@@ -36,6 +36,17 @@ def get(url: str) -> bytes:
         return r.read()
 
 
+def fetch(url: str, what: str):
+    try:
+        return get(url)
+    except urllib.error.HTTPError as e:
+        print(f"{what}: HTTP {e.code} fetching {url}", file=sys.stderr)
+        return None
+    except urllib.error.URLError as e:
+        print(f"{what}: {e.reason} fetching {url}", file=sys.stderr)
+        return None
+
+
 def main() -> int:
     tag = sys.argv[1] if len(sys.argv) > 1 else "latest"
     api = f"https://api.github.com/repos/{REPO}/releases/{'latest' if tag == 'latest' else 'tags/' + tag}"
@@ -52,8 +63,13 @@ def main() -> int:
         print(f"release {release['tag_name']} has no archive for {target()}", file=sys.stderr)
         return 1
     name = want[0]
-    data = get(assets[name])
-    sums = get(assets["SHA256SUMS"]).decode()
+    data = fetch(assets[name], name)
+    if data is None:
+        return 1
+    sums_bytes = fetch(assets["SHA256SUMS"], "SHA256SUMS")
+    if sums_bytes is None:
+        return 1
+    sums = sums_bytes.decode()
     expected = next(line.split()[0] for line in sums.splitlines() if line.endswith(name))
     actual = hashlib.sha256(data).hexdigest()
     if actual != expected:
