@@ -18,6 +18,26 @@ and need a license: free 30-day trials at
 or download an archive from the releases page and unpack its `lib/` and
 `include/` here.
 
+### Same release, please
+
+The wrappers here read structs the library fills in, not the other way
+round: `cadaclysm_open_options_init` writes the library's whole options
+struct, and a wrapper compiled against an older or newer layout will
+misread it. Keep the wrapper files and the `lib/` beside them from the same
+release -- `fetch.py` and each release's archive already guarantee this;
+copying a newer library in beside older wrapper files (or vice versa) is
+unsupported.
+
+### Platforms and signing
+
+Prebuilt libraries cover Windows x64, macOS 11+ (universal, Intel and
+Apple Silicon in one file) and Linux x64/arm64 (glibc 2.17+). The 0.1.x
+binaries are **not code-signed**. On macOS, a library downloaded by a
+browser is quarantined and `dlopen` refuses to load it; either fetch with
+`fetch.py` (which does not set the quarantine attribute) or clear it
+yourself: `xattr -d com.apple.quarantine lib/*.dylib`. The EULA shipped
+today is an interim text until the reviewed one lands.
+
 ## The license file
 
 Put it where the libraries look: the `CADACLYSM_LICENSE` environment variable
@@ -33,8 +53,12 @@ Java).
 | Python | [python/](python/) | `python -c "import cadaclysm as c; print(c.open('samples/cube.scad').bounds)"` | see the release notes |
 | C# | [csharp/](csharp/) | `dotnet run --project csharp/smoke -- samples/cube.scad` | see the release notes |
 | Go | [go/](go/) | `go run -C go ./cmd/smoke "$PWD/samples/cube.scad"` | see the release notes |
-| Java | [java/](java/) | `javac --release 22 -d classes java/*.java && java --enable-native-access=ALL-UNNAMED -cp classes Smoke samples/cube.scad` | see the release notes |
+| Java | [java/](java/) | `javac --release 22 -d java/classes java/*.java && java --enable-native-access=ALL-UNNAMED -cp java/classes Smoke samples/cube.scad` | see the release notes |
 | C / C++ | [include/](include/) | the headers are the reference | 100% |
+
+The Go sample's loader must find the library at run time: put the library
+directory on `PATH` (Windows), `LD_LIBRARY_PATH` (Linux) or
+`DYLD_LIBRARY_PATH` (macOS) -- see [go/README.md](go/README.md).
 
 The C#, Go and Java bindings cover the viewer subset of the C API today;
 the header is the reference for the rest, and each release's notes carry the

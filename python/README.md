@@ -11,9 +11,9 @@ mesh arrays.
     c.license("path/to/cadaclysm.lic")          # or CADACLYSM_LICENSE
     scene = c.open("samples/cube.scad")
     print(scene.bounds)
-    for node in scene.nodes():
+    for node in scene.nodes:
         if node.can_mesh:
-            mesh = node.mesh()
-            print(node.name, len(mesh.indices) // 3, "triangles")
+            mesh = node.mesh
+            print(node.name, mesh.triangle_count, "triangles")
 
 Coverage: see the release notes. The docstrings in the file are the reference.

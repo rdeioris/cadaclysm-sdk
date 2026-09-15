@@ -70,7 +70,11 @@ def main() -> int:
     if sums_bytes is None:
         return 1
     sums = sums_bytes.decode()
-    expected = next(line.split()[0] for line in sums.splitlines() if line.endswith(name))
+    try:
+        expected = next(line.split()[0] for line in sums.splitlines() if line.endswith(name))
+    except StopIteration:
+        print(f"SHA256SUMS has no entry for {name}", file=sys.stderr)
+        return 1
     actual = hashlib.sha256(data).hexdigest()
     if actual != expected:
         print(f"{name}: sha256 {actual} != {expected}", file=sys.stderr)
@@ -83,6 +87,8 @@ def main() -> int:
             for m in zf.namelist():
                 rel = m[len(top) + 1:]
                 if rel.startswith(("lib/", "include/")) and not m.endswith("/"):
+                    # Overwrites the tracked headers by design: the archive's include/
+                    # is the one that matches lib/, and a checkout must not drift from it.
                     (HERE / rel).parent.mkdir(parents=True, exist_ok=True)
                     (HERE / rel).write_bytes(zf.read(m))
                     members.append(rel)
