@@ -32,8 +32,8 @@ Java).
 |---|---|---|---|
 | Python | [python/](python/) | `python -c "import cadaclysm as c; print(c.open('samples/cube.scad').bounds)"` | see the release notes |
 | C# | [csharp/](csharp/) | `dotnet run --project csharp/smoke -- samples/cube.scad` | see the release notes |
-| Go | [go/](go/) | `go run ./go/cmd/smoke samples/cube.scad` | see the release notes |
-| Java | [java/](java/) | `javac --release 22 -d classes java/*.java && java -cp classes Smoke samples/cube.scad` | see the release notes |
+| Go | [go/](go/) | `go run -C go ./cmd/smoke "$PWD/samples/cube.scad"` | see the release notes |
+| Java | [java/](java/) | `javac --release 22 -d classes java/*.java && java --enable-native-access=ALL-UNNAMED -cp classes Smoke samples/cube.scad` | see the release notes |
 | C / C++ | [include/](include/) | the headers are the reference | 100% |
 
 The C#, Go and Java bindings cover the viewer subset of the C API today;
