@@ -1,0 +1,6 @@
+lib/
+include/*.h.downloaded
+csharp/**/bin/
+csharp/**/obj/
+java/classes/
+__pycache__/
