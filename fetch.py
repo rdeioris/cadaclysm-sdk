@@ -27,10 +27,9 @@ from pathlib import Path
 REPO = "rdeioris/cadaclysm-sdk"
 HERE = Path(__file__).resolve().parent
 
-# The worker's own name is `cadaclysm-store` (see the store's wrangler.toml);
-# this is the default `wrangler dev`-shaped URL until the store is deployed
-# and its real address lands here. `--store` overrides it in the meantime.
-STORE_URL = "https://cadaclysm-store.blitter.workers.dev"
+# The store worker (name `cadaclysm-store` in the store's wrangler.toml), as
+# deployed on 2026-09-16; `--store` overrides it.
+STORE_URL = "https://cadaclysm-store.billowing-snow-c12e.workers.dev"
 
 
 def target() -> str:
