@@ -11,13 +11,21 @@ until then.
    Roberto De Ioris, licensed, not sold.
 2. You may evaluate them without a license -- they run in full, printing a
    notice on every file opened and every file written -- and use them in
-   your own applications under a paid per-seat license, and redistribute
-   them only as a component of those applications.
-3. You may not redistribute them on their own, remove or circumvent the
+   your own applications under a paid per-seat or per-server license, and
+   redistribute them only as a component of those applications.
+3. Seats and servers. A per-seat license covers one developer: their own
+   workstations, the build and test automation of the applications they
+   work on, and the applications you ship to end users with the libraries
+   inside. It does not cover a server -- any machine that opens or
+   processes files unattended on behalf of other users or systems: a web
+   service or API, a conversion or ingestion pipeline, a batch job, a
+   render or processing farm, whether physical, virtual or a container
+   host. Each such machine needs a server license.
+4. You may not redistribute them on their own, remove or circumvent the
    license check, or use them to build a competing software development kit.
-4. They are provided as is, without warranty of any kind, to the extent
+5. They are provided as is, without warranty of any kind, to the extent
    permitted by law.
-5. The wrappers, headers and samples published at
+6. The wrappers, headers and samples published at
    https://github.com/rdeioris/cadaclysm-sdk are separately licensed under
    the Apache License 2.0.
 

@@ -8,7 +8,8 @@ modelling kernel (`cadaclysm_blacksmith`) beside it.
 Everything in this repository is Apache-2.0. The libraries themselves are
 proprietary, attached to each [release](../../releases) under [EULA.md](EULA.md):
 no license is needed to try it -- unlicensed, everything works and a notice
-is printed on every open and export; per-seat licenses at
+is printed on every open and export; per-seat licenses (developers) and
+per-server licenses (machines processing files unattended for others) at
 <https://cadaclysm.blitter.studio/license>.
 
 ## Install
