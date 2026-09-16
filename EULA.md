@@ -9,10 +9,10 @@ until then.
 1. The cadaclysm libraries in this archive (cadaclysm_capi and
    cadaclysm_blacksmith, in every file form) are proprietary software of
    Roberto De Ioris, licensed, not sold.
-2. You may evaluate them without a license (the libraries run for 60
-   minutes per process unlicensed), and use them in your own applications
-   under a paid per-seat license, and redistribute them only as a
-   component of those applications.
+2. You may evaluate them without a license -- they run in full, printing a
+   notice on every file opened and every file written -- and use them in
+   your own applications under a paid per-seat license, and redistribute
+   them only as a component of those applications.
 3. You may not redistribute them on their own, remove or circumvent the
    license check, or use them to build a competing software development kit.
 4. They are provided as is, without warranty of any kind, to the extent
