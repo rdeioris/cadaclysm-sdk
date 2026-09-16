@@ -3,3 +3,4 @@ csharp/**/bin/
 csharp/**/obj/
 java/classes/
 __pycache__/
+node/node_modules/

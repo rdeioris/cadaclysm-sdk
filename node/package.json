@@ -1,0 +1,17 @@
+{
+  "name": "cadaclysm",
+  "version": "0.1.0",
+  "description": "The cadaclysm C ABIs -- CAD readers and the blacksmith B-rep builder -- for Node.js, over the shipped shared libraries.",
+  "license": "Apache-2.0",
+  "main": "cadaclysm.js",
+  "types": "cadaclysm.d.ts",
+  "exports": {
+    ".": { "types": "./cadaclysm.d.ts", "default": "./cadaclysm.js" },
+    "./blacksmith": { "types": "./cadaclysm_blacksmith.d.ts", "default": "./cadaclysm_blacksmith.js" }
+  },
+  "files": ["cadaclysm.js", "cadaclysm_blacksmith.js", "worker.js", "cadaclysm.d.ts", "cadaclysm_blacksmith.d.ts", "README.md", "smoke.js"],
+  "engines": { "node": ">=18" },
+  "scripts": { "test": "node --test test/" },
+  "dependencies": { "koffi": "^2.16.0" },
+  "devDependencies": { "typescript": "^5.4.0", "@types/node": "^18.19.0" }
+}

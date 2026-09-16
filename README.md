@@ -46,7 +46,7 @@ is printed to stderr on every open and every export. A license file removes
 it. Put it where the libraries look: the `CADACLYSM_LICENSE` environment
 variable (the file's path, or its text), or `cadaclysm.lic` beside your
 executable or in the working directory, or pass it from code (`license()` in
-Python, `Scene.LicenseSet` in C#, `cadaclysm.LicenseSet` in Go,
+Python and Node.js, `Scene.LicenseSet` in C#, `cadaclysm.LicenseSet` in Go,
 `Cad.licenseSet` in Java).
 
 ## Languages
@@ -57,16 +57,18 @@ Python, `Scene.LicenseSet` in C#, `cadaclysm.LicenseSet` in Go,
 | C# | [csharp/](csharp/) | `dotnet run --project csharp/smoke -- samples/cube.scad` | see the release notes |
 | Go | [go/](go/) | `go run -C go ./cmd/smoke "$PWD/samples/cube.scad"` | see the release notes |
 | Java | [java/](java/) | `javac --release 22 -d java/classes java/*.java && java --enable-native-access=ALL-UNNAMED -cp java/classes Smoke samples/cube.scad` | see the release notes |
+| Node.js | [node/](node/) | `npm install` in `node/`, then `node node/smoke.js samples/cube.scad path/to/cadaclysm.lic` | see the release notes |
 | C / C++ | [include/](include/) | the headers are the reference | 100% |
 
 The Go sample's loader must find the library at run time: put the library
 directory on `PATH` (Windows), `LD_LIBRARY_PATH` (Linux) or
 `DYLD_LIBRARY_PATH` (macOS) -- see [go/README.md](go/README.md).
 
-The C#, Go and Java bindings cover the viewer subset of the C API today;
-the header is the reference for the rest, and each release's notes carry the
-exact counts. Contributions welcome: a pull request here is ported back
-into the library's repository, which is where these files are maintained.
+The C#, Go, Java and Node.js bindings cover the viewer subset of the C API
+today; the header is the reference for the rest, and each release's notes
+carry the exact counts. Contributions welcome: a pull request here is ported
+back into the library's repository, which is where these files are
+maintained.
 
 ## Versions
 
