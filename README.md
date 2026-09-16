@@ -49,6 +49,13 @@ executable or in the working directory, or pass it from code (`license()` in
 Python and Node.js, `Scene.LicenseSet` in C#, `cadaclysm.LicenseSet` in Go,
 `Cad.licenseSet` in Java).
 
+    python fetch.py --license KEY
+
+writes it here: the key is the one in your purchase email, and this drops
+`cadaclysm.lic` beside `fetch.py` for the searches above to find. Re-run it
+whenever the license changes -- a renewal, a seat added through the customer
+portal -- to pick up the new file the same way.
+
 ## Languages
 
 | | binding | sample | coverage |
