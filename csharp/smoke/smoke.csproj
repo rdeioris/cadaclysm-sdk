@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- The whole binding is ../Cad.cs; this project proves it loads and runs against
-       the built library, and is what the public SDK's C# sample is. -->
+  <!-- The whole binding is ../Cad.cs (the reader) and ../Blacksmith.cs (the kernel); this
+       project proves both load and run against the built libraries, and is what the public
+       SDK's C# sample is. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net9.0</TargetFramework>
@@ -13,5 +14,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../Cad.cs" />
+    <Compile Include="../Blacksmith.cs" />
   </ItemGroup>
 </Project>

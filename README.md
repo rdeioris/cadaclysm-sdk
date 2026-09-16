@@ -62,9 +62,9 @@ portal -- to pick up the new file the same way.
 | | binding | sample | coverage |
 |---|---|---|---|
 | Python | [python/](python/) | `python -c "import cadaclysm as c; print(c.open('samples/cube.scad').bounds)"` | see the release notes |
-| C# | [csharp/](csharp/) | `dotnet run --project csharp/smoke -- samples/cube.scad` | see the release notes |
-| Go | [go/](go/) | `go run -C go ./cmd/smoke "$PWD/samples/cube.scad"` | see the release notes |
-| Java | [java/](java/) | `javac --release 22 -d java/classes java/*.java && java --enable-native-access=ALL-UNNAMED -cp java/classes Smoke samples/cube.scad` | see the release notes |
+| C# | [csharp/](csharp/) | `dotnet run --project csharp/smoke -- samples/cube.scad` | Python's set, both libraries |
+| Go | [go/](go/) | `go run -C go ./cmd/smoke "$PWD/samples/cube.scad"` | Python's set, both libraries |
+| Java | [java/](java/) | `javac --release 22 -d java/classes java/*.java && java --enable-native-access=ALL-UNNAMED -cp java/classes Smoke samples/cube.scad` | Python's set, both libraries |
 | Node.js | [node/](node/) | `npm install` in `node/`, then `node node/smoke.js samples/cube.scad path/to/cadaclysm.lic` | see the release notes |
 | C / C++ | [include/](include/) | the headers are the reference | 100% |
 
