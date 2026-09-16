@@ -8,6 +8,12 @@ working directory.
     javac --release 22 -d classes java/Cad.java java/Blacksmith.java java/Smoke.java
     java --enable-native-access=ALL-UNNAMED -cp classes Smoke samples/cube.scad path/to/cadaclysm.lic
 
+Against the `v0.1.0` libraries the smoke fails to link: the binding looks up
+`cadaclysm_scene_save` and `cadaclysm_license_notice_count`, which those
+predate; the next tagged release has them (and the `schemas/ap203.exp` the
+kernel's `step()` needs -- until then, `CADACLYSM_SCHEMAS` at a checkout's
+`schemas/`).
+
 Coverage: see the release notes; the header is the reference.
 
 ## The kernel
