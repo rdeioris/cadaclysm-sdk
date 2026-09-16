@@ -6,8 +6,9 @@ Rhino 3dm, IFC and more in; meshes, LODs and exact B-rep out; an exact
 modelling kernel (`cadaclysm_blacksmith`) beside it.
 
 Everything in this repository is Apache-2.0. The libraries themselves are
-proprietary, attached to each [release](../../releases) under [EULA.md](EULA.md),
-and need a license: free 30-day trials at
+proprietary, attached to each [release](../../releases) under [EULA.md](EULA.md):
+no license is needed to try it -- unlicensed, everything works for 60
+minutes per process; per-seat licenses at
 <https://cadaclysm.blitter.studio/license>.
 
 ## Install
@@ -40,9 +41,12 @@ today is an interim text until the reviewed one lands.
 
 ## The license file
 
-Put it where the libraries look: the `CADACLYSM_LICENSE` environment variable
-(the file's path, or its text), or `cadaclysm.lic` beside your executable or
-in the working directory, or pass it from code (`license()` in Python,
+No license is needed to try it: unlicensed, everything works for 60 minutes
+per process, then gated calls refuse until the process restarts. A license
+file lifts that. Put it where the libraries look: the `CADACLYSM_LICENSE`
+environment variable (the file's path, or its text), or `cadaclysm.lic`
+beside your executable or in the working directory, or pass it from code
+(`license()` in Python,
 `Scene.LicenseSet` in C#, `cadaclysm.LicenseSet` in Go, `Cad.licenseSet` in
 Java).
 

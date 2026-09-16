@@ -9,8 +9,9 @@ until then.
 1. The cadaclysm libraries in this archive (cadaclysm_capi and
    cadaclysm_blacksmith, in every file form) are proprietary software of
    Roberto De Ioris, licensed, not sold.
-2. You may use them for evaluation under a trial license, and in your own
-   applications under a paid license, and redistribute them only as a
+2. You may evaluate them without a license (the libraries run for 60
+   minutes per process unlicensed), and use them in your own applications
+   under a paid per-seat license, and redistribute them only as a
    component of those applications.
 3. You may not redistribute them on their own, remove or circumvent the
    license check, or use them to build a competing software development kit.
@@ -20,4 +21,4 @@ until then.
    https://github.com/rdeioris/cadaclysm-sdk are separately licensed under
    the Apache License 2.0.
 
-Licenses and trials: https://cadaclysm.blitter.studio/license
+Licenses: https://cadaclysm.blitter.studio/license
