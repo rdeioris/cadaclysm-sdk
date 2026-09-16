@@ -11,8 +11,10 @@ until then.
    Roberto De Ioris, licensed, not sold.
 2. You may evaluate them without a license -- they run in full, printing a
    notice on every file opened and every file written -- and use them in
-   your own applications under a paid per-seat or per-server license, and
-   redistribute them only as a component of those applications.
+   your own applications under a paid per-seat or per-server license --
+   or an education license, issued free on request for learning, teaching
+   and research -- and redistribute them only as a component of those
+   applications.
 3. Seats and servers. A per-seat license covers one developer: their own
    workstations, the build and test automation of the applications they
    work on, and the applications you ship to end users with the libraries
