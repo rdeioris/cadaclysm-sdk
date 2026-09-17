@@ -15,7 +15,7 @@ per-server licenses (machines processing files unattended for others) at
 ## Install
 
     python fetch.py            # the latest release's archive for this machine -> lib/ and include/
-    python fetch.py v0.1.0     # a specific one
+    python fetch.py v0.2.0     # a specific one
 
 or download an archive from the releases page and unpack its `lib/` and
 `include/` here.
@@ -29,15 +29,6 @@ misread it. Keep the wrapper files and the `lib/` beside them from the same
 release -- `fetch.py` and each release's archive already guarantee this;
 copying a newer library in beside older wrapper files (or vice versa) is
 unsupported.
-
-The C#, Go and Java bindings in this checkout are ahead of the `v0.1.0`
-libraries `fetch.py` brings today: they use two entry points those
-libraries predate, `cadaclysm_scene_save` and
-`cadaclysm_license_notice_count`, so against `v0.1.0` the Go packages do
-not compile and the Java smoke fails to link. The next tagged release
-closes the gap. The kernel's `step()`/`toScene()` also need the STEP
-schema, `schemas/ap203.exp`, which ships with that release; until then
-point `CADACLYSM_SCHEMAS` at a checkout's `schemas/` directory.
 
 ### Platforms and signing
 

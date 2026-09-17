@@ -10,11 +10,7 @@ your binary.
     export CGO_LDFLAGS="-L$PWD/lib"; export LD_LIBRARY_PATH="$PWD/lib"   # Linux
     go run -C go ./cmd/smoke "$PWD/samples/cube.scad" path/to/cadaclysm.lic
 
-Against the `v0.1.0` libraries this does not compile: the package uses
-`cadaclysm_scene_save` and `cadaclysm_license_notice_count`, which those
-predate; the next tagged release has them (and the `schemas/ap203.exp` the
-kernel's `Step` needs -- until then, `CADACLYSM_SCHEMAS` at a checkout's
-`schemas/`).
+
 
 Coverage: see the release notes; the header is the reference.
 
