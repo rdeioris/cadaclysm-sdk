@@ -27,12 +27,28 @@ if (path.EndsWith("cube.scad") &&
 
 // The reader's own extras: a query, the diagnostics, an in-memory open of the same bytes.
 // "class == mesh" does not match here: the OpenSCAD reader's own node.Kind for cube.scad's
-// solid is "solid", not "mesh" -- confirmed by probing it directly, and noted in the report.
+// solid is "solid", not "mesh".
 var matched = scene.Query("class == solid");
 Console.WriteLine($"query: {matched.Count} node(s)");
 Console.WriteLine($"diagnostics: {scene.Diagnostics.Count}");
+Mesh? borrowed;
 using (var again = Cadaclysm.Cadaclysm.OpenMemory(File.ReadAllBytes(path), System.IO.Path.GetFileName(path)))
+{
     if (again.Bounds.Max[2] != bounds.Max[2]) return Fail("open_memory disagrees with open");
+    // An in-memory scene keeps the name it was given as its path, as Python's does.
+    if (again.Path != System.IO.Path.GetFileName(path)) return Fail($"open_memory's path is {again.Path}");
+    borrowed = again.Query("class == solid")[0].Mesh;
+}
+// A view borrowed from a scene since closed refuses to read, as the kernel's stale views do,
+// rather than handing out a span over freed memory.
+try
+{
+    _ = borrowed!.Positions;
+    return Fail("a mesh view read a closed scene");
+}
+catch (CadaclysmException)
+{
+}
 // `System.IO.Path` spelt out: the kernel namespace has a `Path` of its own (the outline builder).
 var stl = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cadaclysm-smoke.stl");
 scene.Roots[0].SaveMesh(stl, "stl");
@@ -54,7 +70,53 @@ var corners = part.Edges.Where(e => e.IsLine && Math.Abs(e.Direction![2]) > 0.99
                                     && e.Faces.All(f => part.FaceKind(f) == "plane")).ToList();
 using var rounded = part.Fillet(corners, 1.0);
 Console.WriteLine($"faces={rounded.Faces} watertight={rounded.IsWatertight()}");
+// A plate has 6 faces, the hole adds 1 cylinder, the pin 2 (its wall and its top), and each
+// of the four corners rounded trades one edge for one face.
+if (rounded.Faces != 15) return Fail($"the filleted part has {rounded.Faces} faces, not 15");
 if (!rounded.IsWatertight()) return Fail("the filleted part is not watertight");
+// A temporary operand -- the cylinder here is nobody's -- must stay alive for the length of
+// the call that reads it: the owners hold SafeHandles, which the marshaller pins across every
+// P/Invoke, so a collection during the join can neither free the cylinder nor crash the
+// process. Two hundred of them, with a collection forced between each and another thread
+// collecting throughout (so one lands while a join is running), prove it.
+using (var collecting = new CancellationTokenSource())
+{
+    var collector = new Thread(() =>
+    {
+        while (!collecting.IsCancellationRequested)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
+    });
+    collector.Start();
+    for (var i = 0; i < 200; i++)
+    {
+        using var joined = Solid.Cuboid(80, 40, 6).Join(Solid.Cylinder(5, 10));
+        if (joined.Faces == 0) return Fail("a joined temporary lost its faces");
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+    }
+    collecting.Cancel();
+    collector.Join();
+}
+Console.WriteLine("200 joins of temporaries under GC pressure: ok");
+// A solid crosses to the reader through STEP text: the scene it becomes is its own document,
+// with the solid's bounds, and it outlives the solid it was made from.
+Scene fromSolid;
+using (var throwaway = Solid.Cuboid(80, 40, 6).Join(Solid.Cylinder(5, 10)))
+{
+    fromSolid = throwaway.ToScene();
+    var (lo, hi) = throwaway.Bounds;
+    var sb = fromSolid.Bounds;
+    if (Math.Abs(sb.Max[2] - hi[2]) > 0.01 || Math.Abs(sb.Min[0] - lo[0]) > 0.01)
+        return Fail("to_scene's bounds disagree with the solid's");
+}
+using (fromSolid)
+{
+    if (fromSolid.Closed || fromSolid.Bounds.IsEmpty) return Fail("the scene did not survive its solid's dispose");
+    Console.WriteLine($"to_scene: {fromSolid.Nodes.Count} node(s), path={fromSolid.Path}");
+}
 // A mesh view is tied to one filling of the solid's cache: meshing at another tolerance and
 // back again replaces that memory, and the first view must refuse to read it.
 var first = rounded.Mesh(0.05);

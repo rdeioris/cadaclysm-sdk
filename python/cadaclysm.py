@@ -53,7 +53,7 @@ import os
 import platform
 import re
 import sys
-from ctypes import POINTER, c_bool, c_char_p, c_double, c_float, c_size_t, c_uint32, c_void_p
+from ctypes import POINTER, c_bool, c_char_p, c_double, c_float, c_size_t, c_uint32, c_uint64, c_void_p
 from pathlib import Path
 
 __all__ = [
@@ -75,6 +75,7 @@ __all__ = [
     "library_path",
     "license",
     "license_info",
+    "license_notice_count",
     "mesh_formats",
     "open",
     "open_memory",
@@ -256,9 +257,9 @@ class _Mesh(ctypes.Structure):
 
 class _OpenOptions(ctypes.Structure):
     #: `CadaclysmOpenOptions`. Field order and `size` are the whole contract:
-    #: the library reads only the fields that fit inside the `size` it is given
-    #: and defaults the rest, so this may lag the header without breaking --
-    #: but it may never reorder.
+    #: `cadaclysm_open_options_init` fills the library's whole struct, so this
+    #: list must match the header field for field -- `tests/bindings.rs` pins
+    #: it -- and it may never reorder.
     _fields_ = [
         ("size", c_size_t),
         ("convention", c_uint32),
@@ -349,6 +350,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_version", c_char_p, []),
     ("cadaclysm_license_set", ctypes.c_bool, [c_char_p]),
     ("cadaclysm_license_info", c_char_p, []),
+    ("cadaclysm_license_notice_count", c_uint64, []),
     ("cadaclysm_build_date", c_char_p, []),
     ("cadaclysm_open", c_void_p, [c_char_p, POINTER(_OpenOptions)]),
     ("cadaclysm_open_memory", c_void_p,
@@ -371,6 +373,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_node_kind", c_char_p, [c_void_p, c_uint32]),
     ("cadaclysm_node_visible", c_bool, [c_void_p, c_uint32]),
     ("cadaclysm_node_save_mesh", c_bool, [c_void_p, c_uint32, c_char_p, c_char_p]),
+    ("cadaclysm_scene_save", c_bool, [c_void_p, c_char_p, c_char_p]),
     ("cadaclysm_mesh_format_count", c_uint32, []),
     ("cadaclysm_mesh_format", c_char_p, [c_uint32]),
     ("cadaclysm_mesh_format_extension", c_char_p, [c_uint32]),
@@ -532,10 +535,22 @@ def license(text_or_path) -> None:
         raise CadaclysmError(_last_error() or "license refused")
 
 
-def license_info() -> "str | None":
-    """One line about the license in use, or None (see ``last_error``) when none resolves."""
-    raw = _lib().cadaclysm_license_info()
-    return _text(raw) if raw else None
+def license_info() -> str:
+    """One line about the license the library is running under.
+
+    Never null: the license line, e.g. ``"customer=Acme Ltd
+    expiry=2027-09-15 entitlements=import,kernel"``, or, without one,
+    ``"unlicensed"`` (``"unlicensed -- <reason>"`` when a license was found
+    but did not verify).
+    """
+    return _text(_lib().cadaclysm_license_info())
+
+
+def license_notice_count() -> int:
+    """How many unlicensed notices this library has printed to stderr in this
+    process. An application without a stderr to watch (a GUI, a game) can
+    show its own banner by polling this instead."""
+    return int(_lib().cadaclysm_license_notice_count())
 
 
 def build_date() -> str:
@@ -1621,6 +1636,26 @@ class Scene:
         stay available one node at a time either way.
         """
         _lib().cadaclysm_cancel(self._handle)
+
+    # -- writing --
+
+    def save(self, path, fmt: str = "glb") -> None:
+        """Write the whole scene to `path`: `"glb"` (binary glTF), `"gltf"`
+        (text glTF, one file either way) or `"obj"` (Wavefront, every
+        placement baked to its own named object, a `.mtl` beside it under the
+        same stem when anything has a colour).
+
+        Every placement of every shape, named and placed as the tree is, with a
+        material per colour -- where `Node.save_mesh` writes one node's mesh
+        on its own (the same names in `mesh_formats()` are those one-mesh forms).
+        Coordinates are the scene's own, in the convention it was opened with
+        (`Y_UP` for the Y-up metres glTF specifies); the winding is turned for
+        a clockwise convention so the file reads right-side out everywhere.
+        Raises `CadaclysmError` on any other format or a failed write.
+        """
+        ok = _lib().cadaclysm_scene_save(self._handle, str(path).encode(), fmt.encode())
+        if not ok:
+            raise CadaclysmError(_last_error() or f"could not write {path}")
 
 
 # ---- opening --------------------------------------------------------------

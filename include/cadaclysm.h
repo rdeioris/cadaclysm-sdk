@@ -1814,6 +1814,30 @@ uint32_t cadaclysm_realize_total(const struct CadaclysmScene *scene);
 void cadaclysm_cancel(const struct CadaclysmScene *scene);
 
 /**
+ * Write the whole scene -- every placement of every shape, named and placed
+ * as the document's tree is, with a material per colour -- to `path` as glTF
+ * or OBJ. False on failure, with [`cadaclysm_last_error`] saying why.
+ *
+ * `format` is `"glb"` (binary, one file), `"gltf"` (JSON with the vertex
+ * buffer embedded, also one file) or `"obj"` (Wavefront text, every placement
+ * baked to its own named object, with a `.mtl` written beside it under the
+ * same stem when anything has a colour). These hold a scene where the
+ * [`cadaclysm_mesh_format`] rows write one node's mesh; the same names there
+ * are the one-mesh forms. Any other name is refused.
+ *
+ * Coordinates are the scene's own, in the space it was opened into: a scene
+ * opened as `CADACLYSM_Y_UP` writes the Y-up metres glTF specifies, and one
+ * opened `CADACLYSM_NATIVE` writes the file's own axes and units. Winding is
+ * turned for a clockwise convention, as [`cadaclysm_node_save_mesh`] turns
+ * it, and for the same reason: a file is not a frame.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `path` and
+ * `format` must be null or valid C strings.
+ */
+bool cadaclysm_scene_save(const struct CadaclysmScene *scene, const char *path, const char *format);
+
+/**
  * How many formats [`cadaclysm_node_save_mesh`] accepts.
  *
  * A caller builds its export menu from this and its neighbours --
@@ -1979,12 +2003,18 @@ const char *cadaclysm_pick_save(const struct CadaclysmWindow *parent, const char
 bool cadaclysm_license_set(const char *text_or_path);
 
 /**
- * The license in use, as one line:
- * `customer=Acme Ltd kind=paid expiry=2027-09-15 entitlements=import,kernel`.
- * Null, with the reason at [`cadaclysm_last_error`], when none resolves.
- * Borrowed and static: good for the life of the process.
+ * The license in use, as one line -- `customer=Acme Ltd expiry=2027-09-15
+ * entitlements=import,kernel seats=20` -- or, without one, `unlicensed`
+ * (`unlicensed -- <reason>` when a license was found but did not verify).
+ * Never null. Borrowed, and good until the next call on this thread.
  */
 const char *cadaclysm_license_info(void);
+
+/**
+ * How many unlicensed notices this library has printed in this process; an
+ * application can show its own banner instead of the stderr line.
+ */
+uint64_t cadaclysm_license_notice_count(void);
 
 /**
  * The date this library was built, `"YYYY-MM-DD"`. A paid license is good for

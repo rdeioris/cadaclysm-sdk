@@ -45,9 +45,12 @@
 //
 // ## Ownership
 //
-// `Profile`, `Path`, `SweepPath` and `Solid` own a C handle: dispose them (a `using`), or let
-// the finalizer free them. `Workplane`, `Selector`, `Slant`, `Edge` and `Axis` are plain
-// values. A call on a disposed object throws `ObjectDisposedException`. Python's
+// `Profile`, `Path`, `SweepPath` and `Solid` own a C handle, held in a `SafeHandle` (see
+// `CadaclysmHandle` in `Cad.cs`): dispose them (a `using`), or let the runtime free them.
+// Every entry point takes the `SafeHandle` itself, so the marshaller keeps an operand alive
+// for the length of the call it is read in -- `Solid.Cuboid(..).Join(Solid.Cylinder(..))` is
+// safe with the cylinder nobody's. `Workplane`, `Selector`, `Slant`, `Edge` and `Axis` are
+// plain values. A call on a disposed object throws `ObjectDisposedException`. Python's
 // `Solid.close()`/`SweepPath.close()` are `Dispose()` here. The progress callbacks Python's
 // `join`/`cut`/`common`/`split_sheet`/`fillet`/`shell` accept are not offered: a C# delegate
 // over the C callback is out of this binding's scope, and every call runs silent.
@@ -69,9 +72,10 @@ public sealed class BuildException : Exception
 // ---- the structs the ABI returns by value ----------------------------------------------
 //
 // These three are transcribed from `cadaclysm_blacksmith.h` by hand, in the header's field
-// order, and nothing pins them against it: `tests/bindings.rs` pins the reader's structs in
-// `Cad.cs` only. A field left out or reordered still compiles and reads every later field
-// from the wrong offset, so a change to the header's structs must be brought here by hand.
+// order, and `tests/bindings.rs` pins them against it, by field order and by whether each
+// field is a pointer, as it pins the reader's structs in `Cad.cs`. A field left out or
+// reordered still compiles and reads every later field from the wrong offset; the pin is
+// what catches it.
 
 /// <summary>`CadaclysmBlacksmithMesh`: a solid's triangles, borrowed from it.</summary>
 [StructLayout(LayoutKind.Sequential)]
@@ -108,6 +112,67 @@ internal struct RawBlacksmithEdge
     public uint SegmentCount;
 }
 
+// ---- the handles the ABI hands out ------------------------------------------------------
+//
+// One `SafeHandle` a kind, each knowing its own free. `Path`'s is the one the library can
+// consume (`path_end`), after which the handle is marked invalid so no free follows.
+
+/// <summary>`CadaclysmBlacksmithProfile *`.</summary>
+internal sealed class ProfileHandle : CadaclysmHandle
+{
+    public ProfileHandle()
+    {
+    }
+
+    protected override bool ReleaseHandle()
+    {
+        BlacksmithNative.cadaclysm_blacksmith_profile_free(handle);
+        return true;
+    }
+}
+
+/// <summary>`CadaclysmBlacksmithPath *`.</summary>
+internal sealed class PathHandle : CadaclysmHandle
+{
+    public PathHandle()
+    {
+    }
+
+    protected override bool ReleaseHandle()
+    {
+        BlacksmithNative.cadaclysm_blacksmith_path_free(handle);
+        return true;
+    }
+}
+
+/// <summary>`CadaclysmBlacksmithSweepPath *`.</summary>
+internal sealed class SweepPathHandle : CadaclysmHandle
+{
+    public SweepPathHandle()
+    {
+    }
+
+    protected override bool ReleaseHandle()
+    {
+        BlacksmithNative.cadaclysm_blacksmith_sweep_path_free(handle);
+        return true;
+    }
+}
+
+/// <summary>`CadaclysmBlacksmithSolid *`.</summary>
+internal sealed class SolidHandle : CadaclysmHandle
+{
+    public SolidHandle()
+    {
+    }
+
+    protected override bool ReleaseHandle()
+    {
+        BlacksmithNative.cadaclysm_blacksmith_solid_free(handle);
+        return true;
+    }
+}
+
 // ---- the library ----------------------------------------------------------------------
 
 /// <summary>Every entry point in `include/cadaclysm_blacksmith.h` this binding declares -- the
@@ -132,95 +197,101 @@ internal static class BlacksmithNative
     [DllImport(Lib)] internal static extern ulong cadaclysm_blacksmith_license_notice_count();
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_build_date();
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_version();
+    // The frees take the raw pointer: they are what each handle's `ReleaseHandle` calls.
     [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_solid_free(IntPtr solid);
     [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_profile_free(IntPtr profile);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_profile_rect(double w, double h);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_profile_circle(double r);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_profile_slot(double cx, double cy, double length, double r);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_profile_polygon(double[] xy, nuint count);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_profile_with_hole(IntPtr outer, IntPtr hole);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_translate_profile(IntPtr profile, double dx, double dy);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_path_begin(double x, double y);
+    [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_rect(double w, double h);
+    [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_circle(double r);
+    [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_slot(double cx, double cy, double length, double r);
+    [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_polygon(double[] xy, nuint count);
+    [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_with_hole(ProfileHandle outer, ProfileHandle hole);
+    [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_translate_profile(ProfileHandle profile, double dx, double dy);
+    [DllImport(Lib)] internal static extern PathHandle cadaclysm_blacksmith_path_begin(double x, double y);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool cadaclysm_blacksmith_path_line_to(IntPtr p, double x, double y);
+    internal static extern bool cadaclysm_blacksmith_path_line_to(PathHandle p, double x, double y);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool cadaclysm_blacksmith_path_arc_to(IntPtr p, double x, double y, double cx, double cy,
+    internal static extern bool cadaclysm_blacksmith_path_arc_to(PathHandle p, double x, double y, double cx, double cy,
         [MarshalAs(UnmanagedType.I1)] bool ccw);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool cadaclysm_blacksmith_path_bezier_to(IntPtr p, double c1x, double c1y, double c2x, double c2y,
+    internal static extern bool cadaclysm_blacksmith_path_bezier_to(PathHandle p, double c1x, double c1y, double c2x, double c2y,
         double x, double y);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool cadaclysm_blacksmith_path_nurbs_to(IntPtr p, double[] controlXy, nuint controlCount,
+    internal static extern bool cadaclysm_blacksmith_path_nurbs_to(PathHandle p, double[] controlXy, nuint controlCount,
         double[]? weights, double[] knots, nuint knotCount, uint degree);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_path_end(IntPtr p);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_path_end_open(IntPtr p);
+    [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_path_end(PathHandle p);
+    [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_path_end_open(PathHandle p);
     [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_path_free(IntPtr p);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_cuboid(double x, double y, double z);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_cylinder(double r, double h);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_cone(double r, double h);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_sphere(double r);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_torus(double major, double minor);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_wedge(double x, double y, double z, double topX);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_extrude(IntPtr profile, double[] frame, double height);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_extrude_open(IntPtr profile, double[] frame, double height);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_extrude_tapered(IntPtr profile, double[] frame, double height,
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_cuboid(double x, double y, double z);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_cylinder(double r, double h);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_cone(double r, double h);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_sphere(double r);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_torus(double major, double minor);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_wedge(double x, double y, double z, double topX);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_extrude(ProfileHandle profile, double[] frame, double height);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_extrude_open(ProfileHandle profile, double[] frame, double height);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_extrude_tapered(ProfileHandle profile, double[] frame, double height,
         double taper);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_extrude_open_tapered(IntPtr profile, double[] frame,
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_extrude_open_tapered(ProfileHandle profile, double[] frame,
         double height, double taper);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_extrude_between(IntPtr profile, double[] frame,
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_extrude_between(ProfileHandle profile, double[] frame,
         double[] bottom, double[] top);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_extrude_open_between(IntPtr profile, double[] frame,
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_extrude_open_between(ProfileHandle profile, double[] frame,
         double[] bottom, double[] top);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_slant_of_plane(double[] frame, double[] point, double[] normal,
         [Out] double[] outSlant);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_loft(IntPtr a, double[] frameA, IntPtr b, double[] frameB);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_loft_open(IntPtr a, double[] frameA, IntPtr b,
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_loft(ProfileHandle a, double[] frameA, ProfileHandle b,
         double[] frameB);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_revolve(IntPtr profile, double[] axis, double angle);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_revolve_open(IntPtr profile, double[] axis, double angle);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_sweep_path_begin(double x, double y, double z);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_loft_open(ProfileHandle a, double[] frameA, ProfileHandle b,
+        double[] frameB);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_revolve(ProfileHandle profile, double[] axis, double angle);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_revolve_open(ProfileHandle profile, double[] axis, double angle);
+    [DllImport(Lib)] internal static extern SweepPathHandle cadaclysm_blacksmith_sweep_path_begin(double x, double y, double z);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool cadaclysm_blacksmith_sweep_path_line_to(IntPtr p, double x, double y, double z);
+    internal static extern bool cadaclysm_blacksmith_sweep_path_line_to(SweepPathHandle p, double x, double y, double z);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool cadaclysm_blacksmith_sweep_path_arc(IntPtr p, double cx, double cy, double cz, double ax,
+    internal static extern bool cadaclysm_blacksmith_sweep_path_arc(SweepPathHandle p, double cx, double cy, double cz, double ax,
         double ay, double az, double angle);
     [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_sweep_path_free(IntPtr p);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_sweep(IntPtr profile, double[] frame, IntPtr path);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_sweep_open(IntPtr profile, double[] frame, IntPtr path);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_extrude_faces(IntPtr sheet, double height);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_place(IntPtr solid, double[] frame);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_translate(IntPtr solid, double dx, double dy, double dz);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_rotate(IntPtr solid, double[] axis, double radians);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_mirror(IntPtr solid, double[] plane);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_join(IntPtr a, IntPtr b, double tolerance,
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_sweep(ProfileHandle profile, double[] frame, SweepPathHandle path);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_sweep_open(ProfileHandle profile, double[] frame,
+        SweepPathHandle path);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_extrude_faces(SolidHandle sheet, double height);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_place(SolidHandle solid, double[] frame);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_translate(SolidHandle solid, double dx, double dy, double dz);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_rotate(SolidHandle solid, double[] axis, double radians);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_mirror(SolidHandle solid, double[] plane);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_join(SolidHandle a, SolidHandle b, double tolerance,
         IntPtr progress, IntPtr user);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_cut(IntPtr a, IntPtr b, double tolerance,
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_cut(SolidHandle a, SolidHandle b, double tolerance,
         IntPtr progress, IntPtr user);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_common(IntPtr a, IntPtr b, double tolerance,
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_common(SolidHandle a, SolidHandle b, double tolerance,
         IntPtr progress, IntPtr user);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_split_sheet(IntPtr sheet, IntPtr tool, double tolerance,
-        IntPtr progress, IntPtr user);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_fillet(IntPtr solid, uint[] edges, nuint count,
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_split_sheet(SolidHandle sheet, SolidHandle tool,
+        double tolerance, IntPtr progress, IntPtr user);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_fillet(SolidHandle solid, uint[] edges, nuint count,
         double radius, double tolerance, IntPtr progress, IntPtr user);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_chamfer(IntPtr solid, uint[] edges, nuint count,
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_chamfer(SolidHandle solid, uint[] edges, nuint count,
         double distance, double tolerance);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_shell(IntPtr solid, double thickness, uint[] openFaces,
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_shell(SolidHandle solid, double thickness, uint[] openFaces,
         nuint count, double tolerance, IntPtr progress, IntPtr user);
-    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_face_count(IntPtr solid);
-    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_select_face(IntPtr solid, uint kind, double[]? v, uint index);
+    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_face_count(SolidHandle solid);
+    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_select_face(SolidHandle solid, uint kind, double[]? v, uint index);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool cadaclysm_blacksmith_face_frame(IntPtr solid, uint face, [Out] double[] outFrame);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_face_kind(IntPtr solid, uint face);
-    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_edge_count(IntPtr solid);
+    internal static extern bool cadaclysm_blacksmith_face_frame(SolidHandle solid, uint face, [Out] double[] outFrame);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_face_kind(SolidHandle solid, uint face);
+    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_edge_count(SolidHandle solid);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool cadaclysm_blacksmith_edge(IntPtr solid, uint i, out RawBlacksmithEdge outEdge);
-    [DllImport(Lib)] internal static extern RawBlacksmithMesh cadaclysm_blacksmith_mesh(IntPtr solid, double tolerance);
-    [DllImport(Lib)] internal static extern RawBlacksmithPolylines cadaclysm_blacksmith_edge_polylines(IntPtr solid, double tolerance);
+    internal static extern bool cadaclysm_blacksmith_edge(SolidHandle solid, uint i, out RawBlacksmithEdge outEdge);
+    [DllImport(Lib)] internal static extern RawBlacksmithMesh cadaclysm_blacksmith_mesh(SolidHandle solid, double tolerance);
+    [DllImport(Lib)] internal static extern RawBlacksmithPolylines cadaclysm_blacksmith_edge_polylines(SolidHandle solid, double tolerance);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool cadaclysm_blacksmith_bounds(IntPtr solid, double tolerance, [Out] double[] min, [Out] double[] max);
-    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_leaked_edges(IntPtr solid, double tolerance);
-    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_unpaired_edges(IntPtr solid, double tolerance);
+    internal static extern bool cadaclysm_blacksmith_bounds(SolidHandle solid, double tolerance, [Out] double[] min, [Out] double[] max);
+    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_leaked_edges(SolidHandle solid, double tolerance);
+    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_unpaired_edges(SolidHandle solid, double tolerance);
+    // The one array of handles the ABI takes: the marshaller cannot ref-count an array of
+    // SafeHandles, so `WriteStepText` passes the raw pointers and keeps the owners alive
+    // itself, across the call, with `GC.KeepAlive`.
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_step(IntPtr[] solids, nuint count,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string schema, uint unit);
     [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_string_free(IntPtr s);
@@ -293,8 +364,13 @@ public static class Blacksmith
     {
         if (!Units.TryGetValue(unit, out var unitCode))
             throw new BuildException($"unit must be one of {string.Join(", ", Units.Keys.OrderBy(k => k, StringComparer.Ordinal))}");
-        var handles = solids.Select(s => s.Handle).ToArray();
+        // An array of raw pointers, the one call shape the marshaller cannot ref-count for
+        // us: the owners are kept reachable, and their handles with them, until the call has
+        // returned -- `GC.KeepAlive` is that fence.
+        var owners = solids.ToArray();
+        var handles = owners.Select(s => s.Handle.DangerousGetHandle()).ToArray();
         var raw = BlacksmithNative.cadaclysm_blacksmith_step(handles, (nuint)handles.Length, SchemaText(schema), unitCode);
+        GC.KeepAlive(owners);
         if (raw == IntPtr.Zero) throw Failure("step");
         try
         {
@@ -332,7 +408,10 @@ public static class Blacksmith
         return new BuildException(reason.Length > 0 ? reason : what);
     }
 
-    internal static IntPtr Checked(IntPtr handle, string what) => handle != IntPtr.Zero ? handle : throw Failure(what);
+    /// <summary>The handle a build call returned, or the library's reason it returned none.
+    /// (A null handle is an invalid `SafeHandle`, which the runtime never frees.)</summary>
+    internal static T Checked<T>(T handle, string what) where T : CadaclysmHandle =>
+        !handle.IsInvalid ? handle : throw Failure(what);
 
     private static double[] Doubles(double[]? values, int count, string what)
     {
@@ -354,30 +433,20 @@ public static class Blacksmith
 /// new one. Owns a handle: dispose it once done.</summary>
 public sealed class Profile : IDisposable
 {
-    private IntPtr _handle;
+    private readonly ProfileHandle _handle;
 
-    internal Profile(IntPtr handle)
+    internal Profile(ProfileHandle handle)
     {
         _handle = Blacksmith.Checked(handle, "profile");
     }
 
-    internal IntPtr Handle => _handle != IntPtr.Zero ? _handle : throw new ObjectDisposedException(nameof(Profile));
+    internal ProfileHandle Handle => !_handle.IsClosed ? _handle : throw new ObjectDisposedException(nameof(Profile));
 
-    public bool Closed => _handle == IntPtr.Zero;
+    public bool Closed => _handle.IsClosed;
 
-    public void Dispose()
-    {
-        if (_handle == IntPtr.Zero) return;
-        var handle = _handle;
-        _handle = IntPtr.Zero;
-        BlacksmithNative.cadaclysm_blacksmith_profile_free(handle);
-        GC.SuppressFinalize(this);
-    }
-
-    ~Profile()
-    {
-        if (_handle != IntPtr.Zero) BlacksmithNative.cadaclysm_blacksmith_profile_free(_handle);
-    }
+    /// <summary>Give the profile back. Idempotent; the runtime does it for a profile never
+    /// disposed.</summary>
+    public void Dispose() => _handle.Dispose();
 
     /// <summary>A rectangle `w` by `h` centred on the origin.</summary>
     public static Profile Rect(double w, double h) => new(BlacksmithNative.cadaclysm_blacksmith_profile_rect(w, h));
@@ -417,7 +486,7 @@ public sealed class Profile : IDisposable
 /// `System.IO.Path` in a file that imports this namespace -- qualify that one.</summary>
 public sealed class Path : IDisposable
 {
-    private IntPtr _handle;
+    private readonly PathHandle _handle;
 
     internal Path((double X, double Y) start)
     {
@@ -425,24 +494,30 @@ public sealed class Path : IDisposable
     }
 
     /// <summary>The live handle; a path already ended (or disposed) has none.</summary>
-    private IntPtr Live => _handle != IntPtr.Zero ? _handle : throw new ObjectDisposedException(nameof(Path), "path: already ended");
+    private PathHandle Live => !_handle.IsClosed ? _handle : throw new ObjectDisposedException(nameof(Path), "path: already ended");
 
-    public bool Closed => _handle == IntPtr.Zero;
+    public bool Closed => _handle.IsClosed;
 
     /// <summary>Release a path that was never ended; a no-op after <see cref="End"/> or
     /// <see cref="EndOpen"/>, which consume the builder.</summary>
-    public void Dispose()
-    {
-        if (_handle == IntPtr.Zero) return;
-        var handle = _handle;
-        _handle = IntPtr.Zero;
-        BlacksmithNative.cadaclysm_blacksmith_path_free(handle);
-        GC.SuppressFinalize(this);
-    }
+    public void Dispose() => _handle.Dispose();
 
-    ~Path()
+    /// <summary>`end` consumes the path: the library frees it whether or not the profile
+    /// came out, so the handle is marked invalid -- closed, and never freed from here -- once
+    /// the call returns, and the builder is consumed either way.</summary>
+    private Profile Consumed(Func<PathHandle, ProfileHandle> end)
     {
-        if (_handle != IntPtr.Zero) BlacksmithNative.cadaclysm_blacksmith_path_free(_handle);
+        var handle = Live;
+        ProfileHandle profile;
+        try
+        {
+            profile = end(handle);
+        }
+        finally
+        {
+            handle.SetHandleAsInvalid();
+        }
+        return new Profile(profile);
     }
 
     private Path Step(bool ok, string what) => ok ? this : throw Blacksmith.Failure(what);
@@ -477,23 +552,11 @@ public sealed class Path : IDisposable
     /// <see cref="Solid.ExtrudeOpen"/>, <see cref="Solid.SweepOpen"/> or
     /// <see cref="Solid.LoftOpen"/> (a closed sweep closes it with a straight side). Consumes
     /// the builder as <see cref="End"/> does.</summary>
-    public Profile EndOpen()
-    {
-        var handle = Live;
-        _handle = IntPtr.Zero;
-        GC.SuppressFinalize(this);
-        return new Profile(BlacksmithNative.cadaclysm_blacksmith_path_end_open(handle));
-    }
+    public Profile EndOpen() => Consumed(BlacksmithNative.cadaclysm_blacksmith_path_end_open);
 
     /// <summary>Close the path into a profile. The builder is consumed whether or not this
     /// succeeds.</summary>
-    public Profile End()
-    {
-        var handle = Live;
-        _handle = IntPtr.Zero;
-        GC.SuppressFinalize(this);
-        return new Profile(BlacksmithNative.cadaclysm_blacksmith_path_end(handle));
-    }
+    public Profile End() => Consumed(BlacksmithNative.cadaclysm_blacksmith_path_end);
 }
 
 /// <summary>A 3D path a profile is carried along -- lines and arcs, a point at a time -- for
@@ -503,33 +566,24 @@ public sealed class Path : IDisposable
 /// path can be swept more than once, open or closed. Dispose it once done.</summary>
 public sealed class SweepPath : IDisposable
 {
-    private IntPtr _handle;
+    private readonly SweepPathHandle _handle;
 
     internal SweepPath((double X, double Y, double Z) at)
     {
         _handle = Blacksmith.Checked(BlacksmithNative.cadaclysm_blacksmith_sweep_path_begin(at.X, at.Y, at.Z), "sweep_path_begin");
     }
 
-    internal IntPtr Live => _handle != IntPtr.Zero ? _handle : throw new ObjectDisposedException(nameof(SweepPath), "sweep_path: closed");
+    internal SweepPathHandle Live =>
+        !_handle.IsClosed ? _handle : throw new ObjectDisposedException(nameof(SweepPath), "sweep_path: closed");
 
-    public bool Closed => _handle == IntPtr.Zero;
+    public bool Closed => _handle.IsClosed;
 
     /// <summary>Start a sweep path at `point`.</summary>
     public static SweepPath At((double X, double Y, double Z) point) => new(point);
 
-    public void Dispose()
-    {
-        if (_handle == IntPtr.Zero) return;
-        var handle = _handle;
-        _handle = IntPtr.Zero;
-        BlacksmithNative.cadaclysm_blacksmith_sweep_path_free(handle);
-        GC.SuppressFinalize(this);
-    }
-
-    ~SweepPath()
-    {
-        if (_handle != IntPtr.Zero) BlacksmithNative.cadaclysm_blacksmith_sweep_path_free(_handle);
-    }
+    /// <summary>Python's `close()`. Idempotent; the runtime does it for a path never
+    /// disposed.</summary>
+    public void Dispose() => _handle.Dispose();
 
     private SweepPath Step(bool ok, string what) => ok ? this : throw Blacksmith.Failure(what);
 
@@ -725,10 +779,10 @@ public sealed class BlacksmithPolylines
 }
 
 /// <summary>An exact B-rep solid (or open sheet). Immutable; every operation returns a new
-/// one. Dispose it to free it; the finalizer does so otherwise.</summary>
+/// one. Dispose it to free it; the runtime does so otherwise, through its handle.</summary>
 public sealed class Solid : IDisposable
 {
-    private IntPtr _handle;
+    private readonly SolidHandle _handle;
 
     /// <summary>The tolerance the library's tessellation cache was last filled at (null before
     /// any of <see cref="Mesh"/>, <see cref="EdgePolylines"/> and <see cref="BoundsAt"/> ran),
@@ -752,33 +806,21 @@ public sealed class Solid : IDisposable
         return _cacheGeneration;
     }
 
-    internal Solid(IntPtr handle)
+    internal Solid(SolidHandle handle)
     {
         _handle = Blacksmith.Checked(handle, "solid");
     }
 
-    /// <summary>The raw handle, refusing to hand over a disposed one, so a use-after-dispose
-    /// throws at the call site instead of passing a dangling pointer into the library.
-    /// </summary>
-    internal IntPtr Handle => _handle != IntPtr.Zero ? _handle : throw new ObjectDisposedException(nameof(Solid), "solid: closed");
+    /// <summary>The handle, refusing to hand over a disposed one, so a use-after-dispose
+    /// throws at the call site instead of passing a dangling pointer into the library. (The
+    /// marshaller would refuse it too; this keeps the message the binding's own.)</summary>
+    internal SolidHandle Handle => !_handle.IsClosed ? _handle : throw new ObjectDisposedException(nameof(Solid), "solid: closed");
 
-    public bool Closed => _handle == IntPtr.Zero;
+    public bool Closed => _handle.IsClosed;
 
     /// <summary>Give the solid back. Idempotent. Every <see cref="BlacksmithMesh"/> and
     /// <see cref="BlacksmithPolylines"/> still held throws on its next read.</summary>
-    public void Dispose()
-    {
-        if (_handle == IntPtr.Zero) return;
-        var handle = _handle;
-        _handle = IntPtr.Zero;
-        BlacksmithNative.cadaclysm_blacksmith_solid_free(handle);
-        GC.SuppressFinalize(this);
-    }
-
-    ~Solid()
-    {
-        if (_handle != IntPtr.Zero) BlacksmithNative.cadaclysm_blacksmith_solid_free(_handle);
-    }
+    public void Dispose() => _handle.Dispose();
 
     /// <summary>A view cut from filling `generation` may read only while that filling is the
     /// one the solid holds; a disposed solid has none.</summary>

@@ -60,6 +60,14 @@
 // [Edge] and [Axis] are plain values. Join, Cut, Common and SplitSheet return a new
 // solid and leave both operands open; WithHole, FromSolid and the sweeps borrow.
 //
+// # The library's error slot is thread-local
+//
+// cadaclysm_blacksmith_last_error reads a thread-local: the reason the failing call left
+// on the OS thread it ran on. A goroutine may move between OS threads between one call
+// and the next, so every call that can fail and the read of its reason are made with the
+// goroutine locked to its thread ([runtime.LockOSThread], through pin below) — a call
+// site that reads lastError outside that lock may read another thread's reason, or none.
+//
 // # Every array borrows from its solid
 //
 // Solid.Mesh and Solid.EdgePolylines hand back slices built with unsafe.Slice over the
@@ -158,6 +166,18 @@ var ErrClosed = errors.New("closed")
 // cache has been replaced underneath it — see the package doc. Test for it with errors.Is.
 var ErrStaleView = errors.New("the view is stale")
 
+// pin locks the goroutine to its OS thread until the func it returns runs, so a call that
+// can fail and the lastError read after it see the same thread-local slot (see the package
+// doc). Every function that makes such a call starts with `defer pin()()` -- including
+// the ones whose read happens in newSolid, newProfile or a builder's step, which run
+// inside the caller's pin; the locks nest, so a caller already pinned loses nothing.
+func pin() func() {
+	runtime.LockOSThread()
+	return runtime.UnlockOSThread
+}
+
+// lastError is the library's own reason for the last failure on this OS thread, or "".
+// Read only under pin, in (or called from) the function that made the failing call.
 func lastError() string { return C.GoString(C.cadaclysm_blacksmith_last_error()) }
 
 // failure is the library's own reason for the last failure, or what if it left none.
@@ -182,6 +202,7 @@ func BuildDate() string { return C.GoString(C.cadaclysm_blacksmith_build_date())
 // the reader package's License). Returns the library's reason when the text does not
 // verify; the previous license, if any, stays in use.
 func License(textOrPath string) error {
+	defer pin()()
 	c := C.CString(textOrPath)
 	defer C.free(unsafe.Pointer(c))
 	if !bool(C.cadaclysm_blacksmith_license_set(c)) {
@@ -291,6 +312,7 @@ func containsNewline(s string) bool {
 // text; unit is what the solids' lengths are, "m", "mm" or "in" (Python's default is
 // "mm").
 func WriteStepText(solids []*Solid, schema, unit string) (string, error) {
+	defer pin()()
 	code, ok := units[unit]
 	if !ok {
 		names := make([]string, 0, len(units))
@@ -409,18 +431,21 @@ func (p *Profile) Close() error {
 
 // Rect is a rectangle w by h centred on the origin.
 func Rect(w, h float64) (*Profile, error) {
+	defer pin()()
 	return newProfile(C.cadaclysm_blacksmith_profile_rect(C.double(w), C.double(h)), "profile")
 }
 
 // Circle is a circle of radius r about the origin: two semicircular arcs, so an
 // extrusion of it is two exact cylinder walls.
 func Circle(r float64) (*Profile, error) {
+	defer pin()()
 	return newProfile(C.cadaclysm_blacksmith_profile_circle(C.double(r)), "profile")
 }
 
 // Slot is a stadium: a length-long slot of end radius r, centred at centre, running
 // along x. length must exceed 2 * r.
 func Slot(centre [2]float64, length, r float64) (*Profile, error) {
+	defer pin()()
 	return newProfile(C.cadaclysm_blacksmith_profile_slot(
 		C.double(centre[0]), C.double(centre[1]), C.double(length), C.double(r)), "profile")
 }
@@ -428,6 +453,7 @@ func Slot(centre [2]float64, length, r float64) (*Profile, error) {
 // Polygon is a closed polygon through points, in order; the closing side is implied. At
 // least three points.
 func Polygon(points [][2]float64) (*Profile, error) {
+	defer pin()()
 	flat := make([]float64, 0, 2*len(points))
 	for _, p := range points {
 		flat = append(flat, p[0], p[1])
@@ -443,6 +469,7 @@ func Polygon(points [][2]float64) (*Profile, error) {
 // untouched. A hole must lie inside the outer boundary and clear of other holes — this
 // does not check, the sweep that consumes it reports.
 func (p *Profile) WithHole(hole *Profile) (*Profile, error) {
+	defer pin()()
 	outer, err := p.h()
 	if err != nil {
 		return nil, err
@@ -460,6 +487,7 @@ func (p *Profile) WithHole(hole *Profile) (*Profile, error) {
 // Translate is this outline shifted by (dx, dy) in its own plane — to push a revolve's
 // profile off the axis, or a hole off centre.
 func (p *Profile) Translate(dx, dy float64) (*Profile, error) {
+	defer pin()()
 	h, err := p.h()
 	if err != nil {
 		return nil, err
@@ -486,6 +514,7 @@ type Path struct {
 // NewPath starts an outline at (x, y) — Python's Profile.path((x, y)). A start the
 // library refuses (a non-finite coordinate) is reported from End.
 func NewPath(x, y float64) *Path {
+	defer pin()()
 	p := &Path{}
 	p.handle = C.cadaclysm_blacksmith_path_begin(C.double(x), C.double(y))
 	if p.handle == nil {
@@ -540,7 +569,8 @@ func (p *Path) live(what string) *C.CadaclysmBlacksmithPath {
 // endedError is Python's "path: already ended", carrying ErrClosed for errors.Is.
 func endedError(what string) error { return fmt.Errorf("%s: path: already ended: %w", what, ErrClosed) }
 
-// step records the outcome of one segment call.
+// step records the outcome of one segment call. The caller made that call under pin and
+// still holds it, so the reason read here is the call's own.
 func (p *Path) step(ok bool, what string) *Path {
 	if !ok && p.err == nil {
 		p.err = failure(what)
@@ -550,6 +580,7 @@ func (p *Path) step(ok bool, what string) *Path {
 
 // LineTo is a straight segment to (x, y).
 func (p *Path) LineTo(x, y float64) *Path {
+	defer pin()()
 	h := p.live("path_line_to")
 	if h == nil {
 		return p
@@ -561,6 +592,7 @@ func (p *Path) LineTo(x, y float64) *Path {
 // default is true). The centre must be equidistant from the current point and the end;
 // the sweep that consumes the profile reports one that is not.
 func (p *Path) ArcTo(x, y float64, centre [2]float64, ccw bool) *Path {
+	defer pin()()
 	h := p.live("path_arc_to")
 	if h == nil {
 		return p
@@ -572,6 +604,7 @@ func (p *Path) ArcTo(x, y float64, centre [2]float64, ccw bool) *Path {
 // BezierTo is a cubic Bezier to `to` with interior control points c1 and c2; the first
 // control point is the current point.
 func (p *Path) BezierTo(c1, c2, to [2]float64) *Path {
+	defer pin()()
 	h := p.live("path_bezier_to")
 	if h == nil {
 		return p
@@ -585,6 +618,7 @@ func (p *Path) BezierTo(c1, c2, to [2]float64) *Path {
 // endpoint last; knots the full repeated knot vector; weights one per control point
 // *including* the current one, or nil (Python's default).
 func (p *Path) NurbsTo(control [][2]float64, knots []float64, degree int, weights []float64) *Path {
+	defer pin()()
 	h := p.live("path_nurbs_to")
 	if h == nil {
 		return p
@@ -634,6 +668,7 @@ func (p *Path) take(what string) (*C.CadaclysmBlacksmithPath, error) {
 // SweepOpen or LoftOpen (a closed sweep closes it with a straight side). Consumes the
 // builder as End does.
 func (p *Path) EndOpen() (*Profile, error) {
+	defer pin()()
 	h, err := p.take("path_end_open")
 	if err != nil {
 		return nil, err
@@ -644,6 +679,7 @@ func (p *Path) EndOpen() (*Profile, error) {
 // End closes the path into a profile. The builder is consumed whether or not this
 // succeeds; a chain that failed earlier reports that failure here.
 func (p *Path) End() (*Profile, error) {
+	defer pin()()
 	h, err := p.take("path_end")
 	if err != nil {
 		return nil, err
@@ -668,6 +704,7 @@ type SweepPath struct {
 
 // NewSweepPath starts a sweep path at (x, y, z) — Python's SweepPath.at(point).
 func NewSweepPath(x, y, z float64) *SweepPath {
+	defer pin()()
 	p := &SweepPath{}
 	p.handle = C.cadaclysm_blacksmith_sweep_path_begin(C.double(x), C.double(y), C.double(z))
 	if p.handle == nil {
@@ -719,6 +756,7 @@ func (p *SweepPath) h() (*C.CadaclysmBlacksmithSweepPath, error) {
 	return p.handle, nil
 }
 
+// step records the outcome of one piece; the caller made the call under pin and holds it.
 func (p *SweepPath) step(ok bool, what string) *SweepPath {
 	if !ok && p.err == nil {
 		p.err = failure(what)
@@ -728,6 +766,7 @@ func (p *SweepPath) step(ok bool, what string) *SweepPath {
 
 // LineTo is a straight piece to point.
 func (p *SweepPath) LineTo(point [3]float64) *SweepPath {
+	defer pin()()
 	h, err := p.h()
 	if err != nil {
 		if p.err == nil {
@@ -742,6 +781,7 @@ func (p *SweepPath) LineTo(point [3]float64) *SweepPath {
 // Arc turns angle radians about the axis through centre with direction axis (need not be
 // unit); angle must be in (0, 2*pi] — the sweep that reads the path is what checks that.
 func (p *SweepPath) Arc(centre, axis [3]float64, angle float64) *SweepPath {
+	defer pin()()
 	h, err := p.h()
 	if err != nil {
 		if p.err == nil {
@@ -773,6 +813,7 @@ func Flat(at float64) Slant { return Slant{At: at} }
 // Returns a BuildError when the plane holds the sweep direction itself (normal square to
 // frame's z), so no height is on it.
 func OfPlane(frame Frame, point, normal [3]float64) (Slant, error) {
+	defer pin()()
 	var out [3]float64
 	f, pt, n := frame, point, normal
 	ok := bool(C.cadaclysm_blacksmith_slant_of_plane(doubles(&f[0]), doubles(&pt[0]), doubles(&n[0]), doubles(&out[0])))
@@ -1122,37 +1163,44 @@ func (s *Solid) checkCache(generation int) error {
 
 // Cuboid is a box x by y by z, centred on the origin. Six planes.
 func Cuboid(x, y, z float64) (*Solid, error) {
+	defer pin()()
 	return newSolid(C.cadaclysm_blacksmith_cuboid(C.double(x), C.double(y), C.double(z)), "solid")
 }
 
 // Cylinder is a cylinder of radius r, height h, based on z=0 and rising along +z.
 func Cylinder(r, h float64) (*Solid, error) {
+	defer pin()()
 	return newSolid(C.cadaclysm_blacksmith_cylinder(C.double(r), C.double(h)), "solid")
 }
 
 // Cone is a cone of base radius r and height h, apex up.
 func Cone(r, h float64) (*Solid, error) {
+	defer pin()()
 	return newSolid(C.cadaclysm_blacksmith_cone(C.double(r), C.double(h)), "solid")
 }
 
 // Sphere is a sphere of radius r about the origin.
 func Sphere(r float64) (*Solid, error) {
+	defer pin()()
 	return newSolid(C.cadaclysm_blacksmith_sphere(C.double(r)), "solid")
 }
 
 // Torus is a torus of ring radius major and tube radius minor, about z.
 func Torus(major, minor float64) (*Solid, error) {
+	defer pin()()
 	return newSolid(C.cadaclysm_blacksmith_torus(C.double(major), C.double(minor)), "solid")
 }
 
 // Wedge is a box x by y by z whose top face is narrowed to topX along x.
 func Wedge(x, y, z, topX float64) (*Solid, error) {
+	defer pin()()
 	return newSolid(C.cadaclysm_blacksmith_wedge(C.double(x), C.double(y), C.double(z), C.double(topX)), "solid")
 }
 
 // Extrude is profile swept height along the frame's z, closed with two caps. The
 // profile's own x/y are the frame's x/y.
 func Extrude(profile *Profile, frame Frame, height float64) (*Solid, error) {
+	defer pin()()
 	h, err := profile.h()
 	if err != nil {
 		return nil, err
@@ -1165,6 +1213,7 @@ func Extrude(profile *Profile, frame Frame, height float64) (*Solid, error) {
 
 // ExtrudeOpen is Extrude without the caps: an open sheet of walls.
 func ExtrudeOpen(profile *Profile, frame Frame, height float64) (*Solid, error) {
+	defer pin()()
 	h, err := profile.h()
 	if err != nil {
 		return nil, err
@@ -1179,6 +1228,7 @@ func ExtrudeOpen(profile *Profile, frame Frame, height float64) (*Solid, error) 
 // rise (in, when negative), every wall exact — a plane off a line, a cone off an arc. A
 // taper of zero is Extrude.
 func ExtrudeTapered(profile *Profile, frame Frame, height, taper float64) (*Solid, error) {
+	defer pin()()
 	h, err := profile.h()
 	if err != nil {
 		return nil, err
@@ -1191,6 +1241,7 @@ func ExtrudeTapered(profile *Profile, frame Frame, height, taper float64) (*Soli
 
 // ExtrudeOpenTapered is ExtrudeTapered without the caps: the drafted walls alone.
 func ExtrudeOpenTapered(profile *Profile, frame Frame, height, taper float64) (*Solid, error) {
+	defer pin()()
 	h, err := profile.h()
 	if err != nil {
 		return nil, err
@@ -1208,6 +1259,7 @@ func ExtrudeOpenTapered(profile *Profile, frame Frame, height, taper float64) (*
 // piece. Returns a BuildError where the top plane comes down to or through the bottom
 // across the profile.
 func ExtrudeBetween(profile *Profile, frame Frame, bottom, top Slant) (*Solid, error) {
+	defer pin()()
 	h, err := profile.h()
 	if err != nil {
 		return nil, err
@@ -1221,6 +1273,7 @@ func ExtrudeBetween(profile *Profile, frame Frame, bottom, top Slant) (*Solid, e
 // ExtrudeOpenBetween is ExtrudeBetween without the caps: an open sheet of walls running
 // from bottom to top, as ExtrudeOpen is to Extrude.
 func ExtrudeOpenBetween(profile *Profile, frame Frame, bottom, top Slant) (*Solid, error) {
+	defer pin()()
 	h, err := profile.h()
 	if err != nil {
 		return nil, err
@@ -1235,6 +1288,7 @@ func ExtrudeOpenBetween(profile *Profile, frame Frame, bottom, top Slant) (*Soli
 // sides (the profiles must have the same number of sides, and no holes), capped by the
 // two profiles.
 func Loft(a *Profile, frameA Frame, b *Profile, frameB Frame) (*Solid, error) {
+	defer pin()()
 	ha, err := a.h()
 	if err != nil {
 		return nil, err
@@ -1252,6 +1306,7 @@ func Loft(a *Profile, frameA Frame, b *Profile, frameB Frame) (*Solid, error) {
 
 // LoftOpen is Loft without the caps: the sheet ruled between the two curves.
 func LoftOpen(a *Profile, frameA Frame, b *Profile, frameB Frame) (*Solid, error) {
+	defer pin()()
 	ha, err := a.h()
 	if err != nil {
 		return nil, err
@@ -1271,6 +1326,7 @@ func LoftOpen(a *Profile, frameA Frame, b *Profile, frameB Frame) (*Solid, error
 // direction). The profile is read with x as radius and y as height along the axis, so it
 // must lie to one side of the axis.
 func Revolve(profile *Profile, axis [6]float64, angle float64) (*Solid, error) {
+	defer pin()()
 	h, err := profile.h()
 	if err != nil {
 		return nil, err
@@ -1283,6 +1339,7 @@ func Revolve(profile *Profile, axis [6]float64, angle float64) (*Solid, error) {
 
 // RevolveOpen is Revolve without the end caps of a partial turn.
 func RevolveOpen(profile *Profile, axis [6]float64, angle float64) (*Solid, error) {
+	defer pin()()
 	h, err := profile.h()
 	if err != nil {
 		return nil, err
@@ -1299,6 +1356,7 @@ func RevolveOpen(profile *Profile, axis [6]float64, angle float64) (*Solid, erro
 // only borrowed, not consumed; sweep it again, open or closed, as often as needed. A
 // path whose chain failed reports that failure here.
 func Sweep(profile *Profile, frame Frame, path *SweepPath) (*Solid, error) {
+	defer pin()()
 	h, err := profile.h()
 	if err != nil {
 		return nil, err
@@ -1317,6 +1375,7 @@ func Sweep(profile *Profile, frame Frame, path *SweepPath) (*Solid, error) {
 // SweepOpen is Sweep for a curve rather than a face: one wall per segment per piece, no
 // caps — an open sheet, the way ExtrudeOpen is to Extrude.
 func SweepOpen(profile *Profile, frame Frame, path *SweepPath) (*Solid, error) {
+	defer pin()()
 	h, err := profile.h()
 	if err != nil {
 		return nil, err
@@ -1335,6 +1394,7 @@ func SweepOpen(profile *Profile, frame Frame, path *SweepPath) (*Solid, error) {
 // ExtrudeFaces is every face of this sheet pushed height along its own normal, walled and
 // closed: the sheet as a solid of that thickness.
 func (s *Solid) ExtrudeFaces(height float64) (*Solid, error) {
+	defer pin()()
 	h, err := s.h()
 	if err != nil {
 		return nil, err
@@ -1347,6 +1407,7 @@ func (s *Solid) ExtrudeFaces(height float64) (*Solid, error) {
 // Place is this solid, built about the origin, moved onto frame: its origin to the
 // frame's origin, its axes to the frame's.
 func (s *Solid) Place(frame Frame) (*Solid, error) {
+	defer pin()()
 	h, err := s.h()
 	if err != nil {
 		return nil, err
@@ -1359,6 +1420,7 @@ func (s *Solid) Place(frame Frame) (*Solid, error) {
 
 // Translate is this solid moved by (dx, dy, dz).
 func (s *Solid) Translate(dx, dy, dz float64) (*Solid, error) {
+	defer pin()()
 	h, err := s.h()
 	if err != nil {
 		return nil, err
@@ -1370,6 +1432,7 @@ func (s *Solid) Translate(dx, dy, dz float64) (*Solid, error) {
 
 // Rotate is this solid turned radians about axis (six numbers: a point and a direction).
 func (s *Solid) Rotate(axis [6]float64, radians float64) (*Solid, error) {
+	defer pin()()
 	h, err := s.h()
 	if err != nil {
 		return nil, err
@@ -1382,6 +1445,7 @@ func (s *Solid) Rotate(axis [6]float64, radians float64) (*Solid, error) {
 
 // Mirror is this solid reflected across plane (a frame; its z is the plane's normal).
 func (s *Solid) Mirror(plane Frame) (*Solid, error) {
+	defer pin()()
 	h, err := s.h()
 	if err != nil {
 		return nil, err
@@ -1411,6 +1475,7 @@ func (s *Solid) pair(other *Solid) (*C.CadaclysmBlacksmithSolid, *C.CadaclysmBla
 // inputs' own faces; only the new edges, where the two meet, are found on the meshes at
 // tolerance (Python's default is DefaultTolerance). Both operands stay open.
 func (s *Solid) Join(other *Solid, tolerance float64) (*Solid, error) {
+	defer pin()()
 	a, b, err := s.pair(other)
 	if err != nil {
 		return nil, err
@@ -1423,6 +1488,7 @@ func (s *Solid) Join(other *Solid, tolerance float64) (*Solid, error) {
 
 // Cut is this solid less other. See Join.
 func (s *Solid) Cut(other *Solid, tolerance float64) (*Solid, error) {
+	defer pin()()
 	a, b, err := s.pair(other)
 	if err != nil {
 		return nil, err
@@ -1435,6 +1501,7 @@ func (s *Solid) Cut(other *Solid, tolerance float64) (*Solid, error) {
 
 // Common is what this solid and other share. See Join.
 func (s *Solid) Common(other *Solid, tolerance float64) (*Solid, error) {
+	defer pin()()
 	a, b, err := s.pair(other)
 	if err != nil {
 		return nil, err
@@ -1453,6 +1520,7 @@ func (s *Solid) Common(other *Solid, tolerance float64) (*Solid, error) {
 // no way yet, from here or the C ABI, to build a new solid from a chosen subset of a
 // result's faces: this only cuts.
 func (s *Solid) SplitSheet(tool *Solid, tolerance float64) (*Solid, error) {
+	defer pin()()
 	a, b, err := s.pair(tool)
 	if err != nil {
 		return nil, err
@@ -1468,6 +1536,7 @@ func (s *Solid) SplitSheet(tool *Solid, tolerance float64) (*Solid, error) {
 // Faces is how many faces the solid has, in its own order; a face index runs to this.
 // Python's faces property.
 func (s *Solid) Faces() (int, error) {
+	defer pin()()
 	h, err := s.h()
 	if err != nil {
 		return 0, err
@@ -1483,6 +1552,7 @@ func (s *Solid) Faces() (int, error) {
 // FaceKind is the face's surface kind: "plane", "cylinder", "cone", "sphere", "torus",
 // "nurbs", "revolution", "extrusion", "other", or "none" for a face without a surface.
 func (s *Solid) FaceKind(face int) (string, error) {
+	defer pin()()
 	h, err := s.h()
 	if err != nil {
 		return "", err
@@ -1507,6 +1577,7 @@ func (s *Solid) Bounds() (cadaclysm.Bounds, error) { return s.BoundsAt(DefaultTo
 // the same tolerance is free — and a call at another tolerance replaces it, staling
 // every view).
 func (s *Solid) BoundsAt(tolerance float64) (cadaclysm.Bounds, error) {
+	defer pin()()
 	h, err := s.h()
 	if err != nil {
 		return cadaclysm.Bounds{}, err
@@ -1526,6 +1597,7 @@ func (s *Solid) BoundsAt(tolerance float64) (cadaclysm.Bounds, error) {
 // closed solid. A seam two solids share along a line (four triangles, two pairs) does
 // *not* count here; a genuine hole or a fold does.
 func (s *Solid) LeakedEdges(tolerance float64) (int, error) {
+	defer pin()()
 	h, err := s.h()
 	if err != nil {
 		return 0, err
@@ -1544,6 +1616,7 @@ func (s *Solid) LeakedEdges(tolerance float64) (int, error) {
 // opposite ways: a shared seam pairs off and is *not* counted, a fold — two triangles
 // running the same way — is.
 func (s *Solid) UnpairedEdges(tolerance float64) (int, error) {
+	defer pin()()
 	h, err := s.h()
 	if err != nil {
 		return 0, err
@@ -1570,6 +1643,7 @@ func (s *Solid) IsWatertight(tolerance float64) (bool, error) {
 // Mesh is the triangles at tolerance (Python's default is DefaultTolerance), as views
 // into the solid's cache. See the package doc for what invalidates them.
 func (s *Solid) Mesh(tolerance float64) (*Mesh, error) {
+	defer pin()()
 	h, err := s.h()
 	if err != nil {
 		return nil, err
@@ -1596,6 +1670,7 @@ func (s *Solid) Mesh(tolerance float64) (*Mesh, error) {
 // EdgePolylines is the feature edges at tolerance as polylines, views into the same cache
 // as Mesh, under the same rule.
 func (s *Solid) EdgePolylines(tolerance float64) (*Polylines, error) {
+	defer pin()()
 	h, err := s.h()
 	if err != nil {
 		return nil, err
@@ -1628,6 +1703,7 @@ func (s *Solid) Step(path, schema, unit string) error {
 
 // SelectFace is the face selector picks; a BuildError when none does.
 func (s *Solid) SelectFace(selector Selector) (int, error) {
+	defer pin()()
 	h, err := s.h()
 	if err != nil {
 		return 0, err
@@ -1652,6 +1728,7 @@ func (s *Solid) SelectFace(selector Selector) (int, error) {
 // FaceFrame is the workplane on face: origin at the face's boundary centroid, z its
 // outward normal — twelve numbers, what Workplane.OnFace adopts.
 func (s *Solid) FaceFrame(face int) (Frame, error) {
+	defer pin()()
 	h, err := s.h()
 	if err != nil {
 		return Frame{}, err
@@ -1672,6 +1749,7 @@ func (s *Solid) FaceFrame(face int) (Frame, error) {
 // Edges is the edges a fillet indexes, as Edge records (copied; safe to keep) — Python's
 // edges property.
 func (s *Solid) Edges() ([]Edge, error) {
+	defer pin()()
 	h, err := s.h()
 	if err != nil {
 		return nil, err
@@ -1709,6 +1787,7 @@ func (s *Solid) Edges() ([]Edge, error) {
 // Fillet is this solid with the edges at edges (indices into Edges; see EdgeIndices)
 // rounded to radius. tolerance is Python's 1e-6 default, FilletTolerance.
 func (s *Solid) Fillet(edges []int, radius, tolerance float64) (*Solid, error) {
+	defer pin()()
 	h, err := s.h()
 	if err != nil {
 		return nil, err
@@ -1731,6 +1810,7 @@ func (s *Solid) Fillet(edges []int, radius, tolerance float64) (*Solid, error) {
 // Chamfer is Fillet with a flat bevel: each edge cut back distance along both its faces.
 // tolerance as Fillet's.
 func (s *Solid) Chamfer(edges []int, distance, tolerance float64) (*Solid, error) {
+	defer pin()()
 	h, err := s.h()
 	if err != nil {
 		return nil, err
@@ -1755,6 +1835,7 @@ func (s *Solid) Chamfer(edges []int, distance, tolerance float64) (*Solid, error
 // faces at open removed so the hollow is reachable (nil for none, Python's default).
 // tolerance as Fillet's.
 func (s *Solid) Shell(thickness float64, open []int, tolerance float64) (*Solid, error) {
+	defer pin()()
 	h, err := s.h()
 	if err != nil {
 		return nil, err

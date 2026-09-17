@@ -56,13 +56,13 @@ import ctypes
 import enum
 import os
 import platform
-from ctypes import (POINTER, c_bool, c_char_p, c_double, c_float, c_size_t, c_uint32, c_void_p)
+from ctypes import (POINTER, c_bool, c_char_p, c_double, c_float, c_size_t, c_uint32, c_uint64, c_void_p)
 from pathlib import Path as _FsPath   # `Path` here is the outline builder
 
 __all__ = [
     "Axis", "BuildError", "Edge", "Path", "Profile", "Selector", "Slant", "Solid", "SweepPath", "Workplane",
-    "build_date", "default_schema", "library_path", "license", "license_info", "version", "write_step",
-    "write_step_text",
+    "build_date", "default_schema", "library_path", "license", "license_info", "license_notice_count", "version",
+    "write_step", "write_step_text",
 ]
 
 NONE = 0xFFFFFFFF
@@ -161,6 +161,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_last_error", c_char_p, []),
     ("cadaclysm_blacksmith_license_set", ctypes.c_bool, [c_char_p]),
     ("cadaclysm_blacksmith_license_info", c_char_p, []),
+    ("cadaclysm_blacksmith_license_notice_count", c_uint64, []),
     ("cadaclysm_blacksmith_build_date", c_char_p, []),
     ("cadaclysm_blacksmith_version", c_char_p, []),
     ("cadaclysm_blacksmith_solid_free", None, [_SOLID]),
@@ -330,9 +331,20 @@ def license(text_or_path) -> None:
         _fail("license refused")
 
 
-def license_info() -> "str | None":
-    raw = _lib().cadaclysm_blacksmith_license_info()
-    return _text(raw) if raw else None
+def license_info() -> str:
+    """One line about the license the library is running under (see cadaclysm.py's).
+
+    Never null: the license line, or, without one, ``"unlicensed"``
+    (``"unlicensed -- <reason>"`` when a license was found but did not
+    verify).
+    """
+    return _text(_lib().cadaclysm_blacksmith_license_info())
+
+
+def license_notice_count() -> int:
+    """How many unlicensed notices this library has printed to stderr in this
+    process (see cadaclysm.py's)."""
+    return int(_lib().cadaclysm_blacksmith_license_notice_count())
 
 
 def build_date() -> str:

@@ -11,6 +11,11 @@
     <RootNamespace>Cadaclysm</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Optimised in every configuration, and no tiering: the smoke's GC-pressure check
+         (temporaries joined while another thread collects) only bites when the JIT ends an
+         operand's lifetime at its last use, which debuggable and tier-0 code never do. -->
+    <Optimize>true</Optimize>
+    <TieredCompilation>false</TieredCompilation>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../Cad.cs" />

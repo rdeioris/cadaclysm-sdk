@@ -56,8 +56,23 @@ public final class Smoke {
             System.out.println("diagnostics: " + scene.diagnostics().size());
 
             byte[] bytes = Files.readAllBytes(Path.of(path));
+            Cad.Mesh borrowed;
             try (Cad.Scene again = Cad.openMemory(bytes, Path.of(path).getFileName().toString())) {
                 if (again.bounds().max()[2] != bounds.max()[2]) fail("open_memory disagrees with open");
+                borrowed = again.query("class == solid").get(0).mesh();
+            }
+            // A view borrowed from a scene since closed refuses to read, as the kernel's stale
+            // views do, rather than handing out a buffer over freed memory.
+            try {
+                borrowed.positions();
+                fail("a mesh view read a closed scene");
+            } catch (Cad.CadaclysmException expected) {
+                // the scene's own "closed" exception
+            }
+            // The format given on its own, as Python's open_memory takes it -- the name has no
+            // extension to fall back on here, so the argument is what opens it.
+            try (Cad.Scene typed = Cad.openMemory(bytes, "cube-bytes", "scad")) {
+                if (!Arrays.equals(typed.bounds().max(), bounds.max())) fail("open_memory with an explicit format disagrees with open");
             }
 
             Path stl = Files.createTempFile("cadaclysm-smoke", ".stl");

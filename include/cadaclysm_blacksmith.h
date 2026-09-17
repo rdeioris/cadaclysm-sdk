@@ -154,12 +154,18 @@ void cadaclysm_blacksmith_profile_free(struct CadaclysmBlacksmithProfile *profil
 bool cadaclysm_blacksmith_license_set(const char *text_or_path);
 
 /**
- * The license in use, as one line:
- * `customer=Acme Ltd kind=paid expiry=2027-09-15 entitlements=import,kernel`.
- * Null, with the reason at [`cadaclysm_blacksmith_last_error`], when none resolves.
- * Borrowed and static: good for the life of the process.
+ * The license in use, as one line -- `customer=Acme Ltd expiry=2027-09-15
+ * entitlements=import,kernel seats=20` -- or, without one, `unlicensed`
+ * (`unlicensed -- <reason>` when a license was found but did not verify).
+ * Never null. Borrowed, and good until the next call on this thread.
  */
 const char *cadaclysm_blacksmith_license_info(void);
+
+/**
+ * How many unlicensed notices this library has printed in this process; an
+ * application can show its own banner instead of the stderr line.
+ */
+uint64_t cadaclysm_blacksmith_license_notice_count(void);
 
 /**
  * The date this library was built, `"YYYY-MM-DD"`. A paid license is good for

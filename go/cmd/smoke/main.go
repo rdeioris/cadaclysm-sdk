@@ -63,8 +63,7 @@ func main() {
 
 	// The reader's own extras: a query, the diagnostics, an in-memory open of the same
 	// bytes. "class == mesh" does not match here: the OpenSCAD reader's own Kind() for
-	// cube.scad's solid is "solid", not "mesh" -- confirmed against the C# smoke this
-	// mirrors, which found the same thing.
+	// cube.scad's solid is "solid", not "mesh".
 	matched, qerr := scene.Query("class == solid")
 	if qerr != nil {
 		fail(qerr.Error())
@@ -83,7 +82,38 @@ func main() {
 	if again.Bounds().Max[2] != bounds.Max[2] {
 		fail("open_memory disagrees with open")
 	}
+	// An in-memory scene keeps the name it was given as its path, as Python's does.
+	if again.Path() != filepath.Base(path) {
+		fail("open_memory's path is " + again.Path())
+	}
 	again.Close()
+	// A closed scene refuses rather than answers: a method with an error returns the
+	// scene's own error, an accessor without one panics with it -- both *CadaclysmError.
+	if _, cerr := again.Query("class == solid"); cerr == nil {
+		fail("a closed scene answered a query")
+	} else if _, ok := cerr.(*cadaclysm.CadaclysmError); !ok {
+		fail("a closed scene's refusal is not a CadaclysmError: " + cerr.Error())
+	}
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				fail("a closed scene answered Bounds")
+			} else if _, ok := r.(*cadaclysm.CadaclysmError); !ok {
+				panic(r)
+			}
+		}()
+		again.Bounds()
+	}()
+	// The format given on its own, as Python's open_memory takes it -- the name has no
+	// extension to fall back on here, so this is the option and nothing else.
+	typed, terr := cadaclysm.OpenMemory(data, "cube-bytes", cadaclysm.WithFormat("scad"))
+	if terr != nil {
+		fail("open_memory with a format: " + terr.Error())
+	}
+	if typed.Bounds() != bounds {
+		fail("open_memory with an explicit format disagrees with open")
+	}
+	typed.Close()
 
 	stl := filepath.Join(os.TempDir(), "cadaclysm-smoke-go.stl")
 	roots := scene.Roots()
@@ -190,6 +220,11 @@ func kernel(license string) {
 	fmt.Printf("faces=%d watertight=%v\n", faces, watertight)
 	if !watertight {
 		fail("the filleted part is not watertight")
+	}
+	// A plate has 6 faces, the hole adds 1 cylinder, the pin 2 (its wall and its top), and
+	// each of the four corners rounded trades one edge for one face.
+	if faces != 15 {
+		fail(fmt.Sprintf("the filleted part has %d faces, not 15", faces))
 	}
 
 	// A mesh view is tied to one filling of the solid's cache: meshing at another

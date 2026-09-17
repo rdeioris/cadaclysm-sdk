@@ -625,14 +625,29 @@ public final class Cad {
     }
 
     /**
-     * Open a CAD file already in bytes. The format is taken as an extension would name it,
-     * from {@code name}'s own extension, since there is otherwise no file name to take it
-     * from -- {@code "step"}, {@code "ifc"}, {@code "igs"}, {@code "brep"}, {@code "3dm"},
-     * {@code "scad"}. {@code options.schema()} must be a path here: there is no file on disk
-     * to read a {@code FILE_SCHEMA} line out of.
+     * {@link #openMemory(byte[], String, String, OpenOptions)} with the format taken from
+     * {@code name}'s own extension.
      */
     public static Scene openMemory(byte[] bytes, String name, OpenOptions options) {
-        String format = extensionOf(name);
+        return openMemory(bytes, name, extensionOf(name), options);
+    }
+
+    /** {@link #openMemory(byte[], String, String, OpenOptions)} with every default. */
+    public static Scene openMemory(byte[] bytes, String name, String format) {
+        return openMemory(bytes, name, format, OpenOptions.defaults());
+    }
+
+    /**
+     * Open a CAD file already in bytes. {@code format} names the kind as an extension would
+     * -- {@code "step"}, {@code "ifc"}, {@code "igs"}, {@code "brep"}, {@code "3dm"},
+     * {@code "scad"} -- since there is no file name to take it from: Python's own
+     * {@code format} argument, given on its own here as there, where the two-argument
+     * overloads read it off {@code name}. A leading dot is allowed and ignored.
+     * {@code options.schema()} must be a path here: there is no file on disk to read a
+     * {@code FILE_SCHEMA} line out of.
+     */
+    public static Scene openMemory(byte[] bytes, String name, String format, OpenOptions options) {
+        if (format.startsWith(".")) format = format.substring(1);
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment buffer = arena.allocate(Math.max(bytes.length, 1));
             MemorySegment.copy(bytes, 0, buffer, ValueLayout.JAVA_BYTE, 0, bytes.length);
@@ -947,26 +962,38 @@ public final class Cad {
             return indexCount / 3;
         }
 
+        /** A view over a closed scene is over freed memory: every buffer below asks the scene
+         *  first, and a closed one throws its own {@link CadaclysmException} rather than hand
+         *  out a buffer into it. */
+        private void open() {
+            scene.handle();
+        }
+
         public FloatBuffer positions() {
+            open();
             return floatView(positions, vertexCount * 3L);
         }
 
         public FloatBuffer normals() {
+            open();
             return floatView(normals, vertexCount * 3L);
         }
 
         /** Two floats a vertex, not three. Null for a node whose reader produced none. */
         public FloatBuffer uvs() {
+            open();
             return floatView(uvs, vertexCount * 2L);
         }
 
         /** Four floats a vertex, RGBA -- present only for a body opened asking for per-vertex
          *  colour whose faces carry more than one between them. */
         public FloatBuffer colours() {
+            open();
             return floatView(colours, vertexCount * 4L);
         }
 
         public IntBuffer indices() {
+            open();
             return intView(indices, indexCount);
         }
 
@@ -975,6 +1002,7 @@ public final class Cad {
          * purpose to be visible: this is where the gigabytes go on a large assembly.
          */
         public MeshData copy() {
+            open();
             return new MeshData(
                     floatArray(positions, vertexCount * 3L),
                     floatArray(normals, vertexCount * 3L),
@@ -1015,13 +1043,16 @@ public final class Cad {
             return vertexCount;
         }
 
-        /** {@code vertexCount * 3} floats, the runs end to end. */
+        /** {@code vertexCount * 3} floats, the runs end to end. A closed scene throws its own
+         *  {@link CadaclysmException} here, as {@link Mesh}'s views do. */
         public FloatBuffer positions() {
+            scene.handle();
             return floatView(positions, vertexCount * 3L);
         }
 
         /** {@code polylineCount} vertex counts saying where each run stops. */
         public IntBuffer counts() {
+            scene.handle();
             return intView(counts, polylineCount);
         }
 
@@ -1362,7 +1393,9 @@ public final class Cad {
         }
 
         /** Whether the file says this cannot be selected or edited -- not hiding: a locked
-         *  thing is drawn exactly as any other and only refuses to be picked. */
+         *  thing is drawn exactly as any other and only refuses to be picked. Only a {@code
+         *  Locked} attribute of {@link ValueKind#BOOLEAN} kind counts; one of any other kind
+         *  reads as unlocked here, where Python truth-tests whatever value it finds. */
         public boolean locked() {
             for (Attribute attribute : attributes()) {
                 if (attribute.name().equals("Locked")) return Boolean.parseBoolean(attribute.value());
@@ -1979,9 +2012,10 @@ public final class Cad {
      *
      * <p>The rule: {@code CADACLYSM_LIBRARY} (and, for the kernel, {@code
      * CADACLYSM_BLACKSMITH_LIBRARY} first) as a directory or the file itself; then beside this
-     * class's own jar or class directory; then the platform's own search. A variable naming a
-     * file that is neither library is a mistake worth failing on, not a hint to fall through
-     * and load something else by accident.
+     * class's own jar or class directory; then {@code lib/} and {@code target/release} or
+     * {@code target/debug} in every ancestor; then the platform's own search. A variable
+     * naming a file or a directory that holds neither library is a mistake worth failing on,
+     * not a hint to fall through and load something else by accident.
      */
     static final class Loader {
         private Loader() {
@@ -1991,10 +2025,10 @@ public final class Cad {
         // segment the library hands back is read under this arena before it is copied out.
         private static final Arena ARENA = Arena.ofShared();
 
-        // Each spelled in two pieces below: `tests/bindings.rs`'s coverage scan matches any
-        // quoted cadaclysm_-prefixed string in this file as if it named a declared entry point,
-        // and a library's own bare name is not one -- written whole it read as stale against the
-        // header, which has no function by that name.
+        // Each spelled in two pieces below, from when `tests/bindings.rs`'s coverage scan
+        // matched any quoted cadaclysm_-prefixed string in this file as a declared entry point
+        // -- a library's own bare name read as stale against the header. The scan is anchored
+        // on the `bind(linker, lib, "..."` lookup now; the split does no harm and stays.
         static final String CAPI_LIBRARY = "cadaclysm" + "_capi";
         static final String BLACKSMITH_LIBRARY = "cadaclysm" + "_blacksmith";
         private static final String[] LIBRARIES = {CAPI_LIBRARY, BLACKSMITH_LIBRARY};
@@ -2031,7 +2065,20 @@ public final class Cad {
                 if (env == null || env.isEmpty()) continue;
                 Path at = Path.of(env);
                 if (Files.isDirectory(at)) {
-                    for (String file : files) candidates.add(at.resolve(file));
+                    // A directory is taken as the place the library is, as Python takes it:
+                    // one holding neither library is the same mistake as a path to nothing,
+                    // not a hint to go on searching and load some other copy. One holding
+                    // only the other library is simply not for this one (see the file case).
+                    boolean holdsThis = false;
+                    for (String file : files) {
+                        if (Files.exists(at.resolve(file))) {
+                            candidates.add(at.resolve(file));
+                            holdsThis = true;
+                        }
+                    }
+                    if (!holdsThis && !holdsEither(at)) {
+                        throw new CadaclysmException(variable + "=" + env + " names nothing that exists");
+                    }
                     continue;
                 }
                 if (!Files.exists(at)) {
@@ -2053,10 +2100,15 @@ public final class Cad {
                 // Names the *other* library: not a mistake, just not for this resolve -- the
                 // search continues (the next variable, or the walk below).
             }
-            // Walking up from this class's own code: an SDK checkout keeps the library in
-            // `lib/` beside the wrappers; the repository this example ships in keeps it in
-            // `target/release` (or `target/debug`, a fallback for a debug-only build).
+            // Beside this class's own code first, as Python looks beside its own file: the
+            // class directory itself, or the directory holding the jar -- a deployment that
+            // ships the library alongside the program. Then walking up from there: an SDK
+            // checkout keeps the library in `lib/` beside the wrappers; the repository this
+            // example ships in keeps it in `target/release` (or `target/debug`, a fallback
+            // for a debug-only build).
             Path start = codeLocation();
+            Path here = start == null || Files.isDirectory(start) ? start : start.getParent();
+            if (here != null) for (String file : files) candidates.add(here.resolve(file));
             for (Path at = start; at != null; at = at.getParent()) {
                 for (String file : files) candidates.add(at.resolve("lib").resolve(file));
                 for (String file : files) candidates.add(at.resolve("target").resolve("release").resolve(file));
@@ -2074,6 +2126,14 @@ public final class Cad {
 
         private static boolean namesOneOf(String basename, String[] files) {
             for (String file : files) if (file.equalsIgnoreCase(basename)) return true;
+            return false;
+        }
+
+        /** Whether {@code dir} holds a copy of either library. */
+        private static boolean holdsEither(Path dir) {
+            for (String library : LIBRARIES) {
+                for (String file : filesOf(library)) if (Files.exists(dir.resolve(file))) return true;
+            }
             return false;
         }
     }

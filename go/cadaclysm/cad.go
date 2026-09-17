@@ -28,6 +28,27 @@
 // Strings are the easy half: every char* this ABI returns is copied into a Go string on
 // the way out through C.GoString, so Node.Name and friends outlive anything.
 //
+// # A closed scene refuses, it does not answer
+//
+// After [Scene.Close] the library's own reads of a nil scene hand back empty values —
+// no nodes, zero bounds, "" for every name — which is a plausible nothing, not an
+// error. Every method here reads the handle through one accessor instead, and a closed
+// scene is refused the way Python, C# and Java refuse it: a method that already returns
+// an error ([Scene.Query], [Scene.Save], [Node.SaveMesh], [Node.Mesh], [Node.Surfaces])
+// returns a *CadaclysmError saying "the scene is closed"; an error-less accessor
+// ([Scene.Bounds], [Node.Name], [Placement.Geometry] and the rest) panics with that same
+// *CadaclysmError, a use-after-close being a programmer error rather than a condition to
+// handle — recover it if a program must go on. The kernel package's ErrClosed follows the
+// same rule, every one of its calls having an error to return it in.
+//
+// # The library's error slot is thread-local
+//
+// cadaclysm_last_error reads a thread-local: the reason the failing call left on the OS
+// thread it ran on. A goroutine may move between OS threads between one call and the
+// next, so every call that can fail and the read of its reason are made with the
+// goroutine locked to its thread ([runtime.LockOSThread], through pin below) — a call
+// site that reads lastError outside that lock may read another thread's reason, or none.
+//
 // The object model — Scene, Node, Placement, Mesh, Polylines, Surfaces — is transcribed
 // from examples/cadaclysm.py, member for member: the same names in Go's own casing, the
 // same arguments (as functional options where Python takes keyword arguments), the same
@@ -74,6 +95,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -95,6 +117,17 @@ type CadaclysmError struct{ Message string }
 // Error satisfies the error interface.
 func (e *CadaclysmError) Error() string { return e.Message }
 
+// pin locks the goroutine to its OS thread until the func it returns runs, so a call that
+// can fail and the lastError read after it see the same thread-local slot (see the package
+// doc). Every function below that reads lastError starts with `defer pin()()`; the locks
+// nest, so a caller already pinned loses nothing.
+func pin() func() {
+	runtime.LockOSThread()
+	return runtime.UnlockOSThread
+}
+
+// lastError is the library's own reason for the last failure on this OS thread, or "".
+// Read only under pin, in the function that made the failing call.
 func lastError() string { return C.GoString(C.cadaclysm_last_error()) }
 
 // lastErrorOr is the library's own reason for the last failure, or fallback if it left
@@ -204,6 +237,7 @@ func BuildDate() string { return C.GoString(C.cadaclysm_build_date()) }
 // running executable and in the working directory. Returns the library's reason when the
 // text does not verify; the previous license, if any, stays in use.
 func License(textOrPath string) error {
+	defer pin()()
 	c := C.CString(textOrPath)
 	defer C.free(unsafe.Pointer(c))
 	if !bool(C.cadaclysm_license_set(c)) {
@@ -358,9 +392,16 @@ type Option func(*openConfig)
 type openConfig struct {
 	convention          Convention
 	schema              string
+	format              string
 	colours             bool
 	sourceMetresPerUnit float64
 }
+
+// WithFormat names the kind of the bytes OpenMemory is given, as an extension would —
+// "step", "ifc", "igs", "brep", "3dm", "scad" — Python's own `format` argument. A leading
+// dot is allowed and ignored. Without it OpenMemory takes the extension of the name it is
+// given. Open ignores it: a file on disk names its own kind.
+func WithFormat(format string) Option { return func(cfg *openConfig) { cfg.format = format } }
 
 // WithConvention sets the space to read the file into. The library does the converting,
 // so every array read out of the scene is already in it. The default is Native.
@@ -425,13 +466,17 @@ func schemaList(schema string, opts *C.CadaclysmOpenOptions) (free func()) {
 }
 
 // openNative calls cadaclysm_open with schema (a file, a directory, or "" for none)
-// wired into opts for the duration of the call.
+// wired into opts for the duration of the call. The error carries the library's reason,
+// read here on the thread the call ran on; Open reports it rather than reading again.
 func openNative(path, schema string, opts C.CadaclysmOpenOptions) (*C.CadaclysmScene, error) {
+	defer pin()()
 	cp := C.CString(path)
 	defer C.free(unsafe.Pointer(cp))
 	defer schemaList(schema, &opts)()
 	p := C.cadaclysm_open(cp, &opts)
 	if p == nil {
+		// The library's own message alone, as Python's f"{path.name}: {_last_error()}";
+		// "open failed" only stands in when it left none.
 		return nil, &CadaclysmError{Message: lastErrorOr("open failed")}
 	}
 	return p, nil
@@ -462,7 +507,7 @@ func Open(path string, opts ...Option) (*Scene, error) {
 		if info, err := os.Stat(cfg.schema); err == nil && info.IsDir() {
 			handle, oerr := openNative(path, cfg.schema, buildOptions(cfg))
 			if oerr != nil {
-				return nil, &CadaclysmError{Message: fmt.Sprintf("%s: %s", label, lastErrorOr("open failed"))}
+				return nil, &CadaclysmError{Message: fmt.Sprintf("%s: %s", label, oerr)}
 			}
 			return &Scene{handle: handle, label: label, path: path, schemaPath: cfg.schema, convention: cfg.convention}, nil
 		}
@@ -476,29 +521,36 @@ func Open(path string, opts ...Option) (*Scene, error) {
 	if chosen == "" && len(fallbacks) > 0 {
 		candidates = fallbacks
 	}
+	var last error
 	for _, candidate := range candidates {
 		handle, oerr := openNative(path, candidate, buildOptions(cfg))
 		if oerr == nil {
 			return &Scene{handle: handle, label: label, path: path, schemaPath: candidate, convention: cfg.convention}, nil
 		}
+		last = oerr
 	}
-	return nil, &CadaclysmError{Message: fmt.Sprintf("%s: %s", label, lastErrorOr("open failed"))}
+	return nil, &CadaclysmError{Message: fmt.Sprintf("%s: %s", label, last)}
 }
 
 // OpenMemory opens a CAD file already in bytes.
 //
-// The format is taken from name's own extension, since there is otherwise no file name
-// to read one from — Python's open_memory takes it as a separate required argument;
-// this package infers it instead so a caller opening bytes it already knows the name of
-// (as the smoke does) need not repeat the extension. WithSchema must name a file here:
-// there is no file on disk to read a FILE_SCHEMA line out of, so a directory is passed
-// through unmatched rather than resolved.
+// The format is WithFormat's if given — Python's open_memory takes it as a separate
+// required argument — else name's own extension, so a caller opening bytes it already
+// knows the name of (as the smoke does) need not repeat it. The name stands as the
+// scene's Path, as Python keeps it. WithSchema must name a file here: there is no file on
+// disk to read a FILE_SCHEMA line out of, so a directory is passed through unmatched
+// rather than resolved.
 func OpenMemory(data []byte, name string, opts ...Option) (*Scene, error) {
+	defer pin()()
 	cfg := openConfig{convention: Native}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	format := strings.TrimPrefix(filepath.Ext(name), ".")
+	format := cfg.format
+	if format == "" {
+		format = filepath.Ext(name)
+	}
+	format = strings.TrimPrefix(format, ".")
 	options := buildOptions(cfg)
 	defer schemaList(cfg.schema, &options)()
 	cf := C.CString(format)
@@ -511,7 +563,7 @@ func OpenMemory(data []byte, name string, opts ...Option) (*Scene, error) {
 	if handle == nil {
 		return nil, &CadaclysmError{Message: fmt.Sprintf("%s: %s", name, lastErrorOr("open failed"))}
 	}
-	return &Scene{handle: handle, label: name, path: "", schemaPath: cfg.schema, convention: cfg.convention}, nil
+	return &Scene{handle: handle, label: name, path: name, schemaPath: cfg.schema, convention: cfg.convention}, nil
 }
 
 // ---- bounds, attributes -------------------------------------------------------------
@@ -752,20 +804,20 @@ func (p *Placement) Index() uint32 { return p.index }
 // shape name the same node and so hand back the same arrays, which is what lets a
 // caller upload it once and draw it twice.
 func (p *Placement) Geometry() *Node {
-	return &Node{scene: p.scene, index: uint32(C.cadaclysm_placement_geometry(p.scene.handle, C.uint32_t(p.index)))}
+	return &Node{scene: p.scene, index: uint32(C.cadaclysm_placement_geometry(p.scene.h(), C.uint32_t(p.index)))}
 }
 
 // Select is what a click on this drawing should select — the placement rather than the
 // shape it draws, since the shape is shared with every sibling copy.
 func (p *Placement) Select() *Node {
-	return &Node{scene: p.scene, index: uint32(C.cadaclysm_placement_select(p.scene.handle, C.uint32_t(p.index)))}
+	return &Node{scene: p.scene, index: uint32(C.cadaclysm_placement_select(p.scene.h(), C.uint32_t(p.index)))}
 }
 
 // RawTransform is where to draw this, sixteen doubles in the ABI's own column-major
 // order.
 func (p *Placement) RawTransform() [16]float64 {
 	var raw [16]C.double
-	C.cadaclysm_placement_transform(p.scene.handle, C.uint32_t(p.index), (*C.double)(unsafe.Pointer(&raw[0])))
+	C.cadaclysm_placement_transform(p.scene.h(), C.uint32_t(p.index), (*C.double)(unsafe.Pointer(&raw[0])))
 	var out [16]float64
 	for i := range raw {
 		out[i] = float64(raw[i])
@@ -806,24 +858,24 @@ func (n *Node) Index() uint32 { return n.index }
 
 // Name is the node's own name, or "" past the end.
 func (n *Node) Name() string {
-	return C.GoString(C.cadaclysm_node_name(n.scene.handle, C.uint32_t(n.index)))
+	return C.GoString(C.cadaclysm_node_name(n.scene.h(), C.uint32_t(n.index)))
 }
 
 // ID is what the file calls it — a STEP #N, an IFC GlobalId, a Rhino UUID. Text rather
 // than a number because that is what the formats carry.
 func (n *Node) ID() string {
-	return C.GoString(C.cadaclysm_node_id(n.scene.handle, C.uint32_t(n.index)))
+	return C.GoString(C.cadaclysm_node_id(n.scene.h(), C.uint32_t(n.index)))
 }
 
 // Kind is what the file calls it — an IFC type, an openNURBS class, a shape kind.
 func (n *Node) Kind() string {
-	return C.GoString(C.cadaclysm_node_kind(n.scene.handle, C.uint32_t(n.index)))
+	return C.GoString(C.cadaclysm_node_kind(n.scene.h(), C.uint32_t(n.index)))
 }
 
 // Visible is whether the file says to show this when it is opened. The file's opening
 // state, and not inherited — see VisibleNow for that.
 func (n *Node) Visible() bool {
-	return bool(C.cadaclysm_node_visible(n.scene.handle, C.uint32_t(n.index)))
+	return bool(C.cadaclysm_node_visible(n.scene.h(), C.uint32_t(n.index)))
 }
 
 // VisibleNow is Visible, but with every ancestor consulted: a layer switched off hides
@@ -841,7 +893,9 @@ func (n *Node) VisibleNow() bool {
 // rides as a derived value rather than a field: an object is locked by its own flag or
 // by its layer's, and the reader has already combined the two. Formats without the
 // concept answer false. Locking is not hiding — a locked thing is drawn exactly as any
-// other and only refuses to be picked.
+// other and only refuses to be picked. Only a Locked attribute of ValueKindBoolean
+// counts; one of any other kind reads as unlocked here, where Python truth-tests
+// whatever value it finds.
 func (n *Node) Locked() bool {
 	for _, a := range n.Attributes() {
 		if a.Name == "Locked" {
@@ -864,19 +918,19 @@ func (n *Node) Label() string {
 
 // Depth is how far down the tree this node sits, a root being zero. For indenting.
 func (n *Node) Depth() uint32 {
-	return uint32(C.cadaclysm_node_depth(n.scene.handle, C.uint32_t(n.index)))
+	return uint32(C.cadaclysm_node_depth(n.scene.h(), C.uint32_t(n.index)))
 }
 
 // Generator is what its geometry was before it was triangles — "brep", "mesh", "csg".
 // Empty for a node that draws nothing, there being no geometry to have come from
 // anything.
 func (n *Node) Generator() string {
-	return C.GoString(C.cadaclysm_node_generator(n.scene.handle, C.uint32_t(n.index)))
+	return C.GoString(C.cadaclysm_node_generator(n.scene.h(), C.uint32_t(n.index)))
 }
 
 // Parent is the node containing this one, or nil for a root.
 func (n *Node) Parent() *Node {
-	p := uint32(C.cadaclysm_node_parent(n.scene.handle, C.uint32_t(n.index)))
+	p := uint32(C.cadaclysm_node_parent(n.scene.h(), C.uint32_t(n.index)))
 	if p == noneIndex {
 		return nil
 	}
@@ -885,10 +939,10 @@ func (n *Node) Parent() *Node {
 
 // Children is every node this one contains directly.
 func (n *Node) Children() []*Node {
-	count := uint32(C.cadaclysm_node_child_count(n.scene.handle, C.uint32_t(n.index)))
+	count := uint32(C.cadaclysm_node_child_count(n.scene.h(), C.uint32_t(n.index)))
 	out := make([]*Node, count)
 	for i := uint32(0); i < count; i++ {
-		out[i] = &Node{scene: n.scene, index: uint32(C.cadaclysm_node_child(n.scene.handle, C.uint32_t(n.index), C.uint32_t(i)))}
+		out[i] = &Node{scene: n.scene, index: uint32(C.cadaclysm_node_child(n.scene.h(), C.uint32_t(n.index), C.uint32_t(i)))}
 	}
 	return out
 }
@@ -897,7 +951,7 @@ func (n *Node) Children() []*Node {
 // meshes coming over in their own frame: a shell placed seventy-four times is one mesh
 // and seventy-four transforms, and this is how a caller knows to upload the buffer once.
 func (n *Node) InstanceOf() *Node {
-	p := uint32(C.cadaclysm_node_instance_of(n.scene.handle, C.uint32_t(n.index)))
+	p := uint32(C.cadaclysm_node_instance_of(n.scene.h(), C.uint32_t(n.index)))
 	if p == noneIndex {
 		return nil
 	}
@@ -908,7 +962,7 @@ func (n *Node) InstanceOf() *Node {
 // format that hangs geometry on a child of the object it belongs to points the child
 // back at the object.
 func (n *Node) SelectAs() *Node {
-	chosen := uint32(C.cadaclysm_node_select_as(n.scene.handle, C.uint32_t(n.index)))
+	chosen := uint32(C.cadaclysm_node_select_as(n.scene.h(), C.uint32_t(n.index)))
 	if chosen == noneIndex {
 		return n
 	}
@@ -917,10 +971,10 @@ func (n *Node) SelectAs() *Node {
 
 // Attributes is everything the file said about this node.
 func (n *Node) Attributes() []Attribute {
-	count := uint32(C.cadaclysm_node_attribute_count(n.scene.handle, C.uint32_t(n.index)))
+	count := uint32(C.cadaclysm_node_attribute_count(n.scene.h(), C.uint32_t(n.index)))
 	out := make([]Attribute, 0, count)
 	for i := uint32(0); i < count; i++ {
-		raw := C.cadaclysm_node_attribute(n.scene.handle, C.uint32_t(n.index), C.uint32_t(i))
+		raw := C.cadaclysm_node_attribute(n.scene.h(), C.uint32_t(n.index), C.uint32_t(i))
 		if raw.name == nil {
 			continue
 		}
@@ -932,7 +986,7 @@ func (n *Node) Attributes() []Attribute {
 // CanMesh is whether this node is drawn — whether it has geometry of its own to show.
 // Asks for nothing to be built. Most nodes of a model are structure and answer false.
 func (n *Node) CanMesh() bool {
-	return bool(C.cadaclysm_node_can_mesh(n.scene.handle, C.uint32_t(n.index)))
+	return bool(C.cadaclysm_node_can_mesh(n.scene.h(), C.uint32_t(n.index)))
 }
 
 // SaveMesh writes this node's mesh to path in format — one of MeshFormats(). Returns an
@@ -944,11 +998,15 @@ func (n *Node) CanMesh() bool {
 // Python's save_mesh(path, fmt="stl") — its default is "stl", and this package has no
 // defaults for a caller to lean on, so format is always spelled out here.
 func (n *Node) SaveMesh(path, format string) error {
+	if err := n.scene.closedError(); err != nil {
+		return err
+	}
+	defer pin()()
 	cp := C.CString(path)
 	defer C.free(unsafe.Pointer(cp))
 	cf := C.CString(format)
 	defer C.free(unsafe.Pointer(cf))
-	if !bool(C.cadaclysm_node_save_mesh(n.scene.handle, C.uint32_t(n.index), cp, cf)) {
+	if !bool(C.cadaclysm_node_save_mesh(n.scene.h(), C.uint32_t(n.index), cp, cf)) {
 		return &CadaclysmError{Message: lastErrorOr(fmt.Sprintf("could not write %s", path))}
 	}
 	return nil
@@ -959,7 +1017,7 @@ func (n *Node) SaveMesh(path, format string) error {
 // caller use its own.
 func (n *Node) Colour() ([4]float32, bool) {
 	var rgba [4]C.float
-	ok := bool(C.cadaclysm_node_color(n.scene.handle, C.uint32_t(n.index), (*C.float)(unsafe.Pointer(&rgba[0]))))
+	ok := bool(C.cadaclysm_node_color(n.scene.h(), C.uint32_t(n.index), (*C.float)(unsafe.Pointer(&rgba[0]))))
 	if !ok {
 		return [4]float32{}, false
 	}
@@ -977,7 +1035,7 @@ func (n *Node) Colour() ([4]float32, bool) {
 // not.
 func (n *Node) RawTransform() [16]float64 {
 	var raw [16]C.double
-	C.cadaclysm_node_transform(n.scene.handle, C.uint32_t(n.index), (*C.double)(unsafe.Pointer(&raw[0])))
+	C.cadaclysm_node_transform(n.scene.h(), C.uint32_t(n.index), (*C.double)(unsafe.Pointer(&raw[0])))
 	var out [16]float64
 	for i := range raw {
 		out[i] = float64(raw[i])
@@ -1004,7 +1062,7 @@ func (n *Node) Transform() [16]float64 {
 // Builds the geometry if it has not been built. Carry it through Transform for world
 // coordinates, exactly as with the mesh it bounds.
 func (n *Node) Bounds() Bounds {
-	b := C.cadaclysm_node_bounds(n.scene.handle, C.uint32_t(n.index))
+	b := C.cadaclysm_node_bounds(n.scene.h(), C.uint32_t(n.index))
 	var out Bounds
 	for i := 0; i < 3; i++ {
 		out.Min[i] = float64(b.min[i])
@@ -1015,10 +1073,14 @@ func (n *Node) Bounds() Bounds {
 
 // Mesh is this node's triangles, in their own frame, built now if they have not been —
 // nil where the node has no triangles (structure, or geometry drawn only as curves).
-// The error return is always nil: nothing in the ABI reports this call failing, but the
-// signature matches Node.Surfaces so both read the same way at the call site.
+// The error is non-nil only for a closed scene: nothing in the ABI reports this call
+// failing otherwise, but the signature matches Node.Surfaces so both read the same way
+// at the call site.
 func (n *Node) Mesh() (*Mesh, error) {
-	raw := C.cadaclysm_node_mesh(n.scene.handle, C.uint32_t(n.index))
+	if err := n.scene.closedError(); err != nil {
+		return nil, err
+	}
+	raw := C.cadaclysm_node_mesh(n.scene.h(), C.uint32_t(n.index))
 	if raw.index_count == 0 || raw.positions == nil {
 		return nil, nil
 	}
@@ -1041,9 +1103,12 @@ func (n *Node) Mesh() (*Mesh, error) {
 
 // Surfaces is this node's faces as surfaces and trim loops, where the reader built them.
 // Empty where the reader has no parametric read of this body or of this format. The
-// error return is always nil, for the reason Mesh's gives.
+// error is non-nil only for a closed scene, as Mesh's.
 func (n *Node) Surfaces() (*Surfaces, error) {
-	raw := C.cadaclysm_node_surfaces(n.scene.handle, C.uint32_t(n.index))
+	if err := n.scene.closedError(); err != nil {
+		return nil, err
+	}
+	raw := C.cadaclysm_node_surfaces(n.scene.h(), C.uint32_t(n.index))
 	if raw.face_count == 0 {
 		return &Surfaces{}, nil
 	}
@@ -1116,19 +1181,19 @@ func polylinesFrom(raw C.CadaclysmPolylines) *Polylines {
 
 // Edges is this node's feature edges, as polylines to draw an overlay from.
 func (n *Node) Edges() *Polylines {
-	return polylinesFrom(C.cadaclysm_node_edges(n.scene.handle, C.uint32_t(n.index)))
+	return polylinesFrom(C.cadaclysm_node_edges(n.scene.h(), C.uint32_t(n.index)))
 }
 
 // Curves is this node's free curves, as polylines. A 2D drawing is all of these.
 func (n *Node) Curves() *Polylines {
-	return polylinesFrom(C.cadaclysm_node_curves(n.scene.handle, C.uint32_t(n.index)))
+	return polylinesFrom(C.cadaclysm_node_curves(n.scene.h(), C.uint32_t(n.index)))
 }
 
 // Isocurves is this node's interior surface lines, as polylines — distinct from Edges:
 // those bound the faces, these rule across them, so a curved face reads as curved
 // rather than as a flat patch.
 func (n *Node) Isocurves() *Polylines {
-	return polylinesFrom(C.cadaclysm_node_isocurves(n.scene.handle, C.uint32_t(n.index)))
+	return polylinesFrom(C.cadaclysm_node_isocurves(n.scene.h(), C.uint32_t(n.index)))
 }
 
 // Walk is this node and every node under it, parents before children.
@@ -1178,7 +1243,28 @@ func (s *Scene) Close() error {
 // Closed is whether Close has already run.
 func (s *Scene) Closed() bool { return s.handle == nil }
 
-// Path is the file this was read from, "" for a scene OpenMemory opened.
+// closedError is the *CadaclysmError a closed scene is refused with, or nil while it is
+// open — what a method with an error return hands back (see the package doc).
+func (s *Scene) closedError() error {
+	if s.handle == nil {
+		return &CadaclysmError{Message: s.label + ": the scene is closed"}
+	}
+	return nil
+}
+
+// h is the handle every call into the library reads through, so a closed scene is refused
+// at the call site rather than handed to the library as nil: a panic carrying
+// closedError, the rule the package doc states for an accessor with no error to return
+// it in. A method that has one checks closedError first and never reaches the panic.
+func (s *Scene) h() *C.CadaclysmScene {
+	if err := s.closedError(); err != nil {
+		panic(err)
+	}
+	return s.handle
+}
+
+// Path is the file this was read from — or, for a scene OpenMemory opened, the name it
+// was given, as Python's Scene.path keeps it.
 func (s *Scene) Path() string { return s.path }
 
 // SchemaPath is the .exp actually used to open this, or "". Worth reporting when Open
@@ -1194,11 +1280,11 @@ func (s *Scene) Convention() Convention { return s.convention }
 func (s *Scene) Version() string { return Version() }
 
 // Schema is the schema the file named, or "" for a format that names none.
-func (s *Scene) Schema() string { return C.GoString(C.cadaclysm_schema(s.handle)) }
+func (s *Scene) Schema() string { return C.GoString(C.cadaclysm_schema(s.h())) }
 
 // SchemaRead is the schema that actually read this file, which is not always the one it
 // named — see Substituted.
-func (s *Scene) SchemaRead() string { return C.GoString(C.cadaclysm_schema_read(s.handle)) }
+func (s *Scene) SchemaRead() string { return C.GoString(C.cadaclysm_schema_read(s.h())) }
 
 // Substituted is whether something other than the file's own schema read it. Compared
 // on the bare names: a FILE_SCHEMA entry may carry a formal identifier and the library
@@ -1224,13 +1310,13 @@ func (s *Scene) Substituted() bool {
 
 // MetresPerUnit is what one length in the file is worth in metres, or 1 where it did not
 // say.
-func (s *Scene) MetresPerUnit() float64 { return float64(C.cadaclysm_metres_per_unit(s.handle)) }
+func (s *Scene) MetresPerUnit() float64 { return float64(C.cadaclysm_metres_per_unit(s.h())) }
 
 // Bounds is everything the model covers, in world coordinates — the one figure here not
 // in a node's own frame. This meshes all of it, being the only way to know how far it
 // reaches; a caller that has not the time should frame from the nodes it has built.
 func (s *Scene) Bounds() Bounds {
-	b := C.cadaclysm_bounds(s.handle)
+	b := C.cadaclysm_bounds(s.h())
 	var out Bounds
 	for i := 0; i < 3; i++ {
 		out.Min[i] = float64(b.min[i])
@@ -1241,10 +1327,10 @@ func (s *Scene) Bounds() Bounds {
 
 // Diagnostics is what this file held that the reader could not build.
 func (s *Scene) Diagnostics() []string {
-	n := uint32(C.cadaclysm_diagnostic_count(s.handle))
+	n := uint32(C.cadaclysm_diagnostic_count(s.h()))
 	out := make([]string, n)
 	for i := uint32(0); i < n; i++ {
-		out[i] = C.GoString(C.cadaclysm_diagnostic(s.handle, C.uint32_t(i)))
+		out[i] = C.GoString(C.cadaclysm_diagnostic(s.h(), C.uint32_t(i)))
 	}
 	return out
 }
@@ -1252,7 +1338,7 @@ func (s *Scene) Diagnostics() []string {
 // SourceName is the archive member this was read from, or "" for a plain file. Open on a
 // .zip chose one member, and this is the only way to learn which.
 func (s *Scene) SourceName() string {
-	p := C.cadaclysm_source_name(s.handle)
+	p := C.cadaclysm_source_name(s.h())
 	if p == nil {
 		return ""
 	}
@@ -1261,7 +1347,7 @@ func (s *Scene) SourceName() string {
 
 // Nodes is every node, in index order.
 func (s *Scene) Nodes() []*Node {
-	n := uint32(C.cadaclysm_node_count(s.handle))
+	n := uint32(C.cadaclysm_node_count(s.h()))
 	out := make([]*Node, n)
 	for i := uint32(0); i < n; i++ {
 		out[i] = &Node{scene: s, index: i}
@@ -1277,9 +1363,13 @@ func (s *Scene) Nodes() []*Node {
 // an error — a filter that matches nothing is a perfectly good answer, and the ABI
 // distinguishes the two by whether it left a reason behind.
 func (s *Scene) Query(filter string) ([]*Node, error) {
+	if err := s.closedError(); err != nil {
+		return nil, err
+	}
+	defer pin()()
 	cf := C.CString(filter)
 	defer C.free(unsafe.Pointer(cf))
-	total := uint32(C.cadaclysm_query(s.handle, cf, nil, 0))
+	total := uint32(C.cadaclysm_query(s.h(), cf, nil, 0))
 	if total == 0 {
 		if reason := lastError(); reason != "" {
 			return nil, &CadaclysmError{Message: fmt.Sprintf("%s: %s", s.label, reason)}
@@ -1287,7 +1377,7 @@ func (s *Scene) Query(filter string) ([]*Node, error) {
 		return nil, nil
 	}
 	buf := make([]uint32, total)
-	written := uint32(C.cadaclysm_query(s.handle, cf, (*C.uint32_t)(unsafe.Pointer(&buf[0])), C.uint32_t(total)))
+	written := uint32(C.cadaclysm_query(s.h(), cf, (*C.uint32_t)(unsafe.Pointer(&buf[0])), C.uint32_t(total)))
 	if written > total {
 		written = total
 	}
@@ -1302,7 +1392,7 @@ func (s *Scene) Query(filter string) ([]*Node, error) {
 // is the point. A node walk draws a Rhino block once at its definition's frame and every
 // placement of it not at all; this is the list to iterate to draw.
 func (s *Scene) Placements() []*Placement {
-	n := uint32(C.cadaclysm_placement_count(s.handle))
+	n := uint32(C.cadaclysm_placement_count(s.h()))
 	out := make([]*Placement, n)
 	for i := uint32(0); i < n; i++ {
 		out[i] = &Placement{scene: s, index: i}
@@ -1312,10 +1402,10 @@ func (s *Scene) Placements() []*Placement {
 
 // Roots is the nodes nothing else contains.
 func (s *Scene) Roots() []*Node {
-	n := uint32(C.cadaclysm_root_count(s.handle))
+	n := uint32(C.cadaclysm_root_count(s.h()))
 	out := make([]*Node, 0, n)
 	for i := uint32(0); i < n; i++ {
-		idx := uint32(C.cadaclysm_root(s.handle, C.uint32_t(i)))
+		idx := uint32(C.cadaclysm_root(s.h(), C.uint32_t(i)))
 		if idx != noneIndex {
 			out = append(out, &Node{scene: s, index: idx})
 		}
@@ -1336,29 +1426,33 @@ func (s *Scene) Walk() []*Node {
 // Reading is lazy so a caller can put the tree on screen while the shapes are still to
 // come; asking node by node instead meshes them one at a time on one core, where this
 // does the same work over every core.
-func (s *Scene) RealizeAll() uint32 { return uint32(C.cadaclysm_realize_all(s.handle)) }
+func (s *Scene) RealizeAll() uint32 { return uint32(C.cadaclysm_realize_all(s.h())) }
 
 // Realized is how many nodes RealizeAll has finished with. Safe to read from another
 // goroutine.
-func (s *Scene) Realized() uint32 { return uint32(C.cadaclysm_realized(s.handle)) }
+func (s *Scene) Realized() uint32 { return uint32(C.cadaclysm_realized(s.h())) }
 
 // RealizeTotal is how many there will be in all — zero until RealizeAll starts.
-func (s *Scene) RealizeTotal() uint32 { return uint32(C.cadaclysm_realize_total(s.handle)) }
+func (s *Scene) RealizeTotal() uint32 { return uint32(C.cadaclysm_realize_total(s.h())) }
 
 // Cancel asks a running RealizeAll to stop. One-way, and for the life of the scene:
 // every later RealizeAll on this scene returns 0 at once.
-func (s *Scene) Cancel() { C.cadaclysm_cancel(s.handle) }
+func (s *Scene) Cancel() { C.cadaclysm_cancel(s.h()) }
 
 // Save writes the whole scene to path: "glb" (binary glTF), "gltf" (text glTF) or "obj"
 // (Wavefront). Every placement of every shape, named and placed as the tree is, with a
 // material per colour — where Node.SaveMesh writes one node's mesh on its own. Python's
 // default format is "glb"; this package has no defaults, so format is always given.
 func (s *Scene) Save(path, format string) error {
+	if err := s.closedError(); err != nil {
+		return err
+	}
+	defer pin()()
 	cp := C.CString(path)
 	defer C.free(unsafe.Pointer(cp))
 	cf := C.CString(format)
 	defer C.free(unsafe.Pointer(cf))
-	if !bool(C.cadaclysm_scene_save(s.handle, cp, cf)) {
+	if !bool(C.cadaclysm_scene_save(s.h(), cp, cf)) {
 		return &CadaclysmError{Message: lastErrorOr(fmt.Sprintf("could not write %s", path))}
 	}
 	return nil
@@ -1372,7 +1466,7 @@ func (s *Scene) Save(path, format string) error {
 // the identity.
 func (s *Scene) SurfaceMatrix() [16]float64 {
 	var raw [16]C.float
-	C.cadaclysm_surface_matrix(s.handle, (*C.float)(unsafe.Pointer(&raw[0])))
+	C.cadaclysm_surface_matrix(s.h(), (*C.float)(unsafe.Pointer(&raw[0])))
 	var out [16]float64
 	for i := range raw {
 		out[i] = float64(raw[i])

@@ -17,7 +17,9 @@
 // assembly with tens of millions of triangles makes a defensive copy of every mesh a cost
 // most callers never asked for, most meshes being uploaded to a GPU and dropped. Call
 // `Mesh.Copy()` for an array that must outlive the scene, or read the span before
-// `Scene.Dispose()` (or `Scene.Close()`) runs.
+// `Scene.Dispose()` (or `Scene.Close()`) runs: a view asked for after that throws the scene's
+// own "closed" exception, as the kernel's views refuse a stale cache, rather than handing
+// out a span over freed memory.
 //
 // Strings are the easy half: every `char *` this ABI returns is marshalled into a copied
 // `string` on the way out, so `Node.Name` and friends outlive anything.
@@ -224,6 +226,39 @@ internal unsafe struct RawFace
     public uint NurbsCount;
 }
 
+// ---- owning a handle ----------------------------------------------------------------------
+
+/// <summary>A native handle this binding owns, freed exactly once by the runtime's own
+/// bookkeeping rather than by a finalizer of the owner's. Every `[DllImport]` that takes or
+/// returns an owned handle is typed with a subclass of this instead of `IntPtr`: the
+/// marshaller then holds a reference on it for the length of every call, so a temporary
+/// operand -- `Solid.Cuboid(..).Join(Solid.Cylinder(..))`, the cylinder nobody's -- cannot be
+/// collected and freed while the library is still reading it, which an owner's finalizer
+/// could not promise once the JIT ended the operand's lifetime at its last use. A closed
+/// handle refuses to be marshalled at all, and disposing twice is a no-op by construction.
+/// Only the `*_free`/`close` entry points still take an `IntPtr`: they are what
+/// <see cref="SafeHandle.ReleaseHandle"/> calls.</summary>
+internal abstract class CadaclysmHandle : Microsoft.Win32.SafeHandles.SafeHandleZeroOrMinusOneIsInvalid
+{
+    protected CadaclysmHandle() : base(ownsHandle: true)
+    {
+    }
+}
+
+/// <summary>`CadaclysmScene *`, given back by `cadaclysm_close`.</summary>
+internal sealed class SceneHandle : CadaclysmHandle
+{
+    public SceneHandle()
+    {
+    }
+
+    protected override bool ReleaseHandle()
+    {
+        Native.cadaclysm_close(handle);
+        return true;
+    }
+}
+
 // ---- loading the library ------------------------------------------------------------------
 
 /// <summary>Resolves `cadaclysm_capi` for every P/Invoke in <see cref="Native"/>, and
@@ -256,8 +291,9 @@ internal static class Loader
 
     /// <summary>Finds and loads the named library: the environment (`CADACLYSM_LIBRARY` for
     /// both, and `CADACLYSM_BLACKSMITH_LIBRARY` first for the kernel, as Python's kernel
-    /// module reads it) as a directory or the file itself, then beside this assembly, then the
-    /// platform default search.</summary>
+    /// module reads it) as a directory or the file itself, then beside this assembly, then
+    /// `lib/` and `target/{release,debug}` in every ancestor, then the platform default
+    /// search.</summary>
     /// <remarks>The library sits in the Rust build directory, not beside this assembly by
     /// default, so this points the loader at it rather than making the caller arrange PATH.
     /// A deployment that ships the library alongside the executable works untouched, since
@@ -275,7 +311,15 @@ internal static class Loader
             if (string.IsNullOrEmpty(env)) continue;
             if (Directory.Exists(env))
             {
-                candidates.AddRange(files.Select(f => Path.Combine(env, f)));
+                // A directory is taken as the place the library is, as Python takes it: one
+                // holding neither library is the same mistake as a path to nothing, not a
+                // hint to go on searching and load some other copy. One holding only the
+                // other library is simply not for this one (see the file case below).
+                var inside = files.Select(f => Path.Combine(env, f)).Where(File.Exists).ToArray();
+                if (inside.Length == 0
+                    && !Libraries.Any(l => FilesOf(l).Any(f => File.Exists(Path.Combine(env, f)))))
+                    throw new CadaclysmException($"{variable}={env} names nothing that exists");
+                candidates.AddRange(inside);
                 continue;
             }
             // A variable that names nothing usable is a mistake to report, as Python's loader
@@ -294,11 +338,15 @@ internal static class Loader
                 throw new CadaclysmException(
                     $"{variable}={env} names neither cadaclysm_capi nor cadaclysm_blacksmith");
         }
-        // Walking up from this assembly: an SDK checkout keeps the library in `lib/` beside
-        // the wrappers; the repository this example ships in keeps it in `target/release`
-        // (or `target/debug`, a fallback for a machine that only built that).
+        // Beside this assembly first, as Python looks beside its own file: a deployment that
+        // ships the library alongside the executable. Then walking up from it: an SDK
+        // checkout keeps the library in `lib/` beside the wrappers; the repository this
+        // example ships in keeps it in `target/release` (or `target/debug`, a fallback for a
+        // machine that only built that).
         var assembly = Assembly.GetExecutingAssembly().Location;
-        for (var dir = Path.GetDirectoryName(assembly); dir is not null; dir = Path.GetDirectoryName(dir))
+        var here = Path.GetDirectoryName(assembly);
+        if (here is not null) candidates.AddRange(files.Select(f => Path.Combine(here, f)));
+        for (var dir = here; dir is not null; dir = Path.GetDirectoryName(dir))
         {
             candidates.AddRange(files.Select(f => Path.Combine(dir, "lib", f)));
             candidates.AddRange(files.Select(f => Path.Combine(dir, "target", "release", f)));
@@ -330,71 +378,71 @@ internal static class Native
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_license_info();
     [DllImport(Lib)] internal static extern ulong cadaclysm_license_notice_count();
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_build_date();
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_open(
+    [DllImport(Lib)] internal static extern SceneHandle cadaclysm_open(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string path, ref RawOpenOptions options);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_open_memory(
+    [DllImport(Lib)] internal static extern SceneHandle cadaclysm_open_memory(
         IntPtr bytes, nuint length, [MarshalAs(UnmanagedType.LPUTF8Str)] string format,
         ref RawOpenOptions options);
     [DllImport(Lib)] internal static extern void cadaclysm_open_options_init(ref RawOpenOptions options);
     [DllImport(Lib)] internal static extern void cadaclysm_close(IntPtr scene);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_source_name(IntPtr scene);
-    [DllImport(Lib)] internal static extern uint cadaclysm_node_count(IntPtr scene);
-    [DllImport(Lib)] internal static extern uint cadaclysm_root_count(IntPtr scene);
-    [DllImport(Lib)] internal static extern uint cadaclysm_root(IntPtr scene, uint index);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_schema(IntPtr scene);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_schema_read(IntPtr scene);
-    [DllImport(Lib)] internal static extern double cadaclysm_metres_per_unit(IntPtr scene);
-    [DllImport(Lib)] internal static extern RawBounds cadaclysm_bounds(IntPtr scene);
-    [DllImport(Lib)] internal static extern uint cadaclysm_node_parent(IntPtr scene, uint node);
-    [DllImport(Lib)] internal static extern uint cadaclysm_node_child_count(IntPtr scene, uint node);
-    [DllImport(Lib)] internal static extern uint cadaclysm_node_child(IntPtr scene, uint node, uint index);
-    [DllImport(Lib)] internal static extern uint cadaclysm_node_depth(IntPtr scene, uint node);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_node_name(IntPtr scene, uint node);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_node_kind(IntPtr scene, uint node);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_source_name(SceneHandle scene);
+    [DllImport(Lib)] internal static extern uint cadaclysm_node_count(SceneHandle scene);
+    [DllImport(Lib)] internal static extern uint cadaclysm_root_count(SceneHandle scene);
+    [DllImport(Lib)] internal static extern uint cadaclysm_root(SceneHandle scene, uint index);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_schema(SceneHandle scene);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_schema_read(SceneHandle scene);
+    [DllImport(Lib)] internal static extern double cadaclysm_metres_per_unit(SceneHandle scene);
+    [DllImport(Lib)] internal static extern RawBounds cadaclysm_bounds(SceneHandle scene);
+    [DllImport(Lib)] internal static extern uint cadaclysm_node_parent(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern uint cadaclysm_node_child_count(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern uint cadaclysm_node_child(SceneHandle scene, uint node, uint index);
+    [DllImport(Lib)] internal static extern uint cadaclysm_node_depth(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_node_name(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_node_kind(SceneHandle scene, uint node);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool cadaclysm_node_visible(IntPtr scene, uint node);
+    internal static extern bool cadaclysm_node_visible(SceneHandle scene, uint node);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool cadaclysm_node_save_mesh(IntPtr scene, uint node,
+    internal static extern bool cadaclysm_node_save_mesh(SceneHandle scene, uint node,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string path, [MarshalAs(UnmanagedType.LPUTF8Str)] string format);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool cadaclysm_scene_save(IntPtr scene,
+    internal static extern bool cadaclysm_scene_save(SceneHandle scene,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string path, [MarshalAs(UnmanagedType.LPUTF8Str)] string format);
     [DllImport(Lib)] internal static extern uint cadaclysm_mesh_format_count();
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_mesh_format(uint index);
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_mesh_format_extension(uint index);
-    [DllImport(Lib)] internal static extern uint cadaclysm_query(IntPtr scene,
+    [DllImport(Lib)] internal static extern uint cadaclysm_query(SceneHandle scene,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string filter, [Out] uint[]? outArr, uint capacity);
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_pick_file(IntPtr window);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_node_id(IntPtr scene, uint node);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_node_id(SceneHandle scene, uint node);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool cadaclysm_node_color(IntPtr scene, uint node, [Out] float[] rgba);
-    [DllImport(Lib)] internal static extern void cadaclysm_node_transform(IntPtr scene, uint node,
+    internal static extern bool cadaclysm_node_color(SceneHandle scene, uint node, [Out] float[] rgba);
+    [DllImport(Lib)] internal static extern void cadaclysm_node_transform(SceneHandle scene, uint node,
         [Out] double[] outMatrix);
-    [DllImport(Lib)] internal static extern uint cadaclysm_node_attribute_count(IntPtr scene, uint node);
-    [DllImport(Lib)] internal static extern RawAttribute cadaclysm_node_attribute(IntPtr scene, uint node, uint index);
-    [DllImport(Lib)] internal static extern uint cadaclysm_placement_count(IntPtr scene);
-    [DllImport(Lib)] internal static extern uint cadaclysm_placement_geometry(IntPtr scene, uint placement);
-    [DllImport(Lib)] internal static extern uint cadaclysm_placement_select(IntPtr scene, uint placement);
-    [DllImport(Lib)] internal static extern void cadaclysm_placement_transform(IntPtr scene, uint placement,
+    [DllImport(Lib)] internal static extern uint cadaclysm_node_attribute_count(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern RawAttribute cadaclysm_node_attribute(SceneHandle scene, uint node, uint index);
+    [DllImport(Lib)] internal static extern uint cadaclysm_placement_count(SceneHandle scene);
+    [DllImport(Lib)] internal static extern uint cadaclysm_placement_geometry(SceneHandle scene, uint placement);
+    [DllImport(Lib)] internal static extern uint cadaclysm_placement_select(SceneHandle scene, uint placement);
+    [DllImport(Lib)] internal static extern void cadaclysm_placement_transform(SceneHandle scene, uint placement,
         [Out] double[] outMatrix);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool cadaclysm_node_can_mesh(IntPtr scene, uint node);
-    [DllImport(Lib)] internal static extern RawMesh cadaclysm_node_mesh(IntPtr scene, uint node);
-    [DllImport(Lib)] internal static extern RawSurfaces cadaclysm_node_surfaces(IntPtr scene, uint node);
-    [DllImport(Lib)] internal static extern void cadaclysm_surface_matrix(IntPtr scene, [Out] float[] outMatrix);
-    [DllImport(Lib)] internal static extern RawBounds cadaclysm_node_bounds(IntPtr scene, uint node);
-    [DllImport(Lib)] internal static extern uint cadaclysm_node_instance_of(IntPtr scene, uint node);
-    [DllImport(Lib)] internal static extern uint cadaclysm_node_select_as(IntPtr scene, uint node);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_node_generator(IntPtr scene, uint node);
-    [DllImport(Lib)] internal static extern uint cadaclysm_diagnostic_count(IntPtr scene);
-    [DllImport(Lib)] internal static extern IntPtr cadaclysm_diagnostic(IntPtr scene, uint index);
-    [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_edges(IntPtr scene, uint node);
-    [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_curves(IntPtr scene, uint node);
-    [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_isocurves(IntPtr scene, uint node);
-    [DllImport(Lib)] internal static extern uint cadaclysm_realize_all(IntPtr scene);
-    [DllImport(Lib)] internal static extern uint cadaclysm_realized(IntPtr scene);
-    [DllImport(Lib)] internal static extern uint cadaclysm_realize_total(IntPtr scene);
-    [DllImport(Lib)] internal static extern void cadaclysm_cancel(IntPtr scene);
+    internal static extern bool cadaclysm_node_can_mesh(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern RawMesh cadaclysm_node_mesh(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern RawSurfaces cadaclysm_node_surfaces(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern void cadaclysm_surface_matrix(SceneHandle scene, [Out] float[] outMatrix);
+    [DllImport(Lib)] internal static extern RawBounds cadaclysm_node_bounds(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern uint cadaclysm_node_instance_of(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern uint cadaclysm_node_select_as(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_node_generator(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern uint cadaclysm_diagnostic_count(SceneHandle scene);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_diagnostic(SceneHandle scene, uint index);
+    [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_edges(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_curves(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_isocurves(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern uint cadaclysm_realize_all(SceneHandle scene);
+    [DllImport(Lib)] internal static extern uint cadaclysm_realized(SceneHandle scene);
+    [DllImport(Lib)] internal static extern uint cadaclysm_realize_total(SceneHandle scene);
+    [DllImport(Lib)] internal static extern void cadaclysm_cancel(SceneHandle scene);
 }
 
 /// <summary>A 4x4 column-major ABI matrix (16 doubles or 16 floats) as the row-major 2D array
@@ -522,29 +570,28 @@ public sealed class Mesh
     public uint IndexCount => _raw.IndexCount;
     public uint TriangleCount => _raw.IndexCount / 3;
 
-    public unsafe ReadOnlySpan<float> Positions => _raw.Positions == IntPtr.Zero
-        ? ReadOnlySpan<float>.Empty
-        : new ReadOnlySpan<float>((void*)_raw.Positions, (int)(_raw.VertexCount * 3));
+    /// <summary>A view over a closed scene is over freed memory: every span below asks the
+    /// scene first, and a closed one throws its own <see cref="CadaclysmException"/> rather
+    /// than handing out a span into it.</summary>
+    private unsafe ReadOnlySpan<T> View<T>(IntPtr at, uint length)
+    {
+        _ = Scene.Handle;
+        return at == IntPtr.Zero ? ReadOnlySpan<T>.Empty : new ReadOnlySpan<T>((void*)at, (int)length);
+    }
 
-    public unsafe ReadOnlySpan<float> Normals => _raw.Normals == IntPtr.Zero
-        ? ReadOnlySpan<float>.Empty
-        : new ReadOnlySpan<float>((void*)_raw.Normals, (int)(_raw.VertexCount * 3));
+    public ReadOnlySpan<float> Positions => View<float>(_raw.Positions, _raw.VertexCount * 3);
+
+    public ReadOnlySpan<float> Normals => View<float>(_raw.Normals, _raw.VertexCount * 3);
 
     /// <summary>Two floats a vertex, not three. See the surface-parameterisation note on
     /// `CadaclysmMesh::uvs` in the header for what generates them and what does not.</summary>
-    public unsafe ReadOnlySpan<float> Uvs => _raw.Uvs == IntPtr.Zero
-        ? ReadOnlySpan<float>.Empty
-        : new ReadOnlySpan<float>((void*)_raw.Uvs, (int)(_raw.VertexCount * 2));
+    public ReadOnlySpan<float> Uvs => View<float>(_raw.Uvs, _raw.VertexCount * 2);
 
     /// <summary>Four floats a vertex, RGBA -- present only for a body opened asking for
     /// per-vertex colour whose faces carry more than one between them.</summary>
-    public unsafe ReadOnlySpan<float> Colours => _raw.Colors == IntPtr.Zero
-        ? ReadOnlySpan<float>.Empty
-        : new ReadOnlySpan<float>((void*)_raw.Colors, (int)(_raw.VertexCount * 4));
+    public ReadOnlySpan<float> Colours => View<float>(_raw.Colors, _raw.VertexCount * 4);
 
-    public unsafe ReadOnlySpan<uint> Indices => _raw.Indices == IntPtr.Zero
-        ? ReadOnlySpan<uint>.Empty
-        : new ReadOnlySpan<uint>((void*)_raw.Indices, (int)_raw.IndexCount);
+    public ReadOnlySpan<uint> Indices => View<uint>(_raw.Indices, _raw.IndexCount);
 
     /// <summary>The same triangles in memory of our own, safe to outlive the scene.</summary>
     /// <remarks>Expensive on purpose to be visible: this is where the gigabytes go on a large
@@ -574,15 +621,19 @@ public sealed class Polylines
     public uint PolylineCount => _raw.PolylineCount;
     public uint VertexCount => _raw.VertexCount;
 
+    /// <summary>As <see cref="Mesh"/>'s: a closed scene throws rather than hands out a span
+    /// over freed memory.</summary>
+    private unsafe ReadOnlySpan<T> View<T>(IntPtr at, uint length)
+    {
+        _ = Scene.Handle;
+        return at == IntPtr.Zero ? ReadOnlySpan<T>.Empty : new ReadOnlySpan<T>((void*)at, (int)length);
+    }
+
     /// <summary>`(VertexCount * 3)` floats, the runs end to end.</summary>
-    public unsafe ReadOnlySpan<float> Positions => _raw.Positions == IntPtr.Zero
-        ? ReadOnlySpan<float>.Empty
-        : new ReadOnlySpan<float>((void*)_raw.Positions, (int)(_raw.VertexCount * 3));
+    public ReadOnlySpan<float> Positions => View<float>(_raw.Positions, _raw.VertexCount * 3);
 
     /// <summary>`(PolylineCount)` vertex counts saying where each run stops.</summary>
-    public unsafe ReadOnlySpan<uint> Counts => _raw.Counts == IntPtr.Zero
-        ? ReadOnlySpan<uint>.Empty
-        : new ReadOnlySpan<uint>((void*)_raw.Counts, (int)_raw.PolylineCount);
+    public ReadOnlySpan<uint> Counts => View<uint>(_raw.Counts, _raw.PolylineCount);
 
     /// <summary>Indices into <see cref="Positions"/> making line-segment endpoint pairs: a
     /// polyline of n points is n - 1 segments, so each interior point is named twice.</summary>
@@ -783,6 +834,8 @@ public sealed class Node : IEquatable<Node>
 
     /// <summary>Whether the file says this cannot be selected or edited. Locking is not
     /// hiding: a locked thing is drawn exactly as any other and only refuses to be picked.
+    /// Only a `Locked` attribute of <see cref="ValueKind.Boolean"/> kind counts; one of any
+    /// other kind reads as unlocked here, where Python truth-tests whatever value it finds.
     /// </summary>
     public bool Locked
     {
@@ -1039,10 +1092,10 @@ public sealed class Node : IEquatable<Node>
 /// hands back borrows from it.</summary>
 public sealed class Scene : IDisposable
 {
-    private IntPtr _handle;
+    private readonly SceneHandle _handle;
     private readonly string _label;
 
-    internal Scene(IntPtr handle, string label, string? path, string? schemaPath, Convention convention)
+    internal Scene(SceneHandle handle, string label, string path, string? schemaPath, Convention convention)
     {
         _handle = handle;
         _label = label;
@@ -1051,9 +1104,9 @@ public sealed class Scene : IDisposable
         Convention = convention;
     }
 
-    /// <summary>The file this was read from -- null for a scene opened by
-    /// <see cref="Cadaclysm.OpenMemory"/>, which has no file on disk to name.</summary>
-    public string? Path { get; }
+    /// <summary>The file this was read from -- or, for a scene opened by
+    /// <see cref="Cadaclysm.OpenMemory"/>, the name it was given, as Python keeps it.</summary>
+    public string Path { get; }
 
     /// <summary>The `.exp` actually used to open this, or null.</summary>
     public string? SchemaPath { get; }
@@ -1064,36 +1117,25 @@ public sealed class Scene : IDisposable
     /// cref="Cadaclysm.Mesh"/> type -- member lookup and type lookup are separate.</remarks>
     public Convention Convention { get; }
 
-    /// <summary>The raw handle, refusing to hand over a closed one -- every call in this file
+    /// <summary>The handle, refusing to hand over a closed one -- every call in this file
     /// goes through here rather than touching the field directly, so a use-after-close raises
     /// a <see cref="CadaclysmException"/> at the call site instead of passing a dangling
-    /// pointer into the library.</summary>
-    internal IntPtr Handle => _handle != IntPtr.Zero
-        ? _handle
-        : throw new CadaclysmException($"{_label}: the scene is closed");
+    /// pointer into the library. (The marshaller would refuse the closed handle too, with an
+    /// <see cref="ObjectDisposedException"/>; this keeps the exception the binding's own.)
+    /// </summary>
+    internal SceneHandle Handle => _handle.IsClosed
+        ? throw new CadaclysmException($"{_label}: the scene is closed")
+        : _handle;
 
-    public bool Closed => _handle == IntPtr.Zero;
+    public bool Closed => _handle.IsClosed;
 
     /// <summary>Give the scene back. Idempotent. Every borrowed <see cref="Mesh"/> and <see
-    /// cref="Polylines"/> still held is reading freed memory afterwards.</summary>
-    public void Close()
-    {
-        if (_handle == IntPtr.Zero) return;
-        var handle = _handle;
-        _handle = IntPtr.Zero;
-        Native.cadaclysm_close(handle);
-    }
+    /// cref="Polylines"/> still held throws on its next read.</summary>
+    public void Close() => _handle.Dispose();
 
-    public void Dispose()
-    {
-        Close();
-        GC.SuppressFinalize(this);
-    }
-
-    ~Scene()
-    {
-        if (_handle != IntPtr.Zero) Native.cadaclysm_close(_handle);
-    }
+    /// <summary><see cref="Close"/>. A scene never disposed is closed when the runtime
+    /// collects its handle.</summary>
+    public void Dispose() => Close();
 
     /// <summary>The version of the library that read it.</summary>
     public string Version => Cadaclysm.Version();
@@ -1423,7 +1465,7 @@ public static class Cadaclysm
         return options;
     }
 
-    private static IntPtr OpenNative(string path, string? schema, RawOpenOptions options)
+    private static SceneHandle OpenNative(string path, string? schema, RawOpenOptions options)
     {
         IntPtr list = IntPtr.Zero, text = IntPtr.Zero;
         try
@@ -1472,7 +1514,7 @@ public static class Cadaclysm
         if (schema is not null && Directory.Exists(schema))
         {
             var handle = OpenNative(path, schema, options);
-            if (handle != IntPtr.Zero) return new Scene(handle, Path.GetFileName(path), path, schema, convention);
+            if (!handle.IsInvalid) return new Scene(handle, Path.GetFileName(path), path, schema, convention);
             // The library's own message alone, exactly as Python's `f"{path.name}: {_last_error()}"`
             // does -- "open failed" only stands in for the message on the (untested-in-practice)
             // case that a null handle left none, which Python's raw (possibly empty) string does not
@@ -1487,7 +1529,7 @@ public static class Cadaclysm
         foreach (var candidate in candidates)
         {
             var handle = OpenNative(path, candidate, options);
-            if (handle != IntPtr.Zero) return new Scene(handle, Path.GetFileName(path), path, candidate, convention);
+            if (!handle.IsInvalid) return new Scene(handle, Path.GetFileName(path), path, candidate, convention);
         }
         throw new CadaclysmException($"{Path.GetFileName(path)}: {LastErrorOr("open failed")}");
     }
@@ -1516,14 +1558,15 @@ public static class Cadaclysm
                 options.Schemas = list;
                 options.SchemaCount = 1;
             }
-            IntPtr handle;
+            SceneHandle handle;
             fixed (byte* ptr = bytes)
             {
                 handle = Native.cadaclysm_open_memory((IntPtr)ptr, (nuint)bytes.Length, format, ref options);
             }
             // As above: the library's own message alone; "open failed" only stands in when it left none.
-            if (handle == IntPtr.Zero) throw new CadaclysmException($"{name}: {LastErrorOr("open failed")}");
-            return new Scene(handle, name, null, schema, convention);
+            if (handle.IsInvalid) throw new CadaclysmException($"{name}: {LastErrorOr("open failed")}");
+            // The name stands as the scene's path, as Python's `Scene.path` keeps it.
+            return new Scene(handle, name, name, schema, convention);
         }
         finally
         {

@@ -110,12 +110,12 @@ public final class Blacksmith {
     // ---- the structs the ABI returns by value ----------------------------------------
     //
     // These three are transcribed from `cadaclysm_blacksmith.h` by hand, in the header's
-    // field order, and nothing pins them against it: `tests/bindings.rs` pins the reader's
-    // structs in `Cad.java` only. A field left out or reordered still compiles and reads
-    // every later field from the wrong offset, so a change to the header's structs must be
-    // brought here by hand. `structLayout` refuses a misaligned field outright, which is
-    // why the two `paddingLayout(4)`s in EDGE are there: a 4-byte count before an 8-byte
-    // pointer needs the gap the C compiler leaves.
+    // field order, and `tests/bindings.rs` pins them against it, by field order and by
+    // whether each field is a pointer, as it pins the reader's structs in `Cad.java`. A
+    // field left out or reordered still compiles and reads every later field from the
+    // wrong offset; the pin is what catches it. `structLayout` refuses a misaligned field
+    // outright, which is why the two `paddingLayout(4)`s in EDGE are there: a 4-byte count
+    // before an 8-byte pointer needs the gap the C compiler leaves.
 
     /** {@code CadaclysmBlacksmithMesh}: a solid's triangles, borrowed from it. */
     private static final MemoryLayout MESH = MemoryLayout.structLayout(
