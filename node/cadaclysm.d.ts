@@ -135,6 +135,7 @@ export class Scene {
   close(): void;
   [Symbol.dispose](): void;
   readonly version: string; readonly schema: string; readonly schemaRead: string; readonly substituted: boolean;
+  readonly sourceName: string | null;
   readonly metresPerUnit: number; readonly bounds: Bounds; readonly surfaceMatrix: Float32Array;
   diagnostics(): string[]; geometryDiagnostics(): string[];
   readonly nodeCount: number;
@@ -147,6 +148,9 @@ export class Scene {
   readonly realized: number; readonly realizeTotal: number;
   cancel(): void;
   forgetMeshes(): void;
+  /** `format`: `'glb'` (the default), `'gltf'` or `'obj'`. */
+  save(path: string, format?: string): void;
+  saveAsync(path: string, format?: string): Promise<void>;
 }
 
 export interface Meshlet {

@@ -53,6 +53,17 @@ export class SweepPath {
   [Symbol.dispose](): void;
 }
 
+/** A plane read as a height over the sketch plane: `at + grad . (x, y)`. */
+export class Slant {
+  constructor(at: number, grad?: Point2);
+  readonly at: number;
+  readonly grad: readonly [number, number];
+  static flat(at: number): Slant;
+  static ofPlane(frame: Frame, point: Point3, normal: Point3): Slant;
+}
+/** A `Slant`, or a bare number for `Slant.flat(number)`. */
+export type SlantLike = Slant | number;
+
 export interface SolidMesh { positions: Float32Array; normals: Float32Array; indices: Uint32Array; vertexCount: number; indexCount: number }
 
 export class Solid {
@@ -70,6 +81,8 @@ export class Solid {
   static extrudeOpen(profile: Profile, frame: Frame, height: number): Solid;
   static extrudeTapered(profile: Profile, frame: Frame, height: number, taper: number): Solid;
   static extrudeOpenTapered(profile: Profile, frame: Frame, height: number, taper: number): Solid;
+  static extrudeBetween(profile: Profile, frame: Frame, bottom: SlantLike, top: SlantLike): Solid;
+  static extrudeOpenBetween(profile: Profile, frame: Frame, bottom: SlantLike, top: SlantLike): Solid;
   static loft(a: Profile, frameA: Frame, b: Profile, frameB: Frame): Solid;
   static loftOpen(a: Profile, frameA: Frame, b: Profile, frameB: Frame): Solid;
   static revolve(profile: Profile, axis: AxisLine, angle: number): Solid;
@@ -87,10 +100,15 @@ export class Solid {
   joinAsync(other: Solid, tolerance?: number, progress?: Progress | null): Promise<Solid>;
   cutAsync(other: Solid, tolerance?: number, progress?: Progress | null): Promise<Solid>;
   commonAsync(other: Solid, tolerance?: number, progress?: Progress | null): Promise<Solid>;
+  splitSheet(tool: Solid, tolerance?: number, progress?: Progress | null): Solid;
+  splitSheetAsync(tool: Solid, tolerance?: number, progress?: Progress | null): Promise<Solid>;
   readonly faces: number;
   faceKind(face: number): string;
   readonly bounds: [number[], number[]];
   boundsAt(tolerance: number): [number[], number[]];
+  leakedEdges(tolerance?: number): number;
+  unpairedEdges(tolerance?: number): number;
+  isWatertight(tolerance?: number): boolean;
   mesh(tolerance?: number): SolidMesh;
   meshAsync(tolerance?: number): Promise<SolidMesh>;
   edgePolylines(tolerance?: number): Float32Array[];
@@ -99,6 +117,9 @@ export class Solid {
   step(path: string, schema?: string | null, unit?: Unit): void;
   selectFace(selector: Selector): number;
   faceFrame(face: number): number[];
+  coloured(colour: string | Iterable<number>, face?: number | null): Solid;
+  readonly colour: [number, number, number] | null;
+  faceColour(face: number): [number, number, number] | null;
   edges(): Edge[];
   fillet(edges: Iterable<Edge | number>, radius: number, tolerance?: number, progress?: Progress | null): Solid;
   chamfer(edges: Iterable<Edge | number>, distance: number, tolerance?: number): Solid;

@@ -164,7 +164,7 @@ public final class Blacksmith {
             SLANT_OF_PLANE, LOFT, LOFT_OPEN, REVOLVE, REVOLVE_OPEN, SWEEP_PATH_BEGIN,
             SWEEP_PATH_LINE_TO, SWEEP_PATH_ARC, SWEEP_PATH_FREE, SWEEP, SWEEP_OPEN, EXTRUDE_FACES,
             PLACE, TRANSLATE, ROTATE, MIRROR, JOIN, CUT, COMMON, SPLIT_SHEET, FILLET, CHAMFER,
-            SHELL, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_KIND, EDGE_COUNT, EDGE_AT, MESH_AT,
+            SHELL, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_KIND, COLOURED, COLOUR, EDGE_COUNT, EDGE_AT, MESH_AT,
             EDGE_POLYLINES, BOUNDS, LEAKED_EDGES, UNPAIRED_EDGES, STEP, STRING_FREE;
 
     static {
@@ -237,6 +237,8 @@ public final class Blacksmith {
         SELECT_FACE = bind(linker, lib, "cadaclysm_blacksmith_select_face", FunctionDescriptor.of(I, A, I, A, I));
         FACE_FRAME = bind(linker, lib, "cadaclysm_blacksmith_face_frame", FunctionDescriptor.of(B, A, I, A));
         FACE_KIND = bind(linker, lib, "cadaclysm_blacksmith_face_kind", FunctionDescriptor.of(A, A, I));
+        COLOURED = bind(linker, lib, "cadaclysm_blacksmith_coloured", FunctionDescriptor.of(A, A, I, D, D, D));
+        COLOUR = bind(linker, lib, "cadaclysm_blacksmith_colour", FunctionDescriptor.of(B, A, I, A));
         EDGE_COUNT = bind(linker, lib, "cadaclysm_blacksmith_edge_count", FunctionDescriptor.of(I, A));
         EDGE_AT = bind(linker, lib, "cadaclysm_blacksmith_edge", FunctionDescriptor.of(B, A, I, A));
         MESH_AT = bind(linker, lib, "cadaclysm_blacksmith_mesh", FunctionDescriptor.of(MESH, A, D));
@@ -1640,6 +1642,53 @@ public final class Blacksmith {
                 boolean ok = call(() -> (boolean) FACE_FRAME.invokeExact(h, i, out));
                 if (!ok) throw failure("face_frame");
                 return out.toArray(ValueLayout.JAVA_DOUBLE);
+            } finally {
+                keep(this);
+            }
+        }
+
+        // -- colour
+
+        /** This solid coloured ({@code r}, {@code g}, {@code b}), each in 0..1. What is made from
+         *  a coloured solid inherits: a move keeps every colour; a boolean, fillet, chamfer or
+         *  shell gives each face the colour of the face it lies on (a cut's bore the tool's), and
+         *  a new face the solid's. */
+        public Solid coloured(double r, double g, double b) {
+            return colouredAt(NONE, r, g, b);
+        }
+
+        /** This solid with {@code face} coloured, a colour that wins over the solid's. */
+        public Solid coloured(int face, double r, double g, double b) {
+            return colouredAt(index(face), r, g, b);
+        }
+
+        private Solid colouredAt(int face, double r, double g, double b) {
+            try {
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) COLOURED.invokeExact(h, face, r, g, b)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The solid's colour as {r, g, b} in 0..1, or null. */
+        public double[] colour() {
+            return colourAt(NONE);
+        }
+
+        /** {@code face}'s colour as drawn -- its own, else the solid's -- or null. */
+        public double[] faceColour(int face) {
+            return colourAt(index(face));
+        }
+
+        private double[] colourAt(int face) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
+                MemorySegment h = handle();
+                boolean ok = call(() -> (boolean) COLOUR.invokeExact(h, face, out));
+                if (ok) return out.toArray(ValueLayout.JAVA_DOUBLE);
+                if (!lastError().isEmpty()) throw failure("colour");
+                return null;
             } finally {
                 keep(this);
             }

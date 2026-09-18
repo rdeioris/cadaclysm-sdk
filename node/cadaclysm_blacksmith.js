@@ -149,8 +149,12 @@ function _lib() {
     select_face: f('uint32_t cadaclysm_blacksmith_select_face(const CadaclysmBlacksmithSolid *solid, uint32_t kind, const double *v, uint32_t index)'),
     face_frame: f('bool cadaclysm_blacksmith_face_frame(const CadaclysmBlacksmithSolid *solid, uint32_t face, _Out_ double *out)'),
     face_kind: f('const char *cadaclysm_blacksmith_face_kind(const CadaclysmBlacksmithSolid *solid, uint32_t face)'),
+    coloured: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_coloured(const CadaclysmBlacksmithSolid *solid, uint32_t face, double r, double g, double b)'),
+    colour: f('bool cadaclysm_blacksmith_colour(const CadaclysmBlacksmithSolid *solid, uint32_t face, _Out_ double *out)'),
     edge_count: f('uint32_t cadaclysm_blacksmith_edge_count(const CadaclysmBlacksmithSolid *solid)'),
     edge: f('bool cadaclysm_blacksmith_edge(const CadaclysmBlacksmithSolid *solid, uint32_t i, _Out_ CadaclysmBlacksmithEdge *out)'),
+    leaked_edges: f('uint32_t cadaclysm_blacksmith_leaked_edges(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
+    unpaired_edges: f('uint32_t cadaclysm_blacksmith_unpaired_edges(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
     cuboid: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_cuboid(double x, double y, double z)'),
     cylinder: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_cylinder(double r, double h)'),
     cone: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_cone(double r, double h)'),
@@ -161,6 +165,9 @@ function _lib() {
     extrude_open: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_extrude_open(const CadaclysmBlacksmithProfile *profile, const double *frame, double height)'),
     extrude_tapered: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_extrude_tapered(const CadaclysmBlacksmithProfile *profile, const double *frame, double height, double taper)'),
     extrude_open_tapered: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_extrude_open_tapered(const CadaclysmBlacksmithProfile *profile, const double *frame, double height, double taper)'),
+    extrude_between: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_extrude_between(const CadaclysmBlacksmithProfile *profile, const double *frame, const double *bottom, const double *top)'),
+    extrude_open_between: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_extrude_open_between(const CadaclysmBlacksmithProfile *profile, const double *frame, const double *bottom, const double *top)'),
+    slant_of_plane: f('bool cadaclysm_blacksmith_slant_of_plane(const double *frame, const double *point, const double *normal, _Out_ double *out)'),
     loft: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_loft(const CadaclysmBlacksmithProfile *a, const double *frame_a, const CadaclysmBlacksmithProfile *b, const double *frame_b)'),
     loft_open: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_loft_open(const CadaclysmBlacksmithProfile *a, const double *frame_a, const CadaclysmBlacksmithProfile *b, const double *frame_b)'),
     revolve: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_revolve(const CadaclysmBlacksmithProfile *profile, const double *axis, double angle)'),
@@ -174,6 +181,7 @@ function _lib() {
     join: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_join(const CadaclysmBlacksmithSolid *a, const CadaclysmBlacksmithSolid *b, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     cut: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_cut(const CadaclysmBlacksmithSolid *a, const CadaclysmBlacksmithSolid *b, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     common: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_common(const CadaclysmBlacksmithSolid *a, const CadaclysmBlacksmithSolid *b, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
+    split_sheet: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_split_sheet(const CadaclysmBlacksmithSolid *sheet, const CadaclysmBlacksmithSolid *tool, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     fillet: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_fillet(const CadaclysmBlacksmithSolid *solid, const uint32_t *edges, size_t count, double radius, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     chamfer: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_chamfer(const CadaclysmBlacksmithSolid *solid, const uint32_t *edges, size_t count, double distance, double tolerance)'),
     shell: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_shell(const CadaclysmBlacksmithSolid *solid, double thickness, const uint32_t *open_faces, size_t count, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
@@ -193,6 +201,26 @@ function _text(raw) { return raw == null ? '' : String(raw); }
 function _lastError() { return _text(_lib().last_error()); }
 /** Throw the library's own reason, or `what` if it left none. */
 function _fail(what) { throw new BuildError(_lastError() || what); }
+/** [r, g, b] from '#rgb', '#rrggbb' or three numbers; the range is the library's to check. */
+function _rgb(colour) {
+  if (typeof colour === 'string') {
+    let h = colour.trim().replace(/^#/, '');
+    if (/^([0-9a-f]{3}|[0-9a-f]{6})$/i.test(h)) {
+      if (h.length === 3) h = [...h].map((c) => c + c).join('');
+      return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
+    }
+  } else if (colour != null && typeof colour[Symbol.iterator] === 'function') {
+    const v = [...colour].map(Number);
+    if (v.length === 3) return v;
+  }
+  throw new BuildError(`coloured: a colour is "#rgb", "#rrggbb" or (r, g, b) in 0..1, not ${JSON.stringify(colour)}`);
+}
+/** A face index for the C call, NONE for the whole solid; a negative one would wrap to NONE. */
+function _faceOrNone(solid, face, what) {
+  if (face == null) return NONE;
+  if (!Number.isInteger(face) || face < 0 || face >= NONE) throw new BuildError(`${what}: face ${face} is not one of the solid's ${solid.faces}`);
+  return face;
+}
 function _checked(handle, what) { if (!handle) _fail(what); return handle; }
 function _doubles(values, count, what) {
   const flat = Array.from(values, Number);
@@ -332,6 +360,38 @@ class SweepPath {
   [Symbol.for('nodejs.dispose')]() { this.close(); }
 }
 
+// ---- slants ---------------------------------------------------------------------
+
+/**
+ * A plane a sweep starts or ends on, read as a height over the sketch plane at
+ * each point: `at + grad . p`. Flat (`grad` zero) for `extrude`'s own caps;
+ * sloped for a mitre -- the mitred end of a sweep's straight piece, where it
+ * meets the plane bisecting its corner with the next.
+ */
+class Slant {
+  constructor(at, grad = [0, 0]) {
+    const [gx, gy] = grad;
+    this.at = Number(at);
+    this.grad = Object.freeze([Number(gx), Number(gy)]);
+    Object.freeze(this);
+  }
+  static flat(at) { return new Slant(at); }
+  /**
+   * The plane through `point` square to `normal`, read as heights over
+   * `frame`. Throws `BuildError` when the plane holds the sweep direction
+   * itself (`normal` square to `frame`'s z), so no height is on it.
+   */
+  static ofPlane(frame, point, normal) {
+    const out = new Float64Array(3);
+    if (!_lib().slant_of_plane(_frame(frame), _doubles(point, 3, 'point'), _doubles(normal, 3, 'normal'), out)) _fail('slant_of_plane');
+    return new Slant(out[0], [out[1], out[2]]);
+  }
+  _raw() { return Float64Array.of(this.at, this.grad[0], this.grad[1]); }
+}
+
+/** A `Slant`, or a bare number treated as `Slant.flat(value)`. */
+function _slant(value) { return value instanceof Slant ? value : Slant.flat(value); }
+
 // ---- solids ---------------------------------------------------------------------
 
 const _solidFinalizer = typeof FinalizationRegistry === 'function'
@@ -370,6 +430,16 @@ class Solid {
   static extrudeOpen(profile, frame, height) { return new Solid(_lib().extrude_open(profile._handle, _frame(frame), height)); }
   static extrudeTapered(profile, frame, height, taper) { return new Solid(_lib().extrude_tapered(profile._handle, _frame(frame), height, taper)); }
   static extrudeOpenTapered(profile, frame, height, taper) { return new Solid(_lib().extrude_open_tapered(profile._handle, _frame(frame), height, taper)); }
+  /**
+   * `extrude` between two planes instead of two heights: `bottom` and `top`
+   * are each a `Slant` (or a bare number, `Slant.flat(number)`). With both
+   * flat this *is* `extrude`, bit for bit; with a slope it is the mitred end
+   * of a sweep's straight piece. Throws where the top plane comes down to or
+   * through the bottom across the profile.
+   */
+  static extrudeBetween(profile, frame, bottom, top) { return new Solid(_lib().extrude_between(profile._handle, _frame(frame), _slant(bottom)._raw(), _slant(top)._raw())); }
+  /** `extrudeBetween` without the caps: an open sheet of walls, as `extrudeOpen` is to `extrude`. */
+  static extrudeOpenBetween(profile, frame, bottom, top) { return new Solid(_lib().extrude_open_between(profile._handle, _frame(frame), _slant(bottom)._raw(), _slant(top)._raw())); }
   static loft(a, frameA, b, frameB) { return new Solid(_lib().loft(a._handle, _frame(frameA), b._handle, _frame(frameB))); }
   static loftOpen(a, frameA, b, frameB) { return new Solid(_lib().loft_open(a._handle, _frame(frameA), b._handle, _frame(frameB))); }
   static revolve(profile, axis, angle) { return new Solid(_lib().revolve(profile._handle, _axis(axis), angle)); }
@@ -388,6 +458,13 @@ class Solid {
   join(other, tolerance = 0.05, progress = null) { return new Solid(_lib().join(this._handle, other._handle, tolerance, _progress(progress), null)); }
   cut(other, tolerance = 0.05, progress = null) { return new Solid(_lib().cut(this._handle, other._handle, tolerance, _progress(progress), null)); }
   common(other, tolerance = 0.05, progress = null) { return new Solid(_lib().common(this._handle, other._handle, tolerance, _progress(progress), null)); }
+  /**
+   * This solid or sheet cut along `tool`'s boundary with nothing removed:
+   * every face comes back as its pieces outside `tool` and then its pieces
+   * inside, in this solid's own face order -- where a surface trim starts.
+   * `tool` must be a closed solid.
+   */
+  splitSheet(tool, tolerance = 0.05, progress = null) { return new Solid(_lib().split_sheet(this._handle, tool._handle, tolerance, _progress(progress), null)); }
   // -- asking
   get faces() {
     const n = _lib().face_count(this._handle);
@@ -403,6 +480,29 @@ class Solid {
     if (!_lib().bounds(this._handle, tolerance, lo, hi)) _fail('bounds');
     return [Array.from(lo), Array.from(hi)];
   }
+  /**
+   * How many edges of the mesh at `tolerance` are bound by anything other
+   * than exactly two triangles -- zero for a closed solid. A seam two solids
+   * share along a line does not count; a hole or a fold does.
+   */
+  leakedEdges(tolerance = 0.05) {
+    const n = _lib().leaked_edges(this._handle, tolerance);
+    if (n === NONE) _fail('leaked_edges');
+    return n;
+  }
+  /**
+   * How many edges of the mesh at `tolerance` have directed triangle uses
+   * that do not cancel out -- zero for a closed, consistently oriented solid.
+   * Unlike `leakedEdges` this counts a fold (two triangles running the same
+   * way) and not a seam two solids share along a line.
+   */
+  unpairedEdges(tolerance = 0.05) {
+    const n = _lib().unpaired_edges(this._handle, tolerance);
+    if (n === NONE) _fail('unpaired_edges');
+    return n;
+  }
+  /** `leakedEdges(tolerance) === 0`. */
+  isWatertight(tolerance = 0.05) { return this.leakedEdges(tolerance) === 0; }
   // -- out
   /** `{ positions, normals, indices }` as fresh typed arrays at `tolerance`. */
   mesh(tolerance = 0.05) {
@@ -440,6 +540,25 @@ class Solid {
     const out = new Float64Array(12);
     if (!_lib().face_frame(this._handle, face, out)) _fail('face_frame');
     return Array.from(out);
+  }
+  // -- colour
+  /** This solid coloured -- `colour` is '#rgb', '#rrggbb' or [r, g, b] in 0..1 -- or with `face`
+   *  just that face, whose colour then wins over the solid's. What is made from a coloured solid
+   *  inherits: a move keeps every colour; a boolean, fillet, chamfer or shell gives each face the
+   *  colour of the face it lies on (a cut's bore the tool's), and a new face the solid's. */
+  coloured(colour, face = null) {
+    const [r, g, b] = _rgb(colour);
+    return new Solid(_lib().coloured(this._handle, _faceOrNone(this, face, 'coloured'), r, g, b));
+  }
+  /** The solid's colour, [r, g, b] in 0..1, or null. */
+  get colour() { return this._colour(NONE); }
+  /** `face`'s colour as drawn -- its own, else the solid's -- or null. */
+  faceColour(face) { return this._colour(_faceOrNone(this, face, 'colour')); }
+  _colour(face) {
+    const out = new Float64Array(3);
+    if (_lib().colour(this._handle, face, out)) return Array.from(out);
+    if (_lastError()) _fail('colour');
+    return null;
   }
   /** The edges a fillet indexes, as `Edge` records (copied; safe to keep). */
   edges() {
@@ -487,6 +606,7 @@ class Solid {
   async joinAsync(other, tolerance = 0.05, progress = null) { return Solid._wrap(await this._async('joinAsync', { op: 'combine', which: 'join', b: _addressOf(other._handle), tolerance }, [other], progress)); }
   async cutAsync(other, tolerance = 0.05, progress = null) { return Solid._wrap(await this._async('cutAsync', { op: 'combine', which: 'cut', b: _addressOf(other._handle), tolerance }, [other], progress)); }
   async commonAsync(other, tolerance = 0.05, progress = null) { return Solid._wrap(await this._async('commonAsync', { op: 'combine', which: 'common', b: _addressOf(other._handle), tolerance }, [other], progress)); }
+  async splitSheetAsync(tool, tolerance = 0.05, progress = null) { return Solid._wrap(await this._async('splitSheetAsync', { op: 'combine', which: 'split_sheet', b: _addressOf(tool._handle), tolerance }, [tool], progress)); }
   async filletAsync(edges, radius, tolerance = 1e-6, progress = null) { return Solid._wrap(await this._async('filletAsync', { op: 'fillet', edges: Solid._edgeIndices(edges), radius, tolerance }, [], progress)); }
   async chamferAsync(edges, distance, tolerance = 1e-6) { return Solid._wrap(await this._async('chamferAsync', { op: 'chamfer', edges: Solid._edgeIndices(edges), distance, tolerance })); }
   async shellAsync(thickness, open = [], tolerance = 1e-6, progress = null) { return Solid._wrap(await this._async('shellAsync', { op: 'shell', thickness, open: Uint32Array.from(Array.from(open, Number)), tolerance }, [], progress)); }
@@ -591,6 +711,6 @@ function writeStep(filePath, solids, schema = null, unit = 'mm') { fs.writeFileS
 module.exports = {
   BuildError, NONE, UNITS, Axis,
   libraryPath, defaultSchema, version, buildDate, license, licenseInfo, licenseNoticeCount,
-  Profile, Path, SweepPath, Solid, Selector, Edge, Workplane, writeStep, writeStepText,
+  Profile, Path, SweepPath, Slant, Solid, Selector, Edge, Workplane, writeStep, writeStepText,
   _lib, _lastError, _frame, _axis, _progress, _searchedPaths, _notFoundMessage, _floats, _uint32s,
 };

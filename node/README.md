@@ -49,7 +49,7 @@ Each variable takes the library itself or the directory holding it.
 No license is needed to try it: without one the libraries run in full, with
 a notice printed to stderr on every file opened (`open`, `openMemory`) and
 every file written (a mesh export -- STL, Gmsh -- through `Node.saveMesh`,
-or the kernel's STEP export) -- never on meshing, walking, or a kernel
+a whole-scene glTF or OBJ through `Scene.save`, or the kernel's STEP export) -- never on meshing, walking, or a kernel
 operation in the middle of a modelling loop. For a per-seat license, put the
 file where the library looks -- `CADACLYSM_LICENSE` naming it, or
 `cadaclysm.lic` beside the executable or in the working directory -- or pass
@@ -76,6 +76,7 @@ for (const node of scene.nodes()) {
   console.log(node.label, mesh.triangleCount, 'triangles', node.bounds.size);
   node.saveMesh(`${node.index}.stl`);
 }
+scene.save('model.glb');                  // the whole scene: 'glb', 'gltf' or 'obj'
 scene.close();
 ```
 

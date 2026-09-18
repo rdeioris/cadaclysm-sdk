@@ -322,6 +322,8 @@ function _lib() {
     format_name: f('const char *cadaclysm_format_name(uint32_t index)'),
     format_extensions: f('const char *cadaclysm_format_extensions(uint32_t index)'),
     node_save_mesh: f('bool cadaclysm_node_save_mesh(const CadaclysmScene *scene, uint32_t node, const char *path, const char *format)'),
+    scene_save: f('bool cadaclysm_scene_save(const CadaclysmScene *scene, const char *path, const char *format)'),
+    source_name: f('const char *cadaclysm_source_name(const CadaclysmScene *scene)'),
     pick_file: f('const char *cadaclysm_pick_file(const CadaclysmWindow *parent)'),
     pick_save: f('const char *cadaclysm_pick_save(const CadaclysmWindow *parent, const char *suggested_name)'),
     license_set: f('bool cadaclysm_license_set(const char *text_or_path)'),
@@ -790,6 +792,8 @@ class Scene {
     const bare = (e) => e.split('{')[0].trim().replace(/^\.+|\.+$/g, '').toLowerCase();
     return !this.schema.split(',').map(bare).includes(bare(read));
   }
+  /** The archive member this was read from (`open` on a `.zip` chose one), or null for a plain file. */
+  get sourceName() { const raw = _lib().source_name(this._handle); return raw ? String(raw) : null; }
   get metresPerUnit() { return _lib().metres_per_unit(this._handle); }
   /** The whole document's box, which meshes all of it. */
   get bounds() { const b = _lib().bounds(this._handle); return new Bounds(b.min, b.max); }
@@ -861,6 +865,23 @@ class Scene {
   }
   /** `realizeAll` off the event loop; `cancel()` still works meanwhile. */
   realizeAllAsync() { return this._async('realizeAllAsync', { op: 'realizeAll' }); }
+  // -- writing --
+  /**
+   * Write the whole scene to `filePath`: `'glb'` (binary glTF), `'gltf'`
+   * (text glTF, one file either way) or `'obj'` (Wavefront, every placement
+   * baked to its own named object, a `.mtl` beside it under the same stem when
+   * anything has a colour). Every placement of every shape, named and placed as
+   * the tree is, a material per colour -- where `Node.saveMesh` writes one
+   * node's mesh on its own. Coordinates are the scene's own, in the convention
+   * it was opened with (`Convention.Y_UP` for the Y-up metres glTF specifies).
+   * Throws `CadaclysmError` on any other format or a failed write.
+   */
+  save(filePath, format = 'glb') {
+    if (!_lib().scene_save(this._handle, String(filePath), format)) {
+      throw new CadaclysmError(_lastError() || `could not write ${filePath}`);
+    }
+  }
+  async saveAsync(filePath, format = 'glb') { await this._async('saveAsync', { op: 'save', path: String(filePath), format }); }
 }
 
 // ---- meshlets ---------------------------------------------------------------

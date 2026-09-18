@@ -280,6 +280,9 @@ internal static class BlacksmithNative
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_face_frame(SolidHandle solid, uint face, [Out] double[] outFrame);
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_face_kind(SolidHandle solid, uint face);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_coloured(SolidHandle solid, uint face, double r, double g, double b);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_colour(SolidHandle solid, uint face, [Out] double[] outRgb);
     [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_edge_count(SolidHandle solid);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_edge(SolidHandle solid, uint i, out RawBlacksmithEdge outEdge);
@@ -1065,6 +1068,30 @@ public sealed class Solid : IDisposable
         var frame = new double[12];
         if (!BlacksmithNative.cadaclysm_blacksmith_face_frame(Handle, Index(face), frame)) throw Blacksmith.Failure("face_frame");
         return frame;
+    }
+
+    // -- colour
+
+    /// <summary>This solid coloured (`r`, `g`, `b`), each in 0..1 -- or with `face` just that
+    /// face, whose colour then wins over the solid's. What is made from a coloured solid
+    /// inherits: a move keeps every colour; a boolean, fillet, chamfer or shell gives each face
+    /// the colour of the face it lies on (a cut's bore the tool's), and a new face the
+    /// solid's.</summary>
+    public Solid Coloured(double r, double g, double b, int? face = null) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_coloured(Handle, face is int f ? Index(f) : Blacksmith.None, r, g, b));
+
+    /// <summary>The solid's colour as { r, g, b } in 0..1, or null.</summary>
+    public double[]? Colour => ColourOf(Blacksmith.None);
+
+    /// <summary>`face`'s colour as drawn -- its own, else the solid's -- or null.</summary>
+    public double[]? FaceColour(int face) => ColourOf(Index(face));
+
+    private double[]? ColourOf(uint face)
+    {
+        var rgb = new double[3];
+        if (BlacksmithNative.cadaclysm_blacksmith_colour(Handle, face, rgb)) return rgb;
+        if (Blacksmith.LastError().Length > 0) throw Blacksmith.Failure("colour");
+        return null;
     }
 
     /// <summary>The edges a fillet indexes, as <see cref="Edge"/> records (copied; safe to

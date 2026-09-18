@@ -115,6 +115,18 @@ public final class Smoke {
                 // top), and each of the four corners rounded trades one edge for one face.
                 if (faces != 15) fail("the filleted part has " + faces + " faces, not 15");
 
+                // Colour: a gold plate joined with a blue pin -- the part is gold, the pin's
+                // top keeps its blue.
+                try (Blacksmith.Solid gold = plate.coloured(0.8, 0.6, 0.4);
+                     Blacksmith.Solid blue = pin.coloured(0.2, 0.4, 1.0);
+                     Blacksmith.Solid coloured = gold.join(blue)) {
+                    double[] top = coloured.faceColour(coloured.selectFace(Blacksmith.Selector.max(Blacksmith.Axis.Z)));
+                    System.out.println("colour=" + Arrays.toString(coloured.colour()) + " pin top=" + Arrays.toString(top));
+                    if (!Arrays.equals(coloured.colour(), new double[] {0.8, 0.6, 0.4})
+                            || !Arrays.equals(top, new double[] {0.2, 0.4, 1.0}) || plate.colour() != null)
+                        fail("the colours did not carry through the join");
+                }
+
                 // The plate is 80 x 40 x 6 centred on the origin and the pin adds 10, so the
                 // far corner sits at (40, 20, 16) -- checked on the kernel's own bounds, on
                 // the STEP read back through the reader, and on toScene's scene.

@@ -1746,6 +1746,68 @@ func (s *Solid) FaceFrame(face int) (Frame, error) {
 	return out, nil
 }
 
+// -- colour
+
+// Coloured is this solid coloured (r, g, b), each in 0..1 — Python's coloured with no face.
+// What is made from a coloured solid inherits: a move keeps every colour; a boolean,
+// fillet, chamfer or shell gives each face the colour of the face it lies on (a cut's bore
+// the tool's), and a new face the solid's.
+func (s *Solid) Coloured(r, g, b float64) (*Solid, error) {
+	return s.coloured(C.CADACLYSM_BLACKSMITH_NONE, r, g, b)
+}
+
+// ColouredFace is this solid with face coloured (r, g, b), a colour that wins over the
+// solid's — Python's coloured(colour, face=face).
+func (s *Solid) ColouredFace(face int, r, g, b float64) (*Solid, error) {
+	i, err := index(face)
+	if err != nil {
+		return nil, err
+	}
+	return s.coloured(i, r, g, b)
+}
+
+func (s *Solid) coloured(face C.uint32_t, r, g, b float64) (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_coloured(h, face, C.double(r), C.double(g), C.double(b)), "coloured")
+	runtime.KeepAlive(s)
+	return out, err
+}
+
+// Colour is the solid's colour, (r, g, b) in 0..1, and false where it has none.
+func (s *Solid) Colour() ([3]float64, bool, error) { return s.colour(C.CADACLYSM_BLACKSMITH_NONE) }
+
+// FaceColour is face's colour as drawn — its own, else the solid's — and false where
+// there is none.
+func (s *Solid) FaceColour(face int) ([3]float64, bool, error) {
+	i, err := index(face)
+	if err != nil {
+		return [3]float64{}, false, err
+	}
+	return s.colour(i)
+}
+
+func (s *Solid) colour(face C.uint32_t) ([3]float64, bool, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return [3]float64{}, false, err
+	}
+	var out [3]float64
+	ok := bool(C.cadaclysm_blacksmith_colour(h, face, doubles(&out[0])))
+	runtime.KeepAlive(s)
+	if !ok {
+		if lastError() != "" {
+			return [3]float64{}, false, failure("colour")
+		}
+		return [3]float64{}, false, nil
+	}
+	return out, true, nil
+}
+
 // Edges is the edges a fillet indexes, as Edge records (copied; safe to keep) — Python's
 // edges property.
 func (s *Solid) Edges() ([]Edge, error) {

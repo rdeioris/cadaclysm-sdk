@@ -16,7 +16,9 @@
     positions, normals, indices = part.mesh(tolerance=0.05)
 
 It uses `ctypes` and the published header `include/cadaclysm_blacksmith.h`, the
-way any Python program would -- no generated bindings, no Rust, no build system.
+way any Python program would -- no generated bindings, no Rust, no build system
+(Python 3.9+). Under Pyodide, in the website's notebook, the same file runs
+against the blacksmith compiled to wasm instead, through one shim behind `_lib()`.
 Drop it beside your own script and point `CADACLYSM_BLACKSMITH_LIBRARY` at the
 shared library if it is not where this looks by default (`target/release` or
 `target/debug` of the repository this file ships in).
@@ -35,7 +37,8 @@ last reference to it. Two things can still invalidate a view:
   cache the earlier views point into.
 
 Call `.copy()` on any array that must outlive either. Strings are copied on the
-way out and are always safe.
+way out and are always safe. Under Pyodide (the website's notebook) the arrays
+are copies and never invalidate.
 
 ## The chain mirrors the Rust `Workplane`
 
@@ -54,16 +57,22 @@ is as correct, only slower.
 
 import ctypes
 import enum
+import numbers
+import operator
 import os
 import platform
+import sys
 from ctypes import (POINTER, c_bool, c_char_p, c_double, c_float, c_size_t, c_uint32, c_uint64, c_void_p)
 from pathlib import Path as _FsPath   # `Path` here is the outline builder
 
 __all__ = [
     "Axis", "BuildError", "Edge", "Path", "Profile", "Selector", "Slant", "Solid", "SweepPath", "Workplane",
     "build_date", "default_schema", "library_path", "license", "license_info", "license_notice_count", "version",
-    "write_step", "write_step_text",
+    "write_step", "write_step_text", "__version__",
 ]
+
+# This file's own version (the workspace's); `version()` is the loaded library's.
+__version__ = "0.3.0"
 
 NONE = 0xFFFFFFFF
 UNITS = {"m": 0, "mm": 1, "in": 2}
@@ -89,6 +98,8 @@ def library_path() -> _FsPath:
     (the SDK layout); then a `target/release` (or `target/debug`) in any ancestor
     (this repository's layout).
     """
+    if _WASM:
+        return _FsPath("cadaclysm_wasm")   # the exports on `globalThis.cadaclysm`; nothing to load
     name = _library_name()
     override = os.environ.get("CADACLYSM_BLACKSMITH_LIBRARY")
     if override:
@@ -128,6 +139,20 @@ def default_schema() -> _FsPath:
     here = _FsPath(__file__).resolve().parent
     if len(here.parents) >= 3:
         candidates.append(here.parents[2] / "schemas" / "ap203.exp")
+    url = os.environ.get("CADACLYSM_SCHEMA_URL")
+    if _WASM and override and url and not (_FsPath(override) / "ap203.exp").exists():
+        # The notebook's worker names where the schema is served from; fetched once
+        # into Pyodide's file system, synchronously -- allowed off the main thread.
+        # A plain XMLHttpRequest rather than `pyodide.http.open_url`, which checks no
+        # status: a 404 page must not be cached as the schema for the session.
+        from js import XMLHttpRequest
+        request = XMLHttpRequest.new()
+        request.open("GET", url + "ap203.exp", False)
+        request.send()
+        if request.status != 200:
+            raise BuildError(f"schema: {request.status} fetching {url}ap203.exp")
+        _FsPath(override).mkdir(parents=True, exist_ok=True)
+        (_FsPath(override) / "ap203.exp").write_text(str(request.response))
     for c in candidates:
         if c.exists():
             return c
@@ -218,6 +243,8 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_face_count", c_uint32, [_SOLID]),
     ("cadaclysm_blacksmith_select_face", c_uint32, [_SOLID, c_uint32, _D, c_uint32]),
     ("cadaclysm_blacksmith_face_frame", c_bool, [_SOLID, c_uint32, _D]),
+    ("cadaclysm_blacksmith_coloured", _SOLID, [_SOLID, c_uint32, c_double, c_double, c_double]),
+    ("cadaclysm_blacksmith_colour", c_bool, [_SOLID, c_uint32, _D]),
     ("cadaclysm_blacksmith_face_kind", c_char_p, [_SOLID, c_uint32]),
     ("cadaclysm_blacksmith_edge_count", c_uint32, [_SOLID]),
     ("cadaclysm_blacksmith_edge", c_bool, [_SOLID, c_uint32, POINTER(_Edge)]),
@@ -230,12 +257,180 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_string_free", None, [c_void_p]),
 ]
 
+# Under Pyodide (the website's notebook) there is no shared library to load: the
+# same entry points are wasm exports on `globalThis.cadaclysm`, and `_lib()` hands
+# out the shim below instead of a `ctypes.CDLL`.
+_WASM = sys.platform == "emscripten"
+
+
+class _WasmLibrary:
+    """The same entry points over the wasm module (`globalThis.cadaclysm`,
+    built from `crates/cadaclysm-wasm`), shaped so every `_lib().name(...)`
+    call site above and below runs unchanged: handles are ints, a ctypes
+    array in becomes a typed array, an out-array is filled back, a failing
+    call records its message and returns the C ABI's null/false/NONE.
+
+    A wasm export takes the C call's arguments minus the ones a JS value
+    carries in itself (an array's count, the progress `user` pointer, the
+    out-arguments); it returns what C wrote through an out-argument; and it
+    throws a JS `Error` -- whose message is the C ABI's own text -- where C
+    returns null and leaves `last_error`. The tables below say which is
+    which, per entry point; the rest of the module never sees the difference.
+    """
+
+    # what a failing call returns, by the C ABI's convention for that name:
+    # `False` for the bool-returning verbs, a zeroed struct (a null pointer in
+    # it) for the two struct-returning ones, NONE for the u32 ones that reserve
+    # it, and 0 (a null handle, or a count the caller checks `last_error` on)
+    # for everything else
+    _BOOLS = {"path_line_to", "path_arc_to", "path_bezier_to", "path_nurbs_to", "sweep_path_line_to",
+              "sweep_path_arc", "slant_of_plane", "face_frame", "bounds", "edge", "colour", "license_set"}
+    _FAILS = {"select_face": NONE, "leaked_edges": NONE, "unpaired_edges": NONE,
+              "mesh": _Mesh(), "edge_polylines": _Polylines()}
+    # results that C writes into an out-array of doubles at this position, and the
+    # wasm returns as a typed array (`bounds` fills two, `edge` a record: see `_back`)
+    _OUT = {"slant_of_plane": 3, "face_frame": 2}
+    # argument positions the C call has and the wasm call does not: an array's
+    # count (a typed array knows its length), the progress `user` pointer, and
+    # the out-arguments above
+    _DROP = {"profile_polygon": (1,), "path_nurbs_to": (2, 5), "join": (4,), "cut": (4,), "common": (4,),
+             "split_sheet": (4,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "step": (1,),
+             "slant_of_plane": (3,), "face_frame": (2,), "bounds": (2, 3), "edge": (2,), "colour": (2,)}
+    # strings the C side returns as `const char*`, and the module decodes
+    _TEXTS = {"version", "build_date", "face_kind", "license_info"}
+
+    def __init__(self):
+        import js
+        self._js = js.cadaclysm
+        self._error = None
+
+    # -- the two the C side owns memory for, and the browser has none
+    def cadaclysm_blacksmith_last_error(self):
+        return self._error.encode() if self._error else None
+
+    def cadaclysm_blacksmith_string_free(self, _text):
+        pass
+
+    def __getattr__(self, name):
+        short = name.removeprefix("cadaclysm_blacksmith_")
+        if name == short or name.startswith("_"):
+            raise AttributeError(name)
+        try:
+            function = getattr(self._js, name)
+        except AttributeError:
+            raise BuildError(f"the wasm module has no {name}: rebuild it with `sh web/build.sh`") from None
+        dropped = self._DROP.get(short, ())
+
+        def call(*args):
+            from pyodide.ffi import JsException
+            self._error = None
+            if short == "select_face" and args[2] is None:
+                args = (args[0], args[1], (c_double * 0)(), args[3])   # the direction, unread for kinds 0/1/3
+            passed = [self._arg(a) for i, a in enumerate(args) if i not in dropped]
+            try:
+                result = function(*passed)
+            except JsException as e:
+                if self._trapped(e):
+                    raise   # not a refusal: the kernel is dead, and the page reboots it
+                self._error = self._message(e)
+                return self._FAILS.get(short, False if short in self._BOOLS else 0)
+            return self._back(short, args, result)
+
+        setattr(self, name, call)   # resolved once; `Solid.close` asks for `solid_free` per solid
+        return call
+
+    @staticmethod
+    def _trapped(e) -> bool:
+        """A `WebAssembly.RuntimeError`: the wasm trapped (a panic aborts, the
+        tables stay borrowed), which no `last_error` can stand for."""
+        import js
+        error = getattr(e, "js_error", None)
+        return error is not None and bool(js.WebAssembly.RuntimeError.prototype.isPrototypeOf(error))
+
+    @staticmethod
+    def _message(e) -> str:
+        """The thrown `Error`'s own message: what the C side would have left in `last_error`."""
+        text = getattr(getattr(e, "js_error", None), "message", None) or str(e)
+        return text[len("Error: "):] if text.startswith("Error: ") else text
+
+    def _arg(self, a):
+        """One C argument as the wasm takes it: numbers and handles as they are,
+        text as a string, a ctypes array as a typed array, a progress callback
+        as itself (Pyodide lends it to JS for the call, which is as long as
+        the wasm holds it)."""
+        import js
+        from pyodide.ffi import to_js
+        if a is None or isinstance(a, bool):
+            return a
+        if isinstance(a, numbers.Integral):   # `int`, and numpy's, as `c_uint32` takes them
+            return operator.index(a)
+        if isinstance(a, numbers.Real):       # `float`, and numpy's, as `c_double` takes them
+            return float(a)
+        if isinstance(a, bytes):
+            return a.decode("utf-8")
+        if isinstance(a, ctypes.Array):
+            kind = js.Float64Array if a._type_ is c_double else js.Uint32Array
+            return kind.new(to_js([v for v in a]))
+        if callable(a):
+            return lambda phase, done, total: a(phase, int(done), int(total))
+        raise BuildError(f"the wasm backend cannot pass {type(a).__name__}")
+
+    def _back(self, short, args, result):
+        """The wasm's return, as the C call's: written into the out-argument
+        and `True` where C fills one, `bytes` where C returns a C string, the
+        mesh/polyline arrays under the C struct's names, else as it is."""
+        if short == "edge":
+            raw = args[2]._obj   # the `_Edge` behind `ctypes.byref(raw)`; the arrays live in it
+            raw.kind = str(result.kind).encode()
+            raw.faces = (c_uint32 * len(result.faces))(*[int(v) for v in result.faces])
+            raw.face_count = len(result.faces)
+            raw.segments = (c_double * len(result.segments))(*[float(v) for v in result.segments])
+            raw.segment_count = len(result.segments) // 6
+            return True
+        if short == "colour":   # the three doubles, or null where there is no colour: C's `false`
+            if result is None:
+                return False
+            args[2][0:3] = [float(v) for v in result]
+            return True
+        if short == "bounds":
+            values = [float(v) for v in result]
+            args[2][0:3], args[3][0:3] = values[0:3], values[3:6]
+            return True
+        if short in self._OUT:
+            out = args[self._OUT[short]]
+            out[0:len(out)] = [float(v) for v in result]
+            return True
+        if short in self._BOOLS:
+            return True
+        if short in self._TEXTS:
+            return str(result).encode()
+        if short in ("mesh", "edge_polylines"):
+            return _JsArrays(result)
+        return result
+
+
+class _JsArrays:
+    """A `mesh`/`edge_polylines` result: the typed arrays under the C struct's names."""
+
+    def __init__(self, js_object):
+        for name in ("positions", "normals", "indices", "points", "offsets"):
+            if hasattr(js_object, name):
+                setattr(self, name, getattr(js_object, name))
+        if hasattr(self, "positions"):
+            self.vertex_count, self.index_count = len(self.positions) // 3, len(self.indices)
+        if hasattr(self, "points"):
+            self.point_count, self.polyline_count = len(self.points) // 3, len(self.offsets) - 1
+
+
 _library = None
 
 
 def _lib() -> ctypes.CDLL:
     global _library
     if _library is None:
+        if _WASM:
+            _library = _WasmLibrary()
+            return _library
         path = library_path()
         library = ctypes.CDLL(str(path))
         for name, restype, argtypes in _ENTRY_POINTS:
@@ -259,6 +454,23 @@ def _text(raw) -> str:
 def _fail(what: str):
     """Raise the library's own reason, or `what` if it left none."""
     raise BuildError(_text(_lib().cadaclysm_blacksmith_last_error()) or what)
+
+
+def _rgb(colour):
+    """(r, g, b) from "#rgb", "#rrggbb" or three numbers; the range is the
+    library's to check."""
+    if isinstance(colour, str):
+        h = colour.strip().removeprefix("#")
+        if len(h) in (3, 6) and all(c in "0123456789abcdefABCDEF" for c in h):
+            h = "".join(c * 2 for c in h) if len(h) == 3 else h
+            return tuple(int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    else:
+        try:
+            r, g, b = (float(c) for c in colour)
+            return r, g, b
+        except (TypeError, ValueError):
+            pass
+    raise BuildError(f'coloured: a colour is "#rgb", "#rrggbb" or (r, g, b) in 0..1, not {colour!r}')
 
 
 def _checked(handle, what: str):
@@ -319,6 +531,14 @@ class _Borrowed:
 
 def _view(solid, pointer, shape, dtype):
     numpy = _numpy()
+    if _WASM:
+        # `pointer` is the wasm's typed array: copied out, so the view is read-only
+        # and has a `.base` as the borrowed one does, but never invalidates.
+        if pointer is None or 0 in shape:
+            return numpy.zeros(shape, dtype=dtype)
+        array = numpy.frombuffer(pointer.to_bytes(), dtype=dtype).reshape(shape)
+        array.flags.writeable = False
+        return array
     if not pointer or 0 in shape:
         return numpy.zeros(shape, dtype=dtype)
     return numpy.asarray(_Borrowed(solid, pointer, shape, numpy.dtype(dtype).str))
@@ -560,6 +780,8 @@ def _slant(value) -> Slant:
 
 def _progress(callback):
     """The C trampoline for a Python `callback(phase, done, total)`, or None."""
+    if _WASM:
+        return callback, None   # the wasm takes the Python callable itself
     if callback is None:
         return _PROGRESS(), None
     def trampoline(phase, done, total, _user):
@@ -847,6 +1069,42 @@ class Solid:
             _fail("face_frame")
         return tuple(out)
 
+    # -- colour
+    def coloured(self, colour, face=None) -> "Solid":
+        """This solid coloured -- `colour` is "#rgb", "#rrggbb" or (r, g, b)
+        in 0..1 -- or with `face` (an index, as `select_face` returns) just
+        that face, whose colour then wins over the solid's. What is made from
+        a coloured solid inherits: a move keeps every colour; a boolean,
+        fillet, chamfer or shell gives each face the colour of the face it
+        lies on (a cut's bore the tool's), and a new face the solid's."""
+        r, g, b = _rgb(colour)
+        return Solid(_lib().cadaclysm_blacksmith_coloured(self._h(), self._face_or_none(face, "coloured"), r, g, b))
+
+    @property
+    def colour(self):
+        """The solid's colour, (r, g, b) in 0..1, or None."""
+        return self._colour(NONE)
+
+    def face_colour(self, face: int):
+        """`face`'s colour as drawn -- its own, else the solid's -- or None."""
+        return self._colour(self._face_or_none(face, "colour"))
+
+    def _face_or_none(self, face, what: str) -> int:
+        if face is None:
+            return NONE
+        face = operator.index(face)
+        if not 0 <= face < NONE:   # a negative index would wrap to NONE, the whole solid
+            raise BuildError(f"{what}: face {face} is not one of the solid's {self.faces}")
+        return face
+
+    def _colour(self, face: int):
+        out = (c_double * 3)()
+        if _lib().cadaclysm_blacksmith_colour(self._h(), face, out):
+            return tuple(out)
+        if _text(_lib().cadaclysm_blacksmith_last_error()):
+            _fail("colour")
+        return None
+
     @property
     def edges(self) -> "list[Edge]":
         """The edges a fillet indexes, as `Edge` records (copied; safe to keep)."""
@@ -1069,6 +1327,8 @@ def write_step_text(solids, schema=None, unit="mm") -> str:
     text = _lib().cadaclysm_blacksmith_step(handles, len(solids), _schema_text(schema), UNITS[unit])
     if not text:
         _fail("step")
+    if _WASM:
+        return text   # the wasm returns the text itself, nothing to free
     try:
         return ctypes.string_at(text).decode("utf-8")
     finally:

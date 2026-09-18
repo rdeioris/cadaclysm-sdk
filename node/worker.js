@@ -121,6 +121,10 @@ if (isMainThread) {
       if (!mod._lib().node_save_mesh(address, node, p, format)) throw new mod.CadaclysmError(mod._lastError() || `could not write ${p}`);
       return true;
     },
+    save({ address, path: p, format }) {
+      if (!mod._lib().scene_save(address, p, format)) throw new mod.CadaclysmError(mod._lastError() || `could not write ${p}`);
+      return true;
+    },
   } : {
     // `a`/`b`/`handles` are BigInt addresses, which koffi accepts directly
     // wherever a `CadaclysmBlacksmithSolid *` argument is expected -- no cast needed.

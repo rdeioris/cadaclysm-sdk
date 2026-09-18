@@ -227,6 +227,40 @@ func kernel(license string) {
 		fail(fmt.Sprintf("the filleted part has %d faces, not 15", faces))
 	}
 
+	// Colour: a gold plate joined with a blue pin -- the part is gold, the pin's top keeps
+	// its blue.
+	gold, err := plate.Coloured(0.8, 0.6, 0.4)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer gold.Close()
+	blue, err := pin.Coloured(0.2, 0.4, 1.0)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer blue.Close()
+	coloured, err := gold.Join(blue, blacksmith.DefaultTolerance)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer coloured.Close()
+	top, err := coloured.SelectFace(blacksmith.Max(blacksmith.AxisZ))
+	if err != nil {
+		fail(err.Error())
+	}
+	partColour, ok, err := coloured.Colour()
+	if err != nil || !ok {
+		fail(fmt.Sprintf("the joined part has no colour (%v)", err))
+	}
+	topColour, ok, err := coloured.FaceColour(top)
+	if err != nil || !ok {
+		fail(fmt.Sprintf("the pin's top has no colour (%v)", err))
+	}
+	fmt.Printf("colour=%v pin top=%v\n", partColour, topColour)
+	if partColour != [3]float64{0.8, 0.6, 0.4} || topColour != [3]float64{0.2, 0.4, 1.0} {
+		fail("the colours did not carry through the join")
+	}
+
 	// A mesh view is tied to one filling of the solid's cache: meshing at another
 	// tolerance and back again replaces that memory, and the first view must refuse to
 	// read it rather than hand back a slice over freed memory.

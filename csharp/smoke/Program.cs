@@ -74,6 +74,14 @@ Console.WriteLine($"faces={rounded.Faces} watertight={rounded.IsWatertight()}");
 // of the four corners rounded trades one edge for one face.
 if (rounded.Faces != 15) return Fail($"the filleted part has {rounded.Faces} faces, not 15");
 if (!rounded.IsWatertight()) return Fail("the filleted part is not watertight");
+// Colour: a gold plate joined with a blue pin -- the part is gold, the pin's top keeps its blue.
+using var gold = plate.Coloured(0.8, 0.6, 0.4);
+using var blue = pin.Coloured(0.2, 0.4, 1.0);
+using var coloured = gold.Join(blue);
+var pinTop = coloured.FaceColour(coloured.SelectFace(Selector.Max(Axis.Z)));
+Console.WriteLine($"colour={string.Join(",", coloured.Colour ?? [])} pin top={string.Join(",", pinTop ?? [])}");
+if (!(coloured.Colour ?? []).SequenceEqual([0.8, 0.6, 0.4]) || !(pinTop ?? []).SequenceEqual([0.2, 0.4, 1.0]) || plate.Colour is not null)
+    return Fail("the colours did not carry through the join");
 // A temporary operand -- the cylinder here is nobody's -- must stay alive for the length of
 // the call that reads it: the owners hold SafeHandles, which the marshaller pins across every
 // P/Invoke, so a collection during the join can neither free the cylinder nor crash the

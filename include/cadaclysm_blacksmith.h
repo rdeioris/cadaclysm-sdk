@@ -407,6 +407,19 @@ bool cadaclysm_blacksmith_face_frame(const struct CadaclysmBlacksmithSolid *soli
                                      double *out);
 
 /**
+ * The solid's colour, or with `face` not `CADACLYSM_BLACKSMITH_NONE` that
+ * face's as drawn (its own, else the solid's), as three doubles into `out`.
+ * `false` where there is none -- and, with `last_error` set, on a bad face or
+ * a null argument.
+ *
+ * # Safety
+ * `solid` live; `out` three doubles.
+ */
+bool cadaclysm_blacksmith_colour(const struct CadaclysmBlacksmithSolid *solid,
+                                 uint32_t face,
+                                 double *out);
+
+/**
  * The face's surface kind: "plane", "cylinder", "cone", "sphere", "torus",
  * "nurbs", "revolution", "extrusion", "other", or "none" for a face without a
  * surface. Static; never freed. Null (and `last_error`) for a face out of range.
@@ -721,6 +734,23 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_rotate(const struct Cadacl
  */
 struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_mirror(const struct CadaclysmBlacksmithSolid *solid,
                                                              const double *plane);
+
+/**
+ * `solid` coloured (`r`, `g`, `b`), each in 0..1: the whole solid, or with
+ * `face` not `CADACLYSM_BLACKSMITH_NONE` just that face, whose colour then wins
+ * over the solid's. What is made from a coloured solid inherits: a rigid move
+ * keeps every colour, and a boolean, fillet, chamfer or shell gives each face
+ * the colour of the input face it lies on -- a cut's bore the tool's -- and a
+ * new face (a round, a shell's inner wall) the solid's.
+ *
+ * # Safety
+ * `solid` a live solid.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_coloured(const struct CadaclysmBlacksmithSolid *solid,
+                                                               uint32_t face,
+                                                               double r,
+                                                               double g,
+                                                               double b);
 
 /**
  * `a ∪ b`, an exact B-rep whose faces are pieces of the inputs' own faces; only
