@@ -34,6 +34,7 @@ export class Profile {
   static path(start: Point2): Path;
   withHole(hole: Profile): Profile;
   translate(dx: number, dy: number): Profile;
+  round(radius: number, corners?: Iterable<number> | null, open?: boolean): Profile;
 }
 export class Path {
   constructor(start: Point2);
@@ -47,6 +48,7 @@ export class Path {
 export class SweepPath {
   constructor(at: Point3);
   static at(point: Point3): SweepPath;
+  static along(curve: Profile, frame: Frame, tolerance?: number, open?: boolean): SweepPath;
   lineTo(point: Point3): this;
   arc(centre: Point3, axis: Point3, angle: number): this;
   close(): void;
@@ -90,6 +92,11 @@ export class Solid {
   static sweep(profile: Profile, frame: Frame, path: SweepPath): Solid;
   static sweepOpen(profile: Profile, frame: Frame, path: SweepPath): Solid;
   extrudeFaces(height: number): Solid;
+  static face(profile: Profile, frame: Frame): Solid;
+  faceSheet(face: number): Solid;
+  dropFaces(faces: Iterable<number>): Solid;
+  trim(tool: Solid, keep?: 'outside' | 'inside', tolerance?: number, progress?: Progress | null): Solid;
+  trimAsync(tool: Solid, keep?: 'outside' | 'inside', tolerance?: number, progress?: Progress | null): Promise<Solid>;
   place(frame: Frame): Solid;
   translate(dx: number, dy: number, dz: number): Solid;
   rotate(axis: AxisLine, radians: number): Solid;
@@ -151,6 +158,7 @@ export class Workplane {
   cuboid(x: number, y: number, z: number): this;
   cylinder(r: number, h: number): this;
   extrude(profile: Profile, height: number): this;
+  face(profile: Profile): this;
   revolve(profile: Profile, angle: number): this;
   translate(dx: number, dy: number, dz: number): this;
   faces(selector: Selector): this;

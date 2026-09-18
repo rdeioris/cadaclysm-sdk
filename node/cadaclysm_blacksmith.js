@@ -175,6 +175,11 @@ function _lib() {
     extrude_faces: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_extrude_faces(const CadaclysmBlacksmithSolid *sheet, double height)'),
     place: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_place(const CadaclysmBlacksmithSolid *solid, const double *frame)'),
     translate_profile: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_translate_profile(const CadaclysmBlacksmithProfile *profile, double dx, double dy)'),
+    profile_round: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_round(const CadaclysmBlacksmithProfile *profile, double radius, const uint32_t *corners, size_t count, bool open)'),
+    face: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_face(const CadaclysmBlacksmithProfile *profile, const double *frame)'),
+    face_sheet: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_face_sheet(const CadaclysmBlacksmithSolid *solid, uint32_t face)'),
+    drop_faces: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_drop_faces(const CadaclysmBlacksmithSolid *solid, const uint32_t *faces, size_t count)'),
+    trim: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_trim(const CadaclysmBlacksmithSolid *sheet, const CadaclysmBlacksmithSolid *tool, bool keep_inside, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     translate: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_translate(const CadaclysmBlacksmithSolid *solid, double dx, double dy, double dz)'),
     rotate: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_rotate(const CadaclysmBlacksmithSolid *solid, const double *axis, double radians)'),
     mirror: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_mirror(const CadaclysmBlacksmithSolid *solid, const double *plane)'),
@@ -188,6 +193,7 @@ function _lib() {
     sweep_path_begin: f('CadaclysmBlacksmithSweepPath *cadaclysm_blacksmith_sweep_path_begin(double x, double y, double z)'),
     sweep_path_line_to: f('bool cadaclysm_blacksmith_sweep_path_line_to(CadaclysmBlacksmithSweepPath *p, double x, double y, double z)'),
     sweep_path_arc: f('bool cadaclysm_blacksmith_sweep_path_arc(CadaclysmBlacksmithSweepPath *p, double cx, double cy, double cz, double ax, double ay, double az, double angle)'),
+    sweep_path_along: f('CadaclysmBlacksmithSweepPath *cadaclysm_blacksmith_sweep_path_along(const CadaclysmBlacksmithProfile *curve, const double *frame, double tolerance, bool open)'),
     sweep_path_free: f('void cadaclysm_blacksmith_sweep_path_free(CadaclysmBlacksmithSweepPath *p)'),
     sweep: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sweep(const CadaclysmBlacksmithProfile *profile, const double *frame, const CadaclysmBlacksmithSweepPath *path)'),
     sweep_open: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sweep_open(const CadaclysmBlacksmithProfile *profile, const double *frame, const CadaclysmBlacksmithSweepPath *path)'),
@@ -300,6 +306,17 @@ class Profile {
   static path(start) { return new Path(start); }
   withHole(hole) { return new Profile(_lib().profile_with_hole(this._handle, hole._handle)); }
   translate(dx, dy) { return new Profile(_lib().translate_profile(this._handle, dx, dy)); }
+  /**
+   * Corners between two straight segments rounded by `radius`, with an exact tangent arc.
+   * `corners` null rounds every one (the holes' too); otherwise it picks corners of the
+   * boundary -- corner `k` is where segment `k` ends. `open` keeps an open chain's ends square.
+   */
+  round(radius, corners = null, open = false) {
+    // A picked list, even an empty one, is a non-null array: null means every corner.
+    const which = corners == null ? null : Uint32Array.from(Array.from(corners, Number));
+    const list = which == null ? null : which.length ? which : new Uint32Array(1);
+    return new Profile(_lib().profile_round(this._handle, radius, list, which == null ? 0 : which.length, !!open));
+  }
 }
 
 const _pathFinalizer = typeof FinalizationRegistry === 'function'
@@ -345,6 +362,17 @@ class SweepPath {
     if (_sweepPathFinalizer) _sweepPathFinalizer.register(this, this._handle, this);
   }
   static at(point) { return new SweepPath(point); }
+  /**
+   * The path the 2D chain `curve` (usually `Path.endOpen()`) draws on `frame`: lines and arcs
+   * as they are, a Bezier or spline fitted with tangent biarcs within `tolerance`. `open`
+   * false closes the path back to its start along the side a profile leaves implicit.
+   */
+  static along(curve, frame, tolerance = 0.05, open = true) {
+    const path = Object.create(SweepPath.prototype);
+    path._handle = _checked(_lib().sweep_path_along(curve._handle, _frame(frame), tolerance, !!open), 'sweep_path_along');
+    if (_sweepPathFinalizer) _sweepPathFinalizer.register(path, path._handle, path);
+    return path;
+  }
   _live() { if (!this._handle) throw new BuildError('sweep_path: closed'); return this._handle; }
   _step(ok, what) { if (!ok) _fail(what); return this; }
   lineTo([x, y, z]) { return this._step(_lib().sweep_path_line_to(this._live(), x, y, z), 'sweep_path_line_to'); }
@@ -448,6 +476,24 @@ class Solid {
   static sweepOpen(profile, frame, sweepPath) { return new Solid(_lib().sweep_open(profile._handle, _frame(frame), sweepPath._live())); }
   /** Thicken an open sheet into a solid. */
   extrudeFaces(height) { return new Solid(_lib().extrude_faces(this._handle, height)); }
+  /** The flat sheet `profile` bounds on `frame`: one planar face, holes as holes, facing the frame's z. */
+  static face(profile, frame) { return new Solid(_lib().face(profile._handle, _frame(frame))); }
+  /** Face `face` alone, as an open sheet: its surface, loops and exact edge curves. */
+  faceSheet(face) { return new Solid(_lib().face_sheet(this._handle, face)); }
+  /** Without the faces at `faces`; the rest keep their order. */
+  dropFaces(faces) {
+    const which = Uint32Array.from(Array.from(faces, Number));
+    return new Solid(_lib().drop_faces(this._handle, which, which.length));
+  }
+  /**
+   * Cut along the closed `tool` and keep one side: `keep` 'outside' (a hole punched
+   * through) or 'inside' (the sheet cut to the tool's outline).
+   */
+  trim(tool, keep = 'outside', tolerance = 0.05, progress = null) {
+    Solid._keep(keep);
+    return new Solid(_lib().trim(this._handle, tool._handle, keep === 'inside', tolerance, _progress(progress), null));
+  }
+  static _keep(keep) { if (keep !== 'outside' && keep !== 'inside') throw new BuildError(`trim: keep must be 'outside' or 'inside', not '${keep}'`); }
   // -- moving
   place(frame) { return new Solid(_lib().place(this._handle, _frame(frame))); }
   translate(dx, dy, dz) { return new Solid(_lib().translate(this._handle, dx, dy, dz)); }
@@ -610,6 +656,10 @@ class Solid {
   async filletAsync(edges, radius, tolerance = 1e-6, progress = null) { return Solid._wrap(await this._async('filletAsync', { op: 'fillet', edges: Solid._edgeIndices(edges), radius, tolerance }, [], progress)); }
   async chamferAsync(edges, distance, tolerance = 1e-6) { return Solid._wrap(await this._async('chamferAsync', { op: 'chamfer', edges: Solid._edgeIndices(edges), distance, tolerance })); }
   async shellAsync(thickness, open = [], tolerance = 1e-6, progress = null) { return Solid._wrap(await this._async('shellAsync', { op: 'shell', thickness, open: Uint32Array.from(Array.from(open, Number)), tolerance }, [], progress)); }
+  async trimAsync(tool, keep = 'outside', tolerance = 0.05, progress = null) {
+    Solid._keep(keep);
+    return Solid._wrap(await this._async('trimAsync', { op: 'trim', b: _addressOf(tool._handle), keepInside: keep === 'inside', tolerance }, [tool], progress));
+  }
   async meshAsync(tolerance = 0.05) { return this._async('meshAsync', { op: 'mesh', tolerance }); }
   async stepAsync(schema = null, unit = 'mm') {
     if (!(unit in UNITS)) throw new BuildError(`unit must be one of ${Object.keys(UNITS).sort().join(', ')}`);
@@ -668,6 +718,8 @@ class Workplane {
   cuboid(x, y, z) { return this._set(Solid.cuboid(x, y, z).place(this.frame)); }
   cylinder(r, h) { return this._set(Solid.cylinder(r, h).place(this.frame)); }
   extrude(profile, height) { return this._set(Solid.extrude(profile, this.frame, height)); }
+  /** The flat sheet `profile` bounds on this workplane's frame. */
+  face(profile) { return this._set(Solid.face(profile, this.frame)); }
   /** About this workplane's own y axis through its origin. */
   revolve(profile, angle) { return this._set(Solid.revolve(profile, [this.frame.slice(0, 3), this.frame.slice(6, 9)], angle)); }
   /** Slide the current solid, keeping the face selection. */

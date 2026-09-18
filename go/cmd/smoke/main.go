@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/rdeioris/cadaclysm-sdk/go/blacksmith"
 	"github.com/rdeioris/cadaclysm-sdk/go/cadaclysm"
@@ -227,6 +228,10 @@ func kernel(license string) {
 		fail(fmt.Sprintf("the filleted part has %d faces, not 15", faces))
 	}
 
+	// The sheet verbs: a face from a profile, a solid's face alone, faces dropped, a trim,
+	// a rounded profile and a path along a curve.
+	sheetVerbs(plate)
+
 	// Colour: a gold plate joined with a blue pin -- the part is gold, the pin's top keeps
 	// its blue.
 	gold, err := plate.Coloured(0.8, 0.6, 0.4)
@@ -259,6 +264,26 @@ func kernel(license string) {
 	fmt.Printf("colour=%v pin top=%v\n", partColour, topColour)
 	if partColour != [3]float64{0.8, 0.6, 0.4} || topColour != [3]float64{0.2, 0.4, 1.0} {
 		fail("the colours did not carry through the join")
+	}
+
+	// A face: the outline as a sheet, which pushed out is the plate again.
+	sheet, err := blacksmith.Face(outline, blacksmith.Frame{0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1})
+	if err != nil {
+		fail(err.Error())
+	}
+	defer sheet.Close()
+	pushed, err := sheet.ExtrudeFaces(6)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer pushed.Close()
+	sheetFaces, _ := sheet.Faces()
+	pushedFaces, _ := pushed.Faces()
+	plateFaces, _ := plate.Faces()
+	pushedTight, _ := pushed.IsWatertight(blacksmith.DefaultTolerance)
+	fmt.Printf("face: %d face, pushed out %d faces\n", sheetFaces, pushedFaces)
+	if sheetFaces != 1 || pushedFaces != plateFaces || !pushedTight {
+		fail("the outline's face did not push out to the plate")
 	}
 
 	// A mesh view is tied to one filling of the solid's cache: meshing at another
@@ -328,4 +353,79 @@ func kernel(license string) {
 func fail(why string) {
 	fmt.Fprintln(os.Stderr, why)
 	os.Exit(1)
+}
+
+// sheetVerbs checks Face, FaceSheet, DropFaces, Trim, Round and SweepPathAlong by their
+// face counts, and that a trim with nothing on the kept side fails in the library's words.
+func sheetVerbs(plate *blacksmith.Solid) {
+	must := func(s *blacksmith.Solid, err error) *blacksmith.Solid {
+		if err != nil {
+			fail("sheet verbs: " + err.Error())
+		}
+		return s
+	}
+	count := func(s *blacksmith.Solid) int {
+		n, err := s.Faces()
+		if err != nil {
+			fail(err.Error())
+		}
+		return n
+	}
+	xy := blacksmith.Frame{0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1}
+	square, err := blacksmith.Rect(20, 20)
+	if err != nil {
+		fail(err.Error())
+	}
+	circle, err := blacksmith.Circle(4)
+	if err != nil {
+		fail(err.Error())
+	}
+	sheet := must(blacksmith.Face(square, xy))
+	peg := must(blacksmith.Extrude(circle, blacksmith.Frame{0, 0, -6, 1, 0, 0, 0, 1, 0, 0, 0, 1}, 12))
+	holed := must(sheet.Trim(peg, "outside", blacksmith.DefaultTolerance))
+	disc := must(sheet.Trim(peg, "inside", blacksmith.DefaultTolerance))
+	top, err := plate.SelectFace(blacksmith.Max(blacksmith.AxisZ))
+	if err != nil {
+		fail(err.Error())
+	}
+	lid := must(plate.FaceSheet(top))
+	walls := must(plate.DropFaces([]int{0, 1}))
+	rounded, err := square.Round(2, nil, false)
+	if err != nil {
+		fail(err.Error())
+	}
+	slab := must(blacksmith.Extrude(rounded, xy, 1))
+	wave, err := blacksmith.NewPath(0, 0).BezierTo([2]float64{20, 0}, [2]float64{20, 20}, [2]float64{40, 10}).EndOpen()
+	if err != nil {
+		fail(err.Error())
+	}
+	ring, err := blacksmith.Circle(1)
+	if err != nil {
+		fail(err.Error())
+	}
+	along := blacksmith.SweepPathAlong(wave, xy, 0.01, true)
+	tube := must(blacksmith.Sweep(ring, blacksmith.Frame{0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0}, along))
+	onPlane := must(blacksmith.XY().Face(square).Solid())
+	watertight, err := tube.IsWatertight(blacksmith.DefaultTolerance)
+	if err != nil {
+		fail(err.Error())
+	}
+	if count(sheet) != 1 || count(holed) < 1 || count(disc) < 1 || count(lid) != 1 || count(walls) != count(plate)-2 ||
+		count(slab) != 10 || !watertight || count(onPlane) != 1 {
+		fail(fmt.Sprintf("sheet verbs: sheet=%d holed=%d disc=%d lid=%d walls=%d slab=%d", count(sheet), count(holed),
+			count(disc), count(lid), count(walls), count(slab)))
+	}
+	away := must(peg.Translate(100, 0, 0))
+	if _, err := sheet.Trim(away, "inside", blacksmith.DefaultTolerance); err == nil ||
+		!strings.Contains(err.Error(), "trim: nothing of the sheet lies inside the tool") {
+		fail(fmt.Sprintf("a trim with nothing inside the tool: %v", err))
+	}
+	fmt.Printf("sheet verbs: face, trim (%d+%d), face_sheet, drop_faces, round (%d faces), along: ok\n", count(holed), count(disc), count(slab))
+	for _, s := range []*blacksmith.Solid{sheet, peg, holed, disc, lid, walls, slab, tube, onPlane, away} {
+		s.Close()
+	}
+	for _, p := range []*blacksmith.Profile{square, circle, rounded, wave, ring} {
+		p.Close()
+	}
+	along.Close()
 }

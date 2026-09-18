@@ -151,19 +151,20 @@ public final class Blacksmith {
 
     // ---- loading the library, and every entry point ----------------------------------
     //
-    // The same 70 Python's `cadaclysm_blacksmith.py` declares, no more and no less;
+    // The same 78 Python's `cadaclysm_blacksmith.py` declares, no more and no less;
     // `tests/bindings.rs` compares the two sets by name (every quoted
     // cadaclysm_blacksmith_ string in this file) and holds Java to Python's.
 
     private static final MethodHandle LAST_ERROR, LICENSE_SET, LICENSE_INFO, LICENSE_NOTICE_COUNT,
             BUILD_DATE, VERSION, SOLID_FREE, PROFILE_FREE, PROFILE_RECT, PROFILE_CIRCLE,
-            PROFILE_SLOT, PROFILE_POLYGON, PROFILE_WITH_HOLE, TRANSLATE_PROFILE, PATH_BEGIN,
+            PROFILE_SLOT, PROFILE_POLYGON, PROFILE_WITH_HOLE, TRANSLATE_PROFILE, PROFILE_ROUND, PATH_BEGIN,
             PATH_LINE_TO, PATH_ARC_TO, PATH_BEZIER_TO, PATH_NURBS_TO, PATH_END, PATH_END_OPEN,
             PATH_FREE, CUBOID, CYLINDER, CONE, SPHERE, TORUS, WEDGE, EXTRUDE, EXTRUDE_OPEN,
             EXTRUDE_TAPERED, EXTRUDE_OPEN_TAPERED, EXTRUDE_BETWEEN, EXTRUDE_OPEN_BETWEEN,
             SLANT_OF_PLANE, LOFT, LOFT_OPEN, REVOLVE, REVOLVE_OPEN, SWEEP_PATH_BEGIN,
-            SWEEP_PATH_LINE_TO, SWEEP_PATH_ARC, SWEEP_PATH_FREE, SWEEP, SWEEP_OPEN, EXTRUDE_FACES,
-            PLACE, TRANSLATE, ROTATE, MIRROR, JOIN, CUT, COMMON, SPLIT_SHEET, FILLET, CHAMFER,
+            SWEEP_PATH_LINE_TO, SWEEP_PATH_ARC, SWEEP_PATH_ALONG, SWEEP_PATH_FREE, SWEEP, SWEEP_OPEN,
+            EXTRUDE_FACES, FACE, FACE_SHEET, DROP_FACES, PLACE, TRANSLATE, ROTATE, MIRROR, JOIN, CUT,
+            COMMON, SPLIT_SHEET, TRIM, FILLET, CHAMFER,
             SHELL, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_KIND, COLOURED, COLOUR, EDGE_COUNT, EDGE_AT, MESH_AT,
             EDGE_POLYLINES, BOUNDS, LEAKED_EDGES, UNPAIRED_EDGES, STEP, STRING_FREE;
 
@@ -190,6 +191,7 @@ public final class Blacksmith {
         PROFILE_POLYGON = bind(linker, lib, "cadaclysm_blacksmith_profile_polygon", FunctionDescriptor.of(A, A, L));
         PROFILE_WITH_HOLE = bind(linker, lib, "cadaclysm_blacksmith_profile_with_hole", FunctionDescriptor.of(A, A, A));
         TRANSLATE_PROFILE = bind(linker, lib, "cadaclysm_blacksmith_translate_profile", FunctionDescriptor.of(A, A, D, D));
+        PROFILE_ROUND = bind(linker, lib, "cadaclysm_blacksmith_profile_round", FunctionDescriptor.of(A, A, D, A, L, B));
         PATH_BEGIN = bind(linker, lib, "cadaclysm_blacksmith_path_begin", FunctionDescriptor.of(A, D, D));
         PATH_LINE_TO = bind(linker, lib, "cadaclysm_blacksmith_path_line_to", FunctionDescriptor.of(B, A, D, D));
         PATH_ARC_TO = bind(linker, lib, "cadaclysm_blacksmith_path_arc_to", FunctionDescriptor.of(B, A, D, D, D, D, B));
@@ -218,10 +220,14 @@ public final class Blacksmith {
         SWEEP_PATH_BEGIN = bind(linker, lib, "cadaclysm_blacksmith_sweep_path_begin", FunctionDescriptor.of(A, D, D, D));
         SWEEP_PATH_LINE_TO = bind(linker, lib, "cadaclysm_blacksmith_sweep_path_line_to", FunctionDescriptor.of(B, A, D, D, D));
         SWEEP_PATH_ARC = bind(linker, lib, "cadaclysm_blacksmith_sweep_path_arc", FunctionDescriptor.of(B, A, D, D, D, D, D, D, D));
+        SWEEP_PATH_ALONG = bind(linker, lib, "cadaclysm_blacksmith_sweep_path_along", FunctionDescriptor.of(A, A, A, D, B));
         SWEEP_PATH_FREE = bind(linker, lib, "cadaclysm_blacksmith_sweep_path_free", FunctionDescriptor.ofVoid(A));
         SWEEP = bind(linker, lib, "cadaclysm_blacksmith_sweep", FunctionDescriptor.of(A, A, A, A));
         SWEEP_OPEN = bind(linker, lib, "cadaclysm_blacksmith_sweep_open", FunctionDescriptor.of(A, A, A, A));
         EXTRUDE_FACES = bind(linker, lib, "cadaclysm_blacksmith_extrude_faces", FunctionDescriptor.of(A, A, D));
+        FACE = bind(linker, lib, "cadaclysm_blacksmith_face", FunctionDescriptor.of(A, A, A));
+        FACE_SHEET = bind(linker, lib, "cadaclysm_blacksmith_face_sheet", FunctionDescriptor.of(A, A, I));
+        DROP_FACES = bind(linker, lib, "cadaclysm_blacksmith_drop_faces", FunctionDescriptor.of(A, A, A, L));
         PLACE = bind(linker, lib, "cadaclysm_blacksmith_place", FunctionDescriptor.of(A, A, A));
         TRANSLATE = bind(linker, lib, "cadaclysm_blacksmith_translate", FunctionDescriptor.of(A, A, D, D, D));
         ROTATE = bind(linker, lib, "cadaclysm_blacksmith_rotate", FunctionDescriptor.of(A, A, A, D));
@@ -230,6 +236,7 @@ public final class Blacksmith {
         CUT = bind(linker, lib, "cadaclysm_blacksmith_cut", FunctionDescriptor.of(A, A, A, D, A, A));
         COMMON = bind(linker, lib, "cadaclysm_blacksmith_common", FunctionDescriptor.of(A, A, A, D, A, A));
         SPLIT_SHEET = bind(linker, lib, "cadaclysm_blacksmith_split_sheet", FunctionDescriptor.of(A, A, A, D, A, A));
+        TRIM = bind(linker, lib, "cadaclysm_blacksmith_trim", FunctionDescriptor.of(A, A, A, B, D, A, A));
         FILLET = bind(linker, lib, "cadaclysm_blacksmith_fillet", FunctionDescriptor.of(A, A, A, L, D, D, A, A));
         CHAMFER = bind(linker, lib, "cadaclysm_blacksmith_chamfer", FunctionDescriptor.of(A, A, A, L, D, D));
         SHELL = bind(linker, lib, "cadaclysm_blacksmith_shell", FunctionDescriptor.of(A, A, D, A, L, D, A, A));
@@ -676,6 +683,34 @@ public final class Blacksmith {
                 keep(this);
             }
         }
+
+        /** {@link #round(double, int[], boolean)} of every corner, closed. */
+        public Profile round(double radius) {
+            return round(radius, null, false);
+        }
+
+        /**
+         * This profile with its corners rounded by {@code radius}: where two straight segments
+         * meet, both are cut back and an exact arc tangent to both put between them. {@code
+         * corners} null rounds every such corner, the holes' too; otherwise it picks corners of
+         * the boundary -- corner {@code k} is where segment {@code k} ends. {@code open} reads
+         * the profile as an open chain whose two ends stay square; closed, the corner at the
+         * start is rounded too. Throws {@link BuildException} naming the corner the radius does
+         * not fit.
+         */
+        public Profile round(double radius, int[] corners, boolean open) {
+            int[] which = corners == null ? null : indices(corners);
+            try (Arena arena = Arena.ofConfined()) {
+                // A picked list, even an empty one, is a non-null array: null means every corner.
+                MemorySegment list = which == null ? MemorySegment.NULL : arena.allocate(ValueLayout.JAVA_INT, Math.max(1, which.length));
+                if (which != null) MemorySegment.copy(which, 0, list, ValueLayout.JAVA_INT, 0, which.length);
+                long count = which == null ? 0 : which.length;
+                MemorySegment h = handle();
+                return new Profile(call(() -> (MemorySegment) PROFILE_ROUND.invokeExact(h, radius, list, count, open)));
+            } finally {
+                keep(this);
+            }
+        }
     }
 
     /**
@@ -816,9 +851,37 @@ public final class Blacksmith {
             cleanable = CLEANER.register(this, handle);
         }
 
+        private SweepPath(MemorySegment raw, String what) {
+            handle = new Handle(SWEEP_PATH_FREE, "sweep_path: closed", checked(raw, what));
+            cleanable = CLEANER.register(this, handle);
+        }
+
         /** Start a sweep path at {@code point} (three numbers). */
         public static SweepPath at(double[] point) {
             return new SweepPath(point);
+        }
+
+        /** {@link #along(Profile, double[], double, boolean)} at 0.05, open. */
+        public static SweepPath along(Profile curve, double[] frame) {
+            return along(curve, frame, 0.05, true);
+        }
+
+        /**
+         * The path the 2D chain {@code curve} (usually from {@link Path#endOpen()}) draws on
+         * {@code frame}: a line a straight piece, an arc a circular one, a Bezier or spline
+         * fitted with biarcs -- arcs tangent to each other and to the curve -- within {@code
+         * tolerance}. {@code open} false closes the path back to its start along the side a
+         * profile leaves implicit.
+         */
+        public static SweepPath along(Profile curve, double[] frame, double tolerance, boolean open) {
+            double[] f = frame(frame);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment fs = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, f);
+                MemorySegment c = curve.handle();
+                return new SweepPath(call(() -> (MemorySegment) SWEEP_PATH_ALONG.invokeExact(c, fs, tolerance, open)), "sweep_path_along");
+            } finally {
+                keep(curve);
+            }
         }
 
         MemorySegment handle() {
@@ -1337,6 +1400,47 @@ public final class Blacksmith {
             return swept(SWEEP_OPEN, profile, frame, path);
         }
 
+        /** The flat sheet {@code profile} bounds on {@code frame}: one planar face, each hole
+         *  a hole through it, its normal the frame's z, every edge the exact line, arc or
+         *  spline its segment is. An open sheet -- raise it with {@link #extrudeFaces}, cut it
+         *  with {@link #trim}. */
+        public static Solid face(Profile profile, double[] frame) {
+            double[] f = frame(frame);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment fs = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, f);
+                MemorySegment p = profile.handle();
+                return new Solid(call(() -> (MemorySegment) FACE.invokeExact(p, fs)));
+            } finally {
+                keep(profile);
+            }
+        }
+
+        /** Face {@code face} alone, as an open sheet: its surface, loops and exact edge
+         *  curves, the rest of the solid left behind. */
+        public Solid faceSheet(int face) {
+            int which = indices(new int[] {face})[0];
+            try {
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) FACE_SHEET.invokeExact(h, which)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** This solid without the faces at {@code faces}: the rest keep their order, so an
+         *  index into the result is this one's with the dropped ones closed up. */
+        public Solid dropFaces(int[] faces) {
+            int[] which = indices(faces);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment list = arena.allocateFrom(ValueLayout.JAVA_INT, which);
+                long count = which.length;
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) DROP_FACES.invokeExact(h, list, count)));
+            } finally {
+                keep(this);
+            }
+        }
+
         /** Every face of this sheet pushed {@code height} along its own normal, walled and
          *  closed: the sheet as a solid of that thickness. */
         public Solid extrudeFaces(double height) {
@@ -1446,12 +1550,38 @@ public final class Blacksmith {
          * This solid (a sheet or a solid) cut along {@code tool}'s boundary, nothing
          * removed: every face comes back in its pieces outside {@code tool} and its pieces
          * inside, each piece a face, in this solid's own face order with each face's outside
-         * pieces before its inside pieces. {@code tool} must be a closed solid. There is no
-         * way yet, from here or the C ABI, to build a new solid from a chosen subset of a
-         * result's faces: this only cuts.
+         * pieces before its inside pieces. {@code tool} must be a closed solid. Keep or
+         * discard pieces with {@link #dropFaces}; {@link #trim} is the split with one side
+         * dropped.
          */
         public Solid splitSheet(Solid tool, double tolerance) {
             return combine(SPLIT_SHEET, tool, tolerance);
+        }
+
+        /** {@link #trim(Solid, String, double)} keeping what lies outside, at 0.05. */
+        public Solid trim(Solid tool) {
+            return trim(tool, "outside", 0.05);
+        }
+
+        /** {@link #trim(Solid, String, double)} at 0.05. */
+        public Solid trim(Solid tool, String keep) {
+            return trim(tool, keep, 0.05);
+        }
+
+        /** This sheet (or solid) cut along the closed {@code tool}'s boundary and the pieces
+         *  on one side thrown away: {@code keep} "outside" keeps what lies outside the tool (a
+         *  hole punched through), "inside" what lies within it. */
+        public Solid trim(Solid tool, String keep, double tolerance) {
+            if (!keep.equals("outside") && !keep.equals("inside"))
+                throw new BuildException("trim: keep must be 'outside' or 'inside', not '" + keep + "'");
+            boolean inside = keep.equals("inside");
+            try {
+                MemorySegment a = handle();
+                MemorySegment b = tool.handle();
+                return new Solid(call(() -> (MemorySegment) TRIM.invokeExact(a, b, inside, tolerance, MemorySegment.NULL, MemorySegment.NULL)));
+            } finally {
+                keep(this, tool);
+            }
         }
 
         // -- asking
@@ -2013,6 +2143,11 @@ public final class Blacksmith {
 
         public Workplane extrude(Profile profile, double height) {
             return set(Solid.extrude(profile, frame, height));
+        }
+
+        /** The flat sheet {@code profile} bounds on this workplane's frame. */
+        public Workplane face(Profile profile) {
+            return set(Solid.face(profile, frame));
         }
 
         /** About this workplane's own y axis through its origin, as the Rust chain. */

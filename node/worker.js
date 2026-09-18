@@ -133,6 +133,11 @@ if (isMainThread) {
       if (!r) throw new mod.BuildError(mod._lastError() || which);
       return { address: koffi.address(r) };
     },
+    trim({ a, b, keepInside, tolerance }, progress) {
+      const r = mod._lib().trim(a, b, keepInside, tolerance, progress, null);
+      if (!r) throw new mod.BuildError(mod._lastError() || 'trim');
+      return { address: koffi.address(r) };
+    },
     fillet({ a, edges, radius, tolerance }, progress) {
       const r = mod._lib().fillet(a, edges, edges.length, radius, tolerance, progress, null);
       if (!r) throw new mod.BuildError(mod._lastError() || 'fillet');

@@ -72,7 +72,7 @@ __all__ = [
 ]
 
 # This file's own version (the workspace's); `version()` is the loaded library's.
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 NONE = 0xFFFFFFFF
 UNITS = {"m": 0, "mm": 1, "in": 2}
@@ -197,6 +197,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_profile_polygon", _PROFILE, [_D, c_size_t]),
     ("cadaclysm_blacksmith_profile_with_hole", _PROFILE, [_PROFILE, _PROFILE]),
     ("cadaclysm_blacksmith_translate_profile", _PROFILE, [_PROFILE, c_double, c_double]),
+    ("cadaclysm_blacksmith_profile_round", _PROFILE, [_PROFILE, c_double, _U, c_size_t, c_bool]),
     ("cadaclysm_blacksmith_path_begin", _PATH, [c_double, c_double]),
     ("cadaclysm_blacksmith_path_line_to", c_bool, [_PATH, c_double, c_double]),
     ("cadaclysm_blacksmith_path_arc_to", c_bool, [_PATH, c_double, c_double, c_double, c_double, c_bool]),
@@ -225,10 +226,14 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_sweep_path_begin", _SWEEP_PATH, [c_double, c_double, c_double]),
     ("cadaclysm_blacksmith_sweep_path_line_to", c_bool, [_SWEEP_PATH, c_double, c_double, c_double]),
     ("cadaclysm_blacksmith_sweep_path_arc", c_bool, [_SWEEP_PATH] + [c_double] * 7),
+    ("cadaclysm_blacksmith_sweep_path_along", _SWEEP_PATH, [_PROFILE, _D, c_double, c_bool]),
     ("cadaclysm_blacksmith_sweep_path_free", None, [_SWEEP_PATH]),
     ("cadaclysm_blacksmith_sweep", _SOLID, [_PROFILE, _D, _SWEEP_PATH]),
     ("cadaclysm_blacksmith_sweep_open", _SOLID, [_PROFILE, _D, _SWEEP_PATH]),
     ("cadaclysm_blacksmith_extrude_faces", _SOLID, [_SOLID, c_double]),
+    ("cadaclysm_blacksmith_face", _SOLID, [_PROFILE, _D]),
+    ("cadaclysm_blacksmith_face_sheet", _SOLID, [_SOLID, c_uint32]),
+    ("cadaclysm_blacksmith_drop_faces", _SOLID, [_SOLID, _U, c_size_t]),
     ("cadaclysm_blacksmith_place", _SOLID, [_SOLID, _D]),
     ("cadaclysm_blacksmith_translate", _SOLID, [_SOLID, c_double, c_double, c_double]),
     ("cadaclysm_blacksmith_rotate", _SOLID, [_SOLID, _D, c_double]),
@@ -237,6 +242,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_cut", _SOLID, [_SOLID, _SOLID, c_double, _PROGRESS, c_void_p]),
     ("cadaclysm_blacksmith_common", _SOLID, [_SOLID, _SOLID, c_double, _PROGRESS, c_void_p]),
     ("cadaclysm_blacksmith_split_sheet", _SOLID, [_SOLID, _SOLID, c_double, _PROGRESS, c_void_p]),
+    ("cadaclysm_blacksmith_trim", _SOLID, [_SOLID, _SOLID, c_bool, c_double, _PROGRESS, c_void_p]),
     ("cadaclysm_blacksmith_fillet", _SOLID, [_SOLID, _U, c_size_t, c_double, c_double, _PROGRESS, c_void_p]),
     ("cadaclysm_blacksmith_chamfer", _SOLID, [_SOLID, _U, c_size_t, c_double, c_double]),
     ("cadaclysm_blacksmith_shell", _SOLID, [_SOLID, c_double, _U, c_size_t, c_double, _PROGRESS, c_void_p]),
@@ -294,7 +300,7 @@ class _WasmLibrary:
     # count (a typed array knows its length), the progress `user` pointer, and
     # the out-arguments above
     _DROP = {"profile_polygon": (1,), "path_nurbs_to": (2, 5), "join": (4,), "cut": (4,), "common": (4,),
-             "split_sheet": (4,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "step": (1,),
+             "split_sheet": (4,), "trim": (5,), "drop_faces": (2,), "profile_round": (3,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "step": (1,),
              "slant_of_plane": (3,), "face_frame": (2,), "bounds": (2, 3), "edge": (2,), "colour": (2,)}
     # strings the C side returns as `const char*`, and the module decodes
     _TEXTS = {"version", "build_date", "face_kind", "license_info"}
@@ -622,6 +628,26 @@ class Profile:
     def translate(self, dx, dy) -> "Profile":
         return Profile(_lib().cadaclysm_blacksmith_translate_profile(self._handle, dx, dy))
 
+    def round(self, radius, corners=None, open=False) -> "Profile":  # noqa: A002, A003
+        """This profile with its corners rounded by `radius`: where two straight
+        segments meet, both are cut back and an exact arc tangent to both put
+        between them. A corner next to an arc or a spline is left as it is.
+
+        `corners=None` rounds every such corner, the holes' too; a list picks
+        corners of the boundary alone -- corner `k` is where segment `k` ends,
+        and a picked corner that is not between two lines raises. `open=True`
+        reads the profile as an open chain (from `Path.end_open`): its two ends
+        stay square. Closed, the corner where the last segment meets the first
+        is rounded too, across the side a profile leaves implicit (so
+        `Profile.rect` has four corners). Raises `BuildError` naming the corner
+        or segment the radius does not fit."""
+        if corners is None:
+            picked, count = None, 0
+        else:
+            ks = [int(k) for k in corners]
+            picked, count = (c_uint32 * len(ks))(*ks), len(ks)
+        return Profile(_lib().cadaclysm_blacksmith_profile_round(self._handle, radius, picked, count, bool(open)))
+
 
 class Path:
     """An outline drawn a segment at a time; `end()` closes it into a `Profile`
@@ -703,6 +729,21 @@ class SweepPath:
     @staticmethod
     def at(point) -> "SweepPath":
         return SweepPath(point)
+
+    @staticmethod
+    def along(curve: Profile, frame, tolerance=0.05, open=True) -> "SweepPath":  # noqa: A002
+        """The path the 2D chain `curve` (usually `Path.end_open()`) draws on
+        `frame`: a line a straight piece, an arc a circular one, and a Bezier or
+        spline fitted with biarcs -- pairs of arcs tangent to each other and to
+        the curve -- until each stays within `tolerance` of it, so the path is
+        tangent throughout and every wall swept along it exact. `open=False`
+        closes the path back to its start along the side a profile leaves
+        implicit. For `Solid.sweep`, whose frame must start where the path does
+        and face along it."""
+        self = SweepPath.__new__(SweepPath)
+        h = _lib().cadaclysm_blacksmith_sweep_path_along(curve._handle, _frame(frame), tolerance, bool(open))
+        self._handle = _checked(h, "sweep_path_along")
+        return self
 
     def _live(self):
         if not self._handle:
@@ -920,6 +961,29 @@ class Solid:
         `extrude`."""
         return Solid(_lib().cadaclysm_blacksmith_sweep_open(profile._handle, _frame(frame), path._live()))
 
+    @staticmethod
+    def face(profile: Profile, frame) -> "Solid":
+        """The flat sheet `profile` bounds on `frame`: one planar face, each hole
+        a hole through it, its normal `frame`'s z (however the profile winds),
+        every edge the exact line, arc or spline its segment is. An open sheet
+        -- raise it with `extrude_faces`, cut it with `trim` or `split_sheet`."""
+        return Solid(_lib().cadaclysm_blacksmith_face(profile._handle, _frame(frame)))
+
+    def face_sheet(self, face: int) -> "Solid":
+        """Face `face` alone, as an open sheet: its surface, its loops and the
+        exact curves on its edges, the rest of the solid left behind -- what
+        extruding a solid's face starts from (`part.face_sheet(top).extrude_faces(5)`
+        is the prism over the top face)."""
+        return Solid(_lib().cadaclysm_blacksmith_face_sheet(self._h(), face))
+
+    def drop_faces(self, faces) -> "Solid":
+        """This solid without the faces at `faces` (repeats allowed): the rest
+        keep their surfaces, loops and curves, in their order, so an index into
+        the result is this one's with the dropped ones closed up. An open sheet
+        unless nothing was dropped."""
+        ks = [int(k) for k in faces]
+        return Solid(_lib().cadaclysm_blacksmith_drop_faces(self._h(), (c_uint32 * len(ks))(*ks), len(ks)))
+
     def extrude_faces(self, height) -> "Solid":
         return Solid(_lib().cadaclysm_blacksmith_extrude_faces(self._h(), height))
 
@@ -949,6 +1013,18 @@ class Solid:
     def common(self, other: "Solid", tolerance=0.05, progress=None) -> "Solid":
         return self._combine(_lib().cadaclysm_blacksmith_common, other, tolerance, progress)
 
+    def trim(self, tool: "Solid", keep="outside", tolerance=0.05, progress=None) -> "Solid":
+        """`self` (a sheet or a solid) cut along the closed `tool`'s boundary and
+        the pieces on one side thrown away: `keep="outside"` keeps what lies
+        outside the tool -- a hole punched through the sheet -- and
+        `keep="inside"` what lies within it, the sheet cut to the tool's
+        outline. `split_sheet` then `drop_faces` of the other side, in one call;
+        the kept pieces come out in `self`'s face order."""
+        if keep not in ("outside", "inside"):
+            raise BuildError(f"trim: keep must be 'outside' or 'inside', not {keep!r}")
+        cb, _keep = _progress(progress)
+        return Solid(_lib().cadaclysm_blacksmith_trim(self._h(), tool._h(), keep == "inside", tolerance, cb, None))
+
     def split_sheet(self, tool: "Solid", tolerance=0.05, progress=None) -> "Solid":
         """`self` (a sheet or a solid) cut along `tool`'s boundary, nothing
         removed: every face of `self` comes back in its pieces outside `tool`
@@ -962,10 +1038,8 @@ class Solid:
         piece for as long as `self` and `tool` stand -- `result.face_kind(i)`
         and the rest of the query surface still work per-face.
 
-        There is no way yet, from Python or the C ABI, to build a new solid
-        from a chosen subset of a result's faces (no `drop_faces` or
-        equivalent exists in this library) -- `split_sheet` only cuts, it
-        does not let you keep or discard pieces."""
+        Keep or discard pieces with `drop_faces`; `trim` is the split with one
+        side dropped, in one call."""
         return self._combine(_lib().cadaclysm_blacksmith_split_sheet, tool, tolerance, progress)
 
     # -- asking
@@ -1272,6 +1346,10 @@ class Workplane:
 
     def extrude(self, profile: Profile, height) -> "Workplane":
         return self._set(Solid.extrude(profile, self.frame, height))
+
+    def face(self, profile: Profile) -> "Workplane":
+        """The flat sheet `profile` bounds on this workplane's frame -- `Solid.face`."""
+        return self._set(Solid.face(profile, self.frame))
 
     def revolve(self, profile: Profile, angle) -> "Workplane":
         """About this workplane's own y axis through its origin, as the Rust chain."""

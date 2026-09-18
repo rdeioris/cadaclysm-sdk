@@ -268,6 +268,26 @@ struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_polygon(const do
                                                                         size_t count);
 
 /**
+ * `profile` with its corners between two straight segments rounded by
+ * `radius`, as a new profile: both lines cut back and an exact tangent arc put
+ * between them. `corners` null rounds every such corner, the holes' too;
+ * otherwise its `count` indices pick the corners of the boundary to round --
+ * corner `k` is where segment `k` ends -- and a picked corner that is not
+ * between two lines is refused. `open` treats the profile as an open chain,
+ * its two ends kept square; closed, the corner where the last segment meets
+ * the first (across the implicit closing side) is rounded too. Refused where
+ * the radius does not fit.
+ *
+ * # Safety
+ * `profile` a live profile; `corners` null or `count` indices.
+ */
+struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_round(const struct CadaclysmBlacksmithProfile *profile,
+                                                                      double radius,
+                                                                      const uint32_t *corners,
+                                                                      size_t count,
+                                                                      bool open);
+
+/**
  * `outer` with `hole` cut from it, as a new profile; both inputs are untouched.
  * A hole must lie inside the outer boundary and clear of other holes -- this
  * does not check, the sweep that consumes it reports.
@@ -684,6 +704,46 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_extrude_faces(const struct
                                                                     double height);
 
 /**
+ * The planar sheet `profile` bounds on `frame` (twelve doubles: origin, x, y,
+ * z): one face on the plane of `frame`, its normal `frame`'s z whichever way
+ * round the profile was drawn, each hole a hole through it, every edge the
+ * exact line, arc or spline its segment is. An open sheet: raise it with
+ * [`cadaclysm_blacksmith_extrude_faces`], trim it with
+ * [`cadaclysm_blacksmith_trim`]. Refused where the profile encloses no area or
+ * a hole does not lie inside the boundary.
+ *
+ * # Safety
+ * `profile` a live profile; `frame` twelve doubles.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_face(const struct CadaclysmBlacksmithProfile *profile,
+                                                           const double *frame);
+
+/**
+ * Face `face` of `solid` (an index below [`cadaclysm_blacksmith_face_count`])
+ * alone, as an open sheet: its surface, its loops and the exact curves its
+ * edges carry, the rest of the solid left behind. What extruding a solid's
+ * face starts from.
+ *
+ * # Safety
+ * `solid` a live solid.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_face_sheet(const struct CadaclysmBlacksmithSolid *solid,
+                                                                 uint32_t face);
+
+/**
+ * `solid` without the faces at `faces` (`count` indices; repeats allowed): the
+ * rest keep their surfaces, loops and curves, in their order, so an index into
+ * the result is the input's with the dropped ones closed up. Refused for an
+ * index the solid has no face at, or where nothing would be left.
+ *
+ * # Safety
+ * `solid` a live solid; `faces` `count` indices.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_drop_faces(const struct CadaclysmBlacksmithSolid *solid,
+                                                                 const uint32_t *faces,
+                                                                 size_t count);
+
+/**
  * `solid`, built about the origin, moved onto `frame`: its origin to the
  * frame's origin, its axes to the frame's. What `Workplane::cuboid` and
  * `::cylinder` do after building the primitive.
@@ -808,6 +868,25 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_split_sheet(const struct C
                                                                   void *user);
 
 /**
+ * `sheet` cut along the closed `tool`'s boundary and the pieces on one side
+ * thrown away -- [`cadaclysm_blacksmith_split_sheet`] and
+ * [`cadaclysm_blacksmith_drop_faces`] in one: `keep_inside` false keeps what
+ * lies outside the tool (a hole punched through the sheet), true what lies
+ * inside it (the sheet cut to the tool's outline). The kept pieces come out in
+ * `sheet`'s face order. Refused where nothing lies on the kept side, and as
+ * the split refuses.
+ *
+ * # Safety
+ * `sheet`, `tool` live solids; `progress` null or a valid callback.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_trim(const struct CadaclysmBlacksmithSolid *sheet,
+                                                           const struct CadaclysmBlacksmithSolid *tool,
+                                                           bool keep_inside,
+                                                           double tolerance,
+                                                           CadaclysmBlacksmithProgress progress,
+                                                           void *user);
+
+/**
  * `solid` with the edges at `edges` (indices into the list
  * [`cadaclysm_blacksmith_edge`] walks) rounded to `radius`.
  *
@@ -890,6 +969,23 @@ bool cadaclysm_blacksmith_sweep_path_arc(struct CadaclysmBlacksmithSweepPath *p,
                                          double ay,
                                          double az,
                                          double angle);
+
+/**
+ * The sweep path the 2D chain `curve` draws on `frame` (twelve doubles): a
+ * line a straight piece, an arc a circular one about `frame`'s z, a Bezier or
+ * spline fitted with biarcs -- pairs of arcs tangent to each other and to the
+ * curve -- within `tolerance`, so the path is tangent throughout. `open` walks
+ * the segments as given; closed, the path also runs back to the start along
+ * the side a profile leaves implicit. Refused for a chain with holes or no
+ * length. Free the path with [`cadaclysm_blacksmith_sweep_path_free`].
+ *
+ * # Safety
+ * `curve` a live profile; `frame` twelve doubles.
+ */
+struct CadaclysmBlacksmithSweepPath *cadaclysm_blacksmith_sweep_path_along(const struct CadaclysmBlacksmithProfile *curve,
+                                                                           const double *frame,
+                                                                           double tolerance,
+                                                                           bool open);
 
 /**
  * Release a sweep path. Null is a no-op. Call this whether or not the path

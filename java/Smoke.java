@@ -105,6 +105,7 @@ public final class Smoke {
             // `rounded` is what the checks after it are about.
             Blacksmith.Solid released;
             Cad.Scene scene;
+            sheetVerbs(plate);
             try (Blacksmith.Solid rounded = part.fillet(corners, 1.0)) {
                 released = rounded;
                 int faces = rounded.faces();
@@ -125,6 +126,14 @@ public final class Smoke {
                     if (!Arrays.equals(coloured.colour(), new double[] {0.8, 0.6, 0.4})
                             || !Arrays.equals(top, new double[] {0.2, 0.4, 1.0}) || plate.colour() != null)
                         fail("the colours did not carry through the join");
+                }
+
+                // A face: the outline as a sheet, which pushed out is the plate again.
+                try (Blacksmith.Solid sheet = Blacksmith.Solid.face(outline, new double[] {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1});
+                     Blacksmith.Solid pushed = sheet.extrudeFaces(6)) {
+                    System.out.println("face: " + sheet.faces() + " face, pushed out " + pushed.faces() + " faces");
+                    if (sheet.faces() != 1 || pushed.faces() != plate.faces() || !pushed.isWatertight())
+                        fail("the outline's face did not push out to the plate");
                 }
 
                 // The plate is 80 x 40 x 6 centred on the origin and the pin adds 10, so the
@@ -194,6 +203,43 @@ public final class Smoke {
 
     private static boolean near(double[] v, double x, double y, double z) {
         return Math.abs(v[0] - x) <= 0.01 && Math.abs(v[1] - y) <= 0.01 && Math.abs(v[2] - z) <= 0.01;
+    }
+
+    // The sheet verbs: a face from a profile, a solid's face alone, faces dropped, a trim, a
+    // rounded profile and a path along a curve -- checked by their face counts.
+    private static void sheetVerbs(Blacksmith.Solid plate) {
+        double[] xy = {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1};
+        int top = plate.selectFace(Blacksmith.Selector.max(Blacksmith.Axis.Z));
+        try (Blacksmith.Profile square = Blacksmith.Profile.rect(20, 20);
+             Blacksmith.Profile circle = Blacksmith.Profile.circle(4);
+             Blacksmith.Solid sheet = Blacksmith.Solid.face(square, xy);
+             Blacksmith.Solid peg = Blacksmith.Solid.extrude(circle, new double[] {0, 0, -6, 1, 0, 0, 0, 1, 0, 0, 0, 1}, 12);
+             Blacksmith.Solid holed = sheet.trim(peg);
+             Blacksmith.Solid disc = sheet.trim(peg, "inside");
+             Blacksmith.Solid lid = plate.faceSheet(top);
+             Blacksmith.Solid walls = plate.dropFaces(new int[] {0, 1});
+             Blacksmith.Profile rounded = square.round(2);
+             Blacksmith.Solid slab = Blacksmith.Solid.extrude(rounded, xy, 1);
+             Blacksmith.Profile wave = Blacksmith.Profile.path(new double[] {0, 0})
+                     .bezierTo(new double[] {20, 0}, new double[] {20, 20}, new double[] {40, 10}).endOpen();
+             Blacksmith.SweepPath along = Blacksmith.SweepPath.along(wave, xy, 0.01, true);
+             Blacksmith.Profile ring = Blacksmith.Profile.circle(1);
+             Blacksmith.Solid tube = Blacksmith.Solid.sweep(ring, new double[] {0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0}, along);
+             Blacksmith.Solid onPlane = Blacksmith.Workplane.xy().face(square).solid();
+             Blacksmith.Solid away = peg.translate(100, 0, 0)) {
+            if (sheet.faces() != 1 || holed.faces() < 1 || disc.faces() < 1 || lid.faces() != 1
+                    || walls.faces() != plate.faces() - 2 || slab.faces() != 10 || !tube.isWatertight() || onPlane.faces() != 1)
+                fail("sheet verbs: sheet=" + sheet.faces() + " holed=" + holed.faces() + " disc=" + disc.faces()
+                        + " lid=" + lid.faces() + " walls=" + walls.faces() + " slab=" + slab.faces());
+            try {
+                sheet.trim(away, "inside").close();
+                fail("a trim with nothing inside the tool did not throw");
+            } catch (Blacksmith.BuildException e) {
+                if (!e.getMessage().contains("trim: nothing of the sheet lies inside the tool")) fail("trim: " + e.getMessage());
+            }
+            System.out.println("sheet verbs: face, trim (" + holed.faces() + "+" + disc.faces() + "), face_sheet, drop_faces, round ("
+                    + slab.faces() + " faces), along: ok");
+        }
     }
 
     private static void fail(String why) {

@@ -74,6 +74,36 @@ Console.WriteLine($"faces={rounded.Faces} watertight={rounded.IsWatertight()}");
 // of the four corners rounded trades one edge for one face.
 if (rounded.Faces != 15) return Fail($"the filleted part has {rounded.Faces} faces, not 15");
 if (!rounded.IsWatertight()) return Fail("the filleted part is not watertight");
+// The sheet verbs: a face from a profile, a solid's face alone, faces dropped, a trim, a
+// rounded profile and a path along a curve.
+{
+    var xy = new double[] { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    using var square = Profile.Rect(20, 20);
+    using var flat = Solid.Face(square, xy);
+    using var peg = Solid.Extrude(Profile.Circle(4), new double[] { 0, 0, -6, 1, 0, 0, 0, 1, 0, 0, 0, 1 }, 12);
+    using var holed = flat.Trim(peg);
+    using var disc = flat.Trim(peg, keep: "inside");
+    using var lid = plate.FaceSheet(plate.SelectFace(Selector.Max(Axis.Z)));
+    using var walls = plate.DropFaces(new[] { 0, 1 });
+    using var roundedSquare = square.Round(2);
+    using var slab = Solid.Extrude(roundedSquare, xy, 1);
+    using var wave = Profile.Path((0, 0)).BezierTo((20, 0), (20, 20), (40, 10)).EndOpen();
+    using var along = SweepPath.Along(wave, xy, 0.01);
+    using var tube = Solid.Sweep(Profile.Circle(1), new double[] { 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0 }, along);
+    using var onPlane = Workplane.Xy().Face(square).Solid();
+    if (flat.Faces != 1 || holed.Faces < 1 || disc.Faces < 1 || lid.Faces != 1 || walls.Faces != plate.Faces - 2
+        || slab.Faces != 10 || !tube.IsWatertight() || onPlane.Faces != 1)
+        return Fail($"sheet verbs: sheet={flat.Faces} holed={holed.Faces} disc={disc.Faces} lid={lid.Faces} walls={walls.Faces} slab={slab.Faces}");
+    try
+    {
+        flat.Trim(peg.Translate(100, 0, 0), keep: "inside");
+        return Fail("a trim with nothing inside the tool did not throw");
+    }
+    catch (BuildException e) when (e.Message.Contains("trim: nothing of the sheet lies inside the tool"))
+    {
+    }
+    Console.WriteLine($"sheet verbs: face, trim ({holed.Faces}+{disc.Faces}), face_sheet, drop_faces, round ({slab.Faces} faces), along: ok");
+}
 // Colour: a gold plate joined with a blue pin -- the part is gold, the pin's top keeps its blue.
 using var gold = plate.Coloured(0.8, 0.6, 0.4);
 using var blue = pin.Coloured(0.2, 0.4, 1.0);
@@ -82,6 +112,11 @@ var pinTop = coloured.FaceColour(coloured.SelectFace(Selector.Max(Axis.Z)));
 Console.WriteLine($"colour={string.Join(",", coloured.Colour ?? [])} pin top={string.Join(",", pinTop ?? [])}");
 if (!(coloured.Colour ?? []).SequenceEqual([0.8, 0.6, 0.4]) || !(pinTop ?? []).SequenceEqual([0.2, 0.4, 1.0]) || plate.Colour is not null)
     return Fail("the colours did not carry through the join");
+// A face: the outline as a sheet, which pushed out is the plate again.
+using var sheet = Solid.Face(outline, [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]);
+using var pushed = sheet.ExtrudeFaces(6);
+Console.WriteLine($"face: {sheet.Faces} face, pushed out {pushed.Faces} faces");
+if (sheet.Faces != 1 || pushed.Faces != plate.Faces || !pushed.IsWatertight()) return Fail("the outline's face did not push out to the plate");
 // A temporary operand -- the cylinder here is nobody's -- must stay alive for the length of
 // the call that reads it: the owners hold SafeHandles, which the marshaller pins across every
 // P/Invoke, so a collection during the join can neither free the cylinder nor crash the

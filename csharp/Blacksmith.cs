@@ -206,6 +206,8 @@ internal static class BlacksmithNative
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_polygon(double[] xy, nuint count);
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_with_hole(ProfileHandle outer, ProfileHandle hole);
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_translate_profile(ProfileHandle profile, double dx, double dy);
+    [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_round(ProfileHandle profile, double radius, uint[]? corners,
+        nuint count, [MarshalAs(UnmanagedType.I1)] bool open);
     [DllImport(Lib)] internal static extern PathHandle cadaclysm_blacksmith_path_begin(double x, double y);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_path_line_to(PathHandle p, double x, double y);
@@ -252,11 +254,16 @@ internal static class BlacksmithNative
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_sweep_path_arc(SweepPathHandle p, double cx, double cy, double cz, double ax,
         double ay, double az, double angle);
+    [DllImport(Lib)] internal static extern SweepPathHandle cadaclysm_blacksmith_sweep_path_along(ProfileHandle curve, double[] frame,
+        double tolerance, [MarshalAs(UnmanagedType.I1)] bool open);
     [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_sweep_path_free(IntPtr p);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_sweep(ProfileHandle profile, double[] frame, SweepPathHandle path);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_sweep_open(ProfileHandle profile, double[] frame,
         SweepPathHandle path);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_extrude_faces(SolidHandle sheet, double height);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_face(ProfileHandle profile, double[] frame);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_face_sheet(SolidHandle solid, uint face);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_drop_faces(SolidHandle solid, uint[] faces, nuint count);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_place(SolidHandle solid, double[] frame);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_translate(SolidHandle solid, double dx, double dy, double dz);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_rotate(SolidHandle solid, double[] axis, double radians);
@@ -269,6 +276,8 @@ internal static class BlacksmithNative
         IntPtr progress, IntPtr user);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_split_sheet(SolidHandle sheet, SolidHandle tool,
         double tolerance, IntPtr progress, IntPtr user);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_trim(SolidHandle sheet, SolidHandle tool,
+        [MarshalAs(UnmanagedType.I1)] bool keepInside, double tolerance, IntPtr progress, IntPtr user);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_fillet(SolidHandle solid, uint[] edges, nuint count,
         double radius, double tolerance, IntPtr progress, IntPtr user);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_chamfer(SolidHandle solid, uint[] edges, nuint count,
@@ -482,6 +491,19 @@ public sealed class Profile : IDisposable
     /// <summary>This outline shifted by (`dx`, `dy`) in its own plane.</summary>
     public Profile Translate(double dx, double dy) =>
         new(BlacksmithNative.cadaclysm_blacksmith_translate_profile(Handle, dx, dy));
+
+    /// <summary>This profile with its corners rounded by `radius`: where two straight segments
+    /// meet, both are cut back and an exact arc tangent to both put between them. `corners`
+    /// null rounds every such corner, the holes' too; otherwise it picks corners of the
+    /// boundary -- corner `k` is where segment `k` ends. `open` reads the profile as an open
+    /// chain whose two ends stay square; closed, the corner at the start is rounded too.
+    /// Throws <see cref="BuildException"/> naming the corner the radius does not fit.</summary>
+    public Profile Round(double radius, IEnumerable<int>? corners = null, bool open = false)
+    {
+        var picked = corners?.Select(k => (uint)k).ToArray();
+        return new Profile(BlacksmithNative.cadaclysm_blacksmith_profile_round(Handle, radius, picked,
+            (nuint)(picked?.Length ?? 0), open));
+    }
 }
 
 /// <summary>An outline drawn a segment at a time; <see cref="End"/> closes it into a
@@ -575,6 +597,20 @@ public sealed class SweepPath : IDisposable
     {
         _handle = Blacksmith.Checked(BlacksmithNative.cadaclysm_blacksmith_sweep_path_begin(at.X, at.Y, at.Z), "sweep_path_begin");
     }
+
+    private SweepPath(SweepPathHandle handle, string what)
+    {
+        _handle = Blacksmith.Checked(handle, what);
+    }
+
+    /// <summary>The path the 2D chain `curve` (usually from <see cref="Path.EndOpen"/>) draws
+    /// on `frame`: a line a straight piece, an arc a circular one, a Bezier or spline fitted
+    /// with biarcs -- arcs tangent to each other and to the curve -- within `tolerance`.
+    /// `open` false closes the path back to its start along the side a profile leaves
+    /// implicit.</summary>
+    public static SweepPath Along(Profile curve, double[] frame, double tolerance = 0.05, bool open = true) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_sweep_path_along(curve.Handle, Blacksmith.Frame(frame), tolerance, open),
+            "sweep_path_along");
 
     internal SweepPathHandle Live =>
         !_handle.IsClosed ? _handle : throw new ObjectDisposedException(nameof(SweepPath), "sweep_path: closed");
@@ -926,6 +962,25 @@ public sealed class Solid : IDisposable
     /// closed: the sheet as a solid of that thickness.</summary>
     public Solid ExtrudeFaces(double height) => new(BlacksmithNative.cadaclysm_blacksmith_extrude_faces(Handle, height));
 
+    /// <summary>The flat sheet `profile` bounds on `frame`: one planar face, each hole a hole
+    /// through it, its normal `frame`'s z, every edge the exact line, arc or spline its segment
+    /// is. An open sheet -- raise it with <see cref="ExtrudeFaces"/>, cut it with
+    /// <see cref="Trim"/>.</summary>
+    public static Solid Face(Profile profile, double[] frame) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_face(profile.Handle, Blacksmith.Frame(frame)));
+
+    /// <summary>Face `face` alone, as an open sheet: its surface, loops and exact edge curves,
+    /// the rest of the solid left behind.</summary>
+    public Solid FaceSheet(int face) => new(BlacksmithNative.cadaclysm_blacksmith_face_sheet(Handle, (uint)face));
+
+    /// <summary>This solid without the faces at `faces`: the rest keep their order, so an index
+    /// into the result is this one's with the dropped ones closed up.</summary>
+    public Solid DropFaces(IEnumerable<int> faces)
+    {
+        var which = faces.Select(f => (uint)f).ToArray();
+        return new Solid(BlacksmithNative.cadaclysm_blacksmith_drop_faces(Handle, which, (nuint)which.Length));
+    }
+
     /// <summary>This solid, built about the origin, moved onto `frame`.</summary>
     public Solid Place(double[] frame) => new(BlacksmithNative.cadaclysm_blacksmith_place(Handle, Blacksmith.Frame(frame)));
 
@@ -955,10 +1010,21 @@ public sealed class Solid : IDisposable
     /// <summary>This solid (a sheet or a solid) cut along `tool`'s boundary, nothing removed:
     /// every face comes back in its pieces outside `tool` and its pieces inside, each piece a
     /// face, in this solid's own face order with each face's outside pieces before its inside
-    /// pieces. `tool` must be a closed solid. There is no way yet, from here or the C ABI, to
-    /// build a new solid from a chosen subset of a result's faces: this only cuts.</summary>
+    /// pieces. `tool` must be a closed solid. Keep or discard pieces with
+    /// <see cref="DropFaces"/>; <see cref="Trim"/> is the split with one side dropped.</summary>
     public Solid SplitSheet(Solid tool, double tolerance = 0.05) =>
         new(BlacksmithNative.cadaclysm_blacksmith_split_sheet(Handle, tool.Handle, tolerance, IntPtr.Zero, IntPtr.Zero));
+
+    /// <summary>This sheet (or solid) cut along the closed `tool`'s boundary and the pieces on
+    /// one side thrown away: `keep` "outside" keeps what lies outside the tool (a hole punched
+    /// through), "inside" what lies within it.</summary>
+    public Solid Trim(Solid tool, string keep = "outside", double tolerance = 0.05)
+    {
+        if (keep != "outside" && keep != "inside")
+            throw new BuildException($"trim: keep must be 'outside' or 'inside', not '{keep}'");
+        return new Solid(BlacksmithNative.cadaclysm_blacksmith_trim(Handle, tool.Handle, keep == "inside", tolerance,
+            IntPtr.Zero, IntPtr.Zero));
+    }
 
     // -- asking
 
@@ -1333,6 +1399,9 @@ public sealed class Workplane
 
     public Workplane Extrude(Profile profile, double height) =>
         Set(global::Cadaclysm.Blacksmith.Solid.Extrude(profile, _frame, height));
+
+    /// <summary>The flat sheet `profile` bounds on this workplane's frame.</summary>
+    public Workplane Face(Profile profile) => Set(global::Cadaclysm.Blacksmith.Solid.Face(profile, _frame));
 
     /// <summary>About this workplane's own y axis through its origin, as the Rust chain.
     /// </summary>

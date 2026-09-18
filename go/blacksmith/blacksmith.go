@@ -497,6 +497,35 @@ func (p *Profile) Translate(dx, dy float64) (*Profile, error) {
 	return out, err
 }
 
+// Round is this profile with its corners rounded by radius: where two straight segments
+// meet, both are cut back and an exact arc tangent to both put between them. corners nil
+// rounds every such corner, the holes' too (Python's None); otherwise it picks corners of
+// the boundary — corner k is where segment k ends — and an empty, non-nil slice rounds
+// none. open reads the profile as an open chain whose two ends stay square; closed, the
+// corner at the start is rounded too. The error names the corner the radius does not fit.
+func (p *Profile) Round(radius float64, corners []int, open bool) (*Profile, error) {
+	defer pin()()
+	h, err := p.h()
+	if err != nil {
+		return nil, err
+	}
+	var first *C.uint32_t
+	var which []uint32
+	if corners != nil {
+		if which, err = indices(corners); err != nil {
+			return nil, err
+		}
+		// A picked list, even an empty one, is a non-null array: null means every corner.
+		which = append(which, 0)
+		first = (*C.uint32_t)(unsafe.Pointer(&which[0]))
+		which = which[:len(which)-1]
+	}
+	out, err := newProfile(C.cadaclysm_blacksmith_profile_round(h, C.double(radius), first, C.size_t(len(which)), C.bool(open)), "profile")
+	runtime.KeepAlive(p)
+	runtime.KeepAlive(which)
+	return out, err
+}
+
 // ---- the outline builder ----------------------------------------------------------------
 
 // Path is an outline drawn a segment at a time; End closes it into a Profile and consumes
@@ -720,6 +749,30 @@ func (p *SweepPath) finalize() {
 		C.cadaclysm_blacksmith_sweep_path_free(p.handle)
 		p.handle = nil
 	}
+}
+
+// SweepPathAlong is the path the 2D chain curve (usually from Path.EndOpen) draws on
+// frame — Python's SweepPath.along: a line a straight piece, an arc a circular one, a
+// Bezier or spline fitted with biarcs (arcs tangent to each other and to the curve) within
+// tolerance. open false closes the path back to its start along the side a profile leaves
+// implicit. A failure is latched and reported by the sweep that reads the path, or Err.
+func SweepPathAlong(curve *Profile, frame Frame, tolerance float64, open bool) *SweepPath {
+	defer pin()()
+	p := &SweepPath{}
+	h, err := curve.h()
+	if err != nil {
+		p.err = err
+		return p
+	}
+	f := frame
+	p.handle = C.cadaclysm_blacksmith_sweep_path_along(h, doubles(&f[0]), C.double(tolerance), C.bool(open))
+	runtime.KeepAlive(curve)
+	if p.handle == nil {
+		p.err = failure("sweep_path_along")
+		return p
+	}
+	runtime.SetFinalizer(p, (*SweepPath).finalize)
+	return p
 }
 
 // Err is the first failure this chain met, or nil.
@@ -1391,6 +1444,60 @@ func SweepOpen(profile *Profile, frame Frame, path *SweepPath) (*Solid, error) {
 	return out, err
 }
 
+// Face is the flat sheet profile bounds on frame: one planar face, each hole a hole
+// through it, its normal frame's z, every edge the exact line, arc or spline its segment
+// is. An open sheet — raise it with ExtrudeFaces, cut it with Trim.
+func Face(profile *Profile, frame Frame) (*Solid, error) {
+	defer pin()()
+	h, err := profile.h()
+	if err != nil {
+		return nil, err
+	}
+	f := frame
+	out, err := newSolid(C.cadaclysm_blacksmith_face(h, doubles(&f[0])), "solid")
+	runtime.KeepAlive(profile)
+	return out, err
+}
+
+// FaceSheet is face alone, as an open sheet: its surface, its loops and the exact curves
+// on its edges, the rest of the solid left behind.
+func (s *Solid) FaceSheet(face int) (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	c, err := index(face)
+	if err != nil {
+		return nil, err
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_face_sheet(h, C.uint32_t(c)), "solid")
+	runtime.KeepAlive(s)
+	return out, err
+}
+
+// DropFaces is this solid without the faces at faces: the rest keep their order, so an
+// index into the result is this one's with the dropped ones closed up.
+func (s *Solid) DropFaces(faces []int) (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	which, err := indices(faces)
+	if err != nil {
+		return nil, err
+	}
+	var first *C.uint32_t
+	if len(which) > 0 {
+		first = (*C.uint32_t)(unsafe.Pointer(&which[0]))
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_drop_faces(h, first, C.size_t(len(which))), "solid")
+	runtime.KeepAlive(s)
+	runtime.KeepAlive(which)
+	return out, err
+}
+
 // ExtrudeFaces is every face of this sheet pushed height along its own normal, walled and
 // closed: the sheet as a solid of that thickness.
 func (s *Solid) ExtrudeFaces(height float64) (*Solid, error) {
@@ -1516,9 +1623,8 @@ func (s *Solid) Common(other *Solid, tolerance float64) (*Solid, error) {
 // removed: every face comes back in its pieces outside tool and its pieces inside, each
 // piece a face, in this solid's own face order with each face's outside pieces before its
 // inside pieces — so an index into the result names a piece for as long as both stand.
-// tool must be a closed solid; this may be an open sheet. tolerance as Join's. There is
-// no way yet, from here or the C ABI, to build a new solid from a chosen subset of a
-// result's faces: this only cuts.
+// tool must be a closed solid; this may be an open sheet. tolerance as Join's. Keep or
+// discard pieces with DropFaces; Trim is the split with one side dropped.
 func (s *Solid) SplitSheet(tool *Solid, tolerance float64) (*Solid, error) {
 	defer pin()()
 	a, b, err := s.pair(tool)
@@ -1526,6 +1632,24 @@ func (s *Solid) SplitSheet(tool *Solid, tolerance float64) (*Solid, error) {
 		return nil, err
 	}
 	out, err := newSolid(C.cadaclysm_blacksmith_split_sheet(a, b, C.double(tolerance), nil, nil), "solid")
+	runtime.KeepAlive(s)
+	runtime.KeepAlive(tool)
+	return out, err
+}
+
+// Trim is this sheet (or solid) cut along the closed tool's boundary and the pieces on
+// one side thrown away: keep "outside" keeps what lies outside the tool (a hole punched
+// through), "inside" what lies within it. tolerance as Join's.
+func (s *Solid) Trim(tool *Solid, keep string, tolerance float64) (*Solid, error) {
+	if keep != "outside" && keep != "inside" {
+		return nil, &BuildError{Message: fmt.Sprintf("trim: keep must be 'outside' or 'inside', not %q", keep)}
+	}
+	defer pin()()
+	a, b, err := s.pair(tool)
+	if err != nil {
+		return nil, err
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_trim(a, b, C.bool(keep == "inside"), C.double(tolerance), nil, nil), "solid")
 	runtime.KeepAlive(s)
 	runtime.KeepAlive(tool)
 	return out, err
@@ -2031,6 +2155,14 @@ func (w *Workplane) Extrude(profile *Profile, height float64) *Workplane {
 		return w
 	}
 	return w.set(Extrude(profile, w.frame, height))
+}
+
+// Face replaces the solid with the flat sheet profile bounds on this workplane's frame.
+func (w *Workplane) Face(profile *Profile) *Workplane {
+	if w.err != nil {
+		return w
+	}
+	return w.set(Face(profile, w.frame))
 }
 
 // Revolve replaces the solid with profile swung angle radians about this workplane's own
