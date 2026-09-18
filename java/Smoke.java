@@ -106,12 +106,16 @@ public final class Smoke {
             Blacksmith.Solid released;
             Cad.Scene scene;
             sheetVerbs(plate);
+            frames();
             try (Blacksmith.Solid rounded = part.fillet(corners, 1.0)) {
                 released = rounded;
                 int faces = rounded.faces();
                 boolean watertight = rounded.isWatertight();
                 System.out.println("faces=" + faces + " watertight=" + watertight);
                 if (!watertight) fail("the filleted part is not watertight");
+                Cad.Manifold shape = rounded.manifold();
+                System.out.println("manifold: " + shape);
+                if (!shape.isClosed() || shape.faces() != faces) fail("the filleted part is not a closed manifold: " + shape);
                 // A plate has 6 faces, the hole adds 1 cylinder, the pin 2 (its wall and its
                 // top), and each of the four corners rounded trades one edge for one face.
                 if (faces != 15) fail("the filleted part has " + faces + " faces, not 15");
@@ -148,6 +152,28 @@ public final class Smoke {
                     float[] max = back.bounds().max();
                     System.out.printf("step read back: bounds max=(%s,%s,%s)%n", max[0], max[1], max[2]);
                     if (!near(max, 40, 20, 16)) fail("the STEP did not read back as the plate with its pin");
+                    // And back into the kernel: the read body's brep, shared with the scene
+                    // rather than copied, as a solid that outlives the scene it came from.
+                    Cad.Node body = null;
+                    for (Cad.Placement p : back.placements()) {
+                        try (Cad.Brep brep = p.geometry().brep()) {
+                            if (brep != null) {
+                                Cad.Manifold read = brep.manifold();
+                                if (!read.isClosed() || read.faces() != 15) fail("the read body is not the closed manifold written: " + read);
+                                body = p.geometry();
+                                break;
+                            }
+                        }
+                    }
+                    if (body == null) fail("no placement of the read-back STEP has a brep");
+                    try (Blacksmith.Solid imported = Blacksmith.Solid.fromNode(back, body)) {
+                        back.close();
+                        if (imported.faces() != faces) fail("fromNode gave " + imported.faces() + " faces, not " + faces);
+                        try (Blacksmith.Solid opened = Blacksmith.Solid.open(step.toString())) {
+                            if (opened.faces() != faces) fail("Solid.open gave " + opened.faces() + " faces, not " + faces);
+                        }
+                        System.out.println("fromNode: " + imported.faces() + " faces after the scene closed; Solid.open: the same");
+                    }
                 }
 
                 // toScene: a reader scene over the same STEP text, and one that stands on
@@ -205,6 +231,31 @@ public final class Smoke {
         return Math.abs(v[0] - x) <= 0.01 && Math.abs(v[1] - y) <= 0.01 && Math.abs(v[2] - z) <= 0.01;
     }
 
+    // Frames: built, checked, and passed wherever twelve numbers go.
+    private static void frames() {
+        if (!Blacksmith.Frame.at(new double[3], new double[] {0, -1, 0}).equals(Blacksmith.Frame.xz())
+                || !Blacksmith.Frame.at(new double[] {1, 2, 3}, new double[] {0, 0, 5}).equals(Blacksmith.Frame.xy(new double[] {1, 2, 3}))
+                || !Blacksmith.Frame.xy().offset(5).equals(Blacksmith.Frame.xy(new double[] {0, 0, 5}))
+                || !Arrays.equals(Blacksmith.Frame.yz().toArray(), Blacksmith.Workplane.yz().frame()))
+            fail("Frame.at / xy / xz / offset disagree");
+        try {
+            new Blacksmith.Frame(new double[3], new double[] {1, 0, 0}, new double[] {0, 1, 0}, new double[] {0, 0, -1});
+            fail("a left-handed frame did not throw");
+        } catch (Blacksmith.BuildException e) {
+            if (!e.getMessage().contains("left-handed")) fail("a left-handed frame: " + e.getMessage());
+        }
+        try (Blacksmith.Profile rect = Blacksmith.Profile.rect(10, 4);
+             Blacksmith.Solid lid = Blacksmith.Solid.extrude(rect, Blacksmith.Frame.xy(new double[] {0, 0, 5}).toArray(), 2);
+             Blacksmith.Solid wall = Blacksmith.Workplane.on(Blacksmith.Frame.xz(new double[] {0, 3, 0}).toArray()).extrude(rect, 1).solid()) {
+            Blacksmith.Frame top = Blacksmith.Frame.of(lid.faceFrame(lid.selectFace(Blacksmith.Selector.max(Blacksmith.Axis.Z))));
+            Blacksmith.Bounds b = lid.bounds();
+            if (Math.abs(b.min()[2] - 5) > 1e-6 || Math.abs(b.max()[2] - 7) > 1e-6 || Math.abs(wall.bounds().max()[1] - 3) > 1e-6
+                    || Math.abs(top.origin()[2] - 7) > 1e-6 || Math.abs(top.z()[2] - 1) > 1e-9)
+                fail("frames: lid " + Arrays.toString(b.min()) + ".." + Arrays.toString(b.max()) + ", top " + top);
+        }
+        System.out.println("frames: " + Blacksmith.Frame.at(new double[3], new double[] {1, 1, 1}) + ": ok");
+    }
+
     // The sheet verbs: a face from a profile, a solid's face alone, faces dropped, a trim, a
     // rounded profile and a path along a curve -- checked by their face counts.
     private static void sheetVerbs(Blacksmith.Solid plate) {
@@ -237,8 +288,46 @@ public final class Smoke {
             } catch (Blacksmith.BuildException e) {
                 if (!e.getMessage().contains("trim: nothing of the sheet lies inside the tool")) fail("trim: " + e.getMessage());
             }
+            // Chain: an L's two sides, the second drawn back to front, joined -- open, two walls.
+            try (Blacksmith.Profile sideA = Blacksmith.Profile.path(new double[] {0, 0}).lineTo(10, 0).endOpen();
+                 Blacksmith.Profile sideB = Blacksmith.Profile.path(new double[] {10, 8}).lineTo(10, 0).endOpen();
+                 Blacksmith.Profile ell = Blacksmith.Profile.chain(List.of(sideA, sideB));
+                 Blacksmith.Solid ellWalls = Blacksmith.Solid.extrudeOpen(ell, xy, 2)) {
+                if (ellWalls.faces() != 2) fail("chain: an L extruded open has " + ellWalls.faces() + " walls, not 2");
+            }
+            // Close: the open L's first side and a line back -- closed, a triangle's three walls.
+            try (Blacksmith.Profile openL = Blacksmith.Profile.path(new double[] {0, 0}).lineTo(10, 0).lineTo(10, 8).endOpen();
+                 Blacksmith.Profile closedL = openL.closeLoop();
+                 Blacksmith.Solid closedWalls = Blacksmith.Solid.extrudeOpen(closedL, xy, 2)) {
+                if (closedWalls.faces() != 3) fail("close_loop: a closed L has " + closedWalls.faces() + " walls, not 3");
+            }
+            // Push-pull: a cube's top raised is one taller box, six faces, not a box and a prism.
+            try (Blacksmith.Solid cube = Blacksmith.Solid.cuboid(10, 10, 10);
+                 Blacksmith.Solid raised = cube.pushPull(cube.selectFace(Blacksmith.Selector.max(Blacksmith.Axis.Z)), 5)) {
+                if (raised.faces() != 6 || !raised.isWatertight()) fail("push_pull: the raised cube has " + raised.faces() + " faces, not 6");
+            }
+            // From loops: a circle given before the square it lies in -- the square is the boundary.
+            try (Blacksmith.Profile loopHole = Blacksmith.Profile.circle(4);
+                 Blacksmith.Profile loopSquare = Blacksmith.Profile.rect(30, 30);
+                 Blacksmith.Profile fromLoops = Blacksmith.Profile.fromLoops(List.of(loopHole, loopSquare));
+                 Blacksmith.Solid holedSquare = Blacksmith.Solid.extrude(fromLoops, xy, 2)) {
+                if (holedSquare.faces() != 8) fail("from_loops: the holed square has " + holedSquare.faces() + " faces, not 8");
+            }
+            // Revolve in plane: a plate drawn beside the y axis turns into a tube of four walls.
+            try (Blacksmith.Profile beside = Blacksmith.Profile.polygon(new double[][] {{5, 0}, {8, 0}, {8, 10}, {5, 10}});
+                 Blacksmith.Solid turned = Blacksmith.Solid.revolveInPlane(beside, xy, new double[] {0, 0}, new double[] {0, 1}, 2 * Math.PI);
+                 Blacksmith.Solid turnedWalls = Blacksmith.Solid.revolveOpenInPlane(beside, xy, new double[] {0, 0}, new double[] {0, 1}, Math.PI)) {
+                if (turned.faces() != 4 || !turned.isWatertight() || turnedWalls.faces() != 4) fail("revolve_in_plane: " + turned.faces() + " and " + turnedWalls.faces() + " faces, not 4");
+            }
+            // A hexagon: six walls and two caps. A closed spline through a square's corners: one wall.
+            try (Blacksmith.Profile hexagon = Blacksmith.Profile.regularPolygon(new double[] {0, 0}, 10, 6);
+                 Blacksmith.Solid hexPrism = Blacksmith.Solid.extrude(hexagon, xy, 2);
+                 Blacksmith.Profile loopSpline = Blacksmith.Profile.spline(new double[][] {{0, 0}, {10, 0}, {10, 10}, {0, 10}}, 3, null, true);
+                 Blacksmith.Solid loopSolid = Blacksmith.Solid.extrude(loopSpline, xy, 2)) {
+                if (hexPrism.faces() != 8 || loopSolid.faces() != 3 || !loopSolid.isWatertight()) fail("shapes: " + hexPrism.faces() + " and " + loopSolid.faces() + " faces, not 8 and 3");
+            }
             System.out.println("sheet verbs: face, trim (" + holed.faces() + "+" + disc.faces() + "), face_sheet, drop_faces, round ("
-                    + slab.faces() + " faces), along: ok");
+                    + slab.faces() + " faces), along, chain, push_pull, close_loop, from_loops, revolve_in_plane, regular_polygon, spline: ok");
         }
     }
 

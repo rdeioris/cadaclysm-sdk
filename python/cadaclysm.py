@@ -59,9 +59,11 @@ from pathlib import Path
 __all__ = [
     "Attribute",
     "Bounds",
+    "Brep",
     "CadaclysmError",
     "Convention",
     "FILE_UNITS",
+    "Manifold",
     "Mesh",
     "NONE",
     "Node",
@@ -396,6 +398,10 @@ _ENTRY_POINTS = [
     ("cadaclysm_node_can_mesh", c_bool, [c_void_p, c_uint32]),
     ("cadaclysm_node_mesh", _Mesh, [c_void_p, c_uint32]),
     ("cadaclysm_node_surfaces", _Surfaces, [c_void_p, c_uint32]),
+    ("cadaclysm_node_brep", c_void_p, [c_void_p, c_uint32]),
+    ("cadaclysm_brep_release", None, [c_void_p]),
+    ("cadaclysm_brep_manifold", c_bool, [c_void_p, POINTER(c_uint32)]),
+    ("cadaclysm_brep_layout_id", c_char_p, []),
     ("cadaclysm_surface_matrix", None, [c_void_p, POINTER(c_float)]),
     ("cadaclysm_node_bounds", _Bounds, [c_void_p, c_uint32]),
     ("cadaclysm_node_instance_of", c_uint32, [c_void_p, c_uint32]),
@@ -1004,6 +1010,92 @@ class Placement:
 # ---- nodes ----------------------------------------------------------------
 
 
+class Brep:
+    """A body's exact B-rep -- the trimmed surfaces its mesh is cut from --
+    shared with the scene rather than copied: a reference of this object's own,
+    given back by `release()` (or leaving a `with` block, or the collector).
+
+    It is for the blacksmith library, which operates on it without a copy
+    (`cadaclysm_blacksmith.Solid.from_node`) -- `pointer` and `layout_id` are
+    what that hands across -- and for asking whether it is a manifold
+    (`manifold`). The brep outlives the scene it came from for as long as
+    anything holds it.
+
+    In the node's own frame and **the file's own units and axes**, whatever
+    convention the scene was opened with. The blacksmith library must come
+    from the same release as this one; it checks `layout_id` and refuses
+    otherwise.
+    """
+
+    __slots__ = ("_pointer", "__weakref__")
+
+    def __init__(self, pointer: int):
+        self._pointer = pointer
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.release()
+
+    def __del__(self):
+        self.release()
+
+    @property
+    def pointer(self) -> int:
+        if not self._pointer:
+            raise CadaclysmError("brep: released")
+        return self._pointer
+
+    @staticmethod
+    def layout_id() -> str:
+        """How this library lays a brep out in memory: its compiler, target and
+        source. The blacksmith library shares a brep only with a library whose
+        id equals its own."""
+        return _text(_lib().cadaclysm_brep_layout_id())
+
+    @property
+    def manifold(self) -> "Manifold":
+        """Whether its faces make a manifold -- every edge bordered by one face
+        or two, the faces round every vertex one fan -- and whether it is
+        closed, as a `Manifold` record. Read off the topology the file wrote,
+        not a mesh: faces that name no shared edge (IGES, each surface its own
+        sheet; an IFC face written as one polygon) read as open however well
+        they meet in space."""
+        out = (c_uint32 * 8)()
+        if not _lib().cadaclysm_brep_manifold(self.pointer, out):
+            raise CadaclysmError(_text(_lib().cadaclysm_last_error()) or "manifold")
+        return Manifold(tuple(out))
+
+    def release(self) -> None:
+        pointer, self._pointer = getattr(self, "_pointer", None), None
+        if pointer and _library is not None:
+            _library.cadaclysm_brep_release(pointer)
+
+
+class Manifold:
+    """Whether a brep's faces make a manifold, as plain data (`Brep.manifold`):
+    its faces, edges and vertices; the edges one face borders (a sheet's rim),
+    the edges three or more do, and the vertices whose faces make more than one
+    fan (two solids touching at a corner); `is_manifold` where there are none of
+    the last two, and `is_closed` where there is no boundary edge either -- it
+    encloses a solid."""
+
+    __slots__ = ("faces", "edges", "vertices", "boundary_edges", "non_manifold_edges", "non_manifold_vertices",
+                 "is_manifold", "is_closed")
+
+    def __init__(self, row):
+        (self.faces, self.edges, self.vertices, self.boundary_edges, self.non_manifold_edges,
+         self.non_manifold_vertices) = (int(v) for v in row[:6])
+        self.is_manifold, self.is_closed = bool(row[6]), bool(row[7])
+
+    def __repr__(self):
+        return (f"Manifold(faces={self.faces}, edges={self.edges}, vertices={self.vertices}, "
+                f"boundary_edges={self.boundary_edges}, non_manifold_edges={self.non_manifold_edges}, "
+                f"non_manifold_vertices={self.non_manifold_vertices}, is_manifold={self.is_manifold}, "
+                f"is_closed={self.is_closed})")
+
+
 class Node:
     """One node of the document: an assembly, a shape, a placement.
 
@@ -1308,6 +1400,14 @@ class Node:
                 nurbs=nurbs[f.nurbs_start:f.nurbs_start + f.nurbs_count],
             ))
         return Surfaces(out)
+
+    @property
+    def brep(self) -> "Brep | None":
+        """Its exact B-rep, for `cadaclysm_blacksmith.Solid.from_node` to operate on,
+        or `None` where it has none (a mesh, a curve, a CSG body, a JT or OpenSCAD
+        part). Shared with the scene, not copied; see `Brep`."""
+        pointer = _lib().cadaclysm_node_brep(self.scene._handle, self.index)
+        return Brep(pointer) if pointer else None
 
     @property
     def edges(self) -> Polylines:

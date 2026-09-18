@@ -16,9 +16,10 @@
 // Declared by hand from the published header `include/cadaclysm_blacksmith.h`, on the object
 // model of `cadaclysm_blacksmith.py` -- the same names, arguments and defaults, member for
 // member -- the way any .NET program would: no generated interop, no Rust, no build system.
-// It shares `Cad.cs`'s loader: point `CADACLYSM_LIBRARY` at the directory holding both
-// libraries (or `CADACLYSM_BLACKSMITH_LIBRARY` at this one, as Python's kernel module reads
-// it) if they are not where the loader looks by default.
+// It finds its library the way `cadaclysm_blacksmith.py` does: point
+// `CADACLYSM_BLACKSMITH_LIBRARY` at the library or the directory holding it if it is not
+// where the loader looks by default (see `BlacksmithLoader`). `CADACLYSM_LIBRARY` is the
+// reader's, as it is in Python.
 //
 // ## Every array borrows from its solid
 //
@@ -175,6 +176,59 @@ internal sealed class SolidHandle : CadaclysmHandle
 
 // ---- the library ----------------------------------------------------------------------
 
+/// <summary>Finds and loads the kernel library by `cadaclysm_blacksmith.py`'s own rule,
+/// `library_path()`: `CADACLYSM_BLACKSMITH_LIBRARY` (the library, or a directory holding it)
+/// and nothing else if it is set; else beside this assembly; else `lib/` in any ancestor (the
+/// SDK layout); else `target/release` or `target/debug` in any ancestor (this repository's).
+/// Nothing found is a <see cref="BuildException"/> naming every place looked, as Python's
+/// `BuildError` does -- never the operating system's own search, which would load whatever
+/// copy happens to be on the path.</summary>
+internal static class BlacksmithLoader
+{
+    private static string LibraryName =>
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "cadaclysm_blacksmith.dll"
+        : RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ? "libcadaclysm_blacksmith.dylib"
+        : "libcadaclysm_blacksmith.so";
+
+    public static IntPtr Load() => NativeLibrary.Load(LibraryPath());
+
+    private static string LibraryPath()
+    {
+        var name = LibraryName;
+        var over = Environment.GetEnvironmentVariable("CADACLYSM_BLACKSMITH_LIBRARY");
+        if (!string.IsNullOrEmpty(over))
+        {
+            // A directory or the library itself, since both are things to point at.
+            var candidate = Directory.Exists(over) ? System.IO.Path.Combine(over, name) : over;
+            if (File.Exists(candidate)) return candidate;
+            throw new BuildException($"CADACLYSM_BLACKSMITH_LIBRARY={over} names nothing that exists");
+        }
+
+        var here = System.IO.Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+        var ancestors = new List<string>();
+        for (var dir = here; !string.IsNullOrEmpty(dir); dir = System.IO.Path.GetDirectoryName(dir))
+            ancestors.Add(dir);
+        var searched = new List<string>();
+        if (!string.IsNullOrEmpty(here)) searched.Add(System.IO.Path.Combine(here, name));
+        // Walking up from this assembly: an SDK checkout keeps the library in `lib/` beside
+        // the wrappers; the repository this example ships in keeps it in `target/release`
+        // (or `target/debug`, a fallback for a machine that only built that).
+        searched.AddRange(ancestors.Select(a => System.IO.Path.Combine(a, "lib", name)));
+        foreach (var a in ancestors)
+        {
+            searched.Add(System.IO.Path.Combine(a, "target", "release", name));
+            searched.Add(System.IO.Path.Combine(a, "target", "debug", name));
+        }
+        foreach (var candidate in searched)
+            if (File.Exists(candidate)) return candidate;
+        throw new BuildException(
+            $"{name} not found. Looked in:\n"
+            + string.Concat(searched.Select(c => $"    {c}\n"))
+            + "Build it with:\n    cargo build --release -p cadaclysm-blacksmith-capi\n"
+            + "or run fetch.py in an SDK checkout, or point CADACLYSM_BLACKSMITH_LIBRARY at it.");
+    }
+}
+
 /// <summary>Every entry point in `include/cadaclysm_blacksmith.h` this binding declares -- the
 /// same 70 Python's `cadaclysm_blacksmith.py` does, no more and no less; `tests/bindings.rs`
 /// compares the two sets by name and holds C# to Python's.</summary>
@@ -187,6 +241,7 @@ internal static class BlacksmithNative
 
     static BlacksmithNative()
     {
+        Loader.Kernel = BlacksmithLoader.Load;
         Loader.Register();
     }
 
@@ -204,10 +259,18 @@ internal static class BlacksmithNative
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_circle(double r);
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_slot(double cx, double cy, double length, double r);
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_polygon(double[] xy, nuint count);
+    [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_regular_polygon(double cx, double cy, double radius, uint sides,
+        double angle);
+    [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_spline(double[] xy, nuint count, uint degree, double[]? weights,
+        [MarshalAs(UnmanagedType.I1)] bool closed);
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_with_hole(ProfileHandle outer, ProfileHandle hole);
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_translate_profile(ProfileHandle profile, double dx, double dy);
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_round(ProfileHandle profile, double radius, uint[]? corners,
         nuint count, [MarshalAs(UnmanagedType.I1)] bool open);
+    [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_close_loop(ProfileHandle profile);
+    [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_chain(IntPtr[] pieces, nuint count,
+        double tolerance);
+    [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_from_loops(IntPtr[] loops, nuint count);
     [DllImport(Lib)] internal static extern PathHandle cadaclysm_blacksmith_path_begin(double x, double y);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_path_line_to(PathHandle p, double x, double y);
@@ -248,6 +311,10 @@ internal static class BlacksmithNative
         double[] frameB);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_revolve(ProfileHandle profile, double[] axis, double angle);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_revolve_open(ProfileHandle profile, double[] axis, double angle);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_revolve_in_plane(ProfileHandle profile, double[] frame,
+        double[] axis, double angle);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_revolve_open_in_plane(ProfileHandle profile, double[] frame,
+        double[] axis, double angle);
     [DllImport(Lib)] internal static extern SweepPathHandle cadaclysm_blacksmith_sweep_path_begin(double x, double y, double z);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_sweep_path_line_to(SweepPathHandle p, double x, double y, double z);
@@ -284,6 +351,9 @@ internal static class BlacksmithNative
         double distance, double tolerance);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_shell(SolidHandle solid, double thickness, uint[] openFaces,
         nuint count, double tolerance, IntPtr progress, IntPtr user);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_push_pull(SolidHandle solid, uint face, double distance,
+        double tolerance, IntPtr progress, IntPtr user);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_merge_flush(SolidHandle solid);
     [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_face_count(SolidHandle solid);
     [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_select_face(SolidHandle solid, uint kind, double[]? v, uint index);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
@@ -301,12 +371,17 @@ internal static class BlacksmithNative
     internal static extern bool cadaclysm_blacksmith_bounds(SolidHandle solid, double tolerance, [Out] double[] min, [Out] double[] max);
     [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_leaked_edges(SolidHandle solid, double tolerance);
     [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_unpaired_edges(SolidHandle solid, double tolerance);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_manifold(SolidHandle solid, [Out] uint[] outRow);
     // The one array of handles the ABI takes: the marshaller cannot ref-count an array of
     // SafeHandles, so `WriteStepText` passes the raw pointers and keeps the owners alive
     // itself, across the call, with `GC.KeepAlive`.
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_step(IntPtr[] solids, nuint count,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string schema, uint unit);
     [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_string_free(IntPtr s);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_from_brep(BrepHandle brep,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string layoutId);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_brep_layout_id();
 }
 
 /// <summary>The module-level entry points: the library's version and licensing, the default
@@ -432,6 +507,11 @@ public static class Blacksmith
         return values;
     }
 
+    /// <summary>How the loaded library lays a brep out in memory: its compiler, target and
+    /// source. `Solid.FromNode` works only where this equals the reader library's
+    /// <see cref="global::Cadaclysm.Brep.LayoutId"/> -- the two from the same release.</summary>
+    public static string BrepLayoutId() => Text(BlacksmithNative.cadaclysm_blacksmith_brep_layout_id());
+
     /// <summary>Twelve numbers: origin, x, y, z.</summary>
     internal static double[] Frame(double[] frame) => Doubles(frame, 12, "frame");
 
@@ -471,17 +551,73 @@ public sealed class Profile : IDisposable
     public static Profile Slot((double X, double Y) centre, double length, double r) =>
         new(BlacksmithNative.cadaclysm_blacksmith_profile_slot(centre.X, centre.Y, length, r));
 
-    /// <summary>A closed polygon through `points`, in order; the closing side is implied.
-    /// </summary>
+    /// <summary>A closed polygon through `points`, in order, its side back to the first
+    /// point a segment of its own.</summary>
     public static Profile Polygon(IEnumerable<(double X, double Y)> points)
     {
         var flat = points.SelectMany(p => new[] { p.X, p.Y }).ToArray();
         return new Profile(BlacksmithNative.cadaclysm_blacksmith_profile_polygon(flat, (nuint)(flat.Length / 2)));
     }
 
+    /// <summary>A regular polygon of `sides` sides (at least 3) on the circle of `radius` about
+    /// `centre`, its first corner at `angle` radians from the sketch's x axis, the rest
+    /// counter-clockwise.</summary>
+    public static Profile RegularPolygon((double X, double Y) centre, double radius, int sides, double angle = 0) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_profile_regular_polygon(centre.X, centre.Y, radius, (uint)Math.Max(0, sides), angle));
+
+    /// <summary>A spline of `degree` through the control polygon `points` (`weights` one per
+    /// point, or null). Open, it starts on the first point and ends on the last -- an open
+    /// chain; `closed`, it is periodic, smooth through its own start -- a closed profile. The
+    /// degree is lowered to fit the points.</summary>
+    public static Profile Spline(IEnumerable<(double X, double Y)> points, int degree = 3, IEnumerable<double>? weights = null, bool closed = false)
+    {
+        var flat = points.SelectMany(p => new[] { p.X, p.Y }).ToArray();
+        return new Profile(BlacksmithNative.cadaclysm_blacksmith_profile_spline(flat, (nuint)(flat.Length / 2), (uint)Math.Max(0, degree),
+            weights?.ToArray(), closed));
+    }
+
     /// <summary>Start drawing an outline at `start`, a segment at a time (the `Path` builder).
     /// </summary>
     public static Path Path((double X, double Y) start) => new(start);
+
+    /// <summary>Open profiles joined end to end into one -- the forge's merge. The pieces
+    /// may come in any order and either way round: each next one is the first of the rest
+    /// with an end within `tolerance` of either end of the chain so far, reversed where
+    /// that makes it meet. Every segment is kept exactly. Closed where the chain's two
+    /// ends meet, otherwise an open chain. Throws for no pieces, a piece empty, with holes
+    /// or closed on its own, or one that meets none of the others.</summary>
+    public static Profile Chain(IEnumerable<Profile> pieces, double tolerance = 1e-6)
+    {
+        // Raw pointers, as WriteStepText passes its solids: the owners kept reachable
+        // until the call has returned.
+        var owners = pieces.ToArray();
+        var handles = owners.Select(p => p.Handle.DangerousGetHandle()).ToArray();
+        var chained = BlacksmithNative.cadaclysm_blacksmith_profile_chain(handles, (nuint)handles.Length, tolerance);
+        GC.KeepAlive(owners);
+        return new Profile(chained);
+    }
+
+    /// <summary>Closed loops, in any order, as one profile: the loop enclosing the most area
+    /// is the boundary and every other a hole in it, in the order given -- a sketch's
+    /// rectangle and the circles drawn inside it. Each loop is closed, with no holes of its
+    /// own, wound either way. Throws, naming loops by their index, for a loop that is open,
+    /// empty or of no area, loops that cross or touch, a hole outside the boundary or inside
+    /// another hole.</summary>
+    public static Profile FromLoops(IEnumerable<Profile> loops)
+    {
+        var owners = loops.ToArray();
+        var handles = owners.Select(p => p.Handle.DangerousGetHandle()).ToArray();
+        var made = BlacksmithNative.cadaclysm_blacksmith_profile_from_loops(handles, (nuint)handles.Length);
+        GC.KeepAlive(owners);
+        return new Profile(made);
+    }
+
+    /// <summary>This profile closed -- Python's <c>close_loop</c>, the forge's sketch "close":
+    /// where its last segment stops short of its start (a path ended open), a straight segment
+    /// back to it; where it already comes back within 1e-9 of its extent, its last segment made
+    /// to land on the start exactly. A closed profile comes back as it is; holes are closed the
+    /// same way. (Not <c>Close</c>: that name frees a handle.)</summary>
+    public Profile CloseLoop() => new(BlacksmithNative.cadaclysm_blacksmith_profile_close_loop(Handle));
 
     /// <summary>This outline with `hole` cut from it, as a new profile; both inputs are
     /// untouched.</summary>
@@ -944,6 +1080,18 @@ public sealed class Solid : IDisposable
     public static Solid RevolveOpen(Profile profile, double[] axis, double angle) =>
         new(BlacksmithNative.cadaclysm_blacksmith_revolve_open(profile.Handle, Blacksmith.AxisOf(axis), angle));
 
+    /// <summary>`profile`, drawn on `frame`, swung `angle` radians about the axis through the
+    /// sketch points `a` and `b` (on the frame) -- the profile and its axis drawn together,
+    /// where <see cref="Revolve"/> reads the profile as (radius, height). The profile may lie
+    /// on either side of the axis and touch it, not cross it; the sweep starts where it is
+    /// drawn and turns right-handed about `b - a`.</summary>
+    public static Solid RevolveInPlane(Profile profile, double[] frame, (double X, double Y) a, (double X, double Y) b, double angle) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_revolve_in_plane(profile.Handle, Blacksmith.Frame(frame), new[] { a.X, a.Y, b.X, b.Y }, angle));
+
+    /// <summary><see cref="RevolveInPlane"/> for a curve: its segments swung into a sheet.</summary>
+    public static Solid RevolveOpenInPlane(Profile profile, double[] frame, (double X, double Y) a, (double X, double Y) b, double angle) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_revolve_open_in_plane(profile.Handle, Blacksmith.Frame(frame), new[] { a.X, a.Y, b.X, b.Y }, angle));
+
     /// <summary>`profile`, drawn on `frame`, carried along `path` into a closed solid: a
     /// straight piece of the path is an extrusion, a circular piece a revolution about the
     /// arc's axis, so nothing is approximated -- a circle along an arc is an exact torus wall.
@@ -998,14 +1146,26 @@ public sealed class Solid : IDisposable
 
     // -- combining
 
-    public Solid Join(Solid other, double tolerance = 0.05) =>
-        new(BlacksmithNative.cadaclysm_blacksmith_join(Handle, other.Handle, tolerance, IntPtr.Zero, IntPtr.Zero));
+    /// <summary>This solid and `other` as one. `merge` merges the flush faces the join leaves
+    /// (<see cref="MergeFlush"/>), as Fusion does -- off by default, so face and edge numbers
+    /// stay as they were.</summary>
+    public Solid Join(Solid other, double tolerance = 0.05, bool merge = false) =>
+        Merged(new(BlacksmithNative.cadaclysm_blacksmith_join(Handle, other.Handle, tolerance, IntPtr.Zero, IntPtr.Zero)), merge);
 
-    public Solid Cut(Solid other, double tolerance = 0.05) =>
-        new(BlacksmithNative.cadaclysm_blacksmith_cut(Handle, other.Handle, tolerance, IntPtr.Zero, IntPtr.Zero));
+    /// <summary>This solid with `other` removed; `merge` as <see cref="Join"/>'s.</summary>
+    public Solid Cut(Solid other, double tolerance = 0.05, bool merge = false) =>
+        Merged(new(BlacksmithNative.cadaclysm_blacksmith_cut(Handle, other.Handle, tolerance, IntPtr.Zero, IntPtr.Zero)), merge);
 
-    public Solid Common(Solid other, double tolerance = 0.05) =>
-        new(BlacksmithNative.cadaclysm_blacksmith_common(Handle, other.Handle, tolerance, IntPtr.Zero, IntPtr.Zero));
+    /// <summary>What this solid and `other` share; `merge` as <see cref="Join"/>'s.</summary>
+    public Solid Common(Solid other, double tolerance = 0.05, bool merge = false) =>
+        Merged(new(BlacksmithNative.cadaclysm_blacksmith_common(Handle, other.Handle, tolerance, IntPtr.Zero, IntPtr.Zero)), merge);
+
+    /// <summary>`solid`, its flush faces merged when `merge`; the unmerged one disposed.</summary>
+    private static Solid Merged(Solid solid, bool merge)
+    {
+        if (!merge) return solid;
+        using (solid) return solid.MergeFlush();
+    }
 
     /// <summary>This solid (a sheet or a solid) cut along `tool`'s boundary, nothing removed:
     /// every face comes back in its pieces outside `tool` and its pieces inside, each piece a
@@ -1088,6 +1248,20 @@ public sealed class Solid : IDisposable
 
     /// <summary>`LeakedEdges(tolerance) == 0`.</summary>
     public bool IsWatertight(double tolerance = 0.05) => LeakedEdges(tolerance) == 0;
+
+    /// <summary>Whether the faces make a manifold -- every edge bordered by one face or two, the
+    /// faces round every vertex one fan -- and whether it is closed. Read off the solid's
+    /// topology, not a mesh, so it takes no tolerance; whether the faces all face out is
+    /// <see cref="UnpairedEdges"/>'s question.</summary>
+    public Manifold Manifold
+    {
+        get
+        {
+            var row = new uint[8];
+            if (!BlacksmithNative.cadaclysm_blacksmith_manifold(Handle, row)) throw Blacksmith.Failure("manifold");
+            return new Manifold(row);
+        }
+    }
 
     // -- out
 
@@ -1223,6 +1397,20 @@ public sealed class Solid : IDisposable
         return new Solid(BlacksmithNative.cadaclysm_blacksmith_chamfer(Handle, which, (nuint)which.Length, distance, tolerance));
     }
 
+    /// <summary>Face `face` pushed out by `distance` along its outward normal (pulled in,
+    /// negative) the way Fusion and Rhino extrude a face: the prism over it joined on (cut
+    /// out), and the flush faces merged -- a box's top raised is one taller box of six faces.
+    /// A face on a cylinder moves out along its normal instead, the radius changed (a boss
+    /// fatter, a bore narrower), the flat faces beside it carried along; any other curved
+    /// face is refused.</summary>
+    public Solid PushPull(int face, double distance, double tolerance = 0.05) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_push_pull(Handle, Index(face), distance, tolerance, IntPtr.Zero, IntPtr.Zero));
+
+    /// <summary>This solid with its flush faces merged: flat faces on one plane, facing one
+    /// way and meeting, made one face, and the vertices left mid-way along a straight edge
+    /// taken out -- the seams a <see cref="Join"/> leaves where two parts are flush.</summary>
+    public Solid MergeFlush() => new(BlacksmithNative.cadaclysm_blacksmith_merge_flush(Handle));
+
     /// <summary>This solid hollowed to a wall `thickness` thick (inward for a positive
     /// thickness, outward for a negative one), with the faces at `open` removed so the hollow
     /// is reachable.</summary>
@@ -1231,6 +1419,133 @@ public sealed class Solid : IDisposable
         var which = Indices(open ?? Array.Empty<int>());
         return new Solid(BlacksmithNative.cadaclysm_blacksmith_shell(Handle, thickness, which, (nuint)which.Length, tolerance,
             IntPtr.Zero, IntPtr.Zero));
+    }
+
+    // -- from files
+
+    /// <summary>The body `node` of a reader <see cref="Scene"/> draws, as a solid -- sharing
+    /// the reader's brep, not copying it. The scene can be disposed before the solid is.
+    /// `placed` puts it where the node's <see cref="Node.Transform"/> does, which is where
+    /// its mesh draws; a node at the identity stays shared, a moved one is a moved copy. In
+    /// the file's own units and axes. Needs the reader's library from the same release as
+    /// this one's: the brep is handed across by pointer and the two layouts are compared
+    /// first. What a solid from a file can then do: see <see cref="Open"/>.</summary>
+    public static Solid FromNode(Scene scene, Node node, bool placed = true)
+    {
+        var solid = FromBrep(node, $"from_node: node {node.Index} ({Label(node)})")
+            ?? throw new BuildException($"from_node: node {node.Index} ({Label(node)}) has no brep: only a B-rep body " +
+                "has one (STEP, ACIS, Rhino, OCCT .brep, IGES, IFC), not a mesh, a curve or a CSG body");
+        if (!placed) return solid;
+        if (scene.Convention != Convention.Native && !IsIdentity(node.Transform))
+            throw new BuildException("from_node: placed=True needs the scene opened with Convention.Native -- the " +
+                "brep is in the file's own axes and the node's transform is not; open Native, or pass placed: false");
+        return solid.Placed(node.Transform, "from_node");
+    }
+
+    /// <summary><see cref="FromNode(Scene, Node, bool)"/> by node index.</summary>
+    public static Solid FromNode(Scene scene, uint node, bool placed = true) =>
+        FromNode(scene, scene.Nodes[(int)node], placed);
+
+    /// <summary>The body a CAD file holds, as a solid: a STEP (AP203/214/242), ACIS `.sat`,
+    /// Rhino `.3dm`, OCCT `.brep`, IGES or IFC file, read where it draws, in the file's own
+    /// units and axes. A file drawing several bodies needs `body` (0-based, in drawing order)
+    /// or <see cref="OpenAll"/>. Fillet and chamfer want line and circle edges; booleans take
+    /// any surface, but the new edges they trace on a free-form (NURBS) face are not always
+    /// writable back to STEP; and every verb meshes its operands first, so its cost grows with
+    /// the body's face count.</summary>
+    public static Solid Open(string path, int? body = null)
+    {
+        var solids = OpenAll(path);
+        var name = System.IO.Path.GetFileName(path);
+        if (body is null && solids.Count == 1) return solids[0];
+        if (body is null || body < 0 || body >= solids.Count)
+        {
+            foreach (var s in solids) s.Dispose();
+            throw new BuildException(body is null
+                ? $"open: {name} holds {solids.Count} bodies: pass body= (0 to {solids.Count - 1}), or use Solid.OpenAll"
+                : $"open: {name} has no body {body}: it holds {solids.Count}");
+        }
+        for (var i = 0; i < solids.Count; i++)
+            if (i != body) solids[i].Dispose();
+        return solids[body.Value];
+    }
+
+    /// <summary>Every body a CAD file draws, as solids placed where it draws them: one per
+    /// placement, so a part placed twice is two solids. See <see cref="Open"/>.</summary>
+    public static IReadOnlyList<Solid> OpenAll(string path)
+    {
+        Scene scene;
+        try
+        {
+            scene = global::Cadaclysm.Cadaclysm.Open(path);
+        }
+        catch (CadaclysmException e)
+        {
+            throw new BuildException($"open: {e.Message}");
+        }
+        var solids = new List<Solid>();
+        using (scene)
+        {
+            try
+            {
+                foreach (var placement in scene.Placements)
+                {
+                    var node = placement.Geometry;
+                    var what = $"open: {Label(node)}";
+                    var solid = FromBrep(node, what);
+                    if (solid is not null) solids.Add(solid.Placed(placement.Transform, what));
+                }
+            }
+            catch
+            {
+                foreach (var s in solids) s.Dispose();
+                throw;
+            }
+        }
+        if (solids.Count == 0)
+        {
+            var extension = System.IO.Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
+            throw new BuildException($"open: the .{extension} file draws no B-rep body -- only a STEP, ACIS, Rhino, " +
+                "OCCT .brep, IGES or IFC body can be a solid, not a mesh, a curve or a CSG body");
+        }
+        return solids;
+    }
+
+    private static string Label(Node node) =>
+        node.Name.Length > 0 ? node.Name : node.Kind.Length > 0 ? node.Kind : node.Index.ToString();
+
+    /// <summary>The node's brep as a solid, shared, or null where it has none.</summary>
+    private static Solid? FromBrep(Node node, string what)
+    {
+        using var brep = node.Brep;
+        if (brep is null) return null;
+        return new Solid(Blacksmith.Checked(
+            BlacksmithNative.cadaclysm_blacksmith_from_brep(brep.Handle, Brep.LayoutId), what));
+    }
+
+    private static bool IsIdentity(double[,] m)
+    {
+        for (var i = 0; i < 4; i++)
+            for (var j = 0; j < 4; j++)
+                if (m[i, j] != (i == j ? 1.0 : 0.0)) return false;
+        return true;
+    }
+
+    /// <summary>This solid moved by a row-major 4x4 placement: itself at the identity, a moved
+    /// copy for a rigid move (a mirror included), refused for a scale or shear, which a brep
+    /// cannot follow exactly (a cylinder's radius is a number, not a point).</summary>
+    private Solid Placed(double[,] m, string what)
+    {
+        if (IsIdentity(m)) return this;
+        for (var a = 0; a < 3; a++)
+            for (var b = 0; b < 3; b++)
+            {
+                var dot = m[0, a] * m[0, b] + m[1, a] * m[1, b] + m[2, a] * m[2, b];
+                if (Math.Abs(dot - (a == b ? 1.0 : 0.0)) > 1e-9)
+                    throw new BuildException($"{what}: the placement scales or shears, which a brep cannot follow");
+            }
+        var frame = new[] { m[0, 3], m[1, 3], m[2, 3], m[0, 0], m[1, 0], m[2, 0], m[0, 1], m[1, 1], m[2, 1], m[0, 2], m[1, 2], m[2, 2] };
+        using (this) return Place(frame);
     }
 
     /// <summary>This solid as a reader <see cref="Scene"/>, through STEP text and
@@ -1325,6 +1640,112 @@ public readonly struct Edge
     }
 
     public override string ToString() => $"Edge({Index}, \"{Kind}\", faces=({string.Join(", ", Faces)}))";
+}
+
+/// <summary>An origin and three unit axes, square to each other and right-handed (z = x × y):
+/// the plane a profile is drawn on (its x/y) and the direction it is built along (its z).
+/// Converts to the twelve numbers every call taking a `frame` reads, so pass it wherever one
+/// goes. Immutable. The constructor normalises the axes and throws
+/// <see cref="BuildException"/> when they are not square or not right-handed.</summary>
+public sealed class Frame : IEquatable<Frame>
+{
+    /// <summary>How far from square the axes may be (the cosine between two of them).</summary>
+    private const double Square = 1e-6;
+
+    private readonly double[] _v;
+
+    public Frame((double X, double Y, double Z) origin, (double X, double Y, double Z) x,
+        (double X, double Y, double Z) y, (double X, double Y, double Z) z)
+    {
+        if (!double.IsFinite(origin.X) || !double.IsFinite(origin.Y) || !double.IsFinite(origin.Z))
+            throw new BuildException("Frame: origin must be three finite numbers");
+        x = Unit(x, "Frame: x");
+        y = Unit(y, "Frame: y");
+        z = Unit(z, "Frame: z");
+        if (Math.Max(Math.Abs(Dot(x, y)), Math.Max(Math.Abs(Dot(y, z)), Math.Abs(Dot(z, x)))) > Square)
+            throw new BuildException("Frame: the axes are not square to each other");
+        if (Dot(Cross(x, y), z) < 0)
+            throw new BuildException("Frame: the axes are left-handed (z must be x × y)");
+        _v = new[] { origin.X, origin.Y, origin.Z, x.X, x.Y, x.Z, y.X, y.Y, y.Z, z.X, z.Y, z.Z };
+        for (var i = 0; i < _v.Length; i++) _v[i] += 0.0; // no -0.0 to print or compare
+    }
+
+    /// <summary>Twelve numbers -- what <see cref="Solid.FaceFrame"/> and
+    /// <see cref="Workplane.Frame"/> hand back -- checked as the constructor checks.</summary>
+    public static Frame Of(double[] frame)
+    {
+        var v = Blacksmith.Frame(frame);
+        return new Frame((v[0], v[1], v[2]), (v[3], v[4], v[5]), (v[6], v[7], v[8]), (v[9], v[10], v[11]));
+    }
+
+    /// <summary>The world XY plane through `origin`: z up, as <see cref="Workplane.Xy"/>.</summary>
+    public static Frame Xy((double X, double Y, double Z) origin = default) => new(origin, (1, 0, 0), (0, 1, 0), (0, 0, 1));
+
+    /// <summary>The world XZ plane through `origin`: x along X, y along Z, so z is -Y, as
+    /// <see cref="Workplane.Xz"/>.</summary>
+    public static Frame Xz((double X, double Y, double Z) origin = default) => new(origin, (1, 0, 0), (0, 0, 1), (0, -1, 0));
+
+    /// <summary>The world YZ plane through `origin`: x along Y, y along Z, so z is +X, as
+    /// <see cref="Workplane.Yz"/>.</summary>
+    public static Frame Yz((double X, double Y, double Z) origin = default) => new(origin, (0, 1, 0), (0, 0, 1), (1, 0, 0));
+
+    /// <summary>The plane through `origin` square to `normal` (the frame's z). Its x axis is `x`
+    /// laid onto that plane; with none, world X laid onto it, or world Y when the normal is
+    /// within about 25° of X -- the axes <see cref="Solid.FaceFrame"/> gives a face facing
+    /// `normal`. So a normal along +Z, -Y or +X gives exactly <see cref="Xy"/>,
+    /// <see cref="Xz"/> or <see cref="Yz"/>.</summary>
+    public static Frame At((double X, double Y, double Z) origin, (double X, double Y, double Z) normal,
+        (double X, double Y, double Z)? x = null)
+    {
+        var z = Unit(normal, "Frame.At: normal");
+        var hint = Unit(x ?? (Math.Abs(z.X) <= 0.9 ? (1.0, 0.0, 0.0) : (0.0, 1.0, 0.0)), "Frame.At: x");
+        var d = Dot(hint, z);
+        if (Math.Abs(d) > 1 - Square) throw new BuildException("Frame.At: x lies along the normal");
+        var ax = Unit((hint.X - d * z.X, hint.Y - d * z.Y, hint.Z - d * z.Z), "Frame.At: x");
+        return new Frame(origin, ax, Cross(z, ax), z);
+    }
+
+    public (double X, double Y, double Z) Origin => (_v[0], _v[1], _v[2]);
+    public (double X, double Y, double Z) X => (_v[3], _v[4], _v[5]);
+    public (double X, double Y, double Z) Y => (_v[6], _v[7], _v[8]);
+    public (double X, double Y, double Z) Z => (_v[9], _v[10], _v[11]);
+
+    /// <summary>This frame moved by (`dx`, `dy`, `dz`) in world coordinates.</summary>
+    public Frame Translate(double dx, double dy, double dz) =>
+        new((_v[0] + dx, _v[1] + dy, _v[2] + dz), X, Y, Z);
+
+    /// <summary>This frame moved `distance` along its own z.</summary>
+    public Frame Offset(double distance) => Translate(distance * _v[9], distance * _v[10], distance * _v[11]);
+
+    /// <summary>The twelve numbers: origin, x, y, z -- a copy.</summary>
+    public double[] ToArray() => (double[])_v.Clone();
+
+    /// <summary>A frame goes wherever twelve numbers do.</summary>
+    public static implicit operator double[](Frame frame) => frame?.ToArray()!;
+
+    public bool Equals(Frame? other) => other is not null && _v.AsSpan().SequenceEqual(other._v);
+    public override bool Equals(object? obj) => Equals(obj as Frame);
+    public override int GetHashCode()
+    {
+        var h = new HashCode();
+        foreach (var v in _v) h.Add(v);
+        return h.ToHashCode();
+    }
+
+    public override string ToString() => $"Frame(origin={Origin}, x={X}, y={Y}, z={Z})";
+
+    private static double Dot((double X, double Y, double Z) a, (double X, double Y, double Z) b) =>
+        a.X * b.X + a.Y * b.Y + a.Z * b.Z;
+
+    private static (double X, double Y, double Z) Cross((double X, double Y, double Z) a, (double X, double Y, double Z) b) =>
+        (a.Y * b.Z - a.Z * b.Y, a.Z * b.X - a.X * b.Z, a.X * b.Y - a.Y * b.X);
+
+    private static (double X, double Y, double Z) Unit((double X, double Y, double Z) v, string what)
+    {
+        var n = Math.Sqrt(Dot(v, v));
+        if (!(n > 1e-12 && double.IsFinite(n))) throw new BuildException($"{what} has no direction");
+        return (v.X / n, v.Y / n, v.Z / n);
+    }
 }
 
 /// <summary>The fluent chain, mirroring the Rust `Workplane`: a frame, the solid built so

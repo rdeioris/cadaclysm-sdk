@@ -122,6 +122,8 @@ function _lib() {
     last_error: f('const char *cadaclysm_blacksmith_last_error(void)'),
     version: f('const char *cadaclysm_blacksmith_version(void)'),
     solid_free: f('void cadaclysm_blacksmith_solid_free(CadaclysmBlacksmithSolid *solid)'),
+    from_brep: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_from_brep(const void *brep, const char *layout_id)'),
+    brep_layout_id: f('const char *cadaclysm_blacksmith_brep_layout_id(void)'),
     profile_free: f('void cadaclysm_blacksmith_profile_free(CadaclysmBlacksmithProfile *profile)'),
     license_set: f('bool cadaclysm_blacksmith_license_set(const char *text_or_path)'),
     license_info: f('const char *cadaclysm_blacksmith_license_info(void)'),
@@ -136,6 +138,8 @@ function _lib() {
     profile_circle: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_circle(double r)'),
     profile_slot: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_slot(double cx, double cy, double length, double r)'),
     profile_polygon: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_polygon(const double *xy, size_t count)'),
+    profile_regular_polygon: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_regular_polygon(double cx, double cy, double radius, uint32_t sides, double angle)'),
+    profile_spline: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_spline(const double *xy, size_t count, uint32_t degree, const double *weights, bool closed)'),
     profile_with_hole: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_with_hole(const CadaclysmBlacksmithProfile *outer, const CadaclysmBlacksmithProfile *hole)'),
     path_begin: f('CadaclysmBlacksmithPath *cadaclysm_blacksmith_path_begin(double x, double y)'),
     path_line_to: f('bool cadaclysm_blacksmith_path_line_to(CadaclysmBlacksmithPath *p, double x, double y)'),
@@ -155,6 +159,7 @@ function _lib() {
     edge: f('bool cadaclysm_blacksmith_edge(const CadaclysmBlacksmithSolid *solid, uint32_t i, _Out_ CadaclysmBlacksmithEdge *out)'),
     leaked_edges: f('uint32_t cadaclysm_blacksmith_leaked_edges(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
     unpaired_edges: f('uint32_t cadaclysm_blacksmith_unpaired_edges(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
+    manifold: f('bool cadaclysm_blacksmith_manifold(const CadaclysmBlacksmithSolid *solid, _Out_ uint32_t *out)'),
     cuboid: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_cuboid(double x, double y, double z)'),
     cylinder: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_cylinder(double r, double h)'),
     cone: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_cone(double r, double h)'),
@@ -172,10 +177,15 @@ function _lib() {
     loft_open: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_loft_open(const CadaclysmBlacksmithProfile *a, const double *frame_a, const CadaclysmBlacksmithProfile *b, const double *frame_b)'),
     revolve: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_revolve(const CadaclysmBlacksmithProfile *profile, const double *axis, double angle)'),
     revolve_open: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_revolve_open(const CadaclysmBlacksmithProfile *profile, const double *axis, double angle)'),
+    revolve_in_plane: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_revolve_in_plane(const CadaclysmBlacksmithProfile *profile, const double *frame, const double *axis, double angle)'),
+    revolve_open_in_plane: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_revolve_open_in_plane(const CadaclysmBlacksmithProfile *profile, const double *frame, const double *axis, double angle)'),
     extrude_faces: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_extrude_faces(const CadaclysmBlacksmithSolid *sheet, double height)'),
     place: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_place(const CadaclysmBlacksmithSolid *solid, const double *frame)'),
     translate_profile: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_translate_profile(const CadaclysmBlacksmithProfile *profile, double dx, double dy)'),
     profile_round: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_round(const CadaclysmBlacksmithProfile *profile, double radius, const uint32_t *corners, size_t count, bool open)'),
+    profile_close_loop: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_close_loop(const CadaclysmBlacksmithProfile *profile)'),
+    profile_chain: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_chain(const CadaclysmBlacksmithProfile **pieces, size_t count, double tolerance)'),
+    profile_from_loops: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_from_loops(const CadaclysmBlacksmithProfile **loops, size_t count)'),
     face: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_face(const CadaclysmBlacksmithProfile *profile, const double *frame)'),
     face_sheet: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_face_sheet(const CadaclysmBlacksmithSolid *solid, uint32_t face)'),
     drop_faces: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_drop_faces(const CadaclysmBlacksmithSolid *solid, const uint32_t *faces, size_t count)'),
@@ -190,6 +200,8 @@ function _lib() {
     fillet: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_fillet(const CadaclysmBlacksmithSolid *solid, const uint32_t *edges, size_t count, double radius, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     chamfer: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_chamfer(const CadaclysmBlacksmithSolid *solid, const uint32_t *edges, size_t count, double distance, double tolerance)'),
     shell: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_shell(const CadaclysmBlacksmithSolid *solid, double thickness, const uint32_t *open_faces, size_t count, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
+    push_pull: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_push_pull(const CadaclysmBlacksmithSolid *solid, uint32_t face, double distance, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
+    merge_flush: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_merge_flush(const CadaclysmBlacksmithSolid *solid)'),
     sweep_path_begin: f('CadaclysmBlacksmithSweepPath *cadaclysm_blacksmith_sweep_path_begin(double x, double y, double z)'),
     sweep_path_line_to: f('bool cadaclysm_blacksmith_sweep_path_line_to(CadaclysmBlacksmithSweepPath *p, double x, double y, double z)'),
     sweep_path_arc: f('bool cadaclysm_blacksmith_sweep_path_arc(CadaclysmBlacksmithSweepPath *p, double cx, double cy, double cz, double ax, double ay, double az, double angle)'),
@@ -208,6 +220,15 @@ function _lastError() { return _text(_lib().last_error()); }
 /** Throw the library's own reason, or `what` if it left none. */
 function _fail(what) { throw new BuildError(_lastError() || what); }
 /** [r, g, b] from '#rgb', '#rrggbb' or three numbers; the range is the library's to check. */
+/** The eight counts `cadaclysm_blacksmith_manifold` writes, as a record. */
+function _manifold(row) {
+  return {
+    faces: row[0], edges: row[1], vertices: row[2],
+    boundaryEdges: row[3], nonManifoldEdges: row[4], nonManifoldVertices: row[5],
+    isManifold: row[6] === 1, isClosed: row[7] === 1,
+  };
+}
+
 function _rgb(colour) {
   if (typeof colour === 'string') {
     let h = colour.trim().replace(/^#/, '');
@@ -303,7 +324,40 @@ class Profile {
   static circle(r) { return new Profile(_lib().profile_circle(r)); }
   static slot([cx, cy], length, r) { return new Profile(_lib().profile_slot(cx, cy, length, r)); }
   static polygon(points) { const xy = _flatPairs(points); return new Profile(_lib().profile_polygon(xy, xy.length / 2)); }
+  /** A regular polygon of `sides` sides (at least 3) on the circle of `radius` about `centre`, its first corner at `angle` radians. */
+  static regularPolygon([cx, cy], radius, sides, angle = 0) { return new Profile(_lib().profile_regular_polygon(cx, cy, radius, Math.max(0, sides | 0), angle)); }
+  /**
+   * A spline of `degree` through the control polygon `points` (`weights` one per point, or null):
+   * open, from the first point to the last; `closed`, periodic and smooth through its own start.
+   */
+  static spline(points, degree = 3, weights = null, closed = false) {
+    const xy = _flatPairs(points);
+    const w = weights == null ? null : Float64Array.from(weights, Number);
+    return new Profile(_lib().profile_spline(xy, xy.length / 2, Math.max(0, degree | 0), w, !!closed));
+  }
   static path(start) { return new Path(start); }
+  /**
+   * Open profiles joined end to end into one -- the forge's merge. The pieces may come in any
+   * order and either way round: each next one is the first of the rest with an end within
+   * `tolerance` of either end of the chain so far, reversed where that makes it meet. Every
+   * segment is kept exactly. Closed where the chain's two ends meet, otherwise an open chain.
+   */
+  static chain(pieces, tolerance = 1e-6) {
+    const handles = Array.from(pieces, (p) => p._handle);
+    return new Profile(_lib().profile_chain(handles, handles.length, tolerance));
+  }
+  /**
+   * Closed loops, in any order, as one profile: the loop enclosing the most area is the boundary
+   * and every other a hole in it, in the order given. Throws, naming loops by their index, for a
+   * loop that is open, empty or of no area, loops that cross or touch, a hole outside the boundary
+   * or inside another hole.
+   */
+  static fromLoops(loops) {
+    const handles = Array.from(loops, (p) => p._handle);
+    return new Profile(_lib().profile_from_loops(handles, handles.length));
+  }
+  /** This profile closed -- the forge's sketch "close": a straight segment from its end back to its start where it stops short. */
+  closeLoop() { return new Profile(_lib().profile_close_loop(this._handle)); }
   withHole(hole) { return new Profile(_lib().profile_with_hole(this._handle, hole._handle)); }
   translate(dx, dy) { return new Profile(_lib().translate_profile(this._handle, dx, dy)); }
   /**
@@ -426,6 +480,12 @@ const _solidFinalizer = typeof FinalizationRegistry === 'function'
   ? new FinalizationRegistry((h) => { try { _lib().solid_free(h); } catch (_) { /* exiting */ } }) : null;
 
 /** An exact B-rep solid (or open sheet). Immutable; every operation returns a new one. `close()` frees it. */
+// A boolean's result with its flush faces merged when `merge`; the unmerged one closed.
+function _merged(solid, merge) {
+  if (!merge) return solid;
+  try { return solid.mergeFlush(); } finally { solid.close(); }
+}
+
 class Solid {
   constructor(handle) {
     this._pointer = _checked(handle, 'solid');
@@ -472,6 +532,14 @@ class Solid {
   static loftOpen(a, frameA, b, frameB) { return new Solid(_lib().loft_open(a._handle, _frame(frameA), b._handle, _frame(frameB))); }
   static revolve(profile, axis, angle) { return new Solid(_lib().revolve(profile._handle, _axis(axis), angle)); }
   static revolveOpen(profile, axis, angle) { return new Solid(_lib().revolve_open(profile._handle, _axis(axis), angle)); }
+  /**
+   * `profile`, drawn on `frame`, swung `angle` radians about the axis through the sketch points `a`
+   * and `b` (`[x, y]` on the frame): the profile and its axis drawn together. The profile may lie on
+   * either side of the axis and touch it, not cross it; the sweep starts where it is drawn.
+   */
+  static revolveInPlane(profile, frame, [ax, ay], [bx, by], angle) { return new Solid(_lib().revolve_in_plane(profile._handle, _frame(frame), Float64Array.of(ax, ay, bx, by), angle)); }
+  /** `revolveInPlane` for a curve: its segments swung into a sheet. */
+  static revolveOpenInPlane(profile, frame, [ax, ay], [bx, by], angle) { return new Solid(_lib().revolve_open_in_plane(profile._handle, _frame(frame), Float64Array.of(ax, ay, bx, by), angle)); }
   static sweep(profile, frame, sweepPath) { return new Solid(_lib().sweep(profile._handle, _frame(frame), sweepPath._live())); }
   static sweepOpen(profile, frame, sweepPath) { return new Solid(_lib().sweep_open(profile._handle, _frame(frame), sweepPath._live())); }
   /** Thicken an open sheet into a solid. */
@@ -501,9 +569,10 @@ class Solid {
   /** Mirror across a plane given as a frame (origin, x, y, z; the plane is spanned by x and y). */
   mirror(plane) { return new Solid(_lib().mirror(this._handle, _frame(plane))); }
   // -- combining
-  join(other, tolerance = 0.05, progress = null) { return new Solid(_lib().join(this._handle, other._handle, tolerance, _progress(progress), null)); }
-  cut(other, tolerance = 0.05, progress = null) { return new Solid(_lib().cut(this._handle, other._handle, tolerance, _progress(progress), null)); }
-  common(other, tolerance = 0.05, progress = null) { return new Solid(_lib().common(this._handle, other._handle, tolerance, _progress(progress), null)); }
+  /** This solid and `other` as one; `merge` merges the flush faces the join leaves (`mergeFlush`), off by default. */
+  join(other, tolerance = 0.05, progress = null, merge = false) { return _merged(new Solid(_lib().join(this._handle, other._handle, tolerance, _progress(progress), null)), merge); }
+  cut(other, tolerance = 0.05, progress = null, merge = false) { return _merged(new Solid(_lib().cut(this._handle, other._handle, tolerance, _progress(progress), null)), merge); }
+  common(other, tolerance = 0.05, progress = null, merge = false) { return _merged(new Solid(_lib().common(this._handle, other._handle, tolerance, _progress(progress), null)), merge); }
   /**
    * This solid or sheet cut along `tool`'s boundary with nothing removed:
    * every face comes back as its pieces outside `tool` and then its pieces
@@ -549,6 +618,19 @@ class Solid {
   }
   /** `leakedEdges(tolerance) === 0`. */
   isWatertight(tolerance = 0.05) { return this.leakedEdges(tolerance) === 0; }
+  /**
+   * Whether the faces make a manifold -- every edge bordered by one face or
+   * two, the faces round every vertex one fan -- and whether it is closed:
+   * `{ faces, edges, vertices, boundaryEdges, nonManifoldEdges,
+   * nonManifoldVertices, isManifold, isClosed }`. Read off the solid's
+   * topology, not a mesh, so it takes no tolerance; whether the faces all
+   * face out is `unpairedEdges`'s question.
+   */
+  get manifold() {
+    const out = new Uint32Array(8);
+    if (!_lib().manifold(this._handle, out)) _fail('manifold');
+    return _manifold(out);
+  }
   // -- out
   /** `{ positions, normals, indices }` as fresh typed arrays at `tolerance`. */
   mesh(tolerance = 0.05) {
@@ -634,6 +716,18 @@ class Solid {
     return new Solid(_lib().chamfer(this._handle, which, which.length, distance, tolerance));
   }
   /** `open`: face indices removed so the hollow is reachable. */
+  /**
+   * Face `face` pushed out by `distance` along its outward normal (pulled in, negative) the way
+   * Fusion and Rhino extrude a face: the prism over it joined on (cut out), and the flush faces
+   * merged -- a box's top raised is one taller box of six faces. A face on a cylinder moves
+   * out along its normal instead, the radius changed (a boss fatter, a bore narrower), the flat
+   * faces beside it carried along; any other curved face is refused.
+   */
+  pushPull(face, distance, tolerance = 0.05, progress = null) {
+    return new Solid(_lib().push_pull(this._handle, face, distance, tolerance, _progress(progress), null));
+  }
+  /** This solid with its flush faces merged, and the vertices left mid-way along a straight edge taken out. */
+  mergeFlush() { return new Solid(_lib().merge_flush(this._handle)); }
   shell(thickness, open = [], tolerance = 1e-6, progress = null) {
     const which = Uint32Array.from(Array.from(open, Number));
     return new Solid(_lib().shell(this._handle, thickness, which, which.length, tolerance, _progress(progress), null));
@@ -665,6 +759,93 @@ class Solid {
     if (!(unit in UNITS)) throw new BuildError(`unit must be one of ${Object.keys(UNITS).sort().join(', ')}`);
     return this._async('stepAsync', { op: 'step', handles: [_addressOf(this._pointer)], schemaText: _schemaText(schema), unit: UNITS[unit] });
   }
+  // -- from files
+  /**
+   * The body `node` of a reader `Scene` draws, as a solid -- sharing the
+   * reader's brep, not copying it. `node`: a `Node` or its index. The scene can
+   * be closed before the solid is. `placed` puts it where the node's
+   * `transform` does, which is where its mesh draws; a node at the identity
+   * stays shared, a moved one is a moved copy. In the file's own units and
+   * axes. The reader's library must come from the same release as this one's.
+   */
+  static fromNode(scene, node, placed = true) {
+    const cad = _reader('fromNode');
+    if (!(node instanceof cad.Node)) node = new cad.Node(scene, Number(node));
+    const label = `from_node: node ${node.index} (${_label(node)})`;
+    const solid = _fromBrep(node, label);
+    if (!solid) {
+      throw new BuildError(`${label} has no brep: only a B-rep body has one (STEP, ACIS, Rhino, OCCT .brep, IGES, IFC), not a mesh, a curve or a CSG body`);
+    }
+    if (!placed) return solid;
+    const m = node.transform;
+    if (scene.convention !== cad.Convention.NATIVE && !_isIdentity(m)) {
+      solid.close();
+      throw new BuildError("from_node: placed=True needs the scene opened with Convention.NATIVE -- the brep is in the file's own axes and the node's transform is not; open NATIVE, or pass placed false");
+    }
+    return solid._placed(m, 'from_node');
+  }
+  /**
+   * The body a CAD file holds, as a solid: a STEP (AP203/214/242), ACIS `.sat`,
+   * Rhino `.3dm`, OCCT `.brep`, IGES or IFC file, read where it draws, in the
+   * file's own units and axes. A file drawing several bodies needs `body`
+   * (0-based, in drawing order) or `openAll`. Fillet and chamfer want line and
+   * circle edges; booleans take any surface, but the new edges they trace on a
+   * free-form (NURBS) face are not always writable back to STEP; and every verb
+   * meshes its operands first, so its cost grows with the body's face count.
+   */
+  static open(filePath, body = null) {
+    const solids = Solid.openAll(filePath);
+    const name = require('node:path').basename(String(filePath));
+    if (body == null && solids.length === 1) return solids[0];
+    if (body == null || !Number.isInteger(body) || body < 0 || body >= solids.length) {
+      for (const s of solids) s.close();
+      throw new BuildError(body == null
+        ? `open: ${name} holds ${solids.length} bodies: pass body= (0 to ${solids.length - 1}), or use Solid.open_all`
+        : `open: ${name} has no body ${body}: it holds ${solids.length}`);
+    }
+    solids.forEach((s, i) => { if (i !== body) s.close(); });
+    return solids[body];
+  }
+  /** Every body a CAD file draws, as solids placed where it draws them: one per placement. See `open`. */
+  static openAll(filePath) {
+    const cad = _reader('open');
+    let scene;
+    try { scene = cad.open(String(filePath)); } catch (e) { throw new BuildError(`open: ${e.message}`); }
+    const solids = [];
+    try {
+      for (const placement of scene.placements()) {
+        const node = placement.geometry;
+        const what = `open: ${_label(node)}`;
+        const solid = _fromBrep(node, what);
+        if (solid) solids.push(solid._placed(placement.transform, what));
+      }
+    } catch (e) {
+      for (const s of solids) s.close();
+      throw e;
+    } finally {
+      scene.close();
+    }
+    if (!solids.length) {
+      const extension = require('node:path').extname(String(filePath)).replace(/^\./, '').toLowerCase();
+      throw new BuildError(`open: the .${extension} file draws no B-rep body -- only a STEP, ACIS, Rhino, OCCT .brep, IGES or IFC body can be a solid, not a mesh, a curve or a CSG body`);
+    }
+    return solids;
+  }
+  /** This solid moved by a row-major 4x4 placement: itself at the identity, a moved copy for a rigid move (this one closed), refused for a scale or shear. */
+  _placed(m, what) {
+    if (_isIdentity(m)) return this;
+    try {
+      for (let a = 0; a < 3; a++) {
+        for (let b = 0; b < 3; b++) {
+          const dot = m[0][a] * m[0][b] + m[1][a] * m[1][b] + m[2][a] * m[2][b];
+          if (Math.abs(dot - (a === b ? 1 : 0)) > 1e-9) throw new BuildError(`${what}: the placement scales or shears, which a brep cannot follow`);
+        }
+      }
+      return this.place([m[0][3], m[1][3], m[2][3], m[0][0], m[1][0], m[2][0], m[0][1], m[1][1], m[2][1], m[0][2], m[1][2], m[2][2]]);
+    } finally {
+      this.close();
+    }
+  }
   /** This solid as a reader `Scene`, through STEP text and `cadaclysm.openMemory`. */
   toScene(schema = null) {
     let cad;
@@ -673,6 +854,25 @@ class Solid {
     return cad.openMemory(this.stepText(schemaPath), 'stp', { schema: schemaPath, name: 'solid.stp' });
   }
 }
+
+function _reader(what) {
+  try { return require('./cadaclysm'); } catch (e) { throw new BuildError(`${what} needs the reader module beside this file: ${e.message}`); }
+}
+function _label(node) { return node.name || node.kind || String(node.index); }
+function _isIdentity(m) { return m.every((row, i) => row.every((v, j) => v === (i === j ? 1 : 0))); }
+/** The node's brep as a solid, shared, or null where it has none. */
+function _fromBrep(node, what) {
+  const brep = node.brep;
+  if (!brep) return null;
+  try {
+    const cad = _reader('fromNode');
+    return new Solid(_checked(_lib().from_brep(brep.pointer, cad.Brep.layoutId()), what));
+  } finally {
+    brep.release();
+  }
+}
+/** How the loaded library lays a brep out in memory; `Solid.fromNode` works only where it equals the reader's `Brep.layoutId()`. */
+function brepLayoutId() { return _text(_lib().brep_layout_id()); }
 
 // ---- selecting ------------------------------------------------------------------
 
@@ -705,6 +905,81 @@ class Edge {
 const _XY = [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1];
 const _XZ = [0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -1, 0];
 const _YZ = [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0];
+
+/** How far from square a frame's axes may be (the cosine between two of them). */
+const _SQUARE = 1e-6;
+const _dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const _cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+function _unit(v, what) {
+  const p = Array.from(_doubles(v, 3, what));
+  const n = Math.hypot(...p);
+  if (!(n > 1e-12 && Number.isFinite(n))) throw new BuildError(`${what} has no direction`);
+  return p.map((c) => c / n);
+}
+
+/**
+ * An origin and three unit axes, square to each other and right-handed
+ * (z = x × y): the plane a profile is drawn on (its x/y) and the direction it
+ * is built along (its z). Iterates as the twelve numbers every call taking a
+ * `frame` reads, so pass it wherever one goes. Immutable.
+ *
+ * The constructor normalises the axes and throws `BuildError` when they are
+ * not square or not right-handed.
+ */
+class Frame {
+  constructor(origin, x, y, z) {
+    const o = Array.from(_doubles(origin, 3, 'Frame: origin'));
+    if (!o.every(Number.isFinite)) throw new BuildError('Frame: origin must be three finite numbers');
+    const [ux, uy, uz] = [_unit(x, 'Frame: x'), _unit(y, 'Frame: y'), _unit(z, 'Frame: z')];
+    if (Math.max(Math.abs(_dot(ux, uy)), Math.abs(_dot(uy, uz)), Math.abs(_dot(uz, ux))) > _SQUARE) {
+      throw new BuildError('Frame: the axes are not square to each other');
+    }
+    if (_dot(_cross(ux, uy), uz) < 0) throw new BuildError('Frame: the axes are left-handed (z must be x × y)');
+    this._v = Object.freeze([...o, ...ux, ...uy, ...uz].map((c) => c + 0)); // + 0: no -0 to print or compare
+    Object.freeze(this);
+  }
+  /** Twelve numbers or four triples -- what `Solid.faceFrame` and `Workplane.frame` hand back -- checked as the constructor checks. */
+  static of(frame) {
+    const v = Array.from(_frame(frame));
+    return new Frame(v.slice(0, 3), v.slice(3, 6), v.slice(6, 9), v.slice(9, 12));
+  }
+  /** The world XY plane through `origin`: z up, as `Workplane.xy`. */
+  static xy(origin = [0, 0, 0]) { return new Frame(origin, _XY.slice(3, 6), _XY.slice(6, 9), _XY.slice(9, 12)); }
+  /** The world XZ plane through `origin`: x along X, y along Z, so z is -Y, as `Workplane.xz`. */
+  static xz(origin = [0, 0, 0]) { return new Frame(origin, _XZ.slice(3, 6), _XZ.slice(6, 9), _XZ.slice(9, 12)); }
+  /** The world YZ plane through `origin`: x along Y, y along Z, so z is +X, as `Workplane.yz`. */
+  static yz(origin = [0, 0, 0]) { return new Frame(origin, _YZ.slice(3, 6), _YZ.slice(6, 9), _YZ.slice(9, 12)); }
+  /**
+   * The plane through `origin` square to `normal` (the frame's z). Its x axis
+   * is `x` laid onto that plane; with none, world X laid onto it, or world Y
+   * when the normal is within about 25° of X -- the axes `Solid.faceFrame`
+   * gives a face facing `normal`. So a normal along +Z, -Y or +X gives exactly
+   * `xy`, `xz` or `yz`.
+   */
+  static at(origin, normal, x = null) {
+    const z = _unit(normal, 'Frame.at: normal');
+    const hint = _unit(x ?? (Math.abs(z[0]) <= 0.9 ? [1, 0, 0] : [0, 1, 0]), 'Frame.at: x');
+    const d = _dot(hint, z);
+    if (Math.abs(d) > 1 - _SQUARE) throw new BuildError('Frame.at: x lies along the normal');
+    const ax = _unit(hint.map((h, i) => h - d * z[i]), 'Frame.at: x');
+    return new Frame(origin, ax, _cross(z, ax), z);
+  }
+  get origin() { return this._v.slice(0, 3); }
+  get x() { return this._v.slice(3, 6); }
+  get y() { return this._v.slice(6, 9); }
+  get z() { return this._v.slice(9, 12); }
+  /** This frame moved by (`dx`, `dy`, `dz`) in world coordinates. */
+  translate(dx, dy, dz) {
+    const o = this.origin;
+    return new Frame([o[0] + dx, o[1] + dy, o[2] + dz], this.x, this.y, this.z);
+  }
+  /** This frame moved `distance` along its own z. */
+  offset(distance) { return this.translate(...this.z.map((c) => distance * c)); }
+  /** Whether `other` is a frame with the same twelve numbers. */
+  equals(other) { return other instanceof Frame && this._v.every((c, i) => c === other._v[i]); }
+  [Symbol.iterator]() { return this._v[Symbol.iterator](); }
+  toString() { return `Frame(origin=[${this.origin}], x=[${this.x}], y=[${this.y}], z=[${this.z}])`; }
+}
 
 /** The fluent chain mirroring the Rust `Workplane`: a frame, the solid so far, the face last picked. A build call replaces the solid. */
 class Workplane {
@@ -762,7 +1037,7 @@ function writeStep(filePath, solids, schema = null, unit = 'mm') { fs.writeFileS
 
 module.exports = {
   BuildError, NONE, UNITS, Axis,
-  libraryPath, defaultSchema, version, buildDate, license, licenseInfo, licenseNoticeCount,
-  Profile, Path, SweepPath, Slant, Solid, Selector, Edge, Workplane, writeStep, writeStepText,
+  libraryPath, defaultSchema, version, buildDate, license, licenseInfo, licenseNoticeCount, brepLayoutId,
+  Frame, Profile, Path, SweepPath, Slant, Solid, Selector, Edge, Workplane, writeStep, writeStepText,
   _lib, _lastError, _frame, _axis, _progress, _searchedPaths, _notFoundMessage, _floats, _uint32s,
 };

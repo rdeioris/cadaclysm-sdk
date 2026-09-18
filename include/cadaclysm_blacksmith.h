@@ -142,6 +142,46 @@ void cadaclysm_blacksmith_solid_free(struct CadaclysmBlacksmithSolid *solid);
 void cadaclysm_blacksmith_profile_free(struct CadaclysmBlacksmithProfile *profile);
 
 /**
+ * This library's brep layout: the compiler, target, profile and source it was
+ * built from, as one string. Equal to the reader library's
+ * `cadaclysm_brep_layout_id()` exactly when the two can share a brep. Static;
+ * never freed.
+ */
+const char *cadaclysm_blacksmith_brep_layout_id(void);
+
+/**
+ * A solid over an imported body's exact brep, **shared with the reader, not
+ * copied**: `brep` is what the reader library's `cadaclysm_node_brep` returned,
+ * `layout_id` what its `cadaclysm_brep_layout_id` returns.
+ *
+ * The solid takes a reference of its own; the caller's is still the caller's,
+ * to give back with `cadaclysm_brep_release` whether this succeeded or not. The
+ * scene the brep came from may be closed before or after the solid is freed --
+ * the brep lives until the last holder lets go of it.
+ *
+ * **Both libraries must come from the same release.** A brep is a Rust
+ * structure with no stable layout, so the two layout ids are compared first
+ * and anything but an exact match is refused (null, `last_error` set
+ * `"from_brep: ..."`, naming both) before `brep` is read. And **both must
+ * allocate from the process heap** -- whichever library lets go last frees
+ * the brep -- which the shipped libraries do (neither installs a custom Rust
+ * `#[global_allocator]`); a build of either that does breaks this.
+ *
+ * Also refused: a null `brep` or `layout_id`, and a brep with no faces. What
+ * a solid from a file can then do depends on its geometry: fillet and chamfer
+ * want line and circle edges; booleans take any surface, but the new edges they
+ * trace on a free-form (NURBS) face are not always writable back to STEP; and
+ * every verb meshes its operands at its tolerance first, so its cost scales
+ * with the body's face count.
+ *
+ * # Safety
+ * `brep` null or a live pointer from `cadaclysm_node_brep` not yet released;
+ * `layout_id` null or a NUL-terminated string.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_from_brep(const void *brep,
+                                                                const char *layout_id);
+
+/**
  * Load a license from `text_or_path`: the certificate text itself, or the
  * path of a file holding it. Replaces the one in use. Null forgets the one in
  * use, so the next call resolves from the environment and the search paths
@@ -259,13 +299,42 @@ struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_slot(double cx,
 
 /**
  * A closed polygon through `count` points, `xy` holding two doubles each, in
- * order; the closing side is implied. At least three points.
+ * order, with a side back to the first as its last segment. At least three points.
  *
  * # Safety
  * `xy` must point at `2 * count` doubles.
  */
 struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_polygon(const double *xy,
                                                                         size_t count);
+
+/**
+ * A regular polygon of `sides` sides (at least 3) on the circle of `radius`
+ * about (`cx`, `cy`), its first corner at `angle` radians from the sketch's x
+ * axis, the rest counter-clockwise; its side back to the first corner a segment
+ * of its own.
+ */
+struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_regular_polygon(double cx,
+                                                                                double cy,
+                                                                                double radius,
+                                                                                uint32_t sides,
+                                                                                double angle);
+
+/**
+ * A spline of `degree` through the control polygon `xy` (`count` points),
+ * `weights` null or one per point. Open, it is clamped -- it starts on the
+ * first point and ends on the last, an open chain; `closed`, it is periodic,
+ * smooth through its own start, a closed profile. The degree is lowered to fit
+ * the points. Refused for a degree of zero, too few points (two open, three
+ * closed), a point or weight not finite, a weight not positive.
+ *
+ * # Safety
+ * `xy` must point at `2 * count` doubles; `weights` null or `count` doubles.
+ */
+struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_spline(const double *xy,
+                                                                       size_t count,
+                                                                       uint32_t degree,
+                                                                       const double *weights,
+                                                                       bool closed);
 
 /**
  * `profile` with its corners between two straight segments rounded by
@@ -275,8 +344,8 @@ struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_polygon(const do
  * corner `k` is where segment `k` ends -- and a picked corner that is not
  * between two lines is refused. `open` treats the profile as an open chain,
  * its two ends kept square; closed, the corner where the last segment meets
- * the first (across the implicit closing side) is rounded too. Refused where
- * the radius does not fit.
+ * the first (across the closing side, drawn or implicit) is rounded too.
+ * Refused where the radius does not fit.
  *
  * # Safety
  * `profile` a live profile; `corners` null or `count` indices.
@@ -286,6 +355,50 @@ struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_round(const stru
                                                                       const uint32_t *corners,
                                                                       size_t count,
                                                                       bool open);
+
+/**
+ * `count` open profiles joined end to end into one new profile, the kernel's
+ * merge: in any order and either way round, each next piece the first of the
+ * rest with an end within `tolerance` of either end of the chain so far,
+ * reversed where that makes it meet. Every segment is kept exactly; a joint is
+ * the chain's own point. Where the chain's two ends meet within `tolerance`
+ * the result is closed (its last segment landing on its start), otherwise an
+ * open chain. Refused (null, `last_error` "chain: ...") for no pieces, a
+ * tolerance not positive and finite, a piece empty, with holes or closed on
+ * its own, or a piece that meets none of the others -- named by its index.
+ * The pieces are untouched.
+ *
+ * # Safety
+ * `pieces` `count` live profiles.
+ */
+struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_chain(const struct CadaclysmBlacksmithProfile *const *pieces,
+                                                                      size_t count,
+                                                                      double tolerance);
+
+/**
+ * `loops` (`count` closed profiles, no holes of their own) as one profile:
+ * the loop enclosing the most area its boundary, every other a hole in it,
+ * in the order given. Refused -- null, with the reason in `last_error`,
+ * naming loops by their index -- for a loop that is open, empty or of no area,
+ * loops that cross or touch, a hole outside the boundary or inside another.
+ *
+ * # Safety
+ * `loops` `count` live profiles.
+ */
+struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_from_loops(const struct CadaclysmBlacksmithProfile *const *loops,
+                                                                           size_t count);
+
+/**
+ * `profile` closed, as a new profile -- the forge's sketch "close": where its
+ * last segment stops short of its start, a straight segment back to it; where it
+ * already comes back within 1e-9 of its extent, its last segment made to land on
+ * the start exactly. A closed profile comes back as it is. Holes are closed the
+ * same way.
+ *
+ * # Safety
+ * `profile` a live profile.
+ */
+struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_close_loop(const struct CadaclysmBlacksmithProfile *profile);
 
 /**
  * `outer` with `hole` cut from it, as a new profile; both inputs are untouched.
@@ -416,7 +529,8 @@ uint32_t cadaclysm_blacksmith_select_face(const struct CadaclysmBlacksmithSolid 
 
 /**
  * The workplane on a face, twelve doubles into `out`: origin at the face's
- * boundary centroid, z its outward normal -- what `Workplane::workplane`
+ * boundary centroid, z its outward normal, x world X laid onto the face
+ * (world Y on a face facing close to X) -- what `Workplane::workplane`
  * adopts. `false` if the face's boundary or normal cannot be read.
  *
  * # Safety
@@ -510,6 +624,26 @@ uint32_t cadaclysm_blacksmith_leaked_edges(const struct CadaclysmBlacksmithSolid
  */
 uint32_t cadaclysm_blacksmith_unpaired_edges(const struct CadaclysmBlacksmithSolid *solid,
                                              double tolerance);
+
+/**
+ * Whether the solid's faces make a manifold, read off its topology -- the edges
+ * and loops it is made of -- rather than a mesh: nothing is tessellated, so it
+ * takes no tolerance. Eight counts into `out`, in order: faces, edges,
+ * vertices, boundary edges (bordered by one face), non-manifold edges (by
+ * three or more), non-manifold vertices (where the faces round a point make
+ * more than one fan: two solids touching at a corner), then `1` if it is a
+ * manifold (no non-manifold edge or vertex) and `1` if it is also closed (no
+ * boundary edge: it encloses a solid), else `0`. A sheet is a manifold that is
+ * not closed.
+ *
+ * Orientation is not asked -- whether the faces all face out is
+ * [`cadaclysm_blacksmith_unpaired_edges`]'s question, on a mesh. `false` (and
+ * `last_error`) on a null argument.
+ *
+ * # Safety
+ * `solid` live; `out` eight `uint32_t`.
+ */
+bool cadaclysm_blacksmith_manifold(const struct CadaclysmBlacksmithSolid *solid, uint32_t *out);
 
 /**
  * A box `x` by `y` by `z`, centred on the origin. Six planes.
@@ -692,6 +826,35 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_revolve(const struct Cadac
 struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_revolve_open(const struct CadaclysmBlacksmithProfile *profile,
                                                                    const double *axis,
                                                                    double angle);
+
+/**
+ * `profile`, drawn on `frame`, swung `angle` radians about the axis through
+ * the sketch points (`axis[0]`, `axis[1]`) and (`axis[2]`, `axis[3]`), in the
+ * frame's own x and y, into a closed solid -- the profile and its axis drawn
+ * together, as a sketch draws them, rather than the profile in (radius,
+ * height) as `cadaclysm_blacksmith_revolve` reads it. The profile may lie on
+ * either side of the axis and touch it, not cross it; the sweep starts where
+ * the profile is drawn, turning right-handed about the axis.
+ *
+ * # Safety
+ * `profile` a live profile; `frame` twelve doubles; `axis` four.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_revolve_in_plane(const struct CadaclysmBlacksmithProfile *profile,
+                                                                       const double *frame,
+                                                                       const double *axis,
+                                                                       double angle);
+
+/**
+ * As `revolve_in_plane`, for a curve: the profile's own segments swung into a
+ * sheet, no caps.
+ *
+ * # Safety
+ * As `revolve_in_plane`.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_revolve_open_in_plane(const struct CadaclysmBlacksmithProfile *profile,
+                                                                            const double *frame,
+                                                                            const double *axis,
+                                                                            double angle);
 
 /**
  * Every face of `sheet` pushed `height` along its own normal, walled and
@@ -914,6 +1077,38 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_chamfer(const struct Cadac
                                                               size_t count,
                                                               double distance,
                                                               double tolerance);
+
+/**
+ * Face `face` of `solid` pushed out by `distance` along its outward normal (pulled
+ * in, negative) the way a CAD program extrudes a face: the prism over it joined on
+ * (cut out) at `tolerance`, and the result's flush faces merged -- a box's top
+ * raised is one taller box of six faces. A face on a cylinder moves out along its
+ * normal instead, the cylinder's radius changed (a boss fatter, a bore narrower), the
+ * planes beside it -- square to its axis -- carried along. Null and `last_error` for
+ * any other curved face, a curved one with anything else beside it or pushed to its
+ * axis or into another edge, a face the solid does not have, a zero or non-finite
+ * distance, or what the boolean refuses.
+ *
+ * # Safety
+ * `solid` live; `progress` null or valid.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_push_pull(const struct CadaclysmBlacksmithSolid *solid,
+                                                                uint32_t face,
+                                                                double distance,
+                                                                double tolerance,
+                                                                CadaclysmBlacksmithProgress progress,
+                                                                void *user);
+
+/**
+ * `solid` with its flush faces merged, as a new solid: planar faces on one plane,
+ * facing one way and meeting along their edges, made one face, and every vertex
+ * left in the middle of a straight edge taken out -- the seams a join leaves where
+ * two parts are flush. A solid with nothing to merge comes back as it was.
+ *
+ * # Safety
+ * `solid` live.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_merge_flush(const struct CadaclysmBlacksmithSolid *solid);
 
 /**
  * `solid` hollowed to a wall `thickness` thick (inward for a positive

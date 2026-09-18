@@ -259,14 +259,38 @@ internal sealed class SceneHandle : CadaclysmHandle
     }
 }
 
+/// <summary>`CadaclysmBrep *`, a reference on a body's brep, given back by
+/// `cadaclysm_brep_release`. A `SafeHandle` so the marshaller holds it for the length of
+/// `cadaclysm_blacksmith_from_brep`, as it does every other owned handle.</summary>
+internal sealed class BrepHandle : CadaclysmHandle
+{
+    public BrepHandle()
+    {
+    }
+
+    protected override bool ReleaseHandle()
+    {
+        Native.cadaclysm_brep_release(handle);
+        return true;
+    }
+}
+
 // ---- loading the library ------------------------------------------------------------------
 
-/// <summary>Resolves `cadaclysm_capi` for every P/Invoke in <see cref="Native"/>, and
-/// `cadaclysm_blacksmith` for every one in `Blacksmith.cs`'s `BlacksmithNative`.</summary>
+/// <summary>Resolves `cadaclysm_capi` for every P/Invoke in <see cref="Native"/>, and hands
+/// `cadaclysm_blacksmith` to <see cref="Kernel"/> for every one in `Blacksmith.cs`'s
+/// `BlacksmithNative`.</summary>
 internal static class Loader
 {
     private static readonly object Gate = new();
     private static bool _registered;
+
+    /// <summary>How the kernel library is found: set by `Blacksmith.cs` before it registers,
+    /// since the kernel follows its own rule -- Python's kernel module's, with its own variable
+    /// and its own error -- and this file compiles without that one. The runtime allows one
+    /// resolver per assembly, so the kernel's rule is handed to this one rather than
+    /// installed beside it.</summary>
+    internal static Func<IntPtr>? Kernel;
 
     /// <summary>Install this assembly's `DllImport` resolver, once. Both native classes call
     /// this from their static constructors: the runtime allows one resolver per assembly and
@@ -278,7 +302,9 @@ internal static class Loader
             if (_registered) return;
             _registered = true;
             NativeLibrary.SetDllImportResolver(typeof(Loader).Assembly, (name, assembly, path) =>
-                name.StartsWith("cadaclysm_", StringComparison.Ordinal) ? Resolve(name) : IntPtr.Zero);
+                name == "cadaclysm_blacksmith" ? Kernel?.Invoke() ?? IntPtr.Zero
+                : name.StartsWith("cadaclysm_", StringComparison.Ordinal) ? Resolve(name)
+                : IntPtr.Zero);
         }
     }
 
@@ -289,11 +315,10 @@ internal static class Loader
     private static string[] FilesOf(string libraryName) =>
         new[] { $"{libraryName}.dll", $"lib{libraryName}.dylib", $"lib{libraryName}.so" };
 
-    /// <summary>Finds and loads the named library: the environment (`CADACLYSM_LIBRARY` for
-    /// both, and `CADACLYSM_BLACKSMITH_LIBRARY` first for the kernel, as Python's kernel
-    /// module reads it) as a directory or the file itself, then beside this assembly, then
-    /// `lib/` and `target/{release,debug}` in every ancestor, then the platform default
-    /// search.</summary>
+    /// <summary>Finds and loads the reader library: `CADACLYSM_LIBRARY` as a directory or the
+    /// file itself, then beside this assembly, then `lib/` and `target/{release,debug}` in
+    /// every ancestor, then the platform default search. The kernel has its own rule, in
+    /// `Blacksmith.cs` (see <see cref="Kernel"/>).</summary>
     /// <remarks>The library sits in the Rust build directory, not beside this assembly by
     /// default, so this points the loader at it rather than making the caller arrange PATH.
     /// A deployment that ships the library alongside the executable works untouched, since
@@ -302,10 +327,7 @@ internal static class Loader
     {
         var files = FilesOf(libraryName);
         var candidates = new List<string>();
-        var variables = libraryName == "cadaclysm_blacksmith"
-            ? new[] { "CADACLYSM_BLACKSMITH_LIBRARY", "CADACLYSM_LIBRARY" }
-            : new[] { "CADACLYSM_LIBRARY" };
-        foreach (var variable in variables)
+        foreach (var variable in new[] { "CADACLYSM_LIBRARY" })
         {
             var env = Environment.GetEnvironmentVariable(variable);
             if (string.IsNullOrEmpty(env)) continue;
@@ -429,6 +451,11 @@ internal static class Native
     internal static extern bool cadaclysm_node_can_mesh(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawMesh cadaclysm_node_mesh(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawSurfaces cadaclysm_node_surfaces(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern BrepHandle cadaclysm_node_brep(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern void cadaclysm_brep_release(IntPtr brep);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_brep_layout_id();
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_brep_manifold(BrepHandle brep, [Out] uint[] outRow);
     [DllImport(Lib)] internal static extern void cadaclysm_surface_matrix(SceneHandle scene, [Out] float[] outMatrix);
     [DllImport(Lib)] internal static extern RawBounds cadaclysm_node_bounds(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern uint cadaclysm_node_instance_of(SceneHandle scene, uint node);
@@ -788,6 +815,88 @@ public sealed class Placement
     }
 }
 
+/// <summary>A body's exact B-rep -- the trimmed surfaces its mesh is cut from -- shared with
+/// the scene rather than copied: a reference of this object's own, given back by
+/// <see cref="Dispose"/>. Nothing here reads it; it is for the blacksmith library, which
+/// operates on it without a copy (`Solid.FromNode`). It outlives its scene for as long as
+/// anything holds it. In the node's own frame and the file's own units and axes, whatever
+/// convention the scene was opened with. The blacksmith library must come from the same
+/// release; it checks <see cref="LayoutId"/> and refuses otherwise.</summary>
+public sealed class Brep : IDisposable
+{
+    internal BrepHandle Handle { get; }
+
+    internal Brep(BrepHandle handle)
+    {
+        Handle = handle;
+    }
+
+    /// <summary>How this library lays a brep out in memory: its compiler, target and source.
+    /// The blacksmith library shares a brep only with a library whose id equals its own.</summary>
+    public static string LayoutId => Marshal.PtrToStringUTF8(Native.cadaclysm_brep_layout_id()) ?? "";
+
+    public bool Closed => Handle.IsClosed;
+
+    /// <summary>Whether its faces make a manifold -- every edge bordered by one face or two,
+    /// the faces round every vertex one fan -- and whether it is closed. Read off the topology
+    /// the file wrote, not a mesh: faces that name no shared edge (IGES, each surface its own
+    /// sheet; an IFC face written as one polygon) read as open however well they meet in
+    /// space.</summary>
+    public Manifold Manifold
+    {
+        get
+        {
+            if (Handle.IsClosed) throw new CadaclysmException("brep: released");
+            var row = new uint[8];
+            if (!Native.cadaclysm_brep_manifold(Handle, row))
+                throw new CadaclysmException(Cadaclysm.LastErrorOr("manifold"));
+            return new Manifold(row);
+        }
+    }
+
+    public void Dispose() => Handle.Dispose();
+}
+
+/// <summary>Whether a brep's or a solid's faces make a manifold, as plain data
+/// (<see cref="Brep.Manifold"/>, and the kernel's <c>Solid.Manifold</c>): its faces, edges
+/// and vertices; the edges one face borders (a sheet's rim), the edges three or more do, and
+/// the vertices whose faces make more than one fan (two solids touching at a corner).
+/// </summary>
+public readonly struct Manifold
+{
+    public int Faces { get; }
+    public int Edges { get; }
+    public int Vertices { get; }
+    public int BoundaryEdges { get; }
+    public int NonManifoldEdges { get; }
+    public int NonManifoldVertices { get; }
+
+    /// <summary>No non-manifold edge or vertex: a manifold, possibly with a boundary.</summary>
+    public bool IsManifold { get; }
+
+    /// <summary>A manifold with no boundary edge either: it encloses a solid.</summary>
+    public bool IsClosed { get; }
+
+    /// <summary>From the eight counts `cadaclysm_brep_manifold` and
+    /// `cadaclysm_blacksmith_manifold` write, in their order.</summary>
+    internal Manifold(uint[] row)
+    {
+        Faces = (int)row[0];
+        Edges = (int)row[1];
+        Vertices = (int)row[2];
+        BoundaryEdges = (int)row[3];
+        NonManifoldEdges = (int)row[4];
+        NonManifoldVertices = (int)row[5];
+        IsManifold = row[6] == 1;
+        IsClosed = row[7] == 1;
+    }
+
+    public override string ToString() =>
+        $"Manifold(faces={Faces}, edges={Edges}, vertices={Vertices}, boundary_edges={BoundaryEdges}, " +
+        $"non_manifold_edges={NonManifoldEdges}, non_manifold_vertices={NonManifoldVertices}, " +
+        $"is_manifold={IsManifold}, is_closed={IsClosed})";
+}
+
 /// <summary>One node of the document: an assembly, a shape, a placement.</summary>
 /// <remarks>A handle rather than a snapshot -- every property below asks the scene when you
 /// ask it, so nothing here goes stale and nothing is read that a caller never looks at.
@@ -998,6 +1107,20 @@ public sealed class Node : IEquatable<Node>
         {
             var raw = Native.cadaclysm_node_mesh(Scene.Handle, Index);
             return raw.IndexCount == 0 || raw.Positions == IntPtr.Zero ? null : new Mesh(Scene, raw);
+        }
+    }
+
+    /// <summary>Its exact B-rep, for `Cadaclysm.Blacksmith.Solid.FromNode` to operate on, or
+    /// null where it has none (a mesh, a curve, a CSG body, a JT or OpenSCAD part). Shared
+    /// with the scene, not copied; see <see cref="Cadaclysm.Brep"/>.</summary>
+    public Brep? Brep
+    {
+        get
+        {
+            var handle = Native.cadaclysm_node_brep(Scene.Handle, Index);
+            if (!handle.IsInvalid) return new Brep(handle);
+            handle.Dispose();
+            return null;
         }
     }
 

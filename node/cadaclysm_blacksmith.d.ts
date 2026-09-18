@@ -1,6 +1,6 @@
 /// <reference types="node" />
 /** The cadaclysm_blacksmith C ABI for Node.js. See cadaclysm_blacksmith.js for the semantics. */
-import type { Scene } from './cadaclysm';
+import type { Node, Scene } from './cadaclysm';
 
 export class BuildError extends Error {}
 export const NONE: number;
@@ -9,8 +9,8 @@ export type Unit = keyof typeof UNITS;
 export declare const Axis: { readonly X: 0; readonly Y: 1; readonly Z: 2 };
 export type AxisValue = 0 | 1 | 2;
 
-/** Twelve numbers (origin, x, y, z) or four triples. */
-export type Frame = ArrayLike<number> | [ArrayLike<number>, ArrayLike<number>, ArrayLike<number>, ArrayLike<number>];
+/** A `Frame`, twelve numbers (origin, x, y, z) or four triples. */
+export type FrameLike = Frame | ArrayLike<number> | [ArrayLike<number>, ArrayLike<number>, ArrayLike<number>, ArrayLike<number>];
 /** Six numbers (point, direction) or two triples. */
 export type AxisLine = ArrayLike<number> | [ArrayLike<number>, ArrayLike<number>];
 export type Point2 = [number, number] | ArrayLike<number>;
@@ -31,7 +31,12 @@ export class Profile {
   static circle(r: number): Profile;
   static slot(centre: Point2, length: number, r: number): Profile;
   static polygon(points: Point2[]): Profile;
+  static regularPolygon(centre: Point2, radius: number, sides: number, angle?: number): Profile;
+  static spline(points: Point2[], degree?: number, weights?: ArrayLike<number> | null, closed?: boolean): Profile;
   static path(start: Point2): Path;
+  static chain(pieces: Iterable<Profile>, tolerance?: number): Profile;
+  static fromLoops(loops: Iterable<Profile>): Profile;
+  closeLoop(): Profile;
   withHole(hole: Profile): Profile;
   translate(dx: number, dy: number): Profile;
   round(radius: number, corners?: Iterable<number> | null, open?: boolean): Profile;
@@ -48,7 +53,7 @@ export class Path {
 export class SweepPath {
   constructor(at: Point3);
   static at(point: Point3): SweepPath;
-  static along(curve: Profile, frame: Frame, tolerance?: number, open?: boolean): SweepPath;
+  static along(curve: Profile, frame: FrameLike, tolerance?: number, open?: boolean): SweepPath;
   lineTo(point: Point3): this;
   arc(centre: Point3, axis: Point3, angle: number): this;
   close(): void;
@@ -56,16 +61,40 @@ export class SweepPath {
 }
 
 /** A plane read as a height over the sketch plane: `at + grad . (x, y)`. */
+/** An origin and three unit, square, right-handed axes; iterates as twelve numbers, so it goes wherever a frame does. */
+export class Frame implements Iterable<number> {
+  constructor(origin: Point3, x: Point3, y: Point3, z: Point3);
+  static of(frame: FrameLike): Frame;
+  static xy(origin?: Point3): Frame;
+  static xz(origin?: Point3): Frame;
+  static yz(origin?: Point3): Frame;
+  static at(origin: Point3, normal: Point3, x?: Point3 | null): Frame;
+  readonly origin: number[];
+  readonly x: number[];
+  readonly y: number[];
+  readonly z: number[];
+  translate(dx: number, dy: number, dz: number): Frame;
+  offset(distance: number): Frame;
+  equals(other: unknown): boolean;
+  [Symbol.iterator](): Iterator<number>;
+}
+
 export class Slant {
   constructor(at: number, grad?: Point2);
   readonly at: number;
   readonly grad: readonly [number, number];
   static flat(at: number): Slant;
-  static ofPlane(frame: Frame, point: Point3, normal: Point3): Slant;
+  static ofPlane(frame: FrameLike, point: Point3, normal: Point3): Slant;
 }
 /** A `Slant`, or a bare number for `Slant.flat(number)`. */
 export type SlantLike = Slant | number;
 
+/** Whether a solid's faces make a manifold, read off its topology (`Solid.manifold`). */
+export interface Manifold {
+  faces: number; edges: number; vertices: number;
+  boundaryEdges: number; nonManifoldEdges: number; nonManifoldVertices: number;
+  isManifold: boolean; isClosed: boolean;
+}
 export interface SolidMesh { positions: Float32Array; normals: Float32Array; indices: Uint32Array; vertexCount: number; indexCount: number }
 
 export class Solid {
@@ -79,31 +108,33 @@ export class Solid {
   static sphere(r: number): Solid;
   static torus(major: number, minor: number): Solid;
   static wedge(x: number, y: number, z: number, topX: number): Solid;
-  static extrude(profile: Profile, frame: Frame, height: number): Solid;
-  static extrudeOpen(profile: Profile, frame: Frame, height: number): Solid;
-  static extrudeTapered(profile: Profile, frame: Frame, height: number, taper: number): Solid;
-  static extrudeOpenTapered(profile: Profile, frame: Frame, height: number, taper: number): Solid;
-  static extrudeBetween(profile: Profile, frame: Frame, bottom: SlantLike, top: SlantLike): Solid;
-  static extrudeOpenBetween(profile: Profile, frame: Frame, bottom: SlantLike, top: SlantLike): Solid;
-  static loft(a: Profile, frameA: Frame, b: Profile, frameB: Frame): Solid;
-  static loftOpen(a: Profile, frameA: Frame, b: Profile, frameB: Frame): Solid;
+  static extrude(profile: Profile, frame: FrameLike, height: number): Solid;
+  static extrudeOpen(profile: Profile, frame: FrameLike, height: number): Solid;
+  static extrudeTapered(profile: Profile, frame: FrameLike, height: number, taper: number): Solid;
+  static extrudeOpenTapered(profile: Profile, frame: FrameLike, height: number, taper: number): Solid;
+  static extrudeBetween(profile: Profile, frame: FrameLike, bottom: SlantLike, top: SlantLike): Solid;
+  static extrudeOpenBetween(profile: Profile, frame: FrameLike, bottom: SlantLike, top: SlantLike): Solid;
+  static loft(a: Profile, frameA: FrameLike, b: Profile, frameB: FrameLike): Solid;
+  static loftOpen(a: Profile, frameA: FrameLike, b: Profile, frameB: FrameLike): Solid;
   static revolve(profile: Profile, axis: AxisLine, angle: number): Solid;
   static revolveOpen(profile: Profile, axis: AxisLine, angle: number): Solid;
-  static sweep(profile: Profile, frame: Frame, path: SweepPath): Solid;
-  static sweepOpen(profile: Profile, frame: Frame, path: SweepPath): Solid;
+  static revolveInPlane(profile: Profile, frame: FrameLike, a: Point2, b: Point2, angle: number): Solid;
+  static revolveOpenInPlane(profile: Profile, frame: FrameLike, a: Point2, b: Point2, angle: number): Solid;
+  static sweep(profile: Profile, frame: FrameLike, path: SweepPath): Solid;
+  static sweepOpen(profile: Profile, frame: FrameLike, path: SweepPath): Solid;
   extrudeFaces(height: number): Solid;
-  static face(profile: Profile, frame: Frame): Solid;
+  static face(profile: Profile, frame: FrameLike): Solid;
   faceSheet(face: number): Solid;
   dropFaces(faces: Iterable<number>): Solid;
   trim(tool: Solid, keep?: 'outside' | 'inside', tolerance?: number, progress?: Progress | null): Solid;
   trimAsync(tool: Solid, keep?: 'outside' | 'inside', tolerance?: number, progress?: Progress | null): Promise<Solid>;
-  place(frame: Frame): Solid;
+  place(frame: FrameLike): Solid;
   translate(dx: number, dy: number, dz: number): Solid;
   rotate(axis: AxisLine, radians: number): Solid;
-  mirror(plane: Frame): Solid;
-  join(other: Solid, tolerance?: number, progress?: Progress | null): Solid;
-  cut(other: Solid, tolerance?: number, progress?: Progress | null): Solid;
-  common(other: Solid, tolerance?: number, progress?: Progress | null): Solid;
+  mirror(plane: FrameLike): Solid;
+  join(other: Solid, tolerance?: number, progress?: Progress | null, merge?: boolean): Solid;
+  cut(other: Solid, tolerance?: number, progress?: Progress | null, merge?: boolean): Solid;
+  common(other: Solid, tolerance?: number, progress?: Progress | null, merge?: boolean): Solid;
   joinAsync(other: Solid, tolerance?: number, progress?: Progress | null): Promise<Solid>;
   cutAsync(other: Solid, tolerance?: number, progress?: Progress | null): Promise<Solid>;
   commonAsync(other: Solid, tolerance?: number, progress?: Progress | null): Promise<Solid>;
@@ -116,6 +147,7 @@ export class Solid {
   leakedEdges(tolerance?: number): number;
   unpairedEdges(tolerance?: number): number;
   isWatertight(tolerance?: number): boolean;
+  readonly manifold: Manifold;
   mesh(tolerance?: number): SolidMesh;
   meshAsync(tolerance?: number): Promise<SolidMesh>;
   edgePolylines(tolerance?: number): Float32Array[];
@@ -130,12 +162,18 @@ export class Solid {
   edges(): Edge[];
   fillet(edges: Iterable<Edge | number>, radius: number, tolerance?: number, progress?: Progress | null): Solid;
   chamfer(edges: Iterable<Edge | number>, distance: number, tolerance?: number): Solid;
+  pushPull(face: number, distance: number, tolerance?: number, progress?: Progress | null): Solid;
+  mergeFlush(): Solid;
   shell(thickness: number, open?: Iterable<number>, tolerance?: number, progress?: Progress | null): Solid;
   filletAsync(edges: Iterable<Edge | number>, radius: number, tolerance?: number, progress?: Progress | null): Promise<Solid>;
   chamferAsync(edges: Iterable<Edge | number>, distance: number, tolerance?: number): Promise<Solid>;
   shellAsync(thickness: number, open?: Iterable<number>, tolerance?: number, progress?: Progress | null): Promise<Solid>;
   toScene(schema?: string | null): Scene;
+  static fromNode(scene: Scene, node: Node | number, placed?: boolean): Solid;
+  static open(path: string, body?: number | null): Solid;
+  static openAll(path: string): Solid[];
 }
+export function brepLayoutId(): string;
 
 export class Selector {
   static max(axis: AxisValue): Selector;
@@ -151,9 +189,9 @@ export class Edge {
 }
 export class Workplane {
   frame: number[];
-  constructor(frame: Frame, solid?: Solid | null);
+  constructor(frame: FrameLike, solid?: Solid | null);
   static xy(): Workplane; static xz(): Workplane; static yz(): Workplane;
-  static on(frame: Frame): Workplane;
+  static on(frame: FrameLike): Workplane;
   static fromSolid(solid: Solid): Workplane;
   cuboid(x: number, y: number, z: number): this;
   cylinder(r: number, h: number): this;

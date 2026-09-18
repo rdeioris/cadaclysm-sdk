@@ -48,6 +48,29 @@ combining two solids is explicit -- build the pin as its own solid, then
 `plate.join(pin)`. Every step here raises `BuildError` at once with the
 library's own text, rather than latching the first error until some final call.
 
+## Frames
+
+Every call taking a `frame` reads twelve numbers: an origin, then the x, y and z
+axes. `Frame` builds them and checks the axes are square and right-handed, so
+they need not be typed out -- `Frame.xy((0, 0, 5))` is the XY plane at z = 5,
+`Frame.at(point, normal)` the plane through a point facing a direction, and
+`Frame.of(solid.face_frame(i))` a face's frame to read or move:
+
+    lid = Solid.extrude(Profile.rect(30, 30), Frame.xy((0, 0, 20)), 2)
+    boss = Solid.extrude(Profile.circle(6), Frame.at((10, 0, 0), (1, 1, 0)), 4)
+
+## Solids from files
+
+`Solid.open("housing.step")` reads a STEP, ACIS, Rhino, OCCT `.brep`, IGES or IFC
+file's body as a solid to cut, fillet, join with parts built here and write back
+out (`Solid.open_all` for every body; JT and OpenSCAD are meshes and have none).
+On the desktop it goes through the reader module, `cadaclysm.py`, and
+`Solid.from_node(scene, node)` takes one node of a scene you already have open:
+the reader's brep is handed to this library by pointer and shared, never copied,
+so the two libraries must come from the same release (the call checks). In the
+notebook the wasm reads the file itself. What an imported solid can do is what
+its geometry allows -- see `Solid.open`.
+
 `join`/`cut`/`common` default their `tolerance` to `0.05`, not the tighter
 `1e-6` `fillet`, `chamfer` and `shell` use, for cost: a boolean meshes both
 solids at its tolerance, and a curved solid at `1e-6` is hundreds of thousands
@@ -64,15 +87,21 @@ import platform
 import sys
 from ctypes import (POINTER, c_bool, c_char_p, c_double, c_float, c_size_t, c_uint32, c_uint64, c_void_p)
 from pathlib import Path as _FsPath   # `Path` here is the outline builder
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:   # names the annotations use; imported when used, never at load
+    import cadaclysm
+    import numpy
 
 __all__ = [
-    "Axis", "BuildError", "Edge", "Path", "Profile", "Selector", "Slant", "Solid", "SweepPath", "Workplane",
-    "build_date", "default_schema", "library_path", "license", "license_info", "license_notice_count", "version",
+    "Axis", "BuildError", "Edge", "Frame", "Manifold", "Path", "Profile", "Selector", "Slant", "Solid", "SweepPath", "Workplane",
+    "brep_layout_id", "build_date", "default_schema", "library_path", "license", "license_info", "license_notice_count",
+    "version",
     "write_step", "write_step_text", "__version__",
 ]
 
 # This file's own version (the workspace's); `version()` is the loaded library's.
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 NONE = 0xFFFFFFFF
 UNITS = {"m": 0, "mm": 1, "in": 2}
@@ -131,14 +160,16 @@ def library_path() -> _FsPath:
 
 
 def default_schema() -> _FsPath:
-    """`schemas/ap203.exp`: `CADACLYSM_SCHEMAS/ap203.exp` if set, else the repository's."""
+    """`ap203.exp`: `CADACLYSM_SCHEMAS/ap203.exp` if set; else beside this file (the pip
+    package); else in a `schemas/` directory in any ancestor, nearest first (the SDK's,
+    beside `python/`, or this repository's, at its root)."""
     override = os.environ.get("CADACLYSM_SCHEMAS")
     candidates = []
     if override:
         candidates.append(_FsPath(override) / "ap203.exp")
     here = _FsPath(__file__).resolve().parent
-    if len(here.parents) >= 3:
-        candidates.append(here.parents[2] / "schemas" / "ap203.exp")
+    candidates.append(here / "ap203.exp")
+    candidates += [ancestor / "schemas" / "ap203.exp" for ancestor in [here, *here.parents]]
     url = os.environ.get("CADACLYSM_SCHEMA_URL")
     if _WASM and override and url and not (_FsPath(override) / "ap203.exp").exists():
         # The notebook's worker names where the schema is served from; fetched once
@@ -194,10 +225,15 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_profile_rect", _PROFILE, [c_double, c_double]),
     ("cadaclysm_blacksmith_profile_circle", _PROFILE, [c_double]),
     ("cadaclysm_blacksmith_profile_slot", _PROFILE, [c_double, c_double, c_double, c_double]),
+    ("cadaclysm_blacksmith_profile_regular_polygon", _PROFILE, [c_double, c_double, c_double, c_uint32, c_double]),
+    ("cadaclysm_blacksmith_profile_spline", _PROFILE, [_D, c_size_t, c_uint32, _D, c_bool]),
     ("cadaclysm_blacksmith_profile_polygon", _PROFILE, [_D, c_size_t]),
     ("cadaclysm_blacksmith_profile_with_hole", _PROFILE, [_PROFILE, _PROFILE]),
     ("cadaclysm_blacksmith_translate_profile", _PROFILE, [_PROFILE, c_double, c_double]),
     ("cadaclysm_blacksmith_profile_round", _PROFILE, [_PROFILE, c_double, _U, c_size_t, c_bool]),
+    ("cadaclysm_blacksmith_profile_chain", _PROFILE, [POINTER(c_void_p), c_size_t, c_double]),
+    ("cadaclysm_blacksmith_profile_from_loops", _PROFILE, [POINTER(c_void_p), c_size_t]),
+    ("cadaclysm_blacksmith_profile_close_loop", _PROFILE, [_PROFILE]),
     ("cadaclysm_blacksmith_path_begin", _PATH, [c_double, c_double]),
     ("cadaclysm_blacksmith_path_line_to", c_bool, [_PATH, c_double, c_double]),
     ("cadaclysm_blacksmith_path_arc_to", c_bool, [_PATH, c_double, c_double, c_double, c_double, c_bool]),
@@ -223,6 +259,8 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_loft_open", _SOLID, [_PROFILE, _D, _PROFILE, _D]),
     ("cadaclysm_blacksmith_revolve", _SOLID, [_PROFILE, _D, c_double]),
     ("cadaclysm_blacksmith_revolve_open", _SOLID, [_PROFILE, _D, c_double]),
+    ("cadaclysm_blacksmith_revolve_in_plane", _SOLID, [_PROFILE, _D, _D, c_double]),
+    ("cadaclysm_blacksmith_revolve_open_in_plane", _SOLID, [_PROFILE, _D, _D, c_double]),
     ("cadaclysm_blacksmith_sweep_path_begin", _SWEEP_PATH, [c_double, c_double, c_double]),
     ("cadaclysm_blacksmith_sweep_path_line_to", c_bool, [_SWEEP_PATH, c_double, c_double, c_double]),
     ("cadaclysm_blacksmith_sweep_path_arc", c_bool, [_SWEEP_PATH] + [c_double] * 7),
@@ -246,6 +284,8 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_fillet", _SOLID, [_SOLID, _U, c_size_t, c_double, c_double, _PROGRESS, c_void_p]),
     ("cadaclysm_blacksmith_chamfer", _SOLID, [_SOLID, _U, c_size_t, c_double, c_double]),
     ("cadaclysm_blacksmith_shell", _SOLID, [_SOLID, c_double, _U, c_size_t, c_double, _PROGRESS, c_void_p]),
+    ("cadaclysm_blacksmith_push_pull", _SOLID, [_SOLID, c_uint32, c_double, c_double, _PROGRESS, c_void_p]),
+    ("cadaclysm_blacksmith_merge_flush", _SOLID, [_SOLID]),
     ("cadaclysm_blacksmith_face_count", c_uint32, [_SOLID]),
     ("cadaclysm_blacksmith_select_face", c_uint32, [_SOLID, c_uint32, _D, c_uint32]),
     ("cadaclysm_blacksmith_face_frame", c_bool, [_SOLID, c_uint32, _D]),
@@ -259,8 +299,11 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_bounds", c_bool, [_SOLID, c_double, _D, _D]),
     ("cadaclysm_blacksmith_leaked_edges", c_uint32, [_SOLID, c_double]),
     ("cadaclysm_blacksmith_unpaired_edges", c_uint32, [_SOLID, c_double]),
+    ("cadaclysm_blacksmith_manifold", c_bool, [_SOLID, _U]),
     ("cadaclysm_blacksmith_step", c_void_p, [POINTER(c_void_p), c_size_t, c_char_p, c_uint32]),
     ("cadaclysm_blacksmith_string_free", None, [c_void_p]),
+    ("cadaclysm_blacksmith_from_brep", _SOLID, [c_void_p, c_char_p]),
+    ("cadaclysm_blacksmith_brep_layout_id", c_char_p, []),
 ]
 
 # Under Pyodide (the website's notebook) there is no shared library to load: the
@@ -290,7 +333,7 @@ class _WasmLibrary:
     # it, and 0 (a null handle, or a count the caller checks `last_error` on)
     # for everything else
     _BOOLS = {"path_line_to", "path_arc_to", "path_bezier_to", "path_nurbs_to", "sweep_path_line_to",
-              "sweep_path_arc", "slant_of_plane", "face_frame", "bounds", "edge", "colour", "license_set"}
+              "sweep_path_arc", "slant_of_plane", "face_frame", "bounds", "edge", "colour", "manifold", "license_set"}
     _FAILS = {"select_face": NONE, "leaked_edges": NONE, "unpaired_edges": NONE,
               "mesh": _Mesh(), "edge_polylines": _Polylines()}
     # results that C writes into an out-array of doubles at this position, and the
@@ -300,10 +343,10 @@ class _WasmLibrary:
     # count (a typed array knows its length), the progress `user` pointer, and
     # the out-arguments above
     _DROP = {"profile_polygon": (1,), "path_nurbs_to": (2, 5), "join": (4,), "cut": (4,), "common": (4,),
-             "split_sheet": (4,), "trim": (5,), "drop_faces": (2,), "profile_round": (3,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "step": (1,),
-             "slant_of_plane": (3,), "face_frame": (2,), "bounds": (2, 3), "edge": (2,), "colour": (2,)}
+             "split_sheet": (4,), "trim": (5,), "drop_faces": (2,), "profile_round": (3,), "profile_spline": (1,), "profile_chain": (1,), "profile_from_loops": (1,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "push_pull": (5,), "step": (1,),
+             "slant_of_plane": (3,), "face_frame": (2,), "bounds": (2, 3), "edge": (2,), "colour": (2,), "manifold": (1,)}
     # strings the C side returns as `const char*`, and the module decodes
-    _TEXTS = {"version", "build_date", "face_kind", "license_info"}
+    _TEXTS = {"version", "build_date", "face_kind", "license_info", "brep_layout_id"}
 
     def __init__(self):
         import js
@@ -316,6 +359,18 @@ class _WasmLibrary:
 
     def cadaclysm_blacksmith_string_free(self, _text):
         pass
+
+    def open_file(self, data: bytes, extension: str) -> "list[int]":
+        """Every body a file draws, as solid handles -- the wasm reads the file
+        itself, readers and kernel being one module. Not a C entry point, so it
+        sits outside the table the rest goes through."""
+        from pyodide.ffi import JsException, to_js
+        try:
+            return [int(h) for h in self._js.cadaclysm_blacksmith_open_file(to_js(memoryview(data)), extension)]
+        except JsException as e:
+            if self._trapped(e):
+                raise
+            raise BuildError(self._message(e)) from None
 
     def __getattr__(self, name):
         short = name.removeprefix("cadaclysm_blacksmith_")
@@ -397,6 +452,9 @@ class _WasmLibrary:
             if result is None:
                 return False
             args[2][0:3] = [float(v) for v in result]
+            return True
+        if short == "manifold":   # eight counts, into C's `uint32_t` out-array
+            args[1][0:8] = [int(v) for v in result]
             return True
         if short == "bounds":
             values = [float(v) for v in result]
@@ -508,6 +566,40 @@ def _axis(axis):
     return _doubles(flat, 6, "axis")
 
 
+def _reader(what: str):
+    """The reader module, `cadaclysm.py`, with a message saying where it lives."""
+    try:
+        import cadaclysm
+    except ImportError:
+        raise ImportError(
+            f"{what} needs the reader module: put crates/cadaclysm-capi/examples on sys.path "
+            "and build its library with `cargo build --release -p cadaclysm-capi`"
+        ) from None
+    return cadaclysm
+
+
+def _from_brep(node, what: str, missing_ok=False):
+    """The node's brep as a solid, shared: the reader's reference handed across
+    and given straight back, the solid holding one of its own."""
+    brep = node.brep
+    if brep is None:
+        if missing_ok:
+            return None
+        raise BuildError(f"{what} has no brep: only a B-rep body has one (STEP, ACIS, Rhino, OCCT .brep, "
+                         "IGES, IFC), not a mesh, a curve or a CSG body")
+    with brep:
+        return Solid(_lib().cadaclysm_blacksmith_from_brep(brep.pointer, brep.layout_id().encode()))
+
+
+def _is_identity(matrix) -> bool:
+    return all(float(matrix[i][j]) == (1.0 if i == j else 0.0) for i in range(4) for j in range(4))
+
+
+def _close_all(solids) -> None:
+    for s in solids:
+        s.close()
+
+
 _numpy_module = None
 
 
@@ -582,6 +674,13 @@ def version() -> str:
     return _text(_lib().cadaclysm_blacksmith_version())
 
 
+def brep_layout_id() -> str:
+    """How the loaded library lays a brep out in memory: its compiler, target and
+    source. `Solid.from_node` works only where this equals the reader library's
+    (`cadaclysm.Brep.layout_id()`) -- the two from the same release."""
+    return _text(_lib().cadaclysm_blacksmith_brep_layout_id())
+
+
 # ---- profiles -------------------------------------------------------------
 
 
@@ -619,8 +718,64 @@ class Profile:
         return Profile(_lib().cadaclysm_blacksmith_profile_polygon((c_double * len(flat))(*flat), n))
 
     @staticmethod
+    def regular_polygon(centre, radius, sides, angle=0.0) -> "Profile":
+        """A regular polygon of `sides` sides (at least 3) on the circle of
+        `radius` about `centre`, its first corner at `angle` radians from the
+        sketch's x axis, the rest counter-clockwise."""
+        cx, cy = centre
+        return Profile(_lib().cadaclysm_blacksmith_profile_regular_polygon(cx, cy, radius, max(0, int(sides)), angle))
+
+    @staticmethod
+    def spline(points, degree=3, weights=None, closed=False) -> "Profile":
+        """A spline of `degree` through the control polygon `points` (`weights`
+        one per point, or None). Open, it starts on the first point and ends on
+        the last -- an open chain; `closed=True`, it is periodic, smooth through
+        its own start -- a closed profile. The degree is lowered to fit the
+        points. Raises `BuildError` for a degree of zero, too few points (two
+        open, three closed), or a weight not positive."""
+        flat = [float(v) for p in points for v in p]
+        n = len(flat) // 2
+        w = None if weights is None else (c_double * len(weights))(*[float(x) for x in weights])
+        return Profile(_lib().cadaclysm_blacksmith_profile_spline((c_double * len(flat))(*flat), n, max(0, int(degree)), w, bool(closed)))
+
+    @staticmethod
     def path(start) -> "Path":
         return Path(start)
+
+    @staticmethod
+    def chain(pieces, tolerance=1e-6) -> "Profile":
+        """Open profiles joined end to end into one -- the forge's merge. The
+        pieces (paths ended open) may come in any order and either way round:
+        each next one is the first of the rest with an end within `tolerance`
+        of either end of the chain so far, reversed where that makes it meet.
+        Every segment is kept exactly; a joint is the chain's own point. Closed
+        where the chain's two ends meet, otherwise an open chain. Raises
+        `BuildError` for no pieces, a piece empty, with holes or closed on its
+        own, or one that meets none of the others, named by its index."""
+        pieces = list(pieces)
+        handles = (c_void_p * len(pieces))(*[p._handle for p in pieces])
+        return Profile(_lib().cadaclysm_blacksmith_profile_chain(handles, len(pieces), tolerance))
+
+    @staticmethod
+    def from_loops(loops) -> "Profile":
+        """Closed loops, in any order, as one profile: the loop enclosing the most
+        area is the boundary and every other a hole in it, in the order given --
+        a sketch's rectangle and the circles drawn inside it. Each loop is a
+        closed profile with no holes of its own (a loop closing within rounding
+        is closed exactly), wound either way. Raises `BuildError`, naming loops
+        by their index, for a loop that is open, empty or of no area, loops that
+        cross or touch, a hole outside the boundary, or one inside another hole."""
+        loops = list(loops)
+        handles = (c_void_p * len(loops))(*[p._handle for p in loops])
+        return Profile(_lib().cadaclysm_blacksmith_profile_from_loops(handles, len(loops)))
+
+    def close_loop(self) -> "Profile":
+        """This profile closed -- the forge's sketch "close": where its last segment
+        stops short of its start (a path ended open), a straight segment back to it;
+        where it already comes back to within 1e-9 of its extent, its last segment
+        made to land on the start exactly. A closed profile comes back as it is.
+        Holes are closed the same way."""
+        return Profile(_lib().cadaclysm_blacksmith_profile_close_loop(self._handle))
 
     def with_hole(self, hole: "Profile") -> "Profile":
         return Profile(_lib().cadaclysm_blacksmith_profile_with_hole(self._handle, hole._handle))
@@ -638,9 +793,8 @@ class Profile:
         and a picked corner that is not between two lines raises. `open=True`
         reads the profile as an open chain (from `Path.end_open`): its two ends
         stay square. Closed, the corner where the last segment meets the first
-        is rounded too, across the side a profile leaves implicit (so
-        `Profile.rect` has four corners). Raises `BuildError` naming the corner
-        or segment the radius does not fit."""
+        is rounded too (so `Profile.rect` has four corners). Raises `BuildError`
+        naming the corner or segment the radius does not fit."""
         if corners is None:
             picked, count = None, 0
         else:
@@ -767,7 +921,7 @@ class SweepPath:
         ok = _lib().cadaclysm_blacksmith_sweep_path_arc(self._live(), cx, cy, cz, ax, ay, az, angle)
         return self._step(ok, "sweep_path_arc")
 
-    def close(self):
+    def close(self) -> None:
         h, self._handle = getattr(self, "_handle", None), None
         if h and _library is not None:
             _library.cadaclysm_blacksmith_sweep_path_free(h)
@@ -850,7 +1004,7 @@ class Solid:
     def __del__(self):
         self.close()
 
-    def close(self):
+    def close(self) -> None:
         h, self._handle = getattr(self, "_handle", None), None
         if h and _library is not None:
             _library.cadaclysm_blacksmith_solid_free(h)
@@ -946,6 +1100,23 @@ class Solid:
         return Solid(_lib().cadaclysm_blacksmith_revolve_open(profile._handle, _axis(axis), angle))
 
     @staticmethod
+    def revolve_in_plane(profile: Profile, frame, a, b, angle) -> "Solid":
+        """`profile`, drawn on `frame`, swung `angle` radians about the axis
+        through the sketch points `a` and `b` (each `(x, y)` on the frame) --
+        the profile and its axis drawn together, as a sketch draws them, where
+        `revolve` reads the profile as (radius, height). The profile may lie on
+        either side of the axis and touch it, not cross it; the sweep starts
+        where the profile is drawn and turns right-handed about `b - a`."""
+        axis = (c_double * 4)(float(a[0]), float(a[1]), float(b[0]), float(b[1]))
+        return Solid(_lib().cadaclysm_blacksmith_revolve_in_plane(profile._handle, _frame(frame), axis, angle))
+
+    @staticmethod
+    def revolve_open_in_plane(profile: Profile, frame, a, b, angle) -> "Solid":
+        """`revolve_in_plane` for a curve: its segments swung into a sheet."""
+        axis = (c_double * 4)(float(a[0]), float(a[1]), float(b[0]), float(b[1]))
+        return Solid(_lib().cadaclysm_blacksmith_revolve_open_in_plane(profile._handle, _frame(frame), axis, angle))
+
+    @staticmethod
     def sweep(profile: Profile, frame, path: SweepPath) -> "Solid":
         """`profile`, drawn on `frame`, carried along `path` into a closed
         solid: a straight piece of the path is an extrusion, a circular piece
@@ -960,6 +1131,121 @@ class Solid:
         piece, no caps -- an open sheet, the way `extrude_open` is to
         `extrude`."""
         return Solid(_lib().cadaclysm_blacksmith_sweep_open(profile._handle, _frame(frame), path._live()))
+
+    # -- from files
+    @staticmethod
+    def from_node(scene, node, placed=True) -> "Solid":
+        """The body `node` of a `cadaclysm.Scene` draws, as a solid -- **sharing the
+        reader's brep, not copying it**. `node`: a `cadaclysm.Node` or its index.
+        The scene can be closed before the solid is: the brep lives on.
+
+        `placed` puts it where the node's `transform` does, which is where its
+        mesh draws; a node at the identity (a part file's one body) stays shared,
+        a moved one is a moved copy. `placed=False` keeps the node's own frame.
+        In the file's own units and axes either way. A block member is drawn once
+        per placement of its block: iterate `scene.placements` for those, or use
+        `Solid.open_all`.
+
+        Needs `cadaclysm.py` and its library, from the same release as this
+        one's -- the brep is handed across by pointer, and the two libraries'
+        layouts are compared first. What a solid from a file can then do: see
+        `Solid.open`.
+        """
+        cadaclysm = _reader("from_node")
+        if not isinstance(node, cadaclysm.Node):
+            node = cadaclysm.Node(scene, int(node))
+        solid = _from_brep(node, f"from_node: node {node.index} ({node.name or node.kind or '?'})")
+        if not placed:
+            return solid
+        if scene.convention != cadaclysm.Convention.NATIVE and not _is_identity(node.transform):
+            raise BuildError(
+                "from_node: placed=True needs the scene opened with Convention.NATIVE -- the brep is in "
+                "the file's own axes and the node's transform is not; open NATIVE, or pass placed=False"
+            )
+        return solid._placed(node.transform, "from_node")
+
+    @staticmethod
+    def open(path, body=None) -> "Solid":  # noqa: A003 - `Solid.open`, the verb
+        """The body a CAD file holds, as a solid: a STEP (AP203/214/242), ACIS
+        `.sat`, Rhino `.3dm`, OCCT `.brep`, IGES or IFC file, read where it
+        draws, in the file's own units and axes. A file drawing several bodies
+        needs `body=` (0-based, in drawing order) or `Solid.open_all`.
+
+        What such a solid can do is what its geometry allows: fillet and chamfer
+        want line and circle edges; booleans take any surface, but the new edges
+        they trace on a free-form (NURBS) face are not always writable back to
+        STEP; and every verb meshes its operands first, so its cost grows with
+        the body's face count -- a 3,000-face import is seconds, not
+        milliseconds.
+
+        On the desktop this reads through `cadaclysm.py` and hands each body
+        across with `from_node`; in the notebook the wasm reads the file itself.
+        """
+        solids = Solid.open_all(path)
+        name = _FsPath(path).name
+        if body is None and len(solids) == 1:
+            return solids[0]
+        if body is None:
+            _close_all(solids)
+            raise BuildError(f"open: {name} holds {len(solids)} bodies: pass body= (0 to {len(solids) - 1}), "
+                             "or use Solid.open_all")
+        if not 0 <= int(body) < len(solids):
+            _close_all(solids)
+            raise BuildError(f"open: {name} has no body {body}: it holds {len(solids)}")
+        keep = solids.pop(int(body))
+        _close_all(solids)
+        return keep
+
+    @staticmethod
+    def open_all(path) -> "list[Solid]":
+        """Every body a CAD file draws, as solids placed where it draws them: one
+        per placement, so a part placed twice is two solids. See `Solid.open`."""
+        path = _FsPath(path)
+        extension = path.suffix.lower().lstrip(".")
+        if _WASM:
+            try:
+                data = path.read_bytes()
+            except OSError as e:
+                raise BuildError(f"open: {e}") from None
+            return [Solid(h) for h in _lib().open_file(data, extension)]
+        cadaclysm = _reader("open")
+        try:
+            scene = cadaclysm.open(path)
+        except (cadaclysm.CadaclysmError, OSError) as e:
+            raise BuildError(f"open: {e}") from None
+        solids = []
+        try:
+            for placement in scene.placements:
+                node = placement.geometry
+                what = f"open: {node.name or node.kind or node.index}"
+                solid = _from_brep(node, what, missing_ok=True)
+                if solid is not None:
+                    solids.append(solid._placed(placement.transform, what))
+        except BuildError:
+            _close_all(solids)
+            raise
+        finally:
+            scene.close()
+        if not solids:
+            raise BuildError(
+                f"open: the .{extension} file draws no B-rep body -- only a STEP, ACIS, Rhino, OCCT .brep, "
+                "IGES or IFC body can be a solid, not a mesh, a curve or a CSG body"
+            )
+        return solids
+
+    def _placed(self, matrix, what: str) -> "Solid":
+        """`self` moved by a 4x4 row-major placement: itself at the identity, a moved
+        copy for a rigid move (a mirror included), refused for a scale or shear, which
+        a brep cannot follow exactly (a cylinder's radius is a number, not a point)."""
+        if _is_identity(matrix):
+            return self
+        numpy = _numpy()
+        m = numpy.asarray(matrix, dtype=float)
+        axes = m[:3, :3]
+        if not numpy.allclose(axes.T @ axes, numpy.eye(3), atol=1e-9):
+            raise BuildError(f"{what}: the placement scales or shears, which a brep cannot follow")
+        frame = (tuple(m[:3, 3]), tuple(m[:3, 0]), tuple(m[:3, 1]), tuple(m[:3, 2]))
+        return self.place(frame)
 
     @staticmethod
     def face(profile: Profile, frame) -> "Solid":
@@ -1000,18 +1286,24 @@ class Solid:
         return Solid(_lib().cadaclysm_blacksmith_mirror(self._h(), _frame(plane)))
 
     # -- combining
-    def _combine(self, f, other: "Solid", tolerance, progress) -> "Solid":
+    def _combine(self, f, other: "Solid", tolerance, progress, merge=False) -> "Solid":
         cb, _keep = _progress(progress)
-        return Solid(f(self._h(), other._h(), tolerance, cb, None))
+        out = Solid(f(self._h(), other._h(), tolerance, cb, None))
+        return out.merge_flush() if merge else out
 
-    def join(self, other: "Solid", tolerance=0.05, progress=None) -> "Solid":
-        return self._combine(_lib().cadaclysm_blacksmith_join, other, tolerance, progress)
+    def join(self, other: "Solid", tolerance=0.05, progress=None, merge=False) -> "Solid":
+        """This solid and `other` as one. `merge=True` merges the flush faces the
+        join leaves where the two meet in a plane or on one cylinder (`merge_flush`),
+        as Fusion does -- off by default, so face and edge numbers stay as they were."""
+        return self._combine(_lib().cadaclysm_blacksmith_join, other, tolerance, progress, merge)
 
-    def cut(self, other: "Solid", tolerance=0.05, progress=None) -> "Solid":
-        return self._combine(_lib().cadaclysm_blacksmith_cut, other, tolerance, progress)
+    def cut(self, other: "Solid", tolerance=0.05, progress=None, merge=False) -> "Solid":
+        """This solid with `other` removed; `merge` as `join`'s."""
+        return self._combine(_lib().cadaclysm_blacksmith_cut, other, tolerance, progress, merge)
 
-    def common(self, other: "Solid", tolerance=0.05, progress=None) -> "Solid":
-        return self._combine(_lib().cadaclysm_blacksmith_common, other, tolerance, progress)
+    def common(self, other: "Solid", tolerance=0.05, progress=None, merge=False) -> "Solid":
+        """What this solid and `other` share; `merge` as `join`'s."""
+        return self._combine(_lib().cadaclysm_blacksmith_common, other, tolerance, progress, merge)
 
     def trim(self, tool: "Solid", keep="outside", tolerance=0.05, progress=None) -> "Solid":
         """`self` (a sheet or a solid) cut along the closed `tool`'s boundary and
@@ -1058,12 +1350,12 @@ class Solid:
         return _text(raw)
 
     @property
-    def bounds(self):
+    def bounds(self) -> "tuple[tuple[float, float, float], tuple[float, float, float]]":
         """`bounds_at(0.05)` -- the bounds of the tessellation at tolerance
         0.05. Use `bounds_at` for a different tolerance."""
         return self.bounds_at(0.05)
 
-    def bounds_at(self, tolerance):
+    def bounds_at(self, tolerance) -> "tuple[tuple[float, float, float], tuple[float, float, float]]":
         """The solid's axis-aligned bounds, over the positions of its cached
         tessellation at `tolerance` (the same cache `mesh` fills and reuses,
         so a second call at the same tolerance is free): `((min_x, min_y,
@@ -1100,8 +1392,20 @@ class Solid:
         """`leaked_edges(tolerance) == 0`."""
         return self.leaked_edges(tolerance) == 0
 
+    @property
+    def manifold(self) -> "Manifold":
+        """Whether the faces make a manifold -- every edge bordered by one face
+        or two, the faces round every vertex one fan -- and whether it is
+        closed, as a `Manifold` record. Read off the solid's topology, not a
+        mesh, so it takes no tolerance; whether the faces all face out is
+        `unpaired_edges`'s question."""
+        out = (c_uint32 * 8)()
+        if not _lib().cadaclysm_blacksmith_manifold(self._h(), out):
+            _fail("manifold")
+        return Manifold(tuple(out))
+
     # -- out
-    def mesh(self, tolerance=0.05):
+    def mesh(self, tolerance=0.05) -> "tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]":
         """`(positions, normals, indices)` as read-only numpy views (float32
         (n,3), float32 (n,3), uint32 (m,)) into the solid's cache at
         `tolerance`. See the module docs for what invalidates them."""
@@ -1113,7 +1417,7 @@ class Solid:
                 _view(self, m.normals, (n, 3), "f4"),
                 _view(self, m.indices, (m.index_count,), "u4"))
 
-    def edge_polylines(self, tolerance=0.05):
+    def edge_polylines(self, tolerance=0.05) -> "list[numpy.ndarray]":
         """The feature edges as a list of float32 (k,3) read-only views."""
         p = _lib().cadaclysm_blacksmith_edge_polylines(self._h(), tolerance)
         if not p.offsets:
@@ -1125,7 +1429,7 @@ class Solid:
     def step_text(self, schema=None, unit="mm") -> str:
         return write_step_text([self], schema, unit)
 
-    def step(self, path, schema=None, unit="mm"):
+    def step(self, path, schema=None, unit="mm") -> None:
         _FsPath(path).write_text(self.step_text(schema, unit), encoding="utf-8")
 
     # -- selecting and edges
@@ -1136,8 +1440,9 @@ class Solid:
             _fail("select_face")
         return i
 
-    def face_frame(self, face: int):
-        """Twelve floats: origin, x, y, z of the workplane on `face`."""
+    def face_frame(self, face: int) -> "tuple[float, ...]":
+        """Twelve floats: origin, x, y, z of the workplane on `face` -- its centre,
+        world X laid onto it and its outward normal, as `Frame.at` lays them."""
         out = (c_double * 12)()
         if not _lib().cadaclysm_blacksmith_face_frame(self._h(), face, out):
             _fail("face_frame")
@@ -1155,11 +1460,11 @@ class Solid:
         return Solid(_lib().cadaclysm_blacksmith_coloured(self._h(), self._face_or_none(face, "coloured"), r, g, b))
 
     @property
-    def colour(self):
+    def colour(self) -> "tuple[float, float, float] | None":
         """The solid's colour, (r, g, b) in 0..1, or None."""
         return self._colour(NONE)
 
-    def face_colour(self, face: int):
+    def face_colour(self, face: int) -> "tuple[float, float, float] | None":
         """`face`'s colour as drawn -- its own, else the solid's -- or None."""
         return self._colour(self._face_or_none(face, "colour"))
 
@@ -1171,7 +1476,7 @@ class Solid:
             raise BuildError(f"{what}: face {face} is not one of the solid's {self.faces}")
         return face
 
-    def _colour(self, face: int):
+    def _colour(self, face: int) -> "tuple[float, float, float] | None":
         out = (c_double * 3)()
         if _lib().cadaclysm_blacksmith_colour(self._h(), face, out):
             return tuple(out)
@@ -1211,6 +1516,24 @@ class Solid:
         arr = (c_uint32 * len(which))(*which)
         return Solid(_lib().cadaclysm_blacksmith_chamfer(self._h(), arr, len(which), distance, tolerance))
 
+    def push_pull(self, face, distance, tolerance=0.05, progress=None) -> "Solid":
+        """Face `face` pushed out by `distance` along its outward normal (pulled in,
+        negative) the way Fusion and Rhino extrude a face: the prism over it joined on
+        (cut out), and the flush faces merged -- a box's top raised is one taller box
+        of six faces, not a box and a prism with every side wall split at the seam.
+        A face on a cylinder moves out along its normal instead, the radius changed
+        -- a boss fatter, a bore narrower -- with the flat faces beside it, square to
+        its axis, carried along; any other curved face is refused. `tolerance` and
+        `progress` as `join`'s."""
+        cb, _keep = _progress(progress)
+        return Solid(_lib().cadaclysm_blacksmith_push_pull(self._h(), face, distance, tolerance, cb, None))
+
+    def merge_flush(self) -> "Solid":
+        """This solid with its flush faces merged: flat faces on one plane, facing one
+        way and meeting, made one face, and the vertices left mid-way along a straight
+        edge taken out -- the seams a `join` leaves where two parts are flush."""
+        return Solid(_lib().cadaclysm_blacksmith_merge_flush(self._h()))
+
     def shell(self, thickness, open=(), tolerance=1e-6, progress=None) -> "Solid":  # noqa: A002
         """`open`: face indices removed so the hollow is reachable."""
         which = [int(f) for f in open]
@@ -1218,7 +1541,7 @@ class Solid:
         cb, _keep = _progress(progress)
         return Solid(_lib().cadaclysm_blacksmith_shell(self._h(), thickness, arr, len(which), tolerance, cb, None))
 
-    def to_scene(self, schema=None):
+    def to_scene(self, schema=None) -> "cadaclysm.Scene":
         """This solid as a reader `Scene`, through STEP text and `cadaclysm.open_memory`
         -- the door to `viewer.py` and the tree walk. Needs `cadaclysm.py`
         importable and its library built."""
@@ -1283,7 +1606,7 @@ class Edge:
         return self.kind == "line"
 
     @property
-    def direction(self):
+    def direction(self) -> "tuple[float, float, float] | None":
         """Unit direction of a line edge (from its first segment), else None."""
         if not self.is_line or not self.segments:
             return None
@@ -1296,9 +1619,150 @@ class Edge:
         return f"Edge({self.index}, {self.kind!r}, faces={self.faces})"
 
 
+class Manifold:
+    """Whether a solid's faces make a manifold, as plain data (`Solid.manifold`):
+    its faces, edges and vertices; the edges one face borders (a sheet's rim),
+    the edges three or more do, and the vertices whose faces make more than one
+    fan (two solids touching at a corner); `is_manifold` where there are none of
+    the last two, and `is_closed` where there is no boundary edge either -- it
+    encloses a solid."""
+
+    __slots__ = ("faces", "edges", "vertices", "boundary_edges", "non_manifold_edges", "non_manifold_vertices",
+                 "is_manifold", "is_closed")
+
+    def __init__(self, row):
+        (self.faces, self.edges, self.vertices, self.boundary_edges, self.non_manifold_edges,
+         self.non_manifold_vertices) = (int(v) for v in row[:6])
+        self.is_manifold, self.is_closed = bool(row[6]), bool(row[7])
+
+    def __repr__(self):
+        return (f"Manifold(faces={self.faces}, edges={self.edges}, vertices={self.vertices}, "
+                f"boundary_edges={self.boundary_edges}, non_manifold_edges={self.non_manifold_edges}, "
+                f"non_manifold_vertices={self.non_manifold_vertices}, is_manifold={self.is_manifold}, "
+                f"is_closed={self.is_closed})")
+
+
 _XY = (0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1)
 _XZ = (0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -1, 0)
 _YZ = (0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0)
+
+# How far from square a frame's axes may be (the cosine between two of them).
+_SQUARE = 1e-6
+
+
+def _dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+def _unit(v, what):
+    x, y, z = (float(c) for c in v)
+    n = (x * x + y * y + z * z) ** 0.5
+    if not (1e-12 < n < float("inf")):
+        raise BuildError(f"{what} has no direction")
+    return (x / n, y / n, z / n)
+
+
+class Frame:
+    """An origin and three unit axes, square to each other and right-handed
+    (z = x × y): the plane a profile is drawn on (its x/y) and the direction it
+    is built along (its z). Iterates as the twelve numbers every call taking a
+    `frame` reads, so pass it wherever one goes. Immutable.
+
+    The constructor normalises the axes and raises `BuildError` when they are
+    not square or not right-handed."""
+
+    __slots__ = ("_v",)
+
+    def __init__(self, origin, x, y, z):
+        o = tuple(float(c) for c in origin)
+        if len(o) != 3 or not all(abs(c) < float("inf") for c in o):
+            raise BuildError("Frame: origin must be three finite numbers")
+        x, y, z = _unit(x, "Frame: x"), _unit(y, "Frame: y"), _unit(z, "Frame: z")
+        if max(abs(_dot(x, y)), abs(_dot(y, z)), abs(_dot(z, x))) > _SQUARE:
+            raise BuildError("Frame: the axes are not square to each other")
+        if _dot(_cross(x, y), z) < 0:
+            raise BuildError("Frame: the axes are left-handed (z must be x × y)")
+        self._v = tuple(c + 0.0 for c in o + x + y + z)  # + 0.0: no -0.0 to print or compare
+
+    @staticmethod
+    def of(frame) -> "Frame":
+        """Twelve numbers or four triples -- what `Solid.face_frame` and
+        `Workplane.frame` hand back -- checked as the constructor checks."""
+        v = tuple(_frame(frame))
+        return Frame(v[0:3], v[3:6], v[6:9], v[9:12])
+
+    @staticmethod
+    def xy(origin=(0, 0, 0)) -> "Frame":
+        """The world XY plane through `origin`: z up, as `Workplane.xy`."""
+        return Frame(origin, _XY[3:6], _XY[6:9], _XY[9:12])
+
+    @staticmethod
+    def xz(origin=(0, 0, 0)) -> "Frame":
+        """The world XZ plane through `origin`: x along X, y along Z, so z is -Y, as `Workplane.xz`."""
+        return Frame(origin, _XZ[3:6], _XZ[6:9], _XZ[9:12])
+
+    @staticmethod
+    def yz(origin=(0, 0, 0)) -> "Frame":
+        """The world YZ plane through `origin`: x along Y, y along Z, so z is +X, as `Workplane.yz`."""
+        return Frame(origin, _YZ[3:6], _YZ[6:9], _YZ[9:12])
+
+    @staticmethod
+    def at(origin, normal, x=None) -> "Frame":
+        """The plane through `origin` square to `normal` (the frame's z). Its x
+        axis is `x` laid onto that plane; with none, world X laid onto it, or
+        world Y when the normal is within about 25° of X -- the axes
+        `Solid.face_frame` gives a face facing `normal`. So a normal along +Z,
+        -Y or +X gives exactly `xy`, `xz` or `yz`."""
+        z = _unit(normal, "Frame.at: normal")
+        if x is None:
+            x = (1.0, 0.0, 0.0) if abs(z[0]) <= 0.9 else (0.0, 1.0, 0.0)
+        hint = _unit(x, "Frame.at: x")
+        d = _dot(hint, z)
+        if abs(d) > 1 - _SQUARE:
+            raise BuildError("Frame.at: x lies along the normal")
+        x = _unit(tuple(h - d * n for h, n in zip(hint, z)), "Frame.at: x")
+        return Frame(origin, x, _cross(z, x), z)
+
+    @property
+    def origin(self) -> "tuple[float, float, float]":
+        return self._v[0:3]
+
+    @property
+    def x(self) -> "tuple[float, float, float]":
+        return self._v[3:6]
+
+    @property
+    def y(self) -> "tuple[float, float, float]":
+        return self._v[6:9]
+
+    @property
+    def z(self) -> "tuple[float, float, float]":
+        return self._v[9:12]
+
+    def translate(self, dx, dy, dz) -> "Frame":
+        """This frame moved by (`dx`, `dy`, `dz`) in world coordinates."""
+        o = self.origin
+        return Frame((o[0] + dx, o[1] + dy, o[2] + dz), self.x, self.y, self.z)
+
+    def offset(self, distance) -> "Frame":
+        """This frame moved `distance` along its own z."""
+        return self.translate(*(distance * c for c in self.z))
+
+    def __iter__(self):
+        return iter(self._v)
+
+    def __eq__(self, other):
+        return isinstance(other, Frame) and self._v == other._v
+
+    def __hash__(self):
+        return hash(self._v)
+
+    def __repr__(self):
+        return f"Frame(origin={self.origin}, x={self.x}, y={self.y}, z={self.z})"
 
 
 class Workplane:
@@ -1413,6 +1877,6 @@ def write_step_text(solids, schema=None, unit="mm") -> str:
         _lib().cadaclysm_blacksmith_string_free(text)
 
 
-def write_step(path, solids, schema=None, unit="mm"):
+def write_step(path, solids, schema=None, unit="mm") -> None:
     """Several solids as one AP203 file, each its own body."""
     _FsPath(path).write_text(write_step_text(solids, schema, unit), encoding="utf-8")

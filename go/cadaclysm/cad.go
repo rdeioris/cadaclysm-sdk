@@ -839,6 +839,87 @@ func (p *Placement) Transform() [16]float64 {
 	return out
 }
 
+// ---- breps -------------------------------------------------------------------------------
+
+// Brep is a body's exact B-rep -- the trimmed surfaces its mesh is cut from -- shared with
+// the scene rather than copied: a reference of this value's own, given back by Close (or
+// the finalizer). It is for the blacksmith library, which operates on it without a copy
+// (blacksmith.FromNode), and for asking whether it is a manifold ([Brep.Manifold]). It
+// outlives its scene for as long as
+// anything holds it. In the node's own frame and the file's own units and axes, whatever
+// convention the scene was opened with. The blacksmith library must come from the same
+// release; it checks [BrepLayoutID] and refuses otherwise.
+type Brep struct {
+	ptr *C.CadaclysmBrep
+}
+
+// BrepLayoutID is how this library lays a brep out in memory: its compiler, target and
+// source. The blacksmith library shares a brep only with a library whose id equals its own.
+func BrepLayoutID() string { return C.GoString(C.cadaclysm_brep_layout_id()) }
+
+// Pointer is the brep's C pointer, for blacksmith.FromNode to hand across; nil once
+// closed.
+func (b *Brep) Pointer() unsafe.Pointer {
+	if b == nil {
+		return nil
+	}
+	return unsafe.Pointer(b.ptr)
+}
+
+// Manifold says whether its faces make a manifold — every edge bordered by one face or
+// two, the faces round every vertex one fan — and whether it is closed. Read off the
+// topology the file wrote, not a mesh: faces that name no shared edge (IGES, each surface
+// its own sheet; an IFC face written as one polygon) read as open however well they meet
+// in space.
+func (b *Brep) Manifold() (Manifold, error) {
+	defer pin()()
+	if b == nil || b.ptr == nil {
+		return Manifold{}, &CadaclysmError{Message: "brep: released"}
+	}
+	var row [8]uint32
+	ok := bool(C.cadaclysm_brep_manifold(b.ptr, (*C.uint32_t)(unsafe.Pointer(&row[0]))))
+	runtime.KeepAlive(b)
+	if !ok {
+		return Manifold{}, &CadaclysmError{Message: lastErrorOr("manifold")}
+	}
+	return ManifoldOf(row), nil
+}
+
+// Manifold is whether a brep's or a solid's faces make a manifold, as plain data
+// ([Brep.Manifold], and the blacksmith package's Solid.Manifold): its faces, edges and
+// vertices; the edges one face borders (a sheet's rim), the edges three or more do, and
+// the vertices whose faces make more than one fan (two solids touching at a corner).
+// IsManifold where there are none of the last two, IsClosed where there is no boundary
+// edge either — it encloses a solid.
+type Manifold struct {
+	Faces, Edges, Vertices                               int
+	BoundaryEdges, NonManifoldEdges, NonManifoldVertices int
+	IsManifold, IsClosed                                 bool
+}
+
+// ManifoldOf reads the eight counts cadaclysm_brep_manifold and
+// cadaclysm_blacksmith_manifold write, in their order.
+func ManifoldOf(row [8]uint32) Manifold {
+	return Manifold{
+		Faces: int(row[0]), Edges: int(row[1]), Vertices: int(row[2]),
+		BoundaryEdges: int(row[3]), NonManifoldEdges: int(row[4]), NonManifoldVertices: int(row[5]),
+		IsManifold: row[6] == 1, IsClosed: row[7] == 1,
+	}
+}
+
+// Close gives this reference back. Idempotent, and a no-op on a nil Brep. The error
+// return is always nil; it exists so a Brep defers like every other resource.
+func (b *Brep) Close() error {
+	if b == nil || b.ptr == nil {
+		return nil
+	}
+	p := b.ptr
+	b.ptr = nil
+	runtime.SetFinalizer(b, nil)
+	C.cadaclysm_brep_release(p)
+	return nil
+}
+
 // ---- nodes ------------------------------------------------------------------------------
 
 // Node is one node of the document: an assembly, a shape, a placement.
@@ -1099,6 +1180,23 @@ func (n *Node) Mesh() (*Mesh, error) {
 		m.Colours = unsafe.Slice((*float32)(unsafe.Pointer(raw.colors)), int(raw.vertex_count)*4)
 	}
 	return m, nil
+}
+
+// Brep is this node's exact B-rep, for the blacksmith package's FromNode to operate on --
+// nil, with a nil error, where it has none (a mesh, a curve, a CSG body, a JT or OpenSCAD
+// part). Shared with the scene, not copied; see [Brep]. The error is non-nil only for a
+// closed scene, as Mesh's.
+func (n *Node) Brep() (*Brep, error) {
+	if err := n.scene.closedError(); err != nil {
+		return nil, err
+	}
+	p := C.cadaclysm_node_brep(n.scene.h(), C.uint32_t(n.index))
+	if p == nil {
+		return nil, nil
+	}
+	b := &Brep{ptr: p}
+	runtime.SetFinalizer(b, (*Brep).Close)
+	return b, nil
 }
 
 // Surfaces is this node's faces as surfaces and trim loops, where the reader built them.

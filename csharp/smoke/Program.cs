@@ -74,6 +74,9 @@ Console.WriteLine($"faces={rounded.Faces} watertight={rounded.IsWatertight()}");
 // of the four corners rounded trades one edge for one face.
 if (rounded.Faces != 15) return Fail($"the filleted part has {rounded.Faces} faces, not 15");
 if (!rounded.IsWatertight()) return Fail("the filleted part is not watertight");
+var shape = rounded.Manifold;
+Console.WriteLine($"manifold: {shape}");
+if (!shape.IsClosed || shape.Faces != rounded.Faces) return Fail($"the filleted part is not a closed manifold: {shape}");
 // The sheet verbs: a face from a profile, a solid's face alone, faces dropped, a trim, a
 // rounded profile and a path along a curve.
 {
@@ -102,7 +105,61 @@ if (!rounded.IsWatertight()) return Fail("the filleted part is not watertight");
     catch (BuildException e) when (e.Message.Contains("trim: nothing of the sheet lies inside the tool"))
     {
     }
-    Console.WriteLine($"sheet verbs: face, trim ({holed.Faces}+{disc.Faces}), face_sheet, drop_faces, round ({slab.Faces} faces), along: ok");
+    // Chain: an L's two sides, the second drawn back to front, joined -- open, two walls.
+    using var sideA = Profile.Path((0, 0)).LineTo(10, 0).EndOpen();
+    using var sideB = Profile.Path((10, 8)).LineTo(10, 0).EndOpen();
+    using var ell = Profile.Chain([sideA, sideB]);
+    using var ellWalls = Solid.ExtrudeOpen(ell, xy, 2);
+    if (ellWalls.Faces != 2) return Fail($"chain: an L extruded open has {ellWalls.Faces} walls, not 2");
+    // Close: the open L's first side and a line back -- closed, a triangle's three walls.
+    using var closedL = Profile.Path((0, 0)).LineTo(10, 0).LineTo(10, 8).EndOpen().CloseLoop();
+    using var closedWalls = Solid.ExtrudeOpen(closedL, xy, 2);
+    if (closedWalls.Faces != 3) return Fail($"close_loop: a closed L has {closedWalls.Faces} walls, not 3");
+    // Push-pull: a cube's top raised is one taller box, six faces, not a box and a prism.
+    using var cube = Solid.Cuboid(10, 10, 10);
+    using var raised = cube.PushPull(cube.SelectFace(Selector.Max(Axis.Z)), 5);
+    if (raised.Faces != 6 || !raised.IsWatertight()) return Fail($"push_pull: the raised cube has {raised.Faces} faces, not 6");
+    // From loops: a circle given before the square it lies in -- the square is the boundary.
+    using var loopHole = Profile.Circle(4);
+    using var loopSquare = Profile.Rect(30, 30);
+    using var fromLoops = Profile.FromLoops([loopHole, loopSquare]);
+    using var holedSquare = Solid.Extrude(fromLoops, xy, 2);
+    if (holedSquare.Faces != 8) return Fail($"from_loops: the holed square has {holedSquare.Faces} faces, not 8");
+    // Revolve in plane: a plate drawn beside the y axis turns into a tube of four walls.
+    using var beside = Profile.Polygon([(5, 0), (8, 0), (8, 10), (5, 10)]);
+    using var turned = Solid.RevolveInPlane(beside, xy, (0, 0), (0, 1), 2 * Math.PI);
+    using var turnedWalls = Solid.RevolveOpenInPlane(beside, xy, (0, 0), (0, 1), Math.PI);
+    if (turned.Faces != 4 || !turned.IsWatertight() || turnedWalls.Faces != 4) return Fail($"revolve_in_plane: {turned.Faces} and {turnedWalls.Faces} faces, not 4");
+    // A hexagon: six walls and two caps. A closed spline through a square's corners: one wall.
+    using var hexagon = Profile.RegularPolygon((0, 0), 10, 6);
+    using var hexPrism = Solid.Extrude(hexagon, xy, 2);
+    using var loopSpline = Profile.Spline([(0, 0), (10, 0), (10, 10), (0, 10)], 3, null, closed: true);
+    using var loopSolid = Solid.Extrude(loopSpline, xy, 2);
+    if (hexPrism.Faces != 8 || loopSolid.Faces != 3 || !loopSolid.IsWatertight()) return Fail($"shapes: {hexPrism.Faces} and {loopSolid.Faces} faces, not 8 and 3");
+    Console.WriteLine($"sheet verbs: face, trim ({holed.Faces}+{disc.Faces}), face_sheet, drop_faces, round ({slab.Faces} faces), along, chain, push_pull, close_loop, from_loops, revolve_in_plane, regular_polygon, spline: ok");
+}
+// Frames: built, checked, and passed wherever twelve numbers go.
+{
+    if (!Frame.At((0, 0, 0), (0, -1, 0)).Equals(Frame.Xz()) || !Frame.At((1, 2, 3), (0, 0, 5)).Equals(Frame.Xy((1, 2, 3)))
+        || !Frame.Xy().Offset(5).Equals(Frame.Xy((0, 0, 5))) || !Frame.Yz().ToArray().SequenceEqual(Workplane.Yz().Frame))
+        return Fail("Frame.At / Xy / Xz / Offset disagree");
+    try
+    {
+        _ = new Frame((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, -1));
+        return Fail("a left-handed frame did not throw");
+    }
+    catch (BuildException e) when (e.Message.Contains("left-handed"))
+    {
+    }
+    using var rect10 = Profile.Rect(10, 4);
+    using var lid = Solid.Extrude(rect10, Frame.Xy((0, 0, 5)), 2);
+    using var wall = Workplane.On(Frame.Xz((0, 3, 0))).Extrude(rect10, 1).Solid();
+    var top = Frame.Of(lid.FaceFrame(lid.SelectFace(Selector.Max(Axis.Z))));
+    var (lo, hi) = lid.Bounds;
+    if (Math.Abs(lo[2] - 5) > 1e-6 || Math.Abs(hi[2] - 7) > 1e-6 || Math.Abs(wall.Bounds.Max[1] - 3) > 1e-6
+        || Math.Abs(top.Origin.Z - 7) > 1e-6 || Math.Abs(top.Z.Z - 1) > 1e-9)
+        return Fail($"frames: lid z {lo[2]}..{hi[2]}, wall max y {wall.Bounds.Max[1]}, top {top}");
+    Console.WriteLine($"frames: {Frame.At((0, 0, 0), (1, 1, 1))}: ok");
 }
 // Colour: a gold plate joined with a blue pin -- the part is gold, the pin's top keeps its blue.
 using var gold = plate.Coloured(0.8, 0.6, 0.4);
@@ -183,6 +240,25 @@ using (var back = Cadaclysm.Cadaclysm.Open(step))
     Console.WriteLine($"step read back: bounds max=({b.Max[0]},{b.Max[1]},{b.Max[2]})");
     // The plate is 80 x 40 x 6, `Profile.Rect` centring it on the origin, and the pin adds 10.
     if (Math.Abs(b.Max[2] - 16) > 0.01 || Math.Abs(b.Max[0] - 40) > 0.01) return Fail("the STEP did not read back as the plate with its pin");
+    // And back into the kernel: the read body's brep, shared with the scene rather than
+    // copied, as a solid that outlives the scene it came from.
+    var node = back.Placements.Select(p => p.Geometry).First(n => { using var brep = n.Brep; return brep is not null; });
+    using (var brep = node.Brep!)
+    {
+        var read = brep.Manifold;
+        if (!read.IsClosed || read.Faces != rounded.Faces) return Fail($"the read body is not the closed manifold written: {read}");
+    }
+    using var imported = Solid.FromNode(back, node);
+    back.Dispose();
+    if (imported.Faces != rounded.Faces) return Fail($"from_node gave {imported.Faces} faces, not {rounded.Faces}");
+    using var drilled = imported.Cut(Solid.Cylinder(2, 40).Translate(-30, 0, -5));
+    if (drilled.Faces <= imported.Faces) return Fail("a boolean on the imported solid added no face");
+    Console.WriteLine($"from_node: {imported.Faces} faces, cut to {drilled.Faces} after the scene closed");
+}
+using (var opened = Solid.Open(step))
+{
+    if (opened.Faces != rounded.Faces) return Fail($"Solid.Open gave {opened.Faces} faces, not {rounded.Faces}");
+    Console.WriteLine($"Solid.Open: {opened.Faces} faces");
 }
 return 0;
 

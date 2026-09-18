@@ -123,6 +123,7 @@ function libraryPath() {
 // header, so a drifted field fails a cargo test rather than a customer.
 
 koffi.opaque('CadaclysmScene');
+koffi.opaque('CadaclysmBrep');
 koffi.opaque('CadaclysmMeshlets');
 const CadaclysmWindow = koffi.struct('CadaclysmWindow', {
   kind: 'uint32_t',
@@ -262,6 +263,10 @@ function _lib() {
     open_memory: f('CadaclysmScene *cadaclysm_open_memory(const uint8_t *bytes, size_t length, const char *format, const CadaclysmOpenOptions *options)'),
     open_options_init: f('void cadaclysm_open_options_init(_Out_ CadaclysmOpenOptions *options)'),
     close: f('void cadaclysm_close(CadaclysmScene *scene)'),
+    node_brep: f('CadaclysmBrep *cadaclysm_node_brep(const CadaclysmScene *scene, uint32_t node)'),
+    brep_release: f('void cadaclysm_brep_release(const CadaclysmBrep *brep)'),
+    brep_layout_id: f('const char *cadaclysm_brep_layout_id(void)'),
+    brep_manifold: f('bool cadaclysm_brep_manifold(const CadaclysmBrep *brep, _Out_ uint32_t *out)'),
     node_count: f('uint32_t cadaclysm_node_count(const CadaclysmScene *scene)'),
     root_count: f('uint32_t cadaclysm_root_count(const CadaclysmScene *scene)'),
     root: f('uint32_t cadaclysm_root(const CadaclysmScene *scene, uint32_t index)'),
@@ -616,6 +621,60 @@ function _rows(flat) {
   return [0, 1, 2, 3].map((r) => [0, 1, 2, 3].map((c) => flat[c * 4 + r]));
 }
 
+// ---- breps --------------------------------------------------------------------
+
+const _brepFinalizer = typeof FinalizationRegistry === 'function'
+  ? new FinalizationRegistry((p) => { try { _lib().brep_release(p); } catch (_) { /* exiting */ } }) : null;
+
+/**
+ * A body's exact B-rep -- the trimmed surfaces its mesh is cut from -- shared
+ * with the scene rather than copied: a reference of this object's own, given
+ * back by `release()` (or the collector). Nothing here reads it; it is for the
+ * blacksmith library, which operates on it without a copy
+ * (`Solid.fromNode`). It outlives its scene for as long as anything holds it.
+ * In the node's own frame and the file's own units and axes, whatever
+ * convention the scene was opened with. The blacksmith library must come from
+ * the same release; it checks `Brep.layoutId()` and refuses otherwise.
+ */
+class Brep {
+  constructor(pointer) {
+    this._pointer = pointer;
+    if (_brepFinalizer) _brepFinalizer.register(this, pointer, this);
+  }
+  get pointer() {
+    if (this._pointer === null) throw new CadaclysmError('brep: released');
+    return this._pointer;
+  }
+  get released() { return this._pointer === null; }
+  /** How this library lays a brep out in memory: its compiler, target and source. */
+  static layoutId() { return _text(_lib().brep_layout_id()); }
+  /**
+   * Whether its faces make a manifold -- every edge bordered by one face or
+   * two, the faces round every vertex one fan -- and whether it is closed:
+   * `{ faces, edges, vertices, boundaryEdges, nonManifoldEdges,
+   * nonManifoldVertices, isManifold, isClosed }`. Read off the topology the
+   * file wrote, not a mesh: faces that name no shared edge (IGES, each surface
+   * its own sheet; an IFC face written as one polygon) read as open however
+   * well they meet in space.
+   */
+  get manifold() {
+    const out = new Uint32Array(8);
+    if (!_lib().brep_manifold(this.pointer, out)) throw new CadaclysmError(_lastError() || 'manifold');
+    return {
+      faces: out[0], edges: out[1], vertices: out[2],
+      boundaryEdges: out[3], nonManifoldEdges: out[4], nonManifoldVertices: out[5],
+      isManifold: out[6] === 1, isClosed: out[7] === 1,
+    };
+  }
+  release() {
+    if (this._pointer === null) return;
+    const p = this._pointer; this._pointer = null;
+    if (_brepFinalizer) _brepFinalizer.unregister(this);
+    _lib().brep_release(p);
+  }
+  [Symbol.for('nodejs.dispose')]() { this.release(); }
+}
+
 // ---- placements -------------------------------------------------------------
 
 /**
@@ -712,6 +771,11 @@ class Node {
   /** How far a level moved the surface, in the scene's units; what to pick levels by. */
   lodError(level) { return _lib().node_lod_error(this.scene._handle, this.index, level); }
   surfaces() { return _surfacesOf(_lib().node_surfaces(this.scene._handle, this.index)); }
+  /** Its exact B-rep, for `Solid.fromNode`, or null where it has none (a mesh, a curve, a CSG body, a JT or OpenSCAD part). */
+  get brep() {
+    const p = _lib().node_brep(this.scene._handle, this.index);
+    return p ? new Brep(p) : null;
+  }
   edges() { return _polylinesOf(_lib().node_edges(this.scene._handle, this.index)); }
   curves() { return _polylinesOf(_lib().node_curves(this.scene._handle, this.index)); }
   isocurves() { return _polylinesOf(_lib().node_isocurves(this.scene._handle, this.index)); }
@@ -1088,7 +1152,7 @@ module.exports = {
   CadaclysmError, NONE, Convention, ValueKind,
   libraryPath, version, buildDate, license, licenseInfo, licenseNoticeCount, meshFormats, formats, lodLevels,
   _lib, _text, _lastError, _floats, _uint32s, _searchedPaths, _notFoundMessage,
-  Bounds, Attribute, Placement, Node, Scene, open, openMemory, _openRaw, openAsync, openMemoryAsync, declaredSchema, resolveSchema, _options, _rows, _attribute,
+  Bounds, Attribute, Brep, Placement, Node, Scene, open, openMemory, _openRaw, openAsync, openMemoryAsync, declaredSchema, resolveSchema, _options, _rows, _attribute,
   Mesh, Polylines, Beziers, Face, Surfaces, Collision, CollisionHull, Meshlets, pickFile, pickSave,
   _meshOf, _polylinesOf, _beziersOf, _surfacesOf,
 };

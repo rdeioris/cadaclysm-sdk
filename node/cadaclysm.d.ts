@@ -93,6 +93,23 @@ export class Collision {
 }
 export class CollisionHull { private constructor(); positions: Float32Array; indices: Uint32Array; vertexCount: number; indexCount: number }
 
+/** A body's exact B-rep, shared with the scene; for `Solid.fromNode`. `release()` gives the reference back. */
+export class Brep {
+  private constructor();
+  readonly pointer: unknown;
+  readonly released: boolean;
+  static layoutId(): string;
+  readonly manifold: Manifold;
+  release(): void;
+}
+
+/** Whether a brep's faces make a manifold, read off its topology (`Brep.manifold`). */
+export interface Manifold {
+  faces: number; edges: number; vertices: number;
+  boundaryEdges: number; nonManifoldEdges: number; nonManifoldVertices: number;
+  isManifold: boolean; isClosed: boolean;
+}
+
 export class Placement {
   private constructor();
   scene: Scene; index: number;
@@ -120,6 +137,7 @@ export class Node {
   meshAsync(): Promise<Mesh>;
   meshLodAsync(level: number): Promise<Mesh>;
   surfaces(): Surfaces;
+  readonly brep: Brep | null;
   edges(): Polylines; curves(): Polylines; isocurves(): Polylines;
   edgeBeziers(): Beziers; curveBeziers(): Beziers; isocurveBeziers(): Beziers;
   collision(hullBudget?: number): Collision | null;

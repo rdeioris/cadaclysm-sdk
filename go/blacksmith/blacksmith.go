@@ -103,9 +103,8 @@ package blacksmith
 // own import library, and plain -l's search order picks the static one, which this MinGW
 // gcc cannot link.
 //
-// Python and C# read CADACLYSM_BLACKSMITH_LIBRARY (this library) and then
-// CADACLYSM_LIBRARY (the directory holding both) to find the shared library at run time.
-// There is no equivalent for Go: cgo cannot read an environment variable while linking.
+// Python, C#, Java and Node read CADACLYSM_BLACKSMITH_LIBRARY (this library, or the
+// directory holding it) to find the shared library at run time. There is no equivalent for Go: cgo cannot read an environment variable while linking.
 // Point CGO_LDFLAGS=-L<dir> at build time, and at run time rely on the platform loader's
 // own search — PATH on Windows, LD_LIBRARY_PATH on Linux, DYLD_LIBRARY_PATH on macOS —
 // exactly as the reader package documents for its own library.
@@ -127,6 +126,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"unsafe"
 
 	"github.com/rdeioris/cadaclysm-sdk/go/cadaclysm"
@@ -366,8 +366,11 @@ func WriteStep(path string, solids []*Solid, schema, unit string) error {
 
 // ---- frames and axes -----------------------------------------------------------------
 
-// Frame is twelve numbers — origin, x, y, z — the plane a profile is drawn on: what
-// Python passes as twelve numbers or four triples.
+// Frame is twelve numbers — origin, x, y, z — the plane a profile is drawn on (its x/y)
+// and the direction it is built along (its z): what Python passes as twelve numbers, four
+// triples or a Frame. The axes must be unit, square to each other and right-handed
+// (z = x × y); [NewFrame], [FrameAt] and [FrameOf] build one that is, and a literal is
+// taken as written.
 type Frame [12]float64
 
 var (
@@ -375,6 +378,134 @@ var (
 	frameXZ = Frame{0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -1, 0}
 	frameYZ = Frame{0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0}
 )
+
+// frameSquare is how far from square a frame's axes may be (the cosine between two of them).
+const frameSquare = 1e-6
+
+func dot3(a, b [3]float64) float64 { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2] }
+
+func cross3(a, b [3]float64) [3]float64 {
+	return [3]float64{a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]}
+}
+
+func unit3(v [3]float64, what string) ([3]float64, error) {
+	n := math.Sqrt(dot3(v, v))
+	if !(n > 1e-12 && !math.IsInf(n, 0)) {
+		return v, &BuildError{Message: what + " has no direction"}
+	}
+	return [3]float64{v[0] / n, v[1] / n, v[2] / n}, nil
+}
+
+// NewFrame is the frame with this origin and these axes, normalised; a *BuildError when
+// they are not square to each other or not right-handed.
+func NewFrame(origin, x, y, z [3]float64) (Frame, error) {
+	for _, c := range origin {
+		if math.IsNaN(c) || math.IsInf(c, 0) {
+			return Frame{}, &BuildError{Message: "Frame: origin must be three finite numbers"}
+		}
+	}
+	var err error
+	if x, err = unit3(x, "Frame: x"); err != nil {
+		return Frame{}, err
+	}
+	if y, err = unit3(y, "Frame: y"); err != nil {
+		return Frame{}, err
+	}
+	if z, err = unit3(z, "Frame: z"); err != nil {
+		return Frame{}, err
+	}
+	if math.Max(math.Abs(dot3(x, y)), math.Max(math.Abs(dot3(y, z)), math.Abs(dot3(z, x)))) > frameSquare {
+		return Frame{}, &BuildError{Message: "Frame: the axes are not square to each other"}
+	}
+	if dot3(cross3(x, y), z) < 0 {
+		return Frame{}, &BuildError{Message: "Frame: the axes are left-handed (z must be x × y)"}
+	}
+	var f Frame
+	for i, v := range [4][3]float64{origin, x, y, z} {
+		copy(f[3*i:3*i+3], v[:])
+	}
+	for i := range f {
+		f[i] += 0 // no -0.0 to print or compare
+	}
+	return f, nil
+}
+
+// FrameOf checks twelve numbers — what FaceFrame and Workplane.Frame hand back — as
+// NewFrame does.
+func FrameOf(f Frame) (Frame, error) { return NewFrame(f.Origin(), f.X(), f.Y(), f.Z()) }
+
+// FrameXY is the world XY plane through origin: z up, as [XY].
+func FrameXY(origin [3]float64) Frame { return frameXY.Translate(origin[0], origin[1], origin[2]) }
+
+// FrameXZ is the world XZ plane through origin: x along X, y along Z, so z is -Y, as [XZ].
+func FrameXZ(origin [3]float64) Frame { return frameXZ.Translate(origin[0], origin[1], origin[2]) }
+
+// FrameYZ is the world YZ plane through origin: x along Y, y along Z, so z is +X, as [YZ].
+func FrameYZ(origin [3]float64) Frame { return frameYZ.Translate(origin[0], origin[1], origin[2]) }
+
+// FrameAt is the plane through origin square to normal (the frame's z). Its x axis is world
+// X laid onto that plane, or world Y when the normal is within about 25° of X — the axes
+// FaceFrame gives a face facing normal — so a normal
+// along +Z, -Y or +X gives exactly FrameXY, FrameXZ or FrameYZ. [FrameAtX] names the x.
+func FrameAt(origin, normal [3]float64) (Frame, error) {
+	z, err := unit3(normal, "Frame.At: normal")
+	if err != nil {
+		return Frame{}, err
+	}
+	if math.Abs(z[0]) <= 0.9 {
+		return FrameAtX(origin, z, [3]float64{1, 0, 0})
+	}
+	return FrameAtX(origin, z, [3]float64{0, 1, 0})
+}
+
+// FrameAtX is [FrameAt] with its x axis x laid onto the plane — Python's Frame.at(origin,
+// normal, x).
+func FrameAtX(origin, normal, x [3]float64) (Frame, error) {
+	z, err := unit3(normal, "Frame.At: normal")
+	if err != nil {
+		return Frame{}, err
+	}
+	hint, err := unit3(x, "Frame.At: x")
+	if err != nil {
+		return Frame{}, err
+	}
+	d := dot3(hint, z)
+	if math.Abs(d) > 1-frameSquare {
+		return Frame{}, &BuildError{Message: "Frame.At: x lies along the normal"}
+	}
+	ax, err := unit3([3]float64{hint[0] - d*z[0], hint[1] - d*z[1], hint[2] - d*z[2]}, "Frame.At: x")
+	if err != nil {
+		return Frame{}, err
+	}
+	return NewFrame(origin, ax, cross3(z, ax), z)
+}
+
+// Origin is the frame's origin.
+func (f Frame) Origin() [3]float64 { return [3]float64{f[0], f[1], f[2]} }
+
+// X is the frame's x axis.
+func (f Frame) X() [3]float64 { return [3]float64{f[3], f[4], f[5]} }
+
+// Y is the frame's y axis.
+func (f Frame) Y() [3]float64 { return [3]float64{f[6], f[7], f[8]} }
+
+// Z is the frame's z axis: the normal of its plane.
+func (f Frame) Z() [3]float64 { return [3]float64{f[9], f[10], f[11]} }
+
+// Translate is this frame moved by (dx, dy, dz) in world coordinates.
+func (f Frame) Translate(dx, dy, dz float64) Frame {
+	f[0], f[1], f[2] = f[0]+dx, f[1]+dy, f[2]+dz
+	return f
+}
+
+// Offset is this frame moved distance along its own z.
+func (f Frame) Offset(distance float64) Frame {
+	return f.Translate(distance*f[9], distance*f[10], distance*f[11])
+}
+
+func (f Frame) String() string {
+	return fmt.Sprintf("Frame(origin=%v, x=%v, y=%v, z=%v)", f.Origin(), f.X(), f.Y(), f.Z())
+}
 
 // doubles is the address a C call reads a Go array of float64 through. The array must
 // stay alive across the call, which a value copied into a local by the caller does.
@@ -450,8 +581,8 @@ func Slot(centre [2]float64, length, r float64) (*Profile, error) {
 		C.double(centre[0]), C.double(centre[1]), C.double(length), C.double(r)), "profile")
 }
 
-// Polygon is a closed polygon through points, in order; the closing side is implied. At
-// least three points.
+// Polygon is a closed polygon through points, in order, its side back to the first point
+// a segment of its own. At least three points.
 func Polygon(points [][2]float64) (*Profile, error) {
 	defer pin()()
 	flat := make([]float64, 0, 2*len(points))
@@ -463,6 +594,46 @@ func Polygon(points [][2]float64) (*Profile, error) {
 		xy = doubles(&flat[0])
 	}
 	return newProfile(C.cadaclysm_blacksmith_profile_polygon(xy, C.size_t(len(points))), "profile")
+}
+
+// RegularPolygon is a regular polygon of sides sides (at least 3) on the circle of radius
+// about centre, its first corner at angle radians from the sketch's x axis, the rest
+// counter-clockwise — Python's Profile.regular_polygon.
+func RegularPolygon(centre [2]float64, radius float64, sides int, angle float64) (*Profile, error) {
+	defer pin()()
+	if sides < 0 {
+		sides = 0
+	}
+	return newProfile(C.cadaclysm_blacksmith_profile_regular_polygon(
+		C.double(centre[0]), C.double(centre[1]), C.double(radius), C.uint32_t(sides), C.double(angle)), "profile")
+}
+
+// Spline is a spline of degree through the control polygon points (weights one per point,
+// or nil) — Python's Profile.spline. Open, it starts on the first point and ends on the
+// last, an open chain; closed, it is periodic, smooth through its own start, a closed
+// profile. The degree is lowered to fit the points.
+func Spline(points [][2]float64, degree int, weights []float64, closed bool) (*Profile, error) {
+	defer pin()()
+	flat := make([]float64, 0, 2*len(points))
+	for _, p := range points {
+		flat = append(flat, p[0], p[1])
+	}
+	var xy, w *C.double
+	if len(flat) > 0 {
+		xy = doubles(&flat[0])
+	}
+	if weights != nil {
+		// A picked list, even an empty one, is a non-null array: null means none.
+		weights = append(weights[:len(weights):len(weights)], 0)
+		w = doubles(&weights[0])
+	}
+	if degree < 0 {
+		degree = 0
+	}
+	out, err := newProfile(C.cadaclysm_blacksmith_profile_spline(xy, C.size_t(len(points)), C.uint32_t(degree), w, C.bool(closed)), "profile")
+	runtime.KeepAlive(flat)
+	runtime.KeepAlive(weights)
+	return out, err
 }
 
 // WithHole is this outline with hole cut from it, as a new profile; both inputs are
@@ -523,6 +694,77 @@ func (p *Profile) Round(radius float64, corners []int, open bool) (*Profile, err
 	out, err := newProfile(C.cadaclysm_blacksmith_profile_round(h, C.double(radius), first, C.size_t(len(which)), C.bool(open)), "profile")
 	runtime.KeepAlive(p)
 	runtime.KeepAlive(which)
+	return out, err
+}
+
+// CloseLoop is this profile closed — Python's Profile.close_loop, the forge's sketch
+// "close": where its last segment stops short of its start (a path ended open), a straight
+// segment back to it; where it already comes back within 1e-9 of its extent, its last
+// segment made to land on the start exactly. A closed profile comes back as it is; holes
+// are closed the same way. (Not Close: that frees the handle.)
+func (p *Profile) CloseLoop() (*Profile, error) {
+	defer pin()()
+	h, err := p.h()
+	if err != nil {
+		return nil, err
+	}
+	out, err := newProfile(C.cadaclysm_blacksmith_profile_close_loop(h), "profile")
+	runtime.KeepAlive(p)
+	return out, err
+}
+
+// Chain is open profiles joined end to end into one — Python's Profile.chain, the forge's
+// merge. The pieces may come in any order and either way round: each next one is the first
+// of the rest with an end within tolerance of either end of the chain so far, reversed
+// where that makes it meet. Every segment is kept exactly. Closed where the chain's two
+// ends meet, otherwise an open chain. The error names a piece that is empty, has holes, is
+// closed on its own or meets none of the others.
+func Chain(pieces []*Profile, tolerance float64) (*Profile, error) {
+	defer pin()()
+	handles := make([]*C.CadaclysmBlacksmithProfile, len(pieces))
+	for i, p := range pieces {
+		h, err := p.h()
+		if err != nil {
+			return nil, err
+		}
+		handles[i] = h
+	}
+	var first **C.CadaclysmBlacksmithProfile
+	if len(handles) > 0 {
+		first = &handles[0]
+	}
+	out, err := newProfile(C.cadaclysm_blacksmith_profile_chain(first, C.size_t(len(handles)), C.double(tolerance)), "profile")
+	// The pieces must outlive the call: a finalizer on one during it would free a handle
+	// the library is reading.
+	for _, p := range pieces {
+		runtime.KeepAlive(p)
+	}
+	return out, err
+}
+
+// FromLoops is closed loops, in any order, as one profile — Python's Profile.from_loops:
+// the loop enclosing the most area is the boundary and every other a hole in it, in the
+// order given. Each loop is closed, with no holes of its own, wound either way. The error
+// names by index a loop that is open, empty or of no area, loops that cross or touch, a
+// hole outside the boundary or inside another hole.
+func FromLoops(loops []*Profile) (*Profile, error) {
+	defer pin()()
+	handles := make([]*C.CadaclysmBlacksmithProfile, len(loops))
+	for i, p := range loops {
+		h, err := p.h()
+		if err != nil {
+			return nil, err
+		}
+		handles[i] = h
+	}
+	var first **C.CadaclysmBlacksmithProfile
+	if len(handles) > 0 {
+		first = &handles[0]
+	}
+	out, err := newProfile(C.cadaclysm_blacksmith_profile_from_loops(first, C.size_t(len(handles))), "profile")
+	for _, p := range loops {
+		runtime.KeepAlive(p)
+	}
 	return out, err
 }
 
@@ -1403,6 +1645,39 @@ func RevolveOpen(profile *Profile, axis [6]float64, angle float64) (*Solid, erro
 	return out, err
 }
 
+// RevolveInPlane is profile, drawn on frame, swung angle radians about the axis through
+// the sketch points a and b (on the frame) — the profile and its axis drawn together,
+// where Revolve reads the profile as (radius, height). The profile may lie on either side
+// of the axis and touch it, not cross it; the sweep starts where it is drawn and turns
+// right-handed about b - a.
+func RevolveInPlane(profile *Profile, frame Frame, a, b [2]float64, angle float64) (*Solid, error) {
+	return inPlane(profile, frame, a, b, angle, false)
+}
+
+// RevolveOpenInPlane is RevolveInPlane for a curve: its segments swung into a sheet.
+func RevolveOpenInPlane(profile *Profile, frame Frame, a, b [2]float64, angle float64) (*Solid, error) {
+	return inPlane(profile, frame, a, b, angle, true)
+}
+
+func inPlane(profile *Profile, frame Frame, a, b [2]float64, angle float64, open bool) (*Solid, error) {
+	defer pin()()
+	h, err := profile.h()
+	if err != nil {
+		return nil, err
+	}
+	f := frame
+	axis := [4]float64{a[0], a[1], b[0], b[1]}
+	var raw *C.CadaclysmBlacksmithSolid
+	if open {
+		raw = C.cadaclysm_blacksmith_revolve_open_in_plane(h, doubles(&f[0]), doubles(&axis[0]), C.double(angle))
+	} else {
+		raw = C.cadaclysm_blacksmith_revolve_in_plane(h, doubles(&f[0]), doubles(&axis[0]), C.double(angle))
+	}
+	out, err := newSolid(raw, "solid")
+	runtime.KeepAlive(profile)
+	return out, err
+}
+
 // Sweep is profile, drawn on frame, carried along path into a closed solid: a straight
 // piece of the path is an extrusion, a circular piece a revolution about the arc's axis,
 // so nothing is approximated — a circle along an arc is an exact torus wall. path is
@@ -1580,8 +1855,15 @@ func (s *Solid) pair(other *Solid) (*C.CadaclysmBlacksmithSolid, *C.CadaclysmBla
 
 // Join is this solid united with other, an exact B-rep whose faces are pieces of the
 // inputs' own faces; only the new edges, where the two meet, are found on the meshes at
-// tolerance (Python's default is DefaultTolerance). Both operands stay open.
-func (s *Solid) Join(other *Solid, tolerance float64) (*Solid, error) {
+// tolerance (Python's default is DefaultTolerance). Both operands stay open. A trailing
+// true merges the flush faces the join leaves (MergeFlush, Python's merge=True); Cut and
+// Common take it too.
+func (s *Solid) Join(other *Solid, tolerance float64, merge ...bool) (*Solid, error) {
+	out, err := s.join(other, tolerance)
+	return merged(out, err, merge)
+}
+
+func (s *Solid) join(other *Solid, tolerance float64) (*Solid, error) {
 	defer pin()()
 	a, b, err := s.pair(other)
 	if err != nil {
@@ -1594,7 +1876,12 @@ func (s *Solid) Join(other *Solid, tolerance float64) (*Solid, error) {
 }
 
 // Cut is this solid less other. See Join.
-func (s *Solid) Cut(other *Solid, tolerance float64) (*Solid, error) {
+func (s *Solid) Cut(other *Solid, tolerance float64, merge ...bool) (*Solid, error) {
+	out, err := s.cut(other, tolerance)
+	return merged(out, err, merge)
+}
+
+func (s *Solid) cut(other *Solid, tolerance float64) (*Solid, error) {
 	defer pin()()
 	a, b, err := s.pair(other)
 	if err != nil {
@@ -1607,7 +1894,12 @@ func (s *Solid) Cut(other *Solid, tolerance float64) (*Solid, error) {
 }
 
 // Common is what this solid and other share. See Join.
-func (s *Solid) Common(other *Solid, tolerance float64) (*Solid, error) {
+func (s *Solid) Common(other *Solid, tolerance float64, merge ...bool) (*Solid, error) {
+	out, err := s.common(other, tolerance)
+	return merged(out, err, merge)
+}
+
+func (s *Solid) common(other *Solid, tolerance float64) (*Solid, error) {
 	defer pin()()
 	a, b, err := s.pair(other)
 	if err != nil {
@@ -1760,6 +2052,25 @@ func (s *Solid) IsWatertight(tolerance float64) (bool, error) {
 		return false, err
 	}
 	return n == 0, nil
+}
+
+// Manifold says whether the faces make a manifold — every edge bordered by one face or
+// two, the faces round every vertex one fan — and whether it is closed. Read off the
+// solid's topology, not a mesh, so it takes no tolerance; whether the faces all face out
+// is UnpairedEdges's question.
+func (s *Solid) Manifold() (cadaclysm.Manifold, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return cadaclysm.Manifold{}, err
+	}
+	var row [8]uint32
+	ok := bool(C.cadaclysm_blacksmith_manifold(h, (*C.uint32_t)(unsafe.Pointer(&row[0]))))
+	runtime.KeepAlive(s)
+	if !ok {
+		return cadaclysm.Manifold{}, failure("manifold")
+	}
+	return cadaclysm.ManifoldOf(row), nil
 }
 
 // -- out
@@ -2016,6 +2327,51 @@ func (s *Solid) Chamfer(edges []int, distance, tolerance float64) (*Solid, error
 	return out, err
 }
 
+// merged is out with its flush faces merged when merge is given and true -- the trailing
+// flag Join, Cut and Common take (Python's merge=True), so a call without it stands as it
+// was. The unmerged solid is closed.
+func merged(out *Solid, err error, merge []bool) (*Solid, error) {
+	if err != nil || len(merge) == 0 || !merge[0] {
+		return out, err
+	}
+	defer out.Close()
+	return out.MergeFlush()
+}
+
+// PushPull is face pushed out by distance along its outward normal (pulled in, negative)
+// the way Fusion and Rhino extrude a face — Python's Solid.push_pull: the prism over it
+// joined on (cut out) at tolerance, and the flush faces merged, so a box's top raised is
+// one taller box of six faces. A face on a cylinder moves out along its normal instead,
+// the radius changed (a boss fatter, a bore narrower), the flat faces beside it carried
+// along; any other curved face is refused.
+func (s *Solid) PushPull(face int, distance, tolerance float64) (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	if face < 0 || face > math.MaxUint32 {
+		return nil, &BuildError{Message: fmt.Sprintf("push_pull: face %d is out of range", face)}
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_push_pull(h, C.uint32_t(face), C.double(distance), C.double(tolerance), nil, nil), "solid")
+	runtime.KeepAlive(s)
+	return out, err
+}
+
+// MergeFlush is this solid with its flush faces merged — Python's Solid.merge_flush: flat
+// faces on one plane, facing one way and meeting, made one face, and the vertices left
+// mid-way along a straight edge taken out.
+func (s *Solid) MergeFlush() (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_merge_flush(h), "solid")
+	runtime.KeepAlive(s)
+	return out, err
+}
+
 // Shell is this solid hollowed to a wall thickness thick (inward for a positive
 // thickness, outward — the solid becoming the cavity — for a negative one), with the
 // faces at open removed so the hollow is reachable (nil for none, Python's default).
@@ -2039,6 +2395,185 @@ func (s *Solid) Shell(thickness float64, open []int, tolerance float64) (*Solid,
 	runtime.KeepAlive(s)
 	runtime.KeepAlive(which)
 	return out, err
+}
+
+// ---- solids from files ------------------------------------------------------------------
+
+// FromNode is the body node of a reader Scene draws, as a solid -- sharing the reader's
+// brep, not copying it. The scene can be closed before the solid is. placed puts it where
+// the node's Transform does, which is where its mesh draws; a node at the identity stays
+// shared, a moved one is a moved copy. In the file's own units and axes. Needs the reader's
+// library from the same release as this one's: the brep is handed across by pointer and
+// the two layouts are compared first. What a solid from a file can then do: see [Open].
+func FromNode(scene *cadaclysm.Scene, node *cadaclysm.Node, placed bool) (*Solid, error) {
+	label := fmt.Sprintf("from_node: node %d (%s)", node.Index(), nodeLabel(node))
+	solid, err := fromBrep(node, label)
+	if err != nil {
+		return nil, err
+	}
+	if solid == nil {
+		return nil, &BuildError{label + " has no brep: only a B-rep body has one (STEP, ACIS, Rhino, OCCT .brep, " +
+			"IGES, IFC), not a mesh, a curve or a CSG body"}
+	}
+	if !placed {
+		return solid, nil
+	}
+	transform := node.Transform()
+	if scene.Convention() != cadaclysm.Native && !isIdentity(transform) {
+		solid.Close()
+		return nil, &BuildError{"from_node: placed=True needs the scene opened with Convention.Native -- the brep " +
+			"is in the file's own axes and the node's transform is not; open Native, or pass placed false"}
+	}
+	return solid.placed(transform, "from_node")
+}
+
+// Open is the body a CAD file holds, as a solid: a STEP (AP203/214/242), ACIS .sat,
+// Rhino .3dm, OCCT .brep, IGES or IFC file, read where it draws, in the file's own units
+// and axes. A file drawing several bodies needs [OpenBody] or [OpenAll]. Fillet and
+// chamfer want line and circle edges; booleans take any surface, but the new edges they
+// trace on a free-form (NURBS) face are not always writable back to STEP; and every verb
+// meshes its operands first, so its cost grows with the body's face count.
+func Open(path string) (*Solid, error) { return openOne(path, -1) }
+
+// OpenBody is [Open] for one body of several, 0-based in drawing order.
+func OpenBody(path string, body int) (*Solid, error) {
+	if body < 0 {
+		return nil, &BuildError{fmt.Sprintf("open: %s has no body %d", filepath.Base(path), body)}
+	}
+	return openOne(path, body)
+}
+
+func openOne(path string, body int) (*Solid, error) {
+	solids, err := OpenAll(path)
+	if err != nil {
+		return nil, err
+	}
+	name := filepath.Base(path)
+	if body < 0 && len(solids) == 1 {
+		return solids[0], nil
+	}
+	if body < 0 || body >= len(solids) {
+		for _, s := range solids {
+			s.Close()
+		}
+		if body < 0 {
+			return nil, &BuildError{fmt.Sprintf("open: %s holds %d bodies: pass body= (0 to %d), or use Solid.open_all",
+				name, len(solids), len(solids)-1)}
+		}
+		return nil, &BuildError{fmt.Sprintf("open: %s has no body %d: it holds %d", name, body, len(solids))}
+	}
+	for i, s := range solids {
+		if i != body {
+			s.Close()
+		}
+	}
+	return solids[body], nil
+}
+
+// OpenAll is every body a CAD file draws, as solids placed where it draws them: one per
+// placement, so a part placed twice is two solids. See [Open].
+func OpenAll(path string) ([]*Solid, error) {
+	scene, err := cadaclysm.Open(path)
+	if err != nil {
+		return nil, &BuildError{"open: " + err.Error()}
+	}
+	defer scene.Close()
+	var solids []*Solid
+	fail := func(err error) ([]*Solid, error) {
+		for _, s := range solids {
+			s.Close()
+		}
+		return nil, err
+	}
+	for _, placement := range scene.Placements() {
+		node := placement.Geometry()
+		what := "open: " + nodeLabel(node)
+		solid, err := fromBrep(node, what)
+		if err != nil {
+			return fail(err)
+		}
+		if solid == nil {
+			continue
+		}
+		moved, err := solid.placed(placement.Transform(), what)
+		if err != nil {
+			return fail(err)
+		}
+		solids = append(solids, moved)
+	}
+	if len(solids) == 0 {
+		extension := strings.ToLower(strings.TrimPrefix(filepath.Ext(path), "."))
+		return nil, &BuildError{fmt.Sprintf("open: the .%s file draws no B-rep body -- only a STEP, ACIS, Rhino, "+
+			"OCCT .brep, IGES or IFC body can be a solid, not a mesh, a curve or a CSG body", extension)}
+	}
+	return solids, nil
+}
+
+// BrepLayoutID is how the loaded library lays a brep out in memory: its compiler, target and
+// source. FromNode works only where this equals the reader library's
+// [cadaclysm.BrepLayoutID] -- the two from the same release.
+func BrepLayoutID() string { return C.GoString(C.cadaclysm_blacksmith_brep_layout_id()) }
+
+func nodeLabel(node *cadaclysm.Node) string {
+	if name := node.Name(); name != "" {
+		return name
+	}
+	if kind := node.Kind(); kind != "" {
+		return kind
+	}
+	return fmt.Sprint(node.Index())
+}
+
+// fromBrep is the node's brep as a solid, shared -- nil, nil where it has none.
+func fromBrep(node *cadaclysm.Node, what string) (*Solid, error) {
+	brep, err := node.Brep()
+	if err != nil || brep == nil {
+		return nil, err
+	}
+	defer brep.Close()
+	defer pin()()
+	layout := C.CString(cadaclysm.BrepLayoutID())
+	defer C.free(unsafe.Pointer(layout))
+	solid, err := newSolid(C.cadaclysm_blacksmith_from_brep(brep.Pointer(), layout), what)
+	runtime.KeepAlive(brep)
+	return solid, err
+}
+
+func isIdentity(m [16]float64) bool {
+	for i := 0; i < 16; i++ {
+		want := 0.0
+		if i%5 == 0 {
+			want = 1
+		}
+		if m[i] != want {
+			return false
+		}
+	}
+	return true
+}
+
+// placed is this solid moved by a row-major 4x4 placement: itself at the identity, a
+// moved copy for a rigid move (a mirror included; this one is closed), refused for a scale
+// or shear, which a brep cannot follow exactly (a cylinder's radius is a number, not a
+// point).
+func (s *Solid) placed(m [16]float64, what string) (*Solid, error) {
+	if isIdentity(m) {
+		return s, nil
+	}
+	defer s.Close()
+	for a := 0; a < 3; a++ {
+		for b := 0; b < 3; b++ {
+			dot := m[a]*m[b] + m[4+a]*m[4+b] + m[8+a]*m[8+b]
+			want := 0.0
+			if a == b {
+				want = 1
+			}
+			if math.Abs(dot-want) > 1e-9 {
+				return nil, &BuildError{what + ": the placement scales or shears, which a brep cannot follow"}
+			}
+		}
+	}
+	return s.Place(Frame{m[3], m[7], m[11], m[0], m[4], m[8], m[1], m[5], m[9], m[2], m[6], m[10]})
 }
 
 // ToScene is this solid as a reader Scene, through STEP text and cadaclysm.OpenMemory —

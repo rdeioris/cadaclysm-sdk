@@ -21,10 +21,10 @@
 // `include/cadaclysm_blacksmith.h`, on the object model of `cadaclysm_blacksmith.py` -- the
 // same names (camelCase here), the same arguments and defaults (Java overloads standing in
 // for Python's keyword arguments), the same C calls, member for member. No JNI, no generated
-// bindings, no third-party interop library. It shares `Cad.java`'s loader: point
-// `CADACLYSM_LIBRARY` at the directory holding both libraries (or
-// `CADACLYSM_BLACKSMITH_LIBRARY` at this one, as Python's kernel module reads it) if they
-// are not where the loader looks by default.
+// bindings, no third-party interop library. It finds its library the way
+// `cadaclysm_blacksmith.py` does: point `CADACLYSM_BLACKSMITH_LIBRARY` at the library or the
+// directory holding it if it is not where the loader looks by default (see `library()`).
+// `CADACLYSM_LIBRARY` is the reader's, as it is in Python.
 //
 // ## Every array borrows from its solid
 //
@@ -151,25 +151,26 @@ public final class Blacksmith {
 
     // ---- loading the library, and every entry point ----------------------------------
     //
-    // The same 78 Python's `cadaclysm_blacksmith.py` declares, no more and no less;
+    // The same 90 Python's `cadaclysm_blacksmith.py` declares, no more and no less;
     // `tests/bindings.rs` compares the two sets by name (every quoted
     // cadaclysm_blacksmith_ string in this file) and holds Java to Python's.
 
     private static final MethodHandle LAST_ERROR, LICENSE_SET, LICENSE_INFO, LICENSE_NOTICE_COUNT,
             BUILD_DATE, VERSION, SOLID_FREE, PROFILE_FREE, PROFILE_RECT, PROFILE_CIRCLE,
-            PROFILE_SLOT, PROFILE_POLYGON, PROFILE_WITH_HOLE, TRANSLATE_PROFILE, PROFILE_ROUND, PATH_BEGIN,
+            PROFILE_SLOT, PROFILE_POLYGON, PROFILE_REGULAR_POLYGON, PROFILE_SPLINE, PROFILE_WITH_HOLE, TRANSLATE_PROFILE, PROFILE_ROUND, PROFILE_CHAIN, PROFILE_FROM_LOOPS, PROFILE_CLOSE_LOOP, PATH_BEGIN,
             PATH_LINE_TO, PATH_ARC_TO, PATH_BEZIER_TO, PATH_NURBS_TO, PATH_END, PATH_END_OPEN,
             PATH_FREE, CUBOID, CYLINDER, CONE, SPHERE, TORUS, WEDGE, EXTRUDE, EXTRUDE_OPEN,
             EXTRUDE_TAPERED, EXTRUDE_OPEN_TAPERED, EXTRUDE_BETWEEN, EXTRUDE_OPEN_BETWEEN,
-            SLANT_OF_PLANE, LOFT, LOFT_OPEN, REVOLVE, REVOLVE_OPEN, SWEEP_PATH_BEGIN,
+            SLANT_OF_PLANE, LOFT, LOFT_OPEN, REVOLVE, REVOLVE_OPEN, REVOLVE_IN_PLANE, REVOLVE_OPEN_IN_PLANE, SWEEP_PATH_BEGIN,
             SWEEP_PATH_LINE_TO, SWEEP_PATH_ARC, SWEEP_PATH_ALONG, SWEEP_PATH_FREE, SWEEP, SWEEP_OPEN,
             EXTRUDE_FACES, FACE, FACE_SHEET, DROP_FACES, PLACE, TRANSLATE, ROTATE, MIRROR, JOIN, CUT,
             COMMON, SPLIT_SHEET, TRIM, FILLET, CHAMFER,
-            SHELL, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_KIND, COLOURED, COLOUR, EDGE_COUNT, EDGE_AT, MESH_AT,
-            EDGE_POLYLINES, BOUNDS, LEAKED_EDGES, UNPAIRED_EDGES, STEP, STRING_FREE;
+            SHELL, PUSH_PULL, MERGE_FLUSH, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_KIND, COLOURED, COLOUR, EDGE_COUNT, EDGE_AT, MESH_AT,
+            EDGE_POLYLINES, BOUNDS, LEAKED_EDGES, UNPAIRED_EDGES, MANIFOLD, STEP, STRING_FREE, FROM_BREP,
+            BREP_LAYOUT_ID;
 
     static {
-        SymbolLookup lib = Cad.Loader.resolve(Cad.Loader.BLACKSMITH_LIBRARY);
+        SymbolLookup lib = library();
         Linker linker = Linker.nativeLinker();
         ValueLayout.OfInt I = ValueLayout.JAVA_INT;
         ValueLayout.OfLong L = ValueLayout.JAVA_LONG;
@@ -189,9 +190,14 @@ public final class Blacksmith {
         PROFILE_CIRCLE = bind(linker, lib, "cadaclysm_blacksmith_profile_circle", FunctionDescriptor.of(A, D));
         PROFILE_SLOT = bind(linker, lib, "cadaclysm_blacksmith_profile_slot", FunctionDescriptor.of(A, D, D, D, D));
         PROFILE_POLYGON = bind(linker, lib, "cadaclysm_blacksmith_profile_polygon", FunctionDescriptor.of(A, A, L));
+        PROFILE_REGULAR_POLYGON = bind(linker, lib, "cadaclysm_blacksmith_profile_regular_polygon", FunctionDescriptor.of(A, D, D, D, I, D));
+        PROFILE_SPLINE = bind(linker, lib, "cadaclysm_blacksmith_profile_spline", FunctionDescriptor.of(A, A, L, I, A, B));
         PROFILE_WITH_HOLE = bind(linker, lib, "cadaclysm_blacksmith_profile_with_hole", FunctionDescriptor.of(A, A, A));
         TRANSLATE_PROFILE = bind(linker, lib, "cadaclysm_blacksmith_translate_profile", FunctionDescriptor.of(A, A, D, D));
         PROFILE_ROUND = bind(linker, lib, "cadaclysm_blacksmith_profile_round", FunctionDescriptor.of(A, A, D, A, L, B));
+        PROFILE_CHAIN = bind(linker, lib, "cadaclysm_blacksmith_profile_chain", FunctionDescriptor.of(A, A, L, D));
+        PROFILE_FROM_LOOPS = bind(linker, lib, "cadaclysm_blacksmith_profile_from_loops", FunctionDescriptor.of(A, A, L));
+        PROFILE_CLOSE_LOOP = bind(linker, lib, "cadaclysm_blacksmith_profile_close_loop", FunctionDescriptor.of(A, A));
         PATH_BEGIN = bind(linker, lib, "cadaclysm_blacksmith_path_begin", FunctionDescriptor.of(A, D, D));
         PATH_LINE_TO = bind(linker, lib, "cadaclysm_blacksmith_path_line_to", FunctionDescriptor.of(B, A, D, D));
         PATH_ARC_TO = bind(linker, lib, "cadaclysm_blacksmith_path_arc_to", FunctionDescriptor.of(B, A, D, D, D, D, B));
@@ -217,6 +223,8 @@ public final class Blacksmith {
         LOFT_OPEN = bind(linker, lib, "cadaclysm_blacksmith_loft_open", FunctionDescriptor.of(A, A, A, A, A));
         REVOLVE = bind(linker, lib, "cadaclysm_blacksmith_revolve", FunctionDescriptor.of(A, A, A, D));
         REVOLVE_OPEN = bind(linker, lib, "cadaclysm_blacksmith_revolve_open", FunctionDescriptor.of(A, A, A, D));
+        REVOLVE_IN_PLANE = bind(linker, lib, "cadaclysm_blacksmith_revolve_in_plane", FunctionDescriptor.of(A, A, A, A, D));
+        REVOLVE_OPEN_IN_PLANE = bind(linker, lib, "cadaclysm_blacksmith_revolve_open_in_plane", FunctionDescriptor.of(A, A, A, A, D));
         SWEEP_PATH_BEGIN = bind(linker, lib, "cadaclysm_blacksmith_sweep_path_begin", FunctionDescriptor.of(A, D, D, D));
         SWEEP_PATH_LINE_TO = bind(linker, lib, "cadaclysm_blacksmith_sweep_path_line_to", FunctionDescriptor.of(B, A, D, D, D));
         SWEEP_PATH_ARC = bind(linker, lib, "cadaclysm_blacksmith_sweep_path_arc", FunctionDescriptor.of(B, A, D, D, D, D, D, D, D));
@@ -240,6 +248,8 @@ public final class Blacksmith {
         FILLET = bind(linker, lib, "cadaclysm_blacksmith_fillet", FunctionDescriptor.of(A, A, A, L, D, D, A, A));
         CHAMFER = bind(linker, lib, "cadaclysm_blacksmith_chamfer", FunctionDescriptor.of(A, A, A, L, D, D));
         SHELL = bind(linker, lib, "cadaclysm_blacksmith_shell", FunctionDescriptor.of(A, A, D, A, L, D, A, A));
+        PUSH_PULL = bind(linker, lib, "cadaclysm_blacksmith_push_pull", FunctionDescriptor.of(A, A, I, D, D, A, A));
+        MERGE_FLUSH = bind(linker, lib, "cadaclysm_blacksmith_merge_flush", FunctionDescriptor.of(A, A));
         FACE_COUNT = bind(linker, lib, "cadaclysm_blacksmith_face_count", FunctionDescriptor.of(I, A));
         SELECT_FACE = bind(linker, lib, "cadaclysm_blacksmith_select_face", FunctionDescriptor.of(I, A, I, A, I));
         FACE_FRAME = bind(linker, lib, "cadaclysm_blacksmith_face_frame", FunctionDescriptor.of(B, A, I, A));
@@ -253,8 +263,11 @@ public final class Blacksmith {
         BOUNDS = bind(linker, lib, "cadaclysm_blacksmith_bounds", FunctionDescriptor.of(B, A, D, A, A));
         LEAKED_EDGES = bind(linker, lib, "cadaclysm_blacksmith_leaked_edges", FunctionDescriptor.of(I, A, D));
         UNPAIRED_EDGES = bind(linker, lib, "cadaclysm_blacksmith_unpaired_edges", FunctionDescriptor.of(I, A, D));
+        MANIFOLD = bind(linker, lib, "cadaclysm_blacksmith_manifold", FunctionDescriptor.of(B, A, A));
         STEP = bind(linker, lib, "cadaclysm_blacksmith_step", FunctionDescriptor.of(A, A, L, A, I));
         STRING_FREE = bind(linker, lib, "cadaclysm_blacksmith_string_free", FunctionDescriptor.ofVoid(A));
+        FROM_BREP = bind(linker, lib, "cadaclysm_blacksmith_from_brep", FunctionDescriptor.of(A, A, A));
+        BREP_LAYOUT_ID = bind(linker, lib, "cadaclysm_blacksmith_brep_layout_id", FunctionDescriptor.of(A));
     }
 
     @SuppressWarnings("restricted") // downcallHandle: every entry point here is the published ABI.
@@ -305,6 +318,13 @@ public final class Blacksmith {
     /** The library's own reason for the last failure, or "" if it left none. */
     private static String lastError() {
         return string(call(() -> (MemorySegment) LAST_ERROR.invokeExact()));
+    }
+
+    /** How the loaded library lays a brep out in memory: its compiler, target and source.
+     *  {@code Solid.fromNode} works only where this equals the reader library's {@code
+     *  Cad.Brep.layoutId()} -- the two from the same release. */
+    public static String brepLayoutId() {
+        return string(call(() -> (MemorySegment) BREP_LAYOUT_ID.invokeExact()));
     }
 
     /** The library's own reason, or {@code what} if it left none. */
@@ -496,6 +516,53 @@ public final class Blacksmith {
         return info.isEmpty() ? "unlicensed" : info;
     }
 
+    /**
+     * The kernel library, found by {@code cadaclysm_blacksmith.py}'s own rule, {@code
+     * library_path()}: {@code CADACLYSM_BLACKSMITH_LIBRARY} (the library, or a directory
+     * holding it) and nothing else if it is set; else beside this class's own jar or class
+     * directory; else {@code lib/} in any ancestor (the SDK layout); else {@code
+     * target/release} or {@code target/debug} in any ancestor (this repository's). Nothing
+     * found is a {@link BuildException} naming every place looked, as Python's {@code
+     * BuildError} does -- never the platform's own search, which would load whatever copy
+     * happens to be on the path.
+     */
+    @SuppressWarnings("restricted") // libraryLookup: the library this file binds.
+    private static SymbolLookup library() {
+        String os = System.getProperty("os.name", "").toLowerCase();
+        String name = os.contains("win") ? "cadaclysm_blacksmith.dll"
+                : os.contains("mac") ? "libcadaclysm_blacksmith.dylib" : "libcadaclysm_blacksmith.so";
+        String override = System.getenv("CADACLYSM_BLACKSMITH_LIBRARY");
+        if (override != null && !override.isEmpty()) {
+            // A directory or the library itself, since both are things to point at.
+            java.nio.file.Path candidate = java.nio.file.Path.of(override);
+            if (Files.isDirectory(candidate)) candidate = candidate.resolve(name);
+            if (Files.exists(candidate)) return SymbolLookup.libraryLookup(candidate, Cad.Loader.ARENA);
+            throw new BuildException("CADACLYSM_BLACKSMITH_LIBRARY=" + override + " names nothing that exists");
+        }
+        java.nio.file.Path start = Cad.Loader.codeLocation();
+        java.nio.file.Path here = start == null || Files.isDirectory(start) ? start : start.getParent();
+        List<java.nio.file.Path> ancestors = new ArrayList<>();
+        for (java.nio.file.Path at = here; at != null; at = at.getParent()) ancestors.add(at);
+        List<java.nio.file.Path> searched = new ArrayList<>();
+        if (here != null) searched.add(here.resolve(name));
+        // Walking up from this class's code: an SDK checkout keeps the library in `lib/`
+        // beside the wrappers; the repository this example ships in keeps it in
+        // `target/release` (or `target/debug`, a fallback for a machine that only built that).
+        for (java.nio.file.Path at : ancestors) searched.add(at.resolve("lib").resolve(name));
+        for (java.nio.file.Path at : ancestors) {
+            searched.add(at.resolve("target").resolve("release").resolve(name));
+            searched.add(at.resolve("target").resolve("debug").resolve(name));
+        }
+        for (java.nio.file.Path candidate : searched) {
+            if (Files.exists(candidate)) return SymbolLookup.libraryLookup(candidate, Cad.Loader.ARENA);
+        }
+        StringBuilder message = new StringBuilder(name).append(" not found. Looked in:\n");
+        for (java.nio.file.Path candidate : searched) message.append("    ").append(candidate).append('\n');
+        message.append("Build it with:\n    cargo build --release -p cadaclysm-blacksmith-capi\n")
+                .append("or run fetch.py in an SDK checkout, or point CADACLYSM_BLACKSMITH_LIBRARY at it.");
+        throw new BuildException(message.toString());
+    }
+
     /** How many unlicensed notices this library has printed to stderr in this process. */
     public static long licenseNoticeCount() {
         return call(() -> (long) LICENSE_NOTICE_COUNT.invokeExact());
@@ -645,14 +712,50 @@ public final class Blacksmith {
             return new Profile(call(() -> (MemorySegment) PROFILE_SLOT.invokeExact(c[0], c[1], length, r)));
         }
 
-        /** A closed polygon through {@code points} (two numbers each), in order; the closing
-         *  side is implied. */
+        /** A closed polygon through {@code points} (two numbers each), in order, its side back
+         *  to the first point a segment of its own. */
         public static Profile polygon(double[][] points) {
             double[] flat = flatten2(points, "point");
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment xy = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, flat);
                 long n = flat.length / 2;
                 return new Profile(call(() -> (MemorySegment) PROFILE_POLYGON.invokeExact(xy, n)));
+            }
+        }
+
+        /** {@link #regularPolygon(double[], double, int, double)} with its first corner on the x axis. */
+        public static Profile regularPolygon(double[] centre, double radius, int sides) {
+            return regularPolygon(centre, radius, sides, 0);
+        }
+
+        /** A regular polygon of {@code sides} sides (at least 3) on the circle of {@code radius}
+         *  about {@code centre}, its first corner at {@code angle} radians from the sketch's x
+         *  axis, the rest counter-clockwise. */
+        public static Profile regularPolygon(double[] centre, double radius, int sides, double angle) {
+            double[] c = point2(centre, "centre");
+            int n = Math.max(0, sides);
+            return new Profile(call(() -> (MemorySegment) PROFILE_REGULAR_POLYGON.invokeExact(c[0], c[1], radius, n, angle)));
+        }
+
+        /** {@link #spline(double[][], int, double[], boolean)} of degree 3, open, unweighted. */
+        public static Profile spline(double[][] points) {
+            return spline(points, 3, null, false);
+        }
+
+        /**
+         * A spline of {@code degree} through the control polygon {@code points} ({@code weights}
+         * one per point, or null). Open, it starts on the first point and ends on the last -- an
+         * open chain; {@code closed}, it is periodic, smooth through its own start -- a closed
+         * profile. The degree is lowered to fit the points.
+         */
+        public static Profile spline(double[][] points, int degree, double[] weights, boolean closed) {
+            double[] flat = flatten2(points, "point");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment xy = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, flat);
+                MemorySegment w = weights == null ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_DOUBLE, weights.length == 0 ? new double[] {0} : weights);
+                long n = flat.length / 2;
+                int d = Math.max(0, degree);
+                return new Profile(call(() -> (MemorySegment) PROFILE_SPLINE.invokeExact(xy, n, d, w, closed)));
             }
         }
 
@@ -681,6 +784,69 @@ public final class Blacksmith {
                 return new Profile(call(() -> (MemorySegment) TRANSLATE_PROFILE.invokeExact(h, dx, dy)));
             } finally {
                 keep(this);
+            }
+        }
+
+        /** This profile closed -- Python's {@code close_loop}, the forge's sketch "close": where
+         *  its last segment stops short of its start (a path ended open), a straight segment back
+         *  to it; where it already comes back within 1e-9 of its extent, its last segment made to
+         *  land on the start exactly. A closed profile comes back as it is; holes are closed the
+         *  same way. (Not {@code close}: that releases the handle.) */
+        public Profile closeLoop() {
+            try {
+                MemorySegment h = handle();
+                return new Profile(call(() -> (MemorySegment) PROFILE_CLOSE_LOOP.invokeExact(h)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #chain(Collection, double)} at a tolerance of {@code 1e-6}. */
+        public static Profile chain(Collection<Profile> pieces) {
+            return chain(pieces, 1e-6);
+        }
+
+        /**
+         * Open profiles joined end to end into one -- the forge's merge. The pieces may come
+         * in any order and either way round: each next one is the first of the rest with an end
+         * within {@code tolerance} of either end of the chain so far, reversed where that makes
+         * it meet. Every segment is kept exactly. Closed where the chain's two ends meet,
+         * otherwise an open chain. Throws {@link BuildException} for no pieces, a piece empty,
+         * with holes or closed on its own, or one that meets none of the others.
+         */
+        public static Profile chain(Collection<Profile> pieces, double tolerance) {
+            Profile[] all = pieces.toArray(new Profile[0]);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment handles = arena.allocate(ValueLayout.ADDRESS, Math.max(all.length, 1));
+                for (int i = 0; i < all.length; i++) {
+                    handles.setAtIndex(ValueLayout.ADDRESS, i, all[i].handle());
+                }
+                long count = all.length;
+                return new Profile(call(() -> (MemorySegment) PROFILE_CHAIN.invokeExact(handles, count, tolerance)));
+            } finally {
+                keep((Object[]) all);
+            }
+        }
+
+        /**
+         * Closed loops, in any order, as one profile: the loop enclosing the most area is the
+         * boundary and every other a hole in it, in the order given -- a sketch's rectangle and
+         * the circles drawn inside it. Each loop is closed, with no holes of its own, wound
+         * either way. Throws {@link BuildException}, naming loops by their index, for a loop
+         * that is open, empty or of no area, loops that cross or touch, a hole outside the
+         * boundary or inside another hole.
+         */
+        public static Profile fromLoops(Collection<Profile> loops) {
+            Profile[] all = loops.toArray(new Profile[0]);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment handles = arena.allocate(ValueLayout.ADDRESS, Math.max(all.length, 1));
+                for (int i = 0; i < all.length; i++) {
+                    handles.setAtIndex(ValueLayout.ADDRESS, i, all[i].handle());
+                }
+                long count = all.length;
+                return new Profile(call(() -> (MemorySegment) PROFILE_FROM_LOOPS.invokeExact(handles, count)));
+            } finally {
+                keep((Object[]) all);
             }
         }
 
@@ -1384,6 +1550,36 @@ public final class Blacksmith {
         }
 
         /**
+         * {@code profile}, drawn on {@code frame}, swung {@code angle} radians about the axis
+         * through the sketch points {@code a} and {@code b} (two numbers each, on the frame) --
+         * the profile and its axis drawn together, where {@link #revolve} reads the profile as
+         * (radius, height). The profile may lie on either side of the axis and touch it, not
+         * cross it; the sweep starts where it is drawn and turns right-handed about b - a.
+         */
+        public static Solid revolveInPlane(Profile profile, double[] frame, double[] a, double[] b, double angle) {
+            return inPlane(REVOLVE_IN_PLANE, profile, frame, a, b, angle);
+        }
+
+        /** {@link #revolveInPlane} for a curve: its segments swung into a sheet. */
+        public static Solid revolveOpenInPlane(Profile profile, double[] frame, double[] a, double[] b, double angle) {
+            return inPlane(REVOLVE_OPEN_IN_PLANE, profile, frame, a, b, angle);
+        }
+
+        private static Solid inPlane(MethodHandle op, Profile profile, double[] frame, double[] a, double[] b, double angle) {
+            double[] f = frame(frame);
+            double[] p0 = point2(a, "a");
+            double[] p1 = point2(b, "b");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment fs = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, f);
+                MemorySegment as = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, p0[0], p0[1], p1[0], p1[1]);
+                MemorySegment p = profile.handle();
+                return new Solid(call(() -> (MemorySegment) op.invokeExact(p, fs, as, angle)));
+            } finally {
+                keep(profile);
+            }
+        }
+
+        /**
          * {@code profile}, drawn on {@code frame}, carried along {@code path} into a closed
          * solid: a straight piece of the path is an extrusion, a circular piece a revolution
          * about the arc's axis, so nothing is approximated -- a circle along an arc is an
@@ -1521,6 +1717,16 @@ public final class Blacksmith {
             return combine(JOIN, other, tolerance);
         }
 
+        /** {@link #join(Solid, double)}, its flush faces merged when {@code merge} ({@link #mergeFlush}), as
+         *  Fusion does; the unmerged result is closed. */
+        public Solid join(Solid other, double tolerance, boolean merge) {
+            Solid out = join(other, tolerance);
+            if (!merge) return out;
+            try (out) {
+                return out.mergeFlush();
+            }
+        }
+
         /** {@link #cut(Solid, double)} at 0.05. */
         public Solid cut(Solid other) {
             return cut(other, 0.05);
@@ -1531,6 +1737,16 @@ public final class Blacksmith {
             return combine(CUT, other, tolerance);
         }
 
+        /** {@link #cut(Solid, double)}, its flush faces merged when {@code merge} ({@link #mergeFlush}), as
+         *  Fusion does; the unmerged result is closed. */
+        public Solid cut(Solid other, double tolerance, boolean merge) {
+            Solid out = cut(other, tolerance);
+            if (!merge) return out;
+            try (out) {
+                return out.mergeFlush();
+            }
+        }
+
         /** {@link #common(Solid, double)} at 0.05. */
         public Solid common(Solid other) {
             return common(other, 0.05);
@@ -1539,6 +1755,16 @@ public final class Blacksmith {
         /** What this solid and {@code other} share; both inputs stay valid. */
         public Solid common(Solid other, double tolerance) {
             return combine(COMMON, other, tolerance);
+        }
+
+        /** {@link #common(Solid, double)}, its flush faces merged when {@code merge} ({@link #mergeFlush}), as
+         *  Fusion does; the unmerged result is closed. */
+        public Solid common(Solid other, double tolerance, boolean merge) {
+            Solid out = common(other, tolerance);
+            if (!merge) return out;
+            try (out) {
+                return out.mergeFlush();
+            }
         }
 
         /** {@link #splitSheet(Solid, double)} at 0.05. */
@@ -1683,6 +1909,22 @@ public final class Blacksmith {
         /** {@code leakedEdges(tolerance) == 0}. */
         public boolean isWatertight(double tolerance) {
             return leakedEdges(tolerance) == 0;
+        }
+
+        /** Whether the faces make a manifold -- every edge bordered by one face or two, the
+         *  faces round every vertex one fan -- and whether it is closed. Read off the solid's
+         *  topology, not a mesh, so it takes no tolerance; whether the faces all face out is
+         *  {@link #unpairedEdges}'s question. */
+        public Cad.Manifold manifold() {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_INT, 8);
+                MemorySegment h = handle();
+                boolean ok = call(() -> (boolean) MANIFOLD.invokeExact(h, out));
+                if (!ok) throw failure("manifold");
+                return Cad.Manifold.of(out.toArray(ValueLayout.JAVA_INT));
+            } finally {
+                keep(this);
+            }
         }
 
         // -- out
@@ -1929,6 +2171,39 @@ public final class Blacksmith {
             }
         }
 
+        /** {@link #pushPull(int, double, double)} at tolerance 0.05. */
+        public Solid pushPull(int face, double distance) {
+            return pushPull(face, distance, 0.05);
+        }
+
+        /** Face {@code face} pushed out by {@code distance} along its outward normal (pulled
+         *  in, negative) the way Fusion and Rhino extrude a face: the prism over it joined on
+         *  (cut out), and the flush faces merged -- a box's top raised is one taller box of
+         *  six faces. A face on a cylinder moves out along its normal instead, the radius
+         *  changed (a boss fatter, a bore narrower), the flat faces beside it carried along;
+         *  any other curved face is refused. */
+        public Solid pushPull(int face, double distance, double tolerance) {
+            int which = index(face);
+            try {
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) PUSH_PULL.invokeExact(h, which, distance, tolerance, MemorySegment.NULL, MemorySegment.NULL)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** This solid with its flush faces merged: flat faces on one plane, facing one way and
+         *  meeting, made one face, and the vertices left mid-way along a straight edge taken
+         *  out -- the seams a {@link #join} leaves where two parts are flush. */
+        public Solid mergeFlush() {
+            try {
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) MERGE_FLUSH.invokeExact(h)));
+            } finally {
+                keep(this);
+            }
+        }
+
         /** {@link #shell(double, int[], double)} with no face opened, at tolerance 1e-6. */
         public Solid shell(double thickness) {
             return shell(thickness, new int[0], 1e-6);
@@ -1952,6 +2227,154 @@ public final class Blacksmith {
                         h, thickness, list, count, tolerance, MemorySegment.NULL, MemorySegment.NULL)));
             } finally {
                 keep(this);
+            }
+        }
+
+        // -- from files
+
+        /** {@link #fromNode(Cad.Scene, Cad.Node, boolean)}, placed. */
+        public static Solid fromNode(Cad.Scene scene, Cad.Node node) {
+            return fromNode(scene, node, true);
+        }
+
+        /** {@link #fromNode(Cad.Scene, Cad.Node, boolean)} by node index. */
+        public static Solid fromNode(Cad.Scene scene, int node, boolean placed) {
+            return fromNode(scene, scene.nodes().get(node), placed);
+        }
+
+        /**
+         * The body {@code node} of a reader {@link Cad.Scene} draws, as a solid -- sharing the
+         * reader's brep, not copying it. The scene can be closed before the solid is.
+         * {@code placed} puts it where the node's {@code transform()} does, which is where its
+         * mesh draws; a node at the identity stays shared, a moved one is a moved copy. In the
+         * file's own units and axes. Needs the reader's library from the same release as this
+         * one's: the brep is handed across by pointer and the two layouts are compared first.
+         * What a solid from a file can then do: see {@link #open(String)}.
+         */
+        public static Solid fromNode(Cad.Scene scene, Cad.Node node, boolean placed) {
+            String label = "from_node: node " + node.index() + " (" + label(node) + ")";
+            Solid solid = fromBrep(node, label);
+            if (solid == null) {
+                throw new BuildException(label + " has no brep: only a B-rep body has one (STEP, ACIS, Rhino, "
+                        + "OCCT .brep, IGES, IFC), not a mesh, a curve or a CSG body");
+            }
+            if (!placed) return solid;
+            double[][] m = node.transform();
+            if (scene.convention() != Cad.Convention.NATIVE && !isIdentity(m)) {
+                solid.close();
+                throw new BuildException("from_node: placed=True needs the scene opened with Convention.NATIVE -- the "
+                        + "brep is in the file's own axes and the node's transform is not; open NATIVE, or pass placed false");
+            }
+            return solid.placed(m, "from_node");
+        }
+
+        /**
+         * The body a CAD file holds, as a solid: a STEP (AP203/214/242), ACIS {@code .sat},
+         * Rhino {@code .3dm}, OCCT {@code .brep}, IGES or IFC file, read where it draws, in the
+         * file's own units and axes. A file drawing several bodies needs {@link #open(String,
+         * int)} or {@link #openAll}. Fillet and chamfer want line and circle edges; booleans
+         * take any surface, but the new edges they trace on a free-form (NURBS) face are not
+         * always writable back to STEP; and every verb meshes its operands first, so its cost
+         * grows with the body's face count.
+         */
+        public static Solid open(String path) {
+            return openOne(path, -1);
+        }
+
+        /** {@link #open(String)} for one body of several, 0-based in drawing order. */
+        public static Solid open(String path, int body) {
+            if (body < 0) throw new BuildException("open: " + java.nio.file.Path.of(path).getFileName() + " has no body " + body);
+            return openOne(path, body);
+        }
+
+        private static Solid openOne(String path, int body) {
+            List<Solid> solids = openAll(path);
+            String name = String.valueOf(java.nio.file.Path.of(path).getFileName());
+            if (body < 0 && solids.size() == 1) return solids.get(0);
+            if (body < 0 || body >= solids.size()) {
+                for (Solid s : solids) s.close();
+                throw new BuildException(body < 0
+                        ? "open: " + name + " holds " + solids.size() + " bodies: pass body= (0 to "
+                                + (solids.size() - 1) + "), or use Solid.open_all"
+                        : "open: " + name + " has no body " + body + ": it holds " + solids.size());
+            }
+            for (int i = 0; i < solids.size(); i++) if (i != body) solids.get(i).close();
+            return solids.get(body);
+        }
+
+        /** Every body a CAD file draws, as solids placed where it draws them: one per
+         *  placement, so a part placed twice is two solids. See {@link #open(String)}. */
+        public static List<Solid> openAll(String path) {
+            Cad.Scene scene;
+            try {
+                scene = Cad.open(path);
+            } catch (Cad.CadaclysmException e) {
+                throw new BuildException("open: " + e.getMessage());
+            }
+            List<Solid> solids = new ArrayList<>();
+            try (scene) {
+                for (Cad.Placement placement : scene.placements()) {
+                    Cad.Node node = placement.geometry();
+                    String what = "open: " + label(node);
+                    Solid solid = fromBrep(node, what);
+                    if (solid != null) solids.add(solid.placed(placement.transform(), what));
+                }
+            } catch (RuntimeException e) {
+                for (Solid s : solids) s.close();
+                throw e;
+            }
+            if (solids.isEmpty()) {
+                String name = String.valueOf(java.nio.file.Path.of(path).getFileName());
+                int dot = name.lastIndexOf('.');
+                String extension = dot < 0 ? "" : name.substring(dot + 1).toLowerCase();
+                throw new BuildException("open: the ." + extension + " file draws no B-rep body -- only a STEP, ACIS, "
+                        + "Rhino, OCCT .brep, IGES or IFC body can be a solid, not a mesh, a curve or a CSG body");
+            }
+            return solids;
+        }
+
+        private static String label(Cad.Node node) {
+            if (!node.name().isEmpty()) return node.name();
+            if (!node.kind().isEmpty()) return node.kind();
+            return String.valueOf(node.index());
+        }
+
+        /** The node's brep as a solid, shared, or null where it has none. */
+        private static Solid fromBrep(Cad.Node node, String what) {
+            try (Cad.Brep brep = node.brep()) {
+                if (brep == null) return null;
+                try (Arena arena = Arena.ofConfined()) {
+                    MemorySegment layout = arena.allocateFrom(Cad.Brep.layoutId());
+                    MemorySegment pointer = brep.pointer();
+                    MemorySegment raw = call(() -> (MemorySegment) FROM_BREP.invokeExact(pointer, layout));
+                    if (raw.address() == 0) throw failure(what);
+                    return new Solid(raw);
+                }
+            }
+        }
+
+        private static boolean isIdentity(double[][] m) {
+            for (int i = 0; i < 4; i++)
+                for (int j = 0; j < 4; j++)
+                    if (m[i][j] != (i == j ? 1.0 : 0.0)) return false;
+            return true;
+        }
+
+        /** This solid moved by a row-major 4x4 placement: itself at the identity, a moved copy
+         *  for a rigid move (a mirror included; this one is closed), refused for a scale or
+         *  shear, which a brep cannot follow exactly (a cylinder's radius is a number, not a
+         *  point). */
+        private Solid placed(double[][] m, String what) {
+            if (isIdentity(m)) return this;
+            try (this) {
+                for (int a = 0; a < 3; a++)
+                    for (int b = 0; b < 3; b++) {
+                        double dot = m[0][a] * m[0][b] + m[1][a] * m[1][b] + m[2][a] * m[2][b];
+                        if (Math.abs(dot - (a == b ? 1.0 : 0.0)) > 1e-9)
+                            throw new BuildException(what + ": the placement scales or shears, which a brep cannot follow");
+                    }
+                return place(new double[] {m[0][3], m[1][3], m[2][3], m[0][0], m[1][0], m[2][0],
+                        m[0][1], m[1][1], m[2][1], m[0][2], m[1][2], m[2][2]});
             }
         }
 
@@ -2057,6 +2480,162 @@ public final class Blacksmith {
         @Override
         public String toString() {
             return "Edge(" + index + ", \"" + kind + "\", faces=" + Arrays.toString(faces) + ")";
+        }
+    }
+
+    // ---- frames ---------------------------------------------------------------------------
+
+    /**
+     * An origin and three unit axes, square to each other and right-handed (z = x × y): the
+     * plane a profile is drawn on (its x/y) and the direction it is built along (its z).
+     * {@link #toArray()} is the twelve numbers every call taking a {@code frame} reads.
+     * Immutable. The constructor normalises the axes and throws {@link BuildException} when
+     * they are not square or not right-handed.
+     */
+    public static final class Frame {
+        /** How far from square the axes may be (the cosine between two of them). */
+        private static final double SQUARE = 1e-6;
+
+        private final double[] v;
+
+        public Frame(double[] origin, double[] x, double[] y, double[] z) {
+            double[] o = point3(origin, "Frame: origin");
+            for (double c : o) {
+                if (!Double.isFinite(c)) throw new BuildException("Frame: origin must be three finite numbers");
+            }
+            double[] ux = unit(x, "Frame: x"), uy = unit(y, "Frame: y"), uz = unit(z, "Frame: z");
+            if (Math.max(Math.abs(dot(ux, uy)), Math.max(Math.abs(dot(uy, uz)), Math.abs(dot(uz, ux)))) > SQUARE) {
+                throw new BuildException("Frame: the axes are not square to each other");
+            }
+            if (dot(cross(ux, uy), uz) < 0) {
+                throw new BuildException("Frame: the axes are left-handed (z must be x × y)");
+            }
+            v = new double[]{o[0], o[1], o[2], ux[0], ux[1], ux[2], uy[0], uy[1], uy[2], uz[0], uz[1], uz[2]};
+            for (int i = 0; i < v.length; i++) v[i] += 0.0; // no -0.0 to print or compare
+        }
+
+        /** Twelve numbers -- what {@link Solid#faceFrame} and {@link Workplane#frame()} hand
+         *  back -- checked as the constructor checks. */
+        public static Frame of(double[] frame) {
+            double[] f = frame(frame);
+            return new Frame(Arrays.copyOfRange(f, 0, 3), Arrays.copyOfRange(f, 3, 6),
+                Arrays.copyOfRange(f, 6, 9), Arrays.copyOfRange(f, 9, 12));
+        }
+
+        /** The world XY plane through the origin: z up, as {@link Workplane#xy()}. */
+        public static Frame xy() {
+            return xy(new double[3]);
+        }
+
+        /** The world XY plane through {@code origin}. */
+        public static Frame xy(double[] origin) {
+            return new Frame(origin, new double[]{1, 0, 0}, new double[]{0, 1, 0}, new double[]{0, 0, 1});
+        }
+
+        /** The world XZ plane through the origin: x along X, y along Z, so z is -Y, as
+         *  {@link Workplane#xz()}. */
+        public static Frame xz() {
+            return xz(new double[3]);
+        }
+
+        /** The world XZ plane through {@code origin}. */
+        public static Frame xz(double[] origin) {
+            return new Frame(origin, new double[]{1, 0, 0}, new double[]{0, 0, 1}, new double[]{0, -1, 0});
+        }
+
+        /** The world YZ plane through the origin: x along Y, y along Z, so z is +X, as
+         *  {@link Workplane#yz()}. */
+        public static Frame yz() {
+            return yz(new double[3]);
+        }
+
+        /** The world YZ plane through {@code origin}. */
+        public static Frame yz(double[] origin) {
+            return new Frame(origin, new double[]{0, 1, 0}, new double[]{0, 0, 1}, new double[]{1, 0, 0});
+        }
+
+        /**
+         * The plane through {@code origin} square to {@code normal} (the frame's z). Its x
+         * axis is world X laid onto that plane, or world Y when the normal is within about
+         * 25° of X, the axes {@link Solid#faceFrame} gives a face facing {@code normal} -- so a
+         * normal along +Z, -Y or +X gives exactly {@link #xy}, {@link #xz} or
+         * {@link #yz}.
+         */
+        public static Frame at(double[] origin, double[] normal) {
+            double[] z = unit(normal, "Frame.at: normal");
+            return at(origin, z, Math.abs(z[0]) <= 0.9 ? new double[]{1, 0, 0} : new double[]{0, 1, 0});
+        }
+
+        /** As {@link #at(double[], double[])}, with its x axis {@code x} laid onto the plane. */
+        public static Frame at(double[] origin, double[] normal, double[] x) {
+            double[] z = unit(normal, "Frame.at: normal");
+            double[] hint = unit(x, "Frame.at: x");
+            double d = dot(hint, z);
+            if (Math.abs(d) > 1 - SQUARE) throw new BuildException("Frame.at: x lies along the normal");
+            double[] ax = unit(new double[]{hint[0] - d * z[0], hint[1] - d * z[1], hint[2] - d * z[2]}, "Frame.at: x");
+            return new Frame(origin, ax, cross(z, ax), z);
+        }
+
+        public double[] origin() {
+            return Arrays.copyOfRange(v, 0, 3);
+        }
+
+        public double[] x() {
+            return Arrays.copyOfRange(v, 3, 6);
+        }
+
+        public double[] y() {
+            return Arrays.copyOfRange(v, 6, 9);
+        }
+
+        public double[] z() {
+            return Arrays.copyOfRange(v, 9, 12);
+        }
+
+        /** This frame moved by ({@code dx}, {@code dy}, {@code dz}) in world coordinates. */
+        public Frame translate(double dx, double dy, double dz) {
+            return new Frame(new double[]{v[0] + dx, v[1] + dy, v[2] + dz}, x(), y(), z());
+        }
+
+        /** This frame moved {@code distance} along its own z. */
+        public Frame offset(double distance) {
+            return translate(distance * v[9], distance * v[10], distance * v[11]);
+        }
+
+        /** The twelve numbers: origin, x, y, z -- a copy, to pass wherever a frame goes. */
+        public double[] toArray() {
+            return v.clone();
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof Frame f && Arrays.equals(v, f.v);
+        }
+
+        @Override
+        public int hashCode() {
+            return Arrays.hashCode(v);
+        }
+
+        @Override
+        public String toString() {
+            return "Frame(origin=" + Arrays.toString(origin()) + ", x=" + Arrays.toString(x()) + ", y="
+                + Arrays.toString(y()) + ", z=" + Arrays.toString(z()) + ")";
+        }
+
+        private static double dot(double[] a, double[] b) {
+            return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        }
+
+        private static double[] cross(double[] a, double[] b) {
+            return new double[]{a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
+        }
+
+        private static double[] unit(double[] v, String what) {
+            double[] p = point3(v, what);
+            double n = Math.sqrt(dot(p, p));
+            if (!(n > 1e-12 && Double.isFinite(n))) throw new BuildException(what + " has no direction");
+            return new double[]{p[0] / n, p[1] / n, p[2] / n};
         }
     }
 

@@ -42,6 +42,7 @@ import java.lang.foreign.SegmentAllocator;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
+import java.lang.ref.Cleaner;
 import java.math.BigDecimal;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
@@ -197,7 +198,8 @@ public final class Cad {
             PLACEMENT_GEOMETRY, PLACEMENT_SELECT, PLACEMENT_TRANSFORM, NODE_CAN_MESH,
             NODE_MESH, NODE_SURFACES, SURFACE_MATRIX, NODE_BOUNDS, NODE_INSTANCE_OF,
             NODE_SELECT_AS, NODE_GENERATOR, DIAGNOSTIC_COUNT, DIAGNOSTIC, NODE_EDGES,
-            NODE_CURVES, NODE_ISOCURVES, REALIZE_ALL, REALIZED, REALIZE_TOTAL, CANCEL;
+            NODE_CURVES, NODE_ISOCURVES, REALIZE_ALL, REALIZED, REALIZE_TOTAL, CANCEL,
+            NODE_BREP, BREP_RELEASE, BREP_LAYOUT_ID, BREP_MANIFOLD;
 
     static {
         SymbolLookup lib = Loader.resolve(Loader.CAPI_LIBRARY);
@@ -266,6 +268,10 @@ public final class Cad {
         REALIZED = bind(linker, lib, "cadaclysm_realized", FunctionDescriptor.of(I, A));
         REALIZE_TOTAL = bind(linker, lib, "cadaclysm_realize_total", FunctionDescriptor.of(I, A));
         CANCEL = bind(linker, lib, "cadaclysm_cancel", FunctionDescriptor.ofVoid(A));
+        NODE_BREP = bind(linker, lib, "cadaclysm_node_brep", FunctionDescriptor.of(A, A, I));
+        BREP_RELEASE = bind(linker, lib, "cadaclysm_brep_release", FunctionDescriptor.ofVoid(A));
+        BREP_LAYOUT_ID = bind(linker, lib, "cadaclysm_brep_layout_id", FunctionDescriptor.of(A));
+        BREP_MANIFOLD = bind(linker, lib, "cadaclysm_brep_manifold", FunctionDescriptor.of(B, A, A));
     }
 
     @SuppressWarnings("restricted") // downcallHandle: every entry point here is the published ABI.
@@ -1263,6 +1269,117 @@ public final class Cad {
      * on their own account. So iterate {@link Scene#placements()} to draw, and nodes to build
      * a tree.
      */
+    // ---- breps ----------------------------------------------------------------------------
+
+    private static final Cleaner CLEANER = Cleaner.create();
+
+    /** The one reference a {@link Brep} holds, and what gives it back -- what the {@link
+     *  Cleaner} runs, so it holds the bare address and never the owner. Given back once:
+     *  the address is zeroed first. */
+    private static final class BrepReference implements Runnable {
+        private long address;
+
+        BrepReference(long address) {
+            this.address = address;
+        }
+
+        @Override
+        public void run() {
+            long a = address;
+            address = 0;
+            if (a == 0) return;
+            try {
+                BREP_RELEASE.invokeExact(MemorySegment.ofAddress(a));
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+    }
+
+    /** Whether a brep's or a solid's faces make a manifold, as plain data ({@link
+     *  Brep#manifold()}, and {@code Blacksmith.Solid.manifold()}): its faces, edges and
+     *  vertices; the edges one face borders (a sheet's rim), the edges three or more do, and
+     *  the vertices whose faces make more than one fan (two solids touching at a corner).
+     *  {@code isManifold} where there are none of the last two, {@code isClosed} where there
+     *  is no boundary edge either -- it encloses a solid. */
+    public record Manifold(int faces, int edges, int vertices, int boundaryEdges, int nonManifoldEdges,
+                           int nonManifoldVertices, boolean isManifold, boolean isClosed) {
+        /** From the eight counts {@code cadaclysm_brep_manifold} and {@code
+         *  cadaclysm_blacksmith_manifold} write, in their order. */
+        public static Manifold of(int[] row) {
+            return new Manifold(row[0], row[1], row[2], row[3], row[4], row[5], row[6] == 1, row[7] == 1);
+        }
+    }
+
+    /**
+     * A body's exact B-rep -- the trimmed surfaces its mesh is cut from -- shared with the
+     * scene rather than copied: a reference of this object's own, given back by {@link
+     * #close()} (or the {@link Cleaner}). It is for the blacksmith library, which operates
+     * on it without a copy ({@code Blacksmith.Solid.fromNode}), and for asking whether it is
+     * a manifold ({@link #manifold()}). It outlives its scene for as long as anything holds
+     * it. In the node's own frame and the
+     * file's own units and axes, whatever convention the scene was opened with. The
+     * blacksmith library must come from the same release; it checks {@link #layoutId()}
+     * and refuses otherwise.
+     */
+    public static final class Brep implements AutoCloseable {
+        private final BrepReference reference;
+        private final Cleaner.Cleanable cleanable;
+
+        private Brep(MemorySegment raw) {
+            reference = new BrepReference(raw.address());
+            cleanable = CLEANER.register(this, reference);
+        }
+
+        /** The C pointer, for the blacksmith library to take its own reference on. */
+        public MemorySegment pointer() {
+            if (reference.address == 0) throw new IllegalStateException("brep: released");
+            return MemorySegment.ofAddress(reference.address);
+        }
+
+        /** How this library lays a brep out in memory: its compiler, target and source.
+         *  The blacksmith library shares a brep only with a library whose id equals its own. */
+        public static String layoutId() {
+            try {
+                return string((MemorySegment) BREP_LAYOUT_ID.invokeExact());
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
+        public boolean closed() {
+            return reference.address == 0;
+        }
+
+        /** Whether its faces make a manifold -- every edge bordered by one face or two, the
+         *  faces round every vertex one fan -- and whether it is closed. Read off the topology
+         *  the file wrote, not a mesh: faces that name no shared edge (IGES, each surface its
+         *  own sheet; an IFC face written as one polygon) read as open however well they meet
+         *  in space. */
+        public Manifold manifold() {
+            MemorySegment p = pointer();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_INT, 8);
+                boolean ok;
+                try {
+                    ok = (boolean) BREP_MANIFOLD.invokeExact(p, out);
+                } catch (Throwable t) {
+                    throw new RuntimeException(t);
+                }
+                if (!ok) throw new CadaclysmException(lastErrorOr("manifold"));
+                return Manifold.of(out.toArray(ValueLayout.JAVA_INT));
+            } finally {
+                java.lang.ref.Reference.reachabilityFence(this);
+            }
+        }
+
+        /** Give this reference back. Idempotent. */
+        @Override
+        public void close() {
+            cleanable.clean();
+        }
+    }
+
     public static final class Placement {
         private final Scene scene;
         private final int index;
@@ -1536,6 +1653,19 @@ public final class Cad {
             } catch (Throwable t) {
                 throw new RuntimeException(t);
             }
+        }
+
+        /** Its exact B-rep, for {@code Blacksmith.Solid.fromNode} to operate on, or null
+         *  where it has none (a mesh, a curve, a CSG body, a JT or OpenSCAD part). Shared
+         *  with the scene, not copied; see {@link Brep}. */
+        public Brep brep() {
+            MemorySegment raw;
+            try {
+                raw = (MemorySegment) NODE_BREP.invokeExact(scene.handle(), index);
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+            return raw.address() == 0 ? null : new Brep(raw);
         }
 
         /** Its triangles, in their own frame, built now if they have not been -- or null for
@@ -2010,12 +2140,13 @@ public final class Cad {
      * file: a class only findable when its neighbour is on the same javac line is a build
      * that works by accident.
      *
-     * <p>The rule: {@code CADACLYSM_LIBRARY} (and, for the kernel, {@code
-     * CADACLYSM_BLACKSMITH_LIBRARY} first) as a directory or the file itself; then beside this
-     * class's own jar or class directory; then {@code lib/} and {@code target/release} or
-     * {@code target/debug} in every ancestor; then the platform's own search. A variable
-     * naming a file or a directory that holds neither library is a mistake worth failing on,
-     * not a hint to fall through and load something else by accident.
+     * <p>The reader's rule: {@code CADACLYSM_LIBRARY} as a directory or the file itself; then
+     * beside this class's own jar or class directory; then {@code lib/} and {@code
+     * target/release} or {@code target/debug} in every ancestor; then the platform's own
+     * search. A variable naming a file or a directory that holds neither library is a mistake
+     * worth failing on, not a hint to fall through and load something else by accident. The
+     * kernel has its own rule, {@code cadaclysm_blacksmith.py}'s, in {@code Blacksmith.java};
+     * it shares {@link #ARENA} and {@link #codeLocation} from here.
      */
     static final class Loader {
         private Loader() {
@@ -2023,7 +2154,7 @@ public final class Cad {
 
         // Never closed: the library stays loaded for the life of the process, and every
         // segment the library hands back is read under this arena before it is copied out.
-        private static final Arena ARENA = Arena.ofShared();
+        static final Arena ARENA = Arena.ofShared();
 
         // Each spelled in two pieces below, from when `tests/bindings.rs`'s coverage scan
         // matched any quoted cadaclysm_-prefixed string in this file as a declared entry point
@@ -2057,10 +2188,7 @@ public final class Cad {
         static SymbolLookup resolve(String libraryName) {
             String[] files = filesOf(libraryName);
             List<Path> candidates = new ArrayList<>();
-            String[] variables = libraryName.equals(BLACKSMITH_LIBRARY)
-                    ? new String[]{"CADACLYSM_BLACKSMITH_LIBRARY", "CADACLYSM_LIBRARY"}
-                    : new String[]{"CADACLYSM_LIBRARY"};
-            for (String variable : variables) {
+            for (String variable : new String[]{"CADACLYSM_LIBRARY"}) {
                 String env = System.getenv(variable);
                 if (env == null || env.isEmpty()) continue;
                 Path at = Path.of(env);

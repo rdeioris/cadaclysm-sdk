@@ -167,6 +167,14 @@ typedef enum CadaclysmMeshColors {
 } CadaclysmMeshColors;
 
 /**
+ * An imported body's exact B-rep -- the trimmed surfaces its mesh is cut from --
+ * opaque, and shared with the scene rather than copied. Made by
+ * [`cadaclysm_node_brep`], given back with [`cadaclysm_brep_release`]. It is
+ * for `cadaclysm_blacksmith_from_brep`, and for [`cadaclysm_brep_manifold`].
+ */
+typedef struct CadaclysmBrep CadaclysmBrep;
+
+/**
  * A mesh split into meshlets, and the coarser levels above them.
  */
 typedef struct CadaclysmMeshlets CadaclysmMeshlets;
@@ -2021,6 +2029,77 @@ uint64_t cadaclysm_license_notice_count(void);
  * every build dated on or before the day its updates end. Static; never freed.
  */
 const char *cadaclysm_build_date(void);
+
+/**
+ * This library's brep layout: the compiler, target, profile and source it was
+ * built from, as one string. Pass it beside a brep to
+ * `cadaclysm_blacksmith_from_brep`, which refuses a brep laid out by any other
+ * build. Static; never freed.
+ */
+const char *cadaclysm_brep_layout_id(void);
+
+/**
+ * The part's exact brep, for the blacksmith library to operate on
+ * (`cadaclysm_blacksmith_from_brep`): **a reference of the caller's own on the
+ * scene's brep, not a copy**, given back with [`cadaclysm_brep_release`]. Good
+ * past [`cadaclysm_close`](crate::cadaclysm_close): the brep lives until its
+ * last holder lets go. Asking twice gives the same pointer and two references.
+ *
+ * In the part's own frame, as [`cadaclysm_node_mesh`](crate::cadaclysm_node_mesh)
+ * is -- [`cadaclysm_node_transform`](crate::cadaclysm_node_transform) places it
+ * -- and following the same hop from an instance to the shape it draws. In the
+ * **file's own units and axes**, whatever convention the scene was opened
+ * with, as `cadaclysm_node_surfaces` is: a convention converts what is drawn,
+ * and converting a brep would mean rebuilding it.
+ *
+ * Null, with [`cadaclysm_last_error`](crate::cadaclysm_last_error) saying why,
+ * where the part is not a B-rep: a mesh, a curve, a CSG or tessellated body, a
+ * part of a JT or OpenSCAD file. The B-rep readers are STEP (AP203/214/242),
+ * ACIS, Rhino, OCCT `.brep`, IGES (each surface a one-face sheet) and IFC (a
+ * product's solids, openings cut, as one brep). Built on first ask where the
+ * reader had not built it already (STEP, IGES, IFC).
+ *
+ * **The blacksmith library must come from the same release as this one**, and
+ * both must allocate from the process heap -- see
+ * `cadaclysm_blacksmith_from_brep`, which checks the first and documents the
+ * second.
+ *
+ * # Safety
+ * `scene` must be null or a live handle from [`cadaclysm_open`](crate::cadaclysm_open).
+ */
+const struct CadaclysmBrep *cadaclysm_node_brep(const struct CadaclysmScene *scene, uint32_t node);
+
+/**
+ * Give back a reference [`cadaclysm_node_brep`] handed out. The last holder's
+ * release frees the brep. Null is a no-op.
+ *
+ * # Safety
+ * `brep` must be null or from [`cadaclysm_node_brep`], and released once.
+ */
+void cadaclysm_brep_release(const struct CadaclysmBrep *brep);
+
+/**
+ * Whether the brep's faces make a manifold, read off its topology -- the edges
+ * and loops the file gave it -- rather than a mesh: nothing is tessellated.
+ * Eight counts into `out`, in order: faces, edges, vertices, boundary edges
+ * (bordered by one face), non-manifold edges (by three or more), non-manifold
+ * vertices (where the faces round a point make more than one fan: two solids
+ * touching at a corner), then `1` if it is a manifold (no non-manifold edge or
+ * vertex) and `1` if it is also closed (no boundary edge: it encloses a
+ * solid), else `0`.
+ *
+ * The answer is about the topology the file wrote. Faces that name no shared
+ * edge -- an IGES body, each surface its own sheet; an IFC face given as one
+ * closed polygon; STEP `CURVE_BOUNDED_SURFACE`s -- read as open,
+ * every edge a boundary, however well they meet in space. Orientation is not
+ * asked. `false` (and [`cadaclysm_last_error`](crate::cadaclysm_last_error))
+ * on a null argument.
+ *
+ * # Safety
+ * `brep` null or from [`cadaclysm_node_brep`] and not yet released; `out`
+ * eight `uint32_t`.
+ */
+bool cadaclysm_brep_manifold(const struct CadaclysmBrep *brep, uint32_t *out);
 
 /**
  * Split a mesh into meshlets, optionally with the coarser levels above them.

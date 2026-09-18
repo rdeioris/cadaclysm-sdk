@@ -222,6 +222,14 @@ func kernel(license string) {
 	if !watertight {
 		fail("the filleted part is not watertight")
 	}
+	shape, err := rounded.Manifold()
+	if err != nil {
+		fail(err.Error())
+	}
+	fmt.Printf("manifold: %+v\n", shape)
+	if !shape.IsClosed || shape.Faces != faces {
+		fail(fmt.Sprintf("the filleted part is not a closed manifold: %+v", shape))
+	}
 	// A plate has 6 faces, the hole adds 1 cylinder, the pin 2 (its wall and its top), and
 	// each of the four corners rounded trades one edge for one face.
 	if faces != 15 {
@@ -231,6 +239,9 @@ func kernel(license string) {
 	// The sheet verbs: a face from a profile, a solid's face alone, faces dropped, a trim,
 	// a rounded profile and a path along a curve.
 	sheetVerbs(plate)
+
+	// Frames: built, checked, and passed wherever twelve numbers go.
+	frames()
 
 	// Colour: a gold plate joined with a blue pin -- the part is gold, the pin's top keeps
 	// its blue.
@@ -324,6 +335,49 @@ func kernel(license string) {
 		fail("the STEP did not read back as the plate with its pin")
 	}
 
+	// And back into the kernel: the read body's brep, shared with the scene rather than
+	// copied, as a solid that outlives the scene it came from.
+	var body *cadaclysm.Node
+	for _, p := range back.Placements() {
+		if brep, _ := p.Geometry().Brep(); brep != nil {
+			read, err := brep.Manifold()
+			brep.Close()
+			if err != nil {
+				fail(err.Error())
+			}
+			if !read.IsClosed || read.Faces != 15 {
+				fail(fmt.Sprintf("the read body is not the closed manifold written: %+v", read))
+			}
+			if _, err := brep.Manifold(); err == nil {
+				fail("a closed brep answered Manifold")
+			}
+			body = p.Geometry()
+			break
+		}
+	}
+	if body == nil {
+		fail("no placement of the read-back STEP has a brep")
+	}
+	imported, err := blacksmith.FromNode(back, body, true)
+	if err != nil {
+		fail("from_node: " + err.Error())
+	}
+	defer imported.Close()
+	back.Close()
+	importedFaces, err := imported.Faces()
+	if err != nil || importedFaces != faces {
+		fail(fmt.Sprintf("from_node gave %d faces, not %d (%v)", importedFaces, faces, err))
+	}
+	opened, err := blacksmith.Open(step)
+	if err != nil {
+		fail("open: " + err.Error())
+	}
+	defer opened.Close()
+	if n, _ := opened.Faces(); n != faces {
+		fail(fmt.Sprintf("Open gave %d faces, not %d", n, faces))
+	}
+	fmt.Printf("from_node: %d faces after the scene closed; Open: the same\n", importedFaces)
+
 	// ToScene is the same round trip in memory: the scene's bounds must match the solid's
 	// own, and the scene is its own document -- closing the solid it came from leaves it
 	// readable. (Open with a schema once stored a Go pointer inside the options struct it
@@ -357,6 +411,47 @@ func fail(why string) {
 
 // sheetVerbs checks Face, FaceSheet, DropFaces, Trim, Round and SweepPathAlong by their
 // face counts, and that a trim with nothing on the kept side fails in the library's words.
+func frames() {
+	at, err := blacksmith.FrameAt([3]float64{}, [3]float64{0, -1, 0})
+	if err != nil || at != blacksmith.FrameXZ([3]float64{}) {
+		fail(fmt.Sprintf("FrameAt(-Y) = %v, %v", at, err))
+	}
+	if at, _ := blacksmith.FrameAt([3]float64{1, 2, 3}, [3]float64{0, 0, 5}); at != blacksmith.FrameXY([3]float64{1, 2, 3}) {
+		fail(fmt.Sprintf("FrameAt(+Z) = %v", at))
+	}
+	if blacksmith.FrameXY([3]float64{}).Offset(5) != blacksmith.FrameXY([3]float64{0, 0, 5}) ||
+		blacksmith.FrameYZ([3]float64{}) != blacksmith.YZ().Frame() {
+		fail("FrameXY / Offset / FrameYZ disagree")
+	}
+	if _, err := blacksmith.NewFrame([3]float64{}, [3]float64{1, 0, 0}, [3]float64{0, 1, 0}, [3]float64{0, 0, -1}); err == nil ||
+		!strings.Contains(err.Error(), "left-handed") {
+		fail(fmt.Sprintf("a left-handed frame: %v", err))
+	}
+	rect, err := blacksmith.Rect(10, 4)
+	if err != nil {
+		fail(err.Error())
+	}
+	lid, err := blacksmith.Extrude(rect, blacksmith.FrameXY([3]float64{0, 0, 5}), 2)
+	if err != nil {
+		fail(err.Error())
+	}
+	wall, err := blacksmith.On(blacksmith.FrameXZ([3]float64{0, 3, 0})).Extrude(rect, 1).Solid()
+	if err != nil {
+		fail(err.Error())
+	}
+	b, _ := lid.Bounds()
+	wb, _ := wall.Bounds()
+	i, _ := lid.SelectFace(blacksmith.Max(blacksmith.AxisZ))
+	raw, _ := lid.FaceFrame(i)
+	top, err := blacksmith.FrameOf(raw)
+	if err != nil || math.Abs(b.Min[2]-5) > 1e-6 || math.Abs(b.Max[2]-7) > 1e-6 || math.Abs(wb.Max[1]-3) > 1e-6 ||
+		math.Abs(top.Origin()[2]-7) > 1e-6 || math.Abs(top.Z()[2]-1) > 1e-9 {
+		fail(fmt.Sprintf("frames: lid %v, wall %v, top %v, %v", b, wb, top, err))
+	}
+	tilted, _ := blacksmith.FrameAt([3]float64{}, [3]float64{1, 1, 1})
+	fmt.Printf("frames: %v: ok\n", tilted)
+}
+
 func sheetVerbs(plate *blacksmith.Solid) {
 	must := func(s *blacksmith.Solid, err error) *blacksmith.Solid {
 		if err != nil {
@@ -420,7 +515,107 @@ func sheetVerbs(plate *blacksmith.Solid) {
 		!strings.Contains(err.Error(), "trim: nothing of the sheet lies inside the tool") {
 		fail(fmt.Sprintf("a trim with nothing inside the tool: %v", err))
 	}
-	fmt.Printf("sheet verbs: face, trim (%d+%d), face_sheet, drop_faces, round (%d faces), along: ok\n", count(holed), count(disc), count(slab))
+	// Chain: an L's two sides, the second drawn back to front, joined -- open, two walls.
+	sideA, err := blacksmith.NewPath(0, 0).LineTo(10, 0).EndOpen()
+	if err != nil {
+		fail(err.Error())
+	}
+	sideB, err := blacksmith.NewPath(10, 8).LineTo(10, 0).EndOpen()
+	if err != nil {
+		fail(err.Error())
+	}
+	ell, err := blacksmith.Chain([]*blacksmith.Profile{sideA, sideB}, 1e-6)
+	if err != nil {
+		fail("chain: " + err.Error())
+	}
+	ellWalls := must(blacksmith.ExtrudeOpen(ell, xy, 2))
+	if count(ellWalls) != 2 {
+		fail(fmt.Sprintf("chain: an L extruded open has %d walls, not 2", count(ellWalls)))
+	}
+	// Close: the open L's first side and a line back -- closed, a triangle's three walls.
+	openL, err := blacksmith.NewPath(0, 0).LineTo(10, 0).LineTo(10, 8).EndOpen()
+	if err != nil {
+		fail(err.Error())
+	}
+	closedL, err := openL.CloseLoop()
+	if err != nil {
+		fail("close_loop: " + err.Error())
+	}
+	closedWalls := must(blacksmith.ExtrudeOpen(closedL, xy, 2))
+	if count(closedWalls) != 3 {
+		fail(fmt.Sprintf("close_loop: a closed L has %d walls, not 3", count(closedWalls)))
+	}
+	closedWalls.Close()
+	closedL.Close()
+	openL.Close()
+	// Push-pull: a cube's top raised is one taller box, six faces, not a box and a prism.
+	cube := must(blacksmith.Cuboid(10, 10, 10))
+	cubeTop, err := cube.SelectFace(blacksmith.Max(blacksmith.AxisZ))
+	if err != nil {
+		fail(err.Error())
+	}
+	raised := must(cube.PushPull(cubeTop, 5, blacksmith.DefaultTolerance))
+	if count(raised) != 6 {
+		fail(fmt.Sprintf("push_pull: the raised cube has %d faces, not 6", count(raised)))
+	}
+	raised.Close()
+	cube.Close()
+	ellWalls.Close()
+	ell.Close()
+	sideA.Close()
+	sideB.Close()
+	// From loops: a circle given before the square it lies in -- the square is the boundary.
+	loopHole, err := blacksmith.Circle(4)
+	if err != nil {
+		fail(err.Error())
+	}
+	loopSquare, err := blacksmith.Rect(30, 30)
+	if err != nil {
+		fail(err.Error())
+	}
+	fromLoops, err := blacksmith.FromLoops([]*blacksmith.Profile{loopHole, loopSquare})
+	if err != nil {
+		fail("from_loops: " + err.Error())
+	}
+	holedSquare := must(blacksmith.Extrude(fromLoops, xy, 2))
+	if count(holedSquare) != 8 {
+		fail(fmt.Sprintf("from_loops: the holed square has %d faces, not 8", count(holedSquare)))
+	}
+	// Revolve in plane: a plate drawn beside the y axis turns into a tube of four walls.
+	beside, err := blacksmith.Polygon([][2]float64{{5, 0}, {8, 0}, {8, 10}, {5, 10}})
+	if err != nil {
+		fail(err.Error())
+	}
+	turned := must(blacksmith.RevolveInPlane(beside, xy, [2]float64{0, 0}, [2]float64{0, 1}, 2*math.Pi))
+	turnedWalls := must(blacksmith.RevolveOpenInPlane(beside, xy, [2]float64{0, 0}, [2]float64{0, 1}, math.Pi))
+	if count(turned) != 4 || count(turnedWalls) != 4 {
+		fail(fmt.Sprintf("revolve_in_plane: %d and %d faces, not 4", count(turned), count(turnedWalls)))
+	}
+	for _, s := range []*blacksmith.Solid{holedSquare, turned, turnedWalls} {
+		s.Close()
+	}
+	for _, p := range []*blacksmith.Profile{loopHole, loopSquare, fromLoops, beside} {
+		p.Close()
+	}
+	// A hexagon: six walls and two caps. A closed spline through a square's corners: one wall.
+	hexagon, err := blacksmith.RegularPolygon([2]float64{0, 0}, 10, 6, 0)
+	if err != nil {
+		fail(err.Error())
+	}
+	loopSpline, err := blacksmith.Spline([][2]float64{{0, 0}, {10, 0}, {10, 10}, {0, 10}}, 3, nil, true)
+	if err != nil {
+		fail(err.Error())
+	}
+	hexPrism := must(blacksmith.Extrude(hexagon, xy, 2))
+	loopSolid := must(blacksmith.Extrude(loopSpline, xy, 2))
+	if count(hexPrism) != 8 || count(loopSolid) != 3 {
+		fail(fmt.Sprintf("shapes: %d and %d faces, not 8 and 3", count(hexPrism), count(loopSolid)))
+	}
+	hexPrism.Close()
+	loopSolid.Close()
+	hexagon.Close()
+	loopSpline.Close()
+	fmt.Printf("sheet verbs: face, trim (%d+%d), face_sheet, drop_faces, round (%d faces), along, chain, push_pull, close_loop, from_loops, revolve_in_plane, regular_polygon, spline: ok\n", count(holed), count(disc), count(slab))
 	for _, s := range []*blacksmith.Solid{sheet, peg, holed, disc, lid, walls, slab, tube, onPlane, away} {
 		s.Close()
 	}
