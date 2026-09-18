@@ -26,7 +26,8 @@ until then.
    a conversion or ingestion pipeline, a batch job, a render or processing
    farm, whether physical, virtual or a container host; a web license per
    website (a domain and its subdomains) embedding the WebAssembly builds
-   in a site that others use.
+   in a site that others use -- the websites a web license names are the
+   ones it covers.
 4. You may not redistribute them on their own, remove or circumvent the
    license check, or use them to build a competing software development kit.
 5. They are provided as is, without warranty of any kind, to the extent

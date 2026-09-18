@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """Fetch the release archive for this machine into lib/ and include/, or
-refresh the license file from the store.
+the WebAssembly package into web/, or refresh the license file from the store.
 
     python fetch.py                        # latest release
     python fetch.py v0.1.0                 # a given tag
     python fetch.py --license KEY          # write cadaclysm.lic from the store
     python fetch.py v0.1.0 --license KEY   # both, release first
     python fetch.py --license KEY --store https://your-worker.workers.dev
+    python fetch.py --web                  # the WebAssembly package cadaclysm.lic covers, into web/
+    python fetch.py --web reader           # a given one: reader (Web Reader) or pro (Web Pro)
+    python fetch.py --license KEY --web    # the license, then the package it covers
 
 Verifies the archive against the release's SHA256SUMS, unpacks lib/ and
-include/ beside this file, and prints the versions so a mismatch is visible.
+include/ (or the package, into web/) beside this file, and prints the
+versions so a mismatch is visible.
 """
 import argparse
+import base64
 import hashlib
 import io
 import json
@@ -94,36 +99,52 @@ def fetch_license(key: str, store: str) -> int:
     return 0
 
 
-def fetch_release(tag: str) -> int:
+def release_of(tag: str):
+    """The release's JSON from the GitHub API, or None (said why) when there is none."""
     api = f"https://api.github.com/repos/{REPO}/releases/{'latest' if tag == 'latest' else 'tags/' + tag}"
     try:
-        release = json.loads(get(api))
+        return json.loads(get(api))
     except urllib.error.HTTPError as e:
         if e.code == 404:
             print("no release found", file=sys.stderr)
-            return 1
+            return None
         raise
+
+
+def verified(release, name: str):
+    """The asset `name` of `release`, checked against the release's SHA256SUMS, or None."""
+    assets = {a["name"]: a["browser_download_url"] for a in release["assets"]}
+    data = fetch(assets[name], name)
+    if data is None:
+        return None
+    sums_bytes = fetch(assets["SHA256SUMS"], "SHA256SUMS")
+    if sums_bytes is None:
+        return None
+    sums = sums_bytes.decode()
+    try:
+        expected = next(line.split()[0] for line in sums.splitlines() if line.endswith(name))
+    except StopIteration:
+        print(f"SHA256SUMS has no entry for {name}", file=sys.stderr)
+        return None
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != expected:
+        print(f"{name}: sha256 {actual} != {expected}", file=sys.stderr)
+        return None
+    return data
+
+
+def fetch_release(tag: str) -> int:
+    release = release_of(tag)
+    if release is None:
+        return 1
     assets = {a["name"]: a["browser_download_url"] for a in release["assets"]}
     want = [n for n in assets if n.startswith("cadaclysm-") and f"-{target()}." in n]
     if not want:
         print(f"release {release['tag_name']} has no archive for {target()}", file=sys.stderr)
         return 1
     name = want[0]
-    data = fetch(assets[name], name)
+    data = verified(release, name)
     if data is None:
-        return 1
-    sums_bytes = fetch(assets["SHA256SUMS"], "SHA256SUMS")
-    if sums_bytes is None:
-        return 1
-    sums = sums_bytes.decode()
-    try:
-        expected = next(line.split()[0] for line in sums.splitlines() if line.endswith(name))
-    except StopIteration:
-        print(f"SHA256SUMS has no entry for {name}", file=sys.stderr)
-        return 1
-    actual = hashlib.sha256(data).hexdigest()
-    if actual != expected:
-        print(f"{name}: sha256 {actual} != {expected}", file=sys.stderr)
         return 1
     top = name.replace(".tar.gz", "").replace(".zip", "")
     members = []
@@ -159,6 +180,67 @@ def fetch_release(tag: str) -> int:
     return 0
 
 
+def licensed_tier(path: Path):
+    """`pro` when the license file at `path` carries the `kernel` entitlement,
+    `reader` when it does not, None when there is no file or it cannot be read.
+
+    Only to pick which package to download: the file's payload is read, not
+    verified -- the module verifies it when the page hands it over, and a
+    doctored file here only buys the wrong download."""
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+        body = "".join(line for line in text.splitlines() if line and not line.startswith("-----"))
+        cert = json.loads(base64.b64decode(body))
+        doc = json.loads(base64.b64decode(cert["enc"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    codes = {r.get("attributes", {}).get("code") for r in doc.get("included", []) if r.get("type") == "entitlements"}
+    return "pro" if "kernel" in codes else "reader"
+
+
+def fetch_web(tag: str, tier) -> int:
+    """The WebAssembly package into web/: the one named, or the one cadaclysm.lic
+    covers (Web Pro with the kernel entitlement, Web Reader without), or -- with no
+    license to go by -- Web Pro, which runs everything unlicensed, with a console notice."""
+    license_path = HERE / "cadaclysm.lic"
+    if tier is None:
+        tier = licensed_tier(license_path)
+        how = f"the one {license_path.name} covers" if tier else "no license to go by"
+        tier = tier or "pro"
+        print(f"web-{tier}: {how}")
+    release = release_of(tag)
+    if release is None:
+        return 1
+    want = [a["name"] for a in release["assets"] if a["name"].startswith("cadaclysm-") and a["name"].endswith(f"-web-{tier}.zip")]
+    if not want:
+        print(f"release {release['tag_name']} has no web-{tier} package (the WebAssembly builds ship from v0.3.0)", file=sys.stderr)
+        return 1
+    name = want[0]
+    data = verified(release, name)
+    if data is None:
+        return 1
+    top = name[: -len(".zip")]
+    out = HERE / "web"
+    build = "(no BUILD in archive)"
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        for m in zf.namelist():
+            rel = m[len(top) + 1:]
+            if not rel or m.endswith("/"):
+                continue
+            (out / rel).parent.mkdir(parents=True, exist_ok=True)
+            (out / rel).write_bytes(zf.read(m))
+            if rel == "BUILD":
+                build = zf.read(m).decode().strip()
+    print(f"{release['tag_name']}: {name} verified; {build}")
+    print(f"   unpacked into {out}")
+    if license_path.is_file():
+        # The example page loads ../cadaclysm.lic, i.e. web/cadaclysm.lic.
+        (out / "cadaclysm.lic").write_bytes(license_path.read_bytes())
+        print(f"   copied {license_path.name} into web/ (the example page loads it)")
+    print(f"   try it: python -m http.server 8000 --directory {out}  then open http://localhost:8000/example/")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Fetch the release archive for this machine, or refresh the license file from the store."
@@ -166,7 +248,18 @@ def main() -> int:
     parser.add_argument("tag", nargs="?", default=None, help="a release tag (default: latest)")
     parser.add_argument("--license", metavar="KEY", help="write cadaclysm.lic from the store's copy of this key")
     parser.add_argument("--store", default=STORE_URL, help="the store's base URL (default: %(default)s)")
+    parser.add_argument("--web", nargs="?", const="auto", choices=["auto", "reader", "pro"],
+                        help="fetch the WebAssembly package into web/ instead of the libraries: reader, pro, "
+                             "or (bare) the one cadaclysm.lic covers")
     args = parser.parse_args()
+
+    if args.web is not None:
+        # The license first, so a bare --web picks the package it covers.
+        if args.license is not None:
+            result = fetch_license(args.license, args.store)
+            if result != 0:
+                return result
+        return fetch_web(args.tag or "latest", None if args.web == "auto" else args.web)
 
     # A bare `--license` refreshes the file only -- it does not also imply
     # "latest", which would silently re-pull the release on every renewal. A

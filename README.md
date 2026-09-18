@@ -78,6 +78,24 @@ carry the exact counts. Contributions welcome: a pull request here is ported
 back into the library's repository, which is where these files are
 maintained.
 
+## In a web page (WebAssembly)
+
+The readers and the mesher -- and, in the Web Pro build, the kernel -- also
+ship as WebAssembly for embedding in a website, one package per web license:
+`cadaclysm-<version>-web-reader.zip` and `cadaclysm-<version>-web-pro.zip` on
+each release (from v0.3.0).
+
+    python fetch.py --license KEY --web   # the license, then the package it covers, into web/
+    python fetch.py --web pro             # a given one: reader or pro
+
+Each holds the module (`pkg/`: an ES module with typings, `load()` and
+`license()`), the WebGL2 viewer this project's site uses (`viewer/`) and an
+example page and worker (`example/`); serve `web/` and open `/example/`. A web
+license names the websites it covers, and the module holds to them -- on
+another host it runs as if unlicensed, with a notice in the browser console;
+`localhost` always passes. Documentation:
+<https://cadaclysm.blitter.studio/docs/web.html>
+
 ## Versions
 
 The tag here, the archive's `BUILD` line and `cadaclysm_version()` in the
