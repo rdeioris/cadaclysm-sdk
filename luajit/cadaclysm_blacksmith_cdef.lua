@@ -21,6 +21,12 @@ typedef struct CadaclysmBlacksmithMesh {
   uint32_t index_count;
 } CadaclysmBlacksmithMesh;
 
+typedef struct CadaclysmBlacksmithFaceTriangles {
+
+  const uint32_t *counts;
+  uint32_t face_count;
+} CadaclysmBlacksmithFaceTriangles;
+
 typedef struct CadaclysmBlacksmithPolylines {
   const float *points;
 
@@ -65,6 +71,9 @@ const char *cadaclysm_blacksmith_build_date(void);
 
 struct CadaclysmBlacksmithMesh cadaclysm_blacksmith_mesh(const struct CadaclysmBlacksmithSolid *solid,
                                                          double tolerance);
+
+struct CadaclysmBlacksmithFaceTriangles cadaclysm_blacksmith_mesh_face_triangles(const struct CadaclysmBlacksmithSolid *solid,
+                                                                                 double tolerance);
 
 struct CadaclysmBlacksmithPolylines cadaclysm_blacksmith_edge_polylines(const struct CadaclysmBlacksmithSolid *solid,
                                                                         double tolerance);

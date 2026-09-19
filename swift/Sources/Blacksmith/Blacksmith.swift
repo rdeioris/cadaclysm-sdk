@@ -1085,6 +1085,17 @@ public final class Solid {
                          count: count)
     }
 
+    /// The kernel's `mesh_face_triangles`, kept for the viewer follow-up (as Go keeps it): how
+    /// many triangles each face meshed to at `tolerance`, in face order, summing to `mesh`'s
+    /// triangle count at the same tolerance -- copied out of the solid's cache.
+    func faceTriangles(tolerance: Double = 0.05) throws -> [UInt32] {
+        try withExtendedLifetime(self) { () throws -> [UInt32] in
+            let raw = cadaclysm_blacksmith_mesh_face_triangles(try h(), tolerance)
+            guard let counts = raw.counts else { throw failure("mesh_face_triangles") }
+            return Array(UnsafeBufferPointer(start: counts, count: Int(raw.face_count)))
+        }
+    }
+
     /// This solid as STEP text (AP203 unless `schema` names another); see `writeStepText`.
     public func stepText(schema: String? = nil, unit: String = "mm") throws -> String {
         try writeStepText([self], schema: schema, unit: unit)

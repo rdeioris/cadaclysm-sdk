@@ -72,7 +72,7 @@ public sealed class BuildException : Exception
 
 // ---- the structs the ABI returns by value ----------------------------------------------
 //
-// These three are transcribed from `cadaclysm_blacksmith.h` by hand, in the header's field
+// These four are transcribed from `cadaclysm_blacksmith.h` by hand, in the header's field
 // order, and `tests/bindings.rs` pins them against it, by field order and by whether each
 // field is a pointer, as it pins the reader's structs in `Cad.cs`. A field left out or
 // reordered still compiles and reads every later field from the wrong offset; the pin is
@@ -98,6 +98,15 @@ internal struct RawBlacksmithPolylines
     public IntPtr Offsets;
     public uint PointCount;
     public uint PolylineCount;
+}
+
+/// <summary>`CadaclysmBlacksmithFaceTriangles`: triangles per face, in face order, over the
+/// solid's mesh at the same tolerance.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawBlacksmithFaceTriangles
+{
+    public IntPtr Counts;
+    public uint FaceCount;
 }
 
 /// <summary>`CadaclysmBlacksmithEdge`: one edge, borrowed from its solid. The C struct has
@@ -389,6 +398,7 @@ internal static class BlacksmithNative
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_edge(SolidHandle solid, uint i, out RawBlacksmithEdge outEdge);
     [DllImport(Lib)] internal static extern RawBlacksmithMesh cadaclysm_blacksmith_mesh(SolidHandle solid, double tolerance);
+    [DllImport(Lib)] internal static extern RawBlacksmithFaceTriangles cadaclysm_blacksmith_mesh_face_triangles(SolidHandle solid, double tolerance);
     [DllImport(Lib)] internal static extern RawBlacksmithPolylines cadaclysm_blacksmith_edge_polylines(SolidHandle solid, double tolerance);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_bounds(SolidHandle solid, double tolerance, [Out] double[] min, [Out] double[] max);

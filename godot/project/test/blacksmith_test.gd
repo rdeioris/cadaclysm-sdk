@@ -135,9 +135,10 @@ func test_solids_build_transform_combine_mesh_bound_and_write_step():
 	eq(part.step(stp, schema()), true)
 	ok(FileAccess.get_file_as_string(stp).begins_with("ISO-10303-21;"))
 	var two := tmp("two.stp")
-	# The mirrored pin sits on a left-handed frame, which STEP's AXIS2_PLACEMENT_3D
-	# cannot express: the writer refuses it rather than turn it inside out.
-	refuses(func(): return CadaclysmBlacksmith.write_step(two, [plate, pin], schema()), "left-handed")
+	# The mirrored pin sits on a left-handed frame; the writer bakes the mirror into
+	# the geometry instead of refusing it (faec26ef), so it writes like the upright one.
+	eq(CadaclysmBlacksmith.write_step(two, [plate, pin], schema()), true)
+	ok(FileAccess.get_file_as_string(two).begins_with("ISO-10303-21;"), "a mirrored solid writes STEP")
 	var upright := CadaclysmSolid.cylinder(4, 10).translate(0, 0, 6).rotate([0, 0, 0], [0, 0, 1], 0.1).place(XY)
 	eq(CadaclysmBlacksmith.write_step(two, [plate, upright], schema()), true)
 	ok(FileAccess.get_file_as_string(two).length() > 0)

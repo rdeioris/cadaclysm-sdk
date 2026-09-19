@@ -109,13 +109,14 @@ public final class Blacksmith {
 
     // ---- the structs the ABI returns by value ----------------------------------------
     //
-    // These three are transcribed from `cadaclysm_blacksmith.h` by hand, in the header's
+    // These four are transcribed from `cadaclysm_blacksmith.h` by hand, in the header's
     // field order, and `tests/bindings.rs` pins them against it, by field order and by
     // whether each field is a pointer, as it pins the reader's structs in `Cad.java`. A
     // field left out or reordered still compiles and reads every later field from the
     // wrong offset; the pin is what catches it. `structLayout` refuses a misaligned field
     // outright, which is why the two `paddingLayout(4)`s in EDGE are there: a 4-byte count
-    // before an 8-byte pointer needs the gap the C compiler leaves.
+    // before an 8-byte pointer needs the gap the C compiler leaves (and FACE_TRIANGLES's
+    // trailing one: the struct is as long as its pointer's alignment rounds it to).
 
     /** {@code CadaclysmBlacksmithMesh}: a solid's triangles, borrowed from it. */
     private static final MemoryLayout MESH = MemoryLayout.structLayout(
@@ -144,6 +145,13 @@ public final class Blacksmith {
             ValueLayout.JAVA_INT.withName("segment_count"),
             MemoryLayout.paddingLayout(4));
 
+    /** {@code CadaclysmBlacksmithFaceTriangles}: triangles per face, in face order, over the
+     *  solid's mesh at the same tolerance. */
+    private static final MemoryLayout FACE_TRIANGLES = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("counts"),
+            ValueLayout.JAVA_INT.withName("face_count"),
+            MemoryLayout.paddingLayout(4));
+
     /** A named field's byte offset in one of the struct layouts above. */
     private static long offset(MemoryLayout struct, String field) {
         return struct.byteOffset(MemoryLayout.PathElement.groupElement(field));
@@ -151,7 +159,7 @@ public final class Blacksmith {
 
     // ---- loading the library, and every entry point ----------------------------------
     //
-    // The same 90 Python's `cadaclysm_blacksmith.py` declares, no more and no less;
+    // The same entry points Python's `cadaclysm_blacksmith.py` declares, no more and no less;
     // `tests/bindings.rs` compares the two sets by name (every quoted
     // cadaclysm_blacksmith_ string in this file) and holds Java to Python's.
 
@@ -165,7 +173,7 @@ public final class Blacksmith {
             SWEEP_PATH_LINE_TO, SWEEP_PATH_ARC, SWEEP_PATH_ALONG, SWEEP_PATH_FREE, SWEEP, SWEEP_OPEN,
             EXTRUDE_FACES, FACE, FACE_SHEET, DROP_FACES, PLACE, TRANSLATE, ROTATE, MIRROR, JOIN, CUT,
             COMMON, SPLIT_SHEET, TRIM, FILLET, CHAMFER,
-            SHELL, THICKEN, PUSH_PULL, PUSH_PULL_FACES, MERGE_FLUSH, REFILLET, UNFILLET, RECHAMFER, UNCHAMFER, COIL, PIPE, SPLIT, SPLIT_BY_PLANE, LUMP_COUNT, LUMP, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_KIND, COLOURED, COLOUR, EDGE_COUNT, EDGE_AT, MESH_AT,
+            SHELL, THICKEN, PUSH_PULL, PUSH_PULL_FACES, MERGE_FLUSH, REFILLET, UNFILLET, RECHAMFER, UNCHAMFER, COIL, PIPE, SPLIT, SPLIT_BY_PLANE, LUMP_COUNT, LUMP, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_KIND, COLOURED, COLOUR, EDGE_COUNT, EDGE_AT, MESH_AT, MESH_FACE_TRIANGLES,
             EDGE_POLYLINES, BOUNDS, LEAKED_EDGES, UNPAIRED_EDGES, MANIFOLD, STEP, STRING_FREE, FROM_BREP,
             BREP_LAYOUT_ID;
 
@@ -276,6 +284,7 @@ public final class Blacksmith {
         EDGE_COUNT = bind(linker, lib, "cadaclysm_blacksmith_edge_count", FunctionDescriptor.of(I, A));
         EDGE_AT = bind(linker, lib, "cadaclysm_blacksmith_edge", FunctionDescriptor.of(B, A, I, A));
         MESH_AT = bind(linker, lib, "cadaclysm_blacksmith_mesh", FunctionDescriptor.of(MESH, A, D));
+        MESH_FACE_TRIANGLES = bind(linker, lib, "cadaclysm_blacksmith_mesh_face_triangles", FunctionDescriptor.of(FACE_TRIANGLES, A, D));
         EDGE_POLYLINES = bind(linker, lib, "cadaclysm_blacksmith_edge_polylines", FunctionDescriptor.of(POLYLINES, A, D));
         BOUNDS = bind(linker, lib, "cadaclysm_blacksmith_bounds", FunctionDescriptor.of(B, A, D, A, A));
         LEAKED_EDGES = bind(linker, lib, "cadaclysm_blacksmith_leaked_edges", FunctionDescriptor.of(I, A, D));

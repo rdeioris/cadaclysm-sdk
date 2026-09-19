@@ -66,6 +66,17 @@ typedef struct CadaclysmBlacksmithMesh {
 } CadaclysmBlacksmithMesh;
 
 /**
+ * How many triangles each face of a solid meshed to, borrowed from it.
+ */
+typedef struct CadaclysmBlacksmithFaceTriangles {
+  /**
+   * One count per face, in face order.
+   */
+  const uint32_t *counts;
+  uint32_t face_count;
+} CadaclysmBlacksmithFaceTriangles;
+
+/**
  * Polylines borrowed from a solid (its feature edges) or a profile (its outline):
  * polyline `i` is `points[offsets[i] .. offsets[i + 1]]`, three floats a point.
  */
@@ -227,6 +238,21 @@ const char *cadaclysm_blacksmith_build_date(void);
  */
 struct CadaclysmBlacksmithMesh cadaclysm_blacksmith_mesh(const struct CadaclysmBlacksmithSolid *solid,
                                                          double tolerance);
+
+/**
+ * The triangles each face contributed to the mesh [`cadaclysm_blacksmith_mesh`]
+ * gives at the same `tolerance`: one count per face in face order, summing to
+ * that mesh's `index_count / 3`. The mesher writes a face's triangles together
+ * and the faces in order, so face `f`'s triangles are the `counts[f]` that
+ * follow the first `sum(counts[..f])`; a face that meshed to nothing counts
+ * zero. What a viewer colours a face by. Same cache and lifetime rule as the
+ * mesh. Null `counts` and `last_error` on failure.
+ *
+ * # Safety
+ * `solid` live.
+ */
+struct CadaclysmBlacksmithFaceTriangles cadaclysm_blacksmith_mesh_face_triangles(const struct CadaclysmBlacksmithSolid *solid,
+                                                                                 double tolerance);
 
 /**
  * The feature edges the mesher locked at `tolerance`, as polylines that lie on

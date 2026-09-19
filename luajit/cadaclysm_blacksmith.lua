@@ -277,7 +277,8 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_lump_count", "cadaclysm_blacksmith_lump", "cadaclysm_blacksmith_face_count",
   "cadaclysm_blacksmith_select_face", "cadaclysm_blacksmith_face_frame", "cadaclysm_blacksmith_coloured",
   "cadaclysm_blacksmith_colour", "cadaclysm_blacksmith_face_kind", "cadaclysm_blacksmith_edge_count",
-  "cadaclysm_blacksmith_edge", "cadaclysm_blacksmith_mesh", "cadaclysm_blacksmith_edge_polylines",
+  "cadaclysm_blacksmith_edge", "cadaclysm_blacksmith_mesh", "cadaclysm_blacksmith_mesh_face_triangles",
+  "cadaclysm_blacksmith_edge_polylines",
   "cadaclysm_blacksmith_bounds", "cadaclysm_blacksmith_leaked_edges", "cadaclysm_blacksmith_unpaired_edges",
   "cadaclysm_blacksmith_manifold", "cadaclysm_blacksmith_step", "cadaclysm_blacksmith_string_free",
   "cadaclysm_blacksmith_from_brep", "cadaclysm_blacksmith_brep_layout_id",
@@ -1530,6 +1531,17 @@ function Solid:edge_polylines(tolerance)
     local pointer = p.points ~= nil and (p.points + 3 * a) or nil
     out[i + 1] = view(self, generation, pointer, { b - a, 3 }, "float32")
   end
+  return out
+end
+
+-- The kernel's mesh_face_triangles, kept for the viewer follow-up (as Go keeps it): how
+-- many triangles each face meshed to at `tolerance`, in face order, summing to `mesh`'s
+-- triangle count at the same tolerance -- copied out into a Lua array of numbers.
+local function mesh_face_triangles(solid, tolerance)
+  local t = lib().cadaclysm_blacksmith_mesh_face_triangles(solid:_h(), tolerance)
+  if t.counts == nil then fail("mesh_face_triangles") end
+  local out = {}
+  for i = 0, t.face_count - 1 do out[i + 1] = t.counts[i] end
   return out
 end
 

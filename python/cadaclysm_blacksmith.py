@@ -27,7 +27,7 @@ shared library if it is not where this looks by default (`target/release` or
 
 ## Every array borrows from its solid
 
-`Solid.mesh` and `Solid.edge_polylines` hand back **read-only numpy views into
+`Solid.mesh`, `Solid.face_triangles` and `Solid.edge_polylines` hand back **read-only numpy views into
 the library's own cache** rather than copies. Each view keeps its `Solid` alive
 through `.base`, so a view cannot outlive the solid by having merely dropped the
 last reference to it. Two things can still invalidate a view:
@@ -101,7 +101,7 @@ __all__ = [
 ]
 
 # This file's own version (the workspace's); `version()` is the loaded library's.
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 NONE = 0xFFFFFFFF
 UNITS = {"m": 0, "mm": 1, "in": 2}
@@ -205,6 +205,10 @@ class _Mesh(ctypes.Structure):
 class _Polylines(ctypes.Structure):
     _fields_ = [("points", POINTER(c_float)), ("offsets", POINTER(c_uint32)),
                 ("point_count", c_uint32), ("polyline_count", c_uint32)]
+
+
+class _FaceTriangles(ctypes.Structure):
+    _fields_ = [("counts", POINTER(c_uint32)), ("face_count", c_uint32)]
 
 
 class _Edge(ctypes.Structure):
@@ -319,6 +323,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_edge_count", c_uint32, [_SOLID]),
     ("cadaclysm_blacksmith_edge", c_bool, [_SOLID, c_uint32, POINTER(_Edge)]),
     ("cadaclysm_blacksmith_mesh", _Mesh, [_SOLID, c_double]),
+    ("cadaclysm_blacksmith_mesh_face_triangles", _FaceTriangles, [_SOLID, c_double]),
     ("cadaclysm_blacksmith_edge_polylines", _Polylines, [_SOLID, c_double]),
     ("cadaclysm_blacksmith_bounds", c_bool, [_SOLID, c_double, _D, _D]),
     ("cadaclysm_blacksmith_leaked_edges", c_uint32, [_SOLID, c_double]),
@@ -353,13 +358,14 @@ class _WasmLibrary:
 
     # what a failing call returns, by the C ABI's convention for that name:
     # `False` for the bool-returning verbs, a zeroed struct (a null pointer in
-    # it) for the two struct-returning ones, NONE for the u32 ones that reserve
+    # it) for the struct-returning ones, NONE for the u32 ones that reserve
     # it, and 0 (a null handle, or a count the caller checks `last_error` on)
     # for everything else
     _BOOLS = {"path_line_to", "path_arc_to", "path_bezier_to", "path_nurbs_to", "sweep_path_line_to",
               "sweep_path_arc", "slant_of_plane", "face_frame", "frame_midplane", "frame_through", "bounds", "edge", "colour", "manifold", "license_set"}
     _FAILS = {"select_face": NONE, "leaked_edges": NONE, "unpaired_edges": NONE,
-              "mesh": _Mesh(), "edge_polylines": _Polylines(), "profile_polylines": _Polylines()}
+              "mesh": _Mesh(), "mesh_face_triangles": _FaceTriangles(), "edge_polylines": _Polylines(),
+              "profile_polylines": _Polylines()}
     # results that C writes into an out-array of doubles at this position, and the
     # wasm returns as a typed array (`bounds` fills two, `edge` a record: see `_back`)
     _OUT = {"slant_of_plane": 3, "face_frame": 2, "frame_midplane": 2, "frame_through": 3}
@@ -495,13 +501,19 @@ class _WasmLibrary:
             return str(result).encode()
         if short in ("mesh", "edge_polylines", "profile_polylines"):
             return _JsArrays(result)
+        if short == "mesh_face_triangles":   # the counts themselves, a `Uint32Array`
+            return _JsArrays(result, "counts")
         return result
 
 
 class _JsArrays:
-    """A `mesh`/`edge_polylines` result: the typed arrays under the C struct's names."""
+    """A `mesh`/`edge_polylines`/`mesh_face_triangles` result: the typed arrays
+    under the C struct's names (`bare` names a result that is the one array)."""
 
-    def __init__(self, js_object):
+    def __init__(self, js_object, bare=None):
+        if bare is not None:
+            self.counts, self.face_count = js_object, len(js_object)
+            return
         for name in ("positions", "normals", "indices", "points", "offsets"):
             if hasattr(js_object, name):
                 setattr(self, name, getattr(js_object, name))
@@ -755,9 +767,15 @@ def _lines_only(options):
     return {k: v for k, v in options.items() if k != "edges"}
 
 
-def _draw(obj, mode, meshes, polylines, default_view, kw):
+def _not_in_the_notebook():
+    """The notebook draws with its own show(obj): refused before anything is meshed
+    or asked of the wasm, which may predate an entry point the drawing uses."""
     if sys.platform == "emscripten":
         raise RuntimeError("in the notebook, draw with show(obj)")
+
+
+def _draw(obj, mode, meshes, polylines, default_view, kw):
+    _not_in_the_notebook()
     viewer = _viewer()
     opts = viewer.options(default_view, **kw)
     last = viewer.draw(mode, type(obj).__name__, meshes, polylines, opts)
@@ -909,10 +927,12 @@ class Profile:
         """Draw the outline and holes with the viewer in use, from the top by default.
         Keywords as `Solid.show`; `edges=` is accepted and ignored, the lines being the
         whole picture."""
+        _not_in_the_notebook()
         _draw(self, "show", [], _edges_as_polylines(self.polylines(tolerance)), "top", _lines_only(options))
 
     def view(self, tolerance=0.05, **options):
         """Orbit the outline with the viewer in use; returns (azimuth, elevation, zoom)."""
+        _not_in_the_notebook()
         return _draw(self, "view", [], _edges_as_polylines(self.polylines(tolerance)), "top", _lines_only(options))
 
 
@@ -1573,6 +1593,18 @@ class Solid:
                 _view(self, m.normals, (n, 3), "f4"),
                 _view(self, m.indices, (m.index_count,), "u4"))
 
+    def face_triangles(self, tolerance=0.05) -> "numpy.ndarray":
+        """How many triangles each face meshed to at `tolerance`, a read-only
+        uint32 view with one count per face in face order: the triangles of
+        `mesh(tolerance)` run face by face, so face `f`'s are the `counts[f]`
+        after the first `counts[:f].sum()`. The counts sum to the mesh's
+        triangle count; a face that meshed to nothing counts zero. Same cache
+        and lifetime as `mesh`."""
+        t = _lib().cadaclysm_blacksmith_mesh_face_triangles(self._h(), tolerance)
+        if not t.counts:
+            _fail("mesh_face_triangles")
+        return _view(self, t.counts, (t.face_count,), "u4")
+
     def edge_polylines(self, tolerance=0.05) -> "list[numpy.ndarray]":
         """The feature edges as a list of float32 (k,3) read-only views."""
         p = _lib().cadaclysm_blacksmith_edge_polylines(self._h(), tolerance)
@@ -1584,19 +1616,44 @@ class Solid:
 
     def show(self, tolerance=0.05, **options) -> None:
         """Draw the solid with the viewer in use -- in a terminal, the picture is left
-        in the scrollback. Keywords: view= (front back left right top bottom iso), az=,
-        el=, zoom=, up=, edges=, width=, height=, hint=."""
+        in the scrollback. Each face is drawn in its own colour (`face_colour`: a
+        colour of its own, else the solid's). Keywords: view= (front back left right
+        top bottom iso), az=, el=, zoom=, up=, edges=, width=, height=, hint=."""
+        _not_in_the_notebook()
         _draw(self, "show", *self._drawn(tolerance, options), "iso", options)
 
     def view(self, tolerance=0.05, **options):
         """Orbit the solid with the viewer in use until it is closed; returns
         (azimuth, elevation, zoom) where it was left. Keywords as `show`."""
+        _not_in_the_notebook()
         return _draw(self, "view", *self._drawn(tolerance, options), "iso", options)
 
     def _drawn(self, tolerance, options):
         positions, normals, indices = self.mesh(tolerance)
         edges = _edges_as_polylines(self.edge_polylines(tolerance)) if options.get("edges", True) else []
-        return [(positions, normals, indices, None, self.colour)], edges
+        whole = self.colour
+        colours = [self.face_colour(f) for f in range(self.faces)]
+        if all(c == whole for c in colours):
+            return [(positions, normals, indices, None, whole)], edges
+        # Faces coloured apart from the solid: one mesh per colour, each holding
+        # its faces' triangles over just the vertices they use.
+        numpy = _numpy()
+        counts = self.face_triangles(tolerance)
+        triangles = indices.reshape(-1, 3)
+        if len(counts) != len(colours) or int(counts.sum()) != len(triangles):
+            raise BuildError(f"show: {len(counts)} faces meshed {int(counts.sum())} triangles, "
+                             f"the mesh has {len(triangles)} over {len(colours)} faces")
+        groups = list(dict.fromkeys(colours))   # the distinct colours, in face order
+        group_of_face = numpy.array([groups.index(c) for c in colours], dtype=numpy.intp)
+        group_of_triangle = numpy.repeat(group_of_face, counts)
+        meshes = []
+        for g, rgb in enumerate(groups):
+            corners = triangles[group_of_triangle == g].reshape(-1)
+            if not corners.size:
+                continue   # its faces all meshed to nothing: no mesh, rather than an empty one
+            used, local = numpy.unique(corners, return_inverse=True)
+            meshes.append((positions[used], normals[used], local.reshape(-1).astype(numpy.uint32), None, rgb))
+        return meshes, edges
 
     def step_text(self, schema=None, unit="mm") -> str:
         return write_step_text([self], schema, unit)

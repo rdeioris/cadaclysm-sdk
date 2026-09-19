@@ -148,10 +148,12 @@ return function(t)
     t.ok(f:read("*a"):match("^ISO%-10303%-21;"))
     f:close()
     local two = t.tmp("two.stp")
-    -- The mirrored pin sits on a left-handed frame, which STEP's AXIS2_PLACEMENT_3D
-    -- cannot express: the writer refuses it rather than turn it inside out. The same
-    -- pin unmirrored writes (as in the Node test).
-    t.raises(function() bs.write_step(two, { plate, pin }, SCHEMA_AP203) end, "left%-handed")
+    -- The mirrored pin sits on a left-handed frame; the writer bakes the mirror into
+    -- the geometry instead of refusing it (faec26ef), so it writes like the upright one.
+    bs.write_step(two, { plate, pin }, SCHEMA_AP203)
+    f = assert(io.open(two, "rb"))
+    t.ok(f:read("*a"):match("^ISO%-10303%-21;"), "a mirrored solid writes STEP")
+    f:close()
     local upright = bs.Solid.cylinder(4, 10):translate(0, 0, 6):rotate({ { 0, 0, 0 }, { 0, 0, 1 } }, 0.1):place(XY)
     bs.write_step(two, { plate, upright }, SCHEMA_AP203)
     f = assert(io.open(two, "rb"))

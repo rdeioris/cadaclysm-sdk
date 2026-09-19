@@ -1,6 +1,6 @@
 [package]
 name = "cadaclysm-sdk"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 rust-version = "1.70"
 description = "Read CAD files (STEP, IGES, IFC, Rhino 3dm, ACIS SAT, OCCT BREP, OpenSCAD) and build exact B-rep solids, over the prebuilt cadaclysm libraries loaded at run time."

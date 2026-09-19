@@ -2267,6 +2267,25 @@ func (s *Solid) EdgePolylines(tolerance float64) (*Polylines, error) {
 	return p, nil
 }
 
+// meshFaceTriangles is the kernel's mesh_face_triangles, kept for the viewer
+// follow-up: how many triangles each face meshed to at tolerance, in face order,
+// summing to Mesh(tolerance)'s triangle count. Copied out of the solid's cache.
+func meshFaceTriangles(s *Solid, tolerance float64) ([]uint32, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	raw := C.cadaclysm_blacksmith_mesh_face_triangles(h, C.double(tolerance))
+	if raw.counts == nil {
+		runtime.KeepAlive(s)
+		return nil, failure("mesh_face_triangles")
+	}
+	counts := append([]uint32(nil), unsafe.Slice((*uint32)(unsafe.Pointer(raw.counts)), int(raw.face_count))...)
+	runtime.KeepAlive(s)
+	return counts, nil
+}
+
 // StepText is this solid as STEP text (AP203 unless schema names another); see
 // WriteStepText for schema and unit.
 func (s *Solid) StepText(schema, unit string) (string, error) {

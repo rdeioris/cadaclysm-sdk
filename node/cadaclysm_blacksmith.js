@@ -105,6 +105,10 @@ const CadaclysmBlacksmithPolylines = koffi.struct('CadaclysmBlacksmithPolylines'
   point_count: 'uint32_t',
   polyline_count: 'uint32_t',
 });
+const CadaclysmBlacksmithFaceTriangles = koffi.struct('CadaclysmBlacksmithFaceTriangles', {
+  counts: 'const uint32_t *',
+  face_count: 'uint32_t',
+});
 const CadaclysmBlacksmithEdge = koffi.struct('CadaclysmBlacksmithEdge', {
   kind: 'const char *',
   faces: 'const uint32_t *',
@@ -137,6 +141,7 @@ function _lib() {
     license_notice_count: f('uint64_t cadaclysm_blacksmith_license_notice_count(void)'),
     build_date: f('const char *cadaclysm_blacksmith_build_date(void)'),
     mesh: f('CadaclysmBlacksmithMesh cadaclysm_blacksmith_mesh(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
+    mesh_face_triangles: f('CadaclysmBlacksmithFaceTriangles cadaclysm_blacksmith_mesh_face_triangles(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
     edge_polylines: f('CadaclysmBlacksmithPolylines cadaclysm_blacksmith_edge_polylines(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
     bounds: f('bool cadaclysm_blacksmith_bounds(const CadaclysmBlacksmithSolid *solid, double tolerance, _Out_ double *min, _Out_ double *max)'),
     step: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_step(const CadaclysmBlacksmithSolid **solids, size_t count, const char *schema, uint32_t unit)'),

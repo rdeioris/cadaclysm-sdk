@@ -56,6 +56,13 @@ pub struct CadaclysmBlacksmithPolylines {
     pub polyline_count: u32,
 }
 
+/// Triangles per face, in face order, over the mesh at the same tolerance.
+#[repr(C)]
+pub struct CadaclysmBlacksmithFaceTriangles {
+    pub counts: *const u32,
+    pub face_count: u32,
+}
+
 #[repr(C)]
 pub struct CadaclysmBlacksmithEdge {
     pub kind: *const c_char,
@@ -267,6 +274,7 @@ entry_points! {
     fn cadaclysm_blacksmith_unpaired_edges(solid: *const Solid, tolerance: f64) -> u32;
     fn cadaclysm_blacksmith_manifold(solid: *const Solid, out: *mut u32) -> bool;
     fn cadaclysm_blacksmith_mesh(solid: *const Solid, tolerance: f64) -> CadaclysmBlacksmithMesh;
+    fn cadaclysm_blacksmith_mesh_face_triangles(solid: *const Solid, tolerance: f64) -> CadaclysmBlacksmithFaceTriangles;
     fn cadaclysm_blacksmith_edge_polylines(solid: *const Solid, tolerance: f64) -> CadaclysmBlacksmithPolylines;
     fn cadaclysm_blacksmith_bounds(solid: *const Solid, tolerance: f64, min: *mut f64, max: *mut f64) -> bool;
     fn cadaclysm_blacksmith_step(solids: *const *const Solid, count: usize, schema: *const c_char, unit: u32) -> *mut c_char;

@@ -1,6 +1,6 @@
 [package]
 name = "cadaclysm-godot"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 rust-version = "1.94"
 description = "cadaclysm for Godot 4: a GDExtension over the prebuilt cadaclysm libraries."
@@ -13,7 +13,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 godot = { version = "0.5.5", features = ["register-docs", "api-4-4"] }
-cadaclysm-sdk = { path = "../rust", version = "0.5.0", default-features = false }
+cadaclysm-sdk = { path = "../rust", version = "0.5.1", default-features = false }
 
 # Standalone, like the SDK crate it sits on: not a member of the repository's workspace.
 [workspace]
