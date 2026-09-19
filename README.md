@@ -67,11 +67,12 @@ is printed to stderr on every open and every export. A license file removes
 it. Put it where the libraries look: the `CADACLYSM_LICENSE` environment
 variable (the file's path, or its text), or `cadaclysm.lic` beside your
 executable or in the working directory, or pass it from code (`license()` in
-Python, Node.js and Swift, `Cadaclysm.License` in C#, `cadaclysm.License` in Go,
+Python, Node.js, Swift and LuaJIT, `Cadaclysm.License` in C#, `cadaclysm.License` in Go,
 `Cad.license` in Java, `cadaclysm_sdk::license` in Rust). The kernel library
 keeps its own license state: from code, license it with its own call beside
 the reader's (`cadaclysm_blacksmith.license()`, `Blacksmith.License`,
-`blacksmith.License`, `Blacksmith.license`, `cadaclysm_sdk::blacksmith::license`).
+`blacksmith.License`, `Blacksmith.license`, `cadaclysm_sdk::blacksmith::license`,
+`require("cadaclysm_blacksmith").license()` in LuaJIT).
 
     python fetch.py --license KEY
 
@@ -91,6 +92,7 @@ portal -- to pick up the new file the same way.
 | Node.js | [node/](node/); [API docs](https://cadaclysm.blitter.studio/docs/node.html) | `npm install` in `node/`, then `node node/smoke.js samples/cube.scad path/to/cadaclysm.lic` | Python's set, both libraries |
 | Rust | [rust/](rust/) -- also on crates.io, `cargo add cadaclysm-sdk`; [API docs](https://cadaclysm.blitter.studio/docs/rust.html) | `cargo run --manifest-path rust/Cargo.toml --example smoke -- samples/cube.scad`, or `--example tree` to print a file's tree | Python's set, both libraries |
 | Swift | [swift/](swift/) -- a Swift package, from v0.4.4; [API docs](https://cadaclysm.blitter.studio/docs/swift.html) | `swift run --package-path swift cadaclysm-smoke samples/cube.scad` | Python's set, both libraries |
+| LuaJIT | [luajit/](luajit/) -- for LÖVE, LÖVR or a plain `luajit`, from the release after v0.4.4; [API docs](https://cadaclysm.blitter.studio/docs/luajit.html), [LÖVE and LÖVR](https://cadaclysm.blitter.studio/engines/love.html) | `luajit luajit/smoke/main.lua samples/cube.scad` | Python's set, both libraries |
 | C / C++ | [include/](include/); [API docs](https://cadaclysm.blitter.studio/docs/c.html) | the headers are the reference | 100% |
 
 The Go sample's loader must find the library at run time: put the library
@@ -98,7 +100,10 @@ directory on `PATH` (Windows), `LD_LIBRARY_PATH` (Linux) or
 `DYLD_LIBRARY_PATH` (macOS) -- see [go/README.md](go/README.md). The Swift
 package links `lib/` when it is built and writes it into the executable's rpath
 on macOS and Linux; on Windows `lib` goes on `PATH` -- see
-[swift/README.md](swift/README.md).
+[swift/README.md](swift/README.md). The LuaJIT modules load the libraries
+through the FFI, nothing compiled: from `CADACLYSM_LIBRARY` /
+`CADACLYSM_BLACKSMITH_LIBRARY`, beside the Lua files, beside a fused LÖVE game's
+executable, or `lib/` in any parent -- see [luajit/README.md](luajit/README.md).
 
 Every binding follows the Python modules' object model over both libraries,
 with each language's own spelling; its API docs page lists every type and call
