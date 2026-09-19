@@ -6,7 +6,8 @@ OCCT .brep and OpenSCAD in; meshes, LODs and exact B-rep out; an exact
 modelling kernel (`cadaclysm_blacksmith`) beside it.
 
 Everything in this repository is Apache-2.0. The libraries themselves are
-proprietary, attached to each [release](../../releases) under [EULA.md](EULA.md):
+proprietary, owned by Blitter S.r.l. and Roberto De Ioris, attached to each
+[release](../../releases) under [EULA.md](EULA.md):
 no license is needed to try it -- unlicensed, everything works and a notice
 is printed on every open and export; per-seat licenses (developers) and
 per-server licenses (machines processing files unattended for others) at
@@ -57,8 +58,7 @@ Apple Silicon in one file) and Linux x64/arm64 (glibc 2.17+). The binaries
 are **not code-signed** yet (each release's notes say so per archive). On macOS, a library downloaded by a
 browser is quarantined and `dlopen` refuses to load it; either fetch with
 `fetch.py` (which does not set the quarantine attribute) or clear it
-yourself: `xattr -d com.apple.quarantine lib/*.dylib`. The EULA shipped
-today is an interim text until the reviewed one lands.
+yourself: `xattr -d com.apple.quarantine lib/*.dylib`.
 
 ## The license file
 
