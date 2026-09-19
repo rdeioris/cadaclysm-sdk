@@ -20,6 +20,10 @@ per-server licenses (machines processing files unattended for others) at
 or download an archive from the releases page and unpack its `lib/` and
 `include/` here.
 
+For Python there is a shorter way: `pip install cadaclysm` installs both
+Python modules together with the libraries of one release -- no `fetch.py`, no
+`lib/` (see [python/](python/README.md)).
+
 ### Same release, please
 
 The wrappers here read structs the library fills in, not the other way
