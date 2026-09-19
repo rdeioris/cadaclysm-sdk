@@ -119,6 +119,9 @@ if (!shape.IsClosed || shape.Faces != rounded.Faces) return Fail($"the filleted 
     using var cube = Solid.Cuboid(10, 10, 10);
     using var raised = cube.PushPull(cube.SelectFace(Selector.Max(Axis.Z)), 5);
     if (raised.Faces != 6 || !raised.IsWatertight()) return Fail($"push_pull: the raised cube has {raised.Faces} faces, not 6");
+    // Its top and a side pushed together: a 15 x 10 x 15 box, still six faces.
+    using var grown = cube.PushPull([cube.SelectFace(Selector.Max(Axis.Z)), cube.SelectFace(Selector.Max(Axis.X))], 5);
+    if (grown.Faces != 6 || !grown.IsWatertight()) return Fail($"push_pull: the cube grown two ways has {grown.Faces} faces, not 6");
     // Quick solids: a coiled wire and a pipe close; a cube split by a plane is two bodies.
     using var wire = Profile.Circle(1).Translate(10, 0);
     using var spring = Solid.Coil(wire, [0, 0, 0, 0, 0, 1], 4, 2);
@@ -146,6 +149,19 @@ if (!shape.IsClosed || shape.Faces != rounded.Faces) return Fail($"the filleted 
     using var loopSpline = Profile.Spline([(0, 0), (10, 0), (10, 10), (0, 10)], 3, null, closed: true);
     using var loopSolid = Solid.Extrude(loopSpline, xy, 2);
     if (hexPrism.Faces != 8 || loopSolid.Faces != 3 || !loopSolid.IsWatertight()) return Fail($"shapes: {hexPrism.Faces} and {loopSolid.Faces} faces, not 8 and 3");
+    // The library reads a fixed count of weights: a wrong count is refused, not read past.
+    static string Refusal(Action build)
+    {
+        try { build(); return "no refusal"; }
+        catch (BuildException e) { return e.Message; }
+    }
+    (double, double)[] squareCorners = [(0, 0), (10, 0), (10, 10), (0, 10)];
+    using var weighted = Profile.Spline(squareCorners, 3, [1, 2, 1, 1], closed: true);
+    using var rational = Profile.Path((0, 0)).NurbsTo([(5, 5), (10, 0)], [0, 0, 0, 1, 1, 1], 2, [1, 0.5, 1]).EndOpen();
+    var shortSpline = Refusal(() => Profile.Spline(squareCorners, 3, [1, 1], closed: true).Dispose());
+    var shortNurbs = Refusal(() => Profile.Path((0, 0)).NurbsTo([(5, 5), (10, 0)], [0, 0, 0, 1, 1, 1], 2, [1, 1]).Dispose());
+    if (shortSpline != "spline: 2 weights for 4 points; give one per point") return Fail($"a short weight list: {shortSpline}");
+    if (shortNurbs != "nurbs_to: 2 weights for 3 control points (the current point and 2 given); give one per point") return Fail($"a short weight list: {shortNurbs}");
     Console.WriteLine($"sheet verbs: face, trim ({holed.Faces}+{disc.Faces}), face_sheet, drop_faces, round ({slab.Faces} faces), along, chain, push_pull, coil, pipe, split_by_plane, close_loop, from_loops, revolve_in_plane, regular_polygon, spline: ok");
 }
 // Frames: built, checked, and passed wherever twelve numbers go.

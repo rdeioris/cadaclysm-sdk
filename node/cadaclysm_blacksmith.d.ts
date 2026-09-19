@@ -178,7 +178,7 @@ export class Solid {
   edges(): Edge[];
   fillet(edges: Iterable<Edge | number>, radius: number, tolerance?: number, progress?: Progress | null): Solid;
   chamfer(edges: Iterable<Edge | number>, distance: number, tolerance?: number): Solid;
-  pushPull(face: number, distance: number, tolerance?: number, progress?: Progress | null): Solid;
+  pushPull(face: number | Iterable<number>, distance: number, tolerance?: number, progress?: Progress | null): Solid;
   mergeFlush(): Solid;
   refillet(face: number, radius: number, tolerance?: number): Solid;
   unfillet(face: number): Solid;

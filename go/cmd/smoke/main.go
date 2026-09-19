@@ -568,6 +568,15 @@ func sheetVerbs(plate *blacksmith.Solid) {
 	if count(raised) != 6 {
 		fail(fmt.Sprintf("push_pull: the raised cube has %d faces, not 6", count(raised)))
 	}
+	// Its top and a side pushed together: a 15 x 10 x 15 box, still six faces.
+	cubeSide, err := cube.SelectFace(blacksmith.Max(blacksmith.AxisX))
+	if err != nil {
+		fail(err.Error())
+	}
+	grown := must(cube.PushPullFaces([]int{cubeTop, cubeSide}, 5, blacksmith.DefaultTolerance))
+	if count(grown) != 6 {
+		fail(fmt.Sprintf("push_pull: the cube grown two ways has %d faces, not 6", count(grown)))
+	}
 	// Quick solids: a coiled wire and a pipe close; a cube split by a plane is two bodies.
 	wireCircle, err := blacksmith.Circle(1)
 	if err != nil {
@@ -600,6 +609,7 @@ func sheetVerbs(plate *blacksmith.Solid) {
 	wireCircle.Close()
 	pipePath.Close()
 	raised.Close()
+	grown.Close()
 	cube.Close()
 	ellWalls.Close()
 	ell.Close()
@@ -656,6 +666,30 @@ func sheetVerbs(plate *blacksmith.Solid) {
 	loopSolid.Close()
 	hexagon.Close()
 	loopSpline.Close()
+	// The library reads a fixed count of weights: a wrong count is refused, not read past.
+	corners := [][2]float64{{0, 0}, {10, 0}, {10, 10}, {0, 10}}
+	control := [][2]float64{{5, 5}, {10, 0}}
+	knots := []float64{0, 0, 0, 1, 1, 1}
+	weighted, err := blacksmith.Spline(corners, 3, []float64{1, 2, 1, 1}, true)
+	if err != nil {
+		fail(err.Error())
+	}
+	weighted.Close()
+	rational, err := blacksmith.NewPath(0, 0).NurbsTo(control, knots, 2, []float64{1, 0.5, 1}).EndOpen()
+	if err != nil {
+		fail(err.Error())
+	}
+	rational.Close()
+	for _, weights := range [][]float64{{1, 1}, {}} {
+		if _, err := blacksmith.Spline(corners, 3, weights, true); err == nil ||
+			err.Error() != fmt.Sprintf("spline: %d weights for 4 points; give one per point", len(weights)) {
+			fail(fmt.Sprintf("a wrong spline weight count: %v", err))
+		}
+		if _, err := blacksmith.NewPath(0, 0).NurbsTo(control, knots, 2, weights).EndOpen(); err == nil ||
+			err.Error() != fmt.Sprintf("nurbs_to: %d weights for 3 control points (the current point and 2 given); give one per point", len(weights)) {
+			fail(fmt.Sprintf("a wrong nurbs_to weight count: %v", err))
+		}
+	}
 	fmt.Printf("sheet verbs: face, trim (%d+%d), face_sheet, drop_faces, round (%d faces), along, chain, push_pull, coil, pipe, split_by_plane, close_loop, from_loops, revolve_in_plane, regular_polygon, spline: ok\n", count(holed), count(disc), count(slab))
 	for _, s := range []*blacksmith.Solid{sheet, peg, holed, disc, lid, walls, slab, tube, onPlane, away} {
 		s.Close()

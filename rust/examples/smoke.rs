@@ -284,6 +284,17 @@ fn sheet_verbs(plate: &Solid) -> Result<(), String> {
         .and_then(|p| p.arc([5.0, 0.0, 10.0], [0.0, 1.0, 0.0], std::f64::consts::FRAC_PI_2))
         .map_err(e)?;
     check(Solid::pipe(&bend, 1.0, 0.2).map_err(e)?.is_watertight(DEFAULT_TOLERANCE).map_err(e)?, "the pipe leaks")?;
+
+    // The library reads a fixed count of weights: a wrong count is refused, not read past.
+    let corners = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
+    let (control, knots) = ([[5.0, 5.0], [10.0, 0.0]], [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+    Profile::spline(&corners, 3, Some(&[1.0, 2.0, 1.0, 1.0][..]), true).map_err(e)?;
+    Outline::begin([0.0, 0.0]).and_then(|p| p.nurbs_to(&control, &knots, 2, Some(&[1.0, 0.5, 1.0][..]))).and_then(|p| p.end_open()).map_err(e)?;
+    let refused = |r: cadaclysm_sdk::Result<Profile>| r.err().map(|err| err.to_string()).unwrap_or_default();
+    let short = refused(Profile::spline(&corners, 3, Some(&[1.0, 1.0][..]), true));
+    check(short == "spline: 2 weights for 4 points; give one per point", &format!("a short weight list: {short:?}"))?;
+    let short = refused(Outline::begin([0.0, 0.0]).and_then(|p| p.nurbs_to(&control, &knots, 2, Some(&[1.0, 1.0][..]))).and_then(|p| p.end_open()));
+    check(short == "nurbs_to: 2 weights for 3 control points (the current point and 2 given); give one per point", &format!("a short weight list: {short:?}"))?;
     Ok(())
 }
 

@@ -357,6 +357,8 @@ internal static class BlacksmithNative
         IntPtr progress, IntPtr user);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_push_pull(SolidHandle solid, uint face, double distance,
         double tolerance, IntPtr progress, IntPtr user);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_push_pull_faces(SolidHandle solid, uint[] faces, nuint count,
+        double distance, double tolerance, IntPtr progress, IntPtr user);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_merge_flush(SolidHandle solid);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_refillet(SolidHandle solid, uint face, double radius, double tolerance);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_unfillet(SolidHandle solid, uint face);
@@ -596,8 +598,12 @@ public sealed class Profile : IDisposable
     public static Profile Spline(IEnumerable<(double X, double Y)> points, int degree = 3, IEnumerable<double>? weights = null, bool closed = false)
     {
         var flat = points.SelectMany(p => new[] { p.X, p.Y }).ToArray();
+        var w = weights?.ToArray();
+        // The library reads exactly one weight per point, whatever the array holds.
+        if (w != null && w.Length != flat.Length / 2)
+            throw new BuildException($"spline: {w.Length} weights for {flat.Length / 2} points; give one per point");
         return new Profile(BlacksmithNative.cadaclysm_blacksmith_profile_spline(flat, (nuint)(flat.Length / 2), (uint)Math.Max(0, degree),
-            weights?.ToArray(), closed));
+            w, closed));
     }
 
     /// <summary>Start drawing an outline at `start`, a segment at a time (the `Path` builder).
@@ -729,6 +735,11 @@ public sealed class Path : IDisposable
         var flat = control.SelectMany(p => new[] { p.X, p.Y }).ToArray();
         var k = knots.ToArray();
         var w = weights?.ToArray();
+        // The library reads one weight per control point plus the current point's.
+        var n = flat.Length / 2;
+        if (w != null && w.Length != n + 1)
+            throw new BuildException($"nurbs_to: {w.Length} weights for {n + 1} control points "
+                + $"(the current point and {n} given); give one per point");
         var ok = BlacksmithNative.cadaclysm_blacksmith_path_nurbs_to(Live, flat, (nuint)(flat.Length / 2), w, k, (nuint)k.Length, degree);
         return Step(ok, "path_nurbs_to");
     }
@@ -1443,6 +1454,18 @@ public sealed class Solid : IDisposable
     /// the flat faces beside it carried along; any other curved face is refused.</summary>
     public Solid PushPull(int face, double distance, double tolerance = 0.05) =>
         new(BlacksmithNative.cadaclysm_blacksmith_push_pull(Handle, Index(face), distance, tolerance, IntPtr.Zero, IntPtr.Zero));
+
+    /// <summary>Faces `faces` pushed out by `distance` together -- Fusion's press-pull on a
+    /// selection: each by <see cref="PushPull(int, double, double)"/>'s rule for it, one after
+    /// another, each found again after the pushes before it renumbered the faces. A box's top
+    /// and a side pushed 5 is the box 5 taller and 5 wider; a face on the same curved surface
+    /// as one before it, and joined to it, moved with that one and is not pushed twice.</summary>
+    public Solid PushPull(IEnumerable<int> faces, double distance, double tolerance = 0.05)
+    {
+        var which = Indices(faces);
+        return new Solid(BlacksmithNative.cadaclysm_blacksmith_push_pull_faces(Handle, which, (nuint)which.Length, distance, tolerance,
+            IntPtr.Zero, IntPtr.Zero));
+    }
 
     /// <summary>This solid split by `tool` into bodies -- Fusion's Split Body: a closed
     /// `tool` gives the parts outside it, then the parts inside; a flat sheet splits by the

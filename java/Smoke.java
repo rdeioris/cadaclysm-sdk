@@ -325,6 +325,11 @@ public final class Smoke {
             try (Blacksmith.Solid cube = Blacksmith.Solid.cuboid(10, 10, 10);
                  Blacksmith.Solid raised = cube.pushPull(cube.selectFace(Blacksmith.Selector.max(Blacksmith.Axis.Z)), 5)) {
                 if (raised.faces() != 6 || !raised.isWatertight()) fail("push_pull: the raised cube has " + raised.faces() + " faces, not 6");
+                // Its top and a side pushed together: a 15 x 10 x 15 box, still six faces.
+                int[] twoWays = {cube.selectFace(Blacksmith.Selector.max(Blacksmith.Axis.Z)), cube.selectFace(Blacksmith.Selector.max(Blacksmith.Axis.X))};
+                try (Blacksmith.Solid grown = cube.pushPull(twoWays, 5)) {
+                    if (grown.faces() != 6 || !grown.isWatertight()) fail("push_pull: the cube grown two ways has " + grown.faces() + " faces, not 6");
+                }
                 // Quick solids: a coiled wire and a pipe close; a cube split by a plane is two bodies.
                 try (Blacksmith.Profile unit = Blacksmith.Profile.circle(1);
                      Blacksmith.Profile wire = unit.translate(10, 0);
@@ -357,6 +362,24 @@ public final class Smoke {
                  Blacksmith.Profile loopSpline = Blacksmith.Profile.spline(new double[][] {{0, 0}, {10, 0}, {10, 10}, {0, 10}}, 3, null, true);
                  Blacksmith.Solid loopSolid = Blacksmith.Solid.extrude(loopSpline, xy, 2)) {
                 if (hexPrism.faces() != 8 || loopSolid.faces() != 3 || !loopSolid.isWatertight()) fail("shapes: " + hexPrism.faces() + " and " + loopSolid.faces() + " faces, not 8 and 3");
+            }
+            // The library reads a fixed count of weights: a wrong count is refused, not read past.
+            double[][] corners = {{0, 0}, {10, 0}, {10, 10}, {0, 10}};
+            double[][] control = {{5, 5}, {10, 0}};
+            double[] knots = {0, 0, 0, 1, 1, 1};
+            try (Blacksmith.Profile weighted = Blacksmith.Profile.spline(corners, 3, new double[] {1, 2, 1, 1}, true);
+                 Blacksmith.Profile rational = Blacksmith.Profile.path(new double[] {0, 0}).nurbsTo(control, knots, 2, new double[] {1, 0.5, 1}).endOpen()) {
+                // built: the right counts pass
+            }
+            try (Blacksmith.Profile p = Blacksmith.Profile.spline(corners, 3, new double[] {1, 1}, true)) {
+                fail("a short spline weight list was not refused");
+            } catch (Blacksmith.BuildException e) {
+                if (!e.getMessage().equals("spline: 2 weights for 4 points; give one per point")) fail("a short weight list: " + e.getMessage());
+            }
+            try (Blacksmith.Path p = Blacksmith.Profile.path(new double[] {0, 0}).nurbsTo(control, knots, 2, new double[] {1, 1})) {
+                fail("a short nurbs_to weight list was not refused");
+            } catch (Blacksmith.BuildException e) {
+                if (!e.getMessage().equals("nurbs_to: 2 weights for 3 control points (the current point and 2 given); give one per point")) fail("a short weight list: " + e.getMessage());
             }
             System.out.println("sheet verbs: face, trim (" + holed.faces() + "+" + disc.faces() + "), face_sheet, drop_faces, round ("
                     + slab.faces() + " faces), along, chain, push_pull, coil, pipe, split_by_plane, close_loop, from_loops, revolve_in_plane, regular_polygon, spline: ok");

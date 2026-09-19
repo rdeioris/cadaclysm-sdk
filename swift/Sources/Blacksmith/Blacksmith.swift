@@ -1202,6 +1202,16 @@ public final class Solid {
         try Solid(cadaclysm_blacksmith_push_pull(try h(), try index32(face, "push_pull"), distance, tolerance, nil, nil))
     }
 
+    /// Faces `faces` pushed out by `distance` together -- Fusion's press-pull on a selection:
+    /// each by `pushPull`'s rule for it, one after another, each found again after the pushes
+    /// before it renumbered the faces. A box's top and a side pushed 5 is the box 5 taller and
+    /// 5 wider; a face on the same curved surface as one before it, and joined to it, moved
+    /// with that one and is not pushed twice. No faces is refused.
+    public func pushPull(_ faces: [Int], _ distance: Double, tolerance: Double = 0.05) throws -> Solid {
+        let which = try indices32(faces, "push_pull")
+        return try Solid(cadaclysm_blacksmith_push_pull_faces(try h(), which, which.count, distance, tolerance, nil, nil))
+    }
+
     /// The round `face` belongs to -- a fillet's bands, balls and rim bands joined to that face
     /// -- made again at `radius`, as Fusion's press-pull on a fillet face: taken back to the
     /// sharp edges it replaced, and those rounded again. Rounds of straight edges between

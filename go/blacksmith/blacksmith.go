@@ -623,6 +623,11 @@ func RegularPolygon(centre [2]float64, radius float64, sides int, angle float64)
 // profile. The degree is lowered to fit the points.
 func Spline(points [][2]float64, degree int, weights []float64, closed bool) (*Profile, error) {
 	defer pin()()
+	// The library reads exactly one weight per point, whatever the slice holds.
+	if weights != nil && len(weights) != len(points) {
+		return nil, &BuildError{Message: fmt.Sprintf("spline: %d weights for %d points; give one per point",
+			len(weights), len(points))}
+	}
 	flat := make([]float64, 0, 2*len(points))
 	for _, p := range points {
 		flat = append(flat, p[0], p[1])
@@ -906,6 +911,15 @@ func (p *Path) NurbsTo(control [][2]float64, knots []float64, degree int, weight
 	if degree < 0 {
 		return p.step(false, fmt.Sprintf("path_nurbs_to: degree %d is negative", degree))
 	}
+	// The library reads one weight per control point plus the current point's; nil is none,
+	// and an empty slice is a count like any other.
+	if weights != nil && len(weights) != len(control)+1 {
+		if p.err == nil {
+			p.err = &BuildError{Message: fmt.Sprintf("nurbs_to: %d weights for %d control points "+
+				"(the current point and %d given); give one per point", len(weights), len(control)+1, len(control))}
+		}
+		return p
+	}
 	flat := make([]float64, 0, 2*len(control))
 	for _, c := range control {
 		flat = append(flat, c[0], c[1])
@@ -917,7 +931,7 @@ func (p *Path) NurbsTo(control [][2]float64, knots []float64, degree int, weight
 	if len(knots) > 0 {
 		k = doubles(&knots[0])
 	}
-	if len(weights) > 0 {
+	if weights != nil {
 		w = doubles(&weights[0])
 	}
 	ok := bool(C.cadaclysm_blacksmith_path_nurbs_to(
@@ -2397,6 +2411,32 @@ func (s *Solid) PushPull(face int, distance, tolerance float64) (*Solid, error) 
 	}
 	out, err := newSolid(C.cadaclysm_blacksmith_push_pull(h, C.uint32_t(face), C.double(distance), C.double(tolerance), nil, nil), "solid")
 	runtime.KeepAlive(s)
+	return out, err
+}
+
+// PushPullFaces is faces pushed out by distance together — Python's Solid.push_pull with a
+// list, Fusion's press-pull on a selection: each face by PushPull's rule for it, one after
+// another, each found again after the pushes before it renumbered the faces. A box's top
+// and a side pushed 5 is the box 5 taller and 5 wider; a face on the same curved surface as
+// one before it, and joined to it, moved with that one and is not pushed twice.
+func (s *Solid) PushPullFaces(faces []int, distance, tolerance float64) (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	which, err := indices(faces)
+	if err != nil {
+		return nil, err
+	}
+	var first *C.uint32_t
+	if len(which) > 0 {
+		first = (*C.uint32_t)(unsafe.Pointer(&which[0]))
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_push_pull_faces(
+		h, first, C.size_t(len(which)), C.double(distance), C.double(tolerance), nil, nil), "solid")
+	runtime.KeepAlive(s)
+	runtime.KeepAlive(which)
 	return out, err
 }
 

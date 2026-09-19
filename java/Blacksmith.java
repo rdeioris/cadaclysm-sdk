@@ -165,7 +165,7 @@ public final class Blacksmith {
             SWEEP_PATH_LINE_TO, SWEEP_PATH_ARC, SWEEP_PATH_ALONG, SWEEP_PATH_FREE, SWEEP, SWEEP_OPEN,
             EXTRUDE_FACES, FACE, FACE_SHEET, DROP_FACES, PLACE, TRANSLATE, ROTATE, MIRROR, JOIN, CUT,
             COMMON, SPLIT_SHEET, TRIM, FILLET, CHAMFER,
-            SHELL, THICKEN, PUSH_PULL, MERGE_FLUSH, REFILLET, UNFILLET, RECHAMFER, UNCHAMFER, COIL, PIPE, SPLIT, SPLIT_BY_PLANE, LUMP_COUNT, LUMP, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_KIND, COLOURED, COLOUR, EDGE_COUNT, EDGE_AT, MESH_AT,
+            SHELL, THICKEN, PUSH_PULL, PUSH_PULL_FACES, MERGE_FLUSH, REFILLET, UNFILLET, RECHAMFER, UNCHAMFER, COIL, PIPE, SPLIT, SPLIT_BY_PLANE, LUMP_COUNT, LUMP, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_KIND, COLOURED, COLOUR, EDGE_COUNT, EDGE_AT, MESH_AT,
             EDGE_POLYLINES, BOUNDS, LEAKED_EDGES, UNPAIRED_EDGES, MANIFOLD, STEP, STRING_FREE, FROM_BREP,
             BREP_LAYOUT_ID;
 
@@ -250,6 +250,7 @@ public final class Blacksmith {
         SHELL = bind(linker, lib, "cadaclysm_blacksmith_shell", FunctionDescriptor.of(A, A, D, A, L, D, A, A));
         THICKEN = bind(linker, lib, "cadaclysm_blacksmith_thicken", FunctionDescriptor.of(A, A, D, D, A, A));
         PUSH_PULL = bind(linker, lib, "cadaclysm_blacksmith_push_pull", FunctionDescriptor.of(A, A, I, D, D, A, A));
+        PUSH_PULL_FACES = bind(linker, lib, "cadaclysm_blacksmith_push_pull_faces", FunctionDescriptor.of(A, A, A, L, D, D, A, A));
         MERGE_FLUSH = bind(linker, lib, "cadaclysm_blacksmith_merge_flush", FunctionDescriptor.of(A, A));
         REFILLET = bind(linker, lib, "cadaclysm_blacksmith_refillet", FunctionDescriptor.of(A, A, I, D, D));
         UNFILLET = bind(linker, lib, "cadaclysm_blacksmith_unfillet", FunctionDescriptor.of(A, A, I));
@@ -789,6 +790,11 @@ public final class Blacksmith {
          */
         public static Profile spline(double[][] points, int degree, double[] weights, boolean closed) {
             double[] flat = flatten2(points, "point");
+            // The library reads exactly one weight per point, whatever the array holds.
+            if (weights != null && weights.length != flat.length / 2) {
+                throw new BuildException("spline: " + weights.length + " weights for " + flat.length / 2
+                        + " points; give one per point");
+            }
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment xy = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, flat);
                 MemorySegment w = weights == null ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_DOUBLE, weights.length == 0 ? new double[] {0} : weights);
@@ -1004,6 +1010,12 @@ public final class Blacksmith {
          */
         public Path nurbsTo(double[][] control, double[] knots, int degree, double[] weights) {
             double[] flat = flatten2(control, "control");
+            // The library reads one weight per control point plus the current point's.
+            int n = flat.length / 2;
+            if (weights != null && weights.length != n + 1) {
+                throw new BuildException("nurbs_to: " + weights.length + " weights for " + (n + 1) + " control points "
+                        + "(the current point and " + n + " given); give one per point");
+            }
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment c = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, flat);
                 MemorySegment w = weights == null ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_DOUBLE, weights);
@@ -2260,6 +2272,30 @@ public final class Blacksmith {
             try {
                 MemorySegment h = handle();
                 return new Solid(call(() -> (MemorySegment) PUSH_PULL.invokeExact(h, which, distance, tolerance, MemorySegment.NULL, MemorySegment.NULL)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #pushPull(int[], double, double)} at tolerance 0.05. */
+        public Solid pushPull(int[] faces, double distance) {
+            return pushPull(faces, distance, 0.05);
+        }
+
+        /** Faces {@code faces} pushed out by {@code distance} together -- Fusion's
+         *  press-pull on a selection: each by {@link #pushPull(int, double, double)}'s rule
+         *  for it, one after another, each found again after the pushes before it
+         *  renumbered the faces. A box's top and a side pushed 5 is the box 5 taller and 5
+         *  wider; a face on the same curved surface as one before it, and joined to it,
+         *  moved with that one and is not pushed twice. */
+        public Solid pushPull(int[] faces, double distance, double tolerance) {
+            int[] which = indices(faces);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment list = arena.allocateFrom(ValueLayout.JAVA_INT, which);
+                long count = which.length;
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) PUSH_PULL_FACES.invokeExact(
+                        h, list, count, distance, tolerance, MemorySegment.NULL, MemorySegment.NULL)));
             } finally {
                 keep(this);
             }

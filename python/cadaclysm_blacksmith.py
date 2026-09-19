@@ -101,7 +101,7 @@ __all__ = [
 ]
 
 # This file's own version (the workspace's); `version()` is the loaded library's.
-__version__ = "0.4.4"
+__version__ = "0.4.5"
 
 NONE = 0xFFFFFFFF
 UNITS = {"m": 0, "mm": 1, "in": 2}
@@ -295,6 +295,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_shell", _SOLID, [_SOLID, c_double, _U, c_size_t, c_double, _PROGRESS, c_void_p]),
     ("cadaclysm_blacksmith_thicken", _SOLID, [_SOLID, c_double, c_double, _PROGRESS, c_void_p]),
     ("cadaclysm_blacksmith_push_pull", _SOLID, [_SOLID, c_uint32, c_double, c_double, _PROGRESS, c_void_p]),
+    ("cadaclysm_blacksmith_push_pull_faces", _SOLID, [_SOLID, _U, c_size_t, c_double, c_double, _PROGRESS, c_void_p]),
     ("cadaclysm_blacksmith_merge_flush", _SOLID, [_SOLID]),
     ("cadaclysm_blacksmith_refillet", _SOLID, [_SOLID, c_uint32, c_double, c_double]),
     ("cadaclysm_blacksmith_unfillet", _SOLID, [_SOLID, c_uint32]),
@@ -361,7 +362,7 @@ class _WasmLibrary:
     # count (a typed array knows its length), the progress `user` pointer, and
     # the out-arguments above
     _DROP = {"profile_polygon": (1,), "path_nurbs_to": (2, 5), "join": (4,), "cut": (4,), "common": (4,),
-             "split_sheet": (4,), "trim": (5,), "drop_faces": (2,), "profile_round": (3,), "profile_spline": (1,), "profile_chain": (1,), "profile_from_loops": (1,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "thicken": (4,), "push_pull": (5,), "split": (4,), "split_by_plane": (4,), "step": (1,),
+             "split_sheet": (4,), "trim": (5,), "drop_faces": (2,), "profile_round": (3,), "profile_spline": (1,), "profile_chain": (1,), "profile_from_loops": (1,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "thicken": (4,), "push_pull": (5,), "push_pull_faces": (2, 6), "split": (4,), "split_by_plane": (4,), "step": (1,),
              "slant_of_plane": (3,), "face_frame": (2,), "bounds": (2, 3), "edge": (2,), "colour": (2,), "manifold": (1,)}
     # strings the C side returns as `const char*`, and the module decodes
     _TEXTS = {"version", "build_date", "face_kind", "license_info", "brep_layout_id"}
@@ -752,10 +753,15 @@ class Profile:
         the last -- an open chain; `closed=True`, it is periodic, smooth through
         its own start -- a closed profile. The degree is lowered to fit the
         points. Raises `BuildError` for a degree of zero, too few points (two
-        open, three closed), or a weight not positive."""
+        open, three closed), a weight not positive, or not one weight per point."""
         flat = [float(v) for p in points for v in p]
         n = len(flat) // 2
-        w = None if weights is None else (c_double * len(weights))(*[float(x) for x in weights])
+        # The library reads exactly one weight per point, whatever the list holds
+        # (the wasm refuses a wrong count in its own words: this one is the same on both).
+        weights = None if weights is None else [float(x) for x in weights]
+        if weights is not None and len(weights) != n:
+            raise BuildError(f"spline: {len(weights)} weights for {n} points; give one per point")
+        w = None if weights is None else (c_double * n)(*weights)
         return Profile(_lib().cadaclysm_blacksmith_profile_spline((c_double * len(flat))(*flat), n, max(0, int(degree)), w, bool(closed)))
 
     @staticmethod
@@ -864,7 +870,12 @@ class Path:
         None; `knots`: the full repeated knot vector."""
         flat = [float(v) for p in control for v in p]
         n = len(flat) // 2
-        w = (c_double * len(weights))(*[float(v) for v in weights]) if weights is not None else None
+        # The library reads one weight per control point plus the current point's.
+        weights = None if weights is None else [float(v) for v in weights]
+        if weights is not None and len(weights) != n + 1:
+            raise BuildError(f"nurbs_to: {len(weights)} weights for {n + 1} control points "
+                             f"(the current point and {n} given); give one per point")
+        w = (c_double * len(weights))(*weights) if weights is not None else None
         k = (c_double * len(knots))(*[float(v) for v in knots])
         ok = _lib().cadaclysm_blacksmith_path_nurbs_to(self._live(), (c_double * len(flat))(*flat), n, w, k, len(knots), degree)
         return self._step(ok, "path_nurbs_to")
@@ -1561,9 +1572,19 @@ class Solid:
         A face on a cylinder, a cone, a sphere or a torus moves out along its normal
         instead, the surface a step out -- a boss fatter, a bore or a countersink
         narrower, a dome fuller -- with the flat faces beside it carried along; any
-        other curved face is refused. `tolerance` and `progress` as `join`'s."""
+        other curved face is refused. `tolerance` and `progress` as `join`'s.
+
+        `face` may be a list of faces, pushed together as Fusion's press-pull on a
+        selection: each by its own rule, one after another, each found again after
+        the pushes before it renumbered the faces -- a box's top and a side pushed 5
+        is the box 5 taller and 5 wider. A face on the same curved surface as one
+        before it, and joined to it, moved with that one and is not pushed twice."""
         cb, _keep = _progress(progress)
-        return Solid(_lib().cadaclysm_blacksmith_push_pull(self._h(), face, distance, tolerance, cb, None))
+        if isinstance(face, int):
+            return Solid(_lib().cadaclysm_blacksmith_push_pull(self._h(), face, distance, tolerance, cb, None))
+        which = [int(f) for f in face]
+        arr = (c_uint32 * len(which))(*which)
+        return Solid(_lib().cadaclysm_blacksmith_push_pull_faces(self._h(), arr, len(which), distance, tolerance, cb, None))
 
     def split(self, tool: "Solid", tolerance=0.05, progress=None) -> list:
         """This solid split by `tool` into bodies -- Fusion's Split Body: a

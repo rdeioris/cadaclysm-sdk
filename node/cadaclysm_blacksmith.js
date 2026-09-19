@@ -210,6 +210,7 @@ function _lib() {
     shell: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_shell(const CadaclysmBlacksmithSolid *solid, double thickness, const uint32_t *open_faces, size_t count, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     thicken: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_thicken(const CadaclysmBlacksmithSolid *solid, double thickness, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     push_pull: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_push_pull(const CadaclysmBlacksmithSolid *solid, uint32_t face, double distance, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
+    push_pull_faces: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_push_pull_faces(const CadaclysmBlacksmithSolid *solid, const uint32_t *faces, size_t count, double distance, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     merge_flush: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_merge_flush(const CadaclysmBlacksmithSolid *solid)'),
     refillet: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_refillet(const CadaclysmBlacksmithSolid *solid, uint32_t face, double radius, double tolerance)'),
     unfillet: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_unfillet(const CadaclysmBlacksmithSolid *solid, uint32_t face)'),
@@ -351,6 +352,10 @@ class Profile {
   static spline(points, degree = 3, weights = null, closed = false) {
     const xy = _flatPairs(points);
     const w = weights == null ? null : Float64Array.from(weights, Number);
+    // The library reads exactly one weight per point, whatever the array holds.
+    if (w && w.length !== xy.length / 2) {
+      throw new BuildError(`spline: ${w.length} weights for ${xy.length / 2} points; give one per point`);
+    }
     return new Profile(_lib().profile_spline(xy, xy.length / 2, Math.max(0, degree | 0), w, !!closed));
   }
   static path(start) { return new Path(start); }
@@ -409,6 +414,12 @@ class Path {
   nurbsTo(control, knots, degree, weights = null) {
     const c = _flatPairs(control), k = Float64Array.from(knots, Number);
     const w = weights == null ? null : Float64Array.from(weights, Number);
+    // The library reads one weight per control point plus the current point's.
+    const n = c.length / 2;
+    if (w && w.length !== n + 1) {
+      throw new BuildError(`nurbs_to: ${w.length} weights for ${n + 1} control points ` +
+        `(the current point and ${n} given); give one per point`);
+    }
     return this._step(_lib().path_nurbs_to(this._live(), c, c.length / 2, w, k, k.length, degree), 'path_nurbs_to');
   }
   /** The path as it stands, unclosed: an open chain for `extrudeOpen`, `sweepOpen`, `loftOpen`. Consumes the builder. */
@@ -750,9 +761,18 @@ class Solid {
    * sphere or a torus moves out along its normal instead, the surface a step out (a boss fatter,
    * a bore or a countersink narrower, a dome fuller), the flat faces beside it carried along; any
    * other curved face is refused.
+   *
+   * `face` may be a list of faces, pushed together as Fusion's press-pull on a selection: each by
+   * its own rule, one after another, each found again after the pushes before it renumbered the
+   * faces -- a box's top and a side pushed 5 is the box 5 taller and 5 wider. A face on the same
+   * curved surface as one before it, and joined to it, moved with that one and is not pushed twice.
    */
   pushPull(face, distance, tolerance = 0.05, progress = null) {
-    return new Solid(_lib().push_pull(this._handle, face, distance, tolerance, _progress(progress), null));
+    if (typeof face === 'number') {
+      return new Solid(_lib().push_pull(this._handle, face, distance, tolerance, _progress(progress), null));
+    }
+    const which = Uint32Array.from(Array.from(face, Number));
+    return new Solid(_lib().push_pull_faces(this._handle, which, which.length, distance, tolerance, _progress(progress), null));
   }
   /**
    * This solid split by `tool` into bodies -- Fusion's Split Body: a closed `tool` gives the parts

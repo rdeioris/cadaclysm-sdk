@@ -424,6 +424,21 @@ final class KernelTests: XCTestCase {
         XCTAssertTrue(try ball.isWatertight())
         XCTAssertEqual(try ball.faces, 1)
         XCTAssertEqual(try volume(ball), try volume(Solid.sphere(6)), accuracy: try volume(Solid.sphere(6)) * 1e-3)
+        // Faces pushed together: the box's top and +x side, 5 taller and 5 longer, each face
+        // found again after the other's push; a can's top and wall, taller and fatter.
+        let grown = try box.pushPull([top, try box.selectFace(.max(.x))], 5)
+        XCTAssertTrue(try grown.isWatertight())
+        XCTAssertEqual(try grown.faces, 6)
+        let grownVolume: Double = 45 * 20 * 15
+        XCTAssertEqual(try volume(grown), grownVolume, accuracy: grownVolume * 1e-9)
+        let can = try Solid.cylinder(5, 10)
+        let wall = try (0..<can.faces).first { try can.faceKind($0) == "cylinder" }!
+        let both = try can.pushPull([try can.selectFace(.max(.z)), wall], 2)
+        XCTAssertTrue(try both.isWatertight())
+        XCTAssertEqual(try both.faces, 3)
+        let fatter = try volume(Solid.cylinder(7, 12))
+        XCTAssertEqual(try volume(both), fatter, accuracy: fatter * 1e-4)
+        XCTAssertEqual(refusal { _ = try box.pushPull([Int](), 2) }, "push_pull: no faces to push")
         // A round made again and taken back: the box's edge rounded 2, made again at 3 as the
         // fillet at 3 makes it, and taken off, the box again.
         let slab = try Solid.cuboid(30, 20, 12)

@@ -1173,6 +1173,27 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_push_pull(const struct Cad
                                                                 void *user);
 
 /**
+ * `solid` with the `count` faces at `faces` pushed out by `distance` together (pulled
+ * in, negative) -- Fusion's press-pull on a selection: each face by
+ * [`cadaclysm_blacksmith_push_pull`]'s rule for it, one after another in the order
+ * given, each found again by a point inside it after the pushes before it renumbered the
+ * faces. A box's top and a side pushed 5 is the box 5 taller and 5 wider. A face on the
+ * same curved surface as one before it, and joined to it, moved with that one and is
+ * not pushed twice. Null and `last_error` for no faces, a face an earlier push took
+ * away, and whatever [`cadaclysm_blacksmith_push_pull`] refuses of a face.
+ *
+ * # Safety
+ * `solid` live; `faces` `count` indices; `progress` null or valid.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_push_pull_faces(const struct CadaclysmBlacksmithSolid *solid,
+                                                                      const uint32_t *faces,
+                                                                      size_t count,
+                                                                      double distance,
+                                                                      double tolerance,
+                                                                      CadaclysmBlacksmithProgress progress,
+                                                                      void *user);
+
+/**
  * `solid` split by `tool` into bodies -- Fusion's Split Body. A closed `tool`
  * gives the part outside it, then the part inside; a flat sheet splits by the
  * whole plane it lies on. Every connected part is a body, and the bodies come
@@ -1255,8 +1276,9 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_shell(const struct Cadacly
  * `solid`, a sheet, made a solid `thickness` thick -- Fusion's Thicken: its faces,
  * their twins moved `thickness` along the faces' normals (against them for a negative
  * thickness), and a wall round every open edge. Two faces of a folded sheet meet on
- * their offsets' mitre; a closed sheet thickens to a hollow. Null and `last_error` for
- * a thickness a face cannot take, or a free-form (NURBS) face.
+ * their offsets' mitre; a closed sheet thickens to a hollow. Free-form (NURBS) faces
+ * offset by a fit held to `tolerance`. Null and `last_error` for a thickness a face
+ * cannot take (a radius used up, a free-form offset folding over).
  *
  * # Safety
  * `solid` live; `progress` null or valid.

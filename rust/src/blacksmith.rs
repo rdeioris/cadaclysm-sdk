@@ -407,8 +407,9 @@ impl Profile {
     /// it is periodic -- a closed profile. The degree is lowered to fit the points.
     pub fn spline(points: &[[f64; 2]], degree: u32, weights: Option<&[f64]>, closed: bool) -> Result<Profile> {
         let api = api()?;
+        // The library reads exactly one weight per point, whatever the slice holds.
         if let Some(w) = weights.filter(|w| w.len() != points.len()) {
-            return Err(Error::new(format!("profile_spline: {} weights for {} points", w.len(), points.len())));
+            return Err(Error::new(format!("spline: {} weights for {} points; give one per point", w.len(), points.len())));
         }
         let raw = unsafe {
             (api.cadaclysm_blacksmith_profile_spline)(
@@ -527,6 +528,15 @@ impl Path {
     /// `weights`: one per control point *including* the current one, or `None`;
     /// `knots`: the full repeated knot vector.
     pub fn nurbs_to(self, control: &[[f64; 2]], knots: &[f64], degree: u32, weights: Option<&[f64]>) -> Result<Path> {
+        // The library reads one weight per control point plus the current point's.
+        if let Some(w) = weights.filter(|w| w.len() != control.len() + 1) {
+            return Err(Error::new(format!(
+                "nurbs_to: {} weights for {} control points (the current point and {} given); give one per point",
+                w.len(),
+                control.len() + 1,
+                control.len()
+            )));
+        }
         let ok = unsafe {
             (self.api.cadaclysm_blacksmith_path_nurbs_to)(
                 self.handle.as_ptr(),
@@ -1143,6 +1153,18 @@ impl Solid {
     /// flat faces beside it carried along; any other curved face is refused.
     pub fn push_pull(&self, face: u32, distance: f64, tolerance: f64) -> Result<Solid> {
         let raw = unsafe { (self.api.cadaclysm_blacksmith_push_pull)(self.raw(), face, distance, tolerance, NO_PROGRESS, ptr::null_mut()) };
+        self.next(raw, "push_pull")
+    }
+
+    /// Faces `faces` pushed out by `distance` together -- Fusion's press-pull on a
+    /// selection: each by [`Solid::push_pull`]'s rule for it, one after another, each
+    /// found again after the pushes before it renumbered the faces. A box's top and a side
+    /// pushed 5 is the box 5 taller and 5 wider; a face on the same curved surface as one
+    /// before it, and joined to it, moved with that one and is not pushed twice.
+    pub fn push_pull_faces(&self, faces: &[u32], distance: f64, tolerance: f64) -> Result<Solid> {
+        let raw = unsafe {
+            (self.api.cadaclysm_blacksmith_push_pull_faces)(self.raw(), faces.as_ptr(), faces.len(), distance, tolerance, NO_PROGRESS, ptr::null_mut())
+        };
         self.next(raw, "push_pull")
     }
 

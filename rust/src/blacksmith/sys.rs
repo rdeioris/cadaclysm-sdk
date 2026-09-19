@@ -216,6 +216,15 @@ entry_points! {
         progress: Progress,
         user: *mut c_void
     ) -> *mut Solid;
+    fn cadaclysm_blacksmith_push_pull_faces(
+        solid: *const Solid,
+        faces: *const u32,
+        count: usize,
+        distance: f64,
+        tolerance: f64,
+        progress: Progress,
+        user: *mut c_void
+    ) -> *mut Solid;
     fn cadaclysm_blacksmith_split(solid: *const Solid, tool: *const Solid, tolerance: f64, progress: Progress, user: *mut c_void) -> *mut Solid;
     fn cadaclysm_blacksmith_split_by_plane(
         solid: *const Solid,
