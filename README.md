@@ -92,7 +92,7 @@ portal -- to pick up the new file the same way.
 | Node.js | [node/](node/); [API docs](https://cadaclysm.blitter.studio/docs/node.html) | `npm install` in `node/`, then `node node/smoke.js samples/cube.scad path/to/cadaclysm.lic` | Python's set, both libraries |
 | Rust | [rust/](rust/) -- also on crates.io, `cargo add cadaclysm-sdk`; [API docs](https://cadaclysm.blitter.studio/docs/rust.html) | `cargo run --manifest-path rust/Cargo.toml --example smoke -- samples/cube.scad`, or `--example tree` to print a file's tree | Python's set, both libraries |
 | Swift | [swift/](swift/) -- a Swift package, from v0.4.4; [API docs](https://cadaclysm.blitter.studio/docs/swift.html) | `swift run --package-path swift cadaclysm-smoke samples/cube.scad` | Python's set, both libraries |
-| LuaJIT | [luajit/](luajit/) -- for LÖVE, LÖVR or a plain `luajit`, from the release after v0.4.4; [API docs](https://cadaclysm.blitter.studio/docs/luajit.html), [LÖVE and LÖVR](https://cadaclysm.blitter.studio/engines/love.html) | `luajit luajit/smoke/main.lua samples/cube.scad` | Python's set, both libraries |
+| LuaJIT | [luajit/](luajit/) -- for LÖVE, LÖVR or a plain `luajit`, from v0.4.5; [API docs](https://cadaclysm.blitter.studio/docs/luajit.html), [LÖVE and LÖVR](https://cadaclysm.blitter.studio/engines/love.html) | `luajit luajit/smoke/main.lua samples/cube.scad` | Python's set, both libraries |
 | C / C++ | [include/](include/); [API docs](https://cadaclysm.blitter.studio/docs/c.html) | the headers are the reference | 100% |
 
 The Go sample's loader must find the library at run time: put the library
