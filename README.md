@@ -27,7 +27,8 @@ Python modules together with the libraries of one release -- no `fetch.py`, no
 For Rust too: `cargo add cadaclysm-sdk` (from v0.4.3) downloads this platform's
 libraries for the crate's own release when it builds, checks them against the
 release's `SHA256SUMS` and puts them beside your binaries -- no `fetch.py`, no
-`lib/` (see [rust/](rust/README.md); `default-features = false` turns it off):
+`lib/` (see [rust/](rust/README.md); `default-features = false` turns it off).
+Every type and call is on the [Rust API page](https://cadaclysm.blitter.studio/docs/rust.html):
 
 ```rust
 fn main() -> cadaclysm_sdk::Result<()> {
@@ -85,7 +86,7 @@ portal -- to pick up the new file the same way.
 | Go | [go/](go/) | `go run -C go ./cmd/smoke "$PWD/samples/cube.scad"` | Python's set, both libraries |
 | Java | [java/](java/) | `javac --release 22 -d java/classes java/*.java && java --enable-native-access=ALL-UNNAMED -cp java/classes Smoke samples/cube.scad` | Python's set, both libraries |
 | Node.js | [node/](node/) | `npm install` in `node/`, then `node node/smoke.js samples/cube.scad path/to/cadaclysm.lic` | see the release notes |
-| Rust | [rust/](rust/) -- also on crates.io, `cargo add cadaclysm-sdk` | `cargo run --manifest-path rust/Cargo.toml --example smoke -- samples/cube.scad`, or `--example tree` to print a file's tree | Python's set, both libraries |
+| Rust | [rust/](rust/) -- also on crates.io, `cargo add cadaclysm-sdk`; [API docs](https://cadaclysm.blitter.studio/docs/rust.html) | `cargo run --manifest-path rust/Cargo.toml --example smoke -- samples/cube.scad`, or `--example tree` to print a file's tree | Python's set, both libraries |
 | Swift | [swift/](swift/) -- a Swift package, from the release after v0.4.3 | `swift run --package-path swift cadaclysm-smoke samples/cube.scad` | Python's set, both libraries |
 | C / C++ | [include/](include/) | the headers are the reference | 100% |
 
