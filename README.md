@@ -1,8 +1,8 @@
 # cadaclysm SDK
 
 Wrappers, headers and samples for [cadaclysm](https://cadaclysm.blitter.studio),
-the CAD import and modelling library: STEP, IGES, JT, ACIS SAT, Parasolid,
-Rhino 3dm, IFC and more in; meshes, LODs and exact B-rep out; an exact
+the CAD import and modelling library: STEP, IGES, IFC, Rhino 3dm, ACIS SAT,
+BREP and OpenSCAD in; meshes, LODs and exact B-rep out; an exact
 modelling kernel (`cadaclysm_blacksmith`) beside it.
 
 Everything in this repository is Apache-2.0. The libraries themselves are
