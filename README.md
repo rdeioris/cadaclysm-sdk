@@ -71,13 +71,17 @@ portal -- to pick up the new file the same way.
 | Java | [java/](java/) | `javac --release 22 -d java/classes java/*.java && java --enable-native-access=ALL-UNNAMED -cp java/classes Smoke samples/cube.scad` | Python's set, both libraries |
 | Node.js | [node/](node/) | `npm install` in `node/`, then `node node/smoke.js samples/cube.scad path/to/cadaclysm.lic` | see the release notes |
 | Rust | [rust/](rust/) -- also on crates.io, `cargo add cadaclysm-sdk` | `cargo run --manifest-path rust/Cargo.toml --example smoke -- samples/cube.scad` | Python's set, both libraries |
+| Swift | [swift/](swift/) -- a Swift package, from the release after v0.4.2 | `swift run --package-path swift cadaclysm-smoke samples/cube.scad` | Python's set, both libraries |
 | C / C++ | [include/](include/) | the headers are the reference | 100% |
 
 The Go sample's loader must find the library at run time: put the library
 directory on `PATH` (Windows), `LD_LIBRARY_PATH` (Linux) or
-`DYLD_LIBRARY_PATH` (macOS) -- see [go/README.md](go/README.md).
+`DYLD_LIBRARY_PATH` (macOS) -- see [go/README.md](go/README.md). The Swift
+package links `lib/` when it is built and writes it into the executable's rpath
+on macOS and Linux; on Windows `lib` goes on `PATH` -- see
+[swift/README.md](swift/README.md).
 
-The C#, Go, Java and Node.js bindings cover the viewer subset of the C API
+The C#, Go, Java, Node.js and Swift bindings cover the viewer subset of the C API
 today; the header is the reference for the rest, and each release's notes
 carry the exact counts. Contributions welcome: a pull request here is ported
 back into the library's repository, which is where these files are
