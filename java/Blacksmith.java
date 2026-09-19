@@ -165,7 +165,7 @@ public final class Blacksmith {
             SWEEP_PATH_LINE_TO, SWEEP_PATH_ARC, SWEEP_PATH_ALONG, SWEEP_PATH_FREE, SWEEP, SWEEP_OPEN,
             EXTRUDE_FACES, FACE, FACE_SHEET, DROP_FACES, PLACE, TRANSLATE, ROTATE, MIRROR, JOIN, CUT,
             COMMON, SPLIT_SHEET, TRIM, FILLET, CHAMFER,
-            SHELL, PUSH_PULL, MERGE_FLUSH, REFILLET, UNFILLET, COIL, PIPE, SPLIT, SPLIT_BY_PLANE, LUMP_COUNT, LUMP, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_KIND, COLOURED, COLOUR, EDGE_COUNT, EDGE_AT, MESH_AT,
+            SHELL, THICKEN, PUSH_PULL, MERGE_FLUSH, REFILLET, UNFILLET, RECHAMFER, UNCHAMFER, COIL, PIPE, SPLIT, SPLIT_BY_PLANE, LUMP_COUNT, LUMP, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_KIND, COLOURED, COLOUR, EDGE_COUNT, EDGE_AT, MESH_AT,
             EDGE_POLYLINES, BOUNDS, LEAKED_EDGES, UNPAIRED_EDGES, MANIFOLD, STEP, STRING_FREE, FROM_BREP,
             BREP_LAYOUT_ID;
 
@@ -248,10 +248,13 @@ public final class Blacksmith {
         FILLET = bind(linker, lib, "cadaclysm_blacksmith_fillet", FunctionDescriptor.of(A, A, A, L, D, D, A, A));
         CHAMFER = bind(linker, lib, "cadaclysm_blacksmith_chamfer", FunctionDescriptor.of(A, A, A, L, D, D));
         SHELL = bind(linker, lib, "cadaclysm_blacksmith_shell", FunctionDescriptor.of(A, A, D, A, L, D, A, A));
+        THICKEN = bind(linker, lib, "cadaclysm_blacksmith_thicken", FunctionDescriptor.of(A, A, D, D, A, A));
         PUSH_PULL = bind(linker, lib, "cadaclysm_blacksmith_push_pull", FunctionDescriptor.of(A, A, I, D, D, A, A));
         MERGE_FLUSH = bind(linker, lib, "cadaclysm_blacksmith_merge_flush", FunctionDescriptor.of(A, A));
         REFILLET = bind(linker, lib, "cadaclysm_blacksmith_refillet", FunctionDescriptor.of(A, A, I, D, D));
         UNFILLET = bind(linker, lib, "cadaclysm_blacksmith_unfillet", FunctionDescriptor.of(A, A, I));
+        RECHAMFER = bind(linker, lib, "cadaclysm_blacksmith_rechamfer", FunctionDescriptor.of(A, A, I, D, D));
+        UNCHAMFER = bind(linker, lib, "cadaclysm_blacksmith_unchamfer", FunctionDescriptor.of(A, A, I));
         COIL = bind(linker, lib, "cadaclysm_blacksmith_coil", FunctionDescriptor.of(A, A, A, D, D));
         PIPE = bind(linker, lib, "cadaclysm_blacksmith_pipe", FunctionDescriptor.of(A, A, D, D));
         SPLIT = bind(linker, lib, "cadaclysm_blacksmith_split", FunctionDescriptor.of(A, A, A, D, A, A));
@@ -2361,6 +2364,36 @@ public final class Blacksmith {
             }
         }
 
+        /** {@link #rechamfer(int, double, double)} at tolerance 1e-6. */
+        public Solid rechamfer(int face, double distance) {
+            return rechamfer(face, distance, 1e-6);
+        }
+
+        /** The chamfer {@code face} belongs to -- its bevels, flat or round a rim, and the corner
+         *  triangles joined to that face -- cut again at {@code distance}, as Fusion's press-pull
+         *  on a chamfer face: taken back to the sharp edges it cut, and those bevelled again. */
+        public Solid rechamfer(int face, double distance, double tolerance) {
+            int which = index(face);
+            try {
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) RECHAMFER.invokeExact(h, which, distance, tolerance)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The chamfer {@code face} belongs to taken off, the faces beside it sharp again --
+         *  Fusion's delete of a chamfer face. */
+        public Solid unchamfer(int face) {
+            int which = index(face);
+            try {
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) UNCHAMFER.invokeExact(h, which)));
+            } finally {
+                keep(this);
+            }
+        }
+
         /** {@link #shell(double, int[], double)} with no face opened, at tolerance 1e-6. */
         public Solid shell(double thickness) {
             return shell(thickness, new int[0], 1e-6);
@@ -2382,6 +2415,24 @@ public final class Blacksmith {
                 MemorySegment h = handle();
                 return new Solid(call(() -> (MemorySegment) SHELL.invokeExact(
                         h, thickness, list, count, tolerance, MemorySegment.NULL, MemorySegment.NULL)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #thicken(double, double)} at tolerance 1e-6. */
+        public Solid thicken(double thickness) {
+            return thicken(thickness, 1e-6);
+        }
+
+        /** This sheet made a solid {@code thickness} thick -- Fusion's Thicken: its faces, their
+         *  twins moved {@code thickness} along the faces' normals (against them for a negative
+         *  thickness), and a wall round every open edge. A closed sheet thickens to a hollow. */
+        public Solid thicken(double thickness, double tolerance) {
+            try {
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) THICKEN.invokeExact(
+                        h, thickness, tolerance, MemorySegment.NULL, MemorySegment.NULL)));
             } finally {
                 keep(this);
             }

@@ -101,7 +101,7 @@ __all__ = [
 ]
 
 # This file's own version (the workspace's); `version()` is the loaded library's.
-__version__ = "0.4.3"
+__version__ = "0.4.4"
 
 NONE = 0xFFFFFFFF
 UNITS = {"m": 0, "mm": 1, "in": 2}
@@ -293,10 +293,13 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_fillet", _SOLID, [_SOLID, _U, c_size_t, c_double, c_double, _PROGRESS, c_void_p]),
     ("cadaclysm_blacksmith_chamfer", _SOLID, [_SOLID, _U, c_size_t, c_double, c_double]),
     ("cadaclysm_blacksmith_shell", _SOLID, [_SOLID, c_double, _U, c_size_t, c_double, _PROGRESS, c_void_p]),
+    ("cadaclysm_blacksmith_thicken", _SOLID, [_SOLID, c_double, c_double, _PROGRESS, c_void_p]),
     ("cadaclysm_blacksmith_push_pull", _SOLID, [_SOLID, c_uint32, c_double, c_double, _PROGRESS, c_void_p]),
     ("cadaclysm_blacksmith_merge_flush", _SOLID, [_SOLID]),
     ("cadaclysm_blacksmith_refillet", _SOLID, [_SOLID, c_uint32, c_double, c_double]),
     ("cadaclysm_blacksmith_unfillet", _SOLID, [_SOLID, c_uint32]),
+    ("cadaclysm_blacksmith_rechamfer", _SOLID, [_SOLID, c_uint32, c_double, c_double]),
+    ("cadaclysm_blacksmith_unchamfer", _SOLID, [_SOLID, c_uint32]),
     ("cadaclysm_blacksmith_split", _SOLID, [_SOLID, _SOLID, c_double, _PROGRESS, c_void_p]),
     ("cadaclysm_blacksmith_split_by_plane", _SOLID, [_SOLID, _D, c_double, _PROGRESS, c_void_p]),
     ("cadaclysm_blacksmith_lump_count", c_uint32, [_SOLID]),
@@ -358,7 +361,7 @@ class _WasmLibrary:
     # count (a typed array knows its length), the progress `user` pointer, and
     # the out-arguments above
     _DROP = {"profile_polygon": (1,), "path_nurbs_to": (2, 5), "join": (4,), "cut": (4,), "common": (4,),
-             "split_sheet": (4,), "trim": (5,), "drop_faces": (2,), "profile_round": (3,), "profile_spline": (1,), "profile_chain": (1,), "profile_from_loops": (1,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "push_pull": (5,), "split": (4,), "split_by_plane": (4,), "step": (1,),
+             "split_sheet": (4,), "trim": (5,), "drop_faces": (2,), "profile_round": (3,), "profile_spline": (1,), "profile_chain": (1,), "profile_from_loops": (1,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "thicken": (4,), "push_pull": (5,), "split": (4,), "split_by_plane": (4,), "step": (1,),
              "slant_of_plane": (3,), "face_frame": (2,), "bounds": (2, 3), "edge": (2,), "colour": (2,), "manifold": (1,)}
     # strings the C side returns as `const char*`, and the module decodes
     _TEXTS = {"version", "build_date", "face_kind", "license_info", "brep_layout_id"}
@@ -1600,6 +1603,18 @@ class Solid:
         Fusion's delete of a fillet face. The same rounds as `refillet`."""
         return Solid(_lib().cadaclysm_blacksmith_unfillet(self._h(), face))
 
+    def rechamfer(self, face, distance, tolerance=1e-6) -> "Solid":
+        """The chamfer `face` belongs to -- its bevels, flat or round a rim, and the
+        corner triangles joined to that face -- cut again at `distance`, as Fusion's
+        press-pull on a chamfer face: taken back to the sharp edges it cut, and those
+        bevelled again."""
+        return Solid(_lib().cadaclysm_blacksmith_rechamfer(self._h(), face, distance, tolerance))
+
+    def unchamfer(self, face) -> "Solid":
+        """The chamfer `face` belongs to taken off, the faces beside it sharp again --
+        Fusion's delete of a chamfer face. The same chamfers as `rechamfer`."""
+        return Solid(_lib().cadaclysm_blacksmith_unchamfer(self._h(), face))
+
     def merge_flush(self) -> "Solid":
         """This solid with its flush faces merged: flat faces on one plane, facing one
         way and meeting, made one face, and the vertices left mid-way along a straight
@@ -1612,6 +1627,14 @@ class Solid:
         arr = (c_uint32 * len(which))(*which)
         cb, _keep = _progress(progress)
         return Solid(_lib().cadaclysm_blacksmith_shell(self._h(), thickness, arr, len(which), tolerance, cb, None))
+
+    def thicken(self, thickness, tolerance=1e-6, progress=None) -> "Solid":
+        """This sheet made a solid `thickness` thick -- Fusion's Thicken: its faces,
+        their twins moved `thickness` along the faces' normals (against them for a
+        negative thickness), and a wall round every open edge. A closed sheet thickens
+        to a hollow."""
+        cb, _keep = _progress(progress)
+        return Solid(_lib().cadaclysm_blacksmith_thicken(self._h(), thickness, tolerance, cb, None))
 
     def to_scene(self, schema=None) -> "cadaclysm.Scene":
         """This solid as a reader `Scene`, through STEP text and `cadaclysm.open_memory`

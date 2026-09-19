@@ -153,6 +153,11 @@ if (isMainThread) {
       if (!r) throw new mod.BuildError(mod._lastError() || 'shell');
       return { address: koffi.address(r) };
     },
+    thicken({ a, thickness, tolerance }, progress) {
+      const r = mod._lib().thicken(a, thickness, tolerance, progress, null);
+      if (!r) throw new mod.BuildError(mod._lastError() || 'thicken');
+      return { address: koffi.address(r) };
+    },
     mesh({ a, tolerance }) {
       const m = mod._lib().mesh(a, tolerance);
       if (m.positions == null) throw new mod.BuildError(mod._lastError() || 'mesh');

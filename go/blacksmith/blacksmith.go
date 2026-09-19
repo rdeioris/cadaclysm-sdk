@@ -2508,6 +2508,39 @@ func (s *Solid) Unfillet(face int) (*Solid, error) {
 	return out, err
 }
 
+// Rechamfer is this solid with the chamfer face belongs to — its bevels, flat or round a
+// rim, and the corner triangles joined to that face — cut again at distance — Python's
+// Solid.rechamfer, Fusion's press-pull on a chamfer face.
+func (s *Solid) Rechamfer(face int, distance, tolerance float64) (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	if face < 0 || face > math.MaxUint32 {
+		return nil, &BuildError{Message: fmt.Sprintf("rechamfer: face %d is out of range", face)}
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_rechamfer(h, C.uint32_t(face), C.double(distance), C.double(tolerance)), "solid")
+	runtime.KeepAlive(s)
+	return out, err
+}
+
+// Unchamfer is this solid with the chamfer face belongs to taken off, the faces beside it
+// sharp again — Python's Solid.unchamfer, Fusion's delete of a chamfer face.
+func (s *Solid) Unchamfer(face int) (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	if face < 0 || face > math.MaxUint32 {
+		return nil, &BuildError{Message: fmt.Sprintf("unchamfer: face %d is out of range", face)}
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_unchamfer(h, C.uint32_t(face)), "solid")
+	runtime.KeepAlive(s)
+	return out, err
+}
+
 // MergeFlush is this solid with its flush faces merged — Python's Solid.merge_flush: flat
 // faces on one plane, facing one way and meeting, made one face, and the vertices left
 // mid-way along a straight edge taken out.
@@ -2544,6 +2577,21 @@ func (s *Solid) Shell(thickness float64, open []int, tolerance float64) (*Solid,
 		h, C.double(thickness), first, C.size_t(len(which)), C.double(tolerance), nil, nil), "solid")
 	runtime.KeepAlive(s)
 	runtime.KeepAlive(which)
+	return out, err
+}
+
+// Thicken is this sheet made a solid thickness thick — Python's Solid.thicken, Fusion's
+// Thicken: its faces, their twins moved thickness along the faces' normals (against them
+// for a negative thickness), and a wall round every open edge. A closed sheet thickens to
+// a hollow. tolerance as Fillet's.
+func (s *Solid) Thicken(thickness, tolerance float64) (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_thicken(h, C.double(thickness), C.double(tolerance), nil, nil), "solid")
+	runtime.KeepAlive(s)
 	return out, err
 }
 

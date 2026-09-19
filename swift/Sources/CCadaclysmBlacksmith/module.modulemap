@@ -1,0 +1,7 @@
+// The kernel ABI. cadaclysm_blacksmith.h here is a copy of
+// crates/cadaclysm-blacksmith-capi/include/cadaclysm_blacksmith.h, kept identical by
+// crates/cadaclysm-capi/tests/bindings.rs (see CCadaclysm/module.modulemap for why a copy).
+module CCadaclysmBlacksmith [system] {
+    header "cadaclysm_blacksmith.h"
+    export *
+}

@@ -182,13 +182,17 @@ export class Solid {
   mergeFlush(): Solid;
   refillet(face: number, radius: number, tolerance?: number): Solid;
   unfillet(face: number): Solid;
+  rechamfer(face: number, distance: number, tolerance?: number): Solid;
+  unchamfer(face: number): Solid;
   split(tool: Solid, tolerance?: number, progress?: Progress | null): Solid[];
   splitByPlane(plane: FrameLike, tolerance?: number, progress?: Progress | null): Solid[];
   lumps(): Solid[];
   shell(thickness: number, open?: Iterable<number>, tolerance?: number, progress?: Progress | null): Solid;
+  thicken(thickness: number, tolerance?: number, progress?: Progress | null): Solid;
   filletAsync(edges: Iterable<Edge | number>, radius: number, tolerance?: number, progress?: Progress | null): Promise<Solid>;
   chamferAsync(edges: Iterable<Edge | number>, distance: number, tolerance?: number): Promise<Solid>;
   shellAsync(thickness: number, open?: Iterable<number>, tolerance?: number, progress?: Progress | null): Promise<Solid>;
+  thickenAsync(thickness: number, tolerance?: number, progress?: Progress | null): Promise<Solid>;
   /**
    * `schema` as `stepText` takes it; the reader is given the schema's path only when
    * it names an existing file, since it carries every built-in schema itself.

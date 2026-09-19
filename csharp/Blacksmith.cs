@@ -353,11 +353,15 @@ internal static class BlacksmithNative
         double distance, double tolerance);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_shell(SolidHandle solid, double thickness, uint[] openFaces,
         nuint count, double tolerance, IntPtr progress, IntPtr user);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_thicken(SolidHandle solid, double thickness, double tolerance,
+        IntPtr progress, IntPtr user);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_push_pull(SolidHandle solid, uint face, double distance,
         double tolerance, IntPtr progress, IntPtr user);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_merge_flush(SolidHandle solid);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_refillet(SolidHandle solid, uint face, double radius, double tolerance);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_unfillet(SolidHandle solid, uint face);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_rechamfer(SolidHandle solid, uint face, double distance, double tolerance);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_unchamfer(SolidHandle solid, uint face);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_split(SolidHandle solid, SolidHandle tool, double tolerance,
         IntPtr progress, IntPtr user);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_split_by_plane(SolidHandle solid, double[] plane,
@@ -1483,6 +1487,16 @@ public sealed class Solid : IDisposable
     /// Fusion's delete of a fillet face.</summary>
     public Solid Unfillet(int face) => new(BlacksmithNative.cadaclysm_blacksmith_unfillet(Handle, Index(face)));
 
+    /// <summary>The chamfer `face` belongs to -- its bevels, flat or round a rim, and the corner
+    /// triangles joined to that face -- cut again at `distance`, as Fusion's press-pull on a chamfer
+    /// face: taken back to the sharp edges it cut, and those bevelled again.</summary>
+    public Solid Rechamfer(int face, double distance, double tolerance = 1e-6) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_rechamfer(Handle, Index(face), distance, tolerance));
+
+    /// <summary>The chamfer `face` belongs to taken off, the faces beside it sharp again --
+    /// Fusion's delete of a chamfer face.</summary>
+    public Solid Unchamfer(int face) => new(BlacksmithNative.cadaclysm_blacksmith_unchamfer(Handle, Index(face)));
+
     /// <summary>This solid hollowed to a wall `thickness` thick (inward for a positive
     /// thickness, outward for a negative one), with the faces at `open` removed so the hollow
     /// is reachable.</summary>
@@ -1492,6 +1506,12 @@ public sealed class Solid : IDisposable
         return new Solid(BlacksmithNative.cadaclysm_blacksmith_shell(Handle, thickness, which, (nuint)which.Length, tolerance,
             IntPtr.Zero, IntPtr.Zero));
     }
+
+    /// <summary>This sheet made a solid `thickness` thick -- Fusion's Thicken: its faces, their
+    /// twins moved `thickness` along the faces' normals (against them for a negative thickness),
+    /// and a wall round every open edge. A closed sheet thickens to a hollow.</summary>
+    public Solid Thicken(double thickness, double tolerance = 1e-6) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_thicken(Handle, thickness, tolerance, IntPtr.Zero, IntPtr.Zero));
 
     // -- from files
 

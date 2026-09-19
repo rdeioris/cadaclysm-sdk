@@ -1,0 +1,8 @@
+// The reader ABI. cadaclysm.h here is a copy of crates/cadaclysm-capi/include/cadaclysm.h,
+// kept identical by crates/cadaclysm-capi/tests/bindings.rs: a module map has no fallback
+// path, and the repository and the SDK keep the canonical header at different depths.
+// The library is linked by Package.swift, which knows which file name to ask for.
+module CCadaclysm [system] {
+    header "cadaclysm.h"
+    export *
+}

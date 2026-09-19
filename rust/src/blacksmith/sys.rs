@@ -233,9 +233,12 @@ entry_points! {
         progress: Progress,
         user: *mut c_void
     ) -> *mut Solid;
+    fn cadaclysm_blacksmith_thicken(solid: *const Solid, thickness: f64, tolerance: f64, progress: Progress, user: *mut c_void) -> *mut Solid;
     fn cadaclysm_blacksmith_merge_flush(solid: *const Solid) -> *mut Solid;
     fn cadaclysm_blacksmith_refillet(solid: *const Solid, face: u32, radius: f64, tolerance: f64) -> *mut Solid;
     fn cadaclysm_blacksmith_unfillet(solid: *const Solid, face: u32) -> *mut Solid;
+    fn cadaclysm_blacksmith_rechamfer(solid: *const Solid, face: u32, distance: f64, tolerance: f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_unchamfer(solid: *const Solid, face: u32) -> *mut Solid;
     fn cadaclysm_blacksmith_lump_count(solid: *const Solid) -> u32;
     fn cadaclysm_blacksmith_lump(solid: *const Solid, index: u32) -> *mut Solid;
 

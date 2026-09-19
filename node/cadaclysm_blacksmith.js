@@ -208,10 +208,13 @@ function _lib() {
     fillet: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_fillet(const CadaclysmBlacksmithSolid *solid, const uint32_t *edges, size_t count, double radius, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     chamfer: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_chamfer(const CadaclysmBlacksmithSolid *solid, const uint32_t *edges, size_t count, double distance, double tolerance)'),
     shell: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_shell(const CadaclysmBlacksmithSolid *solid, double thickness, const uint32_t *open_faces, size_t count, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
+    thicken: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_thicken(const CadaclysmBlacksmithSolid *solid, double thickness, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     push_pull: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_push_pull(const CadaclysmBlacksmithSolid *solid, uint32_t face, double distance, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     merge_flush: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_merge_flush(const CadaclysmBlacksmithSolid *solid)'),
     refillet: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_refillet(const CadaclysmBlacksmithSolid *solid, uint32_t face, double radius, double tolerance)'),
     unfillet: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_unfillet(const CadaclysmBlacksmithSolid *solid, uint32_t face)'),
+    rechamfer: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_rechamfer(const CadaclysmBlacksmithSolid *solid, uint32_t face, double distance, double tolerance)'),
+    unchamfer: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_unchamfer(const CadaclysmBlacksmithSolid *solid, uint32_t face)'),
     split: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_split(const CadaclysmBlacksmithSolid *solid, const CadaclysmBlacksmithSolid *tool, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     split_by_plane: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_split_by_plane(const CadaclysmBlacksmithSolid *solid, const double *plane, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     lump_count: f('uint32_t cadaclysm_blacksmith_lump_count(const CadaclysmBlacksmithSolid *solid)'),
@@ -788,9 +791,24 @@ class Solid {
   refillet(face, radius, tolerance = 1e-6) { return new Solid(_lib().refillet(this._handle, face, radius, tolerance)); }
   /** The round `face` belongs to taken off, the faces beside it sharp again -- Fusion's delete of a fillet face. */
   unfillet(face) { return new Solid(_lib().unfillet(this._handle, face)); }
+  /**
+   * The chamfer `face` belongs to -- its bevels, flat or round a rim, and the corner triangles
+   * joined to that face -- cut again at `distance`, as Fusion's press-pull on a chamfer face.
+   */
+  rechamfer(face, distance, tolerance = 1e-6) { return new Solid(_lib().rechamfer(this._handle, face, distance, tolerance)); }
+  /** The chamfer `face` belongs to taken off, the faces beside it sharp again -- Fusion's delete of a chamfer face. */
+  unchamfer(face) { return new Solid(_lib().unchamfer(this._handle, face)); }
   shell(thickness, open = [], tolerance = 1e-6, progress = null) {
     const which = Uint32Array.from(Array.from(open, Number));
     return new Solid(_lib().shell(this._handle, thickness, which, which.length, tolerance, _progress(progress), null));
+  }
+  /**
+   * This sheet made a solid `thickness` thick -- Fusion's Thicken: its faces, their twins moved
+   * `thickness` along the faces' normals (against them for a negative thickness), and a wall round
+   * every open edge. A closed sheet thickens to a hollow.
+   */
+  thicken(thickness, tolerance = 1e-6, progress = null) {
+    return new Solid(_lib().thicken(this._handle, thickness, tolerance, _progress(progress), null));
   }
   /** Run `message` on the worker with this solid (and `others`) locked as `name`. */
   async _async(name, message, others = [], progress = null) {
@@ -810,6 +828,7 @@ class Solid {
   async filletAsync(edges, radius, tolerance = 1e-6, progress = null) { return Solid._wrap(await this._async('filletAsync', { op: 'fillet', edges: Solid._edgeIndices(edges), radius, tolerance }, [], progress)); }
   async chamferAsync(edges, distance, tolerance = 1e-6) { return Solid._wrap(await this._async('chamferAsync', { op: 'chamfer', edges: Solid._edgeIndices(edges), distance, tolerance })); }
   async shellAsync(thickness, open = [], tolerance = 1e-6, progress = null) { return Solid._wrap(await this._async('shellAsync', { op: 'shell', thickness, open: Uint32Array.from(Array.from(open, Number)), tolerance }, [], progress)); }
+  async thickenAsync(thickness, tolerance = 1e-6, progress = null) { return Solid._wrap(await this._async('thickenAsync', { op: 'thicken', thickness, tolerance }, [], progress)); }
   async trimAsync(tool, keep = 'outside', tolerance = 0.05, progress = null) {
     Solid._keep(keep);
     return Solid._wrap(await this._async('trimAsync', { op: 'trim', b: _addressOf(tool._handle), keepInside: keep === 'inside', tolerance }, [tool], progress));

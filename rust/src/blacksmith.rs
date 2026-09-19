@@ -1190,6 +1190,19 @@ impl Solid {
         self.next(unsafe { (self.api.cadaclysm_blacksmith_unfillet)(self.raw(), face) }, "unfillet")
     }
 
+    /// The chamfer `face` belongs to -- its bevels, flat or round a rim, and the corner
+    /// triangles joined to that face -- cut again at `distance`, as Fusion's press-pull on
+    /// a chamfer face: taken back to the sharp edges it cut, and those bevelled again.
+    pub fn rechamfer(&self, face: u32, distance: f64, tolerance: f64) -> Result<Solid> {
+        self.next(unsafe { (self.api.cadaclysm_blacksmith_rechamfer)(self.raw(), face, distance, tolerance) }, "rechamfer")
+    }
+
+    /// The chamfer `face` belongs to taken off, the faces beside it sharp again --
+    /// Fusion's delete of a chamfer face.
+    pub fn unchamfer(&self, face: u32) -> Result<Solid> {
+        self.next(unsafe { (self.api.cadaclysm_blacksmith_unchamfer)(self.raw(), face) }, "unchamfer")
+    }
+
     /// This solid hollowed to walls `thickness` thick, the faces at `open` removed so
     /// the hollow is reachable.
     pub fn shell(&self, thickness: f64, open: &[u32], tolerance: f64) -> Result<Solid> {
@@ -1197,6 +1210,14 @@ impl Solid {
             (self.api.cadaclysm_blacksmith_shell)(self.raw(), thickness, open.as_ptr(), open.len(), tolerance, NO_PROGRESS, ptr::null_mut())
         };
         self.next(raw, "shell")
+    }
+
+    /// This sheet made a solid `thickness` thick -- Fusion's Thicken: its faces, their
+    /// twins moved `thickness` along the faces' normals (against them for a negative
+    /// thickness), and a wall round every open edge. A closed sheet thickens to a hollow.
+    pub fn thicken(&self, thickness: f64, tolerance: f64) -> Result<Solid> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_thicken)(self.raw(), thickness, tolerance, NO_PROGRESS, ptr::null_mut()) };
+        self.next(raw, "thicken")
     }
 
     // -- colour
