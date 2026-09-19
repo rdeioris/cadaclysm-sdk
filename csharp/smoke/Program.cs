@@ -119,6 +119,16 @@ if (!shape.IsClosed || shape.Faces != rounded.Faces) return Fail($"the filleted 
     using var cube = Solid.Cuboid(10, 10, 10);
     using var raised = cube.PushPull(cube.SelectFace(Selector.Max(Axis.Z)), 5);
     if (raised.Faces != 6 || !raised.IsWatertight()) return Fail($"push_pull: the raised cube has {raised.Faces} faces, not 6");
+    // Quick solids: a coiled wire and a pipe close; a cube split by a plane is two bodies.
+    using var wire = Profile.Circle(1).Translate(10, 0);
+    using var spring = Solid.Coil(wire, [0, 0, 0, 0, 0, 1], 4, 2);
+    if (!spring.IsWatertight()) return Fail("coil: the spring leaks");
+    using var pipePath = SweepPath.At((0, 0, 0)).LineTo((0, 0, 10));
+    using var pipe = Solid.Pipe(pipePath, 2, 0.5);
+    if (!pipe.IsWatertight() || pipe.Faces != 6) return Fail($"pipe: the tube has {pipe.Faces} faces, not 6");
+    var halves = cube.SplitByPlane([2, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0]);
+    if (halves.Count != 2 || halves[0].Faces != 6) return Fail($"split_by_plane: {halves.Count} bodies, not 2");
+    foreach (var half in halves) half.Dispose();
     // From loops: a circle given before the square it lies in -- the square is the boundary.
     using var loopHole = Profile.Circle(4);
     using var loopSquare = Profile.Rect(30, 30);
@@ -136,7 +146,7 @@ if (!shape.IsClosed || shape.Faces != rounded.Faces) return Fail($"the filleted 
     using var loopSpline = Profile.Spline([(0, 0), (10, 0), (10, 10), (0, 10)], 3, null, closed: true);
     using var loopSolid = Solid.Extrude(loopSpline, xy, 2);
     if (hexPrism.Faces != 8 || loopSolid.Faces != 3 || !loopSolid.IsWatertight()) return Fail($"shapes: {hexPrism.Faces} and {loopSolid.Faces} faces, not 8 and 3");
-    Console.WriteLine($"sheet verbs: face, trim ({holed.Faces}+{disc.Faces}), face_sheet, drop_faces, round ({slab.Faces} faces), along, chain, push_pull, close_loop, from_loops, revolve_in_plane, regular_polygon, spline: ok");
+    Console.WriteLine($"sheet verbs: face, trim ({holed.Faces}+{disc.Faces}), face_sheet, drop_faces, round ({slab.Faces} faces), along, chain, push_pull, coil, pipe, split_by_plane, close_loop, from_loops, revolve_in_plane, regular_polygon, spline: ok");
 }
 // Frames: built, checked, and passed wherever twelve numbers go.
 {
@@ -232,6 +242,10 @@ catch (InvalidOperationException)
 {
 }
 Console.WriteLine($"mesh at 0.05: {triangles0} triangles; the first view is stale after 0.05, 0.5, 0.05");
+// No schema at all: the kernel writes against its built-in AP203, no ap203.exp needed.
+var noSchemaText = rounded.StepText();
+if (!noSchemaText.StartsWith("ISO-10303-21;")) return Fail("StepText() with no schema did not write valid STEP");
+Console.WriteLine("StepText() with no schema: ISO-10303-21; ok");
 var step = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cadaclysm-smoke.stp");
 rounded.Step(step);
 using (var back = Cadaclysm.Cadaclysm.Open(step))

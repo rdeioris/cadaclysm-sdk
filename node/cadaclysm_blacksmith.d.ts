@@ -18,6 +18,13 @@ export type Point3 = [number, number, number] | ArrayLike<number>;
 export type Progress = (phase: string, done: number, total: number) => void;
 
 export function libraryPath(): string;
+/**
+ * `schemas/ap203.exp`, found by walking up from this file.
+ *
+ * The `ap203.exp` file this finds is no longer needed: the kernel writes against its
+ * built-in AP203 when no schema is given. This function stays for compatibility and the
+ * parity gates; nothing here calls it to write STEP any more.
+ */
 export function defaultSchema(): string;
 export function version(): string;
 export function buildDate(): string;
@@ -118,10 +125,12 @@ export class Solid {
   static loftOpen(a: Profile, frameA: FrameLike, b: Profile, frameB: FrameLike): Solid;
   static revolve(profile: Profile, axis: AxisLine, angle: number): Solid;
   static revolveOpen(profile: Profile, axis: AxisLine, angle: number): Solid;
+  static coil(profile: Profile, axis: AxisLine, pitch: number, turns: number): Solid;
   static revolveInPlane(profile: Profile, frame: FrameLike, a: Point2, b: Point2, angle: number): Solid;
   static revolveOpenInPlane(profile: Profile, frame: FrameLike, a: Point2, b: Point2, angle: number): Solid;
   static sweep(profile: Profile, frame: FrameLike, path: SweepPath): Solid;
   static sweepOpen(profile: Profile, frame: FrameLike, path: SweepPath): Solid;
+  static pipe(path: SweepPath, radius: number, thickness?: number): Solid;
   extrudeFaces(height: number): Solid;
   static face(profile: Profile, frame: FrameLike): Solid;
   faceSheet(face: number): Solid;
@@ -151,6 +160,13 @@ export class Solid {
   mesh(tolerance?: number): SolidMesh;
   meshAsync(tolerance?: number): Promise<SolidMesh>;
   edgePolylines(tolerance?: number): Float32Array[];
+  /**
+   * `schema`: null/undefined (the kernel's built-in AP203); the path of a schema file
+   * (no newline in it, naming an existing file), read and sent as EXPRESS text; the
+   * bare name of a built-in schema (case-insensitive, e.g.
+   * `"AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF"` -- an unknown name throws
+   * `BuildError`); or a custom schema's own EXPRESS text.
+   */
   stepText(schema?: string | null, unit?: Unit): string;
   stepAsync(schema?: string | null, unit?: Unit): Promise<string>;
   step(path: string, schema?: string | null, unit?: Unit): void;
@@ -164,10 +180,17 @@ export class Solid {
   chamfer(edges: Iterable<Edge | number>, distance: number, tolerance?: number): Solid;
   pushPull(face: number, distance: number, tolerance?: number, progress?: Progress | null): Solid;
   mergeFlush(): Solid;
+  split(tool: Solid, tolerance?: number, progress?: Progress | null): Solid[];
+  splitByPlane(plane: FrameLike, tolerance?: number, progress?: Progress | null): Solid[];
+  lumps(): Solid[];
   shell(thickness: number, open?: Iterable<number>, tolerance?: number, progress?: Progress | null): Solid;
   filletAsync(edges: Iterable<Edge | number>, radius: number, tolerance?: number, progress?: Progress | null): Promise<Solid>;
   chamferAsync(edges: Iterable<Edge | number>, distance: number, tolerance?: number): Promise<Solid>;
   shellAsync(thickness: number, open?: Iterable<number>, tolerance?: number, progress?: Progress | null): Promise<Solid>;
+  /**
+   * `schema` as `stepText` takes it; the reader is given the schema's path only when
+   * it names an existing file, since it carries every built-in schema itself.
+   */
   toScene(schema?: string | null): Scene;
   static fromNode(scene: Scene, node: Node | number, placed?: boolean): Solid;
   static open(path: string, body?: number | null): Solid;
@@ -203,5 +226,12 @@ export class Workplane {
   workplane(): this;
   solid(): Solid;
 }
+/**
+ * `schema`: null/undefined (the kernel's built-in AP203); the path of a schema file
+ * (no newline in it, naming an existing file), read and sent as EXPRESS text; the bare
+ * name of a built-in schema (case-insensitive, e.g.
+ * `"AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF"` -- an unknown name throws
+ * `BuildError`); or a custom schema's own EXPRESS text.
+ */
 export function writeStepText(solids: Iterable<Solid>, schema?: string | null, unit?: Unit): string;
 export function writeStep(path: string, solids: Iterable<Solid>, schema?: string | null, unit?: Unit): void;

@@ -319,6 +319,16 @@ func kernel(license string) {
 	}
 	fmt.Printf("mesh at 0.05: %d triangles; the first view is stale after 0.05, 0.5, 0.05\n", triangles0)
 
+	// No schema at all: the kernel writes against its built-in AP203, no ap203.exp needed.
+	noSchemaText, err := rounded.StepText("", "mm")
+	if err != nil {
+		fail(err.Error())
+	}
+	if !strings.HasPrefix(noSchemaText, "ISO-10303-21;") {
+		fail("StepText(\"\", ...) with no schema did not write valid STEP")
+	}
+	fmt.Println("StepText with no schema: ISO-10303-21; ok")
+
 	step := filepath.Join(os.TempDir(), "cadaclysm-smoke-go.stp")
 	if err := rounded.Step(step, "", "mm"); err != nil {
 		fail(err.Error())
@@ -558,6 +568,37 @@ func sheetVerbs(plate *blacksmith.Solid) {
 	if count(raised) != 6 {
 		fail(fmt.Sprintf("push_pull: the raised cube has %d faces, not 6", count(raised)))
 	}
+	// Quick solids: a coiled wire and a pipe close; a cube split by a plane is two bodies.
+	wireCircle, err := blacksmith.Circle(1)
+	if err != nil {
+		fail(err.Error())
+	}
+	wire, err := wireCircle.Translate(10, 0)
+	if err != nil {
+		fail(err.Error())
+	}
+	spring := must(blacksmith.Coil(wire, [6]float64{0, 0, 0, 0, 0, 1}, 4, 2))
+	if ok, err := spring.IsWatertight(blacksmith.DefaultTolerance); err != nil || !ok {
+		fail("coil: the spring leaks")
+	}
+	pipePath := blacksmith.NewSweepPath(0, 0, 0).LineTo([3]float64{0, 0, 10})
+	pipe := must(blacksmith.Pipe(pipePath, 2, 0.5))
+	if count(pipe) != 6 {
+		fail(fmt.Sprintf("pipe: the tube has %d faces, not 6", count(pipe)))
+	}
+	halves, err := cube.SplitByPlane(blacksmith.Frame{2, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0}, blacksmith.DefaultTolerance)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(halves) != 2 || count(halves[0]) != 6 {
+		fail(fmt.Sprintf("split_by_plane: %d bodies, not 2", len(halves)))
+	}
+	for _, s := range append(halves, spring, pipe) {
+		s.Close()
+	}
+	wire.Close()
+	wireCircle.Close()
+	pipePath.Close()
 	raised.Close()
 	cube.Close()
 	ellWalls.Close()
@@ -615,7 +656,7 @@ func sheetVerbs(plate *blacksmith.Solid) {
 	loopSolid.Close()
 	hexagon.Close()
 	loopSpline.Close()
-	fmt.Printf("sheet verbs: face, trim (%d+%d), face_sheet, drop_faces, round (%d faces), along, chain, push_pull, close_loop, from_loops, revolve_in_plane, regular_polygon, spline: ok\n", count(holed), count(disc), count(slab))
+	fmt.Printf("sheet verbs: face, trim (%d+%d), face_sheet, drop_faces, round (%d faces), along, chain, push_pull, coil, pipe, split_by_plane, close_loop, from_loops, revolve_in_plane, regular_polygon, spline: ok\n", count(holed), count(disc), count(slab))
 	for _, s := range []*blacksmith.Solid{sheet, peg, holed, disc, lid, walls, slab, tube, onPlane, away} {
 		s.Close()
 	}

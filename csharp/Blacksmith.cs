@@ -311,6 +311,7 @@ internal static class BlacksmithNative
         double[] frameB);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_revolve(ProfileHandle profile, double[] axis, double angle);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_revolve_open(ProfileHandle profile, double[] axis, double angle);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_coil(ProfileHandle profile, double[] axis, double pitch, double turns);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_revolve_in_plane(ProfileHandle profile, double[] frame,
         double[] axis, double angle);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_revolve_open_in_plane(ProfileHandle profile, double[] frame,
@@ -327,6 +328,7 @@ internal static class BlacksmithNative
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_sweep(ProfileHandle profile, double[] frame, SweepPathHandle path);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_sweep_open(ProfileHandle profile, double[] frame,
         SweepPathHandle path);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_pipe(SweepPathHandle path, double radius, double thickness);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_extrude_faces(SolidHandle sheet, double height);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_face(ProfileHandle profile, double[] frame);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_face_sheet(SolidHandle solid, uint face);
@@ -354,6 +356,12 @@ internal static class BlacksmithNative
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_push_pull(SolidHandle solid, uint face, double distance,
         double tolerance, IntPtr progress, IntPtr user);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_merge_flush(SolidHandle solid);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_split(SolidHandle solid, SolidHandle tool, double tolerance,
+        IntPtr progress, IntPtr user);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_split_by_plane(SolidHandle solid, double[] plane,
+        double tolerance, IntPtr progress, IntPtr user);
+    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_lump_count(SolidHandle solid);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_lump(SolidHandle solid, uint index);
     [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_face_count(SolidHandle solid);
     [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_select_face(SolidHandle solid, uint kind, double[]? v, uint index);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
@@ -377,7 +385,7 @@ internal static class BlacksmithNative
     // SafeHandles, so `WriteStepText` passes the raw pointers and keeps the owners alive
     // itself, across the call, with `GC.KeepAlive`.
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_step(IntPtr[] solids, nuint count,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string schema, uint unit);
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? schema, uint unit);
     [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_string_free(IntPtr s);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_from_brep(BrepHandle brep,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string layoutId);
@@ -426,7 +434,11 @@ public static class Blacksmith
 
     /// <summary>`schemas/ap203.exp`: `CADACLYSM_SCHEMAS/ap203.exp` if set, else the
     /// repository's, found by walking up from this assembly the way the loader finds the
-    /// library.</summary>
+    /// library.
+    ///
+    /// The `ap203.exp` file this finds is no longer needed: the kernel writes against its
+    /// built-in AP203 when no schema is given. This method stays for compatibility and the
+    /// parity gates; nothing here calls it to write STEP any more.</summary>
     public static string DefaultSchema()
     {
         var candidates = new List<string>();
@@ -440,12 +452,16 @@ public static class Blacksmith
             candidates.Add(System.IO.Path.Combine(dir, "schemas", "ap203.exp"));
         foreach (var candidate in candidates)
             if (File.Exists(candidate)) return candidate;
-        throw new BuildException("ap203.exp not found; pass schema (a path or the schema's text)");
+        throw new BuildException("ap203.exp not found (none is needed to write STEP: leave schema out for the "
+            + "built-in AP203, or pass a schema name, a .exp path or EXPRESS text)");
     }
 
-    /// <summary>Several solids as one AP203 part file's text, each its own body.</summary>
-    /// <param name="schema">Null for the default lookup, the path of an `.exp`, or the
-    /// schema's own text.</param>
+    /// <summary>Several solids as one part file's text, each its own body.</summary>
+    /// <param name="schema">One of four things: null (the kernel's built-in AP203); the
+    /// path of a schema file (no newline in it, naming an existing file), read and sent as
+    /// EXPRESS text; the bare name of a built-in schema (case-insensitive, e.g.
+    /// `"AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF"` -- an unknown name throws
+    /// <see cref="BuildException"/>); or a custom schema's own EXPRESS text.</param>
     /// <param name="unit">What the solids' lengths are: "m", "mm" or "in".</param>
     public static string WriteStepText(IEnumerable<Solid> solids, string? schema = null, string unit = "mm")
     {
@@ -469,14 +485,16 @@ public static class Blacksmith
         }
     }
 
-    /// <summary>Several solids as one AP203 file, each its own body.</summary>
+    /// <summary>One STEP file (AP203 unless <paramref name="schema"/> names another), each solid its own body.</summary>
     public static void WriteStep(string path, IEnumerable<Solid> solids, string? schema = null, string unit = "mm") =>
         File.WriteAllText(path, WriteStepText(solids, schema, unit), new UTF8Encoding(false));
 
-    /// <summary>`schema` is null (the default lookup), a path, or the schema's text.</summary>
-    private static string SchemaText(string? schema)
+    /// <summary>`schema` is null (the built-in AP203), the path of a schema file, a
+    /// built-in schema's name, or a custom schema's own EXPRESS text -- see
+    /// <see cref="WriteStepText"/>.</summary>
+    private static string? SchemaText(string? schema)
     {
-        schema ??= DefaultSchema();
+        if (schema is null) return null;
         if (!schema.Contains('\n') && File.Exists(schema)) return File.ReadAllText(schema);
         return schema;
     }
@@ -1080,6 +1098,14 @@ public sealed class Solid : IDisposable
     public static Solid RevolveOpen(Profile profile, double[] axis, double angle) =>
         new(BlacksmithNative.cadaclysm_blacksmith_revolve_open(profile.Handle, Blacksmith.AxisOf(axis), angle));
 
+    /// <summary>`profile` coiled about `axis` (six numbers: a point and a direction): read as
+    /// <see cref="Revolve"/> reads it -- x the distance from the axis, y along it -- and turned
+    /// `turns` times while climbing `pitch` along the axis each turn: a spring, a thread. The
+    /// two ends are the profile itself, flat; from a full turn up the pitch must be taller
+    /// than the profile.</summary>
+    public static Solid Coil(Profile profile, double[] axis, double pitch, double turns) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_coil(profile.Handle, Blacksmith.AxisOf(axis), pitch, turns));
+
     /// <summary>`profile`, drawn on `frame`, swung `angle` radians about the axis through the
     /// sketch points `a` and `b` (on the frame) -- the profile and its axis drawn together,
     /// where <see cref="Revolve"/> reads the profile as (radius, height). The profile may lie
@@ -1105,6 +1131,12 @@ public sealed class Solid : IDisposable
     /// <see cref="Extrude"/>.</summary>
     public static Solid SweepOpen(Profile profile, double[] frame, SweepPath path) =>
         new(BlacksmithNative.cadaclysm_blacksmith_sweep_open(profile.Handle, Blacksmith.Frame(frame), path.Live));
+
+    /// <summary>A circle of `radius` swept along `path`, square to its start -- Fusion's
+    /// Pipe: a rod, or with a positive `thickness` a tube whose walls are that thick. `path`
+    /// is only borrowed, as by <see cref="Sweep"/>.</summary>
+    public static Solid Pipe(SweepPath path, double radius, double thickness = 0.0) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_pipe(path.Live, radius, thickness));
 
     /// <summary>Every face of this sheet pushed `height` along its own normal, walled and
     /// closed: the sheet as a solid of that thickness.</summary>
@@ -1400,11 +1432,39 @@ public sealed class Solid : IDisposable
     /// <summary>Face `face` pushed out by `distance` along its outward normal (pulled in,
     /// negative) the way Fusion and Rhino extrude a face: the prism over it joined on (cut
     /// out), and the flush faces merged -- a box's top raised is one taller box of six faces.
-    /// A face on a cylinder moves out along its normal instead, the radius changed (a boss
-    /// fatter, a bore narrower), the flat faces beside it carried along; any other curved
-    /// face is refused.</summary>
+    /// A face on a cylinder or a cone moves out along its normal instead, the surface a step
+    /// out (a boss fatter, a bore or a countersink narrower), the flat faces beside it carried
+    /// along; any other curved face is refused.</summary>
     public Solid PushPull(int face, double distance, double tolerance = 0.05) =>
         new(BlacksmithNative.cadaclysm_blacksmith_push_pull(Handle, Index(face), distance, tolerance, IntPtr.Zero, IntPtr.Zero));
+
+    /// <summary>This solid split by `tool` into bodies -- Fusion's Split Body: a closed
+    /// `tool` gives the parts outside it, then the parts inside; a flat sheet splits by the
+    /// whole plane it lies on. Each connected part is a body of its own.</summary>
+    public IReadOnlyList<Solid> Split(Solid tool, double tolerance = 0.05)
+    {
+        using var all = new Solid(BlacksmithNative.cadaclysm_blacksmith_split(Handle, tool.Handle, tolerance, IntPtr.Zero, IntPtr.Zero));
+        return all.Lumps();
+    }
+
+    /// <summary>This solid split by the plane through `plane`'s origin, square to its z (a
+    /// frame, twelve numbers): the bodies in front of it first, then those behind.</summary>
+    public IReadOnlyList<Solid> SplitByPlane(double[] plane, double tolerance = 0.05)
+    {
+        using var all = new Solid(BlacksmithNative.cadaclysm_blacksmith_split_by_plane(Handle, Blacksmith.Frame(plane), tolerance, IntPtr.Zero, IntPtr.Zero));
+        return all.Lumps();
+    }
+
+    /// <summary>This solid's connected bodies, each a solid of its own -- faces sharing an
+    /// edge are one body -- in the order of their first faces.</summary>
+    public IReadOnlyList<Solid> Lumps()
+    {
+        var n = BlacksmithNative.cadaclysm_blacksmith_lump_count(Handle);
+        if (n == 0) throw Blacksmith.Failure("lump_count");
+        var found = new List<Solid>((int)n);
+        for (uint i = 0; i < n; i++) found.Add(new Solid(BlacksmithNative.cadaclysm_blacksmith_lump(Handle, i)));
+        return found;
+    }
 
     /// <summary>This solid with its flush faces merged: flat faces on one plane, facing one
     /// way and meeting, made one face, and the vertices left mid-way along a straight edge
@@ -1434,7 +1494,7 @@ public sealed class Solid : IDisposable
     {
         var solid = FromBrep(node, $"from_node: node {node.Index} ({Label(node)})")
             ?? throw new BuildException($"from_node: node {node.Index} ({Label(node)}) has no brep: only a B-rep body " +
-                "has one (STEP, ACIS, Rhino, OCCT .brep, IGES, IFC), not a mesh, a curve or a CSG body");
+                "has one (STEP, ACIS, Rhino, BREP (.brep), IGES, IFC), not a mesh, a curve or a CSG body");
         if (!placed) return solid;
         if (scene.Convention != Convention.Native && !IsIdentity(node.Transform))
             throw new BuildException("from_node: placed=True needs the scene opened with Convention.Native -- the " +
@@ -1447,7 +1507,7 @@ public sealed class Solid : IDisposable
         FromNode(scene, scene.Nodes[(int)node], placed);
 
     /// <summary>The body a CAD file holds, as a solid: a STEP (AP203/214/242), ACIS `.sat`,
-    /// Rhino `.3dm`, OCCT `.brep`, IGES or IFC file, read where it draws, in the file's own
+    /// Rhino `.3dm`, BREP (`.brep`), IGES or IFC file, read where it draws, in the file's own
     /// units and axes. A file drawing several bodies needs `body` (0-based, in drawing order)
     /// or <see cref="OpenAll"/>. Fillet and chamfer want line and circle edges; booleans take
     /// any surface, but the new edges they trace on a free-form (NURBS) face are not always
@@ -1506,7 +1566,7 @@ public sealed class Solid : IDisposable
         {
             var extension = System.IO.Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
             throw new BuildException($"open: the .{extension} file draws no B-rep body -- only a STEP, ACIS, Rhino, " +
-                "OCCT .brep, IGES or IFC body can be a solid, not a mesh, a curve or a CSG body");
+                "BREP (.brep), IGES or IFC body can be a solid, not a mesh, a curve or a CSG body");
         }
         return solids;
     }
@@ -1551,13 +1611,13 @@ public sealed class Solid : IDisposable
     /// <summary>This solid as a reader <see cref="Scene"/>, through STEP text and
     /// <see cref="global::Cadaclysm.Cadaclysm.OpenMemory"/> -- the door to the viewer and the
     /// tree walk. Needs the reader's library built beside this one.</summary>
-    /// <param name="schema">The path of the `.exp` to write and read with; null for
-    /// <see cref="Blacksmith.DefaultSchema"/>. A path, not text: the reader's open takes
-    /// one.</param>
+    /// <param name="schema">As <see cref="StepText"/> takes it; the reader is given the
+    /// schema's path only when it names an existing file, since it carries every built-in
+    /// schema itself and there is no file here to read a `FILE_SCHEMA` line out of.</param>
     public Scene ToScene(string? schema = null)
     {
-        var schemaPath = schema ?? Blacksmith.DefaultSchema();
-        var bytes = Encoding.UTF8.GetBytes(StepText(schemaPath));
+        var schemaPath = schema is not null && !schema.Contains('\n') && File.Exists(schema) ? schema : null;
+        var bytes = Encoding.UTF8.GetBytes(StepText(schema));
         return global::Cadaclysm.Cadaclysm.OpenMemory(bytes, "solid.stp", "stp", schema: schemaPath);
     }
 }

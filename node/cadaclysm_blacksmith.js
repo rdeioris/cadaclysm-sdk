@@ -67,13 +67,20 @@ function libraryPath() {
   throw new BuildError(_notFoundMessage(searched));
 }
 
-/** `schemas/ap203.exp`: `CADACLYSM_SCHEMAS/ap203.exp` if set, else `schemas/ap203.exp` in any ancestor. */
+/**
+ * `schemas/ap203.exp`: `CADACLYSM_SCHEMAS/ap203.exp` if set, else `schemas/ap203.exp` in any ancestor.
+ *
+ * The `ap203.exp` file this finds is no longer needed: the kernel writes against its
+ * built-in AP203 when no schema is given. This function stays for compatibility and the
+ * parity gates; nothing here calls it to write STEP any more.
+ */
 function defaultSchema() {
   const candidates = [];
   if (process.env.CADACLYSM_SCHEMAS) candidates.push(path.join(process.env.CADACLYSM_SCHEMAS, 'ap203.exp'));
   for (const a of ancestors(__dirname)) candidates.push(path.join(a, 'schemas', 'ap203.exp'));
   for (const c of candidates) if (fs.existsSync(c)) return c;
-  throw new BuildError('ap203.exp not found; pass schema (a path or the schema\'s text)');
+  throw new BuildError('ap203.exp not found (none is needed to write STEP: leave schema out for the built-in '
+    + 'AP203, or pass a schema name, a .exp path or EXPRESS text)');
 }
 
 // ---- the ABI's types -------------------------------------------------------
@@ -177,6 +184,7 @@ function _lib() {
     loft_open: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_loft_open(const CadaclysmBlacksmithProfile *a, const double *frame_a, const CadaclysmBlacksmithProfile *b, const double *frame_b)'),
     revolve: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_revolve(const CadaclysmBlacksmithProfile *profile, const double *axis, double angle)'),
     revolve_open: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_revolve_open(const CadaclysmBlacksmithProfile *profile, const double *axis, double angle)'),
+    coil: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_coil(const CadaclysmBlacksmithProfile *profile, const double *axis, double pitch, double turns)'),
     revolve_in_plane: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_revolve_in_plane(const CadaclysmBlacksmithProfile *profile, const double *frame, const double *axis, double angle)'),
     revolve_open_in_plane: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_revolve_open_in_plane(const CadaclysmBlacksmithProfile *profile, const double *frame, const double *axis, double angle)'),
     extrude_faces: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_extrude_faces(const CadaclysmBlacksmithSolid *sheet, double height)'),
@@ -202,6 +210,10 @@ function _lib() {
     shell: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_shell(const CadaclysmBlacksmithSolid *solid, double thickness, const uint32_t *open_faces, size_t count, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     push_pull: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_push_pull(const CadaclysmBlacksmithSolid *solid, uint32_t face, double distance, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     merge_flush: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_merge_flush(const CadaclysmBlacksmithSolid *solid)'),
+    split: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_split(const CadaclysmBlacksmithSolid *solid, const CadaclysmBlacksmithSolid *tool, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
+    split_by_plane: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_split_by_plane(const CadaclysmBlacksmithSolid *solid, const double *plane, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
+    lump_count: f('uint32_t cadaclysm_blacksmith_lump_count(const CadaclysmBlacksmithSolid *solid)'),
+    lump: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_lump(const CadaclysmBlacksmithSolid *solid, uint32_t index)'),
     sweep_path_begin: f('CadaclysmBlacksmithSweepPath *cadaclysm_blacksmith_sweep_path_begin(double x, double y, double z)'),
     sweep_path_line_to: f('bool cadaclysm_blacksmith_sweep_path_line_to(CadaclysmBlacksmithSweepPath *p, double x, double y, double z)'),
     sweep_path_arc: f('bool cadaclysm_blacksmith_sweep_path_arc(CadaclysmBlacksmithSweepPath *p, double cx, double cy, double cz, double ax, double ay, double az, double angle)'),
@@ -209,6 +221,7 @@ function _lib() {
     sweep_path_free: f('void cadaclysm_blacksmith_sweep_path_free(CadaclysmBlacksmithSweepPath *p)'),
     sweep: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sweep(const CadaclysmBlacksmithProfile *profile, const double *frame, const CadaclysmBlacksmithSweepPath *path)'),
     sweep_open: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sweep_open(const CadaclysmBlacksmithProfile *profile, const double *frame, const CadaclysmBlacksmithSweepPath *path)'),
+    pipe: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_pipe(const CadaclysmBlacksmithSweepPath *path, double radius, double thickness)'),
   };
   return library;
 }
@@ -533,6 +546,13 @@ class Solid {
   static revolve(profile, axis, angle) { return new Solid(_lib().revolve(profile._handle, _axis(axis), angle)); }
   static revolveOpen(profile, axis, angle) { return new Solid(_lib().revolve_open(profile._handle, _axis(axis), angle)); }
   /**
+   * `profile` coiled about `axis` (a point and a direction): read as `revolve` reads it -- x the
+   * distance from the axis, y along it -- and turned `turns` times while climbing `pitch` along
+   * the axis each turn: a spring, a thread. The two ends are the profile itself, flat; from a
+   * full turn up the pitch must be taller than the profile.
+   */
+  static coil(profile, axis, pitch, turns) { return new Solid(_lib().coil(profile._handle, _axis(axis), pitch, turns)); }
+  /**
    * `profile`, drawn on `frame`, swung `angle` radians about the axis through the sketch points `a`
    * and `b` (`[x, y]` on the frame): the profile and its axis drawn together. The profile may lie on
    * either side of the axis and touch it, not cross it; the sweep starts where it is drawn.
@@ -542,6 +562,8 @@ class Solid {
   static revolveOpenInPlane(profile, frame, [ax, ay], [bx, by], angle) { return new Solid(_lib().revolve_open_in_plane(profile._handle, _frame(frame), Float64Array.of(ax, ay, bx, by), angle)); }
   static sweep(profile, frame, sweepPath) { return new Solid(_lib().sweep(profile._handle, _frame(frame), sweepPath._live())); }
   static sweepOpen(profile, frame, sweepPath) { return new Solid(_lib().sweep_open(profile._handle, _frame(frame), sweepPath._live())); }
+  /** A circle of `radius` swept along `sweepPath`, square to its start -- Fusion's Pipe: a rod, or with a positive `thickness` a tube whose walls are that thick. */
+  static pipe(sweepPath, radius, thickness = 0) { return new Solid(_lib().pipe(sweepPath._live(), radius, thickness)); }
   /** Thicken an open sheet into a solid. */
   extrudeFaces(height) { return new Solid(_lib().extrude_faces(this._handle, height)); }
   /** The flat sheet `profile` bounds on `frame`: one planar face, holes as holes, facing the frame's z. */
@@ -719,12 +741,40 @@ class Solid {
   /**
    * Face `face` pushed out by `distance` along its outward normal (pulled in, negative) the way
    * Fusion and Rhino extrude a face: the prism over it joined on (cut out), and the flush faces
-   * merged -- a box's top raised is one taller box of six faces. A face on a cylinder moves
-   * out along its normal instead, the radius changed (a boss fatter, a bore narrower), the flat
-   * faces beside it carried along; any other curved face is refused.
+   * merged -- a box's top raised is one taller box of six faces. A face on a cylinder or a cone
+   * moves out along its normal instead, the surface a step out (a boss fatter, a bore or a
+   * countersink narrower), the flat faces beside it carried along; any other curved face is
+   * refused.
    */
   pushPull(face, distance, tolerance = 0.05, progress = null) {
     return new Solid(_lib().push_pull(this._handle, face, distance, tolerance, _progress(progress), null));
+  }
+  /**
+   * This solid split by `tool` into bodies -- Fusion's Split Body: a closed `tool` gives the parts
+   * outside it, then the parts inside; a flat sheet splits by the whole plane it lies on. Each
+   * connected part is a body of its own.
+   */
+  split(tool, tolerance = 0.05, progress = null) {
+    const all = new Solid(_lib().split(this._handle, tool._handle, tolerance, _progress(progress), null));
+    try { return all.lumps(); } finally { all.close(); }
+  }
+  /** This solid split by the plane through `plane`'s origin, square to its z: the bodies in front of it first, then those behind. */
+  splitByPlane(plane, tolerance = 0.05, progress = null) {
+    const all = new Solid(_lib().split_by_plane(this._handle, _frame(plane), tolerance, _progress(progress), null));
+    try { return all.lumps(); } finally { all.close(); }
+  }
+  /** This solid's connected bodies, each a solid of its own -- faces sharing an edge are one body -- in the order of their first faces. */
+  lumps() {
+    const n = _lib().lump_count(this._handle);
+    if (n === 0) _fail('lump_count');
+    const bodies = [];
+    try {
+      for (let i = 0; i < n; i++) bodies.push(new Solid(_lib().lump(this._handle, i)));
+    } catch (e) {
+      for (const b of bodies) b.close();
+      throw e;
+    }
+    return bodies;
   }
   /** This solid with its flush faces merged, and the vertices left mid-way along a straight edge taken out. */
   mergeFlush() { return new Solid(_lib().merge_flush(this._handle)); }
@@ -774,7 +824,7 @@ class Solid {
     const label = `from_node: node ${node.index} (${_label(node)})`;
     const solid = _fromBrep(node, label);
     if (!solid) {
-      throw new BuildError(`${label} has no brep: only a B-rep body has one (STEP, ACIS, Rhino, OCCT .brep, IGES, IFC), not a mesh, a curve or a CSG body`);
+      throw new BuildError(`${label} has no brep: only a B-rep body has one (STEP, ACIS, Rhino, BREP (.brep), IGES, IFC), not a mesh, a curve or a CSG body`);
     }
     if (!placed) return solid;
     const m = node.transform;
@@ -786,7 +836,7 @@ class Solid {
   }
   /**
    * The body a CAD file holds, as a solid: a STEP (AP203/214/242), ACIS `.sat`,
-   * Rhino `.3dm`, OCCT `.brep`, IGES or IFC file, read where it draws, in the
+   * Rhino `.3dm`, BREP (`.brep`), IGES or IFC file, read where it draws, in the
    * file's own units and axes. A file drawing several bodies needs `body`
    * (0-based, in drawing order) or `openAll`. Fillet and chamfer want line and
    * circle edges; booleans take any surface, but the new edges they trace on a
@@ -827,7 +877,7 @@ class Solid {
     }
     if (!solids.length) {
       const extension = require('node:path').extname(String(filePath)).replace(/^\./, '').toLowerCase();
-      throw new BuildError(`open: the .${extension} file draws no B-rep body -- only a STEP, ACIS, Rhino, OCCT .brep, IGES or IFC body can be a solid, not a mesh, a curve or a CSG body`);
+      throw new BuildError(`open: the .${extension} file draws no B-rep body -- only a STEP, ACIS, Rhino, BREP (.brep), IGES or IFC body can be a solid, not a mesh, a curve or a CSG body`);
     }
     return solids;
   }
@@ -846,12 +896,17 @@ class Solid {
       this.close();
     }
   }
-  /** This solid as a reader `Scene`, through STEP text and `cadaclysm.openMemory`. */
+  /**
+   * This solid as a reader `Scene`, through STEP text and `cadaclysm.openMemory`.
+   * `schema` is as `stepText` takes it; the reader is given the schema's path only
+   * when it names an existing file, since it carries every built-in schema itself
+   * and there is no file here to read a `FILE_SCHEMA` line out of.
+   */
   toScene(schema = null) {
     let cad;
     try { cad = require('./cadaclysm'); } catch (e) { throw new BuildError(`toScene needs the reader module beside this file: ${e.message}`); }
-    const schemaPath = schema == null ? defaultSchema() : String(schema);
-    return cad.openMemory(this.stepText(schemaPath), 'stp', { schema: schemaPath, name: 'solid.stp' });
+    const schemaPath = schema != null && _isSchemaFile(String(schema)) ? String(schema) : null;
+    return cad.openMemory(this.stepText(schema), 'stp', { schema: schemaPath, name: 'solid.stp' });
   }
 }
 
@@ -1015,15 +1070,29 @@ class Workplane {
 
 // ---- STEP -------------------------------------------------------------------------
 
-/** `schema` is null (the default lookup), a path, or the schema's text. */
-function _schemaText(schema) {
-  if (schema == null) schema = defaultSchema();
-  schema = String(schema);
-  if (!schema.includes('\n') && fs.existsSync(schema)) return fs.readFileSync(schema, 'utf8');
-  if (schema.includes('\n')) return schema;
-  throw new BuildError(`schema: ${schema} is neither a file nor schema text`);
+/**
+ * `schema` is null (the built-in AP203), the path of a schema file, a built-in schema's
+ * name, or a custom schema's own EXPRESS text -- see `writeStepText`.
+ */
+function _isSchemaFile(schema) {
+  return !schema.includes('\n') && !!fs.statSync(schema, { throwIfNoEntry: false })?.isFile();
 }
 
+function _schemaText(schema) {
+  if (schema == null) return null;
+  schema = String(schema);
+  if (_isSchemaFile(schema)) return fs.readFileSync(schema, 'utf8');
+  return schema;
+}
+
+/**
+ * Several solids as one part file's text, each its own body. `schema` is one of four
+ * things: null (the kernel's built-in AP203); the path of a schema file (no newline in
+ * it, naming an existing file), read and sent as EXPRESS text; the bare name of a
+ * built-in schema (case-insensitive, e.g.
+ * `"AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF"` -- an unknown name throws
+ * `BuildError`); or a custom schema's own EXPRESS text.
+ */
 function writeStepText(solids, schema = null, unit = 'mm') {
   if (!(unit in UNITS)) throw new BuildError(`unit must be one of ${Object.keys(UNITS).sort().join(', ')}`);
   const handles = Array.from(solids, (s) => s._handle);
@@ -1032,7 +1101,7 @@ function writeStepText(solids, schema = null, unit = 'mm') {
   return text;
 }
 
-/** Several solids as one AP203 file, each its own body. */
+/** One STEP file (AP203 unless `schema` names another), each solid its own body. */
 function writeStep(filePath, solids, schema = null, unit = 'mm') { fs.writeFileSync(filePath, writeStepText(solids, schema, unit), 'utf8'); }
 
 module.exports = {

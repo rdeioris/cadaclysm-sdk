@@ -165,7 +165,7 @@ public final class Blacksmith {
             SWEEP_PATH_LINE_TO, SWEEP_PATH_ARC, SWEEP_PATH_ALONG, SWEEP_PATH_FREE, SWEEP, SWEEP_OPEN,
             EXTRUDE_FACES, FACE, FACE_SHEET, DROP_FACES, PLACE, TRANSLATE, ROTATE, MIRROR, JOIN, CUT,
             COMMON, SPLIT_SHEET, TRIM, FILLET, CHAMFER,
-            SHELL, PUSH_PULL, MERGE_FLUSH, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_KIND, COLOURED, COLOUR, EDGE_COUNT, EDGE_AT, MESH_AT,
+            SHELL, PUSH_PULL, MERGE_FLUSH, COIL, PIPE, SPLIT, SPLIT_BY_PLANE, LUMP_COUNT, LUMP, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_KIND, COLOURED, COLOUR, EDGE_COUNT, EDGE_AT, MESH_AT,
             EDGE_POLYLINES, BOUNDS, LEAKED_EDGES, UNPAIRED_EDGES, MANIFOLD, STEP, STRING_FREE, FROM_BREP,
             BREP_LAYOUT_ID;
 
@@ -250,6 +250,12 @@ public final class Blacksmith {
         SHELL = bind(linker, lib, "cadaclysm_blacksmith_shell", FunctionDescriptor.of(A, A, D, A, L, D, A, A));
         PUSH_PULL = bind(linker, lib, "cadaclysm_blacksmith_push_pull", FunctionDescriptor.of(A, A, I, D, D, A, A));
         MERGE_FLUSH = bind(linker, lib, "cadaclysm_blacksmith_merge_flush", FunctionDescriptor.of(A, A));
+        COIL = bind(linker, lib, "cadaclysm_blacksmith_coil", FunctionDescriptor.of(A, A, A, D, D));
+        PIPE = bind(linker, lib, "cadaclysm_blacksmith_pipe", FunctionDescriptor.of(A, A, D, D));
+        SPLIT = bind(linker, lib, "cadaclysm_blacksmith_split", FunctionDescriptor.of(A, A, A, D, A, A));
+        SPLIT_BY_PLANE = bind(linker, lib, "cadaclysm_blacksmith_split_by_plane", FunctionDescriptor.of(A, A, A, D, A, A));
+        LUMP_COUNT = bind(linker, lib, "cadaclysm_blacksmith_lump_count", FunctionDescriptor.of(I, A));
+        LUMP = bind(linker, lib, "cadaclysm_blacksmith_lump", FunctionDescriptor.of(A, A, I));
         FACE_COUNT = bind(linker, lib, "cadaclysm_blacksmith_face_count", FunctionDescriptor.of(I, A));
         SELECT_FACE = bind(linker, lib, "cadaclysm_blacksmith_select_face", FunctionDescriptor.of(I, A, I, A, I));
         FACE_FRAME = bind(linker, lib, "cadaclysm_blacksmith_face_frame", FunctionDescriptor.of(B, A, I, A));
@@ -572,6 +578,10 @@ public final class Blacksmith {
      * {@code schemas/ap203.exp}: {@code CADACLYSM_SCHEMAS/ap203.exp} if set, else the
      * repository's, found by walking up from this class's own code the way the loader finds
      * the library.
+     *
+     * <p>The {@code ap203.exp} file this finds is no longer needed: the kernel writes
+     * against its built-in AP203 when no schema is given. This method stays for
+     * compatibility and the parity gates; nothing here calls it to write STEP any more.
      */
     public static String defaultSchema() {
         List<java.nio.file.Path> candidates = new ArrayList<>();
@@ -587,19 +597,24 @@ public final class Blacksmith {
         for (java.nio.file.Path candidate : candidates) {
             if (Files.isRegularFile(candidate)) return candidate.toString();
         }
-        throw new BuildException("ap203.exp not found; pass schema (a path or the schema's text)");
+        throw new BuildException("ap203.exp not found (none is needed to write STEP: leave schema out for the "
+                + "built-in AP203, or pass a schema name, a .exp path or EXPRESS text)");
     }
 
-    /** {@link #writeStepText(Collection, String, String)} with the default schema, in millimetres. */
+    /** {@link #writeStepText(Collection, String, String)} writing one STEP file (AP203 unless a schema is named), in millimetres. */
     public static String writeStepText(Collection<Solid> solids) {
         return writeStepText(solids, null, "mm");
     }
 
     /**
-     * Several solids as one AP203 part file's text, each its own body.
+     * Several solids as one part file's text, each its own body.
      *
-     * @param schema null for the default lookup, the path of an {@code .exp}, or the
-     *               schema's own text
+     * @param schema one of four things: null (the kernel's built-in AP203); the path of a
+     *               schema file (no newline in it, naming an existing file), read and sent
+     *               as EXPRESS text; the bare name of a built-in schema (case-insensitive,
+     *               e.g. {@code "AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF"} -- an
+     *               unknown name throws {@link BuildException}); or a custom schema's own
+     *               EXPRESS text
      * @param unit   what the solids' lengths are: {@code "m"}, {@code "mm"} or {@code "in"}
      */
     public static String writeStepText(Collection<Solid> solids, String schema, String unit) {
@@ -614,10 +629,11 @@ public final class Blacksmith {
             for (int i = 0; i < all.length; i++) {
                 handles.setAtIndex(ValueLayout.ADDRESS, i, all[i].handle());
             }
-            MemorySegment schemaText = arena.allocateFrom(schemaText(schema));
+            String text = schemaText(schema);
+            MemorySegment schemaSeg = text == null ? MemorySegment.NULL : arena.allocateFrom(text);
             long count = all.length;
             int code = unitCode;
-            raw = call(() -> (MemorySegment) STEP.invokeExact(handles, count, schemaText, code));
+            raw = call(() -> (MemorySegment) STEP.invokeExact(handles, count, schemaSeg, code));
         } finally {
             keep((Object[]) all);
         }
@@ -650,12 +666,15 @@ public final class Blacksmith {
         }
     }
 
-    /** {@code schema} is null (the default lookup), a path, or the schema's text. */
+    /**
+     * {@code schema} is null (the built-in AP203), the path of a schema file, a built-in
+     * schema's name, or a custom schema's own EXPRESS text -- see {@link #writeStepText}.
+     */
     private static String schemaText(String schema) {
-        if (schema == null) schema = defaultSchema();
+        if (schema == null) return null;
         if (schema.indexOf('\n') < 0) {
-            java.nio.file.Path at = java.nio.file.Path.of(schema);
-            if (Files.isRegularFile(at)) {
+            java.nio.file.Path at = schemaFilePath(schema);
+            if (at != null && Files.isRegularFile(at)) {
                 try {
                     return Files.readString(at, StandardCharsets.UTF_8);
                 } catch (IOException e) {
@@ -664,6 +683,21 @@ public final class Blacksmith {
             }
         }
         return schema;
+    }
+
+    /**
+     * {@code schema} as a filesystem path, or null if it is not one -- not every legal
+     * single-line schema is a legal path: a schema name always is, but custom EXPRESS
+     * text ("SCHEMA x; ... : STRING ...") carries characters like {@code :} and {@code ;}
+     * a Windows path refuses ({@link java.nio.file.InvalidPathException}). Not a path,
+     * then: it falls through to the ABI as text.
+     */
+    private static java.nio.file.Path schemaFilePath(String schema) {
+        try {
+            return java.nio.file.Path.of(schema);
+        } catch (java.nio.file.InvalidPathException e) {
+            return null;
+        }
     }
 
     // ---- profiles -------------------------------------------------------------------------
@@ -1549,6 +1583,39 @@ public final class Blacksmith {
             return revolved(REVOLVE_OPEN, profile, axis, angle);
         }
 
+        /** {@code profile} coiled about {@code axis} (six numbers: a point and a direction):
+         *  read as {@link #revolve} reads it -- x the distance from the axis, y along it --
+         *  and turned {@code turns} times while climbing {@code pitch} along the axis each
+         *  turn: a spring, a thread. The two ends are the profile itself, flat; from a full
+         *  turn up the pitch must be taller than the profile. */
+        public static Solid coil(Profile profile, double[] axis, double pitch, double turns) {
+            double[] ax = axisOf(axis);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment as = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, ax);
+                MemorySegment p = profile.handle();
+                return new Solid(call(() -> (MemorySegment) COIL.invokeExact(p, as, pitch, turns)));
+            } finally {
+                keep(profile);
+            }
+        }
+
+        /** {@link #pipe(SweepPath, double, double)} as a solid rod. */
+        public static Solid pipe(SweepPath path, double radius) {
+            return pipe(path, radius, 0.0);
+        }
+
+        /** A circle of {@code radius} swept along {@code path}, square to its start --
+         *  Fusion's Pipe: a rod, or with a positive {@code thickness} a tube whose walls are
+         *  that thick. {@code path} is only borrowed, as by {@link #sweep}. */
+        public static Solid pipe(SweepPath path, double radius, double thickness) {
+            try {
+                MemorySegment sp = path.handle();
+                return new Solid(call(() -> (MemorySegment) PIPE.invokeExact(sp, radius, thickness)));
+            } finally {
+                keep(path);
+            }
+        }
+
         /**
          * {@code profile}, drawn on {@code frame}, swung {@code angle} radians about the axis
          * through the sketch points {@code a} and {@code b} (two numbers each, on the frame) --
@@ -2179,14 +2246,71 @@ public final class Blacksmith {
         /** Face {@code face} pushed out by {@code distance} along its outward normal (pulled
          *  in, negative) the way Fusion and Rhino extrude a face: the prism over it joined on
          *  (cut out), and the flush faces merged -- a box's top raised is one taller box of
-         *  six faces. A face on a cylinder moves out along its normal instead, the radius
-         *  changed (a boss fatter, a bore narrower), the flat faces beside it carried along;
-         *  any other curved face is refused. */
+         *  six faces. A face on a cylinder or a cone moves out along its normal instead, the
+         *  surface a step out (a boss fatter, a bore or a countersink narrower), the flat
+         *  faces beside it carried along; any other curved face is refused. */
         public Solid pushPull(int face, double distance, double tolerance) {
             int which = index(face);
             try {
                 MemorySegment h = handle();
                 return new Solid(call(() -> (MemorySegment) PUSH_PULL.invokeExact(h, which, distance, tolerance, MemorySegment.NULL, MemorySegment.NULL)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #split(Solid, double)} at 0.05. */
+        public List<Solid> split(Solid tool) {
+            return split(tool, 0.05);
+        }
+
+        /** This solid split by {@code tool} into bodies -- Fusion's Split Body: a closed
+         *  {@code tool} gives the parts outside it, then the parts inside; a flat sheet splits
+         *  by the whole plane it lies on. Each connected part is a body of its own. */
+        public List<Solid> split(Solid tool, double tolerance) {
+            try (Solid all = combine(SPLIT, tool, tolerance)) {
+                return all.lumps();
+            }
+        }
+
+        /** {@link #splitByPlane(double[], double)} at 0.05. */
+        public List<Solid> splitByPlane(double[] plane) {
+            return splitByPlane(plane, 0.05);
+        }
+
+        /** This solid split by the plane through {@code plane}'s origin, square to its z (a
+         *  frame, twelve numbers): the bodies in front of it first, then those behind. */
+        public List<Solid> splitByPlane(double[] plane, double tolerance) {
+            double[] f = frame(plane);
+            Solid all;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment fs = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, f);
+                MemorySegment h = handle();
+                all = new Solid(call(() -> (MemorySegment) SPLIT_BY_PLANE.invokeExact(h, fs, tolerance, MemorySegment.NULL, MemorySegment.NULL)));
+            } finally {
+                keep(this);
+            }
+            try (all) {
+                return all.lumps();
+            }
+        }
+
+        /** This solid's connected bodies, each a solid of its own -- faces sharing an edge are
+         *  one body -- in the order of their first faces. */
+        public List<Solid> lumps() {
+            List<Solid> bodies = new ArrayList<>();
+            try {
+                MemorySegment h = handle();
+                int n = call(() -> (int) LUMP_COUNT.invokeExact(h));
+                if (n == 0) throw failure("lump_count");
+                for (int i = 0; i < n; i++) {
+                    int which = i;
+                    bodies.add(new Solid(call(() -> (MemorySegment) LUMP.invokeExact(h, which))));
+                }
+                return bodies;
+            } catch (RuntimeException e) {
+                for (Solid b : bodies) b.close();
+                throw e;
             } finally {
                 keep(this);
             }
@@ -2256,7 +2380,7 @@ public final class Blacksmith {
             Solid solid = fromBrep(node, label);
             if (solid == null) {
                 throw new BuildException(label + " has no brep: only a B-rep body has one (STEP, ACIS, Rhino, "
-                        + "OCCT .brep, IGES, IFC), not a mesh, a curve or a CSG body");
+                        + "BREP (.brep), IGES, IFC), not a mesh, a curve or a CSG body");
             }
             if (!placed) return solid;
             double[][] m = node.transform();
@@ -2270,7 +2394,7 @@ public final class Blacksmith {
 
         /**
          * The body a CAD file holds, as a solid: a STEP (AP203/214/242), ACIS {@code .sat},
-         * Rhino {@code .3dm}, OCCT {@code .brep}, IGES or IFC file, read where it draws, in the
+         * Rhino {@code .3dm}, BREP ({@code .brep}), IGES or IFC file, read where it draws, in the
          * file's own units and axes. A file drawing several bodies needs {@link #open(String,
          * int)} or {@link #openAll}. Fillet and chamfer want line and circle edges; booleans
          * take any surface, but the new edges they trace on a free-form (NURBS) face are not
@@ -2328,7 +2452,7 @@ public final class Blacksmith {
                 int dot = name.lastIndexOf('.');
                 String extension = dot < 0 ? "" : name.substring(dot + 1).toLowerCase();
                 throw new BuildException("open: the ." + extension + " file draws no B-rep body -- only a STEP, ACIS, "
-                        + "Rhino, OCCT .brep, IGES or IFC body can be a solid, not a mesh, a curve or a CSG body");
+                        + "Rhino, BREP (.brep), IGES or IFC body can be a solid, not a mesh, a curve or a CSG body");
             }
             return solids;
         }
@@ -2378,7 +2502,7 @@ public final class Blacksmith {
             }
         }
 
-        /** {@link #toScene(String)} with {@link Blacksmith#defaultSchema()}. */
+        /** {@link #toScene(String)} with the built-in AP203. */
         public Cad.Scene toScene() {
             return toScene(null);
         }
@@ -2388,13 +2512,15 @@ public final class Blacksmith {
          * Cad#openMemory} -- the door to the viewer and the tree walk. Needs the reader's
          * library built beside this one.
          *
-         * @param schema the path of the {@code .exp} to write and read with; null for
-         *               {@link Blacksmith#defaultSchema()}. A path, not text: the reader's
-         *               open takes one.
+         * @param schema as {@link #stepText(String, String)} takes it; the reader is given
+         *               the schema's path only when it names an existing file, since it
+         *               carries every built-in schema itself and there is no file here to
+         *               read a {@code FILE_SCHEMA} line out of.
          */
         public Cad.Scene toScene(String schema) {
-            String schemaPath = schema == null ? defaultSchema() : schema;
-            byte[] bytes = stepText(schemaPath, "mm").getBytes(StandardCharsets.UTF_8);
+            byte[] bytes = stepText(schema, "mm").getBytes(StandardCharsets.UTF_8);
+            java.nio.file.Path at = schema != null && schema.indexOf('\n') < 0 ? schemaFilePath(schema) : null;
+            String schemaPath = at != null && Files.isRegularFile(at) ? schema : null;
             Cad.OpenOptions options = new Cad.OpenOptions(Cad.Convention.NATIVE, false, false, schemaPath, false, 0.0);
             return Cad.openMemory(bytes, "solid.stp", options);
         }

@@ -253,14 +253,18 @@ bool cadaclysm_blacksmith_bounds(const struct CadaclysmBlacksmithSolid *solid,
                                  double *max);
 
 /**
- * `count` solids as one AP203 part file, each its own `MANIFOLD_SOLID_BREP`,
- * through `cadaclysm_step_ap::write_breps`. `schema` is the source text of
- * `ap203.exp`; `unit` 0 = metre, 1 = millimetre, 2 = inch, and says what the
- * solids' lengths are. The text is owned: release it with
+ * `count` solids as one STEP part file, each its own `MANIFOLD_SOLID_BREP`,
+ * through `cadaclysm_step_ap::write_breps`. `schema` is NULL for the built-in
+ * AP203 (`CONFIG_CONTROL_DESIGN`), the name of a built-in schema
+ * (`AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF`, …; case-insensitive) --
+ * a built-in schema must carry every entity the writer emits, as AP203 and
+ * AP242 do and AP214's `AUTOMOTIVE_DESIGN` does not -- or the EXPRESS source
+ * text of a custom schema. `unit` 0 = metre, 1 = millimetre, 2 = inch, and
+ * says what the solids' lengths are. The text is owned: release it with
  * [`cadaclysm_blacksmith_string_free`]. Null and `last_error` on failure.
  *
  * # Safety
- * `solids` `count` live solids; `schema` a NUL-terminated string.
+ * `solids` `count` live solids; `schema` NULL or a NUL-terminated string.
  */
 char *cadaclysm_blacksmith_step(const struct CadaclysmBlacksmithSolid *const *solids,
                                 size_t count,
@@ -818,6 +822,23 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_revolve(const struct Cadac
                                                               double angle);
 
 /**
+ * `profile` coiled about `axis` (a point and a direction): read like
+ * [`cadaclysm_blacksmith_revolve`]'s -- x the distance from the axis, y along it --
+ * and turned `turns` times while climbing `pitch` along the axis each turn, a
+ * spring or a thread. The walls follow the helix to a few millionths of the
+ * radius; the two ends are the profile itself, flat. Null and `last_error` for an
+ * open profile or one with holes, one reaching the axis, turns that are not
+ * positive, or -- from a full turn up -- a pitch no taller than the profile.
+ *
+ * # Safety
+ * `profile` a live profile; `axis` six doubles.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_coil(const struct CadaclysmBlacksmithProfile *profile,
+                                                           const double *axis,
+                                                           double pitch,
+                                                           double turns);
+
+/**
  * [`cadaclysm_blacksmith_revolve`] without the end caps of a partial turn.
  *
  * # Safety
@@ -1082,12 +1103,12 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_chamfer(const struct Cadac
  * Face `face` of `solid` pushed out by `distance` along its outward normal (pulled
  * in, negative) the way a CAD program extrudes a face: the prism over it joined on
  * (cut out) at `tolerance`, and the result's flush faces merged -- a box's top
- * raised is one taller box of six faces. A face on a cylinder moves out along its
- * normal instead, the cylinder's radius changed (a boss fatter, a bore narrower), the
- * planes beside it -- square to its axis -- carried along. Null and `last_error` for
- * any other curved face, a curved one with anything else beside it or pushed to its
- * axis or into another edge, a face the solid does not have, a zero or non-finite
- * distance, or what the boolean refuses.
+ * raised is one taller box of six faces. A face on a cylinder or a cone moves out along
+ * its normal instead, the surface a step out (a boss fatter, a bore or a countersink
+ * narrower), the planes beside it -- square to its axis -- carried along. Null and
+ * `last_error` for any other curved face, a curved one with anything else beside it,
+ * reaching a cone's apex, pushed to its axis or into another edge, a face the solid
+ * does not have, a zero or non-finite distance, or what the boolean refuses.
  *
  * # Safety
  * `solid` live; `progress` null or valid.
@@ -1098,6 +1119,58 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_push_pull(const struct Cad
                                                                 double tolerance,
                                                                 CadaclysmBlacksmithProgress progress,
                                                                 void *user);
+
+/**
+ * `solid` split by `tool` into bodies -- Fusion's Split Body. A closed `tool`
+ * gives the part outside it, then the part inside; a flat sheet splits by the
+ * whole plane it lies on. Every connected part is a body, and the bodies come
+ * back side by side in one solid: take them apart with
+ * [`cadaclysm_blacksmith_lump_count`] and [`cadaclysm_blacksmith_lump`]. Null and
+ * `last_error` for a tool that does not cross the solid, or a curved sheet.
+ *
+ * # Safety
+ * `solid`, `tool` live; `progress` null or valid.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_split(const struct CadaclysmBlacksmithSolid *solid,
+                                                            const struct CadaclysmBlacksmithSolid *tool,
+                                                            double tolerance,
+                                                            CadaclysmBlacksmithProgress progress,
+                                                            void *user);
+
+/**
+ * `solid` split by the plane through `plane`'s origin square to its z (a frame,
+ * twelve doubles): the bodies in front of it, then those behind, side by side in
+ * one solid -- see [`cadaclysm_blacksmith_split`].
+ *
+ * # Safety
+ * `solid` live; `plane` twelve doubles; `progress` null or valid.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_split_by_plane(const struct CadaclysmBlacksmithSolid *solid,
+                                                                     const double *plane,
+                                                                     double tolerance,
+                                                                     CadaclysmBlacksmithProgress progress,
+                                                                     void *user);
+
+/**
+ * How many connected bodies `solid` is -- faces sharing an edge are one body. A
+ * split's result is several; a boolean's can be. 0 and `last_error` for a null
+ * solid.
+ *
+ * # Safety
+ * `solid` live.
+ */
+uint32_t cadaclysm_blacksmith_lump_count(const struct CadaclysmBlacksmithSolid *solid);
+
+/**
+ * Body `index` of `solid` (see [`cadaclysm_blacksmith_lump_count`]) as a solid of
+ * its own, its faces in `solid`'s order and colours. Null and `last_error` for an
+ * index the solid has no body at.
+ *
+ * # Safety
+ * `solid` live.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_lump(const struct CadaclysmBlacksmithSolid *solid,
+                                                           uint32_t index);
 
 /**
  * `solid` with its flush faces merged, as a new solid: planar faces on one plane,
@@ -1213,6 +1286,20 @@ void cadaclysm_blacksmith_sweep_path_free(struct CadaclysmBlacksmithSweepPath *p
 struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sweep(const struct CadaclysmBlacksmithProfile *profile,
                                                             const double *frame,
                                                             const struct CadaclysmBlacksmithSweepPath *path);
+
+/**
+ * A circle of `radius` swept along `path`, square to its start -- Fusion's Pipe:
+ * a rod, or with a positive `thickness` a tube whose walls are that thick. `path`
+ * is borrowed, as by [`cadaclysm_blacksmith_sweep`]. Null and `last_error` for a
+ * radius that is not positive, a thickness that is negative or reaches the
+ * radius, or what the sweep refuses.
+ *
+ * # Safety
+ * `path` live.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_pipe(const struct CadaclysmBlacksmithSweepPath *path,
+                                                           double radius,
+                                                           double thickness);
 
 /**
  * [`cadaclysm_blacksmith_sweep`] for a curve rather than a face: the profile's

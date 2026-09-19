@@ -59,18 +59,14 @@ function main() {
   console.log(`cuboid: ${box.faces} faces, bounds min=(${fmt(lo)}) max=(${fmt(hi)})`);
   if (box.faces !== 6) throw new Error(`a cuboid has 6 faces, not ${box.faces}`);
 
-  // STEP out needs the AP203 schema text, found beside the SDK or through
-  // CADACLYSM_SCHEMAS; without it there is nothing to read back.
-  let schema;
-  try { schema = bs.defaultSchema(); } catch (e) { console.log(`STEP skipped: ${e.message}`); return; }
-  const text = box.stepText(schema);
-  console.log(`STEP: ${text.length} bytes with ${path.basename(schema)}`);
+  // STEP out, with no schema: the kernel writes against its own built-in AP203.
+  const text = box.stepText();
+  console.log(`STEP: ${text.length} bytes with the built-in AP203`);
   box.close();
 
-  // The reader, on the text the builder just wrote. The built-in schemas
-  // read it on their own; the file found above is passed as well so a
-  // library built before them reads it too.
-  const built = cad.openMemory(text, 'stp', { schema, name: 'cuboid.stp' });
+  // The reader, on the text the builder just wrote. With no schema, it reads
+  // against its own built-in AP203 too.
+  const built = cad.openMemory(text, 'stp', { name: 'cuboid.stp' });
   try {
     const b = built.bounds;
     console.log(`scene: ${built.nodeCount} nodes, bounds min=(${fmt(b.min)}) max=(${fmt(b.max)})`);

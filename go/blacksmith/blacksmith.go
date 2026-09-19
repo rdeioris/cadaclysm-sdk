@@ -33,7 +33,8 @@
 // Go has no defaults, so every value Python defaults is spelled out at the call: the
 // tolerance Join/Cut/Common/SplitSheet default to is [DefaultTolerance] (0.05), the one
 // Fillet/Chamfer/Shell default to is [FilletTolerance] (1e-6); a schema of "" is Python's
-// None (the [DefaultSchema] lookup); the unit Python defaults to is "mm".
+// None (the kernel's built-in AP203, [DefaultSchema]'s ap203.exp no longer needed); the
+// unit Python defaults to is "mm".
 //
 // Python's progress callbacks (the progress=None parameter of join, cut, common,
 // split_sheet, fillet and shell) are not offered: a Go func over the C callback is out of
@@ -249,6 +250,10 @@ func ancestors(dir string) []string {
 // above this source file (the checkout it was built from — the SDK layout and this
 // repository's both keep schemas/ at the top), then above the running executable, then
 // above the working directory.
+//
+// The ap203.exp file this finds is no longer needed: the kernel writes against its
+// built-in AP203 when no schema is given. This function stays for compatibility and the
+// parity gates; nothing here calls it to write STEP any more.
 func DefaultSchema() (string, error) {
 	var candidates []string
 	if env := os.Getenv("CADACLYSM_SCHEMAS"); env != "" {
@@ -272,30 +277,29 @@ func DefaultSchema() (string, error) {
 			return candidate, nil
 		}
 	}
-	return "", &BuildError{Message: "ap203.exp not found; pass schema (a path or the schema's text)"}
+	return "", &BuildError{Message: "ap203.exp not found (none is needed to write STEP: leave schema out for the " +
+		"built-in AP203, or pass a schema name, a .exp path or EXPRESS text)"}
 }
 
-// schemaText is schema read as Python's _schema_text reads it: "" for the default lookup,
-// the path of an .exp, or the schema's own text (anything holding a newline, or naming no
-// file, is taken as text).
-func schemaText(schema string) (string, error) {
+// schemaText is schema resolved as the ABI's rules take it: "" -> nil (the built-in
+// AP203); an existing file, named with no newline in it, -> its text, as a freshly
+// allocated *C.char; anything else -> the string itself (a built-in schema's name or a
+// custom schema's own EXPRESS text), also freshly allocated. The caller must C.free a
+// non-nil result.
+func schemaText(schema string) (*C.char, error) {
 	if schema == "" {
-		found, err := DefaultSchema()
-		if err != nil {
-			return "", err
-		}
-		schema = found
+		return nil, nil
 	}
 	if !containsNewline(schema) {
 		if info, err := os.Stat(schema); err == nil && !info.IsDir() {
 			text, rerr := os.ReadFile(schema)
 			if rerr != nil {
-				return "", &BuildError{Message: fmt.Sprintf("schema: %s: %v", schema, rerr)}
+				return nil, &BuildError{Message: fmt.Sprintf("schema: %s: %v", schema, rerr)}
 			}
-			return string(text), nil
+			return C.CString(string(text)), nil
 		}
 	}
-	return schema, nil
+	return C.CString(schema), nil
 }
 
 func containsNewline(s string) bool {
@@ -307,10 +311,13 @@ func containsNewline(s string) bool {
 	return false
 }
 
-// WriteStepText is several solids as one AP203 part file's text, each its own body.
-// schema is "" for the DefaultSchema lookup, the path of an .exp, or the schema's own
-// text; unit is what the solids' lengths are, "m", "mm" or "in" (Python's default is
-// "mm").
+// WriteStepText is several solids as one part file's text, each its own body. schema is
+// one of four things: "" (the kernel's built-in AP203); the path of a schema file (no
+// newline in it, naming an existing file), read and sent as EXPRESS text; the bare name
+// of a built-in schema (case-insensitive, e.g.
+// "AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF" — an unknown name returns a
+// *BuildError); or a custom schema's own EXPRESS text. unit is what the solids' lengths
+// are, "m", "mm" or "in" (Python's default is "mm").
 func WriteStepText(solids []*Solid, schema, unit string) (string, error) {
 	defer pin()()
 	code, ok := units[unit]
@@ -330,12 +337,13 @@ func WriteStepText(solids []*Solid, schema, unit string) (string, error) {
 		}
 		handles[i] = h
 	}
-	text, err := schemaText(schema)
+	cs, err := schemaText(schema)
 	if err != nil {
 		return "", err
 	}
-	cs := C.CString(text)
-	defer C.free(unsafe.Pointer(cs))
+	if cs != nil {
+		defer C.free(unsafe.Pointer(cs))
+	}
 	var first **C.CadaclysmBlacksmithSolid
 	if len(handles) > 0 {
 		first = &handles[0]
@@ -1645,6 +1653,23 @@ func RevolveOpen(profile *Profile, axis [6]float64, angle float64) (*Solid, erro
 	return out, err
 }
 
+// Coil is profile coiled about axis (a point and a direction) — Python's Solid.coil: read
+// as Revolve reads it, x the distance from the axis and y along it, and turned turns
+// times while climbing pitch along the axis each turn: a spring, a thread. The two ends
+// are the profile itself, flat; from a full turn up the pitch must be taller than the
+// profile.
+func Coil(profile *Profile, axis [6]float64, pitch, turns float64) (*Solid, error) {
+	defer pin()()
+	h, err := profile.h()
+	if err != nil {
+		return nil, err
+	}
+	a := axis
+	out, err := newSolid(C.cadaclysm_blacksmith_coil(h, doubles(&a[0]), C.double(pitch), C.double(turns)), "solid")
+	runtime.KeepAlive(profile)
+	return out, err
+}
+
 // RevolveInPlane is profile, drawn on frame, swung angle radians about the axis through
 // the sketch points a and b (on the frame) — the profile and its axis drawn together,
 // where Revolve reads the profile as (radius, height). The profile may lie on either side
@@ -1715,6 +1740,20 @@ func SweepOpen(profile *Profile, frame Frame, path *SweepPath) (*Solid, error) {
 	f := frame
 	out, err := newSolid(C.cadaclysm_blacksmith_sweep_open(h, doubles(&f[0]), hp), "solid")
 	runtime.KeepAlive(profile)
+	runtime.KeepAlive(path)
+	return out, err
+}
+
+// Pipe is a circle of radius swept along path, square to its start — Python's
+// Solid.pipe, Fusion's Pipe: a rod, or with a positive thickness a tube whose walls are
+// that thick. path is only borrowed, as by Sweep.
+func Pipe(path *SweepPath, radius, thickness float64) (*Solid, error) {
+	defer pin()()
+	hp, err := path.h()
+	if err != nil {
+		return nil, err
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_pipe(hp, C.double(radius), C.double(thickness)), "solid")
 	runtime.KeepAlive(path)
 	return out, err
 }
@@ -2341,9 +2380,9 @@ func merged(out *Solid, err error, merge []bool) (*Solid, error) {
 // PushPull is face pushed out by distance along its outward normal (pulled in, negative)
 // the way Fusion and Rhino extrude a face — Python's Solid.push_pull: the prism over it
 // joined on (cut out) at tolerance, and the flush faces merged, so a box's top raised is
-// one taller box of six faces. A face on a cylinder moves out along its normal instead,
-// the radius changed (a boss fatter, a bore narrower), the flat faces beside it carried
-// along; any other curved face is refused.
+// one taller box of six faces. A face on a cylinder or a cone moves out along its normal
+// instead, the surface a step out (a boss fatter, a bore or a countersink narrower), the
+// flat faces beside it carried along; any other curved face is refused.
 func (s *Solid) PushPull(face int, distance, tolerance float64) (*Solid, error) {
 	defer pin()()
 	h, err := s.h()
@@ -2356,6 +2395,80 @@ func (s *Solid) PushPull(face int, distance, tolerance float64) (*Solid, error) 
 	out, err := newSolid(C.cadaclysm_blacksmith_push_pull(h, C.uint32_t(face), C.double(distance), C.double(tolerance), nil, nil), "solid")
 	runtime.KeepAlive(s)
 	return out, err
+}
+
+// Split is this solid split by tool into bodies — Python's Solid.split, Fusion's Split
+// Body: a closed tool gives the parts outside it, then the parts inside; a flat sheet
+// splits by the whole plane it lies on. Each connected part is a body of its own.
+func (s *Solid) Split(tool *Solid, tolerance float64) ([]*Solid, error) {
+	all, err := func() (*Solid, error) {
+		defer pin()()
+		h, err := s.h()
+		if err != nil {
+			return nil, err
+		}
+		ht, err := tool.h()
+		if err != nil {
+			return nil, err
+		}
+		out, err := newSolid(C.cadaclysm_blacksmith_split(h, ht, C.double(tolerance), nil, nil), "solid")
+		runtime.KeepAlive(s)
+		runtime.KeepAlive(tool)
+		return out, err
+	}()
+	if err != nil {
+		return nil, err
+	}
+	defer all.Close()
+	return all.Lumps()
+}
+
+// SplitByPlane is this solid split by the plane through plane's origin, square to its z
+// — Python's Solid.split_by_plane: the bodies in front of it first, then those behind.
+func (s *Solid) SplitByPlane(plane Frame, tolerance float64) ([]*Solid, error) {
+	all, err := func() (*Solid, error) {
+		defer pin()()
+		h, err := s.h()
+		if err != nil {
+			return nil, err
+		}
+		f := plane
+		out, err := newSolid(C.cadaclysm_blacksmith_split_by_plane(h, doubles(&f[0]), C.double(tolerance), nil, nil), "solid")
+		runtime.KeepAlive(s)
+		return out, err
+	}()
+	if err != nil {
+		return nil, err
+	}
+	defer all.Close()
+	return all.Lumps()
+}
+
+// Lumps is this solid's connected bodies, each a solid of its own — Python's
+// Solid.lumps: faces sharing an edge are one body, in the order of their first faces.
+func (s *Solid) Lumps() ([]*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	n := uint32(C.cadaclysm_blacksmith_lump_count(h))
+	if n == 0 {
+		return nil, failure("lump_count")
+	}
+	out := make([]*Solid, 0, n)
+	for i := uint32(0); i < n; i++ {
+		body, err := newSolid(C.cadaclysm_blacksmith_lump(h, C.uint32_t(i)), "solid")
+		if err != nil {
+			for _, b := range out {
+				b.Close()
+			}
+			return nil, err
+		}
+		out = append(out, body)
+	}
+	runtime.KeepAlive(s)
+	return out, nil
 }
 
 // MergeFlush is this solid with its flush faces merged — Python's Solid.merge_flush: flat
@@ -2412,7 +2525,7 @@ func FromNode(scene *cadaclysm.Scene, node *cadaclysm.Node, placed bool) (*Solid
 		return nil, err
 	}
 	if solid == nil {
-		return nil, &BuildError{label + " has no brep: only a B-rep body has one (STEP, ACIS, Rhino, OCCT .brep, " +
+		return nil, &BuildError{label + " has no brep: only a B-rep body has one (STEP, ACIS, Rhino, BREP (.brep), " +
 			"IGES, IFC), not a mesh, a curve or a CSG body"}
 	}
 	if !placed {
@@ -2428,7 +2541,7 @@ func FromNode(scene *cadaclysm.Scene, node *cadaclysm.Node, placed bool) (*Solid
 }
 
 // Open is the body a CAD file holds, as a solid: a STEP (AP203/214/242), ACIS .sat,
-// Rhino .3dm, OCCT .brep, IGES or IFC file, read where it draws, in the file's own units
+// Rhino .3dm, BREP (.brep), IGES or IFC file, read where it draws, in the file's own units
 // and axes. A file drawing several bodies needs [OpenBody] or [OpenAll]. Fillet and
 // chamfer want line and circle edges; booleans take any surface, but the new edges they
 // trace on a free-form (NURBS) face are not always writable back to STEP; and every verb
@@ -2504,7 +2617,7 @@ func OpenAll(path string) ([]*Solid, error) {
 	if len(solids) == 0 {
 		extension := strings.ToLower(strings.TrimPrefix(filepath.Ext(path), "."))
 		return nil, &BuildError{fmt.Sprintf("open: the .%s file draws no B-rep body -- only a STEP, ACIS, Rhino, "+
-			"OCCT .brep, IGES or IFC body can be a solid, not a mesh, a curve or a CSG body", extension)}
+			"BREP (.brep), IGES or IFC body can be a solid, not a mesh, a curve or a CSG body", extension)}
 	}
 	return solids, nil
 }
@@ -2578,22 +2691,21 @@ func (s *Solid) placed(m [16]float64, what string) (*Solid, error) {
 
 // ToScene is this solid as a reader Scene, through STEP text and cadaclysm.OpenMemory —
 // the door to the viewer and the tree walk. Needs the reader's library built beside this
-// one. schema is the path of the .exp to write and read with, or "" for DefaultSchema —
-// a path, not text: the reader's open takes one.
+// one. schema is as StepText takes it; the reader is given the schema's path only when
+// it names an existing file, since it carries every built-in schema itself and there is
+// no file here to read a FILE_SCHEMA line out of.
 func (s *Solid) ToScene(schema string) (*cadaclysm.Scene, error) {
-	schemaPath := schema
-	if schemaPath == "" {
-		found, err := DefaultSchema()
-		if err != nil {
-			return nil, err
-		}
-		schemaPath = found
-	}
-	text, err := s.StepText(schemaPath, "mm")
+	text, err := s.StepText(schema, "mm")
 	if err != nil {
 		return nil, err
 	}
-	return cadaclysm.OpenMemory([]byte(text), "solid.stp", cadaclysm.WithSchema(schemaPath))
+	var opts []cadaclysm.Option
+	if schema != "" && !containsNewline(schema) {
+		if info, err := os.Stat(schema); err == nil && !info.IsDir() {
+			opts = append(opts, cadaclysm.WithSchema(schema))
+		}
+	}
+	return cadaclysm.OpenMemory([]byte(text), "solid.stp", opts...)
 }
 
 // ---- the workplane -------------------------------------------------------------------------------

@@ -146,6 +146,26 @@ public final class Smoke {
                 Blacksmith.Bounds own = rounded.bounds();
                 if (!near(own.max(), 40, 20, 16)) fail("the kernel's own bounds are off: " + Arrays.toString(own.max()));
 
+                // No schema at all: the kernel writes against its built-in AP203, no
+                // ap203.exp needed.
+                String noSchemaText = rounded.stepText();
+                if (!noSchemaText.startsWith("ISO-10303-21;")) fail("stepText() with no schema did not write valid STEP");
+                System.out.println("stepText() with no schema: ISO-10303-21; ok");
+
+                // A single-line custom EXPRESS schema is text, not a path, even though it
+                // holds ':' and ';' -- characters java.nio.file.Path.of() refuses on
+                // Windows (InvalidPathException). schemaText must treat that as "not a
+                // file" and pass the string through, so the failure below is the ABI's own
+                // parse error, not a Java path exception.
+                try {
+                    rounded.stepText("SCHEMA x; ENTITY a; s : STRING := 'x'; END_ENTITY; END_SCHEMA;", "mm");
+                    fail("a bogus single-line custom schema should have failed to parse");
+                } catch (Blacksmith.BuildException e) {
+                    if (e.getMessage() == null || !e.getMessage().contains("step: schema:"))
+                        fail("expected the ABI's step: schema: parse error, got: " + e.getMessage());
+                    System.out.println("single-line custom schema text reached the ABI: " + e.getMessage());
+                }
+
                 Path step = Files.createTempFile("cadaclysm-smoke", ".stp");
                 rounded.step(step.toString());
                 try (Cad.Scene back = Cad.open(step.toString())) {
@@ -305,6 +325,18 @@ public final class Smoke {
             try (Blacksmith.Solid cube = Blacksmith.Solid.cuboid(10, 10, 10);
                  Blacksmith.Solid raised = cube.pushPull(cube.selectFace(Blacksmith.Selector.max(Blacksmith.Axis.Z)), 5)) {
                 if (raised.faces() != 6 || !raised.isWatertight()) fail("push_pull: the raised cube has " + raised.faces() + " faces, not 6");
+                // Quick solids: a coiled wire and a pipe close; a cube split by a plane is two bodies.
+                try (Blacksmith.Profile unit = Blacksmith.Profile.circle(1);
+                     Blacksmith.Profile wire = unit.translate(10, 0);
+                     Blacksmith.Solid spring = Blacksmith.Solid.coil(wire, new double[] {0, 0, 0, 0, 0, 1}, 4, 2);
+                     Blacksmith.SweepPath pipePath = Blacksmith.SweepPath.at(new double[] {0, 0, 0}).lineTo(new double[] {0, 0, 10});
+                     Blacksmith.Solid pipe = Blacksmith.Solid.pipe(pipePath, 2, 0.5)) {
+                    if (!spring.isWatertight()) fail("coil: the spring leaks");
+                    if (pipe.faces() != 6) fail("pipe: the tube has " + pipe.faces() + " faces, not 6");
+                    List<Blacksmith.Solid> halves = cube.splitByPlane(new double[] {2, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0});
+                    if (halves.size() != 2 || halves.get(0).faces() != 6) fail("split_by_plane: " + halves.size() + " bodies, not 2");
+                    for (Blacksmith.Solid half : halves) half.close();
+                }
             }
             // From loops: a circle given before the square it lies in -- the square is the boundary.
             try (Blacksmith.Profile loopHole = Blacksmith.Profile.circle(4);
@@ -327,7 +359,7 @@ public final class Smoke {
                 if (hexPrism.faces() != 8 || loopSolid.faces() != 3 || !loopSolid.isWatertight()) fail("shapes: " + hexPrism.faces() + " and " + loopSolid.faces() + " faces, not 8 and 3");
             }
             System.out.println("sheet verbs: face, trim (" + holed.faces() + "+" + disc.faces() + "), face_sheet, drop_faces, round ("
-                    + slab.faces() + " faces), along, chain, push_pull, close_loop, from_loops, revolve_in_plane, regular_polygon, spline: ok");
+                    + slab.faces() + " faces), along, chain, push_pull, coil, pipe, split_by_plane, close_loop, from_loops, revolve_in_plane, regular_polygon, spline: ok");
         }
     }
 

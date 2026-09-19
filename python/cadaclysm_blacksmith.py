@@ -17,7 +17,7 @@
 
 It uses `ctypes` and the published header `include/cadaclysm_blacksmith.h`, the
 way any Python program would -- no generated bindings, no Rust, no build system
-(Python 3.9+). Under Pyodide, in the website's notebook, the same file runs
+(Python 3.8+). Under Pyodide, in the website's notebook, the same file runs
 against the blacksmith compiled to wasm instead, through one shim behind `_lib()`.
 Drop it beside your own script and point `CADACLYSM_BLACKSMITH_LIBRARY` at the
 shared library if it is not where this looks by default (`target/release` or
@@ -61,7 +61,7 @@ they need not be typed out -- `Frame.xy((0, 0, 5))` is the XY plane at z = 5,
 
 ## Solids from files
 
-`Solid.open("housing.step")` reads a STEP, ACIS, Rhino, OCCT `.brep`, IGES or IFC
+`Solid.open("housing.step")` reads a STEP, ACIS, Rhino, BREP (`.brep`), IGES or IFC
 file's body as a solid to cut, fillet, join with parts built here and write back
 out (`Solid.open_all` for every body; JT and OpenSCAD are meshes and have none).
 On the desktop it goes through the reader module, `cadaclysm.py`, and
@@ -101,7 +101,7 @@ __all__ = [
 ]
 
 # This file's own version (the workspace's); `version()` is the loaded library's.
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 NONE = 0xFFFFFFFF
 UNITS = {"m": 0, "mm": 1, "in": 2}
@@ -162,7 +162,11 @@ def library_path() -> _FsPath:
 def default_schema() -> _FsPath:
     """`ap203.exp`: `CADACLYSM_SCHEMAS/ap203.exp` if set; else beside this file (the pip
     package); else in a `schemas/` directory in any ancestor, nearest first (the SDK's,
-    beside `python/`, or this repository's, at its root)."""
+    beside `python/`, or this repository's, at its root).
+
+    The `ap203.exp` file this finds is no longer needed: the kernel writes against
+    its built-in AP203 when no schema is given. This function stays for compatibility
+    and the parity gates; nothing here calls it to write STEP any more."""
     override = os.environ.get("CADACLYSM_SCHEMAS")
     candidates = []
     if override:
@@ -187,7 +191,10 @@ def default_schema() -> _FsPath:
     for c in candidates:
         if c.exists():
             return c
-    raise BuildError("ap203.exp not found; pass schema= (a path or the schema's text)")
+    raise BuildError(
+        "ap203.exp not found (none is needed to write STEP: leave schema out for the "
+        "built-in AP203, or pass a schema name, a .exp path or EXPRESS text)"
+    )
 
 
 class _Mesh(ctypes.Structure):
@@ -259,6 +266,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_loft_open", _SOLID, [_PROFILE, _D, _PROFILE, _D]),
     ("cadaclysm_blacksmith_revolve", _SOLID, [_PROFILE, _D, c_double]),
     ("cadaclysm_blacksmith_revolve_open", _SOLID, [_PROFILE, _D, c_double]),
+    ("cadaclysm_blacksmith_coil", _SOLID, [_PROFILE, _D, c_double, c_double]),
     ("cadaclysm_blacksmith_revolve_in_plane", _SOLID, [_PROFILE, _D, _D, c_double]),
     ("cadaclysm_blacksmith_revolve_open_in_plane", _SOLID, [_PROFILE, _D, _D, c_double]),
     ("cadaclysm_blacksmith_sweep_path_begin", _SWEEP_PATH, [c_double, c_double, c_double]),
@@ -268,6 +276,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_sweep_path_free", None, [_SWEEP_PATH]),
     ("cadaclysm_blacksmith_sweep", _SOLID, [_PROFILE, _D, _SWEEP_PATH]),
     ("cadaclysm_blacksmith_sweep_open", _SOLID, [_PROFILE, _D, _SWEEP_PATH]),
+    ("cadaclysm_blacksmith_pipe", _SOLID, [_SWEEP_PATH, c_double, c_double]),
     ("cadaclysm_blacksmith_extrude_faces", _SOLID, [_SOLID, c_double]),
     ("cadaclysm_blacksmith_face", _SOLID, [_PROFILE, _D]),
     ("cadaclysm_blacksmith_face_sheet", _SOLID, [_SOLID, c_uint32]),
@@ -286,6 +295,10 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_shell", _SOLID, [_SOLID, c_double, _U, c_size_t, c_double, _PROGRESS, c_void_p]),
     ("cadaclysm_blacksmith_push_pull", _SOLID, [_SOLID, c_uint32, c_double, c_double, _PROGRESS, c_void_p]),
     ("cadaclysm_blacksmith_merge_flush", _SOLID, [_SOLID]),
+    ("cadaclysm_blacksmith_split", _SOLID, [_SOLID, _SOLID, c_double, _PROGRESS, c_void_p]),
+    ("cadaclysm_blacksmith_split_by_plane", _SOLID, [_SOLID, _D, c_double, _PROGRESS, c_void_p]),
+    ("cadaclysm_blacksmith_lump_count", c_uint32, [_SOLID]),
+    ("cadaclysm_blacksmith_lump", _SOLID, [_SOLID, c_uint32]),
     ("cadaclysm_blacksmith_face_count", c_uint32, [_SOLID]),
     ("cadaclysm_blacksmith_select_face", c_uint32, [_SOLID, c_uint32, _D, c_uint32]),
     ("cadaclysm_blacksmith_face_frame", c_bool, [_SOLID, c_uint32, _D]),
@@ -343,7 +356,7 @@ class _WasmLibrary:
     # count (a typed array knows its length), the progress `user` pointer, and
     # the out-arguments above
     _DROP = {"profile_polygon": (1,), "path_nurbs_to": (2, 5), "join": (4,), "cut": (4,), "common": (4,),
-             "split_sheet": (4,), "trim": (5,), "drop_faces": (2,), "profile_round": (3,), "profile_spline": (1,), "profile_chain": (1,), "profile_from_loops": (1,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "push_pull": (5,), "step": (1,),
+             "split_sheet": (4,), "trim": (5,), "drop_faces": (2,), "profile_round": (3,), "profile_spline": (1,), "profile_chain": (1,), "profile_from_loops": (1,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "push_pull": (5,), "split": (4,), "split_by_plane": (4,), "step": (1,),
              "slant_of_plane": (3,), "face_frame": (2,), "bounds": (2, 3), "edge": (2,), "colour": (2,), "manifold": (1,)}
     # strings the C side returns as `const char*`, and the module decodes
     _TEXTS = {"version", "build_date", "face_kind", "license_info", "brep_layout_id"}
@@ -373,7 +386,8 @@ class _WasmLibrary:
             raise BuildError(self._message(e)) from None
 
     def __getattr__(self, name):
-        short = name.removeprefix("cadaclysm_blacksmith_")
+        prefix = "cadaclysm_blacksmith_"   # str.removeprefix is 3.9+; this module runs on 3.8
+        short = name[len(prefix):] if name.startswith(prefix) else name
         if name == short or name.startswith("_"):
             raise AttributeError(name)
         try:
@@ -524,7 +538,8 @@ def _rgb(colour):
     """(r, g, b) from "#rgb", "#rrggbb" or three numbers; the range is the
     library's to check."""
     if isinstance(colour, str):
-        h = colour.strip().removeprefix("#")
+        h = colour.strip()
+        h = h[1:] if h.startswith("#") else h
         if len(h) in (3, 6) and all(c in "0123456789abcdefABCDEF" for c in h):
             h = "".join(c * 2 for c in h) if len(h) == 3 else h
             return tuple(int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
@@ -585,7 +600,7 @@ def _from_brep(node, what: str, missing_ok=False):
     if brep is None:
         if missing_ok:
             return None
-        raise BuildError(f"{what} has no brep: only a B-rep body has one (STEP, ACIS, Rhino, OCCT .brep, "
+        raise BuildError(f"{what} has no brep: only a B-rep body has one (STEP, ACIS, Rhino, BREP (.brep), "
                          "IGES, IFC), not a mesh, a curve or a CSG body")
     with brep:
         return Solid(_lib().cadaclysm_blacksmith_from_brep(brep.pointer, brep.layout_id().encode()))
@@ -1126,6 +1141,23 @@ class Solid:
         return Solid(_lib().cadaclysm_blacksmith_sweep(profile._handle, _frame(frame), path._live()))
 
     @staticmethod
+    def coil(profile: Profile, axis, pitch, turns) -> "Solid":
+        """`profile` coiled about `axis` (a point and a direction): read as
+        `revolve` reads it -- x the distance from the axis, y along it -- and
+        turned `turns` times while climbing `pitch` along the axis each turn:
+        a spring, a thread. The walls follow the helix to a few millionths of
+        the radius; the two ends are the profile itself, flat. From a full turn
+        up the pitch must be taller than the profile."""
+        return Solid(_lib().cadaclysm_blacksmith_coil(profile._handle, _axis(axis), pitch, turns))
+
+    @staticmethod
+    def pipe(path: SweepPath, radius, thickness=0.0) -> "Solid":
+        """A circle of `radius` swept along `path`, square to its start --
+        Fusion's Pipe: a rod, or with a positive `thickness` a tube whose walls
+        are that thick. `path` is only borrowed, as by `sweep`."""
+        return Solid(_lib().cadaclysm_blacksmith_pipe(path._live(), radius, thickness))
+
+    @staticmethod
     def sweep_open(profile: Profile, frame, path: SweepPath) -> "Solid":
         """`sweep` for a curve rather than a face: one wall per segment per
         piece, no caps -- an open sheet, the way `extrude_open` is to
@@ -1167,7 +1199,7 @@ class Solid:
     @staticmethod
     def open(path, body=None) -> "Solid":  # noqa: A003 - `Solid.open`, the verb
         """The body a CAD file holds, as a solid: a STEP (AP203/214/242), ACIS
-        `.sat`, Rhino `.3dm`, OCCT `.brep`, IGES or IFC file, read where it
+        `.sat`, Rhino `.3dm`, BREP (`.brep`), IGES or IFC file, read where it
         draws, in the file's own units and axes. A file drawing several bodies
         needs `body=` (0-based, in drawing order) or `Solid.open_all`.
 
@@ -1228,7 +1260,7 @@ class Solid:
             scene.close()
         if not solids:
             raise BuildError(
-                f"open: the .{extension} file draws no B-rep body -- only a STEP, ACIS, Rhino, OCCT .brep, "
+                f"open: the .{extension} file draws no B-rep body -- only a STEP, ACIS, Rhino, BREP (.brep), "
                 "IGES or IFC body can be a solid, not a mesh, a curve or a CSG body"
             )
         return solids
@@ -1521,12 +1553,38 @@ class Solid:
         negative) the way Fusion and Rhino extrude a face: the prism over it joined on
         (cut out), and the flush faces merged -- a box's top raised is one taller box
         of six faces, not a box and a prism with every side wall split at the seam.
-        A face on a cylinder moves out along its normal instead, the radius changed
-        -- a boss fatter, a bore narrower -- with the flat faces beside it, square to
-        its axis, carried along; any other curved face is refused. `tolerance` and
-        `progress` as `join`'s."""
+        A face on a cylinder or a cone moves out along its normal instead, the
+        surface a step out -- a boss fatter, a bore or a countersink narrower -- with
+        the flat faces beside it, square to its axis, carried along; any other curved
+        face is refused. `tolerance` and `progress` as `join`'s."""
         cb, _keep = _progress(progress)
         return Solid(_lib().cadaclysm_blacksmith_push_pull(self._h(), face, distance, tolerance, cb, None))
+
+    def split(self, tool: "Solid", tolerance=0.05, progress=None) -> list:
+        """This solid split by `tool` into bodies -- Fusion's Split Body: a
+        closed `tool` gives the parts outside it, then the parts inside; a flat
+        sheet (a `face`) splits by the whole plane it lies on. Each connected
+        part is a body of its own, so a U cut across both arms is three. The
+        new faces are pieces of the tool's; colours carry over."""
+        cb, _keep = _progress(progress)
+        return Solid(_lib().cadaclysm_blacksmith_split(self._h(), tool._h(), tolerance, cb, None)).lumps()
+
+    def split_by_plane(self, plane, tolerance=0.05, progress=None) -> list:
+        """This solid split by the plane through `plane`'s origin, square to its
+        z: the bodies in front of it (on z's side) first, then those behind."""
+        cb, _keep = _progress(progress)
+        return Solid(_lib().cadaclysm_blacksmith_split_by_plane(self._h(), _frame(plane), tolerance, cb, None)).lumps()
+
+    def lumps(self) -> list:
+        """This solid's connected bodies, each a solid of its own -- faces
+        sharing an edge are one body. One body comes back as itself; a boolean
+        that leaves two parts, or a split, gives several, in the order of
+        their first faces."""
+        h = self._h()
+        n = _lib().cadaclysm_blacksmith_lump_count(h)
+        if n == 0:
+            _fail("lump_count")
+        return [Solid(_lib().cadaclysm_blacksmith_lump(h, i)) for i in range(n)]
 
     def merge_flush(self) -> "Solid":
         """This solid with its flush faces merged: flat faces on one plane, facing one
@@ -1544,7 +1602,10 @@ class Solid:
     def to_scene(self, schema=None) -> "cadaclysm.Scene":
         """This solid as a reader `Scene`, through STEP text and `cadaclysm.open_memory`
         -- the door to `viewer.py` and the tree walk. Needs `cadaclysm.py`
-        importable and its library built."""
+        importable and its library built. `schema` as `step_text` takes it; the
+        reader is given the schema's **path** only when it names an existing file,
+        since it carries every built-in schema itself and there is no file here to
+        read a `FILE_SCHEMA` line out of."""
         try:
             import cadaclysm
         except ImportError:
@@ -1552,8 +1613,8 @@ class Solid:
                 "to_scene needs the reader module: put crates/cadaclysm-capi/examples on sys.path "
                 "and build its library with `cargo build --release -p cadaclysm-capi`"
             ) from None
-        schema_path = _FsPath(schema) if schema is not None else default_schema()
-        return cadaclysm.open_memory(self.step_text(schema_path).encode(), "stp", schema=schema_path)
+        schema_path = _schema_file(schema)
+        return cadaclysm.open_memory(self.step_text(schema).encode(), "stp", schema=schema_path)
 
 
 class Axis(enum.Enum):
@@ -1851,18 +1912,39 @@ class Workplane:
         return self._solid
 
 
-def _schema_text(schema) -> bytes:
-    """`schema` is None (the default lookup), a path, or the schema's text."""
+def _schema_file(schema):
+    """`schema`'s path, if it is a `str`/`Path` with no newline in it that names a
+    regular file -- else `None`. A filesystem error while checking (e.g. a long
+    single-line string with no separators, over `NAME_MAX` on POSIX) counts as
+    "not a file", not a crash."""
+    if not isinstance(schema, (str, _FsPath)) or "\n" in str(schema):
+        return None
+    try:
+        path = _FsPath(schema)
+        return path if path.is_file() else None
+    except (OSError, ValueError):
+        return None
+
+
+def _schema_text(schema):
+    """`schema` is None (the built-in AP203), the path of a schema file, a built-in
+    schema's name, or a custom schema's EXPRESS text -- see `write_step_text`."""
     if schema is None:
-        schema = default_schema()
-    if isinstance(schema, (str, _FsPath)) and "\n" not in str(schema) and _FsPath(schema).exists():
-        return _FsPath(schema).read_bytes()
+        return None
+    schema_file = _schema_file(schema)
+    if schema_file is not None:
+        return schema_file.read_bytes()
     if isinstance(schema, str):
         return schema.encode()
-    raise BuildError(f"schema: {schema!r} is neither a file nor schema text")
+    raise BuildError(f"schema: {schema!r} is neither a file, a schema name nor schema text")
 
 
 def write_step_text(solids, schema=None, unit="mm") -> str:
+    """`schema` is one of four things: `None` (the kernel's built-in AP203); the
+    path of a schema file (a string or `Path` with no newline in it, naming an
+    existing file), read and sent as EXPRESS text; the bare name of a built-in
+    schema (case-insensitive, e.g. `"AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF"`
+    -- an unknown name raises `BuildError`); or a custom schema's own EXPRESS text."""
     if unit not in UNITS:
         raise BuildError(f"unit must be one of {sorted(UNITS)}")
     handles = (c_void_p * len(solids))(*[s._h() for s in solids])
@@ -1878,5 +1960,6 @@ def write_step_text(solids, schema=None, unit="mm") -> str:
 
 
 def write_step(path, solids, schema=None, unit="mm") -> None:
-    """Several solids as one AP203 file, each its own body."""
+    """One STEP file (AP203 unless `schema` names another), each solid its own body.
+    `schema` as `write_step_text`."""
     _FsPath(path).write_text(write_step_text(solids, schema, unit), encoding="utf-8")

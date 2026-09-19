@@ -107,12 +107,15 @@ Every call returns a new `Solid`; `close()` frees one early. `join`, `cut`
 and `common` take a tolerance (default `0.05`) and a progress callback.
 
 Writing STEP -- `step()`, `stepText()`, `writeStep`, `writeStepText`,
-`toScene()` -- needs the AP203 schema text, which the builder library does
-not carry. With no `schema` argument, `defaultSchema()` finds it as
+`toScene()` -- takes a `schema` argument that is one of four things: left
+out (or `null`), the kernel writes against its own built-in AP203; the bare
+name of a built-in schema (case-insensitive, e.g.
+`"AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF"` -- an unknown name
+throws); the path of a schema file, read and sent as its text; or a custom
+schema's own EXPRESS text. `defaultSchema()` still finds `ap203.exp` as
 `$CADACLYSM_SCHEMAS/ap203.exp`, else `schemas/ap203.exp` in any directory
-above the wrapper -- the SDK checkout's own `schemas/ap203.exp` -- and throws
-naming what it looked for otherwise. Pass a path, or the schema's text, to
-use another.
+above the wrapper, for compatibility -- nothing here calls it to write STEP
+any more.
 
 ## Off the event loop
 
