@@ -72,6 +72,10 @@ export class SweepPath {
 export class Frame implements Iterable<number> {
   constructor(origin: Point3, x: Point3, y: Point3, z: Point3);
   static of(frame: FrameLike): Frame;
+  /** The plane midway between the planes of `a` and `b` -- Fusion's midplane. */
+  static midplane(a: FrameLike, b: FrameLike): Frame;
+  /** The plane through three points: origin `p`, x towards `q`, z the normal they turn about counter-clockwise. */
+  static through(p: Point3, q: Point3, r: Point3): Frame;
   static xy(origin?: Point3): Frame;
   static xz(origin?: Point3): Frame;
   static yz(origin?: Point3): Frame;
@@ -123,6 +127,8 @@ export class Solid {
   static extrudeOpenBetween(profile: Profile, frame: FrameLike, bottom: SlantLike, top: SlantLike): Solid;
   static loft(a: Profile, frameA: FrameLike, b: Profile, frameB: FrameLike): Solid;
   static loftOpen(a: Profile, frameA: FrameLike, b: Profile, frameB: FrameLike): Solid;
+  static loftThrough(sections: Iterable<[Profile, FrameLike]>): Solid;
+  static loftThroughOpen(sections: Iterable<[Profile, FrameLike]>): Solid;
   static revolve(profile: Profile, axis: AxisLine, angle: number): Solid;
   static revolveOpen(profile: Profile, axis: AxisLine, angle: number): Solid;
   static coil(profile: Profile, axis: AxisLine, pitch: number, turns: number): Solid;

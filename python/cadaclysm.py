@@ -1007,6 +1007,63 @@ class Placement:
         return f"Placement(index={self.index}, geometry={self.geometry.index})"
 
 
+# ---- drawing ----------------------------------------------------------------
+
+
+def _viewer():
+    """The viewer loader: `cadaclysm.viewer` in the wheel, `cadaclysm_viewer` beside this
+    module in a checkout. Imported only when something is drawn."""
+    try:
+        from cadaclysm import viewer
+        return viewer
+    except ImportError:
+        pass
+    try:
+        import cadaclysm_viewer
+        return cadaclysm_viewer
+    except ImportError:
+        here = Path(__file__).resolve().parent
+        sys.path.insert(0, str(here))
+        import cadaclysm_viewer
+        return cadaclysm_viewer
+
+
+_Y_UP = {int(Convention.UNITY), int(Convention.Y_UP)}
+
+
+def _drawn_placements(placements, edges):
+    """(meshes, polylines) for the loader, one entry per drawing -- see `Placement`.
+
+    Each placement draws its geometry's mesh (or, for a node drawn as a curve, its
+    curves) through the placement's own transform, in the colour of what a click on it
+    selects -- else the shape's -- and only while that selected node is visible. With
+    `edges`, a meshed placement brings its B-rep edges too, through the same matrix.
+    """
+    meshes, lines = [], []
+    for place in placements:
+        select = place.select
+        if not select.visible_now:
+            continue
+        node = place.geometry
+        if not node.can_mesh:
+            continue
+        colour = select.colour or node.colour
+        rgb = None if colour is None else colour[:3]
+        matrix = place.raw_transform
+        mesh = node.mesh
+        if mesh:
+            meshes.append((mesh.positions, mesh.normals, mesh.indices, matrix, rgb))
+            if edges:
+                outline = node.edges
+                if outline:
+                    lines.append((outline.positions, outline.counts, matrix, None))
+        else:
+            curves = node.curves
+            if curves:
+                lines.append((curves.positions, curves.counts, matrix, rgb))
+    return meshes, lines
+
+
 # ---- nodes ----------------------------------------------------------------
 
 
@@ -1447,6 +1504,21 @@ class Node:
             yield node
             stack.extend(reversed(node.children))
 
+    def show(self, **options) -> None:
+        """Draw what this node and everything under it places -- the placements whose
+        selected node is this one or in its subtree -- with the viewer in use. Keywords
+        as `Scene.show`."""
+        self.scene._draw("show", self._placements(), options, "Node")
+
+    def view(self, **options):
+        """Orbit what this node and everything under it places; returns (azimuth,
+        elevation, zoom)."""
+        return self.scene._draw("view", self._placements(), options, "Node")
+
+    def _placements(self) -> "list[Placement]":
+        mine = {node.index for node in self.walk()}
+        return [p for p in self.scene.placements if p.select.index in mine]
+
 
 # ---- the scene ------------------------------------------------------------
 
@@ -1756,6 +1828,37 @@ class Scene:
         ok = _lib().cadaclysm_scene_save(self._handle, str(path).encode(), fmt.encode())
         if not ok:
             raise CadaclysmError(_last_error() or f"could not write {path}")
+
+    # -- drawing --
+
+    def show(self, **options) -> None:
+        """Draw every visible placement with the viewer in use. Keywords: view= (front
+        back left right top bottom iso), az=, el=, zoom=, up= (default from the convention
+        the scene was opened with), edges= (the B-rep edges over the shapes; free curves
+        are drawn either way), width=, height=, hint=. No tolerance=: a document is drawn
+        at the tolerance it was read with."""
+        self._draw("show", self.placements, options, "Scene")
+
+    def view(self, **options):
+        """Orbit the model with the viewer in use; returns (azimuth, elevation, zoom)."""
+        return self._draw("view", self.placements, options, "Scene")
+
+    def _draw(self, mode, placements, options, owner):
+        if "tolerance" in options:
+            raise TypeError(f"{owner}.{mode} takes no tolerance: a document is drawn at the "
+                            "tolerance it was read with")
+        viewer = _viewer()
+        default_up = "y" if (self.convention & 0xFF) in _Y_UP else "z"
+        opts = viewer.options("iso", default_up=default_up, **options)
+        edges = options.get("edges", True)
+        meshes, lines = _drawn_placements(placements, edges)
+        # Lines are drawn only while the edges flag is clear, so free curves keep it clear;
+        # only a picture with no lines at all may be asked for no (screen-space) edges.
+        opts["flags"] = viewer.NO_EDGES if not edges and not lines else 0
+        last = viewer.draw(mode, self.path.name, meshes, lines, opts)
+        if mode == "view":
+            viewer.announce(owner.lower(), last)
+        return last
 
 
 # ---- opening --------------------------------------------------------------

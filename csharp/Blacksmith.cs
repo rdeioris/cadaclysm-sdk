@@ -268,6 +268,7 @@ internal static class BlacksmithNative
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_round(ProfileHandle profile, double radius, uint[]? corners,
         nuint count, [MarshalAs(UnmanagedType.I1)] bool open);
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_close_loop(ProfileHandle profile);
+    [DllImport(Lib)] internal static extern RawBlacksmithPolylines cadaclysm_blacksmith_profile_polylines(ProfileHandle profile, double tolerance);
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_chain(IntPtr[] pieces, nuint count,
         double tolerance);
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_from_loops(IntPtr[] loops, nuint count);
@@ -303,12 +304,18 @@ internal static class BlacksmithNative
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_extrude_open_between(ProfileHandle profile, double[] frame,
         double[] bottom, double[] top);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_frame_midplane(double[] a, double[] b, [Out] double[] outFrame);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_frame_through(double[] p, double[] q, double[] r, [Out] double[] outFrame);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_slant_of_plane(double[] frame, double[] point, double[] normal,
         [Out] double[] outSlant);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_loft(ProfileHandle a, double[] frameA, ProfileHandle b,
         double[] frameB);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_loft_open(ProfileHandle a, double[] frameA, ProfileHandle b,
         double[] frameB);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_loft_through(IntPtr[] profiles, double[] frames, nuint count);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_loft_through_open(IntPtr[] profiles, double[] frames, nuint count);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_revolve(ProfileHandle profile, double[] axis, double angle);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_revolve_open(ProfileHandle profile, double[] axis, double angle);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_coil(ProfileHandle profile, double[] axis, double pitch, double turns);
@@ -1107,6 +1114,29 @@ public sealed class Solid : IDisposable
     public static Solid LoftOpen(Profile a, double[] frameA, Profile b, double[] frameB) =>
         new(BlacksmithNative.cadaclysm_blacksmith_loft_open(a.Handle, Blacksmith.Frame(frameA), b.Handle, Blacksmith.Frame(frameB)));
 
+    /// <summary>The solid smooth through every section -- a profile on its frame, in order:
+    /// each wall interpolates its side across all the profiles (cubic through four or more,
+    /// quadratic through three, <see cref="Loft"/> through two), capped by the first and the
+    /// last. The profiles must have the same number of sides and no holes.</summary>
+    public static Solid LoftThrough(IEnumerable<(Profile Profile, double[] Frame)> sections) =>
+        LoftedThrough(sections, true);
+
+    /// <summary><see cref="LoftThrough"/> without the caps: the sheet through the curves.</summary>
+    public static Solid LoftThroughOpen(IEnumerable<(Profile Profile, double[] Frame)> sections) =>
+        LoftedThrough(sections, false);
+
+    private static Solid LoftedThrough(IEnumerable<(Profile Profile, double[] Frame)> sections, bool solid)
+    {
+        var all = sections.ToArray();
+        var handles = all.Select(s => s.Profile.Handle.DangerousGetHandle()).ToArray();
+        var frames = all.SelectMany(s => Blacksmith.Frame(s.Frame)).ToArray();
+        var made = solid
+            ? BlacksmithNative.cadaclysm_blacksmith_loft_through(handles, frames, (nuint)handles.Length)
+            : BlacksmithNative.cadaclysm_blacksmith_loft_through_open(handles, frames, (nuint)handles.Length);
+        GC.KeepAlive(all);
+        return new Solid(made);
+    }
+
     /// <summary>`profile` swung `angle` radians about `axis` (six numbers: a point and a
     /// direction).</summary>
     public static Solid Revolve(Profile profile, double[] axis, double angle) =>
@@ -1818,6 +1848,24 @@ public sealed class Frame : IEquatable<Frame>
         if (Math.Abs(d) > 1 - Square) throw new BuildException("Frame.At: x lies along the normal");
         var ax = Unit((hint.X - d * z.X, hint.Y - d * z.Y, hint.Z - d * z.Z), "Frame.At: x");
         return new Frame(origin, ax, Cross(z, ax), z);
+    }
+
+    /// <summary>The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line -- Fusion's midplane.</summary>
+    public static Frame Midplane(Frame a, Frame b)
+    {
+        var raw = new double[12];
+        if (!BlacksmithNative.cadaclysm_blacksmith_frame_midplane(a.ToArray(), b.ToArray(), raw)) throw Blacksmith.Failure("frame_midplane");
+        return Of(raw);
+    }
+
+    /// <summary>The plane through three points: its origin p, its x towards q, its z the normal they turn about counter-clockwise. Throws <see cref="BuildException"/> for three points
+    /// on one line.</summary>
+    public static Frame Through((double X, double Y, double Z) p, (double X, double Y, double Z) q, (double X, double Y, double Z) r)
+    {
+        var raw = new double[12];
+        if (!BlacksmithNative.cadaclysm_blacksmith_frame_through(new[] { p.X, p.Y, p.Z }, new[] { q.X, q.Y, q.Z }, new[] { r.X, r.Y, r.Z }, raw))
+            throw Blacksmith.Failure("frame_through");
+        return Of(raw);
     }
 
     public (double X, double Y, double Z) Origin => (_v[0], _v[1], _v[2]);

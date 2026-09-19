@@ -447,6 +447,22 @@ public final class Profile {
         let picked = try indices32(corners, "round")
         return try Profile(cadaclysm_blacksmith_profile_round(handle, radius, picked, picked.count, isOpen))
     }
+
+    /// The kernel's `profile_polylines`, kept for the viewer follow-up (as Go keeps it): the
+    /// outline then each hole as polylines at z = 0 within `tolerance`, one run of x, y, z
+    /// floats per loop, copied out -- the library's arrays belong to the profile and go stale
+    /// when it is asked again at another tolerance.
+    func outlineRuns(tolerance: Double) throws -> [[Float]] {
+        try withExtendedLifetime(self) { () throws -> [[Float]] in
+            let raw = cadaclysm_blacksmith_profile_polylines(handle, tolerance)
+            guard let offsets = raw.offsets else { throw failure("profile_polylines") }
+            return (0..<Int(raw.polyline_count)).map { (i: Int) -> [Float] in
+                let from = Int(offsets[i]) * 3, to = Int(offsets[i + 1]) * 3
+                guard let points = raw.points, to > from else { return [] }
+                return Array(UnsafeBufferPointer(start: points + from, count: to - from))
+            }
+        }
+    }
 }
 
 /// An outline drawn a segment at a time -- lines, arcs, Beziers, NURBS -- then closed into a
@@ -774,6 +790,26 @@ public final class Solid {
     /// `loft` without the caps: the sheet ruled between the two curves.
     public static func loftOpen(_ a: Profile, _ frameA: Frame, _ b: Profile, _ frameB: Frame) throws -> Solid {
         try Solid(cadaclysm_blacksmith_loft_open(a.handle, frameA.values, b.handle, frameB.values))
+    }
+
+    /// The solid smooth through every section -- a profile on its frame, in order: each
+    /// wall interpolates its side across all the profiles (cubic through four or more,
+    /// quadratic through three, `loft` through two), capped by the first and the last.
+    public static func loftThrough(_ sections: [(Profile, Frame)]) throws -> Solid {
+        let handles: [OpaquePointer?] = sections.map { $0.0.handle }
+        let frames: [Double] = sections.flatMap { $0.1.values }
+        return try withExtendedLifetime(sections) {
+            try Solid(cadaclysm_blacksmith_loft_through(handles, frames, handles.count))
+        }
+    }
+
+    /// `loftThrough` without the caps: the sheet through the curves.
+    public static func loftThroughOpen(_ sections: [(Profile, Frame)]) throws -> Solid {
+        let handles: [OpaquePointer?] = sections.map { $0.0.handle }
+        let frames: [Double] = sections.flatMap { $0.1.values }
+        return try withExtendedLifetime(sections) {
+            try Solid(cadaclysm_blacksmith_loft_through_open(handles, frames, handles.count))
+        }
     }
 
     /// `profile` swung `angle` radians about `axis` (a point and a direction). Its x is read
@@ -1599,6 +1635,20 @@ public struct Frame: Hashable, CustomStringConvertible {
     /// Twelve numbers as a checked frame, to read its axes or move it: `Frame(values:)`.
     public static func of(_ values: [Double]) throws -> Frame {
         try Frame(values: values)
+    }
+
+    /// The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line -- Fusion's midplane.
+    public static func midplane(_ a: Frame, _ b: Frame) throws -> Frame {
+        var out = [Double](repeating: 0, count: 12)
+        if !cadaclysm_blacksmith_frame_midplane(a.values, b.values, &out) { throw failure("frame_midplane") }
+        return try Frame(values: out)
+    }
+
+    /// The plane through three points: its origin p, its x towards q, its z the normal they turn about counter-clockwise. Throws for three points on one line.
+    public static func through(_ p: SIMD3<Double>, _ q: SIMD3<Double>, _ r: SIMD3<Double>) throws -> Frame {
+        var out = [Double](repeating: 0, count: 12)
+        if !cadaclysm_blacksmith_frame_through([p.x, p.y, p.z], [q.x, q.y, q.z], [r.x, r.y, r.z], &out) { throw failure("frame_through") }
+        return try Frame(values: out)
     }
 
     private static func world(_ v: [Double], _ origin: SIMD3<Double>) throws -> Frame {

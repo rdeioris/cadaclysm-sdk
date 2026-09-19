@@ -1,0 +1,20 @@
+; cadaclysm for Godot: read CAD files and build exact solids.
+; Each platform's extension sits in bin/<platform>/ with the two cadaclysm libraries
+; beside it; [dependencies] copies them next to an exported game's executable, where the
+; extension finds them.
+[configuration]
+entry_symbol = "gdext_rust_init"
+compatibility_minimum = 4.4
+reloadable = false
+
+[libraries]
+windows.x86_64 = "res://addons/cadaclysm/bin/windows-x64/cadaclysm_godot.dll"
+linux.x86_64 = "res://addons/cadaclysm/bin/linux-x64/libcadaclysm_godot.so"
+linux.arm64 = "res://addons/cadaclysm/bin/linux-arm64/libcadaclysm_godot.so"
+macos = "res://addons/cadaclysm/bin/macos-universal/libcadaclysm_godot.dylib"
+
+[dependencies]
+windows.x86_64 = { "res://addons/cadaclysm/bin/windows-x64/cadaclysm_capi.dll": "", "res://addons/cadaclysm/bin/windows-x64/cadaclysm_blacksmith.dll": "" }
+linux.x86_64 = { "res://addons/cadaclysm/bin/linux-x64/libcadaclysm_capi.so": "", "res://addons/cadaclysm/bin/linux-x64/libcadaclysm_blacksmith.so": "" }
+linux.arm64 = { "res://addons/cadaclysm/bin/linux-arm64/libcadaclysm_capi.so": "", "res://addons/cadaclysm/bin/linux-arm64/libcadaclysm_blacksmith.so": "" }
+macos = { "res://addons/cadaclysm/bin/macos-universal/libcadaclysm_capi.dylib": "", "res://addons/cadaclysm/bin/macos-universal/libcadaclysm_blacksmith.dylib": "" }

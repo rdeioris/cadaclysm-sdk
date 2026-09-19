@@ -251,7 +251,7 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_profile_regular_polygon", "cadaclysm_blacksmith_profile_spline",
   "cadaclysm_blacksmith_profile_polygon", "cadaclysm_blacksmith_profile_with_hole",
   "cadaclysm_blacksmith_translate_profile", "cadaclysm_blacksmith_profile_round", "cadaclysm_blacksmith_profile_chain",
-  "cadaclysm_blacksmith_profile_from_loops", "cadaclysm_blacksmith_profile_close_loop",
+  "cadaclysm_blacksmith_profile_from_loops", "cadaclysm_blacksmith_profile_close_loop", "cadaclysm_blacksmith_profile_polylines",
   "cadaclysm_blacksmith_path_begin", "cadaclysm_blacksmith_path_line_to", "cadaclysm_blacksmith_path_arc_to",
   "cadaclysm_blacksmith_path_bezier_to", "cadaclysm_blacksmith_path_nurbs_to", "cadaclysm_blacksmith_path_end",
   "cadaclysm_blacksmith_path_end_open", "cadaclysm_blacksmith_path_free", "cadaclysm_blacksmith_cuboid",
@@ -259,8 +259,8 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_torus", "cadaclysm_blacksmith_wedge", "cadaclysm_blacksmith_extrude",
   "cadaclysm_blacksmith_extrude_open", "cadaclysm_blacksmith_extrude_tapered",
   "cadaclysm_blacksmith_extrude_open_tapered", "cadaclysm_blacksmith_extrude_between",
-  "cadaclysm_blacksmith_extrude_open_between", "cadaclysm_blacksmith_slant_of_plane", "cadaclysm_blacksmith_loft",
-  "cadaclysm_blacksmith_loft_open", "cadaclysm_blacksmith_revolve", "cadaclysm_blacksmith_revolve_open",
+  "cadaclysm_blacksmith_extrude_open_between", "cadaclysm_blacksmith_slant_of_plane", "cadaclysm_blacksmith_frame_midplane", "cadaclysm_blacksmith_frame_through", "cadaclysm_blacksmith_loft",
+  "cadaclysm_blacksmith_loft_open", "cadaclysm_blacksmith_loft_through", "cadaclysm_blacksmith_loft_through_open", "cadaclysm_blacksmith_revolve", "cadaclysm_blacksmith_revolve_open",
   "cadaclysm_blacksmith_coil", "cadaclysm_blacksmith_revolve_in_plane", "cadaclysm_blacksmith_revolve_open_in_plane",
   "cadaclysm_blacksmith_sweep_path_begin", "cadaclysm_blacksmith_sweep_path_line_to",
   "cadaclysm_blacksmith_sweep_path_arc", "cadaclysm_blacksmith_sweep_path_along", "cadaclysm_blacksmith_sweep_path_free",
@@ -734,6 +734,22 @@ function Profile:round(radius, corners, open)
   return new_profile(lib().cadaclysm_blacksmith_profile_round(self._handle, radius, picked, count, open and true or false))
 end
 
+-- The kernel's profile_polylines, kept for the viewer follow-up (as Go keeps it): the
+-- outline then each hole as polylines at z = 0 within `tolerance`, copied out -- a Lua
+-- array of {x, y, z, x, y, z, ...} runs, one per loop -- since the library's arrays
+-- belong to the profile and go stale when it is asked again at another tolerance.
+local function profile_polylines(profile, tolerance)
+  local p = lib().cadaclysm_blacksmith_profile_polylines(profile_handle(profile, "profile_polylines"), tolerance)
+  if p.offsets == nil then fail("profile_polylines") end
+  local out = {}
+  for i = 0, p.polyline_count - 1 do
+    local run = {}
+    for k = 3 * p.offsets[i], 3 * p.offsets[i + 1] - 1 do run[#run + 1] = p.points[k] end
+    out[i + 1] = run
+  end
+  return out
+end
+
 -- ---- paths ---------------------------------------------------------------------------
 
 --- An outline drawn a segment at a time; `end` closes it into a `Profile` and
@@ -1082,6 +1098,31 @@ end
 function Solid.loft_open(a, frame_a, b, frame_b)
   return new_solid(lib().cadaclysm_blacksmith_loft_open(profile_handle(a), frame_arg(frame_a), profile_handle(b),
     frame_arg(frame_b)))
+end
+
+-- The profiles' handles and their frames' numbers, twelve each, for a loft through them.
+local function sections_arg(sections, what)
+  local n = #sections
+  local handles = ffi.new("const struct CadaclysmBlacksmithProfile *[?]", math.max(n, 1))
+  local frames = ffi.new("double[?]", math.max(12 * n, 1))
+  for i = 1, n do
+    handles[i - 1] = profile_handle(sections[i][1], what)
+    local f = frame_arg(sections[i][2])
+    for k = 0, 11 do frames[12 * (i - 1) + k] = f[k] end
+  end
+  return handles, frames, n
+end
+
+--- The solid smooth through every section -- `{profile, frame}` pairs, in order: each
+--- wall interpolates its side across all the profiles (cubic through four or more,
+--- quadratic through three, `loft` through two), capped by the first and the last.
+function Solid.loft_through(sections)
+  return new_solid(lib().cadaclysm_blacksmith_loft_through(sections_arg(sections, "loft_through")))
+end
+
+--- `loft_through` without the caps: the sheet through the curves.
+function Solid.loft_through_open(sections)
+  return new_solid(lib().cadaclysm_blacksmith_loft_through_open(sections_arg(sections, "loft_through_open")))
 end
 
 --- The profile swung `angle` radians about `axis` (a point and a direction:
@@ -1946,6 +1987,22 @@ function Frame.of(frame)
   local v = {}
   for i = 0, 11 do v[i + 1] = d[i] end
   return Frame.new(slice(v, 1, 3), slice(v, 4, 6), slice(v, 7, 9), slice(v, 10, 12))
+end
+
+--- The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line -- Fusion's midplane.
+function Frame.midplane(a, b)
+  local out = ffi.new("double[12]")
+  if not lib().cadaclysm_blacksmith_frame_midplane(frame_arg(a), frame_arg(b), out) then fail("frame_midplane") end
+  return Frame.of({ out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7], out[8], out[9], out[10], out[11] })
+end
+
+--- The plane through three points: its origin p, its x towards q, its z the normal they turn about counter-clockwise. Raises `BuildError` for three points on one line.
+function Frame.through(p, q, r)
+  local out = ffi.new("double[12]")
+  if not lib().cadaclysm_blacksmith_frame_through(doubles(p, 3, "p"), doubles(q, 3, "q"), doubles(r, 3, "r"), out) then
+    fail("frame_through")
+  end
+  return Frame.of({ out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7], out[8], out[9], out[10], out[11] })
 end
 
 --- The world XY plane through `origin` (default {0, 0, 0}): z up, as `Workplane.xy`.

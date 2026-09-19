@@ -157,11 +157,11 @@ public final class Blacksmith {
 
     private static final MethodHandle LAST_ERROR, LICENSE_SET, LICENSE_INFO, LICENSE_NOTICE_COUNT,
             BUILD_DATE, VERSION, SOLID_FREE, PROFILE_FREE, PROFILE_RECT, PROFILE_CIRCLE,
-            PROFILE_SLOT, PROFILE_POLYGON, PROFILE_REGULAR_POLYGON, PROFILE_SPLINE, PROFILE_WITH_HOLE, TRANSLATE_PROFILE, PROFILE_ROUND, PROFILE_CHAIN, PROFILE_FROM_LOOPS, PROFILE_CLOSE_LOOP, PATH_BEGIN,
+            PROFILE_SLOT, PROFILE_POLYGON, PROFILE_REGULAR_POLYGON, PROFILE_SPLINE, PROFILE_WITH_HOLE, TRANSLATE_PROFILE, PROFILE_ROUND, PROFILE_CHAIN, PROFILE_FROM_LOOPS, PROFILE_CLOSE_LOOP, PROFILE_POLYLINES, PATH_BEGIN,
             PATH_LINE_TO, PATH_ARC_TO, PATH_BEZIER_TO, PATH_NURBS_TO, PATH_END, PATH_END_OPEN,
             PATH_FREE, CUBOID, CYLINDER, CONE, SPHERE, TORUS, WEDGE, EXTRUDE, EXTRUDE_OPEN,
             EXTRUDE_TAPERED, EXTRUDE_OPEN_TAPERED, EXTRUDE_BETWEEN, EXTRUDE_OPEN_BETWEEN,
-            SLANT_OF_PLANE, LOFT, LOFT_OPEN, REVOLVE, REVOLVE_OPEN, REVOLVE_IN_PLANE, REVOLVE_OPEN_IN_PLANE, SWEEP_PATH_BEGIN,
+            SLANT_OF_PLANE, FRAME_MIDPLANE, FRAME_THROUGH, LOFT, LOFT_OPEN, LOFT_THROUGH, LOFT_THROUGH_OPEN, REVOLVE, REVOLVE_OPEN, REVOLVE_IN_PLANE, REVOLVE_OPEN_IN_PLANE, SWEEP_PATH_BEGIN,
             SWEEP_PATH_LINE_TO, SWEEP_PATH_ARC, SWEEP_PATH_ALONG, SWEEP_PATH_FREE, SWEEP, SWEEP_OPEN,
             EXTRUDE_FACES, FACE, FACE_SHEET, DROP_FACES, PLACE, TRANSLATE, ROTATE, MIRROR, JOIN, CUT,
             COMMON, SPLIT_SHEET, TRIM, FILLET, CHAMFER,
@@ -198,6 +198,7 @@ public final class Blacksmith {
         PROFILE_CHAIN = bind(linker, lib, "cadaclysm_blacksmith_profile_chain", FunctionDescriptor.of(A, A, L, D));
         PROFILE_FROM_LOOPS = bind(linker, lib, "cadaclysm_blacksmith_profile_from_loops", FunctionDescriptor.of(A, A, L));
         PROFILE_CLOSE_LOOP = bind(linker, lib, "cadaclysm_blacksmith_profile_close_loop", FunctionDescriptor.of(A, A));
+        PROFILE_POLYLINES = bind(linker, lib, "cadaclysm_blacksmith_profile_polylines", FunctionDescriptor.of(POLYLINES, A, D));
         PATH_BEGIN = bind(linker, lib, "cadaclysm_blacksmith_path_begin", FunctionDescriptor.of(A, D, D));
         PATH_LINE_TO = bind(linker, lib, "cadaclysm_blacksmith_path_line_to", FunctionDescriptor.of(B, A, D, D));
         PATH_ARC_TO = bind(linker, lib, "cadaclysm_blacksmith_path_arc_to", FunctionDescriptor.of(B, A, D, D, D, D, B));
@@ -219,8 +220,12 @@ public final class Blacksmith {
         EXTRUDE_BETWEEN = bind(linker, lib, "cadaclysm_blacksmith_extrude_between", FunctionDescriptor.of(A, A, A, A, A));
         EXTRUDE_OPEN_BETWEEN = bind(linker, lib, "cadaclysm_blacksmith_extrude_open_between", FunctionDescriptor.of(A, A, A, A, A));
         SLANT_OF_PLANE = bind(linker, lib, "cadaclysm_blacksmith_slant_of_plane", FunctionDescriptor.of(B, A, A, A, A));
+        FRAME_MIDPLANE = bind(linker, lib, "cadaclysm_blacksmith_frame_midplane", FunctionDescriptor.of(B, A, A, A));
+        FRAME_THROUGH = bind(linker, lib, "cadaclysm_blacksmith_frame_through", FunctionDescriptor.of(B, A, A, A, A));
         LOFT = bind(linker, lib, "cadaclysm_blacksmith_loft", FunctionDescriptor.of(A, A, A, A, A));
         LOFT_OPEN = bind(linker, lib, "cadaclysm_blacksmith_loft_open", FunctionDescriptor.of(A, A, A, A, A));
+        LOFT_THROUGH = bind(linker, lib, "cadaclysm_blacksmith_loft_through", FunctionDescriptor.of(A, A, A, L));
+        LOFT_THROUGH_OPEN = bind(linker, lib, "cadaclysm_blacksmith_loft_through_open", FunctionDescriptor.of(A, A, A, L));
         REVOLVE = bind(linker, lib, "cadaclysm_blacksmith_revolve", FunctionDescriptor.of(A, A, A, D));
         REVOLVE_OPEN = bind(linker, lib, "cadaclysm_blacksmith_revolve_open", FunctionDescriptor.of(A, A, A, D));
         REVOLVE_IN_PLANE = bind(linker, lib, "cadaclysm_blacksmith_revolve_in_plane", FunctionDescriptor.of(A, A, A, A, D));
@@ -1590,6 +1595,41 @@ public final class Blacksmith {
             return lofted(LOFT_OPEN, a, frameA, b, frameB);
         }
 
+        /** The solid smooth through every profile, each on its frame ({@code frames.get(i)}
+         *  for {@code profiles.get(i)}, in order): each wall interpolates its side across all
+         *  the profiles (cubic through four or more, quadratic through three, {@link #loft}
+         *  through two), capped by the first and the last. */
+        public static Solid loftThrough(List<Profile> profiles, List<double[]> frames) {
+            return loftedThrough(LOFT_THROUGH, profiles, frames);
+        }
+
+        /** {@link #loftThrough} without the caps: the sheet through the curves. */
+        public static Solid loftThroughOpen(List<Profile> profiles, List<double[]> frames) {
+            return loftedThrough(LOFT_THROUGH_OPEN, profiles, frames);
+        }
+
+        private static Solid loftedThrough(MethodHandle op, List<Profile> profiles, List<double[]> frames) {
+            if (profiles.size() != frames.size()) {
+                throw new BuildException("loft_through: " + frames.size() + " frames for " + profiles.size() + " profiles");
+            }
+            Profile[] all = profiles.toArray(new Profile[0]);
+            double[] numbers = new double[12 * all.length];
+            for (int i = 0; i < all.length; i++) {
+                System.arraycopy(frame(frames.get(i)), 0, numbers, 12 * i, 12);
+            }
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment handles = arena.allocate(ValueLayout.ADDRESS, Math.max(all.length, 1));
+                for (int i = 0; i < all.length; i++) {
+                    handles.setAtIndex(ValueLayout.ADDRESS, i, all[i].handle());
+                }
+                MemorySegment frameSegment = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, numbers.length == 0 ? new double[1] : numbers);
+                long count = all.length;
+                return new Solid(call(() -> (MemorySegment) op.invokeExact(handles, frameSegment, count)));
+            } finally {
+                keep((Object[]) all);
+            }
+        }
+
         /** {@code profile} swung {@code angle} radians about {@code axis} (six numbers: a
          *  point and a direction). */
         public static Solid revolve(Profile profile, double[] axis, double angle) {
@@ -2807,6 +2847,32 @@ public final class Blacksmith {
          * normal along +Z, -Y or +X gives exactly {@link #xy}, {@link #xz} or
          * {@link #yz}.
          */
+        /** The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line -- Fusion's midplane. */
+        public static Frame midplane(Frame a, Frame b) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment sa = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, a.toArray());
+                MemorySegment sb = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, b.toArray());
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 12);
+                boolean ok = call(() -> (boolean) FRAME_MIDPLANE.invokeExact(sa, sb, out));
+                if (!ok) throw failure("frame_midplane");
+                return of(out.toArray(ValueLayout.JAVA_DOUBLE));
+            }
+        }
+
+        /** The plane through three points: its origin p, its x towards q, its z the normal they turn about counter-clockwise. Throws for three points on one line. */
+        public static Frame through(double[] p, double[] q, double[] r) {
+            double[] a = point3(p, "p"), b = point3(q, "q"), c = point3(r, "r");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment sp = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, a);
+                MemorySegment sq = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, b);
+                MemorySegment sr = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, c);
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 12);
+                boolean ok = call(() -> (boolean) FRAME_THROUGH.invokeExact(sp, sq, sr, out));
+                if (!ok) throw failure("frame_through");
+                return of(out.toArray(ValueLayout.JAVA_DOUBLE));
+            }
+        }
+
         public static Frame at(double[] origin, double[] normal) {
             double[] z = unit(normal, "Frame.at: normal");
             return at(origin, z, Math.abs(z[0]) <= 0.9 ? new double[]{1, 0, 0} : new double[]{0, 1, 0});

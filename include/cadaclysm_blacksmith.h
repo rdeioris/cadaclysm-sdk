@@ -24,7 +24,9 @@
 typedef struct CadaclysmBlacksmithPath CadaclysmBlacksmithPath;
 
 /**
- * A closed 2D outline, with holes: what a sweep reads. Immutable.
+ * A closed 2D outline, with holes: what a sweep reads. Immutable. The outline a
+ * viewer asks for (`profile_polylines`) is cached on it, per tolerance, like a
+ * solid's tessellation.
  */
 typedef struct CadaclysmBlacksmithProfile CadaclysmBlacksmithProfile;
 
@@ -64,8 +66,8 @@ typedef struct CadaclysmBlacksmithMesh {
 } CadaclysmBlacksmithMesh;
 
 /**
- * A solid's feature edges as polylines, borrowed from it: polyline `i` is
- * `points[offsets[i] .. offsets[i + 1]]`, three floats a point.
+ * Polylines borrowed from a solid (its feature edges) or a profile (its outline):
+ * polyline `i` is `points[offsets[i] .. offsets[i + 1]]`, three floats a point.
  */
 typedef struct CadaclysmBlacksmithPolylines {
   const float *points;
@@ -236,6 +238,19 @@ struct CadaclysmBlacksmithMesh cadaclysm_blacksmith_mesh(const struct CadaclysmB
  */
 struct CadaclysmBlacksmithPolylines cadaclysm_blacksmith_edge_polylines(const struct CadaclysmBlacksmithSolid *solid,
                                                                         double tolerance);
+
+/**
+ * The outline, then each hole, as polylines at z = 0, within `tolerance` of its
+ * arcs and splines: a closed loop repeats its first point at the end; an open
+ * chain (a profile ended open) is the segments it has. What a viewer draws a
+ * profile with. The arrays belong to the profile and stay valid until it is
+ * freed or this is called on it again with another tolerance.
+ *
+ * # Safety
+ * `profile` live.
+ */
+struct CadaclysmBlacksmithPolylines cadaclysm_blacksmith_profile_polylines(const struct CadaclysmBlacksmithProfile *profile,
+                                                                           double tolerance);
 
 /**
  * The solid's axis-aligned bounds, over the positions of the solid's cached
@@ -741,6 +756,32 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_extrude_open_between(const
                                                                            const double *top);
 
 /**
+ * The plane midway between the planes of frames `a` and `b` (twelve doubles each),
+ * twelve doubles into `out` -- Fusion's midplane: for parallel planes the one halfway
+ * between, on `a`'s axes; for planes that meet, the plane bisecting them through the
+ * line they meet on, its x along that line. `false` and `last_error` for a frame with
+ * no normal.
+ *
+ * # Safety
+ * `a`, `b` twelve doubles each; `out` twelve writable doubles.
+ */
+bool cadaclysm_blacksmith_frame_midplane(const double *a, const double *b, double *out);
+
+/**
+ * The plane through the points `p`, `q` and `r` (three doubles each), twelve doubles
+ * into `out`: its origin `p`, its x towards `q`, its z the normal the three turn
+ * about counter-clockwise -- Fusion's plane through three points. `false` and
+ * `last_error` for three points on one line.
+ *
+ * # Safety
+ * `p`, `q`, `r` three doubles each; `out` twelve writable doubles.
+ */
+bool cadaclysm_blacksmith_frame_through(const double *p,
+                                        const double *q,
+                                        const double *r,
+                                        double *out);
+
+/**
  * The plane through `point` square to `normal`, read as heights over
  * `frame` and written to `out` (`at`, `grad.x`, `grad.y`, for
  * [`cadaclysm_blacksmith_extrude_between`]). `false`, with `last_error` set,
@@ -808,6 +849,30 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_loft_open(const struct Cad
                                                                 const double *frame_a,
                                                                 const struct CadaclysmBlacksmithProfile *b,
                                                                 const double *frame_b);
+
+/**
+ * The solid smooth through `count` profiles, each on its frame (`frames` twelve
+ * doubles a profile, in order): every wall interpolates its side across all the
+ * profiles -- cubic through four or more, quadratic through three, the ruled
+ * [`cadaclysm_blacksmith_loft`] through two -- capped by the first and the last. The
+ * profiles must have the same number of sides and no holes.
+ *
+ * # Safety
+ * `profiles` `count` live profiles; `frames` `12 * count` doubles.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_loft_through(const struct CadaclysmBlacksmithProfile *const *profiles,
+                                                                   const double *frames,
+                                                                   size_t count);
+
+/**
+ * [`cadaclysm_blacksmith_loft_through`] without the caps: the sheet through the curves.
+ *
+ * # Safety
+ * As `loft_through`.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_loft_through_open(const struct CadaclysmBlacksmithProfile *const *profiles,
+                                                                        const double *frames,
+                                                                        size_t count);
 
 /**
  * `profile` swung `angle` radians about `axis` (a point and a direction). The

@@ -69,6 +69,9 @@ struct CadaclysmBlacksmithMesh cadaclysm_blacksmith_mesh(const struct CadaclysmB
 struct CadaclysmBlacksmithPolylines cadaclysm_blacksmith_edge_polylines(const struct CadaclysmBlacksmithSolid *solid,
                                                                         double tolerance);
 
+struct CadaclysmBlacksmithPolylines cadaclysm_blacksmith_profile_polylines(const struct CadaclysmBlacksmithProfile *profile,
+                                                                           double tolerance);
+
 bool cadaclysm_blacksmith_bounds(const struct CadaclysmBlacksmithSolid *solid,
                                  double tolerance,
                                  double *min,
@@ -221,6 +224,13 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_extrude_open_between(const
                                                                            const double *bottom,
                                                                            const double *top);
 
+bool cadaclysm_blacksmith_frame_midplane(const double *a, const double *b, double *out);
+
+bool cadaclysm_blacksmith_frame_through(const double *p,
+                                        const double *q,
+                                        const double *r,
+                                        double *out);
+
 bool cadaclysm_blacksmith_slant_of_plane(const double *frame,
                                          const double *point,
                                          const double *normal,
@@ -245,6 +255,14 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_loft_open(const struct Cad
                                                                 const double *frame_a,
                                                                 const struct CadaclysmBlacksmithProfile *b,
                                                                 const double *frame_b);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_loft_through(const struct CadaclysmBlacksmithProfile *const *profiles,
+                                                                   const double *frames,
+                                                                   size_t count);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_loft_through_open(const struct CadaclysmBlacksmithProfile *const *profiles,
+                                                                        const double *frames,
+                                                                        size_t count);
 
 struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_revolve(const struct CadaclysmBlacksmithProfile *profile,
                                                               const double *axis,

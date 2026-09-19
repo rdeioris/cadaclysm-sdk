@@ -101,7 +101,7 @@ __all__ = [
 ]
 
 # This file's own version (the workspace's); `version()` is the loaded library's.
-__version__ = "0.4.5"
+__version__ = "0.5.0"
 
 NONE = 0xFFFFFFFF
 UNITS = {"m": 0, "mm": 1, "in": 2}
@@ -241,6 +241,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_profile_chain", _PROFILE, [POINTER(c_void_p), c_size_t, c_double]),
     ("cadaclysm_blacksmith_profile_from_loops", _PROFILE, [POINTER(c_void_p), c_size_t]),
     ("cadaclysm_blacksmith_profile_close_loop", _PROFILE, [_PROFILE]),
+    ("cadaclysm_blacksmith_profile_polylines", _Polylines, [_PROFILE, c_double]),
     ("cadaclysm_blacksmith_path_begin", _PATH, [c_double, c_double]),
     ("cadaclysm_blacksmith_path_line_to", c_bool, [_PATH, c_double, c_double]),
     ("cadaclysm_blacksmith_path_arc_to", c_bool, [_PATH, c_double, c_double, c_double, c_double, c_bool]),
@@ -264,6 +265,8 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_slant_of_plane", c_bool, [_D, _D, _D, _D]),
     ("cadaclysm_blacksmith_loft", _SOLID, [_PROFILE, _D, _PROFILE, _D]),
     ("cadaclysm_blacksmith_loft_open", _SOLID, [_PROFILE, _D, _PROFILE, _D]),
+    ("cadaclysm_blacksmith_loft_through", _SOLID, [POINTER(c_void_p), _D, c_size_t]),
+    ("cadaclysm_blacksmith_loft_through_open", _SOLID, [POINTER(c_void_p), _D, c_size_t]),
     ("cadaclysm_blacksmith_revolve", _SOLID, [_PROFILE, _D, c_double]),
     ("cadaclysm_blacksmith_revolve_open", _SOLID, [_PROFILE, _D, c_double]),
     ("cadaclysm_blacksmith_coil", _SOLID, [_PROFILE, _D, c_double, c_double]),
@@ -308,6 +311,8 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_face_count", c_uint32, [_SOLID]),
     ("cadaclysm_blacksmith_select_face", c_uint32, [_SOLID, c_uint32, _D, c_uint32]),
     ("cadaclysm_blacksmith_face_frame", c_bool, [_SOLID, c_uint32, _D]),
+    ("cadaclysm_blacksmith_frame_midplane", c_bool, [_D, _D, _D]),
+    ("cadaclysm_blacksmith_frame_through", c_bool, [_D, _D, _D, _D]),
     ("cadaclysm_blacksmith_coloured", _SOLID, [_SOLID, c_uint32, c_double, c_double, c_double]),
     ("cadaclysm_blacksmith_colour", c_bool, [_SOLID, c_uint32, _D]),
     ("cadaclysm_blacksmith_face_kind", c_char_p, [_SOLID, c_uint32]),
@@ -352,17 +357,17 @@ class _WasmLibrary:
     # it, and 0 (a null handle, or a count the caller checks `last_error` on)
     # for everything else
     _BOOLS = {"path_line_to", "path_arc_to", "path_bezier_to", "path_nurbs_to", "sweep_path_line_to",
-              "sweep_path_arc", "slant_of_plane", "face_frame", "bounds", "edge", "colour", "manifold", "license_set"}
+              "sweep_path_arc", "slant_of_plane", "face_frame", "frame_midplane", "frame_through", "bounds", "edge", "colour", "manifold", "license_set"}
     _FAILS = {"select_face": NONE, "leaked_edges": NONE, "unpaired_edges": NONE,
-              "mesh": _Mesh(), "edge_polylines": _Polylines()}
+              "mesh": _Mesh(), "edge_polylines": _Polylines(), "profile_polylines": _Polylines()}
     # results that C writes into an out-array of doubles at this position, and the
     # wasm returns as a typed array (`bounds` fills two, `edge` a record: see `_back`)
-    _OUT = {"slant_of_plane": 3, "face_frame": 2}
+    _OUT = {"slant_of_plane": 3, "face_frame": 2, "frame_midplane": 2, "frame_through": 3}
     # argument positions the C call has and the wasm call does not: an array's
     # count (a typed array knows its length), the progress `user` pointer, and
     # the out-arguments above
     _DROP = {"profile_polygon": (1,), "path_nurbs_to": (2, 5), "join": (4,), "cut": (4,), "common": (4,),
-             "split_sheet": (4,), "trim": (5,), "drop_faces": (2,), "profile_round": (3,), "profile_spline": (1,), "profile_chain": (1,), "profile_from_loops": (1,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "thicken": (4,), "push_pull": (5,), "push_pull_faces": (2, 6), "split": (4,), "split_by_plane": (4,), "step": (1,),
+             "split_sheet": (4,), "trim": (5,), "drop_faces": (2,), "profile_round": (3,), "profile_spline": (1,), "profile_chain": (1,), "profile_from_loops": (1,), "loft_through": (2,), "loft_through_open": (2,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "thicken": (4,), "push_pull": (5,), "push_pull_faces": (2, 6), "split": (4,), "split_by_plane": (4,), "step": (1,),
              "slant_of_plane": (3,), "face_frame": (2,), "bounds": (2, 3), "edge": (2,), "colour": (2,), "manifold": (1,)}
     # strings the C side returns as `const char*`, and the module decodes
     _TEXTS = {"version", "build_date", "face_kind", "license_info", "brep_layout_id"}
@@ -488,7 +493,7 @@ class _WasmLibrary:
             return True
         if short in self._TEXTS:
             return str(result).encode()
-        if short in ("mesh", "edge_polylines"):
+        if short in ("mesh", "edge_polylines", "profile_polylines"):
             return _JsArrays(result)
         return result
 
@@ -702,6 +707,65 @@ def brep_layout_id() -> str:
     return _text(_lib().cadaclysm_blacksmith_brep_layout_id())
 
 
+# ---- drawing ----------------------------------------------------------------
+
+
+def _viewer():
+    """The viewer loader, imported only when something is drawn: `cadaclysm.viewer` (the
+    wheel), `cadaclysm_viewer` on the path, then beside this module, then the reader's
+    examples beside the kernel's in a checkout. A directory joins `sys.path` only when it
+    holds `cadaclysm_viewer.py`."""
+    try:
+        from cadaclysm import viewer
+        return viewer
+    except ImportError:
+        pass
+    try:
+        import cadaclysm_viewer
+        return cadaclysm_viewer
+    except ModuleNotFoundError as e:
+        if e.name != "cadaclysm_viewer":
+            raise
+    here = _FsPath(__file__).resolve().parent
+    folders = [here]
+    if len(here.parents) > 1:
+        folders.append(here.parents[1] / "cadaclysm-capi" / "examples")
+    for folder in folders:
+        if (folder / "cadaclysm_viewer.py").is_file():
+            if str(folder) not in sys.path:
+                sys.path.append(str(folder))
+            import cadaclysm_viewer
+            return cadaclysm_viewer
+    raise ModuleNotFoundError("no viewer loader: cadaclysm_viewer.py is neither installed nor beside "
+                              "cadaclysm_blacksmith.py -- reinstall cadaclysm", name="cadaclysm_viewer")
+
+
+def _edges_as_polylines(runs):
+    """A list of (k,3) runs as the loader's (points, counts) pair."""
+    import numpy as np
+
+    if not runs:
+        return []
+    return [(np.concatenate(runs), np.array([len(r) for r in runs], "u4"), None, None)]
+
+
+def _lines_only(options):
+    """A profile's keywords without `edges`: its lines are its picture, and the viewer
+    draws no lines under NO_EDGES."""
+    return {k: v for k, v in options.items() if k != "edges"}
+
+
+def _draw(obj, mode, meshes, polylines, default_view, kw):
+    if sys.platform == "emscripten":
+        raise RuntimeError("in the notebook, draw with show(obj)")
+    viewer = _viewer()
+    opts = viewer.options(default_view, **kw)
+    last = viewer.draw(mode, type(obj).__name__, meshes, polylines, opts)
+    if mode == "view":
+        viewer.announce(type(obj).__name__.lower(), last)
+    return last
+
+
 # ---- profiles -------------------------------------------------------------
 
 
@@ -827,6 +891,29 @@ class Profile:
             ks = [int(k) for k in corners]
             picked, count = (c_uint32 * len(ks))(*ks), len(ks)
         return Profile(_lib().cadaclysm_blacksmith_profile_round(self._handle, radius, picked, count, bool(open)))
+
+    def polylines(self, tolerance=0.05) -> "list[numpy.ndarray]":
+        """The outline, then each hole, as float32 (k,3) read-only views at z = 0,
+        within `tolerance` of the profile's arcs and splines -- what a viewer draws it
+        with. A closed loop repeats its first point at the end; an open chain (a profile
+        ended open) stays open, the segments it has. Valid until the profile is freed or
+        asked again at another tolerance."""
+        p = _lib().cadaclysm_blacksmith_profile_polylines(self._handle, tolerance)
+        if not p.offsets:
+            _fail("profile_polylines")
+        points = _view(self, p.points, (p.point_count, 3), "f4")
+        offsets = [p.offsets[i] for i in range(p.polyline_count + 1)]
+        return [points[a:b] for a, b in zip(offsets, offsets[1:])]
+
+    def show(self, tolerance=0.05, **options) -> None:
+        """Draw the outline and holes with the viewer in use, from the top by default.
+        Keywords as `Solid.show`; `edges=` is accepted and ignored, the lines being the
+        whole picture."""
+        _draw(self, "show", [], _edges_as_polylines(self.polylines(tolerance)), "top", _lines_only(options))
+
+    def view(self, tolerance=0.05, **options):
+        """Orbit the outline with the viewer in use; returns (azimuth, elevation, zoom)."""
+        return _draw(self, "view", [], _edges_as_polylines(self.polylines(tolerance)), "top", _lines_only(options))
 
 
 class Path:
@@ -1121,6 +1208,27 @@ class Solid:
     def loft_open(a: Profile, frame_a, b: Profile, frame_b) -> "Solid":
         """`loft` without the caps: the sheet ruled between the two curves."""
         return Solid(_lib().cadaclysm_blacksmith_loft_open(a._handle, _frame(frame_a), b._handle, _frame(frame_b)))
+
+    @staticmethod
+    def loft_through(sections) -> "Solid":
+        """The solid smooth through every section -- `(profile, frame)` pairs, in order:
+        each wall interpolates its side across all the profiles (cubic through four or
+        more, quadratic through three, `loft` through two), capped by the first and the
+        last. The profiles must have the same number of sides and no holes."""
+        return Solid._lofted_through(sections, _lib().cadaclysm_blacksmith_loft_through)
+
+    @staticmethod
+    def loft_through_open(sections) -> "Solid":
+        """`loft_through` without the caps: the sheet through the curves."""
+        return Solid._lofted_through(sections, _lib().cadaclysm_blacksmith_loft_through_open)
+
+    @staticmethod
+    def _lofted_through(sections, call) -> "Solid":
+        sections = list(sections)
+        handles = (c_void_p * max(len(sections), 1))(*[p._handle for p, _ in sections])
+        numbers = [v for _, f in sections for v in _frame(f)]
+        frames = (c_double * max(len(numbers), 1))(*numbers)
+        return Solid(call(handles, frames, len(sections)))
 
     @staticmethod
     def revolve(profile: Profile, axis, angle) -> "Solid":
@@ -1473,6 +1581,22 @@ class Solid:
         points = _view(self, p.points, (p.point_count, 3), "f4")
         offsets = [p.offsets[i] for i in range(p.polyline_count + 1)]
         return [points[a:b] for a, b in zip(offsets, offsets[1:])]
+
+    def show(self, tolerance=0.05, **options) -> None:
+        """Draw the solid with the viewer in use -- in a terminal, the picture is left
+        in the scrollback. Keywords: view= (front back left right top bottom iso), az=,
+        el=, zoom=, up=, edges=, width=, height=, hint=."""
+        _draw(self, "show", *self._drawn(tolerance, options), "iso", options)
+
+    def view(self, tolerance=0.05, **options):
+        """Orbit the solid with the viewer in use until it is closed; returns
+        (azimuth, elevation, zoom) where it was left. Keywords as `show`."""
+        return _draw(self, "view", *self._drawn(tolerance, options), "iso", options)
+
+    def _drawn(self, tolerance, options):
+        positions, normals, indices = self.mesh(tolerance)
+        edges = _edges_as_polylines(self.edge_polylines(tolerance)) if options.get("edges", True) else []
+        return [(positions, normals, indices, None, self.colour)], edges
 
     def step_text(self, schema=None, unit="mm") -> str:
         return write_step_text([self], schema, unit)
@@ -1845,6 +1969,22 @@ class Frame:
             raise BuildError("Frame.at: x lies along the normal")
         x = _unit(tuple(h - d * n for h, n in zip(hint, z)), "Frame.at: x")
         return Frame(origin, x, _cross(z, x), z)
+
+    @staticmethod
+    def midplane(a, b) -> "Frame":
+        """The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line -- Fusion's midplane. `a` and `b` are frames or twelve numbers."""
+        out = (c_double * 12)()
+        if not _lib().cadaclysm_blacksmith_frame_midplane(_frame(a), _frame(b), out):
+            _fail("frame_midplane")
+        return Frame.of(tuple(out))
+
+    @staticmethod
+    def through(p, q, r) -> "Frame":
+        """The plane through three points: its origin p, its x towards q, its z the normal they turn about counter-clockwise. Raises `BuildError` for three points on one line."""
+        out = (c_double * 12)()
+        if not _lib().cadaclysm_blacksmith_frame_through((c_double * 3)(*p), (c_double * 3)(*q), (c_double * 3)(*r), out):
+            _fail("frame_through")
+        return Frame.of(tuple(out))
 
     @property
     def origin(self) -> "tuple[float, float, float]":

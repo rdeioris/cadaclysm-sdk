@@ -111,6 +111,7 @@ entry_points! {
     fn cadaclysm_blacksmith_profile_chain(pieces: *const *const Profile, count: usize, tolerance: f64) -> *mut Profile;
     fn cadaclysm_blacksmith_profile_from_loops(loops: *const *const Profile, count: usize) -> *mut Profile;
     fn cadaclysm_blacksmith_profile_close_loop(profile: *const Profile) -> *mut Profile;
+    fn cadaclysm_blacksmith_profile_polylines(profile: *const Profile, tolerance: f64) -> CadaclysmBlacksmithPolylines;
     fn cadaclysm_blacksmith_profile_with_hole(outer: *const Profile, hole: *const Profile) -> *mut Profile;
     fn cadaclysm_blacksmith_translate_profile(profile: *const Profile, dx: f64, dy: f64) -> *mut Profile;
 
@@ -159,8 +160,12 @@ entry_points! {
     fn cadaclysm_blacksmith_extrude_between(profile: *const Profile, frame: *const f64, bottom: *const f64, top: *const f64) -> *mut Solid;
     fn cadaclysm_blacksmith_extrude_open_between(profile: *const Profile, frame: *const f64, bottom: *const f64, top: *const f64) -> *mut Solid;
     fn cadaclysm_blacksmith_slant_of_plane(frame: *const f64, point: *const f64, normal: *const f64, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_frame_midplane(a: *const f64, b: *const f64, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_frame_through(p: *const f64, q: *const f64, r: *const f64, out: *mut f64) -> bool;
     fn cadaclysm_blacksmith_loft(a: *const Profile, frame_a: *const f64, b: *const Profile, frame_b: *const f64) -> *mut Solid;
     fn cadaclysm_blacksmith_loft_open(a: *const Profile, frame_a: *const f64, b: *const Profile, frame_b: *const f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_loft_through(profiles: *const *const Profile, frames: *const f64, count: usize) -> *mut Solid;
+    fn cadaclysm_blacksmith_loft_through_open(profiles: *const *const Profile, frames: *const f64, count: usize) -> *mut Solid;
     fn cadaclysm_blacksmith_revolve(profile: *const Profile, axis: *const f64, angle: f64) -> *mut Solid;
     fn cadaclysm_blacksmith_revolve_open(profile: *const Profile, axis: *const f64, angle: f64) -> *mut Solid;
     fn cadaclysm_blacksmith_coil(profile: *const Profile, axis: *const f64, pitch: f64, turns: f64) -> *mut Solid;

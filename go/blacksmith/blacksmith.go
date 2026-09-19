@@ -469,6 +469,29 @@ func FrameAt(origin, normal [3]float64) (Frame, error) {
 
 // FrameAtX is [FrameAt] with its x axis x laid onto the plane — Python's Frame.at(origin,
 // normal, x).
+// FrameMidplane is the plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line — Python's
+// Frame.midplane, Fusion's midplane.
+func FrameMidplane(a, b Frame) (Frame, error) {
+	defer pin()()
+	var out Frame
+	fa, fb := a, b
+	if !bool(C.cadaclysm_blacksmith_frame_midplane(doubles(&fa[0]), doubles(&fb[0]), doubles(&out[0]))) {
+		return Frame{}, failure("frame_midplane")
+	}
+	return FrameOf(out)
+}
+
+// FrameThrough is the plane through three points: its origin p, its x towards q, its z the normal they turn about counter-clockwise —
+// Python's Frame.through. A BuildError for three points on one line.
+func FrameThrough(p, q, r [3]float64) (Frame, error) {
+	defer pin()()
+	var out Frame
+	if !bool(C.cadaclysm_blacksmith_frame_through(doubles(&p[0]), doubles(&q[0]), doubles(&r[0]), doubles(&out[0]))) {
+		return Frame{}, failure("frame_through")
+	}
+	return FrameOf(out)
+}
+
 func FrameAtX(origin, normal, x [3]float64) (Frame, error) {
 	z, err := unit3(normal, "Frame.At: normal")
 	if err != nil {
@@ -725,6 +748,25 @@ func (p *Profile) CloseLoop() (*Profile, error) {
 	out, err := newProfile(C.cadaclysm_blacksmith_profile_close_loop(h), "profile")
 	runtime.KeepAlive(p)
 	return out, err
+}
+
+// profilePolylines is the kernel's profile_polylines, kept for the viewer
+// follow-up: the outline then each hole as runs of xyz, and the run offsets.
+func profilePolylines(p *Profile, tolerance float64) ([]float32, []uint32, error) {
+	defer pin()()
+	h, err := p.h()
+	if err != nil {
+		return nil, nil, err
+	}
+	raw := C.cadaclysm_blacksmith_profile_polylines(h, C.double(tolerance))
+	if raw.offsets == nil {
+		runtime.KeepAlive(p)
+		return nil, nil, failure("profile_polylines")
+	}
+	points := append([]float32(nil), unsafe.Slice((*float32)(unsafe.Pointer(raw.points)), int(raw.point_count)*3)...)
+	offsets := append([]uint32(nil), unsafe.Slice((*uint32)(unsafe.Pointer(raw.offsets)), int(raw.polyline_count)+1)...)
+	runtime.KeepAlive(p)
+	return points, offsets, nil
 }
 
 // Chain is open profiles joined end to end into one — Python's Profile.chain, the forge's
@@ -1619,6 +1661,54 @@ func Loft(a *Profile, frameA Frame, b *Profile, frameB Frame) (*Solid, error) {
 	out, err := newSolid(C.cadaclysm_blacksmith_loft(ha, doubles(&fa[0]), hb, doubles(&fb[0])), "solid")
 	runtime.KeepAlive(a)
 	runtime.KeepAlive(b)
+	return out, err
+}
+
+// LoftThrough is the solid smooth through every profile, each on its frame (frames[i]
+// for profiles[i], in order) — Python's Solid.loft_through: each wall interpolates its side
+// across all the profiles (cubic through four or more, quadratic through three, Loft
+// through two), capped by the first and the last.
+func LoftThrough(profiles []*Profile, frames []Frame) (*Solid, error) {
+	return loftedThrough(profiles, frames, true)
+}
+
+// LoftThroughOpen is LoftThrough without the caps: the sheet through the curves.
+func LoftThroughOpen(profiles []*Profile, frames []Frame) (*Solid, error) {
+	return loftedThrough(profiles, frames, false)
+}
+
+func loftedThrough(profiles []*Profile, frames []Frame, solid bool) (*Solid, error) {
+	defer pin()()
+	if len(frames) != len(profiles) {
+		return nil, &BuildError{Message: fmt.Sprintf("loft_through: %d frames for %d profiles", len(frames), len(profiles))}
+	}
+	handles := make([]*C.CadaclysmBlacksmithProfile, len(profiles))
+	numbers := make([]float64, 0, 12*len(frames))
+	for i, p := range profiles {
+		h, err := p.h()
+		if err != nil {
+			return nil, err
+		}
+		handles[i] = h
+		numbers = append(numbers, frames[i][:]...)
+	}
+	var first **C.CadaclysmBlacksmithProfile
+	var firstFrame *C.double
+	if len(handles) > 0 {
+		first = &handles[0]
+		firstFrame = doubles(&numbers[0])
+	}
+	var raw *C.CadaclysmBlacksmithSolid
+	if solid {
+		raw = C.cadaclysm_blacksmith_loft_through(first, firstFrame, C.size_t(len(handles)))
+	} else {
+		raw = C.cadaclysm_blacksmith_loft_through_open(first, firstFrame, C.size_t(len(handles)))
+	}
+	out, err := newSolid(raw, "solid")
+	for _, p := range profiles {
+		runtime.KeepAlive(p)
+	}
+	runtime.KeepAlive(numbers)
 	return out, err
 }
 

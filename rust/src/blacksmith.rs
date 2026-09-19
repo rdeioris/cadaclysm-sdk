@@ -251,6 +251,26 @@ impl Frame {
         Frame::new(at(0), at(3), at(6), at(9))
     }
 
+    /// The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line -- Fusion's midplane.
+    pub fn midplane(a: &Frame, b: &Frame) -> Result<Frame> {
+        let api = api()?;
+        let mut out = [0.0; 12];
+        if !unsafe { (api.cadaclysm_blacksmith_frame_midplane)(a.v.as_ptr(), b.v.as_ptr(), out.as_mut_ptr()) } {
+            return Err(fail(api, "frame_midplane"));
+        }
+        Frame::of(out)
+    }
+
+    /// The plane through three points: its origin p, its x towards q, its z the normal they turn about counter-clockwise. Fails for three points on one line.
+    pub fn through(p: [f64; 3], q: [f64; 3], r: [f64; 3]) -> Result<Frame> {
+        let api = api()?;
+        let mut out = [0.0; 12];
+        if !unsafe { (api.cadaclysm_blacksmith_frame_through)(p.as_ptr(), q.as_ptr(), r.as_ptr(), out.as_mut_ptr()) } {
+            return Err(fail(api, "frame_through"));
+        }
+        Frame::of(out)
+    }
+
     /// The world XY plane through `origin`: z up.
     pub fn xy(origin: [f64; 3]) -> Frame {
         Frame::XY.translate(origin[0], origin[1], origin[2])
@@ -898,6 +918,27 @@ impl Solid {
         let api = a.api;
         let raw = unsafe { (api.cadaclysm_blacksmith_loft_open)(a.raw(), frame_a.v.as_ptr(), b.raw(), frame_b.v.as_ptr()) };
         Solid::wrap(api, raw, "loft_open")
+    }
+
+    /// The solid smooth through every section -- a profile on its frame, in order: each
+    /// wall interpolates its side across all the profiles (cubic through four or more,
+    /// quadratic through three, `loft` through two), capped by the first and the last.
+    pub fn loft_through(sections: &[(&Profile, &Frame)]) -> Result<Solid> {
+        Self::lofted_through(sections, true)
+    }
+
+    /// `loft_through` without the caps: the sheet through the curves.
+    pub fn loft_through_open(sections: &[(&Profile, &Frame)]) -> Result<Solid> {
+        Self::lofted_through(sections, false)
+    }
+
+    fn lofted_through(sections: &[(&Profile, &Frame)], solid: bool) -> Result<Solid> {
+        let api = api()?;
+        let handles: Vec<_> = sections.iter().map(|(p, _)| p.raw()).collect();
+        let frames: Vec<f64> = sections.iter().flat_map(|(_, f)| f.v).collect();
+        let (call, what) = if solid { (api.cadaclysm_blacksmith_loft_through, "loft_through") } else { (api.cadaclysm_blacksmith_loft_through_open, "loft_through_open") };
+        let raw = unsafe { call(handles.as_ptr(), frames.as_ptr(), handles.len()) };
+        Solid::wrap(api, raw, what)
     }
 
     /// `profile`, read as (distance from the axis, height along it), swung `angle`

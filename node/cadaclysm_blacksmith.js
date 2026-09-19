@@ -180,8 +180,12 @@ function _lib() {
     extrude_between: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_extrude_between(const CadaclysmBlacksmithProfile *profile, const double *frame, const double *bottom, const double *top)'),
     extrude_open_between: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_extrude_open_between(const CadaclysmBlacksmithProfile *profile, const double *frame, const double *bottom, const double *top)'),
     slant_of_plane: f('bool cadaclysm_blacksmith_slant_of_plane(const double *frame, const double *point, const double *normal, _Out_ double *out)'),
+    frame_midplane: f('bool cadaclysm_blacksmith_frame_midplane(const double *a, const double *b, _Out_ double *out)'),
+    frame_through: f('bool cadaclysm_blacksmith_frame_through(const double *p, const double *q, const double *r, _Out_ double *out)'),
     loft: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_loft(const CadaclysmBlacksmithProfile *a, const double *frame_a, const CadaclysmBlacksmithProfile *b, const double *frame_b)'),
     loft_open: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_loft_open(const CadaclysmBlacksmithProfile *a, const double *frame_a, const CadaclysmBlacksmithProfile *b, const double *frame_b)'),
+    loft_through: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_loft_through(const CadaclysmBlacksmithProfile **profiles, const double *frames, size_t count)'),
+    loft_through_open: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_loft_through_open(const CadaclysmBlacksmithProfile **profiles, const double *frames, size_t count)'),
     revolve: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_revolve(const CadaclysmBlacksmithProfile *profile, const double *axis, double angle)'),
     revolve_open: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_revolve_open(const CadaclysmBlacksmithProfile *profile, const double *axis, double angle)'),
     coil: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_coil(const CadaclysmBlacksmithProfile *profile, const double *axis, double pitch, double turns)'),
@@ -192,6 +196,7 @@ function _lib() {
     translate_profile: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_translate_profile(const CadaclysmBlacksmithProfile *profile, double dx, double dy)'),
     profile_round: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_round(const CadaclysmBlacksmithProfile *profile, double radius, const uint32_t *corners, size_t count, bool open)'),
     profile_close_loop: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_close_loop(const CadaclysmBlacksmithProfile *profile)'),
+    profile_polylines: f('CadaclysmBlacksmithPolylines cadaclysm_blacksmith_profile_polylines(const CadaclysmBlacksmithProfile *profile, double tolerance)'),
     profile_chain: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_chain(const CadaclysmBlacksmithProfile **pieces, size_t count, double tolerance)'),
     profile_from_loops: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_from_loops(const CadaclysmBlacksmithProfile **loops, size_t count)'),
     face: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_face(const CadaclysmBlacksmithProfile *profile, const double *frame)'),
@@ -559,6 +564,20 @@ class Solid {
   static extrudeOpenBetween(profile, frame, bottom, top) { return new Solid(_lib().extrude_open_between(profile._handle, _frame(frame), _slant(bottom)._raw(), _slant(top)._raw())); }
   static loft(a, frameA, b, frameB) { return new Solid(_lib().loft(a._handle, _frame(frameA), b._handle, _frame(frameB))); }
   static loftOpen(a, frameA, b, frameB) { return new Solid(_lib().loft_open(a._handle, _frame(frameA), b._handle, _frame(frameB))); }
+  /**
+   * The solid smooth through every section -- `[profile, frame]` pairs, in order: each wall
+   * interpolates its side across all the profiles (cubic through four or more, quadratic
+   * through three, `loft` through two), capped by the first and the last.
+   */
+  static loftThrough(sections) { return Solid._loftedThrough(sections, 'loft_through'); }
+  /** `loftThrough` without the caps: the sheet through the curves. */
+  static loftThroughOpen(sections) { return Solid._loftedThrough(sections, 'loft_through_open'); }
+  static _loftedThrough(sections, which) {
+    const all = Array.from(sections);
+    const handles = all.map(([p]) => p._handle);
+    const frames = Float64Array.from(all.flatMap(([, f]) => Array.from(_frame(f))));
+    return new Solid(_lib()[which](handles, frames, handles.length));
+  }
   static revolve(profile, axis, angle) { return new Solid(_lib().revolve(profile._handle, _axis(axis), angle)); }
   static revolveOpen(profile, axis, angle) { return new Solid(_lib().revolve_open(profile._handle, _axis(axis), angle)); }
   /**
@@ -1046,6 +1065,18 @@ class Frame {
   static of(frame) {
     const v = Array.from(_frame(frame));
     return new Frame(v.slice(0, 3), v.slice(3, 6), v.slice(6, 9), v.slice(9, 12));
+  }
+  /** The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line -- Fusion's midplane. */
+  static midplane(a, b) {
+    const out = new Float64Array(12);
+    if (!_lib().frame_midplane(_frame(a), _frame(b), out)) _fail('frame_midplane');
+    return Frame.of(out);
+  }
+  /** The plane through three points: its origin p, its x towards q, its z the normal they turn about counter-clockwise. Throws for three points on one line. */
+  static through(p, q, r) {
+    const out = new Float64Array(12);
+    if (!_lib().frame_through(_doubles(p, 3, 'p'), _doubles(q, 3, 'q'), _doubles(r, 3, 'r'), out)) _fail('frame_through');
+    return Frame.of(out);
   }
   /** The world XY plane through `origin`: z up, as `Workplane.xy`. */
   static xy(origin = [0, 0, 0]) { return new Frame(origin, _XY.slice(3, 6), _XY.slice(6, 9), _XY.slice(9, 12)); }

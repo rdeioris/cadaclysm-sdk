@@ -1,0 +1,681 @@
+# The kernel: the LuaJIT suite (luajit/test/blacksmith_test.lua, itself the Node.js
+# suite) ported, with the same shapes and the same expected numbers, plus what only
+# Godot has -- Transform3D frames, ArrayMeshes, AABB bounds.
+extends "res://test/suite.gd"
+
+const XY := [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]
+const SCHEMA_AP203 := "schemas/ap203.exp"
+
+func plate_outline() -> CadaclysmProfile:
+	return CadaclysmProfile.rect(80, 40).with_hole(CadaclysmProfile.circle(4)).with_hole(CadaclysmProfile.slot([25, 0], 24, 5))
+
+func count_faces(solid: CadaclysmSolid, kind: String) -> Array:
+	var out := []
+	for i in solid.faces:
+		if solid.face_kind(i) == kind:
+			out.append(i)
+	return out
+
+func all_near(a, b, tolerance := 1e-9) -> bool:
+	if a.size() != b.size():
+		return false
+	for i in a.size():
+		if absf(a[i] - b[i]) > tolerance:
+			return false
+	return true
+
+func v3near(a: Vector3, b: Vector3, tolerance := 1e-6) -> bool:
+	return all_near([a.x, a.y, a.z], [b.x, b.y, b.z], tolerance)
+
+# `fails`, after a call that works has cleared the last error: a call that should fail
+# and does not then cannot pass on an earlier call's message.
+func refuses(f: Callable, pattern := "") -> String:
+	CadaclysmBlacksmith.version()
+	return fails(f, pattern)
+
+func schema() -> String:
+	var r := root()
+	return r.path_join(SCHEMA_AP203) if r != "" and FileAccess.file_exists(r.path_join(SCHEMA_AP203)) else ""
+
+func test_the_library_loads():
+	var path := CadaclysmBlacksmith.library_path()
+	ok(FileAccess.file_exists(path), "library_path names a file: " + path)
+	ok(path.contains("cadaclysm_blacksmith"), path)
+	ok(RegEx.create_from_string("^\\d+\\.\\d+\\.\\d+").search(CadaclysmBlacksmith.version()) != null, CadaclysmBlacksmith.version())
+	ok(RegEx.create_from_string("^\\d{4}-\\d{2}-\\d{2}$").search(CadaclysmBlacksmith.build_date()) != null, CadaclysmBlacksmith.build_date())
+	ok(CadaclysmBlacksmith.license_info() != "")
+	ok(CadaclysmBlacksmith.license_notice_count() >= 0)
+	eq(CadaclysmBlacksmith.load(path), true)
+	ok(CadaclysmBlacksmith.brep_layout_id() != "")
+	eq(CadaclysmBlacksmith.brep_layout_id(), CadaclysmBrep.layout_id(), "one release, one layout")
+	eq(CadaclysmBlacksmith.default_tolerance(), 0.05)
+	eq(CadaclysmBlacksmith.fillet_tolerance(), 1e-6)
+	refuses(func(): return CadaclysmBlacksmith.license("garbage"))
+	eq(CadaclysmBlacksmith.license("garbage"), false)
+	if schema() != "":
+		eq(CadaclysmBlacksmith.default_schema().replace("\\", "/").to_lower(), schema().replace("\\", "/").to_lower())
+	eq(CadaclysmBlacksmith.rgb("#ff0000"), Color(1, 0, 0))
+	refuses(func(): return CadaclysmBlacksmith.rgb("#ff00"), "a colour is")
+
+func test_an_error_carries_the_library_text():
+	eq(CadaclysmProfile.rect(0, 1), null)
+	ok(Cadaclysm.last_error().contains("profile_rect: width and height must be positive"), Cadaclysm.last_error())
+	ok(CadaclysmProfile.rect(1, 1) != null)
+	eq(Cadaclysm.last_error(), "", "a call that works clears it")
+
+func test_profiles_and_paths_build_and_a_bad_one_fails():
+	ok(plate_outline() is CadaclysmProfile)
+	ok(CadaclysmProfile.polygon([[0, 0], [10, 0], [0, 10]]) is CadaclysmProfile)
+	ok(CadaclysmProfile.polygon(PackedVector2Array([Vector2(0, 0), Vector2(10, 0), Vector2(0, 10)])) is CadaclysmProfile)
+	var rounded := CadaclysmProfile.path([0, 0]).line_to(10, 0).line_to(10, 8).arc_to(8, 10, [8, 8], true) \
+		.line_to(0, 10).line_to(0, 0).end()
+	ok(rounded is CadaclysmProfile)
+	var p := CadaclysmProfile.path(Vector2(0, 0)).line_to(5, 0)
+	ok(p.end_open() is CadaclysmProfile)
+	refuses(func(): return p.line_to(1, 1), "path: already ended")
+	var builder := CadaclysmProfile.path([0, 0]).line_to(10, 0).bezier_to([12, 2], [12, 8], [10, 10]).line_to(0, 10).line_to(0, 0)
+	ok(builder.end() is CadaclysmProfile)
+	refuses(func(): return builder.end(), "path: already ended")
+	ok(CadaclysmProfile.circle(3).translate(5, 5) is CadaclysmProfile)
+	ok(CadaclysmPath.begin([0, 0]) is CadaclysmPath)
+	refuses(func(): return CadaclysmPath.begin([0, 0, 0]), "path: start: expected 2 numbers, got 3")
+	# A NURBS segment: a quadratic arc-like piece, then closed.
+	var nurbs := CadaclysmProfile.path([0, 0]).nurbs_to([[5, 5], [10, 0]], [0, 0, 0, 1, 1, 1], 2, PackedFloat64Array([1, 0.7, 1])) \
+		.line_to(0, 0).end()
+	eq(CadaclysmSolid.extrude(nurbs, XY, 1).faces, 4)
+	refuses(func(): return CadaclysmProfile.path([0, 0]).nurbs_to([[5, 5], [10, 0]], [0, 0, 0, 1, 1, 1], 2, PackedFloat64Array([1, 1])), "nurbs_to: 2 weights")
+
+func test_an_abandoned_path_does_not_wedge_the_library():
+	CadaclysmProfile.path([0, 0]).line_to(1, 1)   # dropped unfinished: freed with its last reference
+	var closed := CadaclysmProfile.path([0, 0]).line_to(1, 0).line_to(1, 1).line_to(0, 1).line_to(0, 0).end()
+	ok(closed is CadaclysmProfile)
+	var open := CadaclysmProfile.path([0, 0]).line_to(5, 0)
+	open.end_open()
+	refuses(func(): return open.end(), "path: already ended")
+	for i in 500:
+		CadaclysmProfile.path([0, 0]).line_to(1, 0).line_to(1, 1).line_to(0, 1).line_to(0, 0).end()
+	ok(CadaclysmProfile.rect(1, 1) is CadaclysmProfile)
+
+func test_solids_build_transform_combine_mesh_bound_and_write_step():
+	var plate := CadaclysmSolid.extrude(plate_outline(), XY, 6)
+	eq(plate.faces, 12)
+	eq(plate.face_kind(0), "plane")
+	near(plate.bounds.size.x, 80, 1e-4)
+	near(plate.bounds.size.z, 6, 1e-4)
+	var raw := plate.raw_bounds()
+	eq(raw.size(), 6)
+	near(raw[3] - raw[0], 80, 1e-9)
+	near(raw[5] - raw[2], 6, 1e-9)
+	var mesh := plate.mesh(0.05)
+	ok(mesh.vertex_count > 0)
+	eq(mesh.normals.size(), mesh.vertex_count)
+	eq(mesh.index_count % 3, 0)
+	ok(mesh.triangle_count > 0)
+	var runs := plate.edge_polylines(0.05)
+	ok(runs.polyline_count > 0)
+	for r in runs.runs():
+		ok(r.size() >= 2)
+	for s in [CadaclysmSolid.cuboid(1, 2, 3), CadaclysmSolid.cylinder(1, 2), CadaclysmSolid.cone(1, 2), CadaclysmSolid.sphere(1),
+			CadaclysmSolid.torus(3, 1), CadaclysmSolid.wedge(2, 2, 2, 1)]:
+		ok(s.faces > 0)
+		s.close()
+	refuses(func(): return CadaclysmSolid.cuboid(-1, 1, 1), "cuboid")
+	eq(CadaclysmSolid.cuboid(-1, 1, 1), null)
+	var pin := CadaclysmSolid.cylinder(4, 10).translate(0, 0, 6).rotate([0, 0, 0], [0, 0, 1], 0.1).place(XY).mirror(XY)
+	ok(pin.faces > 0)
+	var part := plate.join(CadaclysmSolid.cuboid(6, 6, 20).translate(30, 10, -5), 0.05)
+	ok(part.faces > plate.faces)
+	ok(plate.join(CadaclysmSolid.cylinder(3, 20).translate(30, 10, -5), 0.05).faces > plate.faces)
+	ok(plate.cut(CadaclysmSolid.cylinder(3, 20).translate(30, 10, -5)).faces > 0)
+	ok(plate.common(CadaclysmSolid.cuboid(20, 20, 20)).faces > 0)
+	var text := part.step_text(schema(), "mm")
+	ok(text.begins_with("ISO-10303-21;"), "STEP text")
+	refuses(func(): return part.step_text(schema(), "furlong"), "unit must be one of")
+	var stp := tmp("part.stp")
+	eq(part.step(stp, schema()), true)
+	ok(FileAccess.get_file_as_string(stp).begins_with("ISO-10303-21;"))
+	var two := tmp("two.stp")
+	# The mirrored pin sits on a left-handed frame, which STEP's AXIS2_PLACEMENT_3D
+	# cannot express: the writer refuses it rather than turn it inside out.
+	refuses(func(): return CadaclysmBlacksmith.write_step(two, [plate, pin], schema()), "left-handed")
+	var upright := CadaclysmSolid.cylinder(4, 10).translate(0, 0, 6).rotate([0, 0, 0], [0, 0, 1], 0.1).place(XY)
+	eq(CadaclysmBlacksmith.write_step(two, [plate, upright], schema()), true)
+	ok(FileAccess.get_file_as_string(two).length() > 0)
+	refuses(func(): return CadaclysmBlacksmith.write_step(two, [plate, "nope"]), "write_step: expected CadaclysmSolids")
+	part.close()
+	eq(part.closed, true)
+	refuses(func(): return part.faces, "closed")
+	refuses(func(): return part.translate(1, 0, 0), "closed")
+	part.close()   # idempotent
+
+func test_step_text_takes_no_schema_a_builtin_name_a_path_or_text():
+	var solid := CadaclysmSolid.cuboid(1, 2, 3)
+	ok(solid.step_text().contains("CONFIG_CONTROL_DESIGN"), "no schema is the built-in AP203")
+	ok(solid.step_text("AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF").begins_with("ISO-10303-21;"))
+	refuses(func(): return solid.step_text("NO_SUCH_SCHEMA"), "no built-in schema named")
+	if schema() != "":
+		ok(solid.step_text(schema()).begins_with("ISO-10303-21;"))
+	# A long one-line string names no file: it is sent as EXPRESS text, which parses and
+	# is then refused for lacking an entity the writer needs.
+	var express := "SCHEMA x; ENTITY a; s : STRING; END_ENTITY; END_SCHEMA; -- " + "x".repeat(300)
+	var message := refuses(func(): return solid.step_text(express))
+	ok(message.begins_with("step: the schema has no entity "), message)
+	eq(CadaclysmBlacksmith.write_step_text([solid]), solid.step_text())
+	eq(CadaclysmBlacksmith.write_step_text([solid], "", "in").contains("INCH"), true, "the unit reaches the file")
+	solid.close()
+
+func test_faces_and_edges_are_queried_selected_filleted_chamfered_and_shelled():
+	var box := CadaclysmSolid.cuboid(20, 20, 10)
+	var top := box.select_face(">Z")
+	eq(box.face_kind(top), "plane")
+	var frame := box.face_frame(top)
+	eq(frame.raw.size(), 12)
+	near(frame.raw[11], 1, 1e-9)
+	eq(box.select_face([0, 0, -1]), box.select_face("<Z"))
+	eq(box.select_face(Vector3(0, 0, -1)), box.select_face("<Z"))
+	eq(box.select_face(2), 2)
+	refuses(func(): return box.select_face(99))
+	eq(box.select_face(99), -1)
+	refuses(func(): return box.select_face("^Z"), "a selector is")
+	var edges := box.edges
+	eq(edges.size(), 12)
+	var vertical := []
+	for e in edges:
+		if e.is_line and absf(e.direction.z) > 0.99:
+			vertical.append(e)
+	eq(vertical.size(), 4)
+	var shape := RegEx.create_from_string("^Edge\\(\\d+, 'line', faces=\\(\\d+, \\d+\\)\\)$")
+	for e in vertical:
+		eq(e.faces.size(), 2)
+		ok(e.segments.size() >= 2)
+		eq(e.raw_segments.size(), e.segments.size() * 3)
+		ok(shape.search(str(e)) != null, str(e))
+	eq(edges.filter(func(e): return not e.is_line).size(), 0)
+	ok(box.fillet(vertical, 2).faces > box.faces)
+	var indices := vertical.map(func(e): return e.index)
+	ok(box.chamfer(indices, 1).faces > box.faces)
+	ok(box.chamfer(PackedInt32Array(indices), 1).faces > box.faces)
+	ok(box.shell(1, [top]).faces > box.faces)
+	refuses(func(): return box.fillet(vertical, -1))
+	refuses(func(): return box.fillet(["a"], 1), "fillet: edges: expected ints or CadaclysmEdges")
+
+func test_a_profile_becomes_a_sheet_and_the_sheet_a_solid():
+	var outline := CadaclysmProfile.rect(80, 40).with_hole(CadaclysmProfile.circle(4))
+	var sheet := CadaclysmSolid.face(outline, XY)
+	eq(sheet.faces, 1)
+	eq(sheet.face_kind(0), "plane")
+	eq(sheet.face_frame(0).raw.slice(9), PackedFloat64Array([0, 0, 1]))
+	eq(sheet.extrude_faces(6).faces, CadaclysmSolid.extrude(outline, XY, 6).faces)
+	eq(CadaclysmWorkplane.xz().face(outline).solid().faces, 1)
+
+func test_push_pull_split_and_rounds_and_bevels_remade():
+	var box := CadaclysmSolid.cuboid(40, 20, 10)
+	var top := box.select_face(">Z")
+	var taller := box.push_pull(top, 6)
+	eq(taller.faces, 6)
+	ok(taller.is_watertight())
+	eq(box.push_pull(top, -4).faces, 6)
+	var spring := CadaclysmSolid.coil(CadaclysmProfile.circle(1).translate(10, 0), [0, 0, 0], [0, 0, 1], 4, 2)
+	ok(spring.is_watertight())
+	var pipe := CadaclysmSolid.pipe(CadaclysmSweepPath.at([0, 0, 0]).line_to([0, 0, 10]), 2, 0.5)
+	ok(pipe.is_watertight())
+	eq(pipe.faces, 6, "two walls outside, two in the bore, two ends")
+	var halves := box.split_by_plane([[10, 0, 0], [0, 1, 0], [0, 0, 1], [1, 0, 0]])
+	eq(halves.size(), 2)
+	eq(halves[0].faces, 6)
+	eq(halves[1].faces, 6)
+	eq(box.lumps().size(), 1)
+	refuses(func(): return box.split_by_plane([[0, 0, 50], [1, 0, 0], [0, 1, 0], [0, 0, 1]]), "split_by_plane: the plane does not cross")
+	eq(box.split_by_plane([[0, 0, 50], [1, 0, 0], [0, 1, 0], [0, 0, 1]]).size(), 0)
+	var slab := CadaclysmSolid.cuboid(40, 20, 2)
+	var parts := box.split(slab)
+	ok(parts.size() >= 2, "a box split by a slab through it is at least two bodies, got %d" % parts.size())
+	var can := CadaclysmSolid.cylinder(5, 10)
+	var caps := [can.select_face(">Z"), can.select_face("<Z")]
+	var wall := -1
+	for i in 3:
+		if not caps.has(i):
+			wall = i
+	var fatter := can.push_pull(wall, 2)
+	ok(fatter.is_watertight())
+	eq(fatter.faces, 3)
+	var block := CadaclysmSolid.cuboid(30, 20, 12)
+	var edge := -1
+	for e in block.edges:
+		if edge == -1 and e.is_line and absf(e.direction.x) > 0.99:
+			edge = e.index
+	var rounded := block.fillet([edge], 2)
+	var band: int = count_faces(rounded, "cylinder")[0]
+	eq(rounded.refillet(band, 3).faces, 7)
+	eq(rounded.unfillet(band).faces, 6)
+	var walls := CadaclysmSolid.extrude_open(CadaclysmProfile.rect(20, 10), XY, 8)
+	var thick := walls.thicken(1)
+	ok(thick.is_watertight())
+	eq(thick.faces, 16)
+	var message := refuses(func(): return walls.thicken(0))
+	ok(message.begins_with("thicken: "), message)
+	var bevelled := block.chamfer([edge], 2)
+	var bevel := -1
+	for i in bevelled.faces:
+		var nz := snappedf(bevelled.face_frame(i).raw[11], 1e-6)
+		if bevel == -1 and bevelled.face_kind(i) == "plane" and nz != 0 and nz != 1 and nz != -1:
+			bevel = i
+	ok(bevel != -1, "a bevel face")
+	eq(bevelled.rechamfer(bevel, 3).faces, 7)
+	eq(bevelled.unchamfer(bevel).faces, 6)
+	var joined := box.join(box.face_sheet(top).extrude_faces(6))
+	eq(joined.faces, 10)
+	eq(joined.merge_flush().faces, 6)
+	eq(box.join(box.face_sheet(top).extrude_faces(6), 0.05, true).faces, 6, "merged as it joins")
+
+func test_an_open_profile_closes_with_a_line_back_to_its_start():
+	var ell := CadaclysmProfile.path([0, 0]).line_to(10, 0).line_to(10, 5).end_open()
+	eq(CadaclysmSolid.extrude_open(ell, XY, 2).faces, 2)
+	eq(CadaclysmSolid.extrude_open(ell.close_loop(), XY, 2).faces, 3)
+
+func test_open_profiles_chain_into_one_in_any_order():
+	var side := func(a, b): return CadaclysmProfile.path(a).line_to(b[0], b[1]).end_open()
+	var rect := CadaclysmProfile.chain([side.call([0, 0], [10, 0]), side.call([10, 5], [0, 5]), side.call([0, 0], [0, 5]),
+		side.call([10, 0], [10, 5])])
+	eq(CadaclysmSolid.extrude(rect, XY, 2).faces, 6)
+	eq(CadaclysmSolid.extrude_open(CadaclysmProfile.chain([side.call([0, 0], [10, 0]), side.call([10, 5], [10, 0])]), XY, 2).faces, 2)
+	var message := refuses(func(): return CadaclysmProfile.chain([side.call([0, 0], [1, 0]), side.call([5, 5], [6, 5])]))
+	eq(message, "chain: piece 1 does not meet the others")
+
+func test_colours_are_set_read_back_and_inherited():
+	var block := CadaclysmSolid.cuboid(10, 10, 10)
+	eq(block.colour, null)
+	var top := block.select_face(">Z")
+	var painted := block.coloured("#cc9966").coloured([0.2, 0.4, 1], top)
+	ok(painted.colour.is_equal_approx(Color(0.8, 0.6, 0.4)), str(painted.colour))
+	ok(painted.face_colour(top).is_equal_approx(Color(0.2, 0.4, 1)))
+	ok(painted.translate(5, 0, 0).face_colour(top).is_equal_approx(Color(0.2, 0.4, 1)))
+	eq(block.coloured("#fff").colour, Color(1, 1, 1))
+	eq(block.coloured(Color(0, 1, 0)).colour, Color(0, 1, 0))
+	var cut := painted.cut(CadaclysmSolid.cylinder(2, 20).translate(0, 0, -10).coloured([1, 0, 0]))
+	var bore := count_faces(cut, "cylinder")
+	ok(bore.size() > 0)
+	for f in bore:
+		eq(cut.face_colour(f), Color(1, 0, 0))
+	refuses(func(): return block.coloured([1.5, 0, 0]), "coloured: r, g and b must be in 0..1")
+	refuses(func(): return block.coloured("#fff", -2), "coloured: face -2 is not one of the solid's 6")
+	refuses(func(): return block.coloured("#fff", 6), "face 6")
+	refuses(func(): return block.face_colour(6), "colour: face 6 is not one of the solid's 6")
+	refuses(func(): return block.coloured("red"), "coloured: a colour is")
+	var painted_mesh := painted.array_mesh()
+	ok((painted_mesh.surface_get_material(0) as StandardMaterial3D).albedo_color.is_equal_approx(Color(0.8, 0.6, 0.4)), "the mesh is painted the solid's colour")
+
+func test_the_workplane_chain_mirrors_the_rust_one():
+	var plate := CadaclysmWorkplane.xy().extrude(plate_outline(), 6).solid()
+	var pin := CadaclysmWorkplane.from_solid(plate).faces(">Z").workplane().cylinder(4, 10).solid()
+	near(pin.bounds.position.z, 6, 1e-5, "the pin sits on the top face")
+	refuses(func(): return CadaclysmWorkplane.xz().solid(), "nothing was built")
+	refuses(func(): return CadaclysmWorkplane.yz().translate(1, 0, 0), "holds no solid")
+	refuses(func(): return CadaclysmWorkplane.xy().faces(">Z"), "holds no solid")
+	eq(CadaclysmWorkplane.on(XY).cuboid(1, 1, 1).translate(1, 2, 3).solid().faces, 6)
+	ok(CadaclysmWorkplane.xy().revolve(CadaclysmProfile.rect(2, 2).translate(5, 0), PI * 2).solid().faces > 0)
+	eq(CadaclysmWorkplane.xy().workplane().frame.raw[0], 0.0, "workplane() with nothing picked is a no-op")
+	ok(CadaclysmWorkplane.on(CadaclysmFrame.xz()) is CadaclysmWorkplane)
+
+func test_a_frame_is_built_checked_and_passed_where_twelve_numbers_go():
+	eq(CadaclysmFrame.xy().raw, PackedFloat64Array(XY))
+	eq(CadaclysmFrame.xz().raw, CadaclysmWorkplane.xz().frame.raw)
+	eq(CadaclysmFrame.yz().raw, CadaclysmWorkplane.yz().frame.raw)
+	eq(CadaclysmFrame.xy().raw[11], 1.0)
+	ok(CadaclysmFrame.at([1, 2, 3], [0, 0, 7]).is_equal_approx(CadaclysmFrame.xy(Vector3(1, 2, 3))))
+	ok(CadaclysmFrame.at([0, 0, 0], [0, -1, 0]).is_equal_approx(CadaclysmFrame.xz()))
+	ok(CadaclysmFrame.at([0, 0, 0], [2, 0, 0]).is_equal_approx(CadaclysmFrame.yz()))
+	var f := CadaclysmFrame.at([0, 0, 0], [0, 0, -1], Vector3(1, 1, 5))
+	var h := sqrt(0.5)
+	ok(all_near(f.raw.slice(3, 6), [h, h, 0]) and all_near(f.raw.slice(6, 9), [h, -h, 0]))
+	eq(f.raw.slice(9), PackedFloat64Array([0, 0, -1]))
+	eq(f.z, Vector3(0, 0, -1))
+	ok(CadaclysmFrame.xy().offset(5).is_equal_approx(CadaclysmFrame.xy(Vector3(0, 0, 5))))
+	ok(all_near(CadaclysmFrame.xz().offset(2).raw.slice(0, 3), [0, -2, 0]))
+	eq(CadaclysmFrame.xy().translate(1, 2, 3).origin, Vector3(1, 2, 3))
+	ok(CadaclysmFrame.create([0, 0, 0], [3, 0, 0], [0, 2, 0], [0, 0, 9]).is_equal_approx(CadaclysmFrame.xy()), "normalised")
+	refuses(func(): return CadaclysmFrame.create([0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 0, 1]), "not square")
+	refuses(func(): return CadaclysmFrame.create([0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, -1]), "left-handed")
+	refuses(func(): return CadaclysmFrame.at([0, 0, 0], [0, 0, 0]), "no direction")
+	refuses(func(): return CadaclysmFrame.at([0, 0, 0], [0, 0, 1], Vector3(0, 0, -2)), "along the normal")
+	ok(str(CadaclysmFrame.xy()).begins_with("Frame(origin="), str(CadaclysmFrame.xy()))
+	var lid := CadaclysmSolid.extrude(CadaclysmProfile.rect(10, 4), CadaclysmFrame.xy(Vector3(0, 0, 5)), 2)
+	ok(all_near(lid.raw_bounds(), [-5, -2, 5, 5, 2, 7]), str(lid.raw_bounds()))
+	var wall := CadaclysmWorkplane.on(CadaclysmFrame.xz(Vector3(0, 3, 0))).extrude(CadaclysmProfile.rect(10, 4), 1).solid()
+	near(wall.raw_bounds()[1], 2, 1e-9)
+	near(wall.raw_bounds()[4], 3, 1e-9)
+	var top := CadaclysmFrame.of(lid.face_frame(lid.select_face(">Z")).raw)
+	near(top.raw[2], 7, 1e-9)
+	ok(all_near(top.raw.slice(9), [0, 0, 1]))
+	# Four triples, a Transform3D and a CadaclysmFrame go wherever twelve numbers do.
+	eq(CadaclysmSolid.extrude(CadaclysmProfile.rect(1, 1), [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], 1).faces, 6)
+	eq(CadaclysmSolid.extrude(CadaclysmProfile.rect(1, 1), Transform3D.IDENTITY, 1).faces, 6)
+	refuses(func(): return CadaclysmSolid.extrude(CadaclysmProfile.rect(1, 1), [0, 0, 0], 1), "frame: expected 12 numbers, got 3")
+	refuses(func(): return CadaclysmSolid.extrude(CadaclysmProfile.rect(1, 1), "xy", 1), "expected a CadaclysmFrame, a Transform3D or 12 numbers")
+	# A Transform3D both ways: a turn and a move survive; a scale is refused.
+	var turned := Transform3D(Basis(Vector3.UP, 0.5), Vector3(1, 2, 3))
+	var back := CadaclysmFrame.from_transform(turned).to_transform()
+	ok(back.is_equal_approx(turned), str(back))
+	ok(CadaclysmFrame.of(turned).is_equal_approx(CadaclysmFrame.from_transform(turned)))
+	refuses(func(): return CadaclysmFrame.from_transform(Transform3D.IDENTITY.scaled(Vector3.ONE * 2)), "scales")
+	var moved := CadaclysmSolid.cuboid(2, 2, 2).place(Transform3D(Basis.IDENTITY, Vector3(10, 20, 30)))
+	ok(all_near(moved.raw_bounds().slice(0, 3), [9, 19, 29], 1e-6), str(moved.raw_bounds()))
+
+func test_sweep_loft_taper_and_open_sheets():
+	var sp := CadaclysmSweepPath.at([0, 0, 0]).line_to([0, 0, 20]).arc([10, 0, 20], [0, 1, 0], PI / 2)
+	ok(CadaclysmSolid.sweep(CadaclysmProfile.circle(2), XY, sp).faces > 0)
+	ok(CadaclysmSolid.sweep_open(CadaclysmProfile.path([-2, 0]).line_to(2, 0).end_open(), XY, sp).faces > 0)
+	sp.close()
+	sp.close()
+	refuses(func(): return sp.line_to([1, 1, 1]), "sweep_path: closed")
+	refuses(func(): return CadaclysmSolid.sweep(CadaclysmProfile.circle(2), XY, sp), "sweep_path: closed")
+	var up := [0, 0, 10, 1, 0, 0, 0, 1, 0, 0, 0, 1]
+	ok(CadaclysmSolid.loft(CadaclysmProfile.rect(10, 10), XY, CadaclysmProfile.polygon([[-2, -3], [3, -2], [2, 3], [-3, 2]]), up).faces > 0)
+	ok(CadaclysmSolid.loft_open(CadaclysmProfile.path([0, 0]).line_to(10, 0).end_open(), XY,
+		CadaclysmProfile.path([0, 0]).line_to(10, 0).end_open(), up).faces > 0)
+	eq(CadaclysmSolid.extrude_tapered(CadaclysmProfile.rect(10, 10), XY, 5, 0.1).faces, 6)
+	var sheet := CadaclysmSolid.extrude_open(CadaclysmProfile.path([0, 0]).line_to(10, 0).end_open(), XY, 5)
+	ok(sheet.faces >= 1)
+	ok(CadaclysmSolid.extrude_open_tapered(CadaclysmProfile.path([0, 0]).line_to(10, 0).end_open(), XY, 5, 0.1).faces >= 1)
+	ok(sheet.extrude_faces(2).faces > sheet.faces)
+	ok(CadaclysmSolid.revolve_open(CadaclysmProfile.path([5, 0]).line_to(6, 0).end_open(), [0, 0, 0], [0, 1, 0], PI).faces >= 1)
+	ok(CadaclysmSolid.revolve(CadaclysmProfile.rect(2, 2).translate(5, 0), Vector3.ZERO, Vector3.UP, PI).faces > 0)
+	ok(CadaclysmSweepPath.at(Vector3.ZERO) is CadaclysmSweepPath)
+
+func test_watertightness_is_checked_and_a_bad_tolerance_fails():
+	var cube := CadaclysmSolid.cuboid(2, 2, 2)
+	eq(cube.is_watertight(), true)
+	eq(cube.leaked_edges(), 0)
+	eq(cube.unpaired_edges(), 0)
+	var sheet := CadaclysmSolid.extrude_open(CadaclysmProfile.rect(4, 4), XY, 2)
+	eq(sheet.is_watertight(), false)
+	ok(sheet.leaked_edges(0.05) > 0)
+	ok(sheet.unpaired_edges(0.05) > 0)
+	var message := refuses(func(): return cube.leaked_edges(0))
+	ok(message.begins_with("leaked_edges: tolerance must be positive and finite"), message)
+	eq(cube.leaked_edges(0), -1)
+	message = refuses(func(): return cube.unpaired_edges(-1))
+	ok(message.begins_with("unpaired_edges: "), message)
+
+func test_manifold_is_read_off_the_topology():
+	var m := CadaclysmSolid.cuboid(2, 2, 2).manifold
+	eq(m["faces"], 6)
+	eq(m["edges"], 12)
+	eq(m["vertices"], 8)
+	eq(m["boundary_edges"], 0)
+	eq(m["non_manifold_edges"], 0)
+	eq(m["non_manifold_vertices"], 0)
+	eq(m["is_manifold"], true)
+	eq(m["is_closed"], true)
+	var sheet := CadaclysmSolid.extrude_open(CadaclysmProfile.rect(4, 4), XY, 2).manifold
+	eq(sheet["faces"], 4)
+	eq(sheet["is_manifold"], true)
+	eq(sheet["is_closed"], false)
+	eq(sheet["boundary_edges"], 8)
+
+func test_split_sheet_cuts_a_sheet_along_a_solids_boundary():
+	var sheet := CadaclysmSolid.extrude_open(CadaclysmProfile.rect(40, 40), XY, 20)
+	eq(sheet.faces, 4)
+	var tool := CadaclysmSolid.cuboid(10, 10, 10).translate(20, 0, 10)
+	ok(sheet.split_sheet(tool).faces > sheet.faces, "the straddled wall comes out in more than one piece")
+	var message := refuses(func(): return sheet.split_sheet(tool, 0))
+	ok(message.begins_with("split_sheet: "), message)
+
+func test_extrude_between_takes_slants_or_numbers():
+	var rect := CadaclysmProfile.rect(80, 40)
+	var between := CadaclysmSolid.extrude_between(rect, XY, 0, {"at": 6})
+	var plain := CadaclysmSolid.extrude(rect, XY, 6)
+	eq(between.faces, plain.faces)
+	eq(between.raw_bounds(), plain.raw_bounds())
+	var flat := CadaclysmBlacksmith.slant_of_plane(XY, [0, 0, 6], [0, 0, 1])
+	near(flat["at"], 6, 1e-9)
+	near(flat["grad"][0], 0, 1e-9)
+	near(flat["grad"][1], 0, 1e-9)
+	var message := refuses(func(): return CadaclysmBlacksmith.slant_of_plane(XY, [0, 0, 6], [1, 0, 0]))
+	eq(message, "slant_of_plane: the plane holds the sweep direction")
+	eq(CadaclysmBlacksmith.slant_of_plane(XY, [0, 0, 6], [1, 0, 0]), {})
+	refuses(func(): return CadaclysmBlacksmith.slant_of_plane(XY, [0, 0], [0, 0, 1]), "point: expected 3 numbers")
+	var shifted := rect.translate(40, 0)
+	var sloped := CadaclysmSolid.extrude_between(shifted, XY, 0.0, {"at": 6, "grad": [0.25, 0]})
+	near(sloped.raw_bounds()[2], 0, 1e-6)
+	near(sloped.raw_bounds()[5], 26, 1e-6)
+	eq(sloped.is_watertight(), true)
+	message = refuses(func(): return CadaclysmSolid.extrude_between(rect, XY, 0, {"at": 6, "grad": Vector2(0.25, 0)}))
+	ok(message.begins_with("extrude_between: "), message)
+	refuses(func(): return CadaclysmSolid.extrude_between(rect, XY, 0, "six"), "extrude_between: top: expected a number or {at, grad}")
+	var walls := CadaclysmSolid.extrude_open_between(shifted, XY, 0, {"at": 6, "grad": [0.25, 0]})
+	eq(walls.faces, CadaclysmSolid.extrude_open(shifted, XY, 6).faces)
+	eq(walls.is_watertight(), false)
+	# What slant_of_plane returns is what extrude_between takes.
+	var mitre := CadaclysmBlacksmith.slant_of_plane(XY, [0, 0, 6], [-0.25, 0, 1])
+	near(mitre["grad"][0], 0.25, 1e-9)
+	near(CadaclysmSolid.extrude_between(shifted, XY, 0, mitre).raw_bounds()[5], 26, 1e-6)
+
+func test_faces_are_made_taken_dropped_and_trimmed_profiles_rounded_and_followed():
+	var square := CadaclysmProfile.rect(20, 20)
+	var sheet := CadaclysmSolid.face(square, XY)
+	eq(sheet.faces, 1)
+	eq(CadaclysmWorkplane.xy().face(square).solid().faces, 1)
+	var peg := CadaclysmSolid.extrude(CadaclysmProfile.circle(4), [0, 0, -6, 1, 0, 0, 0, 1, 0, 0, 0, 1], 12)
+	var holed := sheet.trim(peg)
+	var disc := sheet.trim(peg, "inside")
+	eq(holed.faces + disc.faces, sheet.faces * 2)
+	ok(holed.raw_bounds()[3] > 9.9 and disc.raw_bounds()[3] < 4.1, "outside keeps the square, inside the disc")
+	refuses(func(): return sheet.trim(peg.translate(100, 0, 0), "inside"), "trim: nothing of the sheet lies inside the tool")
+	refuses(func(): return sheet.trim(peg, "both"), "keep must be 'outside' or 'inside', not 'both'")
+	var plate := CadaclysmSolid.extrude(square, XY, 6)
+	var top := plate.select_face(">Z")
+	eq(plate.face_sheet(top).faces, 1)
+	eq(plate.drop_faces([0, 1]).faces, plate.faces - 2)
+	refuses(func(): return plate.face_sheet(6), "face_sheet: no face 6 -- the solid has 6 (0 to 5)")
+	refuses(func(): return plate.face_sheet(-1), "face_sheet: no face -1")
+	eq(CadaclysmSolid.extrude(square.round(2), XY, 1).faces, 10)
+	eq(CadaclysmSolid.extrude(square.round(2, [1]), XY, 1).faces, 7)
+	refuses(func(): return square.round(30), "round: the radius 30 does not fit corner 0")
+	var wave := CadaclysmProfile.path([0, 0]).bezier_to([20, 0], [20, 20], [40, 10]).end_open()
+	var along := CadaclysmSweepPath.along(wave, XY, 0.01)
+	var tube := CadaclysmSolid.sweep(CadaclysmProfile.circle(1), [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0], along)
+	var hi_x: float = tube.raw_bounds()[3]
+	ok(tube.faces > 2 and hi_x > 40 and hi_x < 41, "a tube to the end of the curve")
+	along.close()
+	refuses(func(): return CadaclysmSweepPath.along(wave, XY, 0), "along: the tolerance must be positive and finite")
+
+func test_a_profile_turns_about_an_axis_beside_it_and_loose_loops_make_a_plate():
+	var plate := CadaclysmProfile.polygon([[-8, 0], [-5, 0], [-5, 10], [-8, 10]])
+	var quarter := CadaclysmSolid.revolve_in_plane(plate, XY, [0, 0], [0, 1], PI / 2)
+	var b := quarter.raw_bounds()
+	near(b[0], -8, 1e-6)
+	near(b[3], 0, 1e-6)
+	near(b[2], 0, 1e-6)
+	near(b[5], 8, 1e-6)
+	var message := refuses(func(): return CadaclysmSolid.revolve_in_plane(plate, XY, [-6, 0], [-6, 1], 1))
+	eq(message, "revolve_in_plane: the profile crosses the axis")
+	eq(CadaclysmSolid.revolve_open_in_plane(CadaclysmProfile.path([5, 0]).line_to(5, 10).end_open(), XY, [0, 0], [0, 1], PI).faces, 1)
+	eq(CadaclysmSolid.extrude(CadaclysmProfile.from_loops([CadaclysmProfile.circle(4), CadaclysmProfile.rect(30, 30)]), XY, 2).faces, 8)
+	message = refuses(func(): return CadaclysmProfile.from_loops([CadaclysmProfile.rect(30, 30), CadaclysmProfile.circle(4).translate(100, 0)]))
+	eq(message, "from_loops: loop 1 lies outside loop 0")
+	refuses(func(): return CadaclysmProfile.from_loops([CadaclysmProfile.rect(30, 30), 4]), "from_loops: expected CadaclysmProfiles")
+
+func test_a_regular_polygon_and_a_spline_open_and_closed():
+	eq(CadaclysmSolid.extrude(CadaclysmProfile.regular_polygon([0, 0], 10, 6), XY, 2).faces, 8)
+	var square := [[0, 0], [10, 0], [10, 10], [0, 10]]
+	var loop := CadaclysmSolid.extrude(CadaclysmProfile.spline(square, 3, PackedFloat64Array(), true), XY, 2)
+	eq(loop.faces, 3)
+	ok(loop.is_watertight())
+	eq(CadaclysmSolid.extrude_open(CadaclysmProfile.spline(square, 3, PackedFloat64Array([1, 2, 2, 1])), XY, 2).faces, 1)
+	var message := refuses(func(): return CadaclysmProfile.regular_polygon([0, 0], 10, 2))
+	eq(message, "profile_regular_polygon: a polygon has at least 3 sides, not 2")
+
+func test_meshes_and_edges_are_copied_out_for_godot():
+	var ball := CadaclysmSolid.sphere(5)
+	var fine := ball.mesh(0.05)
+	var p: Vector3 = fine.positions[0]
+	near(p.length(), 5, 0.06, "a vertex on the sphere")
+	near(fine.normals[0].length_squared(), 1, 1e-4, "a unit normal")
+	var top_index := 0
+	for i in fine.indices:
+		top_index = maxi(top_index, i)
+	ok(top_index < fine.vertex_count, "indices count from zero into the vertices")
+	var coarse := ball.mesh(0.5)
+	ok(coarse.vertex_count < fine.vertex_count, "coarser is fewer vertices")
+	eq(fine.positions[0], p, "a copy outlives a re-mesh")
+	var drawn := ball.array_mesh()
+	eq(drawn.get_surface_count(), 1)
+	eq(drawn.surface_get_primitive_type(0), Mesh.PRIMITIVE_TRIANGLES)
+	eq(drawn.surface_get_array_index_len(0), fine.index_count)
+	var material := drawn.surface_get_material(0) as StandardMaterial3D
+	ok(material != null)
+	eq(material.cull_mode, BaseMaterial3D.CULL_BACK, "a closed solid draws one side")
+	# Godot winds the other way: each triangle's last two corners trade places.
+	var godot_indices: PackedInt32Array = drawn.surface_get_arrays(0)[Mesh.ARRAY_INDEX]
+	eq([godot_indices[0], godot_indices[1], godot_indices[2]], [fine.indices[0], fine.indices[2], fine.indices[1]])
+	var sheet := CadaclysmSolid.extrude_open(CadaclysmProfile.rect(4, 4), XY, 2).array_mesh()
+	eq((sheet.surface_get_material(0) as StandardMaterial3D).cull_mode, BaseMaterial3D.CULL_DISABLED, "a sheet draws both sides")
+	var box := CadaclysmSolid.cuboid(10, 10, 10)
+	var edges := box.edge_polylines(0.05)
+	eq(edges.polyline_count, 12)
+	for run in edges.runs():
+		ok(run.size() >= 2)
+		near(absf(run[0].x), 5, 1e-6, "an edge of the box runs along its surface")
+	var lines := box.edge_mesh()
+	eq(lines.surface_get_primitive_type(0), Mesh.PRIMITIVE_LINES)
+	ok(lines.surface_get_material(0) is ShaderMaterial)
+	var kept := box.mesh()
+	box.close()
+	refuses(func(): return box.mesh(), "closed")
+	refuses(func(): return box.array_mesh(), "closed")
+	refuses(func(): return box.edge_polylines(), "closed")
+	ok(kept.triangle_count > 0, "a copy outlives its solid")
+	refuses(func(): return ball.mesh(0), "mesh")
+
+func test_to_scene_hands_a_solid_to_the_reader():
+	var scene := CadaclysmSolid.cuboid(10, 20, 30).to_scene()
+	var meshed: CadaclysmNode = null
+	for n in scene.nodes:
+		if meshed == null and n.can_mesh:
+			meshed = n
+	ok(meshed != null, "a node that meshes")
+	ok(v3near(meshed.bounds.size, Vector3(10, 20, 30), 1e-3), "size " + str(meshed.bounds.size))
+	scene.close()
+	if schema() != "":
+		var again := CadaclysmSolid.cuboid(1, 1, 1).to_scene(schema())
+		ok(again.node_count >= 1)
+		again.close()
+
+func test_a_read_body_is_a_solid_sharing_the_reader_brep():
+	var plate := CadaclysmSolid.extrude(plate_outline(), XY, 6)
+	var file := tmp("plate.stp")
+	ok(plate.step(file, schema()))
+	var scene := CadaclysmScene.open_with(file, {"convention": "native"})
+	var node: CadaclysmNode = null
+	for p in scene.placements:
+		var g: CadaclysmNode = p.geometry
+		var b := g.brep
+		if b != null:
+			b.release()
+			if node == null:
+				node = g
+	ok(node != null, "a placement with a brep")
+	var part := CadaclysmSolid.from_node(node)
+	var again := CadaclysmSolid.from_node(node, false)
+	scene.close()
+	eq(part.faces, plate.faces)
+	eq(again.faces, plate.faces, "the scene can close first")
+	ok(part.cut(CadaclysmSolid.cylinder(2, 20).translate(-30, 0, -5)).faces > part.faces)
+	refuses(func(): return CadaclysmSolid.from_node(node), "closed")
+	eq(CadaclysmSolid.open(file).faces, plate.faces)
+	var all := CadaclysmSolid.open_all(file)
+	eq(all.size(), 1)
+	eq(all[0].faces, plate.faces)
+	var message := refuses(func(): return CadaclysmSolid.open(tmp("missing.stp")))
+	ok(message.begins_with("open: "), message)
+	# Two bodies: body picks one, from zero.
+	var two := tmp("two-bodies.stp")
+	ok(CadaclysmBlacksmith.write_step(two, [CadaclysmSolid.cuboid(1, 1, 1), CadaclysmSolid.cylinder(1, 3).translate(10, 0, 0)]))
+	eq(CadaclysmSolid.open_all(two).size(), 2)
+	refuses(func(): return CadaclysmSolid.open(two), "holds 2 bodies: pass a body (0 to 1)")
+	var picked := [CadaclysmSolid.open(two, 0).faces, CadaclysmSolid.open(two, 1).faces]
+	picked.sort()
+	eq(picked, [3, 6])
+	refuses(func(): return CadaclysmSolid.open(two, 5), "has no body 5: it holds 2")
+	# A mesh-only document: no brep to hand across.
+	var mesh := CadaclysmScene.open_bytes("cube(10);".to_utf8_buffer(), "scad", {})
+	var cube: CadaclysmNode = null
+	for n in mesh.nodes:
+		if cube == null and n.brep == null:
+			cube = n
+	ok(cube != null, "a node with no brep")
+	message = refuses(func(): return CadaclysmSolid.from_node(cube))
+	ok(message.begins_with("from_node: node ") and message.contains("has no brep"), message)
+	mesh.close()
+	var scad := tmp("cube.scad")
+	var f := FileAccess.open(scad, FileAccess.WRITE)
+	f.store_string("cube(10);\n")
+	f.close()
+	refuses(func(): return CadaclysmSolid.open(scad), "open: the .scad file draws no B-rep body")
+
+func test_push_pull_on_several_faces_at_once():
+	# The box's top and +x side pushed together: 5 taller and 5 longer, each face found
+	# again after the other's push; a can's top and wall, taller and fatter.
+	var box := CadaclysmSolid.cuboid(40, 20, 10)
+	var top := box.select_face(">Z")
+	var side := box.select_face(">X")
+	var grown := box.push_pull([top, side], 5)
+	ok(grown.is_watertight())
+	eq(grown.faces, 6)
+	var b := grown.raw_bounds()
+	near(b[3] - b[0], 45, 1e-6)
+	near(b[4] - b[1], 20, 1e-6)
+	near(b[5] - b[2], 15, 1e-6)
+	eq(box.push_pull(PackedInt32Array([top, side]), 5).faces, 6)
+	var can := CadaclysmSolid.cylinder(5, 10)
+	var cap := can.select_face(">Z")
+	var base := can.select_face("<Z")
+	var wall := -1
+	for i in can.faces:
+		if i != cap and i != base:
+			wall = i
+	var both := can.push_pull([cap, wall], 2)
+	ok(both.is_watertight())
+	eq(both.faces, 3)
+	b = both.raw_bounds()
+	near(b[5] - b[2], 12, 1e-6)
+	near(b[3] - b[0], 14, 0.05)
+	eq(refuses(func(): return box.push_pull([], 2)), "push_pull: no faces to push")
+	refuses(func(): return box.push_pull(-1, 2), "push_pull: no face -1")
+
+func test_weights_one_per_point_refused_otherwise():
+	var square := [[0, 0], [10, 0], [10, 10], [0, 10]]
+	eq(refuses(func(): return CadaclysmProfile.spline(square, 3, PackedFloat64Array([1, 1]), true)),
+		"spline: 2 weights for 4 points; give one per point")
+	ok(CadaclysmProfile.spline(square, 3, PackedFloat64Array([1, 1, 1, 1]), true) != null)
+	eq(refuses(func(): return CadaclysmProfile.path([0, 0]).nurbs_to([[5, 5], [10, 0]], [0, 0, 0, 1, 1, 1], 2, PackedFloat64Array([1, 1]))),
+		"nurbs_to: 2 weights for 3 control points (the current point and 2 given); give one per point")
+
+# A closed mesh's volume, by the divergence theorem over its triangles.
+func volume(solid: CadaclysmSolid) -> float:
+	var m := solid.mesh(0.01)
+	var p := m.positions
+	var ix := m.indices
+	var v := 0.0
+	for t in range(0, ix.size(), 3):
+		v += p[ix[t]].dot(p[ix[t + 1]].cross(p[ix[t + 2]])) / 6.0
+	return absf(v)
+
+func test_loft_through_several_sections():
+	# Wide, narrow, wide: a waist, round at every height, and the sheet through the same
+	# curves, open.
+	var sections := []
+	for rz in [[10, 0], [6, 10], [10, 20]]:
+		sections.append([CadaclysmProfile.circle(rz[0]), CadaclysmFrame.xy(Vector3(0, 0, rz[1]))])
+	var waist := CadaclysmSolid.loft_through(sections)
+	ok(waist.is_watertight())
+	var drum := volume(CadaclysmSolid.extrude(CadaclysmProfile.circle(10), CadaclysmFrame.xy(), 20))
+	var inside := volume(waist)
+	ok(inside > 0 and inside < drum, "waist %f of the drum's %f" % [inside, drum])
+	var sheet := CadaclysmSolid.loft_through_open(sections)
+	eq(sheet.is_watertight(), false)
+	eq(CadaclysmSolid.loft_through(sections.slice(0, 1)), null)
+	ok(Cadaclysm.last_error().begins_with("loft_through: "), Cadaclysm.last_error())
+	eq(CadaclysmSolid.loft_through([sections[0], "nope"]), null)
+	ok(Cadaclysm.last_error().contains("section 1 is not a [profile, frame] pair"), Cadaclysm.last_error())
