@@ -9,19 +9,29 @@ same prebuilt libraries.
 
 It carries **no cadaclysm source**. The crate opens the libraries (`.dll`, `.so`,
 `.dylib`) when your program runs, the way Python's ctypes does, so building needs
-no C toolchain, no import library and no build script. Its only dependency is
-`libloading`.
-
-- **API reference:** <https://cadaclysm.blitter.studio/docs/rust.html>
-- **The libraries:** attached to each release of the
-  [SDK](https://github.com/rdeioris/cadaclysm-sdk) -- `python fetch.py` there
-  downloads the right archive for the machine into `lib/`. Windows x64,
-  macOS 11+, Linux x64 and arm64. Use the crate and the libraries from the same
-  release: the crate's version is the release's.
+no C toolchain and no import library. Its only dependency is `libloading`.
 
 ```
 cargo add cadaclysm-sdk
 ```
+
+**The libraries come with it.** When the crate builds, it downloads this
+platform's libraries for its own version from the
+[SDK](https://github.com/rdeioris/cadaclysm-sdk)'s release (Windows x64, macOS 11+,
+Linux x64 and arm64), checks them against the release's `SHA256SUMS`, and copies
+them beside your binaries in `target/debug` or `target/release` -- so `cargo run`
+works as it is, and shipping is copying those two files with your executable.
+The download happens once per build directory; `curl` and `tar`, which Windows 10+,
+macOS and Linux all carry, do the work.
+
+- **Without it:** `default-features = false`, or `CADACLYSM_NO_DOWNLOAD=1` in the
+  build's environment (where the crate is a dependency of a dependency). Then get
+  the libraries from the SDK (`python fetch.py` puts them in `lib/`) and the crate
+  finds them as below. A download that fails is a build warning, not an error,
+  with the same fallback.
+- **API reference:** <https://cadaclysm.blitter.studio/docs/rust.html>
+- The libraries are proprietary, under the SDK's EULA; this crate's own source is
+  Apache-2.0.
 
 ```rust
 fn main() -> cadaclysm_sdk::Result<()> {
@@ -53,10 +63,11 @@ fn main() -> cadaclysm_sdk::Result<()> {
 
 1. `CADACLYSM_LIBRARY` for the reader, `CADACLYSM_BLACKSMITH_LIBRARY` for the
    kernel -- the library itself, or its directory. Each reads only its own;
-2. beside your executable;
-3. a `lib/` directory in any ancestor of the executable or the working directory
+2. beside your executable -- where the download puts them;
+3. where the build downloaded them;
+4. a `lib/` directory in any ancestor of the executable or the working directory
    (the SDK layout -- `python fetch.py` puts the libraries there);
-4. `target/release` or `target/debug` in any of those ancestors (this repository).
+5. `target/release` or `target/debug` in any of those ancestors (this repository).
 
 Or call `cadaclysm_sdk::load(path)` / `cadaclysm_sdk::blacksmith::load(path)`
 before anything else. When shipping, put the libraries beside your executable.

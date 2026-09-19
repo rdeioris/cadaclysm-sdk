@@ -165,7 +165,7 @@ public final class Blacksmith {
             SWEEP_PATH_LINE_TO, SWEEP_PATH_ARC, SWEEP_PATH_ALONG, SWEEP_PATH_FREE, SWEEP, SWEEP_OPEN,
             EXTRUDE_FACES, FACE, FACE_SHEET, DROP_FACES, PLACE, TRANSLATE, ROTATE, MIRROR, JOIN, CUT,
             COMMON, SPLIT_SHEET, TRIM, FILLET, CHAMFER,
-            SHELL, PUSH_PULL, MERGE_FLUSH, COIL, PIPE, SPLIT, SPLIT_BY_PLANE, LUMP_COUNT, LUMP, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_KIND, COLOURED, COLOUR, EDGE_COUNT, EDGE_AT, MESH_AT,
+            SHELL, PUSH_PULL, MERGE_FLUSH, REFILLET, UNFILLET, COIL, PIPE, SPLIT, SPLIT_BY_PLANE, LUMP_COUNT, LUMP, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_KIND, COLOURED, COLOUR, EDGE_COUNT, EDGE_AT, MESH_AT,
             EDGE_POLYLINES, BOUNDS, LEAKED_EDGES, UNPAIRED_EDGES, MANIFOLD, STEP, STRING_FREE, FROM_BREP,
             BREP_LAYOUT_ID;
 
@@ -250,6 +250,8 @@ public final class Blacksmith {
         SHELL = bind(linker, lib, "cadaclysm_blacksmith_shell", FunctionDescriptor.of(A, A, D, A, L, D, A, A));
         PUSH_PULL = bind(linker, lib, "cadaclysm_blacksmith_push_pull", FunctionDescriptor.of(A, A, I, D, D, A, A));
         MERGE_FLUSH = bind(linker, lib, "cadaclysm_blacksmith_merge_flush", FunctionDescriptor.of(A, A));
+        REFILLET = bind(linker, lib, "cadaclysm_blacksmith_refillet", FunctionDescriptor.of(A, A, I, D, D));
+        UNFILLET = bind(linker, lib, "cadaclysm_blacksmith_unfillet", FunctionDescriptor.of(A, A, I));
         COIL = bind(linker, lib, "cadaclysm_blacksmith_coil", FunctionDescriptor.of(A, A, A, D, D));
         PIPE = bind(linker, lib, "cadaclysm_blacksmith_pipe", FunctionDescriptor.of(A, A, D, D));
         SPLIT = bind(linker, lib, "cadaclysm_blacksmith_split", FunctionDescriptor.of(A, A, A, D, A, A));
@@ -2324,6 +2326,36 @@ public final class Blacksmith {
             try {
                 MemorySegment h = handle();
                 return new Solid(call(() -> (MemorySegment) MERGE_FLUSH.invokeExact(h)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #refillet(int, double, double)} at tolerance 1e-6. */
+        public Solid refillet(int face, double radius) {
+            return refillet(face, radius, 1e-6);
+        }
+
+        /** The round {@code face} belongs to -- a fillet's bands, balls and rim bands joined to
+         *  that face -- made again at {@code radius}, as Fusion's press-pull on a fillet face:
+         *  taken back to the sharp edges it replaced, and those rounded again. */
+        public Solid refillet(int face, double radius, double tolerance) {
+            int which = index(face);
+            try {
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) REFILLET.invokeExact(h, which, radius, tolerance)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The round {@code face} belongs to taken off, the faces beside it sharp again --
+         *  Fusion's delete of a fillet face. */
+        public Solid unfillet(int face) {
+            int which = index(face);
+            try {
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) UNFILLET.invokeExact(h, which)));
             } finally {
                 keep(this);
             }

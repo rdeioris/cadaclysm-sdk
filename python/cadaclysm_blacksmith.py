@@ -101,7 +101,7 @@ __all__ = [
 ]
 
 # This file's own version (the workspace's); `version()` is the loaded library's.
-__version__ = "0.4.2"
+__version__ = "0.4.3"
 
 NONE = 0xFFFFFFFF
 UNITS = {"m": 0, "mm": 1, "in": 2}
@@ -295,6 +295,8 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_shell", _SOLID, [_SOLID, c_double, _U, c_size_t, c_double, _PROGRESS, c_void_p]),
     ("cadaclysm_blacksmith_push_pull", _SOLID, [_SOLID, c_uint32, c_double, c_double, _PROGRESS, c_void_p]),
     ("cadaclysm_blacksmith_merge_flush", _SOLID, [_SOLID]),
+    ("cadaclysm_blacksmith_refillet", _SOLID, [_SOLID, c_uint32, c_double, c_double]),
+    ("cadaclysm_blacksmith_unfillet", _SOLID, [_SOLID, c_uint32]),
     ("cadaclysm_blacksmith_split", _SOLID, [_SOLID, _SOLID, c_double, _PROGRESS, c_void_p]),
     ("cadaclysm_blacksmith_split_by_plane", _SOLID, [_SOLID, _D, c_double, _PROGRESS, c_void_p]),
     ("cadaclysm_blacksmith_lump_count", c_uint32, [_SOLID]),
@@ -1585,6 +1587,18 @@ class Solid:
         if n == 0:
             _fail("lump_count")
         return [Solid(_lib().cadaclysm_blacksmith_lump(h, i)) for i in range(n)]
+
+    def refillet(self, face, radius, tolerance=1e-6) -> "Solid":
+        """The round `face` belongs to -- a fillet's bands, balls and rim bands joined
+        to that face -- made again at `radius`, as Fusion's press-pull on a fillet
+        face: taken back to the sharp edges it replaced, and those rounded again.
+        Rounds of straight edges between planes and of circular rims beside a plane."""
+        return Solid(_lib().cadaclysm_blacksmith_refillet(self._h(), face, radius, tolerance))
+
+    def unfillet(self, face) -> "Solid":
+        """The round `face` belongs to taken off, the faces beside it sharp again --
+        Fusion's delete of a fillet face. The same rounds as `refillet`."""
+        return Solid(_lib().cadaclysm_blacksmith_unfillet(self._h(), face))
 
     def merge_flush(self) -> "Solid":
         """This solid with its flush faces merged: flat faces on one plane, facing one

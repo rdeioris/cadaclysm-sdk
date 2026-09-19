@@ -356,6 +356,8 @@ internal static class BlacksmithNative
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_push_pull(SolidHandle solid, uint face, double distance,
         double tolerance, IntPtr progress, IntPtr user);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_merge_flush(SolidHandle solid);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_refillet(SolidHandle solid, uint face, double radius, double tolerance);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_unfillet(SolidHandle solid, uint face);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_split(SolidHandle solid, SolidHandle tool, double tolerance,
         IntPtr progress, IntPtr user);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_split_by_plane(SolidHandle solid, double[] plane,
@@ -1470,6 +1472,16 @@ public sealed class Solid : IDisposable
     /// way and meeting, made one face, and the vertices left mid-way along a straight edge
     /// taken out -- the seams a <see cref="Join"/> leaves where two parts are flush.</summary>
     public Solid MergeFlush() => new(BlacksmithNative.cadaclysm_blacksmith_merge_flush(Handle));
+
+    /// <summary>The round `face` belongs to -- a fillet's bands, balls and rim bands joined to
+    /// that face -- made again at `radius`, as Fusion's press-pull on a fillet face: taken back to
+    /// the sharp edges it replaced, and those rounded again.</summary>
+    public Solid Refillet(int face, double radius, double tolerance = 1e-6) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_refillet(Handle, Index(face), radius, tolerance));
+
+    /// <summary>The round `face` belongs to taken off, the faces beside it sharp again --
+    /// Fusion's delete of a fillet face.</summary>
+    public Solid Unfillet(int face) => new(BlacksmithNative.cadaclysm_blacksmith_unfillet(Handle, Index(face)));
 
     /// <summary>This solid hollowed to a wall `thickness` thick (inward for a positive
     /// thickness, outward for a negative one), with the faces at `open` removed so the hollow

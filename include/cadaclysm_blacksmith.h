@@ -1100,6 +1100,32 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_chamfer(const struct Cadac
                                                               double tolerance);
 
 /**
+ * `solid` with the round face `face` belongs to made again at `radius` -- the
+ * fillet's bands, balls and rim bands joined to that face taken back to the sharp
+ * edges they replaced and those rounded again, as Fusion's press-pull on a fillet
+ * face. Null and `last_error` for a face that is not a round of straight edges
+ * between planes or of circular rims, or a radius that does not fit.
+ *
+ * # Safety
+ * `solid` live.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_refillet(const struct CadaclysmBlacksmithSolid *solid,
+                                                               uint32_t face,
+                                                               double radius,
+                                                               double tolerance);
+
+/**
+ * `solid` with the round face `face` belongs to taken off, the faces beside it made
+ * sharp again -- Fusion's delete of a fillet face. The same refusals as
+ * [`cadaclysm_blacksmith_refillet`].
+ *
+ * # Safety
+ * `solid` live.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_unfillet(const struct CadaclysmBlacksmithSolid *solid,
+                                                               uint32_t face);
+
+/**
  * Face `face` of `solid` pushed out by `distance` along its outward normal (pulled
  * in, negative) the way a CAD program extrudes a face: the prism over it joined on
  * (cut out) at `tolerance`, and the result's flush faces merged -- a box's top

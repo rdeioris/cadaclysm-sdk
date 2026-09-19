@@ -1,6 +1,6 @@
 [package]
 name = "cadaclysm-sdk"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 rust-version = "1.70"
 description = "Read CAD files (STEP, IGES, IFC, Rhino 3dm, ACIS SAT, OCCT BREP, OpenSCAD) and build exact B-rep solids, over the prebuilt cadaclysm libraries loaded at run time."
@@ -15,16 +15,23 @@ keywords = ["cad", "step", "ifc", "brep", "mesh"]
 categories = ["api-bindings", "graphics", "science"]
 # What a crate needs and nothing else: the smoke and tree examples ride along as
 # documentation, the repository's own tests stay behind.
-include = ["src/**/*.rs", "examples/*.rs", "README.md", "Cargo.toml"]
+include = ["src/**/*.rs", "examples/*.rs", "build.rs", "README.md", "Cargo.toml"]
 
 [lib]
 name = "cadaclysm_sdk"
 
+[features]
+# Fetch this platform's libraries for this version from the SDK's release when the
+# crate is built (build.rs), so nothing needs installing by hand. Off with
+# `default-features = false`, or CADACLYSM_NO_DOWNLOAD=1 in the build's environment.
+default = ["download"]
+download = []
+
 [dependencies]
-# The only dependency, and the reason there is no build script: the library is
-# opened when the program runs, the way Python's ctypes and Node's koffi open it,
-# so nothing here links against it and nothing needs a C toolchain or an import
-# library to build.
+# The only dependency: the library is opened when the program runs, the way
+# Python's ctypes and Node's koffi open it, so nothing here links against it and
+# nothing needs a C toolchain or an import library to build. (build.rs only
+# downloads; it compiles and links nothing.)
 libloading = "0.8"
 
 # Standalone on purpose. This crate must build with nothing of cadaclysm but the

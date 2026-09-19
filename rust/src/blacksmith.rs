@@ -1177,6 +1177,19 @@ impl Solid {
         self.next(unsafe { (self.api.cadaclysm_blacksmith_merge_flush)(self.raw()) }, "merge_flush")
     }
 
+    /// The round `face` belongs to -- a fillet's bands, balls and rim bands joined to
+    /// that face -- made again at `radius`, as Fusion's press-pull on a fillet face:
+    /// taken back to the sharp edges it replaced, and those rounded again.
+    pub fn refillet(&self, face: u32, radius: f64, tolerance: f64) -> Result<Solid> {
+        self.next(unsafe { (self.api.cadaclysm_blacksmith_refillet)(self.raw(), face, radius, tolerance) }, "refillet")
+    }
+
+    /// The round `face` belongs to taken off, the faces beside it sharp again --
+    /// Fusion's delete of a fillet face.
+    pub fn unfillet(&self, face: u32) -> Result<Solid> {
+        self.next(unsafe { (self.api.cadaclysm_blacksmith_unfillet)(self.raw(), face) }, "unfillet")
+    }
+
     /// This solid hollowed to walls `thickness` thick, the faces at `open` removed so
     /// the hollow is reachable.
     pub fn shell(&self, thickness: f64, open: &[u32], tolerance: f64) -> Result<Solid> {

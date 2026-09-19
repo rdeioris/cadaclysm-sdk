@@ -210,6 +210,8 @@ function _lib() {
     shell: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_shell(const CadaclysmBlacksmithSolid *solid, double thickness, const uint32_t *open_faces, size_t count, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     push_pull: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_push_pull(const CadaclysmBlacksmithSolid *solid, uint32_t face, double distance, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     merge_flush: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_merge_flush(const CadaclysmBlacksmithSolid *solid)'),
+    refillet: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_refillet(const CadaclysmBlacksmithSolid *solid, uint32_t face, double radius, double tolerance)'),
+    unfillet: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_unfillet(const CadaclysmBlacksmithSolid *solid, uint32_t face)'),
     split: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_split(const CadaclysmBlacksmithSolid *solid, const CadaclysmBlacksmithSolid *tool, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     split_by_plane: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_split_by_plane(const CadaclysmBlacksmithSolid *solid, const double *plane, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     lump_count: f('uint32_t cadaclysm_blacksmith_lump_count(const CadaclysmBlacksmithSolid *solid)'),
@@ -778,6 +780,14 @@ class Solid {
   }
   /** This solid with its flush faces merged, and the vertices left mid-way along a straight edge taken out. */
   mergeFlush() { return new Solid(_lib().merge_flush(this._handle)); }
+  /**
+   * The round `face` belongs to -- a fillet's bands, balls and rim bands joined to that face --
+   * made again at `radius`, as Fusion's press-pull on a fillet face: taken back to the sharp edges
+   * it replaced, and those rounded again.
+   */
+  refillet(face, radius, tolerance = 1e-6) { return new Solid(_lib().refillet(this._handle, face, radius, tolerance)); }
+  /** The round `face` belongs to taken off, the faces beside it sharp again -- Fusion's delete of a fillet face. */
+  unfillet(face) { return new Solid(_lib().unfillet(this._handle, face)); }
   shell(thickness, open = [], tolerance = 1e-6, progress = null) {
     const which = Uint32Array.from(Array.from(open, Number));
     return new Solid(_lib().shell(this._handle, thickness, which, which.length, tolerance, _progress(progress), null));

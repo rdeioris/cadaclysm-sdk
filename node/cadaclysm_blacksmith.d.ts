@@ -180,6 +180,8 @@ export class Solid {
   chamfer(edges: Iterable<Edge | number>, distance: number, tolerance?: number): Solid;
   pushPull(face: number, distance: number, tolerance?: number, progress?: Progress | null): Solid;
   mergeFlush(): Solid;
+  refillet(face: number, radius: number, tolerance?: number): Solid;
+  unfillet(face: number): Solid;
   split(tool: Solid, tolerance?: number, progress?: Progress | null): Solid[];
   splitByPlane(plane: FrameLike, tolerance?: number, progress?: Progress | null): Solid[];
   lumps(): Solid[];

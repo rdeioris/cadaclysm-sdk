@@ -2474,6 +2474,40 @@ func (s *Solid) Lumps() ([]*Solid, error) {
 	return out, nil
 }
 
+// Refillet is this solid with the round face belongs to — a fillet's bands, balls and rim
+// bands joined to that face — made again at radius — Python's Solid.refillet, Fusion's
+// press-pull on a fillet face: taken back to the sharp edges it replaced, and those
+// rounded again. FilletTolerance is Python's default tolerance.
+func (s *Solid) Refillet(face int, radius, tolerance float64) (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	if face < 0 || face > math.MaxUint32 {
+		return nil, &BuildError{Message: fmt.Sprintf("refillet: face %d is out of range", face)}
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_refillet(h, C.uint32_t(face), C.double(radius), C.double(tolerance)), "solid")
+	runtime.KeepAlive(s)
+	return out, err
+}
+
+// Unfillet is this solid with the round face belongs to taken off, the faces beside it
+// sharp again — Python's Solid.unfillet, Fusion's delete of a fillet face.
+func (s *Solid) Unfillet(face int) (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	if face < 0 || face > math.MaxUint32 {
+		return nil, &BuildError{Message: fmt.Sprintf("unfillet: face %d is out of range", face)}
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_unfillet(h, C.uint32_t(face)), "solid")
+	runtime.KeepAlive(s)
+	return out, err
+}
+
 // MergeFlush is this solid with its flush faces merged — Python's Solid.merge_flush: flat
 // faces on one plane, facing one way and meeting, made one face, and the vertices left
 // mid-way along a straight edge taken out.

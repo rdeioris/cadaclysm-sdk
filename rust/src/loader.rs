@@ -69,11 +69,11 @@ pub(crate) fn file_name(stem: &str) -> String {
 /// found, a message naming every place that was looked in.
 ///
 /// `env` first (the library itself or its directory); then beside the running
-/// executable; then a `lib/` directory in any ancestor of the executable or of the
-/// working directory (the SDK's layout); then a `target/release` or `target/debug`
-/// in any of those ancestors (the repository's layout). No other variable is read
-/// and the system's own search is not consulted, so a stray copy elsewhere on `PATH`
-/// is never picked up by accident.
+/// executable; then where the build downloaded it (the `download` feature); then a
+/// `lib/` directory in any ancestor of the executable or of the working directory (the
+/// SDK's layout); then a `target/release` or `target/debug` in any of those ancestors
+/// (the repository's layout). No other variable is read and the system's own search is
+/// not consulted, so a stray copy elsewhere on `PATH` is never picked up by accident.
 pub(crate) fn find(name: &str, env: &str) -> Result<PathBuf, String> {
     if let Some(value) = std::env::var_os(env).filter(|v| !v.is_empty()) {
         let given = PathBuf::from(&value);
@@ -93,6 +93,10 @@ pub(crate) fn find(name: &str, env: &str) -> Result<PathBuf, String> {
         starts.push(dir);
     }
     let mut searched: Vec<PathBuf> = starts.iter().take(1).map(|dir| dir.join(name)).collect();
+    // What the build downloaded (the `download` feature): this crate's own release.
+    if let Some(bundled) = option_env!("CADACLYSM_SDK_BUNDLED") {
+        searched.push(Path::new(bundled).join(name));
+    }
     for start in &starts {
         searched.extend(start.ancestors().map(|dir| dir.join("lib").join(name)));
     }
@@ -107,6 +111,9 @@ pub(crate) fn find(name: &str, env: &str) -> Result<PathBuf, String> {
     let mut message = format!("{name} not found. Looked in:\n");
     for candidate in &searched {
         message.push_str(&format!("    {}\n", candidate.display()));
+    }
+    if let Some(reason) = option_env!("CADACLYSM_SDK_DOWNLOAD_ERROR") {
+        message.push_str(&format!("The build did not download the libraries: {reason}\n"));
     }
     message.push_str(&format!("Point {env} at it, or load it with its path first."));
     Err(message)
