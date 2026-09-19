@@ -52,7 +52,7 @@ it. Put it where the libraries look: the `CADACLYSM_LICENSE` environment
 variable (the file's path, or its text), or `cadaclysm.lic` beside your
 executable or in the working directory, or pass it from code (`license()` in
 Python and Node.js, `Scene.LicenseSet` in C#, `cadaclysm.LicenseSet` in Go,
-`Cad.licenseSet` in Java).
+`Cad.licenseSet` in Java, `cadaclysm_sdk::license` in Rust).
 
     python fetch.py --license KEY
 
@@ -70,6 +70,7 @@ portal -- to pick up the new file the same way.
 | Go | [go/](go/) | `go run -C go ./cmd/smoke "$PWD/samples/cube.scad"` | Python's set, both libraries |
 | Java | [java/](java/) | `javac --release 22 -d java/classes java/*.java && java --enable-native-access=ALL-UNNAMED -cp java/classes Smoke samples/cube.scad` | Python's set, both libraries |
 | Node.js | [node/](node/) | `npm install` in `node/`, then `node node/smoke.js samples/cube.scad path/to/cadaclysm.lic` | see the release notes |
+| Rust | [rust/](rust/) -- also on crates.io, `cargo add cadaclysm-sdk` | `cargo run --manifest-path rust/Cargo.toml --example smoke -- samples/cube.scad` | Python's set, both libraries |
 | C / C++ | [include/](include/) | the headers are the reference | 100% |
 
 The Go sample's loader must find the library at run time: put the library

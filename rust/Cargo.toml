@@ -1,0 +1,34 @@
+[package]
+name = "cadaclysm-sdk"
+version = "0.4.2"
+edition = "2021"
+rust-version = "1.70"
+description = "Read CAD files (STEP, IGES, IFC, Rhino 3dm, ACIS SAT, OCCT BREP, OpenSCAD) and build exact B-rep solids, over the prebuilt cadaclysm libraries loaded at run time."
+# The wrapper's own source, like every wrapper in the SDK; the libraries it loads are
+# proprietary, downloaded from the SDK's releases.
+license = "Apache-2.0"
+repository = "https://github.com/rdeioris/cadaclysm-sdk"
+homepage = "https://cadaclysm.blitter.studio"
+documentation = "https://cadaclysm.blitter.studio/docs/rust.html"
+readme = "README.md"
+keywords = ["cad", "step", "ifc", "brep", "mesh"]
+categories = ["api-bindings", "graphics", "science"]
+# What a crate needs and nothing else: the smoke and tree examples ride along as
+# documentation, the repository's own tests stay behind.
+include = ["src/**/*.rs", "examples/*.rs", "README.md", "Cargo.toml"]
+
+[lib]
+name = "cadaclysm_sdk"
+
+[dependencies]
+# The only dependency, and the reason there is no build script: the library is
+# opened when the program runs, the way Python's ctypes and Node's koffi open it,
+# so nothing here links against it and nothing needs a C toolchain or an import
+# library to build.
+libloading = "0.8"
+
+# Standalone on purpose. This crate must build with nothing of cadaclysm but the
+# shared library it loads, exactly as it does for a customer who has only the SDK
+# zip, so it is not a member of the repository's workspace and must never grow a
+# path dependency on one of its crates.
+[workspace]
