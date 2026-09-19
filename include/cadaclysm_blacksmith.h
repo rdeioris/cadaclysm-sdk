@@ -1103,12 +1103,13 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_chamfer(const struct Cadac
  * Face `face` of `solid` pushed out by `distance` along its outward normal (pulled
  * in, negative) the way a CAD program extrudes a face: the prism over it joined on
  * (cut out) at `tolerance`, and the result's flush faces merged -- a box's top
- * raised is one taller box of six faces. A face on a cylinder or a cone moves out along
- * its normal instead, the surface a step out (a boss fatter, a bore or a countersink
- * narrower), the planes beside it -- square to its axis -- carried along. Null and
- * `last_error` for any other curved face, a curved one with anything else beside it,
- * reaching a cone's apex, pushed to its axis or into another edge, a face the solid
- * does not have, a zero or non-finite distance, or what the boolean refuses.
+ * raised is one taller box of six faces. A face on a cylinder, a cone, a sphere or a
+ * torus moves out along its normal instead, the surface a step out (a boss fatter, a
+ * bore or a countersink narrower, a dome fuller), the planes beside it carried along.
+ * Null and `last_error` for any other curved face, a curved one with anything but a
+ * plane it can follow beside it, reaching a cone's apex, pushed to its axis or centre,
+ * off a plane beside it or into another edge, a face the solid does not have, a zero
+ * or non-finite distance, or what the boolean refuses.
  *
  * # Safety
  * `solid` live; `progress` null or valid.

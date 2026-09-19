@@ -1214,7 +1214,7 @@ struct CadaclysmMesh cadaclysm_node_mesh(const struct CadaclysmScene *scene, uin
  * does, so an instance answers for what it draws.
  *
  * **An estimate, from the reader's own knowledge of the part.** A b-rep
- * (STEP, ACIS, OpenCASCADE `.brep`, an IGES trimmed surface, a Rhino brep
+ * (STEP, ACIS, OCCT `.brep`, an IGES trimmed surface, a Rhino brep
  * without a render mesh) is counted the way its mesher will count it -- the
  * same trims, the same grid stations -- and lands within a few tens of
  * percent of the mesh; an untrimmed IGES patch is its grid, exact; a stored

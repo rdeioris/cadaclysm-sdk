@@ -362,7 +362,8 @@ func WriteStepText(solids []*Solid, schema, unit string) (string, error) {
 	return C.GoString(raw), nil
 }
 
-// WriteStep is several solids as one AP203 file at path, each its own body — see
+// WriteStep is several solids as one STEP file at path (AP203 unless schema names
+// another), each its own body — see
 // WriteStepText for schema and unit.
 func WriteStep(path string, solids []*Solid, schema, unit string) error {
 	text, err := WriteStepText(solids, schema, unit)
@@ -2162,13 +2163,14 @@ func (s *Solid) EdgePolylines(tolerance float64) (*Polylines, error) {
 	return p, nil
 }
 
-// StepText is this solid as AP203 STEP text; see WriteStepText for schema and unit.
+// StepText is this solid as STEP text (AP203 unless schema names another); see
+// WriteStepText for schema and unit.
 func (s *Solid) StepText(schema, unit string) (string, error) {
 	return WriteStepText([]*Solid{s}, schema, unit)
 }
 
-// Step writes this solid as an AP203 STEP file at path; see WriteStepText for schema and
-// unit.
+// Step writes this solid as a STEP file at path (AP203 unless schema names another); see
+// WriteStepText for schema and unit.
 func (s *Solid) Step(path, schema, unit string) error {
 	return WriteStep(path, []*Solid{s}, schema, unit)
 }
@@ -2380,9 +2382,10 @@ func merged(out *Solid, err error, merge []bool) (*Solid, error) {
 // PushPull is face pushed out by distance along its outward normal (pulled in, negative)
 // the way Fusion and Rhino extrude a face — Python's Solid.push_pull: the prism over it
 // joined on (cut out) at tolerance, and the flush faces merged, so a box's top raised is
-// one taller box of six faces. A face on a cylinder or a cone moves out along its normal
-// instead, the surface a step out (a boss fatter, a bore or a countersink narrower), the
-// flat faces beside it carried along; any other curved face is refused.
+// one taller box of six faces. A face on a cylinder, a cone, a sphere or a torus moves out
+// along its normal instead, the surface a step out (a boss fatter, a bore or a countersink
+// narrower, a dome fuller), the flat faces beside it carried along; any other curved face
+// is refused.
 func (s *Solid) PushPull(face int, distance, tolerance float64) (*Solid, error) {
 	defer pin()()
 	h, err := s.h()
@@ -2525,7 +2528,7 @@ func FromNode(scene *cadaclysm.Scene, node *cadaclysm.Node, placed bool) (*Solid
 		return nil, err
 	}
 	if solid == nil {
-		return nil, &BuildError{label + " has no brep: only a B-rep body has one (STEP, ACIS, Rhino, BREP (.brep), " +
+		return nil, &BuildError{label + " has no brep: only a B-rep body has one (STEP, ACIS, Rhino, OCCT .brep, " +
 			"IGES, IFC), not a mesh, a curve or a CSG body"}
 	}
 	if !placed {
@@ -2541,7 +2544,7 @@ func FromNode(scene *cadaclysm.Scene, node *cadaclysm.Node, placed bool) (*Solid
 }
 
 // Open is the body a CAD file holds, as a solid: a STEP (AP203/214/242), ACIS .sat,
-// Rhino .3dm, BREP (.brep), IGES or IFC file, read where it draws, in the file's own units
+// Rhino .3dm, OCCT .brep, IGES or IFC file, read where it draws, in the file's own units
 // and axes. A file drawing several bodies needs [OpenBody] or [OpenAll]. Fillet and
 // chamfer want line and circle edges; booleans take any surface, but the new edges they
 // trace on a free-form (NURBS) face are not always writable back to STEP; and every verb
@@ -2617,7 +2620,7 @@ func OpenAll(path string) ([]*Solid, error) {
 	if len(solids) == 0 {
 		extension := strings.ToLower(strings.TrimPrefix(filepath.Ext(path), "."))
 		return nil, &BuildError{fmt.Sprintf("open: the .%s file draws no B-rep body -- only a STEP, ACIS, Rhino, "+
-			"BREP (.brep), IGES or IFC body can be a solid, not a mesh, a curve or a CSG body", extension)}
+			"OCCT .brep, IGES or IFC body can be a solid, not a mesh, a curve or a CSG body", extension)}
 	}
 	return solids, nil
 }

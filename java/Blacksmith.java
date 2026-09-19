@@ -648,12 +648,12 @@ public final class Blacksmith {
         }
     }
 
-    /** {@link #writeStep(String, Collection, String, String)} with the default schema, in millimetres. */
+    /** {@link #writeStep(String, Collection, String, String)} with no schema (the built-in AP203), in millimetres. */
     public static void writeStep(String path, Collection<Solid> solids) {
         writeStep(path, solids, null, "mm");
     }
 
-    /** Several solids as one AP203 file, each its own body. */
+    /** Several solids as one STEP file (AP203 unless {@code schema} names another), each its own body. */
     public static void writeStep(String path, Collection<Solid> solids, String schema, String unit) {
         writeText(path, writeStepText(solids, schema, unit));
     }
@@ -2033,22 +2033,22 @@ public final class Blacksmith {
             }
         }
 
-        /** {@link #stepText(String, String)} with the default schema, in millimetres. */
+        /** {@link #stepText(String, String)} with no schema (the built-in AP203), in millimetres. */
         public String stepText() {
             return stepText(null, "mm");
         }
 
-        /** This solid as AP203 STEP text; see {@link Blacksmith#writeStepText}. */
+        /** This solid as STEP text (AP203 unless {@code schema} names another); see {@link Blacksmith#writeStepText}. */
         public String stepText(String schema, String unit) {
             return writeStepText(List.of(this), schema, unit);
         }
 
-        /** {@link #step(String, String, String)} with the default schema, in millimetres. */
+        /** {@link #step(String, String, String)} with no schema (the built-in AP203), in millimetres. */
         public void step(String path) {
             step(path, null, "mm");
         }
 
-        /** This solid written as an AP203 STEP file. */
+        /** This solid written as a STEP file (AP203 unless {@code schema} names another). */
         public void step(String path, String schema, String unit) {
             writeText(path, stepText(schema, unit));
         }
@@ -2246,9 +2246,10 @@ public final class Blacksmith {
         /** Face {@code face} pushed out by {@code distance} along its outward normal (pulled
          *  in, negative) the way Fusion and Rhino extrude a face: the prism over it joined on
          *  (cut out), and the flush faces merged -- a box's top raised is one taller box of
-         *  six faces. A face on a cylinder or a cone moves out along its normal instead, the
-         *  surface a step out (a boss fatter, a bore or a countersink narrower), the flat
-         *  faces beside it carried along; any other curved face is refused. */
+         *  six faces. A face on a cylinder, a cone, a sphere or a torus moves out along its
+         *  normal instead, the surface a step out (a boss fatter, a bore or a countersink
+         *  narrower, a dome fuller), the flat faces beside it carried along; any other
+         *  curved face is refused. */
         public Solid pushPull(int face, double distance, double tolerance) {
             int which = index(face);
             try {
@@ -2380,7 +2381,7 @@ public final class Blacksmith {
             Solid solid = fromBrep(node, label);
             if (solid == null) {
                 throw new BuildException(label + " has no brep: only a B-rep body has one (STEP, ACIS, Rhino, "
-                        + "BREP (.brep), IGES, IFC), not a mesh, a curve or a CSG body");
+                        + "OCCT .brep, IGES, IFC), not a mesh, a curve or a CSG body");
             }
             if (!placed) return solid;
             double[][] m = node.transform();
@@ -2394,7 +2395,7 @@ public final class Blacksmith {
 
         /**
          * The body a CAD file holds, as a solid: a STEP (AP203/214/242), ACIS {@code .sat},
-         * Rhino {@code .3dm}, BREP ({@code .brep}), IGES or IFC file, read where it draws, in the
+         * Rhino {@code .3dm}, OCCT {@code .brep}, IGES or IFC file, read where it draws, in the
          * file's own units and axes. A file drawing several bodies needs {@link #open(String,
          * int)} or {@link #openAll}. Fillet and chamfer want line and circle edges; booleans
          * take any surface, but the new edges they trace on a free-form (NURBS) face are not
@@ -2452,7 +2453,7 @@ public final class Blacksmith {
                 int dot = name.lastIndexOf('.');
                 String extension = dot < 0 ? "" : name.substring(dot + 1).toLowerCase();
                 throw new BuildException("open: the ." + extension + " file draws no B-rep body -- only a STEP, ACIS, "
-                        + "Rhino, BREP (.brep), IGES or IFC body can be a solid, not a mesh, a curve or a CSG body");
+                        + "Rhino, OCCT .brep, IGES or IFC body can be a solid, not a mesh, a curve or a CSG body");
             }
             return solids;
         }

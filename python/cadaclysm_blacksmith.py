@@ -61,7 +61,7 @@ they need not be typed out -- `Frame.xy((0, 0, 5))` is the XY plane at z = 5,
 
 ## Solids from files
 
-`Solid.open("housing.step")` reads a STEP, ACIS, Rhino, BREP (`.brep`), IGES or IFC
+`Solid.open("housing.step")` reads a STEP, ACIS, Rhino, OCCT `.brep`, IGES or IFC
 file's body as a solid to cut, fillet, join with parts built here and write back
 out (`Solid.open_all` for every body; JT and OpenSCAD are meshes and have none).
 On the desktop it goes through the reader module, `cadaclysm.py`, and
@@ -101,7 +101,7 @@ __all__ = [
 ]
 
 # This file's own version (the workspace's); `version()` is the loaded library's.
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 NONE = 0xFFFFFFFF
 UNITS = {"m": 0, "mm": 1, "in": 2}
@@ -600,7 +600,7 @@ def _from_brep(node, what: str, missing_ok=False):
     if brep is None:
         if missing_ok:
             return None
-        raise BuildError(f"{what} has no brep: only a B-rep body has one (STEP, ACIS, Rhino, BREP (.brep), "
+        raise BuildError(f"{what} has no brep: only a B-rep body has one (STEP, ACIS, Rhino, OCCT .brep, "
                          "IGES, IFC), not a mesh, a curve or a CSG body")
     with brep:
         return Solid(_lib().cadaclysm_blacksmith_from_brep(brep.pointer, brep.layout_id().encode()))
@@ -1199,7 +1199,7 @@ class Solid:
     @staticmethod
     def open(path, body=None) -> "Solid":  # noqa: A003 - `Solid.open`, the verb
         """The body a CAD file holds, as a solid: a STEP (AP203/214/242), ACIS
-        `.sat`, Rhino `.3dm`, BREP (`.brep`), IGES or IFC file, read where it
+        `.sat`, Rhino `.3dm`, OCCT `.brep`, IGES or IFC file, read where it
         draws, in the file's own units and axes. A file drawing several bodies
         needs `body=` (0-based, in drawing order) or `Solid.open_all`.
 
@@ -1260,7 +1260,7 @@ class Solid:
             scene.close()
         if not solids:
             raise BuildError(
-                f"open: the .{extension} file draws no B-rep body -- only a STEP, ACIS, Rhino, BREP (.brep), "
+                f"open: the .{extension} file draws no B-rep body -- only a STEP, ACIS, Rhino, OCCT .brep, "
                 "IGES or IFC body can be a solid, not a mesh, a curve or a CSG body"
             )
         return solids
@@ -1553,10 +1553,10 @@ class Solid:
         negative) the way Fusion and Rhino extrude a face: the prism over it joined on
         (cut out), and the flush faces merged -- a box's top raised is one taller box
         of six faces, not a box and a prism with every side wall split at the seam.
-        A face on a cylinder or a cone moves out along its normal instead, the
-        surface a step out -- a boss fatter, a bore or a countersink narrower -- with
-        the flat faces beside it, square to its axis, carried along; any other curved
-        face is refused. `tolerance` and `progress` as `join`'s."""
+        A face on a cylinder, a cone, a sphere or a torus moves out along its normal
+        instead, the surface a step out -- a boss fatter, a bore or a countersink
+        narrower, a dome fuller -- with the flat faces beside it carried along; any
+        other curved face is refused. `tolerance` and `progress` as `join`'s."""
         cb, _keep = _progress(progress)
         return Solid(_lib().cadaclysm_blacksmith_push_pull(self._h(), face, distance, tolerance, cb, None))
 

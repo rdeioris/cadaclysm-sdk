@@ -741,10 +741,10 @@ class Solid {
   /**
    * Face `face` pushed out by `distance` along its outward normal (pulled in, negative) the way
    * Fusion and Rhino extrude a face: the prism over it joined on (cut out), and the flush faces
-   * merged -- a box's top raised is one taller box of six faces. A face on a cylinder or a cone
-   * moves out along its normal instead, the surface a step out (a boss fatter, a bore or a
-   * countersink narrower), the flat faces beside it carried along; any other curved face is
-   * refused.
+   * merged -- a box's top raised is one taller box of six faces. A face on a cylinder, a cone, a
+   * sphere or a torus moves out along its normal instead, the surface a step out (a boss fatter,
+   * a bore or a countersink narrower, a dome fuller), the flat faces beside it carried along; any
+   * other curved face is refused.
    */
   pushPull(face, distance, tolerance = 0.05, progress = null) {
     return new Solid(_lib().push_pull(this._handle, face, distance, tolerance, _progress(progress), null));
@@ -824,7 +824,7 @@ class Solid {
     const label = `from_node: node ${node.index} (${_label(node)})`;
     const solid = _fromBrep(node, label);
     if (!solid) {
-      throw new BuildError(`${label} has no brep: only a B-rep body has one (STEP, ACIS, Rhino, BREP (.brep), IGES, IFC), not a mesh, a curve or a CSG body`);
+      throw new BuildError(`${label} has no brep: only a B-rep body has one (STEP, ACIS, Rhino, OCCT .brep, IGES, IFC), not a mesh, a curve or a CSG body`);
     }
     if (!placed) return solid;
     const m = node.transform;
@@ -836,7 +836,7 @@ class Solid {
   }
   /**
    * The body a CAD file holds, as a solid: a STEP (AP203/214/242), ACIS `.sat`,
-   * Rhino `.3dm`, BREP (`.brep`), IGES or IFC file, read where it draws, in the
+   * Rhino `.3dm`, OCCT `.brep`, IGES or IFC file, read where it draws, in the
    * file's own units and axes. A file drawing several bodies needs `body`
    * (0-based, in drawing order) or `openAll`. Fillet and chamfer want line and
    * circle edges; booleans take any surface, but the new edges they trace on a
@@ -877,7 +877,7 @@ class Solid {
     }
     if (!solids.length) {
       const extension = require('node:path').extname(String(filePath)).replace(/^\./, '').toLowerCase();
-      throw new BuildError(`open: the .${extension} file draws no B-rep body -- only a STEP, ACIS, Rhino, BREP (.brep), IGES or IFC body can be a solid, not a mesh, a curve or a CSG body`);
+      throw new BuildError(`open: the .${extension} file draws no B-rep body -- only a STEP, ACIS, Rhino, OCCT .brep, IGES or IFC body can be a solid, not a mesh, a curve or a CSG body`);
     }
     return solids;
   }
@@ -1075,7 +1075,14 @@ class Workplane {
  * name, or a custom schema's own EXPRESS text -- see `writeStepText`.
  */
 function _isSchemaFile(schema) {
-  return !schema.includes('\n') && !!fs.statSync(schema, { throwIfNoEntry: false })?.isFile();
+  if (schema.includes('\n')) return false;
+  try {
+    return !!fs.statSync(schema, { throwIfNoEntry: false })?.isFile();
+  } catch {
+    // Not a name the file system will look up (ENAMETOOLONG for long one-line text on
+    // Linux and macOS, EINVAL and the like elsewhere): then it is not a file, it is text.
+    return false;
+  }
 }
 
 function _schemaText(schema) {

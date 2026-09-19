@@ -1315,11 +1315,11 @@ public sealed class Solid : IDisposable
         return new BlacksmithPolylines(this, tolerance, Filled(tolerance), raw);
     }
 
-    /// <summary>This solid as AP203 STEP text; see <see cref="Blacksmith.WriteStepText"/>.
+    /// <summary>This solid as STEP text (AP203 unless <paramref name="schema"/> names another); see <see cref="Blacksmith.WriteStepText"/>.
     /// </summary>
     public string StepText(string? schema = null, string unit = "mm") => Blacksmith.WriteStepText(new[] { this }, schema, unit);
 
-    /// <summary>This solid written as an AP203 STEP file.</summary>
+    /// <summary>This solid written as a STEP file (AP203 unless <paramref name="schema"/> names another).</summary>
     public void Step(string path, string? schema = null, string unit = "mm") =>
         File.WriteAllText(path, StepText(schema, unit), new UTF8Encoding(false));
 
@@ -1432,9 +1432,9 @@ public sealed class Solid : IDisposable
     /// <summary>Face `face` pushed out by `distance` along its outward normal (pulled in,
     /// negative) the way Fusion and Rhino extrude a face: the prism over it joined on (cut
     /// out), and the flush faces merged -- a box's top raised is one taller box of six faces.
-    /// A face on a cylinder or a cone moves out along its normal instead, the surface a step
-    /// out (a boss fatter, a bore or a countersink narrower), the flat faces beside it carried
-    /// along; any other curved face is refused.</summary>
+    /// A face on a cylinder, a cone, a sphere or a torus moves out along its normal instead,
+    /// the surface a step out (a boss fatter, a bore or a countersink narrower, a dome fuller),
+    /// the flat faces beside it carried along; any other curved face is refused.</summary>
     public Solid PushPull(int face, double distance, double tolerance = 0.05) =>
         new(BlacksmithNative.cadaclysm_blacksmith_push_pull(Handle, Index(face), distance, tolerance, IntPtr.Zero, IntPtr.Zero));
 
@@ -1494,7 +1494,7 @@ public sealed class Solid : IDisposable
     {
         var solid = FromBrep(node, $"from_node: node {node.Index} ({Label(node)})")
             ?? throw new BuildException($"from_node: node {node.Index} ({Label(node)}) has no brep: only a B-rep body " +
-                "has one (STEP, ACIS, Rhino, BREP (.brep), IGES, IFC), not a mesh, a curve or a CSG body");
+                "has one (STEP, ACIS, Rhino, OCCT .brep, IGES, IFC), not a mesh, a curve or a CSG body");
         if (!placed) return solid;
         if (scene.Convention != Convention.Native && !IsIdentity(node.Transform))
             throw new BuildException("from_node: placed=True needs the scene opened with Convention.Native -- the " +
@@ -1507,7 +1507,7 @@ public sealed class Solid : IDisposable
         FromNode(scene, scene.Nodes[(int)node], placed);
 
     /// <summary>The body a CAD file holds, as a solid: a STEP (AP203/214/242), ACIS `.sat`,
-    /// Rhino `.3dm`, BREP (`.brep`), IGES or IFC file, read where it draws, in the file's own
+    /// Rhino `.3dm`, OCCT `.brep`, IGES or IFC file, read where it draws, in the file's own
     /// units and axes. A file drawing several bodies needs `body` (0-based, in drawing order)
     /// or <see cref="OpenAll"/>. Fillet and chamfer want line and circle edges; booleans take
     /// any surface, but the new edges they trace on a free-form (NURBS) face are not always
@@ -1566,7 +1566,7 @@ public sealed class Solid : IDisposable
         {
             var extension = System.IO.Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
             throw new BuildException($"open: the .{extension} file draws no B-rep body -- only a STEP, ACIS, Rhino, " +
-                "BREP (.brep), IGES or IFC body can be a solid, not a mesh, a curve or a CSG body");
+                "OCCT .brep, IGES or IFC body can be a solid, not a mesh, a curve or a CSG body");
         }
         return solids;
     }
