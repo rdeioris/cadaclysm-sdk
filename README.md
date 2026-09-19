@@ -81,14 +81,14 @@ portal -- to pick up the new file the same way.
 
 | | binding | sample | coverage |
 |---|---|---|---|
-| Python | [python/](python/) | `python -c "import cadaclysm as c; print(c.open('samples/cube.scad').bounds)"` | see the release notes |
-| C# | [csharp/](csharp/) | `dotnet run --project csharp/smoke -- samples/cube.scad` | Python's set, both libraries |
-| Go | [go/](go/) | `go run -C go ./cmd/smoke "$PWD/samples/cube.scad"` | Python's set, both libraries |
-| Java | [java/](java/) | `javac --release 22 -d java/classes java/*.java && java --enable-native-access=ALL-UNNAMED -cp java/classes Smoke samples/cube.scad` | Python's set, both libraries |
-| Node.js | [node/](node/) | `npm install` in `node/`, then `node node/smoke.js samples/cube.scad path/to/cadaclysm.lic` | see the release notes |
+| Python | [python/](python/); [API docs](https://cadaclysm.blitter.studio/docs/python.html) | `python -c "import cadaclysm as c; print(c.open('samples/cube.scad').bounds)"` | see the release notes |
+| C# | [csharp/](csharp/); [API docs](https://cadaclysm.blitter.studio/docs/csharp.html) | `dotnet run --project csharp/smoke -- samples/cube.scad` | Python's set, both libraries |
+| Go | [go/](go/); [API docs](https://cadaclysm.blitter.studio/docs/go.html) | `go run -C go ./cmd/smoke "$PWD/samples/cube.scad"` | Python's set, both libraries |
+| Java | [java/](java/); [API docs](https://cadaclysm.blitter.studio/docs/java.html) | `javac --release 22 -d java/classes java/*.java && java --enable-native-access=ALL-UNNAMED -cp java/classes Smoke samples/cube.scad` | Python's set, both libraries |
+| Node.js | [node/](node/); [API docs](https://cadaclysm.blitter.studio/docs/node.html) | `npm install` in `node/`, then `node node/smoke.js samples/cube.scad path/to/cadaclysm.lic` | see the release notes |
 | Rust | [rust/](rust/) -- also on crates.io, `cargo add cadaclysm-sdk`; [API docs](https://cadaclysm.blitter.studio/docs/rust.html) | `cargo run --manifest-path rust/Cargo.toml --example smoke -- samples/cube.scad`, or `--example tree` to print a file's tree | Python's set, both libraries |
-| Swift | [swift/](swift/) -- a Swift package, from the release after v0.4.3 | `swift run --package-path swift cadaclysm-smoke samples/cube.scad` | Python's set, both libraries |
-| C / C++ | [include/](include/) | the headers are the reference | 100% |
+| Swift | [swift/](swift/) -- a Swift package, from the release after v0.4.3; [API docs](https://cadaclysm.blitter.studio/docs/swift.html) | `swift run --package-path swift cadaclysm-smoke samples/cube.scad` | Python's set, both libraries |
+| C / C++ | [include/](include/); [API docs](https://cadaclysm.blitter.studio/docs/c.html) | the headers are the reference | 100% |
 
 The Go sample's loader must find the library at run time: put the library
 directory on `PATH` (Windows), `LD_LIBRARY_PATH` (Linux) or
