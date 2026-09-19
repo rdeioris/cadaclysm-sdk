@@ -2,7 +2,7 @@
 
 Wrappers, headers and samples for [cadaclysm](https://cadaclysm.blitter.studio),
 the CAD import and modelling library: STEP, IGES, IFC, Rhino 3dm, ACIS SAT,
-BREP and OpenSCAD in; meshes, LODs and exact B-rep out; an exact
+OCCT .brep and OpenSCAD in; meshes, LODs and exact B-rep out; an exact
 modelling kernel (`cadaclysm_blacksmith`) beside it.
 
 Everything in this repository is Apache-2.0. The libraries themselves are
@@ -15,7 +15,7 @@ per-server licenses (machines processing files unattended for others) at
 ## Install
 
     python fetch.py            # the latest release's archive for this machine -> lib/ and include/
-    python fetch.py v0.2.0     # a specific one
+    python fetch.py v0.4.4     # a specific one
 
 or download an archive from the releases page and unpack its `lib/` and
 `include/` here.
@@ -53,8 +53,8 @@ unsupported.
 ### Platforms and signing
 
 Prebuilt libraries cover Windows x64, macOS 11+ (universal, Intel and
-Apple Silicon in one file) and Linux x64/arm64 (glibc 2.17+). The 0.1.x
-binaries are **not code-signed**. On macOS, a library downloaded by a
+Apple Silicon in one file) and Linux x64/arm64 (glibc 2.17+). The binaries
+are **not code-signed** yet (each release's notes say so per archive). On macOS, a library downloaded by a
 browser is quarantined and `dlopen` refuses to load it; either fetch with
 `fetch.py` (which does not set the quarantine attribute) or clear it
 yourself: `xattr -d com.apple.quarantine lib/*.dylib`. The EULA shipped
@@ -67,8 +67,11 @@ is printed to stderr on every open and every export. A license file removes
 it. Put it where the libraries look: the `CADACLYSM_LICENSE` environment
 variable (the file's path, or its text), or `cadaclysm.lic` beside your
 executable or in the working directory, or pass it from code (`license()` in
-Python and Node.js, `Scene.LicenseSet` in C#, `cadaclysm.LicenseSet` in Go,
-`Cad.licenseSet` in Java, `cadaclysm_sdk::license` in Rust).
+Python, Node.js and Swift, `Cadaclysm.License` in C#, `cadaclysm.License` in Go,
+`Cad.license` in Java, `cadaclysm_sdk::license` in Rust). The kernel library
+keeps its own license state: from code, license it with its own call beside
+the reader's (`cadaclysm_blacksmith.license()`, `Blacksmith.License`,
+`blacksmith.License`, `Blacksmith.license`, `cadaclysm_sdk::blacksmith::license`).
 
     python fetch.py --license KEY
 
@@ -81,13 +84,13 @@ portal -- to pick up the new file the same way.
 
 | | binding | sample | coverage |
 |---|---|---|---|
-| Python | [python/](python/); [API docs](https://cadaclysm.blitter.studio/docs/python.html) | `python -c "import cadaclysm as c; print(c.open('samples/cube.scad').bounds)"` | see the release notes |
+| Python | [python/](python/); [API docs](https://cadaclysm.blitter.studio/docs/python.html) | `python -c "import cadaclysm as c; print(c.open('samples/cube.scad').bounds)"` | the reference set, both libraries |
 | C# | [csharp/](csharp/); [API docs](https://cadaclysm.blitter.studio/docs/csharp.html) | `dotnet run --project csharp/smoke -- samples/cube.scad` | Python's set, both libraries |
 | Go | [go/](go/); [API docs](https://cadaclysm.blitter.studio/docs/go.html) | `go run -C go ./cmd/smoke "$PWD/samples/cube.scad"` | Python's set, both libraries |
 | Java | [java/](java/); [API docs](https://cadaclysm.blitter.studio/docs/java.html) | `javac --release 22 -d java/classes java/*.java && java --enable-native-access=ALL-UNNAMED -cp java/classes Smoke samples/cube.scad` | Python's set, both libraries |
-| Node.js | [node/](node/); [API docs](https://cadaclysm.blitter.studio/docs/node.html) | `npm install` in `node/`, then `node node/smoke.js samples/cube.scad path/to/cadaclysm.lic` | see the release notes |
+| Node.js | [node/](node/); [API docs](https://cadaclysm.blitter.studio/docs/node.html) | `npm install` in `node/`, then `node node/smoke.js samples/cube.scad path/to/cadaclysm.lic` | Python's set, both libraries |
 | Rust | [rust/](rust/) -- also on crates.io, `cargo add cadaclysm-sdk`; [API docs](https://cadaclysm.blitter.studio/docs/rust.html) | `cargo run --manifest-path rust/Cargo.toml --example smoke -- samples/cube.scad`, or `--example tree` to print a file's tree | Python's set, both libraries |
-| Swift | [swift/](swift/) -- a Swift package, from the release after v0.4.3; [API docs](https://cadaclysm.blitter.studio/docs/swift.html) | `swift run --package-path swift cadaclysm-smoke samples/cube.scad` | Python's set, both libraries |
+| Swift | [swift/](swift/) -- a Swift package, from v0.4.4; [API docs](https://cadaclysm.blitter.studio/docs/swift.html) | `swift run --package-path swift cadaclysm-smoke samples/cube.scad` | Python's set, both libraries |
 | C / C++ | [include/](include/); [API docs](https://cadaclysm.blitter.studio/docs/c.html) | the headers are the reference | 100% |
 
 The Go sample's loader must find the library at run time: put the library
@@ -97,9 +100,10 @@ package links `lib/` when it is built and writes it into the executable's rpath
 on macOS and Linux; on Windows `lib` goes on `PATH` -- see
 [swift/README.md](swift/README.md).
 
-The C#, Go, Java, Node.js, Rust and Swift bindings cover the viewer subset of the C API
-today; the header is the reference for the rest, and each release's notes
-carry the exact counts. Contributions welcome: a pull request here is ported
+Every binding follows the Python modules' object model over both libraries,
+with each language's own spelling; its API docs page lists every type and call
+and marks the few it does not have yet. The headers are the reference for the
+whole C API, and each release's notes carry the exact counts. Contributions welcome: a pull request here is ported
 back into the library's repository, which is where these files are
 maintained.
 

@@ -7,9 +7,11 @@ search. `smoke/` is a complete console program:
 
     dotnet run --project csharp/smoke -- samples/cube.scad path/to/cadaclysm.lic
 
-Coverage: the viewer subset of the C API (opening, walking, meshing, colours,
-attributes) plus the license calls; the exact count is in each release's
-notes, and `include/cadaclysm.h` is the reference for adding a `[DllImport]`.
+Coverage: the Python module's object model (opening, walking, meshing,
+placements, surfaces, attributes, writing) plus the license calls -- every
+type and call is on the [C# API page](https://cadaclysm.blitter.studio/docs/csharp.html);
+the exact count is in each release's notes, and `include/cadaclysm.h` is the
+reference for adding a `[DllImport]`.
 
 ## The kernel
 
@@ -32,7 +34,7 @@ the solid again at a different tolerance frees the memory an earlier view
 still points at, so reading that view throws `InvalidOperationException`
 even after re-meshing back at the tolerance it was taken at.
 
-Coverage: the exact-geometry subset of the blacksmith C API (profiles,
-workplanes, booleans, fillets, meshing, STEP) plus its own license calls;
-the exact count is in each release's notes, and
+Coverage: the Python kernel module's object model (profiles, paths,
+workplanes, booleans, fillets, sweeps, meshing, STEP) plus its own license
+calls, on the same API page; the exact count is in each release's notes, and
 `include/cadaclysm_blacksmith.h` is the reference for adding a `[DllImport]`.
