@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/rdeioris/cadaclysm-sdk/go/blacksmith"
@@ -72,6 +73,118 @@ func main() {
 	fmt.Printf("query: %d node(s)\n", len(matched))
 	fmt.Printf("diagnostics: %d\n", len(scene.Diagnostics()))
 
+	iges := false
+	for _, f := range cadaclysm.Formats() {
+		if f.Name == "IGES" && len(f.Extensions) == 2 && f.Extensions[0] == "iges" && f.Extensions[1] == "igs" {
+			iges = true
+		}
+	}
+	if !iges {
+		fail("Formats() lacks IGES iges;igs")
+	}
+	for _, f := range cadaclysm.MeshFormats() {
+		if f.Name == "stl" && f.Label != "STL (binary)" {
+			fail("mesh format label is not the library's: " + f.Label)
+		}
+	}
+	fmt.Printf("geometry diagnostics: %d\n", len(scene.GeometryDiagnostics()))
+	scene.ForgetMeshes()
+	rebuiltTriangles := 0
+	for _, n := range scene.Walk() {
+		if m, _ := n.Mesh(); m != nil {
+			rebuiltTriangles += m.TriangleCount()
+		}
+	}
+	if rebuiltTriangles != triangles {
+		fail("ForgetMeshes did not rebuild")
+	}
+
+	if cadaclysm.LodLevels() != 3 {
+		fail("LodLevels is not 3")
+	}
+	var first *cadaclysm.Node
+	for _, n := range scene.Walk() {
+		if n.CanMesh() {
+			first = n
+			break
+		}
+	}
+	lod0, _ := first.MeshLod(0)
+	full, _ := first.Mesh()
+	if lod0 == nil || full == nil || lod0.TriangleCount() != full.TriangleCount() {
+		fail("LOD 0 is not the mesh")
+	}
+	if first.LodError(0) != 0 {
+		fail("LOD error at level 0 is not zero")
+	}
+	if past, _ := first.MeshLod(4); past != nil {
+		fail("a level past LodLevels is not empty")
+	}
+	if strings.HasSuffix(path, "cube.scad") {
+		lod1, _ := first.MeshLod(1)
+		if lod1 == nil || lod1.TriangleCount() != 3 || first.EdgeBeziers().Count() != 12 || len(first.EdgeBeziers().Points) != 12*12 {
+			fail("the cube's LOD 1 or Béziers are off")
+		}
+	}
+	fit, ok := first.Collision(0)
+	if !ok || fit.Error != 0 || fit.HullVertexCount != 8 || fit.ShapeName() == "" {
+		fail("the collision fit is off")
+	}
+	if hull := first.CollisionHull(0); hull.VertexCount() != 8 || hull.IndexCount() != 36 {
+		fail("the collision hull is off")
+	}
+
+	meshlets, merr := cadaclysm.BuildMeshlets(full.Positions, full.Normals, full.Indices, 124, 64, 0)
+	if merr != nil {
+		fail(merr.Error())
+	}
+	if meshlets.Count() < 1 {
+		fail("no meshlets")
+	}
+	one := meshlets.Meshlet(0)
+	if len(one.Positions) != one.VertexCount*3 || len(one.Indices) != one.TriangleCount*3 || one.Level != 0 {
+		fail("meshlet 0 is off")
+	}
+	if strings.HasSuffix(path, "cube.scad") && (meshlets.Count() != 1 || one.TriangleCount != 12 || one.VertexCount != 36) {
+		fail("the cube's meshlets are off")
+	}
+	meshlets.Close()
+	meshlets.Close()
+	if _, err := cadaclysm.BuildMeshlets(full.Positions, nil, full.Indices, 0, 64, 0); err == nil {
+		fail("a zero budget was accepted")
+	}
+
+	if est := first.TriangleEstimate(); est <= 0 && est != -1 {
+		fail("triangle estimate is neither a count nor -1")
+	}
+	if strings.HasSuffix(path, "cube.scad") {
+		proxy, _ := first.SurfaceProxyMesh(4)
+		if first.TriangleEstimate() != 12 || first.SurfaceEdges().PolylineCount() != 0 || proxy != nil {
+			fail("the cube has no surface products")
+		}
+		if _, hit := first.SurfacePick([3]float64{10, 10, 100}, [3]float64{10, 10, -100}); hit || !first.BoundsPlaced(nil).IsEmpty() {
+			fail("the cube picks or bounds through surfaces")
+		}
+	}
+	fresh, ferr := cadaclysm.Open(path)
+	if ferr != nil {
+		fail(ferr.Error())
+	}
+	var body *cadaclysm.Node
+	for _, n := range fresh.Walk() {
+		if n.CanMesh() {
+			body = n
+			break
+		}
+	}
+	if body.IsMeshed() {
+		fail("a fresh scene is already meshed")
+	}
+	if built := fresh.RealizeMeshes(false); built == 0 || !body.IsMeshed() {
+		fail("RealizeMeshes(false) did not build")
+	}
+	fresh.Close()
+
 	data, rerr := os.ReadFile(path)
 	if rerr != nil {
 		fail(rerr.Error())
@@ -132,6 +245,36 @@ func main() {
 		fail("save_mesh wrote no triangles")
 	}
 
+	// SVG: the library's own camera, no viewer -- a scene and a node each write a
+	// wireframe.
+	svgText, serr := scene.SvgText(nil)
+	if serr != nil {
+		fail(serr.Error())
+	}
+	if !strings.HasPrefix(svgText, "<svg") || !strings.Contains(svgText, "<path") {
+		fail("scene SVG text did not look like an SVG wireframe")
+	}
+	svgPath := filepath.Join(os.TempDir(), "cadaclysm-smoke-go.svg")
+	if serr := scene.Svg(svgPath, nil); serr != nil {
+		fail(serr.Error())
+	}
+	if svgInfo, serr := os.Stat(svgPath); serr != nil || svgInfo.Size() == 0 {
+		fail("Scene.Svg wrote an empty file")
+	}
+	nodeSvgText, serr := first.SvgText(nil)
+	if serr != nil {
+		fail(serr.Error())
+	}
+	if !strings.HasPrefix(nodeSvgText, "<svg") || !strings.Contains(nodeSvgText, "<path") {
+		fail("node SVG text did not look like an SVG wireframe")
+	}
+	badFov := cadaclysm.NewSvgOptions()
+	badFov.Fov = 200
+	if _, serr := scene.SvgText(&badFov); serr == nil {
+		fail("scene svg: fov=200 was accepted")
+	}
+	fmt.Println("svg: scene and node text, file written, fov=200 refused")
+
 	kernel(license)
 }
 
@@ -164,6 +307,8 @@ func kernel(license string) {
 		fail(err.Error())
 	}
 	defer outline.Close()
+	hits()
+	edgeCurves()
 	plate, err := blacksmith.XY().Extrude(outline, 6).Solid()
 	if err != nil {
 		fail(err.Error())
@@ -345,6 +490,25 @@ func kernel(license string) {
 		fail("the STEP did not read back as the plate with its pin")
 	}
 
+	// The OCCT .brep writer, and its reader.
+	brep := filepath.Join(os.TempDir(), "cadaclysm-smoke-go.brep")
+	if err := rounded.Brep(brep); err != nil {
+		fail(err.Error())
+	}
+	if text, err := rounded.BrepText(); err != nil || !strings.HasPrefix(text, "DBRep_DrawableShape") {
+		fail("the .brep text does not begin as one")
+	}
+	backBrep, err := cadaclysm.Open(brep)
+	if err != nil {
+		fail("brep read back: " + err.Error())
+	}
+	defer backBrep.Close()
+	bb := backBrep.Bounds()
+	fmt.Printf("brep read back: bounds max=(%g,%g,%g)\n", bb.Max[0], bb.Max[1], bb.Max[2])
+	if math.Abs(bb.Max[0]-40) > 0.01 || math.Abs(bb.Max[1]-20) > 0.01 || math.Abs(bb.Max[2]-16) > 0.01 {
+		fail("the .brep did not read back as the plate with its pin")
+	}
+
 	// And back into the kernel: the read body's brep, shared with the scene rather than
 	// copied, as a solid that outlives the scene it came from.
 	var body *cadaclysm.Node
@@ -388,6 +552,47 @@ func kernel(license string) {
 	}
 	fmt.Printf("from_node: %d faces after the scene closed; Open: the same\n", importedFaces)
 
+	// The same solid as SAT, written by the library itself, read back the same way.
+	sat := filepath.Join(os.TempDir(), "cadaclysm-smoke-go.sat")
+	if err := rounded.Sat(sat, "mm"); err != nil {
+		fail(err.Error())
+	}
+	if text, err := rounded.SatText("mm"); err != nil || !strings.HasPrefix(text, "400 0 1 0") {
+		fail("the SAT text does not open with the record version")
+	}
+	satBack, err := cadaclysm.Open(sat)
+	if err != nil {
+		fail("sat read back: " + err.Error())
+	}
+	defer satBack.Close()
+	satBounds := satBack.Bounds()
+	fmt.Printf("sat read back: bounds max=(%g,%g,%g)\n", satBounds.Max[0], satBounds.Max[1], satBounds.Max[2])
+	if math.Abs(satBounds.Max[0]-40) > 0.01 || math.Abs(satBounds.Max[1]-20) > 0.01 || math.Abs(satBounds.Max[2]-16) > 0.01 {
+		fail("the SAT did not read back as the plate with its pin")
+	}
+
+	// SVG over the kernel: the solid's own wireframe, no scene involved.
+	solidSvgText, err := rounded.SvgText(nil)
+	if err != nil {
+		fail(err.Error())
+	}
+	if !strings.HasPrefix(solidSvgText, "<svg") || !strings.Contains(solidSvgText, "<path") {
+		fail("solid SVG text did not look like an SVG wireframe")
+	}
+	solidSvgPath := filepath.Join(os.TempDir(), "cadaclysm-smoke-go-solid.svg")
+	if err := rounded.Svg(solidSvgPath, nil); err != nil {
+		fail(err.Error())
+	}
+	if svgInfo, serr := os.Stat(solidSvgPath); serr != nil || svgInfo.Size() == 0 {
+		fail("Solid.Svg wrote an empty file")
+	}
+	badFov := blacksmith.NewSvgOptions()
+	badFov.Fov = 200
+	if _, err := rounded.SvgText(&badFov); err == nil {
+		fail("blacksmith svg: fov=200 was accepted")
+	}
+	fmt.Println("blacksmith svg: solid text, file written, fov=200 refused")
+
 	// ToScene is the same round trip in memory: the scene's bounds must match the solid's
 	// own, and the scene is its own document -- closing the solid it came from leaves it
 	// readable. (Open with a schema once stored a Go pointer inside the options struct it
@@ -417,6 +622,175 @@ func kernel(license string) {
 func fail(why string) {
 	fmt.Fprintln(os.Stderr, why)
 	os.Exit(1)
+}
+
+// hits checks two radius-5 circles six apart cross at two points, (3, -4) and (3, 4). At
+// (3, 4) the first circle's upper arc is at t 0.2952 and the moved one's at 0.7048; at
+// (3, -4) the other way round -- which catches the two sides read swapped.
+func hits() {
+	left, err := blacksmith.Circle(5)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer left.Close()
+	circle, err := blacksmith.Circle(5)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer circle.Close()
+	right, err := circle.Translate(6, 0)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer right.Close()
+	crossing, err := left.Hits(right, 1e-6)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(crossing) != 2 {
+		fail(fmt.Sprintf("hits: two circles hit %d times, not 2", len(crossing)))
+	}
+	ys := []float64{crossing[0].Start[1], crossing[1].Start[1]}
+	sort.Float64s(ys)
+	if math.Abs(ys[0]+4) > 1e-9 || math.Abs(ys[1]-4) > 1e-9 {
+		fail(fmt.Sprintf("hits: y %v, not -4 and 4", ys))
+	}
+	for _, h := range crossing {
+		ta, tb := 0.7048, 0.2952
+		if h.Start[1] > 0 {
+			ta, tb = tb, ta
+		}
+		if h.Run || h.Touch || h.AStart.LoopIndex != 0 || math.Abs(h.Start[0]-3) > 1e-9 ||
+			math.Abs(h.AStart.T-ta) > 1e-3 || math.Abs(h.BStart.T-tb) > 1e-3 {
+			fail(fmt.Sprintf("hits: %v is not a crossing at (3, +-4) at t %v on a and %v on b", h, ta, tb))
+		}
+	}
+	fmt.Printf("hits: %v, %v\n", crossing[0], crossing[1])
+	// Common: the same two circles share one lens, four arcs (each circle's own seam stays
+	// a join) between two caps once extruded; moved apart they share nothing.
+	lenses, err := left.Common(right, 1e-6)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(lenses) != 1 {
+		fail(fmt.Sprintf("common: two circles share %d regions, not 1", len(lenses)))
+	}
+	defer lenses[0].Close()
+	lensSolid, err := blacksmith.XY().Extrude(lenses[0], 1).Solid()
+	if err != nil {
+		fail(err.Error())
+	}
+	defer lensSolid.Close()
+	lensFaces, _ := lensSolid.Faces()
+	if lensFaces != 6 {
+		fail(fmt.Sprintf("common: the lens extrudes to %d faces, not 6", lensFaces))
+	}
+	far, err := circle.Translate(100, 0)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer far.Close()
+	if none, err := left.Common(far, 1e-6); err != nil || len(none) != 0 {
+		fail(fmt.Sprintf("common: circles 100 apart share %d regions (%v)", len(none), err))
+	}
+	if _, err := left.Common(right, 0); err == nil || !strings.Contains(err.Error(), "profile_common: tolerance must be positive and finite") {
+		fail(fmt.Sprintf("common: a zero tolerance was accepted or refused in other words: %v", err))
+	}
+	fmt.Printf("common: one lens, %d faces extruded\n", lensFaces)
+}
+
+// edgeCurves: a cylinder's rims are circles of its radius about a cap centre in a unit
+// frame, a whole turn each; a cuboid's edges are lines whose origin + x is the far end;
+// an extruded closed spline keeps a nurbs edge with knots = poles + degree + 1.
+func edgeCurves() {
+	norm := func(v [3]float64) float64 { return math.Sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]) }
+	sub := func(a, b [3]float64) [3]float64 { return [3]float64{a[0] - b[0], a[1] - b[1], a[2] - b[2]} }
+	cyl, err := blacksmith.Cylinder(5, 3)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer cyl.Close()
+	edges, err := cyl.Edges()
+	if err != nil {
+		fail(err.Error())
+	}
+	var rims []*blacksmith.Curve
+	for _, e := range edges {
+		if e.Kind == "circle" {
+			rims = append(rims, e.Curve)
+		}
+	}
+	if len(rims) < 2 {
+		fail("edge_curve: the cylinder has under two rims")
+	}
+	for _, c := range rims {
+		if c == nil {
+			fail("edge_curve: a rim has no curve")
+		}
+		unit := math.Abs(norm(c.X)-1) < 1e-9 && math.Abs(norm(c.Y)-1) < 1e-9 &&
+			math.Abs(c.X[0]*c.Y[0]+c.X[1]*c.Y[1]+c.X[2]*c.Y[2]) < 1e-9
+		centred := math.Abs(c.Origin[0]) < 1e-9 && math.Abs(c.Origin[1]) < 1e-9 &&
+			math.Min(math.Abs(c.Origin[2]), math.Abs(c.Origin[2]-3)) < 1e-9
+		if c.Kind != "circle" || math.Abs(c.Radius-5) > 1e-9 || !unit || !centred ||
+			math.Abs(math.Abs(c.T1-c.T0)-2*math.Pi) > 1e-9 || c.Degree != 0 || len(c.Knots) != 0 || c.Weights != nil {
+			fail(fmt.Sprintf("edge_curve: a rim reads %v", c))
+		}
+	}
+	box, err := blacksmith.Cuboid(2, 4, 6)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer box.Close()
+	boxEdges, err := box.Edges()
+	if err != nil {
+		fail(err.Error())
+	}
+	for _, e := range boxEdges {
+		c := e.Curve
+		if c == nil || c.Kind != "line" || c.T0 != 0 || c.T1 != 1 {
+			fail(fmt.Sprintf("edge_curve: a cuboid edge reads %v", c))
+		}
+		far := [3]float64{c.Origin[0] + c.X[0], c.Origin[1] + c.X[1], c.Origin[2] + c.X[2]}
+		atOrigin, atFar := false, false
+		for _, s := range e.Segments {
+			for _, p := range s {
+				atOrigin = atOrigin || norm(sub(p, c.Origin)) < 1e-9
+				atFar = atFar || norm(sub(p, far)) < 1e-9
+			}
+		}
+		if !atOrigin || !atFar {
+			fail(fmt.Sprintf("edge_curve: a cuboid line's ends are not its own vertices: %v", c))
+		}
+	}
+	square, err := blacksmith.Spline([][2]float64{{0, 0}, {10, 0}, {10, 10}, {0, 10}}, 3, nil, true)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer square.Close()
+	loop, err := blacksmith.XY().Extrude(square, 2).Solid()
+	if err != nil {
+		fail(err.Error())
+	}
+	defer loop.Close()
+	loopEdges, err := loop.Edges()
+	if err != nil {
+		fail(err.Error())
+	}
+	var splines []*blacksmith.Curve
+	for _, e := range loopEdges {
+		if e.Kind == "nurbs" {
+			splines = append(splines, e.Curve)
+		}
+	}
+	if len(splines) == 0 {
+		fail("edge_curve: the extruded spline keeps no nurbs edge")
+	}
+	for _, c := range splines {
+		if c == nil || c.Kind != "nurbs" || c.Degree != 3 || len(c.Knots) != len(c.Poles)+c.Degree+1 || c.Weights != nil {
+			fail(fmt.Sprintf("edge_curve: the spline edge reads %v", c))
+		}
+	}
+	fmt.Printf("edge_curve: %v; %v; %v\n", rims[0], boxEdges[0].Curve, splines[0])
 }
 
 // sheetVerbs checks Face, FaceSheet, DropFaces, Trim, Round and SweepPathAlong by their

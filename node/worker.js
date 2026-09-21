@@ -125,6 +125,13 @@ if (isMainThread) {
       if (!mod._lib().scene_save(address, p, format)) throw new mod.CadaclysmError(mod._lastError() || `could not write ${p}`);
       return true;
     },
+    // `node` is only present for `Node.svgAsync`; `Scene.svgAsync` leaves it out.
+    svg({ address, node, options }) {
+      const l = mod._lib();
+      const ptr = node === undefined ? l.scene_svg_text(address, options) : l.node_svg_text(address, node, options);
+      if (ptr == null) throw new mod.CadaclysmError(mod._lastError() || 'svg');
+      return mod._text(ptr);
+    },
   } : {
     // `a`/`b`/`handles` are BigInt addresses, which koffi accepts directly
     // wherever a `CadaclysmBlacksmithSolid *` argument is expected -- no cast needed.
@@ -172,6 +179,16 @@ if (isMainThread) {
     step({ handles, schemaText, unit }) {
       const text = mod._lib().step(handles, handles.length, schemaText, unit);
       if (text == null) throw new mod.BuildError(mod._lastError() || 'step');
+      return text;
+    },
+    sat({ handles, unit }) {
+      const text = mod._lib().sat_text(handles, handles.length, unit);
+      if (text == null) throw new mod.BuildError(mod._lastError() || 'sat_text');
+      return text;
+    },
+    svg({ handles, options }) {
+      const text = mod._lib().svg_text(handles, handles.length, options);
+      if (text == null) throw new mod.BuildError(mod._lastError() || 'svg_text');
       return text;
     },
   };

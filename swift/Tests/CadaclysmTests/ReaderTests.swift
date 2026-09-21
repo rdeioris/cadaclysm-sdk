@@ -28,6 +28,7 @@ private let cube = "samples/cube.scad"
 private let blocks = "crates/cadaclysm-acis/tests/fixtures/rhino/block-instances.3dm"
 private let attributed = "crates/cadaclysm-acis/tests/fixtures/fusion/attributed.stp"
 private let assembly = "android/app/src/debug/assets/as1-ac-214.stp"
+private let fusionAssembly = "crates/cadaclysm-acis/tests/fixtures/fusion/assembly.stp"
 
 private let identity: [Double] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
 
@@ -279,7 +280,7 @@ final class ReaderTests: XCTestCase {
         let scene = try Cadaclysm.open(try sample(cube))
         let node = scene.nodes[0]
         let formats = Cadaclysm.meshFormats()
-        XCTAssertTrue(formats.contains(MeshFormat(name: "stl-ascii", extension: "stl")), "\(formats)")
+        XCTAssertTrue(formats.contains { $0.name == "stl-ascii" && $0.extension == "stl" }, "\(formats)")
 
         let stl = scratch("cube.stl")
         try node.saveMesh(stl)
@@ -299,6 +300,45 @@ final class ReaderTests: XCTestCase {
         XCTAssertGreaterThan(size(obj), 0)
         XCTAssertThrowsError(try scene.save(scratch("cube.nope"), format: "nope"))
         XCTAssertTrue(try String(contentsOfFile: obj, encoding: .utf8).contains("\nf "))
+    }
+
+    func testSvg() throws {
+        let scene = try Cadaclysm.open(try sample(cube))
+        let node = scene.nodes[0]
+
+        let text = try scene.svgText()
+        XCTAssertTrue(text.hasPrefix("<svg"))
+        XCTAssertTrue(text.contains("<path"))
+
+        let path = scratch("cube.svg")
+        try scene.svg(path)
+        XCTAssertGreaterThan(size(path), 0)
+        XCTAssertTrue(try String(contentsOfFile: path, encoding: .utf8).hasPrefix("<svg"))
+
+        let nodeText = try node.svgText()
+        XCTAssertTrue(nodeText.hasPrefix("<svg"))
+        XCTAssertTrue(nodeText.contains("<path"))
+        let nodePath = scratch("cube-node.svg")
+        try node.svg(nodePath)
+        XCTAssertGreaterThan(size(nodePath), 0)
+
+        // A view, an explicit up and a background all reach the camera and the page: front and
+        // top read differently, as do z-up and y-up, and a coloured background paints a rect.
+        let front = try scene.svgText(SvgOptions(view: .front))
+        let top = try scene.svgText(SvgOptions(view: .top))
+        XCTAssertNotEqual(front, top)
+        let zUp = try scene.svgText(SvgOptions(up: .z))
+        let yUp = try scene.svgText(SvgOptions(up: .y))
+        XCTAssertNotEqual(zUp, yUp)
+        let painted = try scene.svgText(SvgOptions(background: 0xFF0000))
+        XCTAssertTrue(painted.contains("fill=\"#ff0000\""), painted.prefix(300).description)
+
+        // Refusals surface as the library's own words, thrown as a CadaclysmError.
+        XCTAssertThrowsError(try scene.svgText(SvgOptions(fov: 200))) { error in
+            XCTAssertTrue((error as? CadaclysmError)?.message.contains("fov") ?? false)
+        }
+        XCTAssertThrowsError(try scene.svgText(SvgOptions(margin: -1)))
+        XCTAssertThrowsError(try node.svgText(SvgOptions(fov: 200)))
     }
 
     func testCopyOutlivesClose() throws {
@@ -426,5 +466,101 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(scene.realized, scene.realizeTotal)
         scene.cancel()
         XCTAssertEqual(scene.realizeAll(), 0)   // one-way for the life of the scene
+    }
+
+    func testFormatsAndLabels() {
+        let iges = formats().first { $0.name == "IGES" }
+        XCTAssertEqual(iges?.extensions, ["iges", "igs"])
+        XCTAssertEqual(meshFormats().first { $0.name == "stl" }?.label, "STL (binary)")
+        XCTAssertEqual(meshFormats().first { $0.name == "stl-ascii" }?.extension, "stl")
+    }
+
+    func testGeometryDiagnosticsAndForgetMeshes() throws {
+        let scene = try Cadaclysm.open(try sample(cube))
+        defer { scene.close() }
+        XCTAssertEqual(scene.geometryDiagnostics, [])
+        XCTAssertEqual(scene.nodes[0].mesh.triangleCount, 12)
+        scene.forgetMeshes()
+        XCTAssertEqual(scene.nodes[0].mesh.triangleCount, 12)
+    }
+
+    func testLodAndBeziers() throws {
+        XCTAssertEqual(lodLevels(), 3)
+        let scene = try Cadaclysm.open(try sample(cube))
+        defer { scene.close() }
+        let node = scene.nodes[0]
+        XCTAssertEqual(node.meshLod(0).triangleCount, node.mesh.triangleCount)
+        XCTAssertEqual(node.meshLod(1).triangleCount, 3)
+        XCTAssertEqual(node.meshLod(1).vertexCount, node.mesh.vertexCount)
+        XCTAssertTrue(node.meshLod(4).isEmpty)
+        XCTAssertEqual(node.lodError(0), 0)
+        XCTAssertGreaterThan(node.lodError(1), 0)
+        XCTAssertEqual(node.edgeBeziers.count, 12)
+        XCTAssertEqual(node.edgeBeziers.points.count, 12 * 12)
+        XCTAssertEqual(node.edgeBeziers.weights.count, 12 * 4)
+        XCTAssertTrue(node.curveBeziers.isEmpty)
+        XCTAssertEqual(node.isocurveBeziers.count, 12)
+    }
+
+    func testCollision() throws {
+        let scene = try Cadaclysm.open(try sample(cube))
+        defer { scene.close() }
+        let node = scene.nodes[0]
+        let fit = try XCTUnwrap(node.collision())
+        XCTAssertEqual(fit.error, 0)
+        XCTAssertEqual(fit.frame.count, 16)
+        XCTAssertEqual(fit.hullVertexCount, 8)
+        XCTAssertTrue(["box", "hull"].contains(fit.shapeName))
+        let hull = node.collisionHull()
+        XCTAssertEqual(hull.vertexCount, 8)
+        XCTAssertEqual(hull.indices.count, 36)
+        XCTAssertFalse(hull.isEmpty)
+    }
+
+    func testMeshlets() throws {
+        let scene = try Cadaclysm.open(try sample(cube))
+        defer { scene.close() }
+        let mesh = scene.nodes[0].mesh
+        let meshlets = try Meshlets.build(positions: Array(mesh.positions), normals: mesh.normals.map(Array.init),
+                                          indices: Array(mesh.indices), maxTriangles: 124, maxVertices: 64)
+        XCTAssertEqual(meshlets.count, 1)
+        let one = meshlets.meshlet(0)
+        XCTAssertEqual(one.triangleCount, 12)
+        XCTAssertEqual(one.vertexCount, 36)
+        XCTAssertEqual(one.positions.count, 36 * 3)
+        XCTAssertEqual(one.indices.count, 36)
+        XCTAssertEqual(one.level, 0)
+        XCTAssertEqual(one.children.count, 0)
+        meshlets.free()
+        XCTAssertTrue(meshlets.freed)
+        meshlets.free()
+        XCTAssertThrowsError(try Meshlets.build(positions: Array(mesh.positions), normals: nil, indices: Array(mesh.indices), maxTriangles: 0, maxVertices: 64))
+    }
+
+    func testSurfacePathWithoutMeshing() throws {
+        let scene = try Cadaclysm.open(try sample(fusionAssembly))
+        defer { scene.close() }
+        let bracket = scene.nodes[1], pin = scene.nodes[2]
+        XCTAssertFalse(bracket.isMeshed)
+        XCTAssertEqual(bracket.triangleEstimate, 18)
+        XCTAssertEqual(pin.triangleEstimate, 480)
+        XCTAssertEqual(bracket.surfaceEdges.polylineCount, 12)
+        XCTAssertEqual(bracket.surfaceEdges.vertexCount, 24)
+        XCTAssertTrue(bracket.surfaceIsocurves.isEmpty)
+        XCTAssertEqual(pin.surfaceIsocurves.polylineCount, 3)
+        let proxy = bracket.surfaceProxyMesh(cells: 4)
+        XCTAssertEqual(proxy.vertexCount, 150)
+        XCTAssertEqual(proxy.indexCount, 576)
+        let hit = try XCTUnwrap(bracket.surfacePick(from: SIMD3(2, 1.5, 1002), to: SIMD3(2, 1.5, -998)))
+        XCTAssertEqual(hit.x, 2, accuracy: 1e-9); XCTAssertEqual(hit.y, 1.5, accuracy: 1e-9); XCTAssertEqual(hit.z, 2, accuracy: 1e-9)
+        XCTAssertNil(bracket.surfacePick(from: SIMD3(1e6, 1.5, 1002), to: SIMD3(1e6, 1.5, -998)))
+        XCTAssertFalse(bracket.isMeshed)
+        XCTAssertEqual(try bracket.boundsPlaced().max, SIMD3(4, 3, 2))
+        XCTAssertEqual(try bracket.boundsPlaced(identity).max, SIMD3(4, 3, 2))
+        XCTAssertThrowsError(try bracket.boundsPlaced([1, 0, 0]))
+        XCTAssertEqual(scene.realizeMeshes(), 0)
+        XCTAssertFalse(bracket.isMeshed)
+        XCTAssertEqual(scene.realizeMeshes(skipSurfaced: false), 3)
+        XCTAssertTrue(bracket.isMeshed)
     }
 }

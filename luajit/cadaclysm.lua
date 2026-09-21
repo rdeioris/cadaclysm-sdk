@@ -221,6 +221,23 @@ local ENTRY_POINTS = {
   "cadaclysm_brep_layout_id", "cadaclysm_brep_manifold", "cadaclysm_brep_release",
   "cadaclysm_mesh_format_count", "cadaclysm_mesh_format", "cadaclysm_mesh_format_extension",
   "cadaclysm_pick_file",
+  "cadaclysm_mesh_format_label", "cadaclysm_format_count", "cadaclysm_format_name", "cadaclysm_format_extensions",
+  "cadaclysm_pick_save", "cadaclysm_geometry_diagnostic_count", "cadaclysm_geometry_diagnostic",
+  "cadaclysm_forget_meshes",
+  "cadaclysm_lod_levels", "cadaclysm_node_mesh_lod", "cadaclysm_node_lod_error",
+  "cadaclysm_node_edge_beziers", "cadaclysm_node_curve_beziers", "cadaclysm_node_isocurve_beziers",
+  "cadaclysm_node_collision", "cadaclysm_node_collision_hull",
+  "cadaclysm_node_bounds_placed", "cadaclysm_node_is_meshed",
+  "cadaclysm_node_surface_edges", "cadaclysm_node_surface_isocurves",
+  "cadaclysm_node_surface_pick", "cadaclysm_node_surface_proxy_mesh",
+  "cadaclysm_node_triangle_estimate", "cadaclysm_realize_meshes",
+  "cadaclysm_meshlets_build", "cadaclysm_meshlets_count", "cadaclysm_meshlets_free",
+  "cadaclysm_meshlet_triangle_count", "cadaclysm_meshlet_vertex_count", "cadaclysm_meshlet_level",
+  "cadaclysm_meshlet_group", "cadaclysm_meshlet_error", "cadaclysm_meshlet_child_count",
+  "cadaclysm_meshlet_positions", "cadaclysm_meshlet_normals", "cadaclysm_meshlet_indices",
+  "cadaclysm_meshlet_children",
+  "cadaclysm_svg_options_init", "cadaclysm_scene_svg_text", "cadaclysm_scene_svg",
+  "cadaclysm_node_svg_text", "cadaclysm_node_svg",
 }
 
 local C
@@ -264,6 +281,9 @@ function M.version() return text(lib().cadaclysm_version()) end
 --- dated on or before its expiry.
 function M.build_date() return text(lib().cadaclysm_build_date()) end
 
+--- How many coarser levels `node:mesh_lod` offers above the mesh itself (level 0).
+function M.lod_levels() return lib().cadaclysm_lod_levels() end
+
 --- One line about the licence in use, or `unlicensed` (`unlicensed -- <reason>` when
 --- a licence was found but did not verify). Never nil.
 function M.license_info() return text(lib().cadaclysm_license_info()) end
@@ -281,12 +301,26 @@ function M.license(text_or_path)
   end
 end
 
---- Every format `node:save_mesh` writes, as `{ {name, extension}, ... }`. Build a
---- menu from this rather than hard-coding it.
+--- Every format `node:save_mesh` writes, as `{ {name, extension, label}, ... }`. Build a
+--- menu from this rather than hard-coding it; the label is what to show in it.
 function M.mesh_formats()
   local L, out = lib(), {}
   for i = 0, L.cadaclysm_mesh_format_count() - 1 do
-    out[#out + 1] = { text(L.cadaclysm_mesh_format(i)), text(L.cadaclysm_mesh_format_extension(i)) }
+    out[#out + 1] = { text(L.cadaclysm_mesh_format(i)), text(L.cadaclysm_mesh_format_extension(i)),
+                      text(L.cadaclysm_mesh_format_label(i)) }
+  end
+  return out
+end
+
+--- Every format this build reads, as `{ {name, {extension, ...}}, ... }`: what an open
+--- dialog's filter is built from. The library hands the extensions over
+--- semicolon-separated; they are split here.
+function M.formats()
+  local L, out = lib(), {}
+  for i = 0, L.cadaclysm_format_count() - 1 do
+    local extensions = {}
+    for e in text(L.cadaclysm_format_extensions(i)):gmatch("[^;]+") do extensions[#extensions + 1] = e end
+    out[#out + 1] = { text(L.cadaclysm_format_name(i)), extensions }
   end
   return out
 end
@@ -295,6 +329,14 @@ end
 --- this build reads. `nil` when they cancel or no dialog is available. Blocks.
 function M.pick_file()
   local raw = lib().cadaclysm_pick_file(nil)
+  if raw == nil then return nil end
+  return ffi.string(raw) -- borrowed only until the next picker call, so copied now
+end
+
+--- Ask the user where to save, through the platform's own dialog, `suggested_name`
+--- prefilled. `nil` when they cancel or no dialog is available. Blocks.
+function M.pick_save(suggested_name)
+  local raw = lib().cadaclysm_pick_save(nil, suggested_name and tostring(suggested_name) or nil)
   if raw == nil then return nil end
   return ffi.string(raw) -- borrowed only until the next picker call, so copied now
 end
@@ -567,6 +609,71 @@ local function polylines(scene, raw)
   }, Polylines)
 end
 
+--- Edges, curves or isocurves as cubic Bézier curves, exact where the file's curves
+--- were: `points` is `const float *`, four control points a curve, three floats each
+--- (`count * 12`); `weights` is `const float *`, one a control point (`count * 4`), all
+--- ones for a polynomial curve. Borrowed from the scene; `:copy()` makes Lua tables.
+---@class Beziers
+---@field points ffi.cdata*
+---@field weights ffi.cdata*
+---@field count integer
+local Beziers = {}
+Beziers.__index = Beziers
+M.Beziers = Beziers
+Beziers.__tostring = function(b) return ("Beziers(count=%d)"):format(b.count) end
+
+--- The same curves as Lua tables of numbers, safe to keep after the scene closes.
+function Beziers:copy()
+  local points, weights = {}, {}
+  for i = 0, self.count * 12 - 1 do points[i + 1] = self.points[i] end
+  for i = 0, self.count * 4 - 1 do weights[i + 1] = self.weights[i] end
+  return { points = points, weights = weights, count = self.count }
+end
+
+local function beziers(scene, raw)
+  return setmetatable({
+    scene = scene,
+    points = null_to_nil(raw.points),
+    weights = null_to_nil(raw.weights),
+    count = raw.count,
+  }, Beziers)
+end
+
+--- What a node turned out to be for a physics engine: a box, sphere, capsule or
+--- cylinder where one fits within `error`, else a convex hull. `frame` (16 numbers,
+--- column-major) and `half_extent` are always the true oriented box. Plain data.
+---@class Collision
+---@field shape integer
+---@field confidence integer
+---@field axis integer
+---@field frame number[]
+---@field half_extent number[]
+---@field radius number
+---@field height number
+---@field error number
+---@field hull_vertex_count integer
+---@field hull_index_count integer
+---@field shape_name string
+local Collision_get = {}
+local COLLISION_NAMES = { [0] = "none", "box", "sphere", "capsule", "cylinder", "hull" }
+--- `none`, `box`, `sphere`, `capsule`, `cylinder` or `hull`.
+function Collision_get.shape_name(self) return COLLISION_NAMES[self.shape] or tostring(self.shape) end
+local Collision = class(Collision_get)
+M.Collision = Collision
+Collision.__tostring = function(c) return ("Collision(%s, error=%g)"):format(c.shape_name, c.error) end
+
+--- A node's convex hull for a physics engine: `positions` `const float *` (3 a vertex),
+--- `indices` `const uint32_t *` (3 a triangle). Borrowed from the scene.
+---@class CollisionHull
+---@field positions ffi.cdata*
+---@field indices ffi.cdata*
+---@field vertex_count integer
+---@field index_count integer
+local CollisionHull = {}
+CollisionHull.__index = CollisionHull
+M.CollisionHull = CollisionHull
+CollisionHull.__tostring = function(h) return ("CollisionHull(vertices=%d, triangles=%d)"):format(h.vertex_count, h.index_count / 3) end
+
 -- ---- surfaces --------------------------------------------------------------------
 
 --- One trimmed face: the surface, plus the loops that cut it. `kind` is 0 plane,
@@ -702,6 +809,171 @@ function Brep:release()
   end
 end
 
+-- ---- meshlets --------------------------------------------------------------------
+
+--- A mesh split into meshlets, optionally with coarser levels above them, for a
+--- mesh-shader or Nanite-style renderer. Built from any mesh and owned by you:
+--- `free()` it (the collector does otherwise).
+---@class Meshlets
+---@field count integer
+---@field freed boolean
+local Meshlets_get = {}
+local Meshlets = class(Meshlets_get)
+M.Meshlets = Meshlets
+
+local function meshlets_handle(self)
+  local p = rawget(self, "_ptr")
+  if p == nil then fail("meshlets: freed", 3) end
+  return p
+end
+
+--- A `const float *`/`const uint32_t *` as the C call wants it, from cdata handed out
+--- by this module or from a Lua table of numbers (copied into `ctype`).
+local function c_array(value, ctype)
+  if value == nil then return nil end
+  if type(value) == "table" then return ffi.new(ctype .. "[?]", #value, value) end
+  return value
+end
+
+--- Split `positions` (three floats a vertex), `normals` (the same, or nil) and
+--- `indices` (three a triangle) -- cdata as `mesh.positions` hands them out, or Lua
+--- tables -- into meshlets of at most `max_triangles` and `max_vertices` each: the
+--- consumer's own limits, with no default (Nanite 128/256, mesh shaders 124/64).
+--- `vertex_count` and `index_count` say how long the arrays are (cdata carries no
+--- length); a Lua table whose length disagrees with them fails before the library is
+--- called. `levels` above 0 groups and simplifies each level into the next until one
+--- meshlet is left.
+function Meshlets.build(positions, normals, indices, vertex_count, index_count, max_triangles, max_vertices, levels)
+  if not (max_triangles and max_triangles > 0 and max_vertices and max_vertices > 0) then
+    fail("meshlets: max_triangles and max_vertices are required", 2)
+  end
+  if index_count % 3 ~= 0 then fail("meshlets: indices must hold three a triangle", 2) end
+  if type(positions) == "table" and #positions ~= vertex_count * 3 then
+    fail("meshlets: positions holds " .. #positions .. " floats, not vertex_count * 3", 2)
+  end
+  if type(normals) == "table" and #normals ~= vertex_count * 3 then
+    fail("meshlets: normals holds " .. #normals .. " floats, not vertex_count * 3", 2)
+  end
+  if type(indices) == "table" and #indices ~= index_count then
+    fail("meshlets: indices holds " .. #indices .. " entries, not index_count", 2)
+  end
+  local p, n, i = c_array(positions, "float"), c_array(normals, "float"), c_array(indices, "uint32_t")
+  local ptr = lib().cadaclysm_meshlets_build(p, n, vertex_count, i, index_count, max_triangles, max_vertices, levels or 0)
+  if ptr == nil then
+    local reason = last_error()
+    fail(reason ~= "" and reason or "meshlets: build failed", 2)
+  end
+  return setmetatable({ _ptr = ffi.gc(ptr, lib().cadaclysm_meshlets_free) }, Meshlets)
+end
+
+--- Whether `free()` has run.
+function Meshlets_get.freed(self) return rawget(self, "_ptr") == nil end
+--- How many meshlets, every level counted.
+function Meshlets_get.count(self) return lib().cadaclysm_meshlets_count(meshlets_handle(self)) end
+
+--- Give the meshlets back. Idempotent.
+function Meshlets:free()
+  local p = rawget(self, "_ptr")
+  if p ~= nil then
+    self._ptr = nil
+    ffi.gc(p, nil)
+    lib().cadaclysm_meshlets_free(p)
+  end
+end
+
+function Meshlets:triangle_count(i) return lib().cadaclysm_meshlet_triangle_count(meshlets_handle(self), i) end
+function Meshlets:vertex_count(i) return lib().cadaclysm_meshlet_vertex_count(meshlets_handle(self), i) end
+--- 0 for a leaf over the mesh itself, higher for a simplified level above it.
+function Meshlets:level(i) return lib().cadaclysm_meshlet_level(meshlets_handle(self), i) end
+function Meshlets:group(i) return lib().cadaclysm_meshlet_group(meshlets_handle(self), i) end
+--- How far this meshlet's level moved the surface; zero at level 0.
+function Meshlets:error(i) return lib().cadaclysm_meshlet_error(meshlets_handle(self), i) end
+function Meshlets:child_count(i) return lib().cadaclysm_meshlet_child_count(meshlets_handle(self), i) end
+
+---@class Meshlet
+---@field index integer
+---@field level integer
+---@field group integer
+---@field error number
+---@field vertex_count integer
+---@field triangle_count integer
+---@field positions number[]
+---@field normals number[]
+---@field indices integer[]
+---@field children integer[]
+--- One meshlet's arrays and numbers, copied out as Lua tables.
+function Meshlets:meshlet(i)
+  local L, h = lib(), meshlets_handle(self)
+  local vertices, triangles, kids = L.cadaclysm_meshlet_vertex_count(h, i), L.cadaclysm_meshlet_triangle_count(h, i), L.cadaclysm_meshlet_child_count(h, i)
+  local positions, normals = ffi.new("float[?]", math.max(1, vertices * 3)), ffi.new("float[?]", math.max(1, vertices * 3))
+  local indices, children = ffi.new("uint32_t[?]", math.max(1, triangles * 3)), ffi.new("uint32_t[?]", math.max(1, kids))
+  L.cadaclysm_meshlet_positions(h, i, positions)
+  L.cadaclysm_meshlet_normals(h, i, normals)
+  L.cadaclysm_meshlet_indices(h, i, indices)
+  L.cadaclysm_meshlet_children(h, i, children)
+  local function tbl(c, n) local t = {} for k = 0, n - 1 do t[k + 1] = c[k] end return t end
+  return {
+    index = i, level = L.cadaclysm_meshlet_level(h, i), group = L.cadaclysm_meshlet_group(h, i), error = L.cadaclysm_meshlet_error(h, i),
+    vertex_count = vertices, triangle_count = triangles,
+    positions = tbl(positions, vertices * 3), normals = tbl(normals, vertices * 3), indices = tbl(indices, triangles * 3), children = tbl(children, kids),
+  }
+end
+
+-- ---- svg -----------------------------------------------------------------------------
+
+--- The seven camera angles `svg_text`/`svg`'s `view=` understands, as (azimuth,
+--- elevation) in degrees -- the same table `cadaclysm_viewer.VIEWS` gives
+--- Python's `show()` and `svg()` both.
+local SVG_VIEWS = {
+  front = { -90, 0 }, back = { 90, 0 }, left = { 180, 0 }, right = { 0, 0 },
+  top = { -90, 90 }, bottom = { -90, -90 }, iso = { -50, 28 },
+}
+
+--- `CadaclysmSvgOptions.background`'s "none" value: no `<rect>` behind the
+--- drawing, the page left to whatever the viewer composites it onto.
+local SVG_TRANSPARENT = 0xffffffff
+
+--- A colour as the ABI's packed `0xRRGGBB`: `"#rrggbb"` or a `{r, g, b}` table.
+local function svg_colour(colour)
+  if type(colour) == "string" then
+    local hex = colour:gsub("^#", "")
+    if #hex ~= 6 then fail(("colour '%s': '#rrggbb' or {r, g, b}"):format(colour), 3) end
+    return tonumber(hex, 16)
+  end
+  return bit.bor(bit.lshift(math.floor(colour[1]), 16), bit.lshift(math.floor(colour[2]), 8), math.floor(colour[3]))
+end
+
+--- `words` (a table: `view=`, `az=`, `el=`, `up=`, `fov=`, `size=` ({width,
+--- height}), `margin=`, `tolerance=`, `stroke=`, `width=` (the stroke's),
+--- `background=`, `edges=`, `curves=`, `isocurves=`, `polylines=`) packed
+--- into a `CadaclysmSvgOptions`. `default_up` is `"y"` or `"z"`, what `up=`
+--- falls back to when left out.
+local function svg_options(default_up, words)
+  words = words or {}
+  local view = words.view or "iso"
+  local angles = SVG_VIEWS[view]
+  if not angles then
+    fail(("view '%s': one of front, back, left, right, top, bottom, iso"):format(tostring(view)), 3)
+  end
+  local o = ffi.new("CadaclysmSvgOptions")
+  lib().cadaclysm_svg_options_init(o)
+  o.up = tostring(words.up or default_up):lower() == "y" and 1 or 0
+  o.azimuth = words.az ~= nil and words.az or angles[1]
+  o.elevation = words.el ~= nil and words.el or angles[2]
+  o.fov = words.fov or 0.0
+  local size = words.size or { 1000, 1000 }
+  o.width, o.height = size[1], size[2]
+  o.margin = words.margin or 0.05
+  o.tolerance = words.tolerance or 0.1
+  o.stroke = words.stroke ~= nil and svg_colour(words.stroke) or 0x000000
+  o.stroke_width = words.width or 1.0
+  o.background = words.background ~= nil and svg_colour(words.background) or SVG_TRANSPARENT
+  local edges = words.edges
+  if edges == nil then edges = true end
+  o.flags = bit.bor(edges and 1 or 0, words.curves and 2 or 0, words.isocurves and 4 or 0, words.polylines and 8 or 0)
+  return o
+end
+
 -- ---- nodes -------------------------------------------------------------------------
 
 local Node_get = {}
@@ -811,6 +1083,13 @@ end
 function Node_get.bounds(self) return bounds(lib().cadaclysm_node_bounds(h(self), self.index)) end
 --- Its triangles, in their own frame, built now if they have not been.
 function Node_get.mesh(self) return mesh(self.scene, lib().cadaclysm_node_mesh(h(self), self.index)) end
+--- Its triangles at a coarser level of detail: 0 is `mesh` itself, 1 up to
+--- `lod_levels()` each about a quarter of the triangles of the one before, and past
+--- that empty. Every level shares the level-0 vertices (the same `positions`, only
+--- `indices` differ), so upload the vertices once and switch level by index range.
+function Node:mesh_lod(level) return mesh(self.scene, lib().cadaclysm_node_mesh_lod(h(self), self.index, level)) end
+--- How far `mesh_lod(level)` moved the surface, in the scene's units. Zero at level 0.
+function Node:lod_error(level) return lib().cadaclysm_node_lod_error(h(self), self.index, level) end
 --- Its faces as surfaces and trim loops, where the reader built them.
 function Node_get.surfaces(self)
   return surfaces(self.scene, lib().cadaclysm_node_surfaces(h(self), self.index))
@@ -830,10 +1109,106 @@ function Node_get.curves(self) return polylines(self.scene, lib().cadaclysm_node
 function Node_get.isocurves(self)
   return polylines(self.scene, lib().cadaclysm_node_isocurves(h(self), self.index))
 end
+--- Its feature edges as cubic Bézier curves, exact where the file's curves were, where
+--- `edges` are their chords. Builds the geometry if needed.
+function Node_get.edge_beziers(self) return beziers(self.scene, lib().cadaclysm_node_edge_beziers(h(self), self.index)) end
+--- Its free curves as cubic Béziers; see `edge_beziers`.
+function Node_get.curve_beziers(self) return beziers(self.scene, lib().cadaclysm_node_curve_beziers(h(self), self.index)) end
+--- Its isocurves as cubic Béziers; see `edge_beziers`.
+function Node_get.isocurve_beziers(self) return beziers(self.scene, lib().cadaclysm_node_isocurve_beziers(h(self), self.index)) end
+
+--- The collision body for what this node draws, building its mesh if it is not built.
+--- `hull_budget` is the most triangles a hull may have; 0 (the default) asks for the
+--- Unity limit (255). `nil` for a node that draws nothing. Cached per node and budget.
+function Node:collision(hull_budget)
+  local raw = ffi.new("struct CadaclysmCollision")
+  raw.size = ffi.sizeof(raw)
+  if not lib().cadaclysm_node_collision(h(self), self.index, hull_budget or 0, raw) then return nil end
+  local frame, half_extent = {}, {}
+  for i = 0, 15 do frame[i + 1] = raw.frame[i] end
+  for i = 0, 2 do half_extent[i + 1] = raw.half_extent[i] end
+  return setmetatable({
+    shape = raw.shape, confidence = raw.confidence, axis = raw.axis,
+    frame = frame, half_extent = half_extent,
+    radius = raw.radius, height = raw.height, error = raw.error,
+    hull_vertex_count = raw.hull_vertex_count, hull_index_count = raw.hull_index_count,
+  }, Collision)
+end
+
+--- The convex hull `collision` counted, as triangles. Empty for a node that draws nothing.
+--- A view into the scene, good until it closes or this node is asked for a different
+--- `hull_budget`, which refits and frees it.
+function Node:collision_hull(hull_budget)
+  local raw = lib().cadaclysm_node_collision_hull(h(self), self.index, hull_budget or 0)
+  return setmetatable({
+    scene = self.scene,
+    positions = null_to_nil(raw.positions),
+    indices = null_to_nil(raw.indices),
+    vertex_count = raw.vertex_count,
+    index_count = raw.index_count,
+  }, CollisionHull)
+end
+
+-- -- the surface path: for a renderer drawing exact surfaces, never triangles --
+
+--- The box of what this node draws under `placement` (16 numbers, column-major, as
+--- `placement.raw_transform`; nil for the identity), for a part drawn from its
+--- surfaces: tighter than placing the corners of `bounds`. All zeros without surfaces.
+function Node:bounds_placed(placement)
+  local m = nil
+  if placement ~= nil then
+    if #placement ~= 16 then fail("bounds_placed: a placement is 16 numbers", 2) end
+    m = ffi.new("double[16]", placement)
+  end
+  return bounds(lib().cadaclysm_node_bounds_placed(h(self), self.index, m))
+end
+--- Whether its mesh has been built and is held.
+function Node_get.is_meshed(self) return lib().cadaclysm_node_is_meshed(h(self), self.index) end
+--- Its face boundaries from its trimmed surfaces: the outline that costs no tessellation,
+--- in the surfaces' frame (`scene.surface_matrix`); empty without surfaces.
+function Node_get.surface_edges(self) return polylines(self.scene, lib().cadaclysm_node_surface_edges(h(self), self.index)) end
+--- Its isocurves from its trimmed surfaces, clipped to the trims, without meshing.
+function Node_get.surface_isocurves(self) return polylines(self.scene, lib().cadaclysm_node_surface_isocurves(h(self), self.index)) end
+--- Where the segment `from`..`to` (each `{x, y, z}`, in the surfaces' frame) first meets
+--- its surfaces, as `{x, y, z}`, or nil.
+function Node:surface_pick(from, to)
+  local a, b, out = ffi.new("double[3]", from), ffi.new("double[3]", to), ffi.new("double[3]")
+  if not lib().cadaclysm_node_surface_pick(h(self), self.index, a, b, out) then return nil end
+  return { out[0], out[1], out[2] }
+end
+--- A coarse, unwelded mesh over its surfaces for ray tracing and distance fields,
+--- `cells` by `cells` a face; built once per part; empty without surfaces.
+function Node:surface_proxy_mesh(cells) return mesh(self.scene, lib().cadaclysm_node_surface_proxy_mesh(h(self), self.index, cells)) end
+--- About how many triangles `mesh` would give, without building it; -1 where the
+--- reader cannot say. Treat -1 as unknown, never as zero.
+function Node_get.triangle_estimate(self) return tonumber(lib().cadaclysm_node_triangle_estimate(h(self), self.index)) end
 
 --- Write this node's mesh to `path`; `fmt` is one of `mesh_formats()` (default "stl").
 function Node:save_mesh(path, fmt)
   if not lib().cadaclysm_node_save_mesh(h(self), self.index, tostring(path), fmt or "stl") then
+    local reason = last_error()
+    fail(reason ~= "" and reason or ("could not write " .. tostring(path)), 2)
+  end
+end
+
+--- This node's own wireframe as SVG text, in its own frame -- `Scene:svg_text`'s
+--- words, one `<g id="node-<index>">`, no placement. Raises `CadaclysmError` on
+--- a refused option (naming the field). Borrowed by the library: copied out
+--- before this returns, and replaced by the scene's next `svg_text` or `svg`.
+function Node:svg_text(words)
+  local o = svg_options(self.scene:_default_up(), words)
+  local p = lib().cadaclysm_node_svg_text(h(self), self.index, o)
+  if p == nil then
+    local reason = last_error()
+    fail(reason ~= "" and reason or "svg", 2)
+  end
+  return ffi.string(p)
+end
+
+--- `svg_text` written to `path` by the library itself.
+function Node:svg(path, words)
+  local o = svg_options(self.scene:_default_up(), words)
+  if not lib().cadaclysm_node_svg(h(self), self.index, tostring(path), o) then
     local reason = last_error()
     fail(reason ~= "" and reason or ("could not write " .. tostring(path)), 2)
   end
@@ -949,6 +1324,16 @@ function Scene_get.diagnostics(self)
   end
   return out
 end
+--- What the reader built but the geometry stage could not finish: a face that would
+--- not trim, a surface that would not mesh. `diagnostics` is what the file held that
+--- could not be read; this is what the geometry did.
+function Scene_get.geometry_diagnostics(self)
+  local L, handle, out = lib(), self:handle(), {}
+  for i = 0, L.cadaclysm_geometry_diagnostic_count(handle) - 1 do
+    out[#out + 1] = text(L.cadaclysm_geometry_diagnostic(handle, i))
+  end
+  return out
+end
 --- The archive member this was read from, or nil for a plain file.
 function Scene_get.source_name(self)
   local raw = lib().cadaclysm_source_name(self:handle())
@@ -1035,12 +1420,61 @@ end
 --- Build every mesh now, across all cores, and say how many were built.
 function Scene:realize_all() return lib().cadaclysm_realize_all(self:handle()) end
 
+--- `realize_all` leaving alone every node that carries surfaces when `skip_surfaced`
+--- is true (the default); returns how many were built.
+function Scene:realize_meshes(skip_surfaced)
+  if skip_surfaced == nil then skip_surfaced = true end
+  return lib().cadaclysm_realize_meshes(self:handle(), skip_surfaced and 1 or 0)
+end
+
+--- Drop every mesh the scene has built; the next ask rebuilds. Every mesh and
+--- polylines table handed out before this points at freed memory.
+function Scene:forget_meshes() lib().cadaclysm_forget_meshes(self:handle()) end
+
 --- Ask a running `realize_all` to stop. One-way, for the life of the scene.
 function Scene:cancel() lib().cadaclysm_cancel(self:handle()) end
 
 --- Write the whole scene: `fmt` is "glb" (default), "gltf" or "obj".
 function Scene:save(path, fmt)
   if not lib().cadaclysm_scene_save(self:handle(), tostring(path), fmt or "glb") then
+    local reason = last_error()
+    fail(reason ~= "" and reason or ("could not write " .. tostring(path)), 2)
+  end
+end
+
+--- `"y"` or `"z"`: which axis is up by default, from `convention` -- `UNITY`
+--- and `Y_UP` give `"y"`, every other convention `"z"`. What `svg_text`/`svg`'s
+--- `up=` falls back to when left out. `FILE_UNITS`/`UV_WORLD` are masked out
+--- first, since they OR into the packed convention a scene carries.
+function Scene:_default_up()
+  local base = bit.band(self.convention, bit.bnot(bit.bor(M.FILE_UNITS, M.UV_WORLD)))
+  return (base == Convention.UNITY or base == Convention.Y_UP) and "y" or "z"
+end
+
+--- Every visible placement's wireframe as SVG text, from the camera `words`
+--- describes -- the library's own camera, not a viewer: `view=` (front back
+--- left right top bottom iso), `az=`, `el=` over it, `up=` (default from the
+--- convention this scene was opened with), `fov=` (0, the default, is
+--- orthographic), `size=` ({width, height}), `margin=`, `tolerance=`,
+--- `stroke=`, `width=` (the stroke's, in page units), `background=` (nil for
+--- transparent), `edges=`, `curves=`, `isocurves=`, `polylines=` (which line
+--- sets are drawn; edges alone by default). Raises `CadaclysmError` on a
+--- refused option, naming the field. Borrowed by the library: copied out
+--- before this returns, and replaced by this scene's next `svg_text` or `svg`.
+function Scene:svg_text(words)
+  local o = svg_options(self:_default_up(), words)
+  local p = lib().cadaclysm_scene_svg_text(self:handle(), o)
+  if p == nil then
+    local reason = last_error()
+    fail(reason ~= "" and reason or "svg", 2)
+  end
+  return ffi.string(p)
+end
+
+--- `svg_text` written to `path` by the library itself.
+function Scene:svg(path, words)
+  local o = svg_options(self:_default_up(), words)
+  if not lib().cadaclysm_scene_svg(self:handle(), tostring(path), o) then
     local reason = last_error()
     fail(reason ~= "" and reason or ("could not write " .. tostring(path)), 2)
   end

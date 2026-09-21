@@ -127,6 +127,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"unsafe"
 
@@ -371,6 +372,366 @@ func WriteStep(path string, solids []*Solid, schema, unit string) error {
 		return err
 	}
 	return os.WriteFile(path, []byte(text), 0o644)
+}
+
+// satHandles is the unit code and the handle array the two SAT entry points take.
+func satHandles(solids []*Solid, unit string) (C.uint32_t, []*C.CadaclysmBlacksmithSolid, error) {
+	code, ok := units[unit]
+	if !ok {
+		names := make([]string, 0, len(units))
+		for name := range units {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		return 0, nil, &BuildError{Message: fmt.Sprintf("unit must be one of %v", names)}
+	}
+	handles := make([]*C.CadaclysmBlacksmithSolid, len(solids))
+	for i, s := range solids {
+		h, err := s.h()
+		if err != nil {
+			return 0, nil, err
+		}
+		handles[i] = h
+	}
+	return C.uint32_t(code), handles, nil
+}
+
+// WriteSatText is several solids as one ACIS SAT file's text, each its own body:
+// analytic surfaces as their own records, splines and swept surfaces as exact NURBS.
+// unit is what the solids' lengths are, "m", "mm" or "in".
+func WriteSatText(solids []*Solid, unit string) (string, error) {
+	defer pin()()
+	code, handles, err := satHandles(solids, unit)
+	if err != nil {
+		return "", err
+	}
+	var first **C.CadaclysmBlacksmithSolid
+	if len(handles) > 0 {
+		first = &handles[0]
+	}
+	raw := C.cadaclysm_blacksmith_sat_text(first, C.size_t(len(handles)), code)
+	for _, s := range solids {
+		runtime.KeepAlive(s)
+	}
+	if raw == nil {
+		return "", failure("sat_text")
+	}
+	defer C.cadaclysm_blacksmith_string_free(raw)
+	return C.GoString(raw), nil
+}
+
+// WriteSat is WriteSatText written to path by the library itself, which names the
+// file in its refusal when it cannot.
+func WriteSat(path string, solids []*Solid, unit string) error {
+	defer pin()()
+	code, handles, err := satHandles(solids, unit)
+	if err != nil {
+		return err
+	}
+	var first **C.CadaclysmBlacksmithSolid
+	if len(handles) > 0 {
+		first = &handles[0]
+	}
+	cs := C.CString(path)
+	defer C.free(unsafe.Pointer(cs))
+	ok := C.cadaclysm_blacksmith_sat(first, C.size_t(len(handles)), cs, code)
+	for _, s := range solids {
+		runtime.KeepAlive(s)
+	}
+	if !ok {
+		return failure("sat")
+	}
+	return nil
+}
+
+// WriteBrepText is several solids as one OCCT .brep, each its own solid under one
+// compound (one solid is the file's root): the exact surfaces and curves, with a curve in
+// each face's own parameters for every edge, so OCCT's BRepTools::Read gives a shape
+// BRepCheck_Analyzer finds valid. No unit is declared — a .brep carries none — so the
+// numbers are the numbers.
+func WriteBrepText(solids []*Solid) (string, error) {
+	defer pin()()
+	handles, err := solidHandles(solids)
+	if err != nil {
+		return "", err
+	}
+	var first **C.CadaclysmBlacksmithSolid
+	if len(handles) > 0 {
+		first = &handles[0]
+	}
+	raw := C.cadaclysm_blacksmith_brep_text(first, C.size_t(len(handles)))
+	for _, s := range solids {
+		runtime.KeepAlive(s)
+	}
+	if raw == nil {
+		return "", failure("brep_text")
+	}
+	defer C.cadaclysm_blacksmith_string_free(raw)
+	return C.GoString(raw), nil
+}
+
+// WriteBrep is WriteBrepText written to path by the library itself.
+func WriteBrep(path string, solids []*Solid) error {
+	defer pin()()
+	handles, err := solidHandles(solids)
+	if err != nil {
+		return err
+	}
+	cs := C.CString(path)
+	defer C.free(unsafe.Pointer(cs))
+	var first **C.CadaclysmBlacksmithSolid
+	if len(handles) > 0 {
+		first = &handles[0]
+	}
+	ok := C.cadaclysm_blacksmith_brep(first, C.size_t(len(handles)), cs)
+	for _, s := range solids {
+		runtime.KeepAlive(s)
+	}
+	if !ok {
+		return failure("brep")
+	}
+	return nil
+}
+
+// solidHandles is the live handle of each solid, or the first closed one's error.
+func solidHandles(solids []*Solid) ([]*C.CadaclysmBlacksmithSolid, error) {
+	handles := make([]*C.CadaclysmBlacksmithSolid, len(solids))
+	for i, s := range solids {
+		h, err := s.h()
+		if err != nil {
+			return nil, err
+		}
+		handles[i] = h
+	}
+	return handles, nil
+}
+
+// ---- svg ----------------------------------------------------------------------------
+
+// SvgView is one of the seven camera angles SvgOptions.View understands — the same
+// table the reader's cadaclysm.SvgView gives, kept separate because this file is the
+// whole kernel binding on its own.
+type SvgView int
+
+// The seven named cameras SvgView holds — front, back, left, right, top, bottom and the
+// default, an isometric-style angle from above.
+const (
+	SvgFront SvgView = iota
+	SvgBack
+	SvgLeft
+	SvgRight
+	SvgTop
+	SvgBottom
+	SvgIso
+)
+
+// svgViewAngles is (azimuth, elevation) degrees for each SvgView.
+var svgViewAngles = map[SvgView][2]float64{
+	SvgFront:  {-90, 0},
+	SvgBack:   {90, 0},
+	SvgLeft:   {180, 0},
+	SvgRight:  {0, 0},
+	SvgTop:    {-90, 90},
+	SvgBottom: {-90, -90},
+	SvgIso:    {-50, 28},
+}
+
+// SvgOptions is how a solid's wireframe is drawn — the camera in the viewer's words,
+// the page, the pen and which line sets. Mirrors CadaclysmBlacksmithSvgOptions,
+// defaulted the way cadaclysm_blacksmith_svg_options_init defaults the struct: build
+// one with NewSvgOptions rather than a bare SvgOptions{}, whose zero value turns every
+// line-set flag off, which the library refuses. Passed to WriteSvgText, WriteSvg and
+// Solid.SvgText/Solid.Svg. No scene convention to default Up from here — a solid's own
+// frame is Z up unless Up says otherwise.
+type SvgOptions struct {
+	// View fills Azimuth/Elevation unless they are set directly. Default SvgIso.
+	View SvgView
+	// Azimuth overrides View's, degrees about the up axis from +X: -90 looks from -Y,
+	// the front. nil keeps View's own.
+	Azimuth *float64
+	// Elevation overrides View's, degrees above the horizon. nil keeps View's own.
+	Elevation *float64
+	// Up is "y" or "z"; "" defaults to "z", a solid carrying no convention of its own.
+	Up string
+	// Fov is the vertical field of view in degrees; 0 (the default) is orthographic.
+	Fov float64
+	// Width, Height are the page's viewBox, page units; 0 is 1000.
+	Width, Height float64
+	// Margin is the fraction of the content's extent left each side. Default 0.05.
+	Margin float64
+	// Tolerance is how far a written curve may stray, in page units. Default 0.1.
+	Tolerance float64
+	// Stroke is the pen colour, "#rrggbb". Default black.
+	Stroke string
+	// StrokeWidth is the pen's width, page units. Default 1.
+	StrokeWidth float64
+	// Background is "#rrggbb", or nil (the default) for no <rect> behind the drawing.
+	Background *string
+	// Edges draws each shape's feature edges. Default true.
+	Edges bool
+	// Curves is accepted and ignored — a solid has no free curves of its own.
+	// Default false.
+	Curves bool
+	// Isocurves is accepted and ignored — a solid has no isocurves of its own either.
+	// Default false.
+	Isocurves bool
+	// Polylines writes every line as straight segments within Tolerance, instead of
+	// being fitted back to cubic Béziers. Default false.
+	Polylines bool
+}
+
+// NewSvgOptions is the defaults cadaclysm_blacksmith_svg_options_init fills: the
+// viewer's iso, orthographic, a 1000-square page, black edges one unit wide on nothing.
+func NewSvgOptions() SvgOptions {
+	return SvgOptions{
+		View:        SvgIso,
+		Width:       1000,
+		Height:      1000,
+		Margin:      0.05,
+		Tolerance:   0.1,
+		Stroke:      "#000000",
+		StrokeWidth: 1,
+		Edges:       true,
+	}
+}
+
+// parseSvgColour is a colour as the ABI's packed 0xRRGGBB: "#rrggbb", the leading '#'
+// optional.
+func parseSvgColour(colour string) (uint32, error) {
+	hex := strings.TrimPrefix(colour, "#")
+	if len(hex) != 6 {
+		return 0, &BuildError{Message: fmt.Sprintf("colour %s: expected '#rrggbb'", colour)}
+	}
+	v, err := strconv.ParseUint(hex, 16, 32)
+	if err != nil {
+		return 0, &BuildError{Message: fmt.Sprintf("colour %s: expected '#rrggbb'", colour)}
+	}
+	return uint32(v), nil
+}
+
+// buildSvgOptions packs opts (nil for NewSvgOptions()'s defaults) into a
+// C.CadaclysmBlacksmithSvgOptions: View fills Azimuth/Elevation unless they are set
+// directly, Up defaults to "z" (a solid carries no convention of its own), colours are
+// "#rrggbb" — as the reader package's own buildSvgOptions, but with no scene to default
+// Up from.
+func buildSvgOptions(opts *SvgOptions) (C.CadaclysmBlacksmithSvgOptions, error) {
+	o := NewSvgOptions()
+	if opts != nil {
+		o = *opts
+	}
+	var raw C.CadaclysmBlacksmithSvgOptions
+	C.cadaclysm_blacksmith_svg_options_init(&raw)
+	angles, ok := svgViewAngles[o.View]
+	if !ok {
+		return raw, &BuildError{Message: fmt.Sprintf("svg: no view numbered %d", int(o.View))}
+	}
+	up := o.Up
+	if up == "" {
+		up = "z"
+	}
+	if strings.EqualFold(up, "y") {
+		raw.up = 1
+	} else {
+		raw.up = 0
+	}
+	az, el := angles[0], angles[1]
+	if o.Azimuth != nil {
+		az = *o.Azimuth
+	}
+	if o.Elevation != nil {
+		el = *o.Elevation
+	}
+	raw.azimuth = C.double(az)
+	raw.elevation = C.double(el)
+	raw.fov = C.double(o.Fov)
+	raw.width = C.double(o.Width)
+	raw.height = C.double(o.Height)
+	raw.margin = C.double(o.Margin)
+	raw.tolerance = C.double(o.Tolerance)
+	raw.stroke_width = C.double(o.StrokeWidth)
+	stroke, err := parseSvgColour(o.Stroke)
+	if err != nil {
+		return raw, err
+	}
+	raw.stroke = C.uint32_t(stroke)
+	if o.Background == nil {
+		raw.background = C.uint32_t(C.CADACLYSM_BLACKSMITH_SVG_TRANSPARENT)
+	} else {
+		bg, err := parseSvgColour(*o.Background)
+		if err != nil {
+			return raw, err
+		}
+		raw.background = C.uint32_t(bg)
+	}
+	var flags uint32
+	if o.Edges {
+		flags |= uint32(C.CADACLYSM_BLACKSMITH_SVG_EDGES)
+	}
+	if o.Curves {
+		flags |= uint32(C.CADACLYSM_BLACKSMITH_SVG_CURVES)
+	}
+	if o.Isocurves {
+		flags |= uint32(C.CADACLYSM_BLACKSMITH_SVG_ISOCURVES)
+	}
+	if o.Polylines {
+		flags |= uint32(C.CADACLYSM_BLACKSMITH_SVG_POLYLINES)
+	}
+	raw.flags = C.uint32_t(flags)
+	return raw, nil
+}
+
+// WriteSvgText is several solids' wireframe as one SVG's text, each its own <g> — see
+// SvgOptions.
+func WriteSvgText(solids []*Solid, opts *SvgOptions) (string, error) {
+	defer pin()()
+	raw, err := buildSvgOptions(opts)
+	if err != nil {
+		return "", err
+	}
+	handles, err := solidHandles(solids)
+	if err != nil {
+		return "", err
+	}
+	var first **C.CadaclysmBlacksmithSolid
+	if len(handles) > 0 {
+		first = &handles[0]
+	}
+	text := C.cadaclysm_blacksmith_svg_text(first, C.size_t(len(handles)), &raw)
+	for _, s := range solids {
+		runtime.KeepAlive(s)
+	}
+	if text == nil {
+		return "", failure("svg_text")
+	}
+	defer C.cadaclysm_blacksmith_string_free(text)
+	return C.GoString(text), nil
+}
+
+// WriteSvg is WriteSvgText written to path by the library itself.
+func WriteSvg(path string, solids []*Solid, opts *SvgOptions) error {
+	defer pin()()
+	raw, err := buildSvgOptions(opts)
+	if err != nil {
+		return err
+	}
+	handles, err := solidHandles(solids)
+	if err != nil {
+		return err
+	}
+	var first **C.CadaclysmBlacksmithSolid
+	if len(handles) > 0 {
+		first = &handles[0]
+	}
+	cs := C.CString(path)
+	defer C.free(unsafe.Pointer(cs))
+	ok := C.cadaclysm_blacksmith_svg(first, C.size_t(len(handles)), cs, &raw)
+	for _, s := range solids {
+		runtime.KeepAlive(s)
+	}
+	if !ok {
+		return failure("svg")
+	}
+	return nil
 }
 
 // ---- frames and axes -----------------------------------------------------------------
@@ -692,6 +1053,79 @@ func (p *Profile) WithHole(hole *Profile) (*Profile, error) {
 	return out, err
 }
 
+// Hits is where this profile's curves cross, touch or run along other's, both read in
+// one plane, ordered along this profile. Points closer than tolerance merge; two curves
+// within tolerance of each other for longer than it are one run when they part only where
+// one ends or the stretch is flat — one curve following the other, offset within tolerance
+// or tilted by under about half of it, even where it leaves mid-both; a tangency or a
+// shallow crossing is one point. A loop that stops short of its start is an open chain.
+// Python's tolerance defaults to 1e-6.
+func (p *Profile) Hits(other *Profile, tolerance float64) ([]Hit, error) {
+	defer pin()()
+	a, err := p.h()
+	if err != nil {
+		return nil, err
+	}
+	b, err := other.h()
+	if err != nil {
+		return nil, err
+	}
+	defer runtime.KeepAlive(p)
+	defer runtime.KeepAlive(other)
+	hits := C.cadaclysm_blacksmith_profile_hits(a, b, C.double(tolerance))
+	if hits == nil {
+		return nil, failure("profile_hits")
+	}
+	defer C.cadaclysm_blacksmith_hits_free(hits)
+	n := uint32(C.cadaclysm_blacksmith_hit_count(hits))
+	out := make([]Hit, 0, n)
+	for i := uint32(0); i < n; i++ {
+		var raw C.CadaclysmBlacksmithHit
+		if !bool(C.cadaclysm_blacksmith_hit(hits, C.uint32_t(i), &raw)) {
+			return nil, failure("hit")
+		}
+		out = append(out, hitOf(&raw))
+	}
+	return out, nil
+}
+
+// Common is the region this profile and other share, both read in one plane, as zero or
+// more profiles — each boundary counter-clockwise, each hole clockwise, arcs and splines
+// kept exact. Both must be closed and simple. No shared area is an empty slice. Fails for
+// a tolerance not positive and finite, or a profile open or crossing itself. Python's
+// tolerance defaults to 1e-6.
+func (p *Profile) Common(other *Profile, tolerance float64) ([]*Profile, error) {
+	defer pin()()
+	a, err := p.h()
+	if err != nil {
+		return nil, err
+	}
+	b, err := other.h()
+	if err != nil {
+		return nil, err
+	}
+	defer runtime.KeepAlive(p)
+	defer runtime.KeepAlive(other)
+	list := C.cadaclysm_blacksmith_profile_common(a, b, C.double(tolerance))
+	if list == nil {
+		return nil, failure("profile_common")
+	}
+	defer C.cadaclysm_blacksmith_profile_list_free(list)
+	n := uint32(C.cadaclysm_blacksmith_profile_list_count(list))
+	out := make([]*Profile, 0, n)
+	for i := uint32(0); i < n; i++ {
+		piece, err := newProfile(C.cadaclysm_blacksmith_profile_list_get(list, C.uint32_t(i)), "profile_list_get")
+		if err != nil {
+			for _, q := range out {
+				q.Close()
+			}
+			return nil, err
+		}
+		out = append(out, piece)
+	}
+	return out, nil
+}
+
 // Translate is this outline shifted by (dx, dy) in its own plane — to push a revolve's
 // profile off the axis, or a hole off centre.
 func (p *Profile) Translate(dx, dy float64) (*Profile, error) {
@@ -796,6 +1230,99 @@ func Chain(pieces []*Profile, tolerance float64) (*Profile, error) {
 		runtime.KeepAlive(p)
 	}
 	return out, err
+}
+
+// cutterHandles is the cutters' handles for the trim's calls, and the pointer to hand
+// C (nil for none).
+func cutterHandles(cutters []*Profile) ([]*C.CadaclysmBlacksmithProfile, **C.CadaclysmBlacksmithProfile, error) {
+	handles := make([]*C.CadaclysmBlacksmithProfile, len(cutters))
+	for i, p := range cutters {
+		h, err := p.h()
+		if err != nil {
+			return nil, nil, err
+		}
+		handles[i] = h
+	}
+	var first **C.CadaclysmBlacksmithProfile
+	if len(handles) > 0 {
+		first = &handles[0]
+	}
+	return handles, first, nil
+}
+
+// Pieces is this curve cut where the cutters cross, touch or run along it — Python's
+// Profile.pieces, the sketch trim's pieces: in order along the curve from its start,
+// each an open profile of portions of this one's own segments (a line's stretch a line,
+// an arc's an arc, a spline's the same spline over part of its domain). One piece, this
+// curve, where nothing cuts it; a closed curve's piece round its start is one piece.
+// Cuts closer than tolerance to each other fold onto one.
+func (p *Profile) Pieces(cutters []*Profile, tolerance float64) ([]*Profile, error) {
+	defer pin()()
+	h, err := p.h()
+	if err != nil {
+		return nil, err
+	}
+	handles, first, err := cutterHandles(cutters)
+	if err != nil {
+		return nil, err
+	}
+	n := uint32(C.cadaclysm_blacksmith_profile_piece_count(h, first, C.size_t(len(handles)), C.double(tolerance)))
+	if n == 0 {
+		return nil, failure("profile_piece_count")
+	}
+	out := make([]*Profile, 0, n)
+	for i := uint32(0); i < n; i++ {
+		piece, err := newProfile(C.cadaclysm_blacksmith_profile_piece(h, first, C.size_t(len(handles)), C.uint32_t(i), C.double(tolerance)), "profile")
+		if err != nil {
+			for _, q := range out {
+				q.Close()
+			}
+			return nil, err
+		}
+		out = append(out, piece)
+	}
+	for _, c := range cutters {
+		runtime.KeepAlive(c)
+	}
+	runtime.KeepAlive(p)
+	return out, nil
+}
+
+// Trim is this curve with piece piece of Pieces taken away — Python's Profile.trim, the
+// sketch trim: what is left, as open profiles. One for a closed curve (its other pieces
+// run together from where the removed one ended), the stretches before and after for an
+// open one, none where the piece was the whole curve. The error names a piece the curve
+// does not have.
+func (p *Profile) Trim(cutters []*Profile, piece uint32, tolerance float64) ([]*Profile, error) {
+	defer pin()()
+	h, err := p.h()
+	if err != nil {
+		return nil, err
+	}
+	handles, first, err := cutterHandles(cutters)
+	if err != nil {
+		return nil, err
+	}
+	n := uint32(C.cadaclysm_blacksmith_profile_trim_count(h, first, C.size_t(len(handles)), C.uint32_t(piece), C.double(tolerance)))
+	if n == 0 && lastError() != "" {
+		return nil, failure("profile_trim_count")
+	}
+	out := make([]*Profile, 0, n)
+	for i := uint32(0); i < n; i++ {
+		chain, err := newProfile(C.cadaclysm_blacksmith_profile_trim_chain(h, first, C.size_t(len(handles)), C.uint32_t(piece), C.uint32_t(i), C.double(tolerance)), "profile")
+		if err != nil {
+			for _, q := range out {
+				q.Close()
+			}
+			return nil, err
+		}
+		out = append(out, chain)
+	}
+	for _, c := range cutters {
+		runtime.KeepAlive(c)
+	}
+	runtime.KeepAlive(p)
+	return out, nil
 }
 
 // FromLoops is closed loops, in any order, as one profile — Python's Profile.from_loops:
@@ -1227,9 +1754,72 @@ func Index(i int) Selector { return Selector{kind: 3, index: i} }
 
 // ---- edges -------------------------------------------------------------------------------------
 
+// Curve is one edge's exact curve, as plain data copied out (Edge.Curve): Kind is "line",
+// "circle", "ellipse" or "nurbs".
+//
+// t0..t1 is the edge's parameter range on its own curve: a line's fraction (0..1 over
+// origin -> origin + x, where x is the full to - from, NOT unit -- so point(t) = origin +
+// x*t); a circle's or ellipse's angle in radians about origin in the x, y plane (point(t) =
+// origin + x*radius*cos(t) + y*radius2*sin(t), radius2 = radius for a circle); a NURBS's
+// knot parameter (knots[degree] <= t0 < t1 <= knots[n]). Frame vectors x, y, z are unit
+// for conics; for a line x is the direction with length = the line's length and y, z are
+// zero.
+//
+// For a NURBS the frame is zero and so are the radii; for a conic or a line Degree is 0
+// and Knots, Poles are empty.
+type Curve struct {
+	Kind string
+	// Origin, X, Y, Z are the frame.
+	Origin, X, Y, Z [3]float64
+	Radius, Radius2 float64
+	T0, T1          float64
+	Degree          int
+	// Knots is the knot vector: len(Knots) == len(Poles) + Degree + 1.
+	Knots []float64
+	// Poles is the control points.
+	Poles [][3]float64
+	// Weights is one per pole, or nil for a non-rational (plain B-spline) curve, a conic
+	// or a line.
+	Weights []float64
+}
+
+// String is Python's repr.
+func (c Curve) String() string {
+	if c.Kind == "nurbs" {
+		return fmt.Sprintf("Curve(%q, degree=%d, poles=%d, rational=%v, t0=%v, t1=%v)",
+			c.Kind, c.Degree, len(c.Poles), c.Weights != nil, c.T0, c.T1)
+	}
+	return fmt.Sprintf("Curve(%q, origin=%v, radius=%v, t0=%v, t1=%v)", c.Kind, c.Origin, c.Radius, c.T0, c.T1)
+}
+
+func curveOf(r *C.CadaclysmBlacksmithCurve) *Curve {
+	p := func(q C.CadaclysmBlacksmithPoint) [3]float64 { return [3]float64{float64(q.x), float64(q.y), float64(q.z)} }
+	doubles := func(at *C.double, n int) []float64 {
+		out := make([]float64, n)
+		if n > 0 && at != nil {
+			copy(out, unsafe.Slice((*float64)(unsafe.Pointer(at)), n))
+		}
+		return out
+	}
+	c := &Curve{
+		Kind: C.GoString(r.kind), Origin: p(r.origin), X: p(r.x), Y: p(r.y), Z: p(r.z),
+		Radius: float64(r.radius), Radius2: float64(r.radius2), T0: float64(r.t0), T1: float64(r.t1),
+		Degree: int(r.degree), Knots: doubles(r.knots, int(r.knot_count)),
+	}
+	flat := doubles(r.poles, 3*int(r.pole_count))
+	c.Poles = make([][3]float64, r.pole_count)
+	for k := range c.Poles {
+		copy(c.Poles[k][:], flat[3*k:3*k+3])
+	}
+	if r.weights != nil {
+		c.Weights = doubles(r.weights, int(r.pole_count))
+	}
+	return c
+}
+
 // Edge is one edge of a solid, as plain data: its index (what Fillet takes), the curve
-// kind, the faces meeting on it, and its segments' ends. Copied out of the solid, so safe
-// to keep.
+// kind, the faces meeting on it, its segments' ends, and its exact Curve. Copied out of
+// the solid, so safe to keep.
 type Edge struct {
 	Index int
 	// Kind is "line", "circle", "ellipse", "nurbs" or "other".
@@ -1238,6 +1828,8 @@ type Edge struct {
 	Faces []int
 	// Segments is the two ends of each trim piece of the edge.
 	Segments [][2][3]float64
+	// Curve is the edge's exact curve, or nil for an edge with none (Kind "other").
+	Curve *Curve
 }
 
 // IsLine is whether the edge's curve is a line.
@@ -1260,6 +1852,54 @@ func (e Edge) Direction() ([3]float64, bool) {
 
 // String is Python's repr.
 func (e Edge) String() string { return fmt.Sprintf("Edge(%d, %q, faces=%v)", e.Index, e.Kind, e.Faces) }
+
+// Spot is where a hit lands on one side: a profile's LoopIndex (0 the boundary or the
+// open chain, then the holes in the order they were added), Segment, and T from 0 to 1
+// along it, with Face NONE (UINT32_MAX) -- or a solid's Face at (U, V), with LoopIndex
+// and Segment NONE.
+type Spot struct {
+	LoopIndex uint32
+	Segment   uint32
+	T         float64
+	Face      uint32
+	U, V      float64
+}
+
+// String is Python's repr.
+func (s Spot) String() string {
+	return fmt.Sprintf("Spot(loop_index=%d, segment=%d, t=%v, face=%d, u=%v, v=%v)",
+		s.LoopIndex, s.Segment, s.T, s.Face, s.U, s.V)
+}
+
+// Hit is one place two curves meet, copied out. A point (Run false): Start equals End,
+// and Touch is true where the curves are tangent rather than crossing. A run (Run true):
+// they coincide from Start to End. AStart/AEnd are where on the first curve,
+// BStart/BEnd where on the second.
+type Hit struct {
+	Run, Touch                 bool
+	Start, End                 [3]float64
+	AStart, AEnd, BStart, BEnd Spot
+}
+
+// String is Python's repr.
+func (h Hit) String() string {
+	return fmt.Sprintf("Hit(run=%v, touch=%v, start=%v, end=%v)", h.Run, h.Touch, h.Start, h.End)
+}
+
+func spotOf(s C.CadaclysmBlacksmithSpot) Spot {
+	return Spot{LoopIndex: uint32(s.loop_index), Segment: uint32(s.segment), T: float64(s.t),
+		Face: uint32(s.face), U: float64(s.u), V: float64(s.v)}
+}
+
+func hitOf(r *C.CadaclysmBlacksmithHit) Hit {
+	return Hit{
+		Run: bool(r.run), Touch: bool(r.touch),
+		Start:  [3]float64{float64(r.start.x), float64(r.start.y), float64(r.start.z)},
+		End:    [3]float64{float64(r.end.x), float64(r.end.y), float64(r.end.z)},
+		AStart: spotOf(r.a_start), AEnd: spotOf(r.a_end),
+		BStart: spotOf(r.b_start), BEnd: spotOf(r.b_end),
+	}
+}
 
 // EdgeIndices is the indices of edges, what Fillet and Chamfer take — Python's fillet
 // accepts Edge objects or their indices; Go takes the indices and this turns one into
@@ -2298,6 +2938,40 @@ func (s *Solid) Step(path, schema, unit string) error {
 	return WriteStep(path, []*Solid{s}, schema, unit)
 }
 
+// SatText is this solid as ACIS SAT text; see WriteSatText for unit.
+func (s *Solid) SatText(unit string) (string, error) {
+	return WriteSatText([]*Solid{s}, unit)
+}
+
+// Sat writes this solid as an ACIS SAT file at path, by the library itself; see
+// WriteSatText for unit.
+func (s *Solid) Sat(path, unit string) error {
+	return WriteSat(path, []*Solid{s}, unit)
+}
+
+// BrepText is this solid as OCCT .brep text; see WriteBrepText.
+func (s *Solid) BrepText() (string, error) {
+	return WriteBrepText([]*Solid{s})
+}
+
+// Brep writes this solid as a .brep file at path, by the library itself.
+func (s *Solid) Brep(path string) error {
+	return WriteBrep(path, []*Solid{s})
+}
+
+// SvgText is this solid's wireframe as SVG text, from the camera opts describes (nil
+// for NewSvgOptions()'s defaults) — the library's own camera, not a viewer. See
+// WriteSvgText.
+func (s *Solid) SvgText(opts *SvgOptions) (string, error) {
+	return WriteSvgText([]*Solid{s}, opts)
+}
+
+// Svg writes this solid as an SVG file at path, by the library itself; see
+// WriteSvgText.
+func (s *Solid) Svg(path string, opts *SvgOptions) error {
+	return WriteSvg(path, []*Solid{s}, opts)
+}
+
 // -- selecting and edges
 
 // SelectFace is the face selector picks; a BuildError when none does.
@@ -2322,6 +2996,57 @@ func (s *Solid) SelectFace(selector Selector) (int, error) {
 		return 0, failure("select_face")
 	}
 	return int(i), nil
+}
+
+// FaceRef is face by what it is, eight numbers: the surface's kind (plane 0, cylinder 1,
+// cone 2, sphere 3, torus 4, NURBS 5, revolution 6, extrusion 7, sum 8), a point on the
+// surface at the face's middle (x y z), the outward normal there (x y z), and the face's
+// extent — what a feature made on the face keeps, to find the face again with FindFace
+// when the solid has been rebuilt with its faces moved, split or renumbered. Take it
+// before any move you apply to the solid, and look it up on the unmoved one.
+func (s *Solid) FaceRef(face int) ([8]float64, error) {
+	defer pin()()
+	var out [8]float64
+	h, err := s.h()
+	if err != nil {
+		return out, err
+	}
+	i, err := index(face)
+	if err != nil {
+		return out, err
+	}
+	ok := bool(C.cadaclysm_blacksmith_face_ref(h, i, doubles(&out[0])))
+	runtime.KeepAlive(s)
+	if !ok {
+		return out, failure("face_ref")
+	}
+	return out, nil
+}
+
+// FindFace is the face ref (from FaceRef) refers to: among the faces of that kind whose
+// surface passes through the point, facing the same way, the one the point lies in — or,
+// where it lies in none, the one whose boundary comes nearest. hint is the index the face
+// had, preferred among faces that fit equally well (negative for none); tolerance how far
+// the point may sit off a surface to still be on it. -1 and no error where the face is
+// gone.
+func (s *Solid) FindFace(ref [8]float64, hint int, tolerance float64) (int, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return -1, err
+	}
+	if hint < 0 {
+		hint = -1
+	}
+	found := int(C.cadaclysm_blacksmith_find_face(h, doubles(&ref[0]), C.int32_t(hint), C.double(tolerance)))
+	runtime.KeepAlive(s)
+	if found == -2 {
+		return -1, failure("find_face")
+	}
+	if found < 0 {
+		return -1, nil
+	}
+	return found, nil
 }
 
 // FaceFrame is the workplane on face: origin at the face's boundary centroid, z its
@@ -2440,7 +3165,14 @@ func (s *Solid) Edges() ([]Edge, error) {
 				copy(segments[k][1][:], flat[6*k+3:6*k+6])
 			}
 		}
-		out = append(out, Edge{Index: int(i), Kind: C.GoString(raw.kind), Faces: faces, Segments: segments})
+		var rawCurve C.CadaclysmBlacksmithCurve
+		var curve *Curve
+		if bool(C.cadaclysm_blacksmith_edge_curve(h, C.uint32_t(i), &rawCurve)) {
+			curve = curveOf(&rawCurve)
+		} else if !strings.Contains(lastError(), "has no exact curve") {
+			return nil, failure("edge_curve")
+		}
+		out = append(out, Edge{Index: int(i), Kind: C.GoString(raw.kind), Faces: faces, Segments: segments, Curve: curve})
 	}
 	return out, nil
 }

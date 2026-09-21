@@ -9,6 +9,47 @@ export type Unit = keyof typeof UNITS;
 export declare const Axis: { readonly X: 0; readonly Y: 1; readonly Z: 2 };
 export type AxisValue = 0 | 1 | 2;
 
+/** front back left right top bottom iso, `[azimuth, elevation]` degrees each. */
+export type SvgViewName = 'front' | 'back' | 'left' | 'right' | 'top' | 'bottom' | 'iso';
+export declare const SvgView: Readonly<Record<SvgViewName, readonly [number, number]>>;
+
+/** How an SVG drawing is made -- see `svgOptionsDefaults` for the defaults every field falls back to. No scene here, so `up` defaults to 'z': a solid carries no convention of its own. */
+export interface SvgOptions {
+  /** Fills `azimuth`/`elevation` unless they are set directly. Default 'iso'. */
+  view?: SvgViewName;
+  /** Degrees about the up axis from +X, overriding `view`'s. -90 looks from -Y, the front. */
+  azimuth?: number | null;
+  /** Degrees above the horizon, overriding `view`'s. */
+  elevation?: number | null;
+  /** 'y' or 'z'; default 'z'. */
+  up?: 'y' | 'z' | null;
+  /** Vertical field of view in degrees; 0 (the default) is orthographic. */
+  fov?: number;
+  /** The page's viewBox, page units; 0 is 1000. */
+  width?: number;
+  height?: number;
+  /** Fraction of the content's extent left each side. Default 0.05. */
+  margin?: number;
+  /** How far a written curve may stray, in page units. Default 0.1. */
+  tolerance?: number;
+  /** `'#rgb'`, `'#rrggbb'` or `[r, g, b]` in 0..255. Default '#000000'. */
+  stroke?: string | ArrayLike<number>;
+  /** The pen's width, page units. Default 1. */
+  strokeWidth?: number;
+  /** As `stroke`, or null (the default) for no `<rect>` behind the drawing. */
+  background?: string | ArrayLike<number> | null;
+  /** Each shape's feature edges. Default true. */
+  edges?: boolean;
+  /** A solid has no free curves of its own; ignored. Default false. */
+  curves?: boolean;
+  /** A solid has no isocurves of its own; ignored. Default false. */
+  isocurves?: boolean;
+  /** Straight segments within `tolerance` instead of fitted Béziers. Default false. */
+  polylines?: boolean;
+}
+/** `SvgOptions`'s own defaults, as `cadaclysm_blacksmith_svg_options_init` fills them. */
+export function svgOptionsDefaults(): SvgOptions;
+
 /** A `Frame`, twelve numbers (origin, x, y, z) or four triples. */
 export type FrameLike = Frame | ArrayLike<number> | [ArrayLike<number>, ArrayLike<number>, ArrayLike<number>, ArrayLike<number>];
 /** Six numbers (point, direction) or two triples. */
@@ -44,7 +85,13 @@ export class Profile {
   static chain(pieces: Iterable<Profile>, tolerance?: number): Profile;
   static fromLoops(loops: Iterable<Profile>): Profile;
   closeLoop(): Profile;
+  /** This curve cut where the cutters cross it -- the sketch trim's pieces, in order along the curve. */
+  pieces(cutters: Iterable<Profile>, tolerance?: number): Profile[];
+  /** This curve with piece `piece` of `pieces` taken away: what is left, as open profiles. */
+  trim(cutters: Iterable<Profile>, piece: number, tolerance?: number): Profile[];
   withHole(hole: Profile): Profile;
+  hits(other: Profile, tolerance?: number): Hit[];
+  common(other: Profile, tolerance?: number): Profile[];
   translate(dx: number, dy: number): Profile;
   round(radius: number, corners?: Iterable<number> | null, open?: boolean): Profile;
 }
@@ -176,8 +223,27 @@ export class Solid {
   stepText(schema?: string | null, unit?: Unit): string;
   stepAsync(schema?: string | null, unit?: Unit): Promise<string>;
   step(path: string, schema?: string | null, unit?: Unit): void;
+  /** The solid as ACIS SAT text: analytic surfaces as their own records, splines and swept surfaces as exact NURBS. */
+  satText(unit?: Unit): string;
+  satAsync(unit?: Unit): Promise<string>;
+  /** `satText` written to `path` by the library itself. */
+  sat(path: string, unit?: Unit): void;
+  /** This solid as OCCT `.brep` text: exact surfaces and curves, a curve in
+   *  each face's own parameters for every edge, no unit declared. */
+  brepText(): string;
+  /** `brepText()` written to `path` by the library itself. */
+  brep(path: string): void;
+  /** This solid's own wireframe as SVG text, from the camera `options` describes. */
+  svgText(options?: SvgOptions): string;
+  svgAsync(options?: SvgOptions): Promise<string>;
+  /** `svgText` written to `path` by the library itself. */
+  svg(path: string, options?: SvgOptions): void;
   selectFace(selector: Selector): number;
   faceFrame(face: number): number[];
+  /** Face `face` by what it is, eight numbers (kind, point x y z, normal x y z, extent): what a feature made on the face keeps, to find the face again with `findFace` on a rebuilt solid. */
+  faceRef(face: number): number[];
+  /** The face `faceRef` refers to, `hint` the index it had; null where it is gone. */
+  findFace(faceRef: Iterable<number>, hint?: number | null, tolerance?: number): number | null;
   coloured(colour: string | Iterable<number>, face?: number | null): Solid;
   readonly colour: [number, number, number] | null;
   faceColour(face: number): [number, number, number] | null;
@@ -216,11 +282,45 @@ export class Selector {
   static normal(direction: Point3): Selector;
   static index(i: number): Selector;
 }
+/**
+ * One edge's exact curve, as plain data (`Edge.curve`): `kind` is `line`, `circle`, `ellipse` or `nurbs`.
+ *
+ * `t0..t1` is the edge's parameter range on its own curve: a line's fraction (0..1 over
+ * `origin -> origin + x`, where `x` is the full `to - from`, NOT unit -- so `point(t) = origin + x*t`);
+ * a circle's or ellipse's angle in radians about `origin` in the `x, y` plane
+ * (`point(t) = origin + x*radius*cos(t) + y*radius2*sin(t)`, `radius2 = radius` for a circle);
+ * a NURBS's knot parameter (`knots[degree] <= t0 < t1 <= knots[n]`). Frame vectors `x, y, z` are
+ * unit for conics; for a line `x` is the direction with length = the line's length and `y, z` are zero.
+ *
+ * For a NURBS the frame is zero and so are the radii; for a conic or a line `degree` is 0 and
+ * `knots`, `poles` are empty. `knots.length === poles.length + degree + 1`; `weights` is one per
+ * pole, or null for a non-rational (plain B-spline) curve, a conic or a line.
+ */
+export class Curve {
+  private constructor();
+  kind: string;
+  origin: number[]; x: number[]; y: number[]; z: number[];
+  radius: number; radius2: number; t0: number; t1: number;
+  degree: number; knots: number[]; poles: number[][]; weights: number[] | null;
+}
 export class Edge {
   private constructor();
   index: number; kind: string; faces: number[]; segments: [number[], number[]][];
+  /** The edge's exact curve, or null for an edge with none (kind `other`). */
+  curve: Curve | null;
   readonly isLine: boolean;
   readonly direction: number[] | null;
+}
+/** Where a hit lands on one side: a profile's loop, segment and t (face NONE), or a solid's face at (u, v). */
+export class Spot {
+  private constructor();
+  loopIndex: number; segment: number; t: number; face: number; u: number; v: number;
+}
+/** One place two curves meet: a point (start equals end; touch where tangent) or a run from start to end. */
+export class Hit {
+  private constructor();
+  run: boolean; touch: boolean; start: number[]; end: number[];
+  aStart: Spot; aEnd: Spot; bStart: Spot; bEnd: Spot;
 }
 export class Workplane {
   frame: number[];
@@ -247,3 +347,12 @@ export class Workplane {
  */
 export function writeStepText(solids: Iterable<Solid>, schema?: string | null, unit?: Unit): string;
 export function writeStep(path: string, solids: Iterable<Solid>, schema?: string | null, unit?: Unit): void;
+/** Several solids as one ACIS SAT file, each its own body. */
+export function writeSatText(solids: Iterable<Solid>, unit?: Unit): string;
+export function writeSat(path: string, solids: Iterable<Solid>, unit?: Unit): void;
+/** Several solids as one `.brep`, each its own solid under one compound. */
+export function writeBrepText(solids: Iterable<Solid>): string;
+export function writeBrep(path: string, solids: Iterable<Solid>): void;
+/** Several solids' wireframes as one SVG, from the camera `options` describes. */
+export function writeSvgText(solids: Iterable<Solid>, options?: SvgOptions): string;
+export function writeSvg(path: string, solids: Iterable<Solid>, options?: SvgOptions): void;

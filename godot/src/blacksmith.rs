@@ -1,5 +1,6 @@
 //! The kernel: `CadaclysmBlacksmith` (the library's own functions), `CadaclysmFrame`, `CadaclysmProfile`,
-//! `CadaclysmPath`, `CadaclysmSweepPath`, `CadaclysmSolid`, `CadaclysmEdge` and `CadaclysmWorkplane`.
+//! `CadaclysmPath`, `CadaclysmSweepPath`, `CadaclysmSolid`, `CadaclysmEdge`, `CadaclysmHit`, `CadaclysmSpot` and
+//! `CadaclysmWorkplane`.
 //!
 //! The kernel works in doubles, in the model's own units (millimetres, as a rule), so
 //! every point it takes is a `Variant`: a `Vector2`/`Vector3` (or the `i` kinds), or an
@@ -302,6 +303,19 @@ fn step_text_of(solids: &[&bs::Solid], schema: &GString, unit: &GString) -> Opti
     ok(bs::write_step_text(solids, schema.as_deref(), unit))
 }
 
+fn sat_text_of(solids: &[&bs::Solid], unit: &GString) -> Option<String> {
+    let unit = step_unit(unit)?;
+    ok(bs::write_sat_text(solids, unit))
+}
+
+/// Several solids' SAT text: every one bound for the length of the call.
+fn solids_sat_text(solids: &AnyArray, unit: &GString) -> Option<String> {
+    let list = object_list::<CadaclysmSolid>(solids, "write_sat")?;
+    let guards: Vec<GdRef<CadaclysmSolid>> = list.iter().map(|s| s.bind()).collect();
+    let held: Vec<&bs::Solid> = guards.iter().map(|g| g.held()).collect::<Option<_>>()?;
+    sat_text_of(&held, unit)
+}
+
 fn write_text(path: &GString, text: String) -> bool {
     let file = os_path(path);
     ok(std::fs::write(&file, text).map_err(|e| format!("{file}: {e}"))).is_some()
@@ -313,6 +327,25 @@ fn solids_step_text(solids: &AnyArray, schema: &GString, unit: &GString) -> Opti
     let guards: Vec<GdRef<CadaclysmSolid>> = list.iter().map(|s| s.bind()).collect();
     let held: Vec<&bs::Solid> = guards.iter().map(|g| g.held()).collect::<Option<_>>()?;
     step_text_of(&held, schema, unit)
+}
+
+fn solids_brep_text(solids: &AnyArray) -> Option<String> {
+    let list = object_list::<CadaclysmSolid>(solids, "write_brep")?;
+    let guards: Vec<GdRef<CadaclysmSolid>> = list.iter().map(|s| s.bind()).collect();
+    let held: Vec<&bs::Solid> = guards.iter().map(|g| g.held()).collect::<Option<_>>()?;
+    ok(bs::write_brep_text(&held))
+}
+
+fn svg_text_of(solids: &[&bs::Solid], options: &sdk::SvgOptions) -> Option<String> {
+    ok(bs::write_svg_text(solids, options))
+}
+
+/// Several solids' SVG text: every one bound for the length of the call.
+fn solids_svg_text(solids: &AnyArray, options: &sdk::SvgOptions) -> Option<String> {
+    let list = object_list::<CadaclysmSolid>(solids, "write_svg")?;
+    let guards: Vec<GdRef<CadaclysmSolid>> = list.iter().map(|s| s.bind()).collect();
+    let held: Vec<&bs::Solid> = guards.iter().map(|g| g.held()).collect::<Option<_>>()?;
+    svg_text_of(&held, options)
 }
 
 // ---- CadaclysmBlacksmith --------------------------------------------------------------------
@@ -428,6 +461,72 @@ impl CadaclysmBlacksmith {
     #[func]
     fn write_step(path: GString, solids: AnyArray, #[opt(default = "")] schema: GString, #[opt(default = "mm")] unit: GString) -> bool {
         match solids_step_text(&solids, &schema, &unit) {
+            Some(text) => write_text(&path, text),
+            None => false,
+        }
+    }
+
+    /// Several solids as one ACIS SAT file's text, each its own body: the analytic
+    /// surfaces as their own records, splines and swept surfaces as exact NURBS.
+    /// `unit`: `"mm"`, `"m"` or `"in"`. `""` on failure.
+    #[func]
+    fn write_sat_text(solids: AnyArray, #[opt(default = "mm")] unit: GString) -> GString {
+        gs(solids_sat_text(&solids, &unit).unwrap_or_default())
+    }
+
+    /// Several solids written to one SAT file at `path`; see `write_sat_text`.
+    #[func]
+    fn write_sat(path: GString, solids: AnyArray, #[opt(default = "mm")] unit: GString) -> bool {
+        match solids_sat_text(&solids, &unit) {
+            Some(text) => write_text(&path, text),
+            None => false,
+        }
+    }
+
+    /// Several solids as one OCCT `.brep` file's text, each its own solid under one
+    /// compound (a single solid is the file's root): the exact surfaces and curves, with a
+    /// curve in each face's own parameters for every edge. No unit is declared. `""` on failure.
+    #[func]
+    fn write_brep_text(solids: AnyArray) -> GString {
+        gs(solids_brep_text(&solids).unwrap_or_default())
+    }
+
+    /// Several solids written to one `.brep` file at `path`; see `write_brep_text`.
+    #[func]
+    fn write_brep(path: GString, solids: AnyArray) -> bool {
+        match solids_brep_text(&solids) {
+            Some(text) => write_text(&path, text),
+            None => false,
+        }
+    }
+
+    /// Several solids' wireframe as one SVG's text, each its own `<g>`. `""` on a
+    /// refused option.
+    #[func]
+    fn write_svg_text(solids: AnyArray) -> GString {
+        Self::write_svg_text_with(solids, VarDictionary::new())
+    }
+
+    /// `write_svg_text`, with options: see `CadaclysmScene.svg_text_with` for every
+    /// key -- `up` left out is always `"z"` here, a solid carrying no convention of
+    /// its own for a scene to default it from.
+    #[func]
+    fn write_svg_text_with(solids: AnyArray, options: VarDictionary) -> GString {
+        let Some(opts) = reader::svg_options(&options) else { return GString::new() };
+        gs(solids_svg_text(&solids, &opts).unwrap_or_default())
+    }
+
+    /// Several solids written to one SVG file at `path`; see `write_svg_text`.
+    #[func]
+    fn write_svg(path: GString, solids: AnyArray) -> bool {
+        Self::write_svg_with(path, solids, VarDictionary::new())
+    }
+
+    /// `write_svg`, with options: see `write_svg_text_with`.
+    #[func]
+    fn write_svg_with(path: GString, solids: AnyArray, options: VarDictionary) -> bool {
+        let Some(opts) = reader::svg_options(&options) else { return false };
+        match solids_svg_text(&solids, &opts) {
             Some(text) => write_text(&path, text),
             None => false,
         }
@@ -618,6 +717,15 @@ impl CadaclysmProfile {
         let refs: Vec<&bs::Profile> = guards.iter().map(|g| &g.profile).collect();
         Self::made(f(&refs))
     }
+
+    /// Several profiles out of a list of them in (the trim's pieces and chains): an
+    /// empty array, with the reason logged, where the kernel refuses.
+    fn several(list: &AnyArray, what: &str, f: impl FnOnce(&[&bs::Profile]) -> sdk::Result<Vec<bs::Profile>>) -> Array<Gd<CadaclysmProfile>> {
+        let Some(list) = object_list::<CadaclysmProfile>(list, what) else { return Array::new() };
+        let guards: Vec<GdRef<CadaclysmProfile>> = list.iter().map(|p| p.bind()).collect();
+        let refs: Vec<&bs::Profile> = guards.iter().map(|g| &g.profile).collect();
+        ok(f(&refs)).unwrap_or_default().into_iter().map(|profile| Gd::from_object(CadaclysmProfile { profile })).collect()
+    }
 }
 
 #[godot_api]
@@ -697,6 +805,20 @@ impl CadaclysmProfile {
         Self::made(self.profile.close_loop())
     }
 
+    /// This curve cut where the `cutters` cross, touch or run along it -- the sketch
+    /// trim's pieces, in order along the curve: portions of its own segments, exactly.
+    #[func]
+    fn pieces(&self, cutters: AnyArray, #[opt(default = 1e-6)] tolerance: f64) -> Array<Gd<CadaclysmProfile>> {
+        Self::several(&cutters, "pieces", |refs| self.profile.pieces(refs, tolerance))
+    }
+
+    /// This curve with piece `piece` of `pieces` taken away -- the sketch trim: what is
+    /// left as open chains (one for a closed curve, up to two for an open one).
+    #[func]
+    fn trim(&self, cutters: AnyArray, piece: u32, #[opt(default = 1e-6)] tolerance: f64) -> Array<Gd<CadaclysmProfile>> {
+        Self::several(&cutters, "trim", |refs| self.profile.trim(refs, piece, tolerance))
+    }
+
     /// This profile with `hole` cut out of it.
     #[func]
     fn with_hole(&self, hole: Gd<CadaclysmProfile>) -> Option<Gd<CadaclysmProfile>> {
@@ -706,6 +828,30 @@ impl CadaclysmProfile {
     #[func]
     fn translate(&self, dx: f64, dy: f64) -> Option<Gd<CadaclysmProfile>> {
         Self::made(self.profile.translate(dx, dy))
+    }
+
+    /// Where this profile's curves cross, touch or run along `other`'s, both read in one
+    /// plane, as `CadaclysmHit`s ordered along this profile. Points closer than
+    /// `tolerance` merge; two curves within `tolerance` of each other for longer than
+    /// it are one run when they part only where one ends or the stretch is flat -- one
+    /// curve following the other, offset within `tolerance` or tilted by under about
+    /// half of it, even where it leaves mid-both; a tangency or a shallow crossing is
+    /// one point. Empty on failure.
+    #[func]
+    fn hits(&self, other: Gd<CadaclysmProfile>, #[opt(default = 1e-6)] tolerance: f64) -> Array<Gd<CadaclysmHit>> {
+        let hits = ok(self.profile.hits(&other.bind().profile, tolerance));
+        hits.unwrap_or_default().into_iter().map(CadaclysmHit::wrap).collect()
+    }
+
+    /// The region this profile and `other` share, both read in one plane, as zero or
+    /// more profiles -- each boundary counter-clockwise, each hole clockwise, arcs and
+    /// splines kept exact. Both must be closed and simple. No shared area is an empty
+    /// array; so is a failure (a `tolerance` not positive and finite, a profile open or
+    /// crossing itself), with `Cadaclysm.last_error()` set.
+    #[func]
+    fn common(&self, other: Gd<CadaclysmProfile>, #[opt(default = 1e-6)] tolerance: f64) -> Array<Gd<CadaclysmProfile>> {
+        let shared = ok(self.profile.common(&other.bind().profile, tolerance));
+        shared.unwrap_or_default().into_iter().map(|profile| Gd::from_object(CadaclysmProfile { profile })).collect()
     }
 
     /// This profile with its corners rounded by `radius` where two straight segments
@@ -895,11 +1041,14 @@ impl CadaclysmSweepPath {
 // ---- CadaclysmEdge -----------------------------------------------------------------------
 
 /// One edge of a solid, as plain data: its index (what `CadaclysmSolid.fillet` takes), its
-/// curve kind, the faces meeting on it, and its segments' ends.
+/// curve kind, the faces meeting on it, its segments' ends, and its exact `CadaclysmCurve`
+/// (`null` for an edge with no exact curve, kind `"other"`).
 #[derive(GodotClass)]
 #[class(no_init, base = RefCounted)]
 pub struct CadaclysmEdge {
     edge: bs::Edge,
+    #[var(get = get_curve, no_set)]
+    curve: PhantomVar<Variant>,
     #[var(rename = index, get = get_index, no_set)]
     index_: PhantomVar<i64>,
     #[var(get = get_kind, no_set)]
@@ -920,6 +1069,7 @@ impl CadaclysmEdge {
     fn wrap(edge: bs::Edge) -> Gd<CadaclysmEdge> {
         Gd::from_object(CadaclysmEdge {
             edge,
+            curve: PhantomVar::default(),
             index_: PhantomVar::default(),
             kind: PhantomVar::default(),
             faces: PhantomVar::default(),
@@ -979,6 +1129,373 @@ impl CadaclysmEdge {
     #[func]
     fn get_direction(&self) -> Variant {
         self.edge.direction().map_or(Variant::nil(), |d| vector3(d).to_variant())
+    }
+
+    /// The edge's exact curve as a `CadaclysmCurve`, or `null` for an edge with none.
+    #[func]
+    fn get_curve(&self) -> Variant {
+        self.edge.curve.clone().map_or(Variant::nil(), |c| CadaclysmCurve::wrap(c).to_variant())
+    }
+}
+
+// ---- CadaclysmCurve ----------------------------------------------------------------------
+
+/// One edge's exact curve, as plain data copied out (`CadaclysmEdge.curve`): `kind` is
+/// `"line"`, `"circle"`, `"ellipse"` or `"nurbs"`.
+///
+/// `t0..t1` is the edge's parameter range on its own curve: a line's fraction (0..1 over
+/// `origin -> origin + x`, where `x` is the full `to - from`, NOT unit -- so
+/// `point(t) = origin + x*t`); a circle's or ellipse's angle in radians about `origin` in
+/// the `x, y` plane (`point(t) = origin + x*radius*cos(t) + y*radius2*sin(t)`,
+/// `radius2 = radius` for a circle); a NURBS's knot parameter
+/// (`knots[degree] <= t0 < t1 <= knots[n]`). Frame vectors `x, y, z` are unit for conics;
+/// for a line `x` is the direction with length = the line's length and `y, z` are zero.
+///
+/// `origin`, `x`, `y`, `z` are `Vector3`s of floats; `raw_frame` keeps the twelve doubles.
+/// For a NURBS the frame is zero and so are the radii; for a conic or a line `degree` is 0
+/// and `knots`, `poles` are empty. `poles` is three doubles a control point
+/// (`knots.size() == poles.size() / 3 + degree + 1`); `weights` is one per pole, or empty
+/// for a non-rational (plain B-spline) curve, a conic or a line (`is_rational` tells).
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmCurve {
+    curve: bs::Curve,
+    #[var(get = get_kind, no_set)]
+    kind: PhantomVar<GString>,
+    #[var(get = get_origin, no_set)]
+    origin: PhantomVar<Vector3>,
+    #[var(get = get_x, no_set)]
+    x: PhantomVar<Vector3>,
+    #[var(get = get_y, no_set)]
+    y: PhantomVar<Vector3>,
+    #[var(get = get_z, no_set)]
+    z: PhantomVar<Vector3>,
+    #[var(get = get_raw_frame, no_set)]
+    raw_frame: PhantomVar<PackedFloat64Array>,
+    #[var(get = get_radius, no_set)]
+    radius: PhantomVar<f64>,
+    #[var(get = get_radius2, no_set)]
+    radius2: PhantomVar<f64>,
+    #[var(get = get_t0, no_set)]
+    t0: PhantomVar<f64>,
+    #[var(get = get_t1, no_set)]
+    t1: PhantomVar<f64>,
+    #[var(get = get_degree, no_set)]
+    degree: PhantomVar<i64>,
+    #[var(get = get_knots, no_set)]
+    knots: PhantomVar<PackedFloat64Array>,
+    #[var(get = get_poles, no_set)]
+    poles: PhantomVar<PackedFloat64Array>,
+    #[var(get = get_weights, no_set)]
+    weights: PhantomVar<PackedFloat64Array>,
+    #[var(get = get_is_rational, no_set)]
+    is_rational: PhantomVar<bool>,
+}
+
+impl CadaclysmCurve {
+    fn wrap(curve: bs::Curve) -> Gd<CadaclysmCurve> {
+        Gd::from_object(CadaclysmCurve {
+            curve,
+            kind: PhantomVar::default(),
+            origin: PhantomVar::default(),
+            x: PhantomVar::default(),
+            y: PhantomVar::default(),
+            z: PhantomVar::default(),
+            raw_frame: PhantomVar::default(),
+            radius: PhantomVar::default(),
+            radius2: PhantomVar::default(),
+            t0: PhantomVar::default(),
+            t1: PhantomVar::default(),
+            degree: PhantomVar::default(),
+            knots: PhantomVar::default(),
+            poles: PhantomVar::default(),
+            weights: PhantomVar::default(),
+            is_rational: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmCurve {
+    fn to_string(&self) -> GString {
+        let c = &self.curve;
+        gs(if c.kind == "nurbs" {
+            format!("Curve('nurbs', degree={}, poles={}, rational={}, t0={}, t1={})", c.degree, c.poles.len(), c.weights.is_some(), c.t0, c.t1)
+        } else {
+            format!("Curve('{}', origin={:?}, radius={}, t0={}, t1={})", c.kind, c.origin, c.radius, c.t0, c.t1)
+        })
+    }
+}
+
+#[godot_api]
+impl CadaclysmCurve {
+    #[func]
+    fn get_kind(&self) -> GString {
+        gs(&self.curve.kind)
+    }
+
+    #[func]
+    fn get_origin(&self) -> Vector3 {
+        vector3(self.curve.origin)
+    }
+
+    #[func]
+    fn get_x(&self) -> Vector3 {
+        vector3(self.curve.x)
+    }
+
+    #[func]
+    fn get_y(&self) -> Vector3 {
+        vector3(self.curve.y)
+    }
+
+    #[func]
+    fn get_z(&self) -> Vector3 {
+        vector3(self.curve.z)
+    }
+
+    /// The frame as twelve doubles -- origin, x, y, z -- where the `Vector3`s hold floats.
+    #[func]
+    fn get_raw_frame(&self) -> PackedFloat64Array {
+        let c = &self.curve;
+        c.origin.iter().chain(c.x.iter()).chain(c.y.iter()).chain(c.z.iter()).copied().collect()
+    }
+
+    #[func]
+    fn get_radius(&self) -> f64 {
+        self.curve.radius
+    }
+
+    #[func]
+    fn get_radius2(&self) -> f64 {
+        self.curve.radius2
+    }
+
+    #[func]
+    fn get_t0(&self) -> f64 {
+        self.curve.t0
+    }
+
+    #[func]
+    fn get_t1(&self) -> f64 {
+        self.curve.t1
+    }
+
+    #[func]
+    fn get_degree(&self) -> i64 {
+        self.curve.degree.into()
+    }
+
+    /// The knot vector; empty for a conic or a line.
+    #[func]
+    fn get_knots(&self) -> PackedFloat64Array {
+        PackedFloat64Array::from(&self.curve.knots[..])
+    }
+
+    /// The control points, three doubles each; empty for a conic or a line.
+    #[func]
+    fn get_poles(&self) -> PackedFloat64Array {
+        self.curve.poles.iter().flatten().copied().collect()
+    }
+
+    /// One weight per pole, or empty for a non-rational curve, a conic or a line.
+    #[func]
+    fn get_weights(&self) -> PackedFloat64Array {
+        self.curve.weights.as_deref().map_or_else(PackedFloat64Array::new, |w| PackedFloat64Array::from(w))
+    }
+
+    /// Whether `weights` are there: a rational NURBS.
+    #[func]
+    fn get_is_rational(&self) -> bool {
+        self.curve.weights.is_some()
+    }
+}
+
+// ---- CadaclysmSpot and CadaclysmHit ------------------------------------------------------
+
+/// Where a `CadaclysmHit` lands on one side: a profile's `loop_index` (0 the boundary or
+/// the open chain, then the holes in the order they were added), `segment` and `t` from 0
+/// to 1 along it, with `face` `NONE` (4294967295) -- or a solid's `face` at (`u`, `v`).
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmSpot {
+    spot: bs::Spot,
+    #[var(get = get_loop_index, no_set)]
+    loop_index: PhantomVar<i64>,
+    #[var(get = get_segment, no_set)]
+    segment: PhantomVar<i64>,
+    #[var(get = get_t, no_set)]
+    t: PhantomVar<f64>,
+    #[var(get = get_face, no_set)]
+    face: PhantomVar<i64>,
+    #[var(get = get_u, no_set)]
+    u: PhantomVar<f64>,
+    #[var(get = get_v, no_set)]
+    v: PhantomVar<f64>,
+}
+
+impl CadaclysmSpot {
+    fn wrap(spot: bs::Spot) -> Gd<CadaclysmSpot> {
+        Gd::from_object(CadaclysmSpot {
+            spot,
+            loop_index: PhantomVar::default(),
+            segment: PhantomVar::default(),
+            t: PhantomVar::default(),
+            face: PhantomVar::default(),
+            u: PhantomVar::default(),
+            v: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmSpot {
+    fn to_string(&self) -> GString {
+        let s = &self.spot;
+        gs(format!("Spot(loop_index={}, segment={}, t={}, face={}, u={}, v={})", s.loop_index, s.segment, s.t, s.face, s.u, s.v))
+    }
+}
+
+#[godot_api]
+impl CadaclysmSpot {
+    #[func]
+    fn get_loop_index(&self) -> i64 {
+        self.spot.loop_index.into()
+    }
+
+    #[func]
+    fn get_segment(&self) -> i64 {
+        self.spot.segment.into()
+    }
+
+    #[func]
+    fn get_t(&self) -> f64 {
+        self.spot.t
+    }
+
+    #[func]
+    fn get_face(&self) -> i64 {
+        self.spot.face.into()
+    }
+
+    #[func]
+    fn get_u(&self) -> f64 {
+        self.spot.u
+    }
+
+    #[func]
+    fn get_v(&self) -> f64 {
+        self.spot.v
+    }
+}
+
+/// One place two curves meet, as plain data, copied out: what `CadaclysmProfile.hits`
+/// lists. A point has `run` false and `start` equal to `end`; a run has the two curves
+/// coinciding from `start` to `end`.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmHit {
+    hit: bs::Hit,
+    #[var(get = get_run, no_set)]
+    run: PhantomVar<bool>,
+    #[var(get = get_touch, no_set)]
+    touch: PhantomVar<bool>,
+    #[var(get = get_start, no_set)]
+    start: PhantomVar<Vector3>,
+    #[var(get = get_end, no_set)]
+    end: PhantomVar<Vector3>,
+    #[var(get = get_raw_start, no_set)]
+    raw_start: PhantomVar<PackedFloat64Array>,
+    #[var(get = get_raw_end, no_set)]
+    raw_end: PhantomVar<PackedFloat64Array>,
+    #[var(get = get_a_start, no_set)]
+    a_start: PhantomVar<Gd<CadaclysmSpot>>,
+    #[var(get = get_a_end, no_set)]
+    a_end: PhantomVar<Gd<CadaclysmSpot>>,
+    #[var(get = get_b_start, no_set)]
+    b_start: PhantomVar<Gd<CadaclysmSpot>>,
+    #[var(get = get_b_end, no_set)]
+    b_end: PhantomVar<Gd<CadaclysmSpot>>,
+}
+
+impl CadaclysmHit {
+    fn wrap(hit: bs::Hit) -> Gd<CadaclysmHit> {
+        Gd::from_object(CadaclysmHit {
+            hit,
+            run: PhantomVar::default(),
+            touch: PhantomVar::default(),
+            start: PhantomVar::default(),
+            end: PhantomVar::default(),
+            raw_start: PhantomVar::default(),
+            raw_end: PhantomVar::default(),
+            a_start: PhantomVar::default(),
+            a_end: PhantomVar::default(),
+            b_start: PhantomVar::default(),
+            b_end: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmHit {
+    fn to_string(&self) -> GString {
+        let h = &self.hit;
+        gs(format!("Hit(run={}, touch={}, start={:?}, end={:?})", h.run, h.touch, h.start, h.end))
+    }
+}
+
+#[godot_api]
+impl CadaclysmHit {
+    #[func]
+    fn get_run(&self) -> bool {
+        self.hit.run
+    }
+
+    #[func]
+    fn get_touch(&self) -> bool {
+        self.hit.touch
+    }
+
+    #[func]
+    fn get_start(&self) -> Vector3 {
+        vector3(self.hit.start)
+    }
+
+    #[func]
+    fn get_end(&self) -> Vector3 {
+        vector3(self.hit.end)
+    }
+
+    /// `start` as three doubles, where a `Vector3` holds floats.
+    #[func]
+    fn get_raw_start(&self) -> PackedFloat64Array {
+        PackedFloat64Array::from(&self.hit.start[..])
+    }
+
+    /// `end` as three doubles.
+    #[func]
+    fn get_raw_end(&self) -> PackedFloat64Array {
+        PackedFloat64Array::from(&self.hit.end[..])
+    }
+
+    #[func]
+    fn get_a_start(&self) -> Gd<CadaclysmSpot> {
+        CadaclysmSpot::wrap(self.hit.a_start)
+    }
+
+    #[func]
+    fn get_a_end(&self) -> Gd<CadaclysmSpot> {
+        CadaclysmSpot::wrap(self.hit.a_end)
+    }
+
+    #[func]
+    fn get_b_start(&self) -> Gd<CadaclysmSpot> {
+        CadaclysmSpot::wrap(self.hit.b_start)
+    }
+
+    #[func]
+    fn get_b_end(&self) -> Gd<CadaclysmSpot> {
+        CadaclysmSpot::wrap(self.hit.b_end)
     }
 }
 
@@ -1614,6 +2131,34 @@ impl CadaclysmSolid {
         ok(self.held()?.face_frame(face)).map(CadaclysmFrame::wrap)
     }
 
+    /// Face `face` by what it is, eight doubles: the surface's kind (plane 0, cylinder 1,
+    /// cone 2, sphere 3, torus 4, NURBS 5, revolution 6, extrusion 7, sum 8), a point on
+    /// the surface at the face's middle (x y z), the outward normal there (x y z), and the
+    /// face's extent -- what a feature made on the face keeps, to find the face again with
+    /// `find_face` when the solid has been rebuilt with its faces moved, split or
+    /// renumbered. Take it before any move you apply to the solid, and look it up on the
+    /// unmoved one. Empty on failure.
+    #[func]
+    fn face_ref(&self, face: i64) -> PackedFloat64Array {
+        let Some(face) = Self::face_index(face, "face_ref") else { return PackedFloat64Array::new() };
+        self.held().and_then(|s| ok(s.face_ref(face))).map(|r| PackedFloat64Array::from(&r[..])).unwrap_or_default()
+    }
+
+    /// The face `face_ref` (from `face_ref`) refers to: among the faces of that kind whose
+    /// surface passes through the point, facing the same way, the one the point lies in --
+    /// or, where it lies in none, the one whose boundary comes nearest. `hint` is the index
+    /// the face had, preferred among faces that fit equally well (negative for none);
+    /// `tolerance` how far the point may sit off a surface to still be on it. -1 where the
+    /// face is gone or on failure.
+    #[func]
+    fn find_face(&self, face_ref: PackedFloat64Array, #[opt(default = -1)] hint: i64, #[opt(default = 1e-3)] tolerance: f64) -> i64 {
+        let Ok(r) = <[f64; 8]>::try_from(face_ref.as_slice()) else {
+            return fail::<()>("find_face: a face reference is eight numbers").map_or(-1, |()| -1);
+        };
+        let hint = u32::try_from(hint).ok();
+        self.held().and_then(|s| ok(s.find_face(&r, hint, tolerance))).flatten().map_or(-1, i64::from)
+    }
+
     /// The axis-aligned box around its mesh at the default tolerance.
     #[func]
     fn get_bounds(&self) -> Aabb {
@@ -1724,6 +2269,69 @@ impl CadaclysmSolid {
     #[func]
     fn step(&self, path: GString, #[opt(default = "")] schema: GString, #[opt(default = "mm")] unit: GString) -> bool {
         match self.own_step_text(&schema, &unit) {
+            Some(text) => write_text(&path, text),
+            None => false,
+        }
+    }
+
+    /// This solid as ACIS SAT text; `unit` as `CadaclysmBlacksmith.write_sat_text` takes it.
+    /// `""` on failure.
+    #[func]
+    fn sat_text(&self, #[opt(default = "mm")] unit: GString) -> GString {
+        gs(self.held().and_then(|s| sat_text_of(&[s], &unit)).unwrap_or_default())
+    }
+
+    /// This solid written to an ACIS SAT file at `path`.
+    #[func]
+    fn sat(&self, path: GString, #[opt(default = "mm")] unit: GString) -> bool {
+        match self.held().and_then(|s| sat_text_of(&[s], &unit)) {
+            Some(text) => write_text(&path, text),
+            None => false,
+        }
+    }
+
+    /// This solid as OCCT `.brep` text; see `CadaclysmBlacksmith.write_brep_text`. `""` on failure.
+    #[func]
+    fn brep_text(&self) -> GString {
+        gs(self.held().and_then(|s| ok(bs::write_brep_text(&[s]))).unwrap_or_default())
+    }
+
+    /// This solid written to a `.brep` file at `path`.
+    #[func]
+    fn brep(&self, path: GString) -> bool {
+        match self.held().and_then(|s| ok(bs::write_brep_text(&[s]))) {
+            Some(text) => write_text(&path, text),
+            None => false,
+        }
+    }
+
+    /// This solid's wireframe as SVG text, from the camera the viewer's `"iso"` angle
+    /// describes -- the library's own camera, not a viewer. `""` on a refused option.
+    #[func]
+    fn svg_text(&self) -> GString {
+        self.svg_text_with(VarDictionary::new())
+    }
+
+    /// `svg_text`, with options: see `CadaclysmScene.svg_text_with` for every key --
+    /// `up` left out is always `"z"` here, this solid carrying no convention of its
+    /// own for a scene to default it from.
+    #[func]
+    fn svg_text_with(&self, options: VarDictionary) -> GString {
+        let Some(opts) = reader::svg_options(&options) else { return GString::new() };
+        gs(self.held().and_then(|s| svg_text_of(&[s], &opts)).unwrap_or_default())
+    }
+
+    /// This solid written to an SVG file at `path`, by the library itself.
+    #[func]
+    fn svg(&self, path: GString) -> bool {
+        self.svg_with(path, VarDictionary::new())
+    }
+
+    /// `svg`, with options: see `svg_text_with`.
+    #[func]
+    fn svg_with(&self, path: GString, options: VarDictionary) -> bool {
+        let Some(opts) = reader::svg_options(&options) else { return false };
+        match self.held().and_then(|s| svg_text_of(&[s], &opts)) {
             Some(text) => write_text(&path, text),
             None => false,
         }

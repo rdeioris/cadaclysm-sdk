@@ -208,18 +208,24 @@ public func licenseInfo() -> String {
 /// application with no console to watch can poll this and show its own banner.
 public func licenseNoticeCount() -> Int { Int(clamping: cadaclysm_license_notice_count()) }
 
-/// One format `Node.saveMesh` writes: its name and the extension it writes, which are not
-/// always the same word (`stl-ascii` writes a `.stl`).
+/// How many coarser levels `Node.meshLod` offers above the mesh itself (level 0).
+public func lodLevels() -> Int { Int(cadaclysm_lod_levels()) }
+
+/// One format `Node.saveMesh` writes: its name, the extension it writes (not always the
+/// same word: `stl-ascii` writes a `.stl`), and a label for a menu (`STL (binary)`).
 public struct MeshFormat: Hashable, Sendable {
     /// The name `Node.saveMesh` takes.
     public let name: String
     /// The file extension it writes, without the dot.
     public let `extension`: String
+    /// What to show in a save menu.
+    public let label: String
 
-    /// A format from its name and extension.
-    public init(name: String, extension: String) {
+    /// A format from its name, extension and label.
+    public init(name: String, extension: String, label: String) {
         self.name = name
         self.extension = `extension`
+        self.label = label
     }
 }
 
@@ -227,7 +233,28 @@ public struct MeshFormat: Hashable, Sendable {
 /// a format added to the library turns up without a code change.
 public func meshFormats() -> [MeshFormat] {
     (0..<cadaclysm_mesh_format_count()).map {
-        MeshFormat(name: borrowed(cadaclysm_mesh_format($0)), extension: borrowed(cadaclysm_mesh_format_extension($0)))
+        MeshFormat(name: borrowed(cadaclysm_mesh_format($0)), extension: borrowed(cadaclysm_mesh_format_extension($0)),
+                   label: borrowed(cadaclysm_mesh_format_label($0)))
+    }
+}
+
+/// One format this build reads: its name and the extensions its files take.
+public struct Format: Hashable, Sendable {
+    public let name: String
+    public let extensions: [String]
+
+    public init(name: String, extensions: [String]) {
+        self.name = name
+        self.extensions = extensions
+    }
+}
+
+/// Every format this build reads, for an open dialog's filter. The library hands the
+/// extensions over semicolon-separated; they are split here.
+public func formats() -> [Format] {
+    (0..<cadaclysm_format_count()).map {
+        Format(name: borrowed(cadaclysm_format_name($0)),
+               extensions: borrowed(cadaclysm_format_extensions($0)).split(separator: ";").map(String.init))
     }
 }
 
@@ -237,6 +264,15 @@ public func meshFormats() -> [MeshFormat] {
 public func pickFile() -> String? {
     guard let raw = cadaclysm_pick_file(nil) else { return nil }
     // Borrowed only until the next picker call on this thread: copied here.
+    return String(cString: raw)
+}
+
+/// Ask the user where to save, through the platform's own dialog, with `suggestedName`
+/// prefilled. Nil when they cancel or no dialog is available. Blocks; on macOS call it from
+/// the main thread.
+public func pickSave(suggestedName: String? = nil) -> String? {
+    let raw = suggestedName.map { name in name.withCString { cadaclysm_pick_save(nil, $0) } } ?? cadaclysm_pick_save(nil, nil)
+    guard let raw = raw else { return nil }
     return String(cString: raw)
 }
 
@@ -742,6 +778,76 @@ public struct Polylines: CustomStringConvertible {
     public var description: String { "Polylines(polylines: \(polylineCount), vertices: \(vertexCount))" }
 }
 
+/// Edges, curves or isocurves as cubic Bézier curves -- exact where the file's curves were,
+/// where `Polylines` are their chords: what `Node.edgeBeziers`, `Node.curveBeziers` and
+/// `Node.isocurveBeziers` return. Views into the scene, like `Mesh`.
+public struct Beziers: CustomStringConvertible {
+    /// `count * 12` floats: four control points a curve, three floats each.
+    public let points: NativeArray<Float>
+    /// `count * 4` floats: a weight per control point, all ones for a polynomial curve, and
+    /// the weights that make a circular arc exact for a rational one.
+    public let weights: NativeArray<Float>
+    /// How many curves.
+    public let count: Int
+
+    /// Whether there are no curves.
+    public var isEmpty: Bool { count == 0 || points.isEmpty }
+
+    /// The same arrays in memory of your own, safe to keep after `Scene.close()`.
+    public func copy() -> Beziers { Beziers(points: points.copy(), weights: weights.copy(), count: count) }
+
+    public var description: String { "Beziers(count: \(count))" }
+}
+
+/// What a node turned out to be for a physics engine: a box, sphere, capsule or cylinder where
+/// one fits within `error`, else a convex hull. `frame` (16 numbers, column-major) and
+/// `halfExtent` are always the true oriented box. Plain data, copied out of the scene.
+public struct Collision: Hashable, Sendable {
+    public let shape: Int
+    public let confidence: Int
+    public let axis: Int
+    public let frame: [Double]
+    public let halfExtent: SIMD3<Double>
+    public let radius: Double
+    public let height: Double
+    public let error: Double
+    public let hullVertexCount: Int
+    public let hullIndexCount: Int
+
+    /// `none`, `box`, `sphere`, `capsule`, `cylinder` or `hull`.
+    public var shapeName: String {
+        let names = ["none", "box", "sphere", "capsule", "cylinder", "hull"]
+        return shape < names.count ? names[shape] : String(shape)
+    }
+
+    init(_ raw: CadaclysmCollision) {
+        shape = Int(raw.shape)
+        confidence = Int(raw.confidence)
+        axis = Int(raw.axis)
+        frame = withUnsafeBytes(of: raw.frame) { Array($0.bindMemory(to: Double.self)) }
+        halfExtent = SIMD3(raw.half_extent.0, raw.half_extent.1, raw.half_extent.2)
+        radius = raw.radius
+        height = raw.height
+        error = raw.error
+        hullVertexCount = Int(raw.hull_vertex_count)
+        hullIndexCount = Int(raw.hull_index_count)
+    }
+}
+
+/// A node's convex hull for a physics engine, as triangles. Views into the scene, like `Mesh`.
+public struct CollisionHull: CustomStringConvertible {
+    /// Three floats a vertex.
+    public let positions: NativeArray<Float>
+    /// Three vertex indices a triangle.
+    public let indices: NativeArray<UInt32>
+    public let vertexCount: Int
+    public let indexCount: Int
+
+    public var isEmpty: Bool { vertexCount == 0 || positions.isEmpty }
+
+    public var description: String { "CollisionHull(vertices: \(vertexCount), triangles: \(indexCount / 3))" }
+}
+
 /// One trimmed face: the surface itself, plus the loops that cut it.
 ///
 /// `kind` is 0 plane, 1 cylinder, 2 cone, 3 sphere, 4 torus, 5 revolution, 6 extrusion,
@@ -921,6 +1027,116 @@ public final class Brep {
     }
 }
 
+/// One meshlet, copied out: the arrays are yours.
+public struct Meshlet: Sendable {
+    public let index: Int
+    /// 0 for a leaf over the mesh itself, higher for a simplified level above it.
+    public let level: Int
+    public let group: Int
+    /// How far this meshlet's level moved the surface; zero at level 0.
+    public let error: Float
+    /// Three floats a vertex.
+    public let positions: [Float]
+    /// Three floats a vertex; zeros where the mesh had none.
+    public let normals: [Float]
+    /// Three a triangle, into this meshlet's own vertices.
+    public let indices: [UInt32]
+    /// The finer meshlets below this one, for a levelled build.
+    public let children: [UInt32]
+
+    public var vertexCount: Int { positions.count / 3 }
+    public var triangleCount: Int { indices.count / 3 }
+}
+
+/// A mesh split into meshlets, optionally with coarser levels above them, for a mesh-shader or
+/// Nanite-style renderer. Built from any mesh and owned by you: `free()` it, or let it go.
+public final class Meshlets {
+    private var handle: OpaquePointer?
+
+    private init(handle: OpaquePointer) { self.handle = handle }
+
+    deinit { free() }
+
+    /// Split `positions` (three floats a vertex), `normals` (the same, or nil) and `indices`
+    /// (three a triangle) into meshlets of at most `maxTriangles` and `maxVertices` each -- the
+    /// consumer's own limits, with no default: Nanite takes 128/256, a mesh-shader pipeline
+    /// 124/64. `levels` above 0 groups and simplifies each level into the next until one
+    /// meshlet is left. Throws `CadaclysmError` with the library's reason on failure.
+    public static func build(positions: [Float], normals: [Float]?, indices: [UInt32],
+                             maxTriangles: Int, maxVertices: Int, levels: Int = 0) throws -> Meshlets {
+        guard maxTriangles > 0, maxVertices > 0 else { throw CadaclysmError("meshlets: maxTriangles and maxVertices are required") }
+        guard positions.count % 3 == 0, indices.count % 3 == 0 else {
+            throw CadaclysmError("meshlets: positions must hold three floats a vertex and indices three a triangle")
+        }
+        if let normals = normals, normals.count != positions.count {
+            throw CadaclysmError("meshlets: normals must hold one per vertex, three floats each")
+        }
+        let built: OpaquePointer? = positions.withUnsafeBufferPointer { p in
+            indices.withUnsafeBufferPointer { i in
+                if let normals = normals {
+                    return normals.withUnsafeBufferPointer { n in
+                        cadaclysm_meshlets_build(p.baseAddress, n.baseAddress, positions.count / 3, i.baseAddress, indices.count,
+                                                 UInt32(maxTriangles), UInt32(maxVertices), Int32(levels))
+                    }
+                }
+                return cadaclysm_meshlets_build(p.baseAddress, nil, positions.count / 3, i.baseAddress, indices.count,
+                                                UInt32(maxTriangles), UInt32(maxVertices), Int32(levels))
+            }
+        }
+        guard let built = built else {
+            let reason = lastError()
+            throw CadaclysmError(reason.isEmpty ? "meshlets: build failed" : reason)
+        }
+        return Meshlets(handle: built)
+    }
+
+    private func live() -> OpaquePointer {
+        guard let handle = handle else { preconditionFailure("Meshlets: freed") }
+        return handle
+    }
+
+    /// Whether `free()` has run.
+    public var freed: Bool { handle == nil }
+
+    /// Give the meshlets back. Idempotent.
+    public func free() {
+        guard let handle = handle else { return }
+        self.handle = nil
+        cadaclysm_meshlets_free(handle)
+    }
+
+    /// How many meshlets, every level counted.
+    public var count: Int { Int(cadaclysm_meshlets_count(live())) }
+
+    public func triangleCount(_ i: Int) -> Int { Int(cadaclysm_meshlet_triangle_count(live(), UInt32(i))) }
+    public func vertexCount(_ i: Int) -> Int { Int(cadaclysm_meshlet_vertex_count(live(), UInt32(i))) }
+    /// 0 for a leaf over the mesh itself, higher for a simplified level above it.
+    public func level(_ i: Int) -> Int { Int(cadaclysm_meshlet_level(live(), UInt32(i))) }
+    public func group(_ i: Int) -> Int { Int(cadaclysm_meshlet_group(live(), UInt32(i))) }
+    /// How far this meshlet's level moved the surface; zero at level 0.
+    public func error(_ i: Int) -> Float { cadaclysm_meshlet_error(live(), UInt32(i)) }
+    public func childCount(_ i: Int) -> Int { Int(cadaclysm_meshlet_child_count(live(), UInt32(i))) }
+
+    /// One meshlet's arrays and numbers, copied out.
+    public func meshlet(_ i: Int) -> Meshlet {
+        let h = live()
+        let idx = UInt32(i)
+        let vertices = Int(cadaclysm_meshlet_vertex_count(h, idx))
+        let triangles = Int(cadaclysm_meshlet_triangle_count(h, idx))
+        let kids = Int(cadaclysm_meshlet_child_count(h, idx))
+        var positions = [Float](repeating: 0, count: vertices * 3)
+        var normals = [Float](repeating: 0, count: vertices * 3)
+        var indices = [UInt32](repeating: 0, count: triangles * 3)
+        var children = [UInt32](repeating: 0, count: kids)
+        positions.withUnsafeMutableBufferPointer { cadaclysm_meshlet_positions(h, idx, $0.baseAddress) }
+        normals.withUnsafeMutableBufferPointer { cadaclysm_meshlet_normals(h, idx, $0.baseAddress) }
+        indices.withUnsafeMutableBufferPointer { cadaclysm_meshlet_indices(h, idx, $0.baseAddress) }
+        children.withUnsafeMutableBufferPointer { cadaclysm_meshlet_children(h, idx, $0.baseAddress) }
+        return Meshlet(index: i, level: Int(cadaclysm_meshlet_level(h, idx)), group: Int(cadaclysm_meshlet_group(h, idx)),
+                       error: cadaclysm_meshlet_error(h, idx), positions: positions, normals: normals, indices: indices, children: children)
+    }
+}
+
 // ---- nodes --------------------------------------------------------------------------------------
 
 /// One node of the document: an assembly, a part, a body, a layer, a placement.
@@ -1056,11 +1272,7 @@ public struct Node: Hashable, CustomStringConvertible {
     /// needed; carry it through `transform` for world coordinates.
     public var bounds: Bounds { Bounds(cadaclysm_node_bounds(live(), raw)) }
 
-    /// Its triangles in their own frame, built now if they have not been. A node that
-    /// instances another hands back the instanced node's arrays -- the same memory for every
-    /// placement. Views into the scene.
-    public var mesh: Mesh {
-        let got = cadaclysm_node_mesh(live(), raw)
+    private func mesh(_ got: CadaclysmMesh) -> Mesh {
         let n = Int(got.vertex_count)
         return Mesh(positions: NativeArray(owner: scene, base: got.positions, count: n * 3),
                     normals: got.normals.map { NativeArray(owner: scene, base: $0, count: n * 3) },
@@ -1069,6 +1281,22 @@ public struct Node: Hashable, CustomStringConvertible {
                     indices: NativeArray(owner: scene, base: got.indices, count: Int(got.index_count)),
                     vertexCount: n, indexCount: Int(got.index_count))
     }
+
+    /// Its triangles in their own frame, built now if they have not been. A node that
+    /// instances another hands back the instanced node's arrays -- the same memory for every
+    /// placement. Views into the scene.
+    public var mesh: Mesh { mesh(cadaclysm_node_mesh(live(), raw)) }
+
+    /// Its triangles at a coarser level of detail: 0 is `mesh` itself, 1 up to `lodLevels()`
+    /// each about a quarter of the triangles of the one before, and past that empty. Every
+    /// level shares the level-0 vertices -- the same positions and `vertexCount`, only the
+    /// indices differ -- so upload the vertices once and switch level by drawing a different
+    /// index range.
+    public func meshLod(_ level: Int) -> Mesh { mesh(cadaclysm_node_mesh_lod(live(), raw, UInt32(level))) }
+
+    /// How far `meshLod(level)` moved the surface, in the scene's units -- what to pick a
+    /// level by. Zero at level 0.
+    public func lodError(_ level: Int) -> Float { cadaclysm_node_lod_error(live(), raw, UInt32(level)) }
 
     /// Its faces as exact surfaces plus the trim loops that cut them, each in the surface's own
     /// (u, v). Nothing is meshed for it. Empty where the reader has no parametric description.
@@ -1124,6 +1352,88 @@ public struct Node: Hashable, CustomStringConvertible {
     /// face yields its outline, so these can overlap `edges`.
     public var isocurves: Polylines { polylines(cadaclysm_node_isocurves(live(), raw)) }
 
+    private func beziers(_ got: CadaclysmBeziers) -> Beziers {
+        let n = Int(got.count)
+        return Beziers(points: NativeArray(owner: scene, base: got.points, count: n * 12),
+                       weights: NativeArray(owner: scene, base: got.weights, count: n * 4), count: n)
+    }
+
+    /// Its feature edges as cubic Bézier curves -- exact where the file's curves were, where
+    /// `edges` are their chords. Builds the geometry if needed.
+    public var edgeBeziers: Beziers { beziers(cadaclysm_node_edge_beziers(live(), raw)) }
+
+    /// Its free curves as cubic Béziers; see `edgeBeziers`.
+    public var curveBeziers: Beziers { beziers(cadaclysm_node_curve_beziers(live(), raw)) }
+
+    /// Its isocurves as cubic Béziers; see `edgeBeziers`.
+    public var isocurveBeziers: Beziers { beziers(cadaclysm_node_isocurve_beziers(live(), raw)) }
+
+    /// The collision body for what this node draws, building its mesh if it is not built.
+    /// `hullBudget` is the most triangles a hull may have; 0 asks for the Unity limit (255) and
+    /// is not clamped to it. Nil for a node that draws nothing. Cached per node and budget.
+    public func collision(hullBudget: Int = 0) -> Collision? {
+        var raw = CadaclysmCollision()
+        raw.size = UInt32(MemoryLayout<CadaclysmCollision>.size)
+        guard cadaclysm_node_collision(live(), self.raw, UInt32(hullBudget), &raw) else { return nil }
+        return Collision(raw)
+    }
+
+    /// The convex hull `collision` counted, as triangles. Empty for a node that draws nothing.
+    /// A view into the scene, good until it closes or this node is asked for a different
+    /// `hullBudget`, which refits and frees it.
+    public func collisionHull(hullBudget: Int = 0) -> CollisionHull {
+        let got = cadaclysm_node_collision_hull(live(), raw, UInt32(hullBudget))
+        return CollisionHull(positions: NativeArray(owner: scene, base: got.positions, count: Int(got.vertex_count) * 3),
+                             indices: NativeArray(owner: scene, base: got.indices, count: Int(got.index_count)),
+                             vertexCount: Int(got.vertex_count), indexCount: Int(got.index_count))
+    }
+
+    // -- the surface path: for a renderer drawing exact surfaces, never triangles --
+
+    /// The box of what this node draws under `placement` (16 numbers, column-major, as
+    /// `Placement.rawTransform`; nil for the identity), for a part drawn from its surfaces:
+    /// tighter than placing the corners of `bounds`. All zeros for a part with no surfaces.
+    public func boundsPlaced(_ placement: [Double]? = nil) throws -> Bounds {
+        if let placement = placement, placement.count != 16 {
+            throw CadaclysmError("boundsPlaced: a placement is 16 numbers, not \(placement.count)")
+        }
+        if let placement = placement {
+            return placement.withUnsafeBufferPointer { Bounds(cadaclysm_node_bounds_placed(live(), raw, $0.baseAddress)) }
+        }
+        return Bounds(cadaclysm_node_bounds_placed(live(), raw, nil))
+    }
+
+    /// Whether its mesh has been built and is held -- by `Scene.realizeAll()`, by an ask for
+    /// it, or by anything else that needed it.
+    public var isMeshed: Bool { cadaclysm_node_is_meshed(live(), raw) }
+
+    /// Its face boundaries taken from its trimmed surfaces -- the outline that costs no
+    /// tessellation, where `edges` meshes the part. In the surfaces' own frame (see
+    /// `Scene.surfaceMatrix`); empty without surfaces.
+    public var surfaceEdges: Polylines { polylines(cadaclysm_node_surface_edges(live(), raw)) }
+
+    /// Its isocurves taken from its trimmed surfaces and clipped to the trims, without meshing;
+    /// a flat face gets none. In the surfaces' frame; empty without surfaces.
+    public var surfaceIsocurves: Polylines { polylines(cadaclysm_node_surface_isocurves(live(), raw)) }
+
+    /// Where the segment `from`..`to` first meets this part's surfaces, or nil where it meets
+    /// none. Exact, and in the surfaces' own frame: carry a ray from the scene's space through
+    /// the inverse of `Scene.surfaceMatrix` first.
+    public func surfacePick(from: SIMD3<Double>, to: SIMD3<Double>) -> SIMD3<Double>? {
+        var a = [from.x, from.y, from.z], b = [to.x, to.y, to.z], hit = [0.0, 0.0, 0.0]
+        let ok = cadaclysm_node_surface_pick(live(), raw, &a, &b, &hit)
+        return ok ? SIMD3(hit[0], hit[1], hit[2]) : nil
+    }
+
+    /// A coarse mesh over its surfaces for what needs triangles and not a picture (ray tracing,
+    /// distance fields): each face gridded `cells` by `cells`, never welded, built once per part
+    /// at the first size asked. Empty without surfaces or for zero cells.
+    public func surfaceProxyMesh(cells: Int) -> Mesh { mesh(cadaclysm_node_surface_proxy_mesh(live(), raw, UInt32(cells))) }
+
+    /// About how many triangles `mesh` would give, without building it; -1 where the reader
+    /// cannot say without doing the work. Treat -1 as unknown, never as zero.
+    public var triangleEstimate: Int { Int(cadaclysm_node_triangle_estimate(live(), raw)) }
+
     /// This node and every node under it, parents before children.
     public func walk() -> [Node] {
         var out: [Node] = []
@@ -1150,6 +1460,182 @@ public struct Node: Hashable, CustomStringConvertible {
     public var description: String {
         scene.closed ? "<Node \(index) (scene closed)>" : "<Node \(index) \(label)>"
     }
+
+    /// This node's own wireframe as SVG text, in its own frame -- `Scene.svgText`'s single-node
+    /// form: one `<g id="node-<index>">`, no placement, from the camera `options` describes.
+    /// Borrowed by the library: copied out before this returns, and replaced by the scene's
+    /// next `svgText` or `svg` call.
+    public func svgText(_ options: SvgOptions = SvgOptions()) throws -> String {
+        let handle = try scene.liveOrThrow()
+        var cOptions = buildSvgOptions(options, defaultUp: scene.defaultUp)
+        guard let ptr = withUnsafePointer(to: &cOptions, { cadaclysm_node_svg_text(handle, raw, $0) }) else {
+            throw CadaclysmError(lastErrorOr("svg"))
+        }
+        return borrowed(ptr)
+    }
+
+    /// `svgText` written to `path` by the library itself.
+    public func svg(_ path: String, options: SvgOptions = SvgOptions()) throws {
+        let handle = try scene.liveOrThrow()
+        var cOptions = buildSvgOptions(options, defaultUp: scene.defaultUp)
+        guard withUnsafePointer(to: &cOptions, { cadaclysm_node_svg(handle, raw, path, $0) }) else {
+            throw CadaclysmError(lastErrorOr("could not write \(path)"))
+        }
+    }
+}
+
+// ---- svg ------------------------------------------------------------------------------------
+
+/// Which axis is up -- `CadaclysmSvgOptions.up`. `nil` in `SvgOptions.up` keeps the scene's own
+/// convention: `.y` for `.unity`/`.yUp`, `.z` otherwise -- and always `.z` for a solid, which
+/// carries no convention of its own.
+public enum Up: Sendable, Equatable {
+    /// Y is up.
+    case y
+    /// Z is up.
+    case z
+}
+
+/// One of the seven camera angles `SvgOptions.view` understands -- the same table
+/// `cadaclysm_viewer.VIEWS` gives Python's `show()` and `svg()` both. Degrees (azimuth,
+/// elevation): see `angles`.
+public enum SvgView: Sendable {
+    /// (-90, 0) -- looking from -Y.
+    case front
+    /// (90, 0) -- looking from +Y.
+    case back
+    /// (180, 0) -- looking from -X.
+    case left
+    /// (0, 0) -- looking from +X.
+    case right
+    /// (-90, 90) -- looking straight down.
+    case top
+    /// (-90, -90) -- looking straight up.
+    case bottom
+    /// (-50, 28) -- the viewer's own default angle.
+    case iso
+
+    /// This view's (azimuth, elevation) in degrees.
+    public var angles: (Double, Double) {
+        switch self {
+        case .front: return (-90, 0)
+        case .back: return (90, 0)
+        case .left: return (180, 0)
+        case .right: return (0, 0)
+        case .top: return (-90, 90)
+        case .bottom: return (-90, -90)
+        case .iso: return (-50, 28)
+        }
+    }
+}
+
+/// `CadaclysmSvgOptions.background`'s "none" value -- `CADACLYSM_SVG_TRANSPARENT`, the same on
+/// both headers. Shared with `Blacksmith`'s own packing.
+public let svgTransparent: UInt32 = 0xFFFF_FFFF
+
+private let svgEdgesFlag: UInt32 = 1
+private let svgCurvesFlag: UInt32 = 2
+private let svgIsocurvesFlag: UInt32 = 4
+private let svgPolylinesFlag: UInt32 = 8
+
+/// How an SVG drawing is made -- the camera in the viewer's words, the page, the pen and which
+/// line sets. Mirrors `CadaclysmSvgOptions`; `SvgOptions()` is the defaults
+/// `cadaclysm_svg_options_init` fills. `view` supplies `azimuth`/`elevation` unless they are set
+/// directly; `up` falls back to the scene's own convention (a solid falls back to `.z`,
+/// carrying no convention of its own). Passed to `Scene.svgText`, `Scene.svg`, `Node.svgText`,
+/// `Node.svg` and, over the kernel, `Blacksmith.Solid.svgText`/`Blacksmith.Solid.svg`. A
+/// refused option (an out-of-range `fov`, say) throws a `CadaclysmError` worded by the library
+/// itself.
+public struct SvgOptions: Sendable {
+    /// front back left right top bottom iso -- fills `azimuth`/`elevation` unless they are set
+    /// directly. Default `.iso`.
+    public var view: SvgView
+    /// Degrees about the up axis from +X, overriding `view`'s: -90 looks from -Y, the front.
+    /// `nil` keeps `view`'s own.
+    public var azimuth: Double?
+    /// Degrees above the horizon, overriding `view`'s. `nil` keeps `view`'s own.
+    public var elevation: Double?
+    /// `nil` keeps the scene's own convention -- `.y` for `.unity`/`.yUp`, `.z` otherwise (and
+    /// always `.z` over the kernel, a solid carrying no convention of its own).
+    public var up: Up?
+    /// Vertical field of view in degrees; 0 (the default) is orthographic.
+    public var fov: Double
+    /// The page's viewBox width, page units; 0 is 1000.
+    public var width: Double
+    /// The page's viewBox height, page units; 0 is 1000.
+    public var height: Double
+    /// Fraction of the content's extent left each side. Default 0.05.
+    public var margin: Double
+    /// How far a written curve may stray, in page units. Default 0.1.
+    public var tolerance: Double
+    /// The pen colour, `0xRRGGBB`. Default black.
+    public var stroke: UInt32
+    /// The pen's width, page units. Default 1.
+    public var strokeWidth: Double
+    /// `0xRRGGBB`, or `nil` (the default) for no `<rect>` behind the drawing -- the page left to
+    /// whatever the viewer composites it onto.
+    public var background: UInt32?
+    /// Each shape's feature edges -- the exact curves the flattened polylines are drawn from.
+    /// Default `true`.
+    public var edges: Bool
+    /// Each shape's free curves -- the ones that are not the edge of any face (ignored over the
+    /// kernel, a solid having none of its own). Default `false`.
+    public var curves: Bool
+    /// Each shape's isocurves -- the constant-parameter lines across a curved face (ignored
+    /// over the kernel too). Default `false`.
+    public var isocurves: Bool
+    /// Write every line as straight segments within `tolerance`, instead of being fitted back
+    /// to cubic Béziers. Default `false`.
+    public var polylines: Bool
+
+    /// The defaults `cadaclysm_svg_options_init` fills: the viewer's iso, orthographic, a
+    /// 1000-square page, black edges one unit wide on nothing.
+    public init(view: SvgView = .iso, azimuth: Double? = nil, elevation: Double? = nil, up: Up? = nil,
+                fov: Double = 0, width: Double = 1000, height: Double = 1000, margin: Double = 0.05,
+                tolerance: Double = 0.1, stroke: UInt32 = 0x00_0000, strokeWidth: Double = 1,
+                background: UInt32? = nil, edges: Bool = true, curves: Bool = false,
+                isocurves: Bool = false, polylines: Bool = false) {
+        self.view = view
+        self.azimuth = azimuth
+        self.elevation = elevation
+        self.up = up
+        self.fov = fov
+        self.width = width
+        self.height = height
+        self.margin = margin
+        self.tolerance = tolerance
+        self.stroke = stroke
+        self.strokeWidth = strokeWidth
+        self.background = background
+        self.edges = edges
+        self.curves = curves
+        self.isocurves = isocurves
+        self.polylines = polylines
+    }
+}
+
+/// `options` packed into a `CadaclysmSvgOptions`: `view` fills `azimuth`/`elevation` unless
+/// they are set directly, `up` falls back to `defaultUp`. `cadaclysm_svg_options_init` fills
+/// the struct first -- `size` included -- so a field this wrapper never sets still carries the
+/// library's own default rather than a zeroed struct's.
+func buildSvgOptions(_ options: SvgOptions, defaultUp: Up) -> CadaclysmSvgOptions {
+    var raw = CadaclysmSvgOptions()
+    cadaclysm_svg_options_init(&raw)
+    let (baseAzimuth, baseElevation) = options.view.angles
+    raw.up = (options.up ?? defaultUp) == .y ? 1 : 0
+    raw.azimuth = options.azimuth ?? baseAzimuth
+    raw.elevation = options.elevation ?? baseElevation
+    raw.fov = options.fov
+    raw.width = options.width
+    raw.height = options.height
+    raw.margin = options.margin
+    raw.tolerance = options.tolerance
+    raw.stroke_width = options.strokeWidth
+    raw.stroke = options.stroke
+    raw.background = options.background ?? svgTransparent
+    raw.flags = (options.edges ? svgEdgesFlag : 0) | (options.curves ? svgCurvesFlag : 0)
+        | (options.isocurves ? svgIsocurvesFlag : 0) | (options.polylines ? svgPolylinesFlag : 0)
+    return raw
 }
 
 // ---- the scene ----------------------------------------------------------------------------------
@@ -1239,6 +1725,14 @@ public final class Scene: NativeMemoryOwner, CustomStringConvertible {
         return (0..<cadaclysm_diagnostic_count(handle)).map { borrowed(cadaclysm_diagnostic(handle, $0)) }
     }
 
+    /// What the reader built but the geometry stage could not finish -- a face that would
+    /// not trim, a surface that would not mesh. `diagnostics` is what the file held that
+    /// could not be read; this is what the geometry did.
+    public var geometryDiagnostics: [String] {
+        let handle = live()
+        return (0..<cadaclysm_geometry_diagnostic_count(handle)).map { borrowed(cadaclysm_geometry_diagnostic(handle, $0)) }
+    }
+
     /// The archive member this was read from, or nil for a plain file.
     public var sourceName: String? {
         guard let raw = cadaclysm_source_name(live()) else { return nil }
@@ -1289,6 +1783,11 @@ public final class Scene: NativeMemoryOwner, CustomStringConvertible {
     /// another thread with `realized` and `realizeTotal`; stop it with `cancel()`.
     public func realizeAll() -> Int { Int(cadaclysm_realize_all(live())) }
 
+    /// `realizeAll()`, leaving alone every node that carries surfaces when `skipSurfaced` is
+    /// true: a renderer drawing those from their surfaces never pays for their triangles.
+    /// Returns how many were built.
+    public func realizeMeshes(skipSurfaced: Bool = true) -> Int { Int(cadaclysm_realize_meshes(live(), skipSurfaced ? 1 : 0)) }
+
     /// How many nodes `realizeAll()` has finished. Safe to read from another thread.
     public var realized: Int { Int(cadaclysm_realized(live())) }
 
@@ -1299,6 +1798,10 @@ public final class Scene: NativeMemoryOwner, CustomStringConvertible {
     /// return at once, and meshes are still built one node at a time on request.
     public func cancel() { cadaclysm_cancel(live()) }
 
+    /// Drop every mesh the scene has built; the next ask rebuilds. Every `Mesh` and
+    /// `Polylines` handed out before this is over freed memory.
+    public func forgetMeshes() { cadaclysm_forget_meshes(live()) }
+
     /// Write the whole scene: `glb` (binary glTF), `gltf` (text glTF, one file) or `obj` (every
     /// placement baked to its own named object, a `.mtl` beside it when anything has a colour).
     /// In the scene's convention (`.yUp` for the space glTF specifies). Throws on any other
@@ -1306,6 +1809,37 @@ public final class Scene: NativeMemoryOwner, CustomStringConvertible {
     public func save(_ path: String, format: String = "glb") throws {
         let handle = try liveOrThrow()
         if !cadaclysm_scene_save(handle, path, format) {
+            throw CadaclysmError(lastErrorOr("could not write \(path)"))
+        }
+    }
+
+    /// `Up.y` or `Up.z`: which axis is up by default, from `convention` -- `.unity` and `.yUp`
+    /// give `.y`, every other convention `.z`. What `SvgOptions.up` falls back to when left
+    /// `nil`. `.fileUnits` and `.uvWorld` are masked out first, since they OR into the packed
+    /// convention this scene carries.
+    var defaultUp: Up {
+        let base = Convention(rawValue: convention.rawValue & ~(Convention.fileUnits.rawValue | Convention.uvWorld.rawValue))
+        return base == .unity || base == .yUp ? .y : .z
+    }
+
+    /// Every visible placement's wireframe as SVG text, from the camera `options` describes --
+    /// the library's own camera, not a viewer. See `SvgOptions`. Borrowed by the library:
+    /// copied out before this returns, and replaced by this scene's next `svgText` or `svg`
+    /// call.
+    public func svgText(_ options: SvgOptions = SvgOptions()) throws -> String {
+        let handle = try liveOrThrow()
+        var cOptions = buildSvgOptions(options, defaultUp: defaultUp)
+        guard let ptr = withUnsafePointer(to: &cOptions, { cadaclysm_scene_svg_text(handle, $0) }) else {
+            throw CadaclysmError(lastErrorOr("svg"))
+        }
+        return borrowed(ptr)
+    }
+
+    /// `svgText` written to `path` by the library itself.
+    public func svg(_ path: String, options: SvgOptions = SvgOptions()) throws {
+        let handle = try liveOrThrow()
+        var cOptions = buildSvgOptions(options, defaultUp: defaultUp)
+        guard withUnsafePointer(to: &cOptions, { cadaclysm_scene_svg(handle, path, $0) }) else {
             throw CadaclysmError(lastErrorOr("could not write \(path)"))
         }
     }

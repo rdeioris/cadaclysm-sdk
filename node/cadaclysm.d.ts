@@ -17,6 +17,48 @@ export declare const Convention: {
 export type ValueKind = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 export declare const ValueKind: { readonly NONE: 0; readonly TEXT: 1; readonly INTEGER: 2; readonly REAL: 3; readonly BOOLEAN: 4; readonly LIST: 5; readonly REFERENCE: 6 };
 
+/** front back left right top bottom iso, `[azimuth, elevation]` degrees each. */
+export type SvgViewName = 'front' | 'back' | 'left' | 'right' | 'top' | 'bottom' | 'iso';
+export declare const SvgView: Readonly<Record<SvgViewName, readonly [number, number]>>;
+
+/** How an SVG drawing is made -- see `svgOptionsDefaults` for the defaults every field falls back to. */
+export interface SvgOptions {
+  /** Fills `azimuth`/`elevation` unless they are set directly. Default 'iso'. */
+  view?: SvgViewName;
+  /** Degrees about the up axis from +X, overriding `view`'s. -90 looks from -Y, the front. */
+  azimuth?: number | null;
+  /** Degrees above the horizon, overriding `view`'s. */
+  elevation?: number | null;
+  /** 'y' or 'z'; null keeps the scene's own convention (`Convention.UNITY`/`Convention.Y_UP` give 'y', every other 'z'). */
+  up?: 'y' | 'z' | null;
+  /** Vertical field of view in degrees; 0 (the default) is orthographic. */
+  fov?: number;
+  /** The page's viewBox, page units; 0 is 1000. */
+  width?: number;
+  height?: number;
+  /** Fraction of the content's extent left each side. Default 0.05. */
+  margin?: number;
+  /** How far a written curve may stray, in page units. Default 0.1. */
+  tolerance?: number;
+  /** `'#rgb'`, `'#rrggbb'` or `[r, g, b]` in 0..255. Default '#000000'. */
+  stroke?: string | ArrayLike<number>;
+  /** The pen's width, page units. Default 1. */
+  strokeWidth?: number;
+  /** As `stroke`, or null (the default) for no `<rect>` behind the drawing. */
+  background?: string | ArrayLike<number> | null;
+  /** Each shape's feature edges. Default true. */
+  edges?: boolean;
+  /** Each shape's free curves. Default false. */
+  curves?: boolean;
+  /** Each shape's isocurves. Default false. */
+  isocurves?: boolean;
+  /** Straight segments within `tolerance` instead of fitted Béziers. Default false. */
+  polylines?: boolean;
+}
+/** `SvgOptions`'s own defaults, as `cadaclysm_svg_options_init` fills them. */
+export function svgOptionsDefaults(): Required<Pick<SvgOptions, 'view' | 'fov' | 'width' | 'height' | 'margin' | 'tolerance' | 'stroke' | 'strokeWidth' | 'edges' | 'curves' | 'isocurves' | 'polylines'>>
+  & Pick<SvgOptions, 'azimuth' | 'elevation' | 'up' | 'background'>;
+
 export function libraryPath(): string;
 export function version(): string;
 export function buildDate(): string;
@@ -142,8 +184,17 @@ export class Node {
   edgeBeziers(): Beziers; curveBeziers(): Beziers; isocurveBeziers(): Beziers;
   collision(hullBudget?: number): Collision | null;
   collisionHull(hullBudget?: number): CollisionHull;
+  boundsPlaced(placement?: ArrayLike<number> | null): Bounds;
+  readonly isMeshed: boolean;
+  surfaceEdges(): Polylines; surfaceIsocurves(): Polylines;
+  surfacePick(from: ArrayLike<number>, to: ArrayLike<number>): number[] | null;
+  surfaceProxyMesh(cells: number): Mesh;
+  readonly triangleEstimate: number;
   saveMesh(path: string, format?: string): void;
   saveMeshAsync(path: string, format?: string): Promise<void>;
+  svgText(options?: SvgOptions): string;
+  svg(path: string, options?: SvgOptions): void;
+  svgAsync(options?: SvgOptions): Promise<string>;
 }
 
 export class Scene {
@@ -163,12 +214,16 @@ export class Scene {
   placements(): Placement[];
   realizeAll(): number;
   realizeAllAsync(): Promise<number>;
+  realizeMeshes(skipSurfaced?: boolean): number;
   readonly realized: number; readonly realizeTotal: number;
   cancel(): void;
   forgetMeshes(): void;
   /** `format`: `'glb'` (the default), `'gltf'` or `'obj'`. */
   save(path: string, format?: string): void;
   saveAsync(path: string, format?: string): Promise<void>;
+  svgText(options?: SvgOptions): string;
+  svg(path: string, options?: SvgOptions): void;
+  svgAsync(options?: SvgOptions): Promise<string>;
 }
 
 export interface Meshlet {

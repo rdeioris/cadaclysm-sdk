@@ -55,6 +55,49 @@ public final class Smoke {
             System.out.println("query: " + matched.size() + " node(s)");
             System.out.println("diagnostics: " + scene.diagnostics().size());
 
+            boolean iges = Cad.formats().stream().anyMatch(f -> f.name().equals("IGES") && f.extensions().equals(List.of("iges", "igs")));
+            if (!iges) fail("formats() lacks IGES iges;igs");
+            if (Cad.meshFormats().stream().noneMatch(f -> f.name().equals("stl") && f.label().equals("STL (binary)"))) fail("mesh format label is not the library's");
+            System.out.println("geometry diagnostics: " + scene.geometryDiagnostics().size());
+            scene.forgetMeshes();
+            long rebuiltTriangles = 0;
+            for (Cad.Node n : scene.walk()) { Cad.Mesh m = n.canMesh() ? n.mesh() : null; if (m != null) rebuiltTriangles += m.triangleCount(); }
+            if (rebuiltTriangles != triangles) fail("forgetMeshes did not rebuild");
+
+            if (Cad.lodLevels() != 3) fail("lodLevels is not 3");
+            Cad.Node first = null;
+            for (Cad.Node n : scene.walk()) if (n.canMesh()) { first = n; break; }
+            if (first.meshLod(0).triangleCount() != first.mesh().triangleCount()) fail("LOD 0 is not the mesh");
+            if (first.lodError(0) != 0f || first.meshLod(4) != null) fail("LOD errors or levels are off");
+            if (path.endsWith("cube.scad") && (first.meshLod(1).triangleCount() != 3 || first.edgeBeziers().count() != 12 || first.edgeBeziers().points().remaining() != 12 * 12)) fail("the cube's LOD 1 or Béziers are off");
+
+            Cad.Collision fit = first.collision(0);
+            if (fit == null || fit.error() != 0 || fit.frame().length != 16 || fit.hullVertexCount() != 8) fail("the collision fit is off");
+            if (first.collisionHull(0).vertexCount() != 8 || first.collisionHull(0).indices().remaining() != 36) fail("the collision hull is off");
+
+            Cad.Mesh full = first.mesh();
+            try (Cad.Meshlets meshlets = Cad.Meshlets.build(full.copy().positions(), full.copy().normals(), full.copy().indices(), 124, 64, 0)) {
+                if (meshlets.count() < 1) fail("no meshlets");
+                Cad.Meshlet one = meshlets.meshlet(0);
+                if (one.positions().length != one.vertexCount() * 3 || one.indices().length != one.triangleCount() * 3 || one.level() != 0) fail("meshlet 0 is off");
+                if (path.endsWith("cube.scad") && (meshlets.count() != 1 || one.triangleCount() != 12 || one.vertexCount() != 36)) fail("the cube's meshlets are off");
+            }
+            try { Cad.Meshlets.build(full.copy().positions(), null, full.copy().indices(), 0, 64, 0); fail("a zero budget was accepted"); }
+            catch (Cad.CadaclysmException expected) { }
+
+            long est = first.triangleEstimate();
+            if (est <= 0 && est != -1) fail("triangle estimate is neither a count nor -1");
+            if (path.endsWith("cube.scad")) {
+                if (est != 12 || first.surfaceEdges().polylineCount() != 0 || first.surfaceProxyMesh(4) != null) fail("the cube has no surface products");
+                if (first.surfacePick(new double[] {10, 10, 100}, new double[] {10, 10, -100}) != null || !first.boundsPlaced(null).isEmpty()) fail("the cube picks or bounds through surfaces");
+            }
+            try (Cad.Scene fresh = Cad.open(path)) {
+                Cad.Node body = null;
+                for (Cad.Node n : fresh.walk()) if (n.canMesh()) { body = n; break; }
+                if (body.isMeshed()) fail("a fresh scene is already meshed");
+                if (fresh.realizeMeshes(false) == 0 || !body.isMeshed()) fail("realizeMeshes(false) did not build");
+            }
+
             byte[] bytes = Files.readAllBytes(Path.of(path));
             Cad.Mesh borrowed;
             try (Cad.Scene again = Cad.openMemory(bytes, Path.of(path).getFileName().toString())) {
@@ -78,6 +121,24 @@ public final class Smoke {
             Path stl = Files.createTempFile("cadaclysm-smoke", ".stl");
             scene.roots().get(0).saveMesh(stl.toString(), "stl");
             if (Files.size(stl) < 84) fail("save_mesh wrote no triangles");
+
+            // SVG: the library's own camera, no viewer. fov = 200 is a refusal it words the
+            // same way as the kernel's.
+            String svgText = scene.svgText();
+            if (!svgText.startsWith("<svg") || !svgText.contains("<path")) fail("scene SVG text did not look like an SVG wireframe");
+            Path svgPath = Files.createTempFile("cadaclysm-smoke", ".svg");
+            scene.svg(svgPath.toString());
+            if (Files.size(svgPath) == 0) fail("Scene.svg wrote an empty file");
+            String nodeSvgText = first.svgText();
+            if (!nodeSvgText.startsWith("<svg") || !nodeSvgText.contains("<path")) fail("node SVG text did not look like an SVG wireframe");
+            try {
+                scene.svgText(new Cad.SvgOptions(null, null, null, null, 200.0, 1000.0, 1000.0, 0.05, 0.1,
+                        "#000000", 1.0, null, true, false, false, false));
+                fail("scene svg: fov=200 was accepted");
+            } catch (Cad.CadaclysmException expected) {
+                // the library's own refusal
+            }
+            System.out.println("svg: scene and node text, file written, fov=200 refused");
         }
     }
 
@@ -107,6 +168,8 @@ public final class Smoke {
             Cad.Scene scene;
             sheetVerbs(plate);
             frames();
+            hits();
+            edgeCurves();
             try (Blacksmith.Solid rounded = part.fillet(corners, 1.0)) {
                 released = rounded;
                 int faces = rounded.faces();
@@ -196,6 +259,42 @@ public final class Smoke {
                     }
                 }
 
+                // The same solid as SAT, written by the library itself, read back the same way.
+                Path sat = Files.createTempFile("cadaclysm-smoke", ".sat");
+                rounded.sat(sat.toString());
+                if (!rounded.satText().startsWith("400 0 1 0")) fail("the SAT text does not open with the record version");
+                try (Cad.Scene back = Cad.open(sat.toString())) {
+                    float[] max = back.bounds().max();
+                    System.out.printf("sat read back: bounds max=(%s,%s,%s)%n", max[0], max[1], max[2]);
+                    if (!near(max, 40, 20, 16)) fail("the SAT did not read back as the plate with its pin");
+                }
+
+                // The OCCT .brep writer, and its reader.
+                Path brep = Files.createTempFile("cadaclysm-smoke", ".brep");
+                rounded.brep(brep.toString());
+                if (!rounded.brepText().startsWith("DBRep_DrawableShape")) fail("the .brep text does not begin as one");
+                try (Cad.Scene back = Cad.open(brep.toString())) {
+                    float[] max = back.bounds().max();
+                    System.out.printf("brep read back: bounds max=(%s,%s,%s)%n", max[0], max[1], max[2]);
+                    if (!near(max, 40, 20, 16)) fail("the .brep did not read back as the plate with its pin");
+                }
+
+                // SVG: the kernel's own camera, no viewer -- fov = 200 is a refusal it words
+                // the same way as the reader's.
+                String solidSvgText = rounded.svgText();
+                if (!solidSvgText.startsWith("<svg") || !solidSvgText.contains("<path")) fail("solid SVG text did not look like an SVG wireframe");
+                Path solidSvgPath = Files.createTempFile("cadaclysm-smoke-solid", ".svg");
+                rounded.svg(solidSvgPath.toString());
+                if (Files.size(solidSvgPath) == 0) fail("Solid.svg wrote an empty file");
+                try {
+                    rounded.svgText(new Blacksmith.SvgOptions(null, null, null, null, 200.0, 1000.0, 1000.0, 0.05, 0.1,
+                            "#000000", 1.0, null, true, false, false, false));
+                    fail("blacksmith svg: fov=200 was accepted");
+                } catch (Blacksmith.BuildException expected) {
+                    // the library's own refusal
+                }
+                System.out.println("blacksmith svg: solid text, file written, fov=200 refused");
+
                 // toScene: a reader scene over the same STEP text, and one that stands on
                 // its own -- the solid's close must not take it down.
                 scene = rounded.toScene();
@@ -249,6 +348,96 @@ public final class Smoke {
 
     private static boolean near(double[] v, double x, double y, double z) {
         return Math.abs(v[0] - x) <= 0.01 && Math.abs(v[1] - y) <= 0.01 && Math.abs(v[2] - z) <= 0.01;
+    }
+
+    // Hits: two radius-5 circles six apart cross at two points, (3, -4) and (3, 4). At
+    // (3, 4) the first circle's upper arc is at t 0.2952 and the moved one's at 0.7048; at
+    // (3, -4) the other way round -- which catches the two sides read swapped.
+    private static void hits() {
+        try (Blacksmith.Profile left = Blacksmith.Profile.circle(5);
+             Blacksmith.Profile five = Blacksmith.Profile.circle(5);
+             Blacksmith.Profile right = five.translate(6, 0)) {
+            List<Blacksmith.Hit> crossing = left.hits(right);
+            if (crossing.size() != 2) fail("hits: two circles hit " + crossing.size() + " times, not 2");
+            double[] ys = crossing.stream().mapToDouble(h -> h.start()[1]).sorted().toArray();
+            if (Math.abs(ys[0] + 4) > 1e-9 || Math.abs(ys[1] - 4) > 1e-9)
+                fail("hits: y " + ys[0] + ", " + ys[1] + ", not -4 and 4");
+            for (Blacksmith.Hit h : crossing) {
+                double ta = h.start()[1] > 0 ? 0.2952 : 0.7048, tb = h.start()[1] > 0 ? 0.7048 : 0.2952;
+                if (h.run() || h.touch() || h.aStart().loopIndex() != 0 || Math.abs(h.start()[0] - 3) > 1e-9
+                        || Math.abs(h.aStart().t() - ta) > 1e-3 || Math.abs(h.bStart().t() - tb) > 1e-3)
+                    fail("hits: " + h + " is not a crossing at (3, +-4) at t " + ta + " on a and " + tb + " on b");
+            }
+            System.out.println("hits: " + crossing.get(0) + ", " + crossing.get(1));
+            // Common: the same two circles share one lens, four arcs (each circle's own seam
+            // stays a join) between two caps once extruded; moved apart they share nothing.
+            List<Blacksmith.Profile> lenses = left.common(right);
+            if (lenses.size() != 1) fail("common: two circles share " + lenses.size() + " regions, not 1");
+            try (Blacksmith.Profile lens = lenses.get(0);
+                 Blacksmith.Solid lensSolid = Blacksmith.Workplane.xy().extrude(lens, 1).solid();
+                 Blacksmith.Profile far = five.translate(100, 0)) {
+                if (lensSolid.faces() != 6) fail("common: the lens extrudes to " + lensSolid.faces() + " faces, not 6");
+                if (!left.common(far).isEmpty()) fail("common: circles 100 apart share a region");
+                try {
+                    left.common(right, 0.0);
+                    fail("common: a zero tolerance was accepted");
+                } catch (Blacksmith.BuildException e) {
+                    if (!e.getMessage().contains("profile_common: tolerance must be positive and finite")) throw e;
+                }
+                System.out.println("common: one lens, " + lensSolid.faces() + " faces extruded");
+            }
+        }
+    }
+
+    // Edge curves: a cylinder's rims are circles of its radius about a cap centre in a unit
+    // frame, a whole turn each; a cuboid's edges are lines whose origin + x is the far end;
+    // an extruded closed spline keeps a nurbs edge with knots = poles + degree + 1.
+    private static void edgeCurves() {
+        try (Blacksmith.Solid cyl = Blacksmith.Solid.cylinder(5, 3);
+             Blacksmith.Solid box = Blacksmith.Solid.cuboid(2, 4, 6);
+             Blacksmith.Profile square = Blacksmith.Profile.spline(
+                     new double[][] {{0, 0}, {10, 0}, {10, 10}, {0, 10}}, 3, null, true);
+             Blacksmith.Solid loop = Blacksmith.Workplane.xy().extrude(square, 2).solid()) {
+            List<Blacksmith.Curve> rims = cyl.edges().stream()
+                    .filter(e -> e.kind().equals("circle")).map(Blacksmith.Edge::curve).toList();
+            if (rims.size() < 2 || rims.stream().anyMatch(c -> c == null)) fail("edge_curve: the cylinder's rims have no curve");
+            for (Blacksmith.Curve c : rims) {
+                boolean unit = Math.abs(norm(c.x()) - 1) < 1e-9 && Math.abs(norm(c.y()) - 1) < 1e-9
+                        && Math.abs(c.x()[0] * c.y()[0] + c.x()[1] * c.y()[1] + c.x()[2] * c.y()[2]) < 1e-9;
+                boolean centred = Math.abs(c.origin()[0]) < 1e-9 && Math.abs(c.origin()[1]) < 1e-9
+                        && Math.min(Math.abs(c.origin()[2]), Math.abs(c.origin()[2] - 3)) < 1e-9;
+                if (!c.kind().equals("circle") || Math.abs(c.radius() - 5) > 1e-9 || !unit || !centred
+                        || Math.abs(Math.abs(c.t1() - c.t0()) - 2 * Math.PI) > 1e-9
+                        || c.degree() != 0 || c.knots().length != 0 || c.weights() != null)
+                    fail("edge_curve: a rim reads " + c);
+            }
+            for (Blacksmith.Edge e : box.edges()) {
+                Blacksmith.Curve c = e.curve();
+                if (c == null || !c.kind().equals("line") || c.t0() != 0 || c.t1() != 1) fail("edge_curve: a cuboid edge reads " + c);
+                double[] far = {c.origin()[0] + c.x()[0], c.origin()[1] + c.x()[1], c.origin()[2] + c.x()[2]};
+                boolean atOrigin = false, atFar = false;
+                for (Blacksmith.Edge.Segment s : e.segments()) {
+                    for (double[] p : new double[][] {s.a(), s.b()}) {
+                        atOrigin |= norm(new double[] {p[0] - c.origin()[0], p[1] - c.origin()[1], p[2] - c.origin()[2]}) < 1e-9;
+                        atFar |= norm(new double[] {p[0] - far[0], p[1] - far[1], p[2] - far[2]}) < 1e-9;
+                    }
+                }
+                if (!atOrigin || !atFar) fail("edge_curve: a cuboid line's ends are not its own vertices: " + c);
+            }
+            List<Blacksmith.Curve> splines = loop.edges().stream()
+                    .filter(e -> e.kind().equals("nurbs")).map(Blacksmith.Edge::curve).toList();
+            if (splines.isEmpty()) fail("edge_curve: the extruded spline keeps no nurbs edge");
+            for (Blacksmith.Curve c : splines) {
+                if (!c.kind().equals("nurbs") || c.degree() != 3
+                        || c.knots().length != c.poles().length / 3 + c.degree() + 1 || c.weights() != null)
+                    fail("edge_curve: the spline edge reads " + c);
+            }
+            System.out.println("edge_curve: " + rims.get(0) + "; " + box.edges().get(0).curve() + "; " + splines.get(0));
+        }
+    }
+
+    private static double norm(double[] v) {
+        return Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
     }
 
     // Frames: built, checked, and passed wherever twelve numbers go.

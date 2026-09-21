@@ -73,7 +73,7 @@ use std::fmt;
 use std::path::{Path as FsPath, PathBuf};
 use std::ptr::{self, NonNull};
 
-use crate::{borrowed, groups, text, Error, Manifold, Mesh, Node, OpenOptions, Result, Scene};
+use crate::{borrowed, groups, text, Error, Manifold, Mesh, Node, OpenOptions, Result, Scene, SvgOptions, Up};
 
 pub mod sys;
 
@@ -479,6 +479,89 @@ impl Profile {
         Profile::wrap(self.api, raw, "profile_with_hole")
     }
 
+    /// This curve cut where the `cutters` cross, touch or run along it -- the sketch
+    /// trim's pieces: in order along the curve from its start, each an open profile of
+    /// portions of this one's own segments (a line's stretch a line, an arc's an arc, a
+    /// spline's the same spline over part of its domain). One piece, this curve, where
+    /// nothing cuts it; a closed curve's piece round its start is one piece. Cuts closer
+    /// than `tolerance` to each other fold onto one.
+    pub fn pieces(&self, cutters: &[&Profile], tolerance: f64) -> Result<Vec<Profile>> {
+        let handles: Vec<_> = cutters.iter().map(|p| p.raw()).collect();
+        let count = unsafe { (self.api.cadaclysm_blacksmith_profile_piece_count)(self.raw(), handles.as_ptr(), handles.len(), tolerance) };
+        if count == 0 {
+            return Err(fail(self.api, "profile_piece_count"));
+        }
+        (0..count)
+            .map(|i| Profile::wrap(self.api, unsafe { (self.api.cadaclysm_blacksmith_profile_piece)(self.raw(), handles.as_ptr(), handles.len(), i, tolerance) }, "profile_piece"))
+            .collect()
+    }
+
+    /// This curve with piece `piece` of [`pieces`](Self::pieces) taken away -- the sketch
+    /// trim: what is left, as open profiles. One for a closed curve (its other pieces run
+    /// together from where the removed one ended), the stretches before and after for an
+    /// open one, none where the piece was the whole curve. An error names a piece the
+    /// curve does not have.
+    pub fn trim(&self, cutters: &[&Profile], piece: u32, tolerance: f64) -> Result<Vec<Profile>> {
+        let handles: Vec<_> = cutters.iter().map(|p| p.raw()).collect();
+        let count = unsafe { (self.api.cadaclysm_blacksmith_profile_trim_count)(self.raw(), handles.as_ptr(), handles.len(), piece, tolerance) };
+        if count == 0 && failed(self.api) {
+            return Err(fail(self.api, "profile_trim_count"));
+        }
+        (0..count)
+            .map(|i| Profile::wrap(self.api, unsafe { (self.api.cadaclysm_blacksmith_profile_trim_chain)(self.raw(), handles.as_ptr(), handles.len(), piece, i, tolerance) }, "profile_trim_chain"))
+            .collect()
+    }
+
+    /// Where this profile's curves cross, touch or run along `other`'s, both read in one
+    /// plane, as [`Hit`]s ordered along this profile. Points closer than `tolerance`
+    /// merge; two curves within `tolerance` of each other for longer than it are one run
+    /// when they part only where one ends or the stretch is flat -- one curve following the
+    /// other, offset within `tolerance` or tilted by under about half of it, even where it
+    /// leaves mid-both; a tangency or a shallow crossing is one point. A loop that stops
+    /// short of its start is an open chain. Python's `tolerance` defaults to 1e-6.
+    pub fn hits(&self, other: &Profile, tolerance: f64) -> Result<Vec<Hit>> {
+        let hits = unsafe { (self.api.cadaclysm_blacksmith_profile_hits)(self.raw(), other.raw(), tolerance) };
+        if hits.is_null() {
+            return Err(fail(self.api, "profile_hits"));
+        }
+        let read = || {
+            let count = unsafe { (self.api.cadaclysm_blacksmith_hit_count)(hits) };
+            let mut out = Vec::with_capacity(count as usize);
+            for i in 0..count {
+                let mut raw = sys::CadaclysmBlacksmithHit::default();
+                if !unsafe { (self.api.cadaclysm_blacksmith_hit)(hits, i, &mut raw) } {
+                    return Err(fail(self.api, "hit"));
+                }
+                out.push(Hit::from(&raw));
+            }
+            Ok(out)
+        };
+        // Read everything, then free on every path, a failed read's too.
+        let found = read();
+        unsafe { (self.api.cadaclysm_blacksmith_hits_free)(hits) };
+        found
+    }
+
+    /// The region this profile and `other` share, both read in one plane, as zero or more
+    /// profiles -- each boundary counter-clockwise, each hole clockwise, arcs and splines
+    /// kept exact. Both must be closed and simple. No shared area is an empty `Vec`. Fails
+    /// for a `tolerance` not positive and finite, or a profile open or crossing itself.
+    /// Python's `tolerance` defaults to 1e-6.
+    pub fn common(&self, other: &Profile, tolerance: f64) -> Result<Vec<Profile>> {
+        let list = unsafe { (self.api.cadaclysm_blacksmith_profile_common)(self.raw(), other.raw(), tolerance) };
+        if list.is_null() {
+            return Err(fail(self.api, "profile_common"));
+        }
+        // Each profile is a handle of its own, freed by its `Drop`; the list goes on every
+        // path once read, a failed read's too (the profiles read so far drop with the Err).
+        let count = unsafe { (self.api.cadaclysm_blacksmith_profile_list_count)(list) };
+        let found = (0..count)
+            .map(|i| Profile::wrap(self.api, unsafe { (self.api.cadaclysm_blacksmith_profile_list_get)(list, i) }, "profile_list_get"))
+            .collect();
+        unsafe { (self.api.cadaclysm_blacksmith_profile_list_free)(list) };
+        found
+    }
+
     pub fn translate(&self, dx: f64, dy: f64) -> Result<Profile> {
         let raw = unsafe { (self.api.cadaclysm_blacksmith_translate_profile)(self.raw(), dx, dy) };
         Profile::wrap(self.api, raw, "translate_profile")
@@ -732,14 +815,75 @@ impl Selector {
     }
 }
 
+/// One edge's exact curve, as plain data copied out ([`Edge::curve`]): `kind` is
+/// `"line"`, `"circle"`, `"ellipse"` or `"nurbs"`.
+///
+/// `t0..t1` is the edge's parameter range on its own curve: a line's fraction (0..1 over
+/// `origin -> origin + x`, where `x` is the full `to - from`, NOT unit -- so
+/// `point(t) = origin + x*t`); a circle's or ellipse's angle in radians about `origin` in
+/// the `x, y` plane (`point(t) = origin + x*radius*cos(t) + y*radius2*sin(t)`,
+/// `radius2 = radius` for a circle); a NURBS's knot parameter
+/// (`knots[degree] <= t0 < t1 <= knots[n]`). Frame vectors `x, y, z` are unit for
+/// conics; for a line `x` is the direction with length = the line's length and `y, z`
+/// are zero.
+///
+/// For a NURBS the frame is zero and so are the radii; for a conic or a line `degree` is
+/// 0 and `knots`, `poles` are empty. `knots.len() == poles.len() + degree as usize + 1`;
+/// `weights` is one per pole, or `None` for a non-rational (plain B-spline) curve, a
+/// conic or a line.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Curve {
+    pub kind: String,
+    pub origin: [f64; 3],
+    pub x: [f64; 3],
+    pub y: [f64; 3],
+    pub z: [f64; 3],
+    pub radius: f64,
+    pub radius2: f64,
+    pub t0: f64,
+    pub t1: f64,
+    pub degree: u32,
+    pub knots: Vec<f64>,
+    pub poles: Vec<[f64; 3]>,
+    pub weights: Option<Vec<f64>>,
+}
+
+impl Curve {
+    /// Copied out of the C struct: the pointers are read here and nowhere kept.
+    ///
+    /// # Safety
+    /// `raw` as `cadaclysm_blacksmith_edge_curve` filled it, its solid still alive.
+    unsafe fn from_raw(raw: &sys::CadaclysmBlacksmithCurve) -> Curve {
+        let p = |q: sys::CadaclysmBlacksmithPoint| [q.x, q.y, q.z];
+        let n = raw.pole_count as usize;
+        Curve {
+            kind: text(raw.kind),
+            origin: p(raw.origin),
+            x: p(raw.x),
+            y: p(raw.y),
+            z: p(raw.z),
+            radius: raw.radius,
+            radius2: raw.radius2,
+            t0: raw.t0,
+            t1: raw.t1,
+            degree: raw.degree,
+            knots: borrowed(raw.knots, raw.knot_count as usize).to_vec(),
+            poles: borrowed(raw.poles, 3 * n).chunks_exact(3).map(|q| [q[0], q[1], q[2]]).collect(),
+            weights: (!raw.weights.is_null()).then(|| borrowed(raw.weights, n).to_vec()),
+        }
+    }
+}
+
 /// One edge of a solid, as plain data: its index (what [`Solid::fillet`] takes), its
-/// curve kind, the faces meeting on it, and its segments' ends.
+/// curve kind, the faces meeting on it, its segments' ends, and its exact [`Curve`]
+/// (`None` for an edge with no exact curve, kind `"other"`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Edge {
     pub index: u32,
     pub kind: String,
     pub faces: Vec<u32>,
     pub segments: Vec<[[f64; 3]; 2]>,
+    pub curve: Option<Curve>,
 }
 
 impl Edge {
@@ -751,6 +895,57 @@ impl Edge {
     pub fn direction(&self) -> Option<[f64; 3]> {
         let [a, b] = *self.segments.first().filter(|_| self.is_line())?;
         unit([b[0] - a[0], b[1] - a[1], b[2] - a[2]], "edge").ok()
+    }
+}
+
+/// Where a hit lands on one side: a profile's `loop_index` (0 the boundary or the open
+/// chain, then the holes in the order they were added), `segment`, and `t` from 0 to 1
+/// along it, with `face` [`NONE`] -- or a solid's `face` at (`u`, `v`), with
+/// `loop_index` and `segment` [`NONE`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Spot {
+    pub loop_index: u32,
+    pub segment: u32,
+    pub t: f64,
+    pub face: u32,
+    pub u: f64,
+    pub v: f64,
+}
+
+/// One place two curves meet, copied out. A point (`run` false): `start` equals `end`,
+/// and `touch` is true where the curves are tangent rather than crossing. A run (`run`
+/// true): they coincide from `start` to `end`. `a_start`/`a_end` are where on the first
+/// curve, `b_start`/`b_end` where on the second.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hit {
+    pub run: bool,
+    pub touch: bool,
+    pub start: [f64; 3],
+    pub end: [f64; 3],
+    pub a_start: Spot,
+    pub a_end: Spot,
+    pub b_start: Spot,
+    pub b_end: Spot,
+}
+
+impl From<&sys::CadaclysmBlacksmithSpot> for Spot {
+    fn from(s: &sys::CadaclysmBlacksmithSpot) -> Spot {
+        Spot { loop_index: s.loop_index, segment: s.segment, t: s.t, face: s.face, u: s.u, v: s.v }
+    }
+}
+
+impl From<&sys::CadaclysmBlacksmithHit> for Hit {
+    fn from(r: &sys::CadaclysmBlacksmithHit) -> Hit {
+        Hit {
+            run: r.run,
+            touch: r.touch,
+            start: [r.start.x, r.start.y, r.start.z],
+            end: [r.end.x, r.end.y, r.end.z],
+            a_start: (&r.a_start).into(),
+            a_end: (&r.a_end).into(),
+            b_start: (&r.b_start).into(),
+            b_end: (&r.b_end).into(),
+        }
     }
 }
 
@@ -1366,6 +1561,37 @@ impl Solid {
         Frame::of(out)
     }
 
+    /// Face `face` by what it is, eight doubles: the surface's kind (plane 0, cylinder 1,
+    /// cone 2, sphere 3, torus 4, NURBS 5, revolution 6, extrusion 7, sum 8), a point on
+    /// the surface at the face's middle (x y z), the outward normal there (x y z), and the
+    /// face's extent -- what a feature made on the face keeps, to find the face again with
+    /// [`Solid::find_face`] when the solid has been rebuilt with its faces moved, split or
+    /// renumbered. Take it before any move you apply to the solid, and look it up on the
+    /// unmoved one.
+    pub fn face_ref(&self, face: u32) -> Result<[f64; 8]> {
+        let mut out = [0.0; 8];
+        if !unsafe { (self.api.cadaclysm_blacksmith_face_ref)(self.raw(), face, out.as_mut_ptr()) } {
+            return Err(fail(self.api, "face_ref"));
+        }
+        Ok(out)
+    }
+
+    /// The face `face_ref` (from [`Solid::face_ref`]) refers to: among the faces of that
+    /// kind whose surface passes through the point, facing the same way, the one the point
+    /// lies in -- or, where it lies in none, the one whose boundary comes nearest. `hint`
+    /// is the index the face had, preferred among faces that fit equally well; `tolerance`
+    /// how far the point may sit off a surface to still be on it. `None` where the face is
+    /// gone.
+    pub fn find_face(&self, face_ref: &[f64; 8], hint: Option<u32>, tolerance: f64) -> Result<Option<u32>> {
+        let hint = hint.and_then(|h| i32::try_from(h).ok()).unwrap_or(-1);
+        let found = unsafe { (self.api.cadaclysm_blacksmith_find_face)(self.raw(), face_ref.as_ptr(), hint, tolerance) };
+        match found {
+            -2 => Err(fail(self.api, "find_face")),
+            f if f < 0 => Ok(None),
+            f => Ok(Some(f as u32)),
+        }
+    }
+
     /// `bounds_at(DEFAULT_TOLERANCE)`.
     pub fn bounds(&self) -> Result<([f64; 3], [f64; 3])> {
         self.bounds_at(DEFAULT_TOLERANCE)
@@ -1443,9 +1669,26 @@ impl Solid {
                 (borrowed(raw.faces, raw.face_count as usize), borrowed(raw.segments, 6 * raw.segment_count as usize))
             };
             let segments = flat.chunks_exact(6).map(|s| [[s[0], s[1], s[2]], [s[3], s[4], s[5]]]).collect();
-            edges.push(Edge { index, kind: unsafe { text(raw.kind) }, faces: faces.to_vec(), segments });
+            let curve = self.edge_curve(index)?;
+            edges.push(Edge { index, kind: unsafe { text(raw.kind) }, faces: faces.to_vec(), segments, curve });
         }
         Ok(edges)
+    }
+
+    /// Edge `i`'s exact curve copied out, or `None` for an edge with none (the library's
+    /// "has no exact curve"); any other refusal is the error.
+    fn edge_curve(&self, i: u32) -> Result<Option<Curve>> {
+        let mut raw = sys::CadaclysmBlacksmithCurve::default();
+        if unsafe { (self.api.cadaclysm_blacksmith_edge_curve)(self.raw(), i, &mut raw) } {
+            // SAFETY: the curve table is cached on the solid and never replaced, and
+            // everything is copied out before this borrow of `self` ends.
+            return Ok(Some(unsafe { Curve::from_raw(&raw) }));
+        }
+        let err = fail(self.api, "edge_curve");
+        if err.to_string().contains("has no exact curve") {
+            return Ok(None);
+        }
+        Err(err)
     }
 
     // -- out
@@ -1501,6 +1744,37 @@ impl Solid {
     /// This solid written to a STEP file at `path`.
     pub fn step(&self, path: impl AsRef<FsPath>, schema: Option<&str>, unit: Unit) -> Result<()> {
         write_step(path, &[self], schema, unit)
+    }
+
+    /// This solid as ACIS SAT text -- see [`write_sat_text`].
+    pub fn sat_text(&self, unit: Unit) -> Result<String> {
+        write_sat_text(&[self], unit)
+    }
+
+    /// This solid written to a SAT file at `path`, by the library itself.
+    pub fn sat(&self, path: impl AsRef<FsPath>, unit: Unit) -> Result<()> {
+        write_sat(path, &[self], unit)
+    }
+
+    /// This solid as OCCT `.brep` text; see [`write_brep_text`].
+    pub fn brep_text(&self) -> Result<String> {
+        write_brep_text(&[self])
+    }
+
+    /// This solid written to a `.brep` file at `path`, by the library itself.
+    pub fn brep(&self, path: impl AsRef<FsPath>) -> Result<()> {
+        write_brep(path, &[self])
+    }
+
+    /// This solid's wireframe as SVG text, from the camera `options` describes -- the
+    /// library's own camera, not a viewer. See [`write_svg_text`].
+    pub fn svg_text(&self, options: &SvgOptions) -> Result<String> {
+        write_svg_text(&[self], options)
+    }
+
+    /// This solid written to an SVG file at `path`, by the library itself.
+    pub fn svg(&self, path: impl AsRef<FsPath>, options: &SvgOptions) -> Result<()> {
+        write_svg(path, &[self], options)
     }
 
     /// This solid as a reader [`Scene`], through STEP text: the door to the tree walk
@@ -1707,6 +1981,118 @@ pub fn write_step(path: impl AsRef<FsPath>, solids: &[&Solid], schema: Option<&s
     std::fs::write(path, text).map_err(|e| Error::new(format!("{}: {e}", path.display())))
 }
 
+// ---- SAT --------------------------------------------------------------------------
+
+/// One ACIS SAT file's text, each solid its own body: the analytic surfaces as their
+/// own records, splines and swept surfaces as exact NURBS, in the layout Rhino's own
+/// exporter writes. `unit` goes into the header as millimetres per unit.
+pub fn write_sat_text(solids: &[&Solid], unit: Unit) -> Result<String> {
+    let api = api()?;
+    let handles: Vec<_> = solids.iter().map(|s| s.raw()).collect();
+    let raw = unsafe { (api.cadaclysm_blacksmith_sat_text)(handles.as_ptr(), handles.len(), unit as u32) };
+    if raw.is_null() {
+        return Err(fail(api, "sat_text"));
+    }
+    let text = unsafe { text(raw as *const c_char) };
+    unsafe { (api.cadaclysm_blacksmith_string_free)(raw) };
+    Ok(text)
+}
+
+/// [`write_sat_text`] written to `path` by the library itself, which names the file in
+/// its refusal when it cannot.
+pub fn write_sat(path: impl AsRef<FsPath>, solids: &[&Solid], unit: Unit) -> Result<()> {
+    let api = api()?;
+    let path = crate::c_path(path.as_ref())?;
+    let handles: Vec<_> = solids.iter().map(|s| s.raw()).collect();
+    let ok = unsafe { (api.cadaclysm_blacksmith_sat)(handles.as_ptr(), handles.len(), path.as_ptr(), unit as u32) };
+    if ok { Ok(()) } else { Err(fail(api, "sat")) }
+}
+
+/// One OCCT `.brep` file's text, each solid its own solid under one compound (one
+/// solid is the file's root): the exact surfaces and curves, with a curve in each
+/// face's own parameters for every edge, so OCCT's `BRepTools::Read` gives a shape
+/// `BRepCheck_Analyzer` finds valid. No unit is declared -- a `.brep` carries none --
+/// so the numbers are the numbers.
+pub fn write_brep_text(solids: &[&Solid]) -> Result<String> {
+    let api = api()?;
+    let handles: Vec<_> = solids.iter().map(|s| s.raw()).collect();
+    let raw = unsafe { (api.cadaclysm_blacksmith_brep_text)(handles.as_ptr(), handles.len()) };
+    if raw.is_null() {
+        return Err(fail(api, "brep_text"));
+    }
+    let text = unsafe { text(raw as *const c_char) };
+    unsafe { (api.cadaclysm_blacksmith_string_free)(raw) };
+    Ok(text)
+}
+
+/// [`write_brep_text`] written to `path` by the library itself.
+pub fn write_brep(path: impl AsRef<FsPath>, solids: &[&Solid]) -> Result<()> {
+    let api = api()?;
+    let path = c_text("path", &path.as_ref().to_string_lossy())?;
+    let handles: Vec<_> = solids.iter().map(|s| s.raw()).collect();
+    let ok = unsafe { (api.cadaclysm_blacksmith_brep)(handles.as_ptr(), handles.len(), path.as_ptr()) };
+    if !ok {
+        return Err(fail(api, "brep"));
+    }
+    Ok(())
+}
+
+// ---- SVG ----------------------------------------------------------------------------
+
+/// `options` packed into a `CadaclysmBlacksmithSvgOptions` -- as [`crate::SvgOptions`]'s
+/// own reader-side packing, but with no scene to default `up` from: a solid carries no
+/// convention of its own, so `options.up` falls back to [`Up::Z`] rather than a scene's.
+fn build_svg_options(api: &Api, options: &SvgOptions) -> sys::CadaclysmBlacksmithSvgOptions {
+    let mut raw: sys::CadaclysmBlacksmithSvgOptions = unsafe { std::mem::zeroed() };
+    unsafe { (api.cadaclysm_blacksmith_svg_options_init)(&mut raw) };
+    let (base_azimuth, base_elevation) = options.view.angles();
+    raw.up = match options.up.unwrap_or(Up::Z) {
+        Up::Y => 1,
+        Up::Z => 0,
+    };
+    raw.azimuth = options.azimuth.unwrap_or(base_azimuth);
+    raw.elevation = options.elevation.unwrap_or(base_elevation);
+    raw.fov = options.fov;
+    raw.width = options.width;
+    raw.height = options.height;
+    raw.margin = options.margin;
+    raw.tolerance = options.tolerance;
+    raw.stroke_width = options.stroke_width;
+    raw.stroke = options.stroke;
+    raw.background = options.background.unwrap_or(crate::SVG_TRANSPARENT);
+    raw.flags = u32::from(options.edges)
+        | (u32::from(options.curves) << 1)
+        | (u32::from(options.isocurves) << 2)
+        | (u32::from(options.polylines) << 3);
+    raw
+}
+
+/// Several solids' wireframe as one SVG's text, each its own `<g>` -- see
+/// [`crate::SvgOptions`].
+pub fn write_svg_text(solids: &[&Solid], options: &SvgOptions) -> Result<String> {
+    let api = api()?;
+    let raw = build_svg_options(api, options);
+    let handles: Vec<_> = solids.iter().map(|s| s.raw()).collect();
+    let text_ptr = unsafe { (api.cadaclysm_blacksmith_svg_text)(handles.as_ptr(), handles.len(), &raw) };
+    if text_ptr.is_null() {
+        return Err(fail(api, "svg_text"));
+    }
+    let out = unsafe { text(text_ptr as *const c_char) };
+    unsafe { (api.cadaclysm_blacksmith_string_free)(text_ptr) };
+    Ok(out)
+}
+
+/// [`write_svg_text`] written to `path` by the library itself, which names the file in
+/// its refusal when it cannot.
+pub fn write_svg(path: impl AsRef<FsPath>, solids: &[&Solid], options: &SvgOptions) -> Result<()> {
+    let api = api()?;
+    let raw = build_svg_options(api, options);
+    let path = crate::c_path(path.as_ref())?;
+    let handles: Vec<_> = solids.iter().map(|s| s.raw()).collect();
+    let ok = unsafe { (api.cadaclysm_blacksmith_svg)(handles.as_ptr(), handles.len(), path.as_ptr(), &raw) };
+    if ok { Ok(()) } else { Err(fail(api, "svg")) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1734,9 +2120,80 @@ mod tests {
 
     #[test]
     fn a_line_edge_has_a_unit_direction() {
-        let edge = Edge { index: 0, kind: "line".into(), faces: vec![], segments: vec![[[0.0; 3], [0.0, 0.0, 4.0]]] };
+        let edge = Edge { index: 0, kind: "line".into(), faces: vec![], segments: vec![[[0.0; 3], [0.0, 0.0, 4.0]]], curve: None };
         assert_eq!(edge.direction(), Some([0.0, 0.0, 1.0]));
         let arc = Edge { kind: "circle".into(), ..edge };
         assert_eq!(arc.direction(), None);
+    }
+
+    #[test]
+    fn a_hit_is_copied_out_field_for_field() {
+        let spot = |k: u32| sys::CadaclysmBlacksmithSpot {
+            loop_index: k,
+            segment: k + 1,
+            t: k as f64 + 0.25,
+            face: NONE,
+            u: k as f64 + 0.5,
+            v: k as f64 + 0.75,
+        };
+        let raw = sys::CadaclysmBlacksmithHit {
+            run: true,
+            touch: false,
+            start: sys::CadaclysmBlacksmithPoint { x: 1.0, y: 2.0, z: 3.0 },
+            end: sys::CadaclysmBlacksmithPoint { x: 4.0, y: 5.0, z: 6.0 },
+            a_start: spot(10),
+            a_end: spot(20),
+            b_start: spot(30),
+            b_end: spot(40),
+        };
+        let hit = Hit::from(&raw);
+        assert!(hit.run && !hit.touch);
+        assert_eq!((hit.start, hit.end), ([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]));
+        let loops: Vec<u32> = [hit.a_start, hit.a_end, hit.b_start, hit.b_end].iter().map(|s| s.loop_index).collect();
+        assert_eq!(loops, [10, 20, 30, 40]);
+        assert_eq!(hit.b_end, Spot { loop_index: 40, segment: 41, t: 40.25, face: NONE, u: 40.5, v: 40.75 });
+        // The header's layout, which `#[repr(C)]` reproduces: 40-byte spots, 216-byte hits.
+        assert_eq!(std::mem::size_of::<sys::CadaclysmBlacksmithSpot>(), 40);
+        assert_eq!(std::mem::size_of::<sys::CadaclysmBlacksmithHit>(), 216);
+    }
+
+    #[test]
+    fn a_curve_is_copied_out_field_for_field() {
+        let knots = [0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 3.0, 3.0, 3.0];
+        let poles = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0];
+        let weights = [1.0, 2.0, 1.0, 2.0, 1.0, 2.0];
+        let kind = std::ffi::CString::new("nurbs").unwrap();
+        let raw = sys::CadaclysmBlacksmithCurve {
+            kind: kind.as_ptr(),
+            origin: sys::CadaclysmBlacksmithPoint { x: 1.0, y: 2.0, z: 3.0 },
+            x: sys::CadaclysmBlacksmithPoint { x: 4.0, y: 5.0, z: 6.0 },
+            y: sys::CadaclysmBlacksmithPoint { x: 7.0, y: 8.0, z: 9.0 },
+            z: sys::CadaclysmBlacksmithPoint { x: 10.0, y: 11.0, z: 12.0 },
+            radius: 0.5,
+            radius2: 0.25,
+            t0: 0.5,
+            t1: 2.5,
+            degree: 3,
+            knots: knots.as_ptr(),
+            knot_count: knots.len() as u32,
+            poles: poles.as_ptr(),
+            pole_count: 6,
+            weights: weights.as_ptr(),
+        };
+        let curve = unsafe { Curve::from_raw(&raw) };
+        assert_eq!(curve.kind, "nurbs");
+        assert_eq!((curve.origin, curve.x), ([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]));
+        assert_eq!((curve.y, curve.z), ([7.0, 8.0, 9.0], [10.0, 11.0, 12.0]));
+        assert_eq!((curve.radius, curve.radius2, curve.t0, curve.t1, curve.degree), (0.5, 0.25, 0.5, 2.5, 3));
+        assert_eq!(curve.knots, knots);
+        assert_eq!(curve.poles.len(), 6);
+        assert_eq!((curve.poles[0], curve.poles[5]), ([1.0, 2.0, 3.0], [16.0, 17.0, 18.0]));
+        assert_eq!(curve.weights.as_deref(), Some(&weights[..]));
+        assert_eq!(curve.knots.len(), curve.poles.len() + curve.degree as usize + 1);
+        // Null pointers read as empty, a null `weights` as `None`; the header's 184 bytes.
+        let plain = sys::CadaclysmBlacksmithCurve { knots: std::ptr::null(), knot_count: 0, poles: std::ptr::null(), pole_count: 0, weights: std::ptr::null(), ..raw };
+        let plain = unsafe { Curve::from_raw(&plain) };
+        assert!(plain.knots.is_empty() && plain.poles.is_empty() && plain.weights.is_none());
+        assert_eq!(std::mem::size_of::<sys::CadaclysmBlacksmithCurve>(), 184);
     }
 }

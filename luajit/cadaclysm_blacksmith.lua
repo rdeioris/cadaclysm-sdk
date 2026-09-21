@@ -250,8 +250,13 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_profile_circle", "cadaclysm_blacksmith_profile_slot",
   "cadaclysm_blacksmith_profile_regular_polygon", "cadaclysm_blacksmith_profile_spline",
   "cadaclysm_blacksmith_profile_polygon", "cadaclysm_blacksmith_profile_with_hole",
-  "cadaclysm_blacksmith_translate_profile", "cadaclysm_blacksmith_profile_round", "cadaclysm_blacksmith_profile_chain",
+  "cadaclysm_blacksmith_translate_profile", "cadaclysm_blacksmith_profile_hits", "cadaclysm_blacksmith_hits_free",
+  "cadaclysm_blacksmith_hit_count", "cadaclysm_blacksmith_hit", "cadaclysm_blacksmith_profile_common",
+  "cadaclysm_blacksmith_profile_list_count", "cadaclysm_blacksmith_profile_list_get", "cadaclysm_blacksmith_profile_list_free",
+  "cadaclysm_blacksmith_profile_round", "cadaclysm_blacksmith_profile_chain",
   "cadaclysm_blacksmith_profile_from_loops", "cadaclysm_blacksmith_profile_close_loop", "cadaclysm_blacksmith_profile_polylines",
+  "cadaclysm_blacksmith_profile_piece_count", "cadaclysm_blacksmith_profile_piece", "cadaclysm_blacksmith_profile_trim_count",
+  "cadaclysm_blacksmith_profile_trim_chain",
   "cadaclysm_blacksmith_path_begin", "cadaclysm_blacksmith_path_line_to", "cadaclysm_blacksmith_path_arc_to",
   "cadaclysm_blacksmith_path_bezier_to", "cadaclysm_blacksmith_path_nurbs_to", "cadaclysm_blacksmith_path_end",
   "cadaclysm_blacksmith_path_end_open", "cadaclysm_blacksmith_path_free", "cadaclysm_blacksmith_cuboid",
@@ -275,13 +280,17 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_refillet", "cadaclysm_blacksmith_unfillet", "cadaclysm_blacksmith_rechamfer",
   "cadaclysm_blacksmith_unchamfer", "cadaclysm_blacksmith_split", "cadaclysm_blacksmith_split_by_plane",
   "cadaclysm_blacksmith_lump_count", "cadaclysm_blacksmith_lump", "cadaclysm_blacksmith_face_count",
-  "cadaclysm_blacksmith_select_face", "cadaclysm_blacksmith_face_frame", "cadaclysm_blacksmith_coloured",
+  "cadaclysm_blacksmith_select_face", "cadaclysm_blacksmith_face_frame", "cadaclysm_blacksmith_face_ref",
+  "cadaclysm_blacksmith_find_face", "cadaclysm_blacksmith_coloured",
   "cadaclysm_blacksmith_colour", "cadaclysm_blacksmith_face_kind", "cadaclysm_blacksmith_edge_count",
-  "cadaclysm_blacksmith_edge", "cadaclysm_blacksmith_mesh", "cadaclysm_blacksmith_mesh_face_triangles",
+  "cadaclysm_blacksmith_edge", "cadaclysm_blacksmith_edge_curve", "cadaclysm_blacksmith_mesh", "cadaclysm_blacksmith_mesh_face_triangles",
   "cadaclysm_blacksmith_edge_polylines",
   "cadaclysm_blacksmith_bounds", "cadaclysm_blacksmith_leaked_edges", "cadaclysm_blacksmith_unpaired_edges",
-  "cadaclysm_blacksmith_manifold", "cadaclysm_blacksmith_step", "cadaclysm_blacksmith_string_free",
+  "cadaclysm_blacksmith_manifold", "cadaclysm_blacksmith_step", "cadaclysm_blacksmith_sat_text",
+  "cadaclysm_blacksmith_sat", "cadaclysm_blacksmith_brep_text", "cadaclysm_blacksmith_brep",
+  "cadaclysm_blacksmith_string_free",
   "cadaclysm_blacksmith_from_brep", "cadaclysm_blacksmith_brep_layout_id",
+  "cadaclysm_blacksmith_svg_options_init", "cadaclysm_blacksmith_svg_text", "cadaclysm_blacksmith_svg",
 }
 
 local C
@@ -711,6 +720,50 @@ function Profile:close_loop()
   return new_profile(lib().cadaclysm_blacksmith_profile_close_loop(self._handle))
 end
 
+--- The cutters' handles for the trim's calls: a C array, and how many.
+local function cutter_handles(cutters, what)
+  local n = #cutters
+  local handles = ffi.new("const struct CadaclysmBlacksmithProfile *[?]", math.max(n, 1))
+  for i = 1, n do handles[i - 1] = profile_handle(cutters[i], what) end
+  return handles, n
+end
+
+--- This curve cut where the `cutters` (Profiles) cross, touch or run along it
+--- -- the sketch trim's pieces: in order along the curve from its start, each an
+--- open profile of portions of this one's own segments (a line's stretch a line,
+--- an arc's an arc, a spline's the same spline over part of its domain). One
+--- piece, this curve, where nothing cuts it; a closed curve's piece round its
+--- start is one piece. Cuts closer than `tolerance` (default 1e-6) to each other
+--- fold onto one. Raises `BuildError` for a curve with no segments.
+function Profile:pieces(cutters, tolerance)
+  if tolerance == nil then tolerance = 1e-6 end
+  local handles, n = cutter_handles(cutters, "pieces")
+  local count = lib().cadaclysm_blacksmith_profile_piece_count(self._handle, handles, n, tolerance)
+  if count == 0 then fail("profile_piece_count") end
+  local found = {}
+  for i = 0, count - 1 do
+    found[i + 1] = new_profile(lib().cadaclysm_blacksmith_profile_piece(self._handle, handles, n, i, tolerance))
+  end
+  return found
+end
+
+--- This curve with piece `piece` (from zero, of `pieces`) taken away -- the
+--- sketch trim: what is left, as open profiles. One for a closed curve (its other
+--- pieces run together from where the removed one ended), the stretches before
+--- and after for an open one, none where the piece was the whole curve. Raises
+--- `BuildError` for a piece the curve does not have.
+function Profile:trim(cutters, piece, tolerance)
+  if tolerance == nil then tolerance = 1e-6 end
+  local handles, n = cutter_handles(cutters, "trim")
+  local count = lib().cadaclysm_blacksmith_profile_trim_count(self._handle, handles, n, piece, tolerance)
+  if count == 0 and last_error() ~= "" then fail("profile_trim_count") end
+  local found = {}
+  for i = 0, count - 1 do
+    found[i + 1] = new_profile(lib().cadaclysm_blacksmith_profile_trim_chain(self._handle, handles, n, piece, i, tolerance))
+  end
+  return found
+end
+
 --- This outline with `hole` (a Profile) cut out of it.
 function Profile:with_hole(hole)
   return new_profile(lib().cadaclysm_blacksmith_profile_with_hole(self._handle, profile_handle(hole, "with_hole")))
@@ -719,6 +772,56 @@ end
 --- This profile moved by (`dx`, `dy`).
 function Profile:translate(dx, dy)
   return new_profile(lib().cadaclysm_blacksmith_translate_profile(self._handle, dx, dy))
+end
+
+--- Where this profile's curves cross, touch or run along `other`'s, both read
+--- in one plane, as an array of `Hit` records ordered along this profile.
+--- Points closer than `tolerance` (default 1e-6) merge; two curves within
+--- `tolerance` of each other for longer than it are one run when they part
+--- only where one ends or the stretch is flat -- one curve following the
+--- other, offset within `tolerance` or tilted by under about half of it, even
+--- where it leaves mid-both; a tangency or a shallow crossing is one point. A
+--- loop that stops short of its start is an open chain.
+function Profile:hits(other, tolerance)
+  if tolerance == nil then tolerance = 1e-6 end
+  local h = lib().cadaclysm_blacksmith_profile_hits(self._handle, profile_handle(other, "hits"), tolerance)
+  if h == nil then fail("profile_hits") end
+  local ok, result = pcall(function()
+    local n = lib().cadaclysm_blacksmith_hit_count(h)
+    local raw = ffi.new("CadaclysmBlacksmithHit")
+    local out = {}
+    for i = 0, n - 1 do
+      if not lib().cadaclysm_blacksmith_hit(h, i, raw) then fail("hit") end
+      out[#out + 1] = M.Hit.of(raw)
+    end
+    return out
+  end)
+  lib().cadaclysm_blacksmith_hits_free(h)
+  if not ok then error(result, 0) end
+  return result
+end
+
+--- The region this profile and `other` share, both read in one plane, as an
+--- array of zero or more profiles -- each boundary counter-clockwise, each
+--- hole clockwise, arcs and splines kept exact. Both must be closed and
+--- simple. No shared area is an empty array. Errors for a `tolerance`
+--- (default 1e-6) not positive and finite, or a profile open or crossing
+--- itself.
+function Profile:common(other, tolerance)
+  if tolerance == nil then tolerance = 1e-6 end
+  local h = lib().cadaclysm_blacksmith_profile_common(self._handle, profile_handle(other, "common"), tolerance)
+  if h == nil then fail("profile_common") end
+  local ok, result = pcall(function()
+    local n = lib().cadaclysm_blacksmith_profile_list_count(h)
+    local out = {}
+    for i = 0, n - 1 do
+      out[#out + 1] = new_profile(lib().cadaclysm_blacksmith_profile_list_get(h, i), "profile_list_get")
+    end
+    return out
+  end)
+  lib().cadaclysm_blacksmith_profile_list_free(h)
+  if not ok then error(result, 0) end
+  return result
 end
 
 --- This profile with its corners rounded by `radius`: where two straight
@@ -966,6 +1069,60 @@ local function slant(value)
   return Slant.flat(value)
 end
 
+-- ---- svg -------------------------------------------------------------------------------
+
+--- The seven camera angles `svg_text`/`svg`'s `view=` understands, as (azimuth,
+--- elevation) in degrees -- as the reader's own `cadaclysm.lua`.
+local SVG_VIEWS = {
+  front = { -90, 0 }, back = { 90, 0 }, left = { 180, 0 }, right = { 0, 0 },
+  top = { -90, 90 }, bottom = { -90, -90 }, iso = { -50, 28 },
+}
+
+--- `CadaclysmBlacksmithSvgOptions.background`'s "none" value: no `<rect>`
+--- behind the drawing. The reader library's own `CADACLYSM_SVG_TRANSPARENT`,
+--- same value.
+local SVG_TRANSPARENT = 0xffffffff
+
+--- A colour as the ABI's packed `0xRRGGBB`: `"#rrggbb"` or a `{r, g, b}` table.
+local function svg_colour(colour)
+  if type(colour) == "string" then
+    local hex = colour:gsub("^#", "")
+    if #hex ~= 6 then raise(("colour '%s': '#rrggbb' or {r, g, b}"):format(colour)) end
+    return tonumber(hex, 16)
+  end
+  return bit.bor(bit.lshift(math.floor(colour[1]), 16), bit.lshift(math.floor(colour[2]), 8), math.floor(colour[3]))
+end
+
+--- `words` packed into a `CadaclysmBlacksmithSvgOptions` -- as the reader's
+--- own `svg_options`, but with no scene to default `up` from: a solid carries
+--- no convention of its own, so `up=` falls back to `"z"` rather than a
+--- scene's.
+local function svg_options(words)
+  words = words or {}
+  local view = words.view or "iso"
+  local angles = SVG_VIEWS[view]
+  if not angles then
+    raise(("view '%s': one of front, back, left, right, top, bottom, iso"):format(tostring(view)))
+  end
+  local o = ffi.new("CadaclysmBlacksmithSvgOptions")
+  lib().cadaclysm_blacksmith_svg_options_init(o)
+  o.up = tostring(words.up or "z"):lower() == "y" and 1 or 0
+  o.azimuth = words.az ~= nil and words.az or angles[1]
+  o.elevation = words.el ~= nil and words.el or angles[2]
+  o.fov = words.fov or 0.0
+  local size = words.size or { 1000, 1000 }
+  o.width, o.height = size[1], size[2]
+  o.margin = words.margin or 0.05
+  o.tolerance = words.tolerance or 0.1
+  o.stroke = words.stroke ~= nil and svg_colour(words.stroke) or 0x000000
+  o.stroke_width = words.width or 1.0
+  o.background = words.background ~= nil and svg_colour(words.background) or SVG_TRANSPARENT
+  local edges = words.edges
+  if edges == nil then edges = true end
+  o.flags = bit.bor(edges and 1 or 0, words.curves and 2 or 0, words.isocurves and 4 or 0, words.polylines and 8 or 0)
+  return o
+end
+
 -- ---- solids ---------------------------------------------------------------------------
 
 --- An exact B-rep solid (or open sheet). Immutable; every operation returns a
@@ -976,7 +1133,7 @@ local Solid_get = {}
 class(Solid, Solid_get)
 M.Solid = Solid
 
-local Edge, Manifold, Selector
+local Edge, Curve, Manifold, Selector
 
 local function new_solid(handle, what)
   checked(handle, what or "solid")
@@ -1558,6 +1715,41 @@ function Solid:step(path, schema, unit)
   write_text(path, self:step_text(schema, unit))
 end
 
+--- This solid as ACIS SAT text; `unit` "mm" (default), "m" or "in". See
+--- `write_sat_text`.
+function Solid:sat_text(unit)
+  if unit == nil then unit = "mm" end
+  return M.write_sat_text({ self }, unit)
+end
+
+--- Write this solid to an ACIS SAT file at `path`, by the library itself; `unit`
+--- as `sat_text`.
+function Solid:sat(path, unit)
+  if unit == nil then unit = "mm" end
+  M.write_sat(path, { self }, unit)
+end
+
+--- This solid as OCCT `.brep` text; see `write_brep_text`.
+function Solid:brep_text()
+  return M.write_brep_text({ self })
+end
+
+--- Write this solid to a `.brep` file at `path`, by the library itself.
+function Solid:brep(path)
+  M.write_brep(path, { self })
+end
+
+--- This solid's wireframe as SVG text, from the camera `words` describes --
+--- the library's own camera, not a viewer. See `write_svg_text`.
+function Solid:svg_text(words)
+  return M.write_svg_text({ self }, words)
+end
+
+--- This solid written to an SVG file at `path`, by the library itself.
+function Solid:svg(path, words)
+  M.write_svg(path, { self }, words)
+end
+
 -- -- selecting and edges
 
 --- The index (from zero) of the face a `Selector` picks.
@@ -1576,6 +1768,36 @@ function Solid:face_frame(face)
   local t = {}
   for i = 0, 11 do t[i + 1] = out[i] end
   return t
+end
+
+--- Face `face` by what it is, eight numbers: the surface's kind (plane 0,
+--- cylinder 1, cone 2, sphere 3, torus 4, NURBS 5, revolution 6, extrusion 7,
+--- sum 8), a point on the surface at the face's middle (x y z), the outward
+--- normal there (x y z), and the face's extent -- what a feature made on the
+--- face keeps, to find the face again with `find_face` when the solid has been
+--- rebuilt with its faces moved, split or renumbered. Take it before any move
+--- you apply to the solid, and look it up on the unmoved one.
+function Solid:face_ref(face)
+  local out = ffi.new("double[8]")
+  if not lib().cadaclysm_blacksmith_face_ref(self:_h(), face, out) then fail("face_ref") end
+  local t = {}
+  for i = 0, 7 do t[i + 1] = out[i] end
+  return t
+end
+
+--- The face `face_ref` (from `face_ref`) refers to: among the faces of that
+--- kind whose surface passes through the point, facing the same way, the one
+--- the point lies in -- or, where it lies in none, the one whose boundary
+--- comes nearest. `hint` is the index the face had, preferred among faces that
+--- fit equally well; `tolerance` (default 1e-3) how far the point may sit off
+--- a surface to still be on it. Nil where the face is gone.
+function Solid:find_face(face_ref, hint, tolerance)
+  if #face_ref ~= 8 then raise("find_face: a face reference is eight numbers") end
+  local ref = ffi.new("double[8]", face_ref)
+  local found = lib().cadaclysm_blacksmith_find_face(self:_h(), ref, hint == nil and -1 or hint, tolerance or 1e-3)
+  if found == -2 then fail("find_face") end
+  if found < 0 then return nil end
+  return found
 end
 
 -- -- colour
@@ -1628,9 +1850,18 @@ function Solid_get.edges(self)
       local s = raw.segments + 6 * k
       segments[k + 1] = { { s[0], s[1], s[2] }, { s[3], s[4], s[5] } }
     end
-    out[i + 1] = Edge.new(i, text(raw.kind), faces, segments)
+    out[i + 1] = Edge.new(i, text(raw.kind), faces, segments, Solid._edge_curve(L, h, i))
   end
   return out
+end
+
+-- Edge `i`'s exact curve copied out, or nil for an edge with none (the library's
+-- "has no exact curve"); any other refusal is raised.
+function Solid._edge_curve(L, h, i)
+  local raw = ffi.new("CadaclysmBlacksmithCurve")
+  if L.cadaclysm_blacksmith_edge_curve(h, i, raw) then return Curve.of(raw) end
+  if last_error():find("has no exact curve", 1, true) then return nil end
+  fail("edge_curve")
 end
 
 local function edge_indices(edges)
@@ -1856,22 +2087,92 @@ end
 
 -- ---- plain records ------------------------------------------------------------------
 
+--- One edge's exact curve, as plain data copied out (`Edge.curve`): `kind` is
+--- "line", "circle", "ellipse" or "nurbs".
+---
+--- `t0..t1` is the edge's parameter range on its own curve: a line's fraction
+--- (0..1 over `origin -> origin + x`, where `x` is the full `to - from`, NOT unit
+--- -- so `point(t) = origin + x*t`); a circle's or ellipse's angle in radians
+--- about `origin` in the `x, y` plane (`point(t) = origin + x*radius*cos(t) +
+--- y*radius2*sin(t)`, `radius2 = radius` for a circle); a NURBS's knot parameter
+--- (`knots[degree] <= t0 < t1 <= knots[n]`). Frame vectors `x, y, z` are unit
+--- for conics; for a line `x` is the direction with length = the line's length
+--- and `y, z` are zero.
+---
+--- For a NURBS the frame is zero and so are the radii; for a conic or a line
+--- `degree` is 0 and `knots`, `poles` are empty. `#knots == #poles + degree + 1`
+--- (Lua arrays from 1; the convention above indexes from zero); `weights` is one
+--- per pole, or nil for a non-rational (plain B-spline) curve, a conic or a line.
+---@class Curve
+---@field kind string
+---@field origin number[]  {x, y, z}
+---@field x number[]  {x, y, z}
+---@field y number[]  {x, y, z}
+---@field z number[]  {x, y, z}
+---@field radius number
+---@field radius2 number
+---@field t0 number
+---@field t1 number
+---@field degree integer
+---@field knots number[]
+---@field poles table[]  {{x, y, z}, ...}
+---@field weights number[]|nil
+Curve = {}
+class(Curve)
+callable(Curve)
+M.Curve = Curve
+
+function Curve.new(kind, origin, x, y, z, radius, radius2, t0, t1, degree, knots, poles, weights)
+  return setmetatable({ kind = kind, origin = origin, x = x, y = y, z = z, radius = radius, radius2 = radius2,
+    t0 = t0, t1 = t1, degree = degree, knots = knots, poles = poles, weights = weights }, Curve)
+end
+
+-- A `Curve` copied out of the library's struct.
+function Curve.of(raw)
+  local function point(p) return { tonumber(p.x), tonumber(p.y), tonumber(p.z) } end
+  local function doubles(at, n)
+    local out = {}
+    if at ~= nil then for j = 0, n - 1 do out[j + 1] = tonumber(at[j]) end end
+    return out
+  end
+  local n = tonumber(raw.pole_count)
+  local flat, poles = doubles(raw.poles, 3 * n), {}
+  for k = 1, n do poles[k] = { flat[3 * k - 2], flat[3 * k - 1], flat[3 * k] } end
+  local weights = nil
+  if raw.weights ~= nil then weights = doubles(raw.weights, n) end
+  return Curve.new(text(raw.kind), point(raw.origin), point(raw.x), point(raw.y), point(raw.z), tonumber(raw.radius),
+    tonumber(raw.radius2), tonumber(raw.t0), tonumber(raw.t1), tonumber(raw.degree),
+    doubles(raw.knots, tonumber(raw.knot_count)), poles, weights)
+end
+
+Curve.__tostring = function(self)
+  if self.kind == "nurbs" then
+    return ("Curve('nurbs', degree=%d, poles=%d, rational=%s, t0=%s, t1=%s)"):format(self.degree, #self.poles,
+      tostring(self.weights ~= nil), tostring(self.t0), tostring(self.t1))
+  end
+  local o = self.origin
+  return ("Curve('%s', origin=(%s, %s, %s), radius=%s, t0=%s, t1=%s)"):format(self.kind, tostring(o[1]), tostring(o[2]),
+    tostring(o[3]), tostring(self.radius), tostring(self.t0), tostring(self.t1))
+end
+
 --- One edge of a solid, as plain data: `index` (what `fillet` takes, from zero),
---- `kind` (the curve), `faces` (the faces meeting on it, indices from zero) and
---- `segments` ({{a, b}, ...}, each end a triple).
+--- `kind` (the curve), `faces` (the faces meeting on it, indices from zero),
+--- `segments` ({{a, b}, ...}, each end a triple) and `curve` (the exact `Curve`,
+--- nil for an edge with none, kind "other").
 ---@class Edge
 ---@field index integer  from zero
 ---@field kind string
 ---@field faces integer[]  from zero
 ---@field segments table[]  {{a, b}, ...}, each end {x, y, z}
+---@field curve Curve|nil
 Edge = {}
 local Edge_get = {}
 class(Edge, Edge_get)
 callable(Edge)
 M.Edge = Edge
 
-function Edge.new(index, kind, faces, segments)
-  return setmetatable({ index = index, kind = kind, faces = faces, segments = segments }, Edge)
+function Edge.new(index, kind, faces, segments, curve)
+  return setmetatable({ index = index, kind = kind, faces = faces, segments = segments, curve = curve }, Edge)
 end
 
 --- Whether the edge is a straight line.
@@ -1928,6 +2229,77 @@ Manifold.__tostring = function(self)
     .. "non_manifold_vertices=%d, is_manifold=%s, is_closed=%s)"):format(self.faces, self.edges, self.vertices,
     self.boundary_edges, self.non_manifold_edges, self.non_manifold_vertices, tostring(self.is_manifold),
     tostring(self.is_closed))
+end
+
+--- Where a hit lands on one side: a profile's `loop_index` (0 the boundary or
+--- the open chain, then the holes in the order they were added), `segment`, and
+--- `t` from 0 to 1 along it, with `face` NONE -- or a solid's `face` at (`u`,
+--- `v`), with `loop_index` and `segment` NONE. Indices count from zero, as the
+--- library does.
+---@class Spot
+---@field loop_index integer  from zero; NONE on a face
+---@field segment integer  from zero; NONE on a face
+---@field t number
+---@field face integer  NONE on a profile
+---@field u number
+---@field v number
+local Spot = {}
+class(Spot)
+callable(Spot)
+M.Spot = Spot
+
+function Spot.new(loop_index, segment, t, face, u, v)
+  return setmetatable({ loop_index = loop_index, segment = segment, t = t, face = face, u = u, v = v }, Spot)
+end
+
+Spot.__tostring = function(self)
+  return ("Spot(loop_index=%d, segment=%d, t=%s, face=%d, u=%s, v=%s)"):format(self.loop_index, self.segment,
+    tostring(self.t), self.face, tostring(self.u), tostring(self.v))
+end
+
+--- One place two curves meet, copied out (`Profile:hits`). A point (`run`
+--- false): `start` equals `end` ({x, y, z}), and `touch` is true where the
+--- curves are tangent rather than crossing. A run (`run` true): they coincide
+--- from `start` to `end`. `a_start`/`a_end` are where on the first curve,
+--- `b_start`/`b_end` where on the second, as `Spot` records. A point at the
+--- join of two segments is reported once, on either: as segment k at `t` 1 or
+--- as segment k + 1 at `t` 0.
+---@class Hit
+---@field run boolean
+---@field touch boolean
+---@field start number[]  {x, y, z}
+---@field end number[]  {x, y, z}; `start` again for a point
+---@field a_start Spot
+---@field a_end Spot
+---@field b_start Spot
+---@field b_end Spot
+local Hit = {}
+class(Hit)
+callable(Hit)
+M.Hit = Hit
+
+function Hit.new(run, touch, start, end_, a_start, a_end, b_start, b_end)
+  return setmetatable({ run = run, touch = touch, start = start, ["end"] = end_, a_start = a_start, a_end = a_end,
+    b_start = b_start, b_end = b_end }, Hit)
+end
+
+local function spot_of(raw)
+  return Spot.new(tonumber(raw.loop_index), tonumber(raw.segment), tonumber(raw.t), tonumber(raw.face),
+    tonumber(raw.u), tonumber(raw.v))
+end
+
+-- A `Hit` copied out of the library's struct.
+function Hit.of(raw)
+  return Hit.new(raw.run, raw.touch, { tonumber(raw.start.x), tonumber(raw.start.y), tonumber(raw.start.z) },
+    { tonumber(raw["end"].x), tonumber(raw["end"].y), tonumber(raw["end"].z) }, spot_of(raw.a_start),
+    spot_of(raw.a_end), spot_of(raw.b_start), spot_of(raw.b_end))
+end
+
+Hit.__tostring = function(self)
+  local s, e = self.start, self["end"]
+  return ("Hit(run=%s, touch=%s, start=(%s, %s, %s), end=(%s, %s, %s))"):format(tostring(self.run),
+    tostring(self.touch), tostring(s[1]), tostring(s[2]), tostring(s[3]), tostring(e[1]), tostring(e[2]),
+    tostring(e[3]))
 end
 
 -- ---- frames ---------------------------------------------------------------------------
@@ -2227,6 +2599,82 @@ end
 function M.write_step(path, solids, schema, unit)
   if unit == nil then unit = "mm" end
   write_text(path, M.write_step_text(solids, schema, unit))
+end
+
+--- Several solids (a Lua array) as one ACIS SAT file's text, each its own body:
+--- the analytic surfaces as their own records, splines and swept surfaces as
+--- exact NURBS, in the layout Rhino's own exporter writes. `unit` "mm"
+--- (default), "m" or "in" goes into the header as millimetres per unit.
+function M.write_sat_text(solids, unit)
+  if unit == nil then unit = "mm" end
+  if UNITS[unit] == nil then raise("unit must be one of ['in', 'm', 'mm']") end
+  local n = #solids
+  local handles = ffi.new("const struct CadaclysmBlacksmithSolid *[?]", math.max(n, 1))
+  for i = 1, n do handles[i - 1] = solid_handle(solids[i], "write_sat_text") end
+  local out = lib().cadaclysm_blacksmith_sat_text(handles, n, UNITS[unit])
+  if out == nil then fail("sat_text") end
+  local result = ffi.string(out)
+  lib().cadaclysm_blacksmith_string_free(out)
+  return result
+end
+
+--- `write_sat_text` written to `path` by the library itself, which names the
+--- file in its refusal when it cannot.
+function M.write_sat(path, solids, unit)
+  if unit == nil then unit = "mm" end
+  if UNITS[unit] == nil then raise("unit must be one of ['in', 'm', 'mm']") end
+  local n = #solids
+  local handles = ffi.new("const struct CadaclysmBlacksmithSolid *[?]", math.max(n, 1))
+  for i = 1, n do handles[i - 1] = solid_handle(solids[i], "write_sat") end
+  if not lib().cadaclysm_blacksmith_sat(handles, n, tostring(path), UNITS[unit]) then fail("sat") end
+end
+
+--- One OCCT `.brep` file's text, each solid its own solid under one compound (one
+--- solid is the file's root): the exact surfaces and curves, with a curve in each
+--- face's own parameters for every edge, so OCCT's `BRepTools::Read` gives a shape
+--- `BRepCheck_Analyzer` finds valid. No unit is declared -- a `.brep` carries none.
+function M.write_brep_text(solids)
+  local n = #solids
+  local handles = ffi.new("const struct CadaclysmBlacksmithSolid *[?]", math.max(n, 1))
+  for i = 1, n do handles[i - 1] = solid_handle(solids[i], "write_brep_text") end
+  local out = lib().cadaclysm_blacksmith_brep_text(handles, n)
+  if out == nil then fail("brep_text") end
+  local result = ffi.string(out)
+  lib().cadaclysm_blacksmith_string_free(out)
+  return result
+end
+
+--- `write_brep_text` written to `path` by the library itself.
+function M.write_brep(path, solids)
+  local n = #solids
+  local handles = ffi.new("const struct CadaclysmBlacksmithSolid *[?]", math.max(n, 1))
+  for i = 1, n do handles[i - 1] = solid_handle(solids[i], "write_brep") end
+  if not lib().cadaclysm_blacksmith_brep(handles, n, tostring(path)) then fail("brep") end
+end
+
+-- ---- SVG ----------------------------------------------------------------------------
+
+--- Several solids (a Lua array) as one SVG's text, each its own `<g>` -- see
+--- `Solid:svg_text` for `words`.
+function M.write_svg_text(solids, words)
+  local o = svg_options(words)
+  local n = #solids
+  local handles = ffi.new("const struct CadaclysmBlacksmithSolid *[?]", math.max(n, 1))
+  for i = 1, n do handles[i - 1] = solid_handle(solids[i], "write_svg_text") end
+  local out = lib().cadaclysm_blacksmith_svg_text(handles, n, o)
+  if out == nil then fail("svg_text") end
+  local result = ffi.string(out)
+  lib().cadaclysm_blacksmith_string_free(out)
+  return result
+end
+
+--- `write_svg_text` written to `path` by the library itself.
+function M.write_svg(path, solids, words)
+  local o = svg_options(words)
+  local n = #solids
+  local handles = ffi.new("const struct CadaclysmBlacksmithSolid *[?]", math.max(n, 1))
+  for i = 1, n do handles[i - 1] = solid_handle(solids[i], "write_svg") end
+  if not lib().cadaclysm_blacksmith_svg(handles, n, tostring(path), o) then fail("svg") end
 end
 
 return M

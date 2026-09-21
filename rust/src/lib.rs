@@ -133,7 +133,7 @@ fn c_string(what: &str, value: &str) -> Result<CString> {
 }
 
 /// A path as the C string the ABI takes, which is UTF-8 on every platform.
-fn c_path(path: &Path) -> Result<CString> {
+pub(crate) fn c_path(path: &Path) -> Result<CString> {
     let text = path
         .to_str()
         .ok_or_else(|| Error::new(format!("{}: the library takes UTF-8 paths only", path.display())))?;
@@ -203,6 +203,11 @@ pub fn build_date() -> Result<String> {
     Ok(unsafe { text((api.cadaclysm_build_date)()) })
 }
 
+/// How many coarser levels [`Node::mesh_lod`] offers above the mesh itself (level 0).
+pub fn lod_levels() -> Result<u32> {
+    Ok(unsafe { (api()?.cadaclysm_lod_levels)() })
+}
+
 /// Load a license: the certificate text, or the path of a file holding it.
 ///
 /// Without this the library looks in `CADACLYSM_LICENSE`, then for `cadaclysm.lic`
@@ -233,12 +238,13 @@ pub fn license_notice_count() -> Result<u64> {
     Ok(unsafe { (api.cadaclysm_license_notice_count)() })
 }
 
-/// One format [`Node::save_mesh`] writes: its name and the extension its files take,
-/// which is not derivable (`stl-ascii` writes a `.stl`).
+/// One format [`Node::save_mesh`] writes: its name, the extension its files take (not
+/// derivable: `stl-ascii` writes a `.stl`), and a label for a menu (`STL (binary)`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MeshFormat {
     pub name: String,
     pub extension: String,
+    pub label: String,
 }
 
 /// Every format [`Node::save_mesh`] writes. Ask rather than hard-code: a format added
@@ -251,6 +257,33 @@ pub fn mesh_formats() -> Result<Vec<MeshFormat>> {
             MeshFormat {
                 name: text((api.cadaclysm_mesh_format)(i)),
                 extension: text((api.cadaclysm_mesh_format_extension)(i)),
+                label: text((api.cadaclysm_mesh_format_label)(i)),
+            }
+        })
+        .collect())
+}
+
+/// One format this build reads: its name and the extensions its files take.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Format {
+    pub name: String,
+    pub extensions: Vec<String>,
+}
+
+/// Every format this build reads, for an open dialog's filter. The library hands the
+/// extensions over semicolon-separated; they are split here.
+pub fn formats() -> Result<Vec<Format>> {
+    let api = api()?;
+    let count = unsafe { (api.cadaclysm_format_count)() };
+    Ok((0..count)
+        .map(|i| unsafe {
+            Format {
+                name: text((api.cadaclysm_format_name)(i)),
+                extensions: text((api.cadaclysm_format_extensions)(i))
+                    .split(';')
+                    .filter(|e| !e.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
             }
         })
         .collect())
@@ -264,6 +297,16 @@ pub fn pick_file() -> Result<Option<PathBuf>> {
     let api = api()?;
     let raw = unsafe { (api.cadaclysm_pick_file)(std::ptr::null()) };
     // Borrowed until the next picker call on this thread, so copied out now.
+    Ok((!raw.is_null()).then(|| PathBuf::from(unsafe { text(raw) })))
+}
+
+/// Ask the user where to save, through the library's own dialog, with
+/// `suggested_name` prefilled. `None` if they cancelled or no dialog was available.
+/// Blocks; on macOS, call it from the main thread.
+pub fn pick_save(suggested_name: Option<&str>) -> Result<Option<PathBuf>> {
+    let api = api()?;
+    let name = suggested_name.map(|n| c_string("suggested_name", n)).transpose()?;
+    let raw = unsafe { (api.cadaclysm_pick_save)(std::ptr::null(), name.as_ref().map_or(std::ptr::null(), |n| n.as_ptr())) };
     Ok((!raw.is_null()).then(|| PathBuf::from(unsafe { text(raw) })))
 }
 
@@ -574,6 +617,101 @@ impl<'s> Polylines<'s> {
     }
 }
 
+/// A node's edges, curves or isocurves as cubic Bézier curves -- exact where the file's
+/// curves were, where [`Polylines`] are their chords -- borrowed from the scene.
+/// `points` holds four control points a curve; `weights` a weight per control point,
+/// all ones for a polynomial curve and the weights that make a circular arc exact for
+/// a rational one.
+#[derive(Clone, Copy, Debug)]
+pub struct Beziers<'s> {
+    pub points: &'s [[f32; 3]],
+    pub weights: &'s [f32],
+}
+
+/// A [`Beziers`] in memory of the program's own.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BeziersData {
+    pub points: Vec<[f32; 3]>,
+    pub weights: Vec<f32>,
+}
+
+impl<'s> Beziers<'s> {
+    fn from_raw(raw: sys::CadaclysmBeziers) -> Beziers<'s> {
+        let n = raw.count as usize;
+        unsafe {
+            Beziers {
+                points: groups::<3>(raw.points, n * 4).unwrap_or(&[]),
+                weights: borrowed(raw.weights, n * 4),
+            }
+        }
+    }
+
+    /// How many curves.
+    pub fn count(&self) -> usize {
+        self.weights.len() / 4
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
+
+    /// One curve's four control points at a time.
+    pub fn iter(&self) -> impl Iterator<Item = &'s [[f32; 3]]> + 's {
+        self.points.chunks_exact(4)
+    }
+
+    pub fn copy(&self) -> BeziersData {
+        BeziersData { points: self.points.to_vec(), weights: self.weights.to_vec() }
+    }
+}
+
+/// What a node turned out to be for a physics engine: a box, sphere, capsule or
+/// cylinder where one fits within `error`, else a convex hull. `frame` (column-major)
+/// and `half_extent` are always the true oriented box. Plain data, copied out.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Collision {
+    pub shape: u32,
+    pub confidence: u32,
+    pub axis: u32,
+    pub frame: [f64; 16],
+    pub half_extent: [f64; 3],
+    pub radius: f64,
+    pub height: f64,
+    pub error: f64,
+    pub hull_vertex_count: u32,
+    pub hull_index_count: u32,
+}
+
+impl Collision {
+    /// `none`, `box`, `sphere`, `capsule`, `cylinder` or `hull`.
+    pub fn shape_name(&self) -> &'static str {
+        ["none", "box", "sphere", "capsule", "cylinder", "hull"].get(self.shape as usize).copied().unwrap_or("?")
+    }
+}
+
+/// A node's convex hull for a physics engine, as triangles, copied out of the scene:
+/// the library frees its own copy when the node is asked for a different `hull_budget`,
+/// so a borrow would not be sound.
+#[derive(Clone, Debug, Default)]
+pub struct CollisionHull {
+    pub positions: Vec<[f32; 3]>,
+    pub indices: Vec<u32>,
+}
+
+impl CollisionHull {
+    pub fn vertex_count(&self) -> usize {
+        self.positions.len()
+    }
+
+    pub fn index_count(&self) -> usize {
+        self.indices.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.positions.is_empty()
+    }
+}
+
 /// One trimmed face: the surface itself, plus the loops that cut it, borrowed from
 /// the scene. See `CadaclysmFace` in the header for the whole story.
 #[derive(Clone, Debug)]
@@ -702,6 +840,167 @@ impl Drop for Brep {
 impl fmt::Debug for Brep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Brep({:p})", self.pointer)
+    }
+}
+
+// ---- meshlets ---------------------------------------------------------------------
+
+/// One meshlet, copied out: the vectors are yours.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Meshlet {
+    pub index: u32,
+    /// 0 for a leaf over the mesh itself, higher for a simplified level above it.
+    pub level: u32,
+    pub group: u32,
+    /// How far this meshlet's level moved the surface; zero at level 0.
+    pub error: f32,
+    pub positions: Vec<[f32; 3]>,
+    /// Zeros where the mesh had none.
+    pub normals: Vec<[f32; 3]>,
+    /// Three a triangle, into this meshlet's own `positions`.
+    pub indices: Vec<u32>,
+    /// The finer meshlets below this one, for a levelled build.
+    pub children: Vec<u32>,
+}
+
+impl Meshlet {
+    pub fn vertex_count(&self) -> usize {
+        self.positions.len()
+    }
+
+    pub fn triangle_count(&self) -> usize {
+        self.indices.len() / 3
+    }
+}
+
+/// A mesh split into meshlets, optionally with coarser levels above them, for a
+/// mesh-shader or Nanite-style renderer. Built from any mesh -- a [`Node::mesh`] or
+/// slices of your own -- and freed when dropped.
+pub struct Meshlets {
+    pointer: NonNull<sys::CadaclysmMeshlets>,
+    api: &'static Api,
+}
+
+// The library builds and reads meshlets with no thread affinity; the handle is owned.
+unsafe impl Send for Meshlets {}
+
+impl Meshlets {
+    /// Split `positions`, `normals` (or `None`) and `indices` (three a triangle) into
+    /// meshlets of at most `max_triangles` and `max_vertices` each -- the consumer's own
+    /// limits, with no default: Nanite takes 128/256, a mesh-shader pipeline 124/64.
+    /// `levels` above 0 groups and simplifies each level into the next until one meshlet
+    /// is left; [`Meshlets::level`] and [`Meshlet::children`] say which is which.
+    pub fn build(
+        positions: &[[f32; 3]],
+        normals: Option<&[[f32; 3]]>,
+        indices: &[u32],
+        max_triangles: u32,
+        max_vertices: u32,
+        levels: i32,
+    ) -> Result<Meshlets> {
+        let api = api()?;
+        if max_triangles == 0 || max_vertices == 0 {
+            return Err(Error::new("meshlets: max_triangles and max_vertices are required"));
+        }
+        if indices.len() % 3 != 0 {
+            return Err(Error::new("meshlets: indices must hold three a triangle"));
+        }
+        if let Some(n) = normals {
+            if n.len() != positions.len() {
+                return Err(Error::new("meshlets: normals must hold one per vertex"));
+            }
+        }
+        let pointer = unsafe {
+            (api.cadaclysm_meshlets_build)(
+                positions.as_ptr().cast(),
+                normals.map_or(std::ptr::null(), |n| n.as_ptr().cast()),
+                positions.len(),
+                indices.as_ptr(),
+                indices.len(),
+                max_triangles,
+                max_vertices,
+                levels,
+            )
+        };
+        let pointer = NonNull::new(pointer).ok_or_else(|| {
+            let reason = last_error(api);
+            Error::new(if reason.is_empty() { "meshlets: build failed".to_string() } else { reason })
+        })?;
+        Ok(Meshlets { pointer, api })
+    }
+
+    fn raw(&self) -> *const sys::CadaclysmMeshlets {
+        self.pointer.as_ptr()
+    }
+
+    /// How many meshlets, every level counted.
+    pub fn count(&self) -> u32 {
+        unsafe { (self.api.cadaclysm_meshlets_count)(self.raw()) }
+    }
+
+    pub fn triangle_count(&self, i: u32) -> u32 {
+        unsafe { (self.api.cadaclysm_meshlet_triangle_count)(self.raw(), i) }
+    }
+
+    pub fn vertex_count(&self, i: u32) -> u32 {
+        unsafe { (self.api.cadaclysm_meshlet_vertex_count)(self.raw(), i) }
+    }
+
+    /// 0 for a leaf over the mesh itself, higher for a simplified level above it.
+    pub fn level(&self, i: u32) -> u32 {
+        unsafe { (self.api.cadaclysm_meshlet_level)(self.raw(), i) }
+    }
+
+    pub fn group(&self, i: u32) -> u32 {
+        unsafe { (self.api.cadaclysm_meshlet_group)(self.raw(), i) }
+    }
+
+    /// How far this meshlet's level moved the surface; zero at level 0.
+    pub fn error(&self, i: u32) -> f32 {
+        unsafe { (self.api.cadaclysm_meshlet_error)(self.raw(), i) }
+    }
+
+    pub fn child_count(&self, i: u32) -> u32 {
+        unsafe { (self.api.cadaclysm_meshlet_child_count)(self.raw(), i) }
+    }
+
+    /// One meshlet's arrays and numbers, copied out.
+    pub fn meshlet(&self, i: u32) -> Meshlet {
+        let vertices = self.vertex_count(i) as usize;
+        let triangles = self.triangle_count(i) as usize;
+        let children = self.child_count(i) as usize;
+        let mut positions = vec![[0.0f32; 3]; vertices];
+        let mut normals = vec![[0.0f32; 3]; vertices];
+        let mut indices = vec![0u32; triangles * 3];
+        let mut kids = vec![0u32; children];
+        unsafe {
+            (self.api.cadaclysm_meshlet_positions)(self.raw(), i, positions.as_mut_ptr().cast());
+            (self.api.cadaclysm_meshlet_normals)(self.raw(), i, normals.as_mut_ptr().cast());
+            (self.api.cadaclysm_meshlet_indices)(self.raw(), i, indices.as_mut_ptr());
+            (self.api.cadaclysm_meshlet_children)(self.raw(), i, kids.as_mut_ptr());
+        }
+        Meshlet {
+            index: i,
+            level: self.level(i),
+            group: self.group(i),
+            error: self.error(i),
+            positions,
+            normals,
+            indices,
+            children: kids,
+        }
+    }
+}
+
+impl Drop for Meshlets {
+    fn drop(&mut self) {
+        unsafe { (self.api.cadaclysm_meshlets_free)(self.pointer.as_ptr()) }
+    }
+}
+
+impl fmt::Debug for Meshlets {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Meshlets(count={})", self.count())
     }
 }
 
@@ -1003,11 +1302,7 @@ impl<'s> Node<'s> {
         Bounds::from_raw(self.call(self.scene.api.cadaclysm_node_bounds))
     }
 
-    /// Its triangles, in their own frame, built now if they have not been. Where the
-    /// node instances another, these are the instanced node's triangles -- two
-    /// occurrences of one shape hand back the *same* slices.
-    pub fn mesh(&self) -> Mesh<'s> {
-        let raw = self.call(self.scene.api.cadaclysm_node_mesh);
+    fn mesh_of(&self, raw: sys::CadaclysmMesh) -> Mesh<'s> {
         let n = raw.vertex_count as usize;
         // SAFETY: the scene keeps every mesh it built until it closes, and `'s`
         // borrows the scene, so these slices cannot outlive the memory.
@@ -1020,6 +1315,28 @@ impl<'s> Node<'s> {
                 indices: borrowed(raw.indices, raw.index_count as usize),
             }
         }
+    }
+
+    /// Its triangles, in their own frame, built now if they have not been. Where the
+    /// node instances another, these are the instanced node's triangles -- two
+    /// occurrences of one shape hand back the *same* slices.
+    pub fn mesh(&self) -> Mesh<'s> {
+        self.mesh_of(self.call(self.scene.api.cadaclysm_node_mesh))
+    }
+
+    /// Its triangles at a coarser level of detail: 0 is [`Node::mesh`] itself, 1 up to
+    /// [`lod_levels`] each about a quarter of the triangles of the one before, and past
+    /// that empty. Every level shares the level-0 vertices -- the same `positions`, only
+    /// `indices` differ -- so upload the vertices once and switch level by drawing a
+    /// different index range.
+    pub fn mesh_lod(&self, level: u32) -> Mesh<'s> {
+        self.mesh_of(unsafe { (self.scene.api.cadaclysm_node_mesh_lod)(self.scene.raw(), self.index, level) })
+    }
+
+    /// How far [`Node::mesh_lod`] at this level moved the surface, in the scene's units
+    /// -- what to pick a level by. Zero at level 0.
+    pub fn lod_error(&self, level: u32) -> f32 {
+        unsafe { (self.scene.api.cadaclysm_node_lod_error)(self.scene.raw(), self.index, level) }
     }
 
     /// Its faces as surfaces and trim loops, where the reader built them. Costs
@@ -1083,9 +1400,153 @@ impl<'s> Node<'s> {
         Polylines::from_raw(self.call(self.scene.api.cadaclysm_node_isocurves))
     }
 
+    /// Its feature edges as cubic Bézier curves -- exact where the file's curves were,
+    /// where [`Node::edges`] are their chords. Builds the geometry if needed.
+    pub fn edge_beziers(&self) -> Beziers<'s> {
+        Beziers::from_raw(self.call(self.scene.api.cadaclysm_node_edge_beziers))
+    }
+
+    /// Its free curves as cubic Béziers; see [`Node::edge_beziers`].
+    pub fn curve_beziers(&self) -> Beziers<'s> {
+        Beziers::from_raw(self.call(self.scene.api.cadaclysm_node_curve_beziers))
+    }
+
+    /// Its isocurves as cubic Béziers; see [`Node::edge_beziers`].
+    pub fn isocurve_beziers(&self) -> Beziers<'s> {
+        Beziers::from_raw(self.call(self.scene.api.cadaclysm_node_isocurve_beziers))
+    }
+
+    /// The collision body for what this node draws, building its mesh if it is not
+    /// built. `hull_budget` is the most triangles a hull may have; 0 asks for the Unity
+    /// limit (255) and is not clamped to it. `None` for a node that draws nothing.
+    /// Cached per node and budget.
+    pub fn collision(&self, hull_budget: u32) -> Option<Collision> {
+        let mut raw = sys::CadaclysmCollision {
+            size: std::mem::size_of::<sys::CadaclysmCollision>() as u32,
+            shape: 0,
+            confidence: 0,
+            axis: 0,
+            frame: [0.0; 16],
+            half_extent: [0.0; 3],
+            radius: 0.0,
+            height: 0.0,
+            error: 0.0,
+            hull_vertex_count: 0,
+            hull_index_count: 0,
+        };
+        let ok = unsafe { (self.scene.api.cadaclysm_node_collision)(self.scene.raw(), self.index, hull_budget, &mut raw) };
+        ok.then(|| Collision {
+            shape: raw.shape,
+            confidence: raw.confidence,
+            axis: raw.axis,
+            frame: raw.frame,
+            half_extent: raw.half_extent,
+            radius: raw.radius,
+            height: raw.height,
+            error: raw.error,
+            hull_vertex_count: raw.hull_vertex_count,
+            hull_index_count: raw.hull_index_count,
+        })
+    }
+
+    /// The convex hull [`Node::collision`] counted, as triangles, copied out. Empty for
+    /// a node that draws nothing.
+    pub fn collision_hull(&self, hull_budget: u32) -> CollisionHull {
+        let raw = unsafe { (self.scene.api.cadaclysm_node_collision_hull)(self.scene.raw(), self.index, hull_budget) };
+        unsafe {
+            CollisionHull {
+                positions: groups::<3>(raw.positions, raw.vertex_count as usize).unwrap_or(&[]).to_vec(),
+                indices: borrowed(raw.indices, raw.index_count as usize).to_vec(),
+            }
+        }
+    }
+
     /// This node and every node under it, parents before children.
     pub fn walk(&self) -> Walk<'s> {
         Walk { stack: vec![*self] }
+    }
+
+    // -- the surface path: for a renderer drawing exact surfaces, never triangles --
+
+    /// The box of what this node draws under `placement` (column-major, as
+    /// [`Placement::raw_transform`]; `None` for the identity), for a part drawn from its
+    /// surfaces: every sample is carried through the convention and the placement before
+    /// it is boxed, so it is tighter than placing the corners of [`Node::bounds`]. All
+    /// zeros for a part with no surfaces.
+    pub fn bounds_placed(&self, placement: Option<&[f64; 16]>) -> Bounds {
+        let matrix = placement.map_or(std::ptr::null(), |m| m.as_ptr());
+        Bounds::from_raw(unsafe { (self.scene.api.cadaclysm_node_bounds_placed)(self.scene.raw(), self.index, matrix) })
+    }
+
+    /// Whether its mesh has been built and is held -- by [`Scene::realize_all`], by an
+    /// ask for it, or by anything else that needed it.
+    pub fn is_meshed(&self) -> bool {
+        self.call(self.scene.api.cadaclysm_node_is_meshed)
+    }
+
+    /// Its face boundaries taken from its trimmed surfaces -- the outline that costs no
+    /// tessellation, where [`Node::edges`] meshes the part. In the surfaces' own frame
+    /// (see [`Scene::surface_matrix`]); empty without surfaces.
+    pub fn surface_edges(&self) -> Polylines<'s> {
+        Polylines::from_raw(self.call(self.scene.api.cadaclysm_node_surface_edges))
+    }
+
+    /// Its isocurves taken from its trimmed surfaces and clipped to the trims, without
+    /// meshing; a flat face gets none. In the surfaces' frame; empty without surfaces.
+    pub fn surface_isocurves(&self) -> Polylines<'s> {
+        Polylines::from_raw(self.call(self.scene.api.cadaclysm_node_surface_isocurves))
+    }
+
+    /// Where the segment `from`..`to` first meets this part's surfaces, or `None` where
+    /// it meets none. Exact, and in the surfaces' own frame: carry a ray from the
+    /// scene's space through the inverse of [`Scene::surface_matrix`] first.
+    pub fn surface_pick(&self, from: [f64; 3], to: [f64; 3]) -> Option<[f64; 3]> {
+        let mut hit = [0.0f64; 3];
+        let ok = unsafe {
+            (self.scene.api.cadaclysm_node_surface_pick)(self.scene.raw(), self.index, from.as_ptr(), to.as_ptr(), hit.as_mut_ptr())
+        };
+        ok.then_some(hit)
+    }
+
+    /// A coarse mesh over its surfaces for what needs triangles and not a picture (ray
+    /// tracing, distance fields): each face gridded `cells` by `cells`, never welded,
+    /// built once per part at the first size asked. Empty without surfaces or for zero
+    /// cells.
+    pub fn surface_proxy_mesh(&self, cells: u32) -> Mesh<'s> {
+        self.mesh_of(unsafe { (self.scene.api.cadaclysm_node_surface_proxy_mesh)(self.scene.raw(), self.index, cells) })
+    }
+
+    /// About how many triangles [`Node::mesh`] would give, without building it; `-1`
+    /// where the reader cannot say without doing the work. Treat `-1` as unknown, never
+    /// as zero.
+    pub fn triangle_estimate(&self) -> i64 {
+        self.call(self.scene.api.cadaclysm_node_triangle_estimate)
+    }
+
+    /// This node's own wireframe as SVG text, in its own frame -- [`Scene::svg_text`]'s
+    /// `options`, read from just this node rather than every placement.
+    pub fn svg_text(&self, options: &SvgOptions) -> Result<String> {
+        let api = self.scene.api;
+        let raw = build_svg_options(api, options, self.scene.default_up());
+        let ptr = unsafe { (api.cadaclysm_node_svg_text)(self.scene.raw(), self.index, &raw) };
+        if ptr.is_null() {
+            let reason = last_error(api);
+            return Err(Error::new(if reason.is_empty() { "svg".to_string() } else { reason }));
+        }
+        Ok(unsafe { text(ptr) })
+    }
+
+    /// [`Node::svg_text`] written to `path` by the library itself.
+    pub fn svg(&self, path: impl AsRef<Path>, options: &SvgOptions) -> Result<()> {
+        let path = path.as_ref();
+        let c_path = c_path(path)?;
+        let api = self.scene.api;
+        let raw = build_svg_options(api, options, self.scene.default_up());
+        if unsafe { (api.cadaclysm_node_svg)(self.scene.raw(), self.index, c_path.as_ptr(), &raw) } {
+            return Ok(());
+        }
+        let reason = last_error(api);
+        Err(Error::new(if reason.is_empty() { format!("could not write {}", path.display()) } else { reason }))
     }
 }
 
@@ -1101,6 +1562,168 @@ impl<'s> Iterator for Walk<'s> {
         self.stack.extend(node.children().into_iter().rev());
         Some(node)
     }
+}
+
+// ---- svg ----------------------------------------------------------------------------
+
+/// Which axis is up -- `CadaclysmSvgOptions::up`. `None` in [`SvgOptions::up`] keeps
+/// the scene's own convention: [`Up::Y`] for [`Convention::Unity`]/[`Convention::YUp`],
+/// [`Up::Z`] otherwise -- and [`Up::Z`] for a solid, which carries no convention of its
+/// own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Up {
+    /// Y is up.
+    Y,
+    /// Z is up.
+    Z,
+}
+
+/// One of the seven camera angles [`SvgOptions::view`] understands -- the same table
+/// `cadaclysm_viewer.VIEWS` gives Python's `show()` and `svg()` both. Degrees
+/// (azimuth, elevation): [`SvgView::angles`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SvgView {
+    /// (-90, 0) -- looking from -Y.
+    Front,
+    /// (90, 0) -- looking from +Y.
+    Back,
+    /// (180, 0) -- looking from -X.
+    Left,
+    /// (0, 0) -- looking from +X.
+    Right,
+    /// (-90, 90) -- looking straight down.
+    Top,
+    /// (-90, -90) -- looking straight up.
+    Bottom,
+    /// (-50, 28) -- the viewer's own default angle.
+    #[default]
+    Iso,
+}
+
+impl SvgView {
+    /// This view's (azimuth, elevation) in degrees.
+    fn angles(self) -> (f64, f64) {
+        match self {
+            SvgView::Front => (-90.0, 0.0),
+            SvgView::Back => (90.0, 0.0),
+            SvgView::Left => (180.0, 0.0),
+            SvgView::Right => (0.0, 0.0),
+            SvgView::Top => (-90.0, 90.0),
+            SvgView::Bottom => (-90.0, -90.0),
+            SvgView::Iso => (-50.0, 28.0),
+        }
+    }
+}
+
+/// How an SVG drawing is made -- the camera in the viewer's words, the page, the pen
+/// and which line sets. Mirrors `CadaclysmSvgOptions`; [`SvgOptions::default`] is the
+/// defaults `cadaclysm_svg_options_init` fills. `view` supplies `azimuth`/`elevation`
+/// unless they are set directly; `up` falls back to the scene's own convention (a solid
+/// falls back to [`Up::Z`], carrying no convention of its own). Passed to
+/// [`Scene::svg_text`], [`Scene::svg`], [`Node::svg_text`], [`Node::svg`] and, over the
+/// kernel, [`blacksmith::Solid::svg_text`]/[`blacksmith::Solid::svg`]. A refused option
+/// (an out-of-range `fov`, say) is an [`Error`] naming the field, worded by the library
+/// itself.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SvgOptions {
+    /// front back left right top bottom iso -- fills `azimuth`/`elevation` unless they
+    /// are set directly. Default [`SvgView::Iso`].
+    pub view: SvgView,
+    /// Degrees about the up axis from +X, overriding `view`'s: -90 looks from -Y, the
+    /// front. `None` keeps `view`'s own.
+    pub azimuth: Option<f64>,
+    /// Degrees above the horizon, overriding `view`'s. `None` keeps `view`'s own.
+    pub elevation: Option<f64>,
+    /// `None` keeps the scene's own convention -- [`Up::Y`] for
+    /// [`Convention::Unity`]/[`Convention::YUp`], [`Up::Z`] otherwise (and always
+    /// [`Up::Z`] over the kernel, a solid carrying no convention of its own).
+    pub up: Option<Up>,
+    /// Vertical field of view in degrees; 0 (the default) is orthographic.
+    pub fov: f64,
+    /// The page's viewBox width and height, page units; 0 is 1000.
+    pub width: f64,
+    pub height: f64,
+    /// Fraction of the content's extent left each side. Default 0.05.
+    pub margin: f64,
+    /// How far a written curve may stray, in page units. Default 0.1.
+    pub tolerance: f64,
+    /// The pen colour, `0xRRGGBB`. Default black.
+    pub stroke: u32,
+    /// The pen's width, page units. Default 1.
+    pub stroke_width: f64,
+    /// `0xRRGGBB`, or `None` (the default) for no `<rect>` behind the drawing -- the
+    /// page left to whatever the viewer composites it onto.
+    pub background: Option<u32>,
+    /// Each shape's feature edges -- the exact curves the flattened polylines are drawn
+    /// from. Default `true`.
+    pub edges: bool,
+    /// Each shape's free curves -- the ones that are not the edge of any face (ignored
+    /// over the kernel, a solid having none of its own). Default `false`.
+    pub curves: bool,
+    /// Each shape's isocurves -- the constant-parameter lines across a curved face
+    /// (ignored over the kernel too). Default `false`.
+    pub isocurves: bool,
+    /// Write every line as straight segments within `tolerance`, instead of being
+    /// fitted back to cubic Béziers. Default `false`.
+    pub polylines: bool,
+}
+
+impl Default for SvgOptions {
+    /// The defaults `cadaclysm_svg_options_init` fills: the viewer's iso, orthographic,
+    /// a 1000-square page, black edges one unit wide on nothing.
+    fn default() -> SvgOptions {
+        SvgOptions {
+            view: SvgView::Iso,
+            azimuth: None,
+            elevation: None,
+            up: None,
+            fov: 0.0,
+            width: 1000.0,
+            height: 1000.0,
+            margin: 0.05,
+            tolerance: 0.1,
+            stroke: 0x00_0000,
+            stroke_width: 1.0,
+            background: None,
+            edges: true,
+            curves: false,
+            isocurves: false,
+            polylines: false,
+        }
+    }
+}
+
+/// `CadaclysmSvgOptions::background`'s "none" value -- `CADACLYSM_SVG_TRANSPARENT`, the
+/// same on both headers.
+const SVG_TRANSPARENT: u32 = 0xFFFF_FFFF;
+
+/// `options` packed into a `CadaclysmSvgOptions`: `view` fills `azimuth`/`elevation`
+/// unless they are set directly, `up` falls back to `default_up`. `cadaclysm_svg_options_init`
+/// fills the struct first -- `size` included -- so a field this crate never sets still
+/// carries the library's own default rather than a zeroed struct's.
+fn build_svg_options(api: &Api, options: &SvgOptions, default_up: Up) -> sys::CadaclysmSvgOptions {
+    let mut raw: sys::CadaclysmSvgOptions = unsafe { std::mem::zeroed() };
+    unsafe { (api.cadaclysm_svg_options_init)(&mut raw) };
+    let (base_azimuth, base_elevation) = options.view.angles();
+    raw.up = match options.up.unwrap_or(default_up) {
+        Up::Y => 1,
+        Up::Z => 0,
+    };
+    raw.azimuth = options.azimuth.unwrap_or(base_azimuth);
+    raw.elevation = options.elevation.unwrap_or(base_elevation);
+    raw.fov = options.fov;
+    raw.width = options.width;
+    raw.height = options.height;
+    raw.margin = options.margin;
+    raw.tolerance = options.tolerance;
+    raw.stroke_width = options.stroke_width;
+    raw.stroke = options.stroke;
+    raw.background = options.background.unwrap_or(SVG_TRANSPARENT);
+    raw.flags = u32::from(options.edges)
+        | (u32::from(options.curves) << 1)
+        | (u32::from(options.isocurves) << 2)
+        | (u32::from(options.polylines) << 3);
+    raw
 }
 
 // ---- the scene --------------------------------------------------------------------
@@ -1214,6 +1837,14 @@ impl Scene {
         (0..count).map(|i| unsafe { text((self.api.cadaclysm_diagnostic)(self.raw(), i)) }).collect()
     }
 
+    /// What the reader built but the geometry stage could not finish: a face that
+    /// would not trim, a surface that would not mesh. [`Scene::diagnostics`] is what
+    /// the file held that could not be read; this is what the geometry did.
+    pub fn geometry_diagnostics(&self) -> Vec<String> {
+        let count = unsafe { (self.api.cadaclysm_geometry_diagnostic_count)(self.raw()) };
+        (0..count).map(|i| unsafe { text((self.api.cadaclysm_geometry_diagnostic)(self.raw(), i)) }).collect()
+    }
+
     /// The archive member this was read from, or `None` for a plain file: `open` on a
     /// `.zip` chooses one member, and this is the only way to learn which.
     pub fn source_name(&self) -> Option<String> {
@@ -1296,6 +1927,13 @@ impl Scene {
         unsafe { (self.api.cadaclysm_realize_all)(self.raw()) }
     }
 
+    /// [`Scene::realize_all`], leaving alone every node that carries surfaces when
+    /// `skip_surfaced` is true: a renderer drawing those from their surfaces never pays
+    /// for their triangles. Returns how many were built.
+    pub fn realize_meshes(&self, skip_surfaced: bool) -> u32 {
+        unsafe { (self.api.cadaclysm_realize_meshes)(self.raw(), u32::from(skip_surfaced)) }
+    }
+
     /// How many nodes `realize_all` has finished with.
     pub fn realized(&self) -> u32 {
         unsafe { (self.api.cadaclysm_realized)(self.raw()) }
@@ -1312,6 +1950,13 @@ impl Scene {
         unsafe { (self.api.cadaclysm_cancel)(self.raw()) }
     }
 
+    /// Drop every mesh the scene has built; the next ask rebuilds. Takes `&mut self`:
+    /// every [`Mesh`] and [`Polylines`] borrowed from the scene is over freed memory
+    /// afterwards, and the borrow checker is what stops one being read.
+    pub fn forget_meshes(&mut self) {
+        unsafe { (self.api.cadaclysm_forget_meshes)(self.raw().cast_mut()) }
+    }
+
     /// Write the whole scene to `path`: `"glb"`, `"gltf"` or `"obj"` -- every placement
     /// of every shape, named and placed as the tree is, in the convention it was opened
     /// with. [`Node::save_mesh`] writes one node's mesh on its own instead.
@@ -1322,6 +1967,48 @@ impl Scene {
             return Ok(());
         }
         let reason = last_error(self.api);
+        Err(Error::new(if reason.is_empty() { format!("could not write {}", path.display()) } else { reason }))
+    }
+
+    /// [`Up::Y`] or [`Up::Z`]: which axis is up by default, from [`Scene::convention`]
+    /// -- [`Convention::Unity`] and [`Convention::YUp`] give [`Up::Y`], every other
+    /// convention [`Up::Z`]. What [`SvgOptions::up`] falls back to when left `None`.
+    /// [`FILE_UNITS`] and [`UV_WORLD`] are masked out first, since they OR into the
+    /// packed convention this scene carries.
+    fn default_up(&self) -> Up {
+        let base = self.convention & !(FILE_UNITS | UV_WORLD);
+        if base == Convention::Unity as u32 || base == Convention::YUp as u32 {
+            Up::Y
+        } else {
+            Up::Z
+        }
+    }
+
+    /// Every visible placement's wireframe as SVG text, from the camera `options`
+    /// describes -- the library's own camera, not a viewer. See [`SvgOptions`].
+    /// Borrowed by the library: copied out before this returns, and replaced by this
+    /// scene's next `svg_text` or `svg` call.
+    pub fn svg_text(&self, options: &SvgOptions) -> Result<String> {
+        let api = self.api;
+        let raw = build_svg_options(api, options, self.default_up());
+        let ptr = unsafe { (api.cadaclysm_scene_svg_text)(self.raw(), &raw) };
+        if ptr.is_null() {
+            let reason = last_error(api);
+            return Err(Error::new(if reason.is_empty() { "svg".to_string() } else { reason }));
+        }
+        Ok(unsafe { text(ptr) })
+    }
+
+    /// [`Scene::svg_text`] written to `path` by the library itself.
+    pub fn svg(&self, path: impl AsRef<Path>, options: &SvgOptions) -> Result<()> {
+        let path = path.as_ref();
+        let c_path = c_path(path)?;
+        let api = self.api;
+        let raw = build_svg_options(api, options, self.default_up());
+        if unsafe { (api.cadaclysm_scene_svg)(self.raw(), c_path.as_ptr(), &raw) } {
+            return Ok(());
+        }
+        let reason = last_error(api);
         Err(Error::new(if reason.is_empty() { format!("could not write {}", path.display()) } else { reason }))
     }
 

@@ -63,6 +63,42 @@
 #define CADACLYSM_WINDOW_APPKIT 4
 
 /**
+ * `CadaclysmSvgOptions::background`'s "none" value: no `<rect>` behind the
+ * drawing, the page left to whatever the viewer composites it onto. Any other
+ * `background` is `0xRRGGBB`, opaque.
+ */
+#define CADACLYSM_SVG_TRANSPARENT UINT32_MAX
+
+/**
+ * A bit of `CadaclysmSvgOptions::flags`: draw each shape's feature edges --
+ * the exact curves `cadaclysm_node_edges`'s polylines are flattened from.
+ */
+#define CADACLYSM_SVG_EDGES 1
+
+/**
+ * A bit of `flags`: draw each shape's free curves -- the ones that are not
+ * the edge of any face, as `cadaclysm_node_curves` hands out, here exact
+ * rather than flattened.
+ */
+#define CADACLYSM_SVG_CURVES 2
+
+/**
+ * A bit of `flags`: draw each shape's isocurves -- the constant-parameter
+ * lines across a curved face, as `cadaclysm_node_isocurves` hands out, here
+ * exact rather than flattened.
+ */
+#define CADACLYSM_SVG_ISOCURVES 4
+
+/**
+ * A bit of `flags`: write every line as straight segments that stay within
+ * `tolerance` of the curve on the page, instead of being fitted back to
+ * cubic Béziers -- for a consumer that reads no curves. Combined with the
+ * line-set bits above, not a replacement for them -- it changes how a set is
+ * drawn, not which set.
+ */
+#define CADACLYSM_SVG_POLYLINES 8
+
+/**
  * One of the six directions an axis can land on, for
  * [`CadaclysmConventionSpec`]. Spelled the way the header spells its other
  * constants, for the same reason [`CadaclysmConvention`] is.
@@ -77,15 +113,21 @@ typedef enum CadaclysmAxis {
 } CadaclysmAxis;
 
 /**
- * Which way round the target's renderer wants a front-facing triangle wound.
+ * Which way round the target's renderer wants a front-facing triangle wound,
+ * **about the outward normal, in the target's own coordinates** -- the
+ * cross-product sense, not the on-screen one. In a left-handed world the
+ * two disagree: Unity's manual says clockwise, meaning on the screen, and
+ * its mirrored view makes that counter-clockwise here; Unreal's manual says
+ * the same word and means clockwise here. Read the engine's rule off which
+ * way `(b - a) x (c - a)` points on a front face, never off the word.
  */
 typedef enum CadaclysmWinding {
   /**
-   * OpenGL, Vulkan, WebGPU -- and what this library produces unchanged.
+   * OpenGL, Vulkan, WebGPU, Unity -- and what this library produces unchanged.
    */
   CADACLYSM_WINDING_COUNTER_CLOCKWISE = 0,
   /**
-   * Direct3D, and Unreal with it.
+   * Unreal.
    */
   CADACLYSM_WINDING_CLOCKWISE = 1,
 } CadaclysmWinding;
@@ -665,6 +707,64 @@ typedef struct CadaclysmWindow {
   void *handle;
   void *display;
 } CadaclysmWindow;
+
+/**
+ * How a drawing is made: the camera in the viewer's words, the page, the
+ * pen and which line sets. `size` is `sizeof(CadaclysmSvgOptions)`, the
+ * struct's growth room, as in [`CadaclysmOpenOptions`](crate::CadaclysmOpenOptions).
+ * Fill it with [`cadaclysm_svg_options_init`] and change what you need.
+ */
+typedef struct CadaclysmSvgOptions {
+  uint32_t size;
+  /**
+   * 0 = Z up, 1 = Y up.
+   */
+  uint32_t up;
+  /**
+   * Degrees about the up axis from +X: -90 looks from -Y, the front. Default -50.
+   */
+  double azimuth;
+  /**
+   * Degrees above the horizon. Default 28 -- with -50, the viewer's `iso`.
+   */
+  double elevation;
+  /**
+   * Vertical field of view in degrees; 0 (the default) is orthographic.
+   */
+  double fov;
+  /**
+   * viewBox width and height; 0 is 1000.
+   */
+  double width;
+  double height;
+  /**
+   * Fraction of the content's extent left each side. Default 0.05.
+   */
+  double margin;
+  /**
+   * How far a written curve may stray, in page units. Default 0.1.
+   */
+  double tolerance;
+  /**
+   * Page units. Default 1.
+   */
+  double stroke_width;
+  /**
+   * 0xRRGGBB. Default black.
+   */
+  uint32_t stroke;
+  /**
+   * 0xRRGGBB, or `CADACLYSM_SVG_TRANSPARENT` (the default) for none.
+   */
+  uint32_t background;
+  /**
+   * `CADACLYSM_SVG_EDGES` (the default) | `CURVES` | `ISOCURVES` |
+   * `POLYLINES`. The three line-set bits combine freely -- any one, any
+   * two or all three, exactly the sets named and no other; at least one
+   * must be set.
+   */
+  uint32_t flags;
+} CadaclysmSvgOptions;
 
 #ifdef __cplusplus
 extern "C" {
@@ -1823,15 +1923,21 @@ void cadaclysm_cancel(const struct CadaclysmScene *scene);
 
 /**
  * Write the whole scene -- every placement of every shape, named and placed
- * as the document's tree is, with a material per colour -- to `path` as glTF
- * or OBJ. False on failure, with [`cadaclysm_last_error`] saying why.
+ * as the document's tree is, with a material per colour -- to `path` as glTF,
+ * OBJ or an OCCT `.brep`. False on failure, with
+ * [`cadaclysm_last_error`] saying why.
  *
  * `format` is `"glb"` (binary, one file), `"gltf"` (JSON with the vertex
  * buffer embedded, also one file) or `"obj"` (Wavefront text, every placement
  * baked to its own named object, with a `.mtl` written beside it under the
  * same stem when anything has a colour). These hold a scene where the
  * [`cadaclysm_mesh_format`] rows write one node's mesh; the same names there
- * are the one-mesh forms. Any other name is refused.
+ * are the one-mesh forms. `"brep"` writes what the readers kept of the exact
+ * geometry rather than the mesh: every face's surface whole, bounded by the
+ * polylines its trims were flattened to, each body once with a location for
+ * each place it stands (`cadaclysm_brep_file::write_document` says exactly
+ * what that carries). A scene with no exact geometry at all -- an STL, a
+ * mesh-only file -- is refused as such. Any other name is refused.
  *
  * Coordinates are the scene's own, in the space it was opened into: a scene
  * opened as `CADACLYSM_Y_UP` writes the Y-up metres glTF specifies, and one
@@ -2100,6 +2206,85 @@ void cadaclysm_brep_release(const struct CadaclysmBrep *brep);
  * eight `uint32_t`.
  */
 bool cadaclysm_brep_manifold(const struct CadaclysmBrep *brep, uint32_t *out);
+
+/**
+ * The defaults: the viewer's `iso`, orthographic, a 1000-square page, black
+ * edges one unit wide on nothing.
+ *
+ * # Safety
+ * `options` must be null or writable.
+ */
+void cadaclysm_svg_options_init(struct CadaclysmSvgOptions *options);
+
+/**
+ * The scene's drawing: every visible placement of every shape, a `<g>` per
+ * placement (`id="placement-<i>"`, `data-node`, `data-name`), the line sets
+ * `flags` name, from the camera the words describe. A placement whose node,
+ * or any ancestor of it, the file marks hidden (`cadaclysm_node_visible`) is
+ * left out, as a viewer leaves it out; `i` counts every placement, hidden
+ * ones too, so an id names the same placement whatever is shown. The text
+ * belongs to the scene and is replaced by the next `cadaclysm_scene_svg_text`
+ * or `cadaclysm_node_svg_text` on it; null and
+ * [`cadaclysm_last_error`](crate::cadaclysm_last_error) on a refused option or
+ * no scene given.
+ *
+ * The pointer's lifetime is the scene's, not the calling thread's -- unlike
+ * `cadaclysm_last_error`, which is per thread. Two threads calling
+ * `*_svg_text` on one scene free each other's text: callers sharing a scene
+ * across threads serialise their `svg_text` calls (and the reads of what
+ * they return) themselves, or write files with `cadaclysm_scene_svg`, which
+ * never touches the slot.
+ *
+ * A scene with nothing to draw is not an error: a placement whose shape has
+ * no curves in the line sets `flags` names gets no group at all (there is
+ * nothing to fit a camera to, let alone draw), and a scene where every
+ * placement is like that still returns a valid `<svg>` with no groups in it
+ * -- an empty page, not a null pointer.
+ *
+ * # Safety
+ * `scene` null or from `cadaclysm_open`; `options` null or a struct filled by
+ * [`cadaclysm_svg_options_init`].
+ */
+const char *cadaclysm_scene_svg_text(const struct CadaclysmScene *scene,
+                                     const struct CadaclysmSvgOptions *options);
+
+/**
+ * [`cadaclysm_scene_svg_text`]'s drawing written to `path`, replacing any
+ * file there -- straight to the file, leaving the scene's `svg_text` text
+ * (and any pointer to it) alone. False and `last_error` on failure, the
+ * file's included.
+ *
+ * # Safety
+ * As `cadaclysm_scene_svg_text`; `path` null or a C string.
+ */
+bool cadaclysm_scene_svg(const struct CadaclysmScene *scene,
+                         const char *path,
+                         const struct CadaclysmSvgOptions *options);
+
+/**
+ * One shape in its own frame, no placement: one `<g id="node-<index>">`.
+ * Otherwise as [`cadaclysm_scene_svg_text`], the text in the same per-scene
+ * slot with the same lifetime -- one slot serves both entry points, so the
+ * same serialising applies to callers sharing a scene across threads.
+ *
+ * # Safety
+ * As `cadaclysm_scene_svg_text`.
+ */
+const char *cadaclysm_node_svg_text(const struct CadaclysmScene *scene,
+                                    uint32_t node,
+                                    const struct CadaclysmSvgOptions *options);
+
+/**
+ * [`cadaclysm_node_svg_text`]'s drawing written to `path`, as
+ * [`cadaclysm_scene_svg`] -- the scene's `svg_text` slot untouched.
+ *
+ * # Safety
+ * As `cadaclysm_scene_svg`.
+ */
+bool cadaclysm_node_svg(const struct CadaclysmScene *scene,
+                        uint32_t node,
+                        const char *path,
+                        const struct CadaclysmSvgOptions *options);
 
 /**
  * Split a mesh into meshlets, optionally with the coarser levels above them.

@@ -122,11 +122,64 @@ public final class Cad {
             ValueLayout.ADDRESS.withName("pick"),
             ValueLayout.ADDRESS.withName("pick_user"));
 
+    /**
+     * {@code CadaclysmSvgOptions}. {@code cadaclysm_svg_options_init} fills the whole struct,
+     * as {@link #OPEN_OPTIONS}'s init does, so this must be at least as long as the header's
+     * and may never reorder. Not padded between {@code up} and {@code azimuth} -- two
+     * {@code int}s already land the first {@code double} on an eight-byte boundary -- but four
+     * bytes trail {@code flags} to bring the 84-byte struct up to the next multiple of eight,
+     * as alignment needs. Pinned by {@code tests/bindings.rs} against the header, as the
+     * kernel's {@code CadaclysmBlacksmithSvgOptions} in {@code Blacksmith.java} is.
+     */
+    private static final MemoryLayout SVG_OPTIONS = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("size"),
+            ValueLayout.JAVA_INT.withName("up"),
+            ValueLayout.JAVA_DOUBLE.withName("azimuth"),
+            ValueLayout.JAVA_DOUBLE.withName("elevation"),
+            ValueLayout.JAVA_DOUBLE.withName("fov"),
+            ValueLayout.JAVA_DOUBLE.withName("width"),
+            ValueLayout.JAVA_DOUBLE.withName("height"),
+            ValueLayout.JAVA_DOUBLE.withName("margin"),
+            ValueLayout.JAVA_DOUBLE.withName("tolerance"),
+            ValueLayout.JAVA_DOUBLE.withName("stroke_width"),
+            ValueLayout.JAVA_INT.withName("stroke"),
+            ValueLayout.JAVA_INT.withName("background"),
+            ValueLayout.JAVA_INT.withName("flags"),
+            MemoryLayout.paddingLayout(4));
+
     private static final MemoryLayout POLYLINES = MemoryLayout.structLayout(
             ValueLayout.ADDRESS.withName("positions"),
             ValueLayout.ADDRESS.withName("counts"),
             ValueLayout.JAVA_INT.withName("polyline_count"),
             ValueLayout.JAVA_INT.withName("vertex_count"));
+
+    // CadaclysmBeziers: two pointers then a count, padded to 8; pinned by bindings.rs.
+    private static final MemoryLayout BEZIERS = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("points"),
+            ValueLayout.ADDRESS.withName("weights"),
+            ValueLayout.JAVA_INT.withName("count"),
+            MemoryLayout.paddingLayout(4));
+
+    // CadaclysmCollision: four ints, then doubles, then two ints -- 200 bytes, naturally
+    // 8-aligned at every field, so no padding. Pinned by bindings.rs.
+    private static final MemoryLayout COLLISION = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("size"),
+            ValueLayout.JAVA_INT.withName("shape"),
+            ValueLayout.JAVA_INT.withName("confidence"),
+            ValueLayout.JAVA_INT.withName("axis"),
+            MemoryLayout.sequenceLayout(16, ValueLayout.JAVA_DOUBLE).withName("frame"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("half_extent"),
+            ValueLayout.JAVA_DOUBLE.withName("radius"),
+            ValueLayout.JAVA_DOUBLE.withName("height"),
+            ValueLayout.JAVA_DOUBLE.withName("error"),
+            ValueLayout.JAVA_INT.withName("hull_vertex_count"),
+            ValueLayout.JAVA_INT.withName("hull_index_count"));
+
+    private static final MemoryLayout COLLISION_HULL = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("positions"),
+            ValueLayout.ADDRESS.withName("indices"),
+            ValueLayout.JAVA_INT.withName("vertex_count"),
+            ValueLayout.JAVA_INT.withName("index_count"));
 
     // {const char* name; enum kind; const char* text; int64_t integer; double real; bool
     // boolean;}. An enum is a C int (4 bytes); the compiler pads 4 bytes before the 8-byte
@@ -199,7 +252,17 @@ public final class Cad {
             NODE_MESH, NODE_SURFACES, SURFACE_MATRIX, NODE_BOUNDS, NODE_INSTANCE_OF,
             NODE_SELECT_AS, NODE_GENERATOR, DIAGNOSTIC_COUNT, DIAGNOSTIC, NODE_EDGES,
             NODE_CURVES, NODE_ISOCURVES, REALIZE_ALL, REALIZED, REALIZE_TOTAL, CANCEL,
-            NODE_BREP, BREP_RELEASE, BREP_LAYOUT_ID, BREP_MANIFOLD;
+            NODE_BREP, BREP_RELEASE, BREP_LAYOUT_ID, BREP_MANIFOLD, MESH_FORMAT_LABEL,
+            FORMAT_COUNT, FORMAT_NAME, FORMAT_EXTENSIONS, PICK_SAVE, GEOMETRY_DIAGNOSTIC_COUNT,
+            GEOMETRY_DIAGNOSTIC, FORGET_MESHES, LOD_LEVELS, NODE_MESH_LOD, NODE_LOD_ERROR,
+            NODE_EDGE_BEZIERS, NODE_CURVE_BEZIERS, NODE_ISOCURVE_BEZIERS,
+            NODE_COLLISION, NODE_COLLISION_HULL,
+            MESHLETS_BUILD, MESHLETS_COUNT, MESHLETS_FREE, MESHLET_TRIANGLE_COUNT, MESHLET_VERTEX_COUNT,
+            MESHLET_LEVEL, MESHLET_GROUP, MESHLET_ERROR, MESHLET_CHILD_COUNT, MESHLET_POSITIONS,
+            MESHLET_NORMALS, MESHLET_INDICES, MESHLET_CHILDREN,
+            NODE_BOUNDS_PLACED, NODE_IS_MESHED, NODE_SURFACE_EDGES, NODE_SURFACE_ISOCURVES,
+            NODE_SURFACE_PICK, NODE_SURFACE_PROXY_MESH, NODE_TRIANGLE_ESTIMATE, REALIZE_MESHES,
+            SVG_OPTIONS_INIT, SCENE_SVG_TEXT, SCENE_SVG, NODE_SVG_TEXT, NODE_SVG;
 
     static {
         SymbolLookup lib = Loader.resolve(Loader.CAPI_LIBRARY);
@@ -207,6 +270,7 @@ public final class Cad {
         ValueLayout.OfInt I = ValueLayout.JAVA_INT;
         ValueLayout.OfLong L = ValueLayout.JAVA_LONG;
         ValueLayout.OfDouble D = ValueLayout.JAVA_DOUBLE;
+        ValueLayout.OfFloat F = ValueLayout.JAVA_FLOAT;
         ValueLayout.OfBoolean B = ValueLayout.JAVA_BOOLEAN;
         var A = ValueLayout.ADDRESS;
 
@@ -272,6 +336,48 @@ public final class Cad {
         BREP_RELEASE = bind(linker, lib, "cadaclysm_brep_release", FunctionDescriptor.ofVoid(A));
         BREP_LAYOUT_ID = bind(linker, lib, "cadaclysm_brep_layout_id", FunctionDescriptor.of(A));
         BREP_MANIFOLD = bind(linker, lib, "cadaclysm_brep_manifold", FunctionDescriptor.of(B, A, A));
+        MESH_FORMAT_LABEL = bind(linker, lib, "cadaclysm_mesh_format_label", FunctionDescriptor.of(A, I));
+        FORMAT_COUNT = bind(linker, lib, "cadaclysm_format_count", FunctionDescriptor.of(I));
+        FORMAT_NAME = bind(linker, lib, "cadaclysm_format_name", FunctionDescriptor.of(A, I));
+        FORMAT_EXTENSIONS = bind(linker, lib, "cadaclysm_format_extensions", FunctionDescriptor.of(A, I));
+        PICK_SAVE = bind(linker, lib, "cadaclysm_pick_save", FunctionDescriptor.of(A, A, A));
+        GEOMETRY_DIAGNOSTIC_COUNT = bind(linker, lib, "cadaclysm_geometry_diagnostic_count", FunctionDescriptor.of(I, A));
+        GEOMETRY_DIAGNOSTIC = bind(linker, lib, "cadaclysm_geometry_diagnostic", FunctionDescriptor.of(A, A, I));
+        FORGET_MESHES = bind(linker, lib, "cadaclysm_forget_meshes", FunctionDescriptor.ofVoid(A));
+        LOD_LEVELS = bind(linker, lib, "cadaclysm_lod_levels", FunctionDescriptor.of(I));
+        NODE_MESH_LOD = bind(linker, lib, "cadaclysm_node_mesh_lod", FunctionDescriptor.of(MESH, A, I, I));
+        NODE_LOD_ERROR = bind(linker, lib, "cadaclysm_node_lod_error", FunctionDescriptor.of(F, A, I, I));
+        NODE_EDGE_BEZIERS = bind(linker, lib, "cadaclysm_node_edge_beziers", FunctionDescriptor.of(BEZIERS, A, I));
+        NODE_CURVE_BEZIERS = bind(linker, lib, "cadaclysm_node_curve_beziers", FunctionDescriptor.of(BEZIERS, A, I));
+        NODE_ISOCURVE_BEZIERS = bind(linker, lib, "cadaclysm_node_isocurve_beziers", FunctionDescriptor.of(BEZIERS, A, I));
+        NODE_COLLISION = bind(linker, lib, "cadaclysm_node_collision", FunctionDescriptor.of(B, A, I, I, A));
+        NODE_COLLISION_HULL = bind(linker, lib, "cadaclysm_node_collision_hull", FunctionDescriptor.of(COLLISION_HULL, A, I, I));
+        MESHLETS_BUILD = bind(linker, lib, "cadaclysm_meshlets_build", FunctionDescriptor.of(A, A, A, L, A, L, I, I, I));
+        MESHLETS_COUNT = bind(linker, lib, "cadaclysm_meshlets_count", FunctionDescriptor.of(I, A));
+        MESHLETS_FREE = bind(linker, lib, "cadaclysm_meshlets_free", FunctionDescriptor.ofVoid(A));
+        MESHLET_TRIANGLE_COUNT = bind(linker, lib, "cadaclysm_meshlet_triangle_count", FunctionDescriptor.of(I, A, I));
+        MESHLET_VERTEX_COUNT = bind(linker, lib, "cadaclysm_meshlet_vertex_count", FunctionDescriptor.of(I, A, I));
+        MESHLET_LEVEL = bind(linker, lib, "cadaclysm_meshlet_level", FunctionDescriptor.of(I, A, I));
+        MESHLET_GROUP = bind(linker, lib, "cadaclysm_meshlet_group", FunctionDescriptor.of(I, A, I));
+        MESHLET_ERROR = bind(linker, lib, "cadaclysm_meshlet_error", FunctionDescriptor.of(F, A, I));
+        MESHLET_CHILD_COUNT = bind(linker, lib, "cadaclysm_meshlet_child_count", FunctionDescriptor.of(I, A, I));
+        MESHLET_POSITIONS = bind(linker, lib, "cadaclysm_meshlet_positions", FunctionDescriptor.ofVoid(A, I, A));
+        MESHLET_NORMALS = bind(linker, lib, "cadaclysm_meshlet_normals", FunctionDescriptor.ofVoid(A, I, A));
+        MESHLET_INDICES = bind(linker, lib, "cadaclysm_meshlet_indices", FunctionDescriptor.ofVoid(A, I, A));
+        MESHLET_CHILDREN = bind(linker, lib, "cadaclysm_meshlet_children", FunctionDescriptor.ofVoid(A, I, A));
+        NODE_BOUNDS_PLACED = bind(linker, lib, "cadaclysm_node_bounds_placed", FunctionDescriptor.of(BOUNDS, A, I, A));
+        NODE_IS_MESHED = bind(linker, lib, "cadaclysm_node_is_meshed", FunctionDescriptor.of(B, A, I));
+        NODE_SURFACE_EDGES = bind(linker, lib, "cadaclysm_node_surface_edges", FunctionDescriptor.of(POLYLINES, A, I));
+        NODE_SURFACE_ISOCURVES = bind(linker, lib, "cadaclysm_node_surface_isocurves", FunctionDescriptor.of(POLYLINES, A, I));
+        NODE_SURFACE_PICK = bind(linker, lib, "cadaclysm_node_surface_pick", FunctionDescriptor.of(B, A, I, A, A, A));
+        NODE_SURFACE_PROXY_MESH = bind(linker, lib, "cadaclysm_node_surface_proxy_mesh", FunctionDescriptor.of(MESH, A, I, I));
+        NODE_TRIANGLE_ESTIMATE = bind(linker, lib, "cadaclysm_node_triangle_estimate", FunctionDescriptor.of(L, A, I));
+        REALIZE_MESHES = bind(linker, lib, "cadaclysm_realize_meshes", FunctionDescriptor.of(I, A, I));
+        SVG_OPTIONS_INIT = bind(linker, lib, "cadaclysm_svg_options_init", FunctionDescriptor.ofVoid(A));
+        SCENE_SVG_TEXT = bind(linker, lib, "cadaclysm_scene_svg_text", FunctionDescriptor.of(A, A, A));
+        SCENE_SVG = bind(linker, lib, "cadaclysm_scene_svg", FunctionDescriptor.of(B, A, A, A));
+        NODE_SVG_TEXT = bind(linker, lib, "cadaclysm_node_svg_text", FunctionDescriptor.of(A, A, I, A));
+        NODE_SVG = bind(linker, lib, "cadaclysm_node_svg", FunctionDescriptor.of(B, A, I, A, A));
     }
 
     @SuppressWarnings("restricted") // downcallHandle: every entry point here is the published ABI.
@@ -376,21 +482,71 @@ public final class Cad {
         }
     }
 
-    /** One format {@link Node#saveMesh} writes, as its bare name and its file extension. */
-    public record MeshFormat(String name, String extension) {
+    /** How many coarser levels {@link Node#meshLod(int)} offers above the mesh itself. */
+    public static int lodLevels() {
+        try {
+            return (int) LOD_LEVELS.invokeExact();
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
     }
 
-    /**
-     * Every format {@link Node#saveMesh} writes. Ask rather than hard-code: a format added to
-     * the library turns up in a menu built from this without the client being touched.
-     */
+    /** One format {@link Node#saveMesh} writes: its bare name, its file extension, and a
+     *  label for a menu ({@code "STL (binary)"}). */
+    public record MeshFormat(String name, String extension, String label) {
+    }
+
     public static List<MeshFormat> meshFormats() {
         int count = invokeMeshFormatCount();
         List<MeshFormat> out = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
-            out.add(new MeshFormat(invokeMeshFormatName(i), invokeMeshFormatExtension(i)));
+            out.add(new MeshFormat(invokeMeshFormatName(i), invokeMeshFormatExtension(i), invokeStringAtIndex(MESH_FORMAT_LABEL, i)));
         }
         return out;
+    }
+
+    /** One format this build reads: its name and the extensions its files take. */
+    public record Format(String name, List<String> extensions) {
+    }
+
+    /** Every format this build reads, for an open dialog's filter. The library hands the
+     *  extensions over semicolon-separated; they are split here. */
+    public static List<Format> formats() {
+        int count;
+        try {
+            count = (int) FORMAT_COUNT.invokeExact();
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+        List<Format> out = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            List<String> extensions = new ArrayList<>();
+            for (String e : invokeStringAtIndex(FORMAT_EXTENSIONS, i).split(";")) if (!e.isEmpty()) extensions.add(e);
+            out.add(new Format(invokeStringAtIndex(FORMAT_NAME, i), List.copyOf(extensions)));
+        }
+        return out;
+    }
+
+    /** A borrowed string from a {@code (uint32_t index)} entry point. */
+    private static String invokeStringAtIndex(MethodHandle function, int index) {
+        try {
+            return string((MemorySegment) function.invokeExact(index));
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
+
+    /** Ask the user where to save, through the library's own dialog, with
+     *  {@code suggestedName} prefilled (null for none). Null if they cancelled or no dialog
+     *  was available. Blocks; on macOS must be called from the main thread. */
+    public static String pickSave(String suggestedName) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment name = suggestedName == null ? MemorySegment.NULL : arena.allocateFrom(suggestedName);
+            MemorySegment raw = (MemorySegment) PICK_SAVE.invokeExact(MemorySegment.NULL, name);
+            return stringOrNull(raw);
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
     }
 
     private static int invokeMeshFormatCount() {
@@ -775,6 +931,119 @@ public final class Cad {
         }
     }
 
+    // ---- SVG --------------------------------------------------------------------------
+
+    /**
+     * One of the seven camera angles {@link SvgOptions#view()} understands -- the same table
+     * {@code cadaclysm_viewer.VIEWS} gives Python's {@code show()} and {@code svg()} both. Each
+     * constant carries its own (azimuth, elevation) in degrees, which is the "View helper"
+     * every language's SVG binding offers.
+     */
+    public enum SvgView {
+        /** Azimuth -90, elevation 0 -- looks from -Y. */
+        FRONT(-90.0, 0.0),
+        /** Azimuth 90, elevation 0 -- looks from +Y. */
+        BACK(90.0, 0.0),
+        /** Azimuth 180, elevation 0 -- looks from -X. */
+        LEFT(180.0, 0.0),
+        /** Azimuth 0, elevation 0 -- looks from +X. */
+        RIGHT(0.0, 0.0),
+        /** Azimuth -90, elevation 90 -- looks from +Z, straight down. */
+        TOP(-90.0, 90.0),
+        /** Azimuth -90, elevation -90 -- looks from -Z, straight up. */
+        BOTTOM(-90.0, -90.0),
+        /** Azimuth -50, elevation 28 -- the viewer's own default. */
+        ISO(-50.0, 28.0);
+
+        /** Degrees about the up axis from +X: -90 looks from -Y, the front. */
+        public final double azimuth;
+        /** Degrees above the horizon. */
+        public final double elevation;
+
+        SvgView(double azimuth, double elevation) {
+            this.azimuth = azimuth;
+            this.elevation = elevation;
+        }
+    }
+
+    /**
+     * How an SVG drawing is made -- the camera in the viewer's words, the page, the pen and
+     * which line sets. Mirrors {@code CadaclysmSvgOptions}, {@link #defaults()} the way {@code
+     * cadaclysm_svg_options_init} defaults the struct, with {@link #view()} supplying {@link
+     * #azimuth()}/{@link #elevation()} unless they are given directly (non-null).
+     *
+     * <p>Passed to {@link Scene#svgText(SvgOptions)}, {@link Scene#svg(String, SvgOptions)},
+     * {@link Node#svgText(SvgOptions)} and {@link Node#svg(String, SvgOptions)}. A refused
+     * option (an out-of-range {@link #fov()}, say) throws {@link CadaclysmException} naming the
+     * field, worded by the library itself.
+     */
+    public record SvgOptions(SvgView view, Double azimuth, Double elevation, String up, double fov,
+                              double width, double height, double margin, double tolerance,
+                              String stroke, double strokeWidth, Integer background,
+                              boolean edges, boolean curves, boolean isocurves, boolean polylines) {
+        /**
+         * {@code view = ISO}, {@code azimuth}/{@code elevation}/{@code up}/{@code background}
+         * null (fall through to {@link #view()}, the scene's convention, and transparent),
+         * {@code fov = 0} (orthographic), a 1000-square page, {@code margin = 0.05}, {@code
+         * tolerance = 0.1}, a black one-unit stroke, edges alone.
+         */
+        public static SvgOptions defaults() {
+            return new SvgOptions(SvgView.ISO, null, null, null, 0.0, 1000.0, 1000.0, 0.05, 0.1,
+                    "#000000", 1.0, null, true, false, false, false);
+        }
+    }
+
+    /** A colour as the ABI's packed {@code 0xRRGGBB}: {@code "#rrggbb"}, the leading {@code #}
+     *  optional. */
+    private static int parseColour(String colour) {
+        String hex = colour.startsWith("#") ? colour.substring(1) : colour;
+        if (hex.length() != 6) throw new CadaclysmException("colour " + colour + ": expected '#rrggbb'");
+        try {
+            return (int) Long.parseLong(hex, 16);
+        } catch (NumberFormatException e) {
+            throw new CadaclysmException("colour " + colour + ": expected '#rrggbb'");
+        }
+    }
+
+    /**
+     * {@link SvgOptions}, packed into the {@link #SVG_OPTIONS} layout: {@code view} fills
+     * {@code azimuth}/{@code elevation} unless they are given directly, {@code up} defaults to
+     * {@code defaultUp}, colours are {@code "#rrggbb"}. Shared by {@link
+     * Scene#svgText(SvgOptions)}/{@link Scene#svg(String, SvgOptions)} and {@link
+     * Node#svgText(SvgOptions)}/{@link Node#svg(String, SvgOptions)}, as Python's {@code
+     * _svg_options} is shared by {@code Scene.svg} and {@code Node.svg}.
+     */
+    private static MemorySegment buildSvgOptions(Arena arena, SvgOptions options, String defaultUp) {
+        SvgOptions o = options == null ? SvgOptions.defaults() : options;
+        MemorySegment out = arena.allocate(SVG_OPTIONS);
+        invokeSvgOptionsInit(out);
+        SvgView view = o.view() == null ? SvgView.ISO : o.view();
+        String up = o.up() == null ? defaultUp : o.up();
+        out.set(ValueLayout.JAVA_INT, offset(SVG_OPTIONS, "up"), up.equalsIgnoreCase("y") ? 1 : 0);
+        out.set(ValueLayout.JAVA_DOUBLE, offset(SVG_OPTIONS, "azimuth"), o.azimuth() == null ? view.azimuth : o.azimuth());
+        out.set(ValueLayout.JAVA_DOUBLE, offset(SVG_OPTIONS, "elevation"), o.elevation() == null ? view.elevation : o.elevation());
+        out.set(ValueLayout.JAVA_DOUBLE, offset(SVG_OPTIONS, "fov"), o.fov());
+        out.set(ValueLayout.JAVA_DOUBLE, offset(SVG_OPTIONS, "width"), o.width());
+        out.set(ValueLayout.JAVA_DOUBLE, offset(SVG_OPTIONS, "height"), o.height());
+        out.set(ValueLayout.JAVA_DOUBLE, offset(SVG_OPTIONS, "margin"), o.margin());
+        out.set(ValueLayout.JAVA_DOUBLE, offset(SVG_OPTIONS, "tolerance"), o.tolerance());
+        out.set(ValueLayout.JAVA_DOUBLE, offset(SVG_OPTIONS, "stroke_width"), o.strokeWidth());
+        out.set(ValueLayout.JAVA_INT, offset(SVG_OPTIONS, "stroke"), parseColour(o.stroke()));
+        out.set(ValueLayout.JAVA_INT, offset(SVG_OPTIONS, "background"),
+                o.background() == null ? 0xFFFFFFFF : o.background()); // CADACLYSM_SVG_TRANSPARENT
+        int flags = (o.edges() ? 1 : 0) | (o.curves() ? 2 : 0) | (o.isocurves() ? 4 : 0) | (o.polylines() ? 8 : 0);
+        out.set(ValueLayout.JAVA_INT, offset(SVG_OPTIONS, "flags"), flags);
+        return out;
+    }
+
+    private static void invokeSvgOptionsInit(MemorySegment options) {
+        try {
+            SVG_OPTIONS_INIT.invokeExact(options);
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
+
     // ---- ValueKind ------------------------------------------------------------------------
 
     /**
@@ -1108,6 +1377,110 @@ public final class Cad {
         return new Polylines(scene, positions, counts, polylineCount, vertexCount);
     }
 
+    /** A node's edges, curves or isocurves as cubic Bézier curves -- exact where the file's
+     *  curves were, where {@link Polylines} are their chords. A view over the scene's
+     *  memory, valid until the scene closes. */
+    public static final class Beziers {
+        private final Scene scene;
+        private final long points, weights;
+        private final int count;
+
+        private Beziers(Scene scene, long points, long weights, int count) {
+            this.scene = scene;
+            this.points = points;
+            this.weights = weights;
+            this.count = count;
+        }
+
+        public Scene scene() {
+            return scene;
+        }
+
+        /** How many curves. */
+        public int count() {
+            return count;
+        }
+
+        /** {@code count * 12} floats: four control points a curve, three floats each. */
+        public FloatBuffer points() {
+            scene.handle();
+            return floatView(points, count * 12L);
+        }
+
+        /** {@code count * 4} floats: a weight per control point, all ones for a polynomial
+         *  curve, and the weights that make a circular arc exact for a rational one. */
+        public FloatBuffer weights() {
+            scene.handle();
+            return floatView(weights, count * 4L);
+        }
+
+        /** The same curves in memory of your own, safe to keep after the scene closes. */
+        public BeziersData copy() {
+            scene.handle();
+            return new BeziersData(floatArray(points, count * 12L), floatArray(weights, count * 4L));
+        }
+    }
+
+    /** A {@link Beziers} copied out as plain arrays. */
+    public record BeziersData(float[] points, float[] weights) {
+    }
+
+    private static Beziers buildBeziers(Scene scene, MemorySegment raw) {
+        long points = raw.get(ValueLayout.ADDRESS, offset(BEZIERS, "points")).address();
+        long weights = raw.get(ValueLayout.ADDRESS, offset(BEZIERS, "weights")).address();
+        int count = raw.get(ValueLayout.JAVA_INT, offset(BEZIERS, "count"));
+        return new Beziers(scene, points, weights, count);
+    }
+
+    /** What a node turned out to be for a physics engine: a box, sphere, capsule or cylinder
+     *  where one fits within {@code error}, else a convex hull. {@code frame} (16 doubles,
+     *  column-major) and {@code halfExtent} are always the true oriented box. */
+    public record Collision(int shape, int confidence, int axis, double[] frame, double[] halfExtent,
+                            double radius, double height, double error, int hullVertexCount, int hullIndexCount) {
+        private static final String[] NAMES = {"none", "box", "sphere", "capsule", "cylinder", "hull"};
+
+        /** {@code none}, {@code box}, {@code sphere}, {@code capsule}, {@code cylinder} or {@code hull}. */
+        public String shapeName() {
+            return shape >= 0 && shape < NAMES.length ? NAMES[shape] : Integer.toString(shape);
+        }
+    }
+
+    /** A node's convex hull for a physics engine, as triangles -- a view over the scene's
+     *  memory, valid until the scene closes. */
+    public static final class CollisionHull {
+        private final Scene scene;
+        private final long positions, indices;
+        private final int vertexCount, indexCount;
+
+        private CollisionHull(Scene scene, long positions, long indices, int vertexCount, int indexCount) {
+            this.scene = scene;
+            this.positions = positions;
+            this.indices = indices;
+            this.vertexCount = vertexCount;
+            this.indexCount = indexCount;
+        }
+
+        public int vertexCount() {
+            return vertexCount;
+        }
+
+        public int indexCount() {
+            return indexCount;
+        }
+
+        /** {@code vertexCount * 3} floats. */
+        public FloatBuffer positions() {
+            scene.handle();
+            return floatView(positions, vertexCount * 3L);
+        }
+
+        /** {@code indexCount} indices, three a triangle. */
+        public IntBuffer indices() {
+            scene.handle();
+            return intView(indices, indexCount);
+        }
+    }
+
     // ---- Face / Surfaces ----------------------------------------------------------------
 
     /**
@@ -1380,6 +1753,165 @@ public final class Cad {
         }
     }
 
+    /** One meshlet, copied out: the arrays are yours. */
+    public record Meshlet(int index, int level, int group, float error, int vertexCount, int triangleCount,
+                          float[] positions, float[] normals, int[] indices, int[] children) {
+    }
+
+    /** The one handle a {@link Meshlets} holds, freed once by the {@link Cleaner} or by
+     *  {@link Meshlets#free()}; the address is zeroed first. */
+    private static final class MeshletsReference implements Runnable {
+        private long address;
+
+        MeshletsReference(long address) {
+            this.address = address;
+        }
+
+        @Override
+        public void run() {
+            long a = address;
+            address = 0;
+            if (a == 0) return;
+            try {
+                MESHLETS_FREE.invokeExact(MemorySegment.ofAddress(a));
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+    }
+
+    /**
+     * A mesh split into meshlets, optionally with coarser levels above them, for a mesh-shader
+     * or Nanite-style renderer. Built from any mesh and owned by you: {@link #free()} it, or
+     * use it in try-with-resources.
+     */
+    public static final class Meshlets implements AutoCloseable {
+        private final MeshletsReference reference;
+        private final Cleaner.Cleanable cleanable;
+
+        private Meshlets(MemorySegment raw) {
+            reference = new MeshletsReference(raw.address());
+            cleanable = CLEANER.register(this, reference);
+        }
+
+        /**
+         * Split {@code positions} (three floats a vertex), {@code normals} (the same, or null)
+         * and {@code indices} (three a triangle) into meshlets of at most {@code maxTriangles}
+         * and {@code maxVertices} each -- the consumer's own limits, with no default: Nanite
+         * takes 128/256, a mesh-shader pipeline 124/64. {@code levels} above 0 groups and
+         * simplifies each level into the next until one meshlet is left.
+         */
+        public static Meshlets build(float[] positions, float[] normals, int[] indices, int maxTriangles, int maxVertices, int levels) {
+            if (maxTriangles <= 0 || maxVertices <= 0) throw new CadaclysmException("meshlets: maxTriangles and maxVertices are required");
+            if (positions.length % 3 != 0 || indices.length % 3 != 0)
+                throw new CadaclysmException("meshlets: positions must hold three floats a vertex and indices three a triangle");
+            if (normals != null && normals.length != positions.length)
+                throw new CadaclysmException("meshlets: normals must hold one per vertex, three floats each");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment p = arena.allocateFrom(ValueLayout.JAVA_FLOAT, positions);
+                MemorySegment n = normals == null ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_FLOAT, normals);
+                MemorySegment i = arena.allocateFrom(ValueLayout.JAVA_INT, indices);
+                MemorySegment raw = (MemorySegment) MESHLETS_BUILD.invokeExact(p, n, (long) (positions.length / 3), i, (long) indices.length,
+                        maxTriangles, maxVertices, levels);
+                if (raw.address() == 0) {
+                    String reason = string((MemorySegment) LAST_ERROR.invokeExact());
+                    throw new CadaclysmException(reason.isEmpty() ? "meshlets: build failed" : reason);
+                }
+                return new Meshlets(raw);
+            } catch (CadaclysmException e) {
+                throw e;
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
+        private MemorySegment handle() {
+            if (reference.address == 0) throw new CadaclysmException("meshlets: freed");
+            return MemorySegment.ofAddress(reference.address);
+        }
+
+        public boolean closed() {
+            return reference.address == 0;
+        }
+
+        /** Give the meshlets back. Idempotent. */
+        public void free() {
+            cleanable.clean();
+        }
+
+        @Override
+        public void close() {
+            free();
+        }
+
+        /** How many meshlets, every level counted. */
+        public int count() {
+            return invokeIntOf(MESHLETS_COUNT, handle());
+        }
+
+        public int triangleCount(int i) {
+            return invokeIntAt(MESHLET_TRIANGLE_COUNT, handle(), i);
+        }
+
+        public int vertexCount(int i) {
+            return invokeIntAt(MESHLET_VERTEX_COUNT, handle(), i);
+        }
+
+        /** 0 for a leaf over the mesh itself, higher for a simplified level above it. */
+        public int level(int i) {
+            return invokeIntAt(MESHLET_LEVEL, handle(), i);
+        }
+
+        public int group(int i) {
+            return invokeIntAt(MESHLET_GROUP, handle(), i);
+        }
+
+        /** How far this meshlet's level moved the surface; zero at level 0. */
+        public float error(int i) {
+            try {
+                return (float) MESHLET_ERROR.invokeExact(handle(), i);
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
+        public int childCount(int i) {
+            return invokeIntAt(MESHLET_CHILD_COUNT, handle(), i);
+        }
+
+        /** One meshlet's arrays and numbers, copied out. */
+        public Meshlet meshlet(int i) {
+            MemorySegment h = handle();
+            int vertexCount = vertexCount(i), triangleCount = triangleCount(i), childCount = childCount(i);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment positions = arena.allocate(ValueLayout.JAVA_FLOAT, Math.max(1, vertexCount * 3L));
+                MemorySegment normals = arena.allocate(ValueLayout.JAVA_FLOAT, Math.max(1, vertexCount * 3L));
+                MemorySegment indices = arena.allocate(ValueLayout.JAVA_INT, Math.max(1, triangleCount * 3L));
+                MemorySegment children = arena.allocate(ValueLayout.JAVA_INT, Math.max(1, (long) childCount));
+                MESHLET_POSITIONS.invokeExact(h, i, positions);
+                MESHLET_NORMALS.invokeExact(h, i, normals);
+                MESHLET_INDICES.invokeExact(h, i, indices);
+                MESHLET_CHILDREN.invokeExact(h, i, children);
+                return new Meshlet(i, level(i), group(i), error(i), vertexCount, triangleCount,
+                        positions.asSlice(0, vertexCount * 3L * Float.BYTES).toArray(ValueLayout.JAVA_FLOAT),
+                        normals.asSlice(0, vertexCount * 3L * Float.BYTES).toArray(ValueLayout.JAVA_FLOAT),
+                        indices.asSlice(0, triangleCount * 3L * Integer.BYTES).toArray(ValueLayout.JAVA_INT),
+                        children.asSlice(0, (long) childCount * Integer.BYTES).toArray(ValueLayout.JAVA_INT));
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+    }
+
+    /** An int from a {@code (handle, uint32_t index)} entry point. */
+    private static int invokeIntAt(MethodHandle function, MemorySegment handle, int index) {
+        try {
+            return (int) function.invokeExact(handle, index);
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
+
     public static final class Placement {
         private final Scene scene;
         private final int index;
@@ -1614,6 +2146,40 @@ public final class Cad {
             if (!ok) throw new CadaclysmException(lastErrorOr("could not write " + path));
         }
 
+        /** {@link #svgText(SvgOptions)} with every default. */
+        public String svgText() {
+            return svgText(null);
+        }
+
+        /** This node's own wireframe as SVG text, in its own frame -- {@link
+         *  Scene#svgText(SvgOptions)}'s options, read from just this node rather than every
+         *  placement. */
+        public String svgText(SvgOptions options) {
+            MemorySegment p;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment o = buildSvgOptions(arena, options, scene.defaultUp());
+                p = invokeNodeSvgText(scene.handle(), index, o);
+            }
+            if (p.address() == 0) throw new CadaclysmException(lastErrorOr("svg"));
+            return string(p);
+        }
+
+        /** {@link #svgText(SvgOptions)} written to {@code path} by the library itself. */
+        public void svg(String path) {
+            svg(path, null);
+        }
+
+        /** {@link #svgText(SvgOptions)} written to {@code path} by the library itself. */
+        public void svg(String path, SvgOptions options) {
+            boolean ok;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment o = buildSvgOptions(arena, options, scene.defaultUp());
+                MemorySegment p = arena.allocateFrom(path);
+                ok = invokeNodeSvg(scene.handle(), index, p, o);
+            }
+            if (!ok) throw new CadaclysmException(lastErrorOr("could not write " + path));
+        }
+
         /** {@code (r, g, b, a)} if the file gave one, else null -- most STEP files carry no
          *  colour at all, and the honest answer lets the caller use its own. */
         public float[] colour() {
@@ -1671,22 +2237,46 @@ public final class Cad {
         /** Its triangles, in their own frame, built now if they have not been -- or null for
          *  a node with no triangles (structure, or geometry drawn only as curves). */
         public Mesh mesh() {
-            long positions, normals, uvs, colours, indices;
-            int vertexCount, indexCount;
             try (Arena arena = Arena.ofConfined()) {
                 SegmentAllocator allocator = SegmentAllocator.prefixAllocator(arena.allocate(MESH));
-                MemorySegment raw = (MemorySegment) NODE_MESH.invokeExact(allocator,
-                        scene.handle(), index);
-                positions = raw.get(ValueLayout.ADDRESS, offset(MESH, "positions")).address();
-                normals = raw.get(ValueLayout.ADDRESS, offset(MESH, "normals")).address();
-                uvs = raw.get(ValueLayout.ADDRESS, offset(MESH, "uvs")).address();
-                colours = raw.get(ValueLayout.ADDRESS, offset(MESH, "colors")).address();
-                indices = raw.get(ValueLayout.ADDRESS, offset(MESH, "indices")).address();
-                vertexCount = raw.get(ValueLayout.JAVA_INT, offset(MESH, "vertex_count"));
-                indexCount = raw.get(ValueLayout.JAVA_INT, offset(MESH, "index_count"));
+                return meshOf((MemorySegment) NODE_MESH.invokeExact(allocator, scene.handle(), index));
             } catch (Throwable t) {
                 throw new RuntimeException(t);
             }
+        }
+
+        /** Its triangles at a coarser level of detail: 0 is {@link #mesh()} itself, 1 up to
+         *  {@link Cad#lodLevels()} each about a quarter of the triangles of the one before,
+         *  and past that null. Every level shares the level-0 vertices -- the same positions
+         *  and vertex count, only the indices differ -- so upload the vertices once and switch
+         *  level by drawing a different index range. */
+        public Mesh meshLod(int level) {
+            try (Arena arena = Arena.ofConfined()) {
+                SegmentAllocator allocator = SegmentAllocator.prefixAllocator(arena.allocate(MESH));
+                return meshOf((MemorySegment) NODE_MESH_LOD.invokeExact(allocator, scene.handle(), index, level));
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
+        /** How far {@link #meshLod(int)} at this level moved the surface, in the scene's
+         *  units -- what to pick a level by. Zero at level 0. */
+        public float lodError(int level) {
+            try {
+                return (float) NODE_LOD_ERROR.invokeExact(scene.handle(), index, level);
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
+        private Mesh meshOf(MemorySegment raw) {
+            long positions = raw.get(ValueLayout.ADDRESS, offset(MESH, "positions")).address();
+            long normals = raw.get(ValueLayout.ADDRESS, offset(MESH, "normals")).address();
+            long uvs = raw.get(ValueLayout.ADDRESS, offset(MESH, "uvs")).address();
+            long colours = raw.get(ValueLayout.ADDRESS, offset(MESH, "colors")).address();
+            long indices = raw.get(ValueLayout.ADDRESS, offset(MESH, "indices")).address();
+            int vertexCount = raw.get(ValueLayout.JAVA_INT, offset(MESH, "vertex_count"));
+            int indexCount = raw.get(ValueLayout.JAVA_INT, offset(MESH, "index_count"));
             if (indexCount == 0 || positions == 0) return null;
             return new Mesh(scene, positions, normals, uvs, colours, indices, vertexCount, indexCount);
         }
@@ -1726,6 +2316,157 @@ public final class Cad {
                 MemorySegment raw = (MemorySegment) function.invokeExact(allocator,
                         scene.handle(), index);
                 return buildPolylines(scene, raw);
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
+        /** Its feature edges as cubic Bézier curves -- exact where the file's curves were,
+         *  where {@link #edges()} are their chords. Builds the geometry if needed. */
+        public Beziers edgeBeziers() {
+            return beziersOf(NODE_EDGE_BEZIERS);
+        }
+
+        /** Its free curves as cubic Béziers; see {@link #edgeBeziers()}. */
+        public Beziers curveBeziers() {
+            return beziersOf(NODE_CURVE_BEZIERS);
+        }
+
+        /** Its isocurves as cubic Béziers; see {@link #edgeBeziers()}. */
+        public Beziers isocurveBeziers() {
+            return beziersOf(NODE_ISOCURVE_BEZIERS);
+        }
+
+        private Beziers beziersOf(MethodHandle function) {
+            try (Arena arena = Arena.ofConfined()) {
+                SegmentAllocator allocator = SegmentAllocator.prefixAllocator(arena.allocate(BEZIERS));
+                MemorySegment raw = (MemorySegment) function.invokeExact(allocator, scene.handle(), index);
+                return buildBeziers(scene, raw);
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
+        /** The collision body for what this node draws, building its mesh if it is not
+         *  built. {@code hullBudget} is the most triangles a hull may have; 0 asks for the
+         *  Unity limit (255) and is not clamped to it. Null for a node that draws nothing.
+         *  Cached per node and budget. */
+        public Collision collision(int hullBudget) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(COLLISION);
+                out.set(ValueLayout.JAVA_INT, offset(COLLISION, "size"), (int) COLLISION.byteSize());
+                boolean ok = (boolean) NODE_COLLISION.invokeExact(scene.handle(), index, hullBudget, out);
+                if (!ok) return null;
+                double[] frame = out.asSlice(offset(COLLISION, "frame"), 16 * Double.BYTES).toArray(ValueLayout.JAVA_DOUBLE);
+                double[] halfExtent = out.asSlice(offset(COLLISION, "half_extent"), 3 * Double.BYTES).toArray(ValueLayout.JAVA_DOUBLE);
+                return new Collision(
+                        out.get(ValueLayout.JAVA_INT, offset(COLLISION, "shape")),
+                        out.get(ValueLayout.JAVA_INT, offset(COLLISION, "confidence")),
+                        out.get(ValueLayout.JAVA_INT, offset(COLLISION, "axis")),
+                        frame, halfExtent,
+                        out.get(ValueLayout.JAVA_DOUBLE, offset(COLLISION, "radius")),
+                        out.get(ValueLayout.JAVA_DOUBLE, offset(COLLISION, "height")),
+                        out.get(ValueLayout.JAVA_DOUBLE, offset(COLLISION, "error")),
+                        out.get(ValueLayout.JAVA_INT, offset(COLLISION, "hull_vertex_count")),
+                        out.get(ValueLayout.JAVA_INT, offset(COLLISION, "hull_index_count")));
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
+        /** The convex hull {@link #collision(int)} counted, as triangles. Empty for a node
+         *  that draws nothing. A view into the scene, good until it closes or this node is
+         *  asked for a different {@code hullBudget}, which refits and frees it. */
+        public CollisionHull collisionHull(int hullBudget) {
+            try (Arena arena = Arena.ofConfined()) {
+                SegmentAllocator allocator = SegmentAllocator.prefixAllocator(arena.allocate(COLLISION_HULL));
+                MemorySegment raw = (MemorySegment) NODE_COLLISION_HULL.invokeExact(allocator, scene.handle(), index, hullBudget);
+                long positions = raw.get(ValueLayout.ADDRESS, offset(COLLISION_HULL, "positions")).address();
+                long indices = raw.get(ValueLayout.ADDRESS, offset(COLLISION_HULL, "indices")).address();
+                int vertexCount = raw.get(ValueLayout.JAVA_INT, offset(COLLISION_HULL, "vertex_count"));
+                int indexCount = raw.get(ValueLayout.JAVA_INT, offset(COLLISION_HULL, "index_count"));
+                return new CollisionHull(scene, positions, indices, vertexCount, indexCount);
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
+        // -- the surface path: for a renderer drawing exact surfaces, never triangles --
+
+        /** The box of what this node draws under {@code placement} (16 doubles, column-major,
+         *  as {@link Placement#rawTransform()}; null for the identity), for a part drawn from
+         *  its surfaces: every sample is carried through the convention and the placement
+         *  before it is boxed, so it is tighter than placing the corners of {@link #bounds()}.
+         *  All zeros for a part with no surfaces. */
+        public Bounds boundsPlaced(double[] placement) {
+            if (placement != null && placement.length != 16) throw new CadaclysmException("bounds_placed: a placement is 16 numbers");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment matrix = placement == null ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_DOUBLE, placement);
+                SegmentAllocator allocator = SegmentAllocator.prefixAllocator(arena.allocate(BOUNDS));
+                MemorySegment raw = (MemorySegment) NODE_BOUNDS_PLACED.invokeExact(allocator, scene.handle(), index, matrix);
+                return readBounds(raw);
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
+        /** Whether its mesh has been built and is held -- by {@link Scene#realizeAll()}, by an
+         *  ask for it, or by anything else that needed it. */
+        public boolean isMeshed() {
+            try {
+                return (boolean) NODE_IS_MESHED.invokeExact(scene.handle(), index);
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
+        /** Its face boundaries taken from its trimmed surfaces -- the outline that costs no
+         *  tessellation, where {@link #edges()} meshes the part. In the surfaces' own frame
+         *  (see {@link Scene#surfaceMatrix()}); empty without surfaces. */
+        public Polylines surfaceEdges() {
+            return polylinesOf(NODE_SURFACE_EDGES);
+        }
+
+        /** Its isocurves taken from its trimmed surfaces and clipped to the trims, without
+         *  meshing; a flat face gets none. In the surfaces' frame; empty without surfaces. */
+        public Polylines surfaceIsocurves() {
+            return polylinesOf(NODE_SURFACE_ISOCURVES);
+        }
+
+        /** Where the segment {@code from}..{@code to} first meets this part's surfaces, or null
+         *  where it meets none. Exact, and in the surfaces' own frame: carry a ray from the
+         *  scene's space through the inverse of {@link Scene#surfaceMatrix()} first. */
+        public double[] surfacePick(double[] from, double[] to) {
+            if (from.length != 3 || to.length != 3) throw new CadaclysmException("surface_pick: from and to are three numbers each");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment a = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, from);
+                MemorySegment b = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, to);
+                MemorySegment hit = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
+                boolean ok = (boolean) NODE_SURFACE_PICK.invokeExact(scene.handle(), index, a, b, hit);
+                return ok ? hit.toArray(ValueLayout.JAVA_DOUBLE) : null;
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
+        /** A coarse mesh over its surfaces for what needs triangles and not a picture (ray
+         *  tracing, distance fields): each face gridded {@code cells} by {@code cells}, never
+         *  welded, built once per part at the first size asked. Null without surfaces or for
+         *  zero cells. */
+        public Mesh surfaceProxyMesh(int cells) {
+            try (Arena arena = Arena.ofConfined()) {
+                SegmentAllocator allocator = SegmentAllocator.prefixAllocator(arena.allocate(MESH));
+                return meshOf((MemorySegment) NODE_SURFACE_PROXY_MESH.invokeExact(allocator, scene.handle(), index, cells));
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
+        /** About how many triangles {@link #mesh()} would give, without building it; -1 where
+         *  the reader cannot say without doing the work. Treat -1 as unknown, never as zero. */
+        public long triangleEstimate() {
+            try {
+                return (long) NODE_TRIANGLE_ESTIMATE.invokeExact(scene.handle(), index);
             } catch (Throwable t) {
                 throw new RuntimeException(t);
             }
@@ -1791,6 +2532,22 @@ public final class Cad {
     private static boolean invokeSaveMesh(MemorySegment scene, int node, MemorySegment path, MemorySegment format) {
         try {
             return (boolean) NODE_SAVE_MESH.invokeExact(scene, node, path, format);
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
+
+    private static MemorySegment invokeNodeSvgText(MemorySegment scene, int node, MemorySegment options) {
+        try {
+            return (MemorySegment) NODE_SVG_TEXT.invokeExact(scene, node, options);
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
+
+    private static boolean invokeNodeSvg(MemorySegment scene, int node, MemorySegment path, MemorySegment options) {
+        try {
+            return (boolean) NODE_SVG.invokeExact(scene, node, path, options);
         } catch (Throwable t) {
             throw new RuntimeException(t);
         }
@@ -1955,6 +2712,16 @@ public final class Cad {
             return found;
         }
 
+        /** What the reader built but the geometry stage could not finish -- a face that would
+         *  not trim, a surface that would not mesh. {@link #diagnostics()} is what the file
+         *  held that could not be read; this is what the geometry did. */
+        public List<String> geometryDiagnostics() {
+            int count = invokeIntOf(GEOMETRY_DIAGNOSTIC_COUNT, handle());
+            List<String> found = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) found.add(string(invokeStringAt(GEOMETRY_DIAGNOSTIC, handle(), i)));
+            return found;
+        }
+
         /** The archive member this was read from, or null for a plain file. */
         public String sourceName() {
             try {
@@ -2036,6 +2803,17 @@ public final class Cad {
             return invokeIntOf(REALIZE_ALL, handle());
         }
 
+        /** {@link #realizeAll()}, leaving alone every node that carries surfaces when
+         *  {@code skipSurfaced} is true: a renderer drawing those from their surfaces never
+         *  pays for their triangles. Returns how many were built. */
+        public int realizeMeshes(boolean skipSurfaced) {
+            try {
+                return (int) REALIZE_MESHES.invokeExact(handle(), skipSurfaced ? 1 : 0);
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
         /** How many nodes {@link #realizeAll()} has finished with. Safe to read from another
          *  thread. */
         public int realized() {
@@ -2051,6 +2829,16 @@ public final class Cad {
         public void cancel() {
             try {
                 CANCEL.invokeExact(handle());
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
+        /** Drop every mesh the scene has built; the next ask rebuilds. Every {@link Mesh} and
+         *  {@link Polylines} handed out before this is over freed memory. */
+        public void forgetMeshes() {
+            try {
+                FORGET_MESHES.invokeExact(handle());
             } catch (Throwable t) {
                 throw new RuntimeException(t);
             }
@@ -2073,6 +2861,51 @@ public final class Cad {
                 MemorySegment p = arena.allocateFrom(path);
                 MemorySegment f = arena.allocateFrom(format);
                 ok = invokeSceneSave(handle(), p, f);
+            }
+            if (!ok) throw new CadaclysmException(lastErrorOr("could not write " + path));
+        }
+
+        /**
+         * "y" or "z": which axis is up by default, from {@link #convention()} -- {@link
+         * Convention#UNITY} and {@link Convention#Y_UP} give "y", every other convention "z".
+         * What {@link SvgOptions#up()} defaults to when left null.
+         */
+        private String defaultUp() {
+            return convention == Convention.UNITY || convention == Convention.Y_UP ? "y" : "z";
+        }
+
+        /** {@link #svgText(SvgOptions)} with every default. */
+        public String svgText() {
+            return svgText(null);
+        }
+
+        /**
+         * Every visible placement's wireframe as SVG text, from the camera {@code options}
+         * describes -- the library's own camera, not a viewer. Borrowed: copied out before
+         * this returns, and replaced by this scene's next {@code svgText}/{@code svg} call.
+         */
+        public String svgText(SvgOptions options) {
+            MemorySegment p;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment o = buildSvgOptions(arena, options, defaultUp());
+                p = invokeSceneSvgText(handle(), o);
+            }
+            if (p.address() == 0) throw new CadaclysmException(lastErrorOr("svg"));
+            return string(p);
+        }
+
+        /** {@link #svgText(SvgOptions)} written to {@code path} by the library itself. */
+        public void svg(String path) {
+            svg(path, null);
+        }
+
+        /** {@link #svgText(SvgOptions)} written to {@code path} by the library itself. */
+        public void svg(String path, SvgOptions options) {
+            boolean ok;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment o = buildSvgOptions(arena, options, defaultUp());
+                MemorySegment p = arena.allocateFrom(path);
+                ok = invokeSceneSvg(handle(), p, o);
             }
             if (!ok) throw new CadaclysmException(lastErrorOr("could not write " + path));
         }
@@ -2125,6 +2958,22 @@ public final class Cad {
     private static boolean invokeSceneSave(MemorySegment scene, MemorySegment path, MemorySegment format) {
         try {
             return (boolean) SCENE_SAVE.invokeExact(scene, path, format);
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
+
+    private static MemorySegment invokeSceneSvgText(MemorySegment scene, MemorySegment options) {
+        try {
+            return (MemorySegment) SCENE_SVG_TEXT.invokeExact(scene, options);
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
+
+    private static boolean invokeSceneSvg(MemorySegment scene, MemorySegment path, MemorySegment options) {
+        try {
+            return (boolean) SCENE_SVG.invokeExact(scene, path, options);
         } catch (Throwable t) {
             throw new RuntimeException(t);
         }

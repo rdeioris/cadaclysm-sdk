@@ -90,6 +90,24 @@ must("save_mesh") { try first.saveMesh(stl, format: "stl") }
 let size = (try? FileManager.default.attributesOfItem(atPath: stl)[.size] as? Int) ?? 0
 check(size >= 84, "save_mesh wrote no triangles")
 
+// The scene's and a node's wireframe as SVG: the library's own camera, no viewer.
+let svgText = must("svg_text") { try scene.svgText() }
+check(svgText.hasPrefix("<svg") && svgText.contains("<path"), "scene SVG text did not look like an SVG wireframe")
+let svgPath = temp.appendingPathComponent("cadaclysm-smoke-swift.svg").path
+must("svg") { try scene.svg(svgPath) }
+let svgSize = (try? FileManager.default.attributesOfItem(atPath: svgPath)[.size] as? Int) ?? 0
+check(svgSize > 0, "scene.svg wrote an empty file")
+let nodeSvgText = must("node svg_text") { try first.svgText() }
+check(nodeSvgText.hasPrefix("<svg") && nodeSvgText.contains("<path"), "node SVG text did not look like an SVG wireframe")
+do {
+    _ = try scene.svgText(SvgOptions(fov: 200))
+    fail("scene svg: fov=200 was accepted")
+} catch is CadaclysmError {
+} catch {
+    fail("scene svg: fov=200's refusal is not a CadaclysmError: \(error)")
+}
+print("svg: scene and node text, file written, fov=200 refused")
+
 // ---- the kernel ------------------------------------------------------------------------
 
 if let license { must("blacksmith license") { try Blacksmith.license(license) } }
@@ -122,8 +140,58 @@ check(shape.isClosed && shape.faces == faces, "the filleted part is not a closed
 // each of the four corners rounded trades one edge for one face.
 check(faces == 15, "the filleted part has \(faces) faces, not 15")
 
+// The solid's own wireframe as SVG, over the kernel ABI rather than the reader's.
+let solidSvgText = must("solid svg_text") { try rounded.svgText() }
+check(solidSvgText.hasPrefix("<svg") && solidSvgText.contains("<path"), "solid SVG text did not look like an SVG wireframe")
+let solidSvgPath = temp.appendingPathComponent("cadaclysm-smoke-swift-solid.svg").path
+must("solid svg") { try rounded.svg(solidSvgPath) }
+let solidSvgSize = (try? FileManager.default.attributesOfItem(atPath: solidSvgPath)[.size] as? Int) ?? 0
+check(solidSvgSize > 0, "Solid.svg wrote an empty file")
+do {
+    _ = try rounded.svgText(SvgOptions(fov: 200))
+    fail("blacksmith svg: fov=200 was accepted")
+} catch is BuildError {
+} catch {
+    fail("blacksmith svg: fov=200's refusal is not a BuildError: \(error)")
+}
+print("blacksmith svg: solid text, file written, fov=200 refused")
+
 frames()
 sheetVerbs(plate)
+
+// Hits: two radius-5 circles six apart cross at two points, (3, -4) and (3, 4). At (3, 4)
+// the first circle's upper arc is at t 0.2952 and the moved one's at 0.7048; at (3, -4) the
+// other way round -- which catches the two sides read swapped.
+let crossing = must("hits") { try Profile.circle(5).hits(try Profile.circle(5).translate(6, 0)) }
+check(crossing.count == 2, "hits: two circles hit \(crossing.count) times, not 2")
+let crossingYs = crossing.map { $0.start.y }.sorted()
+check(abs(crossingYs[0] + 4) < 1e-9 && abs(crossingYs[1] - 4) < 1e-9, "hits: y \(crossingYs), not -4 and 4")
+for h in crossing {
+    let (ta, tb) = h.start.y > 0 ? (0.2952, 0.7048) : (0.7048, 0.2952)
+    check(!h.run && !h.touch && h.aStart.loopIndex == 0 && abs(h.start.x - 3) < 1e-9
+        && abs(h.aStart.t - ta) < 1e-3 && abs(h.bStart.t - tb) < 1e-3,
+        "hits: \(h) is not a crossing at (3, +-4) at t \(ta) on a and \(tb) on b")
+}
+print("hits: \(crossing[0]), \(crossing[1])")
+
+// Edge curves: a cylinder's rims are circles of its radius about a cap centre, a whole turn
+// each; a cuboid's edges are lines whose origin + x is the far end.
+let rims = must("edges") { try Solid.cylinder(5, 3).edges }.filter { $0.kind == "circle" }.compactMap { $0.curve }
+check(rims.count >= 2, "edge_curve: the cylinder's rims have no curve")
+for c in rims {
+    let unit = abs((c.x * c.x).sum().squareRoot() - 1) < 1e-9 && abs((c.y * c.y).sum().squareRoot() - 1) < 1e-9 && abs((c.x * c.y).sum()) < 1e-9
+    let centred = abs(c.origin.x) < 1e-9 && abs(c.origin.y) < 1e-9 && min(abs(c.origin.z), abs(c.origin.z - 3)) < 1e-9
+    check(c.kind == "circle" && abs(c.radius - 5) < 1e-9 && unit && centred && abs(abs(c.t1 - c.t0) - 2 * Double.pi) < 1e-9
+        && c.degree == 0 && c.knots.isEmpty && c.weights == nil, "edge_curve: a rim reads \(c)")
+}
+for e in must("edges") { try Solid.cuboid(2, 4, 6).edges } {
+    guard let c = e.curve, c.kind == "line", c.t0 == 0, c.t1 == 1 else { fail("edge_curve: a cuboid edge reads \(String(describing: e.curve))") }
+    let far = c.origin + c.x
+    let ends = e.segments.flatMap { [$0.start, $0.end] }
+    check(ends.contains { (($0 - c.origin) * ($0 - c.origin)).sum() < 1e-18 } && ends.contains { (($0 - far) * ($0 - far)).sum() < 1e-18 },
+          "edge_curve: a cuboid line's ends are not its own vertices: \(c)")
+}
+print("edge_curve: \(rims[0])")
 
 // Colour: a gold plate joined with a blue pin -- the part is gold, the pin's top keeps its blue.
 let gold = must("coloured") { try plate.coloured(SIMD3(0.8, 0.6, 0.4)) }
@@ -165,6 +233,17 @@ print("step read back: bounds max=\(b.max)")
 // The plate is 80 x 40 x 6, Rect centring it on the origin, and the pin adds 10.
 check(abs(b.max.x - 40) <= 0.01 && abs(b.max.y - 20) <= 0.01 && abs(b.max.z - 16) <= 0.01,
       "the STEP did not read back as the plate with its pin")
+
+// The same solid as SAT, written by the library itself, read back the same way.
+let sat = temp.appendingPathComponent("cadaclysm-smoke-swift.sat").path
+must("sat") { try rounded.sat(sat) }
+check(must("sat_text") { try rounded.satText() }.hasPrefix("400 0 1 0"), "the SAT text does not open with the record version")
+let satBack: Scene = must("sat read back") { try Cadaclysm.open(sat) }
+let satBounds = satBack.bounds
+print("sat read back: bounds max=\(satBounds.max)")
+check(abs(satBounds.max.x - 40) <= 0.01 && abs(satBounds.max.y - 20) <= 0.01 && abs(satBounds.max.z - 16) <= 0.01,
+      "the SAT did not read back as the plate with its pin")
+satBack.close()
 
 // And back into the kernel: the read body's brep, shared with the scene rather than copied,
 // as a solid that outlives the scene it came from.

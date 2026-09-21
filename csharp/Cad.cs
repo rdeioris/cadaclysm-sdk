@@ -96,6 +96,113 @@ public enum ValueKind
     Reference = 6,
 }
 
+// ---- SVG ---------------------------------------------------------------------------------
+
+/// <summary>One of the seven camera angles <see cref="SvgOptions.View"/> understands -- the
+/// same table `cadaclysm_viewer.VIEWS` gives Python's `show()` and `svg()` both.</summary>
+public enum SvgView
+{
+    /// <summary>Azimuth -90, elevation 0 -- looks from -Y.</summary>
+    Front,
+    /// <summary>Azimuth 90, elevation 0 -- looks from +Y.</summary>
+    Back,
+    /// <summary>Azimuth 180, elevation 0 -- looks from -X.</summary>
+    Left,
+    /// <summary>Azimuth 0, elevation 0 -- looks from +X.</summary>
+    Right,
+    /// <summary>Azimuth -90, elevation 90 -- looks from +Z, straight down.</summary>
+    Top,
+    /// <summary>Azimuth -90, elevation -90 -- looks from -Z, straight up.</summary>
+    Bottom,
+    /// <summary>Azimuth -50, elevation 28 -- the viewer's own default.</summary>
+    Iso,
+}
+
+/// <summary>Degrees (azimuth, elevation) for each <see cref="SvgView"/>.</summary>
+public static class SvgViewAngles
+{
+    private static readonly Dictionary<SvgView, (double Azimuth, double Elevation)> Table = new()
+    {
+        [SvgView.Front] = (-90.0, 0.0),
+        [SvgView.Back] = (90.0, 0.0),
+        [SvgView.Left] = (180.0, 0.0),
+        [SvgView.Right] = (0.0, 0.0),
+        [SvgView.Top] = (-90.0, 90.0),
+        [SvgView.Bottom] = (-90.0, -90.0),
+        [SvgView.Iso] = (-50.0, 28.0),
+    };
+
+    /// <summary>This view's (azimuth, elevation) in degrees.</summary>
+    public static (double Azimuth, double Elevation) For(SvgView view) => Table[view];
+}
+
+/// <summary>How an SVG drawing is made -- the camera in the viewer's words, the page, the pen
+/// and which line sets. Mirrors `CadaclysmSvgOptions`, defaulted the way
+/// `cadaclysm_svg_options_init` defaults the struct, with <see cref="View"/> supplying <see
+/// cref="Azimuth"/>/<see cref="Elevation"/> unless they are set directly.</summary>
+/// <remarks>Passed to <see cref="Scene.SvgText"/>, <see cref="Scene.Svg"/>, <see
+/// cref="Node.SvgText"/> and <see cref="Node.Svg"/>. A refused option (an out-of-range
+/// <see cref="Fov"/>, say) throws <see cref="CadaclysmException"/> naming the field, worded by
+/// the library itself.</remarks>
+public sealed class SvgOptions
+{
+    /// <summary>front back left right top bottom iso -- fills <see cref="Azimuth"/>/<see
+    /// cref="Elevation"/> unless they are set directly. Default Iso.</summary>
+    public SvgView View { get; set; } = SvgView.Iso;
+
+    /// <summary>Degrees about the up axis from +X, overriding <see cref="View"/>'s. -90 looks
+    /// from -Y, the front.</summary>
+    public double? Azimuth { get; set; }
+
+    /// <summary>Degrees above the horizon, overriding <see cref="View"/>'s.</summary>
+    public double? Elevation { get; set; }
+
+    /// <summary>"y" or "z"; null keeps the scene's own convention -- <see cref="Convention.Unity"/>
+    /// and <see cref="Convention.YUp"/> default to "y", every other convention to "z".</summary>
+    public string? Up { get; set; }
+
+    /// <summary>Vertical field of view in degrees; 0 (the default) is orthographic.</summary>
+    public double Fov { get; set; } = 0.0;
+
+    /// <summary>The page's viewBox width, page units. Default 1000.</summary>
+    public double Width { get; set; } = 1000.0;
+
+    /// <summary>The page's viewBox height, page units. Default 1000.</summary>
+    public double Height { get; set; } = 1000.0;
+
+    /// <summary>Fraction of the content's extent left each side. Default 0.05.</summary>
+    public double Margin { get; set; } = 0.05;
+
+    /// <summary>How far a written curve may stray, in page units. Default 0.1.</summary>
+    public double Tolerance { get; set; } = 0.1;
+
+    /// <summary>The pen colour, `'#rrggbb'`. Default black.</summary>
+    public string Stroke { get; set; } = "#000000";
+
+    /// <summary>The pen's width, page units. Default 1.</summary>
+    public double StrokeWidth { get; set; } = 1.0;
+
+    /// <summary>`0xRRGGBB`, or null (the default) for no `&lt;rect&gt;` behind the drawing --
+    /// the page left to whatever the viewer composites it onto.</summary>
+    public uint? Background { get; set; }
+
+    /// <summary>Each shape's feature edges -- the exact curves the flattened polylines are
+    /// drawn from. Default true.</summary>
+    public bool Edges { get; set; } = true;
+
+    /// <summary>Each shape's free curves -- the ones that are not the edge of any face.
+    /// Default false.</summary>
+    public bool Curves { get; set; } = false;
+
+    /// <summary>Each shape's isocurves -- the constant-parameter lines across a curved face.
+    /// Default false.</summary>
+    public bool Isocurves { get; set; } = false;
+
+    /// <summary>Write every line as straight segments within <see cref="Tolerance"/>, instead
+    /// of being fitted back to cubic Béziers. Default false.</summary>
+    public bool Polylines { get; set; } = false;
+}
+
 // ---- the structs the ABI returns by value ----------------------------------------------
 
 [StructLayout(LayoutKind.Sequential)]
@@ -160,6 +267,28 @@ internal struct RawOpenOptions
     public IntPtr PickUser;
 }
 
+/// <summary>`CadaclysmSvgOptions`. Field order and `Size` are the contract, as <see
+/// cref="RawOpenOptions"/> above: `cadaclysm_svg_options_init` fills the library's whole
+/// struct, so this must match the header field for field and may never reorder. Pinned by
+/// `tests/bindings.rs` against the header, as the other structs here are.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawSvgOptions
+{
+    public uint Size;
+    public uint Up;
+    public double Azimuth;
+    public double Elevation;
+    public double Fov;
+    public double Width;
+    public double Height;
+    public double Margin;
+    public double Tolerance;
+    public double StrokeWidth;
+    public uint Stroke;
+    public uint Background;
+    public uint Flags;
+}
+
 [StructLayout(LayoutKind.Sequential)]
 internal struct RawPolylines
 {
@@ -167,6 +296,44 @@ internal struct RawPolylines
     public IntPtr Counts;
     public uint PolylineCount;
     public uint VertexCount;
+}
+
+// Field order must match the header's CadaclysmBeziers exactly; pinned by bindings.rs.
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawBeziers
+{
+    public IntPtr Points;
+    public IntPtr Weights;
+    public uint Count;
+}
+
+// CadaclysmCollision: `Size` first, which the caller fills. `Frame` and `HalfExtent` are
+// fixed buffers, which bindings.rs's field parser does not read (as RawFace); the field
+// order is the header's, checked by eye against it.
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct RawCollision
+{
+    public uint Size;
+    public uint Shape;
+    public uint Confidence;
+    public uint Axis;
+    public fixed double Frame[16];
+    public fixed double HalfExtent[3];
+    public double Radius;
+    public double Height;
+    public double Error;
+    public uint HullVertexCount;
+    public uint HullIndexCount;
+}
+
+// Field order must match the header's CadaclysmCollisionHull exactly; pinned by bindings.rs.
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawCollisionHull
+{
+    public IntPtr Positions;
+    public IntPtr Indices;
+    public uint VertexCount;
+    public uint IndexCount;
 }
 
 // Field order must match the header's CadaclysmAttribute exactly.
@@ -271,6 +438,20 @@ internal sealed class BrepHandle : CadaclysmHandle
     protected override bool ReleaseHandle()
     {
         Native.cadaclysm_brep_release(handle);
+        return true;
+    }
+}
+
+/// <summary>`CadaclysmMeshlets *`, freed by `cadaclysm_meshlets_free`.</summary>
+internal sealed class MeshletsHandle : CadaclysmHandle
+{
+    public MeshletsHandle()
+    {
+    }
+
+    protected override bool ReleaseHandle()
+    {
+        Native.cadaclysm_meshlets_free(handle);
         return true;
     }
 }
@@ -432,9 +613,14 @@ internal static class Native
     [DllImport(Lib)] internal static extern uint cadaclysm_mesh_format_count();
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_mesh_format(uint index);
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_mesh_format_extension(uint index);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_mesh_format_label(uint index);
+    [DllImport(Lib)] internal static extern uint cadaclysm_format_count();
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_format_name(uint index);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_format_extensions(uint index);
     [DllImport(Lib)] internal static extern uint cadaclysm_query(SceneHandle scene,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string filter, [Out] uint[]? outArr, uint capacity);
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_pick_file(IntPtr window);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_pick_save(IntPtr window, [MarshalAs(UnmanagedType.LPUTF8Str)] string? suggestedName);
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_node_id(SceneHandle scene, uint node);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_node_color(SceneHandle scene, uint node, [Out] float[] rgba);
@@ -450,6 +636,21 @@ internal static class Native
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_node_can_mesh(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawMesh cadaclysm_node_mesh(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern uint cadaclysm_lod_levels();
+    [DllImport(Lib)] internal static extern RawMesh cadaclysm_node_mesh_lod(SceneHandle scene, uint node, uint level);
+    [DllImport(Lib)] internal static extern float cadaclysm_node_lod_error(SceneHandle scene, uint node, uint level);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_node_collision(SceneHandle scene, uint node, uint hullBudget, ref RawCollision outBody);
+    [DllImport(Lib)] internal static extern RawCollisionHull cadaclysm_node_collision_hull(SceneHandle scene, uint node, uint hullBudget);
+    [DllImport(Lib)] internal static extern RawBounds cadaclysm_node_bounds_placed(SceneHandle scene, uint node, double[]? placement);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_node_is_meshed(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_surface_edges(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_surface_isocurves(SceneHandle scene, uint node);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_node_surface_pick(SceneHandle scene, uint node, double[] from, double[] to, [Out] double[] outPoint);
+    [DllImport(Lib)] internal static extern RawMesh cadaclysm_node_surface_proxy_mesh(SceneHandle scene, uint node, uint cells);
+    [DllImport(Lib)] internal static extern long cadaclysm_node_triangle_estimate(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawSurfaces cadaclysm_node_surfaces(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern BrepHandle cadaclysm_node_brep(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern void cadaclysm_brep_release(IntPtr brep);
@@ -463,13 +664,42 @@ internal static class Native
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_node_generator(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern uint cadaclysm_diagnostic_count(SceneHandle scene);
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_diagnostic(SceneHandle scene, uint index);
+    [DllImport(Lib)] internal static extern uint cadaclysm_geometry_diagnostic_count(SceneHandle scene);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_geometry_diagnostic(SceneHandle scene, uint index);
     [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_edges(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_curves(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_isocurves(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern RawBeziers cadaclysm_node_edge_beziers(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern RawBeziers cadaclysm_node_curve_beziers(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern RawBeziers cadaclysm_node_isocurve_beziers(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern uint cadaclysm_realize_all(SceneHandle scene);
+    [DllImport(Lib)] internal static extern uint cadaclysm_realize_meshes(SceneHandle scene, uint skipSurfaced);
     [DllImport(Lib)] internal static extern uint cadaclysm_realized(SceneHandle scene);
     [DllImport(Lib)] internal static extern uint cadaclysm_realize_total(SceneHandle scene);
     [DllImport(Lib)] internal static extern void cadaclysm_cancel(SceneHandle scene);
+    [DllImport(Lib)] internal static extern MeshletsHandle cadaclysm_meshlets_build(float[] positions, float[]? normals, nuint vertexCount, uint[] indices, nuint indexCount, uint maxTriangles, uint maxVertices, int levels);
+    [DllImport(Lib)] internal static extern uint cadaclysm_meshlets_count(MeshletsHandle handle);
+    [DllImport(Lib)] internal static extern void cadaclysm_meshlets_free(IntPtr handle);
+    [DllImport(Lib)] internal static extern uint cadaclysm_meshlet_triangle_count(MeshletsHandle handle, uint index);
+    [DllImport(Lib)] internal static extern uint cadaclysm_meshlet_vertex_count(MeshletsHandle handle, uint index);
+    [DllImport(Lib)] internal static extern uint cadaclysm_meshlet_level(MeshletsHandle handle, uint index);
+    [DllImport(Lib)] internal static extern uint cadaclysm_meshlet_group(MeshletsHandle handle, uint index);
+    [DllImport(Lib)] internal static extern float cadaclysm_meshlet_error(MeshletsHandle handle, uint index);
+    [DllImport(Lib)] internal static extern uint cadaclysm_meshlet_child_count(MeshletsHandle handle, uint index);
+    [DllImport(Lib)] internal static extern void cadaclysm_meshlet_positions(MeshletsHandle handle, uint index, [Out] float[] outPositions);
+    [DllImport(Lib)] internal static extern void cadaclysm_meshlet_normals(MeshletsHandle handle, uint index, [Out] float[] outNormals);
+    [DllImport(Lib)] internal static extern void cadaclysm_meshlet_indices(MeshletsHandle handle, uint index, [Out] uint[] outIndices);
+    [DllImport(Lib)] internal static extern void cadaclysm_meshlet_children(MeshletsHandle handle, uint index, [Out] uint[] outChildren);
+    [DllImport(Lib)] internal static extern void cadaclysm_forget_meshes(SceneHandle scene);
+    [DllImport(Lib)] internal static extern void cadaclysm_svg_options_init(ref RawSvgOptions options);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_scene_svg_text(SceneHandle scene, ref RawSvgOptions options);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_scene_svg(SceneHandle scene,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path, ref RawSvgOptions options);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_node_svg_text(SceneHandle scene, uint node, ref RawSvgOptions options);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_node_svg(SceneHandle scene, uint node,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path, ref RawSvgOptions options);
 }
 
 /// <summary>A 4x4 column-major ABI matrix (16 doubles or 16 floats) as the row-major 2D array
@@ -701,6 +931,114 @@ public sealed class Polylines
     }
 }
 
+/// <summary>A node's edges, curves or isocurves as cubic Bézier curves -- exact where the
+/// file's curves were, where <see cref="Polylines"/> are their chords. A view over the
+/// scene's memory, valid until the scene closes.</summary>
+public sealed class Beziers
+{
+    private readonly RawBeziers _raw;
+
+    public Scene Scene { get; }
+
+    internal Beziers(Scene scene, RawBeziers raw)
+    {
+        Scene = scene;
+        _raw = raw;
+    }
+
+    public uint Count => _raw.Count;
+
+    private unsafe ReadOnlySpan<float> View(IntPtr at, uint length)
+    {
+        _ = Scene.Handle;
+        return at == IntPtr.Zero ? ReadOnlySpan<float>.Empty : new ReadOnlySpan<float>((void*)at, (int)length);
+    }
+
+    /// <summary>`Count * 12` floats: four control points a curve, three floats each.</summary>
+    public ReadOnlySpan<float> Points => View(_raw.Points, _raw.Count * 12);
+
+    /// <summary>`Count * 4` floats: a weight per control point, all ones for a polynomial
+    /// curve, and the weights that make a circular arc exact for a rational one.</summary>
+    public ReadOnlySpan<float> Weights => View(_raw.Weights, _raw.Count * 4);
+
+    public BeziersData Copy() => new(Points.ToArray(), Weights.ToArray());
+}
+
+/// <summary>A <see cref="Beziers"/> in memory of your own.</summary>
+public sealed record BeziersData(float[] Points, float[] Weights);
+
+/// <summary>What a node turned out to be for a physics engine: a box, sphere, capsule or
+/// cylinder where one fits within <see cref="Error"/>, else a convex hull. <see cref="Frame"/>
+/// (column-major) and <see cref="HalfExtent"/> are always the true oriented box. Plain data,
+/// copied out of the scene.</summary>
+public sealed class Collision
+{
+    private static readonly string[] Names = { "none", "box", "sphere", "capsule", "cylinder", "hull" };
+
+    public uint Shape { get; }
+    public uint Confidence { get; }
+    public uint Axis { get; }
+    public double[] Frame { get; }
+    public double[] HalfExtent { get; }
+    public double Radius { get; }
+    public double Height { get; }
+    public double Error { get; }
+    public uint HullVertexCount { get; }
+    public uint HullIndexCount { get; }
+
+    internal unsafe Collision(in RawCollision raw)
+    {
+        Shape = raw.Shape;
+        Confidence = raw.Confidence;
+        Axis = raw.Axis;
+        Frame = new double[16];
+        HalfExtent = new double[3];
+        fixed (RawCollision* p = &raw)
+        {
+            for (var i = 0; i < 16; i++) Frame[i] = p->Frame[i];
+            for (var i = 0; i < 3; i++) HalfExtent[i] = p->HalfExtent[i];
+        }
+        Radius = raw.Radius;
+        Height = raw.Height;
+        Error = raw.Error;
+        HullVertexCount = raw.HullVertexCount;
+        HullIndexCount = raw.HullIndexCount;
+    }
+
+    /// <summary>`none`, `box`, `sphere`, `capsule`, `cylinder` or `hull`.</summary>
+    public string ShapeName => Shape < Names.Length ? Names[Shape] : Shape.ToString();
+}
+
+/// <summary>A node's convex hull for a physics engine, as triangles -- a view over the
+/// scene's memory, valid until the scene closes.</summary>
+public sealed class CollisionHull
+{
+    private readonly RawCollisionHull _raw;
+
+    public Scene Scene { get; }
+
+    internal CollisionHull(Scene scene, RawCollisionHull raw)
+    {
+        Scene = scene;
+        _raw = raw;
+    }
+
+    public uint VertexCount => _raw.VertexCount;
+    public uint IndexCount => _raw.IndexCount;
+
+    private unsafe ReadOnlySpan<T> View<T>(IntPtr at, uint length)
+    {
+        _ = Scene.Handle;
+        return at == IntPtr.Zero ? ReadOnlySpan<T>.Empty : new ReadOnlySpan<T>((void*)at, (int)length);
+    }
+
+    /// <summary>`VertexCount * 3` floats.</summary>
+    public ReadOnlySpan<float> Positions => View<float>(_raw.Positions, _raw.VertexCount * 3);
+
+    /// <summary>`IndexCount` indices, three a triangle.</summary>
+    public ReadOnlySpan<uint> Indices => View<uint>(_raw.Indices, _raw.IndexCount);
+}
+
 /// <summary>One trimmed face: the surface itself, plus the loops that cut it.</summary>
 /// <remarks><see cref="Kind"/> is 0 plane, 1 cylinder, 2 cone, 3 sphere, 4 torus, 5
 /// revolution, 6 extrusion, 7 NURBS, 8 sum. <see cref="Origin"/>, <see cref="Ax"/>, <see
@@ -774,6 +1112,10 @@ public sealed class Surfaces : IReadOnlyList<Face>
 /// <summary>What <see cref="Cadaclysm.MeshFormats"/> offers: every format <see
 /// cref="Node.SaveMesh"/> writes, plus a label ready to put in a menu.</summary>
 public sealed record MeshFormat(string Name, string Extension, string Label);
+
+/// <summary>One format this build reads: its name and the extensions its files take.
+/// What <see cref="Cadaclysm.Formats"/> offers, for an open dialog's filter.</summary>
+public sealed record Format(string Name, IReadOnlyList<string> Extensions);
 
 /// <summary>One drawing of one node's geometry, at one place.</summary>
 /// <remarks><b>A node is not a drawing, and the difference is a bug this library shipped.</b>
@@ -895,6 +1237,86 @@ public readonly struct Manifold
         $"Manifold(faces={Faces}, edges={Edges}, vertices={Vertices}, boundary_edges={BoundaryEdges}, " +
         $"non_manifold_edges={NonManifoldEdges}, non_manifold_vertices={NonManifoldVertices}, " +
         $"is_manifold={IsManifold}, is_closed={IsClosed})";
+}
+
+/// <summary>One meshlet, copied out: the arrays are yours.</summary>
+public sealed record Meshlet(uint Index, uint Level, uint Group, float Error, uint VertexCount, uint TriangleCount,
+                             float[] Positions, float[] Normals, uint[] Indices, uint[] Children);
+
+/// <summary>A mesh split into meshlets, optionally with coarser levels above them, for a
+/// mesh-shader or Nanite-style renderer. Built from any mesh and owned by you: dispose it.</summary>
+public sealed class Meshlets : IDisposable
+{
+    internal MeshletsHandle Handle { get; }
+
+    private Meshlets(MeshletsHandle handle)
+    {
+        Handle = handle;
+    }
+
+    /// <summary>Split <paramref name="positions"/> (three floats a vertex), <paramref name="normals"/>
+    /// (the same, or empty for none) and <paramref name="indices"/> (three a triangle) into
+    /// meshlets of at most <paramref name="maxTriangles"/> and <paramref name="maxVertices"/> each --
+    /// the consumer's own limits, with no default: Nanite takes 128/256, a mesh-shader pipeline
+    /// 124/64. <paramref name="levels"/> above 0 groups and simplifies each level into the next
+    /// until one meshlet is left.</summary>
+    public static Meshlets Build(ReadOnlySpan<float> positions, ReadOnlySpan<float> normals, ReadOnlySpan<uint> indices,
+                                 uint maxTriangles, uint maxVertices, int levels = 0)
+    {
+        if (maxTriangles == 0 || maxVertices == 0) throw new CadaclysmException("meshlets: maxTriangles and maxVertices are required");
+        if (positions.Length % 3 != 0 || indices.Length % 3 != 0)
+            throw new CadaclysmException("meshlets: positions must hold three floats a vertex and indices three a triangle");
+        if (!normals.IsEmpty && normals.Length != positions.Length)
+            throw new CadaclysmException("meshlets: normals must hold one per vertex, three floats each");
+        var handle = Native.cadaclysm_meshlets_build(positions.ToArray(), normals.IsEmpty ? null : normals.ToArray(),
+            (nuint)(positions.Length / 3), indices.ToArray(), (nuint)indices.Length, maxTriangles, maxVertices, levels);
+        if (handle.IsInvalid)
+        {
+            handle.Dispose();
+            throw new CadaclysmException(Cadaclysm.LastErrorOr("meshlets: build failed"));
+        }
+        return new Meshlets(handle);
+    }
+
+    private MeshletsHandle Live => Handle.IsClosed ? throw new CadaclysmException("meshlets: freed") : Handle;
+
+    public bool Freed => Handle.IsClosed;
+
+    /// <summary>How many meshlets, every level counted.</summary>
+    public uint Count => Native.cadaclysm_meshlets_count(Live);
+
+    public uint TriangleCount(uint i) => Native.cadaclysm_meshlet_triangle_count(Live, i);
+    public uint VertexCount(uint i) => Native.cadaclysm_meshlet_vertex_count(Live, i);
+    /// <summary>0 for a leaf over the mesh itself, higher for a simplified level above it.</summary>
+    public uint Level(uint i) => Native.cadaclysm_meshlet_level(Live, i);
+    public uint Group(uint i) => Native.cadaclysm_meshlet_group(Live, i);
+    /// <summary>How far this meshlet's level moved the surface; zero at level 0.</summary>
+    public float Error(uint i) => Native.cadaclysm_meshlet_error(Live, i);
+    public uint ChildCount(uint i) => Native.cadaclysm_meshlet_child_count(Live, i);
+
+    /// <summary>One meshlet's arrays and numbers, copied out.</summary>
+    public Meshlet Meshlet(uint i)
+    {
+        var handle = Live;
+        var vertexCount = Native.cadaclysm_meshlet_vertex_count(handle, i);
+        var triangleCount = Native.cadaclysm_meshlet_triangle_count(handle, i);
+        var childCount = Native.cadaclysm_meshlet_child_count(handle, i);
+        var positions = new float[vertexCount * 3];
+        var normals = new float[vertexCount * 3];
+        var indices = new uint[triangleCount * 3];
+        var children = new uint[childCount];
+        Native.cadaclysm_meshlet_positions(handle, i, positions);
+        Native.cadaclysm_meshlet_normals(handle, i, normals);
+        Native.cadaclysm_meshlet_indices(handle, i, indices);
+        Native.cadaclysm_meshlet_children(handle, i, children);
+        return new Meshlet(i, Native.cadaclysm_meshlet_level(handle, i), Native.cadaclysm_meshlet_group(handle, i),
+            Native.cadaclysm_meshlet_error(handle, i), vertexCount, triangleCount, positions, normals, indices, children);
+    }
+
+    /// <summary>Give the meshlets back. Idempotent.</summary>
+    public void Free() => Handle.Dispose();
+
+    public void Dispose() => Free();
 }
 
 /// <summary>One node of the document: an assembly, a shape, a placement.</summary>
@@ -1059,6 +1481,25 @@ public sealed class Node : IEquatable<Node>
             throw new CadaclysmException(Cadaclysm.LastErrorOr($"could not write {path}"));
     }
 
+    /// <summary>This node's own wireframe as SVG text, in its own frame -- <see
+    /// cref="Scene.SvgText"/>'s options, read from just this node rather than every placement.
+    /// </summary>
+    public string SvgText(SvgOptions? options = null)
+    {
+        var raw = Cadaclysm.BuildSvgOptions(options, Scene.DefaultUp);
+        var ptr = Native.cadaclysm_node_svg_text(Scene.Handle, Index, ref raw);
+        if (ptr == IntPtr.Zero) throw new CadaclysmException(Cadaclysm.LastErrorOr("svg"));
+        return Marshal.PtrToStringUTF8(ptr) ?? "";
+    }
+
+    /// <summary><see cref="SvgText"/> written to `path` by the library itself.</summary>
+    public void Svg(string path, SvgOptions? options = null)
+    {
+        var raw = Cadaclysm.BuildSvgOptions(options, Scene.DefaultUp);
+        if (!Native.cadaclysm_node_svg(Scene.Handle, Index, path, ref raw))
+            throw new CadaclysmException(Cadaclysm.LastErrorOr($"could not write {path}"));
+    }
+
     /// <summary>`(r, g, b, a)` if the file gave one, else null -- most STEP files carry no
     /// colour at all, and the honest answer lets the caller use its own.</summary>
     public float[]? Colour
@@ -1103,12 +1544,22 @@ public sealed class Node : IEquatable<Node>
     /// property-for-zero-argument transcription rule calls for.</remarks>
     public Mesh? Mesh
     {
-        get
-        {
-            var raw = Native.cadaclysm_node_mesh(Scene.Handle, Index);
-            return raw.IndexCount == 0 || raw.Positions == IntPtr.Zero ? null : new Mesh(Scene, raw);
-        }
+        get => MeshOf(Native.cadaclysm_node_mesh(Scene.Handle, Index));
     }
+
+    private Mesh? MeshOf(RawMesh raw) =>
+        raw.IndexCount == 0 || raw.Positions == IntPtr.Zero ? null : new Mesh(Scene, raw);
+
+    /// <summary>Its triangles at a coarser level of detail: 0 is <see cref="Mesh"/> itself,
+    /// 1 up to <see cref="Cadaclysm.LodLevels"/> each about a quarter of the triangles of
+    /// the one before, and past that null. Every level shares the level-0 vertices -- the
+    /// same positions and vertex count, only the indices differ -- so upload the vertices
+    /// once and switch level by drawing a different index range.</summary>
+    public Mesh? MeshLod(uint level) => MeshOf(Native.cadaclysm_node_mesh_lod(Scene.Handle, Index, level));
+
+    /// <summary>How far <see cref="MeshLod"/> at this level moved the surface, in the
+    /// scene's units -- what to pick a level by. Zero at level 0.</summary>
+    public float LodError(uint level) => Native.cadaclysm_node_lod_error(Scene.Handle, Index, level);
 
     /// <summary>Its exact B-rep, for `Cadaclysm.Blacksmith.Solid.FromNode` to operate on, or
     /// null where it has none (a mesh, a curve, a CSG body, a JT or OpenSCAD part). Shared
@@ -1187,6 +1638,79 @@ public sealed class Node : IEquatable<Node>
     /// <summary>Its interior surface lines, as polylines -- distinct from <see cref="Edges"/>:
     /// those bound the faces, these rule across them.</summary>
     public Polylines Isocurves => new(Scene, Native.cadaclysm_node_isocurves(Scene.Handle, Index));
+
+    /// <summary>Its feature edges as cubic Bézier curves -- exact where the file's curves
+    /// were, where <see cref="Edges"/> are their chords. Builds the geometry if needed.</summary>
+    public Beziers EdgeBeziers => new(Scene, Native.cadaclysm_node_edge_beziers(Scene.Handle, Index));
+
+    /// <summary>Its free curves as cubic Béziers; see <see cref="EdgeBeziers"/>.</summary>
+    public Beziers CurveBeziers => new(Scene, Native.cadaclysm_node_curve_beziers(Scene.Handle, Index));
+
+    /// <summary>Its isocurves as cubic Béziers; see <see cref="EdgeBeziers"/>.</summary>
+    public Beziers IsocurveBeziers => new(Scene, Native.cadaclysm_node_isocurve_beziers(Scene.Handle, Index));
+
+    /// <summary>The collision body for what this node draws, building its mesh if it is not
+    /// built. <paramref name="hullBudget"/> is the most triangles a hull may have; 0 asks for
+    /// the Unity limit (255) and is not clamped to it. Null for a node that draws nothing.
+    /// Cached per node and budget.</summary>
+    public Collision? Collision(uint hullBudget = 0)
+    {
+        var raw = new RawCollision { Size = (uint)Marshal.SizeOf<RawCollision>() };
+        return Native.cadaclysm_node_collision(Scene.Handle, Index, hullBudget, ref raw) ? new Collision(in raw) : null;
+    }
+
+    /// <summary>The convex hull <see cref="Collision"/> counted, as triangles. Empty for a
+    /// node that draws nothing. A view into the scene, good until it closes or this node is
+    /// asked for a different <paramref name="hullBudget"/>, which refits and frees it.</summary>
+    public CollisionHull CollisionHull(uint hullBudget = 0) =>
+        new(Scene, Native.cadaclysm_node_collision_hull(Scene.Handle, Index, hullBudget));
+
+    // -- the surface path: for a renderer drawing exact surfaces, never triangles --
+
+    /// <summary>The box of what this node draws under <paramref name="placement"/> (16 doubles,
+    /// column-major, as <see cref="Placement.RawTransform"/>; null for the identity), for a part
+    /// drawn from its surfaces: every sample is carried through the convention and the placement
+    /// before it is boxed, so it is tighter than placing the corners of <see cref="Bounds"/>. All
+    /// zeros for a part with no surfaces.</summary>
+    public Bounds BoundsPlaced(double[]? placement = null)
+    {
+        if (placement is not null && placement.Length != 16) throw new CadaclysmException("bounds_placed: a placement is 16 numbers");
+        var raw = Native.cadaclysm_node_bounds_placed(Scene.Handle, Index, placement);
+        return new Bounds(new[] { raw.MinX, raw.MinY, raw.MinZ }, new[] { raw.MaxX, raw.MaxY, raw.MaxZ });
+    }
+
+    /// <summary>Whether its mesh has been built and is held -- by <see cref="Scene.RealizeAll"/>,
+    /// by an ask for it, or by anything else that needed it.</summary>
+    public bool IsMeshed => Native.cadaclysm_node_is_meshed(Scene.Handle, Index);
+
+    /// <summary>Its face boundaries taken from its trimmed surfaces -- the outline that costs no
+    /// tessellation, where <see cref="Edges"/> meshes the part. In the surfaces' own frame (see
+    /// <see cref="Scene.SurfaceMatrix"/>); empty without surfaces.</summary>
+    public Polylines SurfaceEdges => new(Scene, Native.cadaclysm_node_surface_edges(Scene.Handle, Index));
+
+    /// <summary>Its isocurves taken from its trimmed surfaces and clipped to the trims, without
+    /// meshing; a flat face gets none. In the surfaces' frame; empty without surfaces.</summary>
+    public Polylines SurfaceIsocurves => new(Scene, Native.cadaclysm_node_surface_isocurves(Scene.Handle, Index));
+
+    /// <summary>Where the segment <paramref name="from"/>..<paramref name="to"/> first meets this
+    /// part's surfaces, or null where it meets none. Exact, and in the surfaces' own frame: carry
+    /// a ray from the scene's space through the inverse of <see cref="Scene.SurfaceMatrix"/> first.</summary>
+    public double[]? SurfacePick(double[] from, double[] to)
+    {
+        if (from.Length != 3 || to.Length != 3) throw new CadaclysmException("surface_pick: from and to are three numbers each");
+        var hit = new double[3];
+        return Native.cadaclysm_node_surface_pick(Scene.Handle, Index, from, to, hit) ? hit : null;
+    }
+
+    /// <summary>A coarse mesh over its surfaces for what needs triangles and not a picture (ray
+    /// tracing, distance fields): each face gridded <paramref name="cells"/> by <paramref name="cells"/>,
+    /// never welded, built once per part at the first size asked. Null without surfaces or for
+    /// zero cells.</summary>
+    public Mesh? SurfaceProxyMesh(uint cells) => MeshOf(Native.cadaclysm_node_surface_proxy_mesh(Scene.Handle, Index, cells));
+
+    /// <summary>About how many triangles <see cref="Mesh"/> would give, without building it; -1
+    /// where the reader cannot say without doing the work. Treat -1 as unknown, never as zero.</summary>
+    public long TriangleEstimate => Native.cadaclysm_node_triangle_estimate(Scene.Handle, Index);
 
     /// <summary>This node and every node under it, parents before children.</summary>
     public IEnumerable<Node> Walk()
@@ -1311,6 +1835,21 @@ public sealed class Scene : IDisposable
         }
     }
 
+    /// <summary>What the reader built but the geometry stage could not finish -- a face that
+    /// would not trim, a surface that would not mesh. <see cref="Diagnostics"/> is what the
+    /// file held that could not be read; this is what the geometry did.</summary>
+    public IReadOnlyList<string> GeometryDiagnostics
+    {
+        get
+        {
+            var count = Native.cadaclysm_geometry_diagnostic_count(Handle);
+            var found = new List<string>((int)count);
+            for (uint i = 0; i < count; i++)
+                found.Add(Marshal.PtrToStringUTF8(Native.cadaclysm_geometry_diagnostic(Handle, i)) ?? "");
+            return found;
+        }
+    }
+
     /// <summary>The archive member this was read from, or null for a plain file.</summary>
     public string? SourceName
     {
@@ -1399,6 +1938,11 @@ public sealed class Scene : IDisposable
     /// does the same work over every core.</remarks>
     public uint RealizeAll() => Native.cadaclysm_realize_all(Handle);
 
+    /// <summary><see cref="RealizeAll"/>, leaving alone every node that carries surfaces when
+    /// <paramref name="skipSurfaced"/> is true: a renderer drawing those from their surfaces never
+    /// pays for their triangles. Returns how many were built.</summary>
+    public uint RealizeMeshes(bool skipSurfaced = true) => Native.cadaclysm_realize_meshes(Handle, skipSurfaced ? 1u : 0u);
+
     /// <summary>How many nodes <see cref="RealizeAll"/> has finished with. Safe to read from
     /// another thread.</summary>
     public uint Realized => Native.cadaclysm_realized(Handle);
@@ -1411,12 +1955,43 @@ public sealed class Scene : IDisposable
     /// scene.</summary>
     public void Cancel() => Native.cadaclysm_cancel(Handle);
 
+    /// <summary>Drop every mesh the scene has built; the next ask rebuilds. Every
+    /// <see cref="Mesh"/> and <see cref="Polylines"/> handed out before this is over freed
+    /// memory.</summary>
+    public void ForgetMeshes() => Native.cadaclysm_forget_meshes(Handle);
+
     /// <summary>Write the whole scene to `path`: "glb", "gltf" or "obj" -- every placement of
     /// every shape, named and placed as the tree is, unlike <see cref="Node.SaveMesh"/> which
     /// writes one node's mesh on its own.</summary>
     public void Save(string path, string format = "glb")
     {
         if (!Native.cadaclysm_scene_save(Handle, path, format))
+            throw new CadaclysmException(Cadaclysm.LastErrorOr($"could not write {path}"));
+    }
+
+    /// <summary>"y" or "z": which axis is up by default, from <see cref="Convention"/> --
+    /// <see cref="Cadaclysm.Convention.Unity"/> and <see cref="Cadaclysm.Convention.YUp"/> give
+    /// "y", every other convention "z". What <see cref="SvgOptions.Up"/> defaults to when left
+    /// null.</summary>
+    internal string DefaultUp => Convention is Convention.Unity or Convention.YUp ? "y" : "z";
+
+    /// <summary>Every visible placement's wireframe as SVG text, from the camera <paramref
+    /// name="options"/> describes -- the library's own camera, not a viewer. See <see
+    /// cref="SvgOptions"/>. Borrowed: copied out before this returns, and replaced by this
+    /// scene's next `SvgText`/`Svg` call.</summary>
+    public string SvgText(SvgOptions? options = null)
+    {
+        var raw = Cadaclysm.BuildSvgOptions(options, DefaultUp);
+        var ptr = Native.cadaclysm_scene_svg_text(Handle, ref raw);
+        if (ptr == IntPtr.Zero) throw new CadaclysmException(Cadaclysm.LastErrorOr("svg"));
+        return Marshal.PtrToStringUTF8(ptr) ?? "";
+    }
+
+    /// <summary><see cref="SvgText"/> written to `path` by the library itself.</summary>
+    public void Svg(string path, SvgOptions? options = null)
+    {
+        var raw = Cadaclysm.BuildSvgOptions(options, DefaultUp);
+        if (!Native.cadaclysm_scene_svg(Handle, path, ref raw))
             throw new CadaclysmException(Cadaclysm.LastErrorOr($"could not write {path}"));
     }
 
@@ -1464,6 +2039,10 @@ public static class Cadaclysm
     /// process.</summary>
     public static ulong LicenseNoticeCount() => Native.cadaclysm_license_notice_count();
 
+    /// <summary>How many coarser levels <see cref="Node.MeshLod"/> offers above the mesh
+    /// itself (level 0).</summary>
+    public static uint LodLevels() => Native.cadaclysm_lod_levels();
+
     /// <summary>Every format <see cref="Node.SaveMesh"/> writes.</summary>
     public static IReadOnlyList<MeshFormat> MeshFormats()
     {
@@ -1473,7 +2052,24 @@ public static class Cadaclysm
         {
             var name = Marshal.PtrToStringUTF8(Native.cadaclysm_mesh_format(i)) ?? "";
             var extension = Marshal.PtrToStringUTF8(Native.cadaclysm_mesh_format_extension(i)) ?? "";
-            found.Add(new MeshFormat(name, extension, $"{name} (.{extension})"));
+            var label = Marshal.PtrToStringUTF8(Native.cadaclysm_mesh_format_label(i)) ?? "";
+            found.Add(new MeshFormat(name, extension, label));
+        }
+        return found;
+    }
+
+    /// <summary>Every format this build reads, for an open dialog's filter. The extensions
+    /// arrive semicolon-separated from the library and are split here.</summary>
+    public static IReadOnlyList<Format> Formats()
+    {
+        var count = Native.cadaclysm_format_count();
+        var found = new List<Format>((int)count);
+        for (uint i = 0; i < count; i++)
+        {
+            var name = Marshal.PtrToStringUTF8(Native.cadaclysm_format_name(i)) ?? "";
+            var extensions = (Marshal.PtrToStringUTF8(Native.cadaclysm_format_extensions(i)) ?? "")
+                .Split(';', StringSplitOptions.RemoveEmptyEntries);
+            found.Add(new Format(name, extensions));
         }
         return found;
     }
@@ -1484,6 +2080,15 @@ public static class Cadaclysm
     public static string? PickFile()
     {
         var raw = Native.cadaclysm_pick_file(IntPtr.Zero);
+        return raw == IntPtr.Zero ? null : Marshal.PtrToStringUTF8(raw);
+    }
+
+    /// <summary>Ask the user where to save, through the library's own dialog, with
+    /// <paramref name="suggestedName"/> prefilled. Null if they cancelled or no dialog was
+    /// available. Blocks; on macOS must be called from the main thread.</summary>
+    public static string? PickSave(string? suggestedName = null)
+    {
+        var raw = Native.cadaclysm_pick_save(IntPtr.Zero, suggestedName);
         return raw == IntPtr.Zero ? null : Marshal.PtrToStringUTF8(raw);
     }
 
@@ -1573,6 +2178,42 @@ public static class Cadaclysm
     {
         var e = Marshal.PtrToStringUTF8(Native.cadaclysm_last_error());
         return string.IsNullOrEmpty(e) ? fallback : e;
+    }
+
+    /// <summary>`SvgOptions`, packed into `RawSvgOptions`: `View` fills `Azimuth`/`Elevation`
+    /// unless they are set directly, `Up` defaults to `defaultUp`, colours are `'#rrggbb'`.
+    /// Shared by <see cref="Scene.SvgText"/>/<see cref="Scene.Svg"/> and <see
+    /// cref="Node.SvgText"/>/<see cref="Node.Svg"/>, as Python's `_svg_options` is shared by
+    /// `Scene.svg` and `Node.svg`.</summary>
+    internal static RawSvgOptions BuildSvgOptions(SvgOptions? options, string defaultUp)
+    {
+        var o = options ?? new SvgOptions();
+        var raw = new RawSvgOptions();
+        Native.cadaclysm_svg_options_init(ref raw);
+        var (baseAzimuth, baseElevation) = SvgViewAngles.For(o.View);
+        raw.Up = string.Equals(o.Up ?? defaultUp, "y", StringComparison.OrdinalIgnoreCase) ? 1u : 0u;
+        raw.Azimuth = o.Azimuth ?? baseAzimuth;
+        raw.Elevation = o.Elevation ?? baseElevation;
+        raw.Fov = o.Fov;
+        raw.Width = o.Width;
+        raw.Height = o.Height;
+        raw.Margin = o.Margin;
+        raw.Tolerance = o.Tolerance;
+        raw.StrokeWidth = o.StrokeWidth;
+        raw.Stroke = ParseColour(o.Stroke);
+        raw.Background = o.Background ?? 0xFFFFFFFFu; // CADACLYSM_SVG_TRANSPARENT
+        raw.Flags = (o.Edges ? 1u : 0u) | (o.Curves ? 2u : 0u) | (o.Isocurves ? 4u : 0u) | (o.Polylines ? 8u : 0u);
+        return raw;
+    }
+
+    /// <summary>A colour as the ABI's packed `0xRRGGBB`: `'#rrggbb'`, the leading `#` optional.
+    /// </summary>
+    internal static uint ParseColour(string colour)
+    {
+        var hex = colour.StartsWith('#') ? colour[1..] : colour;
+        if (hex.Length != 6 || !uint.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var value))
+            throw new CadaclysmException($"colour {colour}: expected '#rrggbb'");
+        return value;
     }
 
     private static RawOpenOptions BuildOptions(Convention convention, bool colours, double sourceMetresPerUnit)

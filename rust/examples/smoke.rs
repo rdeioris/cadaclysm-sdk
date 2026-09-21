@@ -9,10 +9,10 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use cadaclysm_sdk::blacksmith::{
-    self, Axis, Frame, Keep, Path as Outline, Profile, Selector, Solid, SweepPath, Unit, Workplane, DEFAULT_TOLERANCE,
+    self, Axis, Curve, Frame, Keep, Path as Outline, Profile, Selector, Solid, SweepPath, Unit, Workplane, DEFAULT_TOLERANCE,
     FILLET_TOLERANCE,
 };
-use cadaclysm_sdk::{Convention, OpenOptions, Scene};
+use cadaclysm_sdk::{Convention, OpenOptions, Scene, SvgOptions};
 
 fn main() -> ExitCode {
     match run() {
@@ -44,7 +44,7 @@ fn run() -> Result<(), String> {
     println!("license: {}", cadaclysm_sdk::license_info().map_err(e)?);
     println!("library: {}", cadaclysm_sdk::library_path().map_err(e)?.display());
 
-    let scene = cadaclysm_sdk::open(&path).map_err(e)?;
+    let mut scene = cadaclysm_sdk::open(&path).map_err(e)?;
     let bounds = scene.bounds();
     println!("bounds min={:?} max={:?}", bounds.min, bounds.max);
 
@@ -64,6 +64,46 @@ fn run() -> Result<(), String> {
     println!("query: {} node(s)", matched.len());
     check(scene.query("class ==").is_err(), "a filter that does not parse was accepted")?;
     println!("diagnostics: {}", scene.diagnostics().len());
+    let formats = cadaclysm_sdk::formats().map_err(e)?;
+    check(formats.iter().any(|f| f.name == "IGES" && f.extensions == ["iges", "igs"]), "formats() lacks IGES iges;igs")?;
+    let mesh_formats = cadaclysm_sdk::mesh_formats().map_err(e)?;
+    check(mesh_formats.iter().any(|f| f.name == "stl" && f.label == "STL (binary)"), "mesh format label is not the library's")?;
+    println!("geometry diagnostics: {}", scene.geometry_diagnostics().len());
+    scene.forget_meshes();
+    let again: usize = scene.walk().filter(|node| node.can_mesh()).map(|node| node.mesh().triangle_count()).sum();
+    check(again == triangles, "forget_meshes did not rebuild")?;
+    check(cadaclysm_sdk::lod_levels().map_err(e)? == 3, "lod_levels is not 3")?;
+    let first = scene.walk().find(|n| n.can_mesh()).ok_or("no meshable node")?;
+    check(first.mesh_lod(0).triangle_count() == first.mesh().triangle_count(), "LOD 0 is not the mesh")?;
+    check(first.lod_error(0) == 0.0 && first.mesh_lod(4).is_empty(), "LOD errors or levels are off")?;
+    if path.ends_with("cube.scad") {
+        let beziers = first.edge_beziers();
+        check(first.mesh_lod(1).triangle_count() == 3 && beziers.count() == 12 && beziers.points.len() == 48, "the cube's LOD 1 or Béziers are off")?;
+    }
+    let fit = first.collision(0).ok_or("no collision body for the first body")?;
+    check(fit.error == 0.0 && fit.hull_vertex_count == 8 && !fit.shape_name().is_empty(), "the collision fit is off")?;
+    let hull = first.collision_hull(0);
+    check(hull.vertex_count() == 8 && hull.index_count() == 36, "the collision hull is off")?;
+    let mesh = first.mesh();
+    let meshlets = cadaclysm_sdk::Meshlets::build(mesh.positions, mesh.normals, mesh.indices, 124, 64, 0).map_err(e)?;
+    check(meshlets.count() >= 1, "no meshlets")?;
+    let one = meshlets.meshlet(0);
+    check(one.positions.len() == one.vertex_count() && one.indices.len() == one.triangle_count() * 3 && one.level == 0, "meshlet 0 is off")?;
+    if path.ends_with("cube.scad") {
+        check(meshlets.count() == 1 && one.triangle_count() == 12 && one.vertex_count() == 36, "the cube's meshlets are off")?;
+    }
+    drop(meshlets);
+    check(cadaclysm_sdk::Meshlets::build(mesh.positions, None, mesh.indices, 0, 64, 0).is_err(), "a zero budget was accepted")?;
+    let estimate = first.triangle_estimate();
+    check(estimate > 0 || estimate == -1, "triangle estimate is neither a count nor -1")?;
+    if path.ends_with("cube.scad") {
+        check(estimate == 12 && first.surface_edges().is_empty() && first.surface_proxy_mesh(4).is_empty(), "the cube has no surface products")?;
+        check(first.surface_pick([10.0, 10.0, 100.0], [10.0, 10.0, -100.0]).is_none() && first.bounds_placed(None).is_empty(), "the cube picks or bounds through surfaces")?;
+    }
+    let fresh = cadaclysm_sdk::open(&path).map_err(e)?;
+    let body = fresh.walk().find(|n| n.can_mesh()).ok_or("no meshable node")?;
+    check(!body.is_meshed(), "a fresh scene is already meshed")?;
+    check(fresh.realize_meshes(false) > 0 && body.is_meshed(), "realize_meshes(false) did not build")?;
     println!("placements: {}", scene.placements().len());
     if is_cube {
         check(!matched.is_empty(), "class == solid matched nothing in the cube")?;
@@ -96,6 +136,20 @@ fn run() -> Result<(), String> {
     check(yup.realized() == yup.realize_total(), "realize_all stopped short")?;
 
     save_checks(&scene)?;
+
+    // SVG: the library's own camera, no viewer -- a scene and a node each write a
+    // wireframe.
+    let svg_text = scene.svg_text(&SvgOptions::default()).map_err(e)?;
+    check(svg_text.starts_with("<svg") && svg_text.contains("<path"), "scene SVG text did not look like an SVG wireframe")?;
+    let svg_path = std::env::temp_dir().join("cadaclysm-smoke-rust.svg");
+    scene.svg(&svg_path, &SvgOptions::default()).map_err(e)?;
+    check(std::fs::metadata(&svg_path).is_ok_and(|m| m.len() > 0), "Scene::svg wrote an empty file")?;
+    let node_svg_text = first.svg_text(&SvgOptions::default()).map_err(e)?;
+    check(node_svg_text.starts_with("<svg") && node_svg_text.contains("<path"), "node SVG text did not look like an SVG wireframe")?;
+    let bad_fov = SvgOptions { fov: 200.0, ..Default::default() };
+    check(scene.svg_text(&bad_fov).is_err(), "scene svg: fov=200 was accepted")?;
+    println!("svg: scene and node text, file written, fov=200 refused");
+
     check(cadaclysm_sdk::open("no/such/file.stp").is_err(), "a missing file opened")?;
     kernel(license.as_deref())?;
     println!("OK");
@@ -117,6 +171,98 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
         blacksmith::brep_layout_id().map_err(e)? == cadaclysm_sdk::Brep::layout_id().map_err(e)?,
         "the reader and the kernel are not from one build",
     )?;
+
+    // Hits: two radius-5 circles six apart cross at two points, (3, -4) and (3, 4). At
+    // (3, 4) the first circle's upper arc is at t 0.2952 and the moved one's at 0.7048;
+    // at (3, -4) the other way round -- which catches the two sides read swapped.
+    let crossing = Profile::circle(5.0)
+        .map_err(e)?
+        .hits(&Profile::circle(5.0).and_then(|c| c.translate(6.0, 0.0)).map_err(e)?, 1e-6)
+        .map_err(e)?;
+    check(crossing.len() == 2, &format!("hits: two circles hit {} times, not 2", crossing.len()))?;
+    let mut ys: Vec<f64> = crossing.iter().map(|h| h.start[1]).collect();
+    ys.sort_by(f64::total_cmp);
+    check((ys[0] + 4.0).abs() < 1e-9 && (ys[1] - 4.0).abs() < 1e-9, &format!("hits: y {ys:?}, not -4 and 4"))?;
+    for h in &crossing {
+        let (ta, tb) = if h.start[1] > 0.0 { (0.2952, 0.7048) } else { (0.7048, 0.2952) };
+        check(
+            !h.run
+                && !h.touch
+                && h.a_start.loop_index == 0
+                && (h.start[0] - 3.0).abs() < 1e-9
+                && (h.a_start.t - ta).abs() < 1e-3
+                && (h.b_start.t - tb).abs() < 1e-3,
+            &format!("hits: {h:?} is not a crossing at (3, +-4) at t {ta} on a and {tb} on b"),
+        )?;
+    }
+    println!("hits: {:?}, {:?}", crossing[0].start, crossing[1].start);
+    // Common: the same two circles share one lens, four arcs (each circle's own seam stays
+    // a join) between two caps once extruded; moved apart they share nothing.
+    let left = Profile::circle(5.0).map_err(e)?;
+    let right = Profile::circle(5.0).and_then(|c| c.translate(6.0, 0.0)).map_err(e)?;
+    let lenses = left.common(&right, 1e-6).map_err(e)?;
+    check(lenses.len() == 1, &format!("common: two circles share {} regions, not 1", lenses.len()))?;
+    let lens_faces = Workplane::xy().extrude(&lenses[0], 1.0).and_then(|w| w.solid()).and_then(|s| s.faces()).map_err(e)?;
+    check(lens_faces == 6, &format!("common: the lens extrudes to {lens_faces} faces, not 6"))?;
+    let far = right.translate(100.0, 0.0).map_err(e)?;
+    check(left.common(&far, 1e-6).map_err(e)?.is_empty(), "common: circles 100 apart share a region")?;
+    match left.common(&right, 0.0) {
+        Err(err) if err.to_string().contains("profile_common: tolerance must be positive and finite") => {}
+        other => return Err(format!("common: a zero tolerance was accepted or refused in other words: {other:?}")),
+    }
+    println!("common: one lens, {lens_faces} faces extruded");
+    // Edge curves: a cylinder's rims are circles of its radius about a cap centre in a unit
+    // frame, a whole turn each; a cuboid's edges are lines whose origin + x is the far end;
+    // an extruded closed spline keeps a nurbs edge with knots = poles + degree + 1.
+    let norm = |v: [f64; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    let sub = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let cyl = Solid::cylinder(5.0, 3.0).map_err(e)?;
+    let rims: Vec<Curve> = cyl.edges().map_err(e)?.into_iter().filter(|edge| edge.kind == "circle").filter_map(|edge| edge.curve).collect();
+    check(rims.len() >= 2, "edge_curve: the cylinder's rims have no curve")?;
+    for c in &rims {
+        let unit = (norm(c.x) - 1.0).abs() < 1e-9
+            && (norm(c.y) - 1.0).abs() < 1e-9
+            && (c.x[0] * c.y[0] + c.x[1] * c.y[1] + c.x[2] * c.y[2]).abs() < 1e-9;
+        let centred = c.origin[0].abs() < 1e-9 && c.origin[1].abs() < 1e-9 && c.origin[2].abs().min((c.origin[2] - 3.0).abs()) < 1e-9;
+        check(
+            c.kind == "circle"
+                && (c.radius - 5.0).abs() < 1e-9
+                && unit
+                && centred
+                && ((c.t1 - c.t0).abs() - 2.0 * std::f64::consts::PI).abs() < 1e-9
+                && c.degree == 0
+                && c.knots.is_empty()
+                && c.weights.is_none(),
+            &format!("edge_curve: a rim reads {c:?}"),
+        )?;
+    }
+    let cube = Solid::cuboid(2.0, 4.0, 6.0).map_err(e)?;
+    let cube_edges = cube.edges().map_err(e)?;
+    for edge in &cube_edges {
+        let c = edge.curve.as_ref().ok_or_else(|| format!("edge_curve: cuboid edge {} has no curve", edge.index))?;
+        check(c.kind == "line" && c.t0 == 0.0 && c.t1 == 1.0, &format!("edge_curve: a cuboid edge reads {c:?}"))?;
+        let far = [c.origin[0] + c.x[0], c.origin[1] + c.x[1], c.origin[2] + c.x[2]];
+        let ends: Vec<[f64; 3]> = edge.segments.iter().flat_map(|s| [s[0], s[1]]).collect();
+        check(
+            ends.iter().any(|p| norm(sub(*p, c.origin)) < 1e-9) && ends.iter().any(|p| norm(sub(*p, far)) < 1e-9),
+            &format!("edge_curve: a cuboid line's ends are not its own vertices: {c:?}"),
+        )?;
+    }
+    let square = Profile::spline(&[[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]], 3, None, true).map_err(e)?;
+    let spline_loop = Solid::extrude(&square, &Frame::xy([0.0; 3]), 2.0).map_err(e)?;
+    let splines: Vec<Curve> = spline_loop.edges().map_err(e)?.into_iter().filter(|edge| edge.kind == "nurbs").filter_map(|edge| edge.curve).collect();
+    check(!splines.is_empty(), "edge_curve: the extruded spline keeps no nurbs edge")?;
+    for c in &splines {
+        check(
+            c.kind == "nurbs" && c.degree == 3 && c.knots.len() == c.poles.len() + c.degree as usize + 1 && c.weights.is_none(),
+            &format!("edge_curve: the spline edge reads {c:?}"),
+        )?;
+    }
+    println!(
+        "edge_curve: {} r={} t={}..{}; line {:?}+{:?}; nurbs degree {} poles {}",
+        rims[0].kind, rims[0].radius, rims[0].t0, rims[0].t1, cube_edges[0].curve.as_ref().unwrap().origin, cube_edges[0].curve.as_ref().unwrap().x,
+        splines[0].degree, splines[0].poles.len()
+    );
 
     let outline = Profile::rect(80.0, 40.0).map_err(e)?.with_hole(&Profile::circle(4.0).map_err(e)?).map_err(e)?;
     let plate = Workplane::xy().extrude(&outline, 6.0).map_err(e)?.solid().map_err(e)?;
@@ -202,6 +348,40 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
         (b.max[0] - 40.0).abs() < 0.01 && (b.max[1] - 20.0).abs() < 0.01 && (b.max[2] - 16.0).abs() < 0.01,
         "the STEP did not read back as the plate with its pin",
     )?;
+
+    // The same solid as SAT, written by the library itself, read back the same way.
+    let sat = std::env::temp_dir().join("cadaclysm-smoke-rust.sat");
+    rounded.sat(&sat, Unit::Millimetre).map_err(e)?;
+    check(rounded.sat_text(Unit::Millimetre).map_err(e)?.starts_with("400 0 1 0"), "the SAT text does not open with the record version")?;
+    let sat_back = cadaclysm_sdk::open(&sat).map_err(|err| format!("sat read back: {err}"))?;
+    let sb = sat_back.bounds();
+    println!("sat read back: bounds max={:?}", sb.max);
+    check(
+        (sb.max[0] - 40.0).abs() < 0.01 && (sb.max[1] - 20.0).abs() < 0.01 && (sb.max[2] - 16.0).abs() < 0.01,
+        "the SAT did not read back as the plate with its pin",
+    )?;
+
+    // The OCCT .brep writer, and its reader.
+    let brep = std::env::temp_dir().join("cadaclysm-smoke-rust.brep");
+    rounded.brep(&brep).map_err(e)?;
+    check(rounded.brep_text().map_err(e)?.starts_with("DBRep_DrawableShape"), "the .brep text does not begin as one")?;
+    let back_brep = cadaclysm_sdk::open(&brep).map_err(|err| format!("brep read back: {err}"))?;
+    let bb = back_brep.bounds();
+    println!("brep read back: bounds max={:?}", bb.max);
+    check(
+        (bb.max[0] - 40.0).abs() < 0.01 && (bb.max[1] - 20.0).abs() < 0.01 && (bb.max[2] - 16.0).abs() < 0.01,
+        "the .brep did not read back as the plate with its pin",
+    )?;
+
+    // SVG over the kernel: the solid's own wireframe, no scene involved.
+    let solid_svg_text = rounded.svg_text(&SvgOptions::default()).map_err(e)?;
+    check(solid_svg_text.starts_with("<svg") && solid_svg_text.contains("<path"), "solid SVG text did not look like an SVG wireframe")?;
+    let solid_svg_path = std::env::temp_dir().join("cadaclysm-smoke-rust-solid.svg");
+    rounded.svg(&solid_svg_path, &SvgOptions::default()).map_err(e)?;
+    check(std::fs::metadata(&solid_svg_path).is_ok_and(|m| m.len() > 0), "Solid::svg wrote an empty file")?;
+    let bad_fov = SvgOptions { fov: 200.0, ..Default::default() };
+    check(rounded.svg_text(&bad_fov).is_err(), "blacksmith svg: fov=200 was accepted")?;
+    println!("blacksmith svg: solid text, file written, fov=200 refused");
 
     // And back into the kernel: the read body's brep, shared rather than copied, as a
     // solid that outlives the scene it came from.

@@ -109,14 +109,15 @@ public final class Blacksmith {
 
     // ---- the structs the ABI returns by value ----------------------------------------
     //
-    // These four are transcribed from `cadaclysm_blacksmith.h` by hand, in the header's
+    // These seven are transcribed from `cadaclysm_blacksmith.h` by hand, in the header's
     // field order, and `tests/bindings.rs` pins them against it, by field order and by
     // whether each field is a pointer, as it pins the reader's structs in `Cad.java`. A
     // field left out or reordered still compiles and reads every later field from the
     // wrong offset; the pin is what catches it. `structLayout` refuses a misaligned field
     // outright, which is why the two `paddingLayout(4)`s in EDGE are there: a 4-byte count
-    // before an 8-byte pointer needs the gap the C compiler leaves (and FACE_TRIANGLES's
-    // trailing one: the struct is as long as its pointer's alignment rounds it to).
+    // before an 8-byte pointer needs the gap the C compiler leaves (SPOT's and HIT's
+    // before a double, and FACE_TRIANGLES's trailing one: the struct is as long as its
+    // pointer's alignment rounds it to).
 
     /** {@code CadaclysmBlacksmithMesh}: a solid's triangles, borrowed from it. */
     private static final MemoryLayout MESH = MemoryLayout.structLayout(
@@ -152,6 +153,80 @@ public final class Blacksmith {
             ValueLayout.JAVA_INT.withName("face_count"),
             MemoryLayout.paddingLayout(4));
 
+    /** {@code CadaclysmBlacksmithPoint}. */
+    private static final MemoryLayout POINT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_DOUBLE.withName("x"),
+            ValueLayout.JAVA_DOUBLE.withName("y"),
+            ValueLayout.JAVA_DOUBLE.withName("z"));
+
+    /** {@code CadaclysmBlacksmithSpot}: four bytes of padding after {@code face}. */
+    private static final MemoryLayout SPOT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("loop_index"),
+            ValueLayout.JAVA_INT.withName("segment"),
+            ValueLayout.JAVA_DOUBLE.withName("t"),
+            ValueLayout.JAVA_INT.withName("face"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.JAVA_DOUBLE.withName("u"),
+            ValueLayout.JAVA_DOUBLE.withName("v"));
+
+    /** {@code CadaclysmBlacksmithHit}: six bytes of padding after the two one-byte bools. */
+    private static final MemoryLayout HIT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_BOOLEAN.withName("run"),
+            ValueLayout.JAVA_BOOLEAN.withName("touch"),
+            MemoryLayout.paddingLayout(6),
+            POINT.withName("start"),
+            POINT.withName("end"),
+            SPOT.withName("a_start"),
+            SPOT.withName("a_end"),
+            SPOT.withName("b_start"),
+            SPOT.withName("b_end"));
+
+    /** {@code CadaclysmBlacksmithCurve}: one edge's exact curve, borrowed from its solid; four
+     *  bytes of padding after {@code degree} and after each count. */
+    private static final MemoryLayout CURVE = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("kind"),
+            POINT.withName("origin"),
+            POINT.withName("x"),
+            POINT.withName("y"),
+            POINT.withName("z"),
+            ValueLayout.JAVA_DOUBLE.withName("radius"),
+            ValueLayout.JAVA_DOUBLE.withName("radius2"),
+            ValueLayout.JAVA_DOUBLE.withName("t0"),
+            ValueLayout.JAVA_DOUBLE.withName("t1"),
+            ValueLayout.JAVA_INT.withName("degree"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("knots"),
+            ValueLayout.JAVA_INT.withName("knot_count"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("poles"),
+            ValueLayout.JAVA_INT.withName("pole_count"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("weights"));
+
+    /**
+     * {@code CadaclysmBlacksmithSvgOptions}. {@code cadaclysm_blacksmith_svg_options_init}
+     * fills the whole struct, so this must be at least as long as the header's and may never
+     * reorder. Not padded between {@code up} and {@code azimuth} -- two {@code int}s already
+     * land the first {@code double} on an eight-byte boundary -- but four bytes trail {@code
+     * flags} to bring the 84-byte struct up to the next multiple of eight, as alignment needs.
+     * Pinned by {@code tests/bindings.rs}.
+     */
+    private static final MemoryLayout SVG_OPTIONS = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("size"),
+            ValueLayout.JAVA_INT.withName("up"),
+            ValueLayout.JAVA_DOUBLE.withName("azimuth"),
+            ValueLayout.JAVA_DOUBLE.withName("elevation"),
+            ValueLayout.JAVA_DOUBLE.withName("fov"),
+            ValueLayout.JAVA_DOUBLE.withName("width"),
+            ValueLayout.JAVA_DOUBLE.withName("height"),
+            ValueLayout.JAVA_DOUBLE.withName("margin"),
+            ValueLayout.JAVA_DOUBLE.withName("tolerance"),
+            ValueLayout.JAVA_DOUBLE.withName("stroke_width"),
+            ValueLayout.JAVA_INT.withName("stroke"),
+            ValueLayout.JAVA_INT.withName("background"),
+            ValueLayout.JAVA_INT.withName("flags"),
+            MemoryLayout.paddingLayout(4));
+
     /** A named field's byte offset in one of the struct layouts above. */
     private static long offset(MemoryLayout struct, String field) {
         return struct.byteOffset(MemoryLayout.PathElement.groupElement(field));
@@ -165,7 +240,7 @@ public final class Blacksmith {
 
     private static final MethodHandle LAST_ERROR, LICENSE_SET, LICENSE_INFO, LICENSE_NOTICE_COUNT,
             BUILD_DATE, VERSION, SOLID_FREE, PROFILE_FREE, PROFILE_RECT, PROFILE_CIRCLE,
-            PROFILE_SLOT, PROFILE_POLYGON, PROFILE_REGULAR_POLYGON, PROFILE_SPLINE, PROFILE_WITH_HOLE, TRANSLATE_PROFILE, PROFILE_ROUND, PROFILE_CHAIN, PROFILE_FROM_LOOPS, PROFILE_CLOSE_LOOP, PROFILE_POLYLINES, PATH_BEGIN,
+            PROFILE_SLOT, PROFILE_POLYGON, PROFILE_REGULAR_POLYGON, PROFILE_SPLINE, PROFILE_WITH_HOLE, PROFILE_HITS, HITS_FREE, HIT_COUNT, HIT_AT, PROFILE_COMMON, PROFILE_LIST_COUNT, PROFILE_LIST_GET, PROFILE_LIST_FREE, TRANSLATE_PROFILE, PROFILE_ROUND, PROFILE_CHAIN, PROFILE_FROM_LOOPS, PROFILE_CLOSE_LOOP, PROFILE_PIECE_COUNT, PROFILE_PIECE, PROFILE_TRIM_COUNT, PROFILE_TRIM_CHAIN, PROFILE_POLYLINES, PATH_BEGIN,
             PATH_LINE_TO, PATH_ARC_TO, PATH_BEZIER_TO, PATH_NURBS_TO, PATH_END, PATH_END_OPEN,
             PATH_FREE, CUBOID, CYLINDER, CONE, SPHERE, TORUS, WEDGE, EXTRUDE, EXTRUDE_OPEN,
             EXTRUDE_TAPERED, EXTRUDE_OPEN_TAPERED, EXTRUDE_BETWEEN, EXTRUDE_OPEN_BETWEEN,
@@ -173,9 +248,9 @@ public final class Blacksmith {
             SWEEP_PATH_LINE_TO, SWEEP_PATH_ARC, SWEEP_PATH_ALONG, SWEEP_PATH_FREE, SWEEP, SWEEP_OPEN,
             EXTRUDE_FACES, FACE, FACE_SHEET, DROP_FACES, PLACE, TRANSLATE, ROTATE, MIRROR, JOIN, CUT,
             COMMON, SPLIT_SHEET, TRIM, FILLET, CHAMFER,
-            SHELL, THICKEN, PUSH_PULL, PUSH_PULL_FACES, MERGE_FLUSH, REFILLET, UNFILLET, RECHAMFER, UNCHAMFER, COIL, PIPE, SPLIT, SPLIT_BY_PLANE, LUMP_COUNT, LUMP, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_KIND, COLOURED, COLOUR, EDGE_COUNT, EDGE_AT, MESH_AT, MESH_FACE_TRIANGLES,
-            EDGE_POLYLINES, BOUNDS, LEAKED_EDGES, UNPAIRED_EDGES, MANIFOLD, STEP, STRING_FREE, FROM_BREP,
-            BREP_LAYOUT_ID;
+            SHELL, THICKEN, PUSH_PULL, PUSH_PULL_FACES, MERGE_FLUSH, REFILLET, UNFILLET, RECHAMFER, UNCHAMFER, COIL, PIPE, SPLIT, SPLIT_BY_PLANE, LUMP_COUNT, LUMP, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_REF, FIND_FACE, FACE_KIND, COLOURED, COLOUR, EDGE_COUNT, EDGE_AT, EDGE_CURVE, MESH_AT, MESH_FACE_TRIANGLES,
+            EDGE_POLYLINES, BOUNDS, LEAKED_EDGES, UNPAIRED_EDGES, MANIFOLD, STEP, SAT_TEXT, SAT, BREP_TEXT, BREP, STRING_FREE, FROM_BREP,
+            BREP_LAYOUT_ID, SVG_OPTIONS_INIT, SVG_TEXT, SVG;
 
     static {
         SymbolLookup lib = library();
@@ -201,10 +276,22 @@ public final class Blacksmith {
         PROFILE_REGULAR_POLYGON = bind(linker, lib, "cadaclysm_blacksmith_profile_regular_polygon", FunctionDescriptor.of(A, D, D, D, I, D));
         PROFILE_SPLINE = bind(linker, lib, "cadaclysm_blacksmith_profile_spline", FunctionDescriptor.of(A, A, L, I, A, B));
         PROFILE_WITH_HOLE = bind(linker, lib, "cadaclysm_blacksmith_profile_with_hole", FunctionDescriptor.of(A, A, A));
+        PROFILE_HITS = bind(linker, lib, "cadaclysm_blacksmith_profile_hits", FunctionDescriptor.of(A, A, A, D));
+        HITS_FREE = bind(linker, lib, "cadaclysm_blacksmith_hits_free", FunctionDescriptor.ofVoid(A));
+        HIT_COUNT = bind(linker, lib, "cadaclysm_blacksmith_hit_count", FunctionDescriptor.of(I, A));
+        PROFILE_COMMON = bind(linker, lib, "cadaclysm_blacksmith_profile_common", FunctionDescriptor.of(A, A, A, D));
+        PROFILE_LIST_COUNT = bind(linker, lib, "cadaclysm_blacksmith_profile_list_count", FunctionDescriptor.of(I, A));
+        PROFILE_LIST_GET = bind(linker, lib, "cadaclysm_blacksmith_profile_list_get", FunctionDescriptor.of(A, A, I));
+        PROFILE_LIST_FREE = bind(linker, lib, "cadaclysm_blacksmith_profile_list_free", FunctionDescriptor.ofVoid(A));
+        HIT_AT = bind(linker, lib, "cadaclysm_blacksmith_hit", FunctionDescriptor.of(B, A, I, A));
         TRANSLATE_PROFILE = bind(linker, lib, "cadaclysm_blacksmith_translate_profile", FunctionDescriptor.of(A, A, D, D));
         PROFILE_ROUND = bind(linker, lib, "cadaclysm_blacksmith_profile_round", FunctionDescriptor.of(A, A, D, A, L, B));
         PROFILE_CHAIN = bind(linker, lib, "cadaclysm_blacksmith_profile_chain", FunctionDescriptor.of(A, A, L, D));
         PROFILE_FROM_LOOPS = bind(linker, lib, "cadaclysm_blacksmith_profile_from_loops", FunctionDescriptor.of(A, A, L));
+        PROFILE_PIECE_COUNT = bind(linker, lib, "cadaclysm_blacksmith_profile_piece_count", FunctionDescriptor.of(I, A, A, L, D));
+        PROFILE_PIECE = bind(linker, lib, "cadaclysm_blacksmith_profile_piece", FunctionDescriptor.of(A, A, A, L, I, D));
+        PROFILE_TRIM_COUNT = bind(linker, lib, "cadaclysm_blacksmith_profile_trim_count", FunctionDescriptor.of(I, A, A, L, I, D));
+        PROFILE_TRIM_CHAIN = bind(linker, lib, "cadaclysm_blacksmith_profile_trim_chain", FunctionDescriptor.of(A, A, A, L, I, I, D));
         PROFILE_CLOSE_LOOP = bind(linker, lib, "cadaclysm_blacksmith_profile_close_loop", FunctionDescriptor.of(A, A));
         PROFILE_POLYLINES = bind(linker, lib, "cadaclysm_blacksmith_profile_polylines", FunctionDescriptor.of(POLYLINES, A, D));
         PATH_BEGIN = bind(linker, lib, "cadaclysm_blacksmith_path_begin", FunctionDescriptor.of(A, D, D));
@@ -261,6 +348,8 @@ public final class Blacksmith {
         FILLET = bind(linker, lib, "cadaclysm_blacksmith_fillet", FunctionDescriptor.of(A, A, A, L, D, D, A, A));
         CHAMFER = bind(linker, lib, "cadaclysm_blacksmith_chamfer", FunctionDescriptor.of(A, A, A, L, D, D));
         SHELL = bind(linker, lib, "cadaclysm_blacksmith_shell", FunctionDescriptor.of(A, A, D, A, L, D, A, A));
+        BREP_TEXT = bind(linker, lib, "cadaclysm_blacksmith_brep_text", FunctionDescriptor.of(A, A, L));
+        BREP = bind(linker, lib, "cadaclysm_blacksmith_brep", FunctionDescriptor.of(B, A, L, A));
         THICKEN = bind(linker, lib, "cadaclysm_blacksmith_thicken", FunctionDescriptor.of(A, A, D, D, A, A));
         PUSH_PULL = bind(linker, lib, "cadaclysm_blacksmith_push_pull", FunctionDescriptor.of(A, A, I, D, D, A, A));
         PUSH_PULL_FACES = bind(linker, lib, "cadaclysm_blacksmith_push_pull_faces", FunctionDescriptor.of(A, A, A, L, D, D, A, A));
@@ -278,11 +367,14 @@ public final class Blacksmith {
         FACE_COUNT = bind(linker, lib, "cadaclysm_blacksmith_face_count", FunctionDescriptor.of(I, A));
         SELECT_FACE = bind(linker, lib, "cadaclysm_blacksmith_select_face", FunctionDescriptor.of(I, A, I, A, I));
         FACE_FRAME = bind(linker, lib, "cadaclysm_blacksmith_face_frame", FunctionDescriptor.of(B, A, I, A));
+        FACE_REF = bind(linker, lib, "cadaclysm_blacksmith_face_ref", FunctionDescriptor.of(B, A, I, A));
+        FIND_FACE = bind(linker, lib, "cadaclysm_blacksmith_find_face", FunctionDescriptor.of(I, A, A, I, D));
         FACE_KIND = bind(linker, lib, "cadaclysm_blacksmith_face_kind", FunctionDescriptor.of(A, A, I));
         COLOURED = bind(linker, lib, "cadaclysm_blacksmith_coloured", FunctionDescriptor.of(A, A, I, D, D, D));
         COLOUR = bind(linker, lib, "cadaclysm_blacksmith_colour", FunctionDescriptor.of(B, A, I, A));
         EDGE_COUNT = bind(linker, lib, "cadaclysm_blacksmith_edge_count", FunctionDescriptor.of(I, A));
         EDGE_AT = bind(linker, lib, "cadaclysm_blacksmith_edge", FunctionDescriptor.of(B, A, I, A));
+        EDGE_CURVE = bind(linker, lib, "cadaclysm_blacksmith_edge_curve", FunctionDescriptor.of(B, A, I, A));
         MESH_AT = bind(linker, lib, "cadaclysm_blacksmith_mesh", FunctionDescriptor.of(MESH, A, D));
         MESH_FACE_TRIANGLES = bind(linker, lib, "cadaclysm_blacksmith_mesh_face_triangles", FunctionDescriptor.of(FACE_TRIANGLES, A, D));
         EDGE_POLYLINES = bind(linker, lib, "cadaclysm_blacksmith_edge_polylines", FunctionDescriptor.of(POLYLINES, A, D));
@@ -291,9 +383,14 @@ public final class Blacksmith {
         UNPAIRED_EDGES = bind(linker, lib, "cadaclysm_blacksmith_unpaired_edges", FunctionDescriptor.of(I, A, D));
         MANIFOLD = bind(linker, lib, "cadaclysm_blacksmith_manifold", FunctionDescriptor.of(B, A, A));
         STEP = bind(linker, lib, "cadaclysm_blacksmith_step", FunctionDescriptor.of(A, A, L, A, I));
+        SAT_TEXT = bind(linker, lib, "cadaclysm_blacksmith_sat_text", FunctionDescriptor.of(A, A, L, I));
+        SAT = bind(linker, lib, "cadaclysm_blacksmith_sat", FunctionDescriptor.of(B, A, L, A, I));
         STRING_FREE = bind(linker, lib, "cadaclysm_blacksmith_string_free", FunctionDescriptor.ofVoid(A));
         FROM_BREP = bind(linker, lib, "cadaclysm_blacksmith_from_brep", FunctionDescriptor.of(A, A, A));
         BREP_LAYOUT_ID = bind(linker, lib, "cadaclysm_blacksmith_brep_layout_id", FunctionDescriptor.of(A));
+        SVG_OPTIONS_INIT = bind(linker, lib, "cadaclysm_blacksmith_svg_options_init", FunctionDescriptor.ofVoid(A));
+        SVG_TEXT = bind(linker, lib, "cadaclysm_blacksmith_svg_text", FunctionDescriptor.of(A, A, L, A));
+        SVG = bind(linker, lib, "cadaclysm_blacksmith_svg", FunctionDescriptor.of(B, A, L, A, A));
     }
 
     @SuppressWarnings("restricted") // downcallHandle: every entry point here is the published ABI.
@@ -621,6 +718,171 @@ public final class Blacksmith {
                 + "built-in AP203, or pass a schema name, a .exp path or EXPRESS text)");
     }
 
+    // ---- SVG --------------------------------------------------------------------------
+
+    /**
+     * One of the seven camera angles {@link SvgOptions#view()} understands -- the same table
+     * the reader's {@code Cad.SvgView} gives, kept separate because this file is the whole
+     * kernel binding on its own. Each constant carries its own (azimuth, elevation) in degrees.
+     */
+    public enum SvgView {
+        /** Azimuth -90, elevation 0 -- looks from -Y. */
+        FRONT(-90.0, 0.0),
+        /** Azimuth 90, elevation 0 -- looks from +Y. */
+        BACK(90.0, 0.0),
+        /** Azimuth 180, elevation 0 -- looks from -X. */
+        LEFT(180.0, 0.0),
+        /** Azimuth 0, elevation 0 -- looks from +X. */
+        RIGHT(0.0, 0.0),
+        /** Azimuth -90, elevation 90 -- looks from +Z, straight down. */
+        TOP(-90.0, 90.0),
+        /** Azimuth -90, elevation -90 -- looks from -Z, straight up. */
+        BOTTOM(-90.0, -90.0),
+        /** Azimuth -50, elevation 28 -- the viewer's own default. */
+        ISO(-50.0, 28.0);
+
+        /** Degrees about the up axis from +X: -90 looks from -Y, the front. */
+        public final double azimuth;
+        /** Degrees above the horizon. */
+        public final double elevation;
+
+        SvgView(double azimuth, double elevation) {
+            this.azimuth = azimuth;
+            this.elevation = elevation;
+        }
+    }
+
+    /**
+     * How an SVG drawing is made -- the camera in the viewer's words, the page, the pen and
+     * which line sets. Mirrors {@code CadaclysmBlacksmithSvgOptions}, {@link #defaults()} the
+     * way {@code cadaclysm_blacksmith_svg_options_init} defaults the struct, with {@link
+     * #view()} supplying {@link #azimuth()}/{@link #elevation()} unless they are given directly
+     * (non-null). No scene convention to default {@link #up()} from here -- a solid's own
+     * frame is Z up unless {@link #up()} says otherwise.
+     *
+     * <p>Passed to {@link #writeSvgText}, {@link #writeSvg} and {@link Solid#svgText}/{@link
+     * Solid#svg}. A refused option (an out-of-range {@link #fov()}, say) throws {@link
+     * BuildException} naming the field, worded by the library itself.
+     */
+    public record SvgOptions(SvgView view, Double azimuth, Double elevation, String up, double fov,
+                              double width, double height, double margin, double tolerance,
+                              String stroke, double strokeWidth, Integer background,
+                              boolean edges, boolean curves, boolean isocurves, boolean polylines) {
+        /**
+         * {@code view = ISO}, {@code azimuth}/{@code elevation}/{@code up}/{@code background}
+         * null (fall through to {@link #view()}, "z", and transparent), {@code fov = 0}
+         * (orthographic), a 1000-square page, {@code margin = 0.05}, {@code tolerance = 0.1}, a
+         * black one-unit stroke, edges alone.
+         */
+        public static SvgOptions defaults() {
+            return new SvgOptions(SvgView.ISO, null, null, null, 0.0, 1000.0, 1000.0, 0.05, 0.1,
+                    "#000000", 1.0, null, true, false, false, false);
+        }
+    }
+
+    /** A colour as the ABI's packed {@code 0xRRGGBB}: {@code "#rrggbb"}, the leading {@code #}
+     *  optional. */
+    private static int parseColour(String colour) {
+        String hex = colour.startsWith("#") ? colour.substring(1) : colour;
+        if (hex.length() != 6) throw new BuildException("colour " + colour + ": expected '#rrggbb'");
+        try {
+            return (int) Long.parseLong(hex, 16);
+        } catch (NumberFormatException e) {
+            throw new BuildException("colour " + colour + ": expected '#rrggbb'");
+        }
+    }
+
+    /**
+     * {@link SvgOptions}, packed into the {@link #SVG_OPTIONS} layout: {@code view} fills
+     * {@code azimuth}/{@code elevation} unless they are given directly, {@code up} defaults to
+     * "z" (a solid carries no convention of its own), colours are {@code "#rrggbb"} -- as the
+     * reader's own {@code Cad.buildSvgOptions}, but with no scene to default {@code up} from.
+     */
+    private static MemorySegment buildSvgOptions(Arena arena, SvgOptions options) {
+        SvgOptions o = options == null ? SvgOptions.defaults() : options;
+        MemorySegment out = arena.allocate(SVG_OPTIONS);
+        call(() -> {
+            SVG_OPTIONS_INIT.invokeExact(out);
+            return null;
+        });
+        SvgView view = o.view() == null ? SvgView.ISO : o.view();
+        String up = o.up() == null ? "z" : o.up();
+        out.set(ValueLayout.JAVA_INT, offset(SVG_OPTIONS, "up"), up.equalsIgnoreCase("y") ? 1 : 0);
+        out.set(ValueLayout.JAVA_DOUBLE, offset(SVG_OPTIONS, "azimuth"), o.azimuth() == null ? view.azimuth : o.azimuth());
+        out.set(ValueLayout.JAVA_DOUBLE, offset(SVG_OPTIONS, "elevation"), o.elevation() == null ? view.elevation : o.elevation());
+        out.set(ValueLayout.JAVA_DOUBLE, offset(SVG_OPTIONS, "fov"), o.fov());
+        out.set(ValueLayout.JAVA_DOUBLE, offset(SVG_OPTIONS, "width"), o.width());
+        out.set(ValueLayout.JAVA_DOUBLE, offset(SVG_OPTIONS, "height"), o.height());
+        out.set(ValueLayout.JAVA_DOUBLE, offset(SVG_OPTIONS, "margin"), o.margin());
+        out.set(ValueLayout.JAVA_DOUBLE, offset(SVG_OPTIONS, "tolerance"), o.tolerance());
+        out.set(ValueLayout.JAVA_DOUBLE, offset(SVG_OPTIONS, "stroke_width"), o.strokeWidth());
+        out.set(ValueLayout.JAVA_INT, offset(SVG_OPTIONS, "stroke"), parseColour(o.stroke()));
+        out.set(ValueLayout.JAVA_INT, offset(SVG_OPTIONS, "background"),
+                o.background() == null ? 0xFFFFFFFF : o.background()); // CADACLYSM_BLACKSMITH_SVG_TRANSPARENT
+        int flags = (o.edges() ? 1 : 0) | (o.curves() ? 2 : 0) | (o.isocurves() ? 4 : 0) | (o.polylines() ? 8 : 0);
+        out.set(ValueLayout.JAVA_INT, offset(SVG_OPTIONS, "flags"), flags);
+        return out;
+    }
+
+    /** {@link #writeSvgText(Collection, SvgOptions)} with every default. */
+    public static String writeSvgText(Collection<Solid> solids) {
+        return writeSvgText(solids, null);
+    }
+
+    /**
+     * Several solids' wireframe as one SVG's text, each its own {@code <g>} -- see {@link
+     * SvgOptions}. Owned by this call, decoded and released before it returns.
+     */
+    public static String writeSvgText(Collection<Solid> solids, SvgOptions options) {
+        Solid[] all = solids.toArray(new Solid[0]);
+        MemorySegment raw;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment handles = arena.allocate(ValueLayout.ADDRESS, Math.max(all.length, 1));
+            for (int i = 0; i < all.length; i++) {
+                handles.setAtIndex(ValueLayout.ADDRESS, i, all[i].handle());
+            }
+            MemorySegment o = buildSvgOptions(arena, options);
+            long count = all.length;
+            raw = call(() -> (MemorySegment) SVG_TEXT.invokeExact(handles, count, o));
+        } finally {
+            keep((Object[]) all);
+        }
+        if (raw.address() == 0) throw failure("svg_text");
+        try {
+            return string(raw);
+        } finally {
+            call(() -> {
+                STRING_FREE.invokeExact(raw);
+                return null;
+            });
+        }
+    }
+
+    /** {@link #writeSvg(String, Collection, SvgOptions)} with every default. */
+    public static void writeSvg(String path, Collection<Solid> solids) {
+        writeSvg(path, solids, null);
+    }
+
+    /** {@link #writeSvgText(Collection, SvgOptions)} written to {@code path} by the library
+     *  itself. */
+    public static void writeSvg(String path, Collection<Solid> solids, SvgOptions options) {
+        Solid[] all = solids.toArray(new Solid[0]);
+        boolean ok;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment handles = arena.allocate(ValueLayout.ADDRESS, Math.max(all.length, 1));
+            for (int i = 0; i < all.length; i++) {
+                handles.setAtIndex(ValueLayout.ADDRESS, i, all[i].handle());
+            }
+            MemorySegment o = buildSvgOptions(arena, options);
+            MemorySegment cPath = arena.allocateFrom(path);
+            long count = all.length;
+            ok = call(() -> (boolean) SVG.invokeExact(handles, count, cPath, o));
+        } finally {
+            keep((Object[]) all);
+        }
+        if (!ok) throw failure("svg");
+    }
+
     /** {@link #writeStepText(Collection, String, String)} writing one STEP file (AP203 unless a schema is named), in millimetres. */
     public static String writeStepText(Collection<Solid> solids) {
         return writeStepText(solids, null, "mm");
@@ -676,6 +938,129 @@ public final class Blacksmith {
     /** Several solids as one STEP file (AP203 unless {@code schema} names another), each its own body. */
     public static void writeStep(String path, Collection<Solid> solids, String schema, String unit) {
         writeText(path, writeStepText(solids, schema, unit));
+    }
+
+    private static int unitCode(String unit) {
+        Integer unitCode = UNITS.get(unit);
+        if (unitCode == null) {
+            throw new BuildException("unit must be one of " + String.join(", ", UNITS.keySet().stream().sorted().toList()));
+        }
+        return unitCode;
+    }
+
+    /** {@link #writeSatText(Collection, String)} in millimetres. */
+    public static String writeSatText(Collection<Solid> solids) {
+        return writeSatText(solids, "mm");
+    }
+
+    /**
+     * Several solids as one ACIS SAT file's text, each its own body: analytic surfaces
+     * as their own records, splines and swept surfaces as exact NURBS.
+     *
+     * @param unit what the solids' lengths are: {@code "m"}, {@code "mm"} or {@code "in"}
+     */
+    public static String writeSatText(Collection<Solid> solids, String unit) {
+        int code = unitCode(unit);
+        Solid[] all = solids.toArray(new Solid[0]);
+        MemorySegment raw;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment handles = arena.allocate(ValueLayout.ADDRESS, Math.max(all.length, 1));
+            for (int i = 0; i < all.length; i++) {
+                handles.setAtIndex(ValueLayout.ADDRESS, i, all[i].handle());
+            }
+            long count = all.length;
+            raw = call(() -> (MemorySegment) SAT_TEXT.invokeExact(handles, count, code));
+        } finally {
+            keep((Object[]) all);
+        }
+        if (raw.address() == 0) throw failure("sat_text");
+        try {
+            return string(raw);
+        } finally {
+            call(() -> {
+                STRING_FREE.invokeExact(raw);
+                return null;
+            });
+        }
+    }
+
+    /** {@link #writeSat(String, Collection, String)} in millimetres. */
+    public static void writeSat(String path, Collection<Solid> solids) {
+        writeSat(path, solids, "mm");
+    }
+
+    /**
+     * {@link #writeSatText(Collection, String)} written to {@code path} by the library
+     * itself, which names the file in its refusal when it cannot.
+     */
+    public static void writeSat(String path, Collection<Solid> solids, String unit) {
+        int code = unitCode(unit);
+        Solid[] all = solids.toArray(new Solid[0]);
+        boolean ok;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment handles = arena.allocate(ValueLayout.ADDRESS, Math.max(all.length, 1));
+            for (int i = 0; i < all.length; i++) {
+                handles.setAtIndex(ValueLayout.ADDRESS, i, all[i].handle());
+            }
+            MemorySegment cPath = arena.allocateFrom(path);
+            long count = all.length;
+            ok = call(() -> (boolean) SAT.invokeExact(handles, count, cPath, code));
+        } finally {
+            keep((Object[]) all);
+        }
+        if (!ok) throw failure("sat");
+    }
+
+    /**
+     * Several solids as one OCCT {@code .brep}, each its own solid under one compound
+     * (one solid is the file's root): the exact surfaces and curves, with a curve in each
+     * face's own parameters for every edge, so OCCT's {@code BRepTools::Read} gives a shape
+     * {@code BRepCheck_Analyzer} finds valid. No unit is declared -- a {@code .brep} carries
+     * none -- so the numbers are the numbers.
+     */
+    public static String writeBrepText(Collection<Solid> solids) {
+        Solid[] all = solids.toArray(new Solid[0]);
+        MemorySegment raw;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment handles = handlesOf(arena, all);
+            long count = all.length;
+            raw = call(() -> (MemorySegment) BREP_TEXT.invokeExact(handles, count));
+        } finally {
+            keep((Object[]) all);
+        }
+        if (raw.address() == 0) throw failure("brep_text");
+        try {
+            return string(raw);
+        } finally {
+            call(() -> {
+                STRING_FREE.invokeExact(raw);
+                return null;
+            });
+        }
+    }
+
+    /** {@link #writeBrepText(Collection)} written to {@code path} by the library itself. */
+    public static void writeBrep(String path, Collection<Solid> solids) {
+        Solid[] all = solids.toArray(new Solid[0]);
+        boolean ok;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment handles = handlesOf(arena, all);
+            MemorySegment where = arena.allocateFrom(path);
+            long count = all.length;
+            ok = call(() -> (boolean) BREP.invokeExact(handles, count, where));
+        } finally {
+            keep((Object[]) all);
+        }
+        if (!ok) throw failure("brep");
+    }
+
+    /** The solids' handles laid out as the one array the ABI takes. */
+    private static MemorySegment handlesOf(Arena arena, Solid[] all) {
+        MemorySegment handles = arena.allocate(ValueLayout.ADDRESS, Math.max(all.length, 1));
+        for (int i = 0; i < all.length; i++) {
+            handles.setAtIndex(ValueLayout.ADDRESS, i, all[i].handle());
+        }
+        return handles;
     }
 
     private static void writeText(String path, String text) {
@@ -836,6 +1221,84 @@ public final class Blacksmith {
             }
         }
 
+        /** {@link #hits(Profile, double)} at a tolerance of {@code 1e-6}. */
+        public List<Hit> hits(Profile other) {
+            return hits(other, 1e-6);
+        }
+
+        /** Where this profile's curves cross, touch or run along {@code other}'s, both read in
+         *  one plane, as {@link Hit} records ordered along this profile. Points closer than
+         *  {@code tolerance} merge; two curves within {@code tolerance} of each other for
+         *  longer than it are one run when they part only where one ends or the stretch is
+         *  flat -- one curve following the other, offset within {@code tolerance} or tilted by
+         *  under about half of it, even where it leaves mid-both; a tangency or a shallow
+         *  crossing is one point. A loop that stops short of its start is an open chain. */
+        public List<Hit> hits(Profile other, double tolerance) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment a = handle();
+                MemorySegment b = other.handle();
+                MemorySegment h = checked(
+                        call(() -> (MemorySegment) PROFILE_HITS.invokeExact(a, b, tolerance)), "profile_hits");
+                try {
+                    int n = call(() -> (int) HIT_COUNT.invokeExact(h));
+                    List<Hit> found = new ArrayList<>(n);
+                    MemorySegment raw = arena.allocate(HIT);
+                    for (int i = 0; i < n; i++) {
+                        int at = i;
+                        boolean ok = call(() -> (boolean) HIT_AT.invokeExact(h, at, raw));
+                        if (!ok) throw failure("hit");
+                        found.add(hitOf(raw));
+                    }
+                    return found;
+                } finally {
+                    call(() -> {
+                        HITS_FREE.invokeExact(h);
+                        return null;
+                    });
+                }
+            } finally {
+                keep(this, other);
+            }
+        }
+
+        /** {@link #common(Profile, double)} at a tolerance of {@code 1e-6}. */
+        public List<Profile> common(Profile other) {
+            return common(other, 1e-6);
+        }
+
+        /** The region this profile and {@code other} share, both read in one plane, as zero
+         *  or more profiles -- each boundary counter-clockwise, each hole clockwise, arcs and
+         *  splines kept exact. Both must be closed and simple. No shared area is an empty
+         *  list. Throws {@link BuildException} for a {@code tolerance} not positive and
+         *  finite, or a profile open or crossing itself. */
+        public List<Profile> common(Profile other, double tolerance) {
+            List<Profile> found = new ArrayList<>();
+            try {
+                MemorySegment a = handle();
+                MemorySegment b = other.handle();
+                MemorySegment list = checked(
+                        call(() -> (MemorySegment) PROFILE_COMMON.invokeExact(a, b, tolerance)), "profile_common");
+                try {
+                    int n = call(() -> (int) PROFILE_LIST_COUNT.invokeExact(list));
+                    for (int i = 0; i < n; i++) {
+                        int at = i;
+                        found.add(new Profile(call(() -> (MemorySegment) PROFILE_LIST_GET.invokeExact(list, at))));
+                    }
+                    return found;
+                } finally {
+                    call(() -> {
+                        PROFILE_LIST_FREE.invokeExact(list);
+                        return null;
+                    });
+                }
+            } catch (RuntimeException e) {
+                for (Profile p : found) p.close();
+                throw e;
+            } finally {
+                keep(this, other);
+            }
+        }
+
         /** This outline shifted by ({@code dx}, {@code dy}) in its own plane. */
         public Profile translate(double dx, double dy) {
             try {
@@ -857,6 +1320,73 @@ public final class Blacksmith {
                 return new Profile(call(() -> (MemorySegment) PROFILE_CLOSE_LOOP.invokeExact(h)));
             } finally {
                 keep(this);
+            }
+        }
+
+        /**
+         * This curve cut where the cutters cross, touch or run along it -- Python's
+         * {@code pieces}, the sketch trim's pieces: in order along the curve from its start,
+         * each an open profile of portions of this one's own segments (a line's stretch a
+         * line, an arc's an arc, a spline's the same spline over part of its domain). One
+         * piece, this curve, where nothing cuts it; a closed curve's piece round its start is
+         * one piece. Cuts closer than {@code tolerance} to each other fold onto one.
+         */
+        public List<Profile> pieces(Collection<Profile> cutters, double tolerance) {
+            Profile[] all = cutters.toArray(new Profile[0]);
+            List<Profile> found = new ArrayList<>();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment h = handle();
+                MemorySegment handles = arena.allocate(ValueLayout.ADDRESS, Math.max(all.length, 1));
+                for (int i = 0; i < all.length; i++) {
+                    handles.setAtIndex(ValueLayout.ADDRESS, i, all[i].handle());
+                }
+                long count = all.length;
+                int n = call(() -> (int) PROFILE_PIECE_COUNT.invokeExact(h, handles, count, tolerance));
+                if (n == 0) throw failure("profile_piece_count");
+                for (int i = 0; i < n; i++) {
+                    int which = i;
+                    found.add(new Profile(call(() -> (MemorySegment) PROFILE_PIECE.invokeExact(h, handles, count, which, tolerance))));
+                }
+                return found;
+            } catch (RuntimeException e) {
+                for (Profile q : found) q.close();
+                throw e;
+            } finally {
+                keep(this);
+                keep((Object[]) all);
+            }
+        }
+
+        /**
+         * This curve with piece {@code piece} of {@link #pieces} taken away -- Python's
+         * {@code trim}, the sketch trim: what is left, as open profiles. One for a closed curve
+         * (its other pieces run together from where the removed one ended), the stretches
+         * before and after for an open one, none where the piece was the whole curve. Throws
+         * {@link BuildException} for a piece the curve does not have.
+         */
+        public List<Profile> trim(Collection<Profile> cutters, int piece, double tolerance) {
+            Profile[] all = cutters.toArray(new Profile[0]);
+            List<Profile> found = new ArrayList<>();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment h = handle();
+                MemorySegment handles = arena.allocate(ValueLayout.ADDRESS, Math.max(all.length, 1));
+                for (int i = 0; i < all.length; i++) {
+                    handles.setAtIndex(ValueLayout.ADDRESS, i, all[i].handle());
+                }
+                long count = all.length;
+                int n = call(() -> (int) PROFILE_TRIM_COUNT.invokeExact(h, handles, count, piece, tolerance));
+                if (n == 0 && !lastError().isEmpty()) throw failure("profile_trim_count");
+                for (int i = 0; i < n; i++) {
+                    int which = i;
+                    found.add(new Profile(call(() -> (MemorySegment) PROFILE_TRIM_CHAIN.invokeExact(h, handles, count, piece, which, tolerance))));
+                }
+                return found;
+            } catch (RuntimeException e) {
+                for (Profile q : found) q.close();
+                throw e;
+            } finally {
+                keep(this);
+                keep((Object[]) all);
             }
         }
 
@@ -2119,6 +2649,57 @@ public final class Blacksmith {
             writeText(path, stepText(schema, unit));
         }
 
+        /** {@link #satText(String)} in millimetres. */
+        public String satText() {
+            return satText("mm");
+        }
+
+        /** This solid as ACIS SAT text; see {@link Blacksmith#writeSatText}. */
+        public String satText(String unit) {
+            return writeSatText(List.of(this), unit);
+        }
+
+        /** {@link #sat(String, String)} in millimetres. */
+        public void sat(String path) {
+            sat(path, "mm");
+        }
+
+        /** This solid written as an ACIS SAT file by the library itself. */
+        public void sat(String path, String unit) {
+            writeSat(path, List.of(this), unit);
+        }
+
+        /** This solid as OCCT {@code .brep} text; see {@link Blacksmith#writeBrepText}. */
+        public String brepText() {
+            return writeBrepText(List.of(this));
+        }
+
+        /** This solid written as a {@code .brep} file, by the library itself. */
+        public void brep(String path) {
+            writeBrep(path, List.of(this));
+        }
+
+        /** {@link #svgText(SvgOptions)} with every default. */
+        public String svgText() {
+            return svgText(null);
+        }
+
+        /** This solid's wireframe as SVG text, from the camera {@code options} describes --
+         *  the library's own camera, not a viewer. See {@link Blacksmith#writeSvgText}. */
+        public String svgText(SvgOptions options) {
+            return writeSvgText(List.of(this), options);
+        }
+
+        /** {@link #svg(String, SvgOptions)} with every default. */
+        public void svg(String path) {
+            svg(path, null);
+        }
+
+        /** This solid written as an SVG file by the library itself. */
+        public void svg(String path, SvgOptions options) {
+            writeSvg(path, List.of(this), options);
+        }
+
         // -- selecting and edges
 
         /** The face {@code selector} picks; throws when none does. */
@@ -2151,6 +2732,49 @@ public final class Blacksmith {
                 keep(this);
             }
         }
+
+        /** Face {@code face} by what it is, eight doubles: the surface's kind (plane 0,
+         * cylinder 1, cone 2, sphere 3, torus 4, NURBS 5, revolution 6, extrusion 7, sum 8), a
+         * point on the surface at the face's middle (x y z), the outward normal there (x y z),
+         * and the face's extent -- what a feature made on the face keeps, to find the face again
+         * with {@link #findFace} when the solid has been rebuilt with its faces moved, split or
+         * renumbered. Take it before any move you apply to the solid, and look it up on the
+         * unmoved one. */
+        public double[] faceRef(int face) {
+            int i = index(face);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 8);
+                MemorySegment h = handle();
+                boolean ok = call(() -> (boolean) FACE_REF.invokeExact(h, i, out));
+                if (!ok) throw failure("face_ref");
+                return out.toArray(ValueLayout.JAVA_DOUBLE);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The face {@code faceRef} (from {@link #faceRef}) refers to: among the faces of that
+         * kind whose surface passes through the point, facing the same way, the one the point
+         * lies in -- or, where it lies in none, the one whose boundary comes nearest.
+         * {@code hint} is the index the face had, preferred among faces that fit equally well
+         * (negative for none); {@code tolerance} how far the point may sit off a surface to
+         * still be on it. -1 where the face is gone. */
+        public int findFace(double[] faceRef, int hint, double tolerance) {
+            if (faceRef.length != 8) throw new BuildException("find_face: a face reference is eight numbers");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment ref = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, faceRef);
+                MemorySegment h = handle();
+                int h2 = hint < 0 ? -1 : hint;
+                int found = call(() -> (int) FIND_FACE.invokeExact(h, ref, h2, tolerance));
+                if (found == -2) throw failure("find_face");
+                return found < 0 ? -1 : found;
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@code findFace(faceRef, hint, 1e-3)}. */
+        public int findFace(double[] faceRef, int hint) { return findFace(faceRef, hint, 1e-3); }
 
         // -- colour
 
@@ -2208,6 +2832,7 @@ public final class Blacksmith {
                 if (n == 0 && !lastError().isEmpty()) throw failure("edge_count");
                 List<Edge> found = new ArrayList<>(n);
                 MemorySegment raw = arena.allocate(EDGE);
+                MemorySegment rawCurve = arena.allocate(CURVE);
                 for (int i = 0; i < n; i++) {
                     int at = i;
                     boolean ok = call(() -> (boolean) EDGE_AT.invokeExact(h, at, raw));
@@ -2231,12 +2856,47 @@ public final class Blacksmith {
                     } else {
                         Arrays.fill(segments, new Edge.Segment(new double[3], new double[3]));
                     }
-                    found.add(new Edge(i, kind, faces, segments));
+                    found.add(new Edge(i, kind, faces, segments, edgeCurve(h, i, rawCurve)));
                 }
                 return found;
             } finally {
                 keep(this);
             }
+        }
+
+        /** Edge {@code i}'s exact curve copied out of {@code raw}, or null for an edge with
+         *  none (the library's "has no exact curve"); any other refusal throws. */
+        private static Curve edgeCurve(MemorySegment h, int i, MemorySegment raw) {
+            boolean ok = call(() -> (boolean) EDGE_CURVE.invokeExact(h, i, raw));
+            if (!ok) {
+                if (lastError().contains("has no exact curve")) return null;
+                throw failure("edge_curve");
+            }
+            int degree = raw.get(ValueLayout.JAVA_INT, offset(CURVE, "degree"));
+            int knotCount = raw.get(ValueLayout.JAVA_INT, offset(CURVE, "knot_count"));
+            int poleCount = raw.get(ValueLayout.JAVA_INT, offset(CURVE, "pole_count"));
+            MemorySegment weightsAt = raw.get(ValueLayout.ADDRESS, offset(CURVE, "weights"));
+            return new Curve(
+                    string(raw.get(ValueLayout.ADDRESS, offset(CURVE, "kind"))),
+                    pointOf(raw, offset(CURVE, "origin")),
+                    pointOf(raw, offset(CURVE, "x")),
+                    pointOf(raw, offset(CURVE, "y")),
+                    pointOf(raw, offset(CURVE, "z")),
+                    raw.get(ValueLayout.JAVA_DOUBLE, offset(CURVE, "radius")),
+                    raw.get(ValueLayout.JAVA_DOUBLE, offset(CURVE, "radius2")),
+                    raw.get(ValueLayout.JAVA_DOUBLE, offset(CURVE, "t0")),
+                    raw.get(ValueLayout.JAVA_DOUBLE, offset(CURVE, "t1")),
+                    degree,
+                    doublesOf(raw.get(ValueLayout.ADDRESS, offset(CURVE, "knots")), knotCount),
+                    doublesOf(raw.get(ValueLayout.ADDRESS, offset(CURVE, "poles")), 3 * poleCount),
+                    weightsAt.address() == 0 ? null : doublesOf(weightsAt, poleCount));
+        }
+
+        @SuppressWarnings("restricted") // reinterpret: the count beside the pointer says how far it reaches.
+        private static double[] doublesOf(MemorySegment at, int count) {
+            return count == 0 || at.address() == 0
+                    ? new double[0]
+                    : at.reinterpret(count * (long) Double.BYTES).toArray(ValueLayout.JAVA_DOUBLE);
         }
 
         private static int[] indicesOf(Collection<Edge> edges) {
@@ -2745,17 +3405,60 @@ public final class Blacksmith {
     }
 
     /**
+     * One edge's exact curve, as plain data copied out ({@link Edge#curve}): {@code kind} is
+     * "line", "circle", "ellipse" or "nurbs".
+     *
+     * <p>{@code t0..t1} is the edge's parameter range on its own curve: a line's fraction (0..1
+     * over {@code origin -> origin + x}, where {@code x} is the full {@code to - from}, NOT unit
+     * -- so {@code point(t) = origin + x*t}); a circle's or ellipse's angle in radians about
+     * {@code origin} in the {@code x, y} plane ({@code point(t) = origin + x*radius*cos(t) +
+     * y*radius2*sin(t)}, {@code radius2 = radius} for a circle); a NURBS's knot parameter
+     * ({@code knots[degree] <= t0 < t1 <= knots[n]}). Frame vectors {@code x, y, z} are unit for
+     * conics; for a line {@code x} is the direction with length = the line's length and
+     * {@code y, z} are zero.
+     *
+     * <p>For a NURBS the frame is zero and so are the radii; for a conic or a line {@code degree}
+     * is 0 and {@code knots}, {@code poles} are empty.
+     *
+     * @param origin  three doubles
+     * @param x       three doubles
+     * @param y       three doubles
+     * @param z       three doubles
+     * @param knots   the knot vector ({@code knots.length == poles.length / 3 + degree + 1})
+     * @param poles   three doubles per control point
+     * @param weights one per pole, or null for a non-rational (plain B-spline) curve, a conic
+     *                or a line
+     */
+    public record Curve(String kind, double[] origin, double[] x, double[] y, double[] z,
+                        double radius, double radius2, double t0, double t1, int degree,
+                        double[] knots, double[] poles, double[] weights) {
+        @Override
+        public String toString() {
+            return kind.equals("nurbs")
+                    ? "Curve(\"nurbs\", degree=" + degree + ", poles=" + poles.length / 3
+                    + ", rational=" + (weights != null) + ", t0=" + t0 + ", t1=" + t1 + ")"
+                    : "Curve(\"" + kind + "\", origin=" + Arrays.toString(origin) + ", radius=" + radius
+                    + ", t0=" + t0 + ", t1=" + t1 + ")";
+        }
+    }
+
+    /**
      * One edge of a solid, as plain data: its index (what {@link Solid#fillet} takes), the
-     * curve kind, the faces meeting on it, and its segments' ends.
+     * curve kind, the faces meeting on it, its segments' ends, and its exact {@link Curve}.
      *
      * @param index    the edge's index in the solid's own order
      * @param kind     "line", "circle", "ellipse", "nurbs" or "other"
      * @param faces    the faces that meet on it, in the solid's face order
      * @param segments the two ends of each trim piece of the edge
+     * @param curve    the edge's exact curve, or null for an edge with none (kind "other")
      */
-    public record Edge(int index, String kind, int[] faces, Segment[] segments) {
+    public record Edge(int index, String kind, int[] faces, Segment[] segments, Curve curve) {
         /** The two ends of one trim piece, three doubles each. */
         public record Segment(double[] a, double[] b) {
+        }
+
+        public Edge(int index, String kind, int[] faces, Segment[] segments) {
+            this(index, kind, faces, segments, null);
         }
 
         public boolean isLine() {
@@ -2776,6 +3479,64 @@ public final class Blacksmith {
         public String toString() {
             return "Edge(" + index + ", \"" + kind + "\", faces=" + Arrays.toString(faces) + ")";
         }
+    }
+
+    /**
+     * Where a hit lands on one side: a profile's {@code loopIndex} (0 the boundary or the open
+     * chain, then the holes in the order they were added), {@code segment}, and {@code t} from 0
+     * to 1 along it, with {@code face} NONE -- or a solid's {@code face} at ({@code u}, {@code
+     * v}), with {@code loopIndex} and {@code segment} NONE. NONE is {@code 0xFFFFFFFF}, read
+     * into a Java {@code int} as -1.
+     */
+    public record Spot(int loopIndex, int segment, double t, int face, double u, double v) {
+    }
+
+    /**
+     * One place two curves meet, copied out. A point ({@code run} false): {@code start} equals
+     * {@code end}, and {@code touch} is true where the curves are tangent rather than crossing.
+     * A run ({@code run} true): they coincide from {@code start} to {@code end}. {@code
+     * aStart}/{@code aEnd} are where on the first curve, {@code bStart}/{@code bEnd} where on
+     * the second.
+     *
+     * @param start three doubles
+     * @param end   three doubles
+     */
+    public record Hit(boolean run, boolean touch, double[] start, double[] end,
+                      Spot aStart, Spot aEnd, Spot bStart, Spot bEnd) {
+        @Override
+        public String toString() {
+            return "Hit(run=" + run + ", touch=" + touch + ", start=" + Arrays.toString(start)
+                    + ", end=" + Arrays.toString(end) + ")";
+        }
+    }
+
+    private static Spot spotOf(MemorySegment raw, long base) {
+        return new Spot(
+                raw.get(ValueLayout.JAVA_INT, base + offset(SPOT, "loop_index")),
+                raw.get(ValueLayout.JAVA_INT, base + offset(SPOT, "segment")),
+                raw.get(ValueLayout.JAVA_DOUBLE, base + offset(SPOT, "t")),
+                raw.get(ValueLayout.JAVA_INT, base + offset(SPOT, "face")),
+                raw.get(ValueLayout.JAVA_DOUBLE, base + offset(SPOT, "u")),
+                raw.get(ValueLayout.JAVA_DOUBLE, base + offset(SPOT, "v")));
+    }
+
+    private static double[] pointOf(MemorySegment raw, long base) {
+        return new double[]{
+                raw.get(ValueLayout.JAVA_DOUBLE, base + offset(POINT, "x")),
+                raw.get(ValueLayout.JAVA_DOUBLE, base + offset(POINT, "y")),
+                raw.get(ValueLayout.JAVA_DOUBLE, base + offset(POINT, "z"))};
+    }
+
+    private static Hit hitOf(MemorySegment raw) {
+        return new Hit(
+                raw.get(ValueLayout.JAVA_BOOLEAN, offset(HIT, "run")),
+                raw.get(ValueLayout.JAVA_BOOLEAN, offset(HIT, "touch")),
+                pointOf(raw, offset(HIT, "start")),
+                pointOf(raw, offset(HIT, "end")),
+                spotOf(raw, offset(HIT, "a_start")),
+                spotOf(raw, offset(HIT, "a_end")),
+                spotOf(raw, offset(HIT, "b_start")),
+                spotOf(raw, offset(HIT, "b_end")));
     }
 
     // ---- frames ---------------------------------------------------------------------------

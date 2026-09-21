@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "cadaclysm-godot"
-version = "0.4.5"
+version = "0.6.0"
 dependencies = [
  "cadaclysm-sdk",
  "godot",
@@ -12,7 +12,7 @@ dependencies = [
 
 [[package]]
 name = "cadaclysm-sdk"
-version = "0.4.5"
+version = "0.6.0"
 dependencies = [
  "libloading",
 ]

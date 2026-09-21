@@ -240,6 +240,45 @@ func test_save_mesh_and_save():
 	ok(Cadaclysm.last_error() != "")
 	scene.close()
 
+func test_svg():
+	var scene := native()
+	if scene == null:
+		return
+	var text := scene.svg_text()
+	ok(text.begins_with("<svg"), text.left(40))
+	ok(text.contains("<path"), "no <path in the scene's svg text")
+
+	var path := tmp("assembly.svg")
+	eq(scene.svg(path), true)
+	var written := FileAccess.get_file_as_string(path)
+	ok(written.length() > 0, "svg wrote an empty file")
+	ok(written.begins_with("<svg"))
+
+	var bracket: CadaclysmNode = scene.roots[0].children[0]
+	var node_text: String = bracket.svg_text()
+	ok(node_text.begins_with("<svg") and node_text.contains("<path"), "node svg_text")
+
+	# The root itself has no geometry: refused, not a blank drawing.
+	eq(scene.roots[0].svg_text(), "")
+	ok(Cadaclysm.last_error().contains("no node"), Cadaclysm.last_error())
+
+	# A view, an explicit up and a coloured background all reach the camera and page.
+	var front: String = scene.svg_text_with({"view": "front"})
+	var top: String = scene.svg_text_with({"view": "top"})
+	ok(front != top, "front and top read the same")
+	var z_up: String = scene.svg_text_with({"up": "z"})
+	var y_up: String = scene.svg_text_with({"up": "y"})
+	ok(z_up != y_up, "z-up and y-up read the same")
+	var painted: String = scene.svg_text_with({"background": "#ff0000"})
+	ok(painted.contains('fill="#ff0000"'), painted.left(300))
+
+	eq(scene.svg_text_with({"fov": 200}), "")
+	ok(Cadaclysm.last_error().contains("fov"), Cadaclysm.last_error())
+	eq(scene.roots[0].svg_text_with({"fov": 200}), "")
+	eq(scene.svg_text_with({"nope": 1}), "")
+	ok(Cadaclysm.last_error().begins_with("no svg option called"), Cadaclysm.last_error())
+	scene.close()
+
 func test_open_bytes_reads_the_same_tree():
 	var path := fixture(ASSEMBLY)
 	if path == "":

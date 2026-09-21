@@ -85,7 +85,7 @@ import operator
 import os
 import platform
 import sys
-from ctypes import (POINTER, c_bool, c_char_p, c_double, c_float, c_size_t, c_uint32, c_uint64, c_void_p)
+from ctypes import (POINTER, c_bool, c_char_p, c_double, c_float, c_int32, c_size_t, c_uint32, c_uint64, c_void_p)
 from pathlib import Path as _FsPath   # `Path` here is the outline builder
 from typing import TYPE_CHECKING
 
@@ -94,14 +94,15 @@ if TYPE_CHECKING:   # names the annotations use; imported when used, never at lo
     import numpy
 
 __all__ = [
-    "Axis", "BuildError", "Edge", "Frame", "Manifold", "Path", "Profile", "Selector", "Slant", "Solid", "SweepPath", "Workplane",
+    "Axis", "BuildError", "Curve", "Edge", "Frame", "Hit", "Manifold", "Path", "Profile", "Selector", "Slant", "Solid", "Spot",
+    "SweepPath", "Workplane",
     "brep_layout_id", "build_date", "default_schema", "library_path", "license", "license_info", "license_notice_count",
     "version",
-    "write_step", "write_step_text", "__version__",
+    "svg", "write_brep", "write_brep_text", "write_sat", "write_sat_text", "write_step", "write_step_text", "__version__",
 ]
 
 # This file's own version (the workspace's); `version()` is the loaded library's.
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 
 NONE = 0xFFFFFFFF
 UNITS = {"m": 0, "mm": 1, "in": 2}
@@ -216,6 +217,49 @@ class _Edge(ctypes.Structure):
                 ("segments", POINTER(c_double)), ("segment_count", c_uint32)]
 
 
+class _Point(ctypes.Structure):
+    _fields_ = [("x", c_double), ("y", c_double), ("z", c_double)]
+
+
+class _Spot(ctypes.Structure):
+    _fields_ = [("loop_index", c_uint32), ("segment", c_uint32), ("t", c_double),
+                ("face", c_uint32), ("u", c_double), ("v", c_double)]
+
+
+class _Hit(ctypes.Structure):
+    _fields_ = [("run", c_bool), ("touch", c_bool), ("start", _Point), ("end", _Point),
+                ("a_start", _Spot), ("a_end", _Spot), ("b_start", _Spot), ("b_end", _Spot)]
+
+
+class _SvgOptions(ctypes.Structure):
+    #: `CadaclysmBlacksmithSvgOptions`. Field order and `size` are the whole
+    #: contract -- `cadaclysm_blacksmith_svg_options_init` fills the library's
+    #: whole struct, so this list must match the header field for field, and it
+    #: may never reorder.
+    _fields_ = [
+        ("size", c_uint32),
+        ("up", c_uint32),
+        ("azimuth", c_double),
+        ("elevation", c_double),
+        ("fov", c_double),
+        ("width", c_double),
+        ("height", c_double),
+        ("margin", c_double),
+        ("tolerance", c_double),
+        ("stroke_width", c_double),
+        ("stroke", c_uint32),
+        ("background", c_uint32),
+        ("flags", c_uint32),
+    ]
+
+
+class _Curve(ctypes.Structure):
+    _fields_ = [("kind", c_char_p), ("origin", _Point), ("x", _Point), ("y", _Point), ("z", _Point),
+                ("radius", c_double), ("radius2", c_double), ("t0", c_double), ("t1", c_double),
+                ("degree", c_uint32), ("knots", POINTER(c_double)), ("knot_count", c_uint32),
+                ("poles", POINTER(c_double)), ("pole_count", c_uint32), ("weights", POINTER(c_double))]
+
+
 _PROGRESS = ctypes.CFUNCTYPE(None, c_char_p, c_size_t, c_size_t, c_void_p)
 _D = POINTER(c_double)
 _U = POINTER(c_uint32)
@@ -223,6 +267,8 @@ _SOLID = c_void_p
 _PROFILE = c_void_p
 _PATH = c_void_p
 _SWEEP_PATH = c_void_p
+_HITS = c_void_p
+_PROFILE_LIST = c_void_p
 
 _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_last_error", c_char_p, []),
@@ -240,11 +286,23 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_profile_spline", _PROFILE, [_D, c_size_t, c_uint32, _D, c_bool]),
     ("cadaclysm_blacksmith_profile_polygon", _PROFILE, [_D, c_size_t]),
     ("cadaclysm_blacksmith_profile_with_hole", _PROFILE, [_PROFILE, _PROFILE]),
+    ("cadaclysm_blacksmith_profile_hits", _HITS, [_PROFILE, _PROFILE, c_double]),
+    ("cadaclysm_blacksmith_hits_free", None, [_HITS]),
+    ("cadaclysm_blacksmith_hit_count", c_uint32, [_HITS]),
+    ("cadaclysm_blacksmith_hit", c_bool, [_HITS, c_uint32, POINTER(_Hit)]),
+    ("cadaclysm_blacksmith_profile_common", _PROFILE_LIST, [_PROFILE, _PROFILE, c_double]),
+    ("cadaclysm_blacksmith_profile_list_count", c_uint32, [_PROFILE_LIST]),
+    ("cadaclysm_blacksmith_profile_list_get", _PROFILE, [_PROFILE_LIST, c_uint32]),
+    ("cadaclysm_blacksmith_profile_list_free", None, [_PROFILE_LIST]),
     ("cadaclysm_blacksmith_translate_profile", _PROFILE, [_PROFILE, c_double, c_double]),
     ("cadaclysm_blacksmith_profile_round", _PROFILE, [_PROFILE, c_double, _U, c_size_t, c_bool]),
     ("cadaclysm_blacksmith_profile_chain", _PROFILE, [POINTER(c_void_p), c_size_t, c_double]),
     ("cadaclysm_blacksmith_profile_from_loops", _PROFILE, [POINTER(c_void_p), c_size_t]),
     ("cadaclysm_blacksmith_profile_close_loop", _PROFILE, [_PROFILE]),
+    ("cadaclysm_blacksmith_profile_piece_count", c_uint32, [_PROFILE, POINTER(c_void_p), c_size_t, c_double]),
+    ("cadaclysm_blacksmith_profile_piece", _PROFILE, [_PROFILE, POINTER(c_void_p), c_size_t, c_uint32, c_double]),
+    ("cadaclysm_blacksmith_profile_trim_count", c_uint32, [_PROFILE, POINTER(c_void_p), c_size_t, c_uint32, c_double]),
+    ("cadaclysm_blacksmith_profile_trim_chain", _PROFILE, [_PROFILE, POINTER(c_void_p), c_size_t, c_uint32, c_uint32, c_double]),
     ("cadaclysm_blacksmith_profile_polylines", _Polylines, [_PROFILE, c_double]),
     ("cadaclysm_blacksmith_path_begin", _PATH, [c_double, c_double]),
     ("cadaclysm_blacksmith_path_line_to", c_bool, [_PATH, c_double, c_double]),
@@ -315,6 +373,8 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_face_count", c_uint32, [_SOLID]),
     ("cadaclysm_blacksmith_select_face", c_uint32, [_SOLID, c_uint32, _D, c_uint32]),
     ("cadaclysm_blacksmith_face_frame", c_bool, [_SOLID, c_uint32, _D]),
+    ("cadaclysm_blacksmith_face_ref", c_bool, [_SOLID, c_uint32, _D]),
+    ("cadaclysm_blacksmith_find_face", c_int32, [_SOLID, _D, c_int32, c_double]),
     ("cadaclysm_blacksmith_frame_midplane", c_bool, [_D, _D, _D]),
     ("cadaclysm_blacksmith_frame_through", c_bool, [_D, _D, _D, _D]),
     ("cadaclysm_blacksmith_coloured", _SOLID, [_SOLID, c_uint32, c_double, c_double, c_double]),
@@ -322,6 +382,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_face_kind", c_char_p, [_SOLID, c_uint32]),
     ("cadaclysm_blacksmith_edge_count", c_uint32, [_SOLID]),
     ("cadaclysm_blacksmith_edge", c_bool, [_SOLID, c_uint32, POINTER(_Edge)]),
+    ("cadaclysm_blacksmith_edge_curve", c_bool, [_SOLID, c_uint32, POINTER(_Curve)]),
     ("cadaclysm_blacksmith_mesh", _Mesh, [_SOLID, c_double]),
     ("cadaclysm_blacksmith_mesh_face_triangles", _FaceTriangles, [_SOLID, c_double]),
     ("cadaclysm_blacksmith_edge_polylines", _Polylines, [_SOLID, c_double]),
@@ -330,6 +391,13 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_unpaired_edges", c_uint32, [_SOLID, c_double]),
     ("cadaclysm_blacksmith_manifold", c_bool, [_SOLID, _U]),
     ("cadaclysm_blacksmith_step", c_void_p, [POINTER(c_void_p), c_size_t, c_char_p, c_uint32]),
+    ("cadaclysm_blacksmith_sat_text", c_void_p, [POINTER(c_void_p), c_size_t, c_uint32]),
+    ("cadaclysm_blacksmith_sat", c_bool, [POINTER(c_void_p), c_size_t, c_char_p, c_uint32]),
+    ("cadaclysm_blacksmith_svg_options_init", None, [POINTER(_SvgOptions)]),
+    ("cadaclysm_blacksmith_svg_text", c_void_p, [POINTER(c_void_p), c_size_t, POINTER(_SvgOptions)]),
+    ("cadaclysm_blacksmith_svg", c_bool, [POINTER(c_void_p), c_size_t, c_char_p, POINTER(_SvgOptions)]),
+    ("cadaclysm_blacksmith_brep_text", c_void_p, [POINTER(c_void_p), c_size_t]),
+    ("cadaclysm_blacksmith_brep", c_bool, [POINTER(c_void_p), c_size_t, c_char_p]),
     ("cadaclysm_blacksmith_string_free", None, [c_void_p]),
     ("cadaclysm_blacksmith_from_brep", _SOLID, [c_void_p, c_char_p]),
     ("cadaclysm_blacksmith_brep_layout_id", c_char_p, []),
@@ -362,19 +430,21 @@ class _WasmLibrary:
     # it, and 0 (a null handle, or a count the caller checks `last_error` on)
     # for everything else
     _BOOLS = {"path_line_to", "path_arc_to", "path_bezier_to", "path_nurbs_to", "sweep_path_line_to",
-              "sweep_path_arc", "slant_of_plane", "face_frame", "frame_midplane", "frame_through", "bounds", "edge", "colour", "manifold", "license_set"}
+              "sweep_path_arc", "slant_of_plane", "face_frame", "face_ref", "frame_midplane", "frame_through", "bounds", "edge", "colour", "manifold", "license_set",
+              "hit", "edge_curve"}
     _FAILS = {"select_face": NONE, "leaked_edges": NONE, "unpaired_edges": NONE,
               "mesh": _Mesh(), "mesh_face_triangles": _FaceTriangles(), "edge_polylines": _Polylines(),
               "profile_polylines": _Polylines()}
     # results that C writes into an out-array of doubles at this position, and the
     # wasm returns as a typed array (`bounds` fills two, `edge` a record: see `_back`)
-    _OUT = {"slant_of_plane": 3, "face_frame": 2, "frame_midplane": 2, "frame_through": 3}
+    _OUT = {"slant_of_plane": 3, "face_frame": 2, "face_ref": 2, "frame_midplane": 2, "frame_through": 3}
     # argument positions the C call has and the wasm call does not: an array's
     # count (a typed array knows its length), the progress `user` pointer, and
     # the out-arguments above
     _DROP = {"profile_polygon": (1,), "path_nurbs_to": (2, 5), "join": (4,), "cut": (4,), "common": (4,),
-             "split_sheet": (4,), "trim": (5,), "drop_faces": (2,), "profile_round": (3,), "profile_spline": (1,), "profile_chain": (1,), "profile_from_loops": (1,), "loft_through": (2,), "loft_through_open": (2,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "thicken": (4,), "push_pull": (5,), "push_pull_faces": (2, 6), "split": (4,), "split_by_plane": (4,), "step": (1,),
-             "slant_of_plane": (3,), "face_frame": (2,), "bounds": (2, 3), "edge": (2,), "colour": (2,), "manifold": (1,)}
+             "split_sheet": (4,), "trim": (5,), "drop_faces": (2,), "profile_round": (3,), "profile_spline": (1,), "profile_chain": (1,), "profile_from_loops": (1,), "profile_piece_count": (2,), "profile_piece": (2,), "profile_trim_count": (2,), "profile_trim_chain": (2,), "loft_through": (2,), "loft_through_open": (2,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "thicken": (4,), "push_pull": (5,), "push_pull_faces": (2, 6), "split": (4,), "split_by_plane": (4,), "step": (1,), "sat_text": (1,), "brep_text": (1,),
+             "slant_of_plane": (3,), "face_frame": (2,), "face_ref": (2,), "bounds": (2, 3), "edge": (2,), "colour": (2,), "manifold": (1,), "hit": (2,), "edge_curve": (2,),
+             "svg_text": (1,)}
     # strings the C side returns as `const char*`, and the module decodes
     _TEXTS = {"version", "build_date", "face_kind", "license_info", "brep_layout_id"}
 
@@ -418,6 +488,17 @@ class _WasmLibrary:
             self._error = None
             if short == "select_face" and args[2] is None:
                 args = (args[0], args[1], (c_double * 0)(), args[3])   # the direction, unread for kinds 0/1/3
+            if short == "svg_text":
+                # cadaclysm_blacksmith_svg_text(solids: &[u32], words: &[f64]) -- the
+                # options struct behind `ctypes.byref(o)` (args[2]) has no cheaper way
+                # to cross into JS than its own twelve fields after `size`, in struct
+                # order (`up` an integral f64 like `stroke`/`background`/`flags`); see
+                # the wasm export's own doc comment in crates/cadaclysm-wasm/src/blacksmith.rs.
+                o = args[2]._obj
+                args = (args[0], args[1], (c_double * 12)(
+                    o.up, o.azimuth, o.elevation, o.fov, o.width, o.height,
+                    o.margin, o.tolerance, o.stroke_width, o.stroke, o.background, o.flags,
+                ))
             passed = [self._arg(a) for i, a in enumerate(args) if i not in dropped]
             try:
                 result = function(*passed)
@@ -478,6 +559,33 @@ class _WasmLibrary:
             raw.face_count = len(result.faces)
             raw.segments = (c_double * len(result.segments))(*[float(v) for v in result.segments])
             raw.segment_count = len(result.segments) // 6
+            return True
+        if short == "hit":   # the record, into the `_Hit` behind `ctypes.byref(raw)`
+            raw = args[2]._obj
+            raw.run, raw.touch = bool(result.run), bool(result.touch)
+            for name in ("start", "end"):
+                p = getattr(result, name)
+                setattr(raw, name, _Point(float(p[0]), float(p[1]), float(p[2])))
+            for name in ("a_start", "a_end", "b_start", "b_end"):
+                s = getattr(result, name)
+                setattr(raw, name, _Spot(int(s.loop_index), int(s.segment), float(s.t),
+                                         int(s.face), float(s.u), float(s.v)))
+            return True
+        if short == "edge_curve":   # the record, into the `_Curve` behind `ctypes.byref(raw)`
+            raw = args[2]._obj
+            raw.kind = str(result.kind).encode()
+            for name in ("origin", "x", "y", "z"):
+                p = getattr(result, name)
+                setattr(raw, name, _Point(float(p[0]), float(p[1]), float(p[2])))
+            raw.radius, raw.radius2 = float(result.radius), float(result.radius2)
+            raw.t0, raw.t1, raw.degree = float(result.t0), float(result.t1), int(result.degree)
+            # the arrays live in fresh `c_double` arrays kept on the struct (as `edge` keeps its)
+            raw.knots = (c_double * len(result.knots))(*[float(v) for v in result.knots])
+            raw.knot_count = len(result.knots)
+            raw.poles = (c_double * len(result.poles))(*[float(v) for v in result.poles])
+            raw.pole_count = len(result.poles) // 3
+            weights = getattr(result, "weights", None)
+            raw.weights = None if weights is None else (c_double * len(weights))(*[float(v) for v in weights])
             return True
         if short == "colour":   # the three doubles, or null where there is no colour: C's `false`
             if result is None:
@@ -555,6 +663,45 @@ def _text(raw) -> str:
 def _fail(what: str):
     """Raise the library's own reason, or `what` if it left none."""
     raise BuildError(_text(_lib().cadaclysm_blacksmith_last_error()) or what)
+
+
+def _packed(colour) -> int:
+    """A colour as the ABI's packed `0xRRGGBB`: `'#rrggbb'` or an `(r, g, b)` triple."""
+    if isinstance(colour, str):
+        h = colour.lstrip("#")
+        if len(h) != 6:
+            raise ValueError(f"colour {colour!r}: '#rrggbb' or (r, g, b)")
+        return int(h, 16)
+    r, g, b = colour
+    return (int(r) << 16) | (int(g) << 8) | int(b)
+
+
+def _svg_options(*, view="iso", az=None, el=None, up=None, fov=0.0, size=(1000, 1000), margin=0.05,
+                 tolerance=0.1, stroke="#000000", width=1.0, background=None, edges=True, curves=False,
+                 isocurves=False, polylines=False) -> _SvgOptions:
+    """`Solid.svg`/`svg()`'s keywords, packed into `CadaclysmBlacksmithSvgOptions` --
+    as the reader's own `_svg_options`, but with no scene convention to default
+    `up` from: a solid's own frame is Z up unless `up=` says otherwise, as
+    `show`'s `viewer.options` already defaults it. Colours as `'#rrggbb'` or an
+    `(r, g, b)` triple."""
+    VIEWS = _viewer().VIEWS   # the same search show() uses: cadaclysm_viewer.py is not
+                              # beside this file, so a bare import only works by accident
+
+    if view not in VIEWS:
+        raise ValueError(f"view {view!r}: one of {', '.join(VIEWS)}")
+    base_az, base_el = VIEWS[view]
+    o = _SvgOptions()
+    _lib().cadaclysm_blacksmith_svg_options_init(ctypes.byref(o))
+    o.up = 1 if (up or "z").lower() == "y" else 0
+    o.azimuth = float(base_az if az is None else az)
+    o.elevation = float(base_el if el is None else el)
+    o.fov = float(fov)
+    o.width, o.height = float(size[0]), float(size[1])
+    o.margin, o.tolerance, o.stroke_width = float(margin), float(tolerance), float(width)
+    o.stroke = _packed(stroke)
+    o.background = NONE if background is None else _packed(background)
+    o.flags = (1 if edges else 0) | (2 if curves else 0) | (4 if isocurves else 0) | (8 if polylines else 0)
+    return o
 
 
 def _rgb(colour):
@@ -723,10 +870,15 @@ def brep_layout_id() -> str:
 
 
 def _viewer():
-    """The viewer loader, imported only when something is drawn: `cadaclysm.viewer` (the
-    wheel), `cadaclysm_viewer` on the path, then beside this module, then the reader's
-    examples beside the kernel's in a checkout. A directory joins `sys.path` only when it
-    holds `cadaclysm_viewer.py`."""
+    """The viewer loader: `cadaclysm.viewer` (the wheel), `cadaclysm_viewer` on the
+    path, then beside this module, then the reader's examples beside the kernel's in
+    a checkout. A directory joins `sys.path` only when it holds `cadaclysm_viewer.py`.
+
+    Imported when something is drawn (`show`/`view`), and by `_svg_options` for its
+    `VIEWS` table alone -- `cadaclysm_viewer.py` lives in the reader's `examples/`,
+    not this module's, so `svg()` needs the same search `show()` does rather than a
+    bare `import cadaclysm_viewer` that only happens to work when that directory is
+    already on `sys.path` for some other reason."""
     try:
         from cadaclysm import viewer
         return viewer
@@ -888,6 +1040,51 @@ class Profile:
     def with_hole(self, hole: "Profile") -> "Profile":
         return Profile(_lib().cadaclysm_blacksmith_profile_with_hole(self._handle, hole._handle))
 
+    def hits(self, other, tolerance=1e-6) -> "list[Hit]":
+        """Where this profile's curves cross, touch or run along `other`'s, both read in
+        one plane, as :class:`Hit` values ordered along this profile. Points closer than
+        `tolerance` merge; two curves within `tolerance` of each other for longer than it
+        are one run when they part only where one ends or the stretch is flat -- one curve
+        following the other, offset within `tolerance` or tilted by under about half of it,
+        even where it leaves mid-both; a tangency or a shallow crossing is one point. A loop
+        that stops short of its start is an open chain."""
+        lib = _lib()
+        h = lib.cadaclysm_blacksmith_profile_hits(self._handle, other._handle, tolerance)
+        if not h:
+            _fail("profile_hits")
+        try:
+            n = lib.cadaclysm_blacksmith_hit_count(h)
+            raw = _Hit()
+            out = []
+            for i in range(n):
+                if not lib.cadaclysm_blacksmith_hit(h, i, ctypes.byref(raw)):
+                    _fail("hit")
+                out.append(_hit_of(raw))
+            return out
+        finally:
+            lib.cadaclysm_blacksmith_hits_free(h)
+
+    def common(self, other, tolerance=1e-6) -> "list[Profile]":
+        """The region this profile and `other` share, both read in one plane, as zero or
+        more profiles -- each boundary counter-clockwise, each hole clockwise, arcs and
+        splines kept exact. Two loops of a result may touch at a point (two holes whose
+        corners meet, one from each input): a right point set that the verbs needing
+        simple loops -- `extrude`, a boolean taking it as an input -- refuse. Both must
+        be closed and simple. No shared area is an empty list. Raises `BuildError` for a
+        `tolerance` not positive and finite, a profile open or crossing itself, a
+        `tolerance` too fine for these profiles (following their arcs and splines to a
+        tenth of it would take more than 8 million points, about 128 MB), and, as a
+        defect rather than an outcome, a result that fails to close."""
+        lib = _lib()
+        h = lib.cadaclysm_blacksmith_profile_common(self._handle, other._handle, tolerance)
+        if not h:
+            _fail("profile_common")
+        try:
+            n = lib.cadaclysm_blacksmith_profile_list_count(h)
+            return [Profile(_checked(lib.cadaclysm_blacksmith_profile_list_get(h, i), "profile_list_get")) for i in range(n)]
+        finally:
+            lib.cadaclysm_blacksmith_profile_list_free(h)
+
     def translate(self, dx, dy) -> "Profile":
         return Profile(_lib().cadaclysm_blacksmith_translate_profile(self._handle, dx, dy))
 
@@ -909,6 +1106,39 @@ class Profile:
             ks = [int(k) for k in corners]
             picked, count = (c_uint32 * len(ks))(*ks), len(ks)
         return Profile(_lib().cadaclysm_blacksmith_profile_round(self._handle, radius, picked, count, bool(open)))
+
+    def pieces(self, cutters, tolerance=1e-6) -> "list[Profile]":
+        """This curve cut where the `cutters` (profiles) cross, touch or run along
+        it -- the sketch trim's pieces: in order along the curve from its start,
+        each an open profile of portions of this one's own segments (a line's
+        stretch a line, an arc's an arc, a spline's the same spline over part of
+        its domain). One piece, this curve, where nothing cuts it; a closed
+        curve's piece round its start is one piece. `tolerance` is how close two
+        curves must come to meet; cuts closer than it to each other fold onto
+        one. Raises `BuildError` for a curve with no segments."""
+        cutters = list(cutters)
+        handles = (c_void_p * len(cutters))(*[c._handle for c in cutters])   # zero-length with none: the wasm takes an array, never None
+        lib = _lib()
+        n = lib.cadaclysm_blacksmith_profile_piece_count(self._handle, handles, len(cutters), tolerance)
+        if n == 0:
+            _fail("profile_piece_count")
+        return [Profile(lib.cadaclysm_blacksmith_profile_piece(self._handle, handles, len(cutters), k, tolerance)) for k in range(n)]
+
+    def trim(self, cutters, piece, tolerance=1e-6) -> "list[Profile]":
+        """This curve with piece `piece` of `pieces(cutters)` taken away -- the
+        sketch trim: what is left, as open profiles. One for a closed curve (its
+        other pieces run together, starting where the removed piece ended), the
+        stretches before and after for an open one, none where the piece was the
+        whole curve. Raises `BuildError` for a piece the curve does not have."""
+        cutters = list(cutters)
+        handles = (c_void_p * len(cutters))(*[c._handle for c in cutters])   # zero-length with none: the wasm takes an array, never None
+        lib = _lib()
+        n = lib.cadaclysm_blacksmith_profile_trim_count(self._handle, handles, len(cutters), int(piece), tolerance)
+        if n == 0:
+            if _text(lib.cadaclysm_blacksmith_last_error()):
+                _fail("profile_trim_count")
+            return []
+        return [Profile(lib.cadaclysm_blacksmith_profile_trim_chain(self._handle, handles, len(cutters), int(piece), k, tolerance)) for k in range(n)]
 
     def polylines(self, tolerance=0.05) -> "list[numpy.ndarray]":
         """The outline, then each hole, as float32 (k,3) read-only views at z = 0,
@@ -1661,6 +1891,33 @@ class Solid:
     def step(self, path, schema=None, unit="mm") -> None:
         _FsPath(path).write_text(self.step_text(schema, unit), encoding="utf-8")
 
+    def sat_text(self, unit="mm") -> str:
+        """The solid as ACIS SAT text: analytic surfaces as their own records,
+        splines and swept surfaces as exact NURBS."""
+        return write_sat_text([self], unit)
+
+    def sat(self, path, unit="mm"):
+        """`sat_text` written to `path` by the library itself."""
+        write_sat(path, [self], unit)
+
+    def svg(self, path=None, **words) -> "str | None":
+        """This solid's wireframe as SVG, from the camera the keywords describe --
+        `show`'s words, read by the library itself rather than a viewer. With
+        `path`, writes the file and returns `None`; without, returns the SVG
+        text. Raises `BuildError` on a refused option or a failed write."""
+        return svg([self], path, **words)
+
+    def brep_text(self) -> str:
+        """This solid as OCCT `.brep` text: the exact surfaces and curves,
+        with a curve in each face's own parameters for every edge, so OCCT's
+        `BRepTools::Read` gives a shape `BRepCheck_Analyzer` finds valid. No unit
+        is declared -- a `.brep` carries none -- so the numbers are the numbers."""
+        return write_brep_text([self])
+
+    def brep(self, path):
+        """`brep_text()` written to `path`, by the library itself."""
+        write_brep(path, [self])
+
     # -- selecting and edges
     def select_face(self, selector: "Selector") -> int:
         kind, v, index = selector._raw()
@@ -1676,6 +1933,38 @@ class Solid:
         if not _lib().cadaclysm_blacksmith_face_frame(self._h(), face, out):
             _fail("face_frame")
         return tuple(out)
+
+    def face_ref(self, face: int) -> "tuple[float, ...]":
+        """Face `face` by what it is, eight floats: the surface's kind (plane 0,
+        cylinder 1, cone 2, sphere 3, torus 4, NURBS 5, revolution 6, extrusion
+        7, sum 8), a point on the surface at the face's middle (x, y, z), the
+        outward normal there (x, y, z), and the face's extent. A reference a
+        feature made on the face keeps, to find the face again with `find_face`
+        when the solid has been rebuilt with its faces moved, split or
+        renumbered -- take it before any move you apply to the solid, and look
+        it up on the unmoved one. Raises `BuildError` for a face the solid does
+        not have."""
+        out = (c_double * 8)()
+        if not _lib().cadaclysm_blacksmith_face_ref(self._h(), face, out):
+            _fail("face_ref")
+        return tuple(out)
+
+    def find_face(self, face_ref, hint=None, tolerance=1e-3) -> "int | None":
+        """The face `face_ref` (from `face_ref`) refers to: among the faces of
+        that kind whose surface passes through the point, facing the same way,
+        the one the point lies in -- or, where it lies in none (the face shrank
+        away, a hole opened under it), the one whose boundary comes nearest.
+        `hint` is the index the face had, preferred among faces that fit equally
+        well; `tolerance` how far the point may sit off a surface to still be on
+        it. None where the face is gone. Raises `BuildError` for a malformed
+        reference."""
+        values = [float(v) for v in face_ref]
+        if len(values) != 8:
+            raise BuildError("find_face: a face reference is eight numbers")
+        found = _lib().cadaclysm_blacksmith_find_face(self._h(), (c_double * 8)(*values), -1 if hint is None else int(hint), tolerance)
+        if found == -2:
+            _fail("find_face")
+        return None if found < 0 else int(found)
 
     # -- colour
     def coloured(self, colour, face=None) -> "Solid":
@@ -1722,14 +2011,25 @@ class Solid:
             _fail("edge_count")
         out = []
         raw = _Edge()
+        curve = _Curve()
         for i in range(n):
             if not _lib().cadaclysm_blacksmith_edge(h, i, ctypes.byref(raw)):
                 _fail("edge")
             faces = tuple(raw.faces[j] for j in range(raw.face_count))
             flat = [raw.segments[j] for j in range(6 * raw.segment_count)]
             segments = tuple((tuple(flat[k:k + 3]), tuple(flat[k + 3:k + 6])) for k in range(0, len(flat), 6))
-            out.append(Edge(i, _text(raw.kind), faces, segments))
+            out.append(Edge(i, _text(raw.kind), faces, segments, self._edge_curve(h, i, curve)))
         return out
+
+    @staticmethod
+    def _edge_curve(h, i, raw) -> "Curve | None":
+        """Edge `i`'s exact curve copied out, or `None` for an edge with none (the
+        library's "has no exact curve"); any other refusal is raised."""
+        if _lib().cadaclysm_blacksmith_edge_curve(h, i, ctypes.byref(raw)):
+            return _curve_of(raw)
+        if "has no exact curve" in _text(_lib().cadaclysm_blacksmith_last_error()):
+            return None
+        _fail("edge_curve")
 
     def fillet(self, edges, radius, tolerance=1e-6, progress=None) -> "Solid":
         """`edges`: `Edge` objects or their indices."""
@@ -1892,14 +2192,109 @@ class Selector:
         return self._kind, v, self._index
 
 
+class Spot:
+    """Where a hit lands on one side: a profile's `loop_index` (0 the boundary or the
+    open chain, then the holes in the order they were added), `segment`, and `t` from
+    0 to 1 along it, with `face` NONE -- or a solid's `face` at (`u`, `v`), with
+    `loop_index` and `segment` NONE."""
+    __slots__ = ("loop_index", "segment", "t", "face", "u", "v")
+
+    def __init__(self, loop_index, segment, t, face, u, v):
+        self.loop_index, self.segment, self.t = loop_index, segment, t
+        self.face, self.u, self.v = face, u, v
+
+    def __repr__(self):
+        return (f"Spot(loop_index={self.loop_index}, segment={self.segment}, t={self.t}, "
+                f"face={self.face}, u={self.u}, v={self.v})")
+
+
+class Hit:
+    """One place two curves meet, copied out. A point (`run` false): `start` equals
+    `end`, and `touch` is true where the curves are tangent rather than crossing. A run
+    (`run` true): they coincide from `start` to `end`. `a_start`/`a_end` are where on
+    the first curve, `b_start`/`b_end` where on the second, as :class:`Spot` values.
+    Where a side ends at a point, `touch` is true if the two continue each other
+    smoothly and false at a corner. A point at the join of two segments is reported
+    once, on either: as segment k at `t` 1 or as segment k + 1 at `t` 0."""
+    __slots__ = ("run", "touch", "start", "end", "a_start", "a_end", "b_start", "b_end")
+
+    def __init__(self, run, touch, start, end, a_start, a_end, b_start, b_end):
+        self.run, self.touch, self.start, self.end = run, touch, start, end
+        self.a_start, self.a_end, self.b_start, self.b_end = a_start, a_end, b_start, b_end
+
+    def __repr__(self):
+        return f"Hit(run={self.run}, touch={self.touch}, start={self.start}, end={self.end})"
+
+
+def _spot_of(raw):
+    return Spot(raw.loop_index, raw.segment, raw.t, raw.face, raw.u, raw.v)
+
+
+def _hit_of(raw):
+    return Hit(bool(raw.run), bool(raw.touch), (raw.start.x, raw.start.y, raw.start.z),
+               (raw.end.x, raw.end.y, raw.end.z), _spot_of(raw.a_start), _spot_of(raw.a_end),
+               _spot_of(raw.b_start), _spot_of(raw.b_end))
+
+
+class Curve:
+    """One edge's exact curve, as plain data copied out (:attr:`Edge.curve`): `kind`
+    is `"line"`, `"circle"`, `"ellipse"` or `"nurbs"`.
+
+    `t0..t1` is the edge's parameter range on its own curve: a line's fraction (0..1
+    over `origin -> origin + x`, where `x` is the full `to - from`, NOT unit -- so
+    `point(t) = origin + x*t`); a circle's or ellipse's angle in radians about
+    `origin` in the `x, y` plane (`point(t) = origin + x*radius*cos(t) + y*radius2*sin(t)`,
+    `radius2 = radius` for a circle); a NURBS's knot parameter
+    (`knots[degree] <= t0 < t1 <= knots[n]`). Frame vectors `x, y, z` are unit for
+    conics; for a line `x` is the direction with length = the line's length and
+    `y, z` are zero. Always `t0 < t1`: an edge whose segments run against its curve's
+    own parameter reports the same range -- read the direction from :attr:`Edge.segments`,
+    not from the range.
+
+    `origin`, `x`, `y`, `z` are 3-tuples (all zero for a NURBS, whose `radius` and
+    `radius2` are 0 too). For a conic or a line `degree` is 0 and `knots`, `poles` are
+    empty tuples; for a NURBS `knots` is the knot vector, `poles` a tuple of 3-tuples
+    (`len(knots) == len(poles) + degree + 1`) and `weights` one per pole, or `None`
+    for a non-rational (plain B-spline) curve -- `None` for a conic or a line too."""
+
+    __slots__ = ("kind", "origin", "x", "y", "z", "radius", "radius2", "t0", "t1", "degree",
+                 "knots", "poles", "weights")
+
+    def __init__(self, kind, origin, x, y, z, radius, radius2, t0, t1, degree, knots, poles, weights):
+        self.kind, self.origin, self.x, self.y, self.z = kind, origin, x, y, z
+        self.radius, self.radius2, self.t0, self.t1, self.degree = radius, radius2, t0, t1, degree
+        self.knots, self.poles, self.weights = knots, poles, weights
+
+    def __repr__(self):
+        if self.kind == "nurbs":
+            return (f"Curve({self.kind!r}, degree={self.degree}, poles={len(self.poles)}, "
+                    f"rational={self.weights is not None}, t0={self.t0}, t1={self.t1})")
+        if self.kind == "line":
+            return f"Curve({self.kind!r}, origin={self.origin}, x={self.x}, t0={self.t0}, t1={self.t1})"
+        return (f"Curve({self.kind!r}, origin={self.origin}, radius={self.radius}, "
+                f"radius2={self.radius2}, t0={self.t0}, t1={self.t1})")
+
+
+def _curve_of(raw):
+    p = lambda q: (q.x, q.y, q.z)   # noqa: E731
+    knots = tuple(raw.knots[j] for j in range(raw.knot_count))
+    flat = [raw.poles[j] for j in range(3 * raw.pole_count)]
+    poles = tuple(tuple(flat[k:k + 3]) for k in range(0, len(flat), 3))
+    weights = tuple(raw.weights[j] for j in range(raw.pole_count)) if raw.weights else None
+    return Curve(_text(raw.kind), p(raw.origin), p(raw.x), p(raw.y), p(raw.z), raw.radius, raw.radius2,
+                 raw.t0, raw.t1, raw.degree, knots, poles, weights)
+
+
 class Edge:
     """One edge of a solid, as plain data: its index (what `fillet` takes), the
-    curve kind, the faces meeting on it, and its segments' ends."""
+    curve kind, the faces meeting on it, its segments' ends, and its exact
+    :class:`Curve` (`None` for an edge with no exact curve, kind `"other"`)."""
 
-    __slots__ = ("index", "kind", "faces", "segments")
+    __slots__ = ("index", "kind", "faces", "segments", "curve")
 
-    def __init__(self, index, kind, faces, segments):
+    def __init__(self, index, kind, faces, segments, curve=None):
         self.index, self.kind, self.faces, self.segments = index, kind, faces, segments
+        self.curve = curve
 
     @property
     def is_line(self) -> bool:
@@ -2218,3 +2613,102 @@ def write_step(path, solids, schema=None, unit="mm") -> None:
     """One STEP file (AP203 unless `schema` names another), each solid its own body.
     `schema` as `write_step_text`."""
     _FsPath(path).write_text(write_step_text(solids, schema, unit), encoding="utf-8")
+
+
+def write_sat_text(solids, unit="mm") -> str:
+    """Several solids as one ACIS SAT file, each its own body."""
+    if unit not in UNITS:
+        raise BuildError(f"unit must be one of {sorted(UNITS)}")
+    handles = (c_void_p * len(solids))(*[s._h() for s in solids])
+    text = _lib().cadaclysm_blacksmith_sat_text(handles, len(solids), UNITS[unit])
+    if not text:
+        _fail("sat_text")
+    if _WASM:
+        return text   # the wasm returns the text itself, nothing to free
+    try:
+        return ctypes.string_at(text).decode("utf-8")
+    finally:
+        _lib().cadaclysm_blacksmith_string_free(text)
+
+
+def write_sat(path, solids, unit="mm"):
+    """`write_sat_text` written to `path` by the library itself, which names the
+    file in its refusal when it cannot."""
+    if _WASM:
+        # The notebook has Pyodide's own filesystem and no C file writer; the
+        # refusal is worded as the C writer words its own (`sat: <path>: <why>`).
+        text = write_sat_text(solids, unit)
+        try:
+            _FsPath(path).write_text(text, encoding="utf-8")
+        except OSError as e:
+            raise BuildError(f"sat: {path}: {e.strerror or e}") from None
+        return
+    if unit not in UNITS:
+        raise BuildError(f"unit must be one of {sorted(UNITS)}")
+    handles = (c_void_p * len(solids))(*[s._h() for s in solids])
+    if not _lib().cadaclysm_blacksmith_sat(handles, len(solids), os.fsencode(str(path)), UNITS[unit]):
+        _fail("sat")
+
+
+def svg(solids, path=None, **words) -> "str | None":
+    """Several solids' wireframe as one SVG, each its own `<g>` -- `Solid.svg`'s
+    words: view= (front back left right top bottom iso), az=, el= over it, up=
+    (default z), fov= (0, the default, is orthographic), size=(width, height),
+    margin=, tolerance=, stroke=, width= (the stroke's, in page units),
+    background= (`None` for transparent), edges=, curves=, isocurves=,
+    polylines= (which line sets are drawn; edges alone by default).
+
+    With `path`, writes the file and returns `None`; without, returns the SVG
+    text -- owned by this call, decoded and released before it returns."""
+    if path is not None and _WASM:
+        # The notebook has Pyodide's own filesystem and no C file writer for SVG --
+        # there is no cadaclysm_blacksmith_svg wasm export, the same gap `sat` has
+        # (see `write_sat`) -- so the text this call already knows how to get is
+        # written through Pyodide's filesystem instead.
+        text = svg(solids, None, **words)
+        try:
+            _FsPath(path).write_text(text, encoding="utf-8")
+        except OSError as e:
+            raise BuildError(f"svg: {path}: {e.strerror or e}") from None
+        return None
+    o = _svg_options(**words)
+    handles = (c_void_p * len(solids))(*[s._h() for s in solids])
+    if path is not None:
+        if not _lib().cadaclysm_blacksmith_svg(handles, len(solids), os.fsencode(str(path)), ctypes.byref(o)):
+            _fail("svg")
+        return None
+    text = _lib().cadaclysm_blacksmith_svg_text(handles, len(solids), ctypes.byref(o))
+    if not text:
+        _fail("svg_text")
+    if _WASM:
+        return text   # the wasm returns the text itself, nothing to free
+    try:
+        return ctypes.string_at(text).decode("utf-8")
+    finally:
+        _lib().cadaclysm_blacksmith_string_free(text)
+
+
+def write_brep_text(solids) -> str:
+    """Several solids as one `.brep`, each its own solid under one compound (one
+    solid is the file's root)."""
+    handles = (c_void_p * len(solids))(*[s._h() for s in solids])
+    text = _lib().cadaclysm_blacksmith_brep_text(handles, len(solids))
+    if not text:
+        _fail("brep_text")
+    if _WASM:
+        return text   # the wasm returns the text itself, nothing to free
+    try:
+        return ctypes.string_at(text).decode("utf-8")
+    finally:
+        _lib().cadaclysm_blacksmith_string_free(text)
+
+
+def write_brep(path, solids):
+    """`write_brep_text` written to `path` -- by the library itself, or by this
+    module in the browser, where the wasm has no files of the page's to write."""
+    if _WASM:
+        _FsPath(path).write_text(write_brep_text(solids), encoding="utf-8")
+        return
+    handles = (c_void_p * len(solids))(*[s._h() for s in solids])
+    if not _lib().cadaclysm_blacksmith_brep(handles, len(solids), str(path).encode("utf-8")):
+        _fail("brep")

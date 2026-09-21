@@ -159,9 +159,51 @@ return function(t)
     f = assert(io.open(two, "rb"))
     t.ok(#f:read("*a") > 0)
     f:close()
+    -- SAT, the same two ways; the file is the library's own writing.
+    local sat = plate:sat_text("mm")
+    t.ok(sat:match("^400 0 1 0"), "SAT text")
+    t.ok(sat:find(" cone%-surface %$%-1 "), "the bore is written exactly")
+    t.raises(function() plate:sat_text("furlong") end, "unit must be one of")
+    local sat_path = t.tmp("plate.sat")
+    plate:sat(sat_path)
+    f = assert(io.open(sat_path, "rb"))
+    t.ok(f:read("*a"):match("^400 0 1 0"), "a SAT file is written")
+    f:close()
+    local two_sat = t.tmp("two.sat")
+    bs.write_sat(two_sat, { plate, upright }, "in")
+    f = assert(io.open(two_sat, "rb"))
+    t.ok(f:read("*a"):find("\n25.4 1e%-06 1e%-10", 1), "the unit line")
+    f:close()
+    t.raises(function() plate:sat(t.tmp("no/such/dir/plate.sat")) end, "sat: ")
     part:close()
     t.raises(function() return part.faces end, "solid: closed")
     part:close()   -- idempotent
+  end)
+
+  t.test("svg: solid text, a file, several solids' groups, up defaults to z, fov=200 refused", function()
+    local plate = bs.Solid.extrude(plate_outline(), XY, 6)
+    local text = plate:svg_text()
+    t.ok(text:sub(1, 4) == "<svg", text:sub(1, 40))
+    t.ok(text:find("<path", 1, true), "no <path in the solid's svg text")
+
+    local path = t.tmp("plate.svg")
+    plate:svg(path)
+    local f = assert(io.open(path, "rb"))
+    t.eq(f:read("*a"):sub(1, 4), "<svg")
+    f:close()
+
+    -- No scene over the kernel: up left out is z, not a scene's convention, so an
+    -- explicit y-up still reads differently from the default.
+    local z_up, y_up = plate:svg_text({ up = "z" }), plate:svg_text({ up = "y" })
+    t.ok(z_up ~= y_up, "z-up and y-up read the same")
+
+    -- Several solids, each its own group.
+    local both = bs.write_svg_text({ plate, bs.Solid.cuboid(1, 1, 1) })
+    local _, groups = both:gsub('<g id="', "")
+    t.eq(groups, 2)
+
+    t.raises(function() plate:svg_text({ fov = 200 }) end, "fov")
+    t.raises(function() plate:svg(t.tmp("no/such/dir/plate.svg"), { fov = 200 }) end, "fov")
   end)
 
   t.test("step_text resolves schema as none, a built-in name, a path or text", function()
@@ -394,6 +436,121 @@ return function(t)
     t.ok(sheet:unpaired_edges(0.05) > 0)
     t.raises(function() cube:leaked_edges(0) end, "^leaked_edges: tolerance must be positive and finite")
     t.raises(function() cube:unpaired_edges(-1) end, "^unpaired_edges: ")
+  end)
+
+  t.test("two circles hit twice, a tangent touches, an overlap runs", function()
+    local crossing = bs.Profile.circle(5):hits(bs.Profile.circle(5):translate(6, 0))
+    t.eq(#crossing, 2)
+    local ys = { crossing[1].start[2], crossing[2].start[2] }
+    table.sort(ys)
+    t.near(ys[1], -4, 1e-12)
+    t.near(ys[2], 4, 1e-12)
+    for _, h in ipairs(crossing) do
+      t.eq(getmetatable(h), bs.Hit)
+      t.eq(getmetatable(h.a_start), bs.Spot)
+      t.eq(h.run, false)
+      t.eq(h.touch, false)
+      t.near(h.start[1], 3, 1e-12)
+      t.eq(h.start[3], 0)
+      t.eq(h["end"][2], h.start[2])
+      t.eq(h.a_start.loop_index, 0)
+      t.eq(h.a_start.face, bs.NONE)
+      -- (3, 4) is t 0.2952 on the first circle's upper arc, 0.7048 on the moved one's
+      local ta, tb = 0.7048, 0.2952
+      if h.start[2] > 0 then ta, tb = tb, ta end
+      t.near(h.a_start.t, ta, 1e-3)
+      t.near(h.b_start.t, tb, 1e-3)
+    end
+    local touched = bs.Profile.circle(5):hits(bs.Profile.path({ -10, 5 }):line_to(10, 5):end_open())
+    t.eq(#touched, 1)
+    t.eq(touched[1].touch, true)
+    t.eq(touched[1].run, false)
+    local runs = 0
+    for _, h in ipairs(bs.Profile.rect(10, 10):hits(bs.Profile.rect(10, 10):translate(5, 0))) do
+      if h.run then runs = runs + 1 end
+    end
+    t.eq(runs, 2)
+    t.raises(function() bs.Profile.circle(1):hits(bs.Profile.circle(2), 0) end,
+      "profile_hits: tolerance must be positive and finite")
+    t.eq(#bs.Profile.circle(1):hits(bs.Profile.circle(2):translate(10, 0)), 0)
+  end)
+
+  t.test("every edge carries its exact curve", function()
+    local function norm(v) return math.sqrt(v[1] * v[1] + v[2] * v[2] + v[3] * v[3]) end
+    local function dot(a, b) return a[1] * b[1] + a[2] * b[2] + a[3] * b[3] end
+    -- A cylinder's rims are circles of its radius about a cap centre, in a unit frame, a whole turn each.
+    local cyl = bs.Solid.cylinder(5, 3)
+    local rims = {}
+    for _, e in ipairs(cyl.edges) do if e.kind == "circle" then rims[#rims + 1] = e.curve end end
+    t.ok(#rims >= 2)
+    for _, c in ipairs(rims) do
+      t.ok(getmetatable(c) == bs.Curve)
+      t.eq(c.kind, "circle")
+      t.near(c.radius, 5, 1e-9)
+      t.near(c.radius2, 5, 1e-9)
+      t.near(c.origin[1], 0, 1e-9)
+      t.near(c.origin[2], 0, 1e-9)
+      t.ok(math.min(math.abs(c.origin[3]), math.abs(c.origin[3] - 3)) < 1e-9)
+      t.near(norm(c.x), 1, 1e-9)
+      t.near(norm(c.y), 1, 1e-9)
+      t.near(dot(c.x, c.y), 0, 1e-9)
+      t.near(math.abs(c.t1 - c.t0), 2 * math.pi, 1e-9)
+      t.eq(c.degree, 0)
+      t.eq(#c.knots, 0)
+      t.eq(#c.poles, 0)
+      t.eq(c.weights, nil)
+      t.ok(tostring(c):find("^Curve%('circle', origin=%(") ~= nil)
+    end
+    -- A cuboid's edges are lines: `origin + x` is the far end, both ends its own vertices.
+    for _, e in ipairs(bs.Solid.cuboid(2, 4, 6).edges) do
+      local c = e.curve
+      t.eq(c.kind, "line")
+      t.eq(c.t0, 0)
+      t.eq(c.t1, 1)
+      local far = { c.origin[1] + c.x[1], c.origin[2] + c.x[2], c.origin[3] + c.x[3] }
+      local at_origin, at_far = false, false
+      for _, s in ipairs(e.segments) do
+        for _, p in ipairs(s) do
+          local d0 = { p[1] - c.origin[1], p[2] - c.origin[2], p[3] - c.origin[3] }
+          local d1 = { p[1] - far[1], p[2] - far[2], p[3] - far[3] }
+          if norm(d0) < 1e-9 then at_origin = true end
+          if norm(d1) < 1e-9 then at_far = true end
+        end
+      end
+      t.ok(at_origin and at_far)
+      t.eq(c.radius, 0)
+      t.ok(norm(c.y) == 0 and norm(c.z) == 0)
+    end
+    -- A closed spline extruded: its wall's seam edge is the NURBS itself.
+    local square = { { 0, 0 }, { 10, 0 }, { 10, 10 }, { 0, 10 } }
+    local loop = bs.Solid.extrude(bs.Profile.spline(square, 3, nil, true), XY, 2)
+    local splines = {}
+    for _, e in ipairs(loop.edges) do if e.kind == "nurbs" then splines[#splines + 1] = e.curve end end
+    t.ok(#splines > 0)
+    for _, c in ipairs(splines) do
+      t.eq(c.kind, "nurbs")
+      t.eq(c.degree, 3)
+      t.eq(#c.knots, #c.poles + c.degree + 1)
+      t.eq(#c.poles[1], 3)
+      t.eq(c.weights, nil)
+      t.ok(c.knots[c.degree + 1] <= c.t0 and c.t0 < c.t1 and c.t1 <= c.knots[#c.poles + 1])
+    end
+    -- A kernel shape's edges all have an exact curve.
+    for _, solid in ipairs({ cyl, loop, bs.Solid.sphere(2) }) do
+      for _, e in ipairs(solid.edges) do t.ok(e.curve ~= nil) end
+    end
+  end)
+
+  t.test("two circles share one lens of arcs", function()
+    local a = bs.Profile.circle(5)
+    local b = bs.Profile.circle(5):translate(6, 0)
+    local lenses = a:common(b)
+    t.eq(#lenses, 1)
+    t.eq(getmetatable(lenses[1]), bs.Profile)
+    -- Four arcs (each circle's own seam stays a join) between two caps.
+    t.eq(bs.Solid.extrude(lenses[1], XY, 1).faces, 6)
+    t.eq(#a:common(b:translate(100, 0)), 0)
+    t.raises(function() a:common(b, 0) end, "profile_common: tolerance must be positive and finite")
   end)
 
   t.test("manifold is read off the topology of a solid and a sheet", function()

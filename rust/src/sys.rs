@@ -37,6 +37,12 @@ pub struct CadaclysmBrep {
     _private: [u8; 0],
 }
 
+/// A mesh split into meshlets. Opaque.
+#[repr(C)]
+pub struct CadaclysmMeshlets {
+    _private: [u8; 0],
+}
+
 /// `CadaclysmOpenOptions`. `size` is the whole compatibility contract: the library
 /// reads only the fields `size` says are there, so a caller built against an older
 /// header is safe against a newer library. This crate therefore fills the struct
@@ -98,6 +104,36 @@ pub struct CadaclysmPolylines {
 }
 
 #[repr(C)]
+pub struct CadaclysmBeziers {
+    pub points: *const f32,
+    pub weights: *const f32,
+    pub count: u32,
+}
+
+#[repr(C)]
+pub struct CadaclysmCollision {
+    pub size: u32,
+    pub shape: u32,
+    pub confidence: u32,
+    pub axis: u32,
+    pub frame: [f64; 16],
+    pub half_extent: [f64; 3],
+    pub radius: f64,
+    pub height: f64,
+    pub error: f64,
+    pub hull_vertex_count: u32,
+    pub hull_index_count: u32,
+}
+
+#[repr(C)]
+pub struct CadaclysmCollisionHull {
+    pub positions: *const f32,
+    pub indices: *const u32,
+    pub vertex_count: u32,
+    pub index_count: u32,
+}
+
+#[repr(C)]
 #[derive(Clone, Copy)]
 pub struct CadaclysmFace {
     pub kind: u32,
@@ -118,6 +154,28 @@ pub struct CadaclysmFace {
     pub profile2_count: u32,
     pub nurbs_start: u32,
     pub nurbs_count: u32,
+}
+
+/// `CadaclysmSvgOptions`. `size` is the struct's growth room, as
+/// [`CadaclysmOpenOptions`] above -- unlike that one, this crate fills it by calling
+/// `cadaclysm_svg_options_init` first (its `size` write is safe here: this struct, not
+/// the caller's allocation, is what the library's own `sizeof` describes), then
+/// overrides the fields [`crate::SvgOptions`] carries.
+#[repr(C)]
+pub struct CadaclysmSvgOptions {
+    pub size: u32,
+    pub up: u32,
+    pub azimuth: f64,
+    pub elevation: f64,
+    pub fov: f64,
+    pub width: f64,
+    pub height: f64,
+    pub margin: f64,
+    pub tolerance: f64,
+    pub stroke_width: f64,
+    pub stroke: u32,
+    pub background: u32,
+    pub flags: u32,
 }
 
 #[repr(C)]
@@ -176,8 +234,13 @@ entry_points! {
     fn cadaclysm_mesh_format_count() -> u32;
     fn cadaclysm_mesh_format(index: u32) -> *const c_char;
     fn cadaclysm_mesh_format_extension(index: u32) -> *const c_char;
+    fn cadaclysm_mesh_format_label(index: u32) -> *const c_char;
+    fn cadaclysm_format_count() -> u32;
+    fn cadaclysm_format_name(index: u32) -> *const c_char;
+    fn cadaclysm_format_extensions(index: u32) -> *const c_char;
     fn cadaclysm_query(scene: *const CadaclysmScene, filter: *const c_char, out: *mut u32, capacity: u32) -> u32;
     fn cadaclysm_pick_file(parent: *const c_void) -> *const c_char;
+    fn cadaclysm_pick_save(parent: *const c_void, suggested_name: *const c_char) -> *const c_char;
     fn cadaclysm_node_id(scene: *const CadaclysmScene, node: u32) -> *const c_char;
     fn cadaclysm_node_color(scene: *const CadaclysmScene, node: u32, rgba: *mut f32) -> bool;
     fn cadaclysm_node_transform(scene: *const CadaclysmScene, node: u32, out: *mut f64);
@@ -189,6 +252,18 @@ entry_points! {
     fn cadaclysm_placement_transform(scene: *const CadaclysmScene, placement: u32, out: *mut f64);
     fn cadaclysm_node_can_mesh(scene: *const CadaclysmScene, node: u32) -> bool;
     fn cadaclysm_node_mesh(scene: *const CadaclysmScene, node: u32) -> CadaclysmMesh;
+    fn cadaclysm_lod_levels() -> u32;
+    fn cadaclysm_node_mesh_lod(scene: *const CadaclysmScene, node: u32, level: u32) -> CadaclysmMesh;
+    fn cadaclysm_node_lod_error(scene: *const CadaclysmScene, node: u32, level: u32) -> f32;
+    fn cadaclysm_node_collision(scene: *const CadaclysmScene, node: u32, hull_budget: u32, out: *mut CadaclysmCollision) -> bool;
+    fn cadaclysm_node_collision_hull(scene: *const CadaclysmScene, node: u32, hull_budget: u32) -> CadaclysmCollisionHull;
+    fn cadaclysm_node_bounds_placed(scene: *const CadaclysmScene, node: u32, placement: *const f64) -> CadaclysmBounds;
+    fn cadaclysm_node_is_meshed(scene: *const CadaclysmScene, node: u32) -> bool;
+    fn cadaclysm_node_surface_edges(scene: *const CadaclysmScene, node: u32) -> CadaclysmPolylines;
+    fn cadaclysm_node_surface_isocurves(scene: *const CadaclysmScene, node: u32) -> CadaclysmPolylines;
+    fn cadaclysm_node_surface_pick(scene: *const CadaclysmScene, node: u32, from: *const f64, to: *const f64, out_point: *mut f64) -> bool;
+    fn cadaclysm_node_surface_proxy_mesh(scene: *const CadaclysmScene, node: u32, cells: u32) -> CadaclysmMesh;
+    fn cadaclysm_node_triangle_estimate(scene: *const CadaclysmScene, node: u32) -> i64;
     fn cadaclysm_node_surfaces(scene: *const CadaclysmScene, node: u32) -> CadaclysmSurfaces;
     fn cadaclysm_node_brep(scene: *const CadaclysmScene, node: u32) -> *const CadaclysmBrep;
     fn cadaclysm_brep_release(brep: *const CadaclysmBrep);
@@ -201,13 +276,38 @@ entry_points! {
     fn cadaclysm_node_generator(scene: *const CadaclysmScene, node: u32) -> *const c_char;
     fn cadaclysm_diagnostic_count(scene: *const CadaclysmScene) -> u32;
     fn cadaclysm_diagnostic(scene: *const CadaclysmScene, index: u32) -> *const c_char;
+    fn cadaclysm_geometry_diagnostic_count(scene: *const CadaclysmScene) -> u32;
+    fn cadaclysm_geometry_diagnostic(scene: *const CadaclysmScene, index: u32) -> *const c_char;
     fn cadaclysm_node_edges(scene: *const CadaclysmScene, node: u32) -> CadaclysmPolylines;
     fn cadaclysm_node_curves(scene: *const CadaclysmScene, node: u32) -> CadaclysmPolylines;
     fn cadaclysm_node_isocurves(scene: *const CadaclysmScene, node: u32) -> CadaclysmPolylines;
+    fn cadaclysm_node_edge_beziers(scene: *const CadaclysmScene, node: u32) -> CadaclysmBeziers;
+    fn cadaclysm_node_curve_beziers(scene: *const CadaclysmScene, node: u32) -> CadaclysmBeziers;
+    fn cadaclysm_node_isocurve_beziers(scene: *const CadaclysmScene, node: u32) -> CadaclysmBeziers;
     fn cadaclysm_realize_all(scene: *const CadaclysmScene) -> u32;
+    fn cadaclysm_realize_meshes(scene: *const CadaclysmScene, skip_surfaced: u32) -> u32;
     fn cadaclysm_realized(scene: *const CadaclysmScene) -> u32;
     fn cadaclysm_realize_total(scene: *const CadaclysmScene) -> u32;
     fn cadaclysm_cancel(scene: *const CadaclysmScene);
+    fn cadaclysm_meshlets_build(positions: *const f32, normals: *const f32, vertex_count: usize, indices: *const u32, index_count: usize, max_triangles: u32, max_vertices: u32, levels: i32) -> *mut CadaclysmMeshlets;
+    fn cadaclysm_meshlets_count(handle: *const CadaclysmMeshlets) -> u32;
+    fn cadaclysm_meshlets_free(handle: *mut CadaclysmMeshlets);
+    fn cadaclysm_meshlet_triangle_count(handle: *const CadaclysmMeshlets, index: u32) -> u32;
+    fn cadaclysm_meshlet_vertex_count(handle: *const CadaclysmMeshlets, index: u32) -> u32;
+    fn cadaclysm_meshlet_level(handle: *const CadaclysmMeshlets, index: u32) -> u32;
+    fn cadaclysm_meshlet_group(handle: *const CadaclysmMeshlets, index: u32) -> u32;
+    fn cadaclysm_meshlet_error(handle: *const CadaclysmMeshlets, index: u32) -> f32;
+    fn cadaclysm_meshlet_child_count(handle: *const CadaclysmMeshlets, index: u32) -> u32;
+    fn cadaclysm_meshlet_positions(handle: *const CadaclysmMeshlets, index: u32, out: *mut f32);
+    fn cadaclysm_meshlet_normals(handle: *const CadaclysmMeshlets, index: u32, out: *mut f32);
+    fn cadaclysm_meshlet_indices(handle: *const CadaclysmMeshlets, index: u32, out: *mut u32);
+    fn cadaclysm_meshlet_children(handle: *const CadaclysmMeshlets, index: u32, out: *mut u32);
+    fn cadaclysm_forget_meshes(scene: *mut CadaclysmScene);
+    fn cadaclysm_svg_options_init(options: *mut CadaclysmSvgOptions);
+    fn cadaclysm_scene_svg_text(scene: *const CadaclysmScene, options: *const CadaclysmSvgOptions) -> *const c_char;
+    fn cadaclysm_scene_svg(scene: *const CadaclysmScene, path: *const c_char, options: *const CadaclysmSvgOptions) -> bool;
+    fn cadaclysm_node_svg_text(scene: *const CadaclysmScene, node: u32, options: *const CadaclysmSvgOptions) -> *const c_char;
+    fn cadaclysm_node_svg(scene: *const CadaclysmScene, node: u32, path: *const c_char, options: *const CadaclysmSvgOptions) -> bool;
 }
 
 // ---- loading --------------------------------------------------------------------

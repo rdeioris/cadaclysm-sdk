@@ -232,6 +232,9 @@ func Version() string { return C.GoString(C.cadaclysm_version()) }
 // every build dated on or before its expiry.
 func BuildDate() string { return C.GoString(C.cadaclysm_build_date()) }
 
+// LodLevels is how many coarser levels Node.MeshLod offers above the mesh itself (level 0).
+func LodLevels() uint32 { return uint32(C.cadaclysm_lod_levels()) }
+
 // License loads a license: the certificate text, or the path of a file holding it.
 // Without it the library looks in CADACLYSM_LICENSE, then for cadaclysm.lic beside the
 // running executable and in the working directory. Returns the library's reason when the
@@ -265,12 +268,13 @@ func LicenseInfo() string {
 // polling this instead.
 func LicenseNoticeCount() uint64 { return uint64(C.cadaclysm_license_notice_count()) }
 
-// MeshFormat is one format Node.SaveMesh writes, as a name ("stl") and the extension it
-// writes ("stl") — carried separately because the two are not always the same word:
-// "stl-ascii" writes a .stl.
+// MeshFormat is one format Node.SaveMesh writes, as a name ("stl"), the extension it
+// writes ("stl") -- carried separately because the two are not always the same word:
+// "stl-ascii" writes a .stl -- and a label for a menu ("STL (binary)").
 type MeshFormat struct {
 	Name      string
 	Extension string
+	Label     string
 }
 
 // MeshFormats is every format Node.SaveMesh writes. Ask rather than hard-code: a format
@@ -282,7 +286,32 @@ func MeshFormats() []MeshFormat {
 		out[i] = MeshFormat{
 			Name:      C.GoString(C.cadaclysm_mesh_format(C.uint32_t(i))),
 			Extension: C.GoString(C.cadaclysm_mesh_format_extension(C.uint32_t(i))),
+			Label:     C.GoString(C.cadaclysm_mesh_format_label(C.uint32_t(i))),
 		}
+	}
+	return out
+}
+
+// Format is one format this build reads: its name and the extensions its files take.
+type Format struct {
+	Name       string
+	Extensions []string
+}
+
+// Formats is every format this build reads, for an open dialog's filter. The library
+// hands the extensions over semicolon-separated; they are split here.
+func Formats() []Format {
+	n := uint32(C.cadaclysm_format_count())
+	out := make([]Format, n)
+	for i := uint32(0); i < n; i++ {
+		joined := C.GoString(C.cadaclysm_format_extensions(C.uint32_t(i)))
+		var extensions []string
+		for _, e := range strings.Split(joined, ";") {
+			if e != "" {
+				extensions = append(extensions, e)
+			}
+		}
+		out[i] = Format{Name: C.GoString(C.cadaclysm_format_name(C.uint32_t(i))), Extensions: extensions}
 	}
 	return out
 }
@@ -293,6 +322,19 @@ func MeshFormats() []MeshFormat {
 // file". Blocks until the user acts; on macOS it must be called from the main thread.
 func PickFile() (string, bool) {
 	p := C.cadaclysm_pick_file(nil)
+	if p == nil {
+		return "", false
+	}
+	return C.GoString(p), true
+}
+
+// PickSave asks the user where to save, through the library's own dialog, with
+// suggestedName prefilled. The second return is false if they cancelled or no dialog
+// was available. Blocks; on macOS it must be called from the main thread.
+func PickSave(suggestedName string) (string, bool) {
+	name := C.CString(suggestedName)
+	defer C.free(unsafe.Pointer(name))
+	p := C.cadaclysm_pick_save(nil, name)
 	if p == nil {
 		return "", false
 	}
@@ -736,6 +778,77 @@ func (p *Polylines) Segments() []float32 {
 	return out
 }
 
+// Beziers is a node's edges, curves or isocurves as cubic Bézier curves -- exact where the
+// file's curves were, where Polylines are their chords. A view over the scene's own
+// memory, valid until Scene.Close.
+//
+// Points is (count * 4 * 3) float32: four control points a curve. Weights is (count * 4):
+// a weight per control point, all ones for a polynomial curve and the weights that make
+// a circular arc exact for a rational one.
+type Beziers struct {
+	Points  []float32
+	Weights []float32
+}
+
+// Count is how many curves this holds.
+func (b *Beziers) Count() int { return len(b.Weights) / 4 }
+
+// BeziersData is a Beziers copied into memory of the caller's own.
+type BeziersData struct {
+	Points  []float32
+	Weights []float32
+}
+
+// Copy is the same curves in memory of our own, safe to outlive the scene.
+func (b *Beziers) Copy() BeziersData {
+	return BeziersData{Points: append([]float32(nil), b.Points...), Weights: append([]float32(nil), b.Weights...)}
+}
+
+func beziersFrom(raw C.CadaclysmBeziers) *Beziers {
+	if raw.count == 0 || raw.points == nil {
+		return &Beziers{}
+	}
+	return &Beziers{
+		Points:  unsafe.Slice((*float32)(unsafe.Pointer(raw.points)), int(raw.count)*12),
+		Weights: unsafe.Slice((*float32)(unsafe.Pointer(raw.weights)), int(raw.count)*4),
+	}
+}
+
+// Collision is what a node turned out to be for a physics engine: a box, sphere,
+// capsule or cylinder where one fits within Error, else a convex hull. Frame
+// (column-major) and HalfExtent are always the true oriented box. Plain data, copied
+// out of the scene.
+type Collision struct {
+	Shape, Confidence, Axis         uint32
+	Frame                           [16]float64
+	HalfExtent                      [3]float64
+	Radius, Height, Error           float64
+	HullVertexCount, HullIndexCount uint32
+}
+
+var collisionNames = [...]string{"none", "box", "sphere", "capsule", "cylinder", "hull"}
+
+// ShapeName is "none", "box", "sphere", "capsule", "cylinder" or "hull".
+func (c *Collision) ShapeName() string {
+	if int(c.Shape) < len(collisionNames) {
+		return collisionNames[c.Shape]
+	}
+	return strconv.Itoa(int(c.Shape))
+}
+
+// CollisionHull is a node's convex hull for a physics engine, as triangles -- a view
+// over the scene's own memory, valid until Scene.Close.
+type CollisionHull struct {
+	Positions []float32
+	Indices   []uint32
+}
+
+// VertexCount is len(Positions) / 3.
+func (h *CollisionHull) VertexCount() int { return len(h.Positions) / 3 }
+
+// IndexCount is len(Indices).
+func (h *CollisionHull) IndexCount() int { return len(h.Indices) }
+
 // ---- surfaces -------------------------------------------------------------------------
 
 // Face is one trimmed face: the surface itself, plus the loops that cut it.
@@ -918,6 +1031,129 @@ func (b *Brep) Close() error {
 	runtime.SetFinalizer(b, nil)
 	C.cadaclysm_brep_release(p)
 	return nil
+}
+
+// Meshlet is one meshlet, copied out: the slices are yours.
+type Meshlet struct {
+	Index, Level, Group        int
+	Error                      float32
+	VertexCount, TriangleCount int
+	Positions, Normals         []float32
+	Indices, Children          []uint32
+}
+
+// Meshlets is a mesh split into meshlets, optionally with coarser levels above them,
+// for a mesh-shader or Nanite-style renderer. Built from any mesh and owned by the
+// caller: Close it.
+type Meshlets struct {
+	handle *C.CadaclysmMeshlets
+}
+
+// BuildMeshlets splits positions (three floats a vertex), normals (the same, or nil)
+// and indices (three a triangle) into meshlets of at most maxTriangles and maxVertices
+// each -- the consumer's own limits, with no default: Nanite takes 128/256, a
+// mesh-shader pipeline 124/64. levels above 0 groups and simplifies each level into
+// the next until one meshlet is left.
+func BuildMeshlets(positions, normals []float32, indices []uint32, maxTriangles, maxVertices uint32, levels int32) (*Meshlets, error) {
+	defer pin()() // the call and the lastError read after it on one OS thread
+	if maxTriangles == 0 || maxVertices == 0 {
+		return nil, &CadaclysmError{Message: "meshlets: maxTriangles and maxVertices are required"}
+	}
+	if len(positions)%3 != 0 || len(indices)%3 != 0 {
+		return nil, &CadaclysmError{Message: "meshlets: positions must hold three floats a vertex and indices three a triangle"}
+	}
+	if normals != nil && len(normals) != len(positions) {
+		return nil, &CadaclysmError{Message: "meshlets: normals must hold one per vertex, three floats each"}
+	}
+	var normalsPtr *C.float
+	if len(normals) > 0 {
+		normalsPtr = (*C.float)(unsafe.Pointer(&normals[0]))
+	}
+	var positionsPtr *C.float
+	if len(positions) > 0 {
+		positionsPtr = (*C.float)(unsafe.Pointer(&positions[0]))
+	}
+	var indicesPtr *C.uint32_t
+	if len(indices) > 0 {
+		indicesPtr = (*C.uint32_t)(unsafe.Pointer(&indices[0]))
+	}
+	h := C.cadaclysm_meshlets_build(positionsPtr, normalsPtr, C.size_t(len(positions)/3), indicesPtr, C.size_t(len(indices)),
+		C.uint32_t(maxTriangles), C.uint32_t(maxVertices), C.int32_t(levels))
+	runtime.KeepAlive(positions)
+	runtime.KeepAlive(normals)
+	runtime.KeepAlive(indices)
+	if h == nil {
+		return nil, &CadaclysmError{Message: lastErrorOr("meshlets: build failed")}
+	}
+	m := &Meshlets{handle: h}
+	runtime.SetFinalizer(m, (*Meshlets).Close)
+	return m, nil
+}
+
+func (m *Meshlets) h() *C.CadaclysmMeshlets {
+	if m.handle == nil {
+		panic(&CadaclysmError{Message: "meshlets: freed"})
+	}
+	return m.handle
+}
+
+// Closed is whether Close has run.
+func (m *Meshlets) Closed() bool { return m.handle == nil }
+
+// Close gives the meshlets back. Idempotent; the collector does it otherwise.
+func (m *Meshlets) Close() {
+	if m.handle != nil {
+		C.cadaclysm_meshlets_free(m.handle)
+		m.handle = nil
+		runtime.SetFinalizer(m, nil)
+	}
+}
+
+// Count is how many meshlets, every level counted.
+func (m *Meshlets) Count() int { return int(C.cadaclysm_meshlets_count(m.h())) }
+
+func (m *Meshlets) TriangleCount(i int) int {
+	return int(C.cadaclysm_meshlet_triangle_count(m.h(), C.uint32_t(i)))
+}
+func (m *Meshlets) VertexCount(i int) int {
+	return int(C.cadaclysm_meshlet_vertex_count(m.h(), C.uint32_t(i)))
+}
+
+// Level is 0 for a leaf over the mesh itself, higher for a simplified level above it.
+func (m *Meshlets) Level(i int) int { return int(C.cadaclysm_meshlet_level(m.h(), C.uint32_t(i))) }
+func (m *Meshlets) Group(i int) int { return int(C.cadaclysm_meshlet_group(m.h(), C.uint32_t(i))) }
+func (m *Meshlets) Error(i int) float32 {
+	return float32(C.cadaclysm_meshlet_error(m.h(), C.uint32_t(i)))
+}
+func (m *Meshlets) ChildCount(i int) int {
+	return int(C.cadaclysm_meshlet_child_count(m.h(), C.uint32_t(i)))
+}
+
+// Meshlet is one meshlet's arrays and numbers, copied out.
+func (m *Meshlets) Meshlet(i int) Meshlet {
+	h := m.h()
+	idx := C.uint32_t(i)
+	out := Meshlet{
+		Index: i, Level: int(C.cadaclysm_meshlet_level(h, idx)), Group: int(C.cadaclysm_meshlet_group(h, idx)),
+		Error:       float32(C.cadaclysm_meshlet_error(h, idx)),
+		VertexCount: int(C.cadaclysm_meshlet_vertex_count(h, idx)), TriangleCount: int(C.cadaclysm_meshlet_triangle_count(h, idx)),
+	}
+	childCount := int(C.cadaclysm_meshlet_child_count(h, idx))
+	out.Positions = make([]float32, out.VertexCount*3)
+	out.Normals = make([]float32, out.VertexCount*3)
+	out.Indices = make([]uint32, out.TriangleCount*3)
+	out.Children = make([]uint32, childCount)
+	if out.VertexCount > 0 {
+		C.cadaclysm_meshlet_positions(h, idx, (*C.float)(unsafe.Pointer(&out.Positions[0])))
+		C.cadaclysm_meshlet_normals(h, idx, (*C.float)(unsafe.Pointer(&out.Normals[0])))
+	}
+	if out.TriangleCount > 0 {
+		C.cadaclysm_meshlet_indices(h, idx, (*C.uint32_t)(unsafe.Pointer(&out.Indices[0])))
+	}
+	if childCount > 0 {
+		C.cadaclysm_meshlet_children(h, idx, (*C.uint32_t)(unsafe.Pointer(&out.Children[0])))
+	}
+	return out
 }
 
 // ---- nodes ------------------------------------------------------------------------------
@@ -1152,18 +1388,9 @@ func (n *Node) Bounds() Bounds {
 	return out
 }
 
-// Mesh is this node's triangles, in their own frame, built now if they have not been —
-// nil where the node has no triangles (structure, or geometry drawn only as curves).
-// The error is non-nil only for a closed scene: nothing in the ABI reports this call
-// failing otherwise, but the signature matches Node.Surfaces so both read the same way
-// at the call site.
-func (n *Node) Mesh() (*Mesh, error) {
-	if err := n.scene.closedError(); err != nil {
-		return nil, err
-	}
-	raw := C.cadaclysm_node_mesh(n.scene.h(), C.uint32_t(n.index))
+func meshFrom(raw C.CadaclysmMesh) *Mesh {
 	if raw.index_count == 0 || raw.positions == nil {
-		return nil, nil
+		return nil
 	}
 	vertexFloats := int(raw.vertex_count) * 3
 	m := &Mesh{
@@ -1179,7 +1406,37 @@ func (n *Node) Mesh() (*Mesh, error) {
 	if raw.colors != nil {
 		m.Colours = unsafe.Slice((*float32)(unsafe.Pointer(raw.colors)), int(raw.vertex_count)*4)
 	}
-	return m, nil
+	return m
+}
+
+// Mesh is this node's triangles, in their own frame, built now if they have not been —
+// nil where the node has no triangles (structure, or geometry drawn only as curves).
+// The error is non-nil only for a closed scene: nothing in the ABI reports this call
+// failing otherwise, but the signature matches Node.Surfaces so both read the same way
+// at the call site.
+func (n *Node) Mesh() (*Mesh, error) {
+	if err := n.scene.closedError(); err != nil {
+		return nil, err
+	}
+	return meshFrom(C.cadaclysm_node_mesh(n.scene.h(), C.uint32_t(n.index))), nil
+}
+
+// MeshLod is this node's triangles at a coarser level of detail: 0 is Mesh itself, 1 up
+// to LodLevels each about a quarter of the triangles of the one before, and past that
+// nil. Every level shares the level-0 vertices -- the same Positions, only Indices
+// differ -- so upload the vertices once and switch level by drawing a different index
+// range.
+func (n *Node) MeshLod(level uint32) (*Mesh, error) {
+	if err := n.scene.closedError(); err != nil {
+		return nil, err
+	}
+	return meshFrom(C.cadaclysm_node_mesh_lod(n.scene.h(), C.uint32_t(n.index), C.uint32_t(level))), nil
+}
+
+// LodError is how far MeshLod at this level moved the surface, in the scene's units --
+// what to pick a level by. Zero at level 0.
+func (n *Node) LodError(level uint32) float32 {
+	return float32(C.cadaclysm_node_lod_error(n.scene.h(), C.uint32_t(n.index), C.uint32_t(level)))
 }
 
 // Brep is this node's exact B-rep, for the blacksmith package's FromNode to operate on --
@@ -1292,6 +1549,127 @@ func (n *Node) Curves() *Polylines {
 // rather than as a flat patch.
 func (n *Node) Isocurves() *Polylines {
 	return polylinesFrom(C.cadaclysm_node_isocurves(n.scene.h(), C.uint32_t(n.index)))
+}
+
+// EdgeBeziers is this node's feature edges as cubic Bézier curves -- exact where the
+// file's curves were, where Edges are their chords. Builds the geometry if needed.
+func (n *Node) EdgeBeziers() *Beziers {
+	return beziersFrom(C.cadaclysm_node_edge_beziers(n.scene.h(), C.uint32_t(n.index)))
+}
+
+// CurveBeziers is this node's free curves as cubic Béziers; see EdgeBeziers.
+func (n *Node) CurveBeziers() *Beziers {
+	return beziersFrom(C.cadaclysm_node_curve_beziers(n.scene.h(), C.uint32_t(n.index)))
+}
+
+// IsocurveBeziers is this node's isocurves as cubic Béziers; see EdgeBeziers.
+func (n *Node) IsocurveBeziers() *Beziers {
+	return beziersFrom(C.cadaclysm_node_isocurve_beziers(n.scene.h(), C.uint32_t(n.index)))
+}
+
+// Collision is the collision body for what this node draws, building its mesh if it
+// is not built. hullBudget is the most triangles a hull may have; 0 asks for the Unity
+// limit (255) and is not clamped to it. The second return is false for a node that
+// draws nothing. Cached per node and budget.
+func (n *Node) Collision(hullBudget uint32) (*Collision, bool) {
+	var raw C.CadaclysmCollision
+	raw.size = C.uint32_t(unsafe.Sizeof(raw))
+	if !bool(C.cadaclysm_node_collision(n.scene.h(), C.uint32_t(n.index), C.uint32_t(hullBudget), &raw)) {
+		return nil, false
+	}
+	out := &Collision{
+		Shape: uint32(raw.shape), Confidence: uint32(raw.confidence), Axis: uint32(raw.axis),
+		Radius: float64(raw.radius), Height: float64(raw.height), Error: float64(raw.error),
+		HullVertexCount: uint32(raw.hull_vertex_count), HullIndexCount: uint32(raw.hull_index_count),
+	}
+	for i := 0; i < 16; i++ {
+		out.Frame[i] = float64(raw.frame[i])
+	}
+	for i := 0; i < 3; i++ {
+		out.HalfExtent[i] = float64(raw.half_extent[i])
+	}
+	return out, true
+}
+
+// CollisionHull is the convex hull Collision counted, as triangles. Empty for a node
+// that draws nothing. A view into the scene, good until it closes or this node is
+// asked for a different hullBudget, which refits and frees it.
+func (n *Node) CollisionHull(hullBudget uint32) *CollisionHull {
+	raw := C.cadaclysm_node_collision_hull(n.scene.h(), C.uint32_t(n.index), C.uint32_t(hullBudget))
+	if raw.vertex_count == 0 || raw.positions == nil {
+		return &CollisionHull{}
+	}
+	return &CollisionHull{
+		Positions: unsafe.Slice((*float32)(unsafe.Pointer(raw.positions)), int(raw.vertex_count)*3),
+		Indices:   unsafe.Slice((*uint32)(unsafe.Pointer(raw.indices)), int(raw.index_count)),
+	}
+}
+
+// -- the surface path: for a renderer drawing exact surfaces, never triangles --
+
+// BoundsPlaced is the box of what this node draws under placement (16 numbers,
+// column-major, as Placement.RawTransform; nil for the identity), for a part drawn from
+// its surfaces: every sample is carried through the convention and the placement before
+// it is boxed, so it is tighter than placing the corners of Bounds. All zeros for a
+// part with no surfaces.
+func (n *Node) BoundsPlaced(placement *[16]float64) Bounds {
+	var p *C.double
+	if placement != nil {
+		p = (*C.double)(unsafe.Pointer(&placement[0]))
+	}
+	b := C.cadaclysm_node_bounds_placed(n.scene.h(), C.uint32_t(n.index), p)
+	var out Bounds
+	for i := 0; i < 3; i++ {
+		out.Min[i] = float64(b.min[i])
+		out.Max[i] = float64(b.max[i])
+	}
+	return out
+}
+
+// IsMeshed is whether its mesh has been built and is held -- by Scene.RealizeAll, by an
+// ask for it, or by anything else that needed it.
+func (n *Node) IsMeshed() bool { return bool(C.cadaclysm_node_is_meshed(n.scene.h(), C.uint32_t(n.index))) }
+
+// SurfaceEdges is its face boundaries taken from its trimmed surfaces -- the outline
+// that costs no tessellation, where Edges meshes the part. In the surfaces' own frame
+// (see Scene.SurfaceMatrix); empty without surfaces.
+func (n *Node) SurfaceEdges() *Polylines {
+	return polylinesFrom(C.cadaclysm_node_surface_edges(n.scene.h(), C.uint32_t(n.index)))
+}
+
+// SurfaceIsocurves is its isocurves taken from its trimmed surfaces and clipped to the
+// trims, without meshing; a flat face gets none. In the surfaces' frame; empty without
+// surfaces.
+func (n *Node) SurfaceIsocurves() *Polylines {
+	return polylinesFrom(C.cadaclysm_node_surface_isocurves(n.scene.h(), C.uint32_t(n.index)))
+}
+
+// SurfacePick is where the segment from..to first meets this part's surfaces; the
+// second return is false where it meets none. Exact, and in the surfaces' own frame:
+// carry a ray from the scene's space through the inverse of Scene.SurfaceMatrix first.
+func (n *Node) SurfacePick(from, to [3]float64) ([3]float64, bool) {
+	var hit [3]float64
+	ok := C.cadaclysm_node_surface_pick(n.scene.h(), C.uint32_t(n.index),
+		(*C.double)(unsafe.Pointer(&from[0])), (*C.double)(unsafe.Pointer(&to[0])), (*C.double)(unsafe.Pointer(&hit[0])))
+	return hit, bool(ok)
+}
+
+// SurfaceProxyMesh is a coarse mesh over its surfaces for what needs triangles and not
+// a picture (ray tracing, distance fields): each face gridded cells by cells, never
+// welded, built once per part at the first size asked. Nil without surfaces or for zero
+// cells.
+func (n *Node) SurfaceProxyMesh(cells uint32) (*Mesh, error) {
+	if err := n.scene.closedError(); err != nil {
+		return nil, err
+	}
+	return meshFrom(C.cadaclysm_node_surface_proxy_mesh(n.scene.h(), C.uint32_t(n.index), C.uint32_t(cells))), nil
+}
+
+// TriangleEstimate is about how many triangles Mesh would give, without building it;
+// -1 where the reader cannot say without doing the work. Treat -1 as unknown, never as
+// zero.
+func (n *Node) TriangleEstimate() int64 {
+	return int64(C.cadaclysm_node_triangle_estimate(n.scene.h(), C.uint32_t(n.index)))
 }
 
 // Walk is this node and every node under it, parents before children.
@@ -1433,6 +1811,18 @@ func (s *Scene) Diagnostics() []string {
 	return out
 }
 
+// GeometryDiagnostics is what the reader built but the geometry stage could not
+// finish: a face that would not trim, a surface that would not mesh. Diagnostics is
+// what the file held that could not be read; this is what the geometry did.
+func (s *Scene) GeometryDiagnostics() []string {
+	n := uint32(C.cadaclysm_geometry_diagnostic_count(s.h()))
+	out := make([]string, n)
+	for i := uint32(0); i < n; i++ {
+		out[i] = C.GoString(C.cadaclysm_geometry_diagnostic(s.h(), C.uint32_t(i)))
+	}
+	return out
+}
+
 // SourceName is the archive member this was read from, or "" for a plain file. Open on a
 // .zip chose one member, and this is the only way to learn which.
 func (s *Scene) SourceName() string {
@@ -1526,6 +1916,17 @@ func (s *Scene) Walk() []*Node {
 // does the same work over every core.
 func (s *Scene) RealizeAll() uint32 { return uint32(C.cadaclysm_realize_all(s.h())) }
 
+// RealizeMeshes is RealizeAll leaving alone every node that carries surfaces when
+// skipSurfaced is true: a renderer drawing those from their surfaces never pays for
+// their triangles. Returns how many were built.
+func (s *Scene) RealizeMeshes(skipSurfaced bool) uint32 {
+	skip := C.uint32_t(0)
+	if skipSurfaced {
+		skip = 1
+	}
+	return uint32(C.cadaclysm_realize_meshes(s.h(), skip))
+}
+
 // Realized is how many nodes RealizeAll has finished with. Safe to read from another
 // goroutine.
 func (s *Scene) Realized() uint32 { return uint32(C.cadaclysm_realized(s.h())) }
@@ -1536,6 +1937,10 @@ func (s *Scene) RealizeTotal() uint32 { return uint32(C.cadaclysm_realize_total(
 // Cancel asks a running RealizeAll to stop. One-way, and for the life of the scene:
 // every later RealizeAll on this scene returns 0 at once.
 func (s *Scene) Cancel() { C.cadaclysm_cancel(s.h()) }
+
+// ForgetMeshes drops every mesh the scene has built; the next ask rebuilds. Every Mesh
+// and Polylines handed out before this is over freed memory.
+func (s *Scene) ForgetMeshes() { C.cadaclysm_forget_meshes(s.h()) }
 
 // Save writes the whole scene to path: "glb" (binary glTF), "gltf" (text glTF) or "obj"
 // (Wavefront). Every placement of every shape, named and placed as the tree is, with a
@@ -1570,4 +1975,266 @@ func (s *Scene) SurfaceMatrix() [16]float64 {
 		out[i] = float64(raw[i])
 	}
 	return out
+}
+
+// ---- svg ----------------------------------------------------------------------------
+
+// SvgView is one of the seven camera angles SvgOptions.View understands — the same
+// table cadaclysm_viewer.VIEWS gives Python's show() and svg() both.
+type SvgView int
+
+// The seven named cameras SvgView holds — front, back, left, right, top, bottom and the
+// default, an isometric-style angle from above.
+const (
+	SvgFront SvgView = iota
+	SvgBack
+	SvgLeft
+	SvgRight
+	SvgTop
+	SvgBottom
+	SvgIso
+)
+
+// svgViewAngles is (azimuth, elevation) degrees for each SvgView.
+var svgViewAngles = map[SvgView][2]float64{
+	SvgFront:  {-90, 0},
+	SvgBack:   {90, 0},
+	SvgLeft:   {180, 0},
+	SvgRight:  {0, 0},
+	SvgTop:    {-90, 90},
+	SvgBottom: {-90, -90},
+	SvgIso:    {-50, 28},
+}
+
+// SvgOptions is how an SVG drawing is made — the camera in the viewer's words, the
+// page, the pen and which line sets. Mirrors CadaclysmSvgOptions, defaulted the way
+// cadaclysm_svg_options_init defaults the struct: build one with NewSvgOptions rather
+// than a bare SvgOptions{}, whose zero value turns every line-set flag off, which the
+// library refuses ("no line set in flags"). Passed to Scene.SvgText, Scene.Svg,
+// Node.SvgText and Node.Svg; a nil *SvgOptions at any of those four is NewSvgOptions()'s
+// defaults. A refused option (an out-of-range Fov, say) is a *CadaclysmError naming the
+// field, worded by the library itself.
+type SvgOptions struct {
+	// View fills Azimuth/Elevation unless they are set directly. Default SvgIso.
+	View SvgView
+	// Azimuth overrides View's, degrees about the up axis from +X: -90 looks from -Y,
+	// the front. nil keeps View's own.
+	Azimuth *float64
+	// Elevation overrides View's, degrees above the horizon. nil keeps View's own.
+	Elevation *float64
+	// Up is "y" or "z"; "" keeps the scene's own convention — Unity and YUp default to
+	// "y", every other convention to "z".
+	Up string
+	// Fov is the vertical field of view in degrees; 0 (the default) is orthographic.
+	Fov float64
+	// Width, Height are the page's viewBox, page units; 0 is 1000.
+	Width, Height float64
+	// Margin is the fraction of the content's extent left each side. Default 0.05.
+	Margin float64
+	// Tolerance is how far a written curve may stray, in page units. Default 0.1.
+	Tolerance float64
+	// Stroke is the pen colour, "#rrggbb". Default black.
+	Stroke string
+	// StrokeWidth is the pen's width, page units. Default 1.
+	StrokeWidth float64
+	// Background is "#rrggbb", or nil (the default) for no <rect> behind the drawing —
+	// the page left to whatever the viewer composites it onto.
+	Background *string
+	// Edges draws each shape's feature edges — the exact curves the flattened
+	// polylines are drawn from. Default true.
+	Edges bool
+	// Curves draws each shape's free curves — the ones that are not the edge of any
+	// face. Default false.
+	Curves bool
+	// Isocurves draws each shape's isocurves — the constant-parameter lines across a
+	// curved face. Default false.
+	Isocurves bool
+	// Polylines writes every line as straight segments within Tolerance, instead of
+	// being fitted back to cubic Béziers. Default false.
+	Polylines bool
+}
+
+// NewSvgOptions is the defaults cadaclysm_svg_options_init fills: the viewer's iso,
+// orthographic, a 1000-square page, black edges one unit wide on nothing.
+func NewSvgOptions() SvgOptions {
+	return SvgOptions{
+		View:        SvgIso,
+		Width:       1000,
+		Height:      1000,
+		Margin:      0.05,
+		Tolerance:   0.1,
+		Stroke:      "#000000",
+		StrokeWidth: 1,
+		Edges:       true,
+	}
+}
+
+// parseSvgColour is a colour as the ABI's packed 0xRRGGBB: "#rrggbb", the leading '#'
+// optional.
+func parseSvgColour(colour string) (uint32, error) {
+	hex := strings.TrimPrefix(colour, "#")
+	if len(hex) != 6 {
+		return 0, &CadaclysmError{Message: fmt.Sprintf("colour %s: expected '#rrggbb'", colour)}
+	}
+	v, err := strconv.ParseUint(hex, 16, 32)
+	if err != nil {
+		return 0, &CadaclysmError{Message: fmt.Sprintf("colour %s: expected '#rrggbb'", colour)}
+	}
+	return uint32(v), nil
+}
+
+// buildSvgOptions packs opts (nil for NewSvgOptions()'s defaults) into a
+// C.CadaclysmSvgOptions: View fills Azimuth/Elevation unless they are set directly, Up
+// defaults to defaultUp, colours are "#rrggbb". Shared by Scene.SvgText/Scene.Svg and
+// Node.SvgText/Node.Svg, as Python's _svg_options is shared by Scene.svg and Node.svg.
+func buildSvgOptions(opts *SvgOptions, defaultUp string) (C.CadaclysmSvgOptions, error) {
+	o := NewSvgOptions()
+	if opts != nil {
+		o = *opts
+	}
+	var raw C.CadaclysmSvgOptions
+	C.cadaclysm_svg_options_init(&raw)
+	angles, ok := svgViewAngles[o.View]
+	if !ok {
+		return raw, &CadaclysmError{Message: fmt.Sprintf("svg: no view numbered %d", int(o.View))}
+	}
+	up := o.Up
+	if up == "" {
+		up = defaultUp
+	}
+	if strings.EqualFold(up, "y") {
+		raw.up = 1
+	} else {
+		raw.up = 0
+	}
+	az, el := angles[0], angles[1]
+	if o.Azimuth != nil {
+		az = *o.Azimuth
+	}
+	if o.Elevation != nil {
+		el = *o.Elevation
+	}
+	raw.azimuth = C.double(az)
+	raw.elevation = C.double(el)
+	raw.fov = C.double(o.Fov)
+	raw.width = C.double(o.Width)
+	raw.height = C.double(o.Height)
+	raw.margin = C.double(o.Margin)
+	raw.tolerance = C.double(o.Tolerance)
+	raw.stroke_width = C.double(o.StrokeWidth)
+	stroke, err := parseSvgColour(o.Stroke)
+	if err != nil {
+		return raw, err
+	}
+	raw.stroke = C.uint32_t(stroke)
+	if o.Background == nil {
+		raw.background = C.uint32_t(C.CADACLYSM_SVG_TRANSPARENT)
+	} else {
+		bg, err := parseSvgColour(*o.Background)
+		if err != nil {
+			return raw, err
+		}
+		raw.background = C.uint32_t(bg)
+	}
+	var flags uint32
+	if o.Edges {
+		flags |= uint32(C.CADACLYSM_SVG_EDGES)
+	}
+	if o.Curves {
+		flags |= uint32(C.CADACLYSM_SVG_CURVES)
+	}
+	if o.Isocurves {
+		flags |= uint32(C.CADACLYSM_SVG_ISOCURVES)
+	}
+	if o.Polylines {
+		flags |= uint32(C.CADACLYSM_SVG_POLYLINES)
+	}
+	raw.flags = C.uint32_t(flags)
+	return raw, nil
+}
+
+// defaultUp is "y" or "z": which axis is up by default, from Convention — Unity and
+// YUp give "y", every other convention "z". What SvgOptions.Up defaults to when left
+// "". FileUnits and UVWorld are masked out first since they OR into the packed
+// Convention this scene carries.
+func (s *Scene) defaultUp() string {
+	base := Convention(uint32(s.convention) &^ (uint32(FileUnits) | uint32(UVWorld)))
+	if base == Unity || base == YUp {
+		return "y"
+	}
+	return "z"
+}
+
+// SvgText is every visible placement's wireframe as SVG text, from the camera opts
+// describes (nil for NewSvgOptions()'s defaults) — the library's own camera, not a
+// viewer. See SvgOptions. Borrowed: copied out before this returns, and replaced by
+// this scene's next SvgText or Svg call.
+func (s *Scene) SvgText(opts *SvgOptions) (string, error) {
+	if err := s.closedError(); err != nil {
+		return "", err
+	}
+	defer pin()()
+	raw, err := buildSvgOptions(opts, s.defaultUp())
+	if err != nil {
+		return "", err
+	}
+	p := C.cadaclysm_scene_svg_text(s.h(), &raw)
+	if p == nil {
+		return "", &CadaclysmError{Message: lastErrorOr("svg")}
+	}
+	return C.GoString(p), nil
+}
+
+// Svg is SvgText written to path by the library itself.
+func (s *Scene) Svg(path string, opts *SvgOptions) error {
+	if err := s.closedError(); err != nil {
+		return err
+	}
+	defer pin()()
+	raw, err := buildSvgOptions(opts, s.defaultUp())
+	if err != nil {
+		return err
+	}
+	cp := C.CString(path)
+	defer C.free(unsafe.Pointer(cp))
+	if !bool(C.cadaclysm_scene_svg(s.h(), cp, &raw)) {
+		return &CadaclysmError{Message: lastErrorOr(fmt.Sprintf("could not write %s", path))}
+	}
+	return nil
+}
+
+// SvgText is this node's own wireframe as SVG text, in its own frame — Scene.SvgText's
+// options, read from just this node rather than every placement.
+func (n *Node) SvgText(opts *SvgOptions) (string, error) {
+	if err := n.scene.closedError(); err != nil {
+		return "", err
+	}
+	defer pin()()
+	raw, err := buildSvgOptions(opts, n.scene.defaultUp())
+	if err != nil {
+		return "", err
+	}
+	p := C.cadaclysm_node_svg_text(n.scene.h(), C.uint32_t(n.index), &raw)
+	if p == nil {
+		return "", &CadaclysmError{Message: lastErrorOr("svg")}
+	}
+	return C.GoString(p), nil
+}
+
+// Svg is SvgText written to path by the library itself.
+func (n *Node) Svg(path string, opts *SvgOptions) error {
+	if err := n.scene.closedError(); err != nil {
+		return err
+	}
+	defer pin()()
+	raw, err := buildSvgOptions(opts, n.scene.defaultUp())
+	if err != nil {
+		return err
+	}
+	cp := C.CString(path)
+	defer C.free(unsafe.Pointer(cp))
+	if !bool(C.cadaclysm_node_svg(n.scene.h(), C.uint32_t(n.index), cp, &raw)) {
+		return &CadaclysmError{Message: lastErrorOr(fmt.Sprintf("could not write %s", path))}
+	}
+	return nil
 }

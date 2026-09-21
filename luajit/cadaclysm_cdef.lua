@@ -16,6 +16,16 @@ static const uint32_t CADACLYSM_WINDOW_WIN32 = 3;
 
 static const uint32_t CADACLYSM_WINDOW_APPKIT = 4;
 
+static const uint32_t CADACLYSM_SVG_TRANSPARENT = 0xffffffff;
+
+static const uint32_t CADACLYSM_SVG_EDGES = 1;
+
+static const uint32_t CADACLYSM_SVG_CURVES = 2;
+
+static const uint32_t CADACLYSM_SVG_ISOCURVES = 4;
+
+static const uint32_t CADACLYSM_SVG_POLYLINES = 8;
+
 typedef enum CadaclysmAxis {
   CADACLYSM_AXIS_X = 0,
   CADACLYSM_AXIS_Y = 1,
@@ -239,6 +249,33 @@ typedef struct CadaclysmWindow {
   void *display;
 } CadaclysmWindow;
 
+typedef struct CadaclysmSvgOptions {
+  uint32_t size;
+
+  uint32_t up;
+
+  double azimuth;
+
+  double elevation;
+
+  double fov;
+
+  double width;
+  double height;
+
+  double margin;
+
+  double tolerance;
+
+  double stroke_width;
+
+  uint32_t stroke;
+
+  uint32_t background;
+
+  uint32_t flags;
+} CadaclysmSvgOptions;
+
 const char *cadaclysm_last_error(void);
 
 const char *cadaclysm_version(void);
@@ -444,6 +481,24 @@ const struct CadaclysmBrep *cadaclysm_node_brep(const struct CadaclysmScene *sce
 void cadaclysm_brep_release(const struct CadaclysmBrep *brep);
 
 bool cadaclysm_brep_manifold(const struct CadaclysmBrep *brep, uint32_t *out);
+
+void cadaclysm_svg_options_init(struct CadaclysmSvgOptions *options);
+
+const char *cadaclysm_scene_svg_text(const struct CadaclysmScene *scene,
+                                     const struct CadaclysmSvgOptions *options);
+
+bool cadaclysm_scene_svg(const struct CadaclysmScene *scene,
+                         const char *path,
+                         const struct CadaclysmSvgOptions *options);
+
+const char *cadaclysm_node_svg_text(const struct CadaclysmScene *scene,
+                                    uint32_t node,
+                                    const struct CadaclysmSvgOptions *options);
+
+bool cadaclysm_node_svg(const struct CadaclysmScene *scene,
+                        uint32_t node,
+                        const char *path,
+                        const struct CadaclysmSvgOptions *options);
 
 struct CadaclysmMeshlets *cadaclysm_meshlets_build(const float *positions,
                                                    const float *normals,

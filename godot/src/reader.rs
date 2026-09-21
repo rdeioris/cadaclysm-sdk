@@ -124,12 +124,135 @@ fn open_options(options: &VarDictionary) -> Option<sdk::OpenOptions> {
         opened = opened.schema(os_path(&GString::from(&schema.to_string())));
     }
     if let Some(metres) = options.get("source_metres_per_unit") {
-        opened = opened.source_metres_per_unit(metres.to::<f64>());
+        opened = opened.source_metres_per_unit(ok(number(&metres, "source_metres_per_unit"))?);
     }
     if let Some(name) = options.get("name") {
         opened = opened.name(name.to_string());
     }
     Some(opened)
+}
+
+/// A number an option may give: gdext's `Variant::to::<f64>()` refuses an INT Variant
+/// outright (`FromGodot::from_variant() failed -- cannot convert from INT to FLOAT`), so
+/// every numeric option is read through this instead of `to::<f64>()` directly.
+fn number(v: &Variant, key: &str) -> Result<f64, String> {
+    match v.get_type() {
+        VariantType::INT => Ok(v.to::<i64>() as f64),
+        VariantType::FLOAT => Ok(v.to::<f64>()),
+        _ => Err(format!("{key}: expected a number, not {v}")),
+    }
+}
+
+/// A colour a `svg_text`/`svg` option may give: a `Color`, `"#rgb"`/`"#rrggbb"`, or an
+/// already packed `0xRRGGBB` int, as `CadaclysmSvgOptions.stroke`/`background` want it.
+fn packed_colour(v: &Variant, what: &str) -> Option<u32> {
+    match v.get_type() {
+        VariantType::COLOR => {
+            let c = v.to::<Color>();
+            let byte = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u32;
+            Some((byte(c.r) << 16) | (byte(c.g) << 8) | byte(c.b))
+        }
+        VariantType::INT => Some(v.to::<i64>() as u32),
+        VariantType::STRING | VariantType::STRING_NAME => {
+            let text = v.to_string();
+            let hex = text.strip_prefix('#').unwrap_or(&text);
+            let hex = if hex.len() == 3 { hex.chars().flat_map(|c| [c, c]).collect::<String>() } else { hex.to_string() };
+            match (hex.len(), u32::from_str_radix(&hex, 16)) {
+                (6, Ok(value)) => Some(value),
+                _ => fail(format!("{what}: colour must be '#rrggbb' or a Color, not {text:?}")),
+            }
+        }
+        _ => fail(format!("{what}: colour must be '#rrggbb' or a Color")),
+    }
+}
+
+/// `svg_text`/`svg`'s options dictionary as the SDK's `SvgOptions`: `view` through the
+/// viewer's own table, `az`/`el` over it, `up` left `None` to keep the scene's (or, for
+/// a kernel solid, always `"z"`) own default -- `Scene::svg_text`/`Node::svg_text` and
+/// `blacksmith::Solid::svg_text` apply that fallback themselves, so this never guesses
+/// it. See `CadaclysmScene.svg_text_with`'s doc for every key.
+pub(crate) fn svg_options(options: &VarDictionary) -> Option<sdk::SvgOptions> {
+    let mut known =
+        vec!["view", "az", "el", "up", "fov", "size", "margin", "tolerance", "stroke", "width", "background", "edges", "curves", "isocurves", "polylines"];
+    known.sort_unstable();
+    for key in options.keys_array().iter_shared() {
+        let key = key.to_string();
+        if known.binary_search(&key.as_str()).is_err() {
+            return fail(format!("no svg option called {key:?}: {}", known.join(", ")));
+        }
+    }
+    let mut opts = sdk::SvgOptions::default();
+    if let Some(view) = options.get("view") {
+        opts.view = match view.to_string().as_str() {
+            "front" => sdk::SvgView::Front,
+            "back" => sdk::SvgView::Back,
+            "left" => sdk::SvgView::Left,
+            "right" => sdk::SvgView::Right,
+            "top" => sdk::SvgView::Top,
+            "bottom" => sdk::SvgView::Bottom,
+            "iso" => sdk::SvgView::Iso,
+            other => return fail(format!("no view called {other:?}: front, back, left, right, top, bottom, iso")),
+        };
+    }
+    if let Some(az) = options.get("az") {
+        opts.azimuth = Some(ok(number(&az, "az"))?);
+    }
+    if let Some(el) = options.get("el") {
+        opts.elevation = Some(ok(number(&el, "el"))?);
+    }
+    if let Some(up) = options.get("up") {
+        opts.up = match up.to_string().to_lowercase().as_str() {
+            "y" => Some(sdk::Up::Y),
+            "z" => Some(sdk::Up::Z),
+            other => return fail(format!("up must be 'y' or 'z', not {other:?}")),
+        };
+    }
+    if let Some(fov) = options.get("fov") {
+        opts.fov = ok(number(&fov, "fov"))?;
+    }
+    if let Some(size) = options.get("size") {
+        let (width, height) = match size.get_type() {
+            VariantType::VECTOR2 => {
+                let v = size.to::<Vector2>();
+                (v.x as f64, v.y as f64)
+            }
+            VariantType::VECTOR2I => {
+                let v = size.to::<Vector2i>();
+                (v.x as f64, v.y as f64)
+            }
+            VariantType::ARRAY => {
+                let items: Vec<Variant> = size.try_to::<AnyArray>().ok()?.iter_shared().collect();
+                if items.len() != 2 {
+                    return fail("size: expected [width, height]");
+                }
+                (ok(number(&items[0], "size"))?, ok(number(&items[1], "size"))?)
+            }
+            _ => return fail("size: expected a Vector2 or [width, height]"),
+        };
+        opts.width = width;
+        opts.height = height;
+    }
+    if let Some(margin) = options.get("margin") {
+        opts.margin = ok(number(&margin, "margin"))?;
+    }
+    if let Some(tolerance) = options.get("tolerance") {
+        opts.tolerance = ok(number(&tolerance, "tolerance"))?;
+    }
+    if let Some(stroke) = options.get("stroke") {
+        opts.stroke = packed_colour(&stroke, "stroke")?;
+    }
+    if let Some(width) = options.get("width") {
+        opts.stroke_width = ok(number(&width, "width"))?;
+    }
+    if let Some(background) = options.get("background") {
+        opts.background = Some(packed_colour(&background, "background")?);
+    }
+    let flag = |name: &str, default: bool| options.get(name).map(|v| v.booleanize()).unwrap_or(default);
+    opts.edges = flag("edges", true);
+    opts.curves = flag("curves", false);
+    opts.isocurves = flag("isocurves", false);
+    opts.polylines = flag("polylines", false);
+    Some(opts)
 }
 
 // ---- Cadaclysm ---------------------------------------------------------------------
@@ -538,6 +661,43 @@ impl CadaclysmScene {
     fn drawing(&self, view: GString) -> VarDictionary {
         with_scene(&self.shared, |s| crate::drawing::drawing(s, &view.to_string())).flatten().unwrap_or_default()
     }
+
+    /// Every visible placement's wireframe as SVG text, from the camera the viewer's
+    /// `"iso"` angle describes -- the library's own camera, not `drawing`/`instantiate`.
+    /// `""` on a refused option; `Cadaclysm.last_error()` says why.
+    #[func]
+    fn svg_text(&self) -> GString {
+        self.svg_text_with(VarDictionary::new())
+    }
+
+    /// `svg_text`, with options: `view` (`"front"` `"back"` `"left"` `"right"` `"top"`
+    /// `"bottom"` `"iso"`, default `"iso"`), `az`, `el` (degrees, over `view`'s), `up`
+    /// (`"y"`/`"z"`, default from this scene's own convention), `fov` (degrees; `0`,
+    /// the default, is orthographic), `size` (a `Vector2` or `[width, height]`, `0` is
+    /// `1000`), `margin` (fraction of the content's extent left each side, default
+    /// `0.05`), `tolerance` (how far a written curve may stray, in page units, default
+    /// `0.1`), `stroke` (a `Color`, `"#rrggbb"` or a packed int, default black),
+    /// `width` (the stroke's, in page units, default `1`), `background` (as `stroke`,
+    /// left out for none), `edges`, `curves`, `isocurves`, `polylines` (which line
+    /// sets are drawn; edges alone by default).
+    #[func]
+    fn svg_text_with(&self, options: VarDictionary) -> GString {
+        let Some(opts) = svg_options(&options) else { return GString::new() };
+        gs(with_scene(&self.shared, |s| ok(s.svg_text(&opts))).flatten().unwrap_or_default())
+    }
+
+    /// `svg_text` written to `path` by the library itself.
+    #[func]
+    fn svg(&self, path: GString) -> bool {
+        self.svg_with(path, VarDictionary::new())
+    }
+
+    /// `svg`, with options: see `svg_text_with`.
+    #[func]
+    fn svg_with(&self, path: GString, options: VarDictionary) -> bool {
+        let Some(opts) = svg_options(&options) else { return false };
+        with_scene(&self.shared, |s| ok(s.svg(os_path(&path), &opts))).flatten().is_some()
+    }
 }
 
 // ---- CadaclysmNode -----------------------------------------------------------------------
@@ -811,6 +971,34 @@ impl CadaclysmNode {
     #[func]
     fn get_isocurves(&self) -> Option<Gd<CadaclysmPolylines>> {
         self.polylines(|n| n.isocurves())
+    }
+
+    /// This node's own wireframe as SVG text, in its own frame -- `CadaclysmScene.svg_text`'s
+    /// options, one `<g id="node-<index>">`, no placement. `""` on a refused option;
+    /// `Cadaclysm.last_error()` says why.
+    #[func]
+    fn svg_text(&self) -> GString {
+        self.svg_text_with(VarDictionary::new())
+    }
+
+    /// `svg_text`, with options: see `CadaclysmScene.svg_text_with`.
+    #[func]
+    fn svg_text_with(&self, options: VarDictionary) -> GString {
+        let Some(opts) = svg_options(&options) else { return GString::new() };
+        gs(self.with(|n| ok(n.svg_text(&opts))).flatten().unwrap_or_default())
+    }
+
+    /// `svg_text` written to `path` by the library itself.
+    #[func]
+    fn svg(&self, path: GString) -> bool {
+        self.svg_with(path, VarDictionary::new())
+    }
+
+    /// `svg`, with options: see `CadaclysmScene.svg_text_with`.
+    #[func]
+    fn svg_with(&self, path: GString, options: VarDictionary) -> bool {
+        let Some(opts) = svg_options(&options) else { return false };
+        self.with(|n| ok(n.svg(os_path(&path), &opts))).flatten().is_some()
     }
 
     /// This node and every node under it, depth first.

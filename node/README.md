@@ -117,6 +117,36 @@ schema's own EXPRESS text. `defaultSchema()` still finds `ap203.exp` as
 above the wrapper, for compatibility -- nothing here calls it to write STEP
 any more.
 
+Writing SAT -- `sat()`, `satText()`, `satAsync()`, `writeSat`,
+`writeSatText` -- needs no schema: the analytic surfaces go out as their own
+ACIS records, splines and swept surfaces as exact NURBS, in the layout Rhino's
+own exporter writes. `sat()` and `writeSat` have the library write the file,
+so a refusal names it.
+
+## Drawing SVG
+
+`Scene.svgText(options)`/`Scene.svg(path, options)` (and `Node`'s own, in its
+own frame) draw the library's own camera, not a viewer -- every field of
+`options` is optional and falls back to `svgOptionsDefaults()`'s (the
+viewer's `iso`, orthographic, a 1000-square page, a black one-unit stroke on
+nothing, edges alone):
+
+```js
+const svg = scene.svgText({ view: 'front', stroke: '#000000', background: '#ffffff' });
+scene.svg('model.svg', { view: 'iso', curves: true, isocurves: true });
+```
+
+`view` is one of `SvgView`'s names (`'front' | 'back' | 'left' | 'right' |
+'top' | 'bottom' | 'iso'`), which fills `azimuth`/`elevation` in degrees
+unless they are given directly; `up` ('y' or 'z') falls back to the scene's
+own convention (a solid -- `Solid.svgText`/`Solid.svg`/`writeSvgText`/
+`writeSvg` in `cadaclysm/blacksmith`, drawing several at once -- always 'z',
+carrying no convention of its own). `stroke` and `background` take `'#rgb'`,
+`'#rrggbb'` or an `[r, g, b]` triple (0..255); `background` left out is no
+`<rect>` at all, the page left transparent. A refused option (`fov` outside
+`0..179`, say) throws with the field named. `svgAsync()` is the worker-thread
+twin of `svgText`, on `Scene`, `Node` and the kernel's `Solid` alike.
+
 ## Off the event loop
 
 Opening a big file, `realizeAll()`, a heavy `mesh()`, and the builder's

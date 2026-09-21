@@ -1,6 +1,7 @@
 // The kernel module over the release library: Python's test_cadaclysm_blacksmith.py, the
 // parts that are not the reader's, plus the lifetimes and views only a native wrapper has.
 import Blacksmith
+import Cadaclysm
 import Foundation
 import XCTest
 
@@ -212,6 +213,100 @@ final class KernelTests: XCTestCase {
         zip(top.values, try Frame.xy([0, 0, 7]).values).forEach { XCTAssertEqual($0, $1, accuracy: 1e-9) }
         let front = try lid.faceFrame(try lid.selectFace(.min(.y)))
         zip(front, try Frame.xz([0, -2, 6]).values).forEach { XCTAssertEqual($0, $1, accuracy: 1e-9) }
+    }
+
+    func testTwoCirclesHitTwiceAndATangentTouches() throws {
+        let five: Double = 5
+        let crossing = try Profile.circle(five).hits(try Profile.circle(five).translate(6, 0))
+        XCTAssertEqual(crossing.count, 2)
+        let ys = crossing.map { $0.start.y }.sorted()
+        XCTAssertEqual(ys[0], -4, accuracy: 1e-12)
+        XCTAssertEqual(ys[1], 4, accuracy: 1e-12)
+        for h in crossing {
+            XCTAssertFalse(h.run || h.touch)
+            XCTAssertEqual(h.start, h.end)
+            XCTAssertEqual(h.start.x, 3, accuracy: 1e-12)
+            XCTAssertEqual(h.aStart.loopIndex, 0)
+            XCTAssertEqual(h.aStart.face, UInt32.max)
+            // (3, 4) is t 0.2952 on the first circle's upper arc, 0.7048 on the moved one's
+            let (ta, tb) = h.start.y > 0 ? (0.2952, 0.7048) : (0.7048, 0.2952)
+            XCTAssertEqual(h.aStart.t, ta, accuracy: 1e-3)
+            XCTAssertEqual(h.bStart.t, tb, accuracy: 1e-3)
+        }
+        let tangent = try Profile.path([-10, 5]).lineTo(10, 5).endOpen()
+        let touched = try Profile.circle(five).hits(tangent)
+        XCTAssertEqual(touched.count, 1)
+        XCTAssertTrue(touched[0].touch && !touched[0].run)
+        let runs = try Profile.rect(10, 10).hits(try Profile.rect(10, 10).translate(5, 0)).filter { $0.run }
+        XCTAssertEqual(runs.count, 2)
+        XCTAssertTrue(refusal { _ = try Profile.circle(1).hits(try Profile.circle(2), tolerance: 0) }?
+            .contains("profile_hits: tolerance must be positive and finite") ?? false)
+        XCTAssertTrue(try Profile.circle(1).hits(try Profile.circle(2).translate(10, 0)).isEmpty)
+    }
+
+    func testTwoCirclesShareOneLensOfArcs() throws {
+        let a = try Profile.circle(5)
+        let b = try Profile.circle(5).translate(6, 0)
+        let lenses = try a.common(b)
+        XCTAssertEqual(lenses.count, 1)
+        // Four arcs (each circle's own seam stays a join) between two caps.
+        XCTAssertEqual(try Solid.extrude(lenses[0], try Frame.xy(), 1).faces, 6)
+        XCTAssertTrue(try a.common(try b.translate(100, 0)).isEmpty)
+        XCTAssertTrue(refusal { _ = try a.common(b, tolerance: 0) }?
+            .contains("profile_common: tolerance must be positive and finite") ?? false)
+    }
+
+    func testEveryEdgeCarriesItsExactCurve() throws {
+        func norm(_ v: SIMD3<Double>) -> Double { (v * v).sum().squareRoot() }
+        // A cylinder's rims are circles of its radius about a cap centre, in a unit frame, a whole turn each.
+        let cyl = try Solid.cylinder(5, 3)
+        let rims = try cyl.edges.filter { $0.kind == "circle" }.map { $0.curve }
+        XCTAssertGreaterThanOrEqual(rims.count, 2)
+        for case let c? in rims {
+            XCTAssertEqual(c.kind, "circle")
+            XCTAssertEqual(c.radius, 5, accuracy: 1e-9)
+            XCTAssertEqual(c.radius2, 5, accuracy: 1e-9)
+            XCTAssertEqual(c.origin.x, 0, accuracy: 1e-9)
+            XCTAssertEqual(c.origin.y, 0, accuracy: 1e-9)
+            XCTAssertLessThan(min(abs(c.origin.z), abs(c.origin.z - 3)), 1e-9)
+            XCTAssertEqual(norm(c.x), 1, accuracy: 1e-9)
+            XCTAssertEqual(norm(c.y), 1, accuracy: 1e-9)
+            XCTAssertEqual((c.x * c.y).sum(), 0, accuracy: 1e-9)
+            XCTAssertEqual(abs(c.t1 - c.t0), 2 * Double.pi, accuracy: 1e-9, "a whole rim is one edge: a full turn")
+            XCTAssertEqual(c.degree, 0)
+            XCTAssertTrue(c.knots.isEmpty && c.poles.isEmpty && c.weights == nil)
+            XCTAssertTrue(c.description.hasPrefix("Curve('circle', origin=("))
+        }
+        XCTAssertFalse(rims.contains { $0 == nil })
+        // A cuboid's edges are lines: `origin + x` is the far end, both ends its own vertices.
+        for e in try Solid.cuboid(2, 4, 6).edges {
+            let c = try XCTUnwrap(e.curve)
+            XCTAssertEqual(c.kind, "line")
+            XCTAssertEqual([c.t0, c.t1], [0, 1])
+            let far = c.origin + c.x
+            let ends = e.segments.flatMap { [$0.start, $0.end] }
+            XCTAssertTrue(ends.contains { norm($0 - c.origin) < 1e-9 })
+            XCTAssertTrue(ends.contains { norm($0 - far) < 1e-9 })
+            XCTAssertEqual(c.y, SIMD3(0, 0, 0))
+            XCTAssertEqual(c.z, SIMD3(0, 0, 0))
+            XCTAssertEqual(c.radius, 0)
+        }
+        // A closed spline extruded: its wall's seam edge is the NURBS itself.
+        let square: [SIMD2<Double>] = [[0, 0], [10, 0], [10, 10], [0, 10]]
+        let loop = try Solid.extrude(try Profile.spline(square, degree: 3, closed: true), try Frame.xy(), 2)
+        let splines = try loop.edges.filter { $0.kind == "nurbs" }.compactMap { $0.curve }
+        XCTAssertFalse(splines.isEmpty, "the extruded spline keeps a nurbs edge")
+        for c in splines {
+            XCTAssertEqual(c.kind, "nurbs")
+            XCTAssertEqual(c.degree, 3)
+            XCTAssertEqual(c.knots.count, c.poles.count + c.degree + 1)
+            XCTAssertNil(c.weights)
+            XCTAssertTrue(c.knots[c.degree] <= c.t0 && c.t0 < c.t1 && c.t1 <= c.knots[c.poles.count])
+        }
+        // A kernel shape's edges all have an exact curve.
+        for solid in [cyl, loop, try Solid.sphere(2)] {
+            XCTAssertTrue(try solid.edges.allSatisfy { $0.curve != nil })
+        }
     }
 
     func testProfilesAndPaths() throws {
@@ -581,6 +676,31 @@ final class KernelTests: XCTestCase {
         XCTAssertEqual(written.components(separatedBy: "DATA;").last, text.components(separatedBy: "DATA;").last)
         try Blacksmith.writeStep(path, [plate])
         XCTAssertTrue(try String(contentsOfFile: path, encoding: .utf8).hasPrefix("ISO-10303-21;"))
+    }
+
+    func testSvg() throws {
+        let plate = try Solid.extrude(try plateOutline(), try Frame.xy(), 6)
+
+        let text = try plate.svgText()
+        XCTAssertTrue(text.hasPrefix("<svg"))
+        XCTAssertTrue(text.contains("<path"))
+
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent("kernel-tests-svg-\(UUID()).svg").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        try plate.svg(path)
+        XCTAssertTrue(try String(contentsOfFile: path, encoding: .utf8).hasPrefix("<svg"))
+
+        let both = try Blacksmith.writeSvgText([plate, try Solid.cuboid(1, 1, 1)])
+        XCTAssertEqual(both.components(separatedBy: "<g ").count - 1, 2)
+
+        // No convention over the kernel: `up` left nil falls back to Z, not a scene's, so a
+        // Y-up ask still reads differently from the default.
+        let zUp = try plate.svgText(SvgOptions(up: .z))
+        let yUp = try plate.svgText(SvgOptions(up: .y))
+        XCTAssertNotEqual(zUp, yUp)
+
+        XCTAssertTrue(refusal { _ = try plate.svgText(SvgOptions(fov: 200)) }?.contains("fov") ?? false)
+        XCTAssertNotNil(refusal { _ = try plate.svg(path, options: SvgOptions(margin: -1)) })
     }
 
     func testMeshViewsAndTheirCopies() throws {

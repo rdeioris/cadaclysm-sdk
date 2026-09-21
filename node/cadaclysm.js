@@ -246,6 +246,21 @@ const CadaclysmSurfaces = koffi.struct('CadaclysmSurfaces', {
   nurbs: 'const float *',
   nurbs_count: 'uint32_t',
 });
+const CadaclysmSvgOptions = koffi.struct('CadaclysmSvgOptions', {
+  size: 'uint32_t',
+  up: 'uint32_t',
+  azimuth: 'double',
+  elevation: 'double',
+  fov: 'double',
+  width: 'double',
+  height: 'double',
+  margin: 'double',
+  tolerance: 'double',
+  stroke_width: 'double',
+  stroke: 'uint32_t',
+  background: 'uint32_t',
+  flags: 'uint32_t',
+});
 
 // ---- the function table ----------------------------------------------------
 
@@ -296,6 +311,13 @@ function _lib() {
     node_bounds: f('CadaclysmBounds cadaclysm_node_bounds(const CadaclysmScene *scene, uint32_t node)'),
     node_collision: f('bool cadaclysm_node_collision(const CadaclysmScene *scene, uint32_t node, uint32_t hull_budget, _Inout_ CadaclysmCollision *out)'),
     node_collision_hull: f('CadaclysmCollisionHull cadaclysm_node_collision_hull(const CadaclysmScene *scene, uint32_t node, uint32_t hull_budget)'),
+    node_bounds_placed: f('CadaclysmBounds cadaclysm_node_bounds_placed(const CadaclysmScene *scene, uint32_t node, const double *placement)'),
+    node_is_meshed: f('bool cadaclysm_node_is_meshed(const CadaclysmScene *scene, uint32_t node)'),
+    node_surface_edges: f('CadaclysmPolylines cadaclysm_node_surface_edges(const CadaclysmScene *scene, uint32_t node)'),
+    node_surface_isocurves: f('CadaclysmPolylines cadaclysm_node_surface_isocurves(const CadaclysmScene *scene, uint32_t node)'),
+    node_surface_pick: f('bool cadaclysm_node_surface_pick(const CadaclysmScene *scene, uint32_t node, const double *from, const double *to, _Out_ double *out_point)'),
+    node_surface_proxy_mesh: f('CadaclysmMesh cadaclysm_node_surface_proxy_mesh(const CadaclysmScene *scene, uint32_t node, uint32_t cells)'),
+    node_triangle_estimate: f('int64_t cadaclysm_node_triangle_estimate(const CadaclysmScene *scene, uint32_t node)'),
     node_instance_of: f('uint32_t cadaclysm_node_instance_of(const CadaclysmScene *scene, uint32_t node)'),
     node_select_as: f('uint32_t cadaclysm_node_select_as(const CadaclysmScene *scene, uint32_t node)'),
     node_generator: f('const char *cadaclysm_node_generator(const CadaclysmScene *scene, uint32_t node)'),
@@ -316,6 +338,7 @@ function _lib() {
     node_isocurves: f('CadaclysmPolylines cadaclysm_node_isocurves(const CadaclysmScene *scene, uint32_t node)'),
     forget_meshes: f('void cadaclysm_forget_meshes(CadaclysmScene *scene)'),
     realize_all: f('uint32_t cadaclysm_realize_all(const CadaclysmScene *scene)'),
+    realize_meshes: f('uint32_t cadaclysm_realize_meshes(const CadaclysmScene *scene, uint32_t skip_surfaced)'),
     realized: f('uint32_t cadaclysm_realized(const CadaclysmScene *scene)'),
     realize_total: f('uint32_t cadaclysm_realize_total(const CadaclysmScene *scene)'),
     cancel: f('void cadaclysm_cancel(const CadaclysmScene *scene)'),
@@ -328,6 +351,11 @@ function _lib() {
     format_extensions: f('const char *cadaclysm_format_extensions(uint32_t index)'),
     node_save_mesh: f('bool cadaclysm_node_save_mesh(const CadaclysmScene *scene, uint32_t node, const char *path, const char *format)'),
     scene_save: f('bool cadaclysm_scene_save(const CadaclysmScene *scene, const char *path, const char *format)'),
+    svg_options_init: f('void cadaclysm_svg_options_init(_Out_ CadaclysmSvgOptions *options)'),
+    scene_svg_text: f('const char *cadaclysm_scene_svg_text(const CadaclysmScene *scene, const CadaclysmSvgOptions *options)'),
+    scene_svg: f('bool cadaclysm_scene_svg(const CadaclysmScene *scene, const char *path, const CadaclysmSvgOptions *options)'),
+    node_svg_text: f('const char *cadaclysm_node_svg_text(const CadaclysmScene *scene, uint32_t node, const CadaclysmSvgOptions *options)'),
+    node_svg: f('bool cadaclysm_node_svg(const CadaclysmScene *scene, uint32_t node, const char *path, const CadaclysmSvgOptions *options)'),
     source_name: f('const char *cadaclysm_source_name(const CadaclysmScene *scene)'),
     pick_file: f('const char *cadaclysm_pick_file(const CadaclysmWindow *parent)'),
     pick_save: f('const char *cadaclysm_pick_save(const CadaclysmWindow *parent, const char *suggested_name)'),
@@ -621,6 +649,79 @@ function _rows(flat) {
   return [0, 1, 2, 3].map((r) => [0, 1, 2, 3].map((c) => flat[c * 4 + r]));
 }
 
+// ---- svg ----------------------------------------------------------------------
+
+/** `CadaclysmSvgOptions.background`'s "none" value: no `<rect>` behind the drawing. */
+const SVG_TRANSPARENT = 0xFFFFFFFF;
+
+/**
+ * The seven camera angles `SvgOptions.view` understands, degrees
+ * `[azimuth, elevation]` -- the same table `cadaclysm_viewer.VIEWS` gives
+ * Python's `show()` and `svg()` both.
+ */
+const SvgView = Object.freeze({
+  front: Object.freeze([-90, 0]), back: Object.freeze([90, 0]), left: Object.freeze([180, 0]), right: Object.freeze([0, 0]),
+  top: Object.freeze([-90, 90]), bottom: Object.freeze([-90, -90]), iso: Object.freeze([-50, 28]),
+});
+
+/** A colour as the ABI's packed `0xRRGGBB`: `'#rgb'`, `'#rrggbb'` or an `[r, g, b]` triple (0..255). */
+function _packedColour(colour, what) {
+  if (typeof colour === 'string') {
+    let h = colour.trim().replace(/^#/, '');
+    if (h.length === 3) h = [...h].map((c) => c + c).join('');
+    if (/^[0-9a-f]{6}$/i.test(h)) return parseInt(h, 16);
+    throw new CadaclysmError(`${what}: '${colour}' is not '#rgb' or '#rrggbb'`);
+  }
+  if (colour != null && typeof colour[Symbol.iterator] === 'function') {
+    const [r, g, b] = Array.from(colour, Number);
+    if ([r, g, b].every(Number.isFinite)) return ((r & 0xff) << 16) | ((g & 0xff) << 8) | (b & 0xff);
+  }
+  throw new CadaclysmError(`${what}: a colour is '#rgb', '#rrggbb' or [r, g, b] in 0..255, not ${JSON.stringify(colour)}`);
+}
+
+/**
+ * `SvgOptions`'s own defaults, the same `cadaclysm_svg_options_init` fills:
+ * the viewer's `iso`, orthographic, a 1000-square page, a black one-unit
+ * stroke on nothing (transparent), edges alone. Every field is optional on
+ * `Scene.svgText`/`Scene.svg`/`Node.svgText`/`Node.svg` (and their `*Async`
+ * twins); a field left out keeps its default here, not `undefined`.
+ */
+function svgOptionsDefaults() {
+  return {
+    view: 'iso', azimuth: null, elevation: null, up: null, fov: 0, width: 1000, height: 1000,
+    margin: 0.05, tolerance: 0.1, stroke: '#000000', strokeWidth: 1, background: null,
+    edges: true, curves: false, isocurves: false, polylines: false,
+  };
+}
+
+/**
+ * `options` (over `svgOptionsDefaults()`) packed into a `CadaclysmSvgOptions`:
+ * `view` fills `azimuth`/`elevation` unless they are set directly, `up`
+ * ('y'/'z') falls back to `defaultUp`. `cadaclysm_svg_options_init` fills the
+ * struct first -- `size` included -- so a field this function never sets
+ * still carries the library's own default rather than a zeroed struct's.
+ */
+function _svgOptions(options, defaultUp) {
+  const o = { ...svgOptionsDefaults(), ...options };
+  if (!(o.view in SvgView)) throw new CadaclysmError(`svg: view must be one of ${Object.keys(SvgView).join(', ')}, not ${JSON.stringify(o.view)}`);
+  const [baseAzimuth, baseElevation] = SvgView[o.view];
+  const raw = {};
+  _lib().svg_options_init(raw);
+  raw.up = String(o.up ?? defaultUp).toLowerCase() === 'y' ? 1 : 0;
+  raw.azimuth = o.azimuth ?? baseAzimuth;
+  raw.elevation = o.elevation ?? baseElevation;
+  raw.fov = o.fov;
+  raw.width = o.width;
+  raw.height = o.height;
+  raw.margin = o.margin;
+  raw.tolerance = o.tolerance;
+  raw.stroke_width = o.strokeWidth;
+  raw.stroke = _packedColour(o.stroke, 'svg: stroke');
+  raw.background = o.background == null ? SVG_TRANSPARENT : _packedColour(o.background, 'svg: background');
+  raw.flags = (o.edges ? 1 : 0) | (o.curves ? 2 : 0) | (o.isocurves ? 4 : 0) | (o.polylines ? 8 : 0);
+  return raw;
+}
+
 // ---- breps --------------------------------------------------------------------
 
 const _brepFinalizer = typeof FinalizationRegistry === 'function'
@@ -791,6 +892,31 @@ class Node {
     const h = _lib().node_collision_hull(this.scene._handle, this.index, hullBudget);
     return new CollisionHull(_floats(h.positions, h.vertex_count * 3) ?? new Float32Array(0), _uint32s(h.indices, h.index_count) ?? new Uint32Array(0), h.vertex_count, h.index_count);
   }
+  // -- the surface path: for a renderer drawing exact surfaces, never triangles --
+  /** The box of what this node draws under `placement` (16 numbers, column-major, as `Placement.rawTransform`; null for the identity), from its surfaces; all zeros without surfaces. */
+  boundsPlaced(placement = null) {
+    const m = placement == null ? null : Float64Array.from(placement);
+    if (m !== null && m.length !== 16) throw new CadaclysmError('boundsPlaced: a placement is 16 numbers');
+    const b = _lib().node_bounds_placed(this.scene._handle, this.index, m);
+    return new Bounds(b.min, b.max);
+  }
+  /** Whether its mesh has been built and is held. */
+  get isMeshed() { return _lib().node_is_meshed(this.scene._handle, this.index); }
+  /** Its face boundaries from its trimmed surfaces: the outline that costs no tessellation, in the surfaces' frame (`Scene.surfaceMatrix`); empty without surfaces. */
+  surfaceEdges() { return _polylinesOf(_lib().node_surface_edges(this.scene._handle, this.index)); }
+  /** Its isocurves from its trimmed surfaces, clipped to the trims, without meshing; in the surfaces' frame. */
+  surfaceIsocurves() { return _polylinesOf(_lib().node_surface_isocurves(this.scene._handle, this.index)); }
+  /** Where the segment `from`..`to` (in the surfaces' frame) first meets its surfaces, `[x, y, z]`, or null. */
+  surfacePick(from, to) {
+    const a = Float64Array.from(from), b = Float64Array.from(to);
+    if (a.length !== 3 || b.length !== 3) throw new CadaclysmError('surfacePick: from and to are three numbers each');
+    const out = new Float64Array(3);
+    return _lib().node_surface_pick(this.scene._handle, this.index, a, b, out) ? Array.from(out) : null;
+  }
+  /** A coarse, unwelded mesh over its surfaces for ray tracing and distance fields, `cells` by `cells` a face; built once per part; empty without surfaces. */
+  surfaceProxyMesh(cells) { return _meshOf(_lib().node_surface_proxy_mesh(this.scene._handle, this.index, cells)); }
+  /** About how many triangles `mesh()` would give, without building it; -1 where the reader cannot say. */
+  get triangleEstimate() { return Number(_lib().node_triangle_estimate(this.scene._handle, this.index)); }
   /** Write this node's own mesh (no placement) in one of `meshFormats()`; throws if it draws nothing. */
   saveMesh(filePath, format = 'stl') {
     if (!_lib().node_save_mesh(this.scene._handle, this.index, String(filePath), format)) {
@@ -800,6 +926,32 @@ class Node {
   async meshAsync() { const m = await this.scene._async('meshAsync', { op: 'mesh', node: this.index }); return new Mesh(m.positions, m.normals, m.uvs, m.colors, m.indices, m.vertexCount, m.indexCount); }
   async meshLodAsync(level) { const m = await this.scene._async('meshLodAsync', { op: 'meshLod', node: this.index, level }); return new Mesh(m.positions, m.normals, m.uvs, m.colors, m.indices, m.vertexCount, m.indexCount); }
   async saveMeshAsync(filePath, format = 'stl') { await this.scene._async('saveMeshAsync', { op: 'saveMesh', node: this.index, path: String(filePath), format }); }
+  /**
+   * This node's own wireframe as SVG text, in its own frame -- `Scene.svgText`'s
+   * `options` (see `svgOptionsDefaults`), read from just this node rather than
+   * every placement.
+   */
+  svgText(options = {}) {
+    const raw = _svgOptions(options, this.scene._defaultUp());
+    const ptr = _lib().node_svg_text(this.scene._handle, this.index, raw);
+    if (ptr == null) throw new CadaclysmError(_lastError() || 'svg');
+    return _text(ptr);
+  }
+  /** `svgText(options)` written to `filePath` by the library itself. */
+  svg(filePath, options = {}) {
+    const raw = _svgOptions(options, this.scene._defaultUp());
+    if (!_lib().node_svg(this.scene._handle, this.index, String(filePath), raw)) {
+      throw new CadaclysmError(_lastError() || `could not write ${filePath}`);
+    }
+  }
+  /** `svgText`, on the worker thread. `options` is validated and packed here, on the
+   * caller's thread, on purpose -- unlike `openAsync`, a bad option (an unknown `view`,
+   * an out-of-range `fov` the library itself refuses) fails fast, before a message
+   * ever reaches the worker. */
+  async svgAsync(options = {}) {
+    const raw = _svgOptions(options, this.scene._defaultUp());
+    return this.scene._async('svgAsync', { op: 'svg', node: this.index, options: raw });
+  }
   /** Depth-first, this node first. */
   *walk() {
     const stack = [this];
@@ -863,6 +1015,17 @@ class Scene {
   get bounds() { const b = _lib().bounds(this._handle); return new Bounds(b.min, b.max); }
   /** The 4x4 (16 floats, column-major) that puts `Node.surfaces()` in the space everything else is in. */
   get surfaceMatrix() { const out = new Float32Array(16); _lib().surface_matrix(this._handle, out); return out; }
+  /**
+   * `'y'` or `'z'`: which axis is up by default, from `this.convention` --
+   * `Convention.UNITY` and `Convention.Y_UP` give `'y'`, every other
+   * convention `'z'`. What `SvgOptions.up` falls back to when left out.
+   * `Convention.FILE_UNITS`/`Convention.UV_WORLD` are masked out first, since
+   * they OR into the packed convention this scene carries.
+   */
+  _defaultUp() {
+    const base = this.convention & ~(Convention.FILE_UNITS | Convention.UV_WORLD);
+    return base === Convention.UNITY || base === Convention.Y_UP ? 'y' : 'z';
+  }
   diagnostics() {
     const l = _lib(); const h = this._handle; const out = [];
     for (let i = 0, n = l.diagnostic_count(h); i < n; i++) out.push(_text(l.diagnostic(h, i)));
@@ -909,6 +1072,8 @@ class Scene {
   // -- building geometry --
   /** Mesh every part over every core; returns how many were built. */
   realizeAll() { return _lib().realize_all(this._handle); }
+  /** `realizeAll` leaving alone every node that carries surfaces when `skipSurfaced` is true; returns how many were built. */
+  realizeMeshes(skipSurfaced = true) { return _lib().realize_meshes(this._handle, skipSurfaced ? 1 : 0); }
   get realized() { return _lib().realized(this._pointerOrThrow()); }
   get realizeTotal() { return _lib().realize_total(this._pointerOrThrow()); }
   /** One-way, for the life of the scene; allowed while an async realize runs. */
@@ -946,6 +1111,32 @@ class Scene {
     }
   }
   async saveAsync(filePath, format = 'glb') { await this._async('saveAsync', { op: 'save', path: String(filePath), format }); }
+  // -- svg --
+  /**
+   * Every visible placement's wireframe as SVG text, from the camera
+   * `options` describes (see `svgOptionsDefaults`) -- the library's own
+   * camera, not a viewer. Borrowed by the library: copied out before this
+   * returns, and replaced by this scene's next `svgText`/`svg` call.
+   */
+  svgText(options = {}) {
+    const raw = _svgOptions(options, this._defaultUp());
+    const ptr = _lib().scene_svg_text(this._handle, raw);
+    if (ptr == null) throw new CadaclysmError(_lastError() || 'svg');
+    return _text(ptr);
+  }
+  /** `svgText(options)` written to `filePath` by the library itself. */
+  svg(filePath, options = {}) {
+    const raw = _svgOptions(options, this._defaultUp());
+    if (!_lib().scene_svg(this._handle, String(filePath), raw)) {
+      throw new CadaclysmError(_lastError() || `could not write ${filePath}`);
+    }
+  }
+  /** `svgText`, on the worker thread. `options` is validated and packed on the caller's
+   * thread first (fail fast), unlike `openAsync`, which forwards its options unchecked. */
+  async svgAsync(options = {}) {
+    const raw = _svgOptions(options, this._defaultUp());
+    return this._async('svgAsync', { op: 'svg', options: raw });
+  }
 }
 
 // ---- meshlets ---------------------------------------------------------------
@@ -1149,10 +1340,11 @@ async function openMemoryAsync(bytes, format, options = {}) {
 }
 
 module.exports = {
-  CadaclysmError, NONE, Convention, ValueKind,
+  CadaclysmError, NONE, Convention, ValueKind, SvgView,
   libraryPath, version, buildDate, license, licenseInfo, licenseNoticeCount, meshFormats, formats, lodLevels,
+  svgOptionsDefaults,
   _lib, _text, _lastError, _floats, _uint32s, _searchedPaths, _notFoundMessage,
   Bounds, Attribute, Brep, Placement, Node, Scene, open, openMemory, _openRaw, openAsync, openMemoryAsync, declaredSchema, resolveSchema, _options, _rows, _attribute,
   Mesh, Polylines, Beziers, Face, Surfaces, Collision, CollisionHull, Meshlets, pickFile, pickSave,
-  _meshOf, _polylinesOf, _beziersOf, _surfacesOf,
+  _meshOf, _polylinesOf, _beziersOf, _surfacesOf, _svgOptions,
 };

@@ -31,6 +31,43 @@ if (path.EndsWith("cube.scad") &&
 var matched = scene.Query("class == solid");
 Console.WriteLine($"query: {matched.Count} node(s)");
 Console.WriteLine($"diagnostics: {scene.Diagnostics.Count}");
+var formats = Cadaclysm.Cadaclysm.Formats();
+if (!formats.Any(f => f.Name == "IGES" && f.Extensions.SequenceEqual(new[] { "iges", "igs" }))) return Fail("formats() lacks IGES iges;igs");
+if (Cadaclysm.Cadaclysm.MeshFormats().First(f => f.Name == "stl").Label != "STL (binary)") return Fail("mesh format label is not the library's");
+Console.WriteLine($"geometry diagnostics: {scene.GeometryDiagnostics.Count}");
+scene.ForgetMeshes();
+if (scene.Query("class == solid").Count == 0 || scene.Walk().Where(n => n.CanMesh).Sum(n => (long)(n.Mesh?.TriangleCount ?? 0)) != triangles) return Fail("forget_meshes did not rebuild");
+if (Cadaclysm.Cadaclysm.LodLevels() != 3) return Fail("lod levels is not 3");
+var first = scene.Walk().First(n => n.CanMesh);
+if (first.MeshLod(0)!.TriangleCount != first.Mesh!.TriangleCount) return Fail("LOD 0 is not the mesh");
+if (first.LodError(0) != 0 || first.MeshLod(4) is not null && first.MeshLod(4)!.TriangleCount != 0) return Fail("LOD errors or levels are off");
+if (path.EndsWith("cube.scad") && (first.MeshLod(1)!.TriangleCount != 3 || first.EdgeBeziers.Count != 12 || first.EdgeBeziers.Points.Length != 12 * 12)) return Fail("the cube's LOD 1 or Béziers are off");
+var fit = first.Collision();
+if (fit is null || fit.Error != 0 || fit.Frame.Length != 16 || fit.HullVertexCount != 8) return Fail("the collision fit is off");
+if (first.CollisionHull().VertexCount != 8 || first.CollisionHull().Indices.Length != 36) return Fail("the collision hull is off");
+var m = first.Mesh!;
+using (var meshlets = Meshlets.Build(m.Positions, m.Normals, m.Indices, 124, 64))
+{
+    if (meshlets.Count < 1) return Fail("no meshlets");
+    var one = meshlets.Meshlet(0);
+    if (one.Positions.Length != one.VertexCount * 3 || one.Indices.Length != one.TriangleCount * 3 || one.Level != 0) return Fail("meshlet 0 is off");
+    if (path.EndsWith("cube.scad") && (meshlets.Count != 1 || one.TriangleCount != 12 || one.VertexCount != 36)) return Fail("the cube's meshlets are off");
+}
+try { Meshlets.Build(m.Positions, m.Normals, m.Indices, 0, 64); return Fail("a zero budget was accepted"); }
+catch (CadaclysmException) { }
+if (first.TriangleEstimate <= 0 && first.TriangleEstimate != -1) return Fail("triangle estimate is neither a count nor -1");
+if (path.EndsWith("cube.scad"))
+{
+    if (first.TriangleEstimate != 12 || !first.SurfaceEdges.Positions.IsEmpty || first.SurfaceProxyMesh(4) is not null) return Fail("the cube has no surface products");
+    if (first.SurfacePick(new double[] { 10, 10, 100 }, new double[] { 10, 10, -100 }) is not null || !first.BoundsPlaced().IsEmpty) return Fail("the cube picks or bounds through surfaces");
+}
+using (var fresh = Cadaclysm.Cadaclysm.Open(path))
+{
+    var body = fresh.Walk().First(n => n.CanMesh);
+    if (body.IsMeshed) return Fail("a fresh scene is already meshed");
+    var built = fresh.RealizeMeshes(skipSurfaced: false);
+    if (built == 0 || !body.IsMeshed) return Fail("RealizeMeshes(false) did not build");
+}
 Mesh? borrowed;
 using (var again = Cadaclysm.Cadaclysm.OpenMemory(File.ReadAllBytes(path), System.IO.Path.GetFileName(path)))
 {
@@ -63,6 +100,75 @@ Console.WriteLine($"blacksmith license: {Blacksmith.LicenseInfo()}");
 using var rect = Profile.Rect(80, 40);
 using var hole = Profile.Circle(4);
 using var outline = rect.WithHole(hole);
+// Hits: two radius-5 circles six apart cross at two points, (3, -4) and (3, 4). At
+// (3, 4) the first circle's upper arc is at t 0.2952 and the moved one's at 0.7048; at
+// (3, -4) the other way round -- which catches the two sides read swapped.
+{
+    using var left = Profile.Circle(5);
+    using var five = Profile.Circle(5);
+    using var right = five.Translate(6, 0);
+    var crossing = left.Hits(right);
+    if (crossing.Count != 2) return Fail($"hits: two circles hit {crossing.Count} times, not 2");
+    var ys = crossing.Select(h => h.Start[1]).OrderBy(y => y).ToArray();
+    if (Math.Abs(ys[0] + 4) > 1e-9 || Math.Abs(ys[1] - 4) > 1e-9) return Fail($"hits: y {ys[0]}, {ys[1]}, not -4 and 4");
+    foreach (var h in crossing)
+    {
+        var (ta, tb) = h.Start[1] > 0 ? (0.2952, 0.7048) : (0.7048, 0.2952);
+        if (h.Run || h.Touch || h.AStart.LoopIndex != 0 || Math.Abs(h.Start[0] - 3) > 1e-9
+            || Math.Abs(h.AStart.T - ta) > 1e-3 || Math.Abs(h.BStart.T - tb) > 1e-3)
+            return Fail($"hits: {h} is not a crossing at (3, +-4) at t {ta} on a and {tb} on b");
+    }
+    Console.WriteLine($"hits: {crossing[0]}, {crossing[1]}");
+    // Common: the same two circles share one lens, four arcs (each circle's own seam
+    // stays a join) between two caps once extruded; moved apart they share nothing.
+    var lenses = left.Common(right);
+    if (lenses.Count != 1) return Fail($"common: two circles share {lenses.Count} regions, not 1");
+    using var lens = lenses[0];
+    using var lensSolid = Workplane.Xy().Extrude(lens, 1).Solid();
+    if (lensSolid.Faces != 6) return Fail($"common: the lens extrudes to {lensSolid.Faces} faces, not 6");
+    using var far = five.Translate(100, 0);
+    if (left.Common(far).Count != 0) return Fail("common: circles 100 apart share a region");
+    try { left.Common(right, 0.0); return Fail("common: a zero tolerance was accepted"); }
+    catch (BuildException e) when (e.Message.Contains("profile_common: tolerance must be positive and finite")) { }
+    Console.WriteLine($"common: one lens, {lensSolid.Faces} faces extruded");
+}
+// Edge curves: a cylinder's rims are circles of its radius about a cap centre in a unit
+// frame, a whole turn each; a cuboid's edges are lines whose origin + x is the far end;
+// an extruded closed spline keeps a nurbs edge with knots = poles + degree + 1.
+{
+    using var cyl = Solid.Cylinder(5, 3);
+    var rims = cyl.Edges.Where(e => e.Kind == "circle").Select(e => e.Curve).ToList();
+    if (rims.Count < 2 || rims.Any(c => c is null)) return Fail("edge_curve: the cylinder's rims have no curve");
+    foreach (var c in rims)
+    {
+        var unit = Math.Abs(Norm(c!.X) - 1) < 1e-9 && Math.Abs(Norm(c.Y) - 1) < 1e-9
+            && Math.Abs(c.X[0] * c.Y[0] + c.X[1] * c.Y[1] + c.X[2] * c.Y[2]) < 1e-9;
+        var centred = Math.Abs(c.Origin[0]) < 1e-9 && Math.Abs(c.Origin[1]) < 1e-9
+            && Math.Min(Math.Abs(c.Origin[2]), Math.Abs(c.Origin[2] - 3)) < 1e-9;
+        if (c.Kind != "circle" || Math.Abs(c.Radius - 5) > 1e-9 || !unit || !centred
+            || Math.Abs(Math.Abs(c.T1 - c.T0) - 2 * Math.PI) > 1e-9 || c.Degree != 0 || c.Knots.Length != 0 || c.Weights is not null)
+            return Fail($"edge_curve: a rim reads {c}");
+    }
+    using var box = Solid.Cuboid(2, 4, 6);
+    foreach (var e in box.Edges)
+    {
+        var c = e.Curve;
+        if (c is null || c.Kind != "line" || c.T0 != 0 || c.T1 != 1) return Fail($"edge_curve: a cuboid edge reads {c}");
+        var far = new[] { c.Origin[0] + c.X[0], c.Origin[1] + c.X[1], c.Origin[2] + c.X[2] };
+        var ends = e.Segments.SelectMany(s => new[] { s.A, s.B }).ToList();
+        if (!ends.Any(p => Norm(new[] { p[0] - c.Origin[0], p[1] - c.Origin[1], p[2] - c.Origin[2] }) < 1e-9)
+            || !ends.Any(p => Norm(new[] { p[0] - far[0], p[1] - far[1], p[2] - far[2] }) < 1e-9))
+            return Fail($"edge_curve: a cuboid line's ends are not its own vertices: {c}");
+    }
+    using var square = Profile.Spline(new[] { (0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0) }, 3, closed: true);
+    using var loop = Workplane.Xy().Extrude(square, 2).Solid();
+    var splines = loop.Edges.Where(e => e.Kind == "nurbs").Select(e => e.Curve!).ToList();
+    if (splines.Count == 0) return Fail("edge_curve: the extruded spline keeps no nurbs edge");
+    foreach (var c in splines)
+        if (c.Kind != "nurbs" || c.Degree != 3 || c.Knots.Length != c.Poles.Length / 3 + c.Degree + 1 || c.Weights is not null)
+            return Fail($"edge_curve: the spline edge reads {c}");
+    Console.WriteLine($"edge_curve: {rims[0]}; {box.Edges[0].Curve}; {splines[0]}");
+}
 using var plate = Workplane.Xy().Extrude(outline, 6).Solid();
 using var pin = Workplane.FromSolid(plate).Faces(Selector.Max(Axis.Z)).OnFace().Cylinder(5, 10).Solid();
 using var part = plate.Join(pin);
@@ -245,13 +351,13 @@ using (fromSolid)
 }
 // A mesh view is tied to one filling of the solid's cache: meshing at another tolerance and
 // back again replaces that memory, and the first view must refuse to read it.
-var first = rounded.Mesh(0.05);
-var triangles0 = first.TriangleCount;
+var firstMesh = rounded.Mesh(0.05);
+var triangles0 = firstMesh.TriangleCount;
 rounded.Mesh(0.5);
 rounded.Mesh(0.05);
 try
 {
-    _ = first.Positions;
+    _ = firstMesh.Positions;
     return Fail("a stale mesh view read freed memory after meshing at 0.05, 0.5, 0.05");
 }
 catch (InvalidOperationException)
@@ -290,6 +396,49 @@ using (var opened = Solid.Open(step))
     if (opened.Faces != rounded.Faces) return Fail($"Solid.Open gave {opened.Faces} faces, not {rounded.Faces}");
     Console.WriteLine($"Solid.Open: {opened.Faces} faces");
 }
+// The same solid as SAT, written by the library itself, read back the same way.
+var sat = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cadaclysm-smoke.sat");
+rounded.Sat(sat);
+if (!rounded.SatText().StartsWith("400 0 1 0")) return Fail("the SAT text does not open with the record version");
+using (var back = Cadaclysm.Cadaclysm.Open(sat))
+{
+    var b = back.Bounds;
+    Console.WriteLine($"sat read back: bounds max=({b.Max[0]},{b.Max[1]},{b.Max[2]})");
+    if (Math.Abs(b.Max[2] - 16) > 0.01 || Math.Abs(b.Max[0] - 40) > 0.01) return Fail("the SAT did not read back as the plate with its pin");
+}
+// The OCCT .brep writer, and its reader.
+var brepPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cadaclysm-smoke.brep");
+rounded.Brep(brepPath);
+if (!rounded.BrepText().StartsWith("DBRep_DrawableShape")) return Fail("the .brep text does not begin as one");
+using (var back = Cadaclysm.Cadaclysm.Open(brepPath))
+{
+    var b = back.Bounds;
+    Console.WriteLine($"brep read back: bounds max=({b.Max[0]},{b.Max[1]},{b.Max[2]})");
+    if (Math.Abs(b.Max[2] - 16) > 0.01 || Math.Abs(b.Max[0] - 40) > 0.01) return Fail("the .brep did not read back as the plate with its pin");
+}
+
+// SVG: the library's own camera, no viewer -- the reader (a scene, a node) and the kernel
+// (a solid) each write a wireframe. `fov = 200` is a refusal both ABIs word the same way.
+var svgText = scene.SvgText();
+if (!svgText.StartsWith("<svg") || !svgText.Contains("<path")) return Fail("scene SVG text did not look like an SVG wireframe");
+var svgPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cadaclysm-smoke.svg");
+scene.Svg(svgPath);
+if (new FileInfo(svgPath).Length == 0) return Fail("Scene.Svg wrote an empty file");
+var nodeSvgText = first.SvgText();
+if (!nodeSvgText.StartsWith("<svg") || !nodeSvgText.Contains("<path")) return Fail("node SVG text did not look like an SVG wireframe");
+try { scene.SvgText(new Cadaclysm.SvgOptions { Fov = 200 }); return Fail("scene svg: fov=200 was accepted"); }
+catch (CadaclysmException) { }
+Console.WriteLine("svg: scene and node text, file written, fov=200 refused");
+
+var solidSvgText = rounded.SvgText();
+if (!solidSvgText.StartsWith("<svg") || !solidSvgText.Contains("<path")) return Fail("solid SVG text did not look like an SVG wireframe");
+var solidSvgPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cadaclysm-smoke-solid.svg");
+rounded.Svg(solidSvgPath);
+if (new FileInfo(solidSvgPath).Length == 0) return Fail("Solid.Svg wrote an empty file");
+try { rounded.SvgText(new Cadaclysm.Blacksmith.SvgOptions { Fov = 200 }); return Fail("blacksmith svg: fov=200 was accepted"); }
+catch (BuildException) { }
+Console.WriteLine("blacksmith svg: solid text, file written, fov=200 refused");
 return 0;
 
 static int Fail(string why) { Console.Error.WriteLine(why); return 1; }
+static double Norm(double[] v) => Math.Sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);

@@ -58,13 +58,18 @@ from pathlib import Path
 
 __all__ = [
     "Attribute",
+    "Beziers",
     "Bounds",
     "Brep",
     "CadaclysmError",
+    "Collision",
+    "CollisionHull",
     "Convention",
     "FILE_UNITS",
     "Manifold",
     "Mesh",
+    "Meshlet",
+    "Meshlets",
     "NONE",
     "Node",
     "Placement",
@@ -74,14 +79,17 @@ __all__ = [
     "ValueKind",
     "build_date",
     "declared_schema",
+    "formats",
     "library_path",
     "license",
     "license_info",
     "license_notice_count",
+    "lod_levels",
     "mesh_formats",
     "open",
     "open_memory",
     "pick_file",
+    "pick_save",
     "resolve_schema",
     "version",
 ]
@@ -283,6 +291,28 @@ class _OpenOptions(ctypes.Structure):
     ]
 
 
+class _SvgOptions(ctypes.Structure):
+    #: `CadaclysmSvgOptions`. Field order and `size` are the whole contract, as
+    #: `_OpenOptions` above: `cadaclysm_svg_options_init` fills the library's
+    #: whole struct, so this list must match the header field for field --
+    #: `tests/bindings.rs` pins it -- and it may never reorder.
+    _fields_ = [
+        ("size", c_uint32),
+        ("up", c_uint32),
+        ("azimuth", c_double),
+        ("elevation", c_double),
+        ("fov", c_double),
+        ("width", c_double),
+        ("height", c_double),
+        ("margin", c_double),
+        ("tolerance", c_double),
+        ("stroke_width", c_double),
+        ("stroke", c_uint32),
+        ("background", c_uint32),
+        ("flags", c_uint32),
+    ]
+
+
 class _Polylines(ctypes.Structure):
     _fields_ = [
         ("positions", POINTER(c_float)),
@@ -292,6 +322,40 @@ class _Polylines(ctypes.Structure):
     ]
 
 
+class _Beziers(ctypes.Structure):
+    #: `CadaclysmBeziers`: four control points a curve (`count * 12` floats) and four
+    #: weights a curve (`count * 4`). Pinned against the header by `tests/bindings.rs`.
+    _fields_ = [
+        ("points", POINTER(c_float)),
+        ("weights", POINTER(c_float)),
+        ("count", c_uint32),
+    ]
+
+
+class _Collision(ctypes.Structure):
+    #: `CadaclysmCollision`; `size` first, which the caller fills. Pinned by `tests/bindings.rs`.
+    _fields_ = [
+        ("size", c_uint32),
+        ("shape", c_uint32),
+        ("confidence", c_uint32),
+        ("axis", c_uint32),
+        ("frame", c_double * 16),
+        ("half_extent", c_double * 3),
+        ("radius", c_double),
+        ("height", c_double),
+        ("error", c_double),
+        ("hull_vertex_count", c_uint32),
+        ("hull_index_count", c_uint32),
+    ]
+
+
+class _CollisionHull(ctypes.Structure):
+    _fields_ = [
+        ("positions", POINTER(c_float)),
+        ("indices", POINTER(c_uint32)),
+        ("vertex_count", c_uint32),
+        ("index_count", c_uint32),
+    ]
 
 
 
@@ -376,9 +440,18 @@ _ENTRY_POINTS = [
     ("cadaclysm_node_visible", c_bool, [c_void_p, c_uint32]),
     ("cadaclysm_node_save_mesh", c_bool, [c_void_p, c_uint32, c_char_p, c_char_p]),
     ("cadaclysm_scene_save", c_bool, [c_void_p, c_char_p, c_char_p]),
+    ("cadaclysm_svg_options_init", None, [POINTER(_SvgOptions)]),
+    ("cadaclysm_scene_svg_text", c_char_p, [c_void_p, POINTER(_SvgOptions)]),
+    ("cadaclysm_scene_svg", c_bool, [c_void_p, c_char_p, POINTER(_SvgOptions)]),
+    ("cadaclysm_node_svg_text", c_char_p, [c_void_p, c_uint32, POINTER(_SvgOptions)]),
+    ("cadaclysm_node_svg", c_bool, [c_void_p, c_uint32, c_char_p, POINTER(_SvgOptions)]),
     ("cadaclysm_mesh_format_count", c_uint32, []),
     ("cadaclysm_mesh_format", c_char_p, [c_uint32]),
     ("cadaclysm_mesh_format_extension", c_char_p, [c_uint32]),
+    ("cadaclysm_mesh_format_label", c_char_p, [c_uint32]),
+    ("cadaclysm_format_count", c_uint32, []),
+    ("cadaclysm_format_name", c_char_p, [c_uint32]),
+    ("cadaclysm_format_extensions", c_char_p, [c_uint32]),
     ("cadaclysm_query", c_uint32,
      [c_void_p, c_char_p, POINTER(c_uint32), c_uint32]),
     # `NULL` for the parent, which is a `const CadaclysmWindow *`. A viewer with
@@ -386,6 +459,7 @@ _ENTRY_POINTS = [
     # hands out a window handle only through platform-specific attributes and a
     # wrong pointer here reaches a platform API.
     ("cadaclysm_pick_file", c_char_p, [c_void_p]),
+    ("cadaclysm_pick_save", c_char_p, [c_void_p, c_char_p]),
     ("cadaclysm_node_id", c_char_p, [c_void_p, c_uint32]),
     ("cadaclysm_node_color", c_bool, [c_void_p, c_uint32, POINTER(c_float)]),
     ("cadaclysm_node_transform", None, [c_void_p, c_uint32, POINTER(c_double)]),
@@ -397,6 +471,19 @@ _ENTRY_POINTS = [
     ("cadaclysm_placement_transform", None, [c_void_p, c_uint32, POINTER(c_double)]),
     ("cadaclysm_node_can_mesh", c_bool, [c_void_p, c_uint32]),
     ("cadaclysm_node_mesh", _Mesh, [c_void_p, c_uint32]),
+    ("cadaclysm_lod_levels", c_uint32, []),
+    ("cadaclysm_node_mesh_lod", _Mesh, [c_void_p, c_uint32, c_uint32]),
+    ("cadaclysm_node_lod_error", c_float, [c_void_p, c_uint32, c_uint32]),
+    ("cadaclysm_node_collision", c_bool, [c_void_p, c_uint32, c_uint32, POINTER(_Collision)]),
+    ("cadaclysm_node_collision_hull", _CollisionHull, [c_void_p, c_uint32, c_uint32]),
+    ("cadaclysm_node_bounds_placed", _Bounds, [c_void_p, c_uint32, POINTER(c_double)]),
+    ("cadaclysm_node_is_meshed", c_bool, [c_void_p, c_uint32]),
+    ("cadaclysm_node_surface_edges", _Polylines, [c_void_p, c_uint32]),
+    ("cadaclysm_node_surface_isocurves", _Polylines, [c_void_p, c_uint32]),
+    ("cadaclysm_node_surface_pick", c_bool,
+     [c_void_p, c_uint32, POINTER(c_double), POINTER(c_double), POINTER(c_double)]),
+    ("cadaclysm_node_surface_proxy_mesh", _Mesh, [c_void_p, c_uint32, c_uint32]),
+    ("cadaclysm_node_triangle_estimate", ctypes.c_int64, [c_void_p, c_uint32]),
     ("cadaclysm_node_surfaces", _Surfaces, [c_void_p, c_uint32]),
     ("cadaclysm_node_brep", c_void_p, [c_void_p, c_uint32]),
     ("cadaclysm_brep_release", None, [c_void_p]),
@@ -409,13 +496,34 @@ _ENTRY_POINTS = [
     ("cadaclysm_node_generator", c_char_p, [c_void_p, c_uint32]),
     ("cadaclysm_diagnostic_count", c_uint32, [c_void_p]),
     ("cadaclysm_diagnostic", c_char_p, [c_void_p, c_uint32]),
+    ("cadaclysm_geometry_diagnostic_count", c_uint32, [c_void_p]),
+    ("cadaclysm_geometry_diagnostic", c_char_p, [c_void_p, c_uint32]),
     ("cadaclysm_node_edges", _Polylines, [c_void_p, c_uint32]),
     ("cadaclysm_node_curves", _Polylines, [c_void_p, c_uint32]),
     ("cadaclysm_node_isocurves", _Polylines, [c_void_p, c_uint32]),
+    ("cadaclysm_node_edge_beziers", _Beziers, [c_void_p, c_uint32]),
+    ("cadaclysm_node_curve_beziers", _Beziers, [c_void_p, c_uint32]),
+    ("cadaclysm_node_isocurve_beziers", _Beziers, [c_void_p, c_uint32]),
     ("cadaclysm_realize_all", c_uint32, [c_void_p]),
+    ("cadaclysm_realize_meshes", c_uint32, [c_void_p, c_uint32]),
     ("cadaclysm_realized", c_uint32, [c_void_p]),
     ("cadaclysm_realize_total", c_uint32, [c_void_p]),
     ("cadaclysm_cancel", None, [c_void_p]),
+    ("cadaclysm_forget_meshes", None, [c_void_p]),
+    ("cadaclysm_meshlets_build", c_void_p,
+     [POINTER(c_float), POINTER(c_float), c_size_t, POINTER(c_uint32), c_size_t, c_uint32, c_uint32, ctypes.c_int32]),
+    ("cadaclysm_meshlets_count", c_uint32, [c_void_p]),
+    ("cadaclysm_meshlets_free", None, [c_void_p]),
+    ("cadaclysm_meshlet_triangle_count", c_uint32, [c_void_p, c_uint32]),
+    ("cadaclysm_meshlet_vertex_count", c_uint32, [c_void_p, c_uint32]),
+    ("cadaclysm_meshlet_level", c_uint32, [c_void_p, c_uint32]),
+    ("cadaclysm_meshlet_group", c_uint32, [c_void_p, c_uint32]),
+    ("cadaclysm_meshlet_error", c_float, [c_void_p, c_uint32]),
+    ("cadaclysm_meshlet_child_count", c_uint32, [c_void_p, c_uint32]),
+    ("cadaclysm_meshlet_positions", None, [c_void_p, c_uint32, POINTER(c_float)]),
+    ("cadaclysm_meshlet_normals", None, [c_void_p, c_uint32, POINTER(c_float)]),
+    ("cadaclysm_meshlet_indices", None, [c_void_p, c_uint32, POINTER(c_uint32)]),
+    ("cadaclysm_meshlet_children", None, [c_void_p, c_uint32, POINTER(c_uint32)]),
 ]
 
 
@@ -523,6 +631,43 @@ def _last_error() -> str:
     return _text(_lib().cadaclysm_last_error())
 
 
+def _packed(colour) -> int:
+    """A colour as the ABI's packed `0xRRGGBB`: `'#rrggbb'` or an `(r, g, b)` triple."""
+    if isinstance(colour, str):
+        h = colour.lstrip("#")
+        if len(h) != 6:
+            raise ValueError(f"colour {colour!r}: '#rrggbb' or (r, g, b)")
+        return int(h, 16)
+    r, g, b = colour
+    return (int(r) << 16) | (int(g) << 8) | int(b)
+
+
+def _svg_options(default_up, *, view="iso", az=None, el=None, up=None, fov=0.0, size=(1000, 1000), margin=0.05,
+                 tolerance=0.1, stroke="#000000", width=1.0, background=None, edges=True, curves=False,
+                 isocurves=False, polylines=False) -> _SvgOptions:
+    """`Scene.svg`/`Node.svg`'s keywords, packed into `CadaclysmSvgOptions`: `view`
+    through the viewer's own table (`cadaclysm_viewer.VIEWS`, the one `show` reads
+    too), `az`/`el` over it, `up` from the scene's convention unless given, colours
+    as `'#rrggbb'` or an `(r, g, b)` triple."""
+    VIEWS = _viewer().VIEWS   # the one table both show() and svg() read, found the way show() finds it
+
+    if view not in VIEWS:
+        raise ValueError(f"view {view!r}: one of {', '.join(VIEWS)}")
+    base_az, base_el = VIEWS[view]
+    o = _SvgOptions()
+    _lib().cadaclysm_svg_options_init(ctypes.byref(o))
+    o.up = 1 if (up or default_up).lower() == "y" else 0
+    o.azimuth = float(base_az if az is None else az)
+    o.elevation = float(base_el if el is None else el)
+    o.fov = float(fov)
+    o.width, o.height = float(size[0]), float(size[1])
+    o.margin, o.tolerance, o.stroke_width = float(margin), float(tolerance), float(width)
+    o.stroke = _packed(stroke)
+    o.background = NONE if background is None else _packed(background)
+    o.flags = (1 if edges else 0) | (2 if curves else 0) | (4 if isocurves else 0) | (8 if polylines else 0)
+    return o
+
+
 def version() -> str:
     """The version of the library actually loaded, which is the one worth reporting."""
     return _text(_lib().cadaclysm_version())
@@ -564,19 +709,41 @@ def build_date() -> str:
     return _text(_lib().cadaclysm_build_date())
 
 
-def mesh_formats() -> "list[tuple[str, str]]":
-    """Every format `Node.save_mesh` writes, as `(name, extension)`.
+def mesh_formats() -> "list[tuple[str, str, str]]":
+    """Every format `Node.save_mesh` writes, as `(name, extension, label)`.
 
     Ask rather than hard-code: a format added to the library turns up in a menu
     built from this without the client being touched, which is the whole reason
     the ABI enumerates them. The extension is carried because it is not
-    derivable -- `stl-ascii` writes a `.stl`.
+    derivable -- `stl-ascii` writes a `.stl` -- and the label is what to show
+    in that menu: `STL (binary)`, `Gmsh`.
     """
     library = _lib()
     return [
         (_text(library.cadaclysm_mesh_format(i)),
-         _text(library.cadaclysm_mesh_format_extension(i)))
+         _text(library.cadaclysm_mesh_format_extension(i)),
+         _text(library.cadaclysm_mesh_format_label(i)))
         for i in range(library.cadaclysm_mesh_format_count())
+    ]
+
+
+def lod_levels() -> int:
+    """How many coarser levels `Node.mesh_lod` offers above the mesh itself (level 0)."""
+    return _lib().cadaclysm_lod_levels()
+
+
+def formats() -> "list[tuple[str, list[str]]]":
+    """Every format this build reads, as `(name, extensions)`: `("IGES", ["iges", "igs"])`.
+
+    What an open dialog's filter is built from, the same way `mesh_formats` feeds
+    a save menu. The ABI hands the extensions over semicolon-separated, the way
+    dialogs want them; here they are split.
+    """
+    library = _lib()
+    return [
+        (_text(library.cadaclysm_format_name(i)),
+         [e for e in _text(library.cadaclysm_format_extensions(i)).split(";") if e])
+        for i in range(library.cadaclysm_format_count())
     ]
 
 
@@ -599,6 +766,19 @@ def pick_file() -> "Path | None":
         return None
     # Borrowed, and only until the next picker call on this thread — so it is
     # copied into a `Path` here rather than held.
+    return Path(_text(raw))
+
+
+def pick_save(suggested_name=None) -> "Path | None":
+    """Ask the user where to save, through the library's own dialog.
+
+    `suggested_name` prefills the file name. `None` if they cancelled or no
+    dialog was available, as `pick_file`. Blocks until the user acts; on macOS
+    it must be called from the main thread.
+    """
+    raw = _lib().cadaclysm_pick_save(None, None if suggested_name is None else str(suggested_name).encode())
+    if not raw:
+        return None
     return Path(_text(raw))
 
 
@@ -888,6 +1068,88 @@ class Polylines:
         return f"Polylines(polylines={self.polyline_count}, vertices={self.vertex_count})"
 
 
+class Beziers:
+    """A node's edges, free curves or isocurves as cubic Bézier curves, exact where
+    the file's curves were.
+
+    `points` is `(count, 4, 3)` float32 -- four control points a curve -- and
+    `weights` is `(count, 4)` float32, all ones for a polynomial curve; a rational
+    one (a circle's arc) carries the weights that make it exact. Read-only views
+    into the scene, like `Polylines`; `copy()` makes arrays of your own.
+    """
+
+    __slots__ = ("points", "weights", "count")
+
+    def __init__(self, points, weights, count):
+        self.points = points
+        self.weights = weights
+        self.count = count
+
+    def __bool__(self) -> bool:
+        return self.count > 0 and self.points is not None
+
+    def copy(self) -> "Beziers":
+        return Beziers(
+            None if self.points is None else self.points.copy(),
+            None if self.weights is None else self.weights.copy(),
+            self.count,
+        )
+
+    def __repr__(self):
+        return f"Beziers(count={self.count})"
+
+
+class Collision:
+    """What a node turned out to be for a physics engine: a box, sphere, capsule or
+    cylinder where one fits within `error`, else a convex hull. `frame` (16 numbers,
+    column-major) and `half_extent` are always the true oriented box; `radius`,
+    `height` and `axis` mean what the shape needs. Plain data, copied out."""
+
+    __slots__ = ("shape", "confidence", "axis", "frame", "half_extent", "radius", "height",
+                 "error", "hull_vertex_count", "hull_index_count")
+    _NAMES = ("none", "box", "sphere", "capsule", "cylinder", "hull")
+
+    def __init__(self, raw):
+        self.shape = raw.shape
+        self.confidence = raw.confidence
+        self.axis = raw.axis
+        self.frame = tuple(raw.frame)
+        self.half_extent = tuple(raw.half_extent)
+        self.radius = raw.radius
+        self.height = raw.height
+        self.error = raw.error
+        self.hull_vertex_count = raw.hull_vertex_count
+        self.hull_index_count = raw.hull_index_count
+
+    @property
+    def shape_name(self) -> str:
+        """`none`, `box`, `sphere`, `capsule`, `cylinder` or `hull`."""
+        return self._NAMES[self.shape] if self.shape < len(self._NAMES) else str(self.shape)
+
+    def __repr__(self):
+        return f"Collision({self.shape_name}, error={self.error})"
+
+
+class CollisionHull:
+    """A node's convex hull for a physics engine: `positions` `(vertex_count, 3)`
+    float32 and `indices` `(index_count,)` uint32, three a triangle. Views into the
+    scene, like `Mesh`."""
+
+    __slots__ = ("positions", "indices", "vertex_count", "index_count")
+
+    def __init__(self, positions, indices, vertex_count, index_count):
+        self.positions = positions
+        self.indices = indices
+        self.vertex_count = vertex_count
+        self.index_count = index_count
+
+    def __bool__(self) -> bool:
+        return self.vertex_count > 0 and self.positions is not None
+
+    def __repr__(self):
+        return f"CollisionHull(vertices={self.vertex_count}, triangles={self.index_count // 3})"
+
+
 # ---- placements -----------------------------------------------------------
 
 
@@ -1153,6 +1415,155 @@ class Manifold:
                 f"is_closed={self.is_closed})")
 
 
+class Meshlet:
+    """One meshlet, copied out: its arrays are yours."""
+
+    __slots__ = ("index", "level", "group", "error", "vertex_count", "triangle_count",
+                 "positions", "normals", "indices", "children")
+
+    def __init__(self, index, level, group, error, vertex_count, triangle_count,
+                 positions, normals, indices, children):
+        self.index = index
+        self.level = level
+        self.group = group
+        self.error = error
+        self.vertex_count = vertex_count
+        self.triangle_count = triangle_count
+        #: `(vertex_count, 3)` float32.
+        self.positions = positions
+        #: `(vertex_count, 3)` float32 (zeros where the mesh had none).
+        self.normals = normals
+        #: `(triangle_count * 3,)` uint32, into this meshlet's own vertices.
+        self.indices = indices
+        #: `(child_count,)` uint32: the finer meshlets below this one, for a levelled build.
+        self.children = children
+
+    def __repr__(self):
+        return f"Meshlet(index={self.index}, level={self.level}, vertices={self.vertex_count}, triangles={self.triangle_count})"
+
+
+class Meshlets:
+    """A mesh split into meshlets, optionally with coarser levels above them, for a
+    mesh-shader or Nanite-style renderer. Built from any mesh -- a `Node.mesh` or
+    arrays of your own -- and owned by you: `free()` it, or use it as a context
+    manager."""
+
+    __slots__ = ("_pointer", "__weakref__")
+
+    def __init__(self, pointer: int):
+        self._pointer = pointer
+
+    @staticmethod
+    def build(positions, normals, indices, max_triangles: int, max_vertices: int, levels: int = 0) -> "Meshlets":
+        """Split `positions` (three floats a vertex), `normals` (the same, or None) and
+        `indices` (three a triangle) into meshlets of at most `max_triangles` and
+        `max_vertices` each -- the consumer's own limits, with no default: Nanite
+        takes 128/256, a mesh-shader pipeline 124/64. `levels` above 0 groups and
+        simplifies each level into the next until one meshlet is left; `level(i)`
+        and `meshlet(i).children` say which is which."""
+        numpy = _numpy()
+        if not (max_triangles > 0 and max_vertices > 0):
+            raise CadaclysmError("meshlets: max_triangles and max_vertices are required")
+        p = numpy.ascontiguousarray(positions, dtype=numpy.float32).reshape(-1)
+        i = numpy.ascontiguousarray(indices, dtype=numpy.uint32).reshape(-1)
+        n = None if normals is None else numpy.ascontiguousarray(normals, dtype=numpy.float32).reshape(-1)
+        if p.size % 3 or i.size % 3:
+            raise CadaclysmError("meshlets: positions must hold three floats a vertex and indices three a triangle")
+        if n is not None and n.size != p.size:
+            raise CadaclysmError("meshlets: normals must hold one per vertex, three floats each")
+        pointer = _lib().cadaclysm_meshlets_build(
+            p.ctypes.data_as(POINTER(c_float)),
+            None if n is None else n.ctypes.data_as(POINTER(c_float)),
+            p.size // 3,
+            i.ctypes.data_as(POINTER(c_uint32)),
+            i.size,
+            max_triangles, max_vertices, levels,
+        )
+        if not pointer:
+            raise CadaclysmError(_last_error() or "meshlets: build failed")
+        return Meshlets(pointer)
+
+    @property
+    def _handle(self) -> int:
+        if not self._pointer:
+            raise CadaclysmError("meshlets: freed")
+        return self._pointer
+
+    @property
+    def freed(self) -> bool:
+        return not self._pointer
+
+    def free(self) -> None:
+        """Give the meshlets back. Idempotent."""
+        pointer, self._pointer = self._pointer, None
+        if pointer:
+            _lib().cadaclysm_meshlets_free(pointer)
+
+    def __enter__(self) -> "Meshlets":
+        return self
+
+    def __exit__(self, *_):
+        self.free()
+
+    def __del__(self):
+        try:
+            self.free()
+        except Exception:  # noqa: BLE001 - the interpreter may be going down
+            pass
+
+    @property
+    def count(self) -> int:
+        """How many meshlets, every level counted."""
+        return _lib().cadaclysm_meshlets_count(self._handle)
+
+    def __len__(self) -> int:
+        return self.count
+
+    def triangle_count(self, i: int) -> int:
+        return _lib().cadaclysm_meshlet_triangle_count(self._handle, i)
+
+    def vertex_count(self, i: int) -> int:
+        return _lib().cadaclysm_meshlet_vertex_count(self._handle, i)
+
+    def level(self, i: int) -> int:
+        """0 for a leaf over the mesh itself, higher for a simplified level above it."""
+        return _lib().cadaclysm_meshlet_level(self._handle, i)
+
+    def group(self, i: int) -> int:
+        return _lib().cadaclysm_meshlet_group(self._handle, i)
+
+    def error(self, i: int) -> float:
+        """How far this meshlet's level moved the surface; zero at level 0."""
+        return _lib().cadaclysm_meshlet_error(self._handle, i)
+
+    def child_count(self, i: int) -> int:
+        return _lib().cadaclysm_meshlet_child_count(self._handle, i)
+
+    def meshlet(self, i: int) -> Meshlet:
+        """One meshlet's arrays and numbers, copied out."""
+        numpy = _numpy()
+        library, handle = _lib(), self._handle
+        vertex_count = library.cadaclysm_meshlet_vertex_count(handle, i)
+        triangle_count = library.cadaclysm_meshlet_triangle_count(handle, i)
+        child_count = library.cadaclysm_meshlet_child_count(handle, i)
+        positions = numpy.zeros(vertex_count * 3, numpy.float32)
+        normals = numpy.zeros(vertex_count * 3, numpy.float32)
+        indices = numpy.zeros(triangle_count * 3, numpy.uint32)
+        children = numpy.zeros(child_count, numpy.uint32)
+        library.cadaclysm_meshlet_positions(handle, i, positions.ctypes.data_as(POINTER(c_float)))
+        library.cadaclysm_meshlet_normals(handle, i, normals.ctypes.data_as(POINTER(c_float)))
+        library.cadaclysm_meshlet_indices(handle, i, indices.ctypes.data_as(POINTER(c_uint32)))
+        library.cadaclysm_meshlet_children(handle, i, children.ctypes.data_as(POINTER(c_uint32)))
+        return Meshlet(
+            i, library.cadaclysm_meshlet_level(handle, i), library.cadaclysm_meshlet_group(handle, i),
+            library.cadaclysm_meshlet_error(handle, i), vertex_count, triangle_count,
+            positions.reshape(vertex_count, 3), normals.reshape(vertex_count, 3), indices, children,
+        )
+
+    def __repr__(self):
+        return "Meshlets(freed)" if self.freed else f"Meshlets(count={self.count})"
+
+
 class Node:
     """One node of the document: an assembly, a shape, a placement.
 
@@ -1399,7 +1810,9 @@ class Node:
         shape hand back the *same* arrays and two different transforms. Read
         the module docstring on what these views may not outlive.
         """
-        raw = _lib().cadaclysm_node_mesh(self.scene._handle, self.index)
+        return self._mesh_of(_lib().cadaclysm_node_mesh(self.scene._handle, self.index))
+
+    def _mesh_of(self, raw) -> Mesh:
         n = raw.vertex_count
         return Mesh(
             _view(self.scene, raw.positions, (n, 3), "float32"),
@@ -1412,6 +1825,20 @@ class Node:
             n,
             raw.index_count,
         )
+
+    def mesh_lod(self, level: int) -> Mesh:
+        """Its triangles at a coarser level of detail: 0 is `mesh` itself, 1 up to
+        `lod_levels()` are each about a quarter of the triangles of the one before,
+        and past that is empty. **Every level shares the level-0 vertices** -- the
+        same `positions` and `vertex_count`, only `indices` differs -- so a caller
+        uploads the vertices once and switches level by drawing a different index
+        range. Simplifying costs about what meshing did, once per node."""
+        return self._mesh_of(_lib().cadaclysm_node_mesh_lod(self.scene._handle, self.index, level))
+
+    def lod_error(self, level: int) -> float:
+        """How far `mesh_lod(level)` moved the surface, in the scene's units --
+        what to pick a level by against the pixel size on screen. Zero at level 0."""
+        return _lib().cadaclysm_node_lod_error(self.scene._handle, self.index, level)
 
     @property
     def surfaces(self) -> Surfaces:
@@ -1496,6 +1923,124 @@ class Node:
             raw.vertex_count,
         )
 
+    @property
+    def edge_beziers(self) -> Beziers:
+        """Its feature edges as cubic Bézier curves -- exact where the file's curves
+        were, where `edges` is their chords. Builds the geometry if needed."""
+        return self._beziers(_lib().cadaclysm_node_edge_beziers)
+
+    @property
+    def curve_beziers(self) -> Beziers:
+        """Its free curves as cubic Béziers; see `edge_beziers`."""
+        return self._beziers(_lib().cadaclysm_node_curve_beziers)
+
+    @property
+    def isocurve_beziers(self) -> Beziers:
+        """Its isocurves as cubic Béziers; see `edge_beziers`."""
+        return self._beziers(_lib().cadaclysm_node_isocurve_beziers)
+
+    def _beziers(self, function) -> Beziers:
+        raw = function(self.scene._handle, self.index)
+        return Beziers(
+            _view(self.scene, raw.points, (raw.count, 4, 3), "float32"),
+            _view(self.scene, raw.weights, (raw.count, 4), "float32"),
+            raw.count,
+        )
+
+    def collision(self, hull_budget: int = 0) -> "Collision | None":
+        """The collision body for what this node draws, building its mesh if it is
+        not built. `hull_budget` is the most triangles a hull may have; 0 asks for
+        the Unity limit (255) and is not clamped to it. `None` for a node that draws
+        nothing. Cached per node and budget, so asking twice costs one fit."""
+        out = _Collision()
+        out.size = ctypes.sizeof(_Collision)
+        if not _lib().cadaclysm_node_collision(self.scene._handle, self.index, hull_budget, ctypes.byref(out)):
+            return None
+        return Collision(out)
+
+    def collision_hull(self, hull_budget: int = 0) -> CollisionHull:
+        """The convex hull `collision` counted, as triangles for the physics engine.
+        Empty for a node that draws nothing. Views into the scene, good until it closes or
+        this node is asked for a different `hull_budget`, which refits and frees them."""
+        raw = _lib().cadaclysm_node_collision_hull(self.scene._handle, self.index, hull_budget)
+        return CollisionHull(
+            _view(self.scene, raw.positions, (raw.vertex_count, 3), "float32"),
+            _view(self.scene, raw.indices, (raw.index_count,), "uint32"),
+            raw.vertex_count,
+            raw.index_count,
+        )
+
+    # -- the surface path: for a renderer drawing exact surfaces, never triangles --
+
+    def bounds_placed(self, placement=None) -> Bounds:
+        """The box of what this node draws **under a placement**, for a part drawn
+        from its surfaces: every sample is carried through the document's convention
+        and then `placement` (16 numbers, column-major, as `Placement.raw_transform`;
+        None for the identity) before it is boxed. Tighter than placing the corners of
+        `bounds`: the box of a rotated box is bigger than the box of the rotated
+        points. All zeros for a part with no surfaces."""
+        values = None if placement is None else [float(v) for v in placement]
+        if values is not None and len(values) != 16:
+            raise CadaclysmError(f"bounds_placed: a placement is 16 numbers, not {len(values)}")
+        matrix = None if values is None else (c_double * 16)(*values)
+        raw = _lib().cadaclysm_node_bounds_placed(self.scene._handle, self.index, matrix)
+        return Bounds(raw.min, raw.max)
+
+    @property
+    def is_meshed(self) -> bool:
+        """Whether its mesh has been built and is held -- by `Scene.realize_all`, by an
+        ask for it, or by anything else that needed it. A renderer drawing the part
+        from its surfaces checks it never paid for the triangles."""
+        return _lib().cadaclysm_node_is_meshed(self.scene._handle, self.index)
+
+    @property
+    def surface_edges(self) -> Polylines:
+        """Its face boundaries taken from its trimmed surfaces -- the outline that
+        costs no tessellation, where `edges` meshes the part. In the surfaces' own
+        frame (see `Scene.surface_matrix`); empty without surfaces. A shared edge
+        appears once from each face."""
+        return self._polylines(_lib().cadaclysm_node_surface_edges)
+
+    @property
+    def surface_isocurves(self) -> Polylines:
+        """Its isocurves taken from its trimmed surfaces and clipped to the trims,
+        without meshing: lines at a surface's bend lines and an even spread where it
+        has none; a flat face gets none. In the surfaces' frame; empty without
+        surfaces."""
+        return self._polylines(_lib().cadaclysm_node_surface_isocurves)
+
+    def surface_pick(self, from_, to):
+        """Where the segment `from_`..`to` first meets this part's surfaces, as
+        `(x, y, z)`, or None where it meets none (or the part has no surfaces).
+        Exact: answers from the surface and tests the trims at the hit's own (u, v).
+        **In the surfaces' own frame**: carry a ray from the scene's space through
+        the inverse of `Scene.surface_matrix` first."""
+        start, end = [float(v) for v in from_], [float(v) for v in to]
+        if len(start) != 3 or len(end) != 3:
+            raise CadaclysmError("surface_pick: from_ and to are three numbers each")
+        a = (c_double * 3)(*start)
+        b = (c_double * 3)(*end)
+        out = (c_double * 3)()
+        if not _lib().cadaclysm_node_surface_pick(self.scene._handle, self.index, a, b, out):
+            return None
+        return tuple(out)
+
+    def surface_proxy_mesh(self, cells: int) -> Mesh:
+        """A coarse mesh over its surfaces for the things that need triangles and not
+        a picture -- ray tracing, distance fields: each face gridded `cells` by `cells`
+        over its trim window, two triangles a cell whose centre lies inside the trims,
+        never welded. Built once per part at the first `cells` asked for. In the
+        scene's space, like `mesh`. Empty without surfaces or for `cells` of 0."""
+        return self._mesh_of(_lib().cadaclysm_node_surface_proxy_mesh(self.scene._handle, self.index, cells))
+
+    @property
+    def triangle_estimate(self) -> int:
+        """About how many triangles `mesh` would give, **without building it** -- for
+        sizing a budget before meshing. Exact for a stored mesh, within a few tens of
+        percent for a B-rep; `-1` where the reader cannot say without doing the work,
+        and for a node that draws nothing. Treat `-1` as unknown, never as zero."""
+        return _lib().cadaclysm_node_triangle_estimate(self.scene._handle, self.index)
+
     def walk(self):
         """This node and every node under it, parents before children."""
         stack = [self]
@@ -1514,6 +2059,26 @@ class Node:
         """Orbit what this node and everything under it places; returns (azimuth,
         elevation, zoom)."""
         return self.scene._draw("view", self._placements(), options, "Node")
+
+    def svg(self, path=None, **words) -> "str | None":
+        """This node's own wireframe as SVG, in its own frame -- `Scene.svg`'s
+        words, read from just this node rather than every placement.
+
+        With `path`, writes the file and returns `None`; without, returns the
+        SVG text. Raises `CadaclysmError` on a refused option (naming the
+        field) or a failed write."""
+        o = _svg_options(self.scene._default_up(), **words)
+        if path is not None:
+            ok = _lib().cadaclysm_node_svg(
+                self.scene._handle, self.index, str(path).encode(), ctypes.byref(o)
+            )
+            if not ok:
+                raise CadaclysmError(_last_error() or f"could not write {path}")
+            return None
+        p = _lib().cadaclysm_node_svg_text(self.scene._handle, self.index, ctypes.byref(o))
+        if p is None:
+            raise CadaclysmError(_last_error() or "svg")
+        return p.decode("utf-8")
 
     def _placements(self) -> "list[Placement]":
         mine = {node.index for node in self.walk()}
@@ -1676,6 +2241,17 @@ class Scene:
         ]
 
     @property
+    def geometry_diagnostics(self) -> "list[str]":
+        """What the reader built but the geometry stage could not finish: a face
+        that would not trim, a surface that would not mesh. `diagnostics` is what
+        the *file* held that could not be read; this is what the geometry did."""
+        library, handle = _lib(), self._handle
+        return [
+            _text(library.cadaclysm_geometry_diagnostic(handle, i))
+            for i in range(library.cadaclysm_geometry_diagnostic_count(handle))
+        ]
+
+    @property
     def source_name(self) -> "str | None":
         """The archive member this was read from, or None for a plain file.
 
@@ -1789,6 +2365,13 @@ class Scene:
         """
         return _lib().cadaclysm_realize_all(self._handle)
 
+    def realize_meshes(self, skip_surfaced: bool = True) -> int:
+        """`realize_all`, leaving alone every node that carries surfaces when
+        `skip_surfaced` is true: a renderer drawing those parts from their surfaces
+        never pays for their triangles, and takes their bounds from `bounds` (which
+        falls back to the surfaces). Nodes without surfaces are built as usual."""
+        return _lib().cadaclysm_realize_meshes(self._handle, 1 if skip_surfaced else 0)
+
     @property
     def realized(self) -> int:
         """How many nodes `realize_all` has finished with. Safe to read from another thread."""
@@ -1808,6 +2391,12 @@ class Scene:
         stay available one node at a time either way.
         """
         _lib().cadaclysm_cancel(self._handle)
+
+    def forget_meshes(self) -> None:
+        """Drop every mesh the scene has built; the next ask rebuilds. For a
+        viewer that has uploaded them and wants the memory back. Every `Mesh`
+        and `Polylines` view handed out before this is over freed memory."""
+        _lib().cadaclysm_forget_meshes(self._handle)
 
     # -- writing --
 
@@ -1843,13 +2432,44 @@ class Scene:
         """Orbit the model with the viewer in use; returns (azimuth, elevation, zoom)."""
         return self._draw("view", self.placements, options, "Scene")
 
+    def svg(self, path=None, **words) -> "str | None":
+        """Every visible placement's wireframe as SVG, from the camera the keywords
+        describe -- the same words `show` takes, read by the library itself rather
+        than a viewer: view= (front back left right top bottom iso), az=, el= over
+        it, up= (default from the convention this scene was opened with), fov= (0,
+        the default, is orthographic), size=(width, height), margin= (fraction of
+        the content's extent left each side), tolerance= (how far a written curve
+        may stray, in page units), stroke=, width= (the stroke's, in page units),
+        background= (`None` for transparent), edges=, curves=, isocurves=,
+        polylines= (which line sets are drawn; edges alone by default).
+
+        With `path`, writes the file and returns `None`; without, returns the SVG
+        text. Raises `CadaclysmError` on a refused option (naming the field) or a
+        failed write."""
+        o = _svg_options(self._default_up(), **words)
+        if path is not None:
+            ok = _lib().cadaclysm_scene_svg(self._handle, str(path).encode(), ctypes.byref(o))
+            if not ok:
+                raise CadaclysmError(_last_error() or f"could not write {path}")
+            return None
+        p = _lib().cadaclysm_scene_svg_text(self._handle, ctypes.byref(o))
+        if p is None:
+            raise CadaclysmError(_last_error() or "svg")
+        return p.decode("utf-8")
+
+    def _default_up(self) -> str:
+        """`"y"` or `"z"`: which axis is up by default, from the convention this
+        scene was opened with. Shared by `_draw` (the viewer) and `svg` (the
+        library's own camera), so the two agree without either scene keeping the
+        other's notion of "default"."""
+        return "y" if (self.convention & 0xFF) in _Y_UP else "z"
+
     def _draw(self, mode, placements, options, owner):
         if "tolerance" in options:
             raise TypeError(f"{owner}.{mode} takes no tolerance: a document is drawn at the "
                             "tolerance it was read with")
         viewer = _viewer()
-        default_up = "y" if (self.convention & 0xFF) in _Y_UP else "z"
-        opts = viewer.options("iso", default_up=default_up, **options)
+        opts = viewer.options("iso", default_up=self._default_up(), **options)
         edges = options.get("edges", True)
         meshes, lines = _drawn_placements(placements, edges)
         # Lines are drawn only while the edges flag is clear, so free curves keep it clear;

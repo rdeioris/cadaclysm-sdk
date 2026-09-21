@@ -143,11 +143,45 @@ func test_solids_build_transform_combine_mesh_bound_and_write_step():
 	eq(CadaclysmBlacksmith.write_step(two, [plate, upright], schema()), true)
 	ok(FileAccess.get_file_as_string(two).length() > 0)
 	refuses(func(): return CadaclysmBlacksmith.write_step(two, [plate, "nope"]), "write_step: expected CadaclysmSolids")
+	# SAT, the same two ways.
+	var sat := plate.sat_text("mm")
+	ok(sat.begins_with("400 0 1 0"), "SAT text")
+	ok(sat.contains(" cone-surface $-1 "), "the bore is written exactly")
+	refuses(func(): return plate.sat_text("furlong"), "unit must be one of")
+	var sat_path := tmp("plate.sat")
+	eq(plate.sat(sat_path), true)
+	ok(FileAccess.get_file_as_string(sat_path).begins_with("400 0 1 0"))
+	eq(CadaclysmBlacksmith.write_sat(tmp("two.sat"), [plate, upright], "in"), true)
+	ok(FileAccess.get_file_as_string(tmp("two.sat")).contains("\n25.4 1e-06 1e-10"), "the unit line")
 	part.close()
 	eq(part.closed, true)
 	refuses(func(): return part.faces, "closed")
 	refuses(func(): return part.translate(1, 0, 0), "closed")
 	part.close()   # idempotent
+
+func test_svg():
+	var plate := CadaclysmSolid.extrude(plate_outline(), XY, 6)
+	var text := plate.svg_text()
+	ok(text.begins_with("<svg"), text.left(40))
+	ok(text.contains("<path"), "no <path in the solid's svg text")
+
+	var path := tmp("plate.svg")
+	eq(plate.svg(path), true)
+	ok(FileAccess.get_file_as_string(path).begins_with("<svg"))
+
+	# No scene over the kernel: `up` left out is always "z", so an explicit y-up
+	# still reads differently from the default.
+	var z_up: String = plate.svg_text_with({"up": "z"})
+	var y_up: String = plate.svg_text_with({"up": "y"})
+	ok(z_up != y_up, "z-up and y-up read the same")
+
+	var both := CadaclysmBlacksmith.write_svg_text([plate, CadaclysmSolid.cuboid(1, 1, 1)])
+	eq(both.count("<g id=\""), 2)
+
+	refuses(func(): return plate.svg_text_with({"fov": 200}), "fov")
+	eq(plate.svg_text_with({"fov": 200}), "")
+	refuses(func(): return plate.svg_with(tmp("no/such/dir/plate.svg"), {"fov": 200}), "fov")
+	plate.close()
 
 func test_step_text_takes_no_schema_a_builtin_name_a_path_or_text():
 	var solid := CadaclysmSolid.cuboid(1, 2, 3)
@@ -680,3 +714,101 @@ func test_loft_through_several_sections():
 	ok(Cadaclysm.last_error().begins_with("loft_through: "), Cadaclysm.last_error())
 	eq(CadaclysmSolid.loft_through([sections[0], "nope"]), null)
 	ok(Cadaclysm.last_error().contains("section 1 is not a [profile, frame] pair"), Cadaclysm.last_error())
+
+func test_two_circles_hit_twice_a_tangent_touches_and_an_overlap_runs():
+	var a := CadaclysmProfile.circle(5)
+	var hits := a.hits(CadaclysmProfile.circle(5).translate(6, 0))
+	eq(hits.size(), 2)
+	var ys := []
+	for h in hits:
+		ok(not h.run and not h.touch)
+		near(h.raw_start[0], 3.0, 1e-12)
+		eq(h.raw_start, h.raw_end)
+		eq(h.a_start.face, 4294967295)
+		eq(h.a_start.loop_index, 0)
+		ok(h.a_start.t >= 0.0 and h.a_start.t <= 1.0, str(h.a_start.t))
+		ys.append(h.raw_start[1])
+	ys.sort()
+	near(ys[0], -4.0, 1e-12)
+	near(ys[1], 4.0, 1e-12)
+	var tangent := CadaclysmProfile.path([-10, 5]).line_to(10, 5).end_open()
+	var touching := a.hits(tangent)
+	eq(touching.size(), 1)
+	ok(touching[0].touch and not touching[0].run)
+	var runs := CadaclysmProfile.rect(10, 10).hits(CadaclysmProfile.rect(10, 10).translate(5, 0)).filter(func(h): return h.run)
+	eq(runs.size(), 2)
+	eq(a.hits(CadaclysmProfile.circle(2).translate(10, 0)).size(), 0)
+	refuses(func(): return a.hits(a, 0.0), "profile_hits: tolerance must be positive and finite")
+	eq(a.hits(a, 0.0).size(), 0, "empty on failure")
+
+func test_every_edge_carries_its_exact_curve():
+	# A cylinder's rims are circles of its radius about a cap centre, in a unit frame, a whole turn each.
+	var cyl := CadaclysmSolid.cylinder(5, 3)
+	var rims := cyl.edges.filter(func(e): return e.kind == "circle").map(func(e): return e.curve)
+	ok(rims.size() >= 2)
+	for c in rims:
+		ok(c is CadaclysmCurve)
+		eq(c.kind, "circle")
+		near(c.radius, 5.0, 1e-9)
+		near(c.radius2, 5.0, 1e-9)
+		var f: PackedFloat64Array = c.raw_frame
+		near(f[0], 0.0, 1e-9)
+		near(f[1], 0.0, 1e-9)
+		ok(minf(absf(f[2]), absf(f[2] - 3.0)) < 1e-9, str(f[2]))
+		near(sqrt(f[3] * f[3] + f[4] * f[4] + f[5] * f[5]), 1.0, 1e-9)
+		near(sqrt(f[6] * f[6] + f[7] * f[7] + f[8] * f[8]), 1.0, 1e-9)
+		near(f[3] * f[6] + f[4] * f[7] + f[5] * f[8], 0.0, 1e-9)
+		ok(v3near(c.origin, Vector3(0, 0, f[2])))
+		near(absf(c.t1 - c.t0), TAU, 1e-9)
+		eq(c.degree, 0)
+		eq(c.knots.size(), 0)
+		eq(c.poles.size(), 0)
+		eq(c.weights.size(), 0)
+		ok(not c.is_rational)
+		ok(str(c).begins_with("Curve('circle', origin="), str(c))
+	# A cuboid's edges are lines: `origin + x` is the far end, both ends its own vertices.
+	for e in CadaclysmSolid.cuboid(2, 4, 6).edges:
+		var c = e.curve
+		eq(c.kind, "line")
+		eq([c.t0, c.t1], [0.0, 1.0])
+		var f: PackedFloat64Array = c.raw_frame
+		var origin := [f[0], f[1], f[2]]
+		var far := [f[0] + f[3], f[1] + f[4], f[2] + f[5]]
+		var at_origin := false
+		var at_far := false
+		var s: PackedFloat64Array = e.raw_segments
+		for k in range(0, s.size(), 3):
+			var p := [s[k], s[k + 1], s[k + 2]]
+			at_origin = at_origin or all_near(p, origin)
+			at_far = at_far or all_near(p, far)
+		ok(at_origin and at_far, str(c))
+		ok(all_near(f.slice(6), [0, 0, 0, 0, 0, 0]))
+		eq(c.radius, 0.0)
+	# A closed spline extruded: its wall's seam edge is the NURBS itself.
+	var square := [[0, 0], [10, 0], [10, 10], [0, 10]]
+	var loop := CadaclysmSolid.extrude(CadaclysmProfile.spline(square, 3, PackedFloat64Array(), true), XY, 2)
+	var splines := loop.edges.filter(func(e): return e.kind == "nurbs").map(func(e): return e.curve)
+	ok(splines.size() > 0, "the extruded spline keeps a nurbs edge")
+	for c in splines:
+		eq(c.kind, "nurbs")
+		eq(c.degree, 3)
+		eq(c.knots.size(), c.poles.size() / 3 + c.degree + 1)
+		eq(c.weights.size(), 0)
+		ok(not c.is_rational)
+		ok(c.knots[c.degree] <= c.t0 and c.t0 < c.t1 and c.t1 <= c.knots[c.poles.size() / 3])
+	# A kernel shape's edges all have an exact curve.
+	for solid in [cyl, loop, CadaclysmSolid.sphere(2)]:
+		for e in solid.edges:
+			ok(e.curve != null)
+
+func test_two_circles_share_one_lens_of_arcs():
+	var a := CadaclysmProfile.circle(5)
+	var b := CadaclysmProfile.circle(5).translate(6, 0)
+	var lenses := a.common(b)
+	eq(lenses.size(), 1)
+	ok(lenses[0] is CadaclysmProfile)
+	# Four arcs (each circle's own seam stays a join) between two caps.
+	eq(CadaclysmSolid.extrude(lenses[0], XY, 1).faces, 6)
+	eq(a.common(b.translate(100, 0)).size(), 0)
+	refuses(func(): return a.common(b, 0.0), "profile_common: tolerance must be positive and finite")
+	eq(a.common(b, 0.0).size(), 0, "empty on failure")

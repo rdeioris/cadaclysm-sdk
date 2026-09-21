@@ -231,6 +231,100 @@ public func writeStep(_ path: String, _ solids: [Solid], schema: String? = nil, 
     try text.write(toFile: path, atomically: true, encoding: .utf8)
 }
 
+/// One ACIS SAT file's text, each solid its own body: the analytic surfaces as their own
+/// records, splines and swept surfaces as exact NURBS, in the layout Rhino's own exporter
+/// writes. `unit` is `"mm"`, `"m"` or `"in"` and goes into the header as millimetres per unit.
+public func writeSatText(_ solids: [Solid], unit: String = "mm") throws -> String {
+    guard let code = units[unit] else { throw BuildError("unit must be one of ['in', 'm', 'mm']") }
+    let handles: [OpaquePointer?] = try solids.map { try $0.h() }
+    let raw: UnsafeMutablePointer<CChar>? = withExtendedLifetime(solids) {
+        cadaclysm_blacksmith_sat_text(handles, handles.count, code)
+    }
+    guard let raw else { throw failure("sat_text") }
+    defer { cadaclysm_blacksmith_string_free(raw) }
+    return String(cString: raw)
+}
+
+/// `writeSatText` written to `path` by the library itself, which names the file in its
+/// refusal when it cannot.
+public func writeSat(_ path: String, _ solids: [Solid], unit: String = "mm") throws {
+    guard let code = units[unit] else { throw BuildError("unit must be one of ['in', 'm', 'mm']") }
+    let handles: [OpaquePointer?] = try solids.map { try $0.h() }
+    let ok = withExtendedLifetime(solids) {
+        cadaclysm_blacksmith_sat(handles, handles.count, path, code)
+    }
+    guard ok else { throw failure("sat") }
+}
+
+/// One OCCT `.brep` file's text, each solid its own solid under one compound (one solid is
+/// the file's root): the exact surfaces and curves, with a curve in each face's own
+/// parameters for every edge, so OCCT's `BRepTools::Read` gives a shape
+/// `BRepCheck_Analyzer` finds valid. No unit is declared -- a `.brep` carries none -- so
+/// the numbers are the numbers.
+public func writeBrepText(_ solids: [Solid]) throws -> String {
+    let handles: [OpaquePointer?] = try solids.map { try $0.h() }
+    let raw: UnsafeMutablePointer<CChar>? = withExtendedLifetime(solids) {
+        cadaclysm_blacksmith_brep_text(handles, handles.count)
+    }
+    guard let raw else { throw failure("brep_text") }
+    defer { cadaclysm_blacksmith_string_free(raw) }
+    return String(cString: raw)
+}
+
+/// `writeBrepText` written to `path` by the library itself.
+public func writeBrep(_ path: String, _ solids: [Solid]) throws {
+    let handles: [OpaquePointer?] = try solids.map { try $0.h() }
+    let ok = withExtendedLifetime(solids) { cadaclysm_blacksmith_brep(handles, handles.count, path) }
+    guard ok else { throw failure("brep") }
+}
+
+// MARK: - SVG
+
+/// `options` packed into a `CadaclysmBlacksmithSvgOptions` -- as `Cadaclysm`'s own reader-side
+/// packing, but with no scene to default `up` from: a solid carries no convention of its own,
+/// so `options.up` falls back to `.z` rather than a scene's.
+func buildSvgOptions(_ options: SvgOptions) -> CadaclysmBlacksmithSvgOptions {
+    var raw = CadaclysmBlacksmithSvgOptions()
+    cadaclysm_blacksmith_svg_options_init(&raw)
+    let (baseAzimuth, baseElevation) = options.view.angles
+    raw.up = (options.up ?? .z) == .y ? 1 : 0
+    raw.azimuth = options.azimuth ?? baseAzimuth
+    raw.elevation = options.elevation ?? baseElevation
+    raw.fov = options.fov
+    raw.width = options.width
+    raw.height = options.height
+    raw.margin = options.margin
+    raw.tolerance = options.tolerance
+    raw.stroke_width = options.strokeWidth
+    raw.stroke = options.stroke
+    raw.background = options.background ?? svgTransparent
+    raw.flags = (options.edges ? UInt32(1) : 0) | (options.curves ? UInt32(2) : 0)
+        | (options.isocurves ? UInt32(4) : 0) | (options.polylines ? UInt32(8) : 0)
+    return raw
+}
+
+/// Several solids' wireframe as one SVG's text, each its own `<g>` -- see `Cadaclysm.SvgOptions`.
+public func writeSvgText(_ solids: [Solid], options: SvgOptions = SvgOptions()) throws -> String {
+    let handles: [OpaquePointer?] = try solids.map { try $0.h() }
+    var cOptions = buildSvgOptions(options)
+    let raw: UnsafeMutablePointer<CChar>? = withExtendedLifetime(solids) {
+        withUnsafePointer(to: &cOptions) { cadaclysm_blacksmith_svg_text(handles, handles.count, $0) }
+    }
+    guard let raw else { throw failure("svg_text") }
+    defer { cadaclysm_blacksmith_string_free(raw) }
+    return String(cString: raw)
+}
+
+/// `writeSvgText` written to `path` by the library itself.
+public func writeSvg(_ path: String, _ solids: [Solid], options: SvgOptions = SvgOptions()) throws {
+    let handles: [OpaquePointer?] = try solids.map { try $0.h() }
+    var cOptions = buildSvgOptions(options)
+    let ok = withExtendedLifetime(solids) {
+        withUnsafePointer(to: &cOptions) { cadaclysm_blacksmith_svg(handles, handles.count, path, $0) }
+    }
+    guard ok else { throw failure("svg") }
+}
+
 // MARK: - Views into a solid's cache
 
 /// The owner of every view cut from one filling of a solid's tessellation cache: it holds the
@@ -424,6 +518,34 @@ public final class Profile {
         try Profile(cadaclysm_blacksmith_profile_close_loop(handle))
     }
 
+    /// This curve cut where the `cutters` cross, touch or run along it -- the sketch trim's
+    /// pieces: in order along the curve from its start, each an open profile of portions of
+    /// this one's own segments (a line's stretch a line, an arc's an arc, a spline's the same
+    /// spline over part of its domain). One piece, this curve, where nothing cuts it; a closed
+    /// curve's piece round its start is one piece. Cuts closer than `tolerance` to each other
+    /// fold onto one.
+    public func pieces(_ cutters: [Profile], tolerance: Double = 1e-6) throws -> [Profile] {
+        let handles: [OpaquePointer?] = cutters.map { $0.handle }
+        return try withExtendedLifetime(cutters) {
+            let n = cadaclysm_blacksmith_profile_piece_count(handle, handles, handles.count, tolerance)
+            if n == 0 { throw failure("profile_piece_count") }
+            return try (0..<n).map { try Profile(cadaclysm_blacksmith_profile_piece(handle, handles, handles.count, $0, tolerance)) }
+        }
+    }
+
+    /// This curve with piece `piece` of `pieces` taken away -- the sketch trim: what is left,
+    /// as open profiles. One for a closed curve (its other pieces run together from where the
+    /// removed one ended), the stretches before and after for an open one, none where the
+    /// piece was the whole curve. Throws for a piece the curve does not have.
+    public func trim(_ cutters: [Profile], piece: UInt32, tolerance: Double = 1e-6) throws -> [Profile] {
+        let handles: [OpaquePointer?] = cutters.map { $0.handle }
+        return try withExtendedLifetime(cutters) {
+            let n = cadaclysm_blacksmith_profile_trim_count(handle, handles, handles.count, piece, tolerance)
+            if n == 0 && !lastError().isEmpty { throw failure("profile_trim_count") }
+            return try (0..<n).map { try Profile(cadaclysm_blacksmith_profile_trim_chain(handle, handles, handles.count, piece, $0, tolerance)) }
+        }
+    }
+
     /// This outline with `hole` cut out of it.
     public func withHole(_ hole: Profile) throws -> Profile {
         try Profile(cadaclysm_blacksmith_profile_with_hole(handle, hole.handle))
@@ -432,6 +554,42 @@ public final class Profile {
     /// This outline moved by (`dx`, `dy`).
     public func translate(_ dx: Double, _ dy: Double) throws -> Profile {
         try Profile(cadaclysm_blacksmith_translate_profile(handle, dx, dy))
+    }
+
+    /// Where this profile's curves cross, touch or run along `other`'s, both read in one
+    /// plane, as `Hit` values ordered along this profile. Points closer than `tolerance`
+    /// merge; two curves within `tolerance` of each other for longer than it are one run
+    /// when they part only where one ends or the stretch is flat -- one curve following the
+    /// other, offset within `tolerance` or tilted by under about half of it, even where it
+    /// leaves mid-both; a tangency or a shallow crossing is one point. A loop that stops
+    /// short of its start is an open chain.
+    public func hits(_ other: Profile, tolerance: Double = 1e-6) throws -> [Hit] {
+        guard let found = cadaclysm_blacksmith_profile_hits(handle, other.handle, tolerance) else {
+            throw failure("profile_hits")
+        }
+        defer { cadaclysm_blacksmith_hits_free(found) }
+        let n = cadaclysm_blacksmith_hit_count(found)
+        var out: [Hit] = []
+        out.reserveCapacity(Int(n))
+        for i in 0..<n {
+            var raw = CadaclysmBlacksmithHit()
+            if !cadaclysm_blacksmith_hit(found, i, &raw) { throw failure("hit") }
+            out.append(Hit(raw))
+        }
+        return out
+    }
+
+    /// The region this profile and `other` share, both read in one plane, as zero or more
+    /// profiles -- each boundary counter-clockwise, each hole clockwise, arcs and splines
+    /// kept exact. Both must be closed and simple. No shared area is an empty array. Throws
+    /// for a `tolerance` not positive and finite, or a profile open or crossing itself.
+    public func common(_ other: Profile, tolerance: Double = 1e-6) throws -> [Profile] {
+        guard let list = cadaclysm_blacksmith_profile_common(handle, other.handle, tolerance) else {
+            throw failure("profile_common")
+        }
+        defer { cadaclysm_blacksmith_profile_list_free(list) }
+        let n = cadaclysm_blacksmith_profile_list_count(list)
+        return try (0..<n).map { try Profile(cadaclysm_blacksmith_profile_list_get(list, $0)) }
     }
 
     /// This profile with its corners rounded by `radius`: where two straight segments meet,
@@ -1107,6 +1265,37 @@ public final class Solid {
         try writeStep(path, [self], schema: schema, unit: unit)
     }
 
+    /// This solid as ACIS SAT text; see `writeSatText`.
+    public func satText(unit: String = "mm") throws -> String {
+        try writeSatText([self], unit: unit)
+    }
+
+    /// This solid written as an ACIS SAT file by the library itself; see `writeSat`.
+    public func sat(_ path: String, unit: String = "mm") throws {
+        try writeSat(path, [self], unit: unit)
+    }
+
+    /// This solid as OCCT `.brep` text; see `writeBrepText`.
+    public func brepText() throws -> String {
+        try writeBrepText([self])
+    }
+
+    /// This solid written as a `.brep` file, by the library itself; see `writeBrep`.
+    public func brep(_ path: String) throws {
+        try writeBrep(path, [self])
+    }
+
+    /// This solid's wireframe as SVG text, from the camera `options` describes -- the library's
+    /// own camera, not a viewer. See `writeSvgText`.
+    public func svgText(_ options: SvgOptions = SvgOptions()) throws -> String {
+        try writeSvgText([self], options: options)
+    }
+
+    /// This solid written to an SVG file at `path`, by the library itself.
+    public func svg(_ path: String, options: SvgOptions = SvgOptions()) throws {
+        try writeSvg(path, [self], options: options)
+    }
+
     // MARK: Selecting
 
     /// The index of the face `selector` picks; throws when none does.
@@ -1132,6 +1321,32 @@ public final class Solid {
             throw failure("face_frame")
         }
         return out
+    }
+
+    /// Face `face` by what it is, eight numbers: the surface's kind (plane 0, cylinder 1, cone 2,
+    /// sphere 3, torus 4, NURBS 5, revolution 6, extrusion 7, sum 8), a point on the surface at
+    /// the face's middle (x y z), the outward normal there (x y z), and the face's extent -- what
+    /// a feature made on the face keeps, to find the face again with `findFace` when the solid
+    /// has been rebuilt with its faces moved, split or renumbered. Take it before any move you
+    /// apply to the solid, and look it up on the unmoved one.
+    public func faceRef(_ face: Int) throws -> [Double] {
+        var out = [Double](repeating: 0, count: 8)
+        if !cadaclysm_blacksmith_face_ref(try h(), try index32(face, "face_ref"), &out) {
+            throw failure("face_ref")
+        }
+        return out
+    }
+
+    /// The face `faceRef` (from `faceRef`) refers to: among the faces of that kind whose surface
+    /// passes through the point, facing the same way, the one the point lies in -- or, where it
+    /// lies in none, the one whose boundary comes nearest. `hint` is the index the face had,
+    /// preferred among faces that fit equally well; `tolerance` how far the point may sit off a
+    /// surface to still be on it. Nil where the face is gone.
+    public func findFace(_ faceRef: [Double], hint: Int? = nil, tolerance: Double = 1e-3) throws -> Int? {
+        if faceRef.count != 8 { throw BuildError("find_face: a face reference is eight numbers") }
+        let found = cadaclysm_blacksmith_find_face(try h(), faceRef, Int32(hint.map { max($0, -1) } ?? -1), tolerance)
+        if found == -2 { throw failure("find_face") }
+        return found < 0 ? nil : Int(found)
     }
 
     // MARK: Colour
@@ -1210,10 +1425,19 @@ public final class Solid {
                         segments.append((SIMD3(s[o], s[o + 1], s[o + 2]), SIMD3(s[o + 3], s[o + 4], s[o + 5])))
                     }
                 }
-                found.append(Edge(Int(i), text(raw.kind), faces, segments))
+                found.append(Edge(Int(i), text(raw.kind), faces, segments, try Solid.edgeCurve(h, i)))
             }
             return found
         }
+    }
+
+    /// Edge `i`'s exact curve copied out, or nil for an edge with none (the library's
+    /// "has no exact curve"); any other refusal throws.
+    private static func edgeCurve(_ h: OpaquePointer, _ i: UInt32) throws -> Curve? {
+        var raw = CadaclysmBlacksmithCurve()
+        if cadaclysm_blacksmith_edge_curve(h, i, &raw) { return Curve(raw) }
+        if lastError().contains("has no exact curve") { return nil }
+        throw failure("edge_curve")
     }
 
     /// Round `edges` with `radius`. Exact: the blend faces are cylinders, tori and NURBS, and
@@ -1514,8 +1738,69 @@ public struct Selector {
     public static func index(_ i: Int) -> Selector { Selector(3, nil, i) }
 }
 
+/// One edge's exact curve, as plain data copied out (`Edge.curve`): `kind` is `"line"`,
+/// `"circle"`, `"ellipse"` or `"nurbs"`.
+///
+/// `t0..t1` is the edge's parameter range on its own curve: a line's fraction (0..1 over
+/// `origin -> origin + x`, where `x` is the full `to - from`, NOT unit -- so
+/// `point(t) = origin + x*t`); a circle's or ellipse's angle in radians about `origin` in
+/// the `x, y` plane (`point(t) = origin + x*radius*cos(t) + y*radius2*sin(t)`,
+/// `radius2 = radius` for a circle); a NURBS's knot parameter
+/// (`knots[degree] <= t0 < t1 <= knots[n]`). Frame vectors `x, y, z` are unit for conics;
+/// for a line `x` is the direction with length = the line's length and `y, z` are zero.
+///
+/// For a NURBS the frame is zero and so are the radii; for a conic or a line `degree` is 0
+/// and `knots`, `poles` are empty. `knots.count == poles.count + degree + 1`; `weights` is
+/// one per pole, or nil for a non-rational (plain B-spline) curve, a conic or a line.
+public struct Curve: Equatable, CustomStringConvertible {
+    public let kind: String
+    public let origin: SIMD3<Double>
+    public let x: SIMD3<Double>
+    public let y: SIMD3<Double>
+    public let z: SIMD3<Double>
+    public let radius: Double
+    public let radius2: Double
+    public let t0: Double
+    public let t1: Double
+    public let degree: Int
+    /// The knot vector.
+    public let knots: [Double]
+    /// The control points.
+    public let poles: [SIMD3<Double>]
+    /// One weight per pole, or nil for a non-rational curve.
+    public let weights: [Double]?
+
+    init(_ raw: CadaclysmBlacksmithCurve) {
+        let p = { (q: CadaclysmBlacksmithPoint) in SIMD3(q.x, q.y, q.z) }
+        let doubles = { (at: UnsafePointer<Double>?, n: Int) -> [Double] in
+            guard let at, n > 0 else { return [] }
+            return Array(UnsafeBufferPointer(start: at, count: n))
+        }
+        kind = text(raw.kind)
+        origin = p(raw.origin)
+        x = p(raw.x)
+        y = p(raw.y)
+        z = p(raw.z)
+        radius = raw.radius
+        radius2 = raw.radius2
+        t0 = raw.t0
+        t1 = raw.t1
+        degree = Int(raw.degree)
+        knots = doubles(raw.knots, Int(raw.knot_count))
+        let flat = doubles(raw.poles, 3 * Int(raw.pole_count))
+        poles = stride(from: 0, to: flat.count, by: 3).map { SIMD3(flat[$0], flat[$0 + 1], flat[$0 + 2]) }
+        weights = raw.weights == nil ? nil : doubles(raw.weights, Int(raw.pole_count))
+    }
+
+    public var description: String {
+        kind == "nurbs"
+            ? "Curve('nurbs', degree=\(degree), poles=\(poles.count), rational=\(weights != nil), t0=\(t0), t1=\(t1))"
+            : "Curve('\(kind)', origin=(\(origin.x), \(origin.y), \(origin.z)), radius=\(radius), t0=\(t0), t1=\(t1))"
+    }
+}
+
 /// One edge of a solid, as plain data: its index (what `Solid.fillet` takes), the curve
-/// kind, the faces meeting on it, and its segments' ends.
+/// kind, the faces meeting on it, its segments' ends, and its exact `Curve`.
 public struct Edge: CustomStringConvertible {
     /// Its index -- what `Solid.fillet` and `Solid.chamfer` take.
     public let index: Int
@@ -1525,12 +1810,15 @@ public struct Edge: CustomStringConvertible {
     public let faces: [Int]
     /// The two ends of each piece of the edge.
     public let segments: [(start: SIMD3<Double>, end: SIMD3<Double>)]
+    /// The edge's exact curve, or nil for an edge with none (kind `"other"`).
+    public let curve: Curve?
 
-    public init(_ index: Int, _ kind: String, _ faces: [Int], _ segments: [(start: SIMD3<Double>, end: SIMD3<Double>)]) {
+    public init(_ index: Int, _ kind: String, _ faces: [Int], _ segments: [(start: SIMD3<Double>, end: SIMD3<Double>)], _ curve: Curve? = nil) {
         self.index = index
         self.kind = kind
         self.faces = faces
         self.segments = segments
+        self.curve = curve
     }
 
     /// Whether the edge is straight.
@@ -1587,6 +1875,78 @@ public struct Manifold: Equatable, CustomStringConvertible {
         "Manifold(faces=\(faces), edges=\(edges), vertices=\(vertices), boundary_edges=\(boundaryEdges), "
             + "non_manifold_edges=\(nonManifoldEdges), non_manifold_vertices=\(nonManifoldVertices), "
             + "is_manifold=\(isManifold), is_closed=\(isClosed))"
+    }
+}
+
+/// Where a hit lands on one side: a profile's `loopIndex` (0 the boundary or the open chain,
+/// then the holes in the order they were added), `segment`, and `t` from 0 to 1 along it,
+/// with `face` NONE (`UInt32.max`) -- or a solid's `face` at (`u`, `v`), with the loop and
+/// segment NONE.
+public struct Spot: Equatable, CustomStringConvertible {
+    /// The loop: 0 the boundary or the open chain, then the holes in the order they were added.
+    public let loopIndex: UInt32
+    /// The segment of that loop, in drawing order.
+    public let segment: UInt32
+    /// How far along the segment, 0 at its start to 1 at its end.
+    public let t: Double
+    /// The face, on a solid; NONE on a profile.
+    public let face: UInt32
+    /// The face's first surface parameter; 0 on a profile.
+    public let u: Double
+    /// The face's second surface parameter; 0 on a profile.
+    public let v: Double
+
+    init(_ raw: CadaclysmBlacksmithSpot) {
+        loopIndex = raw.loop_index
+        segment = raw.segment
+        t = raw.t
+        face = raw.face
+        u = raw.u
+        v = raw.v
+    }
+
+    public var description: String {
+        "Spot(loop_index=\(loopIndex), segment=\(segment), t=\(t), face=\(face), u=\(u), v=\(v))"
+    }
+}
+
+/// One place two curves meet, copied out (`Profile.hits`). A point (`run` false): `start`
+/// equals `end`, and `touch` is true where the curves are tangent rather than crossing. A run
+/// (`run` true): they coincide from `start` to `end`. `aStart`/`aEnd` are where on the first
+/// curve, `bStart`/`bEnd` where on the second. A point at the join of two segments is
+/// reported once, on either: as segment k at `t` 1 or as segment k + 1 at `t` 0.
+public struct Hit: Equatable, CustomStringConvertible {
+    /// Whether the curves coincide along a stretch rather than meeting at a point.
+    public let run: Bool
+    /// For a point: the curves are tangent there rather than crossing.
+    public let touch: Bool
+    /// Where it starts (`z` is 0 for two profiles).
+    public let start: SIMD3<Double>
+    /// Where it ends: `start` again for a point.
+    public let end: SIMD3<Double>
+    /// Where it starts on the first curve.
+    public let aStart: Spot
+    /// Where it ends on the first curve.
+    public let aEnd: Spot
+    /// Where it starts on the second curve.
+    public let bStart: Spot
+    /// Where it ends on the second curve.
+    public let bEnd: Spot
+
+    init(_ raw: CadaclysmBlacksmithHit) {
+        run = raw.run
+        touch = raw.touch
+        start = SIMD3(raw.start.x, raw.start.y, raw.start.z)
+        end = SIMD3(raw.end.x, raw.end.y, raw.end.z)
+        aStart = Spot(raw.a_start)
+        aEnd = Spot(raw.a_end)
+        bStart = Spot(raw.b_start)
+        bEnd = Spot(raw.b_end)
+    }
+
+    public var description: String {
+        "Hit(run=\(run), touch=\(touch), start=(\(start.x), \(start.y), \(start.z)), "
+            + "end=(\(end.x), \(end.y), \(end.z)))"
     }
 }
 
