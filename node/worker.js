@@ -116,6 +116,13 @@ if (isMainThread) {
     // convert here.
     realizeAll({ address }) { return mod._lib().realize_all(address); },
     mesh({ address, node }) { return plain(mod._meshOf(mod._lib().node_mesh(address, node))); },
+    // `mesh64` copies the document's own f64 mesh out (the exact values `mesh`'s
+    // narrowed floats come from), and is null where the node has nothing to mesh
+    // (`Node.mesh64`'s own check on `positions`).
+    mesh64({ address, node }) {
+      const raw = mod._lib().node_mesh64(address, node);
+      return raw.positions == null ? null : plain(mod._mesh64Of(raw));
+    },
     meshLod({ address, node, level }) { return plain(mod._meshOf(mod._lib().node_mesh_lod(address, node, level))); },
     saveMesh({ address, node, path: p, format }) {
       if (!mod._lib().node_save_mesh(address, node, p, format)) throw new mod.CadaclysmError(mod._lastError() || `could not write ${p}`);
@@ -176,6 +183,18 @@ if (isMainThread) {
         vertexCount: n, indexCount: m.index_count,
       };
     },
+    // `mesh64`: the same tessellation's own double positions/normals, from the same cache.
+    mesh64({ a, tolerance }) {
+      const m = mod._lib().mesh64(a, tolerance);
+      if (m.positions == null) throw new mod.BuildError(mod._lastError() || 'mesh64');
+      const n = m.vertex_count;
+      return {
+        positions: mod._doublesAt(m.positions, n * 3) ?? new Float64Array(0),
+        normals: mod._doublesAt(m.normals, n * 3) ?? new Float64Array(0),
+        indices: mod._uint32s(m.indices, m.index_count) ?? new Uint32Array(0),
+        vertexCount: n, indexCount: m.index_count,
+      };
+    },
     step({ handles, schemaText, unit }) {
       const text = mod._lib().step(handles, handles.length, schemaText, unit);
       if (text == null) throw new mod.BuildError(mod._lastError() || 'step');
@@ -186,8 +205,12 @@ if (isMainThread) {
       if (text == null) throw new mod.BuildError(mod._lastError() || 'sat_text');
       return text;
     },
-    svg({ handles, options }) {
-      const text = mod._lib().svg_text(handles, handles.length, options);
+    // `handles` (solids) and `profileHandles` are each BigInt addresses; either may be
+    // left out (a bare `Solid.svgAsync`, a bare `Profile.svgAsync`). Always
+    // `drawing_svg_text`, same as the sync `writeSvgText` -- it refuses in the same words
+    // `svg_text` always did.
+    svg({ handles = [], profileHandles = [], options }) {
+      const text = mod._lib().drawing_svg_text(handles, handles.length, profileHandles, profileHandles.length, options);
       if (text == null) throw new mod.BuildError(mod._lastError() || 'svg_text');
       return text;
     },

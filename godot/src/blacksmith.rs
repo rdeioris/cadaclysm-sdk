@@ -348,6 +348,38 @@ fn solids_svg_text(solids: &AnyArray, options: &sdk::SvgOptions) -> Option<Strin
     svg_text_of(&held, options)
 }
 
+/// Several solids and profiles' SVG text, any mix -- the SDK's own `svg_text_of`,
+/// which calls the kernel's widened drawing pair (never the solids-only one, so a
+/// mixed drawing and a solids-only one drawn this way refuse in the same words).
+fn drawing_svg_text_of(solids: &[&bs::Solid], profiles: &[&bs::Profile], options: &sdk::SvgOptions) -> Option<String> {
+    ok(bs::svg_text_of(solids, profiles, options))
+}
+
+/// Several solids and profiles' SVG text, any mix: every solid bound for the length of
+/// the call, a profile carrying no such lock. The widened pair beside `solids_svg_text`.
+fn drawables_svg_text(solids: &AnyArray, profiles: &AnyArray, options: &sdk::SvgOptions) -> Option<String> {
+    let solid_list = object_list::<CadaclysmSolid>(solids, "write_svg")?;
+    let solid_guards: Vec<GdRef<CadaclysmSolid>> = solid_list.iter().map(|s| s.bind()).collect();
+    let solid_held: Vec<&bs::Solid> = solid_guards.iter().map(|g| g.held()).collect::<Option<_>>()?;
+    let profile_list = object_list::<CadaclysmProfile>(profiles, "write_svg")?;
+    let profile_guards: Vec<GdRef<CadaclysmProfile>> = profile_list.iter().map(|p| p.bind()).collect();
+    let profile_refs: Vec<&bs::Profile> = profile_guards.iter().map(|g| &g.profile).collect();
+    drawing_svg_text_of(&solid_held, &profile_refs, options)
+}
+
+/// `options`, with `view` defaulted to `"top"` where the caller left it out -- a
+/// profile lies in `z = 0`, so its own plane already is the page, unlike a solid's,
+/// which has no plane of its own to prefer and keeps `reader::svg_options`'s own
+/// `"iso"`. A shallow copy: the caller's own dictionary (GDScript's) is never mutated,
+/// and a `"view"` the caller did set (even `"iso"`) is kept as given.
+fn profile_svg_options(options: &VarDictionary) -> VarDictionary {
+    let mut merged = options.duplicate_shallow();
+    if !merged.contains_key("view") {
+        merged.set("view", "top");
+    }
+    merged
+}
+
 // ---- CadaclysmBlacksmith --------------------------------------------------------------------
 
 /// The kernel library itself: its version, its license, and STEP for several solids at
@@ -527,6 +559,39 @@ impl CadaclysmBlacksmith {
     fn write_svg_with(path: GString, solids: AnyArray, options: VarDictionary) -> bool {
         let Some(opts) = reader::svg_options(&options) else { return false };
         match solids_svg_text(&solids, &opts) {
+            Some(text) => write_text(&path, text),
+            None => false,
+        }
+    }
+
+    /// Several solids and profiles' wireframes, any mix, as one SVG's text, each its
+    /// own `<g>` -- the pair beside `write_svg_text` a drawing takes both kinds
+    /// through. `""` on a refused option.
+    #[func]
+    fn write_drawing_svg_text(solids: AnyArray, profiles: AnyArray) -> GString {
+        Self::write_drawing_svg_text_with(solids, profiles, VarDictionary::new())
+    }
+
+    /// `write_drawing_svg_text`, with options: see `CadaclysmScene.svg_text_with` for
+    /// every key -- `up` left out is always `"z"` here, as `write_svg_text_with`.
+    #[func]
+    fn write_drawing_svg_text_with(solids: AnyArray, profiles: AnyArray, options: VarDictionary) -> GString {
+        let Some(opts) = reader::svg_options(&options) else { return GString::new() };
+        gs(drawables_svg_text(&solids, &profiles, &opts).unwrap_or_default())
+    }
+
+    /// Several solids and profiles, any mix, written to one SVG file at `path`; see
+    /// `write_drawing_svg_text`.
+    #[func]
+    fn write_drawing_svg(path: GString, solids: AnyArray, profiles: AnyArray) -> bool {
+        Self::write_drawing_svg_with(path, solids, profiles, VarDictionary::new())
+    }
+
+    /// `write_drawing_svg`, with options: see `write_drawing_svg_text_with`.
+    #[func]
+    fn write_drawing_svg_with(path: GString, solids: AnyArray, profiles: AnyArray, options: VarDictionary) -> bool {
+        let Some(opts) = reader::svg_options(&options) else { return false };
+        match drawables_svg_text(&solids, &profiles, &opts) {
             Some(text) => write_text(&path, text),
             None => false,
         }
@@ -763,6 +828,15 @@ impl CadaclysmProfile {
         Self::made(bs::Profile::regular_polygon(v2(&centre, "regular_polygon: centre")?, radius, sides, angle))
     }
 
+    /// A star of `points` tips (at least 3) on the circle of `outer` about `centre`, its
+    /// inner corners on the circle of `inner` (positive, under `outer`), alternating: the
+    /// first tip at `angle` radians from the sketch's x axis, the rest counter-clockwise.
+    #[func]
+    fn star(centre: Variant, outer: f64, inner: f64, points: i64, #[opt(default = 0.0)] angle: f64) -> Option<Gd<CadaclysmProfile>> {
+        let points = u32::try_from(points).unwrap_or(0);
+        Self::made(bs::Profile::star(v2(&centre, "star: centre")?, outer, inner, points, angle))
+    }
+
     /// A spline of `degree` through the control polygon `points`, with `weights` one per
     /// point (empty: none). Open, it starts on the first point and ends on the last;
     /// `closed`, it is periodic -- a closed profile.
@@ -782,6 +856,17 @@ impl CadaclysmProfile {
     #[func]
     fn path(start: Variant) -> Option<Gd<CadaclysmPath>> {
         CadaclysmPath::start(start)
+    }
+
+    /// Start drawing on the arc of the parabola with `vertex`, axis direction `axis` and
+    /// focal length `focal`, over the across-axis coordinates `from`..`to`: the path
+    /// begins at the arc's first point and holds the arc -- a reflector from rim to rim,
+    /// `CadaclysmProfile.parabola([0, 0], [0, 1], 20, -50, 50)` a dish 100 wide opening
+    /// up.
+    #[func]
+    fn parabola(vertex: Variant, axis: Variant, focal: f64, from: f64, to: f64) -> Option<Gd<CadaclysmPath>> {
+        let (vertex, axis) = (v2(&vertex, "parabola: vertex")?, v2(&axis, "parabola: axis")?);
+        CadaclysmPath::made(bs::Path::parabola(vertex, axis, focal, from, to))
     }
 
     /// Open profiles joined end to end into one, in any order and either way round, each
@@ -854,6 +939,35 @@ impl CadaclysmProfile {
         shared.unwrap_or_default().into_iter().map(|profile| Gd::from_object(CadaclysmProfile { profile })).collect()
     }
 
+    /// `text` set in a font, one profile per closed shape -- a letter with its counters
+    /// as holes (`o` one, `8` two; `i` is two profiles) -- on the sketch plane, the
+    /// baseline along x from the origin, each outline counter-clockwise and its holes
+    /// clockwise, a curved side the font's own cubic Bezier kept exactly. `size` is
+    /// roughly the height of a capital. `font` is a family (optionally
+    /// `"Liberation Sans:style=Bold"`), a font file's path, or empty for the bundled
+    /// Liberation Sans Regular -- which also serves when the family is not found;
+    /// `font_bytes` a font file's bytes, used instead of `font` when not empty. `halign`
+    /// is "left", "center" or "right"; `valign` "baseline", "bottom", "center" or "top";
+    /// `spacing` multiplies the gap between glyphs; `direction` "ltr" or "rtl". Empty
+    /// text is an empty array; a refusal is an empty array with the error logged.
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn text(
+        text: GString,
+        #[opt(default = 10.0)] size: f64,
+        #[opt(default = "")] font: GString,
+        #[opt(default = "left")] halign: GString,
+        #[opt(default = "baseline")] valign: GString,
+        #[opt(default = 1.0)] spacing: f64,
+        #[opt(default = "ltr")] direction: GString,
+        #[opt(default = &PackedByteArray::new())] font_bytes: PackedByteArray,
+    ) -> Array<Gd<CadaclysmProfile>> {
+        let bytes = font_bytes.to_vec();
+        let set = ok(bs::Profile::text(&text.to_string(), size, &font.to_string(), &halign.to_string(), &valign.to_string(),
+                                       spacing, &direction.to_string(), if bytes.is_empty() { None } else { Some(&bytes[..]) }));
+        set.unwrap_or_default().into_iter().map(|profile| Gd::from_object(CadaclysmProfile { profile })).collect()
+    }
+
     /// This profile with its corners rounded by `radius` where two straight segments
     /// meet. `corners` empty rounds every such corner, the holes' too; a list picks
     /// corners of the boundary alone (corner `k` is where segment `k` ends). `open`
@@ -867,6 +981,40 @@ impl CadaclysmProfile {
     ) -> Option<Gd<CadaclysmProfile>> {
         let picked = if corners.is_empty() { None } else { Some(packed_indices(&corners, "round: corner")?) };
         Self::made(self.profile.round(radius, picked.as_deref(), open))
+    }
+
+    /// This profile's own loops as SVG text, from directly above by default -- a
+    /// profile lies in `z = 0`, so its own plane already is the page, unlike
+    /// `CadaclysmSolid.svg_text` (`"iso"`), which has no plane of its own to prefer.
+    /// `""` on a refused option.
+    #[func]
+    fn svg_text(&self) -> GString {
+        self.svg_text_with(VarDictionary::new())
+    }
+
+    /// `svg_text`, with options: see `CadaclysmScene.svg_text_with` for every key --
+    /// `view` left out of `options` is `"top"` here, not `svg_options`'s own `"iso"`.
+    #[func]
+    fn svg_text_with(&self, options: VarDictionary) -> GString {
+        let Some(opts) = reader::svg_options(&profile_svg_options(&options)) else { return GString::new() };
+        gs(drawing_svg_text_of(&[], &[&self.profile], &opts).unwrap_or_default())
+    }
+
+    /// This profile written to an SVG file at `path`, by the library itself; see
+    /// `svg_text` for the `top` default.
+    #[func]
+    fn svg(&self, path: GString) -> bool {
+        self.svg_with(path, VarDictionary::new())
+    }
+
+    /// `svg`, with options: see `svg_text_with`.
+    #[func]
+    fn svg_with(&self, path: GString, options: VarDictionary) -> bool {
+        let Some(opts) = reader::svg_options(&profile_svg_options(&options)) else { return false };
+        match drawing_svg_text_of(&[], &[&self.profile], &opts) {
+            Some(text) => write_text(&path, text),
+            None => false,
+        }
     }
 }
 
@@ -889,7 +1037,11 @@ pub struct CadaclysmPath {
 
 impl CadaclysmPath {
     fn start(start: Variant) -> Option<Gd<CadaclysmPath>> {
-        let path = ok(bs::Path::begin(v2(&start, "path: start")?))?;
+        Self::made(bs::Path::begin(v2(&start, "path: start")?))
+    }
+
+    fn made(result: sdk::Result<bs::Path>) -> Option<Gd<CadaclysmPath>> {
+        let path = ok(result)?;
         Some(Gd::from_init_fn(|base| CadaclysmPath { base, path: Some(path) }))
     }
 
@@ -930,6 +1082,49 @@ impl CadaclysmPath {
     fn bezier_to(&mut self, c1: Variant, c2: Variant, to: Variant) -> Option<Gd<CadaclysmPath>> {
         let (c1, c2, to) = (v2(&c1, "bezier_to: c1")?, v2(&c2, "bezier_to: c2")?, v2(&to, "bezier_to: to")?);
         self.step(|p| p.bezier_to(c1, c2, to))
+    }
+
+    /// A conic arc to (`x`, `y`) through the control point `control` with middle weight
+    /// `weight`: under 1 an elliptical arc, 1 a parabola, over 1 a hyperbola -- the
+    /// rational quadratic Bézier, kept exact.
+    #[func]
+    fn conic_to(&mut self, x: f64, y: f64, control: Variant, weight: f64) -> Option<Gd<CadaclysmPath>> {
+        let control = v2(&control, "conic_to: control")?;
+        self.step(|p| p.conic_to(x, y, control, weight))
+    }
+
+    /// A parabolic arc to (`x`, `y`) whose end tangents meet at `control`: `conic_to`
+    /// with weight 1.
+    #[func]
+    fn parabola_to(&mut self, x: f64, y: f64, control: Variant) -> Option<Gd<CadaclysmPath>> {
+        let control = v2(&control, "parabola_to: control")?;
+        self.step(|p| p.parabola_to(x, y, control))
+    }
+
+    /// A hyperbolic arc to (`x`, `y`) through `control` with middle `weight` over 1.
+    #[func]
+    fn hyperbola_to(&mut self, x: f64, y: f64, control: Variant, weight: f64) -> Option<Gd<CadaclysmPath>> {
+        let control = v2(&control, "hyperbola_to: control")?;
+        self.step(|p| p.hyperbola_to(x, y, control, weight))
+    }
+
+    /// The parabolic arc to (`x`, `y`) with `vertex`: its axis and focal length solved
+    /// from the two ends. Fails when no parabola with that vertex passes through both.
+    #[func]
+    fn parabola_by_vertex(&mut self, x: f64, y: f64, vertex: Variant) -> Option<Gd<CadaclysmPath>> {
+        let vertex = v2(&vertex, "parabola_by_vertex: vertex")?;
+        self.step(|p| p.parabola_by_vertex(x, y, vertex))
+    }
+
+    /// The parabolic arc to (`x`, `y`) with `focus`: of the two through the ends, the
+    /// one whose vertex lies between the ends' projections, then the one whose arc cups
+    /// the focus (the focus between the arc and its chord), then the more symmetric; with
+    /// the focus beyond the chord that is the arch over the ends, not the shallow dish --
+    /// draw that one with `CadaclysmProfile.parabola`.
+    #[func]
+    fn parabola_by_focus(&mut self, x: f64, y: f64, focus: Variant) -> Option<Gd<CadaclysmPath>> {
+        let focus = v2(&focus, "parabola_by_focus: focus")?;
+        self.step(|p| p.parabola_by_focus(x, y, focus))
     }
 
     /// A NURBS piece: `control` every control point after the current one, the endpoint
@@ -1141,7 +1336,7 @@ impl CadaclysmEdge {
 // ---- CadaclysmCurve ----------------------------------------------------------------------
 
 /// One edge's exact curve, as plain data copied out (`CadaclysmEdge.curve`): `kind` is
-/// `"line"`, `"circle"`, `"ellipse"` or `"nurbs"`.
+/// `"line"`, `"circle"`, `"ellipse"`, `"parabola"`, `"hyperbola"` or `"nurbs"`.
 ///
 /// `t0..t1` is the edge's parameter range on its own curve: a line's fraction (0..1 over
 /// `origin -> origin + x`, where `x` is the full `to - from`, NOT unit -- so
@@ -1308,6 +1503,313 @@ impl CadaclysmCurve {
     #[func]
     fn get_is_rational(&self) -> bool {
         self.curve.weights.is_some()
+    }
+}
+
+// ---- CadaclysmSolidHits, CadaclysmPiece -------------------------------------------------------
+
+/// What `CadaclysmSolid.hits` found, copied out: `hits` (`CadaclysmHit`s ordered along the
+/// profile; `a_start`/`a_end` on the profile, `b_start`/`b_end` on the solid's faces: a
+/// `face` at (`u`, `v`)) and `pieces` (`CadaclysmPiece`s, empty for an open body).
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmSolidHits {
+    found: Vec<bs::Hit>,
+    cut: Vec<Gd<CadaclysmPiece>>,
+    #[var(get = get_hits, no_set)]
+    hits: PhantomVar<Array<Gd<CadaclysmHit>>>,
+    #[var(get = get_pieces, no_set)]
+    pieces: PhantomVar<Array<Gd<CadaclysmPiece>>>,
+}
+
+impl CadaclysmSolidHits {
+    fn wrap(found: bs::SolidHits) -> Gd<CadaclysmSolidHits> {
+        let cut = found.pieces.into_iter().map(CadaclysmPiece::wrap).collect();
+        Gd::from_object(CadaclysmSolidHits { found: found.hits, cut, hits: PhantomVar::default(), pieces: PhantomVar::default() })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmSolidHits {
+    fn to_string(&self) -> GString {
+        gs(format!("SolidHits(hits={}, pieces={})", self.found.len(), self.cut.len()))
+    }
+}
+
+#[godot_api]
+impl CadaclysmSolidHits {
+    #[func]
+    fn get_hits(&self) -> Array<Gd<CadaclysmHit>> {
+        self.found.iter().copied().map(CadaclysmHit::wrap).collect()
+    }
+
+    #[func]
+    fn get_pieces(&self) -> Array<Gd<CadaclysmPiece>> {
+        self.cut.iter().cloned().collect()
+    }
+}
+
+/// One stretch of a profile loop between two cuts (`CadaclysmSolidHits.pieces`): `inside`
+/// (by its middle's winding number over the body; a piece lying on the surface is inside),
+/// `start`/`end` (profile `CadaclysmSpot`s -- a segment join reads as the next segment's
+/// start (k + 1, 0), an open chain runs from (0, 0) to (n - 1, 1); a loop no hit cuts is
+/// one closed piece) and `profile`, the piece's own open chain (what
+/// `CadaclysmSweepPath.along` with `open` sweeps).
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmPiece {
+    is_inside: bool,
+    from: bs::Spot,
+    to: bs::Spot,
+    own: Gd<CadaclysmProfile>,
+    #[var(get = get_inside, no_set)]
+    inside: PhantomVar<bool>,
+    #[var(get = get_start, no_set)]
+    start: PhantomVar<Gd<CadaclysmSpot>>,
+    #[var(get = get_end, no_set)]
+    end: PhantomVar<Gd<CadaclysmSpot>>,
+    #[var(get = get_profile, no_set)]
+    profile: PhantomVar<Gd<CadaclysmProfile>>,
+}
+
+impl CadaclysmPiece {
+    fn wrap(piece: bs::Piece) -> Gd<CadaclysmPiece> {
+        Gd::from_object(CadaclysmPiece {
+            is_inside: piece.inside,
+            from: piece.start,
+            to: piece.end,
+            own: Gd::from_object(CadaclysmProfile { profile: piece.profile }),
+            inside: PhantomVar::default(),
+            start: PhantomVar::default(),
+            end: PhantomVar::default(),
+            profile: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmPiece {
+    fn to_string(&self) -> GString {
+        gs(format!("Piece(inside={}, start={}, end={})", self.is_inside, CadaclysmSpot::wrap(self.from), CadaclysmSpot::wrap(self.to)))
+    }
+}
+
+#[godot_api]
+impl CadaclysmPiece {
+    #[func]
+    fn get_inside(&self) -> bool {
+        self.is_inside
+    }
+
+    #[func]
+    fn get_start(&self) -> Gd<CadaclysmSpot> {
+        CadaclysmSpot::wrap(self.from)
+    }
+
+    #[func]
+    fn get_end(&self) -> Gd<CadaclysmSpot> {
+        CadaclysmSpot::wrap(self.to)
+    }
+
+    #[func]
+    fn get_profile(&self) -> Gd<CadaclysmProfile> {
+        self.own.clone()
+    }
+}
+
+// ---- CadaclysmIntersection, CadaclysmChain, CadaclysmOverlap ---------------------------------
+
+/// What `CadaclysmSolid.intersect` found, copied out: `chains` (`CadaclysmChain`, one per
+/// face pair per branch) and `overlaps` (`CadaclysmOverlap`, one per coincident face
+/// pair). Both empty where the solids do not meet.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmIntersection {
+    found: bs::Intersection,
+    #[var(get = get_chains, no_set)]
+    chains: PhantomVar<Array<Gd<CadaclysmChain>>>,
+    #[var(get = get_overlaps, no_set)]
+    overlaps: PhantomVar<Array<Gd<CadaclysmOverlap>>>,
+}
+
+impl CadaclysmIntersection {
+    fn wrap(found: bs::Intersection) -> Gd<CadaclysmIntersection> {
+        Gd::from_object(CadaclysmIntersection { found, chains: PhantomVar::default(), overlaps: PhantomVar::default() })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmIntersection {
+    fn to_string(&self) -> GString {
+        gs(format!("Intersection(chains={}, overlaps={})", self.found.chains.len(), self.found.overlaps.len()))
+    }
+}
+
+#[godot_api]
+impl CadaclysmIntersection {
+    #[func]
+    fn get_chains(&self) -> Array<Gd<CadaclysmChain>> {
+        self.found.chains.iter().cloned().map(CadaclysmChain::wrap).collect()
+    }
+
+    #[func]
+    fn get_overlaps(&self) -> Array<Gd<CadaclysmOverlap>> {
+        self.found.overlaps.iter().cloned().map(CadaclysmOverlap::wrap).collect()
+    }
+}
+
+/// One branch of one face pair's crossing (`CadaclysmIntersection.chains`): `points`
+/// (`Vector3`s in walk order; a closed chain does not repeat its first point;
+/// `raw_points` keeps the doubles), `closed`, the faces (`face_a` in the first solid,
+/// `face_b` in the second), `tangent` (the surfaces near-tangent along it, or the snap
+/// unsettled -- the points their best estimate) and `curve`, its exact `CadaclysmCurve`
+/// over the chain's own `t0..t1`, or `null` where the kernel found none. A chain may stop
+/// at a face boundary or a closed curve's seam and continue as another: join chains by
+/// matching ends.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmChain {
+    chain: bs::Chain,
+    #[var(get = get_points, no_set)]
+    points: PhantomVar<PackedVector3Array>,
+    #[var(get = get_raw_points, no_set)]
+    raw_points: PhantomVar<PackedFloat64Array>,
+    #[var(get = get_closed, no_set)]
+    closed: PhantomVar<bool>,
+    #[var(get = get_face_a, no_set)]
+    face_a: PhantomVar<i64>,
+    #[var(get = get_face_b, no_set)]
+    face_b: PhantomVar<i64>,
+    #[var(get = get_tangent, no_set)]
+    tangent: PhantomVar<bool>,
+    #[var(get = get_curve, no_set)]
+    curve: PhantomVar<Variant>,
+}
+
+impl CadaclysmChain {
+    fn wrap(chain: bs::Chain) -> Gd<CadaclysmChain> {
+        Gd::from_object(CadaclysmChain {
+            chain,
+            points: PhantomVar::default(),
+            raw_points: PhantomVar::default(),
+            closed: PhantomVar::default(),
+            face_a: PhantomVar::default(),
+            face_b: PhantomVar::default(),
+            tangent: PhantomVar::default(),
+            curve: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmChain {
+    fn to_string(&self) -> GString {
+        let c = &self.chain;
+        let curve = c.curve.as_ref().map_or_else(|| "null".to_string(), |curve| CadaclysmCurve::wrap(curve.clone()).to_string());
+        gs(format!("Chain(points={}, closed={}, faces=({}, {}), tangent={}, curve={curve})", c.points.len(), c.closed, c.faces.0, c.faces.1, c.tangent))
+    }
+}
+
+#[godot_api]
+impl CadaclysmChain {
+    #[func]
+    fn get_points(&self) -> PackedVector3Array {
+        self.chain.points.iter().map(|&p| vector3(p)).collect()
+    }
+
+    /// The same, as doubles: three a point.
+    #[func]
+    fn get_raw_points(&self) -> PackedFloat64Array {
+        self.chain.points.iter().flatten().copied().collect()
+    }
+
+    #[func]
+    fn get_closed(&self) -> bool {
+        self.chain.closed
+    }
+
+    #[func]
+    fn get_face_a(&self) -> i64 {
+        self.chain.faces.0.into()
+    }
+
+    #[func]
+    fn get_face_b(&self) -> i64 {
+        self.chain.faces.1.into()
+    }
+
+    #[func]
+    fn get_tangent(&self) -> bool {
+        self.chain.tangent
+    }
+
+    /// The chain's exact curve as a `CadaclysmCurve`, or `null` for a chain with none.
+    #[func]
+    fn get_curve(&self) -> Variant {
+        self.chain.curve.clone().map_or(Variant::nil(), |c| CadaclysmCurve::wrap(c).to_variant())
+    }
+}
+
+/// A face of the first solid and a face of the second that coincide
+/// (`CadaclysmIntersection.overlaps`): the faces (`face_a`, `face_b`) and `loops`, the
+/// shared region's rings as `PackedVector3Array`s (outer first, holes after; each ring
+/// closed without repeating its first point; `raw_loops` keeps the doubles) -- empty for a
+/// partial overlap whose outlines cross.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmOverlap {
+    overlap: bs::Overlap,
+    #[var(get = get_face_a, no_set)]
+    face_a: PhantomVar<i64>,
+    #[var(get = get_face_b, no_set)]
+    face_b: PhantomVar<i64>,
+    #[var(get = get_loops, no_set)]
+    loops: PhantomVar<Array<PackedVector3Array>>,
+    #[var(get = get_raw_loops, no_set)]
+    raw_loops: PhantomVar<Array<PackedFloat64Array>>,
+}
+
+impl CadaclysmOverlap {
+    fn wrap(overlap: bs::Overlap) -> Gd<CadaclysmOverlap> {
+        Gd::from_object(CadaclysmOverlap {
+            overlap,
+            face_a: PhantomVar::default(),
+            face_b: PhantomVar::default(),
+            loops: PhantomVar::default(),
+            raw_loops: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmOverlap {
+    fn to_string(&self) -> GString {
+        let o = &self.overlap;
+        gs(format!("Overlap(faces=({}, {}), loops={})", o.faces.0, o.faces.1, o.loops.len()))
+    }
+}
+
+#[godot_api]
+impl CadaclysmOverlap {
+    #[func]
+    fn get_face_a(&self) -> i64 {
+        self.overlap.faces.0.into()
+    }
+
+    #[func]
+    fn get_face_b(&self) -> i64 {
+        self.overlap.faces.1.into()
+    }
+
+    #[func]
+    fn get_loops(&self) -> Array<PackedVector3Array> {
+        self.overlap.loops.iter().map(|ring| ring.iter().map(|&p| vector3(p)).collect::<PackedVector3Array>()).collect()
+    }
+
+    /// The same, as doubles: three a point.
+    #[func]
+    fn get_raw_loops(&self) -> Array<PackedFloat64Array> {
+        self.overlap.loops.iter().map(|ring| ring.iter().flatten().copied().collect::<PackedFloat64Array>()).collect()
     }
 }
 
@@ -1911,7 +2413,7 @@ impl CadaclysmSolid {
     // -- combining
 
     /// This solid and `other` as one. `merge` then merges the flush faces the join
-    /// leaves (`merge_flush`), as Fusion does.
+    /// leaves (`merge_flush`).
     #[func]
     fn join(&self, other: Gd<CadaclysmSolid>, #[opt(default = 0.05)] tolerance: f64, #[opt(default = false)] merge: bool) -> Option<Gd<CadaclysmSolid>> {
         Self::combined(self.with(&other, |a, b| a.join(b, tolerance)), merge)
@@ -1945,6 +2447,41 @@ impl CadaclysmSolid {
         self.with(&tool, |a, b| a.split_sheet(b, tolerance)).map(CadaclysmSolid::wrap)
     }
 
+    /// Where this solid's faces cross or coincide with `other`'s, at `tolerance`, as a
+    /// `CadaclysmIntersection`: `chains` along the curves the faces meet on and
+    /// `overlaps` where a face pair coincides. Neither solid is changed; either may be an
+    /// open sheet. No crossing is an empty result, never an error. Each chain's points are
+    /// within `tolerance` of both faces' exact surfaces; one chain per face pair per
+    /// branch -- chains are not joined across a face boundary or a closed curve's seam, so
+    /// join them by matching ends. `null` (and the error) for a `tolerance` not positive
+    /// and finite, a solid with no faces, or one that meshes to nothing.
+    #[func]
+    fn intersect(&self, other: Gd<CadaclysmSolid>, #[opt(default = 0.05)] tolerance: f64) -> Option<Gd<CadaclysmIntersection>> {
+        self.with(&other, |a, b| a.intersect(b, tolerance)).map(CadaclysmIntersection::wrap)
+    }
+
+    /// Where `profile`, placed on `frame`, pierces this solid's faces, and the pieces its
+    /// loops cut into, as a `CadaclysmSolidHits`. Neither is changed. A point hit lies
+    /// within `tolerance` of the segment's exact curve and of the face's exact surface,
+    /// inside the face's trim; its profile spot (`a_start`) and face spot (`b_start`: face,
+    /// u, v) evaluate to the point within `tolerance`; `touch` at a graze (the curve's
+    /// tangent within 1e-3, sine, of the tangent plane), false at a crossing; a run is a
+    /// stretch of one segment lying on one face, longer than `tolerance`; hits within
+    /// `tolerance` of each other merge (a segment join reported once, as (k, t = 1); a
+    /// closed loop's closing join reads (0, 0)); every
+    /// point in world space. Pieces only for a closed body -- an open body has none -- in
+    /// loop order, covering every loop exactly: a segment join reads as (k + 1, 0), an open
+    /// chain runs from (0, 0) to (n - 1, 1), a loop no hit cuts is one closed piece, and a
+    /// piece lying on the surface is inside. `null` (and the error) for a `tolerance` not
+    /// positive and finite, a solid with no faces or that meshes to nothing, a profile with
+    /// no segments, or a free-form segment that is not an evaluable NURBS curve.
+    #[func]
+    fn hits(&self, profile: Gd<CadaclysmProfile>, frame: Variant, #[opt(default = 0.05)] tolerance: f64) -> Option<Gd<CadaclysmSolidHits>> {
+        let f = self::frame(&frame, "hits: frame")?;
+        let found = ok(self.held()?.hits(&profile.bind().profile, &f, tolerance))?;
+        Some(CadaclysmSolidHits::wrap(found))
+    }
+
     /// Round `edges` (`CadaclysmEdge`s or their indices) to `radius`.
     #[func]
     fn fillet(&self, edges: Variant, radius: f64, #[opt(default = 1e-6)] tolerance: f64) -> Option<Gd<CadaclysmSolid>> {
@@ -1960,12 +2497,12 @@ impl CadaclysmSolid {
     }
 
     /// Face `face` pushed out by `distance` along its outward normal (in, negative) and
-    /// the flush faces merged, as Fusion and Rhino extrude a face. A face on a cylinder,
+    /// the flush faces merged, as a face extrude does it. A face on a cylinder,
     /// a cone, a sphere or a torus moves out along its normal instead, the flat faces
     /// beside it carried along.
     ///
     /// `face` may be a list of faces (ints or a `PackedInt32Array`), pushed together as
-    /// Fusion's press-pull on a selection: a box's top and a side pushed 5 is the box 5
+    /// a press-pull on a selection: a box's top and a side pushed 5 is the box 5
     /// taller and 5 wider.
     #[func]
     fn push_pull(&self, face: Variant, distance: f64, #[opt(default = 0.05)] tolerance: f64) -> Option<Gd<CadaclysmSolid>> {
@@ -2007,7 +2544,7 @@ impl CadaclysmSolid {
         self.then(|s| s.merge_flush())
     }
 
-    /// The round `face` belongs to, made again at `radius` (Fusion's press-pull on a
+    /// The round `face` belongs to, made again at `radius` (a press-pull on a
     /// fillet face).
     #[func]
     fn refillet(&self, face: i64, radius: f64, #[opt(default = 1e-6)] tolerance: f64) -> Option<Gd<CadaclysmSolid>> {
@@ -2049,7 +2586,7 @@ impl CadaclysmSolid {
         self.then(|s| s.shell(thickness, &open, tolerance))
     }
 
-    /// This sheet made a solid `thickness` thick (Fusion's Thicken): its faces, their
+    /// This sheet made a solid `thickness` thick: its faces, their
     /// twins moved along the faces' normals, and a wall round every open edge.
     #[func]
     fn thicken(&self, thickness: f64, #[opt(default = 1e-6)] tolerance: f64) -> Option<Gd<CadaclysmSolid>> {

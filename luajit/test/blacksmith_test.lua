@@ -2,6 +2,7 @@
 -- ported, plus what only a borrowing binding has to prove -- the stale-view rule,
 -- views keeping their solid alive, and callbacks that raise.
 local bs = require("cadaclysm_blacksmith")
+local ffi = require("ffi")
 
 local XY = { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 }
 local pi = math.pi
@@ -204,6 +205,41 @@ return function(t)
 
     t.raises(function() plate:svg_text({ fov = 200 }) end, "fov")
     t.raises(function() plate:svg(t.tmp("no/such/dir/plate.svg"), { fov = 200 }) end, "fov")
+  end)
+
+  t.test("svg: a profile's own plane, top by default, and a drawing of both kinds", function()
+    local outline = plate_outline()
+    local top_text = outline:svg_text()
+    t.ok(top_text:sub(1, 4) == "<svg", top_text:sub(1, 40))
+    t.ok(top_text:find("<path", 1, true), "no <path in the profile's svg text")
+
+    local path = t.tmp("outline.svg")
+    outline:svg(path)
+    local f = assert(io.open(path, "rb"))
+    t.eq(f:read("*a"):sub(1, 4), "<svg")
+    f:close()
+
+    -- Pinned against an explicit iso call, not just checked non-empty -- a silently-iso
+    -- default would make this equal and the assertion below would fail.
+    local iso_text = outline:svg_text({ view = "iso" })
+    t.ok(top_text ~= iso_text, "profile svg_text did not default to the top view")
+
+    -- The widened writer: any mix of solids and profiles, each its own group id --
+    -- a solids-only call (the test above) still reads exactly as it always did.
+    local plate = bs.Solid.extrude(plate_outline(), XY, 6)
+    local mixed = bs.write_svg_text({ plate, outline })
+    t.ok(mixed:find("<path", 1, true), "no <path in the mixed drawing")
+    t.ok(mixed:find('id="solid-0"', 1, true), "no solid-0 group in the mixed drawing")
+    t.ok(mixed:find('id="profile-0"', 1, true), "no profile-0 group in the mixed drawing")
+
+    local mixed_path = t.tmp("mixed.svg")
+    bs.write_svg(mixed_path, { plate, outline })
+    local mf = assert(io.open(mixed_path, "rb"))
+    t.eq(mf:read("*a"):sub(1, 4), "<svg")
+    mf:close()
+
+    t.raises(function() bs.write_svg_text({ plate, 5 }) end, "svg: only solids and profiles can be drawn")
+    plate:close()
   end)
 
   t.test("step_text resolves schema as none, a built-in name, a path or text", function()
@@ -541,6 +577,103 @@ return function(t)
     end
   end)
 
+  t.test("two crossed pipes intersect on ellipse chains, coaxial pipes overlap on their wall", function()
+    local tol = 1e-3
+    local function off_a(p) return math.abs(math.sqrt(p[1] * p[1] + p[2] * p[2]) - 1) end
+    local function off_b(p) return math.abs(math.sqrt(p[1] * p[1] + (p[3] - 3) * (p[3] - 3)) - 1) end
+    -- Two equal pipes crossing at right angles: `a` up z, `b` along y through a's middle.
+    local a = bs.Solid.cylinder(1, 6)
+    local b = bs.Solid.cylinder(1, 6):rotate({ 0, 0, 3, 1, 0, 0 }, math.pi / 2)
+    local phases = {}
+    local found = a:intersect(b, tol, function(phase) phases[phase] = true end)
+    t.ok(getmetatable(found) == bs.Intersection)
+    t.ok(phases.mesh and phases.cross and phases.snap)
+    t.ok(#found.chains >= 2)
+    t.eq(#found.overlaps, 0)
+    local ellipses = 0
+    for _, c in ipairs(found.chains) do
+      t.ok(getmetatable(c) == bs.Chain)
+      t.ok(type(c.closed) == "boolean" and type(c.tangent) == "boolean")
+      t.ok(c.faces[1] >= 0 and c.faces[1] < a.faces and c.faces[2] >= 0 and c.faces[2] < b.faces)
+      t.ok(#c.points >= 2 and #c.points[1] == 3)
+      for _, p in ipairs(c.points) do t.ok(off_a(p) < 50 * tol and off_b(p) < 50 * tol) end
+      if c.curve ~= nil then
+        t.ok(getmetatable(c.curve) == bs.Curve)
+        t.ok(c.curve.kind == "ellipse" or c.curve.kind == "nurbs")
+        if c.curve.kind == "ellipse" then
+          ellipses = ellipses + 1
+          local cv, tt = c.curve, (c.curve.t0 + c.curve.t1) / 2   -- the curve's own point, mid-chain
+          local q = {}
+          for k = 1, 3 do q[k] = cv.origin[k] + cv.x[k] * cv.radius * math.cos(tt) + cv.y[k] * cv.radius2 * math.sin(tt) end
+          t.ok(off_a(q) < 50 * tol and off_b(q) < 50 * tol)
+        end
+      end
+      t.ok(tostring(c):find("^Chain%(points=") ~= nil)
+    end
+    t.ok(ellipses > 0)
+    -- Apart: nothing, and not an error. A bad tolerance is refused in the kernel's words.
+    local apart = a:intersect(b:translate(10, 0, 0))
+    t.eq(#apart.chains, 0)
+    t.eq(#apart.overlaps, 0)
+    t.raises(function() a:intersect(b, 0.0) end, "intersect: tolerance must be positive and finite")
+    -- Two coaxial pipes overlapping in height share a wall band: rings on that wall.
+    local lower = bs.Solid.cylinder(1, 4)
+    local upper = bs.Solid.cylinder(1, 4):translate(0, 0, 2)
+    local shared = lower:intersect(upper, tol)
+    t.ok(#shared.overlaps >= 1)
+    local o = shared.overlaps[1]
+    t.ok(getmetatable(o) == bs.Overlap)
+    t.ok(o.faces[1] >= 0 and o.faces[1] < lower.faces and o.faces[2] >= 0 and o.faces[2] < upper.faces)
+    t.ok(#o.loops >= 1)
+    for _, ring in ipairs(o.loops) do
+      t.ok(#ring >= 3)
+      for _, p in ipairs(ring) do t.ok(off_a(p) < 50 * tol and p[3] >= 2 - 50 * tol and p[3] <= 4 + 50 * tol) end
+    end
+    t.eq(tostring(o), ("Overlap(faces=(%d, %d), loops=%d)"):format(o.faces[1], o.faces[2], #o.loops))
+  end)
+
+  t.test("a line through a cuboid hits twice and cuts three pieces", function()
+    local box = bs.Solid.cuboid(10, 20, 30)
+    local line = bs.Profile.path({ -20, 0 }):line_to(20, 0):end_open()
+    local phases = {}
+    local found = box:hits(line, XY, 0.05, function(phase) phases[phase] = true end)
+    t.eq(getmetatable(found), bs.SolidHits)
+    t.eq(tostring(found), "SolidHits(hits=2, pieces=3)")
+    t.ok(phases.mesh and phases.pieces)
+    for k, h in ipairs(found.hits) do
+      t.eq(h.run, false)
+      t.eq(h.touch, false)
+      t.near(h.start[1], ({ -5, 5 })[k], 0.05)
+      t.eq(h.a_start.segment, 0)
+      t.eq(h.a_start.face, bs.NONE)
+      t.ok(h.b_start.face ~= bs.NONE and h.b_start.u == h.b_start.u and h.b_start.v == h.b_start.v)
+    end
+    local p = found.pieces
+    t.eq(getmetatable(p[2]), bs.Piece)
+    t.eq(getmetatable(p[2].profile), bs.Profile)
+    t.eq(p[1].inside, false)
+    t.eq(p[2].inside, true)
+    t.eq(p[3].inside, false)
+    t.eq(p[1].start.t, 0)
+    t.eq(p[3]["end"].t, 1)
+    t.eq(p[1]["end"].t, p[2].start.t, "the pieces run head to tail")
+    t.eq(p[2]["end"].t, p[3].start.t, "the pieces run head to tail")
+    local b = bs.Solid.extrude_open(p[2].profile, XY, 1).bounds
+    t.near(b[1][1], -5, 0.05, "the middle piece starts on the box")
+    t.near(b[2][1], 5, 0.05, "the middle piece ends on the box")
+    t.ok(bs.SweepPath.along(p[2].profile, XY, 0.05, true))
+    -- A loop no hit cuts is one piece, outside here; an open sheet has no pieces.
+    local far = box:hits(bs.Profile.circle(1), { 100, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 })
+    t.eq(#far.hits, 0)
+    t.eq(#far.pieces, 1)
+    t.eq(far.pieces[1].inside, false)
+    local sheet = bs.Solid.face(bs.Profile.rect(20, 20), XY)
+    local across = sheet:hits(bs.Profile.path({ 0, -20 }):line_to(0, 20):end_open(), { 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -1, 0 })
+    t.ok(#across.hits >= 1)
+    t.eq(#across.pieces, 0)
+    t.raises(function() box:hits(line, XY, 0.0) end, "solid_profile_hits: tolerance must be positive and finite")
+  end)
+
   t.test("two circles share one lens of arcs", function()
     local a = bs.Profile.circle(5)
     local b = bs.Profile.circle(5):translate(6, 0)
@@ -666,6 +799,42 @@ return function(t)
     t.eq(bs.Solid.extrude_open(bs.Profile.spline(square, 3, { 1, 2, 2, 1 }), XY, 2).faces, 1)
     local e = t.raises(function() bs.Profile.regular_polygon({ 0, 0 }, 10, 2) end)
     t.eq(e.message, "profile_regular_polygon: a polygon has at least 3 sides, not 2")
+    -- A five-pointed star: ten walls and two caps.
+    local star = bs.Solid.extrude(bs.Profile.star({ 0, 0 }, 10, 4, 5), XY, 2)
+    t.eq(star.faces, 12)
+    t.ok(star:is_watertight())
+    e = t.raises(function() bs.Profile.star({ 0, 0 }, 10, 10, 5) end)
+    t.eq(e.message, "profile_star: the inner radius must be under the outer")
+  end)
+
+  t.test("text is set as profiles with curved walls", function()
+    -- An `i` is two shapes and an `o` one; the `o` extrudes to a watertight ring
+    -- whose walls meet the caps on splines: the font's curves are kept.
+    local word = bs.Profile.text("io", 10)
+    t.eq(#word, 3)
+    local ring = bs.Solid.extrude(word[3], XY, 2)
+    t.ok(ring:is_watertight())
+    local spline = false
+    for _, edge in ipairs(ring.edges) do
+      if edge.kind == "nurbs" then spline = true end
+    end
+    t.ok(spline)
+    -- An unknown family sets in the bundled face; the same face as bytes sets the same letter.
+    local unknown = bs.Profile.text("g", 10, "No Such Family Anywhere")
+    t.eq(#unknown, 1)
+    local font = t.fixture("crates/cadaclysm-text/fonts/LiberationSans-Regular.ttf")
+    if font then
+      local file = assert(io.open(font, "rb"))
+      local bytes = file:read("*a")
+      file:close()
+      local by_bytes = bs.Profile.text("g", 10, nil, nil, nil, nil, nil, bytes)
+      t.eq(bs.Solid.extrude(by_bytes[1], XY, 1).faces, bs.Solid.extrude(unknown[1], XY, 1).faces)
+    end
+    t.eq(#bs.Profile.text("", 10), 0)
+    local e = t.raises(function() bs.Profile.text("x", 0) end)
+    t.eq(e.message, "profile_text: the size must be positive and finite")
+    e = t.raises(function() bs.Profile.text("x", 10, nil, nil, nil, nil, nil, "not a font") end)
+    t.eq(e.message, "profile_text: the font bytes are not a font")
   end)
 
   t.test("mesh and edge views borrow the cache and refuse to read once stale", function()
@@ -721,6 +890,56 @@ return function(t)
     t.raises(function() edges[1]:get(0) end, "closed")
     t.eq(#kept, indices.size)
     t.raises(function() box:mesh() end, "solid: closed")
+  end)
+
+  t.test("mesh64/bounds_at64 agree with their float twins, from the same cache and generation", function()
+    local ball = bs.Solid.sphere(5)
+    local p32, n32, i32 = ball:mesh(0.05)
+    local p64, n64, i64 = ball:mesh64(0.05)
+    t.eq(p64.dtype, "float64")
+    t.eq(n64.dtype, "float64")
+    t.eq(i64.dtype, "uint32")
+    t.eq(p64.shape[1], p32.shape[1])
+    t.eq(i64.size, i32.size)
+    -- mesh64's index view is the very same tessellation's, so the same generation.
+    t.eq(i64:get(0), i32:get(0))
+    local x64, y64, z64 = p64:row(0)
+    local x32, y32, z32 = p32:row(0)
+    t.eq(tonumber(ffi.cast("float", x64)), x32)
+    t.eq(tonumber(ffi.cast("float", y64)), y32)
+    t.eq(tonumber(ffi.cast("float", z64)), z32)
+    local lo64, hi64 = ball:bounds_at64(0.05)[1], ball:bounds_at64(0.05)[2]
+    local lo32, hi32 = ball:bounds_at(0.05)[1], ball:bounds_at(0.05)[2]
+    for k = 1, 3 do
+      t.near(lo64[k], lo32[k], 1e-6)
+      t.near(hi64[k], hi32[k], 1e-6)
+    end
+    -- Another tolerance replaces the shared cache: mesh64's views go stale too.
+    ball:mesh(0.5)
+    t.raises(function() return p64:get(0) end, "stale")
+    ball:close()
+    t.raises(function() ball:mesh64() end, "solid: closed")
+  end)
+
+  t.test("mesh64/bounds_at64 keep coordinates far from the origin that mesh()/bounds_at cannot", function()
+    local far = bs.Solid.cuboid(2, 2, 2):translate(1000000.123456789, -2600000.987654321, 450.5)
+    local p64, _, i64 = far:mesh64(0.05)
+    local p32, _, i32 = far:mesh(0.05)
+    t.eq(i64.size, i32.size)
+    t.eq(p64.shape[1], p32.shape[1])
+    local kept_y, saw_unfloatable = nil, false
+    for i = 0, p64.shape[1] - 1 do
+      local _, y = p64:row(i)
+      if math.abs(y - (-2600000.987654321 - 1)) < 1e-6 then kept_y = y end
+      if math.abs(tonumber(ffi.cast("float", y)) - y) > 1e-3 then saw_unfloatable = true end
+    end
+    t.ok(kept_y ~= nil, "mesh64 lost the far low-y corner")
+    t.ok(saw_unfloatable, "mesh64 carries no coordinate float cannot hold, so this test cannot tell mesh64 from mesh widened")
+    local lo64 = far:bounds_at64(0.05)[1]
+    local lo32 = far:bounds_at(0.05)[1]
+    t.near(lo64[2], -2600001.987654321, 1e-6, "bounds_at64 lost the far corner")
+    t.ok(math.abs(lo64[2] - lo32[2]) > 1e-3, "bounds_at64 agrees with bounds_at narrowed to the bit, so it is not exact where float is not")
+    far:close()
   end)
 
   t.test("a view keeps its solid alive under collection pressure", function()
@@ -894,5 +1113,30 @@ return function(t)
     t.raises(function()
       bs.Profile.path({ 0, 0 }):nurbs_to({ { 5, 5 }, { 10, 0 } }, { 0, 0, 0, 1, 1, 1 }, 2, { 1, 1 })
     end, "^nurbs_to: 2 weights for 3 control points %(the current point and 2 given%); give one per point$")
+  end)
+
+  t.test("a reflector is drawn and revolved from a parabola", function()
+    -- A dish 100 wide, focal length 20, opening up: from rim to rim on the parabola,
+    -- closed by the rim line, revolved about the axis -- one NURBS wall, watertight.
+    local dish = bs.Profile.parabola({ 0, 0 }, { 0, 1 }, 20, 0, 50):line_to(0, 31.25):line_to(0, 0):end_()
+    local bowl = bs.Solid.revolve(dish, { { 0, 0, 0 }, { 0, 1, 0 } }, 2 * pi)
+    t.ok(bowl:is_watertight())
+    t.eq(#count_faces(bowl, "revolution") > 0, true)
+    -- The dish's own arc by vertex, closed by a second parabola through the same rim
+    -- points with a focus beyond the chord -- the arch over the top, not the dish again
+    -- (a focus at (0, 20) would rebuild the identical arc and retrace it, per
+    -- parabola_by_focus's own doc comment on this reflector).
+    local p = bs.Profile.path({ -50, 31.25 }):parabola_by_vertex(50, 31.25, { 0, 0 })
+      :parabola_by_focus(-50, 31.25, { 0, 40 }):end_()
+    t.ok(bs.Solid.extrude(p, XY, 2):is_watertight())
+    -- A conic with a quarter circle's weight.
+    local q = bs.Profile.path({ 10, 0 }):conic_to(0, 10, { 10, 10 }, math.cos(pi / 4)):line_to(0, 0):line_to(10, 0):end_()
+    t.eq(bs.Solid.extrude(q, XY, 2).faces, 5)
+    t.raises(function() bs.Profile.path({ 0, 0 }):conic_to(2, 0, { 1, 0 }, 1) end,
+      "^path_conic_to: the control point lies on the chord$")
+    t.raises(function() bs.Profile.path({ 0, 0 }):hyperbola_to(2, 0, { 1, 1 }, 1) end,
+      "^hyperbola_to: the weight must be over 1 %(1 is a parabola, under 1 an ellipse%)$")
+    t.raises(function() bs.Profile.parabola({ 0, 0 }, { 0, 0 }, 1, -1, 1) end,
+      "^path_parabola: the axis direction is zero$")
   end)
 end

@@ -90,9 +90,24 @@ default `up` from, so it is always `"z"`): `Solid::svg_text`/`Solid::svg`, and
   `Scene` and are valid until it is closed or destroyed. `Solid::mesh(tolerance)` and
   `edge_polylines(tolerance)` point into the solid's tessellation cache and are valid
   until the solid is closed or destroyed, or meshed again at a *different* tolerance
-  (`mesh`, `edge_polylines` and `bounds_at` all fill that cache). `Profile::polylines(tolerance)`
+  (`mesh`, `mesh64`, `edge_polylines`, `bounds_at` and `bounds64` all fill that cache, so
+  a `Mesh64` shares `Mesh`'s cache and invalidation). `Profile::polylines(tolerance)`
   points into the profile's own cache the same way: valid until the profile is destroyed
   or asked again at a different tolerance. `.copy()` gives arrays of your own.
+- **`Node::mesh64()` is different: a forget drops it, `mesh()` does not.** The `double`
+  members (`mesh64`, `edge_beziers64`, `curve_beziers64`, `isocurve_beziers64`,
+  `bounds64`, `bounds_placed64`) are the same values as their `float` twins, unnarrowed
+  -- not a second copy. `Bounds64`/`Bounds` (from `bounds64`/`bounds_placed64` and their
+  `float` twins) are plain value structs, copied out on every call, never dangling.
+  `edge_beziers64` and its two siblings are views into the scene exactly like `edges()`:
+  valid until the scene closes. `mesh64()` is not: it lends the document's own mesh
+  cache directly, and `Scene::forget_meshes()` frees that cache -- read none of a
+  `Mesh64`'s arrays after a forget without asking `mesh64()` again, even though
+  `Node::mesh()`'s `float` copy survives the same forget (kept separately, narrowed
+  once and cached). `mesh64()`'s liveness check (in `CADACLYSM_CHECKED` mode) is the
+  same one `mesh()` makes -- that the scene itself is still open -- because a forget is
+  not a close; using a held `Mesh64` after a forget without an intervening close is
+  undefined behaviour, exactly as the C ABI documents for `cadaclysm_node_mesh64`.
 - **Nodes and placements** are cheap handles, valid while their `Scene` is open.
 - Moving a `Scene`, `Solid` or `Profile` keeps every view into it valid.
 

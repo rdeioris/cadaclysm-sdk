@@ -55,9 +55,25 @@
 #define CADACLYSM_BLACKSMITH_SVG_POLYLINES 8
 
 /**
+ * One solid meshed for a solver: opaque, owned, and freed with
+ * [`cadaclysm_blacksmith_fem_mesh_free`].
+ *
+ * Made by [`cadaclysm_blacksmith_fem_mesh`]. Every pointer any accessor here writes is
+ * borrowed from this handle and dies with it -- except the `.msh` text, which is the caller's
+ * (see this module's own documentation).
+ */
+typedef struct CadaclysmBlacksmithFemMesh CadaclysmBlacksmithFemMesh;
+
+/**
  * The hits of one call. Immutable; free with [`cadaclysm_blacksmith_hits_free`].
  */
 typedef struct CadaclysmBlacksmithHits CadaclysmBlacksmithHits;
+
+/**
+ * The crossing of two solids, read one chain or one overlap at a time.
+ * Immutable; free with [`cadaclysm_blacksmith_intersection_free`].
+ */
+typedef struct CadaclysmBlacksmithIntersection CadaclysmBlacksmithIntersection;
 
 /**
  * An outline under construction: a start point and the segments drawn so far.
@@ -74,7 +90,8 @@ typedef struct CadaclysmBlacksmithPath CadaclysmBlacksmithPath;
 typedef struct CadaclysmBlacksmithProfile CadaclysmBlacksmithProfile;
 
 /**
- * Profiles a boolean produced. Immutable; free with [`cadaclysm_blacksmith_profile_list_free`].
+ * Profiles a boolean or a line of text produced. Immutable; free with
+ * [`cadaclysm_blacksmith_profile_list_free`].
  */
 typedef struct CadaclysmBlacksmithProfileList CadaclysmBlacksmithProfileList;
 
@@ -92,6 +109,273 @@ typedef struct CadaclysmBlacksmithSolid CadaclysmBlacksmithSolid;
  * [`cadaclysm_blacksmith_sweep_path_free`].
  */
 typedef struct CadaclysmBlacksmithSweepPath CadaclysmBlacksmithSweepPath;
+
+/**
+ * What a FEM mesh is meshed to.
+ *
+ * Zero it, set `size`, then set what you care about -- [`cadaclysm_blacksmith_fem_options_init`]
+ * does the first two. A **null** pointer where one of these is expected means every default,
+ * so `cadaclysm_blacksmith_fem_mesh(solid, NULL, NULL, NULL, NULL)` is the short way in.
+ *
+ * **`size` is how this struct grows**, and it is the reader library's `CadaclysmOpenOptions`
+ * rule rather than this library's own `CadaclysmBlacksmithSvgOptions` one: set it to
+ * `sizeof(CadaclysmBlacksmithFemOptions)` as **your** header declares it, and the library reads
+ * the fields that fit inside it and defaults the rest. A caller built against an older header
+ * works with a newer library, and one built against a newer header works with an older library
+ * that stops reading at the end of what it knows. The rule that makes that hold, and the only
+ * one: fields are appended, never reordered and never removed. `CadaclysmBlacksmithSvgOptions`
+ * demands an exact match instead, which refuses both of those callers; the spec expects this
+ * struct to grow a quality stage, which is the case the growth rule exists for.
+ */
+typedef struct CadaclysmBlacksmithFemOptions {
+  /**
+   * `sizeof(CadaclysmBlacksmithFemOptions)`. Zero, or anything shorter than the first
+   * published struct, is refused rather than defaulted: that is uninitialised memory rather
+   * than an old caller, and defaulting it would take whatever garbage sits in `tolerance`
+   * for the figure [`cadaclysm_blacksmith_fem_options_init`] would have written there.
+   */
+  size_t size;
+  /**
+   * Chordal tolerance, model units: finite and above zero. **This alone governs how closely
+   * the mesh follows the geometry.** Anything else is refused, with
+   * [`cadaclysm_blacksmith_last_error`](crate::cadaclysm_blacksmith_last_error) saying so.
+   */
+  double tolerance;
+  /**
+   * A size ceiling, model units: finite and zero or more. `0` is no ceiling (curvature
+   * alone). **It bounds the boundary and targets the interior**, which is not the same
+   * thing as a longest element edge: it adds boundary nodes and does not refine boundary
+   * geometry, and `CadaclysmBlacksmithFemMeshView::longest_edge` is what the mesh actually
+   * came to -- the only figure that bounds the whole of it.
+   */
+  double max_size;
+} CadaclysmBlacksmithFemOptions;
+
+/**
+ * Where a long operation reports: `phase` is a short static name ("snap",
+ * "clip", ...), `done` of `total` steps within it, `user` whatever was passed
+ * in. Called on the calling thread, often -- once per vertex in some phases --
+ * so a sink that forwards elsewhere throttles itself. Must not call back into
+ * this library. Null means silent.
+ */
+typedef void (*CadaclysmBlacksmithProgress)(const char *phase, size_t done, size_t total, void *user);
+
+/**
+ * The flat arrays of one FEM mesh, and its summary.
+ *
+ * Every pointer is **borrowed from the handle** and good until
+ * [`cadaclysm_blacksmith_fem_mesh_free`]; none of them is a copy, and none of them is built by
+ * the call that hands it over.
+ */
+typedef struct CadaclysmBlacksmithFemMeshView {
+  /**
+   * Three doubles a node, placed, in `f64`.
+   */
+  const double *nodes;
+  uint32_t node_count;
+  /**
+   * Three node indices a triangle, wound outward.
+   */
+  const uint32_t *triangles;
+  uint32_t triangle_count;
+  /**
+   * The brep face each triangle lies on: one per triangle.
+   */
+  const uint32_t *triangle_face;
+  /**
+   * What each node lies on: `0` a vertex, `1` an edge, `2` a face. One per node.
+   */
+  const uint32_t *node_kind;
+  /**
+   * Which vertex, edge or face that is -- an index into this mesh's vertices, its edges or
+   * the solid's faces, by the matching `node_kind`. One per node.
+   */
+  const uint32_t *node_entity;
+  /**
+   * The solid's faces; `triangle_face` and a `node_kind` of 2 index them. The same faces
+   * [`cadaclysm_blacksmith_face_count`](crate::cadaclysm_blacksmith_face_count) counts.
+   */
+  uint32_t face_count;
+  /**
+   * The B-rep edges [`cadaclysm_blacksmith_fem_mesh_edge`] describes; a `node_kind` of 1
+   * indexes them. **Not the same numbering as
+   * [`cadaclysm_blacksmith_edge`](crate::cadaclysm_blacksmith_edge)**, which is the solid's
+   * own edge table: these are the manifold analysis's, ascending by edge id.
+   *
+   * `CadaclysmBlacksmithFemEdge::id` carries the solid's own edge id for each of them, which is
+   * the bridge from this numbering back to the topology -- to the brep, the censuses and the
+   * `.msh` entities, though not to that geometric edge table.
+   */
+  uint32_t edge_count;
+  /**
+   * The B-rep vertices [`cadaclysm_blacksmith_fem_mesh_vertex`] describes; a `node_kind` of
+   * 0 indexes them.
+   */
+  uint32_t vertex_count;
+  /**
+   * The cracks [`cadaclysm_blacksmith_fem_mesh_open_edge`] describes.
+   */
+  uint32_t open_edge_count;
+  /**
+   * The folds [`cadaclysm_blacksmith_fem_mesh_folded_edge`] describes.
+   *
+   * **A caller checking only `open_edge_count` calls a folded body sound.** The closure
+   * census's own pinned rows are folds, not open cracks: a directed mesh edge used by more
+   * than one triangle is a solid no thicker than a line, and it leaves no hole for an open
+   * edge to find.
+   */
+  uint32_t folded_edge_count;
+  /**
+   * The topology is closed and the welded mesh is too. **False for every body whose topology
+   * is not closed** (an open sheet from `face_sheet`, `drop_faces` or `extrude_open`), whose
+   * mesh is then not asked about: such a body reports this false with `open_edge_count` and
+   * `folded_edge_count` both zero, and *that trio together* says "not asked", not "nothing
+   * found".
+   */
+  bool watertight;
+  /**
+   * Always false here, and kept so the two ABIs' views are the same struct: a solid always
+   * has a brep behind it, so this library has no mesh-only body to report. The reader's
+   * `cadaclysm_node_fem_mesh` sets it for a node with no brep (a JT, an STL, an OpenSCAD
+   * body).
+   */
+  bool from_mesh;
+  /**
+   * The smallest interior angle of any triangle, in degrees.
+   */
+  double min_angle;
+  /**
+   * The triangle with that angle.
+   */
+  uint32_t worst_triangle;
+  /**
+   * The longest triangle edge, placed.
+   *
+   * **The figure to check against `CadaclysmBlacksmithFemOptions::max_size`, and the only one
+   * that says what the mesh actually is**: `max_size` bounds the boundary segments and merely
+   * targets the interior, and a `max_size` small enough to hit the mesher's own piece and
+   * station ceilings is not honoured at all. A caller that asked for an element size reads
+   * this to find out whether it got one.
+   */
+  double longest_edge;
+} CadaclysmBlacksmithFemMeshView;
+
+/**
+ * One B-rep edge of a FEM mesh: the chain of nodes along it, and where that chain breaks.
+ */
+typedef struct CadaclysmBlacksmithFemEdge {
+  /**
+   * Which B-rep edge this is, by the **solid's own** edge id -- `LoopTrim::edge` on the brep
+   * behind the solid, the number its topology gives the edge.
+   *
+   * **Not this mesh's edge index**, which is what `CadaclysmBlacksmithFemMeshView::edge_count`
+   * counts and everything else here means by an edge: a `node_kind` of 1 read through
+   * `node_entity`, the third `uint32_t` of an open or folded census row, and the `edge_<i>`
+   * physical group of the `.msh` text. The FEM edge list is a densely renumbered *subset* of
+   * the solid's edges -- ascending by id, with every edge collapsed to a point left out -- so
+   * a sphere, whose two pole runs collapse, reports its seam as edge **0** with an `id` of
+   * **1**. This is the one field that leads from any of those numbers back to the solid's own
+   * topology, and without it a caller holding `edge_7` out of a solver deck cannot say which
+   * edge of the solid that is.
+   *
+   * **Nor is it a row of
+   * [`cadaclysm_blacksmith_edge`](crate::cadaclysm_blacksmith_edge)**: that table is the
+   * solid's edges grouped by geometry, one row per piece of curve, numbered by its own walk.
+   * This id names the *topological* edge, which is what `.msh` entities, the censuses and the
+   * brep all speak in.
+   *
+   * Saturating at `UINT32_MAX`, as every count in this ABI does, so an id past that would read
+   * as [`CADACLYSM_BLACKSMITH_NONE`]; unreachable, an id being an index into the brep's own
+   * edge table and a brep of 4e9 edges being terabytes of topology.
+   */
+  uint32_t id;
+  /**
+   * The edge's nodes in order along it, its end vertices included; a closed edge repeats no
+   * node. Borrowed from the handle.
+   */
+  const uint32_t *nodes;
+  uint32_t node_count;
+  /**
+   * Where each connected run of `nodes` begins: `[0]` for one chain along the whole edge --
+   * the same offsets-into-a-flat-array shape as
+   * `CadaclysmBlacksmithOverlap::loop_offsets`.
+   *
+   * **Read `nodes[runs[i] .. runs[i + 1]]` (the last run to the end) as one polyline and
+   * join nothing across a boundary.** The two ends either side of one are two points of the
+   * edge with no mesh edge between them -- a crack along the edge, or a stretch of it the
+   * mesher sampled on one face only. One run is the ordinary answer; a caller reading
+   * `nodes` as one polyline without looking here silently jumps the gap.
+   */
+  const uint32_t *runs;
+  uint32_t run_count;
+  /**
+   * A face it bounds.
+   */
+  uint32_t face_a;
+  /**
+   * The other, or [`CADACLYSM_BLACKSMITH_NONE`] on an open sheet's rim. **`0` is a face, not
+   * a sentinel**: an edge whose second face is face 0 reads `face_b == 0`.
+   *
+   * A non-manifold edge's third and further faces are not here.
+   */
+  uint32_t face_b;
+  /**
+   * A B-rep vertex its chain ends at, as [`cadaclysm_blacksmith_fem_mesh_vertex`] indexes
+   * them.
+   */
+  uint32_t end_a;
+  /**
+   * The other, or [`CADACLYSM_BLACKSMITH_NONE`] where both ends are one vertex -- a closed
+   * edge, a circle's rim, a full-turn seam. **`0` is a vertex, not a sentinel.**
+   *
+   * **Which end is `end_a` is the first trim's direction, and means nothing else.** The pair
+   * bounds the edge; it does not orient it.
+   */
+  uint32_t end_b;
+  /**
+   * The nodes make one loop. False wherever `run_count` is more than one.
+   */
+  bool closed;
+  /**
+   * Bounded twice by one face: a closed surface's seam, not a real boundary. `face_a` and
+   * `face_b` are then the same face.
+   */
+  bool seam;
+} CadaclysmBlacksmithFemEdge;
+
+/**
+ * One B-rep vertex of a FEM mesh: the node the mesh put there, if any, and where the topology
+ * says it is, if that is known.
+ *
+ * One struct rather than three out-parameters: it matches the fill-an-out-struct-return-`bool`
+ * shape of every sibling accessor here and in `intersection.rs`, it gives the header and every
+ * wrapper a named type to pin a layout against, and it puts `node`'s sentinel beside
+ * `has_position` where a caller reads both at once.
+ */
+typedef struct CadaclysmBlacksmithFemVertex {
+  /**
+   * The mesh node at this vertex, or [`CADACLYSM_BLACKSMITH_NONE`] where the mesh has none
+   * there.
+   *
+   * **A sentinel here is ordinary, not a fault.** The analysis rebuilds a vertex wherever two
+   * trims meet, and a pole's polyline runs give a sphere 48 of them where the mesh has 2
+   * points; a caller walking these skips the sentinel rather than treating it as a gap.
+   */
+  uint32_t node;
+  /**
+   * Where the vertex is, in the same space and under the same placement as the view's
+   * `nodes`. **Meaningless unless `has_position`** -- it is left zeroed in that case, and a
+   * caller that reads it anyway reads a point no geometry has.
+   */
+  double point[3];
+  /**
+   * `point` was placed. False where every trim meeting at this vertex is a curve with no
+   * geometry to read an end off -- then there is **no position at all**, reported as this
+   * flag rather than as a plausible-looking `(0, 0, 0)` that a solver would take for a node
+   * at the origin.
+   */
+  bool has_position;
+} CadaclysmBlacksmithFemVertex;
 
 /**
  * A point in model space.
@@ -138,6 +422,81 @@ typedef struct CadaclysmBlacksmithHit {
 } CadaclysmBlacksmithHit;
 
 /**
+ * One branch of one face pair's crossing, borrowed from the intersection
+ * result: valid until it is freed. `points` is `point_count` xyz triples, in
+ * walk order (a closed chain does not repeat its first point); `has_curve`
+ * says whether `cadaclysm_blacksmith_intersection_curve` has anything for
+ * this chain -- a tangent closed chain may have none (a closed chain that
+ * does not go once round its curve is reported without one, `tangent`
+ * still true, the points kept at their best estimate).
+ */
+typedef struct CadaclysmBlacksmithChain {
+  const double *points;
+  uint32_t point_count;
+  uint32_t face_a;
+  uint32_t face_b;
+  bool closed;
+  bool tangent;
+  bool has_curve;
+} CadaclysmBlacksmithChain;
+
+/**
+ * One edge's exact curve, borrowed from the solid: valid until it is freed.
+ * See [`cadaclysm_blacksmith_edge_curve`]'s doc for the range convention and
+ * what each field means for each `kind`.
+ */
+typedef struct CadaclysmBlacksmithCurve {
+  /**
+   * "line", "circle", "ellipse", "parabola", "hyperbola" or "nurbs". Static.
+   */
+  const char *kind;
+  struct CadaclysmBlacksmithPoint origin;
+  struct CadaclysmBlacksmithPoint x;
+  struct CadaclysmBlacksmithPoint y;
+  struct CadaclysmBlacksmithPoint z;
+  double radius;
+  double radius2;
+  double t0;
+  double t1;
+  uint32_t degree;
+  /**
+   * The knot vector, `NULL` (with `knot_count` 0) for a conic or a line.
+   */
+  const double *knots;
+  uint32_t knot_count;
+  /**
+   * Three doubles per control point, `NULL` (with `pole_count` 0) for a
+   * conic or a line.
+   */
+  const double *poles;
+  uint32_t pole_count;
+  /**
+   * One weight per pole, or `NULL` for a non-rational (plain B-spline)
+   * curve, a conic or a line.
+   */
+  const double *weights;
+} CadaclysmBlacksmithCurve;
+
+/**
+ * A region where a face of `a` and a face of `b` coincide, borrowed from the
+ * intersection result: valid until it is freed. `points` is `point_count` xyz
+ * triples, every ring back to back (outer first, holes after, `a`'s rings then
+ * `b`'s), each ring closed but not repeating its first point; `loop_offsets`
+ * is `loop_count` starting indices into `points` counted in points, not
+ * doubles, so ring `i` is `points[loop_offsets[i] .. loop_offsets[i + 1]]` and
+ * the last ring runs to `point_count`. May carry zero rings (a partial overlap
+ * whose outlines cross).
+ */
+typedef struct CadaclysmBlacksmithOverlap {
+  uint32_t face_a;
+  uint32_t face_b;
+  const double *points;
+  const uint32_t *loop_offsets;
+  uint32_t point_count;
+  uint32_t loop_count;
+} CadaclysmBlacksmithOverlap;
+
+/**
  * A solid's triangles, borrowed from it.
  */
 typedef struct CadaclysmBlacksmithMesh {
@@ -156,6 +515,18 @@ typedef struct CadaclysmBlacksmithMesh {
   uint32_t vertex_count;
   uint32_t index_count;
 } CadaclysmBlacksmithMesh;
+
+/**
+ * [`CadaclysmBlacksmithMesh`] in `double`: the same tessellation (the index pointer is the
+ * very one [`cadaclysm_blacksmith_mesh`] gives), positions and normals unnarrowed.
+ */
+typedef struct CadaclysmBlacksmithMesh64 {
+  const double *positions;
+  const double *normals;
+  const uint32_t *indices;
+  uint32_t vertex_count;
+  uint32_t index_count;
+} CadaclysmBlacksmithMesh64;
 
 /**
  * How many triangles each face of a solid meshed to, borrowed from it.
@@ -257,7 +628,7 @@ typedef struct CadaclysmBlacksmithSvgOptions {
  */
 typedef struct CadaclysmBlacksmithEdge {
   /**
-   * "line", "circle", "ellipse", "nurbs" or "other". Static.
+   * "line", "circle", "ellipse", "parabola", "hyperbola", "nurbs" or "other". Static.
    */
   const char *kind;
   /**
@@ -271,52 +642,6 @@ typedef struct CadaclysmBlacksmithEdge {
   const double *segments;
   uint32_t segment_count;
 } CadaclysmBlacksmithEdge;
-
-/**
- * One edge's exact curve, borrowed from the solid: valid until it is freed.
- * See [`cadaclysm_blacksmith_edge_curve`]'s doc for the range convention and
- * what each field means for each `kind`.
- */
-typedef struct CadaclysmBlacksmithCurve {
-  /**
-   * "line", "circle", "ellipse" or "nurbs". Static.
-   */
-  const char *kind;
-  struct CadaclysmBlacksmithPoint origin;
-  struct CadaclysmBlacksmithPoint x;
-  struct CadaclysmBlacksmithPoint y;
-  struct CadaclysmBlacksmithPoint z;
-  double radius;
-  double radius2;
-  double t0;
-  double t1;
-  uint32_t degree;
-  /**
-   * The knot vector, `NULL` (with `knot_count` 0) for a conic or a line.
-   */
-  const double *knots;
-  uint32_t knot_count;
-  /**
-   * Three doubles per control point, `NULL` (with `pole_count` 0) for a
-   * conic or a line.
-   */
-  const double *poles;
-  uint32_t pole_count;
-  /**
-   * One weight per pole, or `NULL` for a non-rational (plain B-spline)
-   * curve, a conic or a line.
-   */
-  const double *weights;
-} CadaclysmBlacksmithCurve;
-
-/**
- * Where a long operation reports: `phase` is a short static name ("snap",
- * "clip", ...), `done` of `total` steps within it, `user` whatever was passed
- * in. Called on the calling thread, often -- once per vertex in some phases --
- * so a sink that forwards elsewhere throttles itself. Must not call back into
- * this library. Null means silent.
- */
-typedef void (*CadaclysmBlacksmithProgress)(const char *phase, size_t done, size_t total, void *user);
 
 #ifdef __cplusplus
 extern "C" {
@@ -352,6 +677,201 @@ void cadaclysm_blacksmith_solid_free(struct CadaclysmBlacksmithSolid *solid);
  * `profile` must have come from this library and not have been freed already.
  */
 void cadaclysm_blacksmith_profile_free(struct CadaclysmBlacksmithProfile *profile);
+
+/**
+ * Fill `options` with `size` set and every default in place: a chordal tolerance and no size
+ * ceiling, exactly as `FemOptions::default()` states them -- the numbers are not restated
+ * here, so the two cannot drift.
+ *
+ * **This is the one call the size rule does not protect.** [`cadaclysm_blacksmith_fem_mesh`]
+ * reads only the fields `size` says are there, so a caller built against an older header is
+ * safe against a newer library. This function has no such input to read: it writes
+ * `sizeof(CadaclysmBlacksmithFemOptions)` bytes as **this library** knows that type, and a
+ * caller compiled against an older, shorter header has only that many bytes of stack local to
+ * receive them into. Its header must be at least as new as the library it links.
+ *
+ * # Safety
+ * `options` must be null, or point at writable storage of at least
+ * `sizeof(CadaclysmBlacksmithFemOptions)` bytes, `sizeof` taken from a header at least as new
+ * as this library -- see above.
+ */
+void cadaclysm_blacksmith_fem_options_init(struct CadaclysmBlacksmithFemOptions *options);
+
+/**
+ * One solid's mesh for a solver: nodes welded by bits, triangles wound outward, each node
+ * tagged with the lowest-dimension B-rep entity it lies on, and every crack reported rather
+ * than closed.
+ *
+ * `placement` is null (the identity) or **twelve doubles -- origin, x, y, z, as every frame
+ * argument in this library; right-handed and orthonormal** -- and is applied in `f64`
+ * throughout. It is the one frame argument here that may be null, because a body meshed in its
+ * own coordinates is the common case where a sweep without a frame is nothing at all. The
+ * reader library's `cadaclysm_node_fem_mesh` takes **sixteen**, column-major, as everything on
+ * that side does; a caller moving between the two reformats the placement.
+ *
+ * `options` is null (every default) or a struct filled by
+ * [`cadaclysm_blacksmith_fem_options_init`] -- whose **`max_size` bounds the boundary segments and
+ * merely targets the interior**, and one small enough beside the body to reach the mesher's own
+ * piece and station ceilings is not honoured at all: `CadaclysmBlacksmithFemMeshView::longest_edge`
+ * is what the mesh actually came to, and the figure a caller that asked for an element size checks
+ * to find out whether it got one. `tolerance` alone decides how closely the boundary follows the
+ * geometry. (Also on `CadaclysmBlacksmithFemOptions::max_size` and
+ * `CadaclysmBlacksmithFemMeshView::longest_edge`, and stated here because a C reader meets a
+ * struct member's own comment nowhere but the header itself -- the docs pages carry a struct as
+ * its declaration alone.)
+ *
+ * `progress` is null (silent) or a callback that receives the two phases **`meshing`** and
+ * **`welding`**, `done` of `total` within each, as the booleans report theirs; `user` comes
+ * back untouched. **Its obligations are
+ * [`CadaclysmBlacksmithProgress`](crate::CadaclysmBlacksmithProgress)'s**, in full and
+ * unchanged: it is called on *this* thread, often, so a sink that forwards elsewhere throttles
+ * itself, and it must not call back into this library.
+ *
+ * **An opened phase is not a promise of a closed one.** Nothing is reported at all when the
+ * call is refused for its inputs -- a bad `size`, tolerance, `max_size` or placement comes back
+ * null with no phase ever opened -- and a body that meshes to no triangles reports `meshing`
+ * through to `1 of 1` and then fails with **no `welding`**, because that close says the mesher
+ * finished, not that it produced something. A watcher that draws a bar on the first report, or
+ * that waits for `welding` before believing the call ended, needs both of those.
+ *
+ * **A cracked body is not a failure.** It comes back with `watertight` false and its cracks in
+ * the two censuses; nothing is welded shut to make it look sound. Null, with
+ * [`cadaclysm_blacksmith_last_error`](crate::cadaclysm_blacksmith_last_error) saying why, for
+ * `fem_mesh: null solid`, a bad `size`, a tolerance or `max_size` the mesher refuses, a
+ * placement not finite or not invertible, and a body that meshes to no triangles at all.
+ *
+ * Free it with [`cadaclysm_blacksmith_fem_mesh_free`].
+ *
+ * # Safety
+ * `solid` must be a live solid; `placement` null or twelve readable doubles; `options` null or
+ * a struct whose `size` bytes are readable; `progress` null or a valid callback.
+ */
+struct CadaclysmBlacksmithFemMesh *cadaclysm_blacksmith_fem_mesh(const struct CadaclysmBlacksmithSolid *solid,
+                                                                 const double *placement,
+                                                                 const struct CadaclysmBlacksmithFemOptions *options,
+                                                                 CadaclysmBlacksmithProgress progress,
+                                                                 void *user);
+
+/**
+ * Release a FEM mesh, and with it every pointer any accessor handed out. Null is a no-op. The
+ * `.msh` texts are **not** freed with it: each is the caller's, and each outlives this.
+ *
+ * # Safety
+ * `m` must have come from [`cadaclysm_blacksmith_fem_mesh`] and not have been freed already.
+ */
+void cadaclysm_blacksmith_fem_mesh_free(struct CadaclysmBlacksmithFemMesh *m);
+
+/**
+ * The flat arrays and the summary of one FEM mesh, into `out`.
+ *
+ * `false` (and `last_error`) for a null handle or a null `out`; nothing is written then.
+ *
+ * # Safety
+ * `m` must be null or a handle from [`cadaclysm_blacksmith_fem_mesh`] that has not been freed;
+ * `out` must be null or point at writable storage for one `CadaclysmBlacksmithFemMeshView`.
+ */
+bool cadaclysm_blacksmith_fem_mesh_view(const struct CadaclysmBlacksmithFemMesh *m,
+                                        struct CadaclysmBlacksmithFemMeshView *out);
+
+/**
+ * B-rep edge `i` of a FEM mesh, into `out`.
+ *
+ * `false` (and `last_error`) for a null handle, a null `out`, or an `i` at or past
+ * `CadaclysmBlacksmithFemMeshView::edge_count`; nothing is written then.
+ *
+ * # Safety
+ * As [`cadaclysm_blacksmith_fem_mesh_view`], with `out` a `CadaclysmBlacksmithFemEdge`.
+ */
+bool cadaclysm_blacksmith_fem_mesh_edge(const struct CadaclysmBlacksmithFemMesh *m,
+                                        uint32_t i,
+                                        struct CadaclysmBlacksmithFemEdge *out);
+
+/**
+ * B-rep vertex `i` of a FEM mesh, into `out`.
+ *
+ * `false` (and `last_error`) for a null handle, a null `out`, or an `i` at or past
+ * `CadaclysmBlacksmithFemMeshView::vertex_count`; nothing is written then. A vertex with no
+ * node and no position is **not** a failure: it comes back `true` with
+ * `node == CADACLYSM_BLACKSMITH_NONE` and `has_position == false`.
+ *
+ * # Safety
+ * As [`cadaclysm_blacksmith_fem_mesh_view`], with `out` a `CadaclysmBlacksmithFemVertex`.
+ */
+bool cadaclysm_blacksmith_fem_mesh_vertex(const struct CadaclysmBlacksmithFemMesh *m,
+                                          uint32_t i,
+                                          struct CadaclysmBlacksmithFemVertex *out);
+
+/**
+ * Crack `i`: a directed mesh edge `(a, b)` with no `(b, a)`, and the B-rep edge both nodes lie
+ * on or [`CADACLYSM_BLACKSMITH_NONE`] where they share none.
+ *
+ * `false` (and `last_error`) for a null handle, a null out-pointer, or an `i` at or past
+ * `CadaclysmBlacksmithFemMeshView::open_edge_count`.
+ *
+ * **Empty unless the solid's topology is closed** -- see
+ * `CadaclysmBlacksmithFemMeshView::watertight`, which explains what an empty census does and
+ * does not mean.
+ *
+ * # Safety
+ * `m` as [`cadaclysm_blacksmith_fem_mesh_view`]; `a`, `b` and `brep_edge` each null or a
+ * writable `uint32_t`.
+ */
+bool cadaclysm_blacksmith_fem_mesh_open_edge(const struct CadaclysmBlacksmithFemMesh *m,
+                                             uint32_t i,
+                                             uint32_t *a,
+                                             uint32_t *b,
+                                             uint32_t *brep_edge);
+
+/**
+ * Fold `i`: a directed mesh edge used by more than one triangle, with its B-rep edge as
+ * [`cadaclysm_blacksmith_fem_mesh_open_edge`] reports one.
+ *
+ * **A body can be folded without being open**, and the closure census's own pinned rows are
+ * folds: a caller that checks only `open_edge_count` calls such a body sound. `false` (and
+ * `last_error`) for a null handle, a null out-pointer, or an `i` at or past
+ * `CadaclysmBlacksmithFemMeshView::folded_edge_count`.
+ *
+ * # Safety
+ * As [`cadaclysm_blacksmith_fem_mesh_open_edge`].
+ */
+bool cadaclysm_blacksmith_fem_mesh_folded_edge(const struct CadaclysmBlacksmithFemMesh *m,
+                                               uint32_t i,
+                                               uint32_t *a,
+                                               uint32_t *b,
+                                               uint32_t *brep_edge);
+
+/**
+ * The mesh as Gmsh 4.1 ASCII `.msh` text: an entity per B-rep vertex, edge and face, a volume
+ * where the body closes, and a physical group naming each.
+ *
+ * **The text is owned: release it with
+ * [`cadaclysm_blacksmith_string_free`](crate::cadaclysm_blacksmith_string_free)**, as every
+ * other text this library hands over. Two asks give two texts, each independent of the other
+ * and of the handle: a text stays good after
+ * [`cadaclysm_blacksmith_fem_mesh_free`]. (The reader library's `cadaclysm_fem_mesh_msh_text`
+ * borrows from a slot on its own handle instead and must **not** be freed -- see this module's
+ * own documentation.)
+ *
+ * Null (and `last_error`) for a null handle or a mesh the writer refuses -- the writer states
+ * a field it cannot honour, and that refusal arrives here as a message, not as a crash.
+ *
+ * # Safety
+ * `m` must be null or a handle from [`cadaclysm_blacksmith_fem_mesh`] that has not been freed.
+ */
+char *cadaclysm_blacksmith_fem_mesh_msh_text(const struct CadaclysmBlacksmithFemMesh *m);
+
+/**
+ * [`cadaclysm_blacksmith_fem_mesh_msh_text`] written to `path`, replacing any file there: the
+ * same bytes, from the same writer, straight to the file rather than through a string.
+ *
+ * `false` (and `last_error`) for a null handle, no path, a mesh the writer refuses, or a file
+ * it cannot write.
+ *
+ * # Safety
+ * `m` as [`cadaclysm_blacksmith_fem_mesh_view`]; `path` must be null or a valid C string.
+ */
+bool cadaclysm_blacksmith_fem_mesh_save_msh(const struct CadaclysmBlacksmithFemMesh *m,
+                                            const char *path);
 
 /**
  * Where `a`'s curves cross, touch or run along `b`'s, both read in one plane:
@@ -401,6 +921,83 @@ bool cadaclysm_blacksmith_hit(const struct CadaclysmBlacksmithHits *hits,
                               struct CadaclysmBlacksmithHit *out);
 
 /**
+ * Where `profile`, placed on `frame` (twelve doubles), pierces `solid`'s
+ * faces, and the pieces its loops cut into: points where a segment crosses a
+ * face's exact surface, within `tolerance` and inside its trim, `touch` at a
+ * graze; runs where a segment lies on a face, from where it enters to where
+ * it leaves; merged within `tolerance` of each other (a hit at a segment
+ * join reported once). `inside` for a piece is by its midpoint's winding
+ * number over `solid`'s own mesh -- only reported for a closed body (its own
+ * manifold/closed report): an open sheet's `pieces` is always empty, read
+ * with [`cadaclysm_blacksmith_hits_piece_count`] alone. A loop no hit cuts is
+ * one closed piece, all `inside` or all outside as the winding number says.
+ * No hits at all is still such a handle, never null.
+ *
+ * Reports its phases -- "mesh", "cull", "hits", "pieces" -- to `progress` if
+ * not null, as the booleans do.
+ *
+ * Null (and `last_error`) for a null `solid` (`"solid_profile_hits: null
+ * solid"`), a null `profile` (`"... null profile"`), a null `frame` (`"...
+ * null frame"`), a `tolerance` not positive and finite, a solid with no
+ * faces or that meshes to nothing, a profile with no segments, or a
+ * free-form segment that does not evaluate to a NURBS curve.
+ *
+ * # Safety
+ * `solid` and `profile` live handles; `frame` twelve doubles; `progress`
+ * null or a valid callback.
+ */
+struct CadaclysmBlacksmithHits *cadaclysm_blacksmith_solid_profile_hits(const struct CadaclysmBlacksmithSolid *solid,
+                                                                        const struct CadaclysmBlacksmithProfile *profile,
+                                                                        const double *frame,
+                                                                        double tolerance,
+                                                                        CadaclysmBlacksmithProgress progress,
+                                                                        void *user);
+
+/**
+ * How many pieces `hits` (from [`cadaclysm_blacksmith_solid_profile_hits`])
+ * cut the profile's loops into. 0 for a `hits` read from
+ * [`cadaclysm_blacksmith_profile_hits`] instead (profile x profile has no
+ * solid to be inside of), for an open sheet, and (and `last_error`) for
+ * null.
+ *
+ * # Safety
+ * `hits` live.
+ */
+uint32_t cadaclysm_blacksmith_hits_piece_count(const struct CadaclysmBlacksmithHits *hits);
+
+/**
+ * Piece `i` (below [`cadaclysm_blacksmith_hits_piece_count`]): `*inside`
+ * true where the piece's midpoint winds inside `solid`, false outside (true
+ * too where the piece lies flat on the solid's surface); `*start` and `*end`
+ * the profile spots it runs between, in loop order, covering every loop
+ * exactly -- a loop no hit cuts is one whole piece round the loop whose
+ * `start` and `end` are both `(0, t=0)`; an open chain's own first and last
+ * pieces run from its own start and to its own end. `false` (and `last_error`) for null `hits`, a
+ * null `inside`, `start` or `end`, or `i` out of range.
+ *
+ * # Safety
+ * `hits` live; `inside`, `start` and `end` valid, writable.
+ */
+bool cadaclysm_blacksmith_hits_piece(const struct CadaclysmBlacksmithHits *hits,
+                                     uint32_t i,
+                                     bool *inside,
+                                     struct CadaclysmBlacksmithSpot *start,
+                                     struct CadaclysmBlacksmithSpot *end);
+
+/**
+ * Piece `i`'s own profile, as a handle of its own: the loop cut down to that
+ * piece alone, running along its segments with no holes -- what
+ * `cadaclysm_blacksmith_sweep_path_along(.., open: true)` sweeps. Free it
+ * with [`cadaclysm_blacksmith_profile_free`]. Null (and `last_error`) for
+ * null `hits` or `i` out of range.
+ *
+ * # Safety
+ * `hits` live.
+ */
+struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_hits_piece_profile(const struct CadaclysmBlacksmithHits *hits,
+                                                                           uint32_t i);
+
+/**
  * This library's brep layout: the compiler, target, profile and source it was
  * built from, as one string. Equal to the reader library's
  * `cadaclysm_brep_layout_id()` exactly when the two can share a brep. Static;
@@ -439,6 +1036,114 @@ const char *cadaclysm_blacksmith_brep_layout_id(void);
  */
 struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_from_brep(const void *brep,
                                                                 const char *layout_id);
+
+/**
+ * Where the faces of `a` and `b` cross or coincide, at `tolerance`: chains
+ * along the curves the faces meet on ([`cadaclysm_blacksmith_intersection_chain`],
+ * [`cadaclysm_blacksmith_intersection_curve`]) and, where a face pair
+ * coincides, the shared region's outline ([`cadaclysm_blacksmith_intersection_overlap`]).
+ * No crossing is a handle with zero of each, never null.
+ *
+ * Each chain's points are within `tolerance` of both faces' exact surfaces;
+ * one chain per face pair per branch -- chains are not joined across a face
+ * boundary or a closed curve's seam, so a caller joins them by matching ends;
+ * `tangent` is set where the surfaces are near-tangent along the chain or the
+ * snap did not settle within `tolerance` (the points are then the best
+ * estimate); a closed chain that does not go once round its own curve --
+ * a sliver of mesh noise where two surfaces barely cross -- is reported
+ * with no curve at all (`cadaclysm_blacksmith_intersection_curve` then
+ * says so by name), `tangent` still true. An overlap's rings are the
+ * shared region's outline, outer first then holes, and may be empty for a
+ * partial overlap whose outlines cross.
+ * Known limit: a crossing narrower than the mesh tolerance -- two surfaces
+ * passing within `tolerance` without their meshes crossing -- can be missed;
+ * near-tangent contact is where this bites.
+ *
+ * `tolerance` is expected well below the solids' extent (the kernel's own
+ * suites use a few ten-thousandths of it): it is the mesh tolerance, and at a
+ * tolerance comparable to the extent the meshes are a few facets, the chains
+ * a few points, and a curve may be attached whose points, all within that
+ * tolerance of it, do not run with its parameter.
+ *
+ * Reports its phases -- "mesh", "cull", "cross", "snap", "curve" -- to
+ * `progress` if not null, as the booleans do.
+ *
+ * Refuses `intersect: null solid`, `intersect: tolerance must be positive and
+ * finite`, `intersect: solid a has no faces` (or `b has no faces`),
+ * `intersect: a meshes to nothing` (or `b meshes to nothing`).
+ *
+ * # Safety
+ * `a`, `b` live solids; `progress` null or a valid callback.
+ */
+struct CadaclysmBlacksmithIntersection *cadaclysm_blacksmith_intersect(const struct CadaclysmBlacksmithSolid *a,
+                                                                       const struct CadaclysmBlacksmithSolid *b,
+                                                                       double tolerance,
+                                                                       CadaclysmBlacksmithProgress progress,
+                                                                       void *user);
+
+/**
+ * Release an intersection result. Null is a no-op.
+ *
+ * # Safety
+ * `intersection` must have come from this library and not have been freed already.
+ */
+void cadaclysm_blacksmith_intersection_free(struct CadaclysmBlacksmithIntersection *intersection);
+
+/**
+ * How many chains. 0 (and `last_error`) for null.
+ *
+ * # Safety
+ * `intersection` live.
+ */
+uint32_t cadaclysm_blacksmith_intersection_chain_count(const struct CadaclysmBlacksmithIntersection *intersection);
+
+/**
+ * Chain `i` into `out`. `false` (and `last_error`) for null `intersection`, a
+ * null `out`, or `i` out of range.
+ *
+ * # Safety
+ * `intersection` live; `out` a valid struct.
+ */
+bool cadaclysm_blacksmith_intersection_chain(const struct CadaclysmBlacksmithIntersection *intersection,
+                                             uint32_t i,
+                                             struct CadaclysmBlacksmithChain *out);
+
+/**
+ * Chain `i`'s exact curve into `out`, over the chain's own span on it -- see
+ * [`cadaclysm_blacksmith_edge_curve`]'s doc for what each field means and the
+ * range convention. The chain's points run WITH the curve's parameter: the
+ * curve at `t0` is the chain's first point and at `t1` its last (to the
+ * tolerance), and the parameter grows from each point to the next, round
+ * the period of a closed curve; a closed chain has the curve's whole domain
+ * and runs with it from its first point on. `false` (and `last_error`) for
+ * null `intersection`, a null `out`, `i` out of range, or a chain with no
+ * curve (`intersection_curve: chain {i} has no curve`).
+ *
+ * # Safety
+ * `intersection` live; `out` a valid struct.
+ */
+bool cadaclysm_blacksmith_intersection_curve(const struct CadaclysmBlacksmithIntersection *intersection,
+                                             uint32_t i,
+                                             struct CadaclysmBlacksmithCurve *out);
+
+/**
+ * How many overlaps. 0 (and `last_error`) for null.
+ *
+ * # Safety
+ * `intersection` live.
+ */
+uint32_t cadaclysm_blacksmith_intersection_overlap_count(const struct CadaclysmBlacksmithIntersection *intersection);
+
+/**
+ * Overlap `i` into `out`. `false` (and `last_error`) for null `intersection`,
+ * a null `out`, or `i` out of range.
+ *
+ * # Safety
+ * `intersection` live; `out` a valid struct.
+ */
+bool cadaclysm_blacksmith_intersection_overlap(const struct CadaclysmBlacksmithIntersection *intersection,
+                                               uint32_t i,
+                                               struct CadaclysmBlacksmithOverlap *out);
 
 /**
  * Load a license from `text_or_path`: the certificate text itself, or the
@@ -484,6 +1189,16 @@ const char *cadaclysm_blacksmith_build_date(void);
  */
 struct CadaclysmBlacksmithMesh cadaclysm_blacksmith_mesh(const struct CadaclysmBlacksmithSolid *solid,
                                                          double tolerance);
+
+/**
+ * [`cadaclysm_blacksmith_mesh`] in `double`, from the same cache, under the same rule:
+ * valid until the solid is freed or meshed again at a different tolerance.
+ *
+ * # Safety
+ * `solid` live.
+ */
+struct CadaclysmBlacksmithMesh64 cadaclysm_blacksmith_mesh64(const struct CadaclysmBlacksmithSolid *solid,
+                                                             double tolerance);
 
 /**
  * The triangles each face contributed to the mesh [`cadaclysm_blacksmith_mesh`]
@@ -557,6 +1272,19 @@ bool cadaclysm_blacksmith_bounds(const struct CadaclysmBlacksmithSolid *solid,
                                  double *max);
 
 /**
+ * [`cadaclysm_blacksmith_bounds`] in `double`, from the same tessellation's unnarrowed
+ * positions: exact far from the origin, where `bounds`' widened `f32` positions are not.
+ * `false` on a null solid or a non-positive, non-finite tolerance.
+ *
+ * # Safety
+ * `solid` live; `min`, `max` three doubles each.
+ */
+bool cadaclysm_blacksmith_bounds64(const struct CadaclysmBlacksmithSolid *solid,
+                                   double tolerance,
+                                   double *min,
+                                   double *max);
+
+/**
  * `count` solids as one STEP part file, each its own `MANIFOLD_SOLID_BREP`,
  * through `cadaclysm_step_ap::write_breps`. `schema` is NULL for the built-in
  * AP203 (`CONFIG_CONTROL_DESIGN`), the name of a built-in schema
@@ -574,6 +1302,32 @@ char *cadaclysm_blacksmith_step(const struct CadaclysmBlacksmithSolid *const *so
                                 size_t count,
                                 const char *schema,
                                 uint32_t unit);
+
+/**
+ * An assembly as one STEP file, through `cadaclysm_step_ap::write_assembly`: each of
+ * the `part_count` parts -- `solids[i]`, named `names[i]` -- written once as its own
+ * product, in its own coordinates; each of the `placement_count` placements an
+ * occurrence of part `parts_of[k]` at the frame `frames[12 * k ..]` (origin, x, y,
+ * z, as every frame argument; right-handed and orthonormal), all under one root
+ * product, `assembly`. A reader tessellates a part once however many times it is
+ * placed. A part no placement names is not written. `schema` and `unit` as for
+ * [`cadaclysm_blacksmith_step`]. The text is owned: release it with
+ * [`cadaclysm_blacksmith_string_free`]. Null and `last_error` on failure -- a
+ * placement naming no part or at a frame a STEP placement cannot state included.
+ *
+ * # Safety
+ * `solids` and `names` `part_count` entries each (live solids, NUL-terminated
+ * UTF-8 names); `parts_of` `placement_count` indices; `frames` `12 * placement_count`
+ * doubles; `schema` NULL or a NUL-terminated string.
+ */
+char *cadaclysm_blacksmith_step_assembly(const struct CadaclysmBlacksmithSolid *const *solids,
+                                         const char *const *names,
+                                         size_t part_count,
+                                         const uint32_t *parts_of,
+                                         const double *frames,
+                                         size_t placement_count,
+                                         const char *schema,
+                                         uint32_t unit);
 
 /**
  * `count` solids as one ACIS SAT file, each its own `body`, through
@@ -664,10 +1418,51 @@ bool cadaclysm_blacksmith_svg(const struct CadaclysmBlacksmithSolid *const *soli
                               const struct CadaclysmBlacksmithSvgOptions *options);
 
 /**
+ * `solid_count` solids and `profile_count` profiles as one SVG wireframe: a
+ * `<g id="solid-<i>">` per solid then a `<g id="profile-<i>">` per profile,
+ * on one page, each stroked in its own colour where it carries one and in the
+ * options' `stroke` otherwise. Either count may be 0 -- a drawing of solids
+ * alone is [`cadaclysm_blacksmith_svg_text`], which is this with no profiles
+ * -- and both 0 is refused. The text is owned: release it with
+ * [`cadaclysm_blacksmith_string_free`]. Null and `last_error` on failure.
+ *
+ * # Safety
+ * `solids` `solid_count` live solids or null when the count is 0; `profiles`
+ * likewise; `options` a struct filled by
+ * [`cadaclysm_blacksmith_svg_options_init`].
+ */
+char *cadaclysm_blacksmith_drawing_svg_text(const struct CadaclysmBlacksmithSolid *const *solids,
+                                            size_t solid_count,
+                                            const struct CadaclysmBlacksmithProfile *const *profiles,
+                                            size_t profile_count,
+                                            const struct CadaclysmBlacksmithSvgOptions *options);
+
+/**
+ * [`cadaclysm_blacksmith_drawing_svg_text`] written to `path`, replacing any
+ * file there. `false` and `last_error` on failure, the file's included.
+ *
+ * # Safety
+ * As [`cadaclysm_blacksmith_drawing_svg_text`]; `path` a NUL-terminated string.
+ */
+bool cadaclysm_blacksmith_drawing_svg(const struct CadaclysmBlacksmithSolid *const *solids,
+                                      size_t solid_count,
+                                      const struct CadaclysmBlacksmithProfile *const *profiles,
+                                      size_t profile_count,
+                                      const char *path,
+                                      const struct CadaclysmBlacksmithSvgOptions *options);
+
+/**
  * Release a string this library handed over as owned (`cadaclysm_blacksmith_step`,
- * `cadaclysm_blacksmith_sat_text`, `cadaclysm_blacksmith_brep_text`,
- * `cadaclysm_blacksmith_svg_text`).
+ * `cadaclysm_blacksmith_step_assembly`, `cadaclysm_blacksmith_sat_text`,
+ * `cadaclysm_blacksmith_brep_text`, `cadaclysm_blacksmith_svg_text`,
+ * `cadaclysm_blacksmith_drawing_svg_text`, `cadaclysm_blacksmith_fem_mesh_msh_text`).
  * Null is a no-op.
+ *
+ * **This list is the whole of it, and it is where a caller comes to find out whether a
+ * pointer is theirs to free.** A text from anywhere else in this library is borrowed and must
+ * not be passed here -- and the reverse mistake costs just as much: the reader library's
+ * `cadaclysm_fem_mesh_msh_text` borrows from its handle, so a caller holding both libraries
+ * frees the kernel's `.msh` text and not the reader's.
  *
  * # Safety
  * `s` must have come from this library and not have been freed already.
@@ -716,6 +1511,20 @@ struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_regular_polygon(
                                                                                 double radius,
                                                                                 uint32_t sides,
                                                                                 double angle);
+
+/**
+ * A star of `points` tips (at least 3) on the circle of `outer` about
+ * (`cx`, `cy`), its inner corners on the circle of `inner` (positive, under
+ * `outer`), alternating: the first tip at `angle` radians from the sketch's x
+ * axis, the rest counter-clockwise, each inner corner half a step on from the
+ * tip before it -- `2 * points` straight sides.
+ */
+struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_star(double cx,
+                                                                     double cy,
+                                                                     double outer,
+                                                                     double inner,
+                                                                     uint32_t points,
+                                                                     double angle);
 
 /**
  * A spline of `degree` through the control polygon `xy` (`count` points),
@@ -943,6 +1752,71 @@ bool cadaclysm_blacksmith_path_bezier_to(struct CadaclysmBlacksmithPath *p,
                                          double y);
 
 /**
+ * A conic arc to (`x`, `y`) through the control point (`cx`, `cy`) with middle
+ * weight `weight`: under 1 an elliptical arc, 1 a parabola, over 1 a hyperbola -- the
+ * rational quadratic Bezier, kept exact. Refused for a weight not positive and finite,
+ * an end on the current point, or a control point on the chord.
+ *
+ * # Safety
+ * `p` must be a live path.
+ */
+bool cadaclysm_blacksmith_path_conic_to(struct CadaclysmBlacksmithPath *p,
+                                        double x,
+                                        double y,
+                                        double cx,
+                                        double cy,
+                                        double weight);
+
+/**
+ * The parabolic arc to (`x`, `y`) whose vertex is (`vx`, `vy`): the axis and focal
+ * length are solved from the two ends. Refused when the vertex lies on the chord or
+ * no parabola with that vertex passes through both ends (the vertex must be the arc's
+ * extreme point).
+ *
+ * # Safety
+ * `p` must be a live path.
+ */
+bool cadaclysm_blacksmith_path_parabola_by_vertex(struct CadaclysmBlacksmithPath *p,
+                                                  double x,
+                                                  double y,
+                                                  double vx,
+                                                  double vy);
+
+/**
+ * The parabolic arc to (`x`, `y`) whose focus is (`fx`, `fy`); of the two parabolas
+ * through the ends with that focus, the one whose vertex lies between the ends'
+ * projections, then the one whose arc cups the focus (the focus between the arc and
+ * its chord), then the more symmetric; with the focus beyond the chord that is the
+ * arch over the ends, not the shallow dish -- draw that one with
+ * [`cadaclysm_blacksmith_path_parabola`].
+ * Refused when the focus lies on the chord or is an end.
+ *
+ * # Safety
+ * `p` must be a live path.
+ */
+bool cadaclysm_blacksmith_path_parabola_by_focus(struct CadaclysmBlacksmithPath *p,
+                                                 double x,
+                                                 double y,
+                                                 double fx,
+                                                 double fy);
+
+/**
+ * Start an outline on the arc of the parabola with vertex (`vx`, `vy`), axis
+ * direction (`ax`, `ay`) and focal length `focal`, over the across-axis coordinates
+ * `from..to` (`from < to`): the path begins at the arc's first point and holds the
+ * arc as one conic segment -- a reflector from rim to rim. Null (and `last_error`)
+ * for a zero axis, a focal length not positive and finite, or `from >= to`. Free it
+ * with [`cadaclysm_blacksmith_path_free`] if it is never ended.
+ */
+struct CadaclysmBlacksmithPath *cadaclysm_blacksmith_path_parabola(double vx,
+                                                                   double vy,
+                                                                   double ax,
+                                                                   double ay,
+                                                                   double focal,
+                                                                   double from,
+                                                                   double to);
+
+/**
  * A NURBS segment. `control_xy` holds every control point **after** the
  * current point, the endpoint last (`control_count` of them, two doubles each);
  * `weights`, if not null, one per control point *including* the current point
@@ -989,6 +1863,38 @@ struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_path_end_open(struct Cad
  * `p` must not have been passed to `path_end`.
  */
 void cadaclysm_blacksmith_path_free(struct CadaclysmBlacksmithPath *p);
+
+/**
+ * `text` (UTF-8) set in a font, one profile per closed shape -- a letter with
+ * its counters as holes (`o` one, `8` two; `i` is two profiles) -- on the
+ * sketch plane, the baseline along x from the origin, each outline
+ * counter-clockwise and its holes clockwise, a curved side the font's own
+ * cubic Bezier kept exactly. `size` is roughly the height of a capital.
+ * `font` is a family, optionally with a style (`"Liberation Sans:style=Bold"`),
+ * a font file's path, or null/empty for the bundled Liberation Sans Regular,
+ * which also serves when the family is not found; `font_bytes` (`font_len` of
+ * them, or null) a font file's bytes, used instead of `font` when given.
+ * `halign` is `"left"`, `"center"` or `"right"` (null: left); `valign`
+ * `"baseline"`, `"bottom"`, `"center"` or `"top"` (null: baseline); `spacing`
+ * multiplies the gap between glyphs (1 as the font has it); `direction`
+ * `"ltr"` or `"rtl"` (null: ltr). Empty text is a list with a count of 0.
+ * Null (and `last_error`) for null text, a size or spacing not positive and
+ * finite, an alignment or direction not one of those words, font bytes that
+ * are not a font.
+ *
+ * # Safety
+ * `text`, `font`, `halign`, `valign`, `direction` NUL-terminated or null;
+ * `font_bytes` readable for `font_len` bytes or null.
+ */
+struct CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_profile_text(const char *text,
+                                                                         double size,
+                                                                         const char *font,
+                                                                         const uint8_t *font_bytes,
+                                                                         size_t font_len,
+                                                                         const char *halign,
+                                                                         const char *valign,
+                                                                         double spacing,
+                                                                         const char *direction);
 
 /**
  * The region `a` and `b` share: zero or more profiles, each outer loop
@@ -1178,15 +2084,18 @@ bool cadaclysm_blacksmith_edge(const struct CadaclysmBlacksmithSolid *solid,
  * is the full `to - from`, NOT unit, so `point(t) = origin + x*t`); a
  * circle's or ellipse's angle in radians about `origin` in the `x, y` plane
  * (`point(t) = origin + x*radius*cos(t) + y*radius2*sin(t)`, `radius2 ==
- * radius` for a circle); a NURBS's knot parameter (`knots[degree] <= t0 < t1
+ * radius` for a circle); a parabola's own parameter with `radius` its focal
+ * length `F` (`point(t) = origin + x*F*t*t + y*2*F*t`, `radius2` 0); a
+ * hyperbola's with `radius, radius2` its semi-axes `a, b` (`point(t) =
+ * origin + x*a*cosh(t) + y*b*sinh(t)`); a NURBS's knot parameter (`knots[degree] <= t0 < t1
  * <= knots[n]`). Frame vectors `x, y, z` are unit for a conic; for a line
  * `x` is the direction with length equal to the line's own length and `y, z`
  * are zero. Always `t0 < t1`: an edge whose segments run against its curve's
  * own parameter reports the same range -- read the direction from the
  * edge's `segments`, not from the range.
  *
- * `kind` is one of "line", "circle", "ellipse" or "nurbs" -- static, never
- * freed. For a conic or a line `degree` is 0 and `knots`, `poles`, `weights`
+ * `kind` is one of "line", "circle", "ellipse", "parabola", "hyperbola" or
+ * "nurbs" -- static, never freed. For a conic or a line `degree` is 0 and `knots`, `poles`, `weights`
  * are null with zero counts; for a NURBS `origin, x, y, z` are zero and
  * `radius, radius2` are 0. `poles` is three doubles per control point;
  * `weights` is null for a non-rational (plain B-spline) curve, otherwise one
@@ -1355,7 +2264,7 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_extrude_open_between(const
 
 /**
  * The plane midway between the planes of frames `a` and `b` (twelve doubles each),
- * twelve doubles into `out` -- Fusion's midplane: for parallel planes the one halfway
+ * twelve doubles into `out`: for parallel planes the one halfway
  * between, on `a`'s axes; for planes that meet, the plane bisecting them through the
  * line they meet on, its x along that line. `false` and `last_error` for a frame with
  * no normal.
@@ -1368,7 +2277,7 @@ bool cadaclysm_blacksmith_frame_midplane(const double *a, const double *b, doubl
 /**
  * The plane through the points `p`, `q` and `r` (three doubles each), twelve doubles
  * into `out`: its origin `p`, its x towards `q`, its z the normal the three turn
- * about counter-clockwise -- Fusion's plane through three points. `false` and
+ * about counter-clockwise. `false` and
  * `last_error` for three points on one line.
  *
  * # Safety
@@ -1787,7 +2696,7 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_chamfer(const struct Cadac
 /**
  * `solid` with the round face `face` belongs to made again at `radius` -- the
  * fillet's bands, balls and rim bands joined to that face taken back to the sharp
- * edges they replaced and those rounded again, as Fusion's press-pull on a fillet
+ * edges they replaced and those rounded again, as a press-pull on a fillet
  * face. Null and `last_error` for a face that is not a round of straight edges
  * between planes or of circular rims, or a radius that does not fit.
  *
@@ -1801,7 +2710,7 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_refillet(const struct Cada
 
 /**
  * `solid` with the round face `face` belongs to taken off, the faces beside it made
- * sharp again -- Fusion's delete of a fillet face. The same refusals as
+ * sharp again -- the delete of a fillet face. The same refusals as
  * [`cadaclysm_blacksmith_refillet`].
  *
  * # Safety
@@ -1814,7 +2723,7 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_unfillet(const struct Cada
  * `solid` with the chamfer face `face` belongs to cut again at `distance` -- its
  * bevels (flat between two planes, cones round rims) and the corner triangles joined
  * to that face taken back to the sharp edges they cut and those bevelled again, as
- * Fusion's press-pull on a chamfer face. Null and `last_error` for a face that is not
+ * a press-pull on a chamfer face. Null and `last_error` for a face that is not
  * a chamfer's bevel, or a distance that does not fit.
  *
  * # Safety
@@ -1859,7 +2768,7 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_push_pull(const struct Cad
 
 /**
  * `solid` with the `count` faces at `faces` pushed out by `distance` together (pulled
- * in, negative) -- Fusion's press-pull on a selection: each face by
+ * in, negative) -- a press-pull on a selection: each face by
  * [`cadaclysm_blacksmith_push_pull`]'s rule for it, one after another in the order
  * given, each found again by a point inside it after the pushes before it renumbered the
  * faces. A box's top and a side pushed 5 is the box 5 taller and 5 wider. A face on the
@@ -1879,7 +2788,7 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_push_pull_faces(const stru
                                                                       void *user);
 
 /**
- * `solid` split by `tool` into bodies -- Fusion's Split Body. A closed `tool`
+ * `solid` split by `tool` into bodies. A closed `tool`
  * gives the part outside it, then the part inside; a flat sheet splits by the
  * whole plane it lies on. Every connected part is a body, and the bodies come
  * back side by side in one solid: take them apart with
@@ -1958,7 +2867,7 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_shell(const struct Cadacly
                                                             void *user);
 
 /**
- * `solid`, a sheet, made a solid `thickness` thick -- Fusion's Thicken: its faces,
+ * `solid`, a sheet, made a solid `thickness` thick: its faces,
  * their twins moved `thickness` along the faces' normals (against them for a negative
  * thickness), and a wall round every open edge. Two faces of a folded sheet meet on
  * their offsets' mitre; a closed sheet thickens to a hollow. Free-form (NURBS) faces
@@ -2063,7 +2972,7 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sweep(const struct Cadacly
                                                             const struct CadaclysmBlacksmithSweepPath *path);
 
 /**
- * A circle of `radius` swept along `path`, square to its start -- Fusion's Pipe:
+ * A circle of `radius` swept along `path`, square to its start:
  * a rod, or with a positive `thickness` a tube whose walls are that thick. `path`
  * is borrowed, as by [`cadaclysm_blacksmith_sweep`]. Null and `last_error` for a
  * radius that is not positive, a thickness that is negative or reaches the

@@ -33,6 +33,7 @@ using Vec3 = cadaclysm::Vec3;
 using AxisLine = std::array<Vec3, 2>;
 using Manifold = cadaclysm::Manifold;
 using MeshData = cadaclysm::MeshData;
+using MeshData64 = cadaclysm::MeshData64;
 // Called with a phase name and progress through it; for the long operations.
 using Progress = std::function<void(std::string_view phase, std::size_t done, std::size_t total)>;
 
@@ -300,8 +301,7 @@ public:
         return placed(o, Frame({0, 0, 0}, ux, detail::cross(n, ux), n));
     }
 
-    // Construction planes. The plane midway between the planes of frames a and b --
-    // Fusion's midplane: for parallel planes the one halfway between, on a's axes; for
+    // Construction planes. The plane midway between the planes of frames a and b: for parallel planes the one halfway between, on a's axes; for
     // planes that meet, the plane bisecting them through the line they meet on, its x
     // along that line.
     static Result<Frame> midplane(const Frame& a, const Frame& b) {
@@ -410,8 +410,8 @@ private:
     std::uint32_t index_;
 };
 
-// One edge's exact curve, as plain data copied out (Edge::curve): `kind` is "line",
-// "circle", "ellipse" or "nurbs".
+// One edge's, or one intersection chain's, exact curve as plain data copied out
+// (Edge::curve, Chain::curve): `kind` is "line", "circle", "ellipse", "parabola", "hyperbola" or "nurbs".
 //
 // `t0..t1` is the edge's parameter range on its own curve: a line's fraction (0..1 over
 // `origin -> origin + x`, where `x` is the full `to - from`, NOT unit -- so
@@ -465,6 +465,80 @@ inline Curve curve_of(const CadaclysmBlacksmithCurve& raw) {
     }
     if (raw.weights) c.weights = std::vector<double>(raw.weights, raw.weights + raw.pole_count);
     return c;
+}
+
+}  // namespace detail
+
+// One branch of one face pair's crossing (Intersection::chains): `points` in walk order
+// (a closed chain does not repeat its first point), `closed`, the faces (`face_a` in the
+// first solid, `face_b` in the second), `tangent` (the surfaces near-tangent along it, or
+// the snap unsettled -- the points their best estimate) and `curve`, its exact curve over
+// the chain's own `t0..t1`, or nothing where the kernel found none. A chain may stop at a
+// face boundary or a closed curve's seam and continue as another: join chains by matching
+// ends.
+struct Chain {
+    std::vector<Vec3> points;
+    bool closed = false;
+    std::uint32_t face_a = 0;
+    std::uint32_t face_b = 0;
+    bool tangent = false;
+    std::optional<Curve> curve;
+};
+
+// A face of the first solid and a face of the second that coincide
+// (Intersection::overlaps): the faces (`face_a`, `face_b`) and `loops`, the shared
+// region's rings (outer first, holes after; each ring closed without repeating its first
+// point) -- empty for a partial overlap whose outlines cross.
+struct Overlap {
+    std::uint32_t face_a = 0;
+    std::uint32_t face_b = 0;
+    std::vector<std::vector<Vec3>> loops;
+};
+
+// What Solid::intersect found, copied out: `chains` (one per face pair per branch) and
+// `overlaps` (one per coincident face pair). Both empty where the solids do not meet.
+struct Intersection {
+    std::vector<Chain> chains;
+    std::vector<Overlap> overlaps;
+};
+
+namespace detail {
+
+// `count` xyz triples at `at`, copied out as points.
+inline std::vector<Vec3> points_at(const double* at, std::uint32_t count) {
+    std::vector<Vec3> out;
+    if (!at) return out;
+    out.reserve(count);
+    for (std::uint32_t k = 0; k < count; ++k) out.push_back(Vec3{at[3 * k], at[3 * k + 1], at[3 * k + 2]});
+    return out;
+}
+
+inline Chain chain_of(const CadaclysmBlacksmithChain& raw, std::optional<Curve> curve) {
+    Chain c;
+    c.points = points_at(raw.points, raw.point_count);
+    c.closed = raw.closed;
+    c.face_a = raw.face_a;
+    c.face_b = raw.face_b;
+    c.tangent = raw.tangent;
+    c.curve = std::move(curve);
+    return c;
+}
+
+// Ring `r` runs from `loop_offsets[r]` to the next start, the last to `point_count`.
+inline Overlap overlap_of(const CadaclysmBlacksmithOverlap& raw) {
+    Overlap o;
+    o.face_a = raw.face_a;
+    o.face_b = raw.face_b;
+    std::vector<Vec3> points = points_at(raw.points, raw.point_count);
+    if (raw.loop_offsets) {
+        o.loops.reserve(raw.loop_count);
+        for (std::uint32_t r = 0; r < raw.loop_count; ++r) {
+            std::uint32_t first = raw.loop_offsets[r];
+            std::uint32_t last = r + 1 < raw.loop_count ? raw.loop_offsets[r + 1] : raw.point_count;
+            o.loops.emplace_back(points.begin() + first, points.begin() + last);
+        }
+    }
+    return o;
 }
 
 }  // namespace detail
@@ -641,6 +715,11 @@ public:
     static Result<Profile> regular_polygon(const Vec2& centre, double radius, std::uint32_t sides, double angle = 0.0) {
         return wrap(::cadaclysm_blacksmith_profile_regular_polygon(centre[0], centre[1], radius, sides, angle));
     }
+    // A star of `points` tips on the circle of `outer` about `centre`, its inner corners on the circle
+    // of `inner` (under `outer`), the first tip at `angle` radians from the sketch's x axis.
+    static Result<Profile> star(const Vec2& centre, double outer, double inner, std::uint32_t points, double angle = 0.0) {
+        return wrap(::cadaclysm_blacksmith_profile_star(centre[0], centre[1], outer, inner, points, angle));
+    }
     // A spline of `degree` through the control polygon `points`; `weights` one a point.
     static Result<Profile> spline(const std::vector<Vec2>& points, std::uint32_t degree = 3,
                                   const std::optional<std::vector<double>>& weights = std::nullopt, bool closed = false) {
@@ -655,6 +734,12 @@ public:
     }
     // An outline drawn a segment at a time.
     static Path path(const Vec2& start);
+    // Start drawing on the arc of the parabola with `vertex`, axis direction `axis` and
+    // focal length `focal`, over the across-axis coordinates `from`..`to`: the path
+    // begins at the arc's first point and holds the arc -- a reflector from rim to rim,
+    // `Profile::parabola({0, 0}, {0, 1}, 20, -50, 50)` a dish 100 wide opening up. A
+    // refusal is latched, as a step's is.
+    static Path parabola(const Vec2& vertex, const Vec2& axis, double focal, double from, double to);
 
     // Open profiles joined end to end into one, in any order and either way round.
     static Result<Profile> chain(const Profiles& pieces, double tolerance = 1e-6) {
@@ -744,10 +829,44 @@ public:
     // points, about 128 MB), and, as a defect rather than an outcome, a result that fails
     // to close.
     Result<std::vector<Profile>> common(const Profile& other, double tolerance = HIT_TOLERANCE) const {
-        CadaclysmBlacksmithProfileList* list = ::cadaclysm_blacksmith_profile_common(ptr(), other.ptr(), tolerance);
-        if (!list) return detail::kernel_error("profile_common");
-        // Each profile is a handle of its own; the list goes on every path once read, a
-        // failed read's too (the profiles read so far are destroyed with `out`).
+        return list(::cadaclysm_blacksmith_profile_common(ptr(), other.ptr(), tolerance), "profile_common");
+    }
+
+    // `text` set in a font, one profile per closed shape -- a letter with its counters as
+    // holes (`o` one, `8` two; `i` is two profiles) -- on the sketch plane, the baseline along
+    // x from the origin, each outline counter-clockwise and its holes clockwise, a curved side
+    // the font's own cubic Bezier kept exactly: an extruded `O` has curved walls. `size` is
+    // roughly the height of a capital. `font` is a family, optionally with a style
+    // ("Liberation Sans:style=Bold"), a font file's path, or empty for the bundled Liberation
+    // Sans Regular -- which also serves when the family is not found; `font_bytes` a font
+    // file's bytes, used instead of `font` when given. `halign` is "left", "center" or
+    // "right"; `valign` "baseline", "bottom", "center" or "top"; `spacing` multiplies the gap
+    // between glyphs; `direction` "ltr" or "rtl". Empty text is an empty vector. An error for
+    // a size or spacing not positive and finite, an alignment or direction not one of those
+    // words, font bytes that are not a font.
+    static Result<std::vector<Profile>> text(const std::string& text, double size = 10.0, const std::string& font = "",
+                                             const std::string& halign = "left", const std::string& valign = "baseline",
+                                             double spacing = 1.0, const std::string& direction = "ltr",
+                                             const std::optional<std::vector<std::uint8_t>>& font_bytes = std::nullopt) {
+        const std::uint8_t* bytes = font_bytes ? font_bytes->data() : nullptr;
+        std::size_t len = font_bytes ? font_bytes->size() : 0;
+        if (font_bytes && font_bytes->empty()) {
+            // An empty vector is bytes that are no font, not "no bytes": give the C side
+            // something to refuse rather than a null it would read as the default.
+            static const std::uint8_t none = 0;
+            bytes = &none;
+        }
+        return list(::cadaclysm_blacksmith_profile_text(text.c_str(), size, font.c_str(), bytes, len, halign.c_str(),
+                                                        valign.c_str(), spacing, direction.c_str()),
+                    "profile_text");
+    }
+
+private:
+    // The profiles of a list the library handed back (null: the last error). Each profile
+    // is a handle of its own; the list goes on every path once read, a failed read's too
+    // (the profiles read so far are destroyed with `out`).
+    static Result<std::vector<Profile>> list(CadaclysmBlacksmithProfileList* list, const char* what) {
+        if (!list) return detail::kernel_error(what);
         std::uint32_t n = ::cadaclysm_blacksmith_profile_list_count(list);
         std::vector<Profile> out;
         out.reserve(n);
@@ -763,6 +882,7 @@ public:
         return out;
     }
 
+public:
     // The outline, then each hole, as polylines at z = 0 within `tolerance` of its arcs
     // and splines -- what a viewer draws it with. A closed loop repeats its first point
     // at the end; an open chain (from end_open) stays open. Views into the profile's
@@ -776,6 +896,16 @@ public:
 
     // The C handle, for code that calls the C ABI directly. Owned by this Profile.
     const CadaclysmBlacksmithProfile* handle() const noexcept { return state_ ? state_->handle : nullptr; }
+
+    // This profile's own loops as SVG text, from directly above by default -- a sketch
+    // lies in z = 0, so its own plane already is the page, unlike a solid's Solid::svg_text
+    // (SvgView::iso), which has no plane of its own to prefer. Passing `options` at all --
+    // even one left at its own defaults -- opts out of the top default and uses its `view`
+    // as given, the same way a caller of SvgOptions controls a solid's. Defined below
+    // write_svg_text, which it calls with no solids. See write_svg_text.
+    Result<std::string> svg_text(const SvgOptions& options = SvgOptions{SvgView::top}) const;
+    // svg_text() written to `path` by the library itself; see svg_text for the top default.
+    Result<void> svg(const std::string& path, const SvgOptions& options = SvgOptions{SvgView::top}) const;
 
 private:
     friend class Path;
@@ -846,6 +976,59 @@ public:
     }
     Path&& bezier_to(const Vec2& c1, const Vec2& c2, const Vec2& to) && { return std::move(bezier_to(c1, c2, to)); }
 
+    // A conic arc to `to` through the control point `control` with middle weight
+    // `weight`: under 1 an elliptical arc, 1 a parabola, over 1 a hyperbola -- the
+    // rational quadratic Bezier, kept exact.
+    Path& conic_to(const Vec2& to, const Vec2& control, double weight) & {
+        step("path_conic_to", [&](CadaclysmBlacksmithPath* p) {
+            return ::cadaclysm_blacksmith_path_conic_to(p, to[0], to[1], control[0], control[1], weight);
+        });
+        return *this;
+    }
+    Path&& conic_to(const Vec2& to, const Vec2& control, double weight) && {
+        return std::move(conic_to(to, control, weight));
+    }
+
+    // A parabolic arc to `to` whose end tangents meet at `control`: conic_to with weight 1.
+    Path& parabola_to(const Vec2& to, const Vec2& control) & { return conic_to(to, control, 1.0); }
+    Path&& parabola_to(const Vec2& to, const Vec2& control) && { return std::move(parabola_to(to, control)); }
+
+    // A hyperbolic arc to `to` through `control` with middle `weight` over 1.
+    Path& hyperbola_to(const Vec2& to, const Vec2& control, double weight) & {
+        // Checked here, latched like a refused step (after any earlier one, which wins).
+        if (!error_ && ptr_ && !(weight > 1.0)) {
+            error_ = detail::refuse("hyperbola_to: the weight must be over 1 (1 is a parabola, under 1 an ellipse)");
+            return *this;
+        }
+        return conic_to(to, control, weight);
+    }
+    Path&& hyperbola_to(const Vec2& to, const Vec2& control, double weight) && {
+        return std::move(hyperbola_to(to, control, weight));
+    }
+
+    // The parabolic arc to `to` with `vertex`: its axis and focal length solved from the
+    // two ends. Refused when no parabola with that vertex passes through both.
+    Path& parabola_by_vertex(const Vec2& to, const Vec2& vertex) & {
+        step("path_parabola_by_vertex", [&](CadaclysmBlacksmithPath* p) {
+            return ::cadaclysm_blacksmith_path_parabola_by_vertex(p, to[0], to[1], vertex[0], vertex[1]);
+        });
+        return *this;
+    }
+    Path&& parabola_by_vertex(const Vec2& to, const Vec2& vertex) && { return std::move(parabola_by_vertex(to, vertex)); }
+
+    // The parabolic arc to `to` with `focus`: of the two through the ends, the one whose
+    // vertex lies between the ends' projections, then the one whose arc cups the focus
+    // (the focus between the arc and its chord), then the more symmetric; with the focus
+    // beyond the chord that is the arch over the ends, not the shallow dish -- draw that
+    // one with `Profile::parabola`.
+    Path& parabola_by_focus(const Vec2& to, const Vec2& focus) & {
+        step("path_parabola_by_focus", [&](CadaclysmBlacksmithPath* p) {
+            return ::cadaclysm_blacksmith_path_parabola_by_focus(p, to[0], to[1], focus[0], focus[1]);
+        });
+        return *this;
+    }
+    Path&& parabola_by_focus(const Vec2& to, const Vec2& focus) && { return std::move(parabola_by_focus(to, focus)); }
+
     // `control`: every control point after the current one, the endpoint last;
     // `weights`: one per control point including the current one; `knots`: the full
     // repeated knot vector.
@@ -884,9 +1067,16 @@ public:
     }
 
 private:
+    friend class Profile;
+
     struct Free {
         void operator()(CadaclysmBlacksmithPath* p) const noexcept { ::cadaclysm_blacksmith_path_free(p); }
     };
+
+    // Wraps the handle another entry point (`path_parabola`) returned, latching its refusal.
+    Path(CadaclysmBlacksmithPath* raw, const char* what) : ptr_(raw) {
+        if (!ptr_) error_ = detail::kernel_error(what);
+    }
 
     template <class Call>
     void step(const char* what, Call&& call) {
@@ -911,6 +1101,9 @@ private:
 };
 
 inline Path Profile::path(const Vec2& start) { return Path(start); }
+inline Path Profile::parabola(const Vec2& vertex, const Vec2& axis, double focal, double from, double to) {
+    return Path(::cadaclysm_blacksmith_path_parabola(vertex[0], vertex[1], axis[0], axis[1], focal, from, to), "path_parabola");
+}
 
 // A 3D path a profile is carried along -- lines and arcs -- for Solid::sweep and
 // Solid::pipe, which only borrow it. Latches its first refused step, like Path.
@@ -982,6 +1175,27 @@ private:
 
     std::unique_ptr<CadaclysmBlacksmithSweepPath, Free> ptr_;
     std::optional<Error> error_;
+};
+
+// One stretch of a profile loop between two cuts (SolidHits::pieces): `inside` (by its
+// middle's winding number over the body; a piece lying on the surface is inside),
+// `start`/`end` (profile spots -- a segment join reads as the next segment's start
+// (k + 1, 0), an open chain runs from (0, 0) to (n - 1, 1); a loop no hit cuts is one
+// closed piece) and `profile`, the piece's own open chain (what SweepPath::along with
+// `open` sweeps).
+struct Piece {
+    bool inside = false;
+    Spot start;
+    Spot end;
+    Profile profile;
+};
+
+// What Solid::hits found, copied out: `hits` (ordered along the profile; `a_start`/`a_end`
+// on the profile, `b_start`/`b_end` on the solid's faces: a `face` at (`u`, `v`)) and
+// `pieces` (empty for an open body).
+struct SolidHits {
+    std::vector<Hit> hits;
+    std::vector<Piece> pieces;
 };
 
 // ---- solids -------------------------------------------------------------------------
@@ -1078,6 +1292,52 @@ private:
     CadaclysmBlacksmithMesh raw_;
 };
 
+// Mesh in `double`, from the same tessellation cache -- the same triangles and
+// indices, Mesh's `float` positions and normals being exactly these narrowed. Borrowed
+// like Mesh, under the same rule: valid until the solid is closed or meshed again at a
+// different tolerance (checked the same way Mesh is, through the solid's generation).
+class Mesh64 {
+public:
+    Span<const double> positions() const {
+        const CadaclysmBlacksmithMesh64& r = raw();
+        return r.positions ? Span<const double>(r.positions, static_cast<std::size_t>(r.vertex_count) * 3) : Span<const double>();
+    }
+    Span<const double> normals() const {
+        const CadaclysmBlacksmithMesh64& r = raw();
+        return r.normals ? Span<const double>(r.normals, static_cast<std::size_t>(r.vertex_count) * 3) : Span<const double>();
+    }
+    Span<const std::uint32_t> indices() const {
+        const CadaclysmBlacksmithMesh64& r = raw();
+        return r.indices ? Span<const std::uint32_t>(r.indices, r.index_count) : Span<const std::uint32_t>();
+    }
+    std::uint32_t vertex_count() const { return raw().vertex_count; }
+    std::uint32_t index_count() const { return raw().index_count; }
+    std::uint32_t triangle_count() const { return raw().index_count / 3; }
+    bool empty() const { return raw().index_count == 0; }
+
+    MeshData64 copy() const {
+        MeshData64 out;
+        Span<const double> p = positions();
+        Span<const double> n = normals();
+        Span<const std::uint32_t> i = indices();
+        out.positions.assign(p.begin(), p.end());
+        out.normals.assign(n.begin(), n.end());
+        out.indices.assign(i.begin(), i.end());
+        return out;
+    }
+
+private:
+    friend class Solid;
+    Mesh64(detail::SolidRef solid, const CadaclysmBlacksmithMesh64& data) : solid_(std::move(solid)), raw_(data) {}
+    const CadaclysmBlacksmithMesh64& raw() const {
+        solid_.get("blacksmith::Mesh64");
+        return raw_;
+    }
+
+    detail::SolidRef solid_;
+    CadaclysmBlacksmithMesh64 raw_;
+};
+
 // A solid's feature edges as polylines, borrowed like Mesh: row i is 3 floats a point.
 class EdgePolylines {
 public:
@@ -1153,6 +1413,16 @@ inline Result<std::string> write_brep_text(const Solids& solids);
 inline Result<void> write_brep(const std::string& path, const Solids& solids);
 inline Result<std::string> write_svg_text(const Solids& solids, const SvgOptions& options);
 inline Result<void> write_svg(const std::string& path, const Solids& solids, const SvgOptions& options);
+// The drawing pair widens write_svg_text/write_svg to profiles as well as solids: a
+// `<g id="solid-N">` per solid then a `<g id="profile-N">` per profile, on one page.
+// Either list may be empty; both empty is refused. Every refusal is worded exactly as
+// the solids-only pair's always has, so a solids-only drawing through this overload
+// (an empty Profiles) reads the same text either pair would give. The overloads above
+// still call the solids-only pair directly rather than delegating to these, though --
+// see their own comments for why.
+inline Result<std::string> write_svg_text(const Solids& solids, const Profiles& profiles, const SvgOptions& options);
+inline Result<void> write_svg(const std::string& path, const Solids& solids, const Profiles& profiles,
+                              const SvgOptions& options);
 
 // An exact B-rep solid (or open sheet). Immutable and move-only: every operation
 // returns a new one. Freed when destroyed or on close(); a call on a closed or
@@ -1328,6 +1598,114 @@ public:
                                                        detail::progress_fn(progress), detail::progress_user(progress)));
     }
 
+    // Where this solid's faces cross or coincide with `other`'s, at `tolerance`, as an
+    // Intersection: `chains` along the curves the faces meet on and `overlaps` where a
+    // face pair coincides. Neither solid is changed; either may be an open sheet. No
+    // crossing is an empty result, never an error.
+    //
+    // Each Chain's points are within `tolerance` of both faces' exact surfaces; there is
+    // one chain per face pair per branch -- chains are not joined across a face boundary
+    // or a closed curve's seam, so join them by matching ends. A chain's `curve` is its
+    // exact curve where the kernel found one every point lies within `tolerance` of, else
+    // nothing; `tangent` is set where the surfaces are near-tangent along the chain or the
+    // snap did not settle (the points are then the best estimate) -- a closed chain that
+    // does not go once round its own curve (a sliver where two surfaces barely cross) has
+    // no curve, `tangent` still true. An Overlap is a coincident face pair with the shared
+    // region's rings (outer first, holes after), which may be empty for a partial overlap
+    // whose outlines cross. Known limit: a crossing narrower than `tolerance` -- two
+    // surfaces passing within it without their meshes crossing -- can be missed;
+    // near-tangent contact is where this bites.
+    //
+    // `progress(phase, done, total)` hears "mesh", "cull", "cross", "snap" and "curve".
+    // Fails for a `tolerance` not positive and finite, a solid with no faces, or one that
+    // meshes to nothing.
+    Result<Intersection> intersect(const Solid& other, double tolerance = DEFAULT_TOLERANCE, const Progress& progress = {}) const {
+        CadaclysmBlacksmithIntersection* found =
+            ::cadaclysm_blacksmith_intersect(raw_handle("intersect"), other.raw_handle("intersect"), tolerance,
+                                             detail::progress_fn(progress), detail::progress_user(progress));
+        if (!found) return detail::kernel_error("intersect");
+        struct Free {
+            CadaclysmBlacksmithIntersection* p;
+            ~Free() { ::cadaclysm_blacksmith_intersection_free(p); }
+        } release{found};
+        Intersection out;
+        std::uint32_t n = ::cadaclysm_blacksmith_intersection_chain_count(found);
+        out.chains.reserve(n);
+        for (std::uint32_t i = 0; i < n; ++i) {
+            CadaclysmBlacksmithChain raw{};
+            if (!::cadaclysm_blacksmith_intersection_chain(found, i, &raw)) return detail::kernel_error("intersection_chain");
+            std::optional<Curve> curve;
+            if (raw.has_curve) {
+                CadaclysmBlacksmithCurve raw_curve{};
+                if (!::cadaclysm_blacksmith_intersection_curve(found, i, &raw_curve)) return detail::kernel_error("intersection_curve");
+                curve = detail::curve_of(raw_curve);
+            }
+            out.chains.push_back(detail::chain_of(raw, std::move(curve)));
+        }
+        n = ::cadaclysm_blacksmith_intersection_overlap_count(found);
+        out.overlaps.reserve(n);
+        for (std::uint32_t i = 0; i < n; ++i) {
+            CadaclysmBlacksmithOverlap raw{};
+            if (!::cadaclysm_blacksmith_intersection_overlap(found, i, &raw)) return detail::kernel_error("intersection_overlap");
+            out.overlaps.push_back(detail::overlap_of(raw));
+        }
+        return out;
+    }
+
+    // Where `profile`, placed on `frame`, pierces this solid's faces, and the pieces its
+    // loops cut into, as a SolidHits. Neither is changed.
+    //
+    // A point hit lies within `tolerance` of the segment's exact curve and of the face's
+    // exact surface, inside the face's trim; its profile spot (`a_start`: loop, segment, t)
+    // and face spot (`b_start`: face, u, v) evaluate to the point within `tolerance`;
+    // `touch` where the curve's tangent lies within 1e-3 (sine) of the surface's tangent
+    // plane there (a graze), false at a crossing. A run is a stretch of one segment lying
+    // within `tolerance` of one face and inside it, longer than `tolerance`. Hits within
+    // `tolerance` of each other merge (a hit at a segment join reported once, as
+    // (k, t = 1); a closed loop's closing join reads (0, 0)). Every point is in world
+    // space (the frame applied).
+    //
+    // Pieces only for a closed body -- an open body has none -- in loop order, covering
+    // every loop exactly; a piece's spots read a segment join as the next segment's start
+    // (k + 1, 0), and an open chain runs from (0, 0) to (n - 1, 1); a loop no hit cuts is
+    // one closed piece. `inside` by the piece middle's winding number over the body's mesh;
+    // a piece lying on the surface is inside. Known limit: a segment passing within
+    // `tolerance` of a face without crossing its mesh can be missed (near-tangent grazes).
+    //
+    // `progress` hears "mesh", "cull", "hits" and "pieces". An error for a `tolerance` not
+    // positive and finite, a solid with no faces or that meshes to nothing, a profile with
+    // no segments, or a free-form segment that is not an evaluable NURBS curve.
+    Result<SolidHits> hits(const Profile& profile, const Frame& frame, double tolerance = DEFAULT_TOLERANCE,
+                           const Progress& progress = {}) const {
+        CadaclysmBlacksmithHits* found =
+            ::cadaclysm_blacksmith_solid_profile_hits(raw_handle("hits"), profile.ptr(), frame.raw().data(), tolerance,
+                                                      detail::progress_fn(progress), detail::progress_user(progress));
+        if (!found) return detail::kernel_error("solid_profile_hits");
+        struct Free {
+            CadaclysmBlacksmithHits* p;
+            ~Free() { ::cadaclysm_blacksmith_hits_free(p); }
+        } release{found};
+        SolidHits out;
+        std::uint32_t n = ::cadaclysm_blacksmith_hit_count(found);
+        out.hits.reserve(n);
+        for (std::uint32_t i = 0; i < n; ++i) {
+            CadaclysmBlacksmithHit raw{};
+            if (!::cadaclysm_blacksmith_hit(found, i, &raw)) return detail::kernel_error("hit");
+            out.hits.push_back(detail::hit_of(raw));
+        }
+        n = ::cadaclysm_blacksmith_hits_piece_count(found);
+        out.pieces.reserve(n);
+        for (std::uint32_t i = 0; i < n; ++i) {
+            bool inside = false;
+            CadaclysmBlacksmithSpot start{}, end{};
+            if (!::cadaclysm_blacksmith_hits_piece(found, i, &inside, &start, &end)) return detail::kernel_error("hits_piece");
+            Result<Profile> own = Profile::wrap(::cadaclysm_blacksmith_hits_piece_profile(found, i), "hits_piece_profile");
+            if (!own) return own.error();
+            out.pieces.push_back(Piece{inside, detail::spot_of(start), detail::spot_of(end), std::move(own).value()});
+        }
+        return out;
+    }
+
     // -- asking
     std::uint32_t faces() const { return ::cadaclysm_blacksmith_face_count(raw_handle("faces")); }
     Result<std::string> face_kind(std::uint32_t f) const {
@@ -1342,6 +1720,17 @@ public:
         Vec3 lo{}, hi{};
         if (!::cadaclysm_blacksmith_bounds(raw_handle("bounds"), tolerance, lo.data(), hi.data())) {
             return detail::kernel_error("bounds");
+        }
+        state_->filled(tolerance);
+        return std::make_pair(lo, hi);
+    }
+    // bounds_at(tolerance), taken from the tessellation cache's own unnarrowed
+    // `double` positions rather than bounds_at's widened `float` ones: exact far from
+    // the origin.
+    Result<std::pair<Vec3, Vec3>> bounds64(double tolerance = DEFAULT_TOLERANCE) const {
+        Vec3 lo{}, hi{};
+        if (!::cadaclysm_blacksmith_bounds64(raw_handle("bounds64"), tolerance, lo.data(), hi.data())) {
+            return detail::kernel_error("bounds64");
         }
         state_->filled(tolerance);
         return std::make_pair(lo, hi);
@@ -1373,6 +1762,14 @@ public:
         if (!data.positions) return detail::kernel_error("mesh");
         state_->filled(tolerance);
         return Mesh(detail::SolidRef(state_), data);
+    }
+    // mesh(tolerance), from the same cache, unnarrowed: the same triangles and
+    // indices, mesh()'s `float` positions and normals being exactly these narrowed.
+    Result<Mesh64> mesh64(double tolerance = DEFAULT_TOLERANCE) const {
+        CadaclysmBlacksmithMesh64 data = ::cadaclysm_blacksmith_mesh64(raw_handle("mesh64"), tolerance);
+        if (!data.positions) return detail::kernel_error("mesh64");
+        state_->filled(tolerance);
+        return Mesh64(detail::SolidRef(state_), data);
     }
     Result<EdgePolylines> edge_polylines(double tolerance = DEFAULT_TOLERANCE) const {
         CadaclysmBlacksmithPolylines data = ::cadaclysm_blacksmith_edge_polylines(raw_handle("edge_polylines"), tolerance);
@@ -1507,13 +1904,13 @@ public:
         return wrap(::cadaclysm_blacksmith_chamfer(raw_handle("chamfer"), edge_indices.data(), edge_indices.size(), distance,
                                                    tolerance));
     }
-    // A face moved `distance` along its normal, as Fusion and Rhino extrude a face.
+    // A face moved `distance` along its normal, as a face extrude does it.
     Result<Solid> push_pull(std::uint32_t f, double distance, double tolerance = DEFAULT_TOLERANCE,
                             const Progress& progress = {}) const {
         return wrap(::cadaclysm_blacksmith_push_pull(raw_handle("push_pull"), f, distance, tolerance,
                                                      detail::progress_fn(progress), detail::progress_user(progress)));
     }
-    // Several faces pushed together, as Fusion's press-pull on a selection: each by its
+    // Several faces pushed together, as a press-pull on a selection: each by its
     // own rule, one after another, each found again after the pushes before it
     // renumbered the faces. A box's top and a side pushed 5 is the box 5 taller and 5
     // wider; a face on the same curved surface as one before it, and joined to it, moved
@@ -1600,6 +1997,8 @@ private:
     friend Result<void> write_brep(const std::string&, const Solids&);
     friend Result<std::string> write_svg_text(const Solids&, const SvgOptions&);
     friend Result<void> write_svg(const std::string&, const Solids&, const SvgOptions&);
+    friend Result<std::string> write_svg_text(const Solids&, const Profiles&, const SvgOptions&);
+    friend Result<void> write_svg(const std::string&, const Solids&, const Profiles&, const SvgOptions&);
 
     explicit Solid(std::shared_ptr<detail::SolidState> owned) : state_(std::move(owned)) {}
 
@@ -1755,8 +2154,32 @@ inline Result<std::string> write_brep_text(const Solids& solids) {
     return out;
 }
 
+// Several solids' and profiles' wireframes as one SVG, from the camera `options`
+// describes. Owned by the library: decoded and released before this returns.
+inline Result<std::string> write_svg_text(const Solids& solids, const Profiles& profiles, const SvgOptions& options) {
+    std::vector<const CadaclysmBlacksmithSolid*> solid_handles;
+    solid_handles.reserve(solids.size());
+    for (const Solid& s : solids) solid_handles.push_back(s.raw_handle("write_svg_text"));
+    std::vector<const CadaclysmBlacksmithProfile*> profile_handles;
+    profile_handles.reserve(profiles.size());
+    for (const Profile& p : profiles) profile_handles.push_back(p.handle());
+    CadaclysmBlacksmithSvgOptions raw = detail::build_svg_options(options);
+    char* text = ::cadaclysm_blacksmith_drawing_svg_text(solid_handles.data(), solid_handles.size(),
+                                                          profile_handles.data(), profile_handles.size(), &raw);
+    if (!text) return detail::kernel_error("svg_text");
+    std::string out(text);
+    ::cadaclysm_blacksmith_string_free(text);
+    return out;
+}
+
 // Several solids' wireframes as one SVG, from the camera `options` describes. Owned
-// by the library: decoded and released before this returns.
+// by the library: decoded and released before this returns. Kept calling the
+// solids-only pair rather than delegating to the overload above with an empty
+// Profiles: this file's own coverage test (`tests/bindings.rs`) reads an entry
+// point as declared only where it is actually called `::`-qualified, so `svg_text`
+// must keep a real call of its own here, not just a mention -- unlike Python and
+// Node, which declare every entry point in a string table independent of whether
+// it is still called. The two pairs refuse in identical words either way.
 inline Result<std::string> write_svg_text(const Solids& solids, const SvgOptions& options) {
     std::vector<const CadaclysmBlacksmithSolid*> handles;
     handles.reserve(solids.size());
@@ -1783,6 +2206,25 @@ inline Result<void> write_brep(const std::string& path, const Solids& solids) {
 
 // `write_svg_text` written to `path` by the library itself, which names the file in
 // its refusal when it cannot.
+inline Result<void> write_svg(const std::string& path, const Solids& solids, const Profiles& profiles,
+                              const SvgOptions& options) {
+    std::vector<const CadaclysmBlacksmithSolid*> solid_handles;
+    solid_handles.reserve(solids.size());
+    for (const Solid& s : solids) solid_handles.push_back(s.raw_handle("write_svg"));
+    std::vector<const CadaclysmBlacksmithProfile*> profile_handles;
+    profile_handles.reserve(profiles.size());
+    for (const Profile& p : profiles) profile_handles.push_back(p.handle());
+    CadaclysmBlacksmithSvgOptions raw = detail::build_svg_options(options);
+    if (!::cadaclysm_blacksmith_drawing_svg(solid_handles.data(), solid_handles.size(), profile_handles.data(),
+                                            profile_handles.size(), path.c_str(), &raw)) {
+        return detail::kernel_error("svg");
+    }
+    return {};
+}
+
+// `write_svg_text` written to `path` by the library itself, which names the file in
+// its refusal when it cannot. Kept calling the solids-only pair, for the same reason
+// `write_svg_text` above does -- see its comment.
 inline Result<void> write_svg(const std::string& path, const Solids& solids, const SvgOptions& options) {
     std::vector<const CadaclysmBlacksmithSolid*> handles;
     handles.reserve(solids.size());
@@ -1798,6 +2240,14 @@ inline Result<void> Solid::brep(const std::string& path) const { return write_br
 
 inline Result<void> Solid::svg(const std::string& path, const SvgOptions& options) const {
     return write_svg(path, {*this}, options);
+}
+
+inline Result<std::string> Profile::svg_text(const SvgOptions& options) const {
+    return write_svg_text(Solids{}, {*this}, options);
+}
+
+inline Result<void> Profile::svg(const std::string& path, const SvgOptions& options) const {
+    return write_svg(path, Solids{}, {*this}, options);
 }
 
 namespace detail {

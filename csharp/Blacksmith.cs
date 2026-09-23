@@ -198,6 +198,19 @@ internal struct RawBlacksmithMesh
     public uint IndexCount;
 }
 
+/// <summary>`CadaclysmBlacksmithMesh64`: the same tessellation as <see
+/// cref="RawBlacksmithMesh"/> (the index pointer is the very one the library's f32 call
+/// gives), positions and normals unnarrowed.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawBlacksmithMesh64
+{
+    public IntPtr Positions;
+    public IntPtr Normals;
+    public IntPtr Indices;
+    public uint VertexCount;
+    public uint IndexCount;
+}
+
 /// <summary>`CadaclysmBlacksmithPolylines`: polyline `i` is `Points[Offsets[i] ..
 /// Offsets[i + 1]]`, three floats a point; `Offsets` has `PolylineCount + 1` entries.</summary>
 [StructLayout(LayoutKind.Sequential)]
@@ -291,6 +304,34 @@ internal struct RawBlacksmithCurve
     public IntPtr Weights;
 }
 
+/// <summary>`CadaclysmBlacksmithChain`: one branch of one face pair's crossing, borrowed from
+/// the intersection result. One byte of padding after `HasCurve`, which sequential layout
+/// reproduces.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawBlacksmithChain
+{
+    public IntPtr Points;
+    public uint PointCount;
+    public uint FaceA;
+    public uint FaceB;
+    [MarshalAs(UnmanagedType.I1)] public bool Closed;
+    [MarshalAs(UnmanagedType.I1)] public bool Tangent;
+    [MarshalAs(UnmanagedType.I1)] public bool HasCurve;
+}
+
+/// <summary>`CadaclysmBlacksmithOverlap`: a coincident face pair's shared region, borrowed
+/// from the intersection result.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawBlacksmithOverlap
+{
+    public uint FaceA;
+    public uint FaceB;
+    public IntPtr Points;
+    public IntPtr LoopOffsets;
+    public uint PointCount;
+    public uint LoopCount;
+}
+
 /// <summary>`CadaclysmBlacksmithSvgOptions`. Field order and `Size` are the contract, as the
 /// four structs above: `cadaclysm_blacksmith_svg_options_init` fills the library's whole
 /// struct, so this must match the header field for field and may never reorder.
@@ -342,6 +383,20 @@ internal sealed class HitsHandle : CadaclysmHandle
     protected override bool ReleaseHandle()
     {
         BlacksmithNative.cadaclysm_blacksmith_hits_free(handle);
+        return true;
+    }
+}
+
+/// <summary>`CadaclysmBlacksmithIntersection *`.</summary>
+internal sealed class IntersectionHandle : CadaclysmHandle
+{
+    public IntersectionHandle()
+    {
+    }
+
+    protected override bool ReleaseHandle()
+    {
+        BlacksmithNative.cadaclysm_blacksmith_intersection_free(handle);
         return true;
     }
 }
@@ -489,6 +544,8 @@ internal static class BlacksmithNative
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_polygon(double[] xy, nuint count);
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_regular_polygon(double cx, double cy, double radius, uint sides,
         double angle);
+    [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_star(double cx, double cy, double outer, double inner, uint points,
+        double angle);
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_spline(double[] xy, nuint count, uint degree, double[]? weights,
         [MarshalAs(UnmanagedType.I1)] bool closed);
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_with_hole(ProfileHandle outer, ProfileHandle hole);
@@ -498,7 +555,18 @@ internal static class BlacksmithNative
     [DllImport(Lib)]
     [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_hit(HitsHandle hits, uint i, out RawBlacksmithHit outHit);
+    [DllImport(Lib)] internal static extern HitsHandle cadaclysm_blacksmith_solid_profile_hits(SolidHandle solid, ProfileHandle profile,
+        double[] frame, double tolerance, IntPtr progress, IntPtr user);
+    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_hits_piece_count(HitsHandle hits);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_hits_piece(HitsHandle hits, uint i, [MarshalAs(UnmanagedType.I1)] out bool inside,
+        out RawBlacksmithSpot start, out RawBlacksmithSpot end);
+    [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_hits_piece_profile(HitsHandle hits, uint i);
     [DllImport(Lib)] internal static extern ProfileListHandle cadaclysm_blacksmith_profile_common(ProfileHandle a, ProfileHandle b, double tolerance);
+    [DllImport(Lib)] internal static extern ProfileListHandle cadaclysm_blacksmith_profile_text(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string text, double size, [MarshalAs(UnmanagedType.LPUTF8Str)] string font,
+        byte[]? fontBytes, nuint fontLen, [MarshalAs(UnmanagedType.LPUTF8Str)] string halign,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string valign, double spacing, [MarshalAs(UnmanagedType.LPUTF8Str)] string direction);
     [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_profile_list_count(ProfileListHandle list);
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_list_get(ProfileListHandle list, uint i);
     [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_profile_list_free(IntPtr list);
@@ -523,6 +591,14 @@ internal static class BlacksmithNative
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_path_bezier_to(PathHandle p, double c1x, double c1y, double c2x, double c2y,
         double x, double y);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_path_conic_to(PathHandle p, double x, double y, double cx, double cy, double weight);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_path_parabola_by_vertex(PathHandle p, double x, double y, double vx, double vy);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_path_parabola_by_focus(PathHandle p, double x, double y, double fx, double fy);
+    [DllImport(Lib)] internal static extern PathHandle cadaclysm_blacksmith_path_parabola(double vx, double vy, double ax, double ay,
+        double focal, double from, double to);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_path_nurbs_to(PathHandle p, double[] controlXy, nuint controlCount,
         double[]? weights, double[] knots, nuint knotCount, uint degree);
@@ -635,11 +711,25 @@ internal static class BlacksmithNative
     internal static extern bool cadaclysm_blacksmith_edge(SolidHandle solid, uint i, out RawBlacksmithEdge outEdge);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_edge_curve(SolidHandle solid, uint i, out RawBlacksmithCurve outCurve);
+    [DllImport(Lib)] internal static extern IntersectionHandle cadaclysm_blacksmith_intersect(SolidHandle a, SolidHandle b,
+        double tolerance, IntPtr progress, IntPtr user);
+    [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_intersection_free(IntPtr intersection);
+    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_intersection_chain_count(IntersectionHandle intersection);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_intersection_chain(IntersectionHandle intersection, uint i, out RawBlacksmithChain outChain);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_intersection_curve(IntersectionHandle intersection, uint i, out RawBlacksmithCurve outCurve);
+    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_intersection_overlap_count(IntersectionHandle intersection);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_intersection_overlap(IntersectionHandle intersection, uint i, out RawBlacksmithOverlap outOverlap);
     [DllImport(Lib)] internal static extern RawBlacksmithMesh cadaclysm_blacksmith_mesh(SolidHandle solid, double tolerance);
+    [DllImport(Lib)] internal static extern RawBlacksmithMesh64 cadaclysm_blacksmith_mesh64(SolidHandle solid, double tolerance);
     [DllImport(Lib)] internal static extern RawBlacksmithFaceTriangles cadaclysm_blacksmith_mesh_face_triangles(SolidHandle solid, double tolerance);
     [DllImport(Lib)] internal static extern RawBlacksmithPolylines cadaclysm_blacksmith_edge_polylines(SolidHandle solid, double tolerance);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_bounds(SolidHandle solid, double tolerance, [Out] double[] min, [Out] double[] max);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_bounds64(SolidHandle solid, double tolerance, [Out] double[] min, [Out] double[] max);
     [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_leaked_edges(SolidHandle solid, double tolerance);
     [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_unpaired_edges(SolidHandle solid, double tolerance);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
@@ -660,6 +750,16 @@ internal static class BlacksmithNative
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_svg_text(IntPtr[] solids, nuint count, ref RawBlacksmithSvgOptions options);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_svg(IntPtr[] solids, nuint count,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path, ref RawBlacksmithSvgOptions options);
+    // The drawing pair widens `svg_text`/`svg` to profiles as well as solids; either
+    // count may be 0 (null array), both 0 is refused, and every refusal is worded
+    // exactly as the pair above's, so `WriteSvgText`/`WriteSvg` call only this pair now
+    // -- one code path, a solids-only drawing included.
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_drawing_svg_text(IntPtr[] solids, nuint solidCount,
+        IntPtr[] profiles, nuint profileCount, ref RawBlacksmithSvgOptions options);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_drawing_svg(IntPtr[] solids, nuint solidCount,
+        IntPtr[] profiles, nuint profileCount,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string path, ref RawBlacksmithSvgOptions options);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_from_brep(BrepHandle brep,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string layoutId);
@@ -832,14 +932,35 @@ public static class Blacksmith
 
     /// <summary>Several solids' wireframe as one SVG's text, each its own `&lt;g&gt;` -- see
     /// <see cref="SvgOptions"/>. Owned by this call, decoded and released before it returns.
+    /// Delegates to <see cref="WriteSvgText(IEnumerable{Solid}, IEnumerable{Profile}, SvgOptions?)"/>
+    /// with no profiles -- the drawing pair refuses in exactly the words the solids-only pair
+    /// always has, so there is nothing to gain from keeping two routes to the same drawing.
     /// </summary>
-    public static string WriteSvgText(IEnumerable<Solid> solids, SvgOptions? options = null)
+    public static string WriteSvgText(IEnumerable<Solid> solids, SvgOptions? options = null) =>
+        WriteSvgText(solids, Array.Empty<Profile>(), options);
+
+    /// <summary><see cref="WriteSvgText(IEnumerable{Solid}, SvgOptions?)"/> written to
+    /// <paramref name="path"/> by the library itself.</summary>
+    public static void WriteSvg(string path, IEnumerable<Solid> solids, SvgOptions? options = null) =>
+        WriteSvg(path, solids, Array.Empty<Profile>(), options);
+
+    /// <summary>Several solids' and profiles' wireframe as one SVG's text: a `&lt;g
+    /// id="solid-N"&gt;` per solid then a `&lt;g id="profile-N"&gt;` per profile, each its
+    /// own colour where it carries one and the options' <see cref="SvgOptions.Stroke"/>
+    /// otherwise. Either list may be empty; both empty is refused. See <see
+    /// cref="SvgOptions"/>. Owned by this call, decoded and released before it returns.
+    /// </summary>
+    public static string WriteSvgText(IEnumerable<Solid> solids, IEnumerable<Profile> profiles, SvgOptions? options = null)
     {
-        var owners = solids.ToArray();
-        var handles = owners.Select(s => s.Handle.DangerousGetHandle()).ToArray();
+        var solidOwners = solids.ToArray();
+        var solidHandles = solidOwners.Select(s => s.Handle.DangerousGetHandle()).ToArray();
+        var profileOwners = profiles.ToArray();
+        var profileHandles = profileOwners.Select(p => p.Handle.DangerousGetHandle()).ToArray();
         var raw = BuildSvgOptions(options);
-        var ptr = BlacksmithNative.cadaclysm_blacksmith_svg_text(handles, (nuint)handles.Length, ref raw);
-        GC.KeepAlive(owners);
+        var ptr = BlacksmithNative.cadaclysm_blacksmith_drawing_svg_text(solidHandles, (nuint)solidHandles.Length,
+            profileHandles, (nuint)profileHandles.Length, ref raw);
+        GC.KeepAlive(solidOwners);
+        GC.KeepAlive(profileOwners);
         if (ptr == IntPtr.Zero) throw Failure("svg_text");
         try
         {
@@ -851,15 +972,19 @@ public static class Blacksmith
         }
     }
 
-    /// <summary><see cref="WriteSvgText"/> written to <paramref name="path"/> by the library
-    /// itself.</summary>
-    public static void WriteSvg(string path, IEnumerable<Solid> solids, SvgOptions? options = null)
+    /// <summary><see cref="WriteSvgText(IEnumerable{Solid}, IEnumerable{Profile}, SvgOptions?)"/>
+    /// written to <paramref name="path"/> by the library itself.</summary>
+    public static void WriteSvg(string path, IEnumerable<Solid> solids, IEnumerable<Profile> profiles, SvgOptions? options = null)
     {
-        var owners = solids.ToArray();
-        var handles = owners.Select(s => s.Handle.DangerousGetHandle()).ToArray();
+        var solidOwners = solids.ToArray();
+        var solidHandles = solidOwners.Select(s => s.Handle.DangerousGetHandle()).ToArray();
+        var profileOwners = profiles.ToArray();
+        var profileHandles = profileOwners.Select(p => p.Handle.DangerousGetHandle()).ToArray();
         var raw = BuildSvgOptions(options);
-        var ok = BlacksmithNative.cadaclysm_blacksmith_svg(handles, (nuint)handles.Length, path, ref raw);
-        GC.KeepAlive(owners);
+        var ok = BlacksmithNative.cadaclysm_blacksmith_drawing_svg(solidHandles, (nuint)solidHandles.Length,
+            profileHandles, (nuint)profileHandles.Length, path, ref raw);
+        GC.KeepAlive(solidOwners);
+        GC.KeepAlive(profileOwners);
         if (!ok) throw Failure("svg");
     }
 
@@ -925,6 +1050,15 @@ public static class Blacksmith
 
     /// <summary>The handle a build call returned, or the library's reason it returned none.
     /// (A null handle is an invalid `SafeHandle`, which the runtime never frees.)</summary>
+    /// <summary>`count` xyz triples at `at`, copied out as one array a point.</summary>
+    internal static unsafe double[][] PointsAt(IntPtr at, uint count)
+    {
+        var flat = at == IntPtr.Zero ? ReadOnlySpan<double>.Empty : new ReadOnlySpan<double>((void*)at, 3 * (int)count);
+        var points = new double[flat.Length / 3][];
+        for (var k = 0; k < points.Length; k++) points[k] = flat.Slice(3 * k, 3).ToArray();
+        return points;
+    }
+
     internal static T Checked<T>(T handle, string what) where T : CadaclysmHandle =>
         !handle.IsInvalid ? handle : throw Failure(what);
 
@@ -993,6 +1127,12 @@ public sealed class Profile : IDisposable
     public static Profile RegularPolygon((double X, double Y) centre, double radius, int sides, double angle = 0) =>
         new(BlacksmithNative.cadaclysm_blacksmith_profile_regular_polygon(centre.X, centre.Y, radius, (uint)Math.Max(0, sides), angle));
 
+    /// <summary>A star of `points` tips (at least 3) on the circle of `outer` about `centre`, its
+    /// inner corners on the circle of `inner` (positive, under `outer`), alternating: the first
+    /// tip at `angle` radians from the sketch's x axis, the rest counter-clockwise.</summary>
+    public static Profile Star((double X, double Y) centre, double outer, double inner, int points, double angle = 0) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_profile_star(centre.X, centre.Y, outer, inner, (uint)Math.Max(0, points), angle));
+
     /// <summary>A spline of `degree` through the control polygon `points` (`weights` one per
     /// point, or null). Open, it starts on the first point and ends on the last -- an open
     /// chain; `closed`, it is periodic, smooth through its own start -- a closed profile. The
@@ -1011,6 +1151,13 @@ public sealed class Profile : IDisposable
     /// <summary>Start drawing an outline at `start`, a segment at a time (the `Path` builder).
     /// </summary>
     public static Path Path((double X, double Y) start) => new(start);
+
+    /// <summary>Start drawing on the arc of the parabola with `vertex`, axis direction `axis`
+    /// and focal length `focal`, over the across-axis coordinates `from`..`to`: the path
+    /// begins at the arc's first point and holds the arc -- a reflector from rim to rim,
+    /// `Profile.Parabola((0, 0), (0, 1), 20, -50, 50)` a dish 100 wide opening up.</summary>
+    public static Path Parabola((double X, double Y) vertex, (double X, double Y) axis, double focal, double from, double to) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_path_parabola(vertex.X, vertex.Y, axis.X, axis.Y, focal, from, to), "path_parabola");
 
     /// <summary>Open profiles joined end to end into one -- the forge's merge. The pieces
     /// may come in any order and either way round: each next one is the first of the rest
@@ -1117,10 +1264,32 @@ public sealed class Profile : IDisposable
     /// arcs and splines kept exact. Both must be closed and simple. No shared area is an empty
     /// list. Throws <see cref="BuildException"/> for a `tolerance` not positive and finite, or
     /// a profile open or crossing itself.</summary>
-    public IReadOnlyList<Profile> Common(Profile other, double tolerance = 1e-6)
+    public IReadOnlyList<Profile> Common(Profile other, double tolerance = 1e-6) =>
+        ProfileList(BlacksmithNative.cadaclysm_blacksmith_profile_common(Handle, other.Handle, tolerance), "profile_common");
+
+    /// <summary>`text` set in a font, one profile per closed shape -- a letter with its counters
+    /// as holes (`o` one, `8` two; `i` is two profiles) -- on the sketch plane, the baseline
+    /// along x from the origin, each outline counter-clockwise and its holes clockwise, a curved
+    /// side the font's own cubic Bezier kept exactly: an extruded `O` has curved walls. `size`
+    /// is roughly the height of a capital. `font` is a family, optionally with a style
+    /// (`"Liberation Sans:style=Bold"`), a font file's path, or empty for the bundled Liberation
+    /// Sans Regular -- which also serves when the family is not found; `fontBytes` a font file's
+    /// bytes, used instead of `font` when given. `halign` is "left", "center" or "right";
+    /// `valign` "baseline", "bottom", "center" or "top"; `spacing` multiplies the gap between
+    /// glyphs; `direction` "ltr" or "rtl". Empty text is an empty list. Throws
+    /// <see cref="BuildException"/> for a size or spacing not positive and finite, an alignment
+    /// or direction not one of those words, font bytes that are not a font.</summary>
+    public static IReadOnlyList<Profile> Text(string text, double size = 10, string font = "", string halign = "left",
+                                              string valign = "baseline", double spacing = 1, string direction = "ltr",
+                                              byte[]? fontBytes = null) =>
+        ProfileList(BlacksmithNative.cadaclysm_blacksmith_profile_text(text, size, font, fontBytes, (nuint)(fontBytes?.Length ?? 0),
+                                                                       halign, valign, spacing, direction), "profile_text");
+
+    /// <summary>The profiles of a list the library handed back (null: throw), each a handle of
+    /// its own, the list freed.</summary>
+    private static IReadOnlyList<Profile> ProfileList(ProfileListHandle handle, string what)
     {
-        using var list = Blacksmith.Checked(
-            BlacksmithNative.cadaclysm_blacksmith_profile_common(Handle, other.Handle, tolerance), "profile_common");
+        using var list = Blacksmith.Checked(handle, what);
         var n = BlacksmithNative.cadaclysm_blacksmith_profile_list_count(list);
         var found = new List<Profile>((int)n);
         for (uint i = 0; i < n; i++) found.Add(new Profile(BlacksmithNative.cadaclysm_blacksmith_profile_list_get(list, i)));
@@ -1143,6 +1312,22 @@ public sealed class Profile : IDisposable
         return new Profile(BlacksmithNative.cadaclysm_blacksmith_profile_round(Handle, radius, picked,
             (nuint)(picked?.Length ?? 0), open));
     }
+
+    /// <summary>This profile's own loops as SVG text, from directly above by default -- a
+    /// sketch lies in z = 0, so its own plane already is the page, unlike a solid's <see
+    /// cref="Solid.SvgText"/> (<see cref="SvgView.Iso"/>), which has no plane of its own to
+    /// prefer. Passing <paramref name="options"/> at all -- even one left at its own defaults
+    /// -- opts out of the top default and uses <see cref="SvgOptions.View"/> as given, the
+    /// same way a caller of <see cref="SvgOptions"/> controls a solid's view. See <see
+    /// cref="Blacksmith.WriteSvgText(IEnumerable{Solid}, IEnumerable{Profile}, SvgOptions?)"/>.
+    /// </summary>
+    public string SvgText(SvgOptions? options = null) =>
+        Blacksmith.WriteSvgText(Array.Empty<Solid>(), new[] { this }, options ?? new SvgOptions { View = SvgView.Top });
+
+    /// <summary>This profile written as an SVG file by the library itself; see <see
+    /// cref="SvgText"/> for the top default.</summary>
+    public void Svg(string path, SvgOptions? options = null) =>
+        Blacksmith.WriteSvg(path, Array.Empty<Solid>(), new[] { this }, options ?? new SvgOptions { View = SvgView.Top });
 }
 
 /// <summary>An outline drawn a segment at a time; <see cref="End"/> closes it into a
@@ -1155,6 +1340,13 @@ public sealed class Path : IDisposable
     internal Path((double X, double Y) start)
     {
         _handle = Blacksmith.Checked(BlacksmithNative.cadaclysm_blacksmith_path_begin(start.X, start.Y), "path_begin");
+    }
+
+    /// <summary>Wraps a handle another entry point (`path_parabola`) already returned.
+    /// </summary>
+    internal Path(PathHandle handle, string what)
+    {
+        _handle = Blacksmith.Checked(handle, what);
     }
 
     /// <summary>The live handle; a path already ended (or disposed) has none.</summary>
@@ -1198,6 +1390,39 @@ public sealed class Path : IDisposable
     /// control point is the current point.</summary>
     public Path BezierTo((double X, double Y) c1, (double X, double Y) c2, (double X, double Y) to) =>
         Step(BlacksmithNative.cadaclysm_blacksmith_path_bezier_to(Live, c1.X, c1.Y, c2.X, c2.Y, to.X, to.Y), "path_bezier_to");
+
+    /// <summary>A conic arc to (`x`, `y`) through the control point `control` with middle
+    /// weight `weight`: under 1 an elliptical arc, 1 a parabola, over 1 a hyperbola -- the
+    /// rational quadratic Bezier, kept exact.</summary>
+    public Path ConicTo(double x, double y, (double X, double Y) control, double weight) =>
+        Step(BlacksmithNative.cadaclysm_blacksmith_path_conic_to(Live, x, y, control.X, control.Y, weight), "path_conic_to");
+
+    /// <summary>A parabolic arc to (`x`, `y`) whose end tangents meet at `control`:
+    /// <see cref="ConicTo"/> with weight 1.</summary>
+    public Path ParabolaTo(double x, double y, (double X, double Y) control) => ConicTo(x, y, control, 1.0);
+
+    /// <summary>A hyperbolic arc to (`x`, `y`) through `control` with middle `weight` over 1.
+    /// </summary>
+    public Path HyperbolaTo(double x, double y, (double X, double Y) control, double weight)
+    {
+        if (!(weight > 1.0))
+            throw new BuildException("hyperbola_to: the weight must be over 1 (1 is a parabola, under 1 an ellipse)");
+        return ConicTo(x, y, control, weight);
+    }
+
+    /// <summary>The parabolic arc to (`x`, `y`) with `vertex`: its axis and focal length
+    /// solved from the two ends. Throws when no parabola with that vertex passes through
+    /// both.</summary>
+    public Path ParabolaByVertex(double x, double y, (double X, double Y) vertex) =>
+        Step(BlacksmithNative.cadaclysm_blacksmith_path_parabola_by_vertex(Live, x, y, vertex.X, vertex.Y), "path_parabola_by_vertex");
+
+    /// <summary>The parabolic arc to (`x`, `y`) with `focus`: of the two through the ends,
+    /// the one whose vertex lies between the ends' projections, then the one whose arc cups
+    /// the focus (the focus between the arc and its chord), then the more symmetric; with
+    /// the focus beyond the chord that is the arch over the ends, not the shallow dish --
+    /// draw that one with <see cref="Profile.Parabola"/>.</summary>
+    public Path ParabolaByFocus(double x, double y, (double X, double Y) focus) =>
+        Step(BlacksmithNative.cadaclysm_blacksmith_path_parabola_by_focus(Live, x, y, focus.X, focus.Y), "path_parabola_by_focus");
 
     /// <summary>A NURBS segment. `control`: every control point after the current one, the
     /// endpoint last; `weights`: one per control point <em>including</em> the current one, or
@@ -1392,6 +1617,80 @@ public sealed class BlacksmithMesh
 
     /// <summary>The same triangles in memory of our own, safe to outlive the solid.</summary>
     public BlacksmithMeshData Copy() => new(Positions.ToArray(), Normals.ToArray(), Indices.ToArray());
+}
+
+/// <summary>A <see cref="BlacksmithMesh64"/> in memory of your own.</summary>
+public sealed record BlacksmithMeshData64(double[] Positions, double[] Normals, uint[] Indices);
+
+/// <summary>[`cadaclysm_blacksmith_mesh64`]: the same tessellation as <see
+/// cref="BlacksmithMesh"/>, from the same cache -- meshing at another tolerance (through
+/// <see cref="Solid.Mesh"/>, <see cref="Solid.Mesh64"/>, <see cref="Solid.EdgePolylines"/>,
+/// <see cref="Solid.BoundsAt"/> or <see cref="Solid.BoundsAt64"/>) invalidates this the same
+/// way it invalidates <see cref="BlacksmithMesh"/>.</summary>
+/// <remarks><see cref="Positions"/> and <see cref="Normals"/> are `(VertexCount * 3)`
+/// doubles, <see cref="Indices"/> is `(IndexCount)`, the very pointer <see
+/// cref="BlacksmithMesh"/> gives.</remarks>
+public sealed class BlacksmithMesh64
+{
+    private readonly RawBlacksmithMesh64 _raw;
+
+    /// <summary>The solid this borrows from.</summary>
+    public Solid Solid { get; }
+
+    /// <summary>The tolerance this was meshed at.</summary>
+    public double Tolerance { get; }
+
+    /// <summary>Which filling of the solid's cache this reads -- see <see cref="Solid.CheckCache"/>.
+    /// </summary>
+    private readonly int _generation;
+
+    internal BlacksmithMesh64(Solid solid, double tolerance, int generation, RawBlacksmithMesh64 raw)
+    {
+        Solid = solid;
+        Tolerance = tolerance;
+        _generation = generation;
+        _raw = raw;
+    }
+
+    public int VertexCount => (int)_raw.VertexCount;
+    public int IndexCount => (int)_raw.IndexCount;
+    public int TriangleCount => (int)(_raw.IndexCount / 3);
+
+    public unsafe ReadOnlySpan<double> Positions
+    {
+        get
+        {
+            Solid.CheckCache(_generation);
+            return _raw.Positions == IntPtr.Zero
+                ? ReadOnlySpan<double>.Empty
+                : new ReadOnlySpan<double>((void*)_raw.Positions, (int)(_raw.VertexCount * 3));
+        }
+    }
+
+    public unsafe ReadOnlySpan<double> Normals
+    {
+        get
+        {
+            Solid.CheckCache(_generation);
+            return _raw.Normals == IntPtr.Zero
+                ? ReadOnlySpan<double>.Empty
+                : new ReadOnlySpan<double>((void*)_raw.Normals, (int)(_raw.VertexCount * 3));
+        }
+    }
+
+    public unsafe ReadOnlySpan<uint> Indices
+    {
+        get
+        {
+            Solid.CheckCache(_generation);
+            return _raw.Indices == IntPtr.Zero
+                ? ReadOnlySpan<uint>.Empty
+                : new ReadOnlySpan<uint>((void*)_raw.Indices, (int)_raw.IndexCount);
+        }
+    }
+
+    /// <summary>The same triangles in memory of our own, safe to outlive the solid.</summary>
+    public BlacksmithMeshData64 Copy() => new(Positions.ToArray(), Normals.ToArray(), Indices.ToArray());
 }
 
 /// <summary>A solid's feature edges as polylines -- views over the library's own cache at one
@@ -1645,8 +1944,7 @@ public sealed class Solid : IDisposable
     public static Solid SweepOpen(Profile profile, double[] frame, SweepPath path) =>
         new(BlacksmithNative.cadaclysm_blacksmith_sweep_open(profile.Handle, Blacksmith.Frame(frame), path.Live));
 
-    /// <summary>A circle of `radius` swept along `path`, square to its start -- Fusion's
-    /// Pipe: a rod, or with a positive `thickness` a tube whose walls are that thick. `path`
+    /// <summary>A circle of `radius` swept along `path`, square to its start: a rod, or with a positive `thickness` a tube whose walls are that thick. `path`
     /// is only borrowed, as by <see cref="Sweep"/>.</summary>
     public static Solid Pipe(SweepPath path, double radius, double thickness = 0.0) =>
         new(BlacksmithNative.cadaclysm_blacksmith_pipe(path.Live, radius, thickness));
@@ -1692,7 +1990,7 @@ public sealed class Solid : IDisposable
     // -- combining
 
     /// <summary>This solid and `other` as one. `merge` merges the flush faces the join leaves
-    /// (<see cref="MergeFlush"/>), as Fusion does -- off by default, so face and edge numbers
+    /// (<see cref="MergeFlush"/>), off by default, so face and edge numbers
     /// stay as they were.</summary>
     public Solid Join(Solid other, double tolerance = 0.05, bool merge = false) =>
         Merged(new(BlacksmithNative.cadaclysm_blacksmith_join(Handle, other.Handle, tolerance, IntPtr.Zero, IntPtr.Zero)), merge);
@@ -1731,6 +2029,102 @@ public sealed class Solid : IDisposable
             IntPtr.Zero, IntPtr.Zero));
     }
 
+    /// <summary>Where this solid's faces cross or coincide with `other`'s, at `tolerance`, as an
+    /// <see cref="Intersection"/>: <see cref="Intersection.Chains"/> along the curves the faces
+    /// meet on and <see cref="Intersection.Overlaps"/> where a face pair coincides. Neither
+    /// solid is changed; either may be an open sheet. No crossing is an empty result, never an
+    /// error.
+    ///
+    /// Each <see cref="Chain"/>'s points are within `tolerance` of both faces' exact surfaces;
+    /// there is one chain per face pair per branch -- chains are not joined across a face
+    /// boundary or a closed curve's seam, so join them by matching ends. A chain's
+    /// <see cref="Chain.Curve"/> is its exact curve where the kernel found one every point lies
+    /// within `tolerance` of, else null; <see cref="Chain.Tangent"/> is set where the surfaces
+    /// are near-tangent along the chain or the snap did not settle (the points are then the best
+    /// estimate) -- a closed chain that does not go once round its own curve (a sliver where two
+    /// surfaces barely cross) has no curve, `Tangent` still true. An <see cref="Overlap"/> is a
+    /// coincident face pair with the shared region's rings (outer first, holes after), which may
+    /// be empty for a partial overlap whose outlines cross. Known limit: a crossing narrower than
+    /// `tolerance` -- two surfaces passing within it without their meshes crossing -- can be
+    /// missed; near-tangent contact is where this bites.
+    ///
+    /// Throws <see cref="BuildException"/> for a `tolerance` not positive and finite, a solid
+    /// with no faces, or one that meshes to nothing.</summary>
+    public Intersection Intersect(Solid other, double tolerance = 0.05)
+    {
+        using var found = Blacksmith.Checked(
+            BlacksmithNative.cadaclysm_blacksmith_intersect(Handle, other.Handle, tolerance, IntPtr.Zero, IntPtr.Zero), "intersect");
+        var n = BlacksmithNative.cadaclysm_blacksmith_intersection_chain_count(found);
+        var chains = new List<Chain>((int)n);
+        for (uint i = 0; i < n; i++)
+        {
+            if (!BlacksmithNative.cadaclysm_blacksmith_intersection_chain(found, i, out var raw)) throw Blacksmith.Failure("intersection_chain");
+            Curve? curve = null;
+            if (raw.HasCurve)
+            {
+                if (!BlacksmithNative.cadaclysm_blacksmith_intersection_curve(found, i, out var rawCurve)) throw Blacksmith.Failure("intersection_curve");
+                curve = new Curve(rawCurve);
+            }
+            chains.Add(new Chain(raw, curve));
+        }
+        n = BlacksmithNative.cadaclysm_blacksmith_intersection_overlap_count(found);
+        var overlaps = new List<Overlap>((int)n);
+        for (uint i = 0; i < n; i++)
+        {
+            if (!BlacksmithNative.cadaclysm_blacksmith_intersection_overlap(found, i, out var raw)) throw Blacksmith.Failure("intersection_overlap");
+            overlaps.Add(new Overlap(raw));
+        }
+        return new Intersection(chains, overlaps);
+    }
+
+    /// <summary>Where <paramref name="profile"/>, placed on <paramref name="frame"/>, pierces this
+    /// solid's faces, and the pieces its loops cut into, as a <see cref="SolidHits"/>. Neither is
+    /// changed.
+    ///
+    /// A point hit lies within `tolerance` of the segment's exact curve and of the face's exact
+    /// surface, inside the face's trim; its profile spot (<see cref="Hit.AStart"/>: loop, segment,
+    /// t) and face spot (<see cref="Hit.BStart"/>: face, u, v) evaluate to the point within
+    /// `tolerance`; <see cref="Hit.Touch"/> where the curve's tangent lies within 1e-3 (sine) of
+    /// the surface's tangent plane there (a graze), false at a crossing. A run is a stretch of one
+    /// segment lying within `tolerance` of one face and inside it, longer than `tolerance`. Hits
+    /// within `tolerance` of each other merge (a hit at a segment join reported once, as
+    /// `(k, t = 1)`; a closed loop's closing join reads `(0, 0)`). Every point is in
+    /// world space (the frame applied).
+    ///
+    /// Pieces only for a closed body -- an open body has none -- in loop order, covering every
+    /// loop exactly; a piece's spots read a segment join as the next segment's start `(k + 1, 0)`,
+    /// and an open chain runs from `(0, 0)` to `(n - 1, 1)`; a loop no hit cuts is one closed
+    /// piece. <see cref="Piece.Inside"/> by the piece middle's winding number over the body's
+    /// mesh; a piece lying on the surface is inside. Known limit: a segment passing within
+    /// `tolerance` of a face without crossing its mesh can be missed (near-tangent grazes).
+    ///
+    /// Throws <see cref="BuildException"/> for a `tolerance` not positive and finite, a solid with
+    /// no faces or that meshes to nothing, a profile with no segments, or a free-form segment that
+    /// is not an evaluable NURBS curve.</summary>
+    public SolidHits Hits(Profile profile, double[] frame, double tolerance = 0.05)
+    {
+        using var found = Blacksmith.Checked(
+            BlacksmithNative.cadaclysm_blacksmith_solid_profile_hits(Handle, profile.Handle, Blacksmith.Frame(frame), tolerance,
+                IntPtr.Zero, IntPtr.Zero), "solid_profile_hits");
+        var n = BlacksmithNative.cadaclysm_blacksmith_hit_count(found);
+        var hits = new List<Hit>((int)n);
+        for (uint i = 0; i < n; i++)
+        {
+            if (!BlacksmithNative.cadaclysm_blacksmith_hit(found, i, out var raw)) throw Blacksmith.Failure("hit");
+            hits.Add(new Hit(raw));
+        }
+        n = BlacksmithNative.cadaclysm_blacksmith_hits_piece_count(found);
+        var pieces = new List<Piece>((int)n);
+        for (uint i = 0; i < n; i++)
+        {
+            if (!BlacksmithNative.cadaclysm_blacksmith_hits_piece(found, i, out var inside, out var start, out var end))
+                throw Blacksmith.Failure("hits_piece");
+            var own = new Profile(Blacksmith.Checked(BlacksmithNative.cadaclysm_blacksmith_hits_piece_profile(found, i), "hits_piece_profile"));
+            pieces.Add(new Piece(inside, new Spot(start), new Spot(end), own));
+        }
+        return new SolidHits(hits, pieces);
+    }
+
     // -- asking
 
     /// <summary>How many faces, in the solid's own order; a face index runs to this.</summary>
@@ -1764,6 +2158,20 @@ public sealed class Solid : IDisposable
     {
         double[] lo = new double[3], hi = new double[3];
         if (!BlacksmithNative.cadaclysm_blacksmith_bounds(Handle, tolerance, lo, hi)) throw Blacksmith.Failure("bounds");
+        Filled(tolerance);
+        return (lo, hi);
+    }
+
+    /// <summary><see cref="BoundsAt64"/> at tolerance 0.05.</summary>
+    public (double[] Min, double[] Max) Bounds64 => BoundsAt64(0.05);
+
+    /// <summary><see cref="BoundsAt"/>, from the same tessellation's unnarrowed positions:
+    /// exact far from the origin, where <see cref="BoundsAt"/>'s widened `float` positions
+    /// are not.</summary>
+    public (double[] Min, double[] Max) BoundsAt64(double tolerance)
+    {
+        double[] lo = new double[3], hi = new double[3];
+        if (!BlacksmithNative.cadaclysm_blacksmith_bounds64(Handle, tolerance, lo, hi)) throw Blacksmith.Failure("bounds64");
         Filled(tolerance);
         return (lo, hi);
     }
@@ -1817,6 +2225,16 @@ public sealed class Solid : IDisposable
         var raw = BlacksmithNative.cadaclysm_blacksmith_mesh(Handle, tolerance);
         if (raw.Positions == IntPtr.Zero) throw Blacksmith.Failure("mesh");
         return new BlacksmithMesh(this, tolerance, Filled(tolerance), raw);
+    }
+
+    /// <summary><see cref="Mesh"/> in `double`, from the same cache: valid until the solid is
+    /// disposed or meshed again at a different tolerance -- through <see cref="Mesh"/> as much
+    /// as through this.</summary>
+    public BlacksmithMesh64 Mesh64(double tolerance = 0.05)
+    {
+        var raw = BlacksmithNative.cadaclysm_blacksmith_mesh64(Handle, tolerance);
+        if (raw.Positions == IntPtr.Zero) throw Blacksmith.Failure("mesh64");
+        return new BlacksmithMesh64(this, tolerance, Filled(tolerance), raw);
     }
 
     /// <summary>The feature edges as polylines, views into the same cache as
@@ -2000,7 +2418,7 @@ public sealed class Solid : IDisposable
     }
 
     /// <summary>Face `face` pushed out by `distance` along its outward normal (pulled in,
-    /// negative) the way Fusion and Rhino extrude a face: the prism over it joined on (cut
+    /// negative) as a face extrude does it: the prism over it joined on (cut
     /// out), and the flush faces merged -- a box's top raised is one taller box of six faces.
     /// A face on a cylinder, a cone, a sphere or a torus moves out along its normal instead,
     /// the surface a step out (a boss fatter, a bore or a countersink narrower, a dome fuller),
@@ -2008,7 +2426,7 @@ public sealed class Solid : IDisposable
     public Solid PushPull(int face, double distance, double tolerance = 0.05) =>
         new(BlacksmithNative.cadaclysm_blacksmith_push_pull(Handle, Index(face), distance, tolerance, IntPtr.Zero, IntPtr.Zero));
 
-    /// <summary>Faces `faces` pushed out by `distance` together -- Fusion's press-pull on a
+    /// <summary>Faces `faces` pushed out by `distance` together -- a press-pull on a
     /// selection: each by <see cref="PushPull(int, double, double)"/>'s rule for it, one after
     /// another, each found again after the pushes before it renumbered the faces. A box's top
     /// and a side pushed 5 is the box 5 taller and 5 wider; a face on the same curved surface
@@ -2020,7 +2438,7 @@ public sealed class Solid : IDisposable
             IntPtr.Zero, IntPtr.Zero));
     }
 
-    /// <summary>This solid split by `tool` into bodies -- Fusion's Split Body: a closed
+    /// <summary>This solid split by `tool` into bodies: a closed
     /// `tool` gives the parts outside it, then the parts inside; a flat sheet splits by the
     /// whole plane it lies on. Each connected part is a body of its own.</summary>
     public IReadOnlyList<Solid> Split(Solid tool, double tolerance = 0.05)
@@ -2054,23 +2472,23 @@ public sealed class Solid : IDisposable
     public Solid MergeFlush() => new(BlacksmithNative.cadaclysm_blacksmith_merge_flush(Handle));
 
     /// <summary>The round `face` belongs to -- a fillet's bands, balls and rim bands joined to
-    /// that face -- made again at `radius`, as Fusion's press-pull on a fillet face: taken back to
+    /// that face -- made again at `radius`, as a press-pull on a fillet face: taken back to
     /// the sharp edges it replaced, and those rounded again.</summary>
     public Solid Refillet(int face, double radius, double tolerance = 1e-6) =>
         new(BlacksmithNative.cadaclysm_blacksmith_refillet(Handle, Index(face), radius, tolerance));
 
     /// <summary>The round `face` belongs to taken off, the faces beside it sharp again --
-    /// Fusion's delete of a fillet face.</summary>
+    /// the delete of a fillet face.</summary>
     public Solid Unfillet(int face) => new(BlacksmithNative.cadaclysm_blacksmith_unfillet(Handle, Index(face)));
 
     /// <summary>The chamfer `face` belongs to -- its bevels, flat or round a rim, and the corner
-    /// triangles joined to that face -- cut again at `distance`, as Fusion's press-pull on a chamfer
+    /// triangles joined to that face -- cut again at `distance`, as a press-pull on a chamfer
     /// face: taken back to the sharp edges it cut, and those bevelled again.</summary>
     public Solid Rechamfer(int face, double distance, double tolerance = 1e-6) =>
         new(BlacksmithNative.cadaclysm_blacksmith_rechamfer(Handle, Index(face), distance, tolerance));
 
     /// <summary>The chamfer `face` belongs to taken off, the faces beside it sharp again --
-    /// Fusion's delete of a chamfer face.</summary>
+    /// the delete of a chamfer face.</summary>
     public Solid Unchamfer(int face) => new(BlacksmithNative.cadaclysm_blacksmith_unchamfer(Handle, Index(face)));
 
     /// <summary>This solid hollowed to a wall `thickness` thick (inward for a positive
@@ -2083,7 +2501,7 @@ public sealed class Solid : IDisposable
             IntPtr.Zero, IntPtr.Zero));
     }
 
-    /// <summary>This sheet made a solid `thickness` thick -- Fusion's Thicken: its faces, their
+    /// <summary>This sheet made a solid `thickness` thick: its faces, their
     /// twins moved `thickness` along the faces' normals (against them for a negative thickness),
     /// and a wall round every open edge. A closed sheet thickens to a hollow.</summary>
     public Solid Thicken(double thickness, double tolerance = 1e-6) =>
@@ -2270,8 +2688,9 @@ public readonly struct Selector
     internal (uint Kind, double[]? V, uint Index) Raw() => (_kind, _v, _index);
 }
 
-/// <summary>One edge's exact curve, as plain data copied out (<see cref="Edge.Curve"/>):
-/// <see cref="Kind"/> is "line", "circle", "ellipse" or "nurbs".
+/// <summary>One edge's, or one intersection chain's, exact curve as plain data copied out
+/// (<see cref="Edge.Curve"/>, <see cref="Chain.Curve"/>): <see cref="Kind"/> is "line",
+/// "circle", "ellipse", "parabola", "hyperbola" or "nurbs".
 ///
 /// `t0..t1` is the edge's parameter range on its own curve: a line's fraction (0..1 over
 /// `origin -> origin + x`, where `x` is the full `to - from`, NOT unit -- so
@@ -2338,7 +2757,7 @@ public readonly struct Edge
 {
     public int Index { get; }
 
-    /// <summary>"line", "circle", "ellipse", "nurbs" or "other".</summary>
+    /// <summary>"line", "circle", "ellipse", "parabola", "hyperbola", "nurbs" or "other".</summary>
     public string Kind { get; }
 
     /// <summary>The faces that meet on it, in the solid's face order.</summary>
@@ -2403,6 +2822,129 @@ public readonly struct Spot
 
     public override string ToString() =>
         $"Spot(loop_index={LoopIndex}, segment={Segment}, t={T}, face={Face}, u={U}, v={V})";
+}
+
+/// <summary>What <see cref="Solid.Intersect"/> found, copied out: <see cref="Chains"/> (one per
+/// face pair per branch) and <see cref="Overlaps"/> (one per coincident face pair). Both empty
+/// where the solids do not meet.</summary>
+public sealed class Intersection
+{
+    public IReadOnlyList<Chain> Chains { get; }
+    public IReadOnlyList<Overlap> Overlaps { get; }
+
+    internal Intersection(IReadOnlyList<Chain> chains, IReadOnlyList<Overlap> overlaps)
+    {
+        Chains = chains;
+        Overlaps = overlaps;
+    }
+
+    public override string ToString() => $"Intersection(chains={Chains.Count}, overlaps={Overlaps.Count})";
+}
+
+/// <summary>One branch of one face pair's crossing (<see cref="Intersection.Chains"/>):
+/// <see cref="Points"/> (three doubles each, in walk order; a closed chain does not repeat its
+/// first point), <see cref="Closed"/>, the faces (<see cref="FaceA"/> in the first solid,
+/// <see cref="FaceB"/> in the second), <see cref="Tangent"/> (the surfaces near-tangent along
+/// it, or the snap unsettled -- the points their best estimate) and <see cref="Curve"/>, its
+/// exact curve over the chain's own `t0..t1`, or null where the kernel found none. A chain
+/// may stop at a face boundary or a closed curve's seam and continue as another: join chains
+/// by matching ends.</summary>
+public sealed class Chain
+{
+    /// <summary>Three doubles each.</summary>
+    public double[][] Points { get; }
+    public bool Closed { get; }
+    public int FaceA { get; }
+    public int FaceB { get; }
+    public bool Tangent { get; }
+    public Curve? Curve { get; }
+
+    internal unsafe Chain(RawBlacksmithChain raw, Curve? curve)
+    {
+        Points = Blacksmith.PointsAt(raw.Points, raw.PointCount);
+        Closed = raw.Closed;
+        FaceA = (int)raw.FaceA;
+        FaceB = (int)raw.FaceB;
+        Tangent = raw.Tangent;
+        Curve = curve;
+    }
+
+    public override string ToString() =>
+        $"Chain(points={Points.Length}, closed={Closed}, faces=({FaceA}, {FaceB}), tangent={Tangent}, curve={Curve?.ToString() ?? "null"})";
+}
+
+/// <summary>A face of the first solid and a face of the second that coincide
+/// (<see cref="Intersection.Overlaps"/>): the faces (<see cref="FaceA"/>, <see cref="FaceB"/>)
+/// and <see cref="Loops"/>, the shared region's rings as arrays of points (outer first, holes
+/// after; each ring closed without repeating its first point) -- empty for a partial overlap
+/// whose outlines cross.</summary>
+public sealed class Overlap
+{
+    public int FaceA { get; }
+    public int FaceB { get; }
+
+    /// <summary>Each ring an array of points, three doubles each.</summary>
+    public double[][][] Loops { get; }
+
+    internal unsafe Overlap(RawBlacksmithOverlap raw)
+    {
+        FaceA = (int)raw.FaceA;
+        FaceB = (int)raw.FaceB;
+        var points = Blacksmith.PointsAt(raw.Points, raw.PointCount);
+        var starts = raw.LoopOffsets == IntPtr.Zero || raw.LoopCount == 0
+            ? Array.Empty<uint>()
+            : new ReadOnlySpan<uint>((void*)raw.LoopOffsets, (int)raw.LoopCount).ToArray();
+        Loops = new double[starts.Length][][];
+        for (var r = 0; r < starts.Length; r++)
+        {
+            var end = r + 1 < starts.Length ? starts[r + 1] : raw.PointCount;
+            Loops[r] = points[(int)starts[r]..(int)end];
+        }
+    }
+
+    public override string ToString() => $"Overlap(faces=({FaceA}, {FaceB}), loops={Loops.Length})";
+}
+
+/// <summary>What <see cref="Solid.Hits"/> found, copied out: <see cref="Hits"/> (ordered along
+/// the profile; <see cref="Hit.AStart"/>/<see cref="Hit.AEnd"/> on the profile,
+/// <see cref="Hit.BStart"/>/<see cref="Hit.BEnd"/> on the solid's faces: a face at (u, v)) and
+/// <see cref="Pieces"/> (empty for an open body).</summary>
+public sealed class SolidHits
+{
+    public IReadOnlyList<Hit> Hits { get; }
+    public IReadOnlyList<Piece> Pieces { get; }
+
+    internal SolidHits(IReadOnlyList<Hit> hits, IReadOnlyList<Piece> pieces)
+    {
+        Hits = hits;
+        Pieces = pieces;
+    }
+
+    public override string ToString() => $"SolidHits(hits={Hits.Count}, pieces={Pieces.Count})";
+}
+
+/// <summary>One stretch of a profile loop between two cuts (<see cref="SolidHits.Pieces"/>):
+/// <see cref="Inside"/> (by its middle's winding number over the body; a piece lying on the
+/// surface is inside), <see cref="Start"/>/<see cref="End"/> (profile spots -- a segment join
+/// reads as the next segment's start `(k + 1, 0)`, an open chain runs from `(0, 0)` to
+/// `(n - 1, 1)`; a loop no hit cuts is one closed piece) and <see cref="Profile"/>, the piece's
+/// own open chain (what <see cref="SweepPath.Along"/> with `open` sweeps).</summary>
+public sealed class Piece
+{
+    public bool Inside { get; }
+    public Spot Start { get; }
+    public Spot End { get; }
+    public Profile Profile { get; }
+
+    internal Piece(bool inside, Spot start, Spot end, Profile profile)
+    {
+        Inside = inside;
+        Start = start;
+        End = end;
+        Profile = profile;
+    }
+
+    public override string ToString() => $"Piece(inside={Inside}, start={Start}, end={End})";
 }
 
 /// <summary>One place two curves meet, copied out. A point (<see cref="Run"/> false):
@@ -2505,7 +3047,7 @@ public sealed class Frame : IEquatable<Frame>
         return new Frame(origin, ax, Cross(z, ax), z);
     }
 
-    /// <summary>The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line -- Fusion's midplane.</summary>
+    /// <summary>The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line.</summary>
     public static Frame Midplane(Frame a, Frame b)
     {
         var raw = new double[12];

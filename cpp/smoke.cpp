@@ -218,12 +218,14 @@ static Result<void> reader(const std::string& path) {
         EXPECT(estimate == -1 || estimate > 0, "triangle estimate is neither a count nor -1");
         std::array<double, 16> identity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
         EXPECT(first->bounds_placed(identity) == first->bounds_placed(), "the identity placement moved the surface bounds");
+        EXPECT(first->bounds_placed64(identity) == first->bounds_placed64(), "the identity placement moved the f64 surface bounds");
         if (is_cube) {
             EXPECT(estimate == 12, "the cube's estimate is not 12");
             EXPECT(first->surface_edges().empty() && first->surface_isocurves().empty(), "the cube has surface curves");
             EXPECT(first->surface_proxy_mesh(4).empty(), "the cube has a surface proxy");
             EXPECT(!first->surface_pick({10, 10, 100}, {10, 10, -100}), "the cube picks through surfaces");
             EXPECT(first->bounds_placed().is_empty(), "the cube has surface bounds");
+            EXPECT(first->bounds_placed64().is_empty(), "the cube has f64 surface bounds");
         }
         EXPECT(first->is_meshed(), "the mesh asked for above is not held");
         CADACLYSM_TRY(fresh, cadaclysm::open(path));
@@ -232,6 +234,36 @@ static Result<void> reader(const std::string& path) {
         EXPECT(body != fresh_bodies.end() && !body->is_meshed(), "a fresh scene is already meshed");
         std::uint32_t built = fresh.realize_meshes(false);
         EXPECT(built > 0 && body->is_meshed(), "realize_meshes(false) did not build");
+    }
+    {
+        // f64 twins: mesh64's counts and first position agree with mesh's, and
+        // bounds64's max widens to bounds's, on both the node and the scene. Catches:
+        // mesh64/bounds64 returning zeros, garbage, or the wrong node's data.
+        std::vector<cadaclysm::Node> bodies = scene.walk();
+        auto first = std::find_if(bodies.begin(), bodies.end(), [](const cadaclysm::Node& n) { return n.can_mesh(); });
+        EXPECT(first != bodies.end(), "no meshable node");
+        cadaclysm::Mesh mesh = first->mesh();
+        cadaclysm::Mesh64 mesh64 = first->mesh64();
+        EXPECT(mesh64.vertex_count() == mesh.vertex_count() && mesh64.index_count() == mesh.index_count(),
+               "mesh64's vertex/index counts do not equal mesh's");
+        cadaclysm::Span<const double> p64 = mesh64.positions();
+        cadaclysm::Span<const float> p32 = mesh.positions();
+        EXPECT(p64.size() >= 3 && p32.size() >= 3 && static_cast<float>(p64[0]) == p32[0] &&
+                   static_cast<float>(p64[1]) == p32[1] && static_cast<float>(p64[2]) == p32[2],
+               "mesh64's first position narrowed to float does not equal mesh's first position");
+        cadaclysm::Bounds node_bounds = first->bounds();
+        cadaclysm::Bounds64 node_bounds64 = first->bounds64();
+        EXPECT(static_cast<float>(node_bounds64.max[0]) == node_bounds.max[0] &&
+                   static_cast<float>(node_bounds64.max[1]) == node_bounds.max[1] &&
+                   static_cast<float>(node_bounds64.max[2]) == node_bounds.max[2],
+               "bounds64's max does not equal bounds's max widened");
+        cadaclysm::Bounds64 scene_bounds64 = scene.bounds64();
+        EXPECT(static_cast<float>(scene_bounds64.max[0]) == bounds.max[0] &&
+                   static_cast<float>(scene_bounds64.max[1]) == bounds.max[1] &&
+                   static_cast<float>(scene_bounds64.max[2]) == bounds.max[2],
+               "scene bounds64's max does not equal bounds's max widened");
+        std::printf("reader f64 twins: mesh64 %u triangles, bounds64 max=(%g, %g, %g)\n", mesh64.triangle_count(),
+                    scene_bounds64.max[0], scene_bounds64.max[1], scene_bounds64.max[2]);
     }
     std::printf("placements: %zu\n", scene.placements().size());
     std::vector<cadaclysm::Node> walked = scene.walk();
@@ -453,6 +485,57 @@ static Result<void> sheet_verbs(const bs::Solid& plate) {
     CADACLYSM_TRY(pipe, bs::Solid::pipe(bend, 1.0, 0.2));
     CADACLYSM_TRY(pipe_closed, pipe.is_watertight());
     EXPECT(pipe_closed, "the pipe leaks");
+
+    // A five-pointed star: ten walls and two caps.
+    CADACLYSM_TRY(star, bs::Profile::star({0, 0}, 10, 4, 5));
+    CADACLYSM_TRY(star_prism, bs::Solid::extrude(star, xy, 2));
+    CADACLYSM_TRY(star_closed, star_prism.is_watertight());
+    EXPECT(star_prism.faces() == 12 && star_closed, "star: not twelve watertight faces");
+
+    // Text: an `i` is two shapes and an `o` one; the `o` extrudes to a watertight ring with spline edges.
+    CADACLYSM_TRY(word, bs::Profile::text("io", 10));
+    CADACLYSM_TRY(text_ring, bs::Solid::extrude(word.at(2), xy, 2));
+    CADACLYSM_TRY(text_edges, text_ring.edges());
+    bool text_spline = false;
+    for (const auto& edge : text_edges) text_spline = text_spline || edge.kind == "nurbs";
+    EXPECT(word.size() == 3 && text_spline, "text: not three shapes with a spline-edged ring");
+    auto no_font = bs::Profile::text("x", 10, "", "left", "baseline", 1, "ltr", std::vector<std::uint8_t>{1, 2, 3});
+    EXPECT(!no_font && no_font.error().message == "profile_text: the font bytes are not a font", "text: bad bytes not refused");
+
+    // A reflector: the parabola from rim to rim, closed and revolved -- watertight.
+    const double kPi = std::acos(-1.0);
+    CADACLYSM_TRY(dish, bs::Profile::parabola({0, 0}, {0, 1}, 20, 0, 50).line_to(0, 31.25).line_to(0, 0).end());
+    CADACLYSM_TRY(bowl, bs::Solid::revolve_in_plane(dish, xy, {0, 0}, {0, 1}, 2 * kPi));
+    CADACLYSM_TRY(bowl_closed, bowl.is_watertight());
+    EXPECT(bowl_closed, "parabola: the bowl leaks");
+    // A conic with a quarter circle's weight; a control point on the chord and a
+    // hyperbola's weight not over 1 are refused (the latter here, before the library).
+    CADACLYSM_TRY(quarter, bs::Profile::path({10, 0}).conic_to({0, 10}, {10, 10}, std::cos(kPi / 4)).line_to(0, 0).line_to(10, 0).end());
+    CADACLYSM_TRY(quarter_box, bs::Solid::extrude(quarter, xy, 2));
+    EXPECT(quarter_box.faces() == 5, "conic_to: a quarter circle's box is not five faces");
+    // The dish's own arc by vertex, closed by a second parabola through the same rim points
+    // with a focus beyond the chord -- the arch over the top, not the dish again (a focus at
+    // (0, 20) would rebuild the identical arc and retrace it).
+    CADACLYSM_TRY(arch, bs::Profile::path({-50, 31.25}).parabola_by_vertex({50, 31.25}, {0, 0}).parabola_by_focus({-50, 31.25}, {0, 40}).end());
+    CADACLYSM_TRY(arch_slab, bs::Solid::extrude(arch, xy, 2));
+    CADACLYSM_TRY(arch_closed, arch_slab.is_watertight());
+    EXPECT(arch_closed, "parabola_by_vertex/focus: the arch leaks");
+    // A parabola by its end tangents, and a hyperbola at weight 2: one wall and a floor each.
+    CADACLYSM_TRY(bump, bs::Profile::path({0, 0}).parabola_to({10, 0}, {5, 5}).line_to(0, 0).end());
+    CADACLYSM_TRY(bump_slab, bs::Solid::extrude(bump, xy, 2));
+    EXPECT(bump_slab.faces() == 4, "parabola_to: a bump is not four faces");
+    CADACLYSM_TRY(hump, bs::Profile::path({0, 0}).hyperbola_to({10, 0}, {5, 5}, 2).line_to(0, 0).end());
+    CADACLYSM_TRY(hump_slab, bs::Solid::extrude(hump, xy, 2));
+    EXPECT(hump_slab.faces() == 4, "hyperbola_to: a hump is not four faces");
+    auto flat = bs::Profile::path({0, 0}).conic_to({2, 0}, {1, 0}, 1).end_open();
+    EXPECT(!flat && flat.error().message == "path_conic_to: the control point lies on the chord",
+           "a conic through its chord: " + (flat ? std::string("accepted") : flat.error().message));
+    auto low = bs::Profile::path({0, 0}).hyperbola_to({2, 0}, {1, 1}, 1).line_to(0, 0).end_open();
+    EXPECT(!low && low.error().message == "hyperbola_to: the weight must be over 1 (1 is a parabola, under 1 an ellipse)",
+           "a hyperbola at weight 1: " + (low ? std::string("accepted") : low.error().message));
+    auto no_axis = bs::Profile::parabola({0, 0}, {0, 0}, 1, -1, 1).end_open();
+    EXPECT(!no_axis && no_axis.error().message == "path_parabola: the axis direction is zero",
+           "a parabola without an axis: " + (no_axis ? std::string("accepted") : no_axis.error().message));
 
     // The library reads a fixed count of weights: a wrong count is refused, not read past.
     // An empty list is a count (zero), as in Python; a refused nurbs_to latches like any step.
@@ -697,6 +780,101 @@ static Result<void> outlines() {
         EXPECT(splines > 0 && splines_ok, "the extruded spline's nurbs edge does not read as a degree-3 B-spline");
     }
 
+    // Intersect: two equal pipes crossing at right angles meet on ellipse chains whose
+    // points lie on both pipes; apart, nothing; a zero tolerance refused in the kernel's
+    // words. Two coaxial pipes overlapping in height share a wall band: an overlap whose
+    // rings lie on that wall.
+    {
+        const double tol = 1e-3;
+        auto off_a = [](const bs::Vec3& p) { return std::fabs(std::sqrt(p[0] * p[0] + p[1] * p[1]) - 1); };
+        auto off_b = [](const bs::Vec3& p) { return std::fabs(std::sqrt(p[0] * p[0] + (p[2] - 3) * (p[2] - 3)) - 1); };
+        CADACLYSM_TRY(pipe_a, bs::Solid::cylinder(1, 6));
+        CADACLYSM_TRY(upright, bs::Solid::cylinder(1, 6));
+        CADACLYSM_TRY(pipe_b, upright.rotate({bs::Vec3{0, 0, 3}, bs::Vec3{1, 0, 0}}, 3.14159265358979323846 / 2));
+        CADACLYSM_TRY(found, pipe_a.intersect(pipe_b, tol));
+        EXPECT(found.chains.size() >= 2 && found.overlaps.empty(), "the crossed pipes do not meet on chains alone");
+        std::size_t ellipses = 0;
+        bool chains_ok = true;
+        for (const bs::Chain& c : found.chains) {
+            chains_ok = chains_ok && c.face_a < pipe_a.faces() && c.face_b < pipe_b.faces() && c.points.size() >= 2;
+            for (const bs::Vec3& p : c.points) chains_ok = chains_ok && off_a(p) < 50 * tol && off_b(p) < 50 * tol;
+            if (!c.curve) continue;
+            chains_ok = chains_ok && (c.curve->kind == "ellipse" || c.curve->kind == "nurbs");
+            if (c.curve->kind != "ellipse") continue;
+            ++ellipses;
+            double t = (c.curve->t0 + c.curve->t1) / 2;
+            bs::Vec3 q{};
+            for (int k = 0; k < 3; ++k)
+                q[k] = c.curve->origin[k] + c.curve->x[k] * c.curve->radius * std::cos(t) + c.curve->y[k] * c.curve->radius2 * std::sin(t);
+            chains_ok = chains_ok && off_a(q) < 50 * tol && off_b(q) < 50 * tol;
+        }
+        EXPECT(chains_ok && ellipses > 0, "the crossed pipes' chains do not read as ellipses on both pipes");
+        CADACLYSM_TRY(far_pipe, pipe_b.translate(10, 0, 0));
+        CADACLYSM_TRY(apart, pipe_a.intersect(far_pipe));
+        EXPECT(apart.chains.empty() && apart.overlaps.empty(), "pipes apart still meet");
+        auto zero = pipe_a.intersect(pipe_b, 0.0);
+        EXPECT(!zero && zero.error().message.find("intersect: tolerance must be positive and finite") != std::string::npos,
+               "Solid::intersect at a zero tolerance: " + (zero ? std::string("accepted") : zero.error().message));
+        CADACLYSM_TRY(lower, bs::Solid::cylinder(1, 4));
+        CADACLYSM_TRY(base, bs::Solid::cylinder(1, 4));
+        CADACLYSM_TRY(upper, base.translate(0, 0, 2));
+        CADACLYSM_TRY(shared, lower.intersect(upper, tol));
+        EXPECT(!shared.overlaps.empty() && !shared.overlaps[0].loops.empty(), "the coaxial pipes share no wall band");
+        bool rings_ok = true;
+        for (const auto& ring : shared.overlaps[0].loops) {
+            rings_ok = rings_ok && ring.size() >= 3;
+            for (const bs::Vec3& p : ring) rings_ok = rings_ok && off_a(p) < 50 * tol && p[2] >= 2 - 50 * tol && p[2] <= 4 + 50 * tol;
+        }
+        EXPECT(rings_ok, "an overlap ring leaves the shared band");
+    }
+
+    // Solid x profile hits: a line through a cuboid pierces two faces and is cut into three
+    // pieces, outside/inside/outside, the middle one spanning the box and sweeping; a loop no
+    // hit cuts is one piece; an open sheet has no pieces; a zero tolerance refused verbatim.
+    {
+        CADACLYSM_TRY(xy0, bs::Frame::xy());
+        CADACLYSM_TRY(box, bs::Solid::cuboid(10, 20, 30));
+        CADACLYSM_TRY(line, bs::Profile::path({-20, 0}).line_to(20, 0).end_open());
+        std::vector<std::string> phases;
+        CADACLYSM_TRY(found, box.hits(line, xy0, bs::DEFAULT_TOLERANCE,
+                                      [&](std::string_view phase, std::size_t, std::size_t) { phases.push_back(std::string(phase)); }));
+        EXPECT(found.hits.size() == 2 && found.pieces.size() == 3,
+               "a line through a cuboid reads " + std::to_string(found.hits.size()) + " hits, " + std::to_string(found.pieces.size()) + " pieces");
+        EXPECT(std::find(phases.begin(), phases.end(), "pieces") != phases.end(), "Solid::hits reported no \"pieces\" phase");
+        for (std::size_t k = 0; k < 2; ++k) {
+            const bs::Hit& h = found.hits[k];
+            EXPECT(!h.run && !h.touch && std::fabs(h.start[0] - (k == 0 ? -5.0 : 5.0)) < 0.05 && h.a_start.segment == 0 &&
+                       h.a_start.face == bs::NONE && h.b_start.face != bs::NONE && std::isfinite(h.b_start.u) && std::isfinite(h.b_start.v),
+                   "solid hit " + std::to_string(k) + " is not a crossing of a face at x = +-5");
+        }
+        const std::vector<bs::Piece>& p = found.pieces;
+        EXPECT(!p[0].inside && p[1].inside && !p[2].inside, "the pieces are not outside, inside, outside");
+        EXPECT(p[0].start.t == 0 && p[2].end.t == 1 && p[0].end.t == p[1].start.t && p[1].end.t == p[2].start.t,
+               "the pieces do not run head to tail");
+        CADACLYSM_TRY(middle, bs::Solid::extrude_open(p[1].profile, xy0, 1));
+        CADACLYSM_TRY(span, middle.bounds());
+        EXPECT(std::fabs(span.first[0] + 5) < 0.05 && std::fabs(span.second[0] - 5) < 0.05,
+               "the middle piece spans x " + std::to_string(span.first[0]) + " .. " + std::to_string(span.second[0]) + ", not the box");
+        bs::SweepPath piece_path = bs::SweepPath::along(p[1].profile, xy0, bs::DEFAULT_TOLERANCE, true);
+        CADACLYSM_TRY(ring, bs::Profile::circle(1));
+        CADACLYSM_TRY(start_frame, bs::Frame::yz({-5, 0, 0}));
+        CADACLYSM_TRY(rod, bs::Solid::sweep(ring, start_frame, piece_path));
+        EXPECT(rod.faces() >= 1, "the middle piece does not sweep");
+        CADACLYSM_TRY(circle, bs::Profile::circle(1));
+        CADACLYSM_TRY(far_frame, bs::Frame::xy({100, 0, 0}));
+        CADACLYSM_TRY(far_hits, box.hits(circle, far_frame));
+        EXPECT(far_hits.hits.empty() && far_hits.pieces.size() == 1 && !far_hits.pieces[0].inside, "a circle far off is not one outside piece");
+        CADACLYSM_TRY(square20, bs::Profile::rect(20, 20));
+        CADACLYSM_TRY(sheet20, bs::Solid::face(square20, xy0));
+        CADACLYSM_TRY(upright_line, bs::Profile::path({0, -20}).line_to(0, 20).end_open());
+        CADACLYSM_TRY(xz0, bs::Frame::xz());
+        CADACLYSM_TRY(across, sheet20.hits(upright_line, xz0));
+        EXPECT(!across.hits.empty() && across.pieces.empty(), "a line across a sheet does not read hits and no pieces");
+        auto zero = box.hits(line, xy0, 0.0);
+        EXPECT(!zero && zero.error().message == "solid_profile_hits: tolerance must be positive and finite",
+               "Solid::hits at a zero tolerance: " + (zero ? std::string("accepted") : zero.error().message));
+    }
+
     // Common: the two circles share one lens (a 4-arc profile that extrudes to a solid);
     // apart, nothing; zero refused in the kernel's words.
     CADACLYSM_TRY(lenses, circle_a.common(circle_b));
@@ -799,6 +977,31 @@ static Result<std::pair<bs::Solid, std::uint32_t>> solids() {
     EXPECT(std::all_of(indices.begin(), indices.end(), [&](std::uint32_t i) { return i < mesh.vertex_count(); }),
            "a kernel index points past the vertices");
     EXPECT(fine > coarse, "a finer tolerance did not mesh finer");
+
+    // f64 twins: mesh64(0.05) shares mesh(0.05)'s counts and first position narrowed;
+    // bounds64(0.05) is the same box as bounds_at(0.05) (both close to the origin
+    // here, so an epsilon rather than exact -- the plate is not at nice round numbers
+    // the way the reader's cube is). Catches: bounds64 returning bounds' widened
+    // float box instead of its own tessellation's unnarrowed one.
+    CADACLYSM_TRY(mesh64, rounded.mesh64(0.05));
+    EXPECT(mesh64.vertex_count() == mesh.vertex_count() && mesh64.index_count() == mesh.index_count(),
+           "blacksmith mesh64(0.05)'s counts do not equal mesh(0.05)'s");
+    cadaclysm::Span<const double> mesh64_p = mesh64.positions();
+    cadaclysm::Span<const float> mesh_p = mesh.positions();
+    EXPECT(mesh64_p.size() >= 3 && mesh_p.size() >= 3 && static_cast<float>(mesh64_p[0]) == mesh_p[0] &&
+               static_cast<float>(mesh64_p[1]) == mesh_p[1] && static_cast<float>(mesh64_p[2]) == mesh_p[2],
+           "blacksmith mesh64's first position narrowed does not equal mesh's");
+    CADACLYSM_TRY(box64, rounded.bounds64(0.05));
+    CADACLYSM_TRY(box32, rounded.bounds_at(0.05));
+    bool boxes_agree = true;
+    for (int i = 0; i < 3; ++i) {
+        boxes_agree = boxes_agree && std::fabs(box64.first[i] - box32.first[i]) < 1e-6 &&
+                      std::fabs(box64.second[i] - box32.second[i]) < 1e-6;
+    }
+    EXPECT(boxes_agree, "blacksmith bounds64(0.05) does not equal bounds_at(0.05)");
+    std::printf("blacksmith f64 twins: mesh64 %u triangles, bounds64 max=(%g, %g, %g)\n", mesh64.triangle_count(),
+                box64.second[0], box64.second[1], box64.second[2]);
+
     CADACLYSM_TRY(polylines, rounded.edge_polylines(0.05));
     bool every_row_a_line = !polylines.empty();
     for (std::size_t i = 0; i < polylines.size(); ++i) every_row_a_line = every_row_a_line && polylines[i].size() >= 6;
@@ -842,6 +1045,35 @@ static Result<std::pair<bs::Solid, std::uint32_t>> solids() {
     CADACLYSM_TRY(across, bs::Frame::yz());
     CADACLYSM_TRY(halves, plate.split_by_plane(across));
     EXPECT(halves.size() == 2, "split_by_plane gave " + std::to_string(halves.size()) + " bodies, not 2");
+
+    // A profile draws its own plane, top by default -- unlike a solid, a sketch has no
+    // camera-facing convention of its own, so its plane (z = 0) is already the page. The
+    // default is pinned against an explicit iso view, not just checked non-empty: a top
+    // default silently left at iso would make the two calls identical and this comparison
+    // would pass wrongly.
+    CADACLYSM_TRY(profile_svg_text, rect.svg_text());
+    EXPECT(profile_svg_text.rfind("<svg", 0) == 0, "profile svg_text does not start with <svg");
+    EXPECT(profile_svg_text.find("<path") != std::string::npos, "profile svg_text has no <path");
+    bs::SvgOptions iso_view;
+    iso_view.view = bs::SvgView::iso;
+    CADACLYSM_TRY(profile_svg_iso, rect.svg_text(iso_view));
+    EXPECT(profile_svg_text != profile_svg_iso, "profile svg: top default did not differ from an explicit iso view");
+    std::string profile_svg = temp_file("cadaclysm-smoke-cpp-profile.svg");
+    CADACLYSM_TRY_VOID(rect.svg(profile_svg));
+    CADACLYSM_TRY(profile_svg_head, read_file(profile_svg));
+    EXPECT(!profile_svg_head.empty(), "Profile::svg wrote an empty file");
+
+    // The module writer draws a solid and a profile on one page: one <g> per drawable,
+    // an id each -- the overload write_svg_text/write_svg take, widened from the
+    // solids-only ones.
+    CADACLYSM_TRY(mixed_svg_text, bs::write_svg_text({rounded}, {rect}, bs::SvgOptions()));
+    EXPECT(mixed_svg_text.find("<path") != std::string::npos, "mixed solid+profile SVG has no <path");
+    EXPECT(mixed_svg_text.find("id=\"solid-0\"") != std::string::npos, "mixed solid+profile SVG has no solid-0 group");
+    EXPECT(mixed_svg_text.find("id=\"profile-0\"") != std::string::npos, "mixed solid+profile SVG has no profile-0 group");
+    std::string mixed_svg = temp_file("cadaclysm-smoke-cpp-mixed.svg");
+    CADACLYSM_TRY_VOID(bs::write_svg(mixed_svg, {rounded}, {rect}, bs::SvgOptions()));
+    CADACLYSM_TRY(mixed_svg_head, read_file(mixed_svg));
+    EXPECT(!mixed_svg_head.empty(), "write_svg (solids and profiles) wrote an empty file");
 
     return std::pair<bs::Solid, std::uint32_t>(std::move(rounded), faces);
 }

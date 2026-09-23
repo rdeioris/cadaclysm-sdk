@@ -160,6 +160,14 @@ unsafe fn groups<'a, const N: usize>(pointer: *const f32, count: usize) -> Optio
     (!pointer.is_null()).then(|| unsafe { borrowed(pointer.cast::<[f32; N]>(), count) })
 }
 
+/// [`groups`] over `f64`, for the `…64` twins.
+///
+/// # Safety
+/// As [`borrowed`], over `count * N` doubles.
+unsafe fn groups64<'a, const N: usize>(pointer: *const f64, count: usize) -> Option<&'a [[f64; N]]> {
+    (!pointer.is_null()).then(|| unsafe { borrowed(pointer.cast::<[f64; N]>(), count) })
+}
+
 /// A column-major 4x4 as rows, so `m[row][column]` reads as the textbooks write it.
 fn rows<T: Copy + Into<f64>>(column_major: &[T; 16]) -> [[f64; 4]; 4] {
     let mut out = [[0.0; 4]; 4];
@@ -429,6 +437,33 @@ impl Bounds {
     }
 }
 
+/// [`Bounds`] in `double`: the same box, unnarrowed -- exact far from the origin,
+/// where `f32` is not.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Bounds64 {
+    pub min: [f64; 3],
+    pub max: [f64; 3],
+}
+
+impl Bounds64 {
+    fn from_raw(raw: sys::CadaclysmBounds64) -> Bounds64 {
+        Bounds64 { min: raw.min, max: raw.max }
+    }
+
+    /// Whether this is the all-zero box the ABI uses for "nothing here".
+    pub fn is_empty(&self) -> bool {
+        self.min == [0.0; 3] && self.max == [0.0; 3]
+    }
+
+    pub fn size(&self) -> [f64; 3] {
+        [0, 1, 2].map(|i| self.max[i] - self.min[i])
+    }
+
+    pub fn centre(&self) -> [f64; 3] {
+        [0, 1, 2].map(|i| (self.min[i] + self.max[i]) / 2.0)
+    }
+}
+
 /// An attribute's value, already the type its kind names. `List` and `Reference`
 /// arrive as text.
 #[derive(Clone, Debug, PartialEq)]
@@ -554,6 +589,43 @@ impl<'s> Mesh<'s> {
     }
 }
 
+/// [`Mesh`] in `double`: the document's own mesh, **lent as it is**, where [`Node::mesh`]
+/// hands a `float` copy of it -- the same triangles and indices, `Node::mesh`'s `float`
+/// positions being exactly these narrowed. For a caller that uses the mesh as geometry
+/// (an exporter, a measurement, a solver) and wants the file's own coordinates, which
+/// `float` cannot hold far from the origin. Colours stay `float`.
+///
+/// **A forget drops it.** [`Scene::forget_meshes`] frees the document's mesh these
+/// slices borrow, but takes `&mut Scene`, so the borrow checker rules out holding a
+/// `Mesh64` across a forget: nothing here needs a runtime check.
+#[derive(Clone, Copy, Debug)]
+pub struct Mesh64<'s> {
+    pub positions: &'s [[f64; 3]],
+    pub normals: Option<&'s [[f64; 3]]>,
+    pub uvs: Option<&'s [[f64; 2]]>,
+    pub colors: Option<&'s [[f32; 4]]>,
+    /// Three to a triangle, into `positions`.
+    pub indices: &'s [u32],
+}
+
+impl<'s> Mesh64<'s> {
+    pub fn vertex_count(&self) -> usize {
+        self.positions.len()
+    }
+
+    pub fn index_count(&self) -> usize {
+        self.indices.len()
+    }
+
+    pub fn triangle_count(&self) -> usize {
+        self.indices.len() / 3
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.indices.is_empty() || self.positions.is_empty()
+    }
+}
+
 /// A node's feature edges or free curves, already flattened to points, borrowed from
 /// the scene: `positions` holds the runs end to end and `counts` says how long each is.
 #[derive(Clone, Copy, Debug)]
@@ -662,6 +734,40 @@ impl<'s> Beziers<'s> {
 
     pub fn copy(&self) -> BeziersData {
         BeziersData { points: self.points.to_vec(), weights: self.weights.to_vec() }
+    }
+}
+
+/// [`Beziers`] in `double`: the same segments, unnarrowed -- the `float` ones are
+/// these narrowed. Borrowed from the scene until it is closed.
+#[derive(Clone, Copy, Debug)]
+pub struct Beziers64<'s> {
+    pub points: &'s [[f64; 3]],
+    pub weights: &'s [f64],
+}
+
+impl<'s> Beziers64<'s> {
+    fn from_raw(raw: sys::CadaclysmBeziers64) -> Beziers64<'s> {
+        let n = raw.count as usize;
+        unsafe {
+            Beziers64 {
+                points: groups64::<3>(raw.points, n * 4).unwrap_or(&[]),
+                weights: borrowed(raw.weights, n * 4),
+            }
+        }
+    }
+
+    /// How many curves.
+    pub fn count(&self) -> usize {
+        self.weights.len() / 4
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
+
+    /// One curve's four control points at a time.
+    pub fn iter(&self) -> impl Iterator<Item = &'s [[f64; 3]]> + 's {
+        self.points.chunks_exact(4)
     }
 }
 
@@ -874,7 +980,7 @@ impl Meshlet {
 }
 
 /// A mesh split into meshlets, optionally with coarser levels above them, for a
-/// mesh-shader or Nanite-style renderer. Built from any mesh -- a [`Node::mesh`] or
+/// mesh-shader or meshlet-based renderer. Built from any mesh -- a [`Node::mesh`] or
 /// slices of your own -- and freed when dropped.
 pub struct Meshlets {
     pointer: NonNull<sys::CadaclysmMeshlets>,
@@ -1302,6 +1408,12 @@ impl<'s> Node<'s> {
         Bounds::from_raw(self.call(self.scene.api.cadaclysm_node_bounds))
     }
 
+    /// [`Node::bounds`] in `double`: the same box, unnarrowed -- exact far from the
+    /// origin, where `bounds`'s widened `f32` positions are not.
+    pub fn bounds64(&self) -> Bounds64 {
+        Bounds64::from_raw(self.call(self.scene.api.cadaclysm_node_bounds64))
+    }
+
     fn mesh_of(&self, raw: sys::CadaclysmMesh) -> Mesh<'s> {
         let n = raw.vertex_count as usize;
         // SAFETY: the scene keeps every mesh it built until it closes, and `'s`
@@ -1322,6 +1434,27 @@ impl<'s> Node<'s> {
     /// occurrences of one shape hand back the *same* slices.
     pub fn mesh(&self) -> Mesh<'s> {
         self.mesh_of(self.call(self.scene.api.cadaclysm_node_mesh))
+    }
+
+    /// [`Node::mesh`] in `double`: the document's own mesh, **lent as it is** rather
+    /// than narrowed -- see [`Mesh64`]. `None` for a node with no triangles.
+    pub fn mesh64(&self) -> Option<Mesh64<'s>> {
+        let raw = self.call(self.scene.api.cadaclysm_node_mesh64);
+        if raw.positions.is_null() || raw.index_count == 0 {
+            return None;
+        }
+        let n = raw.vertex_count as usize;
+        // SAFETY: as `mesh_of` -- the scene keeps every mesh it built until it closes
+        // or `forget_meshes` runs, and `'s` borrows the scene either way.
+        unsafe {
+            Some(Mesh64 {
+                positions: groups64::<3>(raw.positions, n).unwrap_or(&[]),
+                normals: groups64::<3>(raw.normals, n),
+                uvs: groups64::<2>(raw.uvs, n),
+                colors: groups::<4>(raw.colors, n),
+                indices: borrowed(raw.indices, raw.index_count as usize),
+            })
+        }
     }
 
     /// Its triangles at a coarser level of detail: 0 is [`Node::mesh`] itself, 1 up to
@@ -1406,14 +1539,29 @@ impl<'s> Node<'s> {
         Beziers::from_raw(self.call(self.scene.api.cadaclysm_node_edge_beziers))
     }
 
+    /// [`Node::edge_beziers`] in `double`: the same segments, unnarrowed.
+    pub fn edge_beziers64(&self) -> Beziers64<'s> {
+        Beziers64::from_raw(self.call(self.scene.api.cadaclysm_node_edge_beziers64))
+    }
+
     /// Its free curves as cubic Béziers; see [`Node::edge_beziers`].
     pub fn curve_beziers(&self) -> Beziers<'s> {
         Beziers::from_raw(self.call(self.scene.api.cadaclysm_node_curve_beziers))
     }
 
+    /// [`Node::curve_beziers`] in `double`; see [`Node::edge_beziers64`].
+    pub fn curve_beziers64(&self) -> Beziers64<'s> {
+        Beziers64::from_raw(self.call(self.scene.api.cadaclysm_node_curve_beziers64))
+    }
+
     /// Its isocurves as cubic Béziers; see [`Node::edge_beziers`].
     pub fn isocurve_beziers(&self) -> Beziers<'s> {
         Beziers::from_raw(self.call(self.scene.api.cadaclysm_node_isocurve_beziers))
+    }
+
+    /// [`Node::isocurve_beziers`] in `double`; see [`Node::edge_beziers64`].
+    pub fn isocurve_beziers64(&self) -> Beziers64<'s> {
+        Beziers64::from_raw(self.call(self.scene.api.cadaclysm_node_isocurve_beziers64))
     }
 
     /// The collision body for what this node draws, building its mesh if it is not
@@ -1476,6 +1624,12 @@ impl<'s> Node<'s> {
     pub fn bounds_placed(&self, placement: Option<&[f64; 16]>) -> Bounds {
         let matrix = placement.map_or(std::ptr::null(), |m| m.as_ptr());
         Bounds::from_raw(unsafe { (self.scene.api.cadaclysm_node_bounds_placed)(self.scene.raw(), self.index, matrix) })
+    }
+
+    /// [`Node::bounds_placed`] in `double`: the same box, unnarrowed.
+    pub fn bounds_placed64(&self, placement: Option<&[f64; 16]>) -> Bounds64 {
+        let matrix = placement.map_or(std::ptr::null(), |m| m.as_ptr());
+        Bounds64::from_raw(unsafe { (self.scene.api.cadaclysm_node_bounds_placed64)(self.scene.raw(), self.index, matrix) })
     }
 
     /// Whether its mesh has been built and is held -- by [`Scene::realize_all`], by an
@@ -1760,6 +1914,13 @@ impl Scene {
         self.handle.as_ptr()
     }
 
+    /// The scene's C handle, for libraries that take a `CadaclysmScene *` -- the render
+    /// libraries' `cadaclysm_render_add_scene`. Valid until this `Scene` is dropped or
+    /// closed; the pointee is opaque.
+    pub fn as_ptr(&self) -> *const std::ffi::c_void {
+        self.handle.as_ptr().cast()
+    }
+
     fn node_or_none(&self, index: u32) -> Option<Node<'_>> {
         (index != NONE).then_some(Node { scene: self, index })
     }
@@ -1820,6 +1981,12 @@ impl Scene {
     /// not in a node's own frame. **This meshes all of it.**
     pub fn bounds(&self) -> Bounds {
         Bounds::from_raw(unsafe { (self.api.cadaclysm_bounds)(self.raw()) })
+    }
+
+    /// [`Scene::bounds`] in `double`: the same union box, unnarrowed. **This meshes all
+    /// of it**, being the only way to know how far it reaches.
+    pub fn bounds64(&self) -> Bounds64 {
+        Bounds64::from_raw(unsafe { (self.api.cadaclysm_bounds64)(self.raw()) })
     }
 
     /// The 4x4, as rows, that puts [`Node::surfaces`] in the space everything else is
@@ -2309,5 +2476,53 @@ mod tests {
         let flag = Attribute { name: "Locked".into(), kind: ValueKind::Boolean, value: Value::Boolean(true) };
         assert_eq!(flag.text(), "true");
         assert!(flag.truthy());
+    }
+
+    /// Far out, `f64` keeps what `f32` cannot: a corner at y = -2600000.987654321 is
+    /// -2600001.0 in `f32` (spacing 0.25 there). Catches: `mesh64`/`bounds64` returning
+    /// the f32 mesh's data widened rather than the document's own unnarrowed positions.
+    ///
+    /// Needs the real library (`CADACLYSM_LIBRARY`), unlike every other test in this
+    /// module -- this crate's own tests otherwise never open one, on purpose (see the
+    /// crate's `Cargo.toml`). Skips quietly rather than failing a `cargo test` run that
+    /// has no library to load, which is the common case for this published crate.
+    #[test]
+    fn mesh64_and_bounds64_keep_coordinates_far_from_the_origin() {
+        let path = std::env::temp_dir().join("cadaclysm-rust-far64.scad");
+        if std::fs::write(&path, "translate([1000000.123456789, -2600000.987654321, 450.5]) cube(1);").is_err() {
+            eprintln!("skipped: could not write a scratch .scad file");
+            return;
+        }
+        let scene = match open(&path) {
+            Ok(scene) => scene,
+            Err(err) => {
+                eprintln!("skipped: {err} (no library to open the far-from-origin cube with)");
+                return;
+            }
+        };
+        let node = scene.walk().find(|n| n.can_mesh()).expect("the translated cube has a meshable node");
+
+        let mesh64 = node.mesh64().expect("mesh64 for a node with triangles");
+        assert!(
+            mesh64.positions.iter().any(|p| (p[1] + 2_600_000.987_654_321).abs() < 1e-6),
+            "mesh64 lost the far low-y corner: {:?}",
+            mesh64.positions
+        );
+        assert!(
+            mesh64.positions.iter().any(|p| ((p[1] as f32) as f64 - p[1]).abs() > 1e-3),
+            "mesh64 carries no coordinate f32 cannot hold, so this test cannot tell mesh64 from mesh widened"
+        );
+
+        let (b64, b32) = (node.bounds64(), node.bounds());
+        assert!((b64.min[1] + 2_600_000.987_654_321).abs() < 1e-6, "bounds64 lost the far corner: {:?}", b64.min);
+        assert!(
+            (b64.min[1] - b32.min[1] as f64).abs() > 1e-3,
+            "bounds64 agrees with bounds narrowed to the bit, so it is not exact where f32 is not: {} vs {}",
+            b64.min[1],
+            b32.min[1]
+        );
+
+        let scene_b64 = scene.bounds64();
+        assert!((scene_b64.min[1] + 2_600_000.987_654_321).abs() < 1e-6, "the scene's bounds64 lost the far corner");
     }
 }

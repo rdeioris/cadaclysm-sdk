@@ -17,9 +17,9 @@ no generated bindings, no Rust, no build system. Drop it beside your own
 script and point `CADACLYSM_LIBRARY` at the shared library if it is not in the
 place this looks by default.
 
-`numpy` is imported only when triangles or polylines are actually asked for. A
-script that walks the tree and reads attributes needs nothing but the standard
-library.
+`numpy` is imported only when triangles, polylines or a FEM mesh's arrays are
+actually asked for. A script that walks the tree and reads attributes needs
+nothing but the standard library.
 
 ## Everything borrows from the scene
 
@@ -31,8 +31,8 @@ what leaving a `with` block does.
 Strings are the easy half: `ctypes` decodes `char *` into a Python `str` on the
 way out, so `node.name` is already a copy and outlives anything.
 
-Arrays are the sharp half, and **`node.mesh` hands back read-only numpy views
-into the library's own memory** rather than copies. That is the deliberate
+Arrays are the sharp half, and **`node.mesh` and `node.fem_mesh(...)` hand back
+read-only numpy views into the library's own memory** rather than copies. That is the deliberate
 choice: `ufi.stp` is 90.5M triangles, and copying every mesh to be safe would
 cost gigabytes and seconds to hand back arrays most callers upload to the GPU
 and drop. Two things make the unsafe use hard to reach by accident:
@@ -44,6 +44,11 @@ and drop. Two things make the unsafe use hard to reach by accident:
 That leaves exactly one way to dangle: keeping a view past an explicit
 `close()`. Call `mesh.copy()` for arrays that must outlive the scene, or
 finish with them inside the `with`.
+
+A `FemMesh` is a caller-owned handle, as `Meshlets` is -- but it is the one whose
+**borrowed arrays** have an owner that is not the scene: they keep the `FemMesh`
+alive through their `.base`, and `free()` (or leaving its own `with` block) is
+what invalidates them, not `Scene.close()`.
 """
 
 import ctypes
@@ -66,6 +71,9 @@ __all__ = [
     "CollisionHull",
     "Convention",
     "FILE_UNITS",
+    "FemEdge",
+    "FemMesh",
+    "FemVertex",
     "Manifold",
     "Mesh",
     "Meshlet",
@@ -228,6 +236,10 @@ class _Bounds(ctypes.Structure):
     _fields_ = [("min", c_float * 3), ("max", c_float * 3)]
 
 
+class _Bounds64(ctypes.Structure):
+    _fields_ = [("min", c_double * 3), ("max", c_double * 3)]
+
+
 class _Attribute(ctypes.Structure):
     _fields_ = [
         ("name", c_char_p),
@@ -258,6 +270,20 @@ class _Mesh(ctypes.Structure):
         ("positions", POINTER(c_float)),
         ("normals", POINTER(c_float)),
         ("uvs", POINTER(c_float)),
+        ("colors", POINTER(c_float)),
+        ("indices", POINTER(c_uint32)),
+        ("vertex_count", c_uint32),
+        ("index_count", c_uint32),
+    ]
+
+
+class _Mesh64(ctypes.Structure):
+    #: `CadaclysmMesh64`: `_Mesh` in `double`, save `colors` which stays float32.
+    #: Same field-order contract as `_Mesh`; pinned by `tests/bindings.rs`.
+    _fields_ = [
+        ("positions", POINTER(c_double)),
+        ("normals", POINTER(c_double)),
+        ("uvs", POINTER(c_double)),
         ("colors", POINTER(c_float)),
         ("indices", POINTER(c_uint32)),
         ("vertex_count", c_uint32),
@@ -328,6 +354,15 @@ class _Beziers(ctypes.Structure):
     _fields_ = [
         ("points", POINTER(c_float)),
         ("weights", POINTER(c_float)),
+        ("count", c_uint32),
+    ]
+
+
+class _Beziers64(ctypes.Structure):
+    #: `CadaclysmBeziers64`: `_Beziers` in `double`. Pinned by `tests/bindings.rs`.
+    _fields_ = [
+        ("points", POINTER(c_double)),
+        ("weights", POINTER(c_double)),
         ("count", c_uint32),
     ]
 
@@ -403,6 +438,76 @@ class _Surfaces(ctypes.Structure):
     ]
 
 
+class _FemOptions(ctypes.Structure):
+    #: `CadaclysmFemOptions`. Field order and `size` are the whole contract, as
+    #: `_OpenOptions` above: `cadaclysm_fem_options_init` fills the library's whole
+    #: struct, so this list must match the header field for field --
+    #: `tests/bindings.rs` pins it -- and it may never reorder. A field the library
+    #: has and this list does not is written **past** what `Node.fem_mesh`
+    #: allocated, which is the `CadaclysmOpenOptions` overrun that pin exists for.
+    _fields_ = [
+        ("size", c_size_t),
+        ("tolerance", c_double),
+        ("max_size", c_double),
+    ]
+
+
+class _FemMeshView(ctypes.Structure):
+    #: `CadaclysmFemMeshView`. Every pointer here is borrowed from the FEM handle
+    #: and dies with it; the counts are in elements, so `nodes` holds
+    #: `node_count * 3` doubles and `triangles` `triangle_count * 3` indices.
+    #: Pinned against the header by `tests/bindings.rs`, which is the only thing
+    #: standing between a missing field here and reading `min_angle` out of
+    #: `watertight`.
+    _fields_ = [
+        ("nodes", POINTER(c_double)),
+        ("node_count", c_uint32),
+        ("triangles", POINTER(c_uint32)),
+        ("triangle_count", c_uint32),
+        ("triangle_face", POINTER(c_uint32)),
+        ("node_kind", POINTER(c_uint32)),
+        ("node_entity", POINTER(c_uint32)),
+        ("face_count", c_uint32),
+        ("edge_count", c_uint32),
+        ("vertex_count", c_uint32),
+        ("open_edge_count", c_uint32),
+        ("folded_edge_count", c_uint32),
+        ("watertight", c_bool),
+        ("from_mesh", c_bool),
+        ("min_angle", c_double),
+        ("worst_triangle", c_uint32),
+        ("longest_edge", c_double),
+    ]
+
+
+class _FemEdge(ctypes.Structure):
+    #: `CadaclysmFemEdge`: one B-rep edge's node chain. Pinned by `tests/bindings.rs`.
+    _fields_ = [
+        ("id", c_uint32),
+        ("nodes", POINTER(c_uint32)),
+        ("node_count", c_uint32),
+        ("runs", POINTER(c_uint32)),
+        ("run_count", c_uint32),
+        ("face_a", c_uint32),
+        ("face_b", c_uint32),
+        ("end_a", c_uint32),
+        ("end_b", c_uint32),
+        ("closed", c_bool),
+        ("seam", c_bool),
+    ]
+
+
+class _FemVertex(ctypes.Structure):
+    #: `CadaclysmFemVertex`. `point` is a fixed array of three doubles, not a
+    #: pointer: it is the vertex's own position, copied into the struct.
+    #: Pinned by `tests/bindings.rs`.
+    _fields_ = [
+        ("node", c_uint32),
+        ("point", c_double * 3),
+        ("has_position", c_bool),
+    ]
+
+
 # ---- loading the library --------------------------------------------------
 
 #: Every entry point in `include/cadaclysm.h`, as `(name, restype, argtypes)`.
@@ -431,6 +536,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_schema_read", c_char_p, [c_void_p]),
     ("cadaclysm_metres_per_unit", c_double, [c_void_p]),
     ("cadaclysm_bounds", _Bounds, [c_void_p]),
+    ("cadaclysm_bounds64", _Bounds64, [c_void_p]),
     ("cadaclysm_node_parent", c_uint32, [c_void_p, c_uint32]),
     ("cadaclysm_node_child_count", c_uint32, [c_void_p, c_uint32]),
     ("cadaclysm_node_child", c_uint32, [c_void_p, c_uint32, c_uint32]),
@@ -471,12 +577,14 @@ _ENTRY_POINTS = [
     ("cadaclysm_placement_transform", None, [c_void_p, c_uint32, POINTER(c_double)]),
     ("cadaclysm_node_can_mesh", c_bool, [c_void_p, c_uint32]),
     ("cadaclysm_node_mesh", _Mesh, [c_void_p, c_uint32]),
+    ("cadaclysm_node_mesh64", _Mesh64, [c_void_p, c_uint32]),
     ("cadaclysm_lod_levels", c_uint32, []),
     ("cadaclysm_node_mesh_lod", _Mesh, [c_void_p, c_uint32, c_uint32]),
     ("cadaclysm_node_lod_error", c_float, [c_void_p, c_uint32, c_uint32]),
     ("cadaclysm_node_collision", c_bool, [c_void_p, c_uint32, c_uint32, POINTER(_Collision)]),
     ("cadaclysm_node_collision_hull", _CollisionHull, [c_void_p, c_uint32, c_uint32]),
     ("cadaclysm_node_bounds_placed", _Bounds, [c_void_p, c_uint32, POINTER(c_double)]),
+    ("cadaclysm_node_bounds_placed64", _Bounds64, [c_void_p, c_uint32, POINTER(c_double)]),
     ("cadaclysm_node_is_meshed", c_bool, [c_void_p, c_uint32]),
     ("cadaclysm_node_surface_edges", _Polylines, [c_void_p, c_uint32]),
     ("cadaclysm_node_surface_isocurves", _Polylines, [c_void_p, c_uint32]),
@@ -491,6 +599,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_brep_layout_id", c_char_p, []),
     ("cadaclysm_surface_matrix", None, [c_void_p, POINTER(c_float)]),
     ("cadaclysm_node_bounds", _Bounds, [c_void_p, c_uint32]),
+    ("cadaclysm_node_bounds64", _Bounds64, [c_void_p, c_uint32]),
     ("cadaclysm_node_instance_of", c_uint32, [c_void_p, c_uint32]),
     ("cadaclysm_node_select_as", c_uint32, [c_void_p, c_uint32]),
     ("cadaclysm_node_generator", c_char_p, [c_void_p, c_uint32]),
@@ -504,6 +613,9 @@ _ENTRY_POINTS = [
     ("cadaclysm_node_edge_beziers", _Beziers, [c_void_p, c_uint32]),
     ("cadaclysm_node_curve_beziers", _Beziers, [c_void_p, c_uint32]),
     ("cadaclysm_node_isocurve_beziers", _Beziers, [c_void_p, c_uint32]),
+    ("cadaclysm_node_edge_beziers64", _Beziers64, [c_void_p, c_uint32]),
+    ("cadaclysm_node_curve_beziers64", _Beziers64, [c_void_p, c_uint32]),
+    ("cadaclysm_node_isocurve_beziers64", _Beziers64, [c_void_p, c_uint32]),
     ("cadaclysm_realize_all", c_uint32, [c_void_p]),
     ("cadaclysm_realize_meshes", c_uint32, [c_void_p, c_uint32]),
     ("cadaclysm_realized", c_uint32, [c_void_p]),
@@ -524,6 +636,23 @@ _ENTRY_POINTS = [
     ("cadaclysm_meshlet_normals", None, [c_void_p, c_uint32, POINTER(c_float)]),
     ("cadaclysm_meshlet_indices", None, [c_void_p, c_uint32, POINTER(c_uint32)]),
     ("cadaclysm_meshlet_children", None, [c_void_p, c_uint32, POINTER(c_uint32)]),
+    # The FEM surface mesh: one handle per meshed body, freed by the caller. The
+    # `.msh` text comes back as `c_char_p` and so as a Python `bytes` copy, which
+    # is what makes the borrowed-slot lifetime `cadaclysm_fem_mesh_msh_text`
+    # documents a non-issue here -- see `FemMesh.msh_text`.
+    ("cadaclysm_fem_options_init", None, [POINTER(_FemOptions)]),
+    ("cadaclysm_node_fem_mesh", c_void_p,
+     [c_void_p, c_uint32, POINTER(c_double), POINTER(_FemOptions)]),
+    ("cadaclysm_fem_mesh_free", None, [c_void_p]),
+    ("cadaclysm_fem_mesh_view", c_bool, [c_void_p, POINTER(_FemMeshView)]),
+    ("cadaclysm_fem_mesh_edge", c_bool, [c_void_p, c_uint32, POINTER(_FemEdge)]),
+    ("cadaclysm_fem_mesh_vertex", c_bool, [c_void_p, c_uint32, POINTER(_FemVertex)]),
+    ("cadaclysm_fem_mesh_open_edge", c_bool,
+     [c_void_p, c_uint32, POINTER(c_uint32), POINTER(c_uint32), POINTER(c_uint32)]),
+    ("cadaclysm_fem_mesh_folded_edge", c_bool,
+     [c_void_p, c_uint32, POINTER(c_uint32), POINTER(c_uint32), POINTER(c_uint32)]),
+    ("cadaclysm_fem_mesh_msh_text", c_char_p, [c_void_p]),
+    ("cadaclysm_fem_mesh_save_msh", c_bool, [c_void_p, c_char_p]),
 ]
 
 
@@ -786,7 +915,7 @@ def pick_save(suggested_name=None) -> "Path | None":
 
 
 class _Borrowed:
-    """One block of the scene's memory, exposed through the array interface.
+    """One block of borrowed memory, exposed through the array interface.
 
     Two properties come out of building views this way rather than with
     `numpy.ctypeslib.as_array`, and both are load-bearing:
@@ -795,15 +924,22 @@ class _Borrowed:
       unwriteable and a stray assignment raises instead of scribbling on the
       document's own vertex buffer.
     * The array `numpy` builds holds this object as its `.base`, and this
-      object holds the scene — so no view can outlive the scene by having
-      merely dropped the last reference to it. An explicit `close()` still
+      object holds the owner — so no view can outlive what it borrows from by
+      having merely dropped the last reference to it. An explicit release still
       invalidates every view, which is the documented sharp edge.
+
+    **The owner is whatever the memory belongs to, not always the `Scene`.** A
+    mesh, a polyline set and a collision hull borrow from the open document, so
+    the owner is the scene and `Scene.close()` is what invalidates them; a
+    `FemMesh`'s arrays borrow from that handle, so the owner is the `FemMesh`
+    and its own `free()` is. Passing the scene for a FEM array would let the
+    handle die under a live view.
     """
 
-    __slots__ = ("_scene", "__array_interface__")
+    __slots__ = ("_owner", "__array_interface__")
 
-    def __init__(self, scene, pointer, shape, typestr):
-        self._scene = scene
+    def __init__(self, owner, pointer, shape, typestr):
+        self._owner = owner
         self.__array_interface__ = {
             "version": 3,
             "data": (ctypes.cast(pointer, c_void_p).value, True),
@@ -812,12 +948,13 @@ class _Borrowed:
         }
 
 
-def _view(scene, pointer, shape, dtype):
-    """A read-only numpy view of `shape` over borrowed memory, or None if null."""
+def _view(owner, pointer, shape, dtype):
+    """A read-only numpy view of `shape` over memory borrowed from `owner`
+    (a `Scene`, or a `FemMesh`), or None if null."""
     if not pointer:
         return None
     numpy = _numpy()
-    return numpy.asarray(_Borrowed(scene, pointer, shape, numpy.dtype(dtype).str))
+    return numpy.asarray(_Borrowed(owner, pointer, shape, numpy.dtype(dtype).str))
 
 
 # ---- the values the ABI hands over ----------------------------------------
@@ -946,7 +1083,9 @@ class Mesh:
     `positions` and `normals` are `(vertex_count, 3)` float32, `uvs` is
     `(vertex_count, 2)` float32 and `indices` is `(index_count,)` uint32, three
     to a triangle. All four are read-only views into the scene — see the module
-    docstring — and `normals` is None for a mesh that carries none.
+    docstring — and `normals` is None for a mesh that carries none. From
+    `Node.mesh64`, `positions`, `normals` and `uvs` are float64 instead — the
+    document's own mesh, unnarrowed — while `colors` stays float32 either way.
 
     `uvs` is None for a node whose reader produced none — which is most of
     them unless the scene was opened with `UV_WORLD`; see that constant for the
@@ -1075,7 +1214,9 @@ class Beziers:
     `points` is `(count, 4, 3)` float32 -- four control points a curve -- and
     `weights` is `(count, 4)` float32, all ones for a polynomial curve; a rational
     one (a circle's arc) carries the weights that make it exact. Read-only views
-    into the scene, like `Polylines`; `copy()` makes arrays of your own.
+    into the scene, like `Polylines`; `copy()` makes arrays of your own. From
+    `Node.edge_beziers64` and its `curve_beziers64`/`isocurve_beziers64` twins,
+    both arrays are float64 instead.
     """
 
     __slots__ = ("points", "weights", "count")
@@ -1444,7 +1585,7 @@ class Meshlet:
 
 class Meshlets:
     """A mesh split into meshlets, optionally with coarser levels above them, for a
-    mesh-shader or Nanite-style renderer. Built from any mesh -- a `Node.mesh` or
+    mesh-shader or meshlet-based renderer. Built from any mesh -- a `Node.mesh` or
     arrays of your own -- and owned by you: `free()` it, or use it as a context
     manager."""
 
@@ -1562,6 +1703,391 @@ class Meshlets:
 
     def __repr__(self):
         return "Meshlets(freed)" if self.freed else f"Meshlets(count={self.count})"
+
+
+class FemEdge:
+    """One B-rep edge of a FEM mesh: the chain of nodes along it, and where that
+    chain breaks. Plain data, copied out of the handle.
+
+    `nodes` are this mesh's node indices in order along the edge, its end
+    vertices included; a closed edge repeats no node. **`runs` says where the
+    chain breaks**: read `nodes[runs[i]:runs[i + 1]]` (the last run to the end)
+    as one polyline and join nothing across a run boundary. The two ends either
+    side of one are two points of the edge with no mesh edge between them -- a
+    crack along the edge, or a stretch of it the mesher sampled on one face
+    only. `(0,)` is the ordinary answer, and a caller reading `nodes` as one
+    polyline without looking here silently jumps the gap.
+
+    `faces` is `(face_a, face_b)` and `ends` is `(end_a, end_b)`, the second of
+    each being `NONE` where there is none -- an open body's rim, or both ends at
+    one vertex (a closed edge, a circle's rim, a full-turn seam). **`0` is a
+    real face and a real vertex, not a sentinel.** Which end comes first is the
+    first trim's direction and means nothing else: the pair bounds the edge, it
+    does not orient it.
+
+    `closed` where the nodes make one loop -- never where there is more than one
+    run. `seam` where one face bounds the edge twice, a closed surface's seam
+    rather than a real boundary; both `faces` are then that same face.
+
+    `id` is **the body's own edge id**, not this mesh's edge index: `FemMesh.edges`
+    is a densely renumbered subset of the body's edges, ascending by id, with every
+    edge collapsed to a point left out, so edge 0 of a STEP body's mesh routinely
+    has an `id` in the hundreds. Everything else that names an edge here means the
+    index -- a `node_kind` of 1 read through `node_entity`, the third number of an
+    `open_edges` or `folded_edges` row, and the `edge_<i>` physical group of
+    `msh_text` -- and this is the one way back from any of them to the topology the
+    file wrote.
+    """
+
+    __slots__ = ("id", "nodes", "runs", "faces", "ends", "closed", "seam")
+
+    def __init__(self, id, nodes, runs, faces, ends, closed, seam):
+        #: The body's own B-rep edge id -- not this mesh's edge index.
+        self.id = id
+        #: This mesh's node indices, in order along the edge.
+        self.nodes = nodes
+        #: Where each connected run of `nodes` begins; `(0,)` for one chain.
+        self.runs = runs
+        #: `(face_a, face_b)`, the second `NONE` on a rim.
+        self.faces = faces
+        #: `(end_a, end_b)`, the second `NONE` where both ends are one vertex.
+        self.ends = ends
+        self.closed = closed
+        self.seam = seam
+
+    def __repr__(self):
+        return (f"FemEdge(id={self.id}, nodes={len(self.nodes)}, runs={len(self.runs)}, "
+                f"faces={self.faces}, ends={self.ends}, closed={self.closed}, seam={self.seam})")
+
+
+class FemVertex:
+    """One B-rep vertex of a FEM mesh: the node the mesh put there, if any, and
+    where the topology says it is, if that is known. Plain data.
+
+    `node` is the mesh node at this vertex, or `NONE` where the mesh has none
+    there. **A sentinel here is ordinary, not a fault**: the analysis rebuilds a
+    vertex wherever two trims meet, and a pole's polyline runs give a sphere 48
+    of them where the mesh has 2 points, so a caller walking these skips the
+    sentinel rather than treating it as a gap.
+
+    `point` is where the vertex is, in the same space and under the same
+    placement as `FemMesh.nodes` -- the file's own vertex rather than a mesh
+    node, so the two can differ by the reader's rounding. **Meaningless unless
+    `has_position`**: it is `(0.0, 0.0, 0.0)` then, which is a point no geometry
+    has and which a solver would take for a node at the origin.
+    """
+
+    __slots__ = ("node", "point", "has_position")
+
+    def __init__(self, node, point, has_position):
+        self.node = node
+        self.point = point
+        self.has_position = has_position
+
+    def __repr__(self):
+        return f"FemVertex(node={self.node}, point={self.point}, has_position={self.has_position})"
+
+
+class FemMesh:
+    """One body meshed for a solver: nodes welded by bits, triangles wound
+    outward, every node tagged with the lowest-dimension B-rep entity it lies on,
+    and every crack reported rather than closed. Built by `Node.fem_mesh`, and
+    **owned by you**: `free()` it, or use it as a context manager.
+
+    A handle rather than a snapshot, and its big arrays are **read-only numpy
+    views into the library's own memory**, exactly as `Node.mesh`'s are and for
+    the same reason: a solver mesh is megabytes, and copying it to hand it over
+    would cost that twice. Each array keeps *this object* alive through its
+    `.base` -- not the scene, which does not own it and whose `close()` does not
+    free it -- so a view cannot outlive the mesh by having merely dropped the
+    last reference to it. What still dangles is a view kept past an explicit
+    `free()`, or past the end of a `with` block; call `.copy()` on anything that
+    must outlive the handle.
+
+    numpy is imported the first time one of those arrays is asked for, as for
+    `Node.mesh`. The flags, the counts, the quality figures, the edge and vertex
+    records, the crack censuses and the `.msh` text need nothing outside the
+    standard library.
+    """
+
+    __slots__ = ("_pointer", "_raw", "__weakref__")
+
+    def __init__(self, pointer: int):
+        self._pointer = pointer
+        # Read once, here. Every pointer in the view is built with the handle and
+        # good until it is freed (nothing in this ABI is built lazily), so asking
+        # again per property would be one C call per array for the same answer.
+        raw = _FemMeshView()
+        if not _lib().cadaclysm_fem_mesh_view(pointer, ctypes.byref(raw)):
+            why = _last_error() or "fem mesh view"
+            self.free()
+            raise CadaclysmError(why)
+        self._raw = raw
+
+    @property
+    def _handle(self) -> int:
+        if not self._pointer:
+            raise CadaclysmError("fem mesh: freed")
+        return self._pointer
+
+    @property
+    def _live(self) -> "_FemMeshView":
+        """The view, the handle checked first: every pointer in it is the
+        handle's, and a freed handle's point at nothing."""
+        if not self._pointer:
+            raise CadaclysmError("fem mesh: freed")
+        return self._raw
+
+    @property
+    def freed(self) -> bool:
+        return not self._pointer
+
+    def free(self) -> None:
+        """Give the mesh back, and with it every view taken from it. Idempotent."""
+        pointer, self._pointer = getattr(self, "_pointer", None), None
+        if pointer and _library is not None:
+            _library.cadaclysm_fem_mesh_free(pointer)
+
+    def __enter__(self) -> "FemMesh":
+        return self
+
+    def __exit__(self, *_):
+        self.free()
+
+    def __del__(self):
+        try:
+            self.free()
+        except Exception:  # noqa: BLE001 - the interpreter may be going down
+            pass
+
+    # -- the flat arrays, borrowed
+
+    @property
+    def nodes(self):
+        """Every node's position, a read-only float64 `(node_count, 3)` view --
+        placed, and in the space `Node.fem_mesh` and `from_mesh` describe."""
+        raw = self._live
+        return _view(self, raw.nodes, (raw.node_count, 3), "float64")
+
+    @property
+    def triangles(self):
+        """Three node indices a triangle, wound outward: a read-only uint32
+        `(triangle_count, 3)` view."""
+        raw = self._live
+        return _view(self, raw.triangles, (raw.triangle_count, 3), "uint32")
+
+    @property
+    def triangle_face(self):
+        """The brep face each triangle lies on, one per triangle: a read-only
+        uint32 `(triangle_count,)` view into `range(face_count)`."""
+        raw = self._live
+        return _view(self, raw.triangle_face, (raw.triangle_count,), "uint32")
+
+    @property
+    def node_kind(self):
+        """What each node lies on -- `0` a vertex, `1` an edge, `2` a face -- one
+        per node, as a read-only uint32 view. Gmsh's own classification rule: the
+        lowest-dimension entity the node lies on. `node_entity` says which one."""
+        raw = self._live
+        return _view(self, raw.node_kind, (raw.node_count,), "uint32")
+
+    @property
+    def node_entity(self):
+        """Which vertex, edge or face each node lies on, by the matching
+        `node_kind`: an index into `vertices`, into `edges`, or into the body's
+        faces. One per node, a read-only uint32 view."""
+        raw = self._live
+        return _view(self, raw.node_entity, (raw.node_count,), "uint32")
+
+    # -- the topology, copied out
+
+    @property
+    def face_count(self) -> int:
+        """The body's faces; `triangle_face` and a `node_kind` of 2 index them."""
+        return self._live.face_count
+
+    @property
+    def edges(self) -> "list[FemEdge]":
+        """One `FemEdge` per B-rep edge, in the order a `node_kind` of 1 indexes
+        them. Empty for a `from_mesh` body, which has no B-rep edges at all.
+
+        **This list's own numbering, not the body's**: each `FemEdge.id` carries the
+        body's own edge id."""
+        library, handle, raw = _lib(), self._handle, _FemEdge()
+        out = []
+        for i in range(self._raw.edge_count):
+            if not library.cadaclysm_fem_mesh_edge(handle, i, ctypes.byref(raw)):
+                raise CadaclysmError(_last_error() or f"fem mesh edge {i}")
+            out.append(FemEdge(
+                raw.id,
+                tuple(raw.nodes[j] for j in range(raw.node_count)),
+                tuple(raw.runs[j] for j in range(raw.run_count)),
+                (raw.face_a, raw.face_b),
+                (raw.end_a, raw.end_b),
+                bool(raw.closed),
+                bool(raw.seam),
+            ))
+        return out
+
+    @property
+    def vertices(self) -> "list[FemVertex]":
+        """One `FemVertex` per B-rep vertex, in the order a `node_kind` of 0
+        indexes them. Empty for a `from_mesh` body."""
+        library, handle, raw = _lib(), self._handle, _FemVertex()
+        out = []
+        for i in range(self._raw.vertex_count):
+            if not library.cadaclysm_fem_mesh_vertex(handle, i, ctypes.byref(raw)):
+                raise CadaclysmError(_last_error() or f"fem mesh vertex {i}")
+            out.append(FemVertex(raw.node, tuple(raw.point), bool(raw.has_position)))
+        return out
+
+    # -- the crack census
+
+    @property
+    def open_edges(self) -> "list[tuple[int, int, int]]":
+        """Every crack, as `(a, b, brep_edge)`: a directed mesh edge `(a, b)`
+        with no `(b, a)`, and the B-rep edge both nodes lie on or `NONE` where
+        they share none.
+
+        **Empty unless the body's topology is closed -- for a B-rep body**, whose
+        mesh is otherwise not asked about at all: such a body reports `watertight`
+        False with this and `folded_edges` both empty, and *that trio together*
+        says "not asked", not "nothing found".
+
+        **A `from_mesh` body is the other case, and the opposite one.** A bare mesh
+        carries no topology to say whether it ought to close, so its census always
+        runs over the welded triangles: an open render mesh reports its cracks here
+        with `watertight` False, a closed one reports `watertight` True, and an
+        empty census there really does mean "nothing found"."""
+        return self._census(_lib().cadaclysm_fem_mesh_open_edge,
+                            self._live.open_edge_count, "open edge")
+
+    @property
+    def folded_edges(self) -> "list[tuple[int, int, int]]":
+        """Every fold, as `open_edges` reports a crack: a directed mesh edge used
+        by more than one triangle.
+
+        **A body can be folded without being open**, and the closure census's own
+        pinned rows are folds rather than open cracks -- a solid no thicker than a
+        line leaves no hole for an open edge to find. A caller that checks only
+        `open_edges` calls such a body sound."""
+        return self._census(_lib().cadaclysm_fem_mesh_folded_edge,
+                            self._live.folded_edge_count, "folded edge")
+
+    def _census(self, call, count: int, what: str) -> "list[tuple[int, int, int]]":
+        """One flattened census, row by row: the shape `open_edges` and
+        `folded_edges` share, so the two cannot drift."""
+        handle = self._handle
+        a, b, edge = c_uint32(), c_uint32(), c_uint32()
+        out = []
+        for i in range(count):
+            if not call(handle, i, ctypes.byref(a), ctypes.byref(b), ctypes.byref(edge)):
+                raise CadaclysmError(_last_error() or f"fem mesh {what} {i}")
+            out.append((a.value, b.value, edge.value))
+        return out
+
+    # -- the summary
+
+    @property
+    def watertight(self) -> bool:
+        """The welded mesh closes -- and, for a B-rep body, so does the topology
+        behind it. **False for every B-rep body whose topology is not closed**,
+        whose mesh is then not asked about at all.
+
+        A `from_mesh` body has no topology to ask of, so this says only that its
+        triangles close: a closed render mesh reports True with no topology behind
+        it at all. `from_mesh` is which of the two you are holding, and `open_edges`
+        says what an empty census beside each does and does not mean."""
+        return bool(self._live.watertight)
+
+    @property
+    def from_mesh(self) -> bool:
+        """This came from the scene's own mesh rather than from a brep: one face,
+        every node on face 0, no edges and no vertices.
+
+        **It is also which space the mesh is in.** A B-rep body's FEM mesh is in
+        the **file's own units and axes**, whatever `Convention` the scene was
+        opened with, because it is taken off the brep -- and a brep is in the
+        file's own space for the reason `Brep` gives: a convention converts what
+        is drawn, and converting a brep would mean rebuilding it. A node with no
+        brep falls back to the scene's mesh, which *is* converted, so it comes
+        back **in the scene's convention**, wound counter-clockwise about the
+        outward normal even where the convention winds the other way.
+
+        Under a non-NATIVE convention those are two different spaces, so a caller
+        mixing these nodes with `Node.transform` on a Y-up scene gets a rotated
+        part unless it reads this flag.
+
+        **It is also which contract `watertight`, `open_edges` and `folded_edges`
+        are reporting under.** A bare mesh has no topology to ask of, so its census
+        always runs and speaks from the triangles alone, where a B-rep body's runs
+        only if its topology claims to close. Read `open_edges`."""
+        return bool(self._live.from_mesh)
+
+    @property
+    def min_angle(self) -> float:
+        """The smallest interior angle of any triangle, in degrees."""
+        return self._live.min_angle
+
+    @property
+    def worst_triangle(self) -> int:
+        """The triangle with that angle: an index into `triangles`."""
+        return self._live.worst_triangle
+
+    @property
+    def longest_edge(self) -> float:
+        """The longest triangle edge, placed.
+
+        **The figure to check against `Node.fem_mesh`'s `max_size`, and the only
+        one that says what the mesh actually is**: `max_size` bounds the boundary
+        segments and merely targets the interior, and one small enough to hit the
+        mesher's own piece and station ceilings is not honoured at all."""
+        return self._live.longest_edge
+
+    # -- out
+
+    def msh_text(self) -> str:
+        """The mesh as Gmsh 4.1 ASCII `.msh` text: an entity per B-rep vertex,
+        edge and face, a volume where the body closes, and a physical group
+        naming each.
+
+        **The library's text is borrowed from this handle** and replaced by the
+        next call on it -- this ABI's convention, and the opposite of the kernel
+        library's, where `cadaclysm_blacksmith_fem_mesh_msh_text` hands over an
+        owned string to free. Nothing here has to free anything either way:
+        ctypes copies a `char *` into Python on the way out, so what comes back
+        is a `str` of your own that outlives the handle.
+
+        **No unlicensed notice is printed here.** `Node.fem_mesh` gave it once
+        when the mesh was built, and this ABI deliberately does not repeat it on
+        either `.msh` call -- where the kernel library notices on both of its
+        writers and *not* on its constructor. Each matches its own siblings, so
+        moving the call to look like the other side would break a convention.
+
+        Raises `CadaclysmError` for a mesh the writer refuses, naming the field
+        it cannot honour, and for a freed handle."""
+        raw = _lib().cadaclysm_fem_mesh_msh_text(self._handle)
+        if not raw:
+            raise CadaclysmError(_last_error() or "msh text")
+        return _text(raw)
+
+    def save_msh(self, path) -> None:
+        """`msh_text()` written to `path` by the library itself: the same bytes
+        from the same writer, straight to the file rather than through the
+        borrowed slot, so a `msh_text()` call on this handle from another thread
+        cannot free the text under the write.
+
+        Raises `CadaclysmError` for a mesh the writer refuses or a file it cannot
+        write, naming the path. No notice here either; see `msh_text`."""
+        if not _lib().cadaclysm_fem_mesh_save_msh(self._handle, str(path).encode()):
+            raise CadaclysmError(_last_error() or f"could not write {path}")
+
+    def __repr__(self):
+        if self.freed:
+            return "FemMesh(freed)"
+        raw = self._raw
+        return (f"FemMesh(nodes={raw.node_count}, triangles={raw.triangle_count}, "
+                f"watertight={bool(raw.watertight)}, from_mesh={bool(raw.from_mesh)})")
 
 
 class Node:
@@ -1802,6 +2328,12 @@ class Node:
         return Bounds(raw.min, raw.max)
 
     @property
+    def bounds64(self) -> Bounds:
+        """`bounds` in float64: exact far from the origin, where float32 is not."""
+        raw = _lib().cadaclysm_node_bounds64(self.scene._handle, self.index)
+        return Bounds(raw.min, raw.max)
+
+    @property
     def mesh(self) -> Mesh:
         """Its triangles, in their own frame, built now if they have not been.
 
@@ -1812,14 +2344,21 @@ class Node:
         """
         return self._mesh_of(_lib().cadaclysm_node_mesh(self.scene._handle, self.index))
 
-    def _mesh_of(self, raw) -> Mesh:
+    @property
+    def mesh64(self) -> Mesh:
+        """`mesh` in float64: the document's own mesh, lent (the float32 one is this
+        narrowed) -- the same indices, for a caller using the mesh as geometry. **A
+        `Scene.forget_meshes()` invalidates these views**; ask again after one."""
+        return self._mesh_of(_lib().cadaclysm_node_mesh64(self.scene._handle, self.index), "float64")
+
+    def _mesh_of(self, raw, real="float32") -> Mesh:
         n = raw.vertex_count
         return Mesh(
-            _view(self.scene, raw.positions, (n, 3), "float32"),
-            _view(self.scene, raw.normals, (n, 3), "float32"),
+            _view(self.scene, raw.positions, (n, 3), real),
+            _view(self.scene, raw.normals, (n, 3), real),
             # Two floats a vertex, not three: `uvs` holds `vertex_count * 2`.
-            _view(self.scene, raw.uvs, (n, 2), "float32"),
-            # Four floats a vertex: `colors` holds `vertex_count * 4`, RGBA.
+            _view(self.scene, raw.uvs, (n, 2), real),
+            # Four floats a vertex: `colors` holds `vertex_count * 4`, RGBA -- always float32.
             _view(self.scene, raw.colors, (n, 4), "float32"),
             _view(self.scene, raw.indices, (raw.index_count,), "uint32"),
             n,
@@ -1839,6 +2378,68 @@ class Node:
         """How far `mesh_lod(level)` moved the surface, in the scene's units --
         what to pick a level by against the pixel size on screen. Zero at level 0."""
         return _lib().cadaclysm_node_lod_error(self.scene._handle, self.index, level)
+
+    def fem_mesh(self, tolerance: float = 0.01, max_size: float = 0.0, placement=None) -> FemMesh:
+        """This node's body meshed for a solver, as a `FemMesh`: nodes welded by
+        bits, triangles wound outward, each node tagged with the lowest-dimension
+        B-rep entity it lies on, and every crack reported rather than closed.
+
+        `tolerance` is the chordal tolerance in model units, finite and above
+        zero, and **it alone governs how closely the mesh follows the geometry**.
+        `max_size` is a size ceiling, finite and zero or more, `0` being no ceiling
+        (curvature alone): **it bounds the boundary and targets the interior**,
+        which is not a longest-element-edge guarantee. It adds boundary nodes
+        without refining boundary geometry, and `FemMesh.longest_edge` is what the
+        mesh actually came to -- the figure to check against it.
+
+        Those two defaults are `FemOptions::default()`'s own, restated here so
+        that the signature says what a caller gets. The library's struct is still
+        filled by `cadaclysm_fem_options_init` first, so a field added to it later
+        defaults without this line being touched; only these two are overwritten.
+        `cadaclysm_blacksmith.py`'s `Solid.fem_mesh` restates the same pair, and
+        has to -- the wasm kernel has no options-init export to ask.
+
+        `placement` is 16 numbers, column-major, as `bounds_placed` takes them
+        (None for the identity), applied in float64 throughout. The kernel
+        library's `Solid.fem_mesh` takes **twelve** instead -- origin, x, y, z --
+        so a caller moving between the two reformats the placement.
+
+        **The space is the body's, not the scene's, for a B-rep -- and the scene's
+        for a mesh**, which `FemMesh.from_mesh` is the flag for; read it there,
+        because under a non-NATIVE convention the two are different spaces.
+
+        Meshed in the part's own frame and following the hop from an instance to
+        the shape it draws that `mesh` follows, so a node instanced six times
+        meshes once, where it is defined.
+
+        **A cracked body is not a failure**: it comes back with `watertight`
+        False and its cracks in `open_edges` / `folded_edges`, and nothing is
+        welded shut to make it look sound. Raises `CadaclysmError` for a tolerance
+        or size the mesher refuses, a placement that is not 16 numbers or is not
+        finite and invertible, a node with neither a brep nor a mesh (an assembly,
+        a storey, a layer, an empty definition, a curve), and a body that meshes
+        to no triangles at all.
+
+        Prints the unlicensed notice once, here, and not again on either of
+        `FemMesh`'s `.msh` calls."""
+        values = None if placement is None else [float(v) for v in placement]
+        if values is not None and len(values) != 16:
+            raise CadaclysmError(f"fem_mesh: a placement is 16 numbers, not {len(values)}")
+        matrix = None if values is None else (c_double * 16)(*values)
+        options = _FemOptions()
+        # `init` writes `sizeof(CadaclysmFemOptions)` bytes as the *library* knows
+        # that type, into the struct `_FemOptions` declares -- which is why
+        # `tests/bindings.rs` pins the two field for field. `size` is then set to
+        # this header's own sizeof, which is what the growth rule asks of a caller.
+        _lib().cadaclysm_fem_options_init(ctypes.byref(options))
+        options.size = ctypes.sizeof(_FemOptions)
+        options.tolerance, options.max_size = float(tolerance), float(max_size)
+        pointer = _lib().cadaclysm_node_fem_mesh(
+            self.scene._handle, self.index, matrix, ctypes.byref(options)
+        )
+        if not pointer:
+            raise CadaclysmError(_last_error() or "fem_mesh")
+        return FemMesh(pointer)
 
     @property
     def surfaces(self) -> Surfaces:
@@ -1939,11 +2540,26 @@ class Node:
         """Its isocurves as cubic Béziers; see `edge_beziers`."""
         return self._beziers(_lib().cadaclysm_node_isocurve_beziers)
 
-    def _beziers(self, function) -> Beziers:
+    @property
+    def edge_beziers64(self) -> Beziers:
+        """`edge_beziers` in float64, kept beside the float Béziers: a forget leaves it valid, unlike `mesh64`."""
+        return self._beziers(_lib().cadaclysm_node_edge_beziers64, "float64")
+
+    @property
+    def curve_beziers64(self) -> Beziers:
+        """`curve_beziers` in float64; see `edge_beziers64`."""
+        return self._beziers(_lib().cadaclysm_node_curve_beziers64, "float64")
+
+    @property
+    def isocurve_beziers64(self) -> Beziers:
+        """`isocurve_beziers` in float64; see `edge_beziers64`."""
+        return self._beziers(_lib().cadaclysm_node_isocurve_beziers64, "float64")
+
+    def _beziers(self, function, real="float32") -> Beziers:
         raw = function(self.scene._handle, self.index)
         return Beziers(
-            _view(self.scene, raw.points, (raw.count, 4, 3), "float32"),
-            _view(self.scene, raw.weights, (raw.count, 4), "float32"),
+            _view(self.scene, raw.points, (raw.count, 4, 3), real),
+            _view(self.scene, raw.weights, (raw.count, 4), real),
             raw.count,
         )
 
@@ -1984,6 +2600,15 @@ class Node:
             raise CadaclysmError(f"bounds_placed: a placement is 16 numbers, not {len(values)}")
         matrix = None if values is None else (c_double * 16)(*values)
         raw = _lib().cadaclysm_node_bounds_placed(self.scene._handle, self.index, matrix)
+        return Bounds(raw.min, raw.max)
+
+    def bounds_placed64(self, placement=None) -> Bounds:
+        """`bounds_placed` in float64; see `bounds64`."""
+        values = None if placement is None else [float(v) for v in placement]
+        if values is not None and len(values) != 16:
+            raise CadaclysmError(f"bounds_placed64: a placement is 16 numbers, not {len(values)}")
+        matrix = None if values is None else (c_double * 16)(*values)
+        raw = _lib().cadaclysm_node_bounds_placed64(self.scene._handle, self.index, matrix)
         return Bounds(raw.min, raw.max)
 
     @property
@@ -2229,6 +2854,13 @@ class Scene:
         not the time should frame from the nodes it has built.
         """
         raw = _lib().cadaclysm_bounds(self._handle)
+        return Bounds(raw.min, raw.max)
+
+    @property
+    def bounds64(self) -> Bounds:
+        """`bounds` in float64, **in world coordinates**: exact far from the origin,
+        where float32 is not. This meshes all of it, as `bounds` does."""
+        raw = _lib().cadaclysm_bounds64(self._handle)
         return Bounds(raw.min, raw.max)
 
     @property

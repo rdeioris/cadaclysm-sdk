@@ -76,6 +76,7 @@ import java.lang.invoke.MethodHandle;
 import java.lang.ref.Cleaner;
 import java.lang.ref.Reference;
 import java.nio.ByteOrder;
+import java.nio.DoubleBuffer;
 import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
 import java.nio.charset.StandardCharsets;
@@ -121,6 +122,16 @@ public final class Blacksmith {
 
     /** {@code CadaclysmBlacksmithMesh}: a solid's triangles, borrowed from it. */
     private static final MemoryLayout MESH = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("positions"),
+            ValueLayout.ADDRESS.withName("normals"),
+            ValueLayout.ADDRESS.withName("indices"),
+            ValueLayout.JAVA_INT.withName("vertex_count"),
+            ValueLayout.JAVA_INT.withName("index_count"));
+
+    /** {@code CadaclysmBlacksmithMesh64}: the same tessellation as {@link #MESH} (the index
+     *  pointer is the very one the library's f32 call gives), positions and normals
+     *  unnarrowed. Pinned by {@code tests/bindings.rs}, as {@link #MESH} is. */
+    private static final MemoryLayout MESH64 = MemoryLayout.structLayout(
             ValueLayout.ADDRESS.withName("positions"),
             ValueLayout.ADDRESS.withName("normals"),
             ValueLayout.ADDRESS.withName("indices"),
@@ -203,6 +214,28 @@ public final class Blacksmith {
             MemoryLayout.paddingLayout(4),
             ValueLayout.ADDRESS.withName("weights"));
 
+    /** {@code CadaclysmBlacksmithChain}: one branch of one face pair's crossing, borrowed from
+     *  the intersection result; one byte of padding after {@code has_curve}. */
+    private static final MemoryLayout CHAIN = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("points"),
+            ValueLayout.JAVA_INT.withName("point_count"),
+            ValueLayout.JAVA_INT.withName("face_a"),
+            ValueLayout.JAVA_INT.withName("face_b"),
+            ValueLayout.JAVA_BOOLEAN.withName("closed"),
+            ValueLayout.JAVA_BOOLEAN.withName("tangent"),
+            ValueLayout.JAVA_BOOLEAN.withName("has_curve"),
+            MemoryLayout.paddingLayout(1));
+
+    /** {@code CadaclysmBlacksmithOverlap}: a coincident face pair's shared region, borrowed
+     *  from the intersection result. */
+    private static final MemoryLayout OVERLAP = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("face_a"),
+            ValueLayout.JAVA_INT.withName("face_b"),
+            ValueLayout.ADDRESS.withName("points"),
+            ValueLayout.ADDRESS.withName("loop_offsets"),
+            ValueLayout.JAVA_INT.withName("point_count"),
+            ValueLayout.JAVA_INT.withName("loop_count"));
+
     /**
      * {@code CadaclysmBlacksmithSvgOptions}. {@code cadaclysm_blacksmith_svg_options_init}
      * fills the whole struct, so this must be at least as long as the header's and may never
@@ -240,17 +273,18 @@ public final class Blacksmith {
 
     private static final MethodHandle LAST_ERROR, LICENSE_SET, LICENSE_INFO, LICENSE_NOTICE_COUNT,
             BUILD_DATE, VERSION, SOLID_FREE, PROFILE_FREE, PROFILE_RECT, PROFILE_CIRCLE,
-            PROFILE_SLOT, PROFILE_POLYGON, PROFILE_REGULAR_POLYGON, PROFILE_SPLINE, PROFILE_WITH_HOLE, PROFILE_HITS, HITS_FREE, HIT_COUNT, HIT_AT, PROFILE_COMMON, PROFILE_LIST_COUNT, PROFILE_LIST_GET, PROFILE_LIST_FREE, TRANSLATE_PROFILE, PROFILE_ROUND, PROFILE_CHAIN, PROFILE_FROM_LOOPS, PROFILE_CLOSE_LOOP, PROFILE_PIECE_COUNT, PROFILE_PIECE, PROFILE_TRIM_COUNT, PROFILE_TRIM_CHAIN, PROFILE_POLYLINES, PATH_BEGIN,
-            PATH_LINE_TO, PATH_ARC_TO, PATH_BEZIER_TO, PATH_NURBS_TO, PATH_END, PATH_END_OPEN,
+            PROFILE_SLOT, PROFILE_POLYGON, PROFILE_REGULAR_POLYGON, PROFILE_STAR, PROFILE_SPLINE, PROFILE_WITH_HOLE, PROFILE_HITS, HITS_FREE, HIT_COUNT, HIT_AT, SOLID_PROFILE_HITS, HITS_PIECE_COUNT, HITS_PIECE, HITS_PIECE_PROFILE, PROFILE_COMMON, PROFILE_TEXT, PROFILE_LIST_COUNT, PROFILE_LIST_GET, PROFILE_LIST_FREE, TRANSLATE_PROFILE, PROFILE_ROUND, PROFILE_CHAIN, PROFILE_FROM_LOOPS, PROFILE_CLOSE_LOOP, PROFILE_PIECE_COUNT, PROFILE_PIECE, PROFILE_TRIM_COUNT, PROFILE_TRIM_CHAIN, PROFILE_POLYLINES, PATH_BEGIN,
+            PATH_LINE_TO, PATH_ARC_TO, PATH_BEZIER_TO, PATH_CONIC_TO, PATH_PARABOLA_BY_VERTEX, PATH_PARABOLA_BY_FOCUS, PATH_PARABOLA, PATH_NURBS_TO, PATH_END, PATH_END_OPEN,
             PATH_FREE, CUBOID, CYLINDER, CONE, SPHERE, TORUS, WEDGE, EXTRUDE, EXTRUDE_OPEN,
             EXTRUDE_TAPERED, EXTRUDE_OPEN_TAPERED, EXTRUDE_BETWEEN, EXTRUDE_OPEN_BETWEEN,
             SLANT_OF_PLANE, FRAME_MIDPLANE, FRAME_THROUGH, LOFT, LOFT_OPEN, LOFT_THROUGH, LOFT_THROUGH_OPEN, REVOLVE, REVOLVE_OPEN, REVOLVE_IN_PLANE, REVOLVE_OPEN_IN_PLANE, SWEEP_PATH_BEGIN,
             SWEEP_PATH_LINE_TO, SWEEP_PATH_ARC, SWEEP_PATH_ALONG, SWEEP_PATH_FREE, SWEEP, SWEEP_OPEN,
             EXTRUDE_FACES, FACE, FACE_SHEET, DROP_FACES, PLACE, TRANSLATE, ROTATE, MIRROR, JOIN, CUT,
             COMMON, SPLIT_SHEET, TRIM, FILLET, CHAMFER,
-            SHELL, THICKEN, PUSH_PULL, PUSH_PULL_FACES, MERGE_FLUSH, REFILLET, UNFILLET, RECHAMFER, UNCHAMFER, COIL, PIPE, SPLIT, SPLIT_BY_PLANE, LUMP_COUNT, LUMP, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_REF, FIND_FACE, FACE_KIND, COLOURED, COLOUR, EDGE_COUNT, EDGE_AT, EDGE_CURVE, MESH_AT, MESH_FACE_TRIANGLES,
+            SHELL, THICKEN, PUSH_PULL, PUSH_PULL_FACES, MERGE_FLUSH, REFILLET, UNFILLET, RECHAMFER, UNCHAMFER, COIL, PIPE, SPLIT, SPLIT_BY_PLANE, LUMP_COUNT, LUMP, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_REF, FIND_FACE, FACE_KIND, COLOURED, COLOUR, EDGE_COUNT, EDGE_AT, EDGE_CURVE, INTERSECT, INTERSECTION_FREE, INTERSECTION_CHAIN_COUNT, INTERSECTION_CHAIN, INTERSECTION_CURVE, INTERSECTION_OVERLAP_COUNT, INTERSECTION_OVERLAP, MESH_AT, MESH_FACE_TRIANGLES,
             EDGE_POLYLINES, BOUNDS, LEAKED_EDGES, UNPAIRED_EDGES, MANIFOLD, STEP, SAT_TEXT, SAT, BREP_TEXT, BREP, STRING_FREE, FROM_BREP,
-            BREP_LAYOUT_ID, SVG_OPTIONS_INIT, SVG_TEXT, SVG;
+            BREP_LAYOUT_ID, SVG_OPTIONS_INIT, SVG_TEXT, SVG, DRAWING_SVG_TEXT, DRAWING_SVG,
+            MESH_AT64, BOUNDS64;
 
     static {
         SymbolLookup lib = library();
@@ -274,16 +308,22 @@ public final class Blacksmith {
         PROFILE_SLOT = bind(linker, lib, "cadaclysm_blacksmith_profile_slot", FunctionDescriptor.of(A, D, D, D, D));
         PROFILE_POLYGON = bind(linker, lib, "cadaclysm_blacksmith_profile_polygon", FunctionDescriptor.of(A, A, L));
         PROFILE_REGULAR_POLYGON = bind(linker, lib, "cadaclysm_blacksmith_profile_regular_polygon", FunctionDescriptor.of(A, D, D, D, I, D));
+        PROFILE_STAR = bind(linker, lib, "cadaclysm_blacksmith_profile_star", FunctionDescriptor.of(A, D, D, D, D, I, D));
         PROFILE_SPLINE = bind(linker, lib, "cadaclysm_blacksmith_profile_spline", FunctionDescriptor.of(A, A, L, I, A, B));
         PROFILE_WITH_HOLE = bind(linker, lib, "cadaclysm_blacksmith_profile_with_hole", FunctionDescriptor.of(A, A, A));
         PROFILE_HITS = bind(linker, lib, "cadaclysm_blacksmith_profile_hits", FunctionDescriptor.of(A, A, A, D));
         HITS_FREE = bind(linker, lib, "cadaclysm_blacksmith_hits_free", FunctionDescriptor.ofVoid(A));
         HIT_COUNT = bind(linker, lib, "cadaclysm_blacksmith_hit_count", FunctionDescriptor.of(I, A));
         PROFILE_COMMON = bind(linker, lib, "cadaclysm_blacksmith_profile_common", FunctionDescriptor.of(A, A, A, D));
+        PROFILE_TEXT = bind(linker, lib, "cadaclysm_blacksmith_profile_text", FunctionDescriptor.of(A, A, D, A, A, L, A, A, D, A));
         PROFILE_LIST_COUNT = bind(linker, lib, "cadaclysm_blacksmith_profile_list_count", FunctionDescriptor.of(I, A));
         PROFILE_LIST_GET = bind(linker, lib, "cadaclysm_blacksmith_profile_list_get", FunctionDescriptor.of(A, A, I));
         PROFILE_LIST_FREE = bind(linker, lib, "cadaclysm_blacksmith_profile_list_free", FunctionDescriptor.ofVoid(A));
         HIT_AT = bind(linker, lib, "cadaclysm_blacksmith_hit", FunctionDescriptor.of(B, A, I, A));
+        SOLID_PROFILE_HITS = bind(linker, lib, "cadaclysm_blacksmith_solid_profile_hits", FunctionDescriptor.of(A, A, A, A, D, A, A));
+        HITS_PIECE_COUNT = bind(linker, lib, "cadaclysm_blacksmith_hits_piece_count", FunctionDescriptor.of(I, A));
+        HITS_PIECE = bind(linker, lib, "cadaclysm_blacksmith_hits_piece", FunctionDescriptor.of(B, A, I, A, A, A));
+        HITS_PIECE_PROFILE = bind(linker, lib, "cadaclysm_blacksmith_hits_piece_profile", FunctionDescriptor.of(A, A, I));
         TRANSLATE_PROFILE = bind(linker, lib, "cadaclysm_blacksmith_translate_profile", FunctionDescriptor.of(A, A, D, D));
         PROFILE_ROUND = bind(linker, lib, "cadaclysm_blacksmith_profile_round", FunctionDescriptor.of(A, A, D, A, L, B));
         PROFILE_CHAIN = bind(linker, lib, "cadaclysm_blacksmith_profile_chain", FunctionDescriptor.of(A, A, L, D));
@@ -298,6 +338,10 @@ public final class Blacksmith {
         PATH_LINE_TO = bind(linker, lib, "cadaclysm_blacksmith_path_line_to", FunctionDescriptor.of(B, A, D, D));
         PATH_ARC_TO = bind(linker, lib, "cadaclysm_blacksmith_path_arc_to", FunctionDescriptor.of(B, A, D, D, D, D, B));
         PATH_BEZIER_TO = bind(linker, lib, "cadaclysm_blacksmith_path_bezier_to", FunctionDescriptor.of(B, A, D, D, D, D, D, D));
+        PATH_CONIC_TO = bind(linker, lib, "cadaclysm_blacksmith_path_conic_to", FunctionDescriptor.of(B, A, D, D, D, D, D));
+        PATH_PARABOLA_BY_VERTEX = bind(linker, lib, "cadaclysm_blacksmith_path_parabola_by_vertex", FunctionDescriptor.of(B, A, D, D, D, D));
+        PATH_PARABOLA_BY_FOCUS = bind(linker, lib, "cadaclysm_blacksmith_path_parabola_by_focus", FunctionDescriptor.of(B, A, D, D, D, D));
+        PATH_PARABOLA = bind(linker, lib, "cadaclysm_blacksmith_path_parabola", FunctionDescriptor.of(A, D, D, D, D, D, D, D));
         PATH_NURBS_TO = bind(linker, lib, "cadaclysm_blacksmith_path_nurbs_to", FunctionDescriptor.of(B, A, A, L, A, A, L, I));
         PATH_END = bind(linker, lib, "cadaclysm_blacksmith_path_end", FunctionDescriptor.of(A, A));
         PATH_END_OPEN = bind(linker, lib, "cadaclysm_blacksmith_path_end_open", FunctionDescriptor.of(A, A));
@@ -375,6 +419,13 @@ public final class Blacksmith {
         EDGE_COUNT = bind(linker, lib, "cadaclysm_blacksmith_edge_count", FunctionDescriptor.of(I, A));
         EDGE_AT = bind(linker, lib, "cadaclysm_blacksmith_edge", FunctionDescriptor.of(B, A, I, A));
         EDGE_CURVE = bind(linker, lib, "cadaclysm_blacksmith_edge_curve", FunctionDescriptor.of(B, A, I, A));
+        INTERSECT = bind(linker, lib, "cadaclysm_blacksmith_intersect", FunctionDescriptor.of(A, A, A, D, A, A));
+        INTERSECTION_FREE = bind(linker, lib, "cadaclysm_blacksmith_intersection_free", FunctionDescriptor.ofVoid(A));
+        INTERSECTION_CHAIN_COUNT = bind(linker, lib, "cadaclysm_blacksmith_intersection_chain_count", FunctionDescriptor.of(I, A));
+        INTERSECTION_CHAIN = bind(linker, lib, "cadaclysm_blacksmith_intersection_chain", FunctionDescriptor.of(B, A, I, A));
+        INTERSECTION_CURVE = bind(linker, lib, "cadaclysm_blacksmith_intersection_curve", FunctionDescriptor.of(B, A, I, A));
+        INTERSECTION_OVERLAP_COUNT = bind(linker, lib, "cadaclysm_blacksmith_intersection_overlap_count", FunctionDescriptor.of(I, A));
+        INTERSECTION_OVERLAP = bind(linker, lib, "cadaclysm_blacksmith_intersection_overlap", FunctionDescriptor.of(B, A, I, A));
         MESH_AT = bind(linker, lib, "cadaclysm_blacksmith_mesh", FunctionDescriptor.of(MESH, A, D));
         MESH_FACE_TRIANGLES = bind(linker, lib, "cadaclysm_blacksmith_mesh_face_triangles", FunctionDescriptor.of(FACE_TRIANGLES, A, D));
         EDGE_POLYLINES = bind(linker, lib, "cadaclysm_blacksmith_edge_polylines", FunctionDescriptor.of(POLYLINES, A, D));
@@ -391,6 +442,10 @@ public final class Blacksmith {
         SVG_OPTIONS_INIT = bind(linker, lib, "cadaclysm_blacksmith_svg_options_init", FunctionDescriptor.ofVoid(A));
         SVG_TEXT = bind(linker, lib, "cadaclysm_blacksmith_svg_text", FunctionDescriptor.of(A, A, L, A));
         SVG = bind(linker, lib, "cadaclysm_blacksmith_svg", FunctionDescriptor.of(B, A, L, A, A));
+        DRAWING_SVG_TEXT = bind(linker, lib, "cadaclysm_blacksmith_drawing_svg_text", FunctionDescriptor.of(A, A, L, A, L, A));
+        DRAWING_SVG = bind(linker, lib, "cadaclysm_blacksmith_drawing_svg", FunctionDescriptor.of(B, A, L, A, L, A, A));
+        MESH_AT64 = bind(linker, lib, "cadaclysm_blacksmith_mesh64", FunctionDescriptor.of(MESH64, A, D));
+        BOUNDS64 = bind(linker, lib, "cadaclysm_blacksmith_bounds64", FunctionDescriptor.of(B, A, D, A, A));
     }
 
     @SuppressWarnings("restricted") // downcallHandle: every entry point here is the published ABI.
@@ -525,6 +580,13 @@ public final class Blacksmith {
                 .asByteBuffer().order(ByteOrder.nativeOrder()).asIntBuffer().asReadOnlyBuffer();
     }
 
+    @SuppressWarnings("restricted")
+    private static DoubleBuffer doubleView(long address, long count) {
+        if (address == 0 || count == 0) return DoubleBuffer.allocate(0).asReadOnlyBuffer();
+        return MemorySegment.ofAddress(address).reinterpret(count * Double.BYTES)
+                .asByteBuffer().order(ByteOrder.nativeOrder()).asDoubleBuffer().asReadOnlyBuffer();
+    }
+
     private static float[] toArray(FloatBuffer view) {
         float[] out = new float[view.remaining()];
         view.duplicate().get(out);
@@ -533,6 +595,12 @@ public final class Blacksmith {
 
     private static int[] toArray(IntBuffer view) {
         int[] out = new int[view.remaining()];
+        view.duplicate().get(out);
+        return out;
+    }
+
+    private static double[] toArray(DoubleBuffer view) {
+        double[] out = new double[view.remaining()];
         view.duplicate().get(out);
         return out;
     }
@@ -775,7 +843,14 @@ public final class Blacksmith {
          * black one-unit stroke, edges alone.
          */
         public static SvgOptions defaults() {
-            return new SvgOptions(SvgView.ISO, null, null, null, 0.0, 1000.0, 1000.0, 0.05, 0.1,
+            return defaults(SvgView.ISO);
+        }
+
+        /** {@link #defaults()}, but with {@code view} in place of {@link SvgView#ISO} --
+         *  {@link Profile#svgText} and {@link Profile#svg} use this to default to {@link
+         *  SvgView#TOP} without repeating the other eleven fields. */
+        private static SvgOptions defaults(SvgView view) {
+            return new SvgOptions(view, null, null, null, 0.0, 1000.0, 1000.0, 0.05, 0.1,
                     "#000000", 1.0, null, true, false, false, false);
         }
     }
@@ -831,21 +906,62 @@ public final class Blacksmith {
 
     /**
      * Several solids' wireframe as one SVG's text, each its own {@code <g>} -- see {@link
-     * SvgOptions}. Owned by this call, decoded and released before it returns.
+     * SvgOptions}. Owned by this call, decoded and released before it returns. Delegates to
+     * {@link #writeSvgText(Collection, Collection, SvgOptions)} with no profiles -- the
+     * drawing pair refuses in exactly the words the solids-only pair always has, so there is
+     * nothing to gain from keeping two routes to the same drawing.
      */
     public static String writeSvgText(Collection<Solid> solids, SvgOptions options) {
-        Solid[] all = solids.toArray(new Solid[0]);
+        return writeSvgText(solids, List.of(), options);
+    }
+
+    /** {@link #writeSvg(String, Collection, SvgOptions)} with every default. */
+    public static void writeSvg(String path, Collection<Solid> solids) {
+        writeSvg(path, solids, null);
+    }
+
+    /** {@link #writeSvgText(Collection, SvgOptions)} written to {@code path} by the library
+     *  itself. Delegates to {@link #writeSvg(String, Collection, Collection, SvgOptions)} with
+     *  no profiles -- see that overload's comment on {@link #writeSvgText(Collection, SvgOptions)}
+     *  for why. */
+    public static void writeSvg(String path, Collection<Solid> solids, SvgOptions options) {
+        writeSvg(path, solids, List.of(), options);
+    }
+
+    // No two-argument "every default" overload of writeSvgText(solids, profiles) -- with the
+    // solids-only writeSvgText(Collection, SvgOptions) already occupying that arity, a call
+    // passing a bare `null` for the third slot would be ambiguous between "no options" and
+    // "no profiles" (neither Collection<Profile> nor SvgOptions is more specific than the
+    // other). Pass `null` for `options` explicitly instead: writeSvgText(solids, profiles,
+    // null).
+
+    /**
+     * Several solids' and profiles' wireframe as one SVG's text: a {@code <g id="solid-N">}
+     * per solid then a {@code <g id="profile-N">} per profile, on one page, each its own
+     * colour where it carries one and the options' {@link SvgOptions#stroke()} otherwise.
+     * Either collection may be empty; both empty is refused. See {@link SvgOptions}. Owned by
+     * this call, decoded and released before it returns.
+     */
+    public static String writeSvgText(Collection<Solid> solids, Collection<Profile> profiles, SvgOptions options) {
+        Solid[] allSolids = solids.toArray(new Solid[0]);
+        Profile[] allProfiles = profiles.toArray(new Profile[0]);
         MemorySegment raw;
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment handles = arena.allocate(ValueLayout.ADDRESS, Math.max(all.length, 1));
-            for (int i = 0; i < all.length; i++) {
-                handles.setAtIndex(ValueLayout.ADDRESS, i, all[i].handle());
+            MemorySegment solidHandles = arena.allocate(ValueLayout.ADDRESS, Math.max(allSolids.length, 1));
+            for (int i = 0; i < allSolids.length; i++) {
+                solidHandles.setAtIndex(ValueLayout.ADDRESS, i, allSolids[i].handle());
+            }
+            MemorySegment profileHandles = arena.allocate(ValueLayout.ADDRESS, Math.max(allProfiles.length, 1));
+            for (int i = 0; i < allProfiles.length; i++) {
+                profileHandles.setAtIndex(ValueLayout.ADDRESS, i, allProfiles[i].handle());
             }
             MemorySegment o = buildSvgOptions(arena, options);
-            long count = all.length;
-            raw = call(() -> (MemorySegment) SVG_TEXT.invokeExact(handles, count, o));
+            long solidCount = allSolids.length;
+            long profileCount = allProfiles.length;
+            raw = call(() -> (MemorySegment) DRAWING_SVG_TEXT.invokeExact(solidHandles, solidCount, profileHandles, profileCount, o));
         } finally {
-            keep((Object[]) all);
+            keep((Object[]) allSolids);
+            keep((Object[]) allProfiles);
         }
         if (raw.address() == 0) throw failure("svg_text");
         try {
@@ -858,27 +974,33 @@ public final class Blacksmith {
         }
     }
 
-    /** {@link #writeSvg(String, Collection, SvgOptions)} with every default. */
-    public static void writeSvg(String path, Collection<Solid> solids) {
-        writeSvg(path, solids, null);
-    }
+    // No three-argument "every default" overload of writeSvg(path, solids, profiles) either,
+    // for the same reason writeSvgText(Collection, Collection) has none -- see its comment.
+    // Pass `null` for `options` explicitly: writeSvg(path, solids, profiles, null).
 
-    /** {@link #writeSvgText(Collection, SvgOptions)} written to {@code path} by the library
-     *  itself. */
-    public static void writeSvg(String path, Collection<Solid> solids, SvgOptions options) {
-        Solid[] all = solids.toArray(new Solid[0]);
+    /** {@link #writeSvgText(Collection, Collection, SvgOptions)} written to {@code path} by
+     *  the library itself. */
+    public static void writeSvg(String path, Collection<Solid> solids, Collection<Profile> profiles, SvgOptions options) {
+        Solid[] allSolids = solids.toArray(new Solid[0]);
+        Profile[] allProfiles = profiles.toArray(new Profile[0]);
         boolean ok;
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment handles = arena.allocate(ValueLayout.ADDRESS, Math.max(all.length, 1));
-            for (int i = 0; i < all.length; i++) {
-                handles.setAtIndex(ValueLayout.ADDRESS, i, all[i].handle());
+            MemorySegment solidHandles = arena.allocate(ValueLayout.ADDRESS, Math.max(allSolids.length, 1));
+            for (int i = 0; i < allSolids.length; i++) {
+                solidHandles.setAtIndex(ValueLayout.ADDRESS, i, allSolids[i].handle());
+            }
+            MemorySegment profileHandles = arena.allocate(ValueLayout.ADDRESS, Math.max(allProfiles.length, 1));
+            for (int i = 0; i < allProfiles.length; i++) {
+                profileHandles.setAtIndex(ValueLayout.ADDRESS, i, allProfiles[i].handle());
             }
             MemorySegment o = buildSvgOptions(arena, options);
             MemorySegment cPath = arena.allocateFrom(path);
-            long count = all.length;
-            ok = call(() -> (boolean) SVG.invokeExact(handles, count, cPath, o));
+            long solidCount = allSolids.length;
+            long profileCount = allProfiles.length;
+            ok = call(() -> (boolean) DRAWING_SVG.invokeExact(solidHandles, solidCount, profileHandles, profileCount, cPath, o));
         } finally {
-            keep((Object[]) all);
+            keep((Object[]) allSolids);
+            keep((Object[]) allProfiles);
         }
         if (!ok) throw failure("svg");
     }
@@ -1176,6 +1298,21 @@ public final class Blacksmith {
             return new Profile(call(() -> (MemorySegment) PROFILE_REGULAR_POLYGON.invokeExact(c[0], c[1], radius, n, angle)));
         }
 
+        /** {@link #star(double[], double, double, int, double)} with its first tip on the x axis. */
+        public static Profile star(double[] centre, double outer, double inner, int points) {
+            return star(centre, outer, inner, points, 0);
+        }
+
+        /** A star of {@code points} tips (at least 3) on the circle of {@code outer} about
+         *  {@code centre}, its inner corners on the circle of {@code inner} (positive, under
+         *  {@code outer}), alternating: the first tip at {@code angle} radians from the sketch's
+         *  x axis, the rest counter-clockwise. */
+        public static Profile star(double[] centre, double outer, double inner, int points, double angle) {
+            double[] c = point2(centre, "centre");
+            int n = Math.max(0, points);
+            return new Profile(call(() -> (MemorySegment) PROFILE_STAR.invokeExact(c[0], c[1], outer, inner, n, angle)));
+        }
+
         /** {@link #spline(double[][], int, double[], boolean)} of degree 3, open, unweighted. */
         public static Profile spline(double[][] points) {
             return spline(points, 3, null, false);
@@ -1207,6 +1344,19 @@ public final class Blacksmith {
          *  {@link Path} builder. */
         public static Path path(double[] start) {
             return new Path(start);
+        }
+
+        /** Start drawing on the arc of the parabola with {@code vertex} (two numbers), axis
+         *  direction {@code axis} (two numbers) and focal length {@code focal}, over the
+         *  across-axis coordinates {@code from}..{@code to}: the path begins at the arc's
+         *  first point and holds the arc -- a reflector from rim to rim, {@code
+         *  Profile.parabola(new double[] {0, 0}, new double[] {0, 1}, 20, -50, 50)} a dish
+         *  100 wide opening up. */
+        public static Path parabola(double[] vertex, double[] axis, double focal, double from, double to) {
+            double[] v = point2(vertex, "vertex");
+            double[] a = point2(axis, "axis");
+            return new Path(call(() -> (MemorySegment) PATH_PARABOLA.invokeExact(v[0], v[1], a[0], a[1], focal, from, to)),
+                    "path_parabola");
         }
 
         /** This outline with {@code hole} cut from it, as a new profile; both inputs are
@@ -1272,12 +1422,61 @@ public final class Blacksmith {
          *  list. Throws {@link BuildException} for a {@code tolerance} not positive and
          *  finite, or a profile open or crossing itself. */
         public List<Profile> common(Profile other, double tolerance) {
-            List<Profile> found = new ArrayList<>();
             try {
                 MemorySegment a = handle();
                 MemorySegment b = other.handle();
-                MemorySegment list = checked(
-                        call(() -> (MemorySegment) PROFILE_COMMON.invokeExact(a, b, tolerance)), "profile_common");
+                return profileList(call(() -> (MemorySegment) PROFILE_COMMON.invokeExact(a, b, tolerance)), "profile_common");
+            } finally {
+                keep(this, other);
+            }
+        }
+
+        /** {@link #text(String, double, String, String, String, double, String, byte[])} in the
+         *  bundled face, left-aligned on the baseline, left to right, at the font's spacing. */
+        public static List<Profile> text(String text, double size) {
+            return text(text, size, "", "left", "baseline", 1.0, "ltr", null);
+        }
+
+        /** {@code text} set in a font, one profile per closed shape -- a letter with its
+         *  counters as holes ({@code o} one, {@code 8} two; {@code i} is two profiles) -- on the
+         *  sketch plane, the baseline along x from the origin, each outline counter-clockwise
+         *  and its holes clockwise, a curved side the font's own cubic Bezier kept exactly: an
+         *  extruded {@code O} has curved walls. {@code size} is roughly the height of a capital.
+         *  {@code font} is a family, optionally with a style ({@code "Liberation Sans:style=Bold"}),
+         *  a font file's path, or empty for the bundled Liberation Sans Regular -- which also
+         *  serves when the family is not found; {@code fontBytes} a font file's bytes, used
+         *  instead of {@code font} when not null. {@code halign} is "left", "center" or "right";
+         *  {@code valign} "baseline", "bottom", "center" or "top"; {@code spacing} multiplies the
+         *  gap between glyphs; {@code direction} "ltr" or "rtl". Empty text is an empty list.
+         *  Throws {@link BuildException} for a size or spacing not positive and finite, an
+         *  alignment or direction not one of those words, font bytes that are not a font. */
+        public static List<Profile> text(String text, double size, String font, String halign, String valign,
+                                         double spacing, String direction, byte[] fontBytes) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment t = arena.allocateFrom(text);
+                MemorySegment f = arena.allocateFrom(font == null ? "" : font);
+                MemorySegment h = arena.allocateFrom(halign);
+                MemorySegment v = arena.allocateFrom(valign);
+                MemorySegment d = arena.allocateFrom(direction);
+                MemorySegment bytes = MemorySegment.NULL;
+                long len = 0;
+                if (fontBytes != null) {
+                    bytes = arena.allocate(Math.max(fontBytes.length, 1));
+                    MemorySegment.copy(fontBytes, 0, bytes, ValueLayout.JAVA_BYTE, 0, fontBytes.length);
+                    len = fontBytes.length;
+                }
+                MemorySegment b = bytes;
+                long n = len;
+                return profileList(call(() -> (MemorySegment) PROFILE_TEXT.invokeExact(t, size, f, b, n, h, v, spacing, d)), "profile_text");
+            }
+        }
+
+        /** The profiles of a list the library handed back (null: throw), each a handle of its
+         *  own, the list freed. */
+        private static List<Profile> profileList(MemorySegment raw, String what) {
+            List<Profile> found = new ArrayList<>();
+            try {
+                MemorySegment list = checked(raw, what);
                 try {
                     int n = call(() -> (int) PROFILE_LIST_COUNT.invokeExact(list));
                     for (int i = 0; i < n; i++) {
@@ -1294,8 +1493,6 @@ public final class Blacksmith {
             } catch (RuntimeException e) {
                 for (Profile p : found) p.close();
                 throw e;
-            } finally {
-                keep(this, other);
             }
         }
 
@@ -1466,6 +1663,35 @@ public final class Blacksmith {
                 keep(this);
             }
         }
+
+        /** {@link #svgText(SvgOptions)} with every default. */
+        public String svgText() {
+            return svgText(null);
+        }
+
+        /**
+         * This profile's own loops as SVG text, from directly above by default -- a sketch
+         * lies in z = 0, so its own plane already is the page, unlike a solid's {@link
+         * Solid#svgText} ({@link SvgView#ISO}), which has no plane of its own to prefer.
+         * Passing {@code options} at all -- even one left at its own defaults -- opts out of
+         * the top default and uses its {@link SvgOptions#view()} as given, the same way a
+         * caller of {@link SvgOptions} controls a solid's. See {@link
+         * Blacksmith#writeSvgText(Collection, Collection, SvgOptions)}.
+         */
+        public String svgText(SvgOptions options) {
+            return writeSvgText(List.of(), List.of(this), options == null ? SvgOptions.defaults(SvgView.TOP) : options);
+        }
+
+        /** {@link #svg(String, SvgOptions)} with every default. */
+        public void svg(String path) {
+            svg(path, null);
+        }
+
+        /** {@link #svgText(SvgOptions)} written to {@code path} by the library itself; see
+         *  {@link #svgText(SvgOptions)} for the top default. */
+        public void svg(String path, SvgOptions options) {
+            writeSvg(path, List.of(), List.of(this), options == null ? SvgOptions.defaults(SvgView.TOP) : options);
+        }
     }
 
     /**
@@ -1481,6 +1707,11 @@ public final class Blacksmith {
             double[] s = point2(start, "start");
             MemorySegment raw = call(() -> (MemorySegment) PATH_BEGIN.invokeExact(s[0], s[1]));
             handle = new Handle(PATH_FREE, "path: already ended", checked(raw, "path_begin"));
+            cleanable = CLEANER.register(this, handle);
+        }
+
+        private Path(MemorySegment raw, String what) {
+            handle = new Handle(PATH_FREE, "path: already ended", checked(raw, what));
             cleanable = CLEANER.register(this, handle);
         }
 
@@ -1537,6 +1768,62 @@ public final class Blacksmith {
                 MemorySegment h = handle.live();
                 return step(call(() -> (boolean) PATH_BEZIER_TO.invokeExact(h, a[0], a[1], b[0], b[1], t[0], t[1])),
                         "path_bezier_to");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** A conic arc to ({@code x}, {@code y}) through the control point {@code control}
+         *  (two numbers) with middle weight {@code weight}: under 1 an elliptical arc, 1 a
+         *  parabola, over 1 a hyperbola -- the rational quadratic Bezier, kept exact. */
+        public Path conicTo(double x, double y, double[] control, double weight) {
+            double[] c = point2(control, "control");
+            try {
+                MemorySegment h = handle.live();
+                return step(call(() -> (boolean) PATH_CONIC_TO.invokeExact(h, x, y, c[0], c[1], weight)), "path_conic_to");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** A parabolic arc to ({@code x}, {@code y}) whose end tangents meet at {@code
+         *  control} (two numbers): {@link #conicTo} with weight 1. */
+        public Path parabolaTo(double x, double y, double[] control) {
+            return conicTo(x, y, control, 1.0);
+        }
+
+        /** A hyperbolic arc to ({@code x}, {@code y}) through {@code control} (two numbers)
+         *  with middle {@code weight} over 1. */
+        public Path hyperbolaTo(double x, double y, double[] control, double weight) {
+            if (!(weight > 1.0)) {
+                throw new BuildException("hyperbola_to: the weight must be over 1 (1 is a parabola, under 1 an ellipse)");
+            }
+            return conicTo(x, y, control, weight);
+        }
+
+        /** The parabolic arc to ({@code x}, {@code y}) with {@code vertex} (two numbers):
+         *  its axis and focal length solved from the two ends. Throws when no parabola with
+         *  that vertex passes through both. */
+        public Path parabolaByVertex(double x, double y, double[] vertex) {
+            double[] v = point2(vertex, "vertex");
+            try {
+                MemorySegment h = handle.live();
+                return step(call(() -> (boolean) PATH_PARABOLA_BY_VERTEX.invokeExact(h, x, y, v[0], v[1])), "path_parabola_by_vertex");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The parabolic arc to ({@code x}, {@code y}) with {@code focus} (two numbers): of
+         *  the two through the ends, the one whose vertex lies between the ends' projections,
+         *  then the one whose arc cups the focus (the focus between the arc and its chord),
+         *  then the more symmetric; with the focus beyond the chord that is the arch over
+         *  the ends, not the shallow dish -- draw that one with {@link Profile#parabola}. */
+        public Path parabolaByFocus(double x, double y, double[] focus) {
+            double[] f = point2(focus, "focus");
+            try {
+                MemorySegment h = handle.live();
+                return step(call(() -> (boolean) PATH_PARABOLA_BY_FOCUS.invokeExact(h, x, y, f[0], f[1])), "path_parabola_by_focus");
             } finally {
                 keep(this);
             }
@@ -1822,6 +2109,81 @@ public final class Blacksmith {
         /** The same triangles in memory of our own, safe to outlive the solid. */
         public MeshData copy() {
             return new MeshData(toArray(positions()), toArray(normals()), toArray(indices()));
+        }
+    }
+
+    /** A {@link Mesh64} in memory of your own. */
+    public record MeshData64(double[] positions, double[] normals, int[] indices) {
+    }
+
+    /**
+     * {@code cadaclysm_blacksmith_mesh64}: the same tessellation as {@link Mesh}, from the
+     * same cache -- meshing at another tolerance (through {@link Solid#mesh}, {@link
+     * Solid#mesh64}, {@link Solid#edgePolylines}, {@link Solid#boundsAt} or {@link
+     * Solid#boundsAt64}) invalidates this the same way it invalidates {@link Mesh}.
+     *
+     * <p>{@link #positions()} and {@link #normals()} are {@code vertexCount * 3} doubles,
+     * {@link #indices()} is {@code indexCount}, the very pointer {@link Mesh} gives.
+     */
+    public static final class Mesh64 {
+        private final Solid solid;
+        private final double tolerance;
+        /** Which filling of the solid's cache this reads -- see {@link Solid#checkCache}. */
+        private final int generation;
+        private final long positions, normals, indices;
+        private final int vertexCount, indexCount;
+
+        private Mesh64(Solid solid, double tolerance, int generation, MemorySegment raw) {
+            this.solid = solid;
+            this.tolerance = tolerance;
+            this.generation = generation;
+            positions = raw.get(ValueLayout.ADDRESS, offset(MESH64, "positions")).address();
+            normals = raw.get(ValueLayout.ADDRESS, offset(MESH64, "normals")).address();
+            indices = raw.get(ValueLayout.ADDRESS, offset(MESH64, "indices")).address();
+            vertexCount = raw.get(ValueLayout.JAVA_INT, offset(MESH64, "vertex_count"));
+            indexCount = raw.get(ValueLayout.JAVA_INT, offset(MESH64, "index_count"));
+        }
+
+        /** The solid this borrows from. */
+        public Solid solid() {
+            return solid;
+        }
+
+        /** The tolerance this was meshed at. */
+        public double tolerance() {
+            return tolerance;
+        }
+
+        public int vertexCount() {
+            return vertexCount;
+        }
+
+        public int indexCount() {
+            return indexCount;
+        }
+
+        public int triangleCount() {
+            return indexCount / 3;
+        }
+
+        public DoubleBuffer positions() {
+            solid.checkCache(generation);
+            return doubleView(positions, vertexCount * 3L);
+        }
+
+        public DoubleBuffer normals() {
+            solid.checkCache(generation);
+            return doubleView(normals, vertexCount * 3L);
+        }
+
+        public IntBuffer indices() {
+            solid.checkCache(generation);
+            return intView(indices, indexCount);
+        }
+
+        /** The same triangles in memory of our own, safe to outlive the solid. */
+        public MeshData64 copy() {
+            return new MeshData64(toArray(positions()), toArray(normals()), toArray(indices()));
         }
     }
 
@@ -2200,8 +2562,7 @@ public final class Blacksmith {
             return pipe(path, radius, 0.0);
         }
 
-        /** A circle of {@code radius} swept along {@code path}, square to its start --
-         *  Fusion's Pipe: a rod, or with a positive {@code thickness} a tube whose walls are
+        /** A circle of {@code radius} swept along {@code path}, square to its start: a rod, or with a positive {@code thickness} a tube whose walls are
          *  that thick. {@code path} is only borrowed, as by {@link #sweep}. */
         public static Solid pipe(SweepPath path, double radius, double thickness) {
             try {
@@ -2380,8 +2741,8 @@ public final class Blacksmith {
             return combine(JOIN, other, tolerance);
         }
 
-        /** {@link #join(Solid, double)}, its flush faces merged when {@code merge} ({@link #mergeFlush}), as
-         *  Fusion does; the unmerged result is closed. */
+        /** {@link #join(Solid, double)}, its flush faces merged when {@code merge} ({@link #mergeFlush});
+         *  the unmerged result is closed. */
         public Solid join(Solid other, double tolerance, boolean merge) {
             Solid out = join(other, tolerance);
             if (!merge) return out;
@@ -2400,8 +2761,8 @@ public final class Blacksmith {
             return combine(CUT, other, tolerance);
         }
 
-        /** {@link #cut(Solid, double)}, its flush faces merged when {@code merge} ({@link #mergeFlush}), as
-         *  Fusion does; the unmerged result is closed. */
+        /** {@link #cut(Solid, double)}, its flush faces merged when {@code merge} ({@link #mergeFlush});
+         *  the unmerged result is closed. */
         public Solid cut(Solid other, double tolerance, boolean merge) {
             Solid out = cut(other, tolerance);
             if (!merge) return out;
@@ -2420,8 +2781,8 @@ public final class Blacksmith {
             return combine(COMMON, other, tolerance);
         }
 
-        /** {@link #common(Solid, double)}, its flush faces merged when {@code merge} ({@link #mergeFlush}), as
-         *  Fusion does; the unmerged result is closed. */
+        /** {@link #common(Solid, double)}, its flush faces merged when {@code merge} ({@link #mergeFlush});
+         *  the unmerged result is closed. */
         public Solid common(Solid other, double tolerance, boolean merge) {
             Solid out = common(other, tolerance);
             if (!merge) return out;
@@ -2473,6 +2834,184 @@ public final class Blacksmith {
             }
         }
 
+        /** {@link #intersect(Solid, double)} at 0.05. */
+        public Intersection intersect(Solid other) {
+            return intersect(other, 0.05);
+        }
+
+        /** Where this solid's faces cross or coincide with {@code other}'s, at {@code tolerance},
+         *  as an {@link Intersection}: {@code chains} along the curves the faces meet on and
+         *  {@code overlaps} where a face pair coincides. Neither solid is changed; either may be
+         *  an open sheet. No crossing is an empty result, never an error.
+         *
+         *  <p>Each {@link Chain}'s points are within {@code tolerance} of both faces' exact
+         *  surfaces; there is one chain per face pair per branch -- chains are not joined across
+         *  a face boundary or a closed curve's seam, so join them by matching ends. A chain's
+         *  {@code curve} is its exact curve where the kernel found one every point lies within
+         *  {@code tolerance} of, else null; {@code tangent} is set where the surfaces are
+         *  near-tangent along the chain or the snap did not settle (the points are then the best
+         *  estimate) -- a closed chain that does not go once round its own curve (a sliver where
+         *  two surfaces barely cross) has no curve, {@code tangent} still true. An
+         *  {@link Overlap} is a coincident face pair with the shared region's rings (outer
+         *  first, holes after), which may be empty for a partial overlap whose outlines cross.
+         *  Known limit: a crossing narrower than {@code tolerance} -- two surfaces passing within
+         *  it without their meshes crossing -- can be missed; near-tangent contact is where this
+         *  bites.
+         *
+         *  <p>Throws {@link BuildException} for a {@code tolerance} not positive and finite, a
+         *  solid with no faces, or one that meshes to nothing. */
+        public Intersection intersect(Solid other, double tolerance) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment a = handle();
+                MemorySegment b = other.handle();
+                MemorySegment h = checked(
+                        call(() -> (MemorySegment) INTERSECT.invokeExact(a, b, tolerance, MemorySegment.NULL, MemorySegment.NULL)),
+                        "intersect");
+                try {
+                    int n = call(() -> (int) INTERSECTION_CHAIN_COUNT.invokeExact(h));
+                    List<Chain> chains = new ArrayList<>(n);
+                    MemorySegment raw = arena.allocate(CHAIN);
+                    MemorySegment rawCurve = arena.allocate(CURVE);
+                    for (int i = 0; i < n; i++) {
+                        int at = i;
+                        boolean ok = call(() -> (boolean) INTERSECTION_CHAIN.invokeExact(h, at, raw));
+                        if (!ok) throw failure("intersection_chain");
+                        Curve curve = null;
+                        if (raw.get(ValueLayout.JAVA_BOOLEAN, offset(CHAIN, "has_curve"))) {
+                            boolean okCurve = call(() -> (boolean) INTERSECTION_CURVE.invokeExact(h, at, rawCurve));
+                            if (!okCurve) throw failure("intersection_curve");
+                            curve = curveOf(rawCurve);
+                        }
+                        int pointCount = raw.get(ValueLayout.JAVA_INT, offset(CHAIN, "point_count"));
+                        chains.add(new Chain(
+                                pointsOf(doublesOf(raw.get(ValueLayout.ADDRESS, offset(CHAIN, "points")), 3 * pointCount)),
+                                raw.get(ValueLayout.JAVA_BOOLEAN, offset(CHAIN, "closed")),
+                                raw.get(ValueLayout.JAVA_INT, offset(CHAIN, "face_a")),
+                                raw.get(ValueLayout.JAVA_INT, offset(CHAIN, "face_b")),
+                                raw.get(ValueLayout.JAVA_BOOLEAN, offset(CHAIN, "tangent")),
+                                curve));
+                    }
+                    n = call(() -> (int) INTERSECTION_OVERLAP_COUNT.invokeExact(h));
+                    List<Overlap> overlaps = new ArrayList<>(n);
+                    MemorySegment rawOverlap = arena.allocate(OVERLAP);
+                    for (int i = 0; i < n; i++) {
+                        int at = i;
+                        boolean ok = call(() -> (boolean) INTERSECTION_OVERLAP.invokeExact(h, at, rawOverlap));
+                        if (!ok) throw failure("intersection_overlap");
+                        int pointCount = rawOverlap.get(ValueLayout.JAVA_INT, offset(OVERLAP, "point_count"));
+                        int loopCount = rawOverlap.get(ValueLayout.JAVA_INT, offset(OVERLAP, "loop_count"));
+                        double[][] points = pointsOf(doublesOf(rawOverlap.get(ValueLayout.ADDRESS, offset(OVERLAP, "points")), 3 * pointCount));
+                        int[] starts = intsOf(rawOverlap.get(ValueLayout.ADDRESS, offset(OVERLAP, "loop_offsets")), loopCount);
+                        double[][][] loops = new double[loopCount][][];
+                        for (int r = 0; r < loopCount; r++) {
+                            int end = r + 1 < loopCount ? starts[r + 1] : pointCount;
+                            loops[r] = Arrays.copyOfRange(points, starts[r], end);
+                        }
+                        overlaps.add(new Overlap(
+                                rawOverlap.get(ValueLayout.JAVA_INT, offset(OVERLAP, "face_a")),
+                                rawOverlap.get(ValueLayout.JAVA_INT, offset(OVERLAP, "face_b")),
+                                loops));
+                    }
+                    return new Intersection(chains, overlaps);
+                } finally {
+                    call(() -> {
+                        INTERSECTION_FREE.invokeExact(h);
+                        return null;
+                    });
+                }
+            } finally {
+                keep(this, other);
+            }
+        }
+
+        /** {@link #hits(Profile, double[], double)} at 0.05. */
+        public SolidHits hits(Profile profile, double[] frame) {
+            return hits(profile, frame, 0.05);
+        }
+
+        /** Where {@code profile}, placed on {@code frame}, pierces this solid's faces, and the
+         *  pieces its loops cut into, as a {@link SolidHits}. Neither is changed.
+         *
+         *  <p>A point hit lies within {@code tolerance} of the segment's exact curve and of the
+         *  face's exact surface, inside the face's trim; its profile spot ({@code aStart}: loop,
+         *  segment, t) and face spot ({@code bStart}: face, u, v) evaluate to the point within
+         *  {@code tolerance}; {@code touch} where the curve's tangent lies within 1e-3 (sine) of
+         *  the surface's tangent plane there (a graze), false at a crossing. A run is a stretch
+         *  of one segment lying within {@code tolerance} of one face and inside it, longer than
+         *  {@code tolerance}. Hits within {@code tolerance} of each other merge (a hit at a
+         *  segment join reported once, as {@code (k, t = 1)}; a closed loop's closing join
+         *  reads {@code (0, 0)}). Every point is in world space
+         *  (the frame applied).
+         *
+         *  <p>Pieces only for a closed body -- an open body has none -- in loop order, covering
+         *  every loop exactly; a piece's spots read a segment join as the next segment's start
+         *  {@code (k + 1, 0)}, and an open chain runs from {@code (0, 0)} to {@code (n - 1, 1)};
+         *  a loop no hit cuts is one closed piece. {@code inside} by the piece middle's winding
+         *  number over the body's mesh; a piece lying on the surface is inside. Known limit: a
+         *  segment passing within {@code tolerance} of a face without crossing its mesh can be
+         *  missed (near-tangent grazes).
+         *
+         *  <p>Throws {@link BuildException} for a {@code tolerance} not positive and finite, a
+         *  solid with no faces or that meshes to nothing, a profile with no segments, or a
+         *  free-form segment that is not an evaluable NURBS curve. */
+        public SolidHits hits(Profile profile, double[] frame, double tolerance) {
+            double[] f = frame(frame);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment fs = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, f);
+                MemorySegment s = handle();
+                MemorySegment p = profile.handle();
+                MemorySegment h = checked(
+                        call(() -> (MemorySegment) SOLID_PROFILE_HITS.invokeExact(s, p, fs, tolerance, MemorySegment.NULL, MemorySegment.NULL)),
+                        "solid_profile_hits");
+                try {
+                    int n = call(() -> (int) HIT_COUNT.invokeExact(h));
+                    List<Hit> hits = new ArrayList<>(n);
+                    MemorySegment raw = arena.allocate(HIT);
+                    for (int i = 0; i < n; i++) {
+                        int at = i;
+                        boolean ok = call(() -> (boolean) HIT_AT.invokeExact(h, at, raw));
+                        if (!ok) throw failure("hit");
+                        hits.add(hitOf(raw));
+                    }
+                    n = call(() -> (int) HITS_PIECE_COUNT.invokeExact(h));
+                    List<Piece> pieces = new ArrayList<>(n);
+                    MemorySegment inside = arena.allocate(ValueLayout.JAVA_BOOLEAN);
+                    MemorySegment start = arena.allocate(SPOT);
+                    MemorySegment end = arena.allocate(SPOT);
+                    for (int i = 0; i < n; i++) {
+                        int at = i;
+                        boolean ok = call(() -> (boolean) HITS_PIECE.invokeExact(h, at, inside, start, end));
+                        if (!ok) throw failure("hits_piece");
+                        Profile own = new Profile(checked(
+                                call(() -> (MemorySegment) HITS_PIECE_PROFILE.invokeExact(h, at)), "hits_piece_profile"));
+                        pieces.add(new Piece(inside.get(ValueLayout.JAVA_BOOLEAN, 0), spotOf(start, 0), spotOf(end, 0), own));
+                    }
+                    return new SolidHits(hits, pieces);
+                } finally {
+                    call(() -> {
+                        HITS_FREE.invokeExact(h);
+                        return null;
+                    });
+                }
+            } finally {
+                keep(this, profile);
+            }
+        }
+
+        /** {@code flat} xyz triples as one array a point. */
+        private static double[][] pointsOf(double[] flat) {
+            double[][] points = new double[flat.length / 3][];
+            for (int k = 0; k < points.length; k++) points[k] = Arrays.copyOfRange(flat, 3 * k, 3 * k + 3);
+            return points;
+        }
+
+        @SuppressWarnings("restricted") // reinterpret: the count beside the pointer says how far it reaches.
+        private static int[] intsOf(MemorySegment at, int count) {
+            return count == 0 || at.address() == 0
+                    ? new int[0]
+                    : at.reinterpret(count * (long) Integer.BYTES).toArray(ValueLayout.JAVA_INT);
+        }
+
         // -- asking
 
         /** How many faces, in the solid's own order; a face index runs to this. */
@@ -2516,6 +3055,28 @@ public final class Blacksmith {
                 MemorySegment h = handle();
                 boolean ok = call(() -> (boolean) BOUNDS.invokeExact(h, tolerance, lo, hi));
                 if (!ok) throw failure("bounds");
+                filled(tolerance);
+                return new Bounds(lo.toArray(ValueLayout.JAVA_DOUBLE), hi.toArray(ValueLayout.JAVA_DOUBLE));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #boundsAt64(double)} at 0.05. */
+        public Bounds bounds64() {
+            return boundsAt64(0.05);
+        }
+
+        /** {@link #boundsAt(double)}, from the same tessellation's unnarrowed positions --
+         *  exact far from the origin, where {@link #boundsAt(double)}'s bounds, widened back
+         *  from `float`, are not. */
+        public Bounds boundsAt64(double tolerance) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment lo = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
+                MemorySegment hi = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
+                MemorySegment h = handle();
+                boolean ok = call(() -> (boolean) BOUNDS64.invokeExact(h, tolerance, lo, hi));
+                if (!ok) throw failure("bounds64");
                 filled(tolerance);
                 return new Bounds(lo.toArray(ValueLayout.JAVA_DOUBLE), hi.toArray(ValueLayout.JAVA_DOUBLE));
             } finally {
@@ -2606,6 +3167,26 @@ public final class Blacksmith {
                 MemorySegment raw = call(() -> (MemorySegment) MESH_AT.invokeExact(allocator, h, tolerance));
                 if (raw.get(ValueLayout.ADDRESS, offset(MESH, "positions")).address() == 0) throw failure("mesh");
                 return new Mesh(this, tolerance, filled(tolerance), raw);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #mesh64(double)} at 0.05. */
+        public Mesh64 mesh64() {
+            return mesh64(0.05);
+        }
+
+        /** {@link #mesh(double)} in {@code double}, from the same cache: valid until the
+         *  solid is closed or meshed again at a different tolerance -- through {@link
+         *  #mesh(double)} as much as through this. */
+        public Mesh64 mesh64(double tolerance) {
+            try (Arena arena = Arena.ofConfined()) {
+                SegmentAllocator allocator = arena;
+                MemorySegment h = handle();
+                MemorySegment raw = call(() -> (MemorySegment) MESH_AT64.invokeExact(allocator, h, tolerance));
+                if (raw.get(ValueLayout.ADDRESS, offset(MESH64, "positions")).address() == 0) throw failure("mesh64");
+                return new Mesh64(this, tolerance, filled(tolerance), raw);
             } finally {
                 keep(this);
             }
@@ -2872,6 +3453,12 @@ public final class Blacksmith {
                 if (lastError().contains("has no exact curve")) return null;
                 throw failure("edge_curve");
             }
+            return curveOf(raw);
+        }
+
+        /** The {@code CadaclysmBlacksmithCurve} in {@code raw} copied out (an edge's or an
+         *  intersection chain's). */
+        private static Curve curveOf(MemorySegment raw) {
             int degree = raw.get(ValueLayout.JAVA_INT, offset(CURVE, "degree"));
             int knotCount = raw.get(ValueLayout.JAVA_INT, offset(CURVE, "knot_count"));
             int poleCount = raw.get(ValueLayout.JAVA_INT, offset(CURVE, "pole_count"));
@@ -2970,7 +3557,7 @@ public final class Blacksmith {
         }
 
         /** Face {@code face} pushed out by {@code distance} along its outward normal (pulled
-         *  in, negative) the way Fusion and Rhino extrude a face: the prism over it joined on
+         *  in, negative) as a face extrude does it: the prism over it joined on
          *  (cut out), and the flush faces merged -- a box's top raised is one taller box of
          *  six faces. A face on a cylinder, a cone, a sphere or a torus moves out along its
          *  normal instead, the surface a step out (a boss fatter, a bore or a countersink
@@ -2991,8 +3578,7 @@ public final class Blacksmith {
             return pushPull(faces, distance, 0.05);
         }
 
-        /** Faces {@code faces} pushed out by {@code distance} together -- Fusion's
-         *  press-pull on a selection: each by {@link #pushPull(int, double, double)}'s rule
+        /** Faces {@code faces} pushed out by {@code distance} together -- a press-pull on a selection: each by {@link #pushPull(int, double, double)}'s rule
          *  for it, one after another, each found again after the pushes before it
          *  renumbered the faces. A box's top and a side pushed 5 is the box 5 taller and 5
          *  wider; a face on the same curved surface as one before it, and joined to it,
@@ -3015,7 +3601,7 @@ public final class Blacksmith {
             return split(tool, 0.05);
         }
 
-        /** This solid split by {@code tool} into bodies -- Fusion's Split Body: a closed
+        /** This solid split by {@code tool} into bodies: a closed
          *  {@code tool} gives the parts outside it, then the parts inside; a flat sheet splits
          *  by the whole plane it lies on. Each connected part is a body of its own. */
         public List<Solid> split(Solid tool, double tolerance) {
@@ -3085,7 +3671,7 @@ public final class Blacksmith {
         }
 
         /** The round {@code face} belongs to -- a fillet's bands, balls and rim bands joined to
-         *  that face -- made again at {@code radius}, as Fusion's press-pull on a fillet face:
+         *  that face -- made again at {@code radius}, as a press-pull on a fillet face:
          *  taken back to the sharp edges it replaced, and those rounded again. */
         public Solid refillet(int face, double radius, double tolerance) {
             int which = index(face);
@@ -3098,7 +3684,7 @@ public final class Blacksmith {
         }
 
         /** The round {@code face} belongs to taken off, the faces beside it sharp again --
-         *  Fusion's delete of a fillet face. */
+         *  the delete of a fillet face. */
         public Solid unfillet(int face) {
             int which = index(face);
             try {
@@ -3115,7 +3701,7 @@ public final class Blacksmith {
         }
 
         /** The chamfer {@code face} belongs to -- its bevels, flat or round a rim, and the corner
-         *  triangles joined to that face -- cut again at {@code distance}, as Fusion's press-pull
+         *  triangles joined to that face -- cut again at {@code distance}, as a press-pull
          *  on a chamfer face: taken back to the sharp edges it cut, and those bevelled again. */
         public Solid rechamfer(int face, double distance, double tolerance) {
             int which = index(face);
@@ -3128,7 +3714,7 @@ public final class Blacksmith {
         }
 
         /** The chamfer {@code face} belongs to taken off, the faces beside it sharp again --
-         *  Fusion's delete of a chamfer face. */
+         *  the delete of a chamfer face. */
         public Solid unchamfer(int face) {
             int which = index(face);
             try {
@@ -3170,7 +3756,7 @@ public final class Blacksmith {
             return thicken(thickness, 1e-6);
         }
 
-        /** This sheet made a solid {@code thickness} thick -- Fusion's Thicken: its faces, their
+        /** This sheet made a solid {@code thickness} thick: its faces, their
          *  twins moved {@code thickness} along the faces' normals (against them for a negative
          *  thickness), and a wall round every open edge. A closed sheet thickens to a hollow. */
         public Solid thicken(double thickness, double tolerance) {
@@ -3405,8 +3991,9 @@ public final class Blacksmith {
     }
 
     /**
-     * One edge's exact curve, as plain data copied out ({@link Edge#curve}): {@code kind} is
-     * "line", "circle", "ellipse" or "nurbs".
+     * One edge's, or one intersection chain's, exact curve as plain data copied out
+     * ({@link Edge#curve}, {@link Chain#curve}): {@code kind} is "line", "circle", "ellipse", "parabola", "hyperbola"
+     * or "nurbs".
      *
      * <p>{@code t0..t1} is the edge's parameter range on its own curve: a line's fraction (0..1
      * over {@code origin -> origin + x}, where {@code x} is the full {@code to - from}, NOT unit
@@ -3447,7 +4034,7 @@ public final class Blacksmith {
      * curve kind, the faces meeting on it, its segments' ends, and its exact {@link Curve}.
      *
      * @param index    the edge's index in the solid's own order
-     * @param kind     "line", "circle", "ellipse", "nurbs" or "other"
+     * @param kind     "line", "circle", "ellipse", "parabola", "hyperbola", "nurbs" or "other"
      * @param faces    the faces that meet on it, in the solid's face order
      * @param segments the two ends of each trim piece of the edge
      * @param curve    the edge's exact curve, or null for an edge with none (kind "other")
@@ -3489,6 +4076,80 @@ public final class Blacksmith {
      * into a Java {@code int} as -1.
      */
     public record Spot(int loopIndex, int segment, double t, int face, double u, double v) {
+    }
+
+    /**
+     * What {@link Solid#hits} found, copied out: {@code hits} (ordered along the profile;
+     * {@code aStart}/{@code aEnd} on the profile, {@code bStart}/{@code bEnd} on the solid's
+     * faces: a face at (u, v)) and {@code pieces} (empty for an open body).
+     */
+    public record SolidHits(List<Hit> hits, List<Piece> pieces) {
+        @Override
+        public String toString() {
+            return "SolidHits(hits=" + hits.size() + ", pieces=" + pieces.size() + ")";
+        }
+    }
+
+    /**
+     * One stretch of a profile loop between two cuts ({@link SolidHits#pieces}): {@code inside}
+     * (by its middle's winding number over the body; a piece lying on the surface is inside),
+     * {@code start}/{@code end} (profile spots -- a segment join reads as the next segment's
+     * start {@code (k + 1, 0)}, an open chain runs from {@code (0, 0)} to {@code (n - 1, 1)}; a
+     * loop no hit cuts is one closed piece) and {@code profile}, the piece's own open chain
+     * (what {@link SweepPath#along} with {@code open} sweeps).
+     */
+    public record Piece(boolean inside, Spot start, Spot end, Profile profile) {
+        @Override
+        public String toString() {
+            return "Piece(inside=" + inside + ", start=" + start + ", end=" + end + ")";
+        }
+    }
+
+    /**
+     * What {@link Solid#intersect} found, copied out: {@code chains} (one per face pair per
+     * branch) and {@code overlaps} (one per coincident face pair). Both empty where the solids
+     * do not meet.
+     */
+    public record Intersection(List<Chain> chains, List<Overlap> overlaps) {
+        @Override
+        public String toString() {
+            return "Intersection(chains=" + chains.size() + ", overlaps=" + overlaps.size() + ")";
+        }
+    }
+
+    /**
+     * One branch of one face pair's crossing ({@link Intersection#chains}): {@code points}
+     * (three doubles each, in walk order; a closed chain does not repeat its first point),
+     * {@code closed}, the faces ({@code faceA} in the first solid, {@code faceB} in the second),
+     * {@code tangent} (the surfaces near-tangent along it, or the snap unsettled -- the points
+     * their best estimate) and {@code curve}, its exact curve over the chain's own
+     * {@code t0..t1}, or null where the kernel found none. A chain may stop at a face boundary
+     * or a closed curve's seam and continue as another: join chains by matching ends.
+     *
+     * @param points three doubles each
+     */
+    public record Chain(double[][] points, boolean closed, int faceA, int faceB, boolean tangent, Curve curve) {
+        @Override
+        public String toString() {
+            return "Chain(points=" + points.length + ", closed=" + closed + ", faces=(" + faceA + ", " + faceB
+                    + "), tangent=" + tangent + ", curve=" + curve + ")";
+        }
+    }
+
+    /**
+     * A face of the first solid and a face of the second that coincide
+     * ({@link Intersection#overlaps}): the faces ({@code faceA}, {@code faceB}) and
+     * {@code loops}, the shared region's rings as arrays of points (outer first, holes after;
+     * each ring closed without repeating its first point) -- empty for a partial overlap whose
+     * outlines cross.
+     *
+     * @param loops each ring an array of points, three doubles each
+     */
+    public record Overlap(int faceA, int faceB, double[][][] loops) {
+        @Override
+        public String toString() {
+            return "Overlap(faces=(" + faceA + ", " + faceB + "), loops=" + loops.length + ")";
+        }
     }
 
     /**
@@ -3617,7 +4278,7 @@ public final class Blacksmith {
          * normal along +Z, -Y or +X gives exactly {@link #xy}, {@link #xz} or
          * {@link #yz}.
          */
-        /** The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line -- Fusion's midplane. */
+        /** The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line. */
         public static Frame midplane(Frame a, Frame b) {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment sa = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, a.toArray());

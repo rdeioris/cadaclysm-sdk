@@ -65,6 +65,63 @@ return function(t)
     scene:close()
   end)
 
+  t.test("mesh64/bounds64/beziers64 agree with their f32 twins on small coordinates, and a forget frees mesh64's pointers but not mesh's", function()
+    local scene = cadaclysm.open(t.fixture("samples/cube.scad"))
+    local node = scene.nodes[1]
+    local mesh, mesh64 = node.mesh, node.mesh64
+    t.eq(getmetatable(mesh64), cadaclysm.Mesh64)
+    t.eq(mesh64.vertex_count, mesh.vertex_count)
+    t.eq(mesh64.index_count, mesh.index_count)
+    t.eq(tonumber(ffi.cast("float", mesh64.positions[0])), mesh.positions[0])
+    for i = 0, mesh.index_count - 1 do t.eq(mesh64.indices[i], mesh.indices[i]) end
+    t.eq(mesh64.triangle_count, 12)
+    t.ok(not mesh64.is_empty)
+    local b, b64 = scene.bounds, scene.bounds64
+    for i = 1, 3 do t.eq(b64.max[i], b.max[i]) end
+    local nb, nb64 = node.bounds, node.bounds64
+    for i = 1, 3 do t.eq(nb64.max[i], nb.max[i]) end
+    local bz, bz64 = node.edge_beziers, node.edge_beziers64
+    t.eq(getmetatable(bz64), cadaclysm.Beziers64)
+    t.eq(bz64.count, bz.count)
+    t.eq(tonumber(ffi.cast("float", bz64.points[0])), bz.points[0])
+    t.eq(node.curve_beziers64.count, node.curve_beziers.count)
+    t.eq(node.isocurve_beziers64.count, node.isocurve_beziers.count)
+    local kept64 = bz64:copy()
+    t.eq(#kept64.points, bz64.count * 12)
+    t.eq(#kept64.weights, bz64.count * 4)
+    -- mesh64's pointers borrow the document's own mesh, which a forget frees;
+    -- mesh's positions are the library's own narrowed copy and survive it.
+    scene:forget_meshes()
+    t.eq(mesh.index_count, 36)
+    local again = node.mesh64
+    t.eq(again.vertex_count, mesh64.vertex_count)
+    scene:close()
+  end)
+
+  t.test("mesh64/bounds64 keep a coordinate far from the origin that mesh()/bounds cannot", function()
+    local scad = t.tmp("far64.scad")
+    local f = assert(io.open(scad, "w"))
+    f:write("translate([1000000.123456789, -2600000.987654321, 450.5]) cube(1);")
+    f:close()
+    local scene = cadaclysm.open(scad)
+    local node = scene.nodes[1]
+    local mesh64 = node.mesh64
+    t.ok(not mesh64.is_empty)
+    local kept_y, saw_unfloatable = nil, false
+    for i = 0, mesh64.vertex_count - 1 do
+      local y = mesh64.positions[3 * i + 1]
+      if math.abs(y - -2600000.987654321) < 1e-6 then kept_y = y end
+      if math.abs(tonumber(ffi.cast("float", y)) - y) > 1e-3 then saw_unfloatable = true end
+    end
+    t.ok(kept_y ~= nil, "mesh64 lost the far low-y corner")
+    t.ok(saw_unfloatable, "mesh64 carries no coordinate float cannot hold, so this test cannot tell mesh64 from mesh widened")
+    local b64, b32 = node.bounds64, node.bounds
+    t.near(b64.min[2], -2600000.987654321, 1e-6, "bounds64 lost the far corner")
+    t.ok(math.abs(b64.min[2] - b32.min[2]) > 1e-3, "bounds64 agrees with bounds narrowed to the bit, so it is not exact where float is not")
+    t.near(scene.bounds64.min[2], -2600000.987654321, 1e-6, "the scene's bounds64 lost the far corner")
+    scene:close()
+  end)
+
   t.test("Convention.parse", function()
     local C = cadaclysm.Convention
     t.eq(C.parse("native"), C.NATIVE)
@@ -432,6 +489,12 @@ return function(t)
     t.eq(bracket.is_meshed, false)
     t.eq(bracket:bounds_placed().max[1], 4)
     t.eq(bracket:bounds_placed({ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 }).max[3], 2)
+    -- bounds_placed64: the same identity placement agrees with bounds_placed exactly
+    -- (the bracket's corners are small coordinates).
+    t.eq(bracket:bounds_placed64().max[1], bracket:bounds_placed().max[1])
+    t.eq(bracket:bounds_placed64({ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 }).max[3],
+      bracket:bounds_placed({ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 }).max[3])
+    t.raises(function() bracket:bounds_placed64({ 1, 2, 3 }) end, "bounds_placed64: a placement is 16 numbers")
     t.eq(scene:realize_meshes(), 0)
     t.eq(bracket.is_meshed, false)
     t.eq(scene:realize_meshes(false), 3)

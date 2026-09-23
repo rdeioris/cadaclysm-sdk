@@ -217,6 +217,15 @@ typedef enum CadaclysmMeshColors {
 typedef struct CadaclysmBrep CadaclysmBrep;
 
 /**
+ * One body meshed for a solver: opaque, owned, and freed with
+ * [`cadaclysm_fem_mesh_free`].
+ *
+ * Made by [`cadaclysm_node_fem_mesh`]. Every pointer any accessor here writes is borrowed
+ * from this handle and dies with it.
+ */
+typedef struct CadaclysmFemMesh CadaclysmFemMesh;
+
+/**
  * A mesh split into meshlets, and the coarser levels above them.
  */
 typedef struct CadaclysmMeshlets CadaclysmMeshlets;
@@ -385,6 +394,15 @@ typedef struct CadaclysmBounds {
 } CadaclysmBounds;
 
 /**
+ * [`CadaclysmBounds`] in `double`: the same box, unnarrowed. All zeros where there is
+ * nothing to bound.
+ */
+typedef struct CadaclysmBounds64 {
+  double min[3];
+  double max[3];
+} CadaclysmBounds64;
+
+/**
  * One thing a file said about a part.
  *
  * `kind` says which of the fields below it means; the rest are zero. `text`
@@ -456,6 +474,30 @@ typedef struct CadaclysmMesh {
   uint32_t vertex_count;
   uint32_t index_count;
 } CadaclysmMesh;
+
+/**
+ * [`CadaclysmMesh`] in `double`: the document's own mesh, **lent as it is**, where
+ * [`cadaclysm_node_mesh`] hands a `float` copy of it. The same triangles and indices; the
+ * `float` positions are exactly these narrowed. For a caller that uses the mesh as
+ * geometry (an exporter, a measurement, a solver) and wants the file's own coordinates,
+ * which `float` cannot hold far from the origin.
+ *
+ * Colours stay `float` (RGBA in 0..1 needs no more). Null where [`CadaclysmMesh`]'s field
+ * would be.
+ *
+ * **A forget drops it.** The pointers borrow the document's mesh, which
+ * [`cadaclysm_forget_meshes`] frees: read none of them after a forget; ask again, and the
+ * mesh is built again. (The `float` mesh's pointers survive a forget, its copy being kept.)
+ */
+typedef struct CadaclysmMesh64 {
+  const double *positions;
+  const double *normals;
+  const double *uvs;
+  const float *colors;
+  const uint32_t *indices;
+  uint32_t vertex_count;
+  uint32_t index_count;
+} CadaclysmMesh64;
 
 /**
  * What a node turned out to be, and the body an engine can simulate for it.
@@ -538,12 +580,6 @@ typedef struct CadaclysmPolylines {
   uint32_t vertex_count;
 } CadaclysmPolylines;
 
-typedef struct CadaclysmBeziers {
-  const float *points;
-  const float *weights;
-  uint32_t count;
-} CadaclysmBeziers;
-
 /**
  * A set of rational cubic Bézier segments. Both pointers borrow from the scene.
  *
@@ -565,6 +601,24 @@ typedef struct CadaclysmBeziers {
  * what makes a circle exact rather than approximated -- the weights are not
  * decoration and a caller that ignores them draws the wrong curve for every
  * conic in the file.
+ */
+typedef struct CadaclysmBeziers {
+  const float *points;
+  const float *weights;
+  uint32_t count;
+} CadaclysmBeziers;
+
+/**
+ * [`CadaclysmBeziers`] in `double`: four control points (xyz) and four weights a
+ * segment. The same segments, in the same order; the `float` ones are these narrowed.
+ */
+typedef struct CadaclysmBeziers64 {
+  const double *points;
+  const double *weights;
+  uint32_t count;
+} CadaclysmBeziers64;
+
+/**
  * One trimmed face as the surface it actually is, for a caller that evaluates surfaces
  * rather than triangles.
  *
@@ -766,6 +820,270 @@ typedef struct CadaclysmSvgOptions {
   uint32_t flags;
 } CadaclysmSvgOptions;
 
+/**
+ * What a FEM mesh is meshed to.
+ *
+ * Zero it, set `size`, then set what you care about -- [`cadaclysm_fem_options_init`] does
+ * the first two. A **null** pointer where one of these is expected means every default, so
+ * `cadaclysm_node_fem_mesh(scene, node, NULL, NULL)` is the short way in.
+ *
+ * **`size` is how this struct grows**, by `CadaclysmOpenOptions`'s rule and not
+ * `CadaclysmSvgOptions`'s: set it to `sizeof(CadaclysmFemOptions)` as **your** header declares
+ * it, and the library reads the fields that fit inside it and defaults the rest. A caller
+ * built against an older header works with a newer library, and one built against a newer
+ * header works with an older library that stops reading at the end of what it knows. The
+ * rule that makes that hold, and the only one: fields are appended, never reordered and
+ * never removed. The spec expects this struct to grow a quality stage, which is the case
+ * that rule exists for.
+ */
+typedef struct CadaclysmFemOptions {
+  /**
+   * `sizeof(CadaclysmFemOptions)`. Zero, or anything shorter than the first published
+   * struct, is refused rather than defaulted: that is uninitialised memory rather than an
+   * old caller, and defaulting it would take whatever garbage sits in `tolerance` for the
+   * figure [`cadaclysm_fem_options_init`] would have written there.
+   */
+  size_t size;
+  /**
+   * Chordal tolerance, model units: finite and above zero. **This alone governs how
+   * closely the mesh follows the geometry.** Anything else is refused, with
+   * [`cadaclysm_last_error`](crate::cadaclysm_last_error) saying so.
+   */
+  double tolerance;
+  /**
+   * A size ceiling, model units: finite and zero or more. `0` is no ceiling (curvature
+   * alone). **It bounds the boundary and targets the interior**, which is not the same
+   * thing as a longest element edge: it adds boundary nodes and does not refine boundary
+   * geometry, and `CadaclysmFemMeshView::longest_edge` is what the mesh actually came to --
+   * the only figure that bounds the whole of it.
+   */
+  double max_size;
+} CadaclysmFemOptions;
+
+/**
+ * The flat arrays of one FEM mesh, and its summary.
+ *
+ * Every pointer is **borrowed from the handle** and good until
+ * [`cadaclysm_fem_mesh_free`]; none of them is a copy, and none of them is built by the call
+ * that hands it over.
+ */
+typedef struct CadaclysmFemMeshView {
+  /**
+   * Three doubles a node, placed, in `f64`.
+   */
+  const double *nodes;
+  uint32_t node_count;
+  /**
+   * Three node indices a triangle, wound outward.
+   */
+  const uint32_t *triangles;
+  uint32_t triangle_count;
+  /**
+   * The brep face each triangle lies on: one per triangle.
+   */
+  const uint32_t *triangle_face;
+  /**
+   * What each node lies on: `0` a vertex, `1` an edge, `2` a face. One per node.
+   */
+  const uint32_t *node_kind;
+  /**
+   * Which vertex, edge or face that is -- an index into this mesh's vertices, its edges or
+   * the body's faces, by the matching `node_kind`. One per node.
+   */
+  const uint32_t *node_entity;
+  /**
+   * The body's faces; `triangle_face` and a `node_kind` of 2 index them. **The same faces
+   * [`cadaclysm_node_surfaces`](crate::cadaclysm_node_surfaces) hands over**, in the same
+   * order and numbered the same way -- measured over `as1-ac-214.stp` nodes 1, 3 and 4, where
+   * this count and that list's own length agree at 18, 16 and 16, both in the file's own
+   * frame. So a caller reads a triangle's surface, and its trims, from there.
+   */
+  uint32_t face_count;
+  /**
+   * The B-rep edges [`cadaclysm_fem_mesh_edge`] describes; a `node_kind` of 1 indexes them.
+   * Zero for a mesh-only body.
+   *
+   * **This is the mesh's own edge numbering, not the body's**: a densely renumbered subset of
+   * the body's edges, ascending by edge id. `CadaclysmFemEdge::id` carries the body's own id
+   * for each of them, and is the only bridge back to the topology the file wrote.
+   */
+  uint32_t edge_count;
+  /**
+   * The B-rep vertices [`cadaclysm_fem_mesh_vertex`] describes; a `node_kind` of 0 indexes
+   * them. Zero for a mesh-only body.
+   */
+  uint32_t vertex_count;
+  /**
+   * The cracks [`cadaclysm_fem_mesh_open_edge`] describes.
+   */
+  uint32_t open_edge_count;
+  /**
+   * The folds [`cadaclysm_fem_mesh_folded_edge`] describes.
+   *
+   * **A caller checking only `open_edge_count` calls a folded body sound.** The closure
+   * census's own pinned rows are folds, not open cracks: a directed mesh edge used by more
+   * than one triangle is a solid no thicker than a line, and it leaves no hole for an open
+   * edge to find.
+   */
+  uint32_t folded_edge_count;
+  /**
+   * The welded mesh closes -- and, for a B-rep body, so does the topology behind it.
+   *
+   * **Which of those two this says depends on `from_mesh`, and so does what an empty
+   * census beside it means.**
+   *
+   * * `from_mesh` false (a B-rep body): this is false for **every** body whose topology
+   *   is not closed, whose mesh is then not asked about at all -- such a body reports
+   *   this false with `open_edge_count` and `folded_edge_count` both zero, and *that
+   *   trio together* says "not asked", not "nothing found".
+   * * `from_mesh` true (the scene's own mesh): there is no topology to ask of, so the
+   *   census always runs over the welded triangles and this says only that they close.
+   *   A closed render mesh reports this **true** with no topology behind it at all, and
+   *   an open one reports it false with its cracks in `open_edge_count` -- where an
+   *   empty census really does mean "nothing found".
+   */
+  bool watertight;
+  /**
+   * This came from the scene's mesh rather than from a brep: one face, every node on face
+   * 0, no edges and no vertices -- and **in the scene's convention rather than the file's
+   * own units and axes**, which is the whole of why this flag is here. See
+   * [`cadaclysm_node_fem_mesh`].
+   *
+   * It also says which of two things `watertight` and the two censuses are reporting: a
+   * bare mesh carries no topology to ask of, so its census always runs and speaks from
+   * the triangles alone. Read `watertight` for the pair of contracts.
+   */
+  bool from_mesh;
+  /**
+   * The smallest interior angle of any triangle, in degrees.
+   */
+  double min_angle;
+  /**
+   * The triangle with that angle.
+   */
+  uint32_t worst_triangle;
+  /**
+   * The longest triangle edge, placed.
+   *
+   * **The figure to check against `CadaclysmFemOptions::max_size`, and the only one that
+   * says what the mesh actually is**: `max_size` bounds the boundary segments and merely
+   * targets the interior, and a `max_size` small enough to hit the mesher's own piece and
+   * station ceilings is not honoured at all. A caller that asked for an element size reads
+   * this to find out whether it got one.
+   */
+  double longest_edge;
+} CadaclysmFemMeshView;
+
+/**
+ * One B-rep edge of a FEM mesh: the chain of nodes along it, and where that chain breaks.
+ */
+typedef struct CadaclysmFemEdge {
+  /**
+   * Which B-rep edge this is, by the **body's own** edge id -- `LoopTrim::edge` on the brep
+   * [`cadaclysm_node_brep`](crate::cadaclysm_node_brep) hands over, which is the number the
+   * file gave the edge.
+   *
+   * **Not this mesh's edge index, and on a read body rarely equal to it.** The FEM edge list
+   * is a densely renumbered *subset* of the body's edges -- ascending by id, with every edge
+   * collapsed to a point left out -- so edge 0 of a STEP body's mesh routinely reports an id
+   * in the hundreds. Everything else here that names an edge means the **index**: a
+   * `node_kind` of 1 read through `node_entity`, the third `uint32_t` of an open or folded
+   * census row, and the `edge_<i>` physical group of the `.msh` text. This is the one field
+   * that leads from any of those back to the body's own topology, and without it a caller
+   * holding `edge_7` out of a solver deck has no way to say which edge of the file that is.
+   *
+   * Saturating at `UINT32_MAX`, as every count in this ABI does, so an id past that would
+   * read as [`CADACLYSM_NONE`]; unreachable, an id being an index into the brep's own edge
+   * table and a brep of 4e9 edges being terabytes of topology.
+   */
+  uint32_t id;
+  /**
+   * The edge's nodes in order along it, its end vertices included; a closed edge repeats
+   * no node. Borrowed from the handle.
+   */
+  const uint32_t *nodes;
+  uint32_t node_count;
+  /**
+   * Where each connected run of `nodes` begins: `[0]` for one chain along the whole edge.
+   *
+   * **Read `nodes[runs[i] .. runs[i + 1]]` (the last run to the end) as one polyline and
+   * join nothing across a boundary.** The two ends either side of one are two points of
+   * the edge with no mesh edge between them -- a crack along the edge, or a stretch of it
+   * the mesher sampled on one face only. One run is the ordinary answer; a caller reading
+   * `nodes` as one polyline without looking here silently jumps the gap.
+   */
+  const uint32_t *runs;
+  uint32_t run_count;
+  /**
+   * A face it bounds.
+   */
+  uint32_t face_a;
+  /**
+   * The other, or [`CADACLYSM_NONE`] on an open body's rim. **`0` is a face, not a
+   * sentinel**: an edge whose second face is face 0 reads `face_b == 0`.
+   *
+   * A non-manifold edge's third and further faces are not here; the manifold report is
+   * where the whole list of them is read.
+   */
+  uint32_t face_b;
+  /**
+   * A B-rep vertex its chain ends at, as [`cadaclysm_fem_mesh_vertex`] indexes them.
+   */
+  uint32_t end_a;
+  /**
+   * The other, or [`CADACLYSM_NONE`] where both ends are one vertex -- a closed edge, a
+   * circle's rim, a full-turn seam. **`0` is a vertex, not a sentinel.**
+   *
+   * **Which end is `end_a` is the first trim's direction, and means nothing else.** The
+   * pair bounds the edge; it does not orient it.
+   */
+  uint32_t end_b;
+  /**
+   * The nodes make one loop. False wherever `run_count` is more than one.
+   */
+  bool closed;
+  /**
+   * Bounded twice by one face: a closed surface's seam, not a real boundary. `face_a` and
+   * `face_b` are then the same face.
+   */
+  bool seam;
+} CadaclysmFemEdge;
+
+/**
+ * One B-rep vertex of a FEM mesh: the node the mesh put there, if any, and where the
+ * topology says it is, if that is known.
+ *
+ * One struct rather than three out-parameters: it matches the fill-an-out-struct-return-
+ * `bool` shape of every sibling accessor here, it gives the header and every wrapper a named
+ * type to pin a layout against, and it puts `node`'s sentinel beside `has_position` where a
+ * caller reads both at once.
+ */
+typedef struct CadaclysmFemVertex {
+  /**
+   * The mesh node at this vertex, or [`CADACLYSM_NONE`] where the mesh has none there.
+   *
+   * **A sentinel here is ordinary, not a fault.** The analysis rebuilds a vertex wherever
+   * two trims meet, and a pole's polyline runs give a sphere 48 of them where the mesh has
+   * 2 points; a caller walking these skips the sentinel rather than treating it as a gap.
+   */
+  uint32_t node;
+  /**
+   * Where the vertex is, in the same space and under the same placement as the view's
+   * `nodes`. **Meaningless unless `has_position`** -- it is left zeroed in that case, and
+   * a caller that reads it anyway reads a point no geometry has.
+   *
+   * The file's own vertex, not a mesh node: the two can differ by the reader's rounding.
+   */
+  double point[3];
+  /**
+   * `point` was placed. False where every trim meeting at this vertex is a curve with no
+   * geometry to read an end off -- then there is **no position at all**, reported as this
+   * flag rather than as a plausible-looking `(0, 0, 0)` that a solver would take for a
+   * node at the origin.
+   */
+  bool has_position;
+} CadaclysmFemVertex;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -961,6 +1279,12 @@ const char *cadaclysm_schema(const struct CadaclysmScene *scene);
  */
 const char *cadaclysm_schema_read(const struct CadaclysmScene *scene);
 
+/**
+ * What one length unit in the file is worth in metres; `1` where the file did not say.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
 double cadaclysm_metres_per_unit(const struct CadaclysmScene *scene);
 
 /**
@@ -987,6 +1311,17 @@ double cadaclysm_metres_per_unit(const struct CadaclysmScene *scene);
  * `scene` must be null or a handle from [`cadaclysm_open`].
  */
 struct CadaclysmBounds cadaclysm_bounds(const struct CadaclysmScene *scene);
+
+/**
+ * [`cadaclysm_bounds`] in `double`: the same union box, unnarrowed.
+ *
+ * **This meshes all of it**, being the only way to know how far it reaches. A caller
+ * that has not the time should frame from the parts it has built.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+struct CadaclysmBounds64 cadaclysm_bounds64(const struct CadaclysmScene *scene);
 
 /**
  * The part containing this one, or [`CADACLYSM_NONE`] for a root.
@@ -1307,6 +1642,19 @@ bool cadaclysm_node_visible(const struct CadaclysmScene *scene, uint32_t node);
 struct CadaclysmMesh cadaclysm_node_mesh(const struct CadaclysmScene *scene, uint32_t node);
 
 /**
+ * This part's triangles in `double`: [`cadaclysm_node_mesh`]'s own mesh, lent rather
+ * than narrowed -- see [`CadaclysmMesh64`], and its note on forgetting. In the part's own
+ * frame, built now if it has not been; an instance lends the mesh of the shape it
+ * instances, the same pointers. All-null for a part with nothing to mesh.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]. The pointers must not be
+ * freed, nor read past the counts, nor used after [`cadaclysm_close`] or
+ * [`cadaclysm_forget_meshes`].
+ */
+struct CadaclysmMesh64 cadaclysm_node_mesh64(const struct CadaclysmScene *scene, uint32_t node);
+
+/**
  * About how many triangles [`cadaclysm_node_mesh`] would give for this part,
  * **without building it** -- for a caller sizing a budget before it meshes:
  * what to skip, what to take at a coarser level, how much memory a scene
@@ -1373,6 +1721,14 @@ struct CadaclysmMesh cadaclysm_node_surface_proxy_mesh(const struct CadaclysmSce
 struct CadaclysmBounds cadaclysm_node_bounds(const struct CadaclysmScene *scene, uint32_t node);
 
 /**
+ * [`cadaclysm_node_bounds`] in `double`.
+ *
+ * # Safety
+ * As [`cadaclysm_node_bounds`].
+ */
+struct CadaclysmBounds64 cadaclysm_node_bounds64(const struct CadaclysmScene *scene, uint32_t node);
+
+/**
  * The extent of what this part draws **under a placement**, for a part drawn from
  * its surfaces: every sample the bounds are taken from is carried through the
  * document's convention and then `placement` -- sixteen doubles, column-major, as
@@ -1399,6 +1755,16 @@ struct CadaclysmBounds cadaclysm_node_bounds(const struct CadaclysmScene *scene,
 struct CadaclysmBounds cadaclysm_node_bounds_placed(const struct CadaclysmScene *scene,
                                                     uint32_t node,
                                                     const double *placement);
+
+/**
+ * [`cadaclysm_node_bounds_placed`] in `double`.
+ *
+ * # Safety
+ * As [`cadaclysm_node_bounds_placed`].
+ */
+struct CadaclysmBounds64 cadaclysm_node_bounds_placed64(const struct CadaclysmScene *scene,
+                                                        uint32_t node,
+                                                        const double *placement);
 
 /**
  * The collision body for what this node draws, **building its mesh if it has not
@@ -1685,6 +2051,16 @@ struct CadaclysmBeziers cadaclysm_node_edge_beziers(const struct CadaclysmScene 
                                                     uint32_t node);
 
 /**
+ * [`cadaclysm_node_edge_beziers`] in `double`: the same segments, unnarrowed -- see
+ * [`CadaclysmBeziers64`]. Borrowed from the scene until it is closed.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+struct CadaclysmBeziers64 cadaclysm_node_edge_beziers64(const struct CadaclysmScene *scene,
+                                                        uint32_t node);
+
+/**
  * This part's faces as surfaces and trims — see [`CadaclysmSurfaces`].
  *
  * **The parametric product, and the trimmed one.** A face carries the surface it sits
@@ -1766,6 +2142,16 @@ struct CadaclysmBeziers cadaclysm_node_curve_beziers(const struct CadaclysmScene
                                                      uint32_t node);
 
 /**
+ * [`cadaclysm_node_edge_beziers64`] for this part's free curves -- see
+ * [`cadaclysm_node_curve_beziers`].
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+struct CadaclysmBeziers64 cadaclysm_node_curve_beziers64(const struct CadaclysmScene *scene,
+                                                         uint32_t node);
+
+/**
  * This part's isocurves as Bézier segments — see
  * [`cadaclysm_node_edge_beziers`], and [`cadaclysm_node_isocurves`] for what an
  * isocurve is.
@@ -1775,6 +2161,16 @@ struct CadaclysmBeziers cadaclysm_node_curve_beziers(const struct CadaclysmScene
  */
 struct CadaclysmBeziers cadaclysm_node_isocurve_beziers(const struct CadaclysmScene *scene,
                                                         uint32_t node);
+
+/**
+ * [`cadaclysm_node_edge_beziers64`] for this part's isocurves -- see
+ * [`cadaclysm_node_isocurve_beziers`].
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+struct CadaclysmBeziers64 cadaclysm_node_isocurve_beziers64(const struct CadaclysmScene *scene,
+                                                            uint32_t node);
 
 /**
  * This part's free curves, as polylines — see [`cadaclysm_node_edges`], which
@@ -1817,7 +2213,10 @@ struct CadaclysmPolylines cadaclysm_node_isocurves(const struct CadaclysmScene *
  * **Nothing breaks.** A node asked for again simply meshes again -- the cache is an
  * optimisation, and this trades time later for memory now. Bounds are kept, being a
  * box per node against a mesh of millions of triangles, and re-deriving one would
- * mean building that mesh again just to cull it.
+ * mean building that mesh again just to cull it. The one exception: the pointers
+ * [`cadaclysm_node_mesh64`] handed out are the document's own mesh (see
+ * [`CadaclysmMesh64`]), and are freed by this call along with it; the float mesh's
+ * pointers and the f64 Béziers' survive, each a separate cache this call does not touch.
  *
  * **It frees the cache, which on some formats is not all of it.** A reader whose
  * builder captured a finished mesh still holds that mesh; one whose builder keeps a
@@ -2434,6 +2833,211 @@ void cadaclysm_meshlet_children(const struct CadaclysmMeshlets *handle,
  * The handle must have come from [`cadaclysm_meshlets_build`] and not been freed.
  */
 void cadaclysm_meshlets_free(struct CadaclysmMeshlets *handle);
+
+/**
+ * Fill `options` with `size` set and every default in place: a chordal tolerance and no size
+ * ceiling, exactly as `FemOptions::default()` states them -- the numbers are not restated
+ * here, so the two cannot drift.
+ *
+ * **This is the one call the size rule does not protect.** [`cadaclysm_node_fem_mesh`] reads
+ * only the fields `size` says are there, so a caller built against an older header is safe
+ * against a newer library. This function has no such input to read: it writes
+ * `sizeof(CadaclysmFemOptions)` bytes as **this library** knows that type, and a caller
+ * compiled against an older, shorter header has only that many bytes of stack local to
+ * receive them into. Its header must be at least as new as the library it links.
+ *
+ * # Safety
+ * `options` must be null, or point at writable storage of at least
+ * `sizeof(CadaclysmFemOptions)` bytes, `sizeof` taken from a header at least as new as this
+ * library -- see above.
+ */
+void cadaclysm_fem_options_init(struct CadaclysmFemOptions *options);
+
+/**
+ * One node's mesh for a solver: nodes welded by bits, triangles wound outward, each node
+ * tagged with the lowest-dimension B-rep entity it lies on, and every crack reported rather
+ * than closed.
+ *
+ * `placement` is null (the identity) or sixteen doubles, column-major, as
+ * [`cadaclysm_node_bounds_placed`](crate::cadaclysm_node_bounds_placed) takes them; it is
+ * applied in `f64` throughout. `options` is null (every default) or a struct filled by
+ * [`cadaclysm_fem_options_init`] -- whose **`max_size` bounds the boundary segments and merely
+ * targets the interior**, and one small enough beside the body to reach the mesher's own piece
+ * and station ceilings is not honoured at all: `CadaclysmFemMeshView::longest_edge` is what the
+ * mesh actually came to, and the figure a caller that asked for an element size checks to find
+ * out whether it got one. `tolerance` alone decides how closely the boundary follows the
+ * geometry. (Also on `CadaclysmFemOptions::max_size` and `CadaclysmFemMeshView::longest_edge`,
+ * and stated here because a C reader meets a struct member's own comment nowhere but the header
+ * itself -- the docs pages carry a struct as its declaration alone.)
+ *
+ * **The space is the body's, not the scene's, for a B-rep -- and the scene's for a mesh.**
+ * A B-rep body's FEM mesh is in the **file's own units and axes**, whatever convention the
+ * scene was opened with, because it is taken off the brep
+ * [`cadaclysm_node_brep`](crate::cadaclysm_node_brep) hands over and that brep is in the
+ * file's own units and axes for the reason stated there: a convention converts what is
+ * drawn, and converting a brep would mean rebuilding it. A node with no brep falls back to
+ * the scene's own mesh, which **is** converted, so it comes back in the scene's convention.
+ * **`CadaclysmFemMeshView::from_mesh` is the flag that says which one a caller got**, and
+ * under a non-NATIVE convention the two are different spaces: a caller mixing these nodes
+ * with [`cadaclysm_node_transform`](crate::cadaclysm_node_transform) on a Y-up scene gets a
+ * rotated part unless it reads that flag.
+ *
+ * The mesh fallback is wound counter-clockwise about the outward normal first, as
+ * [`cadaclysm_node_save_mesh`](crate::cadaclysm_node_save_mesh) winds it and for the same
+ * reason: a solver mesh is a file, not a frame, and a clockwise-convention scene's mesh
+ * handed over as it stands reads inside out.
+ *
+ * In the part's own frame and following the same hop from an instance to the shape it draws
+ * that [`cadaclysm_node_mesh`](crate::cadaclysm_node_mesh) follows: a node instanced six
+ * times meshes once, where it is defined.
+ *
+ * **A cracked body is not a failure.** It comes back with `watertight` false and its cracks
+ * in `open_edges` / `folded_edges`; nothing is welded shut to make it look sound. Null, with
+ * [`cadaclysm_last_error`](crate::cadaclysm_last_error) saying why, for a bad tolerance or
+ * size, a non-finite or singular placement, a node with neither a brep nor a mesh, and a
+ * body that meshes to no triangles at all.
+ *
+ * Free it with [`cadaclysm_fem_mesh_free`].
+ *
+ * # Safety
+ * `scene` must be null or a live handle from [`cadaclysm_open`](crate::cadaclysm_open);
+ * `placement` null or sixteen readable doubles; `options` null or a struct whose `size`
+ * bytes are readable.
+ */
+struct CadaclysmFemMesh *cadaclysm_node_fem_mesh(const struct CadaclysmScene *scene,
+                                                 uint32_t node,
+                                                 const double *placement,
+                                                 const struct CadaclysmFemOptions *options);
+
+/**
+ * The flat arrays and the summary of one FEM mesh, into `out`.
+ *
+ * `false`, with [`cadaclysm_last_error`](crate::cadaclysm_last_error), for a null handle or
+ * a null `out`; nothing is written in that case.
+ *
+ * # Safety
+ * `m` must be null or a handle from [`cadaclysm_node_fem_mesh`] that has not been freed;
+ * `out` must be null or point at writable storage for one `CadaclysmFemMeshView`.
+ */
+bool cadaclysm_fem_mesh_view(const struct CadaclysmFemMesh *m, struct CadaclysmFemMeshView *out);
+
+/**
+ * B-rep edge `i` of a FEM mesh, into `out`.
+ *
+ * `false`, with [`cadaclysm_last_error`](crate::cadaclysm_last_error), for a null handle, a
+ * null `out`, or an `i` at or past `CadaclysmFemMeshView::edge_count`; nothing is written in
+ * that case.
+ *
+ * # Safety
+ * As [`cadaclysm_fem_mesh_view`], with `out` a `CadaclysmFemEdge`.
+ */
+bool cadaclysm_fem_mesh_edge(const struct CadaclysmFemMesh *m,
+                             uint32_t i,
+                             struct CadaclysmFemEdge *out);
+
+/**
+ * B-rep vertex `i` of a FEM mesh, into `out`.
+ *
+ * `false`, with [`cadaclysm_last_error`](crate::cadaclysm_last_error), for a null handle, a
+ * null `out`, or an `i` at or past `CadaclysmFemMeshView::vertex_count`; nothing is written
+ * in that case. A vertex with no node and no position is **not** a failure: it comes back
+ * `true` with `node == CADACLYSM_NONE` and `has_position == false`.
+ *
+ * # Safety
+ * As [`cadaclysm_fem_mesh_view`], with `out` a `CadaclysmFemVertex`.
+ */
+bool cadaclysm_fem_mesh_vertex(const struct CadaclysmFemMesh *m,
+                               uint32_t i,
+                               struct CadaclysmFemVertex *out);
+
+/**
+ * Crack `i`: a directed mesh edge `(a, b)` with no `(b, a)`, and the B-rep edge both nodes
+ * lie on or [`CADACLYSM_NONE`] where they share none.
+ *
+ * `false`, with [`cadaclysm_last_error`](crate::cadaclysm_last_error), for a null handle, a
+ * null out-pointer, or an `i` at or past `CadaclysmFemMeshView::open_edge_count`.
+ *
+ * **Empty unless the body's topology is closed -- for a B-rep body.** A mesh-only body
+ * (`CadaclysmFemMeshView::from_mesh`) carries no topology to say whether it ought to close,
+ * so its census always runs over the welded triangles, and an empty one there really does
+ * mean "nothing found". `CadaclysmFemMeshView::watertight` states both contracts and which
+ * of them a caller is holding.
+ *
+ * # Safety
+ * `m` as [`cadaclysm_fem_mesh_view`]; `a`, `b` and `brep_edge` each null or a writable
+ * `uint32_t`.
+ */
+bool cadaclysm_fem_mesh_open_edge(const struct CadaclysmFemMesh *m,
+                                  uint32_t i,
+                                  uint32_t *a,
+                                  uint32_t *b,
+                                  uint32_t *brep_edge);
+
+/**
+ * Fold `i`: a directed mesh edge used by more than one triangle, with its B-rep edge as
+ * [`cadaclysm_fem_mesh_open_edge`] reports one.
+ *
+ * **A body can be folded without being open**, and the closure census's own pinned rows are
+ * folds: a caller that checks only `open_edge_count` calls such a body sound. `false`, with
+ * [`cadaclysm_last_error`](crate::cadaclysm_last_error), for a null handle, a null
+ * out-pointer, or an `i` at or past `CadaclysmFemMeshView::folded_edge_count`.
+ *
+ * # Safety
+ * As [`cadaclysm_fem_mesh_open_edge`].
+ */
+bool cadaclysm_fem_mesh_folded_edge(const struct CadaclysmFemMesh *m,
+                                    uint32_t i,
+                                    uint32_t *a,
+                                    uint32_t *b,
+                                    uint32_t *brep_edge);
+
+/**
+ * Write the mesh to `path` as a Gmsh 4.1 ASCII `.msh`: an entity per B-rep vertex, edge and
+ * face, a volume where the body closes, and a physical group naming each.
+ *
+ * The same bytes [`cadaclysm_fem_mesh_msh_text`] returns, from the same writer -- the text
+ * goes straight to the file rather than through the handle's slot, so a `_msh_text` call on
+ * the same handle from another thread cannot free it under the write.
+ *
+ * `false`, with [`cadaclysm_last_error`](crate::cadaclysm_last_error), for a null handle, no
+ * path, a mesh the writer refuses, or a file it cannot write.
+ *
+ * # Safety
+ * `m` as [`cadaclysm_fem_mesh_view`]; `path` must be null or a valid C string.
+ */
+bool cadaclysm_fem_mesh_save_msh(const struct CadaclysmFemMesh *m, const char *path);
+
+/**
+ * The mesh as Gmsh 4.1 ASCII `.msh` text, borrowed from the handle.
+ *
+ * The text belongs to the handle and is replaced by the next call on it: the previous text
+ * is freed under the lock, so the pointer that dies is the one a **previous** call returned,
+ * never one this call hands out. It dies for good with
+ * [`cadaclysm_fem_mesh_free`]. A caller that wants to keep it copies it.
+ *
+ * One handle, one slot -- not one per scene as `cadaclysm_scene_svg_text`'s is, so two
+ * threads working on two handles never free each other's text. Two calls on **one** handle
+ * still race, as any two writes to one slot do: a caller that asks twice reads the first
+ * answer before it asks again, or writes files with [`cadaclysm_fem_mesh_save_msh`], which
+ * never touches the slot.
+ *
+ * Null, with [`cadaclysm_last_error`](crate::cadaclysm_last_error), for a null handle or a
+ * mesh the writer refuses -- the writer states a field it cannot honour, and that refusal
+ * arrives here as a message, not as a crash.
+ *
+ * # Safety
+ * `m` must be null or a handle from [`cadaclysm_node_fem_mesh`] that has not been freed.
+ */
+const char *cadaclysm_fem_mesh_msh_text(const struct CadaclysmFemMesh *m);
+
+/**
+ * Release a FEM mesh, and with it every pointer any accessor handed out and the `.msh` text.
+ * Null is a no-op.
+ *
+ * # Safety
+ * `m` must have come from [`cadaclysm_node_fem_mesh`] and not been freed.
+ */
+void cadaclysm_fem_mesh_free(struct CadaclysmFemMesh *m);
 
 #ifdef __cplusplus
 }  // extern "C"

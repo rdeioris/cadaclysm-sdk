@@ -167,6 +167,26 @@ const CadaclysmBounds = koffi.struct('CadaclysmBounds', {
   min: koffi.array('float', 3),
   max: koffi.array('float', 3),
 });
+// f64 twins (Task 11 of the f64-twins plan): CadaclysmMesh64/CadaclysmBeziers64/
+// CadaclysmBounds64, beside CadaclysmBounds, in the header's field order.
+const CadaclysmMesh64 = koffi.struct('CadaclysmMesh64', {
+  positions: 'const double *',
+  normals: 'const double *',
+  uvs: 'const double *',
+  colors: 'const float *',
+  indices: 'const uint32_t *',
+  vertex_count: 'uint32_t',
+  index_count: 'uint32_t',
+});
+const CadaclysmBeziers64 = koffi.struct('CadaclysmBeziers64', {
+  points: 'const double *',
+  weights: 'const double *',
+  count: 'uint32_t',
+});
+const CadaclysmBounds64 = koffi.struct('CadaclysmBounds64', {
+  min: koffi.array('double', 3),
+  max: koffi.array('double', 3),
+});
 const CadaclysmAttribute = koffi.struct('CadaclysmAttribute', {
   name: 'const char *',
   kind: 'uint32_t',
@@ -312,6 +332,15 @@ function _lib() {
     node_collision: f('bool cadaclysm_node_collision(const CadaclysmScene *scene, uint32_t node, uint32_t hull_budget, _Inout_ CadaclysmCollision *out)'),
     node_collision_hull: f('CadaclysmCollisionHull cadaclysm_node_collision_hull(const CadaclysmScene *scene, uint32_t node, uint32_t hull_budget)'),
     node_bounds_placed: f('CadaclysmBounds cadaclysm_node_bounds_placed(const CadaclysmScene *scene, uint32_t node, const double *placement)'),
+    // f64 twins (Task 11): the document's own double mesh and Béziers, and bounds
+    // exact far from the origin -- see the doc comments on `mesh64`/`bounds64` below.
+    node_mesh64: f('CadaclysmMesh64 cadaclysm_node_mesh64(const CadaclysmScene *scene, uint32_t node)'),
+    node_edge_beziers64: f('CadaclysmBeziers64 cadaclysm_node_edge_beziers64(const CadaclysmScene *scene, uint32_t node)'),
+    node_curve_beziers64: f('CadaclysmBeziers64 cadaclysm_node_curve_beziers64(const CadaclysmScene *scene, uint32_t node)'),
+    node_isocurve_beziers64: f('CadaclysmBeziers64 cadaclysm_node_isocurve_beziers64(const CadaclysmScene *scene, uint32_t node)'),
+    node_bounds64: f('CadaclysmBounds64 cadaclysm_node_bounds64(const CadaclysmScene *scene, uint32_t node)'),
+    node_bounds_placed64: f('CadaclysmBounds64 cadaclysm_node_bounds_placed64(const CadaclysmScene *scene, uint32_t node, const double *placement)'),
+    bounds64: f('CadaclysmBounds64 cadaclysm_bounds64(const CadaclysmScene *scene)'),
     node_is_meshed: f('bool cadaclysm_node_is_meshed(const CadaclysmScene *scene, uint32_t node)'),
     node_surface_edges: f('CadaclysmPolylines cadaclysm_node_surface_edges(const CadaclysmScene *scene, uint32_t node)'),
     node_surface_isocurves: f('CadaclysmPolylines cadaclysm_node_surface_isocurves(const CadaclysmScene *scene, uint32_t node)'),
@@ -395,6 +424,11 @@ function _uint32s(ptr, n) {
   if (ptr == null) return null;
   return n === 0 ? new Uint32Array(0) : koffi.decode(ptr, 'uint32_t', n);
 }
+/** `n` doubles at `ptr` as a fresh `Float64Array`, or `null` for a null pointer -- the f64 twin of `_floats`. */
+function _doubles(ptr, n) {
+  if (ptr == null) return null;
+  return n === 0 ? new Float64Array(0) : koffi.decode(ptr, 'double', n);
+}
 
 // ---- module-level functions --------------------------------------------------
 
@@ -460,6 +494,18 @@ class Bounds {
   constructor(min, max) {
     this.min = Float32Array.from(min);
     this.max = Float32Array.from(max);
+  }
+  /** Whether this is the all-zero box the ABI uses for "nothing here". */
+  get isEmpty() { return !this.min.some(Boolean) && !this.max.some(Boolean); }
+  get size() { return [0, 1, 2].map((i) => this.max[i] - this.min[i]); }
+  get centre() { return [0, 1, 2].map((i) => (this.min[i] + this.max[i]) / 2); }
+}
+
+/** `Bounds` in `double`: the same box, unnarrowed -- exact far from the origin, where `Bounds`'s widened `float` is not. */
+class Bounds64 {
+  constructor(min, max) {
+    this.min = Float64Array.from(min);
+    this.max = Float64Array.from(max);
   }
   /** Whether this is the all-zero box the ABI uses for "nothing here". */
   get isEmpty() { return !this.min.some(Boolean) && !this.max.some(Boolean); }
@@ -537,6 +583,34 @@ function _meshOf(raw) {
   );
 }
 
+/**
+ * `Mesh` in `double`: the document's own mesh -- positions/normals/uvs are the exact
+ * f64 values `mesh()`'s `float` ones are narrowed from, same indices -- copied out at
+ * call time, as `mesh()`'s `Float32Array`s are. Like `mesh()`'s copy, it survives
+ * `Scene.forgetMeshes()` and `Scene.close()`. Colours stay `Float32Array`: RGBA in 0..1
+ * needs no more precision, as `CadaclysmMesh64` says.
+ */
+class Mesh64 {
+  constructor(positions, normals, uvs, colors, indices, vertexCount, indexCount) {
+    this.positions = positions; this.normals = normals; this.uvs = uvs; this.colors = colors;
+    this.indices = indices; this.vertexCount = vertexCount; this.indexCount = indexCount;
+  }
+  get triangleCount() { return Math.floor(this.indexCount / 3); }
+}
+
+/** A `CadaclysmMesh64` (by value) as a `Mesh64`. */
+function _mesh64Of(raw) {
+  const n = raw.vertex_count;
+  return new Mesh64(
+    _doubles(raw.positions, n * 3) ?? new Float64Array(0),
+    _doubles(raw.normals, n * 3),
+    _doubles(raw.uvs, n * 2),
+    _floats(raw.colors, n * 4),
+    _uint32s(raw.indices, raw.index_count) ?? new Uint32Array(0),
+    n, raw.index_count,
+  );
+}
+
 /** Feature edges or free curves, flattened: runs of points end to end, and a count per run. */
 class Polylines {
   constructor(positions, counts, polylineCount, vertexCount) {
@@ -578,6 +652,13 @@ class Beziers {
 
 function _beziersOf(raw) {
   return new Beziers(_floats(raw.points, raw.count * 12) ?? new Float32Array(0), _floats(raw.weights, raw.count * 4) ?? new Float32Array(0), raw.count);
+}
+
+/** `Beziers` in `double`: the same segments, unnarrowed -- see `edgeBeziers64`/`curveBeziers64`/`isocurveBeziers64`. */
+class Beziers64 { constructor(points, weights, count) { this.points = points; this.weights = weights; this.count = count; } }
+
+function _beziers64Of(raw) {
+  return new Beziers64(_doubles(raw.points, raw.count * 12) ?? new Float64Array(0), _doubles(raw.weights, raw.count * 4) ?? new Float64Array(0), raw.count);
 }
 
 /**
@@ -866,7 +947,19 @@ class Node {
   }
   /** Builds the geometry if it has not been built. */
   get bounds() { const b = _lib().node_bounds(this.scene._handle, this.index); return new Bounds(b.min, b.max); }
+  /** `bounds` in `double`: the same extent, unnarrowed -- exact far from the origin. */
+  get bounds64() { const b = _lib().node_bounds64(this.scene._handle, this.index); return new Bounds64(b.min, b.max); }
   mesh() { return _meshOf(_lib().node_mesh(this.scene._handle, this.index)); }
+  /**
+   * `mesh()` in `double` (see `Mesh64`): positions/normals/uvs copied out at call time
+   * as the exact f64 values `mesh()`'s `float` ones are narrowed from, same indices --
+   * null for a part with nothing to mesh, where `mesh()` gives an empty `Mesh`. Like
+   * `mesh()`'s copy, it survives `Scene.forgetMeshes()` and `Scene.close()`.
+   */
+  mesh64() {
+    const raw = _lib().node_mesh64(this.scene._handle, this.index);
+    return raw.positions == null ? null : _mesh64Of(raw);
+  }
   /** Level 0 is `mesh()`; 1..`lodLevels()` share its vertices and use fewer of its indices. */
   meshLod(level) { return _meshOf(_lib().node_mesh_lod(this.scene._handle, this.index, level)); }
   /** How far a level moved the surface, in the scene's units; what to pick levels by. */
@@ -883,6 +976,10 @@ class Node {
   edgeBeziers() { return _beziersOf(_lib().node_edge_beziers(this.scene._handle, this.index)); }
   curveBeziers() { return _beziersOf(_lib().node_curve_beziers(this.scene._handle, this.index)); }
   isocurveBeziers() { return _beziersOf(_lib().node_isocurve_beziers(this.scene._handle, this.index)); }
+  /** `edgeBeziers()`/`curveBeziers()`/`isocurveBeziers()` in `double`: the same segments, unnarrowed. */
+  edgeBeziers64() { return _beziers64Of(_lib().node_edge_beziers64(this.scene._handle, this.index)); }
+  curveBeziers64() { return _beziers64Of(_lib().node_curve_beziers64(this.scene._handle, this.index)); }
+  isocurveBeziers64() { return _beziers64Of(_lib().node_isocurve_beziers64(this.scene._handle, this.index)); }
   /** The collision body, or null for a node that draws nothing. `hullBudget` 0 asks for the Unity limit. */
   collision(hullBudget = 0) {
     const out = { size: koffi.sizeof(CadaclysmCollision) };
@@ -899,6 +996,13 @@ class Node {
     if (m !== null && m.length !== 16) throw new CadaclysmError('boundsPlaced: a placement is 16 numbers');
     const b = _lib().node_bounds_placed(this.scene._handle, this.index, m);
     return new Bounds(b.min, b.max);
+  }
+  /** `boundsPlaced()` in `double`: the same box, unnarrowed. */
+  boundsPlaced64(placement = null) {
+    const m = placement == null ? null : Float64Array.from(placement);
+    if (m !== null && m.length !== 16) throw new CadaclysmError('boundsPlaced64: a placement is 16 numbers');
+    const b = _lib().node_bounds_placed64(this.scene._handle, this.index, m);
+    return new Bounds64(b.min, b.max);
   }
   /** Whether its mesh has been built and is held. */
   get isMeshed() { return _lib().node_is_meshed(this.scene._handle, this.index); }
@@ -924,6 +1028,11 @@ class Node {
     }
   }
   async meshAsync() { const m = await this.scene._async('meshAsync', { op: 'mesh', node: this.index }); return new Mesh(m.positions, m.normals, m.uvs, m.colors, m.indices, m.vertexCount, m.indexCount); }
+  /** `mesh64()`, on the worker thread. */
+  async meshAsync64() {
+    const m = await this.scene._async('meshAsync64', { op: 'mesh64', node: this.index });
+    return m == null ? null : new Mesh64(m.positions, m.normals, m.uvs, m.colors, m.indices, m.vertexCount, m.indexCount);
+  }
   async meshLodAsync(level) { const m = await this.scene._async('meshLodAsync', { op: 'meshLod', node: this.index, level }); return new Mesh(m.positions, m.normals, m.uvs, m.colors, m.indices, m.vertexCount, m.indexCount); }
   async saveMeshAsync(filePath, format = 'stl') { await this.scene._async('saveMeshAsync', { op: 'saveMesh', node: this.index, path: String(filePath), format }); }
   /**
@@ -1013,6 +1122,8 @@ class Scene {
   get metresPerUnit() { return _lib().metres_per_unit(this._handle); }
   /** The whole document's box, which meshes all of it. */
   get bounds() { const b = _lib().bounds(this._handle); return new Bounds(b.min, b.max); }
+  /** `bounds` in `double`: the same union box, unnarrowed. **This meshes all of it.** */
+  get bounds64() { const b = _lib().bounds64(this._handle); return new Bounds64(b.min, b.max); }
   /** The 4x4 (16 floats, column-major) that puts `Node.surfaces()` in the space everything else is in. */
   get surfaceMatrix() { const out = new Float32Array(16); _lib().surface_matrix(this._handle, out); return out; }
   /**
@@ -1343,8 +1454,8 @@ module.exports = {
   CadaclysmError, NONE, Convention, ValueKind, SvgView,
   libraryPath, version, buildDate, license, licenseInfo, licenseNoticeCount, meshFormats, formats, lodLevels,
   svgOptionsDefaults,
-  _lib, _text, _lastError, _floats, _uint32s, _searchedPaths, _notFoundMessage,
-  Bounds, Attribute, Brep, Placement, Node, Scene, open, openMemory, _openRaw, openAsync, openMemoryAsync, declaredSchema, resolveSchema, _options, _rows, _attribute,
-  Mesh, Polylines, Beziers, Face, Surfaces, Collision, CollisionHull, Meshlets, pickFile, pickSave,
-  _meshOf, _polylinesOf, _beziersOf, _surfacesOf, _svgOptions,
+  _lib, _text, _lastError, _floats, _uint32s, _doubles, _searchedPaths, _notFoundMessage,
+  Bounds, Bounds64, Attribute, Brep, Placement, Node, Scene, open, openMemory, _openRaw, openAsync, openMemoryAsync, declaredSchema, resolveSchema, _options, _rows, _attribute,
+  Mesh, Mesh64, Polylines, Beziers, Beziers64, Face, Surfaces, Collision, CollisionHull, Meshlets, pickFile, pickSave,
+  _meshOf, _mesh64Of, _polylinesOf, _beziersOf, _beziers64Of, _surfacesOf, _svgOptions,
 };

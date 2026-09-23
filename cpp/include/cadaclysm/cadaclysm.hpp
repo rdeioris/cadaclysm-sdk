@@ -351,6 +351,23 @@ struct Bounds {
     bool operator!=(const Bounds& other) const noexcept { return !(*this == other); }
 };
 
+// Bounds in `double`: the same box, unnarrowed. All zeros where there was nothing to
+// bound.
+struct Bounds64 {
+    std::array<double, 3> min{};
+    std::array<double, 3> max{};
+
+    bool is_empty() const noexcept {
+        return min == std::array<double, 3>{} && max == std::array<double, 3>{};
+    }
+    std::array<double, 3> size() const noexcept { return {max[0] - min[0], max[1] - min[1], max[2] - min[2]}; }
+    std::array<double, 3> centre() const noexcept {
+        return {(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2};
+    }
+    bool operator==(const Bounds64& other) const noexcept { return min == other.min && max == other.max; }
+    bool operator!=(const Bounds64& other) const noexcept { return !(*this == other); }
+};
+
 // One thing the file said about a node. `value` holds the alternative `kind` names:
 // a string for text, list and reference; int64 for integer; double for real; bool
 // for boolean; monostate for none.
@@ -443,6 +460,79 @@ private:
 
     detail::Ref<detail::SceneState> scene_;
     CadaclysmMesh raw_;
+};
+
+// Triangles in `double`, in memory of our own: what Mesh64::copy() returns, safe to
+// outlive anything. Colours stay `float` (RGBA in 0..1 needs no more).
+struct MeshData64 {
+    std::vector<double> positions;  // 3 a vertex
+    std::vector<double> normals;    // 3 a vertex, or empty
+    std::vector<double> uvs;        // 2 a vertex, or empty
+    std::vector<float> colors;      // 4 a vertex (RGBA 0..1), or empty
+    std::vector<std::uint32_t> indices;
+
+    std::size_t vertex_count() const noexcept { return positions.size() / 3; }
+    std::size_t triangle_count() const noexcept { return indices.size() / 3; }
+};
+
+// Mesh in `double`: the node's own mesh, **lent as it is** rather than narrowed the
+// way Mesh is -- the same triangles and indices, Mesh's `float` positions being
+// exactly these narrowed. For a caller that uses the mesh as geometry (an exporter, a
+// measurement, a solver) and wants the file's own coordinates, which `float` cannot
+// hold far from the origin. Colours stay `float`.
+//
+// **A forget drops it.** Scene::forget_meshes frees the document's own mesh these
+// pointers borrow: read none of them after a forget; ask again and the mesh is built
+// again. Mesh's pointers survive a forget, its `float` copy being kept separately.
+// raw() checks the scene is still open, the same check Mesh makes, but a forget is not
+// a close and is not tracked: reading a Mesh64 after a forget (without an intervening
+// close) is undefined behaviour, exactly as the C ABI documents.
+class Mesh64 {
+public:
+    Span<const double> positions() const { return doubles(raw().positions, 3); }
+    Span<const double> normals() const { return doubles(raw().normals, 3); }
+    Span<const double> uvs() const { return doubles(raw().uvs, 2); }
+    // Four floats a vertex, RGBA -- still `float`: CadaclysmMesh64::colors says RGBA
+    // in 0..1 needs no more precision.
+    Span<const float> colors() const {
+        const CadaclysmMesh64& r = raw();
+        return r.colors ? Span<const float>(r.colors, static_cast<std::size_t>(r.vertex_count) * 4) : Span<const float>();
+    }
+    Span<const std::uint32_t> indices() const {
+        const CadaclysmMesh64& r = raw();
+        return r.indices ? Span<const std::uint32_t>(r.indices, r.index_count) : Span<const std::uint32_t>();
+    }
+    std::uint32_t vertex_count() const { return raw().vertex_count; }
+    std::uint32_t index_count() const { return raw().index_count; }
+    std::uint32_t triangle_count() const { return raw().index_count / 3; }
+    bool empty() const { return raw().index_count == 0; }
+
+    MeshData64 copy() const {
+        MeshData64 out;
+        auto take_d = [](std::vector<double>& to, Span<const double> from) { to.assign(from.begin(), from.end()); };
+        take_d(out.positions, positions());
+        take_d(out.normals, normals());
+        take_d(out.uvs, uvs());
+        Span<const float> c = colors();
+        out.colors.assign(c.begin(), c.end());
+        Span<const std::uint32_t> i = indices();
+        out.indices.assign(i.begin(), i.end());
+        return out;
+    }
+
+private:
+    friend class Node;
+    Mesh64(detail::Ref<detail::SceneState> scene, const CadaclysmMesh64& data) : scene_(std::move(scene)), raw_(data) {}
+    const CadaclysmMesh64& raw() const {
+        scene_.get("Mesh64");
+        return raw_;
+    }
+    Span<const double> doubles(const double* p, std::size_t per_vertex) const {
+        return p ? Span<const double>(p, static_cast<std::size_t>(raw_.vertex_count) * per_vertex) : Span<const double>();
+    }
+
+    detail::Ref<detail::SceneState> scene_;
+    CadaclysmMesh64 raw_;
 };
 
 // A node's feature edges or free curves as runs of points, borrowed from the scene.
@@ -542,6 +632,54 @@ private:
 
     detail::Ref<detail::SceneState> scene_;
     CadaclysmBeziers raw_;
+};
+
+// A Beziers64 in memory of your own, safe to outlive the scene: what Beziers64::copy()
+// returns.
+struct BeziersData64 {
+    std::vector<double> points;   // 3 a control point, 4 a curve
+    std::vector<double> weights;  // 1 a control point, 4 a curve
+
+    std::uint32_t count() const noexcept { return static_cast<std::uint32_t>(weights.size() / 4); }
+};
+
+// Beziers in `double`: the same segments, in the same order -- Beziers' `float`
+// points and weights being exactly these narrowed. Borrowed from the scene until it
+// closes, like Beziers; unlike Mesh64, unaffected by a forget (the beziers are not
+// part of the document's mesh cache).
+class Beziers64 {
+public:
+    Span<const double> points() const {
+        const CadaclysmBeziers64& r = raw();
+        return r.points ? Span<const double>(r.points, static_cast<std::size_t>(r.count) * 12) : Span<const double>();
+    }
+    Span<const double> weights() const {
+        const CadaclysmBeziers64& r = raw();
+        return r.weights ? Span<const double>(r.weights, static_cast<std::size_t>(r.count) * 4) : Span<const double>();
+    }
+    std::uint32_t count() const { return raw().count; }
+    bool empty() const { return raw().count == 0; }
+
+    // The same arrays in memory of your own, safe to keep after the scene closes.
+    BeziersData64 copy() const {
+        BeziersData64 out;
+        Span<const double> p = points();
+        Span<const double> w = weights();
+        out.points.assign(p.begin(), p.end());
+        out.weights.assign(w.begin(), w.end());
+        return out;
+    }
+
+private:
+    friend class Node;
+    Beziers64(detail::Ref<detail::SceneState> scene, const CadaclysmBeziers64& data) : scene_(std::move(scene)), raw_(data) {}
+    const CadaclysmBeziers64& raw() const {
+        scene_.get("Beziers64");
+        return raw_;
+    }
+
+    detail::Ref<detail::SceneState> scene_;
+    CadaclysmBeziers64 raw_;
 };
 
 // What a node turned out to be for a physics engine: a box, sphere, capsule or
@@ -702,7 +840,7 @@ struct Meshlet {
 };
 
 // A mesh split into meshlets, optionally with coarser levels above them, for a
-// mesh-shader or Nanite-style renderer. Built from any mesh -- a Node's or arrays of
+// mesh-shader or meshlet-based renderer. Built from any mesh -- a Node's or arrays of
 // your own -- and owned by you: freed when destroyed, or on free().
 class Meshlets {
 public:
@@ -1026,6 +1164,10 @@ public:
     // Its triangles, in its own frame, built now if they have not been.
     Mesh mesh() const { return Mesh(scene_, ::cadaclysm_node_mesh(h(), index_)); }
 
+    // mesh()'s own mesh, in `double`, lent rather than narrowed -- see Mesh64. All-null
+    // (empty()) for a node with nothing to mesh.
+    Mesh64 mesh64() const { return Mesh64(scene_, ::cadaclysm_node_mesh64(h(), index_)); }
+
     // Its triangles at a coarser level of detail: 0 is mesh() itself, 1 up to
     // lod_levels() each about a quarter of the triangles of the one before, and past
     // that empty. Every level shares the level-0 vertices -- the same positions, only
@@ -1044,6 +1186,13 @@ public:
     Beziers edge_beziers() const { return Beziers(scene_, ::cadaclysm_node_edge_beziers(h(), index_)); }
     Beziers curve_beziers() const { return Beziers(scene_, ::cadaclysm_node_curve_beziers(h(), index_)); }
     Beziers isocurve_beziers() const { return Beziers(scene_, ::cadaclysm_node_isocurve_beziers(h(), index_)); }
+
+    // The same three, unnarrowed -- see Beziers64.
+    Beziers64 edge_beziers64() const { return Beziers64(scene_, ::cadaclysm_node_edge_beziers64(h(), index_)); }
+    Beziers64 curve_beziers64() const { return Beziers64(scene_, ::cadaclysm_node_curve_beziers64(h(), index_)); }
+    Beziers64 isocurve_beziers64() const {
+        return Beziers64(scene_, ::cadaclysm_node_isocurve_beziers64(h(), index_));
+    }
 
     // The collision body for what this node draws, building its mesh if it is not
     // built. hull_budget is the most triangles a hull may have; 0 asks for the Unity
@@ -1143,6 +1292,13 @@ public:
     // The same in the node's own frame.
     Bounds bounds_placed() const { return bounds_of(::cadaclysm_node_bounds_placed(h(), index_, nullptr)); }
 
+    // bounds_placed(placement), in `double`.
+    Bounds64 bounds_placed64(const std::array<double, 16>& placement) const {
+        return bounds64_of(::cadaclysm_node_bounds_placed64(h(), index_, placement.data()));
+    }
+    // bounds_placed(), in `double`.
+    Bounds64 bounds_placed64() const { return bounds64_of(::cadaclysm_node_bounds_placed64(h(), index_, nullptr)); }
+
     // Whether the triangles are built and held. Asking for surface products
     // (surface_edges, surface_pick, ...) leaves this false.
     bool is_meshed() const { return ::cadaclysm_node_is_meshed(h(), index_); }
@@ -1174,6 +1330,9 @@ public:
 
     // In the node's own frame. Meshes the node to find out.
     Bounds bounds() const { return bounds_of(::cadaclysm_node_bounds(h(), index_)); }
+
+    // bounds(), in `double`.
+    Bounds64 bounds64() const { return bounds64_of(::cadaclysm_node_bounds64(h(), index_)); }
 
     // This node and every node under it, parents before children.
     std::vector<Node> walk() const {
@@ -1209,6 +1368,15 @@ private:
 
     static Bounds bounds_of(const CadaclysmBounds& raw) {
         Bounds b;
+        for (int i = 0; i < 3; ++i) {
+            b.min[i] = raw.min[i];
+            b.max[i] = raw.max[i];
+        }
+        return b;
+    }
+
+    static Bounds64 bounds64_of(const CadaclysmBounds64& raw) {
+        Bounds64 b;
         for (int i = 0; i < 3; ++i) {
             b.min[i] = raw.min[i];
             b.max[i] = raw.max[i];
@@ -1318,6 +1486,18 @@ public:
     Bounds bounds() const {
         CadaclysmBounds raw = ::cadaclysm_bounds(h());
         Bounds b;
+        for (int i = 0; i < 3; ++i) {
+            b.min[i] = raw.min[i];
+            b.max[i] = raw.max[i];
+        }
+        return b;
+    }
+
+    // bounds(), in `double`. This meshes all of it too, being the only way to know how
+    // far it reaches.
+    Bounds64 bounds64() const {
+        CadaclysmBounds64 raw = ::cadaclysm_bounds64(h());
+        Bounds64 b;
         for (int i = 0; i < 3; ++i) {
             b.min[i] = raw.min[i];
             b.max[i] = raw.max[i];

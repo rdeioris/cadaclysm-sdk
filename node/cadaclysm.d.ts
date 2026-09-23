@@ -94,6 +94,12 @@ export class Bounds {
   min: Float32Array; max: Float32Array;
   readonly isEmpty: boolean; readonly size: number[]; readonly centre: number[];
 }
+/** `Bounds` in `double`: the same box, unnarrowed -- exact far from the origin. */
+export class Bounds64 {
+  private constructor();
+  min: Float64Array; max: Float64Array;
+  readonly isEmpty: boolean; readonly size: number[]; readonly centre: number[];
+}
 export class Attribute {
   private constructor();
   name: string; kind: ValueKind; value: string | number | boolean | null;
@@ -105,6 +111,13 @@ export class Mesh {
   indices: Uint32Array; vertexCount: number; indexCount: number;
   readonly triangleCount: number;
 }
+/** `Mesh` in `double`: the document's own mesh, copied out at call time as `mesh()`'s copy is -- positions/normals/uvs the exact f64 values `mesh()`'s `float` ones are narrowed from, colors stay `Float32Array`. */
+export class Mesh64 {
+  private constructor();
+  positions: Float64Array; normals: Float64Array | null; uvs: Float64Array | null; colors: Float32Array | null;
+  indices: Uint32Array; vertexCount: number; indexCount: number;
+  readonly triangleCount: number;
+}
 export class Polylines {
   private constructor();
   positions: Float32Array; counts: Uint32Array; polylineCount: number; vertexCount: number;
@@ -112,6 +125,8 @@ export class Polylines {
   segments(): Float32Array;
 }
 export class Beziers { private constructor(); points: Float32Array; weights: Float32Array; count: number }
+/** `Beziers` in `double`: the same segments, unnarrowed. */
+export class Beziers64 { private constructor(); points: Float64Array; weights: Float64Array; count: number }
 export class Face {
   private constructor();
   kind: number; reversed: boolean; transposed: boolean;
@@ -173,18 +188,25 @@ export class Node {
   readonly color: number[] | null;
   readonly rawTransform: Float64Array; readonly transform: number[][];
   readonly bounds: Bounds;
+  /** `bounds` in `double`: exact far from the origin. */
+  readonly bounds64: Bounds64;
   mesh(): Mesh;
+  /** `mesh()` in `double`, copied at call time -- null with nothing to mesh; survives `Scene.forgetMeshes()` and `Scene.close()` as `mesh()`'s copy does. */
+  mesh64(): Mesh64 | null;
   meshLod(level: number): Mesh;
   lodError(level: number): number;
   meshAsync(): Promise<Mesh>;
+  meshAsync64(): Promise<Mesh64 | null>;
   meshLodAsync(level: number): Promise<Mesh>;
   surfaces(): Surfaces;
   readonly brep: Brep | null;
   edges(): Polylines; curves(): Polylines; isocurves(): Polylines;
   edgeBeziers(): Beziers; curveBeziers(): Beziers; isocurveBeziers(): Beziers;
+  edgeBeziers64(): Beziers64; curveBeziers64(): Beziers64; isocurveBeziers64(): Beziers64;
   collision(hullBudget?: number): Collision | null;
   collisionHull(hullBudget?: number): CollisionHull;
   boundsPlaced(placement?: ArrayLike<number> | null): Bounds;
+  boundsPlaced64(placement?: ArrayLike<number> | null): Bounds64;
   readonly isMeshed: boolean;
   surfaceEdges(): Polylines; surfaceIsocurves(): Polylines;
   surfacePick(from: ArrayLike<number>, to: ArrayLike<number>): number[] | null;
@@ -205,7 +227,7 @@ export class Scene {
   [Symbol.dispose](): void;
   readonly version: string; readonly schema: string; readonly schemaRead: string; readonly substituted: boolean;
   readonly sourceName: string | null;
-  readonly metresPerUnit: number; readonly bounds: Bounds; readonly surfaceMatrix: Float32Array;
+  readonly metresPerUnit: number; readonly bounds: Bounds; readonly bounds64: Bounds64; readonly surfaceMatrix: Float32Array;
   diagnostics(): string[]; geometryDiagnostics(): string[];
   readonly nodeCount: number;
   node(index: number): Node; nodes(): Node[]; roots(): Node[];

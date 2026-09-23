@@ -732,6 +732,49 @@ func (m *Mesh) Copy() MeshData {
 	}
 }
 
+// Mesh64 is [Mesh] in double: the document's own mesh, lent **as it is**, where Node.Mesh
+// hands back a float32 copy of it -- the float32 positions are exactly these narrowed.
+// For a caller that uses the mesh as geometry (an exporter, a measurement, a solver) and
+// wants the file's own coordinates, which float32 cannot hold far from the origin.
+//
+// Colours stay float32 (RGBA in 0..1 needs no more). Shares Indices' very pointer with
+// Mesh.
+//
+// A forget drops it: the pointers borrow the document's own mesh, which
+// Scene.ForgetMeshes frees -- read none of them after a forget; ask again, and the mesh
+// is built again. (Mesh's float32 copy survives a forget, its own memory being kept.)
+type Mesh64 struct {
+	Positions []float64
+	Normals   []float64
+	Uvs       []float64
+	Colours   []float32
+	Indices   []uint32
+}
+
+// TriangleCount is len(Indices) / 3.
+func (m *Mesh64) TriangleCount() int { return len(m.Indices) / 3 }
+
+func meshFrom64(raw C.CadaclysmMesh64) *Mesh64 {
+	if raw.index_count == 0 || raw.positions == nil {
+		return nil
+	}
+	vertexFloats := int(raw.vertex_count) * 3
+	m := &Mesh64{
+		Positions: unsafe.Slice((*float64)(unsafe.Pointer(raw.positions)), vertexFloats),
+		Indices:   unsafe.Slice((*uint32)(unsafe.Pointer(raw.indices)), int(raw.index_count)),
+	}
+	if raw.normals != nil {
+		m.Normals = unsafe.Slice((*float64)(unsafe.Pointer(raw.normals)), vertexFloats)
+	}
+	if raw.uvs != nil {
+		m.Uvs = unsafe.Slice((*float64)(unsafe.Pointer(raw.uvs)), int(raw.vertex_count)*2)
+	}
+	if raw.colors != nil {
+		m.Colours = unsafe.Slice((*float32)(unsafe.Pointer(raw.colors)), int(raw.vertex_count)*4)
+	}
+	return m
+}
+
 // Polylines is a node's feature edges or free curves, already flattened to points — a
 // view over the scene's own memory, valid until Scene.Close.
 //
@@ -811,6 +854,37 @@ func beziersFrom(raw C.CadaclysmBeziers) *Beziers {
 	return &Beziers{
 		Points:  unsafe.Slice((*float32)(unsafe.Pointer(raw.points)), int(raw.count)*12),
 		Weights: unsafe.Slice((*float32)(unsafe.Pointer(raw.weights)), int(raw.count)*4),
+	}
+}
+
+// Beziers64 is [Beziers] in double: the same segments, unnarrowed -- the float32 ones are
+// these narrowed. A view over the scene's own memory, valid until Scene.Close.
+type Beziers64 struct {
+	Points  []float64
+	Weights []float64
+}
+
+// Count is how many curves this holds.
+func (b *Beziers64) Count() int { return len(b.Weights) / 4 }
+
+// BeziersData64 is a Beziers64 copied into memory of the caller's own.
+type BeziersData64 struct {
+	Points  []float64
+	Weights []float64
+}
+
+// Copy is the same curves in memory of our own, safe to outlive the scene.
+func (b *Beziers64) Copy() BeziersData64 {
+	return BeziersData64{Points: append([]float64(nil), b.Points...), Weights: append([]float64(nil), b.Weights...)}
+}
+
+func beziersFrom64(raw C.CadaclysmBeziers64) *Beziers64 {
+	if raw.count == 0 || raw.points == nil {
+		return &Beziers64{}
+	}
+	return &Beziers64{
+		Points:  unsafe.Slice((*float64)(unsafe.Pointer(raw.points)), int(raw.count)*12),
+		Weights: unsafe.Slice((*float64)(unsafe.Pointer(raw.weights)), int(raw.count)*4),
 	}
 }
 
@@ -1043,7 +1117,7 @@ type Meshlet struct {
 }
 
 // Meshlets is a mesh split into meshlets, optionally with coarser levels above them,
-// for a mesh-shader or Nanite-style renderer. Built from any mesh and owned by the
+// for a mesh-shader or meshlet-based renderer. Built from any mesh and owned by the
 // caller: Close it.
 type Meshlets struct {
 	handle *C.CadaclysmMeshlets
@@ -1388,6 +1462,20 @@ func (n *Node) Bounds() Bounds {
 	return out
 }
 
+// Bounds64 is Bounds, taken from the document's box, unnarrowed, rather than from Bounds'
+// own widened float32 positions -- exact far from the origin, where those are not. Bounds
+// is already double in this package, so this returns the same [Bounds] type; only the
+// precision of what filled it differs.
+func (n *Node) Bounds64() Bounds {
+	b := C.cadaclysm_node_bounds64(n.scene.h(), C.uint32_t(n.index))
+	var out Bounds
+	for i := 0; i < 3; i++ {
+		out.Min[i] = float64(b.min[i])
+		out.Max[i] = float64(b.max[i])
+	}
+	return out
+}
+
 func meshFrom(raw C.CadaclysmMesh) *Mesh {
 	if raw.index_count == 0 || raw.positions == nil {
 		return nil
@@ -1419,6 +1507,15 @@ func (n *Node) Mesh() (*Mesh, error) {
 		return nil, err
 	}
 	return meshFrom(C.cadaclysm_node_mesh(n.scene.h(), C.uint32_t(n.index))), nil
+}
+
+// Mesh64 is Mesh in double: see [Mesh64]. The error is non-nil only for a closed scene,
+// as Mesh's.
+func (n *Node) Mesh64() (*Mesh64, error) {
+	if err := n.scene.closedError(); err != nil {
+		return nil, err
+	}
+	return meshFrom64(C.cadaclysm_node_mesh64(n.scene.h(), C.uint32_t(n.index))), nil
 }
 
 // MeshLod is this node's triangles at a coarser level of detail: 0 is Mesh itself, 1 up
@@ -1557,14 +1654,29 @@ func (n *Node) EdgeBeziers() *Beziers {
 	return beziersFrom(C.cadaclysm_node_edge_beziers(n.scene.h(), C.uint32_t(n.index)))
 }
 
+// EdgeBeziers64 is EdgeBeziers in double; see [Beziers64].
+func (n *Node) EdgeBeziers64() *Beziers64 {
+	return beziersFrom64(C.cadaclysm_node_edge_beziers64(n.scene.h(), C.uint32_t(n.index)))
+}
+
 // CurveBeziers is this node's free curves as cubic Béziers; see EdgeBeziers.
 func (n *Node) CurveBeziers() *Beziers {
 	return beziersFrom(C.cadaclysm_node_curve_beziers(n.scene.h(), C.uint32_t(n.index)))
 }
 
+// CurveBeziers64 is CurveBeziers in double; see EdgeBeziers64.
+func (n *Node) CurveBeziers64() *Beziers64 {
+	return beziersFrom64(C.cadaclysm_node_curve_beziers64(n.scene.h(), C.uint32_t(n.index)))
+}
+
 // IsocurveBeziers is this node's isocurves as cubic Béziers; see EdgeBeziers.
 func (n *Node) IsocurveBeziers() *Beziers {
 	return beziersFrom(C.cadaclysm_node_isocurve_beziers(n.scene.h(), C.uint32_t(n.index)))
+}
+
+// IsocurveBeziers64 is IsocurveBeziers in double; see EdgeBeziers64.
+func (n *Node) IsocurveBeziers64() *Beziers64 {
+	return beziersFrom64(C.cadaclysm_node_isocurve_beziers64(n.scene.h(), C.uint32_t(n.index)))
 }
 
 // Collision is the collision body for what this node draws, building its mesh if it
@@ -1618,6 +1730,22 @@ func (n *Node) BoundsPlaced(placement *[16]float64) Bounds {
 		p = (*C.double)(unsafe.Pointer(&placement[0]))
 	}
 	b := C.cadaclysm_node_bounds_placed(n.scene.h(), C.uint32_t(n.index), p)
+	var out Bounds
+	for i := 0; i < 3; i++ {
+		out.Min[i] = float64(b.min[i])
+		out.Max[i] = float64(b.max[i])
+	}
+	return out
+}
+
+// BoundsPlaced64 is BoundsPlaced, taken from the surfaces' unnarrowed double positions;
+// see Bounds64.
+func (n *Node) BoundsPlaced64(placement *[16]float64) Bounds {
+	var p *C.double
+	if placement != nil {
+		p = (*C.double)(unsafe.Pointer(&placement[0]))
+	}
+	b := C.cadaclysm_node_bounds_placed64(n.scene.h(), C.uint32_t(n.index), p)
 	var out Bounds
 	for i := 0; i < 3; i++ {
 		out.Min[i] = float64(b.min[i])
@@ -1793,6 +1921,19 @@ func (s *Scene) MetresPerUnit() float64 { return float64(C.cadaclysm_metres_per_
 // reaches; a caller that has not the time should frame from the nodes it has built.
 func (s *Scene) Bounds() Bounds {
 	b := C.cadaclysm_bounds(s.h())
+	var out Bounds
+	for i := 0; i < 3; i++ {
+		out.Min[i] = float64(b.min[i])
+		out.Max[i] = float64(b.max[i])
+	}
+	return out
+}
+
+// Bounds64 is Bounds, taken from the unnarrowed double positions; see Node.Bounds64.
+// This meshes all of it, being the only way to know how far it reaches, exactly as
+// Bounds does.
+func (s *Scene) Bounds64() Bounds {
+	b := C.cadaclysm_bounds64(s.h())
 	var out Bounds
 	for i := 0; i < 3; i++ {
 		out.Min[i] = float64(b.min[i])

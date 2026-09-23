@@ -62,6 +62,14 @@ func main() {
 		(bounds.Min != [3]float64{0, 0, 0} || bounds.Max != [3]float64{20, 20, 20} || triangles != 12) {
 		fail("the cube did not come back as a 20-unit cube of 12 triangles")
 	}
+	// scene.Bounds64's max narrowed to float32 equals bounds's max: narrowing (round to
+	// nearest) is monotonic, so this holds for any file, not only the small-coordinate cube.
+	sceneBounds64 := scene.Bounds64()
+	for i := 0; i < 3; i++ {
+		if float32(sceneBounds64.Max[i]) != float32(bounds.Max[i]) {
+			fail("scene Bounds64's max narrowed does not equal Bounds's max")
+		}
+	}
 
 	// The reader's own extras: a query, the diagnostics, an in-memory open of the same
 	// bytes. "class == mesh" does not match here: the OpenSCAD reader's own Kind() for
@@ -126,6 +134,46 @@ func main() {
 			fail("the cube's LOD 1 or Béziers are off")
 		}
 	}
+
+	// f64 twins: mesh64, beziers64 and bounds64 mirror their f32 twins, narrowed exactly --
+	// narrowing (round to nearest) is monotonic, so comparing narrowed values holds for any
+	// file, not only this small-coordinate cube. See the task report for what this
+	// comparison cannot see (the far-from-origin case Go has no unit test to carry).
+	mesh64, m64err := first.Mesh64()
+	if m64err != nil {
+		fail(m64err.Error())
+	}
+	if mesh64 == nil || mesh64.TriangleCount() != full.TriangleCount() || len(mesh64.Positions) != len(full.Positions) ||
+		len(mesh64.Indices) != len(full.Indices) {
+		fail("mesh64's vertex/index counts do not equal mesh's")
+	}
+	if len(full.Positions) >= 3 &&
+		(float32(mesh64.Positions[0]) != full.Positions[0] ||
+			float32(mesh64.Positions[1]) != full.Positions[1] ||
+			float32(mesh64.Positions[2]) != full.Positions[2]) {
+		fail("mesh64's first position narrowed to float does not equal mesh's first position")
+	}
+	edgeBeziers32, edgeBeziers64 := first.EdgeBeziers(), first.EdgeBeziers64()
+	if edgeBeziers64.Count() != edgeBeziers32.Count() || len(edgeBeziers64.Points) != len(edgeBeziers32.Points) {
+		fail("edgeBeziers64's count/length does not equal edgeBeziers's")
+	}
+	if len(edgeBeziers32.Points) >= 3 && float32(edgeBeziers64.Points[0]) != edgeBeziers32.Points[0] {
+		fail("edgeBeziers64's first point narrowed does not equal edgeBeziers's")
+	}
+	if first.CurveBeziers64().Count() != first.CurveBeziers().Count() {
+		fail("curveBeziers64's count does not equal curveBeziers's")
+	}
+	if first.IsocurveBeziers64().Count() != first.IsocurveBeziers().Count() {
+		fail("isocurveBeziers64's count does not equal isocurveBeziers's")
+	}
+	nodeBounds64, nodeBounds32 := first.Bounds64(), first.Bounds()
+	for i := 0; i < 3; i++ {
+		if float32(nodeBounds64.Max[i]) != float32(nodeBounds32.Max[i]) {
+			fail("bounds64's max narrowed does not equal bounds's max")
+		}
+	}
+	fmt.Printf("reader f64 twins: mesh64 %d triangles, edgeBeziers64 %d, bounds64 max (%g,%g,%g)\n",
+		mesh64.TriangleCount(), edgeBeziers64.Count(), sceneBounds64.Max[0], sceneBounds64.Max[1], sceneBounds64.Max[2])
 	fit, ok := first.Collision(0)
 	if !ok || fit.Error != 0 || fit.HullVertexCount != 8 || fit.ShapeName() == "" {
 		fail("the collision fit is off")
@@ -164,6 +212,9 @@ func main() {
 		}
 		if _, hit := first.SurfacePick([3]float64{10, 10, 100}, [3]float64{10, 10, -100}); hit || !first.BoundsPlaced(nil).IsEmpty() {
 			fail("the cube picks or bounds through surfaces")
+		}
+		if !first.BoundsPlaced64(nil).IsEmpty() {
+			fail("the cube's boundsPlaced64 is not empty either")
 		}
 	}
 	fresh, ferr := cadaclysm.Open(path)
@@ -309,6 +360,8 @@ func kernel(license string) {
 	defer outline.Close()
 	hits()
 	edgeCurves()
+	intersections()
+	solidHits()
 	plate, err := blacksmith.XY().Extrude(outline, 6).Solid()
 	if err != nil {
 		fail(err.Error())
@@ -464,6 +517,48 @@ func kernel(license string) {
 	}
 	fmt.Printf("mesh at 0.05: %d triangles; the first view is stale after 0.05, 0.5, 0.05\n", triangles0)
 
+	// f64 twins on the kernel: mesh64 shares mesh's cache and bounds64 the same
+	// tessellation, unnarrowed. rounded's cache is filled at 0.05 by the view test above.
+	kMesh32, err := rounded.Mesh(0.05)
+	if err != nil {
+		fail(err.Error())
+	}
+	kPositions32, err := kMesh32.Positions()
+	if err != nil {
+		fail(err.Error())
+	}
+	kMesh64, err := rounded.Mesh64(0.05)
+	if err != nil {
+		fail(err.Error())
+	}
+	kPositions64, err := kMesh64.Positions()
+	if err != nil {
+		fail(err.Error())
+	}
+	if kMesh64.VertexCount() != kMesh32.VertexCount() || kMesh64.IndexCount() != kMesh32.IndexCount() {
+		fail("blacksmith mesh64's vertex/index counts do not equal mesh's")
+	}
+	if len(kPositions32) >= 3 &&
+		(float32(kPositions64[0]) != kPositions32[0] ||
+			float32(kPositions64[1]) != kPositions32[1] ||
+			float32(kPositions64[2]) != kPositions32[2]) {
+		fail("blacksmith mesh64's first position narrowed to float does not equal mesh's first position")
+	}
+	kBounds32, err := rounded.BoundsAt(0.05)
+	if err != nil {
+		fail(err.Error())
+	}
+	kBounds64, err := rounded.BoundsAt64(0.05)
+	if err != nil {
+		fail(err.Error())
+	}
+	for i := 0; i < 3; i++ {
+		if math.Abs(kBounds64.Min[i]-kBounds32.Min[i]) > 1e-6 || math.Abs(kBounds64.Max[i]-kBounds32.Max[i]) > 1e-6 {
+			fail("blacksmith bounds64(0.05) does not equal bounds(0.05)")
+		}
+	}
+	fmt.Printf("blacksmith f64 twins: mesh64 %d triangles, bounds64 max z %g\n", kMesh64.TriangleCount(), kBounds64.Max[2])
+
 	// No schema at all: the kernel writes against its built-in AP203, no ap203.exp needed.
 	noSchemaText, err := rounded.StepText("", "mm")
 	if err != nil {
@@ -592,6 +687,49 @@ func kernel(license string) {
 		fail("blacksmith svg: fov=200 was accepted")
 	}
 	fmt.Println("blacksmith svg: solid text, file written, fov=200 refused")
+
+	// A profile's own plane, top by default -- pinned against an explicit iso call, not
+	// just checked non-empty, so a silently-iso default would fail this.
+	profileSvgTop, err := outline.SvgText(nil)
+	if err != nil {
+		fail(err.Error())
+	}
+	if !strings.HasPrefix(profileSvgTop, "<svg") || !strings.Contains(profileSvgTop, "<path") {
+		fail("profile SVG text did not look like an SVG wireframe")
+	}
+	profileSvgPath := filepath.Join(os.TempDir(), "cadaclysm-smoke-go-profile.svg")
+	if err := outline.Svg(profileSvgPath, nil); err != nil {
+		fail(err.Error())
+	}
+	if svgInfo, serr := os.Stat(profileSvgPath); serr != nil || svgInfo.Size() == 0 {
+		fail("Profile.Svg wrote an empty file")
+	}
+	isoOptions := blacksmith.NewSvgOptions()
+	profileSvgIso, err := outline.SvgText(&isoOptions)
+	if err != nil {
+		fail(err.Error())
+	}
+	if profileSvgTop == profileSvgIso {
+		fail("Profile.SvgText did not default to the top view")
+	}
+	fmt.Println("blacksmith svg: profile text, file written, top default confirmed against iso")
+
+	// The widened pair: a solid and a profile drawn together, one call, both group ids.
+	mixed, err := blacksmith.WriteDrawingSvgText([]*blacksmith.Solid{rounded}, []*blacksmith.Profile{outline}, nil)
+	if err != nil {
+		fail(err.Error())
+	}
+	if !strings.Contains(mixed, "<path") || !strings.Contains(mixed, `id="solid-0"`) || !strings.Contains(mixed, `id="profile-0"`) {
+		fail("the mixed drawing did not contain both group ids")
+	}
+	mixedSvgPath := filepath.Join(os.TempDir(), "cadaclysm-smoke-go-mixed.svg")
+	if err := blacksmith.WriteDrawingSvg(mixedSvgPath, []*blacksmith.Solid{rounded}, []*blacksmith.Profile{outline}, nil); err != nil {
+		fail(err.Error())
+	}
+	if svgInfo, serr := os.Stat(mixedSvgPath); serr != nil || svgInfo.Size() == 0 {
+		fail("WriteDrawingSvg wrote an empty file")
+	}
+	fmt.Println("blacksmith svg: solid and profile drawn together, both group ids present")
 
 	// ToScene is the same round trip in memory: the scene's bounds must match the solid's
 	// own, and the scene is its own document -- closing the solid it came from leaves it
@@ -791,6 +929,196 @@ func edgeCurves() {
 		}
 	}
 	fmt.Printf("edge_curve: %v; %v; %v\n", rims[0], boxEdges[0].Curve, splines[0])
+}
+
+// intersections: two equal pipes crossing at right angles meet on ellipse chains whose
+// points lie on both pipes; apart, nothing; a zero tolerance refused in the kernel's words.
+// Two coaxial pipes overlapping in height share a wall band: an overlap whose rings lie on it.
+func intersections() {
+	const tol = 1e-3
+	offA := func(p [3]float64) float64 { return math.Abs(math.Hypot(p[0], p[1]) - 1) }
+	offB := func(p [3]float64) float64 { return math.Abs(math.Hypot(p[0], p[2]-3) - 1) }
+	pipeA, err := blacksmith.Cylinder(1, 6)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer pipeA.Close()
+	upright, err := blacksmith.Cylinder(1, 6)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer upright.Close()
+	pipeB, err := upright.Rotate([6]float64{0, 0, 3, 1, 0, 0}, math.Pi/2)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer pipeB.Close()
+	found, err := pipeA.Intersect(pipeB, tol)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(found.Chains) < 2 || len(found.Overlaps) != 0 {
+		fail(fmt.Sprintf("intersect: the crossed pipes read %v", found))
+	}
+	facesA, _ := pipeA.Faces()
+	facesB, _ := pipeB.Faces()
+	ellipses := 0
+	for _, c := range found.Chains {
+		if c.FaceA < 0 || c.FaceA >= facesA || c.FaceB < 0 || c.FaceB >= facesB || len(c.Points) < 2 {
+			fail(fmt.Sprintf("intersect: a chain reads %v", c))
+		}
+		for _, p := range c.Points {
+			if offA(p) > 50*tol || offB(p) > 50*tol {
+				fail(fmt.Sprintf("intersect: a chain leaves the pipes: %v", c))
+			}
+		}
+		if c.Curve == nil {
+			continue
+		}
+		if c.Curve.Kind != "ellipse" && c.Curve.Kind != "nurbs" {
+			fail(fmt.Sprintf("intersect: a chain's curve reads %v", c.Curve))
+		}
+		if c.Curve.Kind != "ellipse" {
+			continue
+		}
+		ellipses++
+		t := (c.Curve.T0 + c.Curve.T1) / 2
+		var q [3]float64
+		for k := range q {
+			q[k] = c.Curve.Origin[k] + c.Curve.X[k]*c.Curve.Radius*math.Cos(t) + c.Curve.Y[k]*c.Curve.Radius2*math.Sin(t)
+		}
+		if offA(q) > 50*tol || offB(q) > 50*tol {
+			fail(fmt.Sprintf("intersect: the ellipse leaves the pipes at %v", c.Curve))
+		}
+	}
+	if ellipses == 0 {
+		fail("intersect: two equal pipes cross on ellipses")
+	}
+	far, err := pipeB.Translate(10, 0, 0)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer far.Close()
+	apart, err := pipeA.Intersect(far, 0.05)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(apart.Chains) != 0 || len(apart.Overlaps) != 0 {
+		fail(fmt.Sprintf("intersect: pipes apart read %v", apart))
+	}
+	if _, err := pipeA.Intersect(pipeB, 0.0); err == nil || !strings.Contains(err.Error(), "intersect: tolerance must be positive and finite") {
+		fail(fmt.Sprintf("intersect: a zero tolerance was accepted or refused in other words: %v", err))
+	}
+	lower, err := blacksmith.Cylinder(1, 4)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer lower.Close()
+	base, err := blacksmith.Cylinder(1, 4)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer base.Close()
+	upper, err := base.Translate(0, 0, 2)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer upper.Close()
+	shared, err := lower.Intersect(upper, tol)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(shared.Overlaps) < 1 || len(shared.Overlaps[0].Loops) < 1 {
+		fail(fmt.Sprintf("intersect: the coaxial pipes read %v", shared))
+	}
+	for _, ring := range shared.Overlaps[0].Loops {
+		if len(ring) < 3 {
+			fail(fmt.Sprintf("intersect: an overlap ring is not a polygon: %v", shared.Overlaps[0]))
+		}
+		for _, p := range ring {
+			if offA(p) > 50*tol || p[2] < 2-50*tol || p[2] > 4+50*tol {
+				fail(fmt.Sprintf("intersect: an overlap ring leaves the shared band: %v", shared.Overlaps[0]))
+			}
+		}
+	}
+	fmt.Printf("intersect: %v (%d ellipses); %v\n", found, ellipses, shared.Overlaps[0])
+}
+
+// solidHits: a line through a cuboid pierces two faces and is cut into three pieces,
+// outside/inside/outside, the middle one spanning the box and sweeping; a loop no hit cuts is
+// one piece; an open sheet has no pieces; a zero tolerance refused in the kernel's words.
+func solidHits() {
+	check := func(err error) {
+		if err != nil {
+			fail(err.Error())
+		}
+	}
+	xy := blacksmith.Frame{0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1}
+	box, err := blacksmith.Cuboid(10, 20, 30)
+	check(err)
+	defer box.Close()
+	line, err := blacksmith.NewPath(-20, 0).LineTo(20, 0).EndOpen()
+	check(err)
+	defer line.Close()
+	found, err := box.Hits(line, xy, 0.05)
+	check(err)
+	if len(found.Hits) != 2 || len(found.Pieces) != 3 {
+		fail(fmt.Sprintf("solid hits: a line through a cuboid reads %v", found))
+	}
+	for k, h := range found.Hits {
+		x := []float64{-5, 5}[k]
+		if h.Run || h.Touch || math.Abs(h.Start[0]-x) > 0.05 || h.AStart.Segment != 0 || h.AStart.Face != math.MaxUint32 ||
+			h.BStart.Face == math.MaxUint32 || math.IsNaN(h.BStart.U) || math.IsInf(h.BStart.U, 0) || math.IsNaN(h.BStart.V) || math.IsInf(h.BStart.V, 0) {
+			fail(fmt.Sprintf("solid hits: hit %d reads %v (%v, %v)", k, h, h.AStart, h.BStart))
+		}
+	}
+	p := found.Pieces
+	if p[0].Inside || !p[1].Inside || p[2].Inside {
+		fail(fmt.Sprintf("solid hits: the pieces read %v", p))
+	}
+	if p[0].Start.T != 0 || p[2].End.T != 1 || p[0].End.T != p[1].Start.T || p[1].End.T != p[2].Start.T {
+		fail(fmt.Sprintf("solid hits: the pieces do not run head to tail: %v", p))
+	}
+	middle, err := blacksmith.ExtrudeOpen(p[1].Profile, xy, 1)
+	check(err)
+	defer middle.Close()
+	b, err := middle.Bounds()
+	check(err)
+	if math.Abs(b.Min[0]+5) > 0.05 || math.Abs(b.Max[0]-5) > 0.05 {
+		fail(fmt.Sprintf("solid hits: the middle piece spans x %v .. %v, not the box", b.Min[0], b.Max[0]))
+	}
+	along := blacksmith.SweepPathAlong(p[1].Profile, xy, 0.05, true)
+	check(along.Err())
+	defer along.Close()
+	for _, piece := range p {
+		defer piece.Profile.Close()
+	}
+	circle, err := blacksmith.Circle(1)
+	check(err)
+	defer circle.Close()
+	far, err := box.Hits(circle, blacksmith.Frame{100, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1}, 0.05)
+	check(err)
+	if len(far.Hits) != 0 || len(far.Pieces) != 1 || far.Pieces[0].Inside {
+		fail(fmt.Sprintf("solid hits: a circle far off reads %v", far))
+	}
+	square, err := blacksmith.Rect(20, 20)
+	check(err)
+	defer square.Close()
+	flat, err := blacksmith.Face(square, xy)
+	check(err)
+	defer flat.Close()
+	upright, err := blacksmith.NewPath(0, -20).LineTo(0, 20).EndOpen()
+	check(err)
+	defer upright.Close()
+	across, err := flat.Hits(upright, blacksmith.Frame{0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -1, 0}, 0.05)
+	check(err)
+	if len(across.Hits) < 1 || len(across.Pieces) != 0 {
+		fail(fmt.Sprintf("solid hits: a line across a sheet reads %v", across))
+	}
+	if _, err := box.Hits(line, xy, 0.0); err == nil || err.Error() != "solid_profile_hits: tolerance must be positive and finite" {
+		fail(fmt.Sprintf("solid hits: a zero tolerance reads %v", err))
+	}
+	fmt.Printf("solid hits: %v; %v\n", found, p[1])
 }
 
 // sheetVerbs checks Face, FaceSheet, DropFaces, Trim, Round and SweepPathAlong by their
@@ -1033,6 +1361,34 @@ func sheetVerbs(plate *blacksmith.Solid) {
 	}
 	hexPrism := must(blacksmith.Extrude(hexagon, xy, 2))
 	loopSolid := must(blacksmith.Extrude(loopSpline, xy, 2))
+	// A five-pointed star: ten walls and two caps.
+	star, err := blacksmith.Star([2]float64{0, 0}, 10, 4, 5, 0)
+	if err != nil {
+		fail(err.Error())
+	}
+	starPrism := must(blacksmith.Extrude(star, xy, 2))
+	if count(starPrism) != 12 {
+		fail(fmt.Sprintf("star: %d faces, not 12", count(starPrism)))
+	}
+	// Text: an `i` is two shapes and an `o` one; the `o` extrudes to a watertight ring with spline edges.
+	word, err := blacksmith.Text("io", 10, "", "left", "baseline", 1, "ltr", nil)
+	if err != nil {
+		fail(err.Error())
+	}
+	textRing := must(blacksmith.Extrude(word[2], xy, 2))
+	ringEdges, err := textRing.Edges()
+	if err != nil {
+		fail(err.Error())
+	}
+	spline := false
+	for _, e := range ringEdges {
+		if e.Kind == "nurbs" {
+			spline = true
+		}
+	}
+	if len(word) != 3 || !spline {
+		fail(fmt.Sprintf("text: %d shapes, spline edges %v", len(word), spline))
+	}
 	if count(hexPrism) != 8 || count(loopSolid) != 3 {
 		fail(fmt.Sprintf("shapes: %d and %d faces, not 8 and 3", count(hexPrism), count(loopSolid)))
 	}
@@ -1040,6 +1396,21 @@ func sheetVerbs(plate *blacksmith.Solid) {
 	loopSolid.Close()
 	hexagon.Close()
 	loopSpline.Close()
+	// A reflector: the parabola from rim to rim, closed and revolved -- watertight.
+	dish, err := blacksmith.Parabola([2]float64{0, 0}, [2]float64{0, 1}, 20, 0, 50)
+	if err != nil {
+		fail(err.Error())
+	}
+	dishProfile, err := dish.LineTo(0, 31.25).LineTo(0, 0).End()
+	if err != nil {
+		fail(err.Error())
+	}
+	bowl := must(blacksmith.RevolveInPlane(dishProfile, xy, [2]float64{0, 0}, [2]float64{0, 1}, 2*math.Pi))
+	if watertight, err := bowl.IsWatertight(blacksmith.DefaultTolerance); err != nil || !watertight {
+		fail("parabola: the bowl leaks")
+	}
+	dishProfile.Close()
+	bowl.Close()
 	// The library reads a fixed count of weights: a wrong count is refused, not read past.
 	corners := [][2]float64{{0, 0}, {10, 0}, {10, 10}, {0, 10}}
 	control := [][2]float64{{5, 5}, {10, 0}}
@@ -1064,7 +1435,7 @@ func sheetVerbs(plate *blacksmith.Solid) {
 			fail(fmt.Sprintf("a wrong nurbs_to weight count: %v", err))
 		}
 	}
-	fmt.Printf("sheet verbs: face, trim (%d+%d), face_sheet, drop_faces, round (%d faces), along, chain, push_pull, coil, pipe, split_by_plane, close_loop, from_loops, revolve_in_plane, regular_polygon, spline: ok\n", count(holed), count(disc), count(slab))
+	fmt.Printf("sheet verbs: face, trim (%d+%d), face_sheet, drop_faces, round (%d faces), along, chain, push_pull, coil, pipe, split_by_plane, close_loop, from_loops, revolve_in_plane, regular_polygon, star, text, spline, parabola: ok\n", count(holed), count(disc), count(slab))
 	for _, s := range []*blacksmith.Solid{sheet, peg, holed, disc, lid, walls, slab, tube, onPlane, away} {
 		s.Close()
 	}

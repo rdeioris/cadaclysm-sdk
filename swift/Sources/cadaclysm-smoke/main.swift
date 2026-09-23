@@ -63,6 +63,19 @@ if URL(fileURLWithPath: path).lastPathComponent == "cube.scad" {
           "the cube did not come back as a 20-unit cube of 12 triangles")
 }
 
+// f64 twins (Task 13): the same document's own mesh/bounds, unnarrowed -- exact on the
+// cube's small coordinates, so this alone cannot tell mesh64 from mesh widened; the far test
+// in ReaderTests.swift proves that.
+let node0 = scene.roots[0]
+let mesh32 = node0.mesh
+let mesh64 = node0.mesh64
+check(mesh64.vertexCount == mesh32.vertexCount && mesh64.indexCount == mesh32.indexCount,
+      "mesh64's counts disagree with mesh's: \(mesh64.vertexCount)/\(mesh64.indexCount) vs \(mesh32.vertexCount)/\(mesh32.indexCount)")
+check(Float(mesh64.positions[0]) == mesh32.positions[0], "mesh64's first position narrowed disagrees with mesh's")
+check(node0.bounds64.max == node0.bounds.max, "node.bounds64 disagrees with node.bounds widened")
+check(scene.bounds64.max == scene.bounds.max, "scene.bounds64 disagrees with scene.bounds widened")
+print("f64 twins: mesh64 \(mesh64.triangleCount) triangles, bounds64 max=\(node0.bounds64.max)")
+
 // The reader's own extras: a query, the diagnostics, an in-memory open of the same bytes.
 // The OpenSCAD reader's own kind for cube.scad's solid is "solid", not "mesh".
 let matched = must("query") { try scene.query("class == solid") }
@@ -156,6 +169,32 @@ do {
 }
 print("blacksmith svg: solid text, file written, fov=200 refused")
 
+// A profile draws its own plane, top by default -- unlike a solid, a sketch has no camera-
+// facing convention of its own, so its plane (z = 0) is already the page. The default is
+// pinned against an explicit iso view, not just checked non-empty: a top default silently
+// left at iso would make the two calls identical and this comparison would pass wrongly.
+let profileSvgText = must("profile svg_text") { try outline.svgText() }
+check(profileSvgText.hasPrefix("<svg") && profileSvgText.contains("<path"), "profile SVG text did not look like an SVG wireframe")
+let profileSvgIso = must("profile svg_text iso") { try outline.svgText(SvgOptions(view: .iso)) }
+check(profileSvgText != profileSvgIso, "profile svg: top default did not differ from an explicit iso view")
+let profileSvgPath = temp.appendingPathComponent("cadaclysm-smoke-swift-profile.svg").path
+must("profile svg") { try outline.svg(profileSvgPath) }
+let profileSvgSize = (try? FileManager.default.attributesOfItem(atPath: profileSvgPath)[.size] as? Int) ?? 0
+check(profileSvgSize > 0, "Profile.svg wrote an empty file")
+print("blacksmith svg: profile text, file written, top default confirmed against iso")
+
+// The module writer draws a solid and a profile on one page: one <g> per drawable, an id
+// each -- the overload writeSvgText(_:_:options:)/writeSvg(_:_:_:options:) take, widened
+// from the solids-only ones.
+let mixedSvgText = must("mixed svg_text") { try writeSvgText([rounded], [outline]) }
+check(mixedSvgText.contains("<path") && mixedSvgText.contains("id=\"solid-0\"") && mixedSvgText.contains("id=\"profile-0\""),
+      "mixed solid+profile SVG did not carry both group ids")
+let mixedSvgPath = temp.appendingPathComponent("cadaclysm-smoke-swift-mixed.svg").path
+must("mixed svg") { try writeSvg(mixedSvgPath, [rounded], [outline]) }
+let mixedSvgSize = (try? FileManager.default.attributesOfItem(atPath: mixedSvgPath)[.size] as? Int) ?? 0
+check(mixedSvgSize > 0, "writeSvg (solids and profiles) wrote an empty file")
+print("blacksmith svg: solid and profile drawn together, both group ids present")
+
 frames()
 sheetVerbs(plate)
 
@@ -193,6 +232,45 @@ for e in must("edges") { try Solid.cuboid(2, 4, 6).edges } {
 }
 print("edge_curve: \(rims[0])")
 
+// Intersect: two equal pipes crossing at right angles meet on ellipse chains whose points lie
+// on both pipes; apart, nothing; two coaxial pipes overlapping in height share a wall band.
+let tol = 1e-3
+let offA = { (p: SIMD3<Double>) in abs((p.x * p.x + p.y * p.y).squareRoot() - 1) }
+let offB = { (p: SIMD3<Double>) in abs((p.x * p.x + (p.z - 3) * (p.z - 3)).squareRoot() - 1) }
+let pipeA = must("cylinder") { try Solid.cylinder(1, 6) }
+let pipeB = must("rotate") { try Solid.cylinder(1, 6).rotate((origin: SIMD3(0, 0, 3), direction: SIMD3(1, 0, 0)), Double.pi / 2) }
+let found = must("intersect") { try pipeA.intersect(pipeB, tolerance: tol) }
+check(found.chains.count >= 2 && found.overlaps.isEmpty, "intersect: the crossed pipes read \(found)")
+var ellipses = 0
+for c in found.chains {
+    check(c.points.count >= 2 && c.points.allSatisfy { offA($0) < 50 * tol && offB($0) < 50 * tol }, "intersect: a chain leaves the pipes: \(c)")
+    guard let curve = c.curve else { continue }
+    check(curve.kind == "ellipse" || curve.kind == "nurbs", "intersect: a chain's curve reads \(curve)")
+    if curve.kind != "ellipse" { continue }
+    ellipses += 1
+    let t = (curve.t0 + curve.t1) / 2
+    let q = curve.origin + curve.x * curve.radius * cos(t) + curve.y * curve.radius2 * sin(t)
+    check(offA(q) < 50 * tol && offB(q) < 50 * tol, "intersect: the ellipse leaves the pipes at \(curve)")
+}
+check(ellipses > 0, "intersect: two equal pipes cross on ellipses")
+let apart = must("intersect") { try pipeA.intersect(try pipeB.translate(10, 0, 0)) }
+check(apart.chains.isEmpty && apart.overlaps.isEmpty, "intersect: pipes apart read \(apart)")
+let shared = must("intersect") { try Solid.cylinder(1, 4).intersect(try Solid.cylinder(1, 4).translate(0, 0, 2), tolerance: tol) }
+check(!shared.overlaps.isEmpty && !shared.overlaps[0].loops.isEmpty, "intersect: the coaxial pipes read \(shared)")
+for ring in shared.overlaps[0].loops {
+    check(ring.count >= 3 && ring.allSatisfy { offA($0) < 50 * tol && $0.z >= 2 - 50 * tol && $0.z <= 4 + 50 * tol },
+          "intersect: an overlap ring leaves the shared band: \(shared.overlaps[0])")
+}
+print("intersect: \(found) (\(ellipses) ellipses); \(shared.overlaps[0])")
+// Solid x profile hits: a line through a cuboid pierces two faces and is cut into three
+// pieces, outside/inside/outside, the middle one spanning the box.
+let cuboid = must("cuboid") { try Solid.cuboid(10, 20, 30) }
+let pierced = must("hits") { try cuboid.hits(try Profile.path([-20, 0]).lineTo(20, 0).endOpen(), try Frame.xy()) }
+check(pierced.hits.count == 2 && pierced.pieces.map { $0.inside } == [false, true, false], "solid hits: a line through a cuboid reads \(pierced)")
+let span = must("bounds") { try Solid.extrudeOpen(pierced.pieces[1].profile, try Frame.xy(), 1).bounds }
+check(abs(span.min.x + 5) < 0.05 && abs(span.max.x - 5) < 0.05, "solid hits: the middle piece spans x \(span.min.x) .. \(span.max.x)")
+print("solid hits: \(pierced); \(pierced.pieces[1])")
+
 // Colour: a gold plate joined with a blue pin -- the part is gold, the pin's top keeps its blue.
 let gold = must("coloured") { try plate.coloured(SIMD3(0.8, 0.6, 0.4)) }
 let blue = must("coloured") { try pin.coloured(SIMD3(0.2, 0.4, 1.0)) }
@@ -219,6 +297,16 @@ _ = must("mesh") { try rounded.mesh(tolerance: 0.5) }
 _ = must("mesh") { try rounded.mesh(tolerance: 0.05) }
 check(firstMesh.isStale, "a mesh view survived meshing at 0.05, 0.5, 0.05")
 print("mesh at 0.05: \(firstMesh.triangleCount) triangles; the first view is stale after 0.05, 0.5, 0.05")
+
+// f64 twins (Task 13): mesh64/bounds64 from the very same tessellation, unnarrowed.
+let mesh32k = must("mesh") { try rounded.mesh(tolerance: 0.05) }
+let mesh64k = must("mesh64") { try rounded.mesh64(tolerance: 0.05) }
+check(mesh64k.vertexCount == mesh32k.vertexCount && mesh64k.indexCount == mesh32k.indexCount,
+      "mesh64's counts disagree with mesh's: \(mesh64k.vertexCount)/\(mesh64k.indexCount) vs \(mesh32k.vertexCount)/\(mesh32k.indexCount)")
+let b32 = must("bounds") { try rounded.boundsAt(0.05) }
+let b64 = must("bounds64") { try rounded.boundsAt64(0.05) }
+check(abs(b64.min.x - b32.min.x) < 1e-9 && abs(b64.max.z - b32.max.z) < 1e-9, "bounds64 disagrees with bounds: \(b64) vs \(b32)")
+print("f64 twins: mesh64 \(mesh64k.triangleCount) triangles, bounds64 max=\(b64.max)")
 
 // No schema at all: the kernel writes against its built-in AP203, no ap203.exp needed.
 let noSchema = must("step_text") { try rounded.stepText() }
@@ -361,9 +449,19 @@ func sheetVerbs(_ plate: Solid) {
     check(count(turned) == 4 && count(turnedWalls) == 4, "revolve_in_plane: \(count(turned)) and \(count(turnedWalls)) faces, not 4")
     // A hexagon: six walls and two caps. A closed spline through a square's corners: one wall.
     let hexPrism = must("regular_polygon") { try Solid.extrude(Profile.regularPolygon(SIMD2(0, 0), 10, 6), xy, 2) }
+    let starPrism = must("star") { try Solid.extrude(Profile.star(SIMD2(0, 0), 10, 4, 5), xy, 2) }
+    check(count(starPrism) == 12, "star: \(count(starPrism)) faces, not 12")
+    let word = must("text") { try Profile.text("io", size: 10) }
+    let textRing = must("text") { try Solid.extrude(word[2], xy, 2) }
+    let textSpline = must("text") { try textRing.edges.contains { $0.kind == "nurbs" } }
+    check(word.count == 3 && textSpline, "text: \(word.count) shapes, no spline edge")
     let loopSolid = must("spline") {
         try Solid.extrude(Profile.spline([SIMD2(0, 0), SIMD2(10, 0), SIMD2(10, 10), SIMD2(0, 10)], closed: true), xy, 2)
     }
     check(count(hexPrism) == 8 && count(loopSolid) == 3, "shapes: \(count(hexPrism)) and \(count(loopSolid)) faces, not 8 and 3")
-    print("sheet verbs: face, trim (\(count(holed))+\(count(disc))), face_sheet, drop_faces, round (\(count(slab)) faces), along, chain, push_pull, coil, pipe, split_by_plane, close_loop, from_loops, revolve_in_plane, regular_polygon, spline: ok")
+    // A reflector: the parabola from rim to rim, closed and revolved -- watertight.
+    let dish = must("parabola") { try Profile.parabola(vertex: SIMD2(0, 0), axis: SIMD2(0, 1), focal: 20, from: 0, to: 50).lineTo(0, 31.25).lineTo(0, 0).end() }
+    let bowl = must("revolve_in_plane") { try Solid.revolveInPlane(dish, xy, SIMD2(0, 0), SIMD2(0, 1), 2 * Double.pi) }
+    check(must("is_watertight") { try bowl.isWatertight() }, "parabola: the bowl leaks")
+    print("sheet verbs: face, trim (\(count(holed))+\(count(disc))), face_sheet, drop_faces, round (\(count(slab)) faces), along, chain, push_pull, coil, pipe, split_by_plane, close_loop, from_loops, revolve_in_plane, regular_polygon, star, text, spline, parabola: ok")
 }

@@ -23,7 +23,7 @@ Drop it beside your own script and point `CADACLYSM_BLACKSMITH_LIBRARY` at the
 shared library if it is not where this looks by default (`target/release` or
 `target/debug` of the repository this file ships in).
 
-`numpy` is imported only when a mesh or polylines are asked for.
+`numpy` is imported only when a mesh, polylines or a FEM mesh's arrays are asked for.
 
 ## Every array borrows from its solid
 
@@ -39,6 +39,11 @@ last reference to it. Two things can still invalidate a view:
 Call `.copy()` on any array that must outlive either. Strings are copied on the
 way out and are always safe. Under Pyodide (the website's notebook) the arrays
 are copies and never invalidate.
+
+`Solid.fem_mesh` is the one array product that is **not** the solid's: it hands
+back a `FemMesh`, a handle of its own whose arrays keep the `FemMesh` alive and
+are invalidated by its `free()` rather than by the solid's `close()` or by
+meshing again.
 
 ## The chain mirrors the Rust `Workplane`
 
@@ -85,7 +90,7 @@ import operator
 import os
 import platform
 import sys
-from ctypes import (POINTER, c_bool, c_char_p, c_double, c_float, c_int32, c_size_t, c_uint32, c_uint64, c_void_p)
+from ctypes import (POINTER, c_bool, c_char_p, c_double, c_float, c_int32, c_size_t, c_uint8, c_uint32, c_uint64, c_void_p)
 from pathlib import Path as _FsPath   # `Path` here is the outline builder
 from typing import TYPE_CHECKING
 
@@ -94,15 +99,15 @@ if TYPE_CHECKING:   # names the annotations use; imported when used, never at lo
     import numpy
 
 __all__ = [
-    "Axis", "BuildError", "Curve", "Edge", "Frame", "Hit", "Manifold", "Path", "Profile", "Selector", "Slant", "Solid", "Spot",
-    "SweepPath", "Workplane",
+    "Axis", "BuildError", "Chain", "Curve", "Edge", "FemEdge", "FemMesh", "FemVertex", "Frame", "Hit", "Intersection", "Manifold", "Overlap", "Path", "Piece",
+    "Profile", "Selector", "Slant", "Solid", "SolidHits", "Spot", "SweepPath", "Workplane",
     "brep_layout_id", "build_date", "default_schema", "library_path", "license", "license_info", "license_notice_count",
     "version",
-    "svg", "write_brep", "write_brep_text", "write_sat", "write_sat_text", "write_step", "write_step_text", "__version__",
+    "svg", "write_brep", "write_brep_text", "write_sat", "write_sat_text", "write_step", "write_step_assembly", "write_step_assembly_text", "write_step_text", "__version__",
 ]
 
 # This file's own version (the workspace's); `version()` is the loaded library's.
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 NONE = 0xFFFFFFFF
 UNITS = {"m": 0, "mm": 1, "in": 2}
@@ -203,6 +208,12 @@ class _Mesh(ctypes.Structure):
                 ("indices", POINTER(c_uint32)), ("vertex_count", c_uint32), ("index_count", c_uint32)]
 
 
+class _Mesh64(ctypes.Structure):
+    #: `CadaclysmBlacksmithMesh64`: `_Mesh` in `double`. Pinned by `tests/bindings.rs`.
+    _fields_ = [("positions", POINTER(c_double)), ("normals", POINTER(c_double)), ("indices", POINTER(c_uint32)),
+                ("vertex_count", c_uint32), ("index_count", c_uint32)]
+
+
 class _Polylines(ctypes.Structure):
     _fields_ = [("points", POINTER(c_float)), ("offsets", POINTER(c_uint32)),
                 ("point_count", c_uint32), ("polyline_count", c_uint32)]
@@ -260,6 +271,56 @@ class _Curve(ctypes.Structure):
                 ("poles", POINTER(c_double)), ("pole_count", c_uint32), ("weights", POINTER(c_double))]
 
 
+class _Chain(ctypes.Structure):
+    _fields_ = [("points", POINTER(c_double)), ("point_count", c_uint32), ("face_a", c_uint32), ("face_b", c_uint32),
+                ("closed", c_bool), ("tangent", c_bool), ("has_curve", c_bool)]
+
+
+class _Overlap(ctypes.Structure):
+    _fields_ = [("face_a", c_uint32), ("face_b", c_uint32), ("points", POINTER(c_double)),
+                ("loop_offsets", POINTER(c_uint32)), ("point_count", c_uint32), ("loop_count", c_uint32)]
+
+
+class _FemOptions(ctypes.Structure):
+    #: `CadaclysmBlacksmithFemOptions`. Field order and `size` are the whole
+    #: contract, as `_SvgOptions` above: `cadaclysm_blacksmith_fem_options_init`
+    #: fills the library's whole struct, so this list must match the header field
+    #: for field -- `cadaclysm-capi/tests/bindings.rs` pins it -- and it may never
+    #: reorder. A field the library has and this list does not is written *past*
+    #: what `Solid.fem_mesh` allocated.
+    _fields_ = [("size", c_size_t), ("tolerance", c_double), ("max_size", c_double)]
+
+
+class _FemMeshView(ctypes.Structure):
+    #: `CadaclysmBlacksmithFemMeshView`: every pointer borrowed from the FEM handle
+    #: and dead with it, the counts in elements (`nodes` holds `node_count * 3`
+    #: doubles). Pinned against the header by `cadaclysm-capi/tests/bindings.rs`,
+    #: which is the only thing between a missing field here and reading
+    #: `min_angle` out of `watertight`.
+    _fields_ = [("nodes", POINTER(c_double)), ("node_count", c_uint32),
+                ("triangles", POINTER(c_uint32)), ("triangle_count", c_uint32),
+                ("triangle_face", POINTER(c_uint32)), ("node_kind", POINTER(c_uint32)),
+                ("node_entity", POINTER(c_uint32)), ("face_count", c_uint32),
+                ("edge_count", c_uint32), ("vertex_count", c_uint32),
+                ("open_edge_count", c_uint32), ("folded_edge_count", c_uint32),
+                ("watertight", c_bool), ("from_mesh", c_bool), ("min_angle", c_double),
+                ("worst_triangle", c_uint32), ("longest_edge", c_double)]
+
+
+class _FemEdge(ctypes.Structure):
+    #: `CadaclysmBlacksmithFemEdge`: one B-rep edge's node chain. Pinned by bindings.rs.
+    _fields_ = [("id", c_uint32), ("nodes", POINTER(c_uint32)), ("node_count", c_uint32),
+                ("runs", POINTER(c_uint32)), ("run_count", c_uint32),
+                ("face_a", c_uint32), ("face_b", c_uint32), ("end_a", c_uint32),
+                ("end_b", c_uint32), ("closed", c_bool), ("seam", c_bool)]
+
+
+class _FemVertex(ctypes.Structure):
+    #: `CadaclysmBlacksmithFemVertex`. `point` is three doubles in the struct, not a
+    #: pointer. Pinned by bindings.rs.
+    _fields_ = [("node", c_uint32), ("point", c_double * 3), ("has_position", c_bool)]
+
+
 _PROGRESS = ctypes.CFUNCTYPE(None, c_char_p, c_size_t, c_size_t, c_void_p)
 _D = POINTER(c_double)
 _U = POINTER(c_uint32)
@@ -268,6 +329,8 @@ _PROFILE = c_void_p
 _PATH = c_void_p
 _SWEEP_PATH = c_void_p
 _HITS = c_void_p
+_INTERSECTION = c_void_p
+_FEM = c_void_p
 _PROFILE_LIST = c_void_p
 
 _ENTRY_POINTS = [
@@ -283,6 +346,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_profile_circle", _PROFILE, [c_double]),
     ("cadaclysm_blacksmith_profile_slot", _PROFILE, [c_double, c_double, c_double, c_double]),
     ("cadaclysm_blacksmith_profile_regular_polygon", _PROFILE, [c_double, c_double, c_double, c_uint32, c_double]),
+    ("cadaclysm_blacksmith_profile_star", _PROFILE, [c_double, c_double, c_double, c_double, c_uint32, c_double]),
     ("cadaclysm_blacksmith_profile_spline", _PROFILE, [_D, c_size_t, c_uint32, _D, c_bool]),
     ("cadaclysm_blacksmith_profile_polygon", _PROFILE, [_D, c_size_t]),
     ("cadaclysm_blacksmith_profile_with_hole", _PROFILE, [_PROFILE, _PROFILE]),
@@ -290,7 +354,12 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_hits_free", None, [_HITS]),
     ("cadaclysm_blacksmith_hit_count", c_uint32, [_HITS]),
     ("cadaclysm_blacksmith_hit", c_bool, [_HITS, c_uint32, POINTER(_Hit)]),
+    ("cadaclysm_blacksmith_solid_profile_hits", _HITS, [_SOLID, _PROFILE, _D, c_double, _PROGRESS, c_void_p]),
+    ("cadaclysm_blacksmith_hits_piece_count", c_uint32, [_HITS]),
+    ("cadaclysm_blacksmith_hits_piece", c_bool, [_HITS, c_uint32, POINTER(c_bool), POINTER(_Spot), POINTER(_Spot)]),
+    ("cadaclysm_blacksmith_hits_piece_profile", _PROFILE, [_HITS, c_uint32]),
     ("cadaclysm_blacksmith_profile_common", _PROFILE_LIST, [_PROFILE, _PROFILE, c_double]),
+    ("cadaclysm_blacksmith_profile_text", _PROFILE_LIST, [c_char_p, c_double, c_char_p, POINTER(c_uint8), c_size_t, c_char_p, c_char_p, c_double, c_char_p]),
     ("cadaclysm_blacksmith_profile_list_count", c_uint32, [_PROFILE_LIST]),
     ("cadaclysm_blacksmith_profile_list_get", _PROFILE, [_PROFILE_LIST, c_uint32]),
     ("cadaclysm_blacksmith_profile_list_free", None, [_PROFILE_LIST]),
@@ -309,6 +378,10 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_path_arc_to", c_bool, [_PATH, c_double, c_double, c_double, c_double, c_bool]),
     ("cadaclysm_blacksmith_path_bezier_to", c_bool, [_PATH] + [c_double] * 6),
     ("cadaclysm_blacksmith_path_nurbs_to", c_bool, [_PATH, _D, c_size_t, _D, _D, c_size_t, c_uint32]),
+    ("cadaclysm_blacksmith_path_conic_to", c_bool, [_PATH] + [c_double] * 5),
+    ("cadaclysm_blacksmith_path_parabola_by_vertex", c_bool, [_PATH] + [c_double] * 4),
+    ("cadaclysm_blacksmith_path_parabola_by_focus", c_bool, [_PATH] + [c_double] * 4),
+    ("cadaclysm_blacksmith_path_parabola", _PATH, [c_double] * 7),
     ("cadaclysm_blacksmith_path_end", _PROFILE, [_PATH]),
     ("cadaclysm_blacksmith_path_end_open", _PROFILE, [_PATH]),
     ("cadaclysm_blacksmith_path_free", None, [_PATH]),
@@ -383,24 +456,50 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_edge_count", c_uint32, [_SOLID]),
     ("cadaclysm_blacksmith_edge", c_bool, [_SOLID, c_uint32, POINTER(_Edge)]),
     ("cadaclysm_blacksmith_edge_curve", c_bool, [_SOLID, c_uint32, POINTER(_Curve)]),
+    ("cadaclysm_blacksmith_intersect", _INTERSECTION, [_SOLID, _SOLID, c_double, _PROGRESS, c_void_p]),
+    ("cadaclysm_blacksmith_intersection_free", None, [_INTERSECTION]),
+    ("cadaclysm_blacksmith_intersection_chain_count", c_uint32, [_INTERSECTION]),
+    ("cadaclysm_blacksmith_intersection_chain", c_bool, [_INTERSECTION, c_uint32, POINTER(_Chain)]),
+    ("cadaclysm_blacksmith_intersection_curve", c_bool, [_INTERSECTION, c_uint32, POINTER(_Curve)]),
+    ("cadaclysm_blacksmith_intersection_overlap_count", c_uint32, [_INTERSECTION]),
+    ("cadaclysm_blacksmith_intersection_overlap", c_bool, [_INTERSECTION, c_uint32, POINTER(_Overlap)]),
     ("cadaclysm_blacksmith_mesh", _Mesh, [_SOLID, c_double]),
+    ("cadaclysm_blacksmith_mesh64", _Mesh64, [_SOLID, c_double]),
     ("cadaclysm_blacksmith_mesh_face_triangles", _FaceTriangles, [_SOLID, c_double]),
     ("cadaclysm_blacksmith_edge_polylines", _Polylines, [_SOLID, c_double]),
     ("cadaclysm_blacksmith_bounds", c_bool, [_SOLID, c_double, _D, _D]),
+    ("cadaclysm_blacksmith_bounds64", c_bool, [_SOLID, c_double, _D, _D]),
     ("cadaclysm_blacksmith_leaked_edges", c_uint32, [_SOLID, c_double]),
     ("cadaclysm_blacksmith_unpaired_edges", c_uint32, [_SOLID, c_double]),
     ("cadaclysm_blacksmith_manifold", c_bool, [_SOLID, _U]),
     ("cadaclysm_blacksmith_step", c_void_p, [POINTER(c_void_p), c_size_t, c_char_p, c_uint32]),
+    ("cadaclysm_blacksmith_step_assembly", c_void_p, [POINTER(c_void_p), POINTER(c_char_p), c_size_t, POINTER(c_uint32), POINTER(c_double), c_size_t, c_char_p, c_uint32]),
     ("cadaclysm_blacksmith_sat_text", c_void_p, [POINTER(c_void_p), c_size_t, c_uint32]),
     ("cadaclysm_blacksmith_sat", c_bool, [POINTER(c_void_p), c_size_t, c_char_p, c_uint32]),
     ("cadaclysm_blacksmith_svg_options_init", None, [POINTER(_SvgOptions)]),
     ("cadaclysm_blacksmith_svg_text", c_void_p, [POINTER(c_void_p), c_size_t, POINTER(_SvgOptions)]),
     ("cadaclysm_blacksmith_svg", c_bool, [POINTER(c_void_p), c_size_t, c_char_p, POINTER(_SvgOptions)]),
+    ("cadaclysm_blacksmith_drawing_svg_text", c_void_p, [POINTER(c_void_p), c_size_t, POINTER(c_void_p), c_size_t, POINTER(_SvgOptions)]),
+    ("cadaclysm_blacksmith_drawing_svg", c_bool, [POINTER(c_void_p), c_size_t, POINTER(c_void_p), c_size_t, c_char_p, POINTER(_SvgOptions)]),
     ("cadaclysm_blacksmith_brep_text", c_void_p, [POINTER(c_void_p), c_size_t]),
     ("cadaclysm_blacksmith_brep", c_bool, [POINTER(c_void_p), c_size_t, c_char_p]),
     ("cadaclysm_blacksmith_string_free", None, [c_void_p]),
     ("cadaclysm_blacksmith_from_brep", _SOLID, [c_void_p, c_char_p]),
     ("cadaclysm_blacksmith_brep_layout_id", c_char_p, []),
+    # The FEM surface mesh: one handle per meshed solid, freed by the caller. Its
+    # `.msh` text is **owned** (`c_void_p`, then `string_free`), as every other text
+    # this library hands over -- unlike the reader library's, which borrows from a
+    # slot on its own handle. See `FemMesh.msh_text`.
+    ("cadaclysm_blacksmith_fem_options_init", None, [POINTER(_FemOptions)]),
+    ("cadaclysm_blacksmith_fem_mesh", _FEM, [_SOLID, _D, POINTER(_FemOptions), _PROGRESS, c_void_p]),
+    ("cadaclysm_blacksmith_fem_mesh_free", None, [_FEM]),
+    ("cadaclysm_blacksmith_fem_mesh_view", c_bool, [_FEM, POINTER(_FemMeshView)]),
+    ("cadaclysm_blacksmith_fem_mesh_edge", c_bool, [_FEM, c_uint32, POINTER(_FemEdge)]),
+    ("cadaclysm_blacksmith_fem_mesh_vertex", c_bool, [_FEM, c_uint32, POINTER(_FemVertex)]),
+    ("cadaclysm_blacksmith_fem_mesh_open_edge", c_bool, [_FEM, c_uint32, _U, _U, _U]),
+    ("cadaclysm_blacksmith_fem_mesh_folded_edge", c_bool, [_FEM, c_uint32, _U, _U, _U]),
+    ("cadaclysm_blacksmith_fem_mesh_msh_text", c_void_p, [_FEM]),
+    ("cadaclysm_blacksmith_fem_mesh_save_msh", c_bool, [_FEM, c_char_p]),
 ]
 
 # Under Pyodide (the website's notebook) there is no shared library to load: the
@@ -429,11 +528,18 @@ class _WasmLibrary:
     # it) for the struct-returning ones, NONE for the u32 ones that reserve
     # it, and 0 (a null handle, or a count the caller checks `last_error` on)
     # for everything else
-    _BOOLS = {"path_line_to", "path_arc_to", "path_bezier_to", "path_nurbs_to", "sweep_path_line_to",
-              "sweep_path_arc", "slant_of_plane", "face_frame", "face_ref", "frame_midplane", "frame_through", "bounds", "edge", "colour", "manifold", "license_set",
-              "hit", "edge_curve"}
+    _BOOLS = {"path_line_to", "path_arc_to", "path_bezier_to", "path_nurbs_to", "path_conic_to",
+              "path_parabola_by_vertex", "path_parabola_by_focus", "sweep_path_line_to",
+              "sweep_path_arc", "slant_of_plane", "face_frame", "face_ref", "frame_midplane", "frame_through", "bounds", "bounds64", "edge", "colour", "manifold", "license_set",
+              "hit", "edge_curve", "intersection_chain", "intersection_curve", "intersection_overlap", "hits_piece",
+              "fem_mesh_view", "fem_mesh_edge", "fem_mesh_vertex", "fem_mesh_open_edge", "fem_mesh_folded_edge",
+              # its wasm export always throws ("the wasm writes no file"); `FemMesh.save_msh`
+              # never reaches it under Pyodide, writing `msh_text()` through Pyodide's own
+              # filesystem as `write_sat`/`write_brep`/`svg` do, so this is the shape a direct
+              # `_lib()` call would still get right rather than a path the module takes
+              "fem_mesh_save_msh"}
     _FAILS = {"select_face": NONE, "leaked_edges": NONE, "unpaired_edges": NONE,
-              "mesh": _Mesh(), "mesh_face_triangles": _FaceTriangles(), "edge_polylines": _Polylines(),
+              "mesh": _Mesh(), "mesh64": _Mesh64(), "mesh_face_triangles": _FaceTriangles(), "edge_polylines": _Polylines(),
               "profile_polylines": _Polylines()}
     # results that C writes into an out-array of doubles at this position, and the
     # wasm returns as a typed array (`bounds` fills two, `edge` a record: see `_back`)
@@ -442,9 +548,14 @@ class _WasmLibrary:
     # count (a typed array knows its length), the progress `user` pointer, and
     # the out-arguments above
     _DROP = {"profile_polygon": (1,), "path_nurbs_to": (2, 5), "join": (4,), "cut": (4,), "common": (4,),
-             "split_sheet": (4,), "trim": (5,), "drop_faces": (2,), "profile_round": (3,), "profile_spline": (1,), "profile_chain": (1,), "profile_from_loops": (1,), "profile_piece_count": (2,), "profile_piece": (2,), "profile_trim_count": (2,), "profile_trim_chain": (2,), "loft_through": (2,), "loft_through_open": (2,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "thicken": (4,), "push_pull": (5,), "push_pull_faces": (2, 6), "split": (4,), "split_by_plane": (4,), "step": (1,), "sat_text": (1,), "brep_text": (1,),
-             "slant_of_plane": (3,), "face_frame": (2,), "face_ref": (2,), "bounds": (2, 3), "edge": (2,), "colour": (2,), "manifold": (1,), "hit": (2,), "edge_curve": (2,),
-             "svg_text": (1,)}
+             "split_sheet": (4,), "trim": (5,), "drop_faces": (2,), "profile_round": (3,), "profile_spline": (1,), "profile_chain": (1,), "profile_from_loops": (1,), "profile_piece_count": (2,), "profile_piece": (2,), "profile_trim_count": (2,), "profile_trim_chain": (2,), "loft_through": (2,), "loft_through_open": (2,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "thicken": (4,), "push_pull": (5,), "push_pull_faces": (2, 6), "split": (4,), "split_by_plane": (4,), "step": (1,), "step_assembly": (2, 5), "sat_text": (1,), "brep_text": (1,), "profile_text": (4,),
+             "slant_of_plane": (3,), "face_frame": (2,), "face_ref": (2,), "bounds": (2, 3), "bounds64": (2, 3), "edge": (2,), "colour": (2,), "manifold": (1,), "hit": (2,), "edge_curve": (2,),
+             "intersect": (4,), "intersection_chain": (2,), "intersection_curve": (2,), "intersection_overlap": (2,), "svg_text": (1,), "drawing_svg_text": (1, 3),
+             "solid_profile_hits": (5,), "hits_piece": (2, 3, 4),
+             # `fem_mesh`'s index counts the tuple `call` rewrites below, not the C call's:
+             # the options struct becomes two scalars, so `user` has moved from 4 to 5.
+             "fem_mesh": (5,), "fem_mesh_view": (1,), "fem_mesh_edge": (2,), "fem_mesh_vertex": (2,),
+             "fem_mesh_open_edge": (2, 3, 4), "fem_mesh_folded_edge": (2, 3, 4)}
     # strings the C side returns as `const char*`, and the module decodes
     _TEXTS = {"version", "build_date", "face_kind", "license_info", "brep_layout_id"}
 
@@ -488,6 +599,28 @@ class _WasmLibrary:
             self._error = None
             if short == "select_face" and args[2] is None:
                 args = (args[0], args[1], (c_double * 0)(), args[3])   # the direction, unread for kinds 0/1/3
+            if short == "fem_mesh":
+                # cadaclysm_blacksmith_fem_mesh(solid, frame, tolerance, max_size, progress):
+                # the options struct behind `ctypes.byref(o)` (args[2]) becomes its two
+                # fields, as `svg_text`'s becomes a flat array below, because the wasm
+                # export takes them as scalars and has no options-init to fill a struct
+                # (see its own doc comment in crates/cadaclysm-wasm/src/blacksmith.rs).
+                # `frame` stays as it is: `None` for the identity, which reaches the
+                # export's `Option<Float64Array>` as `null` -- never a zero-length array,
+                # which that export refuses as a frame of no numbers.
+                o = args[2]._obj
+                args = (args[0], args[1], o.tolerance, o.max_size, args[3], args[4])
+            if short == "step_assembly":
+                # The module pads all four of its arrays to at least one entry, so
+                # ctypes always has a buffer to point at even with nothing to write.
+                # Over the wasm the two counts that say how much of each is real
+                # (args[2], args[5]) are dropped -- a typed array carries its own
+                # length -- so the padding has to come off here, or an empty call
+                # would arrive as one null part at a one-number frame.
+                parts, places = args[2], args[5]
+                args = ((c_void_p * parts)(*args[0][:parts]), (c_char_p * parts)(*args[1][:parts]), parts,
+                        (c_uint32 * places)(*args[3][:places]), (c_double * (12 * places))(*args[4][:12 * places]),
+                        places, args[6], args[7])
             if short == "svg_text":
                 # cadaclysm_blacksmith_svg_text(solids: &[u32], words: &[f64]) -- the
                 # options struct behind `ctypes.byref(o)` (args[2]) has no cheaper way
@@ -496,6 +629,17 @@ class _WasmLibrary:
                 # the wasm export's own doc comment in crates/cadaclysm-wasm/src/blacksmith.rs.
                 o = args[2]._obj
                 args = (args[0], args[1], (c_double * 12)(
+                    o.up, o.azimuth, o.elevation, o.fov, o.width, o.height,
+                    o.margin, o.tolerance, o.stroke_width, o.stroke, o.background, o.flags,
+                ))
+            if short == "drawing_svg_text":
+                # cadaclysm_blacksmith_drawing_svg_text(solids: &[u32], profiles: &[u32],
+                # words: &[f64]) -- the same twelve-word flattening as svg_text above,
+                # with the options struct now behind args[4] (solids, solid_count,
+                # profiles, profile_count, options); DROP's (1, 3) drops both counts,
+                # leaving solids, profiles and words in that order.
+                o = args[4]._obj
+                args = (args[0], args[1], args[2], args[3], (c_double * 12)(
                     o.up, o.azimuth, o.elevation, o.fov, o.width, o.height,
                     o.margin, o.tolerance, o.stroke_width, o.stroke, o.background, o.flags,
                 ))
@@ -542,7 +686,9 @@ class _WasmLibrary:
         if isinstance(a, bytes):
             return a.decode("utf-8")
         if isinstance(a, ctypes.Array):
-            kind = js.Float64Array if a._type_ is c_double else js.Uint32Array
+            if a._type_ is c_char_p:   # a name per part (`step_assembly`), as a JS array of strings
+                return to_js([v.decode("utf-8") for v in a])
+            kind = js.Float64Array if a._type_ is c_double else js.Uint8Array if a._type_ is c_uint8 else js.Uint32Array
             return kind.new(to_js([v for v in a]))
         if callable(a):
             return lambda phase, done, total: a(phase, int(done), int(total))
@@ -571,7 +717,14 @@ class _WasmLibrary:
                 setattr(raw, name, _Spot(int(s.loop_index), int(s.segment), float(s.t),
                                          int(s.face), float(s.u), float(s.v)))
             return True
-        if short == "edge_curve":   # the record, into the `_Curve` behind `ctypes.byref(raw)`
+        if short == "hits_piece":   # `inside` and the two spots, into the `c_bool` and `_Spot`s behind `ctypes.byref`
+            args[2]._obj.value = bool(result.inside)
+            for at, name in ((3, "start"), (4, "end")):
+                raw, s = args[at]._obj, getattr(result, name)
+                raw.loop_index, raw.segment, raw.t = int(s.loop_index), int(s.segment), float(s.t)
+                raw.face, raw.u, raw.v = int(s.face), float(s.u), float(s.v)
+            return True
+        if short in ("edge_curve", "intersection_curve"):   # the record, into the `_Curve` behind `ctypes.byref(raw)`
             raw = args[2]._obj
             raw.kind = str(result.kind).encode()
             for name in ("origin", "x", "y", "z"):
@@ -587,6 +740,65 @@ class _WasmLibrary:
             weights = getattr(result, "weights", None)
             raw.weights = None if weights is None else (c_double * len(weights))(*[float(v) for v in weights])
             return True
+        if short == "intersection_chain":   # the record, into the `_Chain` behind `ctypes.byref(raw)`
+            raw = args[2]._obj
+            raw.points = (c_double * len(result.points))(*[float(v) for v in result.points])
+            raw.point_count = len(result.points) // 3
+            raw.face_a, raw.face_b = int(result.face_a), int(result.face_b)
+            raw.closed, raw.tangent, raw.has_curve = bool(result.closed), bool(result.tangent), bool(result.has_curve)
+            return True
+        if short == "intersection_overlap":   # the record, into the `_Overlap` behind `ctypes.byref(raw)`
+            raw = args[2]._obj
+            raw.face_a, raw.face_b = int(result.face_a), int(result.face_b)
+            raw.points = (c_double * len(result.points))(*[float(v) for v in result.points])
+            raw.point_count = len(result.points) // 3
+            raw.loop_offsets = (c_uint32 * len(result.loop_offsets))(*[int(v) for v in result.loop_offsets])
+            raw.loop_count = len(result.loop_offsets)
+            return True
+        if short == "fem_mesh_view":   # the arrays and the summary, into the `_FemMeshView` behind `ctypes.byref(raw)`
+            raw = args[1]._obj
+            # The typed arrays are copied into ctypes arrays kept on the struct (as
+            # `edge` keeps its), rather than handed on as JS objects: a pointer field
+            # cannot hold one, and `_view` reads a ctypes array the same way on either
+            # backend. `nodes`/`triangles`/`node_kind` are new names, so this is a
+            # branch of its own rather than an entry in `_JsArrays`.
+            raw.nodes = (c_double * len(result.nodes))(*[float(v) for v in result.nodes])
+            raw.triangles = (c_uint32 * len(result.triangles))(*[int(v) for v in result.triangles])
+            raw.triangle_face = (c_uint32 * len(result.triangle_face))(*[int(v) for v in result.triangle_face])
+            raw.node_kind = (c_uint32 * len(result.node_kind))(*[int(v) for v in result.node_kind])
+            raw.node_entity = (c_uint32 * len(result.node_entity))(*[int(v) for v in result.node_entity])
+            raw.node_count, raw.triangle_count = int(result.node_count), int(result.triangle_count)
+            raw.face_count, raw.edge_count = int(result.face_count), int(result.edge_count)
+            raw.vertex_count = int(result.vertex_count)
+            raw.open_edge_count = int(result.open_edge_count)
+            raw.folded_edge_count = int(result.folded_edge_count)
+            raw.watertight, raw.from_mesh = bool(result.watertight), bool(result.from_mesh)
+            raw.min_angle, raw.worst_triangle = float(result.min_angle), int(result.worst_triangle)
+            raw.longest_edge = float(result.longest_edge)
+            return True
+        if short == "fem_mesh_edge":   # the record, into the `_FemEdge` behind `ctypes.byref(raw)`
+            raw = args[2]._obj
+            # The counts are the arrays' own lengths: the wasm object carries no
+            # `node_count`/`run_count`, a typed array knowing its own length.
+            raw.id = int(result.id)
+            raw.nodes = (c_uint32 * len(result.nodes))(*[int(v) for v in result.nodes])
+            raw.node_count = len(result.nodes)
+            raw.runs = (c_uint32 * len(result.runs))(*[int(v) for v in result.runs])
+            raw.run_count = len(result.runs)
+            raw.face_a, raw.face_b = int(result.face_a), int(result.face_b)
+            raw.end_a, raw.end_b = int(result.end_a), int(result.end_b)
+            raw.closed, raw.seam = bool(result.closed), bool(result.seam)
+            return True
+        if short == "fem_mesh_vertex":   # the record, into the `_FemVertex` behind `ctypes.byref(raw)`
+            raw = args[2]._obj
+            raw.node = int(result.node)
+            raw.point[:] = [float(v) for v in result.point]   # a fixed array in the struct, not a pointer
+            raw.has_position = bool(result.has_position)
+            return True
+        if short in ("fem_mesh_open_edge", "fem_mesh_folded_edge"):   # a census row, into three `c_uint32`s
+            for at, name in ((2, "a"), (3, "b"), (4, "brep_edge")):
+                args[at]._obj.value = int(getattr(result, name))
+            return True
         if short == "colour":   # the three doubles, or null where there is no colour: C's `false`
             if result is None:
                 return False
@@ -595,7 +807,7 @@ class _WasmLibrary:
         if short == "manifold":   # eight counts, into C's `uint32_t` out-array
             args[1][0:8] = [int(v) for v in result]
             return True
-        if short == "bounds":
+        if short in ("bounds", "bounds64"):
             values = [float(v) for v in result]
             args[2][0:3], args[3][0:3] = values[0:3], values[3:6]
             return True
@@ -607,7 +819,7 @@ class _WasmLibrary:
             return True
         if short in self._TEXTS:
             return str(result).encode()
-        if short in ("mesh", "edge_polylines", "profile_polylines"):
+        if short in ("mesh", "mesh64", "edge_polylines", "profile_polylines"):
             return _JsArrays(result)
         if short == "mesh_face_triangles":   # the counts themselves, a `Uint32Array`
             return _JsArrays(result, "counts")
@@ -691,7 +903,10 @@ def _svg_options(*, view="iso", az=None, el=None, up=None, fov=0.0, size=(1000, 
         raise ValueError(f"view {view!r}: one of {', '.join(VIEWS)}")
     base_az, base_el = VIEWS[view]
     o = _SvgOptions()
-    _lib().cadaclysm_blacksmith_svg_options_init(ctypes.byref(o))
+    # The wasm has no svg_options_init export (its svg_text takes the fields that follow
+    # `size` as numbers, every one set below), so only the DLL is asked for its defaults.
+    if not _WASM:
+        _lib().cadaclysm_blacksmith_svg_options_init(ctypes.byref(o))
     o.up = 1 if (up or "z").lower() == "y" else 0
     o.azimuth = float(base_az if az is None else az)
     o.elevation = float(base_el if el is None else el)
@@ -726,6 +941,19 @@ def _checked(handle, what: str):
     if not handle:
         _fail(what)
     return handle
+
+
+def _profile_list(handle, what: str) -> "list[Profile]":
+    """The profiles of a list the library handed back (null: raise), each as a handle
+    of its own, the list freed."""
+    if not handle:
+        _fail(what)
+    lib = _lib()
+    try:
+        n = lib.cadaclysm_blacksmith_profile_list_count(handle)
+        return [Profile(_checked(lib.cadaclysm_blacksmith_profile_list_get(handle, i), "profile_list_get")) for i in range(n)]
+    finally:
+        lib.cadaclysm_blacksmith_profile_list_free(handle)
 
 
 def _doubles(values, count: int, what: str):
@@ -797,13 +1025,19 @@ def _numpy():
 
 
 class _Borrowed:
-    """One block of a solid's cache, exposed through the array interface so the
-    numpy view is read-only and holds the solid as its `.base`."""
+    """One block of borrowed memory, exposed through the array interface so the numpy
+    view is read-only and holds its owner as its `.base`.
 
-    __slots__ = ("_solid", "__array_interface__")
+    **The owner is whatever the memory belongs to.** A mesh, its per-face counts and
+    its edge polylines borrow from the solid's own cache, so the owner is the `Solid`
+    and closing it (or meshing again at another tolerance) is what invalidates them;
+    a `FemMesh`'s arrays borrow from that handle, so the owner is the `FemMesh` and
+    its `free()` is."""
 
-    def __init__(self, solid, pointer, shape, typestr):
-        self._solid = solid
+    __slots__ = ("_owner", "__array_interface__")
+
+    def __init__(self, owner, pointer, shape, typestr):
+        self._owner = owner
         self.__array_interface__ = {
             "version": 3,
             "data": (ctypes.cast(pointer, c_void_p).value, True),
@@ -812,19 +1046,31 @@ class _Borrowed:
         }
 
 
-def _view(solid, pointer, shape, dtype):
+def _view(owner, pointer, shape, dtype):
     numpy = _numpy()
     if _WASM:
-        # `pointer` is the wasm's typed array: copied out, so the view is read-only
-        # and has a `.base` as the borrowed one does, but never invalidates.
-        if pointer is None or 0 in shape:
-            return numpy.zeros(shape, dtype=dtype)
-        array = numpy.frombuffer(pointer.to_bytes(), dtype=dtype).reshape(shape)
-        array.flags.writeable = False
-        return array
+        from pyodide.ffi import JsProxy
+        # A JS typed array lives in the JS heap, which has no address this side, so it
+        # is copied out -- the view is read-only and has a `.base` as the borrowed one
+        # does, but never invalidates. A **ctypes** pointer under Pyodide is addressable
+        # exactly as on the desktop and falls through to the borrowed path:
+        # `fem_mesh_view`'s own `_back` branch converts its typed arrays into ctypes
+        # arrays kept on the out-struct, so the FEM arrays come through here the same
+        # way on both backends.
+        #
+        # `isinstance` against `JsProxy` rather than `hasattr(pointer, "to_bytes")`,
+        # which is what a JS object and a plain `int` both answer to: a future caller
+        # handing this a raw address would otherwise take this branch silently and fail
+        # inside `frombuffer` instead of being read as the pointer it is.
+        if isinstance(pointer, JsProxy):
+            if 0 in shape:
+                return numpy.zeros(shape, dtype=dtype)
+            array = numpy.frombuffer(pointer.to_bytes(), dtype=dtype).reshape(shape)
+            array.flags.writeable = False
+            return array
     if not pointer or 0 in shape:
         return numpy.zeros(shape, dtype=dtype)
-    return numpy.asarray(_Borrowed(solid, pointer, shape, numpy.dtype(dtype).str))
+    return numpy.asarray(_Borrowed(owner, pointer, shape, numpy.dtype(dtype).str))
 
 
 def license(text_or_path) -> None:
@@ -981,6 +1227,15 @@ class Profile:
         return Profile(_lib().cadaclysm_blacksmith_profile_regular_polygon(cx, cy, radius, max(0, int(sides)), angle))
 
     @staticmethod
+    def star(centre, outer, inner, points, angle=0.0) -> "Profile":
+        """A star of `points` tips (at least 3) on the circle of `outer` about
+        `centre`, its inner corners on the circle of `inner` (positive, under
+        `outer`), alternating: the first tip at `angle` radians from the
+        sketch's x axis, the rest counter-clockwise."""
+        cx, cy = centre
+        return Profile(_lib().cadaclysm_blacksmith_profile_star(cx, cy, outer, inner, max(0, int(points)), angle))
+
+    @staticmethod
     def spline(points, degree=3, weights=None, closed=False) -> "Profile":
         """A spline of `degree` through the control polygon `points` (`weights`
         one per point, or None). Open, it starts on the first point and ends on
@@ -1001,6 +1256,16 @@ class Profile:
     @staticmethod
     def path(start) -> "Path":
         return Path(start)
+
+    @staticmethod
+    def parabola(vertex, axis, focal, from_, to) -> "Path":
+        """Start drawing on the arc of the parabola with `vertex`, axis direction `axis`
+        and focal length `focal`, over the across-axis coordinates `from_..to`: the path
+        begins at the arc's first point and holds the arc -- a reflector from rim to rim,
+        `Profile.parabola((0, 0), (0, 1), 20, -50, 50)` a dish 100 wide opening up."""
+        vx, vy = vertex
+        ax, ay = axis
+        return Path._from_handle(_checked(_lib().cadaclysm_blacksmith_path_parabola(vx, vy, ax, ay, focal, from_, to), "path_parabola"))
 
     @staticmethod
     def chain(pieces, tolerance=1e-6) -> "Profile":
@@ -1075,15 +1340,29 @@ class Profile:
         `tolerance` too fine for these profiles (following their arcs and splines to a
         tenth of it would take more than 8 million points, about 128 MB), and, as a
         defect rather than an outcome, a result that fails to close."""
-        lib = _lib()
-        h = lib.cadaclysm_blacksmith_profile_common(self._handle, other._handle, tolerance)
-        if not h:
-            _fail("profile_common")
-        try:
-            n = lib.cadaclysm_blacksmith_profile_list_count(h)
-            return [Profile(_checked(lib.cadaclysm_blacksmith_profile_list_get(h, i), "profile_list_get")) for i in range(n)]
-        finally:
-            lib.cadaclysm_blacksmith_profile_list_free(h)
+        return _profile_list(_lib().cadaclysm_blacksmith_profile_common(self._handle, other._handle, tolerance), "profile_common")
+
+    @staticmethod
+    def text(text, size=10.0, font="", halign="left", valign="baseline", spacing=1.0, direction="ltr", font_bytes=None) -> "list[Profile]":
+        """`text` set in a font, one profile per closed shape -- a letter with its
+        counters as holes (`o` one, `8` two; `i` is two profiles) -- on the sketch
+        plane, the baseline along x from the origin, each outline counter-clockwise
+        and its holes clockwise, a curved side the font's own cubic Bezier kept
+        exactly: an extruded `O` has curved walls. `size` is roughly the height of a
+        capital. `font` is a family, optionally with a style
+        (`"Liberation Sans:style=Bold"`), a font file's path, or empty for the bundled
+        Liberation Sans Regular -- which also serves when the family is not found;
+        `font_bytes` a font file's bytes, used instead of `font` when given. `halign`
+        is "left", "center" or "right"; `valign` "baseline", "bottom", "center" or
+        "top"; `spacing` multiplies the gap between glyphs; `direction` "ltr" or
+        "rtl". Empty text is an empty list. Raises `BuildError` for a size or spacing
+        not positive and finite, an alignment or direction not one of those words,
+        font bytes that are not a font."""
+        data = (c_uint8 * len(font_bytes))(*font_bytes) if font_bytes is not None else None
+        h = _lib().cadaclysm_blacksmith_profile_text(str(text).encode("utf-8"), size, str(font).encode("utf-8"), data,
+                                                     len(font_bytes) if font_bytes is not None else 0,
+                                                     str(halign).encode("utf-8"), str(valign).encode("utf-8"), spacing, str(direction).encode("utf-8"))
+        return _profile_list(h, "profile_text")
 
     def translate(self, dx, dy) -> "Profile":
         return Profile(_lib().cadaclysm_blacksmith_translate_profile(self._handle, dx, dy))
@@ -1165,6 +1444,15 @@ class Profile:
         _not_in_the_notebook()
         return _draw(self, "view", [], _edges_as_polylines(self.polylines(tolerance)), "top", _lines_only(options))
 
+    def svg(self, path=None, *, view="top", **words) -> "str | None":
+        """This profile's own loops as SVG, from directly above by default -- a
+        sketch lies in z = 0, so its own plane already is the page, unlike a
+        solid's `Solid.svg` (`view="iso"`), which has no plane of its own to
+        prefer. The rest of the keywords are `svg()`'s. With `path`, writes the
+        file and returns `None`; without, returns the SVG text. Raises
+        `BuildError` on a refused option or a failed write."""
+        return svg([self], path, view=view, **words)
+
 
 class Path:
     """An outline drawn a segment at a time; `end()` closes it into a `Profile`
@@ -1175,6 +1463,12 @@ class Path:
     def __init__(self, start):
         x, y = start
         self._handle = _checked(_lib().cadaclysm_blacksmith_path_begin(x, y), "path_begin")
+
+    @classmethod
+    def _from_handle(cls, handle) -> "Path":
+        path = cls.__new__(cls)
+        path._handle = handle
+        return path
 
     def __del__(self):
         h, self._handle = getattr(self, "_handle", None), None
@@ -1216,6 +1510,38 @@ class Path:
         k = (c_double * len(knots))(*[float(v) for v in knots])
         ok = _lib().cadaclysm_blacksmith_path_nurbs_to(self._live(), (c_double * len(flat))(*flat), n, w, k, len(knots), degree)
         return self._step(ok, "path_nurbs_to")
+
+    def conic_to(self, x, y, control, weight) -> "Path":
+        """A conic arc to (`x`, `y`) through the control point `control` with middle
+        weight `weight`: under 1 an elliptical arc, 1 a parabola, over 1 a hyperbola --
+        the rational quadratic Bezier, kept exact."""
+        cx, cy = control
+        return self._step(_lib().cadaclysm_blacksmith_path_conic_to(self._live(), x, y, cx, cy, weight), "path_conic_to")
+
+    def parabola_to(self, x, y, control) -> "Path":
+        """A parabolic arc to (`x`, `y`) whose end tangents meet at `control`: `conic_to` with weight 1."""
+        return self.conic_to(x, y, control, 1.0)
+
+    def hyperbola_to(self, x, y, control, weight) -> "Path":
+        """A hyperbolic arc to (`x`, `y`) through `control` with middle `weight` over 1."""
+        if not (weight > 1.0):
+            raise BuildError("hyperbola_to: the weight must be over 1 (1 is a parabola, under 1 an ellipse)")
+        return self.conic_to(x, y, control, weight)
+
+    def parabola_by_vertex(self, x, y, vertex) -> "Path":
+        """The parabolic arc to (`x`, `y`) with `vertex`: its axis and focal length solved
+        from the two ends. Raises when no parabola with that vertex passes through both."""
+        vx, vy = vertex
+        return self._step(_lib().cadaclysm_blacksmith_path_parabola_by_vertex(self._live(), x, y, vx, vy), "path_parabola_by_vertex")
+
+    def parabola_by_focus(self, x, y, focus) -> "Path":
+        """The parabolic arc to (`x`, `y`) with `focus`: of the two through the ends, the
+        one whose vertex lies between the ends' projections, then the one whose arc cups
+        the focus (the focus between the arc and its chord), then the more symmetric; with
+        the focus beyond the chord that is the arch over the ends, not the shallow dish --
+        draw that one with `Profile.parabola`."""
+        fx, fy = focus
+        return self._step(_lib().cadaclysm_blacksmith_path_parabola_by_focus(self._live(), x, y, fx, fy), "path_parabola_by_focus")
 
     def end_open(self) -> Profile:
         """The path as it stands, without closing it: an open chain for
@@ -1526,8 +1852,7 @@ class Solid:
 
     @staticmethod
     def pipe(path: SweepPath, radius, thickness=0.0) -> "Solid":
-        """A circle of `radius` swept along `path`, square to its start --
-        Fusion's Pipe: a rod, or with a positive `thickness` a tube whose walls
+        """A circle of `radius` swept along `path`, square to its start: a rod, or with a positive `thickness` a tube whose walls
         are that thick. `path` is only borrowed, as by `sweep`."""
         return Solid(_lib().cadaclysm_blacksmith_pipe(path._live(), radius, thickness))
 
@@ -1700,7 +2025,7 @@ class Solid:
     def join(self, other: "Solid", tolerance=0.05, progress=None, merge=False) -> "Solid":
         """This solid and `other` as one. `merge=True` merges the flush faces the
         join leaves where the two meet in a plane or on one cylinder (`merge_flush`),
-        as Fusion does -- off by default, so face and edge numbers stay as they were."""
+        off by default, so face and edge numbers stay as they were."""
         return self._combine(_lib().cadaclysm_blacksmith_join, other, tolerance, progress, merge)
 
     def cut(self, other: "Solid", tolerance=0.05, progress=None, merge=False) -> "Solid":
@@ -1740,6 +2065,102 @@ class Solid:
         side dropped, in one call."""
         return self._combine(_lib().cadaclysm_blacksmith_split_sheet, tool, tolerance, progress)
 
+    def intersect(self, other: "Solid", tolerance=0.05, progress=None) -> "Intersection":
+        """Where this solid's faces cross or coincide with `other`'s, at `tolerance`,
+        as an :class:`Intersection`: `chains` along the curves the faces meet on and
+        `overlaps` where a face pair coincides. Neither solid is changed; either may
+        be an open sheet. No crossing is an empty result, never an error.
+
+        Each :class:`Chain`'s points are within `tolerance` of both faces' exact
+        surfaces; there is one chain per face pair per branch -- chains are not
+        joined across a face boundary or a closed curve's seam, so join them by
+        matching ends. A chain's `curve` is its exact curve where the kernel found
+        one every point lies within `tolerance` of, else `None`; `tangent` is set
+        where the surfaces are near-tangent along the chain or the snap did not
+        settle (the points are then the best estimate) -- a closed chain that does
+        not go once round its own curve (a sliver where two surfaces barely cross)
+        has no curve, `tangent` still true. An :class:`Overlap` is a coincident face
+        pair with the shared region's rings (outer first, holes after), which may
+        be empty for a partial overlap whose outlines cross. Known limit: a crossing
+        narrower than `tolerance` -- two surfaces passing within it without their
+        meshes crossing -- can be missed; near-tangent contact is where this bites.
+
+        `progress(phase, done, total)` hears "mesh", "cull", "cross", "snap" and
+        "curve". Raises `BuildError` for a `tolerance` not positive and finite, a
+        solid with no faces, or one that meshes to nothing."""
+        lib = _lib()
+        cb, _keep = _progress(progress)
+        h = lib.cadaclysm_blacksmith_intersect(self._h(), other._h(), tolerance, cb, None)
+        if not h:
+            _fail("intersect")
+        try:
+            chains, raw, curve = [], _Chain(), _Curve()
+            for i in range(lib.cadaclysm_blacksmith_intersection_chain_count(h)):
+                if not lib.cadaclysm_blacksmith_intersection_chain(h, i, ctypes.byref(raw)):
+                    _fail("intersection_chain")
+                exact = None
+                if raw.has_curve:
+                    if not lib.cadaclysm_blacksmith_intersection_curve(h, i, ctypes.byref(curve)):
+                        _fail("intersection_curve")
+                    exact = _curve_of(curve)
+                chains.append(_chain_of(raw, exact))
+            overlaps, raw = [], _Overlap()
+            for i in range(lib.cadaclysm_blacksmith_intersection_overlap_count(h)):
+                if not lib.cadaclysm_blacksmith_intersection_overlap(h, i, ctypes.byref(raw)):
+                    _fail("intersection_overlap")
+                overlaps.append(_overlap_of(raw))
+            return Intersection(chains, overlaps)
+        finally:
+            lib.cadaclysm_blacksmith_intersection_free(h)
+
+    def hits(self, profile: "Profile", frame, tolerance=0.05, progress=None) -> "SolidHits":
+        """Where `profile`, placed on `frame`, pierces this solid's faces, and the
+        pieces its loops cut into, as a :class:`SolidHits`. Neither is changed.
+
+        A point hit lies within `tolerance` of the segment's exact curve and of the
+        face's exact surface, inside the face's trim; its profile spot (`a_start`:
+        loop, segment, t) and face spot (`b_start`: face, u, v) evaluate to the point
+        within `tolerance`; `touch` where the curve's tangent lies within 1e-3 (sine)
+        of the surface's tangent plane there (a graze), false at a crossing. A run is
+        a stretch of one segment lying within `tolerance` of one face and inside it,
+        longer than `tolerance`. Hits within `tolerance` of each other merge (a hit at
+        a segment join reported once, as `(k, t = 1)`; a closed loop's closing join
+        reads `(0, 0)`). Every point is in world space
+        (the frame applied).
+
+        Pieces (:class:`Piece`) only for a closed body -- an open body has none -- in
+        loop order, covering every loop exactly; a piece's spots read a segment join
+        as the next segment's start `(k + 1, 0)`, and an open chain runs from `(0, 0)`
+        to `(n - 1, 1)`; a loop no hit cuts is one closed piece. `inside` by the piece
+        middle's winding number over the body's mesh; a piece lying on the surface is
+        inside. Known limit: a segment passing within `tolerance` of a face without
+        crossing its mesh can be missed (near-tangent grazes).
+
+        `progress(phase, done, total)` hears "mesh", "cull", "hits" and "pieces".
+        Raises `BuildError` for a `tolerance` not positive and finite, a solid with no
+        faces or that meshes to nothing, a profile with no segments, or a free-form
+        segment that is not an evaluable NURBS curve."""
+        lib = _lib()
+        cb, _keep = _progress(progress)
+        h = lib.cadaclysm_blacksmith_solid_profile_hits(self._h(), profile._handle, _frame(frame), tolerance, cb, None)
+        if not h:
+            _fail("solid_profile_hits")
+        try:
+            hits, raw = [], _Hit()
+            for i in range(lib.cadaclysm_blacksmith_hit_count(h)):
+                if not lib.cadaclysm_blacksmith_hit(h, i, ctypes.byref(raw)):
+                    _fail("hit")
+                hits.append(_hit_of(raw))
+            pieces, inside, start, end = [], c_bool(), _Spot(), _Spot()
+            for i in range(lib.cadaclysm_blacksmith_hits_piece_count(h)):
+                if not lib.cadaclysm_blacksmith_hits_piece(h, i, ctypes.byref(inside), ctypes.byref(start), ctypes.byref(end)):
+                    _fail("hits_piece")
+                own = Profile(_checked(lib.cadaclysm_blacksmith_hits_piece_profile(h, i), "hits_piece_profile"))
+                pieces.append(Piece(bool(inside.value), _spot_of(start), _spot_of(end), own))
+            return SolidHits(hits, pieces)
+        finally:
+            lib.cadaclysm_blacksmith_hits_free(h)
+
     # -- asking
     @property
     def faces(self) -> int:
@@ -1769,6 +2190,13 @@ class Solid:
         lo, hi = (c_double * 3)(), (c_double * 3)()
         if not _lib().cadaclysm_blacksmith_bounds(self._h(), tolerance, lo, hi):
             _fail("bounds")
+        return tuple(lo), tuple(hi)
+
+    def bounds64(self, tolerance=0.05) -> "tuple[tuple[float, float, float], tuple[float, float, float]]":
+        """`bounds` from the float64 positions: exact far from the origin."""
+        lo, hi = (c_double * 3)(), (c_double * 3)()
+        if not _lib().cadaclysm_blacksmith_bounds64(self._h(), tolerance, lo, hi):
+            _fail("bounds64")
         return tuple(lo), tuple(hi)
 
     def leaked_edges(self, tolerance=0.05) -> int:
@@ -1823,6 +2251,17 @@ class Solid:
                 _view(self, m.normals, (n, 3), "f4"),
                 _view(self, m.indices, (m.index_count,), "u4"))
 
+    def mesh64(self, tolerance=0.05) -> "tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]":
+        """`mesh` in float64: the same tessellation (the same indices), positions and normals
+        unnarrowed. The same cache and the same invalidation."""
+        m = _lib().cadaclysm_blacksmith_mesh64(self._h(), tolerance)
+        if not m.positions:
+            _fail("mesh64")
+        n = m.vertex_count
+        return (_view(self, m.positions, (n, 3), "f8"),
+                _view(self, m.normals, (n, 3), "f8"),
+                _view(self, m.indices, (m.index_count,), "u4"))
+
     def face_triangles(self, tolerance=0.05) -> "numpy.ndarray":
         """How many triangles each face meshed to at `tolerance`, a read-only
         uint32 view with one count per face in face order: the triangles of
@@ -1843,6 +2282,70 @@ class Solid:
         points = _view(self, p.points, (p.point_count, 3), "f4")
         offsets = [p.offsets[i] for i in range(p.polyline_count + 1)]
         return [points[a:b] for a, b in zip(offsets, offsets[1:])]
+
+    def fem_mesh(self, tolerance=0.01, max_size=0.0, placement=None, progress=None) -> "FemMesh":
+        """This solid meshed for a solver, as a `FemMesh`: nodes welded by bits,
+        triangles wound outward, each node tagged with the lowest-dimension B-rep
+        entity it lies on, and every crack reported rather than closed.
+
+        `tolerance` is the chordal tolerance in model units, finite and above zero, and
+        **it alone governs how closely the mesh follows the geometry**. `max_size` is a
+        size ceiling, finite and zero or more, `0` being no ceiling (curvature alone):
+        **it bounds the boundary and targets the interior**, which is not a
+        longest-element-edge guarantee. It adds boundary nodes without refining boundary
+        geometry, and `FemMesh.longest_edge` is what the mesh actually came to -- the
+        figure to check against it.
+
+        Those two defaults are `FemOptions::default()`'s own, restated here because
+        **there is nothing to ask under Pyodide**: the wasm kernel has no
+        `fem_options_init` export, its `fem_mesh` taking the two as plain scalars, so a
+        signature that said "the library's default" would have no default in the
+        notebook. The DLL's own init is still called where there is one, so a field
+        added to the struct later defaults without this line being touched; only these
+        two are overwritten. (`cadaclysm.py`'s `Node.fem_mesh` restates the same pair,
+        for symmetry rather than necessity -- the reader wrapper has no wasm backend.)
+
+        `placement` is a `Frame` or twelve numbers -- origin, x, y, z -- as every frame
+        in this module, and None for the identity; it is applied in float64 throughout.
+        This is the one frame argument here that may be omitted, a solid meshed in its
+        own coordinates being the common case where a sweep without a frame is nothing
+        at all. The reader module's `Node.fem_mesh` takes **sixteen**, column-major, so
+        a caller moving between the two reformats the placement.
+
+        `progress(phase, done, total)` hears **"meshing"** and **"welding"**. An opened
+        phase is not a promise of a closed one: a refused call opens no phase at all,
+        and a solid that meshes to no triangles reports "meshing" through to `1 of 1`
+        and then raises with no "welding" -- that close says the mesher finished, not
+        that it produced something.
+
+        **A cracked body is not a failure**: it comes back with `watertight` False and
+        its cracks in `open_edges` / `folded_edges`, and nothing is welded shut to make
+        it look sound. Raises `BuildError` for a tolerance or `max_size` the mesher
+        refuses, a placement that is not twelve finite numbers or is not invertible, a
+        closed solid this module cannot mesh, and a solid that meshes to no triangles.
+
+        No unlicensed notice here: `FemMesh.msh_text` and `FemMesh.save_msh` print it,
+        this library noticing on its writers rather than on its builders."""
+        options = _FemOptions()
+        # `init` writes `sizeof(CadaclysmBlacksmithFemOptions)` bytes as the *library*
+        # knows that type, into the struct `_FemOptions` declares -- which is why
+        # `cadaclysm-capi/tests/bindings.rs` pins the two field for field. The wasm has
+        # no such export (its `fem_mesh` takes the two numbers as scalars, both set
+        # below), exactly as `_svg_options` finds for `svg_options_init`. `size` is then
+        # set to this header's own sizeof, which is what the growth rule asks of a
+        # caller and what leaves the struct valid on the wasm path too.
+        if not _WASM:
+            _lib().cadaclysm_blacksmith_fem_options_init(ctypes.byref(options))
+        options.size = ctypes.sizeof(_FemOptions)
+        options.tolerance, options.max_size = float(tolerance), float(max_size)
+        cb, _keep = _progress(progress)
+        # None, never an empty array: the wasm export reads `null` as the identity and
+        # refuses a zero-length frame as twelve numbers it did not get.
+        frame = None if placement is None else _frame(placement)
+        h = _lib().cadaclysm_blacksmith_fem_mesh(self._h(), frame, ctypes.byref(options), cb, None)
+        if not h:
+            _fail("fem_mesh")
+        return FemMesh(h)
 
     def show(self, tolerance=0.05, **options) -> None:
         """Draw the solid with the viewer in use -- in a terminal, the picture is left
@@ -2047,7 +2550,7 @@ class Solid:
 
     def push_pull(self, face, distance, tolerance=0.05, progress=None) -> "Solid":
         """Face `face` pushed out by `distance` along its outward normal (pulled in,
-        negative) the way Fusion and Rhino extrude a face: the prism over it joined on
+        negative) as a face extrude does it: the prism over it joined on
         (cut out), and the flush faces merged -- a box's top raised is one taller box
         of six faces, not a box and a prism with every side wall split at the seam.
         A face on a cylinder, a cone, a sphere or a torus moves out along its normal
@@ -2055,7 +2558,7 @@ class Solid:
         narrower, a dome fuller -- with the flat faces beside it carried along; any
         other curved face is refused. `tolerance` and `progress` as `join`'s.
 
-        `face` may be a list of faces, pushed together as Fusion's press-pull on a
+        `face` may be a list of faces, pushed together as a press-pull on a
         selection: each by its own rule, one after another, each found again after
         the pushes before it renumbered the faces -- a box's top and a side pushed 5
         is the box 5 taller and 5 wider. A face on the same curved surface as one
@@ -2068,7 +2571,7 @@ class Solid:
         return Solid(_lib().cadaclysm_blacksmith_push_pull_faces(self._h(), arr, len(which), distance, tolerance, cb, None))
 
     def split(self, tool: "Solid", tolerance=0.05, progress=None) -> list:
-        """This solid split by `tool` into bodies -- Fusion's Split Body: a
+        """This solid split by `tool` into bodies: a
         closed `tool` gives the parts outside it, then the parts inside; a flat
         sheet (a `face`) splits by the whole plane it lies on. Each connected
         part is a body of its own, so a U cut across both arms is three. The
@@ -2095,26 +2598,25 @@ class Solid:
 
     def refillet(self, face, radius, tolerance=1e-6) -> "Solid":
         """The round `face` belongs to -- a fillet's bands, balls and rim bands joined
-        to that face -- made again at `radius`, as Fusion's press-pull on a fillet
+        to that face -- made again at `radius`, as a press-pull on a fillet
         face: taken back to the sharp edges it replaced, and those rounded again.
         Rounds of straight edges between planes and of circular rims beside a plane."""
         return Solid(_lib().cadaclysm_blacksmith_refillet(self._h(), face, radius, tolerance))
 
     def unfillet(self, face) -> "Solid":
         """The round `face` belongs to taken off, the faces beside it sharp again --
-        Fusion's delete of a fillet face. The same rounds as `refillet`."""
+        the delete of a fillet face. The same rounds as `refillet`."""
         return Solid(_lib().cadaclysm_blacksmith_unfillet(self._h(), face))
 
     def rechamfer(self, face, distance, tolerance=1e-6) -> "Solid":
         """The chamfer `face` belongs to -- its bevels, flat or round a rim, and the
-        corner triangles joined to that face -- cut again at `distance`, as Fusion's
-        press-pull on a chamfer face: taken back to the sharp edges it cut, and those
+        corner triangles joined to that face -- cut again at `distance`, as a press-pull on a chamfer face: taken back to the sharp edges it cut, and those
         bevelled again."""
         return Solid(_lib().cadaclysm_blacksmith_rechamfer(self._h(), face, distance, tolerance))
 
     def unchamfer(self, face) -> "Solid":
         """The chamfer `face` belongs to taken off, the faces beside it sharp again --
-        Fusion's delete of a chamfer face. The same chamfers as `rechamfer`."""
+        the delete of a chamfer face. The same chamfers as `rechamfer`."""
         return Solid(_lib().cadaclysm_blacksmith_unchamfer(self._h(), face))
 
     def merge_flush(self) -> "Solid":
@@ -2131,7 +2633,7 @@ class Solid:
         return Solid(_lib().cadaclysm_blacksmith_shell(self._h(), thickness, arr, len(which), tolerance, cb, None))
 
     def thicken(self, thickness, tolerance=1e-6, progress=None) -> "Solid":
-        """This sheet made a solid `thickness` thick -- Fusion's Thicken: its faces,
+        """This sheet made a solid `thickness` thick: its faces,
         their twins moved `thickness` along the faces' normals (against them for a
         negative thickness), and a wall round every open edge. A closed sheet thickens
         to a hollow."""
@@ -2237,8 +2739,9 @@ def _hit_of(raw):
 
 
 class Curve:
-    """One edge's exact curve, as plain data copied out (:attr:`Edge.curve`): `kind`
-    is `"line"`, `"circle"`, `"ellipse"` or `"nurbs"`.
+    """One edge's, or one intersection chain's, exact curve as plain data copied out
+    (:attr:`Edge.curve`, :attr:`Chain.curve`): `kind` is `"line"`, `"circle"`,
+    `"ellipse"` or `"nurbs"`.
 
     `t0..t1` is the edge's parameter range on its own curve: a line's fraction (0..1
     over `origin -> origin + x`, where `x` is the full `to - from`, NOT unit -- so
@@ -2314,6 +2817,101 @@ class Edge:
         return f"Edge({self.index}, {self.kind!r}, faces={self.faces})"
 
 
+class SolidHits:
+    """What :meth:`Solid.hits` found, copied out: `hits` (:class:`Hit`, ordered along
+    the profile; `a_start`/`a_end` on the profile, `b_start`/`b_end` on the solid's
+    faces: `face` at (`u`, `v`)) and `pieces` (:class:`Piece`, empty for an open body)."""
+
+    __slots__ = ("hits", "pieces")
+
+    def __init__(self, hits, pieces):
+        self.hits, self.pieces = hits, pieces
+
+    def __repr__(self):
+        return f"SolidHits(hits={len(self.hits)}, pieces={len(self.pieces)})"
+
+
+class Piece:
+    """One stretch of a profile loop between two cuts (:attr:`SolidHits.pieces`):
+    `inside` (by its middle's winding number over the body; a piece lying on the
+    surface is inside), `start`/`end` (profile :class:`Spot` values -- a segment join
+    reads as the next segment's start `(k + 1, 0)`, an open chain runs from `(0, 0)`
+    to `(n - 1, 1)`; a loop no hit cuts is one closed piece) and `profile`, the
+    piece's own open chain (what `SweepPath.along(open=True)` sweeps)."""
+
+    __slots__ = ("inside", "start", "end", "profile")
+
+    def __init__(self, inside, start, end, profile):
+        self.inside, self.start, self.end, self.profile = inside, start, end, profile
+
+    def __repr__(self):
+        return f"Piece(inside={self.inside}, start={self.start}, end={self.end})"
+
+
+class Intersection:
+    """What :meth:`Solid.intersect` found, copied out: `chains` (:class:`Chain`, one
+    per face pair per branch) and `overlaps` (:class:`Overlap`, one per coincident
+    face pair). Both empty where the solids do not meet."""
+
+    __slots__ = ("chains", "overlaps")
+
+    def __init__(self, chains, overlaps):
+        self.chains, self.overlaps = chains, overlaps
+
+    def __repr__(self):
+        return f"Intersection(chains={len(self.chains)}, overlaps={len(self.overlaps)})"
+
+
+class Chain:
+    """One branch of one face pair's crossing (:attr:`Intersection.chains`): `points`
+    (3-tuples in walk order; a closed chain does not repeat its first point),
+    `closed`, `faces` (`(face in a, face in b)`), `tangent` (the surfaces near-tangent
+    along it, or the snap unsettled -- the points their best estimate) and `curve`,
+    its exact :class:`Curve` over the chain's own `t0..t1`, or `None` where the
+    kernel found none. A chain may stop at a face boundary or a closed curve's seam
+    and continue as another: join chains by matching ends."""
+
+    __slots__ = ("points", "closed", "faces", "tangent", "curve")
+
+    def __init__(self, points, closed, faces, tangent, curve=None):
+        self.points, self.closed, self.faces, self.tangent, self.curve = points, closed, faces, tangent, curve
+
+    def __repr__(self):
+        return (f"Chain(points={len(self.points)}, closed={self.closed}, faces={self.faces}, "
+                f"tangent={self.tangent}, curve={self.curve!r})")
+
+
+class Overlap:
+    """A face of `a` and a face of `b` that coincide (:attr:`Intersection.overlaps`):
+    `faces` (`(face in a, face in b)`) and `loops`, the shared region's rings as
+    tuples of 3-tuples (outer first, holes after; each ring closed without repeating
+    its first point) -- empty for a partial overlap whose outlines cross."""
+
+    __slots__ = ("faces", "loops")
+
+    def __init__(self, faces, loops):
+        self.faces, self.loops = faces, loops
+
+    def __repr__(self):
+        return f"Overlap(faces={self.faces}, loops={len(self.loops)})"
+
+
+def _points_of(raw, count):
+    flat = [raw[j] for j in range(3 * count)]
+    return tuple(tuple(flat[k:k + 3]) for k in range(0, len(flat), 3))
+
+
+def _chain_of(raw, curve):
+    return Chain(_points_of(raw.points, raw.point_count), bool(raw.closed), (raw.face_a, raw.face_b), bool(raw.tangent), curve)
+
+
+def _overlap_of(raw):
+    points = _points_of(raw.points, raw.point_count)
+    ends = [raw.loop_offsets[j] for j in range(raw.loop_count)] + [raw.point_count]
+    loops = tuple(points[ends[r]:ends[r + 1]] for r in range(raw.loop_count))
+    return Overlap((raw.face_a, raw.face_b), loops)
+
+
 class Manifold:
     """Whether a solid's faces make a manifold, as plain data (`Solid.manifold`):
     its faces, edges and vertices; the edges one face borders (a sheet's rim),
@@ -2335,6 +2933,367 @@ class Manifold:
                 f"boundary_edges={self.boundary_edges}, non_manifold_edges={self.non_manifold_edges}, "
                 f"non_manifold_vertices={self.non_manifold_vertices}, is_manifold={self.is_manifold}, "
                 f"is_closed={self.is_closed})")
+
+
+class FemEdge:
+    """One B-rep edge of a FEM mesh: the chain of nodes along it, and where that chain
+    breaks. Plain data, copied out of the handle.
+
+    `nodes` are this mesh's node indices in order along the edge, its end vertices
+    included; a closed edge repeats no node. **`runs` says where the chain breaks**:
+    read `nodes[runs[i]:runs[i + 1]]` (the last run to the end) as one polyline and
+    join nothing across a run boundary -- the two ends either side of one are two
+    points of the edge with no mesh edge between them. `(0,)` is the ordinary answer,
+    and a caller reading `nodes` as one polyline without looking here jumps the gap
+    silently.
+
+    `faces` is `(face_a, face_b)` and `ends` is `(end_a, end_b)`, the second of each
+    being `NONE` where there is none -- an open sheet's rim, or both ends at one
+    vertex (a closed edge, a circle's rim, a full-turn seam). **`0` is a real face and
+    a real vertex, not a sentinel.** Which end comes first is the first trim's
+    direction and means nothing else. `closed` where the nodes make one loop, never
+    with more than one run; `seam` where one face bounds the edge twice, and both
+    `faces` are then that face.
+
+    **`faces` numbers the solid's faces as `Solid.face_kind` does; the edges
+    themselves are not `Solid.edges`' numbering** -- these are the manifold analysis's,
+    ascending by edge id, and `FemMesh.node_entity` indexes this list.
+
+    `id` is **the solid's own edge id**, not this mesh's edge index: the list is a
+    densely renumbered subset of the solid's edges, with every edge collapsed to a point
+    left out, so a sphere -- whose two pole runs collapse -- reports its seam as edge 0
+    with an `id` of 1. Everything else that names an edge here means the index: a
+    `node_kind` of 1 read through `node_entity`, the third number of an `open_edges` or
+    `folded_edges` row, and the `edge_<i>` physical group of `msh_text`. It is not a row
+    of `Solid.edges` either, that table being the solid's edges grouped by geometry; the
+    id names the topological edge."""
+
+    __slots__ = ("id", "nodes", "runs", "faces", "ends", "closed", "seam")
+
+    def __init__(self, id, nodes, runs, faces, ends, closed, seam):
+        self.id = id
+        self.nodes = nodes
+        self.runs = runs
+        self.faces = faces
+        self.ends = ends
+        self.closed = closed
+        self.seam = seam
+
+    def __repr__(self):
+        return (f"FemEdge(id={self.id}, nodes={len(self.nodes)}, runs={len(self.runs)}, "
+                f"faces={self.faces}, ends={self.ends}, closed={self.closed}, seam={self.seam})")
+
+
+class FemVertex:
+    """One B-rep vertex of a FEM mesh: the node the mesh put there, if any, and where
+    the topology says it is, if that is known. Plain data.
+
+    `node` is `NONE` where the mesh has none there, **which is ordinary rather than a
+    fault**: the analysis rebuilds a vertex wherever two trims meet, and a pole's
+    polyline runs give a sphere 48 of them where the mesh has 2 points, so a caller
+    walking these skips the sentinel rather than treating it as a gap.
+
+    `point` is where the vertex is, in the same space and under the same placement as
+    `FemMesh.nodes`. **Meaningless unless `has_position`**: it is `(0.0, 0.0, 0.0)`
+    then -- a point no geometry has, which a solver would take for a node at the
+    origin."""
+
+    __slots__ = ("node", "point", "has_position")
+
+    def __init__(self, node, point, has_position):
+        self.node = node
+        self.point = point
+        self.has_position = has_position
+
+    def __repr__(self):
+        return f"FemVertex(node={self.node}, point={self.point}, has_position={self.has_position})"
+
+
+class FemMesh:
+    """One solid meshed for a solver: nodes welded by bits, triangles wound outward,
+    every node tagged with the lowest-dimension B-rep entity it lies on, and every
+    crack reported rather than closed. Built by `Solid.fem_mesh`, and **owned by
+    you**: `free()` it, or use it as a context manager.
+
+    A handle rather than a snapshot, as a `Solid` is, and its big arrays are
+    **read-only numpy views into the library's own memory**, exactly as `Solid.mesh`'s
+    are and for the same reason: a solver mesh is megabytes, and copying it to hand it
+    over would cost that twice. Each array keeps *this object* alive through its
+    `.base` -- not the solid, which does not own it and whose `close()` does not free
+    it, and not the mesh cache, which meshing again at another tolerance replaces. What
+    still dangles is a view kept past an explicit `free()` or the end of a `with`
+    block; call `.copy()` on anything that must outlive the handle. Under Pyodide the
+    arrays are copies and never invalidate, as everywhere else in this module.
+
+    It is `free()` here where a `Solid` has `close()`: this follows the reader module's
+    `FemMesh` and `Meshlets`, the two other handles whose arrays are borrowed views,
+    so one FEM mesh is released the same way on both sides of the ABI.
+
+    numpy is imported the first time one of those arrays is asked for. The flags, the
+    counts, the quality figures, the edge and vertex records, the crack censuses and
+    the `.msh` text need nothing outside the standard library."""
+
+    __slots__ = ("_handle_", "_raw", "__weakref__")
+
+    def __init__(self, handle):
+        self._handle_ = _checked(handle, "fem_mesh")
+        # Read once, here. Every pointer in the view is built with the handle and good
+        # until it is freed -- nothing in this ABI is built lazily -- so asking again
+        # per property would be one C call per array for the same answer.
+        raw = _FemMeshView()
+        if not _lib().cadaclysm_blacksmith_fem_mesh_view(self._handle_, ctypes.byref(raw)):
+            why = _text(_lib().cadaclysm_blacksmith_last_error()) or "fem_mesh_view"
+            self.free()
+            raise BuildError(why)
+        self._raw = raw
+
+    def _h(self):
+        if not self._handle_:
+            raise BuildError("fem mesh: freed")
+        return self._handle_
+
+    @property
+    def _live(self) -> "_FemMeshView":
+        """The view, the handle checked first: every pointer in it is the handle's, and
+        a freed handle's point at nothing."""
+        if not self._handle_:
+            raise BuildError("fem mesh: freed")
+        return self._raw
+
+    @property
+    def freed(self) -> bool:
+        return not self._handle_
+
+    def free(self) -> None:
+        """Give the mesh back, and with it every view taken from it. Idempotent. The
+        `.msh` texts are not freed with it: each is already a Python `str`."""
+        h, self._handle_ = getattr(self, "_handle_", None), None
+        if h and _library is not None:
+            _library.cadaclysm_blacksmith_fem_mesh_free(h)
+
+    def __enter__(self) -> "FemMesh":
+        return self
+
+    def __exit__(self, *_):
+        self.free()
+
+    def __del__(self):
+        try:
+            self.free()
+        except Exception:  # noqa: BLE001 - the interpreter may be going down
+            pass
+
+    # -- the flat arrays, borrowed
+    @property
+    def nodes(self) -> "numpy.ndarray":
+        """Every node's position, a read-only float64 `(node_count, 3)` view -- placed
+        by `Solid.fem_mesh`'s `placement`, in the solid's own coordinates otherwise."""
+        raw = self._live
+        return _view(self, raw.nodes, (raw.node_count, 3), "f8")
+
+    @property
+    def triangles(self) -> "numpy.ndarray":
+        """Three node indices a triangle, wound outward: a read-only uint32
+        `(triangle_count, 3)` view."""
+        raw = self._live
+        return _view(self, raw.triangles, (raw.triangle_count, 3), "u4")
+
+    @property
+    def triangle_face(self) -> "numpy.ndarray":
+        """The face each triangle lies on, one per triangle: a read-only uint32 view
+        into `range(face_count)`, the same faces `Solid.face_kind` names."""
+        raw = self._live
+        return _view(self, raw.triangle_face, (raw.triangle_count,), "u4")
+
+    @property
+    def node_kind(self) -> "numpy.ndarray":
+        """What each node lies on -- `0` a vertex, `1` an edge, `2` a face -- one per
+        node, as a read-only uint32 view. Gmsh's own classification rule: the
+        lowest-dimension entity the node lies on. `node_entity` says which one."""
+        raw = self._live
+        return _view(self, raw.node_kind, (raw.node_count,), "u4")
+
+    @property
+    def node_entity(self) -> "numpy.ndarray":
+        """Which vertex, edge or face each node lies on, by the matching `node_kind`:
+        an index into `vertices`, into `edges`, or into the solid's faces. One per
+        node, a read-only uint32 view."""
+        raw = self._live
+        return _view(self, raw.node_entity, (raw.node_count,), "u4")
+
+    # -- the topology, copied out
+    @property
+    def face_count(self) -> int:
+        """The solid's faces -- the same faces `Solid.faces` counts."""
+        return self._live.face_count
+
+    @property
+    def edges(self) -> "list[FemEdge]":
+        """One `FemEdge` per B-rep edge, in the order a `node_kind` of 1 indexes them.
+        **Not `Solid.edges`' numbering**, and not the solid's own edge ids either -- each
+        `FemEdge.id` carries that; see `FemEdge`."""
+        library, handle, raw = _lib(), self._h(), _FemEdge()
+        out = []
+        for i in range(self._raw.edge_count):
+            if not library.cadaclysm_blacksmith_fem_mesh_edge(handle, i, ctypes.byref(raw)):
+                _fail(f"fem_mesh_edge {i}")
+            out.append(FemEdge(
+                raw.id,
+                tuple(raw.nodes[j] for j in range(raw.node_count)),
+                tuple(raw.runs[j] for j in range(raw.run_count)),
+                (raw.face_a, raw.face_b),
+                (raw.end_a, raw.end_b),
+                bool(raw.closed),
+                bool(raw.seam),
+            ))
+        return out
+
+    @property
+    def vertices(self) -> "list[FemVertex]":
+        """One `FemVertex` per B-rep vertex, in the order a `node_kind` of 0 indexes
+        them."""
+        library, handle, raw = _lib(), self._h(), _FemVertex()
+        out = []
+        for i in range(self._raw.vertex_count):
+            if not library.cadaclysm_blacksmith_fem_mesh_vertex(handle, i, ctypes.byref(raw)):
+                _fail(f"fem_mesh_vertex {i}")
+            out.append(FemVertex(raw.node, tuple(raw.point), bool(raw.has_position)))
+        return out
+
+    # -- the crack census
+    @property
+    def open_edges(self) -> "list[tuple[int, int, int]]":
+        """Every crack, as `(a, b, brep_edge)`: a directed mesh edge `(a, b)` with no
+        `(b, a)`, and the B-rep edge both nodes lie on or `NONE` where they share none.
+
+        **Empty unless the solid's topology is closed**, whose mesh is otherwise not
+        asked about at all -- an open sheet from `face`, `face_sheet`, `drop_faces` or
+        `extrude_open` reports `watertight` False with this and `folded_edges` both
+        empty, and *that trio together* says "not asked", not "nothing found"."""
+        return self._census(_lib().cadaclysm_blacksmith_fem_mesh_open_edge,
+                            self._live.open_edge_count, "fem_mesh_open_edge")
+
+    @property
+    def folded_edges(self) -> "list[tuple[int, int, int]]":
+        """Every fold, as `open_edges` reports a crack: a directed mesh edge used by
+        more than one triangle.
+
+        **A body can be folded without being open** -- a solid no thicker than a line
+        leaves no hole for an open edge to find -- so a caller that checks only
+        `open_edges` calls such a body sound."""
+        return self._census(_lib().cadaclysm_blacksmith_fem_mesh_folded_edge,
+                            self._live.folded_edge_count, "fem_mesh_folded_edge")
+
+    def _census(self, call, count: int, what: str) -> "list[tuple[int, int, int]]":
+        """One flattened census, row by row: the shape `open_edges` and `folded_edges`
+        share, so the two cannot drift."""
+        handle = self._h()
+        a, b, edge = c_uint32(), c_uint32(), c_uint32()
+        out = []
+        for i in range(count):
+            if not call(handle, i, ctypes.byref(a), ctypes.byref(b), ctypes.byref(edge)):
+                _fail(f"{what} {i}")
+            out.append((a.value, b.value, edge.value))
+        return out
+
+    # -- the summary
+    @property
+    def watertight(self) -> bool:
+        """The topology is closed and the welded mesh is too. **False for every solid
+        whose topology is not closed**; see `open_edges` for what an empty census
+        beside a False here does and does not mean."""
+        return bool(self._live.watertight)
+
+    @property
+    def from_mesh(self) -> bool:
+        """**Always False here**, and kept so the two ABIs' views are one struct: a
+        `Solid` always has a brep behind it, so this library has no mesh-only body to
+        report. The reader module's `Node.fem_mesh` sets it for a node with no brep (a
+        JT, an STL, an OpenSCAD body), where it also says which space the mesh is in --
+        here there is only one space, the solid's own under `placement` -- and where a
+        true one means the census speaks from the triangles alone rather than from a
+        topology. **That second difference cannot arise here**: every solid has a brep
+        (`cadaclysm_blacksmith_fem_mesh` only ever calls `fem::fem_mesh_with`, never
+        `fem_mesh_of_mesh`), so `open_edges`' "empty unless the topology is closed"
+        holds without exception on this side of the ABI."""
+        return bool(self._live.from_mesh)
+
+    @property
+    def min_angle(self) -> float:
+        """The smallest interior angle of any triangle, in degrees."""
+        return self._live.min_angle
+
+    @property
+    def worst_triangle(self) -> int:
+        """The triangle with that angle: an index into `triangles`."""
+        return self._live.worst_triangle
+
+    @property
+    def longest_edge(self) -> float:
+        """The longest triangle edge, placed.
+
+        **The figure to check against `Solid.fem_mesh`'s `max_size`, and the only one
+        that says what the mesh actually is**: `max_size` bounds the boundary segments
+        and merely targets the interior, and one small enough to hit the mesher's own
+        piece and station ceilings is not honoured at all."""
+        return self._live.longest_edge
+
+    # -- out
+    def msh_text(self) -> str:
+        """The mesh as Gmsh 4.1 ASCII `.msh` text: an entity per B-rep vertex, edge and
+        face, a volume where the solid closes, and a physical group naming each.
+
+        **The library's text is owned and released here** with
+        `cadaclysm_blacksmith_string_free`, as every other text this library hands over
+        (`step_text`, `sat_text`, `brep_text`, `svg`). Two asks give two independent
+        texts, and neither dies with the handle. The reader module's
+        `FemMesh.msh_text` is the other way round -- it borrows from a slot on its own
+        handle and must not be freed -- so a reader porting one side's reasoning onto
+        the other leaks or double-frees.
+
+        **The unlicensed notice is printed here**, on this writer and on `save_msh`,
+        and *not* by `Solid.fem_mesh`: meshing is not a licensed output and the `.msh`
+        file is, which is where `sat_text` and `brep_text` put theirs too. The reader
+        library notices in its constructor instead and on neither `.msh` call; each
+        matches its own siblings, so moving the call to look like the other side breaks
+        a convention.
+
+        Raises `BuildError` for a mesh the writer refuses, naming the field it cannot
+        honour, and for a freed handle."""
+        text = _lib().cadaclysm_blacksmith_fem_mesh_msh_text(self._h())
+        if not text:
+            _fail("fem_mesh_msh_text")
+        if _WASM:
+            return text   # the wasm returns the text itself, nothing to free
+        try:
+            return ctypes.string_at(text).decode("utf-8")
+        finally:
+            _lib().cadaclysm_blacksmith_string_free(text)
+
+    def save_msh(self, path) -> None:
+        """`msh_text()` written to `path`, replacing any file there -- by the library
+        itself, or by this module in the browser, where the wasm has no files of the
+        page's to write (as `write_sat`, `write_brep` and `svg`).
+
+        Raises `BuildError` for a mesh the writer refuses or a file it cannot write,
+        naming the path. Prints the unlicensed notice; see `msh_text`."""
+        if _WASM:
+            # Refused as the C writer words its own (`fem_mesh_save_msh: <path>: <why>`).
+            text = self.msh_text()
+            try:
+                _FsPath(path).write_text(text, encoding="utf-8")
+            except OSError as e:
+                raise BuildError(f"fem_mesh_save_msh: {path}: {e.strerror or e}") from None
+            return
+        if not _lib().cadaclysm_blacksmith_fem_mesh_save_msh(self._h(), str(path).encode("utf-8")):
+            _fail("fem_mesh_save_msh")
+
+    def __repr__(self):
+        if self.freed:
+            return "FemMesh(freed)"
+        raw = self._raw
+        return (f"FemMesh(nodes={raw.node_count}, triangles={raw.triangle_count}, "
+                f"watertight={bool(raw.watertight)})")
 
 
 _XY = (0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1)
@@ -2424,7 +3383,7 @@ class Frame:
 
     @staticmethod
     def midplane(a, b) -> "Frame":
-        """The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line -- Fusion's midplane. `a` and `b` are frames or twelve numbers."""
+        """The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line. `a` and `b` are frames or twelve numbers."""
         out = (c_double * 12)()
         if not _lib().cadaclysm_blacksmith_frame_midplane(_frame(a), _frame(b), out):
             _fail("frame_midplane")
@@ -2615,6 +3574,45 @@ def write_step(path, solids, schema=None, unit="mm") -> None:
     _FsPath(path).write_text(write_step_text(solids, schema, unit), encoding="utf-8")
 
 
+def write_step_assembly_text(parts, placements, schema=None, unit="mm") -> str:
+    """An assembly as STEP text: `parts` maps a name to a solid in its own coordinates,
+    each written once as its own product; `placements` is a list of `(name, frame)`,
+    each an occurrence of that part at that frame (a `Frame`, or twelve numbers --
+    right-handed and orthonormal), all under one root product, `assembly`. A reader
+    tessellates a part once however many times it is placed, and shows each placement
+    under its part's name. A part no placement names is not written. `schema` and
+    `unit` as `write_step_text`."""
+    if unit not in UNITS:
+        raise BuildError(f"unit must be one of {sorted(UNITS)}")
+    names = list(parts)
+    index = {n: i for i, n in enumerate(names)}
+    placements = list(placements)
+    missing = [n for n, _ in placements if n not in index]
+    if missing:
+        raise BuildError(f"step_assembly: no part named {missing[0]!r}")
+    handles = (c_void_p * max(len(names), 1))(*[parts[n]._h() for n in names])
+    labels = (c_char_p * max(len(names), 1))(*[n.encode("utf-8") for n in names])
+    which = (c_uint32 * max(len(placements), 1))(*[index[n] for n, _ in placements])
+    flat = [v for _, f in placements for v in _frame(f)]
+    frames = (c_double * max(len(flat), 1))(*flat)
+    text = _lib().cadaclysm_blacksmith_step_assembly(
+        handles, labels, len(names), which, frames, len(placements), _schema_text(schema), UNITS[unit]
+    )
+    if not text:
+        _fail("step_assembly")
+    if _WASM:
+        return text   # the wasm returns the text itself, nothing to free
+    try:
+        return ctypes.string_at(text).decode("utf-8")
+    finally:
+        _lib().cadaclysm_blacksmith_string_free(text)
+
+
+def write_step_assembly(path, parts, placements, schema=None, unit="mm") -> None:
+    """`write_step_assembly_text` written to `path`."""
+    _FsPath(path).write_text(write_step_assembly_text(parts, placements, schema, unit), encoding="utf-8")
+
+
 def write_sat_text(solids, unit="mm") -> str:
     """Several solids as one ACIS SAT file, each its own body."""
     if unit not in UNITS:
@@ -2650,34 +3648,45 @@ def write_sat(path, solids, unit="mm"):
         _fail("sat")
 
 
-def svg(solids, path=None, **words) -> "str | None":
-    """Several solids' wireframe as one SVG, each its own `<g>` -- `Solid.svg`'s
-    words: view= (front back left right top bottom iso), az=, el= over it, up=
-    (default z), fov= (0, the default, is orthographic), size=(width, height),
-    margin=, tolerance=, stroke=, width= (the stroke's, in page units),
-    background= (`None` for transparent), edges=, curves=, isocurves=,
-    polylines= (which line sets are drawn; edges alone by default).
+def svg(things, path=None, **words) -> "str | None":
+    """The solids and profiles in `things` (any mix of `Solid` and `Profile`,
+    in any order) as one SVG drawing -- a `<g id="solid-<i>">` per solid then
+    a `<g id="profile-<i>">` per profile, each its own colour where it carries
+    one. `Solid.svg`'s words: view= (front back left right top bottom iso),
+    az=, el= over it, up= (default z), fov= (0, the default, is orthographic),
+    size=(width, height), margin=, tolerance=, stroke=, width= (the stroke's,
+    in page units), background= (`None` for transparent), edges=, curves=,
+    isocurves=, polylines= (which line sets are drawn; edges alone by
+    default). A list of solids alone still draws exactly as it always did.
 
     With `path`, writes the file and returns `None`; without, returns the SVG
-    text -- owned by this call, decoded and released before it returns."""
+    text -- owned by this call, decoded and released before it returns.
+    Raises `BuildError` for anything in `things` that is not a `Solid` or a
+    `Profile`, and where both lists come out empty."""
+    solids = [t for t in things if isinstance(t, Solid)]
+    profiles = [t for t in things if isinstance(t, Profile)]
+    if len(solids) + len(profiles) != len(things):
+        raise BuildError("svg: only solids and profiles can be drawn")
     if path is not None and _WASM:
         # The notebook has Pyodide's own filesystem and no C file writer for SVG --
-        # there is no cadaclysm_blacksmith_svg wasm export, the same gap `sat` has
-        # (see `write_sat`) -- so the text this call already knows how to get is
-        # written through Pyodide's filesystem instead.
-        text = svg(solids, None, **words)
+        # there is no cadaclysm_blacksmith_drawing_svg wasm export, the same gap
+        # `sat` has (see `write_sat`) -- so the text this call already knows how
+        # to get is written through Pyodide's filesystem instead.
+        text = svg(things, None, **words)
         try:
             _FsPath(path).write_text(text, encoding="utf-8")
         except OSError as e:
             raise BuildError(f"svg: {path}: {e.strerror or e}") from None
         return None
     o = _svg_options(**words)
-    handles = (c_void_p * len(solids))(*[s._h() for s in solids])
+    solid_handles = (c_void_p * len(solids))(*[s._h() for s in solids])
+    profile_handles = (c_void_p * len(profiles))(*[p._handle for p in profiles])
     if path is not None:
-        if not _lib().cadaclysm_blacksmith_svg(handles, len(solids), os.fsencode(str(path)), ctypes.byref(o)):
+        if not _lib().cadaclysm_blacksmith_drawing_svg(solid_handles, len(solids), profile_handles, len(profiles),
+                                                        os.fsencode(str(path)), ctypes.byref(o)):
             _fail("svg")
         return None
-    text = _lib().cadaclysm_blacksmith_svg_text(handles, len(solids), ctypes.byref(o))
+    text = _lib().cadaclysm_blacksmith_drawing_svg_text(solid_handles, len(solids), profile_handles, len(profiles), ctypes.byref(o))
     if not text:
         _fail("svg_text")
     if _WASM:
@@ -2707,7 +3716,12 @@ def write_brep(path, solids):
     """`write_brep_text` written to `path` -- by the library itself, or by this
     module in the browser, where the wasm has no files of the page's to write."""
     if _WASM:
-        _FsPath(path).write_text(write_brep_text(solids), encoding="utf-8")
+        # Refused as the C writer words its own (`brep: <path>: <why>`), as write_sat.
+        text = write_brep_text(solids)
+        try:
+            _FsPath(path).write_text(text, encoding="utf-8")
+        except OSError as e:
+            raise BuildError(f"brep: {path}: {e.strerror or e}") from None
         return
     handles = (c_void_p * len(solids))(*[s._h() for s in solids])
     if not _lib().cadaclysm_blacksmith_brep(handles, len(solids), str(path).encode("utf-8")):

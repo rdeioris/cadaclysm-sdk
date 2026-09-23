@@ -42,6 +42,32 @@ var first = scene.Walk().First(n => n.CanMesh);
 if (first.MeshLod(0)!.TriangleCount != first.Mesh!.TriangleCount) return Fail("LOD 0 is not the mesh");
 if (first.LodError(0) != 0 || first.MeshLod(4) is not null && first.MeshLod(4)!.TriangleCount != 0) return Fail("LOD errors or levels are off");
 if (path.EndsWith("cube.scad") && (first.MeshLod(1)!.TriangleCount != 3 || first.EdgeBeziers.Count != 12 || first.EdgeBeziers.Points.Length != 12 * 12)) return Fail("the cube's LOD 1 or Béziers are off");
+// f64 twins: mesh64, beziers64 and bounds64 mirror their f32 twins, narrowed exactly, on
+// this small-coordinate cube -- see the far-from-origin note in the task report for what
+// this comparison cannot see.
+var mesh32 = first.Mesh!;
+var mesh64 = first.Mesh64;
+if (mesh64 is null || mesh64.VertexCount != mesh32.VertexCount || mesh64.IndexCount != mesh32.IndexCount)
+    return Fail("mesh64's vertex/index counts do not equal mesh's");
+if (mesh32.Positions.Length >= 3 &&
+    ((float)mesh64.Positions[0] != mesh32.Positions[0] || (float)mesh64.Positions[1] != mesh32.Positions[1] || (float)mesh64.Positions[2] != mesh32.Positions[2]))
+    return Fail("mesh64's first position narrowed to float does not equal mesh's first position");
+var edgeBeziers32 = first.EdgeBeziers;
+var edgeBeziers64 = first.EdgeBeziers64;
+if (edgeBeziers64.Count != edgeBeziers32.Count || edgeBeziers64.Points.Length != edgeBeziers32.Points.Length)
+    return Fail("edgeBeziers64's count/length does not equal edgeBeziers's");
+if (edgeBeziers32.Points.Length >= 3 && (float)edgeBeziers64.Points[0] != edgeBeziers32.Points[0])
+    return Fail("edgeBeziers64's first point narrowed does not equal edgeBeziers's");
+if (first.CurveBeziers64.Count != first.CurveBeziers.Count) return Fail("curveBeziers64's count does not equal curveBeziers's");
+if (first.IsocurveBeziers64.Count != first.IsocurveBeziers.Count) return Fail("isocurveBeziers64's count does not equal isocurveBeziers's");
+var nodeBounds64 = first.Bounds64;
+var nodeBounds32 = first.Bounds;
+if ((float)nodeBounds64.Max[0] != nodeBounds32.Max[0] || (float)nodeBounds64.Max[1] != nodeBounds32.Max[1] || (float)nodeBounds64.Max[2] != nodeBounds32.Max[2])
+    return Fail("bounds64's max does not equal bounds's max widened");
+var sceneBounds64 = scene.Bounds64;
+if ((float)sceneBounds64.Max[0] != bounds.Max[0] || (float)sceneBounds64.Max[1] != bounds.Max[1] || (float)sceneBounds64.Max[2] != bounds.Max[2])
+    return Fail("scene bounds64's max does not equal bounds's max widened");
+Console.WriteLine($"reader f64 twins: mesh64 {mesh64.TriangleCount} triangles, edgeBeziers64 {edgeBeziers64.Count}, bounds64 max ({sceneBounds64.Max[0]},{sceneBounds64.Max[1]},{sceneBounds64.Max[2]})");
 var fit = first.Collision();
 if (fit is null || fit.Error != 0 || fit.Frame.Length != 16 || fit.HullVertexCount != 8) return Fail("the collision fit is off");
 if (first.CollisionHull().VertexCount != 8 || first.CollisionHull().Indices.Length != 36) return Fail("the collision hull is off");
@@ -60,6 +86,7 @@ if (path.EndsWith("cube.scad"))
 {
     if (first.TriangleEstimate != 12 || !first.SurfaceEdges.Positions.IsEmpty || first.SurfaceProxyMesh(4) is not null) return Fail("the cube has no surface products");
     if (first.SurfacePick(new double[] { 10, 10, 100 }, new double[] { 10, 10, -100 }) is not null || !first.BoundsPlaced().IsEmpty) return Fail("the cube picks or bounds through surfaces");
+    if (!first.BoundsPlaced64().IsEmpty) return Fail("the cube's boundsPlaced64 is not empty");
 }
 using (var fresh = Cadaclysm.Cadaclysm.Open(path))
 {
@@ -169,6 +196,80 @@ using var outline = rect.WithHole(hole);
             return Fail($"edge_curve: the spline edge reads {c}");
     Console.WriteLine($"edge_curve: {rims[0]}; {box.Edges[0].Curve}; {splines[0]}");
 }
+// Intersect: two equal pipes crossing at right angles meet on ellipse chains whose points lie
+// on both pipes; apart, nothing; a zero tolerance refused in the kernel's words. Two coaxial
+// pipes overlapping in height share a wall band: an overlap whose rings lie on that wall.
+{
+    const double tol = 1e-3;
+    using var pipeA = Solid.Cylinder(1, 6);
+    using var pipeB = Solid.Cylinder(1, 6).Rotate(new[] { 0.0, 0.0, 3.0, 1.0, 0.0, 0.0 }, Math.PI / 2);
+    static double OnA(double[] p) => Math.Abs(Math.Sqrt(p[0] * p[0] + p[1] * p[1]) - 1);
+    static double OnB(double[] p) => Math.Abs(Math.Sqrt(p[0] * p[0] + (p[2] - 3) * (p[2] - 3)) - 1);
+    var found = pipeA.Intersect(pipeB, tol);
+    if (found.Chains.Count < 2 || found.Overlaps.Count != 0) return Fail($"intersect: the crossed pipes read {found}");
+    var ellipses = 0;
+    foreach (var c in found.Chains)
+    {
+        if (c.FaceA < 0 || c.FaceA >= pipeA.Faces || c.FaceB < 0 || c.FaceB >= pipeB.Faces || c.Points.Length < 2)
+            return Fail($"intersect: a chain reads {c}");
+        if (c.Points.Any(p => OnA(p) > 50 * tol || OnB(p) > 50 * tol)) return Fail($"intersect: a chain leaves the pipes: {c}");
+        if (c.Curve is null) continue;
+        if (c.Curve.Kind != "ellipse" && c.Curve.Kind != "nurbs") return Fail($"intersect: a chain's curve reads {c.Curve}");
+        if (c.Curve.Kind != "ellipse") continue;
+        ellipses++;
+        var t = (c.Curve.T0 + c.Curve.T1) / 2;
+        var q = new double[3];
+        for (var k = 0; k < 3; k++) q[k] = c.Curve.Origin[k] + c.Curve.X[k] * c.Curve.Radius * Math.Cos(t) + c.Curve.Y[k] * c.Curve.Radius2 * Math.Sin(t);
+        if (OnA(q) > 50 * tol || OnB(q) > 50 * tol) return Fail($"intersect: the ellipse leaves the pipes at {c.Curve}");
+    }
+    if (ellipses == 0) return Fail("intersect: two equal pipes cross on ellipses");
+    using var far = pipeB.Translate(10, 0, 0);
+    var apart = pipeA.Intersect(far);
+    if (apart.Chains.Count != 0 || apart.Overlaps.Count != 0) return Fail($"intersect: pipes apart read {apart}");
+    try { pipeA.Intersect(pipeB, 0.0); return Fail("intersect: a zero tolerance was accepted"); }
+    catch (BuildException e) when (e.Message.Contains("intersect: tolerance must be positive and finite")) { }
+    using var lower = Solid.Cylinder(1, 4);
+    using var upper = Solid.Cylinder(1, 4).Translate(0, 0, 2);
+    var shared = lower.Intersect(upper, tol);
+    if (shared.Overlaps.Count < 1 || shared.Overlaps[0].Loops.Length < 1) return Fail($"intersect: the coaxial pipes read {shared}");
+    foreach (var ring in shared.Overlaps[0].Loops)
+        if (ring.Length < 3 || ring.Any(p => OnA(p) > 50 * tol || p[2] < 2 - 50 * tol || p[2] > 4 + 50 * tol))
+            return Fail($"intersect: an overlap ring leaves the shared band: {shared.Overlaps[0]}");
+    Console.WriteLine($"intersect: {found} ({ellipses} ellipses); {shared.Overlaps[0]}");
+}
+// Solid x profile hits: a line through a cuboid pierces two faces and is cut into three
+// pieces, outside/inside/outside, the middle one spanning the box and sweeping; a loop no hit
+// cuts is one piece; an open sheet has no pieces; a zero tolerance refused in the kernel's words.
+{
+    var xy = new double[] { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    using var box = Solid.Cuboid(10, 20, 30);
+    using var line = Profile.Path((-20, 0)).LineTo(20, 0).EndOpen();
+    var found = box.Hits(line, xy);
+    if (found.Hits.Count != 2 || found.Pieces.Count != 3) return Fail($"solid hits: a line through a cuboid reads {found}");
+    for (var k = 0; k < 2; k++)
+    {
+        var h = found.Hits[k];
+        if (h.Run || h.Touch || Math.Abs(h.Start[0] - (k == 0 ? -5 : 5)) > 0.05 || h.AStart.Segment != 0 || h.AStart.Face != uint.MaxValue
+            || h.BStart.Face == uint.MaxValue || !double.IsFinite(h.BStart.U) || !double.IsFinite(h.BStart.V))
+            return Fail($"solid hits: hit {k} reads {h} ({h.AStart}, {h.BStart})");
+    }
+    var p = found.Pieces;
+    if (p[0].Inside || !p[1].Inside || p[2].Inside) return Fail($"solid hits: the pieces read {p[0]}, {p[1]}, {p[2]}");
+    if (p[0].Start.T != 0 || p[2].End.T != 1 || p[0].End.T != p[1].Start.T || p[1].End.T != p[2].Start.T)
+        return Fail($"solid hits: the pieces do not run head to tail: {p[0]}, {p[1]}, {p[2]}");
+    using var middle = Solid.ExtrudeOpen(p[1].Profile, xy, 1);
+    var (lo, hi) = middle.Bounds;
+    if (Math.Abs(lo[0] + 5) > 0.05 || Math.Abs(hi[0] - 5) > 0.05) return Fail($"solid hits: the middle piece spans x {lo[0]} .. {hi[0]}, not the box");
+    using var along = SweepPath.Along(p[1].Profile, xy, 0.05, true);
+    var far = box.Hits(Profile.Circle(1), new double[] { 100, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 });
+    if (far.Hits.Count != 0 || far.Pieces.Count != 1 || far.Pieces[0].Inside) return Fail($"solid hits: a circle far off reads {far}");
+    using var flat = Solid.Face(Profile.Rect(20, 20), xy);
+    var across = flat.Hits(Profile.Path((0, -20)).LineTo(0, 20).EndOpen(), new double[] { 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -1, 0 });
+    if (across.Hits.Count < 1 || across.Pieces.Count != 0) return Fail($"solid hits: a line across a sheet reads {across}");
+    try { box.Hits(line, xy, 0.0); return Fail("solid hits: a zero tolerance was accepted"); }
+    catch (BuildException e) when (e.Message == "solid_profile_hits: tolerance must be positive and finite") { }
+    Console.WriteLine($"solid hits: {found}; {p[1]}");
+}
 using var plate = Workplane.Xy().Extrude(outline, 6).Solid();
 using var pin = Workplane.FromSolid(plate).Faces(Selector.Max(Axis.Z)).OnFace().Cylinder(5, 10).Solid();
 using var part = plate.Join(pin);
@@ -255,6 +356,19 @@ if (!shape.IsClosed || shape.Faces != rounded.Faces) return Fail($"the filleted 
     using var loopSpline = Profile.Spline([(0, 0), (10, 0), (10, 10), (0, 10)], 3, null, closed: true);
     using var loopSolid = Solid.Extrude(loopSpline, xy, 2);
     if (hexPrism.Faces != 8 || loopSolid.Faces != 3 || !loopSolid.IsWatertight()) return Fail($"shapes: {hexPrism.Faces} and {loopSolid.Faces} faces, not 8 and 3");
+    // A five-pointed star: ten walls and two caps.
+    using var star = Profile.Star((0, 0), 10, 4, 5);
+    using var starPrism = Solid.Extrude(star, xy, 2);
+    if (starPrism.Faces != 12 || !starPrism.IsWatertight()) return Fail($"star: {starPrism.Faces} faces, not 12");
+    // Text: an `i` is two shapes and an `o` one; the `o` extrudes to a watertight ring with spline edges.
+    var word = Profile.Text("io", 10);
+    using var ring = Solid.Extrude(word[2], xy, 2);
+    if (word.Count != 3 || !ring.IsWatertight() || !ring.Edges.Any(e => e.Kind == "nurbs")) return Fail($"text: {word.Count} shapes, ring watertight {ring.IsWatertight()}");
+    foreach (var p in word) p.Dispose();
+    // A reflector: the parabola from rim to rim, closed and revolved -- watertight.
+    using var dish = Profile.Parabola((0, 0), (0, 1), 20, 0, 50).LineTo(0, 31.25).LineTo(0, 0).End();
+    using var bowl = Solid.RevolveInPlane(dish, xy, (0, 0), (0, 1), 2 * Math.PI);
+    if (!bowl.IsWatertight()) return Fail("parabola: the bowl leaks");
     // The library reads a fixed count of weights: a wrong count is refused, not read past.
     static string Refusal(Action build)
     {
@@ -268,7 +382,7 @@ if (!shape.IsClosed || shape.Faces != rounded.Faces) return Fail($"the filleted 
     var shortNurbs = Refusal(() => Profile.Path((0, 0)).NurbsTo([(5, 5), (10, 0)], [0, 0, 0, 1, 1, 1], 2, [1, 1]).Dispose());
     if (shortSpline != "spline: 2 weights for 4 points; give one per point") return Fail($"a short weight list: {shortSpline}");
     if (shortNurbs != "nurbs_to: 2 weights for 3 control points (the current point and 2 given); give one per point") return Fail($"a short weight list: {shortNurbs}");
-    Console.WriteLine($"sheet verbs: face, trim ({holed.Faces}+{disc.Faces}), face_sheet, drop_faces, round ({slab.Faces} faces), along, chain, push_pull, coil, pipe, split_by_plane, close_loop, from_loops, revolve_in_plane, regular_polygon, spline: ok");
+    Console.WriteLine($"sheet verbs: face, trim ({holed.Faces}+{disc.Faces}), face_sheet, drop_faces, round ({slab.Faces} faces), along, chain, push_pull, coil, pipe, split_by_plane, close_loop, from_loops, revolve_in_plane, regular_polygon, star, text, spline, parabola: ok");
 }
 // Frames: built, checked, and passed wherever twelve numbers go.
 {
@@ -364,6 +478,21 @@ catch (InvalidOperationException)
 {
 }
 Console.WriteLine($"mesh at 0.05: {triangles0} triangles; the first view is stale after 0.05, 0.5, 0.05");
+// f64 twins on the kernel: mesh64 shares mesh's cache and bounds64 the same tessellation's
+// unnarrowed positions.
+var kMesh32 = rounded.Mesh(0.05);
+var kMesh64 = rounded.Mesh64(0.05);
+if (kMesh64.VertexCount != kMesh32.VertexCount || kMesh64.IndexCount != kMesh32.IndexCount)
+    return Fail("blacksmith mesh64(0.05)'s counts do not equal mesh(0.05)'s");
+if (kMesh32.Positions.Length >= 3 &&
+    ((float)kMesh64.Positions[0] != kMesh32.Positions[0] || (float)kMesh64.Positions[1] != kMesh32.Positions[1] || (float)kMesh64.Positions[2] != kMesh32.Positions[2]))
+    return Fail("blacksmith mesh64's first position narrowed does not equal mesh's");
+var (kLo, kHi) = rounded.BoundsAt(0.05);
+var (kLo64, kHi64) = rounded.BoundsAt64(0.05);
+if (Math.Abs(kLo64[0] - kLo[0]) > 1e-9 || Math.Abs(kLo64[1] - kLo[1]) > 1e-9 || Math.Abs(kLo64[2] - kLo[2]) > 1e-9
+    || Math.Abs(kHi64[0] - kHi[0]) > 1e-9 || Math.Abs(kHi64[1] - kHi[1]) > 1e-9 || Math.Abs(kHi64[2] - kHi[2]) > 1e-9)
+    return Fail("blacksmith bounds64(0.05) does not equal bounds(0.05)");
+Console.WriteLine($"blacksmith f64 twins: mesh64 {kMesh64.TriangleCount} triangles, bounds64 max z {kHi64[2]}");
 // No schema at all: the kernel writes against its built-in AP203, no ap203.exp needed.
 var noSchemaText = rounded.StepText();
 if (!noSchemaText.StartsWith("ISO-10303-21;")) return Fail("StepText() with no schema did not write valid STEP");
@@ -438,6 +567,29 @@ if (new FileInfo(solidSvgPath).Length == 0) return Fail("Solid.Svg wrote an empt
 try { rounded.SvgText(new Cadaclysm.Blacksmith.SvgOptions { Fov = 200 }); return Fail("blacksmith svg: fov=200 was accepted"); }
 catch (BuildException) { }
 Console.WriteLine("blacksmith svg: solid text, file written, fov=200 refused");
+
+// A profile draws its own plane, top by default -- unlike a solid, a sketch has no camera-
+// facing convention of its own, so its plane (z = 0) is already the page. The default is
+// pinned against an explicit iso view, not just checked non-empty: a top default silently
+// left at iso would make the two calls identical and this comparison would pass wrongly.
+var profileSvgText = rect.SvgText();
+if (!profileSvgText.StartsWith("<svg") || !profileSvgText.Contains("<path")) return Fail("profile SVG text did not look like an SVG wireframe");
+if (profileSvgText == rect.SvgText(new Cadaclysm.Blacksmith.SvgOptions { View = Cadaclysm.Blacksmith.SvgView.Iso }))
+    return Fail("profile svg: top default did not differ from an explicit iso view");
+var profileSvgPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cadaclysm-smoke-profile.svg");
+rect.Svg(profileSvgPath);
+if (new FileInfo(profileSvgPath).Length == 0) return Fail("Profile.Svg wrote an empty file");
+Console.WriteLine("blacksmith svg: profile text, file written, top default confirmed against iso");
+
+// The module writer draws a solid and a profile on one page: one <g> per drawable, an id
+// each -- the overload `WriteSvgText`/`WriteSvg` take, widened from the solids-only ones.
+var mixedSvgText = Blacksmith.WriteSvgText(new[] { rounded }, new[] { rect });
+if (!mixedSvgText.Contains("<path") || !mixedSvgText.Contains("id=\"solid-0\"") || !mixedSvgText.Contains("id=\"profile-0\""))
+    return Fail("mixed solid+profile SVG did not carry both group ids");
+var mixedSvgPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cadaclysm-smoke-mixed.svg");
+Blacksmith.WriteSvg(mixedSvgPath, new[] { rounded }, new[] { rect });
+if (new FileInfo(mixedSvgPath).Length == 0) return Fail("WriteSvg (solids and profiles) wrote an empty file");
+Console.WriteLine("blacksmith svg: solid and profile drawn together, both group ids present");
 return 0;
 
 static int Fail(string why) { Console.Error.WriteLine(why); return 1; }

@@ -84,6 +84,29 @@ Iterate `scene.placements()` to *draw* -- a block placed six times is one
 node and six placements -- and nodes to build a tree. Every array is a copy;
 keep it as long as you like.
 
+### Double precision
+
+Every `float`-based reader member -- `mesh()`, `edgeBeziers()`/`curveBeziers()`/
+`isocurveBeziers()`, `bounds`, `boundsPlaced()` -- has a `64` twin on `Node` and
+`Scene` (`mesh64()`, `edgeBeziers64()`, `bounds64`, `boundsPlaced64()`) returning
+`Float64Array`s in double precision, and the kernel's `Solid` has `mesh64(tolerance)`
+and `bounds64`/`boundsAt64(tolerance)`. They matter far from the origin, where
+`float` cannot hold a coordinate exactly:
+
+```js
+const mesh64 = node.mesh64();       // null where node.mesh() is empty
+console.log(mesh64.positions[1]);   // -2600000.987654321, not -2600001
+```
+
+**`mesh64()` returns the document's own f64 mesh's positions/normals/uvs, copied
+out at call time** -- the exact values `mesh()`'s `Float32Array`s are narrowed
+from, same indices. Like `mesh()`'s copy, a `Mesh64` survives `scene.forgetMeshes()`
+and `scene.close()`. The kernel's `mesh64(tolerance)` reads from the same
+tessellation cache as `mesh(tolerance)` -- meshing at another tolerance through
+either refills that cache, but a `Mesh64` (or `SolidMesh64`) already copied out
+is unaffected. `meshAsync64()` (reader `Node`, kernel `Solid`) is the
+worker-thread twin of `meshAsync()`.
+
 Every schema the project ships -- the IFC releases, the STEP application
 protocols -- is built into the library, so STEP and IFC open with no schema
 given. `{ schema: 'house.exp' }` (or a directory of `.exp` files, matched

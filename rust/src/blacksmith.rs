@@ -73,7 +73,7 @@ use std::fmt;
 use std::path::{Path as FsPath, PathBuf};
 use std::ptr::{self, NonNull};
 
-use crate::{borrowed, groups, text, Error, Manifold, Mesh, Node, OpenOptions, Result, Scene, SvgOptions, Up};
+use crate::{borrowed, groups, groups64, text, Error, Manifold, Mesh, Mesh64, Node, OpenOptions, Result, Scene, SvgOptions, SvgView, Up};
 
 pub mod sys;
 
@@ -106,6 +106,21 @@ fn fail(api: &Api, what: &str) -> Error {
 fn failed(api: &Api) -> bool {
     !unsafe { (api.cadaclysm_blacksmith_last_error)() }.is_null()
         && !unsafe { text((api.cadaclysm_blacksmith_last_error)()) }.is_empty()
+}
+
+/// The profiles of a list the library handed back (null: the last error). Each profile is
+/// a handle of its own, freed by its `Drop`; the list goes on every path once read, a
+/// failed read's too (the profiles read so far drop with the Err).
+fn profile_list(api: &'static Api, list: *mut sys::CadaclysmBlacksmithProfileList, what: &str) -> Result<Vec<Profile>> {
+    if list.is_null() {
+        return Err(fail(api, what));
+    }
+    let count = unsafe { (api.cadaclysm_blacksmith_profile_list_count)(list) };
+    let found = (0..count)
+        .map(|i| Profile::wrap(api, unsafe { (api.cadaclysm_blacksmith_profile_list_get)(list, i) }, "profile_list_get"))
+        .collect();
+    unsafe { (api.cadaclysm_blacksmith_profile_list_free)(list) };
+    found
 }
 
 fn c_text(what: &str, value: &str) -> Result<CString> {
@@ -251,7 +266,7 @@ impl Frame {
         Frame::new(at(0), at(3), at(6), at(9))
     }
 
-    /// The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line -- Fusion's midplane.
+    /// The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line.
     pub fn midplane(a: &Frame, b: &Frame) -> Result<Frame> {
         let api = api()?;
         let mut out = [0.0; 12];
@@ -422,6 +437,15 @@ impl Profile {
         Profile::wrap(api, raw, "profile_regular_polygon")
     }
 
+    /// A star of `points` tips (at least 3) on the circle of `outer` about `centre`, its
+    /// inner corners on the circle of `inner` (positive, under `outer`), alternating: the
+    /// first tip at `angle` radians from the sketch's x axis, the rest counter-clockwise.
+    pub fn star(centre: [f64; 2], outer: f64, inner: f64, points: u32, angle: f64) -> Result<Profile> {
+        let api = api()?;
+        let raw = unsafe { (api.cadaclysm_blacksmith_profile_star)(centre[0], centre[1], outer, inner, points, angle) };
+        Profile::wrap(api, raw, "profile_star")
+    }
+
     /// A spline of `degree` through the control polygon `points` (`weights` one per
     /// point, or `None`). Open, it starts on the first point and ends on the last; closed,
     /// it is periodic -- a closed profile. The degree is lowered to fit the points.
@@ -446,6 +470,11 @@ impl Profile {
     /// An outline drawn a segment at a time from `start`.
     pub fn path(start: [f64; 2]) -> Result<Path> {
         Path::begin(start)
+    }
+
+    /// An outline started on a parabola's arc, from rim to rim: [`Path::parabola`].
+    pub fn parabola(vertex: [f64; 2], axis: [f64; 2], focal: f64, from: f64, to: f64) -> Result<Path> {
+        Path::parabola(vertex, axis, focal, from, to)
     }
 
     /// Open profiles joined end to end into one: in any order and either way round,
@@ -549,17 +578,32 @@ impl Profile {
     /// Python's `tolerance` defaults to 1e-6.
     pub fn common(&self, other: &Profile, tolerance: f64) -> Result<Vec<Profile>> {
         let list = unsafe { (self.api.cadaclysm_blacksmith_profile_common)(self.raw(), other.raw(), tolerance) };
-        if list.is_null() {
-            return Err(fail(self.api, "profile_common"));
-        }
-        // Each profile is a handle of its own, freed by its `Drop`; the list goes on every
-        // path once read, a failed read's too (the profiles read so far drop with the Err).
-        let count = unsafe { (self.api.cadaclysm_blacksmith_profile_list_count)(list) };
-        let found = (0..count)
-            .map(|i| Profile::wrap(self.api, unsafe { (self.api.cadaclysm_blacksmith_profile_list_get)(list, i) }, "profile_list_get"))
-            .collect();
-        unsafe { (self.api.cadaclysm_blacksmith_profile_list_free)(list) };
-        found
+        profile_list(self.api, list, "profile_common")
+    }
+
+    /// `text` set in a font, one profile per closed shape -- a letter with its counters as
+    /// holes (`o` one, `8` two; `i` is two profiles) -- on the sketch plane, the baseline
+    /// along x from the origin, each outline counter-clockwise and its holes clockwise, a
+    /// curved side the font's own cubic Bezier kept exactly: an extruded `O` has curved
+    /// walls. `size` is roughly the height of a capital. `font` is a family, optionally
+    /// with a style (`"Liberation Sans:style=Bold"`), a font file's path, or empty for the
+    /// bundled Liberation Sans Regular -- which also serves when the family is not found;
+    /// `font_bytes` a font file's bytes, used instead of `font` when given. `halign` is
+    /// `"left"`, `"center"` or `"right"`; `valign` `"baseline"`, `"bottom"`, `"center"` or
+    /// `"top"`; `spacing` multiplies the gap between glyphs; `direction` `"ltr"` or
+    /// `"rtl"`. Empty text is an empty list. An error for a size or spacing not positive
+    /// and finite, an alignment or direction not one of those words, font bytes that are
+    /// not a font.
+    #[allow(clippy::too_many_arguments)]
+    pub fn text(text: &str, size: f64, font: &str, halign: &str, valign: &str, spacing: f64, direction: &str, font_bytes: Option<&[u8]>) -> Result<Vec<Profile>> {
+        let api = api()?;
+        let (t, f, h, v, d) = (c_text("text", text)?, c_text("font", font)?, c_text("halign", halign)?, c_text("valign", valign)?, c_text("direction", direction)?);
+        let (bytes, len) = match font_bytes {
+            Some(b) => (b.as_ptr(), b.len()),
+            None => (ptr::null(), 0),
+        };
+        let list = unsafe { (api.cadaclysm_blacksmith_profile_text)(t.as_ptr(), size, f.as_ptr(), bytes, len, h.as_ptr(), v.as_ptr(), spacing, d.as_ptr()) };
+        profile_list(api, list, "profile_text")
     }
 
     pub fn translate(&self, dx: f64, dy: f64) -> Result<Profile> {
@@ -575,6 +619,27 @@ impl Profile {
         let (picked, count) = corners.map_or((ptr::null(), 0), |c| (c.as_ptr(), c.len()));
         let raw = unsafe { (self.api.cadaclysm_blacksmith_profile_round)(self.raw(), radius, picked, count, open) };
         Profile::wrap(self.api, raw, "profile_round")
+    }
+
+    /// This profile's own loops as SVG text, from the camera `options` describes -- see
+    /// [`svg_text_of`]. A profile lies in `z = 0`, so its own plane already is the page:
+    /// with `options` left `None` the view defaults to [`SvgView::Top`], not
+    /// [`SvgOptions::default`]'s own `Iso` -- a solid has no plane of its own to prefer,
+    /// so [`Solid::svg_text`] keeps that default. Passing any `SvgOptions` at all, even
+    /// one left at [`SvgView::Iso`], opts out of the `Top` default: once built, an
+    /// `&SvgOptions` carries no way to tell an explicit `Iso` from a field the caller
+    /// never touched, so the choice is made by whether an options value was passed at
+    /// all, not by inspecting one.
+    pub fn svg_text(&self, options: Option<&SvgOptions>) -> Result<String> {
+        let top = SvgOptions { view: SvgView::Top, ..Default::default() };
+        svg_text_of(&[], &[self], options.unwrap_or(&top))
+    }
+
+    /// This profile written to an SVG file at `path`, by the library itself -- see
+    /// [`Profile::svg_text`] for the `Top` default.
+    pub fn svg(&self, path: impl AsRef<FsPath>, options: Option<&SvgOptions>) -> Result<()> {
+        let top = SvgOptions { view: SvgView::Top, ..Default::default() };
+        svg_of(path, &[], &[self], options.unwrap_or(&top))
     }
 }
 
@@ -601,6 +666,17 @@ impl Path {
         NonNull::new(raw).map(|handle| Path { handle, api }).ok_or_else(|| fail(api, "path_begin"))
     }
 
+    /// Start drawing on the arc of the parabola with `vertex`, axis direction `axis` and
+    /// focal length `focal`, over the across-axis coordinates `from..to`: the path begins
+    /// at the arc's first point and holds the arc -- a reflector from rim to rim,
+    /// `Path::parabola([0.0, 0.0], [0.0, 1.0], 20.0, -50.0, 50.0)` a dish 100 wide
+    /// opening up.
+    pub fn parabola(vertex: [f64; 2], axis: [f64; 2], focal: f64, from: f64, to: f64) -> Result<Path> {
+        let api = api()?;
+        let raw = unsafe { (api.cadaclysm_blacksmith_path_parabola)(vertex[0], vertex[1], axis[0], axis[1], focal, from, to) };
+        NonNull::new(raw).map(|handle| Path { handle, api }).ok_or_else(|| fail(api, "path_parabola"))
+    }
+
     fn step(self, ok: bool, what: &str) -> Result<Path> {
         if ok {
             Ok(self)
@@ -625,6 +701,53 @@ impl Path {
             (self.api.cadaclysm_blacksmith_path_bezier_to)(self.handle.as_ptr(), c1[0], c1[1], c2[0], c2[1], to[0], to[1])
         };
         self.step(ok, "path_bezier_to")
+    }
+
+    /// A conic arc to (`x`, `y`) through the control point `control` with middle weight
+    /// `weight`: under 1 an elliptical arc, 1 a parabola, over 1 a hyperbola -- the
+    /// rational quadratic Bezier, kept exact.
+    pub fn conic_to(self, x: f64, y: f64, control: [f64; 2], weight: f64) -> Result<Path> {
+        let ok = unsafe {
+            (self.api.cadaclysm_blacksmith_path_conic_to)(self.handle.as_ptr(), x, y, control[0], control[1], weight)
+        };
+        self.step(ok, "path_conic_to")
+    }
+
+    /// A parabolic arc to (`x`, `y`) whose end tangents meet at `control`: [`conic_to`]
+    /// with weight 1.
+    ///
+    /// [`conic_to`]: Path::conic_to
+    pub fn parabola_to(self, x: f64, y: f64, control: [f64; 2]) -> Result<Path> {
+        self.conic_to(x, y, control, 1.0)
+    }
+
+    /// A hyperbolic arc to (`x`, `y`) through `control` with middle `weight` over 1.
+    pub fn hyperbola_to(self, x: f64, y: f64, control: [f64; 2], weight: f64) -> Result<Path> {
+        if !(weight > 1.0) {
+            return Err(Error::new("hyperbola_to: the weight must be over 1 (1 is a parabola, under 1 an ellipse)"));
+        }
+        self.conic_to(x, y, control, weight)
+    }
+
+    /// The parabolic arc to (`x`, `y`) with `vertex`: its axis and focal length solved
+    /// from the two ends. Fails when no parabola with that vertex passes through both.
+    pub fn parabola_by_vertex(self, x: f64, y: f64, vertex: [f64; 2]) -> Result<Path> {
+        let ok = unsafe {
+            (self.api.cadaclysm_blacksmith_path_parabola_by_vertex)(self.handle.as_ptr(), x, y, vertex[0], vertex[1])
+        };
+        self.step(ok, "path_parabola_by_vertex")
+    }
+
+    /// The parabolic arc to (`x`, `y`) with `focus`: of the two through the ends, the
+    /// one whose vertex lies between the ends' projections, then the one whose arc cups
+    /// the focus (the focus between the arc and its chord), then the more symmetric; with
+    /// the focus beyond the chord that is the arch over the ends, not the shallow dish --
+    /// draw that one with [`parabola`](Self::parabola).
+    pub fn parabola_by_focus(self, x: f64, y: f64, focus: [f64; 2]) -> Result<Path> {
+        let ok = unsafe {
+            (self.api.cadaclysm_blacksmith_path_parabola_by_focus)(self.handle.as_ptr(), x, y, focus[0], focus[1])
+        };
+        self.step(ok, "path_parabola_by_focus")
     }
 
     /// `control`: every control point after the current one, the endpoint last;
@@ -815,8 +938,9 @@ impl Selector {
     }
 }
 
-/// One edge's exact curve, as plain data copied out ([`Edge::curve`]): `kind` is
-/// `"line"`, `"circle"`, `"ellipse"` or `"nurbs"`.
+/// One edge's, or one intersection chain's, exact curve as plain data copied out
+/// ([`Edge::curve`], [`Chain::curve`]): `kind` is `"line"`, `"circle"`, `"ellipse"` or
+/// `"nurbs"`.
 ///
 /// `t0..t1` is the edge's parameter range on its own curve: a line's fraction (0..1 over
 /// `origin -> origin + x`, where `x` is the full `to - from`, NOT unit -- so
@@ -872,6 +996,102 @@ impl Curve {
             weights: (!raw.weights.is_null()).then(|| borrowed(raw.weights, n).to_vec()),
         }
     }
+}
+
+/// What [`Solid::hits`] found, copied out: `hits` (ordered along the profile;
+/// `a_start`/`a_end` on the profile, `b_start`/`b_end` on the solid's faces: a `face` at
+/// (`u`, `v`)) and `pieces` (empty for an open body).
+pub struct SolidHits {
+    pub hits: Vec<Hit>,
+    pub pieces: Vec<Piece>,
+}
+
+/// One stretch of a profile loop between two cuts ([`SolidHits::pieces`]): `inside` (by
+/// its middle's winding number over the body; a piece lying on the surface is inside),
+/// `start`/`end` (profile spots -- a segment join reads as the next segment's start
+/// `(k + 1, 0)`, an open chain runs from `(0, 0)` to `(n - 1, 1)`; a loop no hit cuts is
+/// one closed piece) and `profile`, the piece's own open chain (what [`SweepPath::along`]
+/// with `open` sweeps).
+pub struct Piece {
+    pub inside: bool,
+    pub start: Spot,
+    pub end: Spot,
+    pub profile: Profile,
+}
+
+/// What [`Solid::intersect`] found, copied out: `chains` (one per face pair per branch)
+/// and `overlaps` (one per coincident face pair). Both empty where the solids do not meet.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Intersection {
+    pub chains: Vec<Chain>,
+    pub overlaps: Vec<Overlap>,
+}
+
+/// One branch of one face pair's crossing ([`Intersection::chains`]): `points` in walk
+/// order (a closed chain does not repeat its first point), `closed`, `faces` (the face in
+/// the first solid, the face in the second), `tangent` (the surfaces near-tangent along
+/// it, or the snap unsettled -- the points their best estimate) and `curve`, its exact
+/// curve over the chain's own `t0..t1`, or `None` where the kernel found none. A chain
+/// may stop at a face boundary or a closed curve's seam and continue as another: join
+/// chains by matching ends.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Chain {
+    pub points: Vec<[f64; 3]>,
+    pub closed: bool,
+    pub faces: (u32, u32),
+    pub tangent: bool,
+    pub curve: Option<Curve>,
+}
+
+impl Chain {
+    /// Copied out of the C struct: the pointer is read here and nowhere kept.
+    ///
+    /// # Safety
+    /// `raw` as `cadaclysm_blacksmith_intersection_chain` filled it, its result still alive.
+    unsafe fn from_raw(raw: &sys::CadaclysmBlacksmithChain, curve: Option<Curve>) -> Chain {
+        Chain {
+            points: points_of(borrowed(raw.points, 3 * raw.point_count as usize)),
+            closed: raw.closed,
+            faces: (raw.face_a, raw.face_b),
+            tangent: raw.tangent,
+            curve,
+        }
+    }
+}
+
+/// A face of the first solid and a face of the second that coincide
+/// ([`Intersection::overlaps`]): `faces` and `loops`, the shared region's rings (outer
+/// first, holes after; each ring closed without repeating its first point) -- empty for a
+/// partial overlap whose outlines cross.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Overlap {
+    pub faces: (u32, u32),
+    pub loops: Vec<Vec<[f64; 3]>>,
+}
+
+impl Overlap {
+    /// Copied out of the C struct: the pointers are read here and nowhere kept.
+    ///
+    /// # Safety
+    /// `raw` as `cadaclysm_blacksmith_intersection_overlap` filled it, its result still alive.
+    unsafe fn from_raw(raw: &sys::CadaclysmBlacksmithOverlap) -> Overlap {
+        let points = points_of(borrowed(raw.points, 3 * raw.point_count as usize));
+        let starts = borrowed(raw.loop_offsets, raw.loop_count as usize);
+        let loops = starts
+            .iter()
+            .enumerate()
+            .map(|(r, &start)| {
+                let end = starts.get(r + 1).copied().unwrap_or(raw.point_count) as usize;
+                points[start as usize..end].to_vec()
+            })
+            .collect();
+        Overlap { faces: (raw.face_a, raw.face_b), loops }
+    }
+}
+
+/// xyz triples as points.
+fn points_of(flat: &[f64]) -> Vec<[f64; 3]> {
+    flat.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect()
 }
 
 /// One edge of a solid, as plain data: its index (what [`Solid::fillet`] takes), its
@@ -1334,7 +1554,7 @@ impl Solid {
     // -- combining
 
     /// This solid and `other` as one. [`Solid::merge_flush`] then merges the flush
-    /// faces the join leaves, as Fusion does.
+    /// faces the join leaves.
     pub fn join(&self, other: &Solid, tolerance: f64) -> Result<Solid> {
         let raw = unsafe { (self.api.cadaclysm_blacksmith_join)(self.raw(), other.raw(), tolerance, NO_PROGRESS, ptr::null_mut()) };
         self.next(raw, "join")
@@ -1368,6 +1588,129 @@ impl Solid {
         self.next(raw, "split_sheet")
     }
 
+    /// Where this solid's faces cross or coincide with `other`'s, at `tolerance`, as an
+    /// [`Intersection`]: `chains` along the curves the faces meet on and `overlaps` where
+    /// a face pair coincides. Neither solid is changed; either may be an open sheet. No
+    /// crossing is an empty result, never an error.
+    ///
+    /// Each [`Chain`]'s points are within `tolerance` of both faces' exact surfaces; there
+    /// is one chain per face pair per branch -- chains are not joined across a face
+    /// boundary or a closed curve's seam, so join them by matching ends. A chain's `curve`
+    /// is its exact curve where the kernel found one every point lies within `tolerance`
+    /// of, else `None`; `tangent` is set where the surfaces are near-tangent along the
+    /// chain or the snap did not settle (the points are then the best estimate) -- a
+    /// closed chain that does not go once round its own curve (a sliver where two surfaces
+    /// barely cross) has no curve, `tangent` still true. An [`Overlap`] is a coincident
+    /// face pair with the shared region's rings (outer first, holes after), which may be
+    /// empty for a partial overlap whose outlines cross. Known limit: a crossing narrower
+    /// than `tolerance` -- two surfaces passing within it without their meshes crossing --
+    /// can be missed; near-tangent contact is where this bites.
+    ///
+    /// Fails for a `tolerance` not positive and finite, a solid with no faces, or one that
+    /// meshes to nothing. Python's `tolerance` defaults to 0.05.
+    pub fn intersect(&self, other: &Solid, tolerance: f64) -> Result<Intersection> {
+        let found = unsafe { (self.api.cadaclysm_blacksmith_intersect)(self.raw(), other.raw(), tolerance, NO_PROGRESS, ptr::null_mut()) };
+        if found.is_null() {
+            return Err(fail(self.api, "intersect"));
+        }
+        let read = || {
+            let count = unsafe { (self.api.cadaclysm_blacksmith_intersection_chain_count)(found) };
+            let mut chains = Vec::with_capacity(count as usize);
+            for i in 0..count {
+                let mut raw = sys::CadaclysmBlacksmithChain::default();
+                if !unsafe { (self.api.cadaclysm_blacksmith_intersection_chain)(found, i, &mut raw) } {
+                    return Err(fail(self.api, "intersection_chain"));
+                }
+                let curve = if raw.has_curve {
+                    let mut raw_curve = sys::CadaclysmBlacksmithCurve::default();
+                    if !unsafe { (self.api.cadaclysm_blacksmith_intersection_curve)(found, i, &mut raw_curve) } {
+                        return Err(fail(self.api, "intersection_curve"));
+                    }
+                    // SAFETY: the curve's arrays live in the result until it is freed below.
+                    Some(unsafe { Curve::from_raw(&raw_curve) })
+                } else {
+                    None
+                };
+                // SAFETY: as above; everything is copied out before the free.
+                chains.push(unsafe { Chain::from_raw(&raw, curve) });
+            }
+            let count = unsafe { (self.api.cadaclysm_blacksmith_intersection_overlap_count)(found) };
+            let mut overlaps = Vec::with_capacity(count as usize);
+            for i in 0..count {
+                let mut raw = sys::CadaclysmBlacksmithOverlap::default();
+                if !unsafe { (self.api.cadaclysm_blacksmith_intersection_overlap)(found, i, &mut raw) } {
+                    return Err(fail(self.api, "intersection_overlap"));
+                }
+                // SAFETY: as above.
+                overlaps.push(unsafe { Overlap::from_raw(&raw) });
+            }
+            Ok(Intersection { chains, overlaps })
+        };
+        // Read everything, then free on every path, a failed read's too.
+        let result = read();
+        unsafe { (self.api.cadaclysm_blacksmith_intersection_free)(found) };
+        result
+    }
+
+    /// Where `profile`, placed on `frame`, pierces this solid's faces, and the pieces its
+    /// loops cut into, as a [`SolidHits`]. Neither is changed.
+    ///
+    /// A point hit lies within `tolerance` of the segment's exact curve and of the face's
+    /// exact surface, inside the face's trim; its profile spot (`a_start`: loop, segment,
+    /// t) and face spot (`b_start`: face, u, v) evaluate to the point within `tolerance`;
+    /// `touch` where the curve's tangent lies within 1e-3 (sine) of the surface's tangent
+    /// plane there (a graze), false at a crossing. A run is a stretch of one segment lying
+    /// within `tolerance` of one face and inside it, longer than `tolerance`. Hits within
+    /// `tolerance` of each other merge (a hit at a segment join reported once, as
+    /// `(k, t = 1)`; a closed loop's closing join reads `(0, 0)`). Every point is in
+    /// world space (the frame applied).
+    ///
+    /// Pieces only for a closed body -- an open body has none -- in loop order, covering
+    /// every loop exactly; a piece's spots read a segment join as the next segment's start
+    /// `(k + 1, 0)`, and an open chain runs from `(0, 0)` to `(n - 1, 1)`; a loop no hit
+    /// cuts is one closed piece. `inside` by the piece middle's winding number over the
+    /// body's mesh; a piece lying on the surface is inside. Known limit: a segment passing
+    /// within `tolerance` of a face without crossing its mesh can be missed (near-tangent
+    /// grazes).
+    ///
+    /// Fails for a `tolerance` not positive and finite, a solid with no faces or that
+    /// meshes to nothing, a profile with no segments, or a free-form segment that is not an
+    /// evaluable NURBS curve. Python's `tolerance` defaults to 0.05.
+    pub fn hits(&self, profile: &Profile, frame: &Frame, tolerance: f64) -> Result<SolidHits> {
+        let found = unsafe {
+            (self.api.cadaclysm_blacksmith_solid_profile_hits)(self.raw(), profile.raw(), frame.v.as_ptr(), tolerance, NO_PROGRESS, ptr::null_mut())
+        };
+        if found.is_null() {
+            return Err(fail(self.api, "solid_profile_hits"));
+        }
+        let read = || {
+            let count = unsafe { (self.api.cadaclysm_blacksmith_hit_count)(found) };
+            let mut hits = Vec::with_capacity(count as usize);
+            for i in 0..count {
+                let mut raw = sys::CadaclysmBlacksmithHit::default();
+                if !unsafe { (self.api.cadaclysm_blacksmith_hit)(found, i, &mut raw) } {
+                    return Err(fail(self.api, "hit"));
+                }
+                hits.push(Hit::from(&raw));
+            }
+            let count = unsafe { (self.api.cadaclysm_blacksmith_hits_piece_count)(found) };
+            let mut pieces = Vec::with_capacity(count as usize);
+            for i in 0..count {
+                let (mut inside, mut start, mut end) = (false, sys::CadaclysmBlacksmithSpot::default(), sys::CadaclysmBlacksmithSpot::default());
+                if !unsafe { (self.api.cadaclysm_blacksmith_hits_piece)(found, i, &mut inside, &mut start, &mut end) } {
+                    return Err(fail(self.api, "hits_piece"));
+                }
+                let own = Profile::wrap(self.api, unsafe { (self.api.cadaclysm_blacksmith_hits_piece_profile)(found, i) }, "hits_piece_profile")?;
+                pieces.push(Piece { inside, start: (&start).into(), end: (&end).into(), profile: own });
+            }
+            Ok(SolidHits { hits, pieces })
+        };
+        // Read everything, then free on every path, a failed read's too.
+        let result = read();
+        unsafe { (self.api.cadaclysm_blacksmith_hits_free)(found) };
+        result
+    }
+
     /// Round `edges` (indices from [`Solid::edges`]) to `radius`.
     pub fn fillet(&self, edges: &[u32], radius: f64, tolerance: f64) -> Result<Solid> {
         let raw = unsafe {
@@ -1383,7 +1726,7 @@ impl Solid {
     }
 
     /// Face `face` pushed out by `distance` along its outward normal (in, negative) and
-    /// the flush faces merged, as Fusion and Rhino extrude a face. A face on a cylinder,
+    /// the flush faces merged, as a face extrude does it. A face on a cylinder,
     /// a cone, a sphere or a torus moves out along its normal instead, the surface a step
     /// out -- a boss fatter, a bore or a countersink narrower, a dome fuller -- with the
     /// flat faces beside it carried along; any other curved face is refused.
@@ -1392,7 +1735,7 @@ impl Solid {
         self.next(raw, "push_pull")
     }
 
-    /// Faces `faces` pushed out by `distance` together -- Fusion's press-pull on a
+    /// Faces `faces` pushed out by `distance` together -- a press-pull on a
     /// selection: each by [`Solid::push_pull`]'s rule for it, one after another, each
     /// found again after the pushes before it renumbered the faces. A box's top and a side
     /// pushed 5 is the box 5 taller and 5 wider; a face on the same curved surface as one
@@ -1436,27 +1779,27 @@ impl Solid {
     }
 
     /// The round `face` belongs to -- a fillet's bands, balls and rim bands joined to
-    /// that face -- made again at `radius`, as Fusion's press-pull on a fillet face:
+    /// that face -- made again at `radius`, as a press-pull on a fillet face:
     /// taken back to the sharp edges it replaced, and those rounded again.
     pub fn refillet(&self, face: u32, radius: f64, tolerance: f64) -> Result<Solid> {
         self.next(unsafe { (self.api.cadaclysm_blacksmith_refillet)(self.raw(), face, radius, tolerance) }, "refillet")
     }
 
     /// The round `face` belongs to taken off, the faces beside it sharp again --
-    /// Fusion's delete of a fillet face.
+    /// the delete of a fillet face.
     pub fn unfillet(&self, face: u32) -> Result<Solid> {
         self.next(unsafe { (self.api.cadaclysm_blacksmith_unfillet)(self.raw(), face) }, "unfillet")
     }
 
     /// The chamfer `face` belongs to -- its bevels, flat or round a rim, and the corner
-    /// triangles joined to that face -- cut again at `distance`, as Fusion's press-pull on
+    /// triangles joined to that face -- cut again at `distance`, as a press-pull on
     /// a chamfer face: taken back to the sharp edges it cut, and those bevelled again.
     pub fn rechamfer(&self, face: u32, distance: f64, tolerance: f64) -> Result<Solid> {
         self.next(unsafe { (self.api.cadaclysm_blacksmith_rechamfer)(self.raw(), face, distance, tolerance) }, "rechamfer")
     }
 
     /// The chamfer `face` belongs to taken off, the faces beside it sharp again --
-    /// Fusion's delete of a chamfer face.
+    /// the delete of a chamfer face.
     pub fn unchamfer(&self, face: u32) -> Result<Solid> {
         self.next(unsafe { (self.api.cadaclysm_blacksmith_unchamfer)(self.raw(), face) }, "unchamfer")
     }
@@ -1470,7 +1813,7 @@ impl Solid {
         self.next(raw, "shell")
     }
 
-    /// This sheet made a solid `thickness` thick -- Fusion's Thicken: its faces, their
+    /// This sheet made a solid `thickness` thick: its faces, their
     /// twins moved `thickness` along the faces' normals (against them for a negative
     /// thickness), and a wall round every open edge. A closed sheet thickens to a hollow.
     pub fn thicken(&self, thickness: f64, tolerance: f64) -> Result<Solid> {
@@ -1610,6 +1953,21 @@ impl Solid {
         Ok((lo, hi))
     }
 
+    /// `bounds_at64(DEFAULT_TOLERANCE)`.
+    pub fn bounds64(&self) -> Result<([f64; 3], [f64; 3])> {
+        self.bounds_at64(DEFAULT_TOLERANCE)
+    }
+
+    /// [`Solid::bounds_at`] from the same tessellation's unnarrowed positions: exact
+    /// far from the origin, where `bounds_at`'s widened `f32` positions are not.
+    pub fn bounds_at64(&self, tolerance: f64) -> Result<([f64; 3], [f64; 3])> {
+        let (mut lo, mut hi) = ([0.0; 3], [0.0; 3]);
+        if !unsafe { (self.api.cadaclysm_blacksmith_bounds64)(self.raw(), tolerance, lo.as_mut_ptr(), hi.as_mut_ptr()) } {
+            return Err(fail(self.api, "bounds64"));
+        }
+        Ok((lo, hi))
+    }
+
     /// How many edges of the mesh at `tolerance` are bound by anything other than
     /// exactly two triangles -- zero for a closed solid.
     pub fn leaked_edges(&self, tolerance: f64) -> Result<u32> {
@@ -1708,6 +2066,27 @@ impl Solid {
             Ok(Mesh {
                 positions: groups::<3>(raw.positions, n).unwrap_or(&[]),
                 normals: groups::<3>(raw.normals, n),
+                uvs: None,
+                colors: None,
+                indices: borrowed(raw.indices, raw.index_count as usize),
+            })
+        }
+    }
+
+    /// [`Solid::mesh`] in `double`, from the same cache, under the same rule: valid
+    /// until the solid is freed or meshed again at a different tolerance.
+    pub fn mesh64(&mut self, tolerance: f64) -> Result<Mesh64<'_>> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_mesh64)(self.raw(), tolerance) };
+        if raw.positions.is_null() {
+            return Err(fail(self.api, "mesh64"));
+        }
+        let n = raw.vertex_count as usize;
+        // SAFETY: as `mesh` -- the cache lives until the solid is freed or re-meshed,
+        // and the `&mut` borrow this mesh carries rules out both.
+        unsafe {
+            Ok(Mesh64 {
+                positions: groups64::<3>(raw.positions, n).unwrap_or(&[]),
+                normals: groups64::<3>(raw.normals, n),
                 uvs: None,
                 colors: None,
                 indices: borrowed(raw.indices, raw.index_count as usize),
@@ -2093,6 +2472,58 @@ pub fn write_svg(path: impl AsRef<FsPath>, solids: &[&Solid], options: &SvgOptio
     if ok { Ok(()) } else { Err(fail(api, "svg")) }
 }
 
+/// Several solids and profiles' wireframes as one SVG's text, each its own `<g>` --
+/// the pair the C API grew beside [`write_svg_text`]/[`write_svg`] so a drawing can
+/// carry both kinds. Always calls the kernel's own drawing pair, never the
+/// solids-only one -- a solids-only call through this function draws exactly what
+/// [`write_svg_text`] does, refused in the same words, so there is one code path for
+/// a mixed drawing and a solids-only one alike. Takes no view default of its own: an
+/// `options.view` left at [`SvgOptions::default`]'s `Iso` stays `Iso`, the same as
+/// [`Solid::svg_text`] -- only [`Profile::svg_text`]'s own no-`options` call defaults
+/// to `Top`.
+pub fn svg_text_of(solids: &[&Solid], profiles: &[&Profile], options: &SvgOptions) -> Result<String> {
+    let api = api()?;
+    let raw = build_svg_options(api, options);
+    let solid_handles: Vec<_> = solids.iter().map(|s| s.raw()).collect();
+    let profile_handles: Vec<_> = profiles.iter().map(|p| p.raw()).collect();
+    let text_ptr = unsafe {
+        (api.cadaclysm_blacksmith_drawing_svg_text)(
+            solid_handles.as_ptr(),
+            solid_handles.len(),
+            profile_handles.as_ptr(),
+            profile_handles.len(),
+            &raw,
+        )
+    };
+    if text_ptr.is_null() {
+        return Err(fail(api, "drawing_svg_text"));
+    }
+    let out = unsafe { text(text_ptr as *const c_char) };
+    unsafe { (api.cadaclysm_blacksmith_string_free)(text_ptr) };
+    Ok(out)
+}
+
+/// [`svg_text_of`] written to `path` by the library itself, which names the file in
+/// its refusal when it cannot.
+pub fn svg_of(path: impl AsRef<FsPath>, solids: &[&Solid], profiles: &[&Profile], options: &SvgOptions) -> Result<()> {
+    let api = api()?;
+    let raw = build_svg_options(api, options);
+    let path = crate::c_path(path.as_ref())?;
+    let solid_handles: Vec<_> = solids.iter().map(|s| s.raw()).collect();
+    let profile_handles: Vec<_> = profiles.iter().map(|p| p.raw()).collect();
+    let ok = unsafe {
+        (api.cadaclysm_blacksmith_drawing_svg)(
+            solid_handles.as_ptr(),
+            solid_handles.len(),
+            profile_handles.as_ptr(),
+            profile_handles.len(),
+            path.as_ptr(),
+            &raw,
+        )
+    };
+    if ok { Ok(()) } else { Err(fail(api, "drawing_svg")) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2195,5 +2626,71 @@ mod tests {
         let plain = unsafe { Curve::from_raw(&plain) };
         assert!(plain.knots.is_empty() && plain.poles.is_empty() && plain.weights.is_none());
         assert_eq!(std::mem::size_of::<sys::CadaclysmBlacksmithCurve>(), 184);
+    }
+
+    #[test]
+    fn a_chain_and_an_overlap_are_copied_out_ring_by_ring() {
+        let points = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 5.0, 5.0, 5.0, 6.0, 5.0, 5.0, 6.0, 6.0, 5.0, 5.0, 6.0, 5.0];
+        let raw = sys::CadaclysmBlacksmithChain { points: points.as_ptr(), point_count: 3, face_a: 2, face_b: 7, closed: true, tangent: false, has_curve: false };
+        let chain = unsafe { Chain::from_raw(&raw, None) };
+        assert_eq!(chain.points, [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]]);
+        assert_eq!((chain.closed, chain.faces, chain.tangent, chain.curve), (true, (2, 7), false, None));
+        // Two rings: a triangle, then a quad that runs to `point_count` -- the last ring's end.
+        let starts = [0u32, 3];
+        let raw = sys::CadaclysmBlacksmithOverlap { face_a: 1, face_b: 4, points: points.as_ptr(), loop_offsets: starts.as_ptr(), point_count: 7, loop_count: 2 };
+        let overlap = unsafe { Overlap::from_raw(&raw) };
+        assert_eq!(overlap.faces, (1, 4));
+        assert_eq!(overlap.loops.len(), 2);
+        assert_eq!(overlap.loops[0], [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]]);
+        assert_eq!(overlap.loops[1], [[5.0, 5.0, 5.0], [6.0, 5.0, 5.0], [6.0, 6.0, 5.0], [5.0, 6.0, 5.0]]);
+        // Zero rings is legal (a partial overlap whose outlines cross); the header's sizes.
+        let none = sys::CadaclysmBlacksmithOverlap { loop_offsets: std::ptr::null(), loop_count: 0, ..raw };
+        assert!(unsafe { Overlap::from_raw(&none) }.loops.is_empty());
+        assert_eq!(std::mem::size_of::<sys::CadaclysmBlacksmithChain>(), 24);
+        assert_eq!(std::mem::size_of::<sys::CadaclysmBlacksmithOverlap>(), 32);
+    }
+
+    /// The kernel twin of the reader's `mesh64_and_bounds64_keep_coordinates_far_from_the_origin`:
+    /// a cuboid moved far out keeps its coordinates in `mesh64`/`bounds_at64`, where
+    /// `mesh`/`bounds_at`'s `f32`-widened ones do not. Catches the same bug as that test,
+    /// on the kernel's own tessellation cache rather than the reader's document mesh.
+    ///
+    /// Needs the real kernel library (`CADACLYSM_BLACKSMITH_LIBRARY`); skips quietly
+    /// without one, as the reader's far-from-origin test does.
+    #[test]
+    fn kernel_mesh64_and_bounds64_keep_coordinates_far_from_the_origin() {
+        // `Solid::cuboid` is centred on the origin it is built at, so the low-y corner
+        // after this translate is the translate's y minus the half-extent (0.5), not
+        // the translate's y itself.
+        let low_y = -2_600_000.987_654_321 - 0.5;
+        let far = Solid::cuboid(1.0, 1.0, 1.0).and_then(|s| s.translate(1_000_000.123_456_789, -2_600_000.987_654_321, 450.5));
+        let mut far = match far {
+            Ok(far) => far,
+            Err(err) => {
+                eprintln!("skipped: {err} (no kernel library to build the far-from-origin cuboid with)");
+                return;
+            }
+        };
+
+        let mesh64 = far.mesh64(0.05).expect("mesh64 for a freshly built solid");
+        assert!(
+            mesh64.positions.iter().any(|p| (p[1] - low_y).abs() < 1e-6),
+            "kernel mesh64 lost the far low-y corner: {:?}",
+            mesh64.positions
+        );
+        assert!(
+            mesh64.positions.iter().any(|p| ((p[1] as f32) as f64 - p[1]).abs() > 1e-3),
+            "kernel mesh64 carries no coordinate f32 cannot hold, so this test cannot tell mesh64 from mesh widened"
+        );
+
+        let (lo64, _) = far.bounds_at64(0.05).expect("bounds_at64");
+        let (lo32, _) = far.bounds_at(0.05).expect("bounds_at");
+        assert!((lo64[1] - low_y).abs() < 1e-6, "kernel bounds64 lost the far corner: {lo64:?}");
+        assert!(
+            (lo64[1] - lo32[1]).abs() > 1e-3,
+            "kernel bounds64 agrees with bounds's f32-mesh-derived box to the bit, so it is not exact where f32 is not: {} vs {}",
+            lo64[1],
+            lo32[1]
+        );
     }
 }

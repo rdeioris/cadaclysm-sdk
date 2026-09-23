@@ -183,6 +183,36 @@ func test_svg():
 	refuses(func(): return plate.svg_with(tmp("no/such/dir/plate.svg"), {"fov": 200}), "fov")
 	plate.close()
 
+func test_svg_profile_and_drawing():
+	var outline := plate_outline()
+	var top_text := outline.svg_text()
+	ok(top_text.begins_with("<svg"), top_text.left(40))
+	ok(top_text.contains("<path"), "no <path in the profile's svg text")
+
+	var path := tmp("outline.svg")
+	eq(outline.svg(path), true)
+	ok(FileAccess.get_file_as_string(path).begins_with("<svg"))
+
+	# Pinned against an explicit iso call, not just checked non-empty -- a silently-iso
+	# default would make this equal and the assertion below would fail.
+	var iso_text: String = outline.svg_text_with({"view": "iso"})
+	ok(top_text != iso_text, "profile svg_text did not default to the top view")
+
+	# The widened pair: any mix of solids and profiles, each its own group id -- a
+	# solids-only call (test_svg above) still reads exactly as it always did.
+	var plate := CadaclysmSolid.extrude(plate_outline(), XY, 6)
+	var mixed: String = CadaclysmBlacksmith.write_drawing_svg_text([plate], [outline])
+	ok(mixed.contains("<path"), "no <path in the mixed drawing")
+	ok(mixed.contains("id=\"solid-0\""), "no solid-0 group in the mixed drawing")
+	ok(mixed.contains("id=\"profile-0\""), "no profile-0 group in the mixed drawing")
+
+	var mixed_path := tmp("mixed.svg")
+	eq(CadaclysmBlacksmith.write_drawing_svg(mixed_path, [plate], [outline]), true)
+	ok(FileAccess.get_file_as_string(mixed_path).begins_with("<svg"))
+
+	refuses(func(): return outline.svg_text_with({"fov": 200}), "fov")
+	plate.close()
+
 func test_step_text_takes_no_schema_a_builtin_name_a_path_or_text():
 	var solid := CadaclysmSolid.cuboid(1, 2, 3)
 	ok(solid.step_text().contains("CONFIG_CONTROL_DESIGN"), "no schema is the built-in AP203")
@@ -540,6 +570,29 @@ func test_a_regular_polygon_and_a_spline_open_and_closed():
 	eq(CadaclysmSolid.extrude_open(CadaclysmProfile.spline(square, 3, PackedFloat64Array([1, 2, 2, 1])), XY, 2).faces, 1)
 	var message := refuses(func(): return CadaclysmProfile.regular_polygon([0, 0], 10, 2))
 	eq(message, "profile_regular_polygon: a polygon has at least 3 sides, not 2")
+	# A five-pointed star: ten walls and two caps.
+	var star := CadaclysmSolid.extrude(CadaclysmProfile.star([0, 0], 10, 4, 5), XY, 2)
+	eq(star.faces, 12)
+	ok(star.is_watertight())
+	message = refuses(func(): return CadaclysmProfile.star([0, 0], 10, 10, 5))
+	eq(message, "profile_star: the inner radius must be under the outer")
+
+func test_text_is_set_as_profiles_with_curved_walls():
+	# An `i` is two shapes and an `o` one; the `o` extrudes to a watertight ring
+	# whose walls meet the caps on splines: the font's curves are kept.
+	var word := CadaclysmProfile.text("io", 10)
+	eq(word.size(), 3)
+	var ring := CadaclysmSolid.extrude(word[2], XY, 2)
+	ok(ring.is_watertight())
+	var spline := false
+	for edge in ring.edges:
+		if edge.kind == "nurbs":
+			spline = true
+	ok(spline)
+	eq(CadaclysmProfile.text("g", 10, "No Such Family Anywhere").size(), 1)
+	eq(CadaclysmProfile.text("", 10).size(), 0)
+	var message := refuses(func(): return CadaclysmProfile.text("x", 0))
+	eq(message, "profile_text: the size must be positive and finite")
 
 func test_meshes_and_edges_are_copied_out_for_godot():
 	var ball := CadaclysmSolid.sphere(5)
@@ -687,6 +740,33 @@ func test_weights_one_per_point_refused_otherwise():
 	eq(refuses(func(): return CadaclysmProfile.path([0, 0]).nurbs_to([[5, 5], [10, 0]], [0, 0, 0, 1, 1, 1], 2, PackedFloat64Array([1, 1]))),
 		"nurbs_to: 2 weights for 3 control points (the current point and 2 given); give one per point")
 
+func test_a_reflector_is_drawn_and_revolved_from_a_parabola():
+	# A dish 100 wide, focal length 20, opening up: from rim to rim on the parabola,
+	# closed by the rim line, revolved about the axis -- one NURBS wall, watertight.
+	var dish := CadaclysmProfile.parabola([0, 0], [0, 1], 20, 0, 50).line_to(0, 31.25).line_to(0, 0).end()
+	var bowl := CadaclysmSolid.revolve_in_plane(dish, XY, [0, 0], [0, 1], 2 * PI)
+	ok(bowl.is_watertight())
+	ok(count_faces(bowl, "revolution").size() > 0)
+	# The dish's own arc by vertex, closed by a second parabola through the same rim
+	# points with a focus beyond the chord -- the arch over the top, not the dish again
+	# (a focus at (0, 20) would rebuild the identical arc and retrace it, per
+	# parabola_by_focus's own doc comment on this reflector).
+	var arch := CadaclysmProfile.path([-50, 31.25]).parabola_by_vertex(50, 31.25, [0, 0]).parabola_by_focus(-50, 31.25, [0, 40]).end()
+	ok(CadaclysmSolid.extrude(arch, XY, 2).is_watertight())
+	# A conic with a quarter circle's weight; a parabola by its end tangents.
+	var quarter := CadaclysmProfile.path([10, 0]).conic_to(0, 10, [10, 10], cos(PI / 4)).line_to(0, 0).line_to(10, 0).end()
+	eq(CadaclysmSolid.extrude(quarter, XY, 2).faces, 5)
+	var bump := CadaclysmProfile.path([0, 0]).parabola_to(10, 0, [5, 5]).line_to(0, 0).end()
+	eq(CadaclysmSolid.extrude(bump, XY, 2).faces, 4)
+	ok(CadaclysmProfile.path([0, 0]).hyperbola_to(10, 0, [5, 5], 2).line_to(0, 0).end() != null)
+	eq(refuses(func(): return CadaclysmProfile.path([0, 0]).conic_to(2, 0, [1, 0], 1)),
+		"path_conic_to: the control point lies on the chord")
+	eq(refuses(func(): return CadaclysmProfile.path([0, 0]).hyperbola_to(2, 0, [1, 1], 1)),
+		"hyperbola_to: the weight must be over 1 (1 is a parabola, under 1 an ellipse)")
+	eq(refuses(func(): return CadaclysmProfile.parabola([0, 0], [0, 0], 1, -1, 1)),
+		"path_parabola: the axis direction is zero")
+	refuses(func(): return CadaclysmProfile.path([0, 0]).conic_to(2, 0, [1, 1, 1], 1), "conic_to: control: expected 2 numbers, got 3")
+
 # A closed mesh's volume, by the divergence theorem over its triangles.
 func volume(solid: CadaclysmSolid) -> float:
 	var m := solid.mesh(0.01)
@@ -740,6 +820,42 @@ func test_two_circles_hit_twice_a_tangent_touches_and_an_overlap_runs():
 	eq(a.hits(CadaclysmProfile.circle(2).translate(10, 0)).size(), 0)
 	refuses(func(): return a.hits(a, 0.0), "profile_hits: tolerance must be positive and finite")
 	eq(a.hits(a, 0.0).size(), 0, "empty on failure")
+
+func test_a_line_through_a_cuboid_hits_twice_and_cuts_three_pieces():
+	var box := CadaclysmSolid.cuboid(10, 20, 30)
+	var line := CadaclysmProfile.path([-20, 0]).line_to(20, 0).end_open()
+	var found = box.hits(line, XY)
+	ok(found is CadaclysmSolidHits)
+	eq(str(found), "SolidHits(hits=2, pieces=3)")
+	eq(found.hits.size(), 2)
+	var xs := [-5.0, 5.0]
+	for k in found.hits.size():
+		var h = found.hits[k]
+		ok(not h.run and not h.touch)
+		near(h.raw_start[0], xs[k], 0.05)
+		eq(h.a_start.segment, 0)
+		eq(h.a_start.face, 4294967295)
+		ok(h.b_start.face != 4294967295 and is_finite(h.b_start.u) and is_finite(h.b_start.v))
+	var p: Array = found.pieces
+	eq(p.size(), 3)
+	ok(p[1] is CadaclysmPiece and p[1].profile is CadaclysmProfile and p[1].start is CadaclysmSpot)
+	eq([p[0].inside, p[1].inside, p[2].inside], [false, true, false])
+	eq([p[0].start.t, p[2].end.t], [0.0, 1.0])
+	eq([p[0].end.t, p[1].end.t], [p[1].start.t, p[2].start.t], "the pieces run head to tail")
+	var span: AABB = CadaclysmSolid.extrude_open(p[1].profile, XY, 1).bounds
+	near(span.position.x, -5, 0.05, "the middle piece starts on the box")
+	near(span.end.x, 5, 0.05, "the middle piece ends on the box")
+	ok(CadaclysmSweepPath.along(p[1].profile, XY, 0.05, true) is CadaclysmSweepPath)
+	# A loop no hit cuts is one piece, outside here; an open sheet has no pieces.
+	var far = box.hits(CadaclysmProfile.circle(1), [100, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])
+	eq(far.hits.size(), 0)
+	eq(far.pieces.size(), 1)
+	eq(far.pieces[0].inside, false)
+	var sheet := CadaclysmSolid.face(CadaclysmProfile.rect(20, 20), XY)
+	var across = sheet.hits(CadaclysmProfile.path([0, -20]).line_to(0, 20).end_open(), [0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -1, 0])
+	ok(across.hits.size() >= 1)
+	eq(across.pieces.size(), 0)
+	refuses(func(): return box.hits(line, XY, 0.0), "solid_profile_hits: tolerance must be positive and finite")
 
 func test_every_edge_carries_its_exact_curve():
 	# A cylinder's rims are circles of its radius about a cap centre, in a unit frame, a whole turn each.
@@ -800,6 +916,60 @@ func test_every_edge_carries_its_exact_curve():
 	for solid in [cyl, loop, CadaclysmSolid.sphere(2)]:
 		for e in solid.edges:
 			ok(e.curve != null)
+
+func test_two_crossed_pipes_intersect_on_ellipse_chains_and_coaxial_pipes_overlap():
+	var tol := 1e-3
+	var off_a := func(p: Array) -> float: return absf(sqrt(p[0] * p[0] + p[1] * p[1]) - 1.0)
+	var off_b := func(p: Array) -> float: return absf(sqrt(p[0] * p[0] + (p[2] - 3.0) * (p[2] - 3.0)) - 1.0)
+	# Two equal pipes crossing at right angles: `a` up z, `b` along y through a's middle.
+	var a := CadaclysmSolid.cylinder(1, 6)
+	var b := CadaclysmSolid.cylinder(1, 6).rotate([0, 0, 3], [1, 0, 0], PI / 2)
+	var found = a.intersect(b, tol)
+	ok(found is CadaclysmIntersection)
+	ok(found.chains.size() >= 2, "the saddle splits into chains")
+	eq(found.overlaps.size(), 0, "a transversal crossing has no coincident face pair")
+	var ellipses := 0
+	for c in found.chains:
+		ok(c is CadaclysmChain)
+		ok(c.face_a >= 0 and c.face_a < a.faces and c.face_b >= 0 and c.face_b < b.faces)
+		var s: PackedFloat64Array = c.raw_points
+		ok(s.size() >= 6 and s.size() == 3 * c.points.size())
+		for k in range(0, s.size(), 3):
+			var p := [s[k], s[k + 1], s[k + 2]]
+			ok(off_a.call(p) < 50 * tol and off_b.call(p) < 50 * tol, "off a surface: " + str(p))
+		if c.curve == null:
+			continue
+		ok(c.curve is CadaclysmCurve and c.curve.kind in ["ellipse", "nurbs"], str(c.curve))
+		if c.curve.kind == "ellipse":
+			ellipses += 1
+			var f: PackedFloat64Array = c.curve.raw_frame
+			var t: float = (c.curve.t0 + c.curve.t1) / 2   # the curve's own point, mid-chain
+			var q := []
+			for k in 3:
+				q.append(f[k] + f[3 + k] * c.curve.radius * cos(t) + f[6 + k] * c.curve.radius2 * sin(t))
+			ok(off_a.call(q) < 50 * tol and off_b.call(q) < 50 * tol, "the ellipse leaves the pipes: " + str(q))
+		ok(str(c).begins_with("Chain(points="), str(c))
+	ok(ellipses > 0, "two equal pipes cross on ellipses")
+	# Apart: nothing, and not an error. A bad tolerance is refused in the kernel's words.
+	var apart = a.intersect(b.translate(10, 0, 0))
+	eq([apart.chains.size(), apart.overlaps.size()], [0, 0])
+	refuses(func(): return a.intersect(b, 0.0), "intersect: tolerance must be positive and finite")
+	# Two coaxial pipes overlapping in height share a wall band: rings on that wall.
+	var lower := CadaclysmSolid.cylinder(1, 4)
+	var upper := CadaclysmSolid.cylinder(1, 4).translate(0, 0, 2)
+	var shared = lower.intersect(upper, tol)
+	ok(shared.overlaps.size() >= 1, "the overlapping wall band is an overlap")
+	var o = shared.overlaps[0]
+	ok(o is CadaclysmOverlap and o.face_a >= 0 and o.face_a < lower.faces and o.face_b >= 0 and o.face_b < upper.faces)
+	ok(o.loops.size() >= 1, "a coaxial wall band closes into rings")
+	eq(o.raw_loops.size(), o.loops.size())
+	for r in o.raw_loops.size():
+		var ring: PackedFloat64Array = o.raw_loops[r]
+		ok(ring.size() >= 9 and ring.size() == 3 * o.loops[r].size(), "a ring is at least a triangle")
+		for k in range(0, ring.size(), 3):
+			var p := [ring[k], ring[k + 1], ring[k + 2]]
+			ok(off_a.call(p) < 50 * tol and p[2] >= 2 - 50 * tol and p[2] <= 4 + 50 * tol, "off the shared band: " + str(p))
+	eq(str(o), "Overlap(faces=(%d, %d), loops=%d)" % [o.face_a, o.face_b, o.loops.size()])
 
 func test_two_circles_share_one_lens_of_arcs():
 	var a := CadaclysmProfile.circle(5)

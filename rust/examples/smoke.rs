@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use cadaclysm_sdk::blacksmith::{
-    self, Axis, Curve, Frame, Keep, Path as Outline, Profile, Selector, Solid, SweepPath, Unit, Workplane, DEFAULT_TOLERANCE,
+    self, Axis, Curve, Frame, Intersection, Keep, Path as Outline, Profile, Selector, Solid, SolidHits, SweepPath, Unit, Workplane, DEFAULT_TOLERANCE,
     FILLET_TOLERANCE,
 };
 use cadaclysm_sdk::{Convention, OpenOptions, Scene, SvgOptions};
@@ -79,6 +79,11 @@ fn run() -> Result<(), String> {
     if path.ends_with("cube.scad") {
         let beziers = first.edge_beziers();
         check(first.mesh_lod(1).triangle_count() == 3 && beziers.count() == 12 && beziers.points.len() == 48, "the cube's LOD 1 or Béziers are off")?;
+        let beziers64 = first.edge_beziers64();
+        check(
+            beziers64.count() == beziers.count() && beziers64.points[0].map(|v| v as f32) == beziers.points[0],
+            "edge_beziers64 does not agree with edge_beziers",
+        )?;
     }
     let fit = first.collision(0).ok_or("no collision body for the first body")?;
     check(fit.error == 0.0 && fit.hull_vertex_count == 8 && !fit.shape_name().is_empty(), "the collision fit is off")?;
@@ -99,7 +104,29 @@ fn run() -> Result<(), String> {
     if path.ends_with("cube.scad") {
         check(estimate == 12 && first.surface_edges().is_empty() && first.surface_proxy_mesh(4).is_empty(), "the cube has no surface products")?;
         check(first.surface_pick([10.0, 10.0, 100.0], [10.0, 10.0, -100.0]).is_none() && first.bounds_placed(None).is_empty(), "the cube picks or bounds through surfaces")?;
+        check(first.bounds_placed64(None).is_empty(), "the cube bounds_placed64 through surfaces")?;
     }
+
+    // f64 twins: mesh64's counts and first position agree with mesh's, and bounds64's
+    // max widens to bounds's, on both the node and the scene.
+    let mesh64 = first.mesh64().ok_or("no mesh64 for the first meshable node")?;
+    check(
+        mesh64.vertex_count() == mesh.vertex_count() && mesh64.index_count() == mesh.index_count(),
+        "mesh64's vertex/index counts do not equal mesh's",
+    )?;
+    check(
+        mesh64.positions[0].map(|v| v as f32) == mesh.positions[0],
+        "mesh64's first position narrowed to float does not equal mesh's first position",
+    )?;
+    let node_bounds64 = first.bounds64();
+    check(node_bounds64.max.map(|v| v as f32) == first.bounds().max, "bounds64's max does not equal bounds's max widened")?;
+    let scene_bounds64 = scene.bounds64();
+    check(scene_bounds64.max.map(|v| v as f32) == bounds.max, "scene bounds64's max does not equal bounds's max widened")?;
+    println!(
+        "reader f64 twins: mesh64 {} triangles, bounds64 max {:?}",
+        mesh64.triangle_count(),
+        scene_bounds64.max
+    );
     let fresh = cadaclysm_sdk::open(&path).map_err(e)?;
     let body = fresh.walk().find(|n| n.can_mesh()).ok_or("no meshable node")?;
     check(!body.is_meshed(), "a fresh scene is already meshed")?;
@@ -264,6 +291,93 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
         splines[0].degree, splines[0].poles.len()
     );
 
+    // Intersect: two equal pipes crossing at right angles meet on ellipse chains whose points
+    // lie on both pipes; apart, nothing; a zero tolerance refused in the kernel's words. Two
+    // coaxial pipes overlapping in height share a wall band: an overlap whose rings lie on it.
+    let tol = 1e-3;
+    let off_a = |p: [f64; 3]| ((p[0] * p[0] + p[1] * p[1]).sqrt() - 1.0).abs();
+    let off_b = |p: [f64; 3]| ((p[0] * p[0] + (p[2] - 3.0) * (p[2] - 3.0)).sqrt() - 1.0).abs();
+    let pipe_a = Solid::cylinder(1.0, 6.0).map_err(e)?;
+    let pipe_b = Solid::cylinder(1.0, 6.0).map_err(e)?.rotate(&[[0.0, 0.0, 3.0], [1.0, 0.0, 0.0]], std::f64::consts::FRAC_PI_2).map_err(e)?;
+    let found: Intersection = pipe_a.intersect(&pipe_b, tol).map_err(e)?;
+    check(found.chains.len() >= 2 && found.overlaps.is_empty(), &format!("intersect: the crossed pipes read {found:?}"))?;
+    let (faces_a, faces_b) = (pipe_a.faces().map_err(e)?, pipe_b.faces().map_err(e)?);
+    let mut ellipses = 0;
+    for c in &found.chains {
+        check(c.faces.0 < faces_a && c.faces.1 < faces_b && c.points.len() >= 2, &format!("intersect: a chain reads {c:?}"))?;
+        check(c.points.iter().all(|&p| off_a(p) < 50.0 * tol && off_b(p) < 50.0 * tol), &format!("intersect: a chain leaves the pipes: {c:?}"))?;
+        let Some(curve) = &c.curve else { continue };
+        check(curve.kind == "ellipse" || curve.kind == "nurbs", &format!("intersect: a chain's curve reads {curve:?}"))?;
+        if curve.kind != "ellipse" {
+            continue;
+        }
+        ellipses += 1;
+        let t = (curve.t0 + curve.t1) / 2.0;
+        let q = std::array::from_fn(|k| curve.origin[k] + curve.x[k] * curve.radius * t.cos() + curve.y[k] * curve.radius2 * t.sin());
+        check(off_a(q) < 50.0 * tol && off_b(q) < 50.0 * tol, &format!("intersect: the ellipse leaves the pipes at {curve:?}"))?;
+    }
+    check(ellipses > 0, "intersect: two equal pipes cross on ellipses")?;
+    let apart = pipe_a.intersect(&pipe_b.translate(10.0, 0.0, 0.0).map_err(e)?, DEFAULT_TOLERANCE).map_err(e)?;
+    check(apart == Intersection::default(), &format!("intersect: pipes apart read {apart:?}"))?;
+    match pipe_a.intersect(&pipe_b, 0.0) {
+        Err(err) if err.to_string().contains("intersect: tolerance must be positive and finite") => {}
+        other => return Err(format!("intersect: a zero tolerance was accepted or refused in other words: {other:?}")),
+    }
+    let lower = Solid::cylinder(1.0, 4.0).map_err(e)?;
+    let upper = Solid::cylinder(1.0, 4.0).map_err(e)?.translate(0.0, 0.0, 2.0).map_err(e)?;
+    let shared = lower.intersect(&upper, tol).map_err(e)?;
+    check(!shared.overlaps.is_empty() && !shared.overlaps[0].loops.is_empty(), &format!("intersect: the coaxial pipes read {shared:?}"))?;
+    for ring in &shared.overlaps[0].loops {
+        check(
+            ring.len() >= 3 && ring.iter().all(|&p| off_a(p) < 50.0 * tol && (2.0 - 50.0 * tol..=4.0 + 50.0 * tol).contains(&p[2])),
+            &format!("intersect: an overlap ring leaves the shared band: {ring:?}"),
+        )?;
+    }
+    println!(
+        "intersect: {} chains ({ellipses} ellipses), {} overlaps; coaxial: faces {:?}, {} rings",
+        found.chains.len(),
+        found.overlaps.len(),
+        shared.overlaps[0].faces,
+        shared.overlaps[0].loops.len()
+    );
+
+    // Solid x profile hits: a line through a cuboid pierces two faces and is cut into three
+    // pieces, outside/inside/outside, the middle one spanning the box and sweeping; a loop no
+    // hit cuts is one piece; an open sheet has no pieces; a zero tolerance refused verbatim.
+    let xy = Frame::xy([0.0; 3]);
+    let cuboid = Solid::cuboid(10.0, 20.0, 30.0).map_err(e)?;
+    let line = Outline::begin([-20.0, 0.0]).and_then(|p| p.line_to(20.0, 0.0)).and_then(|p| p.end_open()).map_err(e)?;
+    let found: SolidHits = cuboid.hits(&line, &xy, DEFAULT_TOLERANCE).map_err(e)?;
+    check(found.hits.len() == 2 && found.pieces.len() == 3, &format!("solid hits: a line through a cuboid reads {:?} and {} pieces", found.hits, found.pieces.len()))?;
+    for (h, x) in found.hits.iter().zip([-5.0, 5.0]) {
+        check(
+            !h.run && !h.touch && (h.start[0] - x).abs() < 0.05 && h.a_start.segment == 0 && h.a_start.face == blacksmith::NONE
+                && h.b_start.face != blacksmith::NONE && h.b_start.u.is_finite() && h.b_start.v.is_finite(),
+            &format!("solid hits: a hit reads {h:?}"),
+        )?;
+    }
+    let p = &found.pieces;
+    let spots: Vec<_> = p.iter().map(|q| (q.inside, q.start, q.end)).collect();
+    check(!p[0].inside && p[1].inside && !p[2].inside, &format!("solid hits: the pieces read {spots:?}"))?;
+    check(
+        p[0].start.t == 0.0 && p[2].end.t == 1.0 && p[0].end.t == p[1].start.t && p[1].end.t == p[2].start.t,
+        &format!("solid hits: the pieces do not run head to tail: {spots:?}"),
+    )?;
+    let (lo, hi) = Solid::extrude_open(&p[1].profile, &xy, 1.0).map_err(e)?.bounds().map_err(e)?;
+    check((lo[0] + 5.0).abs() < 0.05 && (hi[0] - 5.0).abs() < 0.05, &format!("solid hits: the middle piece spans x {} .. {}, not the box", lo[0], hi[0]))?;
+    SweepPath::along(&p[1].profile, &xy, DEFAULT_TOLERANCE, true).map_err(e)?;
+    let far = cuboid.hits(&Profile::circle(1.0).map_err(e)?, &Frame::xy([100.0, 0.0, 0.0]), DEFAULT_TOLERANCE).map_err(e)?;
+    check(far.hits.is_empty() && far.pieces.len() == 1 && !far.pieces[0].inside, "solid hits: a circle far off is not one outside piece")?;
+    let flat = Solid::face(&Profile::rect(20.0, 20.0).map_err(e)?, &xy).map_err(e)?;
+    let upright = Outline::begin([0.0, -20.0]).and_then(|p| p.line_to(0.0, 20.0)).and_then(|p| p.end_open()).map_err(e)?;
+    let across = flat.hits(&upright, &Frame::xz([0.0; 3]), DEFAULT_TOLERANCE).map_err(e)?;
+    check(!across.hits.is_empty() && across.pieces.is_empty(), &format!("solid hits: a line across a sheet reads {:?}, {} pieces", across.hits, across.pieces.len()))?;
+    match cuboid.hits(&line, &xy, 0.0) {
+        Err(err) if err.to_string() == "solid_profile_hits: tolerance must be positive and finite" => {}
+        other => return Err(format!("solid hits: a zero tolerance was accepted or refused in other words: {:?}", other.map(|f| f.hits))),
+    }
+    println!("solid hits: {} hits, {} pieces; the middle {:?}", found.hits.len(), found.pieces.len(), spots[1]);
+
     let outline = Profile::rect(80.0, 40.0).map_err(e)?.with_hole(&Profile::circle(4.0).map_err(e)?).map_err(e)?;
     let plate = Workplane::xy().extrude(&outline, 6.0).map_err(e)?.solid().map_err(e)?;
     // The chain borrows the plate, which stays the caller's to join the pin to.
@@ -329,6 +443,26 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
     check(mesh.normals.is_some_and(|n| n.len() == mesh.positions.len()), "the kernel mesh has no normals")?;
     check(mesh.indices.iter().all(|&i| (i as usize) < mesh.positions.len()), "a kernel index points past the vertices")?;
     check(fine > coarse, "a finer tolerance did not mesh finer")?;
+
+    // f64 twins: mesh64(0.05) shares mesh(0.05)'s counts and first position narrowed;
+    // bounds64(0.05) is the same box as bounds(0.05) (both close to the origin here).
+    let (mesh_vertex_count, mesh_index_count, mesh_first) = (mesh.vertex_count(), mesh.index_count(), mesh.positions[0]);
+    let mesh64 = rounded.mesh64(0.05).map_err(e)?;
+    let (mesh64_vertex_count, mesh64_index_count, mesh64_first, mesh64_triangles) =
+        (mesh64.vertex_count(), mesh64.index_count(), mesh64.positions[0], mesh64.triangle_count());
+    check(
+        mesh64_vertex_count == mesh_vertex_count && mesh64_index_count == mesh_index_count,
+        "blacksmith mesh64(0.05)'s counts do not equal mesh(0.05)'s",
+    )?;
+    check(mesh64_first.map(|v| v as f32) == mesh_first, "blacksmith mesh64's first position narrowed does not equal mesh's")?;
+    let (lo64, hi64) = rounded.bounds_at64(0.05).map_err(e)?;
+    let (lo32, hi32) = rounded.bounds_at(0.05).map_err(e)?;
+    check(
+        (0..3).all(|i| (lo64[i] - lo32[i]).abs() < 1e-6 && (hi64[i] - hi32[i]).abs() < 1e-6),
+        "blacksmith bounds64(0.05) does not equal bounds(0.05)",
+    )?;
+    println!("blacksmith f64 twins: mesh64 {mesh64_triangles} triangles, bounds64 max {hi64:?}");
+
     let polylines = rounded.edge_polylines(0.05).map_err(e)?;
     check(!polylines.is_empty() && polylines.iter().all(|p| p.len() >= 2), "the edge polylines are empty")?;
     println!("mesh: {coarse} triangles at 0.5, {fine} at 0.05; {} edge polylines", polylines.len());
@@ -382,6 +516,28 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
     let bad_fov = SvgOptions { fov: 200.0, ..Default::default() };
     check(rounded.svg_text(&bad_fov).is_err(), "blacksmith svg: fov=200 was accepted")?;
     println!("blacksmith svg: solid text, file written, fov=200 refused");
+
+    // A profile's own plane, top by default -- pinned against an explicit iso call, not
+    // just checked non-empty, so a silently-iso default would fail this.
+    let profile_svg_top = outline.svg_text(None).map_err(e)?;
+    check(profile_svg_top.starts_with("<svg") && profile_svg_top.contains("<path"), "profile SVG text did not look like an SVG wireframe")?;
+    let profile_svg_path = std::env::temp_dir().join("cadaclysm-smoke-rust-profile.svg");
+    outline.svg(&profile_svg_path, None).map_err(e)?;
+    check(std::fs::metadata(&profile_svg_path).is_ok_and(|m| m.len() > 0), "Profile::svg wrote an empty file")?;
+    let profile_svg_iso = outline.svg_text(Some(&SvgOptions::default())).map_err(e)?;
+    check(profile_svg_top != profile_svg_iso, "Profile::svg_text did not default to the top view")?;
+    println!("blacksmith svg: profile text, file written, top default confirmed against iso");
+
+    // The widened pair: a solid and a profile drawn together, one call, both group ids.
+    let mixed = blacksmith::svg_text_of(&[&rounded], &[&outline], &SvgOptions::default()).map_err(e)?;
+    check(
+        mixed.contains("<path") && mixed.contains("id=\"solid-0\"") && mixed.contains("id=\"profile-0\""),
+        "the mixed drawing did not contain both group ids",
+    )?;
+    let mixed_path = std::env::temp_dir().join("cadaclysm-smoke-rust-mixed.svg");
+    blacksmith::svg_of(&mixed_path, &[&rounded], &[&outline], &SvgOptions::default()).map_err(e)?;
+    check(std::fs::metadata(&mixed_path).is_ok_and(|m| m.len() > 0), "svg_of wrote an empty file")?;
+    println!("blacksmith svg: solid and profile drawn together, both group ids present");
 
     // And back into the kernel: the read body's brep, shared rather than copied, as a
     // solid that outlives the scene it came from.
@@ -464,6 +620,53 @@ fn sheet_verbs(plate: &Solid) -> Result<(), String> {
         .and_then(|p| p.arc([5.0, 0.0, 10.0], [0.0, 1.0, 0.0], std::f64::consts::FRAC_PI_2))
         .map_err(e)?;
     check(Solid::pipe(&bend, 1.0, 0.2).map_err(e)?.is_watertight(DEFAULT_TOLERANCE).map_err(e)?, "the pipe leaks")?;
+
+    // A five-pointed star: ten walls and two caps.
+    let star = Solid::extrude(&Profile::star([0.0, 0.0], 10.0, 4.0, 5, 0.0).map_err(e)?, &xy, 2.0).map_err(e)?;
+    check(count(&star)? == 12 && star.is_watertight(DEFAULT_TOLERANCE).map_err(e)?, "star: not twelve watertight faces")?;
+
+    // Text: an `i` is two shapes and an `o` one; the `o` extrudes to a watertight ring with spline edges.
+    let word = Profile::text("io", 10.0, "", "left", "baseline", 1.0, "ltr", None).map_err(e)?;
+    let text_ring = Solid::extrude(&word[2], &xy, 2.0).map_err(e)?;
+    let spline = text_ring.edges().map_err(e)?.iter().any(|edge| edge.kind == "nurbs");
+    check(word.len() == 3 && spline && text_ring.is_watertight(DEFAULT_TOLERANCE).map_err(e)?, "text: not three shapes with a spline-edged ring")?;
+
+    // A reflector: the parabola from rim to rim, closed and revolved -- watertight.
+    let dish = Outline::parabola([0.0, 0.0], [0.0, 1.0], 20.0, 0.0, 50.0)
+        .and_then(|p| p.line_to(0.0, 31.25))
+        .and_then(|p| p.line_to(0.0, 0.0))
+        .and_then(|p| p.end())
+        .map_err(e)?;
+    let bowl = Solid::revolve_in_plane(&dish, &xy, [0.0, 0.0], [0.0, 1.0], std::f64::consts::TAU).map_err(e)?;
+    check(bowl.is_watertight(DEFAULT_TOLERANCE).map_err(e)?, "parabola: the bowl leaks")?;
+    // A conic with a quarter circle's weight; a control point on the chord and a
+    // hyperbola's weight not over 1 are refused.
+    let quarter = Outline::begin([10.0, 0.0])
+        .and_then(|p| p.conic_to(0.0, 10.0, [10.0, 10.0], std::f64::consts::FRAC_PI_4.cos()))
+        .and_then(|p| p.line_to(0.0, 0.0))
+        .and_then(|p| p.line_to(10.0, 0.0))
+        .and_then(|p| p.end())
+        .map_err(e)?;
+    check(count(&Solid::extrude(&quarter, &xy, 2.0).map_err(e)?)? == 5, "conic_to: a quarter circle's box is not five faces")?;
+    // The dish's own arc by vertex, closed by a second parabola through the same rim points
+    // with a focus beyond the chord -- the arch over the top, not the dish again (a focus at
+    // (0, 20) would rebuild the identical arc and retrace it).
+    let arch = Outline::begin([-50.0, 31.25])
+        .and_then(|p| p.parabola_by_vertex(50.0, 31.25, [0.0, 0.0]))
+        .and_then(|p| p.parabola_by_focus(-50.0, 31.25, [0.0, 40.0]))
+        .and_then(|p| p.end())
+        .map_err(e)?;
+    check(Solid::extrude(&arch, &xy, 2.0).map_err(e)?.is_watertight(DEFAULT_TOLERANCE).map_err(e)?, "parabola_by_vertex/focus: the arch leaks")?;
+    // A parabola by its end tangents, and a hyperbola at weight 2: one wall and a floor each.
+    let bump = Outline::begin([0.0, 0.0]).and_then(|p| p.parabola_to(10.0, 0.0, [5.0, 5.0])).and_then(|p| p.line_to(0.0, 0.0)).and_then(|p| p.end()).map_err(e)?;
+    check(count(&Solid::extrude(&bump, &xy, 2.0).map_err(e)?)? == 4, "parabola_to: a bump is not four faces")?;
+    let hump = Outline::begin([0.0, 0.0]).and_then(|p| p.hyperbola_to(10.0, 0.0, [5.0, 5.0], 2.0)).and_then(|p| p.line_to(0.0, 0.0)).and_then(|p| p.end()).map_err(e)?;
+    check(count(&Solid::extrude(&hump, &xy, 2.0).map_err(e)?)? == 4, "hyperbola_to: a hump is not four faces")?;
+    let refused_path = |r: cadaclysm_sdk::Result<Outline>| r.err().map(|err| err.to_string()).unwrap_or_default();
+    let flat = refused_path(Outline::begin([0.0, 0.0]).and_then(|p| p.conic_to(2.0, 0.0, [1.0, 0.0], 1.0)));
+    check(flat == "path_conic_to: the control point lies on the chord", &format!("a conic through its chord: {flat:?}"))?;
+    let low = refused_path(Outline::begin([0.0, 0.0]).and_then(|p| p.hyperbola_to(2.0, 0.0, [1.0, 1.0], 1.0)));
+    check(low == "hyperbola_to: the weight must be over 1 (1 is a parabola, under 1 an ellipse)", &format!("a hyperbola at weight 1: {low:?}"))?;
 
     // The library reads a fixed count of weights: a wrong count is refused, not read past.
     let corners = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];

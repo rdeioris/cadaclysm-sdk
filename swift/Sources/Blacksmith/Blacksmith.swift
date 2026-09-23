@@ -304,6 +304,12 @@ func buildSvgOptions(_ options: SvgOptions) -> CadaclysmBlacksmithSvgOptions {
 }
 
 /// Several solids' wireframe as one SVG's text, each its own `<g>` -- see `Cadaclysm.SvgOptions`.
+/// Keeps calling the solids-only pair rather than the widened `writeSvgText(_:_:options:)`
+/// below with an empty profile list: this package's own coverage test
+/// (`cadaclysm-capi/tests/bindings.rs`) reads an entry point as declared only where it is
+/// actually called, so `cadaclysm_blacksmith_svg_text` needs a real call of its own here --
+/// unlike Python and Node, which declare every entry point in a table independent of
+/// whether it is still called. The two pairs refuse in identical words either way.
 public func writeSvgText(_ solids: [Solid], options: SvgOptions = SvgOptions()) throws -> String {
     let handles: [OpaquePointer?] = try solids.map { try $0.h() }
     var cOptions = buildSvgOptions(options)
@@ -315,12 +321,48 @@ public func writeSvgText(_ solids: [Solid], options: SvgOptions = SvgOptions()) 
     return String(cString: raw)
 }
 
-/// `writeSvgText` written to `path` by the library itself.
+/// `writeSvgText` written to `path` by the library itself. Kept calling the solids-only
+/// pair, for the same reason `writeSvgText` above does -- see its comment.
 public func writeSvg(_ path: String, _ solids: [Solid], options: SvgOptions = SvgOptions()) throws {
     let handles: [OpaquePointer?] = try solids.map { try $0.h() }
     var cOptions = buildSvgOptions(options)
     let ok = withExtendedLifetime(solids) {
         withUnsafePointer(to: &cOptions) { cadaclysm_blacksmith_svg(handles, handles.count, path, $0) }
+    }
+    guard ok else { throw failure("svg") }
+}
+
+/// Several solids' and profiles' wireframe as one SVG's text: a `<g id="solid-N">` per
+/// solid then a `<g id="profile-N">` per profile, on one page, each its own colour where
+/// it carries one and the options' `stroke` otherwise. Either list may be empty; both
+/// empty is refused. See `Cadaclysm.SvgOptions`.
+public func writeSvgText(_ solids: [Solid], _ profiles: [Profile], options: SvgOptions = SvgOptions()) throws -> String {
+    let solidHandles: [OpaquePointer?] = try solids.map { try $0.h() }
+    let profileHandles: [OpaquePointer?] = profiles.map { $0.handle }
+    var cOptions = buildSvgOptions(options)
+    let raw: UnsafeMutablePointer<CChar>? = withExtendedLifetime(solids) {
+        withExtendedLifetime(profiles) {
+            withUnsafePointer(to: &cOptions) {
+                cadaclysm_blacksmith_drawing_svg_text(solidHandles, solidHandles.count, profileHandles, profileHandles.count, $0)
+            }
+        }
+    }
+    guard let raw else { throw failure("svg_text") }
+    defer { cadaclysm_blacksmith_string_free(raw) }
+    return String(cString: raw)
+}
+
+/// `writeSvgText(_:_:options:)` written to `path` by the library itself.
+public func writeSvg(_ path: String, _ solids: [Solid], _ profiles: [Profile], options: SvgOptions = SvgOptions()) throws {
+    let solidHandles: [OpaquePointer?] = try solids.map { try $0.h() }
+    let profileHandles: [OpaquePointer?] = profiles.map { $0.handle }
+    var cOptions = buildSvgOptions(options)
+    let ok = withExtendedLifetime(solids) {
+        withExtendedLifetime(profiles) {
+            withUnsafePointer(to: &cOptions) {
+                cadaclysm_blacksmith_drawing_svg(solidHandles, solidHandles.count, profileHandles, profileHandles.count, path, $0)
+            }
+        }
     }
     guard ok else { throw failure("svg") }
 }
@@ -374,6 +416,37 @@ public struct Mesh {
     /// The same triangles in memory of our own, safe to outlive the solid.
     public func copy() -> Mesh {
         Mesh(tolerance: tolerance, positions: positions.copy(), normals: normals.copy(), indices: indices.copy())
+    }
+}
+
+/// `Mesh` in `double`: the same tessellation `mesh(tolerance:)` narrows -- the very same
+/// index buffer, positions and normals unnarrowed. `NativeArray` views into the solid's
+/// cache, under `Mesh`'s own rule: valid until the solid is closed or meshed again at
+/// another tolerance (the same cache, so meshing through either view refills it).
+public struct Mesh64 {
+    /// The tolerance this was meshed at.
+    public let tolerance: Double
+    /// Vertex positions, three doubles each.
+    public let positions: NativeArray<Double>
+    /// Vertex normals, three doubles each, unit, outward.
+    public let normals: NativeArray<Double>
+    /// Three indices into `positions` per triangle -- the same buffer `mesh(tolerance:)`'s
+    /// `indices` view is cut from.
+    public let indices: NativeArray<UInt32>
+
+    /// How many vertices.
+    public var vertexCount: Int { positions.count / 3 }
+    /// How many indices, three to a triangle.
+    public var indexCount: Int { indices.count }
+    /// `indexCount / 3`.
+    public var triangleCount: Int { indices.count / 3 }
+    /// Whether the solid has closed or replaced the cache this reads since: every read traps
+    /// then. Never after `copy()`.
+    public var isStale: Bool { !positions.isValid || !indices.isValid }
+
+    /// The same triangles in memory of our own, safe to outlive the solid.
+    public func copy() -> Mesh64 {
+        Mesh64(tolerance: tolerance, positions: positions.copy(), normals: normals.copy(), indices: indices.copy())
     }
 }
 
@@ -461,6 +534,15 @@ public final class Profile {
                                                                  UInt32(clamping: sides), angle))
     }
 
+    /// A star of `points` tips (at least 3) on the circle of `outer` about `centre`, its
+    /// inner corners on the circle of `inner` (positive, under `outer`), alternating: the
+    /// first tip at `angle` radians from the sketch's x axis, the rest counter-clockwise.
+    public static func star(_ centre: SIMD2<Double>, _ outer: Double, _ inner: Double, _ points: Int,
+                            angle: Double = 0.0) throws -> Profile {
+        try Profile(cadaclysm_blacksmith_profile_star(centre.x, centre.y, outer, inner,
+                                                      UInt32(clamping: points), angle))
+    }
+
     /// A spline of `degree` through the control polygon `points` (`weights` one per point, or
     /// nil). Open, it starts on the first point and ends on the last -- an open chain;
     /// `closed`, it is periodic, smooth through its own start -- a closed profile. The degree
@@ -483,6 +565,16 @@ public final class Profile {
     /// Start drawing an outline segment by segment at `start`; see `Path`.
     public static func path(_ start: SIMD2<Double>) throws -> Path {
         try Path(start)
+    }
+
+    /// Start drawing on the arc of the parabola with `vertex`, axis direction `axis` and
+    /// focal length `focal`, over the across-axis coordinates `from...to`: the path begins
+    /// at the arc's first point and holds the arc -- a reflector from rim to rim,
+    /// `Profile.parabola(vertex: [0, 0], axis: [0, 1], focal: 20, from: -50, to: 50)` a
+    /// dish 100 wide opening up.
+    public static func parabola(vertex: SIMD2<Double>, axis: SIMD2<Double>, focal: Double,
+                                from: Double, to: Double) throws -> Path {
+        try Path(parabola: cadaclysm_blacksmith_path_parabola(vertex.x, vertex.y, axis.x, axis.y, focal, from, to))
     }
 
     /// Open profiles joined end to end into one -- the forge's merge. The pieces (paths ended
@@ -584,8 +676,40 @@ public final class Profile {
     /// kept exact. Both must be closed and simple. No shared area is an empty array. Throws
     /// for a `tolerance` not positive and finite, or a profile open or crossing itself.
     public func common(_ other: Profile, tolerance: Double = 1e-6) throws -> [Profile] {
-        guard let list = cadaclysm_blacksmith_profile_common(handle, other.handle, tolerance) else {
-            throw failure("profile_common")
+        try Profile.list(cadaclysm_blacksmith_profile_common(handle, other.handle, tolerance), "profile_common")
+    }
+
+    /// `text` set in a font, one profile per closed shape -- a letter with its counters as
+    /// holes (`o` one, `8` two; `i` is two profiles) -- on the sketch plane, the baseline
+    /// along x from the origin, each outline counter-clockwise and its holes clockwise, a
+    /// curved side the font's own cubic Bezier kept exactly: an extruded `O` has curved
+    /// walls. `size` is roughly the height of a capital. `font` is a family, optionally with
+    /// a style (`"Liberation Sans:style=Bold"`), a font file's path, or empty for the bundled
+    /// Liberation Sans Regular -- which also serves when the family is not found;
+    /// `fontBytes` a font file's bytes, used instead of `font` when given. `halign` is
+    /// "left", "center" or "right"; `valign` "baseline", "bottom", "center" or "top";
+    /// `spacing` multiplies the gap between glyphs; `direction` "ltr" or "rtl". Empty text
+    /// is an empty array. Throws for a size or spacing not positive and finite, an alignment
+    /// or direction not one of those words, font bytes that are not a font.
+    public static func text(_ text: String, size: Double = 10, font: String = "", halign: String = "left",
+                            valign: String = "baseline", spacing: Double = 1, direction: String = "ltr",
+                            fontBytes: [UInt8]? = nil) throws -> [Profile] {
+        let raw: OpaquePointer?
+        if let fontBytes {
+            raw = fontBytes.withUnsafeBufferPointer { bytes in
+                cadaclysm_blacksmith_profile_text(text, size, font, bytes.baseAddress, bytes.count, halign, valign, spacing, direction)
+            }
+        } else {
+            raw = cadaclysm_blacksmith_profile_text(text, size, font, nil, 0, halign, valign, spacing, direction)
+        }
+        return try Profile.list(raw, "profile_text")
+    }
+
+    /// The profiles of a list the library handed back (nil: throw), each a handle of its
+    /// own, the list freed.
+    private static func list(_ raw: OpaquePointer?, _ what: String) throws -> [Profile] {
+        guard let list = raw else {
+            throw failure(what)
         }
         defer { cadaclysm_blacksmith_profile_list_free(list) }
         let n = cadaclysm_blacksmith_profile_list_count(list)
@@ -621,6 +745,20 @@ public final class Profile {
             }
         }
     }
+
+    /// This profile's own loops as SVG text, from directly above by default -- a sketch lies
+    /// in z = 0, so its own plane already is the page, unlike a solid's `Solid.svgText`
+    /// (`.iso`), which has no plane of its own to prefer. Passing `options` at all -- even one
+    /// left at its own defaults -- opts out of the top default and uses `view` as given, the
+    /// same way a caller of `SvgOptions` controls a solid's. See `writeSvgText(_:_:options:)`.
+    public func svgText(_ options: SvgOptions = SvgOptions(view: .top)) throws -> String {
+        try writeSvgText([], [self], options: options)
+    }
+
+    /// `svgText` written to `path` by the library itself; see `svgText` for the top default.
+    public func svg(_ path: String, options: SvgOptions = SvgOptions(view: .top)) throws {
+        try writeSvg(path, [], [self], options: options)
+    }
 }
 
 /// An outline drawn a segment at a time -- lines, arcs, Beziers, NURBS -- then closed into a
@@ -632,6 +770,11 @@ public final class Path {
     /// Start an outline at `start`.
     public init(_ start: SIMD2<Double>) throws {
         handle = try checked(cadaclysm_blacksmith_path_begin(start.x, start.y), "path_begin")
+    }
+
+    /// Wraps the handle `path_parabola` returned, or throws its refusal.
+    init(parabola raw: OpaquePointer?) throws {
+        handle = try checked(raw, "path_parabola")
     }
 
     deinit {
@@ -664,6 +807,48 @@ public final class Path {
     @discardableResult
     public func bezierTo(_ c1: SIMD2<Double>, _ c2: SIMD2<Double>, _ to: SIMD2<Double>) throws -> Path {
         try step(cadaclysm_blacksmith_path_bezier_to(try live(), c1.x, c1.y, c2.x, c2.y, to.x, to.y), "path_bezier_to")
+    }
+
+    /// A conic arc to (`x`, `y`) through the control point `control` with middle weight
+    /// `weight`: under 1 an elliptical arc, 1 a parabola, over 1 a hyperbola -- the rational
+    /// quadratic Bezier, kept exact.
+    @discardableResult
+    public func conicTo(_ x: Double, _ y: Double, control: SIMD2<Double>, weight: Double) throws -> Path {
+        try step(cadaclysm_blacksmith_path_conic_to(try live(), x, y, control.x, control.y, weight), "path_conic_to")
+    }
+
+    /// A parabolic arc to (`x`, `y`) whose end tangents meet at `control`: `conicTo` with
+    /// weight 1.
+    @discardableResult
+    public func parabolaTo(_ x: Double, _ y: Double, control: SIMD2<Double>) throws -> Path {
+        try conicTo(x, y, control: control, weight: 1.0)
+    }
+
+    /// A hyperbolic arc to (`x`, `y`) through `control` with middle `weight` over 1.
+    @discardableResult
+    public func hyperbolaTo(_ x: Double, _ y: Double, control: SIMD2<Double>, weight: Double) throws -> Path {
+        let h = try live()
+        if !(weight > 1.0) {
+            throw BuildError("hyperbola_to: the weight must be over 1 (1 is a parabola, under 1 an ellipse)")
+        }
+        return try step(cadaclysm_blacksmith_path_conic_to(h, x, y, control.x, control.y, weight), "path_conic_to")
+    }
+
+    /// The parabolic arc to (`x`, `y`) with `vertex`: its axis and focal length solved from
+    /// the two ends. Throws when no parabola with that vertex passes through both.
+    @discardableResult
+    public func parabolaByVertex(_ x: Double, _ y: Double, vertex: SIMD2<Double>) throws -> Path {
+        try step(cadaclysm_blacksmith_path_parabola_by_vertex(try live(), x, y, vertex.x, vertex.y), "path_parabola_by_vertex")
+    }
+
+    /// The parabolic arc to (`x`, `y`) with `focus`: of the two through the ends, the one
+    /// whose vertex lies between the ends' projections, then the one whose arc cups the
+    /// focus (the focus between the arc and its chord), then the more symmetric; with the
+    /// focus beyond the chord that is the arch over the ends, not the shallow dish -- draw
+    /// that one with `Profile.parabola`.
+    @discardableResult
+    public func parabolaByFocus(_ x: Double, _ y: Double, focus: SIMD2<Double>) throws -> Path {
+        try step(cadaclysm_blacksmith_path_parabola_by_focus(try live(), x, y, focus.x, focus.y), "path_parabola_by_focus")
     }
 
     /// A NURBS segment. `control`: every control point after the current one, the endpoint
@@ -1023,7 +1208,7 @@ public final class Solid {
         try Solid(cadaclysm_blacksmith_sweep_open(profile.handle, frame.values, try path.live()))
     }
 
-    /// A circle of `radius` swept along `path`, square to its start -- Fusion's Pipe: a rod,
+    /// A circle of `radius` swept along `path`, square to its start: a rod,
     /// or with a positive `thickness` a tube whose walls are that thick. `path` is only
     /// borrowed, as by `sweep`.
     public static func pipe(_ path: SweepPath, _ radius: Double, thickness: Double = 0.0) throws -> Solid {
@@ -1105,8 +1290,7 @@ public final class Solid {
     }
 
     /// This solid and `other` as one, as an exact B-rep. `merge` merges the flush faces the
-    /// join leaves where the two meet in a plane or on one cylinder (`mergeFlush`), as Fusion
-    /// does -- off by default, so face and edge numbers stay as they were. `tolerance` is the
+    /// join leaves where the two meet in a plane or on one cylinder (`mergeFlush`), off by default, so face and edge numbers stay as they were. `tolerance` is the
     /// mesh tolerance the boolean decides at; a tighter one is as correct, only slower.
     public func join(_ other: Solid, tolerance: Double = 0.05, merge: Bool = false) throws -> Solid {
         try combine(other, merge: merge) { cadaclysm_blacksmith_join($0, $1, tolerance, nil, nil) }
@@ -1144,6 +1328,101 @@ public final class Solid {
         try combine(tool, merge: false) { cadaclysm_blacksmith_split_sheet($0, $1, tolerance, nil, nil) }
     }
 
+    /// Where this solid's faces cross or coincide with `other`'s, at `tolerance`, as an
+    /// `Intersection`: `chains` along the curves the faces meet on and `overlaps` where a
+    /// face pair coincides. Neither solid is changed; either may be an open sheet. No
+    /// crossing is an empty result, never an error.
+    ///
+    /// Each `Chain`'s points are within `tolerance` of both faces' exact surfaces; there is
+    /// one chain per face pair per branch -- chains are not joined across a face boundary or
+    /// a closed curve's seam, so join them by matching ends. A chain's `curve` is its exact
+    /// curve where the kernel found one every point lies within `tolerance` of, else nil;
+    /// `tangent` is set where the surfaces are near-tangent along the chain or the snap did
+    /// not settle (the points are then the best estimate) -- a closed chain that does not go
+    /// once round its own curve (a sliver where two surfaces barely cross) has no curve,
+    /// `tangent` still true. An `Overlap` is a coincident face pair with the shared region's
+    /// rings (outer first, holes after), which may be empty for a partial overlap whose
+    /// outlines cross. Known limit: a crossing narrower than `tolerance` -- two surfaces
+    /// passing within it without their meshes crossing -- can be missed; near-tangent contact
+    /// is where this bites.
+    ///
+    /// Throws for a `tolerance` not positive and finite, a solid with no faces, or one that
+    /// meshes to nothing.
+    public func intersect(_ other: Solid, tolerance: Double = 0.05) throws -> Intersection {
+        try withExtendedLifetime(other) {
+            guard let found = cadaclysm_blacksmith_intersect(try h(), try other.h(), tolerance, nil, nil) else {
+                throw failure("intersect")
+            }
+            defer { cadaclysm_blacksmith_intersection_free(found) }
+            var chains: [Chain] = []
+            for i in 0..<cadaclysm_blacksmith_intersection_chain_count(found) {
+                var raw = CadaclysmBlacksmithChain()
+                if !cadaclysm_blacksmith_intersection_chain(found, i, &raw) { throw failure("intersection_chain") }
+                var curve: Curve? = nil
+                if raw.has_curve {
+                    var rawCurve = CadaclysmBlacksmithCurve()
+                    if !cadaclysm_blacksmith_intersection_curve(found, i, &rawCurve) { throw failure("intersection_curve") }
+                    curve = Curve(rawCurve)
+                }
+                chains.append(Chain(raw, curve))
+            }
+            var overlaps: [Overlap] = []
+            for i in 0..<cadaclysm_blacksmith_intersection_overlap_count(found) {
+                var raw = CadaclysmBlacksmithOverlap()
+                if !cadaclysm_blacksmith_intersection_overlap(found, i, &raw) { throw failure("intersection_overlap") }
+                overlaps.append(Overlap(raw))
+            }
+            return Intersection(chains: chains, overlaps: overlaps)
+        }
+    }
+
+    /// Where `profile`, placed on `frame`, pierces this solid's faces, and the pieces its
+    /// loops cut into, as a `SolidHits`. Neither is changed.
+    ///
+    /// A point hit lies within `tolerance` of the segment's exact curve and of the face's
+    /// exact surface, inside the face's trim; its profile spot (`aStart`: loop, segment, t)
+    /// and face spot (`bStart`: face, u, v) evaluate to the point within `tolerance`; `touch`
+    /// where the curve's tangent lies within 1e-3 (sine) of the surface's tangent plane there
+    /// (a graze), false at a crossing. A run is a stretch of one segment lying within
+    /// `tolerance` of one face and inside it, longer than `tolerance`. Hits within `tolerance`
+    /// of each other merge (a hit at a segment join reported once, as `(k, t = 1)`; a
+    /// closed loop's closing join reads `(0, 0)`). Every
+    /// point is in world space (the frame applied).
+    ///
+    /// Pieces only for a closed body -- an open body has none -- in loop order, covering
+    /// every loop exactly; a piece's spots read a segment join as the next segment's start
+    /// `(k + 1, 0)`, and an open chain runs from `(0, 0)` to `(n - 1, 1)`; a loop no hit cuts
+    /// is one closed piece. `inside` by the piece middle's winding number over the body's
+    /// mesh; a piece lying on the surface is inside. Known limit: a segment passing within
+    /// `tolerance` of a face without crossing its mesh can be missed (near-tangent grazes).
+    ///
+    /// Throws for a `tolerance` not positive and finite, a solid with no faces or that meshes
+    /// to nothing, a profile with no segments, or a free-form segment that is not an
+    /// evaluable NURBS curve.
+    public func hits(_ profile: Profile, _ frame: Frame, tolerance: Double = 0.05) throws -> SolidHits {
+        try withExtendedLifetime(profile) {
+            guard let found = cadaclysm_blacksmith_solid_profile_hits(try h(), profile.handle, frame.values, tolerance, nil, nil) else {
+                throw failure("solid_profile_hits")
+            }
+            defer { cadaclysm_blacksmith_hits_free(found) }
+            var hits: [Hit] = []
+            for i in 0..<cadaclysm_blacksmith_hit_count(found) {
+                var raw = CadaclysmBlacksmithHit()
+                if !cadaclysm_blacksmith_hit(found, i, &raw) { throw failure("hit") }
+                hits.append(Hit(raw))
+            }
+            var pieces: [Piece] = []
+            for i in 0..<cadaclysm_blacksmith_hits_piece_count(found) {
+                var inside = false
+                var start = CadaclysmBlacksmithSpot(), end = CadaclysmBlacksmithSpot()
+                if !cadaclysm_blacksmith_hits_piece(found, i, &inside, &start, &end) { throw failure("hits_piece") }
+                let own = try Profile(cadaclysm_blacksmith_hits_piece_profile(found, i), "hits_piece_profile")
+                pieces.append(Piece(inside: inside, start: Spot(start), end: Spot(end), profile: own))
+            }
+            return SolidHits(hits: hits, pieces: pieces)
+        }
+    }
+
     // MARK: Asking
 
     /// How many faces, in the solid's own order; a face index runs to this.
@@ -1176,6 +1455,23 @@ public final class Solid {
         var lo = [Double](repeating: 0, count: 3)
         var hi = [Double](repeating: 0, count: 3)
         if !cadaclysm_blacksmith_bounds(try h(), tolerance, &lo, &hi) { throw failure("bounds") }
+        _ = filled(tolerance)
+        return (SIMD3(lo[0], lo[1], lo[2]), SIMD3(hi[0], hi[1], hi[2]))
+    }
+
+    /// `boundsAt64(0.05)`.
+    public var bounds64: (min: SIMD3<Double>, max: SIMD3<Double>) {
+        get throws { try boundsAt64(0.05) }
+    }
+
+    /// `boundsAt(tolerance)` from the same tessellation's own unnarrowed positions -- exact
+    /// far from the origin, where `boundsAt`'s widened `Float` is not. The same cache
+    /// `boundsAt` and `mesh(tolerance:)` fill and reuse, so a second call at the same
+    /// tolerance (through either the `float` or the `double` side) is free.
+    public func boundsAt64(_ tolerance: Double) throws -> (min: SIMD3<Double>, max: SIMD3<Double>) {
+        var lo = [Double](repeating: 0, count: 3)
+        var hi = [Double](repeating: 0, count: 3)
+        if !cadaclysm_blacksmith_bounds64(try h(), tolerance, &lo, &hi) { throw failure("bounds64") }
         _ = filled(tolerance)
         return (SIMD3(lo[0], lo[1], lo[2]), SIMD3(hi[0], hi[1], hi[2]))
     }
@@ -1228,6 +1524,21 @@ public final class Solid {
                     positions: NativeArray(owner: owner, base: raw.positions, count: floats),
                     normals: NativeArray(owner: owner, base: raw.normals, count: floats),
                     indices: NativeArray(owner: owner, base: raw.indices, count: Int(raw.index_count)))
+    }
+
+    /// `mesh(tolerance:)` in `double`: the very same index buffer, positions and normals
+    /// unnarrowed -- from the same cache, under the same rule as `mesh(tolerance:)`: valid
+    /// until the solid is closed or meshed again at another tolerance; `copy()` what must
+    /// outlive either.
+    public func mesh64(tolerance: Double = 0.05) throws -> Mesh64 {
+        let raw = cadaclysm_blacksmith_mesh64(try h(), tolerance)
+        if raw.positions == nil { throw failure("mesh64") }
+        let owner = CacheFilling(self, filled(tolerance))
+        let doubles = Int(raw.vertex_count) * 3
+        return Mesh64(tolerance: tolerance,
+                     positions: NativeArray(owner: owner, base: raw.positions, count: doubles),
+                     normals: NativeArray(owner: owner, base: raw.normals, count: doubles),
+                     indices: NativeArray(owner: owner, base: raw.indices, count: Int(raw.index_count)))
     }
 
     /// The feature edges as polylines at `tolerance`, one run of points per edge -- views into
@@ -1463,8 +1774,7 @@ public final class Solid {
         return try Solid(cadaclysm_blacksmith_chamfer(try h(), which, which.count, distance, tolerance))
     }
 
-    /// Face `face` pushed out by `distance` along its outward normal (pulled in, negative) the
-    /// way Fusion and Rhino extrude a face: the prism over it joined on (cut out), and the
+    /// Face `face` pushed out by `distance` along its outward normal (pulled in, negative) as a face extrude does it: the prism over it joined on (cut out), and the
     /// flush faces merged -- a box's top raised is one taller box of six faces. A face on a
     /// cylinder, a cone, a sphere or a torus moves out along its normal instead, the surface a
     /// step out -- a boss fatter, a bore narrower, a dome fuller -- with the flat faces beside
@@ -1473,7 +1783,7 @@ public final class Solid {
         try Solid(cadaclysm_blacksmith_push_pull(try h(), try index32(face, "push_pull"), distance, tolerance, nil, nil))
     }
 
-    /// Faces `faces` pushed out by `distance` together -- Fusion's press-pull on a selection:
+    /// Faces `faces` pushed out by `distance` together -- a press-pull on a selection:
     /// each by `pushPull`'s rule for it, one after another, each found again after the pushes
     /// before it renumbered the faces. A box's top and a side pushed 5 is the box 5 taller and
     /// 5 wider; a face on the same curved surface as one before it, and joined to it, moved
@@ -1484,40 +1794,38 @@ public final class Solid {
     }
 
     /// The round `face` belongs to -- a fillet's bands, balls and rim bands joined to that face
-    /// -- made again at `radius`, as Fusion's press-pull on a fillet face: taken back to the
+    /// -- made again at `radius`, as a press-pull on a fillet face: taken back to the
     /// sharp edges it replaced, and those rounded again. Rounds of straight edges between
     /// planes and of circular rims beside a plane.
     public func refillet(_ face: Int, _ radius: Double, tolerance: Double = 1e-6) throws -> Solid {
         try Solid(cadaclysm_blacksmith_refillet(try h(), try index32(face, "refillet"), radius, tolerance))
     }
 
-    /// The round `face` belongs to taken off, the faces beside it sharp again -- Fusion's
-    /// delete of a fillet face. The same rounds as `refillet`.
+    /// The round `face` belongs to taken off, the faces beside it sharp again -- the delete of a fillet face. The same rounds as `refillet`.
     public func unfillet(_ face: Int) throws -> Solid {
         try Solid(cadaclysm_blacksmith_unfillet(try h(), try index32(face, "unfillet")))
     }
 
     /// The chamfer `face` belongs to -- its bevels, flat or round a rim, and the corner
-    /// triangles joined to that face -- cut again at `distance`, as Fusion's press-pull on a
+    /// triangles joined to that face -- cut again at `distance`, as a press-pull on a
     /// chamfer face: taken back to the sharp edges it cut, and those bevelled again.
     public func rechamfer(_ face: Int, _ distance: Double, tolerance: Double = 1e-6) throws -> Solid {
         try Solid(cadaclysm_blacksmith_rechamfer(try h(), try index32(face, "rechamfer"), distance, tolerance))
     }
 
-    /// The chamfer `face` belongs to taken off, the faces beside it sharp again -- Fusion's
-    /// delete of a chamfer face. The same chamfers as `rechamfer`.
+    /// The chamfer `face` belongs to taken off, the faces beside it sharp again -- the delete of a chamfer face. The same chamfers as `rechamfer`.
     public func unchamfer(_ face: Int) throws -> Solid {
         try Solid(cadaclysm_blacksmith_unchamfer(try h(), try index32(face, "unchamfer")))
     }
 
-    /// This sheet made a solid `thickness` thick -- Fusion's Thicken: its faces, their twins
+    /// This sheet made a solid `thickness` thick: its faces, their twins
     /// moved `thickness` along the faces' normals (against them for a negative thickness),
     /// and a wall round every open edge. A closed sheet thickens to a hollow.
     public func thicken(_ thickness: Double, tolerance: Double = 1e-6) throws -> Solid {
         try Solid(cadaclysm_blacksmith_thicken(try h(), thickness, tolerance, nil, nil))
     }
 
-    /// This solid split by `tool` into bodies -- Fusion's Split Body: a closed `tool` gives the
+    /// This solid split by `tool` into bodies: a closed `tool` gives the
     /// parts outside it, then the parts inside; a flat sheet (a `face`) splits by the whole
     /// plane it lies on. Each connected part is a body of its own, so a U cut across both arms
     /// is three. The new faces are pieces of the tool's; colours carry over.
@@ -1738,8 +2046,8 @@ public struct Selector {
     public static func index(_ i: Int) -> Selector { Selector(3, nil, i) }
 }
 
-/// One edge's exact curve, as plain data copied out (`Edge.curve`): `kind` is `"line"`,
-/// `"circle"`, `"ellipse"` or `"nurbs"`.
+/// One edge's, or one intersection chain's, exact curve as plain data copied out
+/// (`Edge.curve`, `Chain.curve`): `kind` is `"line"`, `"circle"`, `"ellipse"` or `"nurbs"`.
 ///
 /// `t0..t1` is the edge's parameter range on its own curve: a line's fraction (0..1 over
 /// `origin -> origin + x`, where `x` is the full `to - from`, NOT unit -- so
@@ -1804,7 +2112,7 @@ public struct Curve: Equatable, CustomStringConvertible {
 public struct Edge: CustomStringConvertible {
     /// Its index -- what `Solid.fillet` and `Solid.chamfer` take.
     public let index: Int
-    /// The curve: `"line"`, `"circle"`, `"ellipse"`, `"nurbs"` or `"other"`.
+    /// The curve: `"line"`, `"circle"`, `"ellipse"`, `"parabola"`, `"hyperbola"`, `"nurbs"` or `"other"`.
     public let kind: String
     /// The faces meeting on it, as face indices.
     public let faces: [Int]
@@ -1910,6 +2218,100 @@ public struct Spot: Equatable, CustomStringConvertible {
     }
 }
 
+/// `count` xyz triples at `at`, copied out as points.
+func pointsAt(_ at: UnsafePointer<Double>?, _ count: UInt32) -> [SIMD3<Double>] {
+    guard let at, count > 0 else { return [] }
+    let flat = UnsafeBufferPointer(start: at, count: 3 * Int(count))
+    return stride(from: 0, to: flat.count, by: 3).map { SIMD3(flat[$0], flat[$0 + 1], flat[$0 + 2]) }
+}
+
+/// What `Solid.hits` found, copied out: `hits` (ordered along the profile; `aStart`/`aEnd`
+/// on the profile, `bStart`/`bEnd` on the solid's faces: a `face` at (`u`, `v`)) and
+/// `pieces` (empty for an open body).
+public struct SolidHits: CustomStringConvertible {
+    public let hits: [Hit]
+    public let pieces: [Piece]
+
+    public var description: String { "SolidHits(hits=\(hits.count), pieces=\(pieces.count))" }
+}
+
+/// One stretch of a profile loop between two cuts (`SolidHits.pieces`): `inside` (by its
+/// middle's winding number over the body; a piece lying on the surface is inside),
+/// `start`/`end` (profile spots -- a segment join reads as the next segment's start
+/// `(k + 1, 0)`, an open chain runs from `(0, 0)` to `(n - 1, 1)`; a loop no hit cuts is one
+/// closed piece) and `profile`, the piece's own open chain (what `SweepPath.along` with
+/// `open` sweeps).
+public struct Piece: CustomStringConvertible {
+    public let inside: Bool
+    public let start: Spot
+    public let end: Spot
+    public let profile: Profile
+
+    public var description: String { "Piece(inside=\(inside), start=\(start), end=\(end))" }
+}
+
+/// What `Solid.intersect` found, copied out: `chains` (one per face pair per branch) and
+/// `overlaps` (one per coincident face pair). Both empty where the solids do not meet.
+public struct Intersection: Equatable, CustomStringConvertible {
+    public let chains: [Chain]
+    public let overlaps: [Overlap]
+
+    public var description: String { "Intersection(chains=\(chains.count), overlaps=\(overlaps.count))" }
+}
+
+/// One branch of one face pair's crossing (`Intersection.chains`): `points` in walk order
+/// (a closed chain does not repeat its first point), `closed`, the faces (`faceA` in the
+/// first solid, `faceB` in the second), `tangent` (the surfaces near-tangent along it, or
+/// the snap unsettled -- the points their best estimate) and `curve`, its exact curve over
+/// the chain's own `t0..t1`, or nil where the kernel found none. A chain may stop at a face
+/// boundary or a closed curve's seam and continue as another: join chains by matching ends.
+public struct Chain: Equatable, CustomStringConvertible {
+    public let points: [SIMD3<Double>]
+    public let closed: Bool
+    public let faceA: Int
+    public let faceB: Int
+    public let tangent: Bool
+    public let curve: Curve?
+
+    init(_ raw: CadaclysmBlacksmithChain, _ curve: Curve?) {
+        points = pointsAt(raw.points, raw.point_count)
+        closed = raw.closed
+        faceA = Int(raw.face_a)
+        faceB = Int(raw.face_b)
+        tangent = raw.tangent
+        self.curve = curve
+    }
+
+    public var description: String {
+        "Chain(points=\(points.count), closed=\(closed), faces=(\(faceA), \(faceB)), tangent=\(tangent), curve=\(curve.map { $0.description } ?? "nil"))"
+    }
+}
+
+/// A face of the first solid and a face of the second that coincide
+/// (`Intersection.overlaps`): the faces (`faceA`, `faceB`) and `loops`, the shared region's
+/// rings (outer first, holes after; each ring closed without repeating its first point) --
+/// empty for a partial overlap whose outlines cross.
+public struct Overlap: Equatable, CustomStringConvertible {
+    public let faceA: Int
+    public let faceB: Int
+    public let loops: [[SIMD3<Double>]]
+
+    init(_ raw: CadaclysmBlacksmithOverlap) {
+        faceA = Int(raw.face_a)
+        faceB = Int(raw.face_b)
+        let points = pointsAt(raw.points, raw.point_count)
+        var starts: [Int] = []
+        if let at = raw.loop_offsets, raw.loop_count > 0 {
+            starts = UnsafeBufferPointer(start: at, count: Int(raw.loop_count)).map { Int($0) }
+        }
+        loops = starts.indices.map { r in
+            Array(points[starts[r]..<(r + 1 < starts.count ? starts[r + 1] : Int(raw.point_count))])
+        }
+    }
+
+    public var description: String { "Overlap(faces=(\(faceA), \(faceB)), loops=\(loops.count))" }
+}
+
 /// One place two curves meet, copied out (`Profile.hits`). A point (`run` false): `start`
 /// equals `end`, and `touch` is true where the curves are tangent rather than crossing. A run
 /// (`run` true): they coincide from `start` to `end`. `aStart`/`aEnd` are where on the first
@@ -2008,7 +2410,7 @@ public struct Frame: Hashable, CustomStringConvertible {
         try Frame(values: values)
     }
 
-    /// The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line -- Fusion's midplane.
+    /// The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line.
     public static func midplane(_ a: Frame, _ b: Frame) throws -> Frame {
         var out = [Double](repeating: 0, count: 12)
         if !cadaclysm_blacksmith_frame_midplane(a.values, b.values, &out) { throw failure("frame_midplane") }

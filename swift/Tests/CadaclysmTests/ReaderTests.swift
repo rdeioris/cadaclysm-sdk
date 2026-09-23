@@ -537,6 +537,69 @@ final class ReaderTests: XCTestCase {
         XCTAssertThrowsError(try Meshlets.build(positions: Array(mesh.positions), normals: nil, indices: Array(mesh.indices), maxTriangles: 0, maxVertices: 64))
     }
 
+    func testMesh64Bounds64AndBeziers64AgreeWithF32OnSmallCoordinates() throws {
+        // Catches curveBeziers64/isocurveBeziers64 wired to the wrong C call (e.g. curveBeziers64
+        // calling cadaclysm_node_edge_beziers64): cube.scad's counts differ per kind (12 edge, 0
+        // curve, 12 isocurve), and beziers64 is not covered by the far test below at all.
+        let scene = try Cadaclysm.open(try sample(cube))
+        defer { scene.close() }
+        let node = scene.nodes[0]
+
+        let mesh = node.mesh
+        let mesh64 = node.mesh64
+        XCTAssertEqual(mesh64.vertexCount, mesh.vertexCount)
+        XCTAssertEqual(mesh64.indexCount, mesh.indexCount)
+        XCTAssertEqual(mesh64.triangleCount, 12)
+        XCTAssertEqual(Float(mesh64.positions[0]), mesh.positions[0], "the f32 mesh is the f64 one narrowed")
+        XCTAssertEqual(Array(mesh64.indices), Array(mesh.indices))
+        XCTAssertEqual(mesh64.normals?.count, mesh.normals?.count)
+        XCTAssertNil(mesh64.uvs)
+        XCTAssertNil(mesh64.colors)
+        XCTAssertEqual(node.bounds64.max, node.bounds.max)
+        XCTAssertEqual(scene.bounds64.max, scene.bounds.max)
+        XCTAssertEqual(try node.boundsPlaced64().max, try node.boundsPlaced().max)
+
+        let bz = node.edgeBeziers, bz64 = node.edgeBeziers64
+        XCTAssertEqual(bz64.count, bz.count)
+        XCTAssertEqual(Float(bz64.points[0]), bz.points[0])
+        XCTAssertEqual(bz64.weights.count, bz.weights.count)
+        XCTAssertEqual(node.curveBeziers64.count, node.curveBeziers.count)
+        XCTAssertEqual(node.isocurveBeziers64.count, node.isocurveBeziers.count)
+    }
+
+    func testMesh64IsRebuiltAfterAForgetUnlikeMesh() throws {
+        // mesh64's arrays borrow the document's own f64 mesh directly, which forgetMeshes
+        // frees (see Node.mesh64's doc comment); mesh's arrays are a separate copy the
+        // library keeps and forgetMeshes does not clear (an existing gap, out of scope).
+        // Asking again after a forget must rebuild rather than answer from stale memory.
+        let scene = try Cadaclysm.open(try sample(cube))
+        defer { scene.close() }
+        let node = scene.nodes[0]
+        XCTAssertEqual(node.mesh64.triangleCount, 12)
+        XCTAssertEqual(node.mesh.triangleCount, 12)
+        scene.forgetMeshes()
+        XCTAssertEqual(node.mesh64.triangleCount, 12, "mesh64 did not rebuild after a forget")
+        XCTAssertEqual(node.mesh.triangleCount, 12)
+    }
+
+    func testMesh64AndBounds64KeepACoordinateFarFromTheOrigin() throws {
+        // A cube at small coordinates cannot tell mesh64 from mesh widened -- both narrow
+        // losslessly there. This catches mesh64 handing back mesh's float positions widened
+        // (or bounds64 handing back bounds's) instead of the document's own double mesh.
+        let scad = "translate([1000000.123456789, -2600000.987654321, 450.5]) cube(1);"
+        let scene = try Cadaclysm.openMemory(Data(scad.utf8), format: "scad", name: "far.scad")
+        defer { scene.close() }
+        let node = scene.nodes[0]
+
+        let mesh64 = node.mesh64
+        let ys = (0..<mesh64.vertexCount).map { mesh64.positions[$0 * 3 + 1] }
+        XCTAssertTrue(ys.contains { abs($0 - -2_600_000.987654321) < 1e-6 }, "\(ys)")
+        XCTAssertTrue(ys.contains { abs(Double(Float($0)) - $0) > 1e-3 },
+                     "mesh64 carries no coordinate float cannot hold, so this test cannot tell mesh64 from mesh widened")
+        XCTAssertEqual(node.bounds64.min.y, -2_600_000.987654321, accuracy: 1e-6)
+        XCTAssertEqual(scene.bounds64.min.y, -2_600_000.987654321, accuracy: 1e-6)
+    }
+
     func testSurfacePathWithoutMeshing() throws {
         let scene = try Cadaclysm.open(try sample(fusionAssembly))
         defer { scene.close() }

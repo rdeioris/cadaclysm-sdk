@@ -212,6 +212,17 @@ internal struct RawBounds
     public float MaxX, MaxY, MaxZ;
 }
 
+/// <summary>`CadaclysmBounds64` in the same flattened shape as <see cref="RawBounds"/> --
+/// not pinned by bindings.rs, exactly as `RawBounds` is not: the header's `double min[3]`
+/// is one array field, and flattening it to six named doubles is this binding's own choice
+/// for callers, not a layout the field-order pin can check.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawBounds64
+{
+    public double MinX, MinY, MinZ;
+    public double MaxX, MaxY, MaxZ;
+}
+
 // Field order must match the header's CadaclysmMesh exactly. Uvs sits between Normals and
 // Indices, which is where the header puts it; a copy that leaves it out still compiles and
 // still runs, and reads the null Uvs as Indices and the two halves of the real indices
@@ -229,6 +240,22 @@ internal struct RawMesh
     /// <summary>Four floats a vertex, RGBA — or null, which is the common case. Only a body
     /// the file painted in more than one colour, opened asking for them, carries any.
     /// </summary>
+    public IntPtr Colors;
+    public IntPtr Indices;
+    public uint VertexCount;
+    public uint IndexCount;
+}
+
+// Field order must match the header's CadaclysmMesh64 exactly (positions, normals, uvs in
+// double; colors stays float; indices; the two counts) -- pinned by bindings.rs, as RawMesh
+// is.
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawMesh64
+{
+    public IntPtr Positions;
+    public IntPtr Normals;
+    public IntPtr Uvs;
+    /// <summary>Still four floats a vertex -- RGBA in 0..1 needs no more precision.</summary>
     public IntPtr Colors;
     public IntPtr Indices;
     public uint VertexCount;
@@ -301,6 +328,15 @@ internal struct RawPolylines
 // Field order must match the header's CadaclysmBeziers exactly; pinned by bindings.rs.
 [StructLayout(LayoutKind.Sequential)]
 internal struct RawBeziers
+{
+    public IntPtr Points;
+    public IntPtr Weights;
+    public uint Count;
+}
+
+// Field order must match the header's CadaclysmBeziers64 exactly; pinned by bindings.rs.
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawBeziers64
 {
     public IntPtr Points;
     public IntPtr Weights;
@@ -596,6 +632,7 @@ internal static class Native
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_schema_read(SceneHandle scene);
     [DllImport(Lib)] internal static extern double cadaclysm_metres_per_unit(SceneHandle scene);
     [DllImport(Lib)] internal static extern RawBounds cadaclysm_bounds(SceneHandle scene);
+    [DllImport(Lib)] internal static extern RawBounds64 cadaclysm_bounds64(SceneHandle scene);
     [DllImport(Lib)] internal static extern uint cadaclysm_node_parent(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern uint cadaclysm_node_child_count(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern uint cadaclysm_node_child(SceneHandle scene, uint node, uint index);
@@ -636,6 +673,7 @@ internal static class Native
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_node_can_mesh(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawMesh cadaclysm_node_mesh(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern RawMesh64 cadaclysm_node_mesh64(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern uint cadaclysm_lod_levels();
     [DllImport(Lib)] internal static extern RawMesh cadaclysm_node_mesh_lod(SceneHandle scene, uint node, uint level);
     [DllImport(Lib)] internal static extern float cadaclysm_node_lod_error(SceneHandle scene, uint node, uint level);
@@ -643,6 +681,7 @@ internal static class Native
     internal static extern bool cadaclysm_node_collision(SceneHandle scene, uint node, uint hullBudget, ref RawCollision outBody);
     [DllImport(Lib)] internal static extern RawCollisionHull cadaclysm_node_collision_hull(SceneHandle scene, uint node, uint hullBudget);
     [DllImport(Lib)] internal static extern RawBounds cadaclysm_node_bounds_placed(SceneHandle scene, uint node, double[]? placement);
+    [DllImport(Lib)] internal static extern RawBounds64 cadaclysm_node_bounds_placed64(SceneHandle scene, uint node, double[]? placement);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_node_is_meshed(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_surface_edges(SceneHandle scene, uint node);
@@ -659,6 +698,7 @@ internal static class Native
     internal static extern bool cadaclysm_brep_manifold(BrepHandle brep, [Out] uint[] outRow);
     [DllImport(Lib)] internal static extern void cadaclysm_surface_matrix(SceneHandle scene, [Out] float[] outMatrix);
     [DllImport(Lib)] internal static extern RawBounds cadaclysm_node_bounds(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern RawBounds64 cadaclysm_node_bounds64(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern uint cadaclysm_node_instance_of(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern uint cadaclysm_node_select_as(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_node_generator(SceneHandle scene, uint node);
@@ -670,8 +710,11 @@ internal static class Native
     [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_curves(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_isocurves(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawBeziers cadaclysm_node_edge_beziers(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern RawBeziers64 cadaclysm_node_edge_beziers64(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawBeziers cadaclysm_node_curve_beziers(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern RawBeziers64 cadaclysm_node_curve_beziers64(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawBeziers cadaclysm_node_isocurve_beziers(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern RawBeziers64 cadaclysm_node_isocurve_beziers64(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern uint cadaclysm_realize_all(SceneHandle scene);
     [DllImport(Lib)] internal static extern uint cadaclysm_realize_meshes(SceneHandle scene, uint skipSurfaced);
     [DllImport(Lib)] internal static extern uint cadaclysm_realized(SceneHandle scene);
@@ -747,6 +790,31 @@ public readonly struct Bounds
     public float[] Centre => new[]
     {
         (Min[0] + Max[0]) / 2f, (Min[1] + Max[1]) / 2f, (Min[2] + Max[2]) / 2f,
+    };
+}
+
+/// <summary>`CadaclysmBounds64`: the same axis-aligned box as <see cref="Bounds"/>,
+/// unnarrowed -- exact far from the origin, where <see cref="Bounds"/>'s widened `float`
+/// positions are not.</summary>
+public readonly struct Bounds64
+{
+    public double[] Min { get; }
+    public double[] Max { get; }
+
+    public Bounds64(double[] min, double[] max)
+    {
+        Min = min;
+        Max = max;
+    }
+
+    /// <summary>Whether this is the all-zero box the ABI uses for "nothing here".</summary>
+    public bool IsEmpty => Min.All(v => v == 0) && Max.All(v => v == 0);
+
+    public double[] Size => new[] { Max[0] - Min[0], Max[1] - Min[1], Max[2] - Min[2] };
+
+    public double[] Centre => new[]
+    {
+        (Min[0] + Max[0]) / 2, (Min[1] + Max[1]) / 2, (Min[2] + Max[2]) / 2,
     };
 }
 
@@ -861,6 +929,67 @@ public sealed class Mesh
         Indices.ToArray());
 }
 
+/// <summary>A node's triangles in `double`, copied out -- what <see cref="Mesh64.Copy"/>
+/// returns.</summary>
+public sealed record MeshData64(double[] Positions, double[] Normals, double[]? Uvs, float[]? Colours, uint[] Indices);
+
+/// <summary>[`CadaclysmMesh64`]: this node's own mesh, in `double`, **lent as it is** rather
+/// than narrowed the way <see cref="Mesh"/> is -- the same triangles and indices, <see
+/// cref="Mesh"/>'s `float` positions being exactly these narrowed. For a caller that uses the
+/// mesh as geometry (an exporter, a measurement, a solver) and wants the file's own
+/// coordinates, which `float` cannot hold far from the origin.</summary>
+/// <remarks>Colours stay `float` (RGBA in 0..1 needs no more). <strong>A forget drops
+/// it</strong>: <see cref="Scene.ForgetMeshes"/> frees the document's own mesh these pointers
+/// borrow -- read none of them after a forget, ask again and the mesh is built again. <see
+/// cref="Mesh"/>'s pointers survive a forget, its `float` copy being kept separately.</remarks>
+public sealed class Mesh64
+{
+    private readonly RawMesh64 _raw;
+
+    /// <summary>The scene this borrows from.</summary>
+    public Scene Scene { get; }
+
+    internal Mesh64(Scene scene, RawMesh64 raw)
+    {
+        Scene = scene;
+        _raw = raw;
+    }
+
+    public uint VertexCount => _raw.VertexCount;
+    public uint IndexCount => _raw.IndexCount;
+    public uint TriangleCount => _raw.IndexCount / 3;
+
+    /// <summary>As <see cref="Mesh"/>'s: a closed scene throws rather than hands out a span
+    /// over freed memory.</summary>
+    private unsafe ReadOnlySpan<T> View<T>(IntPtr at, uint length)
+    {
+        _ = Scene.Handle;
+        return at == IntPtr.Zero ? ReadOnlySpan<T>.Empty : new ReadOnlySpan<T>((void*)at, (int)length);
+    }
+
+    public ReadOnlySpan<double> Positions => View<double>(_raw.Positions, _raw.VertexCount * 3);
+
+    public ReadOnlySpan<double> Normals => View<double>(_raw.Normals, _raw.VertexCount * 3);
+
+    /// <summary>Two doubles a vertex, not three. See <see cref="Mesh.Uvs"/> for what
+    /// generates them and what does not.</summary>
+    public ReadOnlySpan<double> Uvs => View<double>(_raw.Uvs, _raw.VertexCount * 2);
+
+    /// <summary>Four floats a vertex, RGBA -- still `float`, as the header's note on
+    /// `CadaclysmMesh64::colors` says: RGBA in 0..1 needs no more precision.</summary>
+    public ReadOnlySpan<float> Colours => View<float>(_raw.Colors, _raw.VertexCount * 4);
+
+    public ReadOnlySpan<uint> Indices => View<uint>(_raw.Indices, _raw.IndexCount);
+
+    /// <summary>The same triangles in memory of our own, safe to outlive the scene.</summary>
+    public MeshData64 Copy() => new(
+        Positions.ToArray(),
+        Normals.ToArray(),
+        Uvs.IsEmpty ? null : Uvs.ToArray(),
+        Colours.IsEmpty ? null : Colours.ToArray(),
+        Indices.ToArray());
+}
+
 /// <summary>A node's feature edges or free curves, already flattened to points -- a view over
 /// the scene's own memory, valid until the scene closes.</summary>
 public sealed class Polylines
@@ -966,6 +1095,42 @@ public sealed class Beziers
 
 /// <summary>A <see cref="Beziers"/> in memory of your own.</summary>
 public sealed record BeziersData(float[] Points, float[] Weights);
+
+/// <summary>[`CadaclysmBeziers64`]: the same segments as a <see cref="Beziers"/>, unnarrowed
+/// -- four control points (xyz) and four weights a segment, in the same order; <see
+/// cref="Beziers"/>'s `float` ones are these narrowed.</summary>
+public sealed class Beziers64
+{
+    private readonly RawBeziers64 _raw;
+
+    public Scene Scene { get; }
+
+    internal Beziers64(Scene scene, RawBeziers64 raw)
+    {
+        Scene = scene;
+        _raw = raw;
+    }
+
+    public uint Count => _raw.Count;
+
+    private unsafe ReadOnlySpan<double> View(IntPtr at, uint length)
+    {
+        _ = Scene.Handle;
+        return at == IntPtr.Zero ? ReadOnlySpan<double>.Empty : new ReadOnlySpan<double>((void*)at, (int)length);
+    }
+
+    /// <summary>`Count * 12` doubles: four control points a curve, three doubles each.</summary>
+    public ReadOnlySpan<double> Points => View(_raw.Points, _raw.Count * 12);
+
+    /// <summary>`Count * 4` doubles: a weight per control point, as <see cref="Beziers.Weights"/>.
+    /// </summary>
+    public ReadOnlySpan<double> Weights => View(_raw.Weights, _raw.Count * 4);
+
+    public BeziersData64 Copy() => new(Points.ToArray(), Weights.ToArray());
+}
+
+/// <summary>A <see cref="Beziers64"/> in memory of your own.</summary>
+public sealed record BeziersData64(double[] Points, double[] Weights);
 
 /// <summary>What a node turned out to be for a physics engine: a box, sphere, capsule or
 /// cylinder where one fits within <see cref="Error"/>, else a convex hull. <see cref="Frame"/>
@@ -1244,7 +1409,7 @@ public sealed record Meshlet(uint Index, uint Level, uint Group, float Error, ui
                              float[] Positions, float[] Normals, uint[] Indices, uint[] Children);
 
 /// <summary>A mesh split into meshlets, optionally with coarser levels above them, for a
-/// mesh-shader or Nanite-style renderer. Built from any mesh and owned by you: dispose it.</summary>
+/// mesh-shader or meshlet-based renderer. Built from any mesh and owned by you: dispose it.</summary>
 public sealed class Meshlets : IDisposable
 {
     internal MeshletsHandle Handle { get; }
@@ -1537,6 +1702,16 @@ public sealed class Node : IEquatable<Node>
         }
     }
 
+    /// <summary><see cref="Bounds"/> in `double`.</summary>
+    public Bounds64 Bounds64
+    {
+        get
+        {
+            var raw = Native.cadaclysm_node_bounds64(Scene.Handle, Index);
+            return new Bounds64(new[] { raw.MinX, raw.MinY, raw.MinZ }, new[] { raw.MaxX, raw.MaxY, raw.MaxZ });
+        }
+    }
+
     /// <summary>Its triangles, in their own frame, built now if they have not been -- or null
     /// for a node with no triangles (structure, or geometry drawn only as curves).</summary>
     /// <remarks>A property, not a method taking a tolerance: `cadaclysm_node_mesh` takes none,
@@ -1549,6 +1724,16 @@ public sealed class Node : IEquatable<Node>
 
     private Mesh? MeshOf(RawMesh raw) =>
         raw.IndexCount == 0 || raw.Positions == IntPtr.Zero ? null : new Mesh(Scene, raw);
+
+    /// <summary>This node's own mesh in `double`, lent rather than narrowed -- see <see
+    /// cref="Mesh64"/>. Null for a node with no triangles.</summary>
+    public Mesh64? Mesh64
+    {
+        get => MeshOf64(Native.cadaclysm_node_mesh64(Scene.Handle, Index));
+    }
+
+    private Mesh64? MeshOf64(RawMesh64 raw) =>
+        raw.IndexCount == 0 || raw.Positions == IntPtr.Zero ? null : new Mesh64(Scene, raw);
 
     /// <summary>Its triangles at a coarser level of detail: 0 is <see cref="Mesh"/> itself,
     /// 1 up to <see cref="Cadaclysm.LodLevels"/> each about a quarter of the triangles of
@@ -1643,11 +1828,20 @@ public sealed class Node : IEquatable<Node>
     /// were, where <see cref="Edges"/> are their chords. Builds the geometry if needed.</summary>
     public Beziers EdgeBeziers => new(Scene, Native.cadaclysm_node_edge_beziers(Scene.Handle, Index));
 
+    /// <summary><see cref="EdgeBeziers"/> in `double`, unnarrowed -- the same segments.</summary>
+    public Beziers64 EdgeBeziers64 => new(Scene, Native.cadaclysm_node_edge_beziers64(Scene.Handle, Index));
+
     /// <summary>Its free curves as cubic Béziers; see <see cref="EdgeBeziers"/>.</summary>
     public Beziers CurveBeziers => new(Scene, Native.cadaclysm_node_curve_beziers(Scene.Handle, Index));
 
+    /// <summary><see cref="CurveBeziers"/> in `double`; see <see cref="EdgeBeziers64"/>.</summary>
+    public Beziers64 CurveBeziers64 => new(Scene, Native.cadaclysm_node_curve_beziers64(Scene.Handle, Index));
+
     /// <summary>Its isocurves as cubic Béziers; see <see cref="EdgeBeziers"/>.</summary>
     public Beziers IsocurveBeziers => new(Scene, Native.cadaclysm_node_isocurve_beziers(Scene.Handle, Index));
+
+    /// <summary><see cref="IsocurveBeziers"/> in `double`; see <see cref="EdgeBeziers64"/>.</summary>
+    public Beziers64 IsocurveBeziers64 => new(Scene, Native.cadaclysm_node_isocurve_beziers64(Scene.Handle, Index));
 
     /// <summary>The collision body for what this node draws, building its mesh if it is not
     /// built. <paramref name="hullBudget"/> is the most triangles a hull may have; 0 asks for
@@ -1677,6 +1871,14 @@ public sealed class Node : IEquatable<Node>
         if (placement is not null && placement.Length != 16) throw new CadaclysmException("bounds_placed: a placement is 16 numbers");
         var raw = Native.cadaclysm_node_bounds_placed(Scene.Handle, Index, placement);
         return new Bounds(new[] { raw.MinX, raw.MinY, raw.MinZ }, new[] { raw.MaxX, raw.MaxY, raw.MaxZ });
+    }
+
+    /// <summary><see cref="BoundsPlaced"/> in `double`.</summary>
+    public Bounds64 BoundsPlaced64(double[]? placement = null)
+    {
+        if (placement is not null && placement.Length != 16) throw new CadaclysmException("bounds_placed64: a placement is 16 numbers");
+        var raw = Native.cadaclysm_node_bounds_placed64(Scene.Handle, Index, placement);
+        return new Bounds64(new[] { raw.MinX, raw.MinY, raw.MinZ }, new[] { raw.MaxX, raw.MaxY, raw.MaxZ });
     }
 
     /// <summary>Whether its mesh has been built and is held -- by <see cref="Scene.RealizeAll"/>,
@@ -1819,6 +2021,17 @@ public sealed class Scene : IDisposable
         {
             var raw = Native.cadaclysm_bounds(Handle);
             return new Bounds(new[] { raw.MinX, raw.MinY, raw.MinZ }, new[] { raw.MaxX, raw.MaxY, raw.MaxZ });
+        }
+    }
+
+    /// <summary><see cref="Bounds"/> in `double`: the same union box, unnarrowed. This meshes
+    /// all of it, being the only way to know how far it reaches.</summary>
+    public Bounds64 Bounds64
+    {
+        get
+        {
+            var raw = Native.cadaclysm_bounds64(Handle);
+            return new Bounds64(new[] { raw.MinX, raw.MinY, raw.MinZ }, new[] { raw.MaxX, raw.MaxY, raw.MaxZ });
         }
     }
 

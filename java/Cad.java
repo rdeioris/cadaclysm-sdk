@@ -45,6 +45,7 @@ import java.lang.invoke.MethodHandle;
 import java.lang.ref.Cleaner;
 import java.math.BigDecimal;
 import java.nio.ByteOrder;
+import java.nio.DoubleBuffer;
 import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
 import java.nio.charset.StandardCharsets;
@@ -94,6 +95,25 @@ public final class Cad {
             ValueLayout.ADDRESS.withName("indices"),
             ValueLayout.JAVA_INT.withName("vertex_count"),
             ValueLayout.JAVA_INT.withName("index_count"));
+
+    // CadaclysmMesh64: the same five pointers and two counts as MESH, positions/normals/uvs
+    // in double rather than float, colors still float (RGBA in 0..1 needs no more) -- pinned
+    // by tests/bindings.rs the same way MESH is.
+    private static final MemoryLayout MESH64 = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("positions"),
+            ValueLayout.ADDRESS.withName("normals"),
+            ValueLayout.ADDRESS.withName("uvs"),
+            ValueLayout.ADDRESS.withName("colors"),
+            ValueLayout.ADDRESS.withName("indices"),
+            ValueLayout.JAVA_INT.withName("vertex_count"),
+            ValueLayout.JAVA_INT.withName("index_count"));
+
+    // CadaclysmBounds64: the same box as BOUNDS, in double. Pinned by bindings.rs against the
+    // header's `double min[3]; double max[3];`, field for field, though neither has a pointer
+    // to misalign the way BOUNDS's own C# twin (flattened MinX..MaxZ) cannot be pinned this way.
+    private static final MemoryLayout BOUNDS64 = MemoryLayout.structLayout(
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("min"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("max"));
 
     /**
      * {@code CadaclysmOpenOptions}. {@code cadaclysm_open_options_init} fills the whole
@@ -155,6 +175,14 @@ public final class Cad {
 
     // CadaclysmBeziers: two pointers then a count, padded to 8; pinned by bindings.rs.
     private static final MemoryLayout BEZIERS = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("points"),
+            ValueLayout.ADDRESS.withName("weights"),
+            ValueLayout.JAVA_INT.withName("count"),
+            MemoryLayout.paddingLayout(4));
+
+    // CadaclysmBeziers64: two pointers then a count, padded to 8, as BEZIERS is; pinned by
+    // bindings.rs.
+    private static final MemoryLayout BEZIERS64 = MemoryLayout.structLayout(
             ValueLayout.ADDRESS.withName("points"),
             ValueLayout.ADDRESS.withName("weights"),
             ValueLayout.JAVA_INT.withName("count"),
@@ -262,7 +290,9 @@ public final class Cad {
             MESHLET_NORMALS, MESHLET_INDICES, MESHLET_CHILDREN,
             NODE_BOUNDS_PLACED, NODE_IS_MESHED, NODE_SURFACE_EDGES, NODE_SURFACE_ISOCURVES,
             NODE_SURFACE_PICK, NODE_SURFACE_PROXY_MESH, NODE_TRIANGLE_ESTIMATE, REALIZE_MESHES,
-            SVG_OPTIONS_INIT, SCENE_SVG_TEXT, SCENE_SVG, NODE_SVG_TEXT, NODE_SVG;
+            SVG_OPTIONS_INIT, SCENE_SVG_TEXT, SCENE_SVG, NODE_SVG_TEXT, NODE_SVG,
+            NODE_MESH64, NODE_EDGE_BEZIERS64, NODE_CURVE_BEZIERS64, NODE_ISOCURVE_BEZIERS64,
+            NODE_BOUNDS64, NODE_BOUNDS_PLACED64, BOUNDS64_ALL;
 
     static {
         SymbolLookup lib = Loader.resolve(Loader.CAPI_LIBRARY);
@@ -378,6 +408,13 @@ public final class Cad {
         SCENE_SVG = bind(linker, lib, "cadaclysm_scene_svg", FunctionDescriptor.of(B, A, A, A));
         NODE_SVG_TEXT = bind(linker, lib, "cadaclysm_node_svg_text", FunctionDescriptor.of(A, A, I, A));
         NODE_SVG = bind(linker, lib, "cadaclysm_node_svg", FunctionDescriptor.of(B, A, I, A, A));
+        NODE_MESH64 = bind(linker, lib, "cadaclysm_node_mesh64", FunctionDescriptor.of(MESH64, A, I));
+        NODE_EDGE_BEZIERS64 = bind(linker, lib, "cadaclysm_node_edge_beziers64", FunctionDescriptor.of(BEZIERS64, A, I));
+        NODE_CURVE_BEZIERS64 = bind(linker, lib, "cadaclysm_node_curve_beziers64", FunctionDescriptor.of(BEZIERS64, A, I));
+        NODE_ISOCURVE_BEZIERS64 = bind(linker, lib, "cadaclysm_node_isocurve_beziers64", FunctionDescriptor.of(BEZIERS64, A, I));
+        NODE_BOUNDS64 = bind(linker, lib, "cadaclysm_node_bounds64", FunctionDescriptor.of(BOUNDS64, A, I));
+        NODE_BOUNDS_PLACED64 = bind(linker, lib, "cadaclysm_node_bounds_placed64", FunctionDescriptor.of(BOUNDS64, A, I, A));
+        BOUNDS64_ALL = bind(linker, lib, "cadaclysm_bounds64", FunctionDescriptor.of(BOUNDS64, A));
     }
 
     @SuppressWarnings("restricted") // downcallHandle: every entry point here is the published ABI.
@@ -1104,6 +1141,31 @@ public final class Cad {
         return new Bounds(new float[]{b[0], b[1], b[2]}, new float[]{b[3], b[4], b[5]});
     }
 
+    /** {@code CadaclysmBounds64}: the same axis-aligned box as {@link Bounds}, unnarrowed --
+     *  exact far from the origin, where {@link Bounds}'s widened {@code float} positions are
+     *  not. */
+    public record Bounds64(double[] min, double[] max) {
+        /** Whether this is the all-zero box the ABI uses for "nothing here". */
+        public boolean isEmpty() {
+            for (double v : min) if (v != 0) return false;
+            for (double v : max) if (v != 0) return false;
+            return true;
+        }
+
+        public double[] size() {
+            return new double[]{max[0] - min[0], max[1] - min[1], max[2] - min[2]};
+        }
+
+        public double[] centre() {
+            return new double[]{(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2};
+        }
+    }
+
+    private static Bounds64 readBounds64(MemorySegment allocatorTarget) {
+        double[] b = allocatorTarget.toArray(ValueLayout.JAVA_DOUBLE);
+        return new Bounds64(new double[]{b[0], b[1], b[2]}, new double[]{b[3], b[4], b[5]});
+    }
+
     // ---- Attribute ------------------------------------------------------------------------
 
     /**
@@ -1185,6 +1247,19 @@ public final class Cad {
     private static int[] intArray(long address, long count) {
         if (address == 0) return null;
         return MemorySegment.ofAddress(address).reinterpret(count * Integer.BYTES).toArray(ValueLayout.JAVA_INT);
+    }
+
+    @SuppressWarnings("restricted")
+    private static DoubleBuffer doubleView(long address, long count) {
+        if (address == 0 || count == 0) return null;
+        return MemorySegment.ofAddress(address).reinterpret(count * Double.BYTES)
+                .asByteBuffer().order(ByteOrder.nativeOrder()).asDoubleBuffer().asReadOnlyBuffer();
+    }
+
+    @SuppressWarnings("restricted")
+    private static double[] doubleArray(long address, long count) {
+        if (address == 0) return null;
+        return MemorySegment.ofAddress(address).reinterpret(count * Double.BYTES).toArray(ValueLayout.JAVA_DOUBLE);
     }
 
     // ---- MeshData / Mesh --------------------------------------------------------------
@@ -1282,6 +1357,102 @@ public final class Cad {
                     floatArray(positions, vertexCount * 3L),
                     floatArray(normals, vertexCount * 3L),
                     floatArray(uvs, vertexCount * 2L),
+                    floatArray(colours, vertexCount * 4L),
+                    intArray(indices, indexCount));
+        }
+    }
+
+    /** A node's triangles in {@code double}, copied out -- what {@link Mesh64#copy()} returns. */
+    public record MeshData64(double[] positions, double[] normals, double[] uvs, float[] colours, int[] indices) {
+    }
+
+    /**
+     * {@code CadaclysmMesh64}: this node's own mesh, in {@code double}, lent as it is rather
+     * than narrowed the way {@link Mesh} is -- the same triangles and indices, {@link Mesh}'s
+     * {@code float} positions being exactly these narrowed. For a caller that uses the mesh as
+     * geometry (an exporter, a measurement, a solver) and wants the file's own coordinates,
+     * which {@code float} cannot hold far from the origin.
+     *
+     * <p>Colours stay {@code float} (RGBA in 0..1 needs no more). <b>A forget drops it</b>:
+     * {@link Scene#forgetMeshes()} frees the document's own mesh these pointers borrow -- read
+     * none of them after a forget, ask again and the mesh is built again. {@link Mesh}'s
+     * pointers survive a forget, its {@code float} copy being kept separately.
+     */
+    public static final class Mesh64 {
+        private final Scene scene;
+        private final long positions, normals, uvs, colours, indices;
+        private final int vertexCount, indexCount;
+
+        private Mesh64(Scene scene, long positions, long normals, long uvs, long colours, long indices,
+                       int vertexCount, int indexCount) {
+            this.scene = scene;
+            this.positions = positions;
+            this.normals = normals;
+            this.uvs = uvs;
+            this.colours = colours;
+            this.indices = indices;
+            this.vertexCount = vertexCount;
+            this.indexCount = indexCount;
+        }
+
+        /** The scene this borrows from. */
+        public Scene scene() {
+            return scene;
+        }
+
+        public int vertexCount() {
+            return vertexCount;
+        }
+
+        public int indexCount() {
+            return indexCount;
+        }
+
+        public int triangleCount() {
+            return indexCount / 3;
+        }
+
+        /** As {@link Mesh}'s: a closed scene throws rather than hand out a view over freed
+         *  memory. */
+        private void open() {
+            scene.handle();
+        }
+
+        public DoubleBuffer positions() {
+            open();
+            return doubleView(positions, vertexCount * 3L);
+        }
+
+        public DoubleBuffer normals() {
+            open();
+            return doubleView(normals, vertexCount * 3L);
+        }
+
+        /** Two doubles a vertex, not three. Null for a node whose reader produced none. */
+        public DoubleBuffer uvs() {
+            open();
+            return doubleView(uvs, vertexCount * 2L);
+        }
+
+        /** Four floats a vertex, RGBA -- still {@code float}, as {@code CadaclysmMesh64::colors}'s
+         *  own note says: RGBA in 0..1 needs no more precision. */
+        public FloatBuffer colours() {
+            open();
+            return floatView(colours, vertexCount * 4L);
+        }
+
+        public IntBuffer indices() {
+            open();
+            return intView(indices, indexCount);
+        }
+
+        /** The same triangles in memory of our own, safe to outlive the scene. */
+        public MeshData64 copy() {
+            open();
+            return new MeshData64(
+                    doubleArray(positions, vertexCount * 3L),
+                    doubleArray(normals, vertexCount * 3L),
+                    doubleArray(uvs, vertexCount * 2L),
                     floatArray(colours, vertexCount * 4L),
                     intArray(indices, indexCount));
         }
@@ -1430,6 +1601,59 @@ public final class Cad {
         long weights = raw.get(ValueLayout.ADDRESS, offset(BEZIERS, "weights")).address();
         int count = raw.get(ValueLayout.JAVA_INT, offset(BEZIERS, "count"));
         return new Beziers(scene, points, weights, count);
+    }
+
+    /** {@code CadaclysmBeziers64}: the same segments as a {@link Beziers}, unnarrowed -- a view
+     *  over the scene's memory, valid until the scene closes. */
+    public static final class Beziers64 {
+        private final Scene scene;
+        private final long points, weights;
+        private final int count;
+
+        private Beziers64(Scene scene, long points, long weights, int count) {
+            this.scene = scene;
+            this.points = points;
+            this.weights = weights;
+            this.count = count;
+        }
+
+        public Scene scene() {
+            return scene;
+        }
+
+        /** How many curves. */
+        public int count() {
+            return count;
+        }
+
+        /** {@code count * 12} doubles: four control points a curve, three doubles each. */
+        public DoubleBuffer points() {
+            scene.handle();
+            return doubleView(points, count * 12L);
+        }
+
+        /** {@code count * 4} doubles: a weight per control point. */
+        public DoubleBuffer weights() {
+            scene.handle();
+            return doubleView(weights, count * 4L);
+        }
+
+        /** The same curves in memory of your own, safe to keep after the scene closes. */
+        public BeziersData64 copy() {
+            scene.handle();
+            return new BeziersData64(doubleArray(points, count * 12L), doubleArray(weights, count * 4L));
+        }
+    }
+
+    /** A {@link Beziers64} copied out as plain arrays. */
+    public record BeziersData64(double[] points, double[] weights) {
+    }
+
+    private static Beziers64 buildBeziers64(Scene scene, MemorySegment raw) {
+        long points = raw.get(ValueLayout.ADDRESS, offset(BEZIERS64, "points")).address();
+        long weights = raw.get(ValueLayout.ADDRESS, offset(BEZIERS64, "weights")).address();
+        int count = raw.get(ValueLayout.JAVA_INT, offset(BEZIERS64, "count"));
+        return new Beziers64(scene, points, weights, count);
     }
 
     /** What a node turned out to be for a physics engine: a box, sphere, capsule or cylinder
@@ -1782,7 +2006,7 @@ public final class Cad {
 
     /**
      * A mesh split into meshlets, optionally with coarser levels above them, for a mesh-shader
-     * or Nanite-style renderer. Built from any mesh and owned by you: {@link #free()} it, or
+     * or meshlet-based renderer. Built from any mesh and owned by you: {@link #free()} it, or
      * use it in try-with-resources.
      */
     public static final class Meshlets implements AutoCloseable {
@@ -2221,6 +2445,19 @@ public final class Cad {
             }
         }
 
+        /** {@link #bounds()}, unnarrowed -- exact far from the origin, where {@link #bounds()}'s
+         *  widened {@code float} positions are not. */
+        public Bounds64 bounds64() {
+            try (Arena arena = Arena.ofConfined()) {
+                SegmentAllocator allocator = SegmentAllocator.prefixAllocator(arena.allocate(BOUNDS64));
+                MemorySegment raw = (MemorySegment) NODE_BOUNDS64.invokeExact(allocator,
+                        scene.handle(), index);
+                return readBounds64(raw);
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
         /** Its exact B-rep, for {@code Blacksmith.Solid.fromNode} to operate on, or null
          *  where it has none (a mesh, a curve, a CSG body, a JT or OpenSCAD part). Shared
          *  with the scene, not copied; see {@link Brep}. */
@@ -2281,6 +2518,29 @@ public final class Cad {
             return new Mesh(scene, positions, normals, uvs, colours, indices, vertexCount, indexCount);
         }
 
+        /** {@link #mesh()} in {@code double}, this node's own mesh lent as it is -- see
+         *  {@link Mesh64}. Null for a node with no triangles. */
+        public Mesh64 mesh64() {
+            try (Arena arena = Arena.ofConfined()) {
+                SegmentAllocator allocator = SegmentAllocator.prefixAllocator(arena.allocate(MESH64));
+                return mesh64Of((MemorySegment) NODE_MESH64.invokeExact(allocator, scene.handle(), index));
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
+        private Mesh64 mesh64Of(MemorySegment raw) {
+            long positions = raw.get(ValueLayout.ADDRESS, offset(MESH64, "positions")).address();
+            long normals = raw.get(ValueLayout.ADDRESS, offset(MESH64, "normals")).address();
+            long uvs = raw.get(ValueLayout.ADDRESS, offset(MESH64, "uvs")).address();
+            long colours = raw.get(ValueLayout.ADDRESS, offset(MESH64, "colors")).address();
+            long indices = raw.get(ValueLayout.ADDRESS, offset(MESH64, "indices")).address();
+            int vertexCount = raw.get(ValueLayout.JAVA_INT, offset(MESH64, "vertex_count"));
+            int indexCount = raw.get(ValueLayout.JAVA_INT, offset(MESH64, "index_count"));
+            if (indexCount == 0 || positions == 0) return null;
+            return new Mesh64(scene, positions, normals, uvs, colours, indices, vertexCount, indexCount);
+        }
+
         /** Its faces as surfaces and trim loops, where the reader built them -- empty where
          *  the reader has no parametric read of this body or of this format. */
         public Surfaces surfaces() {
@@ -2335,6 +2595,31 @@ public final class Cad {
         /** Its isocurves as cubic Béziers; see {@link #edgeBeziers()}. */
         public Beziers isocurveBeziers() {
             return beziersOf(NODE_ISOCURVE_BEZIERS);
+        }
+
+        /** Its feature edges as cubic Béziers, in {@code double}; see {@link #edgeBeziers()}. */
+        public Beziers64 edgeBeziers64() {
+            return beziers64Of(NODE_EDGE_BEZIERS64);
+        }
+
+        /** Its free curves as cubic Béziers, in {@code double}; see {@link #edgeBeziers64()}. */
+        public Beziers64 curveBeziers64() {
+            return beziers64Of(NODE_CURVE_BEZIERS64);
+        }
+
+        /** Its isocurves as cubic Béziers, in {@code double}; see {@link #edgeBeziers64()}. */
+        public Beziers64 isocurveBeziers64() {
+            return beziers64Of(NODE_ISOCURVE_BEZIERS64);
+        }
+
+        private Beziers64 beziers64Of(MethodHandle function) {
+            try (Arena arena = Arena.ofConfined()) {
+                SegmentAllocator allocator = SegmentAllocator.prefixAllocator(arena.allocate(BEZIERS64));
+                MemorySegment raw = (MemorySegment) function.invokeExact(allocator, scene.handle(), index);
+                return buildBeziers64(scene, raw);
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
         }
 
         private Beziers beziersOf(MethodHandle function) {
@@ -2405,6 +2690,19 @@ public final class Cad {
                 SegmentAllocator allocator = SegmentAllocator.prefixAllocator(arena.allocate(BOUNDS));
                 MemorySegment raw = (MemorySegment) NODE_BOUNDS_PLACED.invokeExact(allocator, scene.handle(), index, matrix);
                 return readBounds(raw);
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
+        /** {@link #boundsPlaced(double[])}, unnarrowed -- exact far from the origin. */
+        public Bounds64 boundsPlaced64(double[] placement) {
+            if (placement != null && placement.length != 16) throw new CadaclysmException("bounds_placed64: a placement is 16 numbers");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment matrix = placement == null ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_DOUBLE, placement);
+                SegmentAllocator allocator = SegmentAllocator.prefixAllocator(arena.allocate(BOUNDS64));
+                MemorySegment raw = (MemorySegment) NODE_BOUNDS_PLACED64.invokeExact(allocator, scene.handle(), index, matrix);
+                return readBounds64(raw);
             } catch (Throwable t) {
                 throw new RuntimeException(t);
             }
@@ -2699,6 +2997,17 @@ public final class Cad {
                 SegmentAllocator allocator = SegmentAllocator.prefixAllocator(arena.allocate(BOUNDS));
                 MemorySegment raw = (MemorySegment) BOUNDS_OF.invokeExact(allocator, handle());
                 return readBounds(raw);
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
+        /** {@link #bounds()}, unnarrowed -- exact far from the origin. */
+        public Bounds64 bounds64() {
+            try (Arena arena = Arena.ofConfined()) {
+                SegmentAllocator allocator = SegmentAllocator.prefixAllocator(arena.allocate(BOUNDS64));
+                MemorySegment raw = (MemorySegment) BOUNDS64_ALL.invokeExact(allocator, handle());
+                return readBounds64(raw);
             } catch (Throwable t) {
                 throw new RuntimeException(t);
             }

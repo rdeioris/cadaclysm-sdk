@@ -526,6 +526,13 @@ public struct Bounds: Hashable, Sendable, CustomStringConvertible {
         max = SIMD3(Double(raw.max.0), Double(raw.max.1), Double(raw.max.2))
     }
 
+    /// `CadaclysmBounds` in `double`: the same corners, unnarrowed rather than widened from
+    /// `float` -- exact far from the origin, where the `float` box is not.
+    init(_ raw: CadaclysmBounds64) {
+        min = SIMD3(raw.min.0, raw.min.1, raw.min.2)
+        max = SIMD3(raw.max.0, raw.max.1, raw.max.2)
+    }
+
     /// Whether this is the all-zero box the ABI uses for "nothing here".
     public var isEmpty: Bool { min == .zero && max == .zero }
 
@@ -722,6 +729,47 @@ public struct Mesh: CustomStringConvertible {
     public var description: String { "Mesh(vertices: \(vertexCount), triangles: \(triangleCount))" }
 }
 
+/// `Mesh` in `double`: the document's own mesh, **lent as it is**, where `Node.mesh` hands a
+/// `Float` copy of it -- the same triangles and indices, `Node.mesh`'s positions being
+/// exactly these narrowed. For a caller that uses the mesh as geometry (an exporter, a
+/// measurement, a solver) and wants the file's own coordinates, which `Float` cannot hold
+/// far from the origin. Colours stay `Float` (RGBA in 0...1 needs no more).
+///
+/// Views into the scene, under the rule at the top of this file -- **except that a forget
+/// drops these views and not `Mesh`'s.** See the note on `Node.mesh64`.
+public struct Mesh64: CustomStringConvertible {
+    /// Three doubles a vertex.
+    public let positions: NativeArray<Double>
+    /// Three doubles a vertex, or nil for a mesh that carries none.
+    public let normals: NativeArray<Double>?
+    /// Two doubles a vertex, or nil: see `Mesh.uvs`.
+    public let uvs: NativeArray<Double>?
+    /// Four floats (RGBA) a vertex, or nil -- as `Mesh.colors`.
+    public let colors: NativeArray<Float>?
+    /// Three vertex indices a triangle.
+    public let indices: NativeArray<UInt32>
+    /// How many vertices.
+    public let vertexCount: Int
+    /// How many indices: three a triangle.
+    public let indexCount: Int
+
+    /// How many triangles.
+    public var triangleCount: Int { indexCount / 3 }
+
+    /// Whether there are no triangles.
+    public var isEmpty: Bool { indexCount == 0 || positions.isEmpty }
+
+    /// The same arrays in memory of your own, safe to keep after `Scene.close()` -- or after
+    /// `Scene.forgetMeshes()`, which these views do not otherwise survive.
+    public func copy() -> Mesh64 {
+        Mesh64(positions: positions.copy(), normals: normals?.copy(), uvs: uvs?.copy(),
+              colors: colors?.copy(), indices: indices.copy(), vertexCount: vertexCount, indexCount: indexCount)
+    }
+
+    /// `Mesh64(vertices: …, triangles: …)`.
+    public var description: String { "Mesh64(vertices: \(vertexCount), triangles: \(triangleCount))" }
+}
+
 /// Edges or curves already flattened to points, in the node's own frame: what `Node.edges`,
 /// `Node.curves` and `Node.isocurves` return. Views into the scene, like `Mesh`.
 public struct Polylines: CustomStringConvertible {
@@ -797,6 +845,27 @@ public struct Beziers: CustomStringConvertible {
     public func copy() -> Beziers { Beziers(points: points.copy(), weights: weights.copy(), count: count) }
 
     public var description: String { "Beziers(count: \(count))" }
+}
+
+/// `Beziers` in `double`: the same segments, unnarrowed -- `Beziers`'s points and weights are
+/// exactly these narrowed. Views into the scene, like `Beziers` -- curves are not part of the
+/// mesh cache, so unlike `Mesh64` these are unaffected by `Scene.forgetMeshes()` and stay
+/// good until the scene closes.
+public struct Beziers64: CustomStringConvertible {
+    /// `count * 12` doubles: four control points a curve, three doubles each.
+    public let points: NativeArray<Double>
+    /// `count * 4` doubles: a weight per control point.
+    public let weights: NativeArray<Double>
+    /// How many curves.
+    public let count: Int
+
+    /// Whether there are no curves.
+    public var isEmpty: Bool { count == 0 || points.isEmpty }
+
+    /// The same arrays in memory of your own, safe to keep after `Scene.close()`.
+    public func copy() -> Beziers64 { Beziers64(points: points.copy(), weights: weights.copy(), count: count) }
+
+    public var description: String { "Beziers64(count: \(count))" }
 }
 
 /// What a node turned out to be for a physics engine: a box, sphere, capsule or cylinder where
@@ -1049,7 +1118,7 @@ public struct Meshlet: Sendable {
 }
 
 /// A mesh split into meshlets, optionally with coarser levels above them, for a mesh-shader or
-/// Nanite-style renderer. Built from any mesh and owned by you: `free()` it, or let it go.
+/// meshlet-based renderer. Built from any mesh and owned by you: `free()` it, or let it go.
 public final class Meshlets {
     private var handle: OpaquePointer?
 
@@ -1272,6 +1341,9 @@ public struct Node: Hashable, CustomStringConvertible {
     /// needed; carry it through `transform` for world coordinates.
     public var bounds: Bounds { Bounds(cadaclysm_node_bounds(live(), raw)) }
 
+    /// `bounds` in `double`, exact far from the origin where `bounds`'s `Float` cannot be.
+    public var bounds64: Bounds { Bounds(cadaclysm_node_bounds64(live(), raw)) }
+
     private func mesh(_ got: CadaclysmMesh) -> Mesh {
         let n = Int(got.vertex_count)
         return Mesh(positions: NativeArray(owner: scene, base: got.positions, count: n * 3),
@@ -1293,6 +1365,30 @@ public struct Node: Hashable, CustomStringConvertible {
     /// indices differ -- so upload the vertices once and switch level by drawing a different
     /// index range.
     public func meshLod(_ level: Int) -> Mesh { mesh(cadaclysm_node_mesh_lod(live(), raw, UInt32(level))) }
+
+    private func mesh64(_ got: CadaclysmMesh64) -> Mesh64 {
+        let n = Int(got.vertex_count)
+        return Mesh64(positions: NativeArray(owner: scene, base: got.positions, count: n * 3),
+                     normals: got.normals.map { NativeArray(owner: scene, base: $0, count: n * 3) },
+                     uvs: got.uvs.map { NativeArray(owner: scene, base: $0, count: n * 2) },
+                     colors: got.colors.map { NativeArray(owner: scene, base: $0, count: n * 4) },
+                     indices: NativeArray(owner: scene, base: got.indices, count: Int(got.index_count)),
+                     vertexCount: n, indexCount: Int(got.index_count))
+    }
+
+    /// `mesh` in `double`: the document's own mesh, lent as it is, where `mesh` hands back a
+    /// `Float` copy -- the same triangles and indices, `mesh`'s positions being exactly these
+    /// narrowed. For a caller that uses the mesh as geometry (an exporter, a measurement, a
+    /// solver) and wants the file's own coordinates, which `Float` cannot hold far from the
+    /// origin. Colours stay `Float`, RGBA in 0...1 needing no more.
+    ///
+    /// **A forget drops it, unlike `mesh`.** `Scene.forgetMeshes()` frees the document's mesh
+    /// these arrays view; `mesh`'s arrays survive a forget, being a separate copy the library
+    /// keeps. A `Mesh64`'s `NativeArray`s check only whether the *scene* is closed, not whether the
+    /// mesh cache has since been forgotten, so nothing here traps on a stale read after
+    /// `forgetMeshes()`: ask for `mesh64` again rather than reuse one held from before the
+    /// forget.
+    public var mesh64: Mesh64 { mesh64(cadaclysm_node_mesh64(live(), raw)) }
 
     /// How far `meshLod(level)` moved the surface, in the scene's units -- what to pick a
     /// level by. Zero at level 0.
@@ -1368,6 +1464,21 @@ public struct Node: Hashable, CustomStringConvertible {
     /// Its isocurves as cubic Béziers; see `edgeBeziers`.
     public var isocurveBeziers: Beziers { beziers(cadaclysm_node_isocurve_beziers(live(), raw)) }
 
+    private func beziers64(_ got: CadaclysmBeziers64) -> Beziers64 {
+        let n = Int(got.count)
+        return Beziers64(points: NativeArray(owner: scene, base: got.points, count: n * 12),
+                         weights: NativeArray(owner: scene, base: got.weights, count: n * 4), count: n)
+    }
+
+    /// `edgeBeziers` in `double`: the same segments, unnarrowed.
+    public var edgeBeziers64: Beziers64 { beziers64(cadaclysm_node_edge_beziers64(live(), raw)) }
+
+    /// `curveBeziers` in `double`; see `edgeBeziers64`.
+    public var curveBeziers64: Beziers64 { beziers64(cadaclysm_node_curve_beziers64(live(), raw)) }
+
+    /// `isocurveBeziers` in `double`; see `edgeBeziers64`.
+    public var isocurveBeziers64: Beziers64 { beziers64(cadaclysm_node_isocurve_beziers64(live(), raw)) }
+
     /// The collision body for what this node draws, building its mesh if it is not built.
     /// `hullBudget` is the most triangles a hull may have; 0 asks for the Unity limit (255) and
     /// is not clamped to it. Nil for a node that draws nothing. Cached per node and budget.
@@ -1401,6 +1512,18 @@ public struct Node: Hashable, CustomStringConvertible {
             return placement.withUnsafeBufferPointer { Bounds(cadaclysm_node_bounds_placed(live(), raw, $0.baseAddress)) }
         }
         return Bounds(cadaclysm_node_bounds_placed(live(), raw, nil))
+    }
+
+    /// `boundsPlaced` in `double`, exact far from the origin where `boundsPlaced`'s `Float`
+    /// cannot be.
+    public func boundsPlaced64(_ placement: [Double]? = nil) throws -> Bounds {
+        if let placement = placement, placement.count != 16 {
+            throw CadaclysmError("boundsPlaced64: a placement is 16 numbers, not \(placement.count)")
+        }
+        if let placement = placement {
+            return placement.withUnsafeBufferPointer { Bounds(cadaclysm_node_bounds_placed64(live(), raw, $0.baseAddress)) }
+        }
+        return Bounds(cadaclysm_node_bounds_placed64(live(), raw, nil))
     }
 
     /// Whether its mesh has been built and is held -- by `Scene.realizeAll()`, by an ask for
@@ -1718,6 +1841,10 @@ public final class Scene: NativeMemoryOwner, CustomStringConvertible {
     /// Everything the model covers, in world coordinates -- the one figure not in a node's own
     /// frame. This meshes the whole model; to frame a view quickly use the built nodes' bounds.
     public var bounds: Bounds { Bounds(cadaclysm_bounds(live())) }
+
+    /// `bounds` in `double`: the same union box, unnarrowed. This meshes all of it, exactly
+    /// as `bounds` does.
+    public var bounds64: Bounds { Bounds(cadaclysm_bounds64(live())) }
 
     /// What the file held that the reader could not build, one line each.
     public var diagnostics: [String] {

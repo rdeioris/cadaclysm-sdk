@@ -96,6 +96,7 @@ function defaultSchema() {
 // line: `tests/bindings.rs` compares these blocks with the header.
 
 koffi.opaque('CadaclysmBlacksmithHits');
+koffi.opaque('CadaclysmBlacksmithIntersection');
 koffi.opaque('CadaclysmBlacksmithPath');
 koffi.opaque('CadaclysmBlacksmithProfile');
 koffi.opaque('CadaclysmBlacksmithProfileList');
@@ -105,6 +106,15 @@ koffi.opaque('CadaclysmBlacksmithSweepPath');
 const CadaclysmBlacksmithMesh = koffi.struct('CadaclysmBlacksmithMesh', {
   positions: 'const float *',
   normals: 'const float *',
+  indices: 'const uint32_t *',
+  vertex_count: 'uint32_t',
+  index_count: 'uint32_t',
+});
+// f64 twin (Task 11 of the f64-twins plan): the same tessellation, unnarrowed positions
+// and normals -- the index pointer is the very one CadaclysmBlacksmithMesh gives.
+const CadaclysmBlacksmithMesh64 = koffi.struct('CadaclysmBlacksmithMesh64', {
+  positions: 'const double *',
+  normals: 'const double *',
   indices: 'const uint32_t *',
   vertex_count: 'uint32_t',
   index_count: 'uint32_t',
@@ -166,6 +176,23 @@ const CadaclysmBlacksmithCurve = koffi.struct('CadaclysmBlacksmithCurve', {
   pole_count: 'uint32_t',
   weights: 'const double *',
 });
+const CadaclysmBlacksmithChain = koffi.struct('CadaclysmBlacksmithChain', {
+  points: 'const double *',
+  point_count: 'uint32_t',
+  face_a: 'uint32_t',
+  face_b: 'uint32_t',
+  closed: 'bool',
+  tangent: 'bool',
+  has_curve: 'bool',
+});
+const CadaclysmBlacksmithOverlap = koffi.struct('CadaclysmBlacksmithOverlap', {
+  face_a: 'uint32_t',
+  face_b: 'uint32_t',
+  points: 'const double *',
+  loop_offsets: 'const uint32_t *',
+  point_count: 'uint32_t',
+  loop_count: 'uint32_t',
+});
 const CadaclysmBlacksmithProgress = koffi.proto('void CadaclysmBlacksmithProgress(const char *phase, size_t done, size_t total, void *user)');
 const CadaclysmBlacksmithSvgOptions = koffi.struct('CadaclysmBlacksmithSvgOptions', {
   size: 'uint32_t',
@@ -218,10 +245,12 @@ function _wasmLibrary(w) {
   // for the bool-returning verbs, a record with a null pointer in it for the
   // struct-returning ones, NONE for the u32 ones that reserve it, and 0 (a null
   // handle, or a count the caller checks `last_error` on) for everything else
-  const BOOLS = new Set(['path_line_to', 'path_arc_to', 'path_bezier_to', 'path_nurbs_to', 'sweep_path_line_to', 'sweep_path_arc',
-    'slant_of_plane', 'face_frame', 'face_ref', 'frame_midplane', 'frame_through', 'bounds', 'edge', 'colour', 'manifold', 'license_set', 'hit', 'edge_curve']);
-  const FAILS = { select_face: NONE, leaked_edges: NONE, unpaired_edges: NONE, mesh: { positions: null }, mesh_face_triangles: { counts: null },
-    edge_polylines: { offsets: null }, profile_polylines: { offsets: null }, step: null, sat_text: null, svg_text: null, face_kind: null, brep_layout_id: null };
+  const BOOLS = new Set(['path_line_to', 'path_arc_to', 'path_bezier_to', 'path_nurbs_to', 'path_conic_to', 'path_parabola_by_vertex',
+    'path_parabola_by_focus', 'sweep_path_line_to', 'sweep_path_arc',
+    'slant_of_plane', 'face_frame', 'face_ref', 'frame_midplane', 'frame_through', 'bounds', 'bounds64', 'edge', 'colour', 'manifold', 'license_set', 'hit', 'edge_curve',
+    'intersection_chain', 'intersection_curve', 'intersection_overlap', 'hits_piece']);
+  const FAILS = { select_face: NONE, leaked_edges: NONE, unpaired_edges: NONE, mesh: { positions: null }, mesh64: { positions: null }, mesh_face_triangles: { counts: null },
+    edge_polylines: { offsets: null }, profile_polylines: { offsets: null }, step: null, sat_text: null, svg_text: null, drawing_svg_text: null, face_kind: null, brep_layout_id: null };
   // results that C writes into an out-array of doubles at this position, and the
   // wasm returns as an array (`bounds` fills two, `edge` and `hit` a record: see `back`)
   const OUT = { slant_of_plane: 3, face_frame: 2, face_ref: 2, frame_midplane: 2, frame_through: 3 };
@@ -231,13 +260,27 @@ function _wasmLibrary(w) {
   const DROP = { profile_polygon: [1], path_nurbs_to: [2, 5], join: [4], cut: [4], common: [4], split_sheet: [4], trim: [5], drop_faces: [2],
     profile_round: [3], profile_spline: [1], profile_chain: [1], profile_from_loops: [1], profile_piece_count: [2], profile_piece: [2],
     profile_trim_count: [2], profile_trim_chain: [2], loft_through: [2], loft_through_open: [2], fillet: [2, 6], chamfer: [2], shell: [3, 6],
-    thicken: [4], push_pull: [5], push_pull_faces: [2, 6], split: [4], split_by_plane: [4], step: [1], sat_text: [1], svg_text: [1],
-    slant_of_plane: [3], face_frame: [2], face_ref: [2], bounds: [2, 3], edge: [2], colour: [2], manifold: [1], hit: [2], edge_curve: [2] };
+    thicken: [4], push_pull: [5], push_pull_faces: [2, 6], split: [4], split_by_plane: [4], step: [1], sat_text: [1], svg_text: [1], drawing_svg_text: [1, 3], profile_text: [4],
+    slant_of_plane: [3], face_frame: [2], face_ref: [2], bounds: [2, 3], bounds64: [2, 3], edge: [2], colour: [2], manifold: [1], hit: [2], edge_curve: [2],
+    intersect: [4], intersection_chain: [2], intersection_curve: [2], intersection_overlap: [2],
+    solid_profile_hits: [5], hits_piece: [2, 3, 4] };
   let error = null;
   /** A `WebAssembly.RuntimeError`: the wasm trapped (a panic aborts, the tables stay borrowed), which no `last_error` can stand for. */
   const trapped = (e) => typeof WebAssembly !== 'undefined' && e instanceof WebAssembly.RuntimeError;
   /** One C argument as the wasm takes it: a handle array as a `Uint32Array`, `null` as an empty array where the C side reads none. */
   const arg = (a) => (Array.isArray(a) ? Uint32Array.from(a, Number) : a);
+  /**
+   * `CadaclysmBlacksmithSvgOptions`'s own twelve fields after `size`, in the C struct's
+   * own order -- what `svg_text`/`drawing_svg_text` flatten a `_svgOptions()` object into
+   * for the wasm exports in crates/cadaclysm-wasm/src/blacksmith.rs (wasm-bindgen has no
+   * cheaper way to take a C struct from JS than one flat array). `up`/`stroke`/`background`/
+   * `flags` are really u32 but carried as an integral f64 like the rest, matching the
+   * exports' own doc comments.
+   */
+  const svgWords = (o) => Float64Array.of(
+    o.up, o.azimuth, o.elevation, o.fov, o.width, o.height,
+    o.margin, o.tolerance, o.stroke_width, o.stroke, o.background, o.flags,
+  );
   /** The wasm's return, as the C call's: written into the out-argument and `true` where C fills one, the arrays under the C struct's names, else as it is. */
   function back(short, args, result) {
     if (short === 'edge') {
@@ -253,7 +296,12 @@ function _wasmLibrary(w) {
       for (const name of ['a_start', 'a_end', 'b_start', 'b_end']) raw[name] = { ...result[name] };
       return true;
     }
-    if (short === 'edge_curve') {
+    if (short === 'hits_piece') {
+      args[2][0] = Boolean(result.inside);
+      Object.assign(args[3], result.start); Object.assign(args[4], result.end);
+      return true;
+    }
+    if (short === 'edge_curve' || short === 'intersection_curve') {
       const raw = args[2];
       raw.kind = String(result.kind);
       for (const name of ['origin', 'x', 'y', 'z']) { const p = result[name]; raw[name] = { x: p[0], y: p[1], z: p[2] }; }
@@ -263,12 +311,26 @@ function _wasmLibrary(w) {
       raw.weights = result.weights ?? null;
       return true;
     }
+    if (short === 'intersection_chain') {
+      const raw = args[2];
+      raw.points = result.points; raw.point_count = result.points.length / 3;
+      raw.face_a = result.face_a; raw.face_b = result.face_b;
+      raw.closed = result.closed; raw.tangent = result.tangent; raw.has_curve = result.has_curve;
+      return true;
+    }
+    if (short === 'intersection_overlap') {
+      const raw = args[2];
+      raw.face_a = result.face_a; raw.face_b = result.face_b;
+      raw.points = result.points; raw.point_count = result.points.length / 3;
+      raw.loop_offsets = result.loop_offsets; raw.loop_count = result.loop_offsets.length;
+      return true;
+    }
     if (short === 'colour') { if (result == null) return false; args[2].set(result); return true; }
     if (short === 'manifold') { args[1].set(result); return true; }
-    if (short === 'bounds') { args[2].set(result.slice(0, 3)); args[3].set(result.slice(3, 6)); return true; }
+    if (short === 'bounds' || short === 'bounds64') { args[2].set(result.slice(0, 3)); args[3].set(result.slice(3, 6)); return true; }
     if (short in OUT) { args[OUT[short]].set(result); return true; }
     if (BOOLS.has(short)) return true;
-    if (short === 'mesh') return { ...result, vertex_count: result.positions.length / 3, index_count: result.indices.length };
+    if (short === 'mesh' || short === 'mesh64') return { ...result, vertex_count: result.positions.length / 3, index_count: result.indices.length };
     if (short === 'edge_polylines' || short === 'profile_polylines') return { ...result, point_count: result.points.length / 3, polyline_count: result.offsets.length - 1 };
     if (short === 'mesh_face_triangles') return { counts: result, face_count: result.length };
     return result;
@@ -295,16 +357,17 @@ function _wasmLibrary(w) {
         if (short === 'select_face' && args[2] == null) args[2] = new Float64Array(0);   // the direction, unread for kinds 0/1/3
         if (short === 'svg_text') {
           // cadaclysm_blacksmith_svg_text(solids: &[u32], words: &[f64]) in
-          // crates/cadaclysm-wasm/src/blacksmith.rs: wasm-bindgen has no cheaper way to
-          // take a C struct from JS than one flat array, so `args[2]` (the plain object
-          // _svgOptions() built) is flattened to its twelve fields after `size`, in
-          // struct order -- `up`/`stroke`/`background`/`flags` are really u32 but carried
-          // as an integral f64 like the rest, matching the export's own doc comment.
-          const o = args[2];
-          args = [args[0], args[1], Float64Array.of(
-            o.up, o.azimuth, o.elevation, o.fov, o.width, o.height,
-            o.margin, o.tolerance, o.stroke_width, o.stroke, o.background, o.flags,
-          )];
+          // crates/cadaclysm-wasm/src/blacksmith.rs: `args[2]` (the plain object
+          // _svgOptions() built) becomes `svgWords`'s flat array.
+          args = [args[0], args[1], svgWords(args[2])];
+        }
+        if (short === 'drawing_svg_text') {
+          // cadaclysm_blacksmith_drawing_svg_text(solids: &[u32], profiles: &[u32], words: &[f64])
+          // in crates/cadaclysm-wasm/src/blacksmith.rs: the same `svgWords` flattening as
+          // svg_text above, with the options struct now behind args[4] (solids, solid_count,
+          // profiles, profile_count, options) -- DROP's [1, 3] drops both counts, leaving
+          // solids, profiles and words in that order.
+          args = [args[0], args[1], args[2], args[3], svgWords(args[4])];
         }
         const passed = args.filter((_, i) => !dropped.includes(i)).map(arg);
         let result;
@@ -342,9 +405,13 @@ function _lib() {
     license_notice_count: f('uint64_t cadaclysm_blacksmith_license_notice_count(void)'),
     build_date: f('const char *cadaclysm_blacksmith_build_date(void)'),
     mesh: f('CadaclysmBlacksmithMesh cadaclysm_blacksmith_mesh(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
+    // f64 twins (Task 11): the same tessellation's own double positions/normals, and
+    // bounds exact far from the origin -- see the doc comments on `mesh64`/`bounds64` below.
+    mesh64: f('CadaclysmBlacksmithMesh64 cadaclysm_blacksmith_mesh64(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
     mesh_face_triangles: f('CadaclysmBlacksmithFaceTriangles cadaclysm_blacksmith_mesh_face_triangles(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
     edge_polylines: f('CadaclysmBlacksmithPolylines cadaclysm_blacksmith_edge_polylines(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
     bounds: f('bool cadaclysm_blacksmith_bounds(const CadaclysmBlacksmithSolid *solid, double tolerance, _Out_ double *min, _Out_ double *max)'),
+    bounds64: f('bool cadaclysm_blacksmith_bounds64(const CadaclysmBlacksmithSolid *solid, double tolerance, _Out_ double *min, _Out_ double *max)'),
     step: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_step(const CadaclysmBlacksmithSolid **solids, size_t count, const char *schema, uint32_t unit)'),
     sat_text: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_sat_text(const CadaclysmBlacksmithSolid **solids, size_t count, uint32_t unit)'),
     sat: f('bool cadaclysm_blacksmith_sat(const CadaclysmBlacksmithSolid **solids, size_t count, const char *path, uint32_t unit)'),
@@ -353,19 +420,32 @@ function _lib() {
     svg_options_init: f('void cadaclysm_blacksmith_svg_options_init(_Out_ CadaclysmBlacksmithSvgOptions *options)'),
     svg_text: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_svg_text(const CadaclysmBlacksmithSolid **solids, size_t count, const CadaclysmBlacksmithSvgOptions *options)'),
     svg: f('bool cadaclysm_blacksmith_svg(const CadaclysmBlacksmithSolid **solids, size_t count, const char *path, const CadaclysmBlacksmithSvgOptions *options)'),
+    // `drawing_svg_text`/`drawing_svg`: `svg_text`/`svg` with a second handle list, the
+    // profiles on the same page (Task 5a, 2026-09-23) -- refusing in the same words
+    // (both read "svg" as their own `what`, not "drawing_svg"), so `writeSvgText`/
+    // `writeSvg` call these two unconditionally, a solids-only list included, and
+    // `svg_text`/`svg` stay declared only because 0.6.0 says they still work.
+    drawing_svg_text: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_drawing_svg_text(const CadaclysmBlacksmithSolid **solids, size_t solid_count, const CadaclysmBlacksmithProfile **profiles, size_t profile_count, const CadaclysmBlacksmithSvgOptions *options)'),
+    drawing_svg: f('bool cadaclysm_blacksmith_drawing_svg(const CadaclysmBlacksmithSolid **solids, size_t solid_count, const CadaclysmBlacksmithProfile **profiles, size_t profile_count, const char *path, const CadaclysmBlacksmithSvgOptions *options)'),
     string_free,
     profile_rect: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_rect(double w, double h)'),
     profile_circle: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_circle(double r)'),
     profile_slot: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_slot(double cx, double cy, double length, double r)'),
     profile_polygon: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_polygon(const double *xy, size_t count)'),
     profile_regular_polygon: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_regular_polygon(double cx, double cy, double radius, uint32_t sides, double angle)'),
+    profile_star: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_star(double cx, double cy, double outer, double inner, uint32_t points, double angle)'),
     profile_spline: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_spline(const double *xy, size_t count, uint32_t degree, const double *weights, bool closed)'),
     profile_with_hole: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_with_hole(const CadaclysmBlacksmithProfile *outer, const CadaclysmBlacksmithProfile *hole)'),
     profile_hits: f('CadaclysmBlacksmithHits *cadaclysm_blacksmith_profile_hits(const CadaclysmBlacksmithProfile *a, const CadaclysmBlacksmithProfile *b, double tolerance)'),
     hits_free: f('void cadaclysm_blacksmith_hits_free(CadaclysmBlacksmithHits *hits)'),
     hit_count: f('uint32_t cadaclysm_blacksmith_hit_count(const CadaclysmBlacksmithHits *hits)'),
     hit: f('bool cadaclysm_blacksmith_hit(const CadaclysmBlacksmithHits *hits, uint32_t i, _Out_ CadaclysmBlacksmithHit *out)'),
+    solid_profile_hits: f('CadaclysmBlacksmithHits *cadaclysm_blacksmith_solid_profile_hits(const CadaclysmBlacksmithSolid *solid, const CadaclysmBlacksmithProfile *profile, const double *frame, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
+    hits_piece_count: f('uint32_t cadaclysm_blacksmith_hits_piece_count(const CadaclysmBlacksmithHits *hits)'),
+    hits_piece: f('bool cadaclysm_blacksmith_hits_piece(const CadaclysmBlacksmithHits *hits, uint32_t i, _Out_ bool *inside, _Out_ CadaclysmBlacksmithSpot *start, _Out_ CadaclysmBlacksmithSpot *end)'),
+    hits_piece_profile: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_hits_piece_profile(const CadaclysmBlacksmithHits *hits, uint32_t i)'),
     profile_common: f('CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_profile_common(const CadaclysmBlacksmithProfile *a, const CadaclysmBlacksmithProfile *b, double tolerance)'),
+    profile_text: f('CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_profile_text(const char *text, double size, const char *font, const uint8_t *font_bytes, size_t font_len, const char *halign, const char *valign, double spacing, const char *direction)'),
     profile_list_count: f('uint32_t cadaclysm_blacksmith_profile_list_count(const CadaclysmBlacksmithProfileList *list)'),
     profile_list_get: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_list_get(const CadaclysmBlacksmithProfileList *list, uint32_t i)'),
     profile_list_free: f('void cadaclysm_blacksmith_profile_list_free(CadaclysmBlacksmithProfileList *list)'),
@@ -373,6 +453,10 @@ function _lib() {
     path_line_to: f('bool cadaclysm_blacksmith_path_line_to(CadaclysmBlacksmithPath *p, double x, double y)'),
     path_arc_to: f('bool cadaclysm_blacksmith_path_arc_to(CadaclysmBlacksmithPath *p, double x, double y, double cx, double cy, bool ccw)'),
     path_bezier_to: f('bool cadaclysm_blacksmith_path_bezier_to(CadaclysmBlacksmithPath *p, double c1x, double c1y, double c2x, double c2y, double x, double y)'),
+    path_conic_to: f('bool cadaclysm_blacksmith_path_conic_to(CadaclysmBlacksmithPath *p, double x, double y, double cx, double cy, double weight)'),
+    path_parabola_by_vertex: f('bool cadaclysm_blacksmith_path_parabola_by_vertex(CadaclysmBlacksmithPath *p, double x, double y, double vx, double vy)'),
+    path_parabola_by_focus: f('bool cadaclysm_blacksmith_path_parabola_by_focus(CadaclysmBlacksmithPath *p, double x, double y, double fx, double fy)'),
+    path_parabola: f('CadaclysmBlacksmithPath *cadaclysm_blacksmith_path_parabola(double vx, double vy, double ax, double ay, double focal, double from, double to)'),
     path_nurbs_to: f('bool cadaclysm_blacksmith_path_nurbs_to(CadaclysmBlacksmithPath *p, const double *control_xy, size_t control_count, const double *weights, const double *knots, size_t knot_count, uint32_t degree)'),
     path_end: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_path_end(CadaclysmBlacksmithPath *p)'),
     path_end_open: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_path_end_open(CadaclysmBlacksmithPath *p)'),
@@ -388,6 +472,13 @@ function _lib() {
     edge_count: f('uint32_t cadaclysm_blacksmith_edge_count(const CadaclysmBlacksmithSolid *solid)'),
     edge: f('bool cadaclysm_blacksmith_edge(const CadaclysmBlacksmithSolid *solid, uint32_t i, _Out_ CadaclysmBlacksmithEdge *out)'),
     edge_curve: f('bool cadaclysm_blacksmith_edge_curve(const CadaclysmBlacksmithSolid *solid, uint32_t i, _Out_ CadaclysmBlacksmithCurve *out)'),
+    intersect: f('CadaclysmBlacksmithIntersection *cadaclysm_blacksmith_intersect(const CadaclysmBlacksmithSolid *a, const CadaclysmBlacksmithSolid *b, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
+    intersection_free: f('void cadaclysm_blacksmith_intersection_free(CadaclysmBlacksmithIntersection *intersection)'),
+    intersection_chain_count: f('uint32_t cadaclysm_blacksmith_intersection_chain_count(const CadaclysmBlacksmithIntersection *intersection)'),
+    intersection_chain: f('bool cadaclysm_blacksmith_intersection_chain(const CadaclysmBlacksmithIntersection *intersection, uint32_t i, _Out_ CadaclysmBlacksmithChain *out)'),
+    intersection_curve: f('bool cadaclysm_blacksmith_intersection_curve(const CadaclysmBlacksmithIntersection *intersection, uint32_t i, _Out_ CadaclysmBlacksmithCurve *out)'),
+    intersection_overlap_count: f('uint32_t cadaclysm_blacksmith_intersection_overlap_count(const CadaclysmBlacksmithIntersection *intersection)'),
+    intersection_overlap: f('bool cadaclysm_blacksmith_intersection_overlap(const CadaclysmBlacksmithIntersection *intersection, uint32_t i, _Out_ CadaclysmBlacksmithOverlap *out)'),
     leaked_edges: f('uint32_t cadaclysm_blacksmith_leaked_edges(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
     unpaired_edges: f('uint32_t cadaclysm_blacksmith_unpaired_edges(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
     manifold: f('bool cadaclysm_blacksmith_manifold(const CadaclysmBlacksmithSolid *solid, _Out_ uint32_t *out)'),
@@ -517,9 +608,29 @@ function _progress(callback) {
   return (phase, done, total) => { callback(_text(phase), Number(done), Number(total)); };
 }
 // A pointer is decoded; the wasm shim's arrays arrive already typed and are handed on.
+/** The profiles of a list the library handed back (null: throw), each a handle of its own, the list freed. */
+function _profileList(h, what) {
+  const l = _lib();
+  _checked(h, what);
+  try {
+    const n = l.profile_list_count(h);
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(new Profile(l.profile_list_get(h, i)));
+    return out;
+  } finally {
+    l.profile_list_free(h);
+  }
+}
 function _floats(ptr, n) { return ptr == null ? null : ArrayBuffer.isView(ptr) ? ptr : n === 0 ? new Float32Array(0) : koffi.decode(ptr, 'float', n); }
 function _uint32s(ptr, n) { return ptr == null ? null : ArrayBuffer.isView(ptr) ? ptr : n === 0 ? new Uint32Array(0) : koffi.decode(ptr, 'uint32_t', n); }
 function _doublesAt(ptr, n) { return ptr == null ? null : ArrayBuffer.isView(ptr) ? ptr : n === 0 ? new Float64Array(0) : koffi.decode(ptr, 'double', n); }
+/** `n` xyz triples at `ptr`, copied out as `[x, y, z]` arrays. */
+function _pointsAt(ptr, n) {
+  const flat = _doublesAt(ptr, 3 * n) ?? new Float64Array(0);
+  const points = [];
+  for (let k = 0; k < flat.length; k += 3) points.push(Array.from(flat.subarray(k, k + 3)));
+  return points;
+}
 
 // ---- svg --------------------------------------------------------------------------
 // Kept separate from the reader's own (cadaclysm.js), which has a scene to default
@@ -661,6 +772,8 @@ class Profile {
   static polygon(points) { const xy = _flatPairs(points); return new Profile(_lib().profile_polygon(xy, xy.length / 2)); }
   /** A regular polygon of `sides` sides (at least 3) on the circle of `radius` about `centre`, its first corner at `angle` radians. */
   static regularPolygon([cx, cy], radius, sides, angle = 0) { return new Profile(_lib().profile_regular_polygon(cx, cy, radius, Math.max(0, sides | 0), angle)); }
+  /** A star of `points` tips (at least 3) on the circle of `outer` about `centre`, its inner corners on the circle of `inner` (positive, under `outer`), the first tip at `angle` radians. */
+  static star([cx, cy], outer, inner, points, angle = 0) { return new Profile(_lib().profile_star(cx, cy, outer, inner, Math.max(0, points | 0), angle)); }
   /**
    * A spline of `degree` through the control polygon `points` (`weights` one per point, or null):
    * open, from the first point to the last; `closed`, periodic and smooth through its own start.
@@ -675,6 +788,15 @@ class Profile {
     return new Profile(_lib().profile_spline(xy, xy.length / 2, Math.max(0, degree | 0), w, !!closed));
   }
   static path(start) { return new Path(start); }
+  /**
+   * Start drawing on the arc of the parabola with `vertex`, axis direction `axis` and focal
+   * length `focal`, over the across-axis coordinates `from..to`: the path begins at the arc's
+   * first point and holds the arc -- a reflector from rim to rim, `Profile.parabola([0, 0], [0, 1], 20, -50, 50)`
+   * a dish 100 wide opening up.
+   */
+  static parabola([vx, vy], [ax, ay], focal, from, to) {
+    return Path._fromHandle(_checked(_lib().path_parabola(vx, vy, ax, ay, focal, from, to), 'path_parabola'));
+  }
   /**
    * Open profiles joined end to end into one -- the forge's merge. The pieces may come in any
    * order and either way round: each next one is the first of the rest with an end within
@@ -758,16 +880,27 @@ class Profile {
    * `tolerance` not positive and finite, or a profile open or crossing itself.
    */
   common(other, tolerance = 1e-6) {
-    const l = _lib();
-    const h = _checked(l.profile_common(this._handle, other._handle, tolerance), 'profile_common');
-    try {
-      const n = l.profile_list_count(h);
-      const out = [];
-      for (let i = 0; i < n; i++) out.push(new Profile(l.profile_list_get(h, i)));
-      return out;
-    } finally {
-      l.profile_list_free(h);
-    }
+    return _profileList(_lib().profile_common(this._handle, other._handle, tolerance), 'profile_common');
+  }
+  /**
+   * `text` set in a font, one profile per closed shape -- a letter with its counters as
+   * holes (`o` one, `8` two; `i` is two profiles) -- on the sketch plane, the baseline
+   * along x from the origin, each outline counter-clockwise and its holes clockwise, a
+   * curved side the font's own cubic Bezier kept exactly: an extruded `O` has curved
+   * walls. `size` is roughly the height of a capital. `font` is a family, optionally
+   * with a style (`'Liberation Sans:style=Bold'`), a font file's path, or empty for the
+   * bundled Liberation Sans Regular -- which also serves when the family is not found;
+   * `fontBytes` (a Uint8Array or Buffer) a font file's bytes, used instead of `font`
+   * when given. `halign` is 'left', 'center' or 'right'; `valign` 'baseline', 'bottom',
+   * 'center' or 'top'; `spacing` multiplies the gap between glyphs; `direction` 'ltr'
+   * or 'rtl'. Empty text is an empty array. Throws `BuildError` for a size or spacing
+   * not positive and finite, an alignment or direction not one of those words, font
+   * bytes that are not a font.
+   */
+  static text(text, size = 10, font = '', halign = 'left', valign = 'baseline', spacing = 1, direction = 'ltr', fontBytes = null) {
+    const bytes = fontBytes == null ? null : fontBytes instanceof Uint8Array ? fontBytes : new Uint8Array(fontBytes);
+    return _profileList(_lib().profile_text(String(text), size, String(font), bytes, bytes == null ? 0 : bytes.length,
+      String(halign), String(valign), spacing, String(direction)), 'profile_text');
   }
   translate(dx, dy) { return new Profile(_lib().translate_profile(this._handle, dx, dy)); }
   /**
@@ -781,6 +914,25 @@ class Profile {
     const list = which == null ? null : which.length ? which : new Uint32Array(1);
     return new Profile(_lib().profile_round(this._handle, radius, list, which == null ? 0 : which.length, !!open));
   }
+  /**
+   * This profile's own loops as SVG text, from directly above by default -- a sketch lies
+   * in z = 0, so its own plane already is the page, unlike a solid's `Solid.svgText`
+   * (`view: 'iso'`), which has no plane of its own to prefer. The rest of `options` is
+   * `svgOptionsDefaults()`'s.
+   */
+  svgText(options = {}) { return writeSvgText([this], { view: 'top', ...options }); }
+  /** `svgText(options)` written to `filePath` by the library itself. */
+  svg(filePath, options = {}) { writeSvg(filePath, [this], { view: 'top', ...options }); }
+  /**
+   * `svgText`, on the worker thread. `options` is validated and packed on the caller's
+   * thread first (fail fast), same as `Solid.svgAsync`. A profile carries no busy lock of
+   * its own -- immutable, freed only by the finalizer -- so this reaches the worker
+   * directly through `_run` rather than through `Solid`'s per-call lock.
+   */
+  async svgAsync(options = {}) {
+    const raw = _svgOptions({ view: 'top', ...options });
+    return _run({ op: 'svg', profileHandles: [_addressOf(this._handle)], options: raw });
+  }
 }
 
 const _pathFinalizer = typeof FinalizationRegistry === 'function'
@@ -792,11 +944,43 @@ class Path {
     this._handle = _checked(_lib().path_begin(x, y), 'path_begin');
     if (_pathFinalizer) _pathFinalizer.register(this, this._handle, this);
   }
+  /** A path already begun elsewhere (`Profile.parabola`'s starter), taking over its handle. */
+  static _fromHandle(handle) {
+    const path = Object.create(Path.prototype);
+    path._handle = handle;
+    if (_pathFinalizer) _pathFinalizer.register(path, handle, path);
+    return path;
+  }
   _live() { if (!this._handle) throw new BuildError('path: already ended'); return this._handle; }
   _step(ok, what) { if (!ok) _fail(what); return this; }
   lineTo(x, y) { return this._step(_lib().path_line_to(this._live(), x, y), 'path_line_to'); }
   arcTo(x, y, [cx, cy], ccw = true) { return this._step(_lib().path_arc_to(this._live(), x, y, cx, cy, ccw), 'path_arc_to'); }
   bezierTo([c1x, c1y], [c2x, c2y], [x, y]) { return this._step(_lib().path_bezier_to(this._live(), c1x, c1y, c2x, c2y, x, y), 'path_bezier_to'); }
+  /**
+   * A conic arc to (`x`, `y`) through `control` with middle weight `weight`: under 1 an
+   * elliptical arc, 1 a parabola, over 1 a hyperbola -- the rational quadratic Bezier, kept exact.
+   */
+  conicTo(x, y, [cx, cy], weight) { return this._step(_lib().path_conic_to(this._live(), x, y, cx, cy, weight), 'path_conic_to'); }
+  /** A parabolic arc to (`x`, `y`) whose end tangents meet at `control`: `conicTo` with weight 1. */
+  parabolaTo(x, y, control) { return this.conicTo(x, y, control, 1.0); }
+  /** A hyperbolic arc to (`x`, `y`) through `control` with middle `weight` over 1. */
+  hyperbolaTo(x, y, control, weight) {
+    if (!(weight > 1.0)) throw new BuildError('hyperbola_to: the weight must be over 1 (1 is a parabola, under 1 an ellipse)');
+    return this.conicTo(x, y, control, weight);
+  }
+  /**
+   * The parabolic arc to (`x`, `y`) with `vertex`: its axis and focal length solved from the
+   * two ends. Throws when no parabola with that vertex passes through both.
+   */
+  parabolaByVertex(x, y, [vx, vy]) { return this._step(_lib().path_parabola_by_vertex(this._live(), x, y, vx, vy), 'path_parabola_by_vertex'); }
+  /**
+   * The parabolic arc to (`x`, `y`) with `focus`: of the two through the ends, the one whose
+   * vertex lies between the ends' projections, then the one whose arc cups the focus (the
+   * focus between the arc and its chord), then the more symmetric; with the focus beyond
+   * the chord that is the arch over the ends, not the shallow dish -- draw that one with
+   * `Profile.parabola`.
+   */
+  parabolaByFocus(x, y, [fx, fy]) { return this._step(_lib().path_parabola_by_focus(this._live(), x, y, fx, fy), 'path_parabola_by_focus'); }
   /** `control`: every control point after the current one, the endpoint last; `weights`: one per control point including the current one, or null; `knots`: the full knot vector. */
   nurbsTo(control, knots, degree, weights = null) {
     const c = _flatPairs(control), k = Float64Array.from(knots, Number);
@@ -979,7 +1163,7 @@ class Solid {
   static revolveOpenInPlane(profile, frame, [ax, ay], [bx, by], angle) { return new Solid(_lib().revolve_open_in_plane(profile._handle, _frame(frame), Float64Array.of(ax, ay, bx, by), angle)); }
   static sweep(profile, frame, sweepPath) { return new Solid(_lib().sweep(profile._handle, _frame(frame), sweepPath._live())); }
   static sweepOpen(profile, frame, sweepPath) { return new Solid(_lib().sweep_open(profile._handle, _frame(frame), sweepPath._live())); }
-  /** A circle of `radius` swept along `sweepPath`, square to its start -- Fusion's Pipe: a rod, or with a positive `thickness` a tube whose walls are that thick. */
+  /** A circle of `radius` swept along `sweepPath`, square to its start: a rod, or with a positive `thickness` a tube whose walls are that thick. */
   static pipe(sweepPath, radius, thickness = 0) { return new Solid(_lib().pipe(sweepPath._live(), radius, thickness)); }
   /** Thicken an open sheet into a solid. */
   extrudeFaces(height) { return new Solid(_lib().extrude_faces(this._handle, height)); }
@@ -1019,6 +1203,110 @@ class Solid {
    * `tool` must be a closed solid.
    */
   splitSheet(tool, tolerance = 0.05, progress = null) { return new Solid(_lib().split_sheet(this._handle, tool._handle, tolerance, _progress(progress), null)); }
+  /**
+   * Where this solid's faces cross or coincide with `other`'s, at `tolerance`, as an
+   * `Intersection`: `chains` along the curves the faces meet on and `overlaps` where a
+   * face pair coincides. Neither solid is changed; either may be an open sheet. No
+   * crossing is an empty result, never an error.
+   *
+   * Each `Chain`'s points are within `tolerance` of both faces' exact surfaces; there is
+   * one chain per face pair per branch -- chains are not joined across a face boundary or
+   * a closed curve's seam, so join them by matching ends. A chain's `curve` is its exact
+   * curve where the kernel found one every point lies within `tolerance` of, else null;
+   * `tangent` is set where the surfaces are near-tangent along the chain or the snap did
+   * not settle (the points are then the best estimate) -- a closed chain that does not go
+   * once round its own curve (a sliver where two surfaces barely cross) has no curve,
+   * `tangent` still true. An `Overlap` is a coincident face pair with the shared region's
+   * rings (outer first, holes after), which may be empty for a partial overlap whose
+   * outlines cross. Known limit: a crossing narrower than `tolerance` -- two surfaces
+   * passing within it without their meshes crossing -- can be missed; near-tangent
+   * contact is where this bites.
+   *
+   * `progress(phase, done, total)` hears `mesh`, `cull`, `cross`, `snap` and `curve`.
+   * Throws `BuildError` for a `tolerance` not positive and finite, a solid with no faces,
+   * or one that meshes to nothing.
+   */
+  intersect(other, tolerance = 0.05, progress = null) {
+    const l = _lib();
+    const h = _checked(l.intersect(this._handle, other._handle, tolerance, _progress(progress), null), 'intersect');
+    try {
+      const chains = [];
+      const n = l.intersection_chain_count(h);
+      for (let i = 0; i < n; i++) {
+        const raw = {};
+        if (!l.intersection_chain(h, i, raw)) _fail('intersection_chain');
+        let curve = null;
+        if (raw.has_curve) {
+          const rawCurve = {};
+          if (!l.intersection_curve(h, i, rawCurve)) _fail('intersection_curve');
+          curve = _curveOf(rawCurve);
+        }
+        chains.push(new Chain(_pointsAt(raw.points, raw.point_count), Boolean(raw.closed), [raw.face_a, raw.face_b], Boolean(raw.tangent), curve));
+      }
+      const overlaps = [];
+      const m = l.intersection_overlap_count(h);
+      for (let i = 0; i < m; i++) {
+        const raw = {};
+        if (!l.intersection_overlap(h, i, raw)) _fail('intersection_overlap');
+        const points = _pointsAt(raw.points, raw.point_count);
+        const starts = Array.from(_uint32s(raw.loop_offsets, raw.loop_count) ?? []);
+        const loops = starts.map((start, r) => points.slice(start, r + 1 < starts.length ? starts[r + 1] : raw.point_count));
+        overlaps.push(new Overlap([raw.face_a, raw.face_b], loops));
+      }
+      return new Intersection(chains, overlaps);
+    } finally {
+      l.intersection_free(h);
+    }
+  }
+  /**
+   * Where `profile`, placed on `frame`, pierces this solid's faces, and the pieces its loops cut
+   * into, as a `SolidHits`. Neither is changed.
+   *
+   * A point hit lies within `tolerance` of the segment's exact curve and of the face's exact
+   * surface, inside the face's trim; its profile spot (`aStart`: loop, segment, t) and face spot
+   * (`bStart`: face, u, v) evaluate to the point within `tolerance`; `touch` where the curve's
+   * tangent lies within 1e-3 (sine) of the surface's tangent plane there (a graze), false at a
+   * crossing. A run is a stretch of one segment lying within `tolerance` of one face and inside
+   * it, longer than `tolerance`. Hits within `tolerance` of each other merge (a hit at a segment
+   * join reported once, as `(k, t = 1)`; a closed loop's closing join reads `(0, 0)`).
+   * Every point is in world space (the frame applied).
+   *
+   * Pieces only for a closed body -- an open body has none -- in loop order, covering every loop
+   * exactly; a piece's spots read a segment join as the next segment's start `(k + 1, 0)`, and an
+   * open chain runs from `(0, 0)` to `(n - 1, 1)`; a loop no hit cuts is one closed piece.
+   * `inside` by the piece middle's winding number over the body's mesh; a piece lying on the
+   * surface is inside. Known limit: a segment passing within `tolerance` of a face without
+   * crossing its mesh can be missed (near-tangent grazes).
+   *
+   * `progress(phase, done, total)` hears `mesh`, `cull`, `hits` and `pieces`. Throws
+   * `BuildError` for a `tolerance` not positive and finite, a solid with no faces or that meshes
+   * to nothing, a profile with no segments, or a free-form segment that is not an evaluable
+   * NURBS curve.
+   */
+  hits(profile, frame, tolerance = 0.05, progress = null) {
+    const l = _lib();
+    const h = _checked(l.solid_profile_hits(this._handle, profile._handle, _frame(frame), tolerance, _progress(progress), null), 'solid_profile_hits');
+    try {
+      const hits = [];
+      const n = l.hit_count(h);
+      for (let i = 0; i < n; i++) {
+        const raw = {};
+        if (!l.hit(h, i, raw)) _fail('hit');
+        hits.push(_hitOf(raw));
+      }
+      const pieces = [];
+      const m = l.hits_piece_count(h);
+      for (let i = 0; i < m; i++) {
+        const inside = [false], start = {}, end = {};
+        if (!l.hits_piece(h, i, inside, start, end)) _fail('hits_piece');
+        const own = new Profile(_checked(l.hits_piece_profile(h, i), 'hits_piece_profile'));
+        pieces.push(new Piece(Boolean(inside[0]), _spotOf(start), _spotOf(end), own));
+      }
+      return new SolidHits(hits, pieces);
+    } finally {
+      l.hits_free(h);
+    }
+  }
   // -- asking
   get faces() {
     const n = _lib().face_count(this._handle);
@@ -1032,6 +1320,14 @@ class Solid {
   boundsAt(tolerance) {
     const lo = new Float64Array(3), hi = new Float64Array(3);
     if (!_lib().bounds(this._handle, tolerance, lo, hi)) _fail('bounds');
+    return [Array.from(lo), Array.from(hi)];
+  }
+  /** `boundsAt64(0.05)`. */
+  get bounds64() { return this.boundsAt64(0.05); }
+  /** `boundsAt(tolerance)` from the same tessellation's own unnarrowed positions -- exact far from the origin, where `boundsAt`'s widened `float` is not. */
+  boundsAt64(tolerance) {
+    const lo = new Float64Array(3), hi = new Float64Array(3);
+    if (!_lib().bounds64(this._handle, tolerance, lo, hi)) _fail('bounds64');
     return [Array.from(lo), Array.from(hi)];
   }
   /**
@@ -1079,6 +1375,25 @@ class Solid {
     return {
       positions: _floats(m.positions, n * 3) ?? new Float32Array(0),
       normals: _floats(m.normals, n * 3) ?? new Float32Array(0),
+      indices: _uint32s(m.indices, m.index_count) ?? new Uint32Array(0),
+      vertexCount: n, indexCount: m.index_count,
+    };
+  }
+  /**
+   * `mesh(tolerance)` in `double`: `{ positions, normals, indices }` with
+   * `positions`/`normals` copied out at call time as the exact f64 values
+   * `mesh()`'s widened `float` positions are narrowed from -- exact far from the
+   * origin, where `mesh()`'s are not. Reads from the same tessellation cache as
+   * `mesh()`; meshing at another tolerance through either refills that cache, but
+   * this copy, once returned, is unaffected.
+   */
+  mesh64(tolerance = 0.05) {
+    const m = _lib().mesh64(this._handle, tolerance);
+    if (m.positions == null) _fail('mesh64');
+    const n = m.vertex_count;
+    return {
+      positions: _doublesAt(m.positions, n * 3) ?? new Float64Array(0),
+      normals: _doublesAt(m.normals, n * 3) ?? new Float64Array(0),
       indices: _uint32s(m.indices, m.index_count) ?? new Uint32Array(0),
       vertexCount: n, indexCount: m.index_count,
     };
@@ -1211,14 +1526,13 @@ class Solid {
   }
   /** `open`: face indices removed so the hollow is reachable. */
   /**
-   * Face `face` pushed out by `distance` along its outward normal (pulled in, negative) the way
-   * Fusion and Rhino extrude a face: the prism over it joined on (cut out), and the flush faces
+   * Face `face` pushed out by `distance` along its outward normal (pulled in, negative) as a face extrude does it: the prism over it joined on (cut out), and the flush faces
    * merged -- a box's top raised is one taller box of six faces. A face on a cylinder, a cone, a
    * sphere or a torus moves out along its normal instead, the surface a step out (a boss fatter,
    * a bore or a countersink narrower, a dome fuller), the flat faces beside it carried along; any
    * other curved face is refused.
    *
-   * `face` may be a list of faces, pushed together as Fusion's press-pull on a selection: each by
+   * `face` may be a list of faces, pushed together as a press-pull on a selection: each by
    * its own rule, one after another, each found again after the pushes before it renumbered the
    * faces -- a box's top and a side pushed 5 is the box 5 taller and 5 wider. A face on the same
    * curved surface as one before it, and joined to it, moved with that one and is not pushed twice.
@@ -1231,7 +1545,7 @@ class Solid {
     return new Solid(_lib().push_pull_faces(this._handle, which, which.length, distance, tolerance, _progress(progress), null));
   }
   /**
-   * This solid split by `tool` into bodies -- Fusion's Split Body: a closed `tool` gives the parts
+   * This solid split by `tool` into bodies: a closed `tool` gives the parts
    * outside it, then the parts inside; a flat sheet splits by the whole plane it lies on. Each
    * connected part is a body of its own.
    */
@@ -1261,25 +1575,25 @@ class Solid {
   mergeFlush() { return new Solid(_lib().merge_flush(this._handle)); }
   /**
    * The round `face` belongs to -- a fillet's bands, balls and rim bands joined to that face --
-   * made again at `radius`, as Fusion's press-pull on a fillet face: taken back to the sharp edges
+   * made again at `radius`, as a press-pull on a fillet face: taken back to the sharp edges
    * it replaced, and those rounded again.
    */
   refillet(face, radius, tolerance = 1e-6) { return new Solid(_lib().refillet(this._handle, face, radius, tolerance)); }
-  /** The round `face` belongs to taken off, the faces beside it sharp again -- Fusion's delete of a fillet face. */
+  /** The round `face` belongs to taken off, the faces beside it sharp again -- the delete of a fillet face. */
   unfillet(face) { return new Solid(_lib().unfillet(this._handle, face)); }
   /**
    * The chamfer `face` belongs to -- its bevels, flat or round a rim, and the corner triangles
-   * joined to that face -- cut again at `distance`, as Fusion's press-pull on a chamfer face.
+   * joined to that face -- cut again at `distance`, as a press-pull on a chamfer face.
    */
   rechamfer(face, distance, tolerance = 1e-6) { return new Solid(_lib().rechamfer(this._handle, face, distance, tolerance)); }
-  /** The chamfer `face` belongs to taken off, the faces beside it sharp again -- Fusion's delete of a chamfer face. */
+  /** The chamfer `face` belongs to taken off, the faces beside it sharp again -- the delete of a chamfer face. */
   unchamfer(face) { return new Solid(_lib().unchamfer(this._handle, face)); }
   shell(thickness, open = [], tolerance = 1e-6, progress = null) {
     const which = Uint32Array.from(Array.from(open, Number));
     return new Solid(_lib().shell(this._handle, thickness, which, which.length, tolerance, _progress(progress), null));
   }
   /**
-   * This sheet made a solid `thickness` thick -- Fusion's Thicken: its faces, their twins moved
+   * This sheet made a solid `thickness` thick: its faces, their twins moved
    * `thickness` along the faces' normals (against them for a negative thickness), and a wall round
    * every open edge. A closed sheet thickens to a hollow.
    */
@@ -1310,6 +1624,8 @@ class Solid {
     return Solid._wrap(await this._async('trimAsync', { op: 'trim', b: _addressOf(tool._handle), keepInside: keep === 'inside', tolerance }, [tool], progress));
   }
   async meshAsync(tolerance = 0.05) { return this._async('meshAsync', { op: 'mesh', tolerance }); }
+  /** `mesh64(tolerance)`, on the worker thread. */
+  async meshAsync64(tolerance = 0.05) { return this._async('meshAsync64', { op: 'mesh64', tolerance }); }
   async stepAsync(schema = null, unit = 'mm') {
     if (!(unit in UNITS)) throw new BuildError(`unit must be one of ${Object.keys(UNITS).sort().join(', ')}`);
     return this._async('stepAsync', { op: 'step', handles: [_addressOf(this._pointer)], schemaText: _schemaText(schema), unit: UNITS[unit] });
@@ -1462,8 +1778,8 @@ class Selector {
 }
 
 /**
- * One edge's exact curve, as plain data copied out (`Edge.curve`): `kind` is `line`,
- * `circle`, `ellipse` or `nurbs`.
+ * One edge's, or one intersection chain's, exact curve as plain data copied out
+ * (`Edge.curve`, `Chain.curve`): `kind` is `line`, `circle`, `ellipse`, `parabola`, `hyperbola` or `nurbs`.
  *
  * `t0..t1` is the edge's parameter range on its own curve: a line's fraction (0..1 over
  * `origin -> origin + x`, where `x` is the full `to - from`, NOT unit -- so
@@ -1528,6 +1844,58 @@ class Spot {
 }
 
 /**
+ * What `Solid.hits` found, copied out: `hits` (`Hit`, ordered along the profile; `aStart`/`aEnd`
+ * on the profile, `bStart`/`bEnd` on the solid's faces: `face` at (`u`, `v`)) and `pieces`
+ * (`Piece`, empty for an open body).
+ */
+class SolidHits {
+  constructor(hits, pieces) { this.hits = hits; this.pieces = pieces; }
+}
+
+/**
+ * One stretch of a profile loop between two cuts (`SolidHits.pieces`): `inside` (by its middle's
+ * winding number over the body; a piece lying on the surface is inside), `start`/`end` (profile
+ * `Spot` values -- a segment join reads as the next segment's start `(k + 1, 0)`, an open chain
+ * runs from `(0, 0)` to `(n - 1, 1)`; a loop no hit cuts is one closed piece) and `profile`, the
+ * piece's own open chain (what `SweepPath.along(.., open = true)` sweeps).
+ */
+class Piece {
+  constructor(inside, start, end, profile) { this.inside = inside; this.start = start; this.end = end; this.profile = profile; }
+}
+
+/**
+ * What `Solid.intersect` found, copied out: `chains` (one per face pair per branch) and
+ * `overlaps` (one per coincident face pair). Both empty where the solids do not meet.
+ */
+class Intersection {
+  constructor(chains, overlaps) { this.chains = chains; this.overlaps = overlaps; }
+}
+
+/**
+ * One branch of one face pair's crossing (`Intersection.chains`): `points` (`[x, y, z]`
+ * arrays in walk order; a closed chain does not repeat its first point), `closed`, `faces`
+ * (`[face in a, face in b]`), `tangent` (the surfaces near-tangent along it, or the snap
+ * unsettled -- the points their best estimate) and `curve`, its exact `Curve` over the
+ * chain's own `t0..t1`, or null where the kernel found none. A chain may stop at a face
+ * boundary or a closed curve's seam and continue as another: join chains by matching ends.
+ */
+class Chain {
+  constructor(points, closed, faces, tangent, curve = null) {
+    this.points = points; this.closed = closed; this.faces = faces; this.tangent = tangent; this.curve = curve;
+  }
+}
+
+/**
+ * A face of `a` and a face of `b` that coincide (`Intersection.overlaps`): `faces`
+ * (`[face in a, face in b]`) and `loops`, the shared region's rings as arrays of `[x, y, z]`
+ * points (outer first, holes after; each ring closed without repeating its first point) --
+ * empty for a partial overlap whose outlines cross.
+ */
+class Overlap {
+  constructor(faces, loops) { this.faces = faces; this.loops = loops; }
+}
+
+/**
  * One place two curves meet, copied out. A point (`run` false): `start` equals `end`, and
  * `touch` is true where the curves are tangent rather than crossing. A run (`run` true): they
  * coincide from `start` to `end`. `aStart`/`aEnd` are where on the first curve,
@@ -1587,7 +1955,7 @@ class Frame {
     const v = Array.from(_frame(frame));
     return new Frame(v.slice(0, 3), v.slice(3, 6), v.slice(6, 9), v.slice(9, 12));
   }
-  /** The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line -- Fusion's midplane. */
+  /** The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line. */
   static midplane(a, b) {
     const out = new Float64Array(12);
     if (!_lib().frame_midplane(_frame(a), _frame(b), out)) _fail('frame_midplane');
@@ -1744,36 +2112,57 @@ function writeBrep(filePath, solids) {
 }
 
 /**
- * Several solids' wireframes as one SVG, from the camera `options` describes
- * (see `svgOptionsDefaults`). Owned by the library: decoded and released
- * before this returns.
+ * `things` (any mix of `Solid` and `Profile`, in any order) split into its solids' and
+ * profiles' handles, each in the order it was given; throws for anything in `things`
+ * that is neither.
  */
-function writeSvgText(solids, options = {}) {
-  const handles = Array.from(solids, (s) => s._handle);
+function _drawables(things) {
+  const solidHandles = [];
+  const profileHandles = [];
+  for (const t of things) {
+    if (t instanceof Solid) solidHandles.push(t._handle);
+    else if (t instanceof Profile) profileHandles.push(t._handle);
+    else throw new BuildError('svg: only solids and profiles can be drawn');
+  }
+  return { solidHandles, profileHandles };
+}
+
+/**
+ * The solids and profiles in `things` (any mix of `Solid` and `Profile`, in any order)
+ * as one SVG drawing -- a `<g id="solid-<i>">` per solid then a `<g id="profile-<i>">`
+ * per profile, from the camera `options` describes (see `svgOptionsDefaults`). Always
+ * `cadaclysm_blacksmith_drawing_svg_text`, solids-only calls included: it refuses in the
+ * same words `cadaclysm_blacksmith_svg_text` always did (both read `"svg"`, not
+ * `"drawing_svg"`, as their own `what`), so a list of solids alone draws -- and fails --
+ * exactly as it always did. Owned by the library: decoded and released before this
+ * returns.
+ */
+function writeSvgText(things, options = {}) {
+  const { solidHandles, profileHandles } = _drawables(things);
   const raw = _svgOptions(options);
-  const text = _lib().svg_text(handles, handles.length, raw);
+  const text = _lib().drawing_svg_text(solidHandles, solidHandles.length, profileHandles, profileHandles.length, raw);
   if (text == null) _fail('svg_text');
   return text;
 }
 
 /**
  * `writeSvgText` written to `filePath` by the library itself, which names the file in
- * its refusal when it cannot. There is no `cadaclysm_blacksmith_svg` wasm export --
- * the same gap `sat` (as opposed to `satText`) has -- so this throws "the wasm module
- * has no cadaclysm_blacksmith_svg: rebuild it" under the wasm build; write the text
- * `writeSvgText` already knows how to get through whatever filesystem the page
+ * its refusal when it cannot. There is no `cadaclysm_blacksmith_drawing_svg` wasm export
+ * -- the same gap `sat` (as opposed to `satText`) has -- so this throws "the wasm module
+ * has no cadaclysm_blacksmith_drawing_svg: rebuild it" under the wasm build; write the
+ * text `writeSvgText` already knows how to get through whatever filesystem the page
  * provides instead.
  */
-function writeSvg(filePath, solids, options = {}) {
-  const handles = Array.from(solids, (s) => s._handle);
+function writeSvg(filePath, things, options = {}) {
+  const { solidHandles, profileHandles } = _drawables(things);
   const raw = _svgOptions(options);
-  if (!_lib().svg(handles, handles.length, String(filePath), raw)) _fail('svg');
+  if (!_lib().drawing_svg(solidHandles, solidHandles.length, profileHandles, profileHandles.length, String(filePath), raw)) _fail('svg');
 }
 
 module.exports = {
   BuildError, NONE, UNITS, Axis, SvgView,
   libraryPath, defaultSchema, version, buildDate, license, licenseInfo, licenseNoticeCount, brepLayoutId,
   svgOptionsDefaults,
-  Frame, Profile, Path, SweepPath, Slant, Solid, Selector, Edge, Curve, Hit, Spot, Workplane, writeStep, writeStepText, writeSat, writeSatText, writeBrep, writeBrepText, writeSvg, writeSvgText,
-  _lib, _lastError, _frame, _axis, _progress, _searchedPaths, _notFoundMessage, _floats, _uint32s, _svgOptions,
+  Frame, Profile, Path, SweepPath, Slant, Solid, Selector, Edge, Curve, Intersection, Chain, Overlap, Hit, Spot, SolidHits, Piece, Workplane, writeStep, writeStepText, writeSat, writeSatText, writeBrep, writeBrepText, writeSvg, writeSvgText,
+  _lib, _lastError, _frame, _axis, _progress, _searchedPaths, _notFoundMessage, _floats, _uint32s, _doublesAt, _svgOptions,
 };

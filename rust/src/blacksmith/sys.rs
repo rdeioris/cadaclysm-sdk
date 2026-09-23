@@ -47,6 +47,17 @@ pub struct CadaclysmBlacksmithMesh {
     pub index_count: u32,
 }
 
+/// `CadaclysmBlacksmithMesh` in `double`: the same tessellation (the index pointer is
+/// the very one `cadaclysm_blacksmith_mesh` gives), positions and normals unnarrowed.
+#[repr(C)]
+pub struct CadaclysmBlacksmithMesh64 {
+    pub positions: *const f64,
+    pub normals: *const f64,
+    pub indices: *const u32,
+    pub vertex_count: u32,
+    pub index_count: u32,
+}
+
 #[repr(C)]
 pub struct CadaclysmBlacksmithPolylines {
     pub points: *const f32,
@@ -153,6 +164,53 @@ impl Default for CadaclysmBlacksmithCurve {
     }
 }
 
+/// One branch of one face pair's crossing, borrowed from an intersection result
+/// (`cadaclysm_blacksmith_intersection_chain`): `points` is `point_count` xyz triples.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CadaclysmBlacksmithChain {
+    pub points: *const f64,
+    pub point_count: u32,
+    pub face_a: u32,
+    pub face_b: u32,
+    pub closed: bool,
+    pub tangent: bool,
+    pub has_curve: bool,
+}
+
+impl Default for CadaclysmBlacksmithChain {
+    fn default() -> Self {
+        CadaclysmBlacksmithChain { points: std::ptr::null(), point_count: 0, face_a: 0, face_b: 0, closed: false, tangent: false, has_curve: false }
+    }
+}
+
+/// A coincident face pair's shared region, borrowed from an intersection result
+/// (`cadaclysm_blacksmith_intersection_overlap`): `points` is `point_count` xyz triples,
+/// every ring back to back; `loop_offsets` is `loop_count` ring starts counted in points.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CadaclysmBlacksmithOverlap {
+    pub face_a: u32,
+    pub face_b: u32,
+    pub points: *const f64,
+    pub loop_offsets: *const u32,
+    pub point_count: u32,
+    pub loop_count: u32,
+}
+
+impl Default for CadaclysmBlacksmithOverlap {
+    fn default() -> Self {
+        CadaclysmBlacksmithOverlap { face_a: 0, face_b: 0, points: std::ptr::null(), loop_offsets: std::ptr::null(), point_count: 0, loop_count: 0 }
+    }
+}
+
+/// The crossing of two solids, from `cadaclysm_blacksmith_intersect`. Opaque; freed with
+/// `cadaclysm_blacksmith_intersection_free`.
+#[repr(C)]
+pub struct CadaclysmBlacksmithIntersection {
+    _private: [u8; 0],
+}
+
 /// `CadaclysmBlacksmithSvgOptions`. `size` is the struct's growth room, as
 /// `CadaclysmOpenOptions` on the reader library -- this crate fills it by calling
 /// `cadaclysm_blacksmith_svg_options_init` first, then overrides the fields
@@ -197,6 +255,7 @@ type Path2 = CadaclysmBlacksmithPath;
 type SweepPath = CadaclysmBlacksmithSweepPath;
 type Progress = CadaclysmBlacksmithProgress;
 type Hits = CadaclysmBlacksmithHits;
+type Intersection = CadaclysmBlacksmithIntersection;
 type ProfileList = CadaclysmBlacksmithProfileList;
 
 entry_points! {
@@ -218,6 +277,7 @@ entry_points! {
     fn cadaclysm_blacksmith_profile_slot(cx: f64, cy: f64, length: f64, r: f64) -> *mut Profile;
     fn cadaclysm_blacksmith_profile_polygon(xy: *const f64, count: usize) -> *mut Profile;
     fn cadaclysm_blacksmith_profile_regular_polygon(cx: f64, cy: f64, radius: f64, sides: u32, angle: f64) -> *mut Profile;
+    fn cadaclysm_blacksmith_profile_star(cx: f64, cy: f64, outer: f64, inner: f64, points: u32, angle: f64) -> *mut Profile;
     fn cadaclysm_blacksmith_profile_spline(
         xy: *const f64,
         count: usize,
@@ -245,7 +305,22 @@ entry_points! {
     fn cadaclysm_blacksmith_hits_free(hits: *mut Hits);
     fn cadaclysm_blacksmith_hit_count(hits: *const Hits) -> u32;
     fn cadaclysm_blacksmith_hit(hits: *const Hits, i: u32, out: *mut CadaclysmBlacksmithHit) -> bool;
+    fn cadaclysm_blacksmith_solid_profile_hits(solid: *const Solid, profile: *const Profile, frame: *const f64, tolerance: f64, progress: Progress, user: *mut c_void) -> *mut Hits;
+    fn cadaclysm_blacksmith_hits_piece_count(hits: *const Hits) -> u32;
+    fn cadaclysm_blacksmith_hits_piece(hits: *const Hits, i: u32, inside: *mut bool, start: *mut CadaclysmBlacksmithSpot, end: *mut CadaclysmBlacksmithSpot) -> bool;
+    fn cadaclysm_blacksmith_hits_piece_profile(hits: *const Hits, i: u32) -> *mut Profile;
     fn cadaclysm_blacksmith_profile_common(a: *const Profile, b: *const Profile, tolerance: f64) -> *mut ProfileList;
+    fn cadaclysm_blacksmith_profile_text(
+        text: *const c_char,
+        size: f64,
+        font: *const c_char,
+        font_bytes: *const u8,
+        font_len: usize,
+        halign: *const c_char,
+        valign: *const c_char,
+        spacing: f64,
+        direction: *const c_char
+    ) -> *mut ProfileList;
     fn cadaclysm_blacksmith_profile_list_count(list: *const ProfileList) -> u32;
     fn cadaclysm_blacksmith_profile_list_get(list: *const ProfileList, i: u32) -> *mut Profile;
     fn cadaclysm_blacksmith_profile_list_free(list: *mut ProfileList);
@@ -255,6 +330,10 @@ entry_points! {
     fn cadaclysm_blacksmith_path_line_to(p: *mut Path2, x: f64, y: f64) -> bool;
     fn cadaclysm_blacksmith_path_arc_to(p: *mut Path2, x: f64, y: f64, cx: f64, cy: f64, ccw: bool) -> bool;
     fn cadaclysm_blacksmith_path_bezier_to(p: *mut Path2, c1x: f64, c1y: f64, c2x: f64, c2y: f64, x: f64, y: f64) -> bool;
+    fn cadaclysm_blacksmith_path_conic_to(p: *mut Path2, x: f64, y: f64, cx: f64, cy: f64, weight: f64) -> bool;
+    fn cadaclysm_blacksmith_path_parabola_by_vertex(p: *mut Path2, x: f64, y: f64, vx: f64, vy: f64) -> bool;
+    fn cadaclysm_blacksmith_path_parabola_by_focus(p: *mut Path2, x: f64, y: f64, fx: f64, fy: f64) -> bool;
+    fn cadaclysm_blacksmith_path_parabola(vx: f64, vy: f64, ax: f64, ay: f64, focal: f64, from: f64, to: f64) -> *mut Path2;
     fn cadaclysm_blacksmith_path_nurbs_to(
         p: *mut Path2,
         control_xy: *const f64,
@@ -402,13 +481,22 @@ entry_points! {
     fn cadaclysm_blacksmith_edge_count(solid: *const Solid) -> u32;
     fn cadaclysm_blacksmith_edge(solid: *const Solid, i: u32, out: *mut CadaclysmBlacksmithEdge) -> bool;
     fn cadaclysm_blacksmith_edge_curve(solid: *const Solid, i: u32, out: *mut CadaclysmBlacksmithCurve) -> bool;
+    fn cadaclysm_blacksmith_intersect(a: *const Solid, b: *const Solid, tolerance: f64, progress: Progress, user: *mut c_void) -> *mut Intersection;
+    fn cadaclysm_blacksmith_intersection_free(intersection: *mut Intersection);
+    fn cadaclysm_blacksmith_intersection_chain_count(intersection: *const Intersection) -> u32;
+    fn cadaclysm_blacksmith_intersection_chain(intersection: *const Intersection, i: u32, out: *mut CadaclysmBlacksmithChain) -> bool;
+    fn cadaclysm_blacksmith_intersection_curve(intersection: *const Intersection, i: u32, out: *mut CadaclysmBlacksmithCurve) -> bool;
+    fn cadaclysm_blacksmith_intersection_overlap_count(intersection: *const Intersection) -> u32;
+    fn cadaclysm_blacksmith_intersection_overlap(intersection: *const Intersection, i: u32, out: *mut CadaclysmBlacksmithOverlap) -> bool;
     fn cadaclysm_blacksmith_leaked_edges(solid: *const Solid, tolerance: f64) -> u32;
     fn cadaclysm_blacksmith_unpaired_edges(solid: *const Solid, tolerance: f64) -> u32;
     fn cadaclysm_blacksmith_manifold(solid: *const Solid, out: *mut u32) -> bool;
     fn cadaclysm_blacksmith_mesh(solid: *const Solid, tolerance: f64) -> CadaclysmBlacksmithMesh;
+    fn cadaclysm_blacksmith_mesh64(solid: *const Solid, tolerance: f64) -> CadaclysmBlacksmithMesh64;
     fn cadaclysm_blacksmith_mesh_face_triangles(solid: *const Solid, tolerance: f64) -> CadaclysmBlacksmithFaceTriangles;
     fn cadaclysm_blacksmith_edge_polylines(solid: *const Solid, tolerance: f64) -> CadaclysmBlacksmithPolylines;
     fn cadaclysm_blacksmith_bounds(solid: *const Solid, tolerance: f64, min: *mut f64, max: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_bounds64(solid: *const Solid, tolerance: f64, min: *mut f64, max: *mut f64) -> bool;
     fn cadaclysm_blacksmith_step(solids: *const *const Solid, count: usize, schema: *const c_char, unit: u32) -> *mut c_char;
     fn cadaclysm_blacksmith_sat_text(solids: *const *const Solid, count: usize, unit: u32) -> *mut c_char;
     fn cadaclysm_blacksmith_sat(solids: *const *const Solid, count: usize, path: *const c_char, unit: u32) -> bool;
@@ -417,6 +505,23 @@ entry_points! {
     fn cadaclysm_blacksmith_svg_options_init(options: *mut CadaclysmBlacksmithSvgOptions);
     fn cadaclysm_blacksmith_svg_text(solids: *const *const Solid, count: usize, options: *const CadaclysmBlacksmithSvgOptions) -> *mut c_char;
     fn cadaclysm_blacksmith_svg(solids: *const *const Solid, count: usize, path: *const c_char, options: *const CadaclysmBlacksmithSvgOptions) -> bool;
+    // The additive pair a drawing takes solids and profiles together through -- see
+    // `crate::blacksmith::svg_text_of`/`svg_of`.
+    fn cadaclysm_blacksmith_drawing_svg_text(
+        solids: *const *const Solid,
+        solid_count: usize,
+        profiles: *const *const Profile,
+        profile_count: usize,
+        options: *const CadaclysmBlacksmithSvgOptions
+    ) -> *mut c_char;
+    fn cadaclysm_blacksmith_drawing_svg(
+        solids: *const *const Solid,
+        solid_count: usize,
+        profiles: *const *const Profile,
+        profile_count: usize,
+        path: *const c_char,
+        options: *const CadaclysmBlacksmithSvgOptions
+    ) -> bool;
 }
 
 // ---- loading --------------------------------------------------------------------

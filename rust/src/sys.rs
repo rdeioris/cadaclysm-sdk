@@ -74,6 +74,14 @@ pub struct CadaclysmBounds {
     pub max: [f32; 3],
 }
 
+/// [`CadaclysmBounds`] in `double`: the same box, unnarrowed.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CadaclysmBounds64 {
+    pub min: [f64; 3],
+    pub max: [f64; 3],
+}
+
 #[repr(C)]
 pub struct CadaclysmAttribute {
     pub name: *const c_char,
@@ -95,6 +103,19 @@ pub struct CadaclysmMesh {
     pub index_count: u32,
 }
 
+/// [`CadaclysmMesh`] in `double`: the document's own mesh, lent as it is -- see the
+/// header. Colours stay `float`. Invalidated by [`crate::Scene::forget_meshes`].
+#[repr(C)]
+pub struct CadaclysmMesh64 {
+    pub positions: *const f64,
+    pub normals: *const f64,
+    pub uvs: *const f64,
+    pub colors: *const f32,
+    pub indices: *const u32,
+    pub vertex_count: u32,
+    pub index_count: u32,
+}
+
 #[repr(C)]
 pub struct CadaclysmPolylines {
     pub positions: *const f32,
@@ -107,6 +128,14 @@ pub struct CadaclysmPolylines {
 pub struct CadaclysmBeziers {
     pub points: *const f32,
     pub weights: *const f32,
+    pub count: u32,
+}
+
+/// [`CadaclysmBeziers`] in `double`: the same segments, unnarrowed.
+#[repr(C)]
+pub struct CadaclysmBeziers64 {
+    pub points: *const f64,
+    pub weights: *const f64,
     pub count: u32,
 }
 
@@ -217,6 +246,7 @@ entry_points! {
     fn cadaclysm_schema_read(scene: *const CadaclysmScene) -> *const c_char;
     fn cadaclysm_metres_per_unit(scene: *const CadaclysmScene) -> f64;
     fn cadaclysm_bounds(scene: *const CadaclysmScene) -> CadaclysmBounds;
+    fn cadaclysm_bounds64(scene: *const CadaclysmScene) -> CadaclysmBounds64;
     fn cadaclysm_node_parent(scene: *const CadaclysmScene, node: u32) -> u32;
     fn cadaclysm_node_child_count(scene: *const CadaclysmScene, node: u32) -> u32;
     fn cadaclysm_node_child(scene: *const CadaclysmScene, node: u32, index: u32) -> u32;
@@ -252,12 +282,14 @@ entry_points! {
     fn cadaclysm_placement_transform(scene: *const CadaclysmScene, placement: u32, out: *mut f64);
     fn cadaclysm_node_can_mesh(scene: *const CadaclysmScene, node: u32) -> bool;
     fn cadaclysm_node_mesh(scene: *const CadaclysmScene, node: u32) -> CadaclysmMesh;
+    fn cadaclysm_node_mesh64(scene: *const CadaclysmScene, node: u32) -> CadaclysmMesh64;
     fn cadaclysm_lod_levels() -> u32;
     fn cadaclysm_node_mesh_lod(scene: *const CadaclysmScene, node: u32, level: u32) -> CadaclysmMesh;
     fn cadaclysm_node_lod_error(scene: *const CadaclysmScene, node: u32, level: u32) -> f32;
     fn cadaclysm_node_collision(scene: *const CadaclysmScene, node: u32, hull_budget: u32, out: *mut CadaclysmCollision) -> bool;
     fn cadaclysm_node_collision_hull(scene: *const CadaclysmScene, node: u32, hull_budget: u32) -> CadaclysmCollisionHull;
     fn cadaclysm_node_bounds_placed(scene: *const CadaclysmScene, node: u32, placement: *const f64) -> CadaclysmBounds;
+    fn cadaclysm_node_bounds_placed64(scene: *const CadaclysmScene, node: u32, placement: *const f64) -> CadaclysmBounds64;
     fn cadaclysm_node_is_meshed(scene: *const CadaclysmScene, node: u32) -> bool;
     fn cadaclysm_node_surface_edges(scene: *const CadaclysmScene, node: u32) -> CadaclysmPolylines;
     fn cadaclysm_node_surface_isocurves(scene: *const CadaclysmScene, node: u32) -> CadaclysmPolylines;
@@ -271,6 +303,7 @@ entry_points! {
     fn cadaclysm_brep_layout_id() -> *const c_char;
     fn cadaclysm_surface_matrix(scene: *const CadaclysmScene, out: *mut f32);
     fn cadaclysm_node_bounds(scene: *const CadaclysmScene, node: u32) -> CadaclysmBounds;
+    fn cadaclysm_node_bounds64(scene: *const CadaclysmScene, node: u32) -> CadaclysmBounds64;
     fn cadaclysm_node_instance_of(scene: *const CadaclysmScene, node: u32) -> u32;
     fn cadaclysm_node_select_as(scene: *const CadaclysmScene, node: u32) -> u32;
     fn cadaclysm_node_generator(scene: *const CadaclysmScene, node: u32) -> *const c_char;
@@ -282,8 +315,11 @@ entry_points! {
     fn cadaclysm_node_curves(scene: *const CadaclysmScene, node: u32) -> CadaclysmPolylines;
     fn cadaclysm_node_isocurves(scene: *const CadaclysmScene, node: u32) -> CadaclysmPolylines;
     fn cadaclysm_node_edge_beziers(scene: *const CadaclysmScene, node: u32) -> CadaclysmBeziers;
+    fn cadaclysm_node_edge_beziers64(scene: *const CadaclysmScene, node: u32) -> CadaclysmBeziers64;
     fn cadaclysm_node_curve_beziers(scene: *const CadaclysmScene, node: u32) -> CadaclysmBeziers;
+    fn cadaclysm_node_curve_beziers64(scene: *const CadaclysmScene, node: u32) -> CadaclysmBeziers64;
     fn cadaclysm_node_isocurve_beziers(scene: *const CadaclysmScene, node: u32) -> CadaclysmBeziers;
+    fn cadaclysm_node_isocurve_beziers64(scene: *const CadaclysmScene, node: u32) -> CadaclysmBeziers64;
     fn cadaclysm_realize_all(scene: *const CadaclysmScene) -> u32;
     fn cadaclysm_realize_meshes(scene: *const CadaclysmScene, skip_surfaced: u32) -> u32;
     fn cadaclysm_realized(scene: *const CadaclysmScene) -> u32;

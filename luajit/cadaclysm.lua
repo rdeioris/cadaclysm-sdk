@@ -26,6 +26,16 @@ its scene, so the collector cannot free the scene under a view still reachable;
 an explicit `scene:close()` invalidates them all, as in Python. `mesh:copy()` makes
 memory of the caller's own.
 
+**`...64` in double.** `mesh64`, `edge_beziers64`, `curve_beziers64`,
+`isocurve_beziers64`, `bounds64` and `bounds_placed64` read the document's own
+`double` coordinates rather than the `float` a plain `mesh`/`bounds` narrows to --
+what a far-from-origin file needs. `mesh64`'s pointers are also borrowed, but from
+the document's mesh rather than the narrowed copy `mesh` keeps: `scene:forget_meshes()`
+frees what a held `Mesh64` points into (a held `Mesh` survives a forget, its own copy
+kept); `edge_beziers64`/`curve_beziers64`/`isocurve_beziers64` are unaffected by a
+forget, like their `float` twins. `mesh64:copy()` makes memory of the caller's own,
+safe past a forget or a close.
+
 **Indices are the ABI's.** `node.index` and the indices a Mesh holds count from
 zero, as the library does; the Lua arrays this module builds count from one.
 
@@ -204,7 +214,7 @@ local ENTRY_POINTS = {
   "cadaclysm_license_set", "cadaclysm_license_info", "cadaclysm_license_notice_count",
   "cadaclysm_open", "cadaclysm_open_memory", "cadaclysm_open_options_init", "cadaclysm_close",
   "cadaclysm_source_name", "cadaclysm_schema", "cadaclysm_schema_read",
-  "cadaclysm_metres_per_unit", "cadaclysm_bounds", "cadaclysm_diagnostic_count",
+  "cadaclysm_metres_per_unit", "cadaclysm_bounds", "cadaclysm_bounds64", "cadaclysm_diagnostic_count",
   "cadaclysm_diagnostic", "cadaclysm_node_count", "cadaclysm_root_count", "cadaclysm_root",
   "cadaclysm_query", "cadaclysm_realize_all", "cadaclysm_realized", "cadaclysm_realize_total",
   "cadaclysm_cancel", "cadaclysm_scene_save", "cadaclysm_surface_matrix",
@@ -215,7 +225,8 @@ local ENTRY_POINTS = {
   "cadaclysm_node_child_count", "cadaclysm_node_child", "cadaclysm_node_instance_of",
   "cadaclysm_node_select_as", "cadaclysm_node_attribute_count", "cadaclysm_node_attribute",
   "cadaclysm_node_can_mesh", "cadaclysm_node_save_mesh", "cadaclysm_node_color",
-  "cadaclysm_node_transform", "cadaclysm_node_bounds", "cadaclysm_node_mesh",
+  "cadaclysm_node_transform", "cadaclysm_node_bounds", "cadaclysm_node_bounds64", "cadaclysm_node_mesh",
+  "cadaclysm_node_mesh64",
   "cadaclysm_node_surfaces", "cadaclysm_node_brep",
   "cadaclysm_node_edges", "cadaclysm_node_curves", "cadaclysm_node_isocurves",
   "cadaclysm_brep_layout_id", "cadaclysm_brep_manifold", "cadaclysm_brep_release",
@@ -226,8 +237,9 @@ local ENTRY_POINTS = {
   "cadaclysm_forget_meshes",
   "cadaclysm_lod_levels", "cadaclysm_node_mesh_lod", "cadaclysm_node_lod_error",
   "cadaclysm_node_edge_beziers", "cadaclysm_node_curve_beziers", "cadaclysm_node_isocurve_beziers",
+  "cadaclysm_node_edge_beziers64", "cadaclysm_node_curve_beziers64", "cadaclysm_node_isocurve_beziers64",
   "cadaclysm_node_collision", "cadaclysm_node_collision_hull",
-  "cadaclysm_node_bounds_placed", "cadaclysm_node_is_meshed",
+  "cadaclysm_node_bounds_placed", "cadaclysm_node_bounds_placed64", "cadaclysm_node_is_meshed",
   "cadaclysm_node_surface_edges", "cadaclysm_node_surface_isocurves",
   "cadaclysm_node_surface_pick", "cadaclysm_node_surface_proxy_mesh",
   "cadaclysm_node_triangle_estimate", "cadaclysm_realize_meshes",
@@ -409,6 +421,12 @@ local function bounds(raw)
   }, Bounds)
 end
 
+-- `CadaclysmBounds64`'s fields are `double`, `CadaclysmBounds`'s `float`, but a Lua
+-- number is already as wide as a `double`: reading either costs nothing extra, so
+-- the same `Bounds` shape serves both -- this helper exists to read the `64` struct
+-- by name at each call site, matching the ABI's own `bounds64` naming.
+local function bounds64(raw) return bounds(raw) end
+
 --- Whether this is the all-zero box the ABI uses for "nothing here".
 function Bounds_get.is_empty(self)
   for i = 1, 3 do
@@ -536,6 +554,68 @@ local function mesh(scene, raw)
   }, Mesh)
 end
 
+--- `Mesh` in `double`: the document's own mesh, **lent as it is** -- `positions`,
+--- `normals` and `uvs` are `const double *`, three (two for `uvs`) a vertex, where
+--- `mesh` hands back a `float` copy of the same triangles (its `positions` are
+--- exactly these narrowed). For a caller that uses the mesh as geometry -- an
+--- exporter, a measurement, a solver -- and wants the file's own coordinates, which
+--- `float` cannot hold far from the origin. `colors` stays `const float *` (RGBA in
+--- 0..1 needs no more); `indices` is `const uint32_t *`, as `Mesh`'s.
+---
+--- **A `scene:forget_meshes()` frees what this points into**, unlike `Mesh`'s arrays,
+--- which are the library's own narrowed copy and survive a forget untouched. A
+--- `Mesh64` read before a forget must not be read after one; ask `node.mesh64` again.
+--- `:copy()` makes Lua tables of the caller's own, safe past a forget or a close.
+local Mesh64_get = {}
+---@class Mesh64
+---@field positions ffi.cdata*  const double *, 3 a vertex
+---@field normals ffi.cdata*|nil
+---@field uvs ffi.cdata*|nil  2 a vertex
+---@field colors ffi.cdata*|nil  RGBA, still float, 4 a vertex
+---@field indices ffi.cdata*  const uint32_t *, 3 a triangle
+---@field vertex_count integer
+---@field index_count integer
+local Mesh64 = class(Mesh64_get)
+M.Mesh64 = Mesh64
+
+function Mesh64_get.triangle_count(self) return math.floor(self.index_count / 3) end
+--- True for a node with no triangles (a curve, an assembly).
+function Mesh64_get.is_empty(self) return self.index_count == 0 or self.positions == nil end
+
+--- The position of vertex `i` (from zero), as three numbers.
+function Mesh64:position(i)
+  local p = self.positions
+  return p[3 * i], p[3 * i + 1], p[3 * i + 2]
+end
+
+--- The same triangles in memory of the caller's own, safe to outlive a forget or the scene.
+function Mesh64:copy()
+  local n = self.vertex_count
+  return setmetatable({
+    positions = owned(self.positions, "double", n * 3),
+    normals = owned(self.normals, "double", n * 3),
+    uvs = owned(self.uvs, "double", n * 2),
+    colors = owned(self.colors, "float", n * 4),
+    indices = owned(self.indices, "uint32_t", self.index_count),
+    vertex_count = n,
+    index_count = self.index_count,
+  }, Mesh64)
+end
+Mesh64.__tostring = function(m) return ("Mesh64(vertices=%d, triangles=%d)"):format(m.vertex_count, m.triangle_count) end
+
+local function mesh64(scene, raw)
+  return setmetatable({
+    scene = scene,
+    positions = null_to_nil(raw.positions),
+    normals = null_to_nil(raw.normals),
+    uvs = null_to_nil(raw.uvs),
+    colors = null_to_nil(raw.colors),
+    indices = null_to_nil(raw.indices),
+    vertex_count = raw.vertex_count,
+    index_count = raw.index_count,
+  }, Mesh64)
+end
+
 --- A node's feature edges or free curves, already flattened to points: `positions`
 --- is `const float *`, 3 a point, the runs end to end; `counts` is
 --- `const uint32_t *`, how long each run is. Borrowed from the scene.
@@ -637,6 +717,38 @@ local function beziers(scene, raw)
     weights = null_to_nil(raw.weights),
     count = raw.count,
   }, Beziers)
+end
+
+--- `Beziers` in `double`: `points` and `weights` are `const double *` over the same
+--- shape (four control points a curve, three doubles each; one weight a control
+--- point). Borrowed from the scene until it is closed, same as `Beziers` -- unlike
+--- `Mesh64`, a `scene:forget_meshes()` does not touch these (edges, curves and
+--- isocurves are not part of the mesh cache a forget drops). `:copy()` makes Lua
+--- tables of the caller's own.
+---@class Beziers64
+---@field points ffi.cdata*
+---@field weights ffi.cdata*
+---@field count integer
+local Beziers64 = {}
+Beziers64.__index = Beziers64
+M.Beziers64 = Beziers64
+Beziers64.__tostring = function(b) return ("Beziers64(count=%d)"):format(b.count) end
+
+--- The same curves as Lua tables of numbers, safe to keep after the scene closes.
+function Beziers64:copy()
+  local points, weights = {}, {}
+  for i = 0, self.count * 12 - 1 do points[i + 1] = self.points[i] end
+  for i = 0, self.count * 4 - 1 do weights[i + 1] = self.weights[i] end
+  return { points = points, weights = weights, count = self.count }
+end
+
+local function beziers64(scene, raw)
+  return setmetatable({
+    scene = scene,
+    points = null_to_nil(raw.points),
+    weights = null_to_nil(raw.weights),
+    count = raw.count,
+  }, Beziers64)
 end
 
 --- What a node turned out to be for a physics engine: a box, sphere, capsule or
@@ -812,7 +924,7 @@ end
 -- ---- meshlets --------------------------------------------------------------------
 
 --- A mesh split into meshlets, optionally with coarser levels above them, for a
---- mesh-shader or Nanite-style renderer. Built from any mesh and owned by you:
+--- mesh-shader or meshlet-based renderer. Built from any mesh and owned by you:
 --- `free()` it (the collector does otherwise).
 ---@class Meshlets
 ---@field count integer
@@ -1081,8 +1193,14 @@ function Node_get.raw_transform(self)
 end
 --- The extent of what it draws, in its own frame. Builds the geometry.
 function Node_get.bounds(self) return bounds(lib().cadaclysm_node_bounds(h(self), self.index)) end
+--- `bounds` in `double`: the same box, unnarrowed. Not part of the mesh cache, so
+--- unaffected by `scene:forget_meshes()`.
+function Node_get.bounds64(self) return bounds64(lib().cadaclysm_node_bounds64(h(self), self.index)) end
 --- Its triangles, in their own frame, built now if they have not been.
 function Node_get.mesh(self) return mesh(self.scene, lib().cadaclysm_node_mesh(h(self), self.index)) end
+--- `mesh` in `double`: the document's own mesh, lent as it is -- see `Mesh64`.
+--- Invalidated by `scene:forget_meshes()`, unlike `mesh`.
+function Node_get.mesh64(self) return mesh64(self.scene, lib().cadaclysm_node_mesh64(h(self), self.index)) end
 --- Its triangles at a coarser level of detail: 0 is `mesh` itself, 1 up to
 --- `lod_levels()` each about a quarter of the triangles of the one before, and past
 --- that empty. Every level shares the level-0 vertices (the same `positions`, only
@@ -1112,10 +1230,16 @@ end
 --- Its feature edges as cubic Bézier curves, exact where the file's curves were, where
 --- `edges` are their chords. Builds the geometry if needed.
 function Node_get.edge_beziers(self) return beziers(self.scene, lib().cadaclysm_node_edge_beziers(h(self), self.index)) end
+--- `edge_beziers` in `double`; see `Beziers64`.
+function Node_get.edge_beziers64(self) return beziers64(self.scene, lib().cadaclysm_node_edge_beziers64(h(self), self.index)) end
 --- Its free curves as cubic Béziers; see `edge_beziers`.
 function Node_get.curve_beziers(self) return beziers(self.scene, lib().cadaclysm_node_curve_beziers(h(self), self.index)) end
+--- `curve_beziers` in `double`; see `Beziers64`.
+function Node_get.curve_beziers64(self) return beziers64(self.scene, lib().cadaclysm_node_curve_beziers64(h(self), self.index)) end
 --- Its isocurves as cubic Béziers; see `edge_beziers`.
 function Node_get.isocurve_beziers(self) return beziers(self.scene, lib().cadaclysm_node_isocurve_beziers(h(self), self.index)) end
+--- `isocurve_beziers` in `double`; see `Beziers64`.
+function Node_get.isocurve_beziers64(self) return beziers64(self.scene, lib().cadaclysm_node_isocurve_beziers64(h(self), self.index)) end
 
 --- The collision body for what this node draws, building its mesh if it is not built.
 --- `hull_budget` is the most triangles a hull may have; 0 (the default) asks for the
@@ -1161,6 +1285,15 @@ function Node:bounds_placed(placement)
     m = ffi.new("double[16]", placement)
   end
   return bounds(lib().cadaclysm_node_bounds_placed(h(self), self.index, m))
+end
+--- `bounds_placed` in `double`; see `bounds64`.
+function Node:bounds_placed64(placement)
+  local m = nil
+  if placement ~= nil then
+    if #placement ~= 16 then fail("bounds_placed64: a placement is 16 numbers", 2) end
+    m = ffi.new("double[16]", placement)
+  end
+  return bounds64(lib().cadaclysm_node_bounds_placed64(h(self), self.index, m))
 end
 --- Whether its mesh has been built and is held.
 function Node_get.is_meshed(self) return lib().cadaclysm_node_is_meshed(h(self), self.index) end
@@ -1316,6 +1449,8 @@ end
 function Scene_get.metres_per_unit(self) return lib().cadaclysm_metres_per_unit(self:handle()) end
 --- Everything the model covers, in world coordinates. **Meshes all of it.**
 function Scene_get.bounds(self) return bounds(lib().cadaclysm_bounds(self:handle())) end
+--- `bounds` in `double`: the same union box, unnarrowed. **Meshes all of it**, as `bounds` does.
+function Scene_get.bounds64(self) return bounds64(lib().cadaclysm_bounds64(self:handle())) end
 --- What this file held that the reader could not build.
 function Scene_get.diagnostics(self)
   local L, handle, out = lib(), self:handle(), {}

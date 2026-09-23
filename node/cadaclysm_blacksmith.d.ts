@@ -80,8 +80,10 @@ export class Profile {
   static slot(centre: Point2, length: number, r: number): Profile;
   static polygon(points: Point2[]): Profile;
   static regularPolygon(centre: Point2, radius: number, sides: number, angle?: number): Profile;
+  static star(centre: Point2, outer: number, inner: number, points: number, angle?: number): Profile;
   static spline(points: Point2[], degree?: number, weights?: ArrayLike<number> | null, closed?: boolean): Profile;
   static path(start: Point2): Path;
+  static parabola(vertex: Point2, axis: Point2, focal: number, from: number, to: number): Path;
   static chain(pieces: Iterable<Profile>, tolerance?: number): Profile;
   static fromLoops(loops: Iterable<Profile>): Profile;
   closeLoop(): Profile;
@@ -92,14 +94,25 @@ export class Profile {
   withHole(hole: Profile): Profile;
   hits(other: Profile, tolerance?: number): Hit[];
   common(other: Profile, tolerance?: number): Profile[];
+  static text(text: string, size?: number, font?: string, halign?: 'left' | 'center' | 'right', valign?: 'baseline' | 'bottom' | 'center' | 'top', spacing?: number, direction?: 'ltr' | 'rtl', fontBytes?: Uint8Array | ArrayBuffer | null): Profile[];
   translate(dx: number, dy: number): Profile;
   round(radius: number, corners?: Iterable<number> | null, open?: boolean): Profile;
+  /** This profile's own loops as SVG text, from directly above by default (`view: 'top'`) -- a sketch lies in z = 0, so its own plane already is the page. */
+  svgText(options?: SvgOptions): string;
+  svgAsync(options?: SvgOptions): Promise<string>;
+  /** `svgText` written to `path` by the library itself. */
+  svg(path: string, options?: SvgOptions): void;
 }
 export class Path {
   constructor(start: Point2);
   lineTo(x: number, y: number): this;
   arcTo(x: number, y: number, centre: Point2, ccw?: boolean): this;
   bezierTo(c1: Point2, c2: Point2, to: Point2): this;
+  conicTo(x: number, y: number, control: Point2, weight: number): Path;
+  parabolaTo(x: number, y: number, control: Point2): Path;
+  hyperbolaTo(x: number, y: number, control: Point2, weight: number): Path;
+  parabolaByVertex(x: number, y: number, vertex: Point2): Path;
+  parabolaByFocus(x: number, y: number, focus: Point2): Path;
   nurbsTo(control: Point2[], knots: ArrayLike<number>, degree: number, weights?: ArrayLike<number> | null): this;
   end(): Profile;
   endOpen(): Profile;
@@ -119,7 +132,7 @@ export class SweepPath {
 export class Frame implements Iterable<number> {
   constructor(origin: Point3, x: Point3, y: Point3, z: Point3);
   static of(frame: FrameLike): Frame;
-  /** The plane midway between the planes of `a` and `b` -- Fusion's midplane. */
+  /** The plane midway between the planes of `a` and `b`. */
   static midplane(a: FrameLike, b: FrameLike): Frame;
   /** The plane through three points: origin `p`, x towards `q`, z the normal they turn about counter-clockwise. */
   static through(p: Point3, q: Point3, r: Point3): Frame;
@@ -154,6 +167,8 @@ export interface Manifold {
   isManifold: boolean; isClosed: boolean;
 }
 export interface SolidMesh { positions: Float32Array; normals: Float32Array; indices: Uint32Array; vertexCount: number; indexCount: number }
+/** `SolidMesh` in `double`: the same tessellation's own unnarrowed positions/normals. */
+export interface SolidMesh64 { positions: Float64Array; normals: Float64Array; indices: Uint32Array; vertexCount: number; indexCount: number }
 
 export class Solid {
   private constructor();
@@ -201,17 +216,56 @@ export class Solid {
   cutAsync(other: Solid, tolerance?: number, progress?: Progress | null): Promise<Solid>;
   commonAsync(other: Solid, tolerance?: number, progress?: Progress | null): Promise<Solid>;
   splitSheet(tool: Solid, tolerance?: number, progress?: Progress | null): Solid;
+  /**
+   * Where this solid's faces cross or coincide with `other`'s: chains along the curves the faces
+   * meet on (one per face pair per branch -- join them by matching ends) and overlaps where a face
+   * pair coincides. Neither solid is changed; no crossing is an empty result.
+   */
+  intersect(other: Solid, tolerance?: number, progress?: Progress | null): Intersection;
+  /**
+   * Where `profile`, placed on `frame`, pierces this solid's faces, and the pieces its loops cut
+   * into, as a `SolidHits`. Neither is changed.
+   *
+   * A point hit lies within `tolerance` of the segment's exact curve and of the face's exact
+   * surface, inside the face's trim; its profile spot (`aStart`: loop, segment, t) and face spot
+   * (`bStart`: face, u, v) evaluate to the point within `tolerance`; `touch` where the curve's
+   * tangent lies within 1e-3 (sine) of the surface's tangent plane there (a graze), false at a
+   * crossing. A run is a stretch of one segment lying within `tolerance` of one face and inside
+   * it, longer than `tolerance`. Hits within `tolerance` of each other merge (a hit at a segment
+   * join reported once, as `(k, t = 1)`; a closed loop's closing join reads `(0, 0)`).
+   * Every point is in world space (the frame applied).
+   *
+   * Pieces only for a closed body -- an open body has none -- in loop order, covering every loop
+   * exactly; a piece's spots read a segment join as the next segment's start `(k + 1, 0)`, and an
+   * open chain runs from `(0, 0)` to `(n - 1, 1)`; a loop no hit cuts is one closed piece.
+   * `inside` by the piece middle's winding number over the body's mesh; a piece lying on the
+   * surface is inside. Known limit: a segment passing within `tolerance` of a face without
+   * crossing its mesh can be missed (near-tangent grazes).
+   *
+   * `progress(phase, done, total)` hears `mesh`, `cull`, `hits` and `pieces`. Throws
+   * `BuildError` for a `tolerance` not positive and finite, a solid with no faces or that meshes
+   * to nothing, a profile with no segments, or a free-form segment that is not an evaluable
+   * NURBS curve.
+   */
+  hits(profile: Profile, frame: FrameLike, tolerance?: number, progress?: Progress | null): SolidHits;
   splitSheetAsync(tool: Solid, tolerance?: number, progress?: Progress | null): Promise<Solid>;
   readonly faces: number;
   faceKind(face: number): string;
   readonly bounds: [number[], number[]];
+  /** `bounds` in `double`: exact far from the origin. */
+  readonly bounds64: [number[], number[]];
   boundsAt(tolerance: number): [number[], number[]];
+  /** `boundsAt` in `double`, from the same tessellation's own unnarrowed positions. */
+  boundsAt64(tolerance: number): [number[], number[]];
   leakedEdges(tolerance?: number): number;
   unpairedEdges(tolerance?: number): number;
   isWatertight(tolerance?: number): boolean;
   readonly manifold: Manifold;
   mesh(tolerance?: number): SolidMesh;
+  /** `mesh` in `double`, from the same tessellation cache -- unnarrowed positions/normals. */
+  mesh64(tolerance?: number): SolidMesh64;
   meshAsync(tolerance?: number): Promise<SolidMesh>;
+  meshAsync64(tolerance?: number): Promise<SolidMesh64>;
   edgePolylines(tolerance?: number): Float32Array[];
   /**
    * `schema`: null/undefined (the kernel's built-in AP203); the path of a schema file
@@ -283,7 +337,7 @@ export class Selector {
   static index(i: number): Selector;
 }
 /**
- * One edge's exact curve, as plain data (`Edge.curve`): `kind` is `line`, `circle`, `ellipse` or `nurbs`.
+ * One edge's exact curve, as plain data (`Edge.curve`): `kind` is `line`, `circle`, `ellipse`, `parabola`, `hyperbola` or `nurbs`.
  *
  * `t0..t1` is the edge's parameter range on its own curve: a line's fraction (0..1 over
  * `origin -> origin + x`, where `x` is the full `to - from`, NOT unit -- so `point(t) = origin + x*t`);
@@ -302,6 +356,56 @@ export class Curve {
   origin: number[]; x: number[]; y: number[]; z: number[];
   radius: number; radius2: number; t0: number; t1: number;
   degree: number; knots: number[]; poles: number[][]; weights: number[] | null;
+}
+/** What `Solid.hits` found: `hits` (a on the profile, b on the solid's faces) and `pieces` (empty for an open body). */
+export class SolidHits {
+  private constructor();
+  hits: Hit[];
+  pieces: Piece[];
+}
+/**
+ * One stretch of a profile loop between two cuts: `inside` (a piece lying on the surface is
+ * inside), `start`/`end` profile spots, and `profile`, the piece's own open chain.
+ */
+export class Piece {
+  private constructor();
+  inside: boolean;
+  start: Spot; end: Spot;
+  profile: Profile;
+}
+/**
+ * What `Solid.intersect` found: `chains` (one per face pair per branch) and `overlaps` (one per
+ * coincident face pair). Both empty where the solids do not meet.
+ */
+export class Intersection {
+  private constructor();
+  chains: Chain[];
+  overlaps: Overlap[];
+}
+/**
+ * One branch of one face pair's crossing: `points` in walk order (a closed chain does not repeat
+ * its first point), `closed`, `faces` (`[face in a, face in b]`), `tangent` (the surfaces
+ * near-tangent along it, or the snap unsettled) and `curve`, its exact curve over the chain's own
+ * `t0..t1`, or null where the kernel found none. A chain may stop at a face boundary or a closed
+ * curve's seam and continue as another: join chains by matching ends.
+ */
+export class Chain {
+  private constructor();
+  points: number[][];
+  closed: boolean;
+  faces: [number, number];
+  tangent: boolean;
+  curve: Curve | null;
+}
+/**
+ * A coincident face pair: `faces` (`[face in a, face in b]`) and `loops`, the shared region's rings
+ * (outer first, holes after; each ring closed without repeating its first point) -- empty for a
+ * partial overlap whose outlines cross.
+ */
+export class Overlap {
+  private constructor();
+  faces: [number, number];
+  loops: number[][][];
 }
 export class Edge {
   private constructor();
@@ -353,6 +457,13 @@ export function writeSat(path: string, solids: Iterable<Solid>, unit?: Unit): vo
 /** Several solids as one `.brep`, each its own solid under one compound. */
 export function writeBrepText(solids: Iterable<Solid>): string;
 export function writeBrep(path: string, solids: Iterable<Solid>): void;
-/** Several solids' wireframes as one SVG, from the camera `options` describes. */
-export function writeSvgText(solids: Iterable<Solid>, options?: SvgOptions): string;
-export function writeSvg(path: string, solids: Iterable<Solid>, options?: SvgOptions): void;
+/** A `Solid` or a `Profile`: what `writeSvgText`/`writeSvg` draw, split by type before the call. */
+export type Drawable = Solid | Profile;
+/**
+ * The solids and profiles in `things` (any mix of `Solid` and `Profile`, in any order) as
+ * one SVG drawing -- a `<g id="solid-<i>">` per solid then a `<g id="profile-<i>">` per
+ * profile, from the camera `options` describes. A list of solids alone draws exactly as
+ * it always did.
+ */
+export function writeSvgText(things: Iterable<Drawable>, options?: SvgOptions): string;
+export function writeSvg(path: string, things: Iterable<Drawable>, options?: SvgOptions): void;

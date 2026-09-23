@@ -38,6 +38,14 @@ A raw pointer taken out *before* that is not checked -- take it again after
 any call that may re-mesh. `view:copy()` gives a plain Lua array that is always
 safe. Strings are copied on the way out.
 
+**`mesh64` and `bounds_at64`.** `Solid:mesh64` hands back the very same
+tessellation `Solid:mesh` does -- same cache, same generation, same `indices`
+view -- with `positions`/`normals` unnarrowed (`float64` views, not `float32`):
+exact far from the origin, where `mesh`'s are not. `Solid:bounds_at64` is
+`bounds_at` from those same unnarrowed positions. Both share `mesh`/`bounds_at`'s
+staleness rule: meshing again at a different tolerance stales every view from
+the tolerance before, `mesh64`'s included.
+
 **Indices are the ABI's.** A face or edge index, a `body`, a corner number
 counts from zero, exactly as Python's; the Lua arrays this module builds
 (`solid.edges`, `edge.faces`, `Frame` triples) count from one, as Lua does.
@@ -248,17 +256,22 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_license_notice_count", "cadaclysm_blacksmith_build_date", "cadaclysm_blacksmith_version",
   "cadaclysm_blacksmith_solid_free", "cadaclysm_blacksmith_profile_free", "cadaclysm_blacksmith_profile_rect",
   "cadaclysm_blacksmith_profile_circle", "cadaclysm_blacksmith_profile_slot",
-  "cadaclysm_blacksmith_profile_regular_polygon", "cadaclysm_blacksmith_profile_spline",
+  "cadaclysm_blacksmith_profile_regular_polygon", "cadaclysm_blacksmith_profile_star", "cadaclysm_blacksmith_profile_text",
+  "cadaclysm_blacksmith_profile_spline",
   "cadaclysm_blacksmith_profile_polygon", "cadaclysm_blacksmith_profile_with_hole",
   "cadaclysm_blacksmith_translate_profile", "cadaclysm_blacksmith_profile_hits", "cadaclysm_blacksmith_hits_free",
-  "cadaclysm_blacksmith_hit_count", "cadaclysm_blacksmith_hit", "cadaclysm_blacksmith_profile_common",
+  "cadaclysm_blacksmith_hit_count", "cadaclysm_blacksmith_hit", "cadaclysm_blacksmith_solid_profile_hits",
+  "cadaclysm_blacksmith_hits_piece_count", "cadaclysm_blacksmith_hits_piece", "cadaclysm_blacksmith_hits_piece_profile",
+  "cadaclysm_blacksmith_profile_common",
   "cadaclysm_blacksmith_profile_list_count", "cadaclysm_blacksmith_profile_list_get", "cadaclysm_blacksmith_profile_list_free",
   "cadaclysm_blacksmith_profile_round", "cadaclysm_blacksmith_profile_chain",
   "cadaclysm_blacksmith_profile_from_loops", "cadaclysm_blacksmith_profile_close_loop", "cadaclysm_blacksmith_profile_polylines",
   "cadaclysm_blacksmith_profile_piece_count", "cadaclysm_blacksmith_profile_piece", "cadaclysm_blacksmith_profile_trim_count",
   "cadaclysm_blacksmith_profile_trim_chain",
   "cadaclysm_blacksmith_path_begin", "cadaclysm_blacksmith_path_line_to", "cadaclysm_blacksmith_path_arc_to",
-  "cadaclysm_blacksmith_path_bezier_to", "cadaclysm_blacksmith_path_nurbs_to", "cadaclysm_blacksmith_path_end",
+  "cadaclysm_blacksmith_path_bezier_to", "cadaclysm_blacksmith_path_conic_to", "cadaclysm_blacksmith_path_parabola_by_vertex",
+  "cadaclysm_blacksmith_path_parabola_by_focus", "cadaclysm_blacksmith_path_parabola",
+  "cadaclysm_blacksmith_path_nurbs_to", "cadaclysm_blacksmith_path_end",
   "cadaclysm_blacksmith_path_end_open", "cadaclysm_blacksmith_path_free", "cadaclysm_blacksmith_cuboid",
   "cadaclysm_blacksmith_cylinder", "cadaclysm_blacksmith_cone", "cadaclysm_blacksmith_sphere",
   "cadaclysm_blacksmith_torus", "cadaclysm_blacksmith_wedge", "cadaclysm_blacksmith_extrude",
@@ -283,14 +296,18 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_select_face", "cadaclysm_blacksmith_face_frame", "cadaclysm_blacksmith_face_ref",
   "cadaclysm_blacksmith_find_face", "cadaclysm_blacksmith_coloured",
   "cadaclysm_blacksmith_colour", "cadaclysm_blacksmith_face_kind", "cadaclysm_blacksmith_edge_count",
-  "cadaclysm_blacksmith_edge", "cadaclysm_blacksmith_edge_curve", "cadaclysm_blacksmith_mesh", "cadaclysm_blacksmith_mesh_face_triangles",
+  "cadaclysm_blacksmith_edge", "cadaclysm_blacksmith_edge_curve", "cadaclysm_blacksmith_mesh", "cadaclysm_blacksmith_mesh64", "cadaclysm_blacksmith_mesh_face_triangles",
+  "cadaclysm_blacksmith_intersect", "cadaclysm_blacksmith_intersection_free", "cadaclysm_blacksmith_intersection_chain_count",
+  "cadaclysm_blacksmith_intersection_chain", "cadaclysm_blacksmith_intersection_curve",
+  "cadaclysm_blacksmith_intersection_overlap_count", "cadaclysm_blacksmith_intersection_overlap",
   "cadaclysm_blacksmith_edge_polylines",
-  "cadaclysm_blacksmith_bounds", "cadaclysm_blacksmith_leaked_edges", "cadaclysm_blacksmith_unpaired_edges",
+  "cadaclysm_blacksmith_bounds", "cadaclysm_blacksmith_bounds64", "cadaclysm_blacksmith_leaked_edges", "cadaclysm_blacksmith_unpaired_edges",
   "cadaclysm_blacksmith_manifold", "cadaclysm_blacksmith_step", "cadaclysm_blacksmith_sat_text",
   "cadaclysm_blacksmith_sat", "cadaclysm_blacksmith_brep_text", "cadaclysm_blacksmith_brep",
   "cadaclysm_blacksmith_string_free",
   "cadaclysm_blacksmith_from_brep", "cadaclysm_blacksmith_brep_layout_id",
   "cadaclysm_blacksmith_svg_options_init", "cadaclysm_blacksmith_svg_text", "cadaclysm_blacksmith_svg",
+  "cadaclysm_blacksmith_drawing_svg_text", "cadaclysm_blacksmith_drawing_svg",
 }
 
 local C
@@ -474,13 +491,14 @@ end
 
 -- The C callback for a Lua `progress(phase, done, total)`, or nil, and the
 -- function that takes the call's result back: it frees the callback and, if
--- `progress` raised, frees the result and raises that. A Lua error must never
--- unwind through the library's frames, so the callback catches it and the
--- raise waits until the call has returned.
-local function progress_callback(progress)
+-- `progress` raised, frees the result (with `free`, the solid free by default)
+-- and raises that. A Lua error must never unwind through the library's frames,
+-- so the callback catches it and the raise waits until the call has returned.
+local function progress_callback(progress, free)
   if progress == nil then
     return nil, function(result) return result end
   end
+  free = free or function(result) lib().cadaclysm_blacksmith_solid_free(result) end
   local raised
   local cb = ffi.cast("CadaclysmBlacksmithProgress", function(phase, done, total, _user)
     if raised ~= nil then return end
@@ -490,7 +508,7 @@ local function progress_callback(progress)
   return cb, function(result)
     cb:free()
     if raised ~= nil then
-      if result ~= nil then lib().cadaclysm_blacksmith_solid_free(result) end
+      if result ~= nil then free(result) end
       error(raised, 0)
     end
     return result
@@ -538,7 +556,7 @@ end
 -- ---- borrowed arrays -------------------------------------------------------------
 
 --- One block of a solid's cache: `pointer` (checked on every read), `shape`
---- (`{n, 3}` or `{m}`), `size` (elements), `dtype` ("float32"/"uint32"), and the
+--- (`{n, 3}` or `{m}`), `size` (elements), `dtype` ("float32"/"uint32"/"float64"), and the
 --- `solid` it borrows from. See the note at the top.
 local View = {}
 local View_get = {}
@@ -620,6 +638,23 @@ local function new_profile(handle, what)
   return setmetatable({ _handle = ffi.gc(handle, free_profile) }, Profile)
 end
 
+--- The profiles of a list the library handed back (nil: raise), each a handle of
+--- its own, the list freed.
+local function profile_list(h, what)
+  if h == nil then fail(what) end
+  local ok, result = pcall(function()
+    local n = lib().cadaclysm_blacksmith_profile_list_count(h)
+    local out = {}
+    for i = 0, n - 1 do
+      out[#out + 1] = new_profile(lib().cadaclysm_blacksmith_profile_list_get(h, i), "profile_list_get")
+    end
+    return out
+  end)
+  lib().cadaclysm_blacksmith_profile_list_free(h)
+  if not ok then error(result, 0) end
+  return result
+end
+
 local function profile_handle(p, what)
   if type(p) ~= "table" or getmetatable(p) ~= Profile then raise((what or "profile") .. ": expected a Profile, got " .. repr(p)) end
   return p._handle
@@ -658,6 +693,17 @@ function Profile.regular_polygon(centre, radius, sides, angle)
   return new_profile(lib().cadaclysm_blacksmith_profile_regular_polygon(cx, cy, radius, sides, angle))
 end
 
+--- A star of `points` tips (at least 3) on the circle of `outer` about
+--- `centre`, its inner corners on the circle of `inner` (positive, under
+--- `outer`), alternating: the first tip at `angle` radians (default 0) from the
+--- sketch's x axis, the rest counter-clockwise.
+function Profile.star(centre, outer, inner, points, angle)
+  if angle == nil then angle = 0.0 end
+  local cx, cy = pair(centre, "centre")
+  points = math.max(0, math.floor(number(points, "points")))
+  return new_profile(lib().cadaclysm_blacksmith_profile_star(cx, cy, outer, inner, points, angle))
+end
+
 --- A spline of `degree` (default 3) through the control polygon `points`
 --- (`weights` one per point, or nil). Open, it starts on the first point and
 --- ends on the last -- an open chain; `closed` true, it is periodic, smooth
@@ -681,6 +727,18 @@ end
 --- A `Path` starting at `start` ({x, y}), to draw an outline a segment at a time.
 function Profile.path(start)
   return M.Path.new(start)
+end
+
+--- Start drawing on the arc of the parabola with `vertex` ({vx, vy}), axis direction
+--- `axis` ({ax, ay}) and focal length `focal`, over the across-axis coordinates
+--- `from..to`: the path begins at the arc's first point and holds the arc -- a
+--- reflector from rim to rim, `Profile.parabola({0, 0}, {0, 1}, 20, -50, 50)` a dish
+--- 100 wide opening up.
+function Profile.parabola(vertex, axis, focal, from, to)
+  local vx, vy = pair(vertex, "vertex")
+  local ax, ay = pair(axis, "axis")
+  local h = checked(lib().cadaclysm_blacksmith_path_parabola(vx, vy, ax, ay, focal, from, to), "path_parabola")
+  return M.Path._from_handle(h)
 end
 
 --- Open profiles joined end to end into one -- the forge's merge. The pieces
@@ -809,19 +867,36 @@ end
 --- itself.
 function Profile:common(other, tolerance)
   if tolerance == nil then tolerance = 1e-6 end
-  local h = lib().cadaclysm_blacksmith_profile_common(self._handle, profile_handle(other, "common"), tolerance)
-  if h == nil then fail("profile_common") end
-  local ok, result = pcall(function()
-    local n = lib().cadaclysm_blacksmith_profile_list_count(h)
-    local out = {}
-    for i = 0, n - 1 do
-      out[#out + 1] = new_profile(lib().cadaclysm_blacksmith_profile_list_get(h, i), "profile_list_get")
-    end
-    return out
-  end)
-  lib().cadaclysm_blacksmith_profile_list_free(h)
-  if not ok then error(result, 0) end
-  return result
+  return profile_list(lib().cadaclysm_blacksmith_profile_common(self._handle, profile_handle(other, "common"), tolerance), "profile_common")
+end
+
+--- `text` set in a font, one profile per closed shape -- a letter with its
+--- counters as holes (`o` one, `8` two; `i` is two profiles) -- on the sketch
+--- plane, the baseline along x from the origin, each outline counter-clockwise
+--- and its holes clockwise, a curved side the font's own cubic Bezier kept
+--- exactly: an extruded `O` has curved walls. `size` (default 10) is roughly
+--- the height of a capital. `font` is a family, optionally with a style
+--- (`"Liberation Sans:style=Bold"`), a font file's path, or nil/empty for the
+--- bundled Liberation Sans Regular -- which also serves when the family is not
+--- found; `font_bytes` (a string of bytes) a font file's contents, used instead
+--- of `font` when given. `halign` is "left" (default), "center" or "right";
+--- `valign` "baseline" (default), "bottom", "center" or "top"; `spacing`
+--- (default 1) multiplies the gap between glyphs; `direction` "ltr" (default)
+--- or "rtl". Empty text is an empty table. Raises a BuildError for a size or
+--- spacing not positive and finite, an alignment or direction not one of those
+--- words, font bytes that are not a font.
+function Profile.text(text, size, font, halign, valign, spacing, direction, font_bytes)
+  if size == nil then size = 10.0 end
+  if spacing == nil then spacing = 1.0 end
+  local bytes, count = nil, 0
+  if font_bytes ~= nil then
+    bytes = ffi.cast("const uint8_t *", font_bytes)
+    count = #font_bytes
+  end
+  local h = lib().cadaclysm_blacksmith_profile_text(tostring(text), number(size, "size"), font == nil and "" or tostring(font),
+    bytes, count, halign == nil and "left" or tostring(halign), valign == nil and "baseline" or tostring(valign),
+    number(spacing, "spacing"), direction == nil and "ltr" or tostring(direction))
+  return profile_list(h, "profile_text")
 end
 
 --- This profile with its corners rounded by `radius`: where two straight
@@ -869,6 +944,11 @@ function Path.new(start)
   local x, y = pair(start, "start")
   local h = checked(lib().cadaclysm_blacksmith_path_begin(x, y), "path_begin")
   return setmetatable({ _handle = ffi.gc(h, free_path) }, Path)
+end
+
+-- A path already begun elsewhere (`Profile.parabola`'s starter), taking over its handle.
+function Path._from_handle(handle)
+  return setmetatable({ _handle = ffi.gc(handle, free_path) }, Path)
 end
 
 function Path:_live()
@@ -927,6 +1007,46 @@ function Path:nurbs_to(control, knots, degree, weights)
   local k = doubles(knots, #knots, "knots")
   local ok = lib().cadaclysm_blacksmith_path_nurbs_to(self:_live(), c, n, w, k, #knots, degree)
   return self:_step(ok, "path_nurbs_to")
+end
+
+--- A conic arc to (`x`, `y`) through the control point `control` ({cx, cy}) with
+--- middle weight `weight`: under 1 an elliptical arc, 1 a parabola, over 1 a
+--- hyperbola -- the rational quadratic Bezier, kept exact.
+function Path:conic_to(x, y, control, weight)
+  local cx, cy = pair(control, "control")
+  return self:_step(lib().cadaclysm_blacksmith_path_conic_to(self:_live(), x, y, cx, cy, weight), "path_conic_to")
+end
+
+--- A parabolic arc to (`x`, `y`) whose end tangents meet at `control`: `conic_to`
+--- with weight 1.
+function Path:parabola_to(x, y, control)
+  return self:conic_to(x, y, control, 1.0)
+end
+
+--- A hyperbolic arc to (`x`, `y`) through `control` with middle `weight` over 1.
+function Path:hyperbola_to(x, y, control, weight)
+  if not (weight > 1.0) then
+    raise("hyperbola_to: the weight must be over 1 (1 is a parabola, under 1 an ellipse)")
+  end
+  return self:conic_to(x, y, control, weight)
+end
+
+--- The parabolic arc to (`x`, `y`) with `vertex` ({vx, vy}): its axis and focal
+--- length solved from the two ends. Raises when no parabola with that vertex
+--- passes through both.
+function Path:parabola_by_vertex(x, y, vertex)
+  local vx, vy = pair(vertex, "vertex")
+  return self:_step(lib().cadaclysm_blacksmith_path_parabola_by_vertex(self:_live(), x, y, vx, vy), "path_parabola_by_vertex")
+end
+
+--- The parabolic arc to (`x`, `y`) with `focus` ({fx, fy}): of the two through the
+--- ends, the one whose vertex lies between the ends' projections, then the one whose
+--- arc cups the focus (the focus between the arc and its chord), then the more
+--- symmetric; with the focus beyond the chord that is the arch over the ends, not the
+--- shallow dish -- draw that one with `Profile.parabola`.
+function Path:parabola_by_focus(x, y, focus)
+  local fx, fy = pair(focus, "focus")
+  return self:_step(lib().cadaclysm_blacksmith_path_parabola_by_focus(self:_live(), x, y, fx, fy), "path_parabola_by_focus")
 end
 
 --- The path as it stands, without closing it: an open chain for `extrude_open`,
@@ -1123,6 +1243,16 @@ local function svg_options(words)
   return o
 end
 
+--- `words` with `view` defaulted to `"top"` instead of `svg_options`'s own `"iso"` --
+--- a profile lies in `z = 0`, so its own plane already is the page, unlike a solid's,
+--- which has no plane of its own to prefer. A copy: the caller's own table is never
+--- touched, and a `words.view` the caller did set (even `"iso"`) is kept as given.
+local function profile_svg_words(words)
+  local merged = { view = "top" }
+  for k, v in pairs(words or {}) do merged[k] = v end
+  return merged
+end
+
 -- ---- solids ---------------------------------------------------------------------------
 
 --- An exact B-rep solid (or open sheet). Immutable; every operation returns a
@@ -1133,7 +1263,7 @@ local Solid_get = {}
 class(Solid, Solid_get)
 M.Solid = Solid
 
-local Edge, Curve, Manifold, Selector
+local Edge, Curve, Intersection, Chain, Overlap, SolidHits, Piece, Manifold, Selector
 
 local function new_solid(handle, what)
   checked(handle, what or "solid")
@@ -1334,8 +1464,8 @@ function Solid.coil(profile, axis, pitch, turns)
   return new_solid(lib().cadaclysm_blacksmith_coil(profile_handle(profile), axis_arg(axis), pitch, turns))
 end
 
---- A circle of `radius` swept along `path`, square to its start -- Fusion's
---- Pipe: a rod, or with a positive `thickness` (default 0) a tube whose walls
+--- A circle of `radius` swept along `path`, square to its start: a
+--- rod, or with a positive `thickness` (default 0) a tube whose walls
 --- are that thick. `path` is only borrowed.
 function Solid.pipe(path, radius, thickness)
   if thickness == nil then thickness = 0.0 end
@@ -1590,6 +1720,111 @@ function Solid:split_sheet(tool, tolerance, progress)
   return new_solid(h)
 end
 
+--- Where this solid's faces cross or coincide with `other`'s, at `tolerance`
+--- (0.05), as an `Intersection`: `chains` along the curves the faces meet on and
+--- `overlaps` where a face pair coincides. Neither solid is changed; either may be
+--- an open sheet. No crossing is an empty result, never an error.
+---
+--- Each `Chain`'s points are within `tolerance` of both faces' exact surfaces;
+--- there is one chain per face pair per branch -- chains are not joined across a
+--- face boundary or a closed curve's seam, so join them by matching ends. A chain's
+--- `curve` is its exact curve where the kernel found one every point lies within
+--- `tolerance` of, else nil; `tangent` is set where the surfaces are near-tangent
+--- along the chain or the snap did not settle (the points are then the best
+--- estimate) -- a closed chain that does not go once round its own curve (a sliver
+--- where two surfaces barely cross) has no curve, `tangent` still true. An `Overlap`
+--- is a coincident face pair with the shared region's rings (outer first, holes
+--- after), which may be empty for a partial overlap whose outlines cross. Known
+--- limit: a crossing narrower than `tolerance` -- two surfaces passing within it
+--- without their meshes crossing -- can be missed; near-tangent contact is where
+--- this bites.
+---
+--- `progress(phase, done, total)` hears "mesh", "cull", "cross", "snap" and "curve".
+--- Raises for a `tolerance` not positive and finite, a solid with no faces, or one
+--- that meshes to nothing.
+function Solid:intersect(other, tolerance, progress)
+  if tolerance == nil then tolerance = 0.05 end
+  local a, b = self:_h(), solid_handle(other)
+  local L = lib()
+  local cb, done = progress_callback(progress, function(h) L.cadaclysm_blacksmith_intersection_free(h) end)
+  local h = done(L.cadaclysm_blacksmith_intersect(a, b, tolerance, cb, nil))
+  if h == nil then fail("intersect") end
+  local ok, result = pcall(function()
+    local chains, raw, raw_curve = {}, ffi.new("CadaclysmBlacksmithChain"), ffi.new("CadaclysmBlacksmithCurve")
+    for i = 0, L.cadaclysm_blacksmith_intersection_chain_count(h) - 1 do
+      if not L.cadaclysm_blacksmith_intersection_chain(h, i, raw) then fail("intersection_chain") end
+      local curve = nil
+      if raw.has_curve then
+        if not L.cadaclysm_blacksmith_intersection_curve(h, i, raw_curve) then fail("intersection_curve") end
+        curve = Curve.of(raw_curve)
+      end
+      chains[#chains + 1] = Chain.of(raw, curve)
+    end
+    local overlaps, raw_overlap = {}, ffi.new("CadaclysmBlacksmithOverlap")
+    for i = 0, L.cadaclysm_blacksmith_intersection_overlap_count(h) - 1 do
+      if not L.cadaclysm_blacksmith_intersection_overlap(h, i, raw_overlap) then fail("intersection_overlap") end
+      overlaps[#overlaps + 1] = Overlap.of(raw_overlap)
+    end
+    return Intersection.new(chains, overlaps)
+  end)
+  L.cadaclysm_blacksmith_intersection_free(h)
+  if not ok then error(result, 0) end
+  return result
+end
+
+--- Where `profile`, placed on `frame`, pierces this solid's faces, and the pieces
+--- its loops cut into, at `tolerance` (0.05), as a `SolidHits`. Neither is changed.
+---
+--- A point hit lies within `tolerance` of the segment's exact curve and of the
+--- face's exact surface, inside the face's trim; its profile spot (`a_start`:
+--- loop, segment, t) and face spot (`b_start`: face, u, v) evaluate to the point
+--- within `tolerance`; `touch` where the curve's tangent lies within 1e-3 (sine) of
+--- the surface's tangent plane there (a graze), false at a crossing. A run is a
+--- stretch of one segment lying within `tolerance` of one face and inside it,
+--- longer than `tolerance`. Hits within `tolerance` of each other merge (a hit at a
+--- segment join reported once, as (k, t = 1); a closed loop's closing join reads
+--- (0, 0)). Every point is in world space (the
+--- frame applied).
+---
+--- Pieces only for a closed body -- an open body has none -- in loop order,
+--- covering every loop exactly; a piece's spots read a segment join as the next
+--- segment's start (k + 1, 0), and an open chain runs from (0, 0) to (n - 1, 1); a
+--- loop no hit cuts is one closed piece. `inside` by the piece middle's winding
+--- number over the body's mesh; a piece lying on the surface is inside. Known
+--- limit: a segment passing within `tolerance` of a face without crossing its mesh
+--- can be missed (near-tangent grazes).
+---
+--- `progress(phase, done, total)` hears "mesh", "cull", "hits" and "pieces".
+--- Raises for a `tolerance` not positive and finite, a solid with no faces or that
+--- meshes to nothing, a profile with no segments, or a free-form segment that is
+--- not an evaluable NURBS curve.
+function Solid:hits(profile, frame, tolerance, progress)
+  if tolerance == nil then tolerance = 0.05 end
+  local s, p, f = self:_h(), profile_handle(profile, "hits"), frame_arg(frame)
+  local L = lib()
+  local cb, done = progress_callback(progress, function(h) L.cadaclysm_blacksmith_hits_free(h) end)
+  local h = done(L.cadaclysm_blacksmith_solid_profile_hits(s, p, f, tolerance, cb, nil))
+  if h == nil then fail("solid_profile_hits") end
+  local ok, result = pcall(function()
+    local hits, raw = {}, ffi.new("CadaclysmBlacksmithHit")
+    for i = 0, L.cadaclysm_blacksmith_hit_count(h) - 1 do
+      if not L.cadaclysm_blacksmith_hit(h, i, raw) then fail("hit") end
+      hits[#hits + 1] = M.Hit.of(raw)
+    end
+    local pieces = {}
+    local inside, start, end_ = ffi.new("bool[1]"), ffi.new("CadaclysmBlacksmithSpot"), ffi.new("CadaclysmBlacksmithSpot")
+    for i = 0, L.cadaclysm_blacksmith_hits_piece_count(h) - 1 do
+      if not L.cadaclysm_blacksmith_hits_piece(h, i, inside, start, end_) then fail("hits_piece") end
+      local own = new_profile(L.cadaclysm_blacksmith_hits_piece_profile(h, i), "hits_piece_profile")
+      pieces[#pieces + 1] = Piece.of(inside[0], start, end_, own)
+    end
+    return SolidHits.new(hits, pieces)
+  end)
+  L.cadaclysm_blacksmith_hits_free(h)
+  if not ok then error(result, 0) end
+  return result
+end
+
 -- -- asking
 
 --- How many faces the solid has.
@@ -1617,6 +1852,17 @@ end
 function Solid:bounds_at(tolerance)
   local lo, hi = ffi.new("double[3]"), ffi.new("double[3]")
   if not lib().cadaclysm_blacksmith_bounds(self:_h(), tolerance, lo, hi) then fail("bounds") end
+  self:_filled(tolerance)
+  return { { lo[0], lo[1], lo[2] }, { hi[0], hi[1], hi[2] } }
+end
+
+--- `bounds_at` from the same tessellation's unnarrowed positions: exact far from
+--- the origin, where `bounds_at`'s (widened from `float`) are not. Same cache as
+--- `bounds_at` and `mesh`/`mesh64` -- a second call at the same tolerance costs
+--- nothing extra.
+function Solid:bounds_at64(tolerance)
+  local lo, hi = ffi.new("double[3]"), ffi.new("double[3]")
+  if not lib().cadaclysm_blacksmith_bounds64(self:_h(), tolerance, lo, hi) then fail("bounds64") end
   self:_filled(tolerance)
   return { { lo[0], lo[1], lo[2] }, { hi[0], hi[1], hi[2] } }
 end
@@ -1672,6 +1918,21 @@ function Solid:mesh(tolerance)
   local n = m.vertex_count
   return view(self, generation, m.positions, { n, 3 }, "float32"),
     view(self, generation, m.normals, { n, 3 }, "float32"),
+    view(self, generation, m.indices, { m.index_count }, "uint32")
+end
+
+--- `mesh` in `double`: the very same tessellation at `tolerance` (default 0.05,
+--- same cache, same generation, same index view) with `positions`/`normals`
+--- unnarrowed -- three views (float64 (n, 3), float64 (n, 3), uint32 (m)). Exact
+--- far from the origin, where `mesh`'s `float` positions are not.
+function Solid:mesh64(tolerance)
+  if tolerance == nil then tolerance = 0.05 end
+  local m = lib().cadaclysm_blacksmith_mesh64(self:_h(), tolerance)
+  if m.positions == nil then fail("mesh64") end
+  local generation = self:_filled(tolerance)
+  local n = m.vertex_count
+  return view(self, generation, m.positions, { n, 3 }, "float64"),
+    view(self, generation, m.normals, { n, 3 }, "float64"),
     view(self, generation, m.indices, { m.index_count }, "uint32")
 end
 
@@ -1748,6 +2009,18 @@ end
 --- This solid written to an SVG file at `path`, by the library itself.
 function Solid:svg(path, words)
   M.write_svg(path, { self }, words)
+end
+
+--- This profile's own loops as SVG text, from the camera `words` describes, `view`
+--- defaulting to `"top"` -- see `profile_svg_words`. See `write_svg_text`.
+function Profile:svg_text(words)
+  return M.write_svg_text({ self }, profile_svg_words(words))
+end
+
+--- This profile written to an SVG file at `path`, by the library itself; see
+--- `Profile:svg_text` for the `top` default.
+function Profile:svg(path, words)
+  M.write_svg(path, { self }, profile_svg_words(words))
 end
 
 -- -- selecting and edges
@@ -1891,12 +2164,12 @@ function Solid:chamfer(edges, distance, tolerance)
 end
 
 --- Face `face` pushed out by `distance` along its outward normal (pulled in,
---- negative) the way Fusion and Rhino extrude a face: the prism joined on (cut
+--- negative) as a face extrude does it: the prism joined on (cut
 --- out) and the flush faces merged. A face on a cylinder, cone, sphere or torus
 --- moves out along its normal instead. `tolerance` (default 0.05) and `progress`
 --- as `join`'s.
 ---
---- `face` may be a list of faces, pushed together as Fusion's press-pull on a
+--- `face` may be a list of faces, pushed together as a press-pull on a
 --- selection: each by its own rule, one after another, each found again after the
 --- pushes before it renumbered the faces -- a box's top and a side pushed 5 is the
 --- box 5 taller and 5 wider. A face on the same curved surface as one before it, and
@@ -1915,7 +2188,7 @@ function Solid:push_pull(face, distance, tolerance, progress)
   return new_solid(h)
 end
 
---- This solid split by `tool` into bodies (a Lua array) -- Fusion's Split Body:
+--- This solid split by `tool` into bodies (a Lua array):
 --- a closed `tool` gives the parts outside it, then the parts inside; a flat
 --- sheet splits by the whole plane it lies on.
 function Solid:split(tool, tolerance, progress)
@@ -1959,7 +2232,7 @@ function Solid:lumps()
   return bodies
 end
 
---- The round `face` belongs to made again at `radius` -- Fusion's press-pull on
+--- The round `face` belongs to made again at `radius` -- a press-pull on
 --- a fillet face. `tolerance` defaults to 1e-6.
 function Solid:refillet(face, radius, tolerance)
   if tolerance == nil then tolerance = 1e-6 end
@@ -2002,7 +2275,7 @@ function Solid:shell(thickness, open, tolerance, progress)
   return new_solid(h)
 end
 
---- This sheet made a solid `thickness` thick -- Fusion's Thicken: its faces,
+--- This sheet made a solid `thickness` thick: its faces,
 --- their twins moved `thickness` along the normals, and a wall round every open
 --- edge. `tolerance` defaults to 1e-6; `progress` as `join`'s.
 function Solid:thicken(thickness, tolerance, progress)
@@ -2087,8 +2360,8 @@ end
 
 -- ---- plain records ------------------------------------------------------------------
 
---- One edge's exact curve, as plain data copied out (`Edge.curve`): `kind` is
---- "line", "circle", "ellipse" or "nurbs".
+--- One edge's, or one intersection chain's, exact curve as plain data copied out
+--- (`Edge.curve`, `Chain.curve`): `kind` is "line", "circle", "ellipse", "parabola", "hyperbola" or "nurbs".
 ---
 --- `t0..t1` is the edge's parameter range on its own curve: a line's fraction
 --- (0..1 over `origin -> origin + x`, where `x` is the full `to - from`, NOT unit
@@ -2264,6 +2537,103 @@ end
 --- `b_start`/`b_end` where on the second, as `Spot` records. A point at the
 --- join of two segments is reported once, on either: as segment k at `t` 1 or
 --- as segment k + 1 at `t` 0.
+-- `n` xyz triples at `at`, copied out as {x, y, z} triples.
+local function points_at(at, n)
+  local out = {}
+  if at ~= nil then
+    for k = 0, n - 1 do out[k + 1] = { tonumber(at[3 * k]), tonumber(at[3 * k + 1]), tonumber(at[3 * k + 2]) } end
+  end
+  return out
+end
+
+--- What `Solid:intersect` found, copied out: `chains` (one per face pair per
+--- branch) and `overlaps` (one per coincident face pair). Both empty where the
+--- solids do not meet.
+---@class Intersection
+---@field chains Chain[]
+---@field overlaps Overlap[]
+Intersection = {}
+class(Intersection)
+callable(Intersection)
+M.Intersection = Intersection
+
+function Intersection.new(chains, overlaps)
+  return setmetatable({ chains = chains, overlaps = overlaps }, Intersection)
+end
+
+Intersection.__tostring = function(self)
+  return ("Intersection(chains=%d, overlaps=%d)"):format(#self.chains, #self.overlaps)
+end
+
+--- One branch of one face pair's crossing (`Intersection.chains`): `points`
+--- ({x, y, z} triples in walk order; a closed chain does not repeat its first
+--- point), `closed`, `faces` ({face in a, face in b}, indices from zero), `tangent`
+--- (the surfaces near-tangent along it, or the snap unsettled -- the points their
+--- best estimate) and `curve`, its exact `Curve` over the chain's own `t0..t1`, or
+--- nil where the kernel found none. A chain may stop at a face boundary or a closed
+--- curve's seam and continue as another: join chains by matching ends.
+---@class Chain
+---@field points table[]  {{x, y, z}, ...}
+---@field closed boolean
+---@field faces integer[]  {face in a, face in b}, from zero
+---@field tangent boolean
+---@field curve Curve|nil
+Chain = {}
+class(Chain)
+callable(Chain)
+M.Chain = Chain
+
+function Chain.new(points, closed, faces, tangent, curve)
+  return setmetatable({ points = points, closed = closed, faces = faces, tangent = tangent, curve = curve }, Chain)
+end
+
+-- A `Chain` copied out of the library's struct, with its curve already read.
+function Chain.of(raw, curve)
+  return Chain.new(points_at(raw.points, tonumber(raw.point_count)), raw.closed,
+    { tonumber(raw.face_a), tonumber(raw.face_b) }, raw.tangent, curve)
+end
+
+Chain.__tostring = function(self)
+  return ("Chain(points=%d, closed=%s, faces=(%d, %d), tangent=%s, curve=%s)"):format(#self.points,
+    tostring(self.closed), self.faces[1], self.faces[2], tostring(self.tangent), tostring(self.curve))
+end
+
+--- A face of `a` and a face of `b` that coincide (`Intersection.overlaps`):
+--- `faces` ({face in a, face in b}, indices from zero) and `loops`, the shared
+--- region's rings as tables of {x, y, z} triples (outer first, holes after; each
+--- ring closed without repeating its first point) -- empty for a partial overlap
+--- whose outlines cross.
+---@class Overlap
+---@field faces integer[]  {face in a, face in b}, from zero
+---@field loops table[]  {{{x, y, z}, ...}, ...}
+Overlap = {}
+class(Overlap)
+callable(Overlap)
+M.Overlap = Overlap
+
+function Overlap.new(faces, loops)
+  return setmetatable({ faces = faces, loops = loops }, Overlap)
+end
+
+-- An `Overlap` copied out of the library's struct: ring `r` runs from
+-- `loop_offsets[r]` to the next start, the last to `point_count`.
+function Overlap.of(raw)
+  local points, n = points_at(raw.points, tonumber(raw.point_count)), tonumber(raw.loop_count)
+  local loops = {}
+  for r = 0, n - 1 do
+    local first = tonumber(raw.loop_offsets[r])
+    local last = r + 1 < n and tonumber(raw.loop_offsets[r + 1]) or tonumber(raw.point_count)
+    local ring = {}
+    for k = first + 1, last do ring[#ring + 1] = points[k] end
+    loops[r + 1] = ring
+  end
+  return Overlap.new({ tonumber(raw.face_a), tonumber(raw.face_b) }, loops)
+end
+
+Overlap.__tostring = function(self)
+  return ("Overlap(faces=(%d, %d), loops=%d)"):format(self.faces[1], self.faces[2], #self.loops)
+end
+
 ---@class Hit
 ---@field run boolean
 ---@field touch boolean
@@ -2293,6 +2663,56 @@ function Hit.of(raw)
   return Hit.new(raw.run, raw.touch, { tonumber(raw.start.x), tonumber(raw.start.y), tonumber(raw.start.z) },
     { tonumber(raw["end"].x), tonumber(raw["end"].y), tonumber(raw["end"].z) }, spot_of(raw.a_start),
     spot_of(raw.a_end), spot_of(raw.b_start), spot_of(raw.b_end))
+end
+
+--- What `Solid:hits` found, copied out: `hits` (`Hit` records ordered along the
+--- profile; `a_start`/`a_end` on the profile, `b_start`/`b_end` on the solid's
+--- faces: a `face` at (`u`, `v`)) and `pieces` (`Piece` records, empty for an open
+--- body).
+---@class SolidHits
+---@field hits Hit[]
+---@field pieces Piece[]
+SolidHits = {}
+class(SolidHits)
+callable(SolidHits)
+M.SolidHits = SolidHits
+
+function SolidHits.new(hits, pieces)
+  return setmetatable({ hits = hits, pieces = pieces }, SolidHits)
+end
+
+SolidHits.__tostring = function(self)
+  return ("SolidHits(hits=%d, pieces=%d)"):format(#self.hits, #self.pieces)
+end
+
+--- One stretch of a profile loop between two cuts (`SolidHits.pieces`): `inside`
+--- (by its middle's winding number over the body; a piece lying on the surface is
+--- inside), `start`/`end` (profile `Spot` records -- a segment join reads as the
+--- next segment's start (k + 1, 0), an open chain runs from (0, 0) to (n - 1, 1); a
+--- loop no hit cuts is one closed piece) and `profile`, the piece's own open chain
+--- (what `SweepPath.along` with `open` sweeps).
+---@class Piece
+---@field inside boolean
+---@field start Spot
+---@field end Spot
+---@field profile Profile
+Piece = {}
+class(Piece)
+callable(Piece)
+M.Piece = Piece
+
+function Piece.new(inside, start, end_, profile)
+  return setmetatable({ inside = inside, start = start, ["end"] = end_, profile = profile }, Piece)
+end
+
+-- A `Piece` copied out of the library's out-parameters, with its profile already read.
+function Piece.of(inside, start, end_, profile)
+  return Piece.new(inside, spot_of(start), spot_of(end_), profile)
+end
+
+Piece.__tostring = function(self)
+  return ("Piece(inside=%s, start=%s, end=%s)"):format(tostring(self.inside), tostring(self.start),
+    tostring(self["end"]))
 end
 
 Hit.__tostring = function(self)
@@ -2373,7 +2793,7 @@ function Frame.of(frame)
   return Frame.new(slice(v, 1, 3), slice(v, 4, 6), slice(v, 7, 9), slice(v, 10, 12))
 end
 
---- The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line -- Fusion's midplane.
+--- The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line.
 function Frame.midplane(a, b)
   local out = ffi.new("double[12]")
   if not lib().cadaclysm_blacksmith_frame_midplane(frame_arg(a), frame_arg(b), out) then fail("frame_midplane") end
@@ -2654,14 +3074,44 @@ end
 
 -- ---- SVG ----------------------------------------------------------------------------
 
---- Several solids (a Lua array) as one SVG's text, each its own `<g>` -- see
---- `Solid:svg_text` for `words`.
-function M.write_svg_text(solids, words)
+--- `things` (a Lua array, any mix of `Solid` and `Profile`, in any order) split into
+--- its solids and profiles, each in the order given -- what `write_svg_text`/`write_svg`
+--- draw together. Raises where an entry is neither, worded as every other binding's.
+local function drawables(things)
+  local solids, profiles = {}, {}
+  for _, t in ipairs(things) do
+    local meta = type(t) == "table" and getmetatable(t) or nil
+    if meta == Solid then
+      solids[#solids + 1] = t
+    elseif meta == Profile then
+      profiles[#profiles + 1] = t
+    else
+      raise("svg: only solids and profiles can be drawn")
+    end
+  end
+  return solids, profiles
+end
+
+--- Several solids and profiles (a Lua array, any mix, in any order) as one SVG's text,
+--- each its own `<g>` -- see `Solid:svg_text`/`Profile:svg_text` for `words`. A list of
+--- solids alone still draws exactly as it always did, through the same entry point;
+--- only a list that holds a profile calls the kernel's widened drawing pair, which
+--- refuses in the same words either way, so the two look identical from here.
+function M.write_svg_text(things, words)
   local o = svg_options(words)
+  local solids, profiles = drawables(things)
   local n = #solids
   local handles = ffi.new("const struct CadaclysmBlacksmithSolid *[?]", math.max(n, 1))
   for i = 1, n do handles[i - 1] = solid_handle(solids[i], "write_svg_text") end
-  local out = lib().cadaclysm_blacksmith_svg_text(handles, n, o)
+  local out
+  if #profiles == 0 then
+    out = lib().cadaclysm_blacksmith_svg_text(handles, n, o)
+  else
+    local pn = #profiles
+    local phandles = ffi.new("const struct CadaclysmBlacksmithProfile *[?]", math.max(pn, 1))
+    for i = 1, pn do phandles[i - 1] = profile_handle(profiles[i], "write_svg_text") end
+    out = lib().cadaclysm_blacksmith_drawing_svg_text(handles, n, phandles, pn, o)
+  end
   if out == nil then fail("svg_text") end
   local result = ffi.string(out)
   lib().cadaclysm_blacksmith_string_free(out)
@@ -2669,12 +3119,22 @@ function M.write_svg_text(solids, words)
 end
 
 --- `write_svg_text` written to `path` by the library itself.
-function M.write_svg(path, solids, words)
+function M.write_svg(path, things, words)
   local o = svg_options(words)
+  local solids, profiles = drawables(things)
   local n = #solids
   local handles = ffi.new("const struct CadaclysmBlacksmithSolid *[?]", math.max(n, 1))
   for i = 1, n do handles[i - 1] = solid_handle(solids[i], "write_svg") end
-  if not lib().cadaclysm_blacksmith_svg(handles, n, tostring(path), o) then fail("svg") end
+  local ok
+  if #profiles == 0 then
+    ok = lib().cadaclysm_blacksmith_svg(handles, n, tostring(path), o)
+  else
+    local pn = #profiles
+    local phandles = ffi.new("const struct CadaclysmBlacksmithProfile *[?]", math.max(pn, 1))
+    for i = 1, pn do phandles[i - 1] = profile_handle(profiles[i], "write_svg") end
+    ok = lib().cadaclysm_blacksmith_drawing_svg(handles, n, phandles, pn, tostring(path), o)
+  end
+  if not ok then fail("svg") end
 end
 
 return M

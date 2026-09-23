@@ -244,6 +244,40 @@ final class KernelTests: XCTestCase {
         XCTAssertTrue(try Profile.circle(1).hits(try Profile.circle(2).translate(10, 0)).isEmpty)
     }
 
+    func testALineThroughACuboidHitsTwiceAndCutsThreePieces() throws {
+        let box = try Solid.cuboid(10, 20, 30)
+        let line = try Profile.path([-20, 0]).lineTo(20, 0).endOpen()
+        let found = try box.hits(line, try Frame.xy())
+        XCTAssertEqual(found.description, "SolidHits(hits=2, pieces=3)")
+        XCTAssertEqual(found.hits.count, 2)
+        for (h, x) in zip(found.hits, [-5.0, 5.0]) {
+            XCTAssertFalse(h.run || h.touch)
+            XCTAssertEqual(h.start.x, x, accuracy: 0.05)
+            XCTAssertEqual(h.aStart.segment, 0)
+            XCTAssertEqual(h.aStart.face, UInt32.max)
+            XCTAssertNotEqual(h.bStart.face, UInt32.max)
+            XCTAssertTrue(h.bStart.u.isFinite && h.bStart.v.isFinite)
+        }
+        XCTAssertEqual(found.pieces.map { $0.inside }, [false, true, false])
+        let (first, middle, last) = (found.pieces[0], found.pieces[1], found.pieces[2])
+        XCTAssertEqual([first.start.t, last.end.t], [0, 1])
+        XCTAssertEqual([first.end.t, middle.end.t], [middle.start.t, last.start.t], "the pieces run head to tail")
+        let (lo, hi) = try Solid.extrudeOpen(middle.profile, try Frame.xy(), 1).bounds
+        XCTAssertEqual(lo.x, -5, accuracy: 0.05, "the middle piece starts on the box")
+        XCTAssertEqual(hi.x, 5, accuracy: 0.05, "the middle piece ends on the box")
+        _ = try SweepPath.along(middle.profile, try Frame.xy(), open: true)
+        // A loop no hit cuts is one piece, outside here; an open sheet has no pieces.
+        let far = try box.hits(try Profile.circle(1), try Frame.xy([100, 0, 0]))
+        XCTAssertTrue(far.hits.isEmpty)
+        XCTAssertEqual(far.pieces.map { $0.inside }, [false])
+        let sheet = try Solid.face(try Profile.rect(20, 20), try Frame.xy())
+        let across = try sheet.hits(try Profile.path([0, -20]).lineTo(0, 20).endOpen(), try Frame.xz())
+        XCTAssertFalse(across.hits.isEmpty)
+        XCTAssertTrue(across.pieces.isEmpty)
+        XCTAssertEqual(refusal { _ = try box.hits(line, try Frame.xy(), tolerance: 0) },
+                       "solid_profile_hits: tolerance must be positive and finite")
+    }
+
     func testTwoCirclesShareOneLensOfArcs() throws {
         let a = try Profile.circle(5)
         let b = try Profile.circle(5).translate(6, 0)
@@ -309,6 +343,53 @@ final class KernelTests: XCTestCase {
         }
     }
 
+    func testTwoCrossedPipesIntersectOnEllipseChainsAndCoaxialPipesOverlap() throws {
+        let tol = 1e-3
+        func offA(_ p: SIMD3<Double>) -> Double { abs((p.x * p.x + p.y * p.y).squareRoot() - 1) }
+        func offB(_ p: SIMD3<Double>) -> Double { abs((p.x * p.x + (p.z - 3) * (p.z - 3)).squareRoot() - 1) }
+        // Two equal pipes crossing at right angles: `a` up z, `b` along y through a's middle.
+        let a = try Solid.cylinder(1, 6)
+        let b = try Solid.cylinder(1, 6).rotate((origin: SIMD3(0, 0, 3), direction: SIMD3(1, 0, 0)), Double.pi / 2)
+        let (facesA, facesB) = (try a.faces, try b.faces)
+        let found = try a.intersect(b, tolerance: tol)
+        XCTAssertGreaterThanOrEqual(found.chains.count, 2, "the saddle splits into chains")
+        XCTAssertTrue(found.overlaps.isEmpty, "a transversal crossing has no coincident face pair")
+        var kinds: [String] = []
+        for c in found.chains {
+            XCTAssertTrue(c.faceA >= 0 && c.faceA < facesA && c.faceB >= 0 && c.faceB < facesB)
+            XCTAssertGreaterThanOrEqual(c.points.count, 2)
+            for p in c.points { XCTAssertTrue(offA(p) < 50 * tol && offB(p) < 50 * tol, "off a surface: \(p)") }
+            guard let curve = c.curve else { continue }
+            XCTAssertTrue(["ellipse", "nurbs"].contains(curve.kind), curve.description)
+            kinds.append(curve.kind)
+            if curve.kind == "ellipse" {
+                let t = (curve.t0 + curve.t1) / 2   // the curve's own point, mid-chain
+                let q = curve.origin + curve.x * curve.radius * cos(t) + curve.y * curve.radius2 * sin(t)
+                XCTAssertTrue(offA(q) < 50 * tol && offB(q) < 50 * tol, "the ellipse leaves the pipes: \(q)")
+            }
+            XCTAssertTrue(c.description.hasPrefix("Chain(points="))
+        }
+        XCTAssertTrue(kinds.contains("ellipse"), "two equal pipes cross on ellipses")
+        // Apart: nothing, and not an error. A bad tolerance is refused in the kernel's words.
+        let apart = try a.intersect(try b.translate(10, 0, 0))
+        XCTAssertTrue(apart.chains.isEmpty && apart.overlaps.isEmpty, apart.description)
+        XCTAssertTrue(refusal { _ = try a.intersect(b, tolerance: 0) }?.hasPrefix("intersect: tolerance must be positive and finite") ?? false)
+        // Two coaxial pipes overlapping in height share a wall band: rings on that wall.
+        let lower = try Solid.cylinder(1, 4)
+        let upper = try Solid.cylinder(1, 4).translate(0, 0, 2)
+        let (facesLower, facesUpper) = (try lower.faces, try upper.faces)
+        let shared = try lower.intersect(upper, tolerance: tol)
+        XCTAssertGreaterThanOrEqual(shared.overlaps.count, 1, "the overlapping wall band is an overlap")
+        let o = try XCTUnwrap(shared.overlaps.first)
+        XCTAssertTrue(o.faceA >= 0 && o.faceA < facesLower && o.faceB >= 0 && o.faceB < facesUpper)
+        XCTAssertGreaterThanOrEqual(o.loops.count, 1, "a coaxial wall band closes into rings")
+        for ring in o.loops {
+            XCTAssertGreaterThanOrEqual(ring.count, 3, "a ring is at least a triangle")
+            for p in ring { XCTAssertTrue(offA(p) < 50 * tol && p.z >= 2 - 50 * tol && p.z <= 4 + 50 * tol, "off the shared band: \(p)") }
+        }
+        XCTAssertEqual(o.description, "Overlap(faces=(\(o.faceA), \(o.faceB)), loops=\(o.loops.count))")
+    }
+
     func testProfilesAndPaths() throws {
         XCTAssertTrue(refusal { _ = try Profile.rect(0, 1) }?.hasPrefix("profile_rect: width and height must be positive") ?? false)
         let xy = try Frame.xy()
@@ -344,6 +425,23 @@ final class KernelTests: XCTestCase {
         XCTAssertEqual(try Solid.extrudeOpen(try Profile.spline(square, weights: [1, 2, 2, 1]), xy, 2).faces, 1)
         XCTAssertEqual(refusal { _ = try Profile.regularPolygon([0, 0], 10, 2) },
                        "profile_regular_polygon: a polygon has at least 3 sides, not 2")
+        // A five-pointed star: ten walls and two caps.
+        let star = try Solid.extrude(try Profile.star([0, 0], 10, 4, 5), xy, 2)
+        XCTAssertEqual(try star.faces, 12)
+        XCTAssertTrue(try star.isWatertight())
+        XCTAssertEqual(refusal { _ = try Profile.star([0, 0], 10, 10, 5) },
+                       "profile_star: the inner radius must be under the outer")
+        // Text: an `i` is two shapes and an `o` one; the `o` extrudes to a watertight ring
+        // with spline edges; an unknown family sets in the bundled face; bad bytes are refused.
+        let word = try Profile.text("io", size: 10)
+        XCTAssertEqual(word.count, 3)
+        let textRing = try Solid.extrude(word[2], xy, 2)
+        XCTAssertTrue(try textRing.isWatertight())
+        XCTAssertTrue(try textRing.edges.contains { $0.kind == "nurbs" })
+        XCTAssertEqual(try Profile.text("g", size: 10, font: "No Such Family Anywhere").count, 1)
+        XCTAssertEqual(try Profile.text("", size: 10).count, 0)
+        XCTAssertEqual(refusal { _ = try Profile.text("x", size: 0) }, "profile_text: the size must be positive and finite")
+        XCTAssertEqual(refusal { _ = try Profile.text("x", size: 10, fontBytes: [1, 2, 3]) }, "profile_text: the font bytes are not a font")
         XCTAssertEqual(refusal { _ = try Profile.spline(Array(square.prefix(2)), closed: true) },
                        "spline: a closed spline needs at least three points")
         XCTAssertEqual(try Solid.extrude(try Profile.fromLoops([try Profile.circle(4), try Profile.rect(30, 30)]), xy, 2)
@@ -654,6 +752,34 @@ final class KernelTests: XCTestCase {
                        "nurbs_to: 2 weights for 3 control points (the current point and 2 given); give one per point")
     }
 
+    func testAReflectorIsDrawnAndRevolvedFromAParabola() throws {
+        let xy = try Frame.xy()
+        // A dish 100 wide, focal length 20, opening up: from rim to rim on the parabola,
+        // closed by the rim line, revolved about the axis -- one NURBS wall, watertight.
+        let dish = try Profile.parabola(vertex: [0, 0], axis: [0, 1], focal: 20, from: 0, to: 50).lineTo(0, 31.25).lineTo(0, 0).end()
+        let bowl = try Solid.revolveInPlane(dish, xy, [0, 0], [0, 1], 2 * Double.pi)
+        XCTAssertTrue(try bowl.isWatertight())
+        XCTAssertTrue(try (0..<bowl.faces).contains { try bowl.faceKind($0) == "revolution" })
+        // The dish's own arc by vertex, closed by a second parabola through the same rim
+        // points with a focus beyond the chord -- the arch over the top, not the dish again
+        // (a focus at (0, 20) would rebuild the identical arc and retrace it, per
+        // `parabolaByFocus`'s own doc comment on this reflector).
+        let arch = try Profile.path([-50, 31.25]).parabolaByVertex(50, 31.25, vertex: [0, 0]).parabolaByFocus(-50, 31.25, focus: [0, 40]).end()
+        XCTAssertTrue(try Solid.extrude(arch, xy, 2).isWatertight())
+        // A conic with a quarter circle's weight; a parabola by its end tangents.
+        let quarter = try Profile.path([10, 0]).conicTo(0, 10, control: [10, 10], weight: cos(Double.pi / 4)).lineTo(0, 0).lineTo(10, 0).end()
+        XCTAssertEqual(try Solid.extrude(quarter, xy, 2).faces, 5)
+        let bump = try Profile.path([0, 0]).parabolaTo(10, 0, control: [5, 5]).lineTo(0, 0).end()
+        XCTAssertEqual(try Solid.extrude(bump, xy, 2).faces, 4)
+        XCTAssertNoThrow(try Profile.path([0, 0]).hyperbolaTo(10, 0, control: [5, 5], weight: 2).lineTo(0, 0).end())
+        XCTAssertEqual(refusal { _ = try Profile.path([0, 0]).conicTo(2, 0, control: [1, 0], weight: 1) },
+                       "path_conic_to: the control point lies on the chord")
+        XCTAssertEqual(refusal { _ = try Profile.path([0, 0]).hyperbolaTo(2, 0, control: [1, 1], weight: 1) },
+                       "hyperbola_to: the weight must be over 1 (1 is a parabola, under 1 an ellipse)")
+        XCTAssertEqual(refusal { _ = try Profile.parabola(vertex: [0, 0], axis: [0, 0], focal: 1, from: -1, to: 1) },
+                       "path_parabola: the axis direction is zero")
+    }
+
     func testStepTextAndFiles() throws {
         let plate = try Solid.extrude(try plateOutline(), try Frame.xy(), 6)
         let text = try plate.stepText()
@@ -701,6 +827,29 @@ final class KernelTests: XCTestCase {
 
         XCTAssertTrue(refusal { _ = try plate.svgText(SvgOptions(fov: 200)) }?.contains("fov") ?? false)
         XCTAssertNotNil(refusal { _ = try plate.svg(path, options: SvgOptions(margin: -1)) })
+
+        // A profile draws its own plane, top by default -- a sketch lies in z = 0, so its own
+        // plane already is the page, unlike a solid's default (`.iso`), which has no plane of
+        // its own to prefer. Pinned against an explicit iso view, not just checked non-empty:
+        // a top default silently left at iso would make the two calls equal.
+        let outline = try plateOutline()
+        let profileText = try outline.svgText()
+        XCTAssertTrue(profileText.hasPrefix("<svg"))
+        XCTAssertTrue(profileText.contains("<path"))
+        XCTAssertNotEqual(profileText, try outline.svgText(SvgOptions(view: .iso)))
+        let profilePath = FileManager.default.temporaryDirectory.appendingPathComponent("kernel-tests-svg-profile-\(UUID()).svg").path
+        defer { try? FileManager.default.removeItem(atPath: profilePath) }
+        try outline.svg(profilePath)
+        XCTAssertTrue(try String(contentsOfFile: profilePath, encoding: .utf8).hasPrefix("<svg"))
+
+        // The module writer draws a solid and a profile together, one <g> per drawable.
+        let mixed = try Blacksmith.writeSvgText([plate], [outline])
+        XCTAssertTrue(mixed.contains("id=\"solid-0\""))
+        XCTAssertTrue(mixed.contains("id=\"profile-0\""))
+        let mixedPath = FileManager.default.temporaryDirectory.appendingPathComponent("kernel-tests-svg-mixed-\(UUID()).svg").path
+        defer { try? FileManager.default.removeItem(atPath: mixedPath) }
+        try Blacksmith.writeSvg(mixedPath, [plate], [outline])
+        XCTAssertTrue(try String(contentsOfFile: mixedPath, encoding: .utf8).hasPrefix("<svg"))
     }
 
     func testMeshViewsAndTheirCopies() throws {
@@ -753,5 +902,44 @@ final class KernelTests: XCTestCase {
         XCTAssertTrue(coarse.isStale, "bounds fill the same cache")
         XCTAssertTrue(fine.isStale, "back at 0.05 is a new filling: the first view's memory is gone")
         XCTAssertFalse(try plate.mesh(tolerance: 0.05).isStale)
+    }
+
+    func testMesh64AndBounds64AgreeWithF32OnSmallCoordinates() throws {
+        // Catches mesh64's normals wired to the wrong pointer (e.g. raw.positions reused for
+        // normals too): the far test below never inspects normals, only positions and bounds.
+        let plate = try Solid.extrude(try plateOutline(), try Frame.xy(), 6)
+        let mesh = try plate.mesh(tolerance: 0.05)
+        let mesh64 = try plate.mesh64(tolerance: 0.05)
+        XCTAssertEqual(mesh64.vertexCount, mesh.vertexCount)
+        XCTAssertEqual(mesh64.indexCount, mesh.indexCount)
+        XCTAssertEqual(Array(mesh64.indices), Array(mesh.indices), "one tessellation, one index buffer")
+        XCTAssertEqual(Float(mesh64.positions[0]), mesh.positions[0], "the f32 mesh is the f64 one narrowed")
+        XCTAssertEqual(Float(mesh64.normals[0]), mesh.normals[0])
+
+        let (lo, hi) = try plate.bounds
+        let (lo64, hi64) = try plate.bounds64
+        assertClose(lo64, lo)
+        assertClose(hi64, hi)
+        let (loAt, hiAt) = try plate.boundsAt(0.05)
+        let (loAt64, hiAt64) = try plate.boundsAt64(0.05)
+        assertClose(loAt64, loAt)
+        assertClose(hiAt64, hiAt)
+    }
+
+    func testMesh64AndBounds64KeepACoordinateFarFromTheOrigin() throws {
+        // A small cuboid at the origin cannot tell mesh64 from mesh widened, both narrowing
+        // losslessly there; moved far away only mesh64/bounds64 can keep -2600001.987654321.
+        let far = try Solid.cuboid(2, 2, 2).translate(1000000.123456789, -2600000.987654321, 450.5)
+        let m32 = try far.mesh(tolerance: 0.05)
+        let m64 = try far.mesh64(tolerance: 0.05)
+        XCTAssertEqual(Array(m64.indices), Array(m32.indices), "one tessellation, one index buffer")
+        XCTAssertEqual(m64.vertexCount, m32.vertexCount)
+        let ys = (0..<m64.vertexCount).map { m64.positions[$0 * 3 + 1] }
+        XCTAssertTrue(ys.contains { abs($0 - -2_600_001.987654321) < 1e-6 }, "\(ys)")
+        XCTAssertTrue(ys.contains { abs(Double(Float($0)) - $0) > 1e-3 },
+                     "mesh64 carries no coordinate float cannot hold, so this test cannot tell mesh64 from mesh widened")
+
+        let (lo64, _) = try far.boundsAt64(0.05)
+        XCTAssertEqual(lo64.y, -2_600_001.987654321, accuracy: 1e-6)
     }
 }
