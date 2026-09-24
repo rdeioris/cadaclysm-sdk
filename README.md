@@ -8,10 +8,12 @@ modelling kernel (`cadaclysm_blacksmith`) beside it.
 Everything in this repository is Apache-2.0. The libraries themselves are
 proprietary, owned by Blitter S.r.l. and Roberto De Ioris, attached to each
 [release](../../releases) under [EULA.md](EULA.md):
-no license is needed to try it -- unlicensed, everything works and a notice
-is printed on every open and export; per-seat licenses (developers) and
-per-server licenses (machines processing files unattended for others) at
-<https://cadaclysm.blitter.studio/license>.
+no license is needed to build, test or evaluate with it -- unlicensed,
+everything works and a notice is printed on every open and export. A license
+is for production: per product (an application you ship or use in-house), per
+server (a machine you pay for, processing files unattended for others) or per
+website (the WebAssembly builds), Startup or Standard, at
+<https://cadaclysm.blitter.studio/pricing.html>.
 
 ## Install
 
@@ -78,8 +80,8 @@ the reader's (`cadaclysm_blacksmith.license()`, `Blacksmith.License`,
 
 writes it here: the key is the one in your purchase email, and this drops
 `cadaclysm.lic` beside `fetch.py` for the searches above to find. Re-run it
-whenever the license changes -- a renewal, a seat added through the customer
-portal -- to pick up the new file the same way.
+whenever the license changes -- a renewal, a unit or a plan changed through the
+customer portal -- to pick up the new file the same way.
 
 ## Languages
 
