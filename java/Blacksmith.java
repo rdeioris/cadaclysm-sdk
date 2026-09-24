@@ -147,6 +147,15 @@ public final class Blacksmith {
             ValueLayout.JAVA_INT.withName("point_count"),
             ValueLayout.JAVA_INT.withName("polyline_count"));
 
+    /** {@code CadaclysmBlacksmithColours}: one colour per edge polyline, three doubles each
+     *  ({@code -1} where the polyline is on no coloured edge); {@code rgb} null and {@code count}
+     *  0 where the solid has no edge paint. Trailing padding the same shape as {@link
+     *  #FACE_TRIANGLES}'s: a pointer then one {@code u32} rounds up to 16 bytes. */
+    private static final MemoryLayout COLOURS = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("rgb"),
+            ValueLayout.JAVA_INT.withName("count"),
+            MemoryLayout.paddingLayout(4));
+
     /** {@code CadaclysmBlacksmithEdge}: one edge, borrowed from its solid. */
     private static final MemoryLayout EDGE = MemoryLayout.structLayout(
             ValueLayout.ADDRESS.withName("kind"),
@@ -281,7 +290,9 @@ public final class Blacksmith {
             SWEEP_PATH_LINE_TO, SWEEP_PATH_ARC, SWEEP_PATH_ALONG, SWEEP_PATH_FREE, SWEEP, SWEEP_OPEN,
             EXTRUDE_FACES, FACE, FACE_SHEET, DROP_FACES, PLACE, TRANSLATE, ROTATE, MIRROR, JOIN, CUT,
             COMMON, SPLIT_SHEET, TRIM, FILLET, CHAMFER,
-            SHELL, THICKEN, PUSH_PULL, PUSH_PULL_FACES, MERGE_FLUSH, REFILLET, UNFILLET, RECHAMFER, UNCHAMFER, COIL, PIPE, SPLIT, SPLIT_BY_PLANE, LUMP_COUNT, LUMP, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_REF, FIND_FACE, FACE_KIND, COLOURED, COLOUR, EDGE_COUNT, EDGE_AT, EDGE_CURVE, INTERSECT, INTERSECTION_FREE, INTERSECTION_CHAIN_COUNT, INTERSECTION_CHAIN, INTERSECTION_CURVE, INTERSECTION_OVERLAP_COUNT, INTERSECTION_OVERLAP, MESH_AT, MESH_FACE_TRIANGLES,
+            SHELL, THICKEN, PUSH_PULL, PUSH_PULL_FACES, MERGE_FLUSH, REFILLET, UNFILLET, RECHAMFER, UNCHAMFER, COIL, PIPE, SPLIT, SPLIT_BY_PLANE, LUMP_COUNT, LUMP, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_REF, FIND_FACE, FACE_KIND, COLOURED, COLOUR,
+            PROFILE_COLOURED, PROFILE_COLOUR, EDGES_COLOURED, EDGE_COLOUR, EDGE_POLYLINE_COLOURS,
+            EDGE_COUNT, EDGE_AT, EDGE_CURVE, INTERSECT, INTERSECTION_FREE, INTERSECTION_CHAIN_COUNT, INTERSECTION_CHAIN, INTERSECTION_CURVE, INTERSECTION_OVERLAP_COUNT, INTERSECTION_OVERLAP, MESH_AT, MESH_FACE_TRIANGLES,
             EDGE_POLYLINES, BOUNDS, LEAKED_EDGES, UNPAIRED_EDGES, MANIFOLD, STEP, SAT_TEXT, SAT, BREP_TEXT, BREP, STRING_FREE, FROM_BREP,
             BREP_LAYOUT_ID, SVG_OPTIONS_INIT, SVG_TEXT, SVG, DRAWING_SVG_TEXT, DRAWING_SVG,
             MESH_AT64, BOUNDS64;
@@ -416,6 +427,11 @@ public final class Blacksmith {
         FACE_KIND = bind(linker, lib, "cadaclysm_blacksmith_face_kind", FunctionDescriptor.of(A, A, I));
         COLOURED = bind(linker, lib, "cadaclysm_blacksmith_coloured", FunctionDescriptor.of(A, A, I, D, D, D));
         COLOUR = bind(linker, lib, "cadaclysm_blacksmith_colour", FunctionDescriptor.of(B, A, I, A));
+        PROFILE_COLOURED = bind(linker, lib, "cadaclysm_blacksmith_profile_coloured", FunctionDescriptor.of(A, A, D, D, D));
+        PROFILE_COLOUR = bind(linker, lib, "cadaclysm_blacksmith_profile_colour", FunctionDescriptor.of(B, A, A));
+        EDGES_COLOURED = bind(linker, lib, "cadaclysm_blacksmith_edges_coloured", FunctionDescriptor.of(A, A, A, L, D, D, D));
+        EDGE_COLOUR = bind(linker, lib, "cadaclysm_blacksmith_edge_colour", FunctionDescriptor.of(B, A, I, A));
+        EDGE_POLYLINE_COLOURS = bind(linker, lib, "cadaclysm_blacksmith_edge_polyline_colours", FunctionDescriptor.of(COLOURS, A, D));
         EDGE_COUNT = bind(linker, lib, "cadaclysm_blacksmith_edge_count", FunctionDescriptor.of(I, A));
         EDGE_AT = bind(linker, lib, "cadaclysm_blacksmith_edge", FunctionDescriptor.of(B, A, I, A));
         EDGE_CURVE = bind(linker, lib, "cadaclysm_blacksmith_edge_curve", FunctionDescriptor.of(B, A, I, A));
@@ -1501,6 +1517,31 @@ public final class Blacksmith {
             try {
                 MemorySegment h = handle();
                 return new Profile(call(() -> (MemorySegment) TRANSLATE_PROFILE.invokeExact(h, dx, dy)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** This outline coloured ({@code r}, {@code g}, {@code b}), each in 0..1: how it is drawn.
+         *  The verbs that make a profile from one carry it; a solid made from it takes nothing. */
+        public Profile coloured(double r, double g, double b) {
+            try {
+                MemorySegment h = handle();
+                return new Profile(call(() -> (MemorySegment) PROFILE_COLOURED.invokeExact(h, r, g, b)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The outline's colour as {r, g, b} in 0..1, or null. */
+        public double[] colour() {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
+                MemorySegment h = handle();
+                boolean ok = call(() -> (boolean) PROFILE_COLOUR.invokeExact(h, out));
+                if (ok) return out.toArray(ValueLayout.JAVA_DOUBLE);
+                if (!lastError().isEmpty()) throw failure("profile_colour");
+                return null;
             } finally {
                 keep(this);
             }
@@ -3399,6 +3440,86 @@ public final class Blacksmith {
                 if (ok) return out.toArray(ValueLayout.JAVA_DOUBLE);
                 if (!lastError().isEmpty()) throw failure("colour");
                 return null;
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** This solid with every edge coloured ({@code r}, {@code g}, {@code b}). Inherited as face
+         *  colours are: a move keeps every one, a boolean or a fillet gives each edge the colour of
+         *  the input edge it lies on, a new edge the all-edges one. */
+        public Solid edgesColoured(double r, double g, double b) {
+            return edgesColouredAt(MemorySegment.NULL, 0, r, g, b);
+        }
+
+        /** This solid with {@code edges} (by index, as {@link #fillet(int[], double, double)} takes
+         *  them) coloured, a colour that wins over the all-edges one; an empty list colours none. */
+        public Solid edgesColoured(int[] edges, double r, double g, double b) {
+            int[] which = indices(edges);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment list = arena.allocateFrom(ValueLayout.JAVA_INT, which);
+                return edgesColouredAt(list, which.length, r, g, b);
+            }
+        }
+
+        /** {@link #edgesColoured(int[], double, double, double)} by {@link Edge}. */
+        public Solid edgesColoured(Collection<Edge> edges, double r, double g, double b) {
+            return edgesColoured(indicesOf(edges), r, g, b);
+        }
+
+        private Solid edgesColouredAt(MemorySegment list, long count, double r, double g, double b) {
+            try {
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) EDGES_COLOURED.invokeExact(h, list, count, r, g, b)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Edge {@code edge}'s colour as drawn -- its own, else the solid's edge colour -- or null. */
+        public double[] edgeColour(int edge) {
+            int at = index(edge);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
+                MemorySegment h = handle();
+                boolean ok = call(() -> (boolean) EDGE_COLOUR.invokeExact(h, at, out));
+                if (ok) return out.toArray(ValueLayout.JAVA_DOUBLE);
+                if (!lastError().isEmpty()) throw failure("edge_colour");
+                return null;
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #edgePolylineColours(double)} at 0.05. */
+        public double[][] edgePolylineColours() {
+            return edgePolylineColours(0.05);
+        }
+
+        /** A colour per polyline of {@link #edgePolylines(double)} at the same tolerance, as drawn:
+         *  {r, g, b}, or null for a polyline on no coloured edge; an empty array where the solid has
+         *  no edge paint at all. Copied out. */
+        @SuppressWarnings("restricted") // reinterpret: `count` says how far `rgb` reaches.
+        public double[][] edgePolylineColours(double tolerance) {
+            try (Arena arena = Arena.ofConfined()) {
+                SegmentAllocator allocator = arena;
+                MemorySegment h = handle();
+                MemorySegment raw = call(() -> (MemorySegment) EDGE_POLYLINE_COLOURS.invokeExact(allocator, h, tolerance));
+                MemorySegment rgb = raw.get(ValueLayout.ADDRESS, offset(COLOURS, "rgb"));
+                int count = raw.get(ValueLayout.JAVA_INT, offset(COLOURS, "count"));
+                if (rgb.address() == 0 && !lastError().isEmpty()) throw failure("edge_polyline_colours");
+                // This call tessellates like every other cache reader, even to report "no
+                // paint": it can replace the cache a view taken earlier is still borrowing, so
+                // it must bump the generation those views check, even though this method
+                // copies its own result out and keeps nothing borrowed itself.
+                filled(tolerance);
+                if (rgb.address() == 0) return new double[0][];
+                double[] values = rgb.reinterpret(3L * count * Double.BYTES).toArray(ValueLayout.JAVA_DOUBLE);
+                double[][] out = new double[count][];
+                for (int i = 0; i < count; i++) {
+                    out[i] = values[3 * i] < 0 ? null : new double[] { values[3 * i], values[3 * i + 1], values[3 * i + 2] };
+                }
+                return out;
             } finally {
                 keep(this);
             }

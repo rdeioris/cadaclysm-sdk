@@ -415,6 +415,21 @@ var pinTop = coloured.FaceColour(coloured.SelectFace(Selector.Max(Axis.Z)));
 Console.WriteLine($"colour={string.Join(",", coloured.Colour ?? [])} pin top={string.Join(",", pinTop ?? [])}");
 if (!(coloured.Colour ?? []).SequenceEqual([0.8, 0.6, 0.4]) || !(pinTop ?? []).SequenceEqual([0.2, 0.4, 1.0]) || plate.Colour is not null)
     return Fail("the colours did not carry through the join");
+// Edge and profile colour: all of a plate's edges gold, then edge 0 blue over it; a profile
+// carries its own colour too.
+using var goldEdges = plate.EdgesColoured(0.8, 0.6, 0.4);
+using var blueEdge = goldEdges.EdgesColoured(0.2, 0.4, 1.0, new[] { 0 });
+using var goldRect = Profile.Rect(10, 4).Coloured(0.8, 0.6, 0.4);
+var edgeColours = blueEdge.EdgePolylineColours();
+Console.WriteLine($"edge 0={string.Join(",", blueEdge.EdgeColour(0) ?? [])} edge 1={string.Join(",", blueEdge.EdgeColour(1) ?? [])} polylines={edgeColours.Length} rect={string.Join(",", goldRect.Colour ?? [])}");
+if (!(blueEdge.EdgeColour(0) ?? []).SequenceEqual([0.2, 0.4, 1.0]) || !(blueEdge.EdgeColour(1) ?? []).SequenceEqual([0.8, 0.6, 0.4])
+    || edgeColours.Length == 0 || !(goldRect.Colour ?? []).SequenceEqual([0.8, 0.6, 0.4]) || plate.EdgeColour(0) is not null)
+    return Fail("edge or profile colours");
+// An empty edges list colours no edge -- not "every edge" (which null would mean) -- so edge 0
+// stays blue and edge 1 stays gold.
+using var untouched = blueEdge.EdgesColoured(0.1, 0.1, 0.1, Array.Empty<int>());
+if (!(untouched.EdgeColour(0) ?? []).SequenceEqual([0.2, 0.4, 1.0]) || !(untouched.EdgeColour(1) ?? []).SequenceEqual([0.8, 0.6, 0.4]))
+    return Fail("an empty edge list should colour nothing");
 // A face: the outline as a sheet, which pushed out is the plate again.
 using var sheet = Solid.Face(outline, [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]);
 using var pushed = sheet.ExtrudeFaces(6);

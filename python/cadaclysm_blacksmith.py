@@ -107,7 +107,7 @@ __all__ = [
 ]
 
 # This file's own version (the workspace's); `version()` is the loaded library's.
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 NONE = 0xFFFFFFFF
 UNITS = {"m": 0, "mm": 1, "in": 2}
@@ -217,6 +217,10 @@ class _Mesh64(ctypes.Structure):
 class _Polylines(ctypes.Structure):
     _fields_ = [("points", POINTER(c_float)), ("offsets", POINTER(c_uint32)),
                 ("point_count", c_uint32), ("polyline_count", c_uint32)]
+
+
+class _Colours(ctypes.Structure):
+    _fields_ = [("rgb", POINTER(c_double)), ("count", c_uint32)]
 
 
 class _FaceTriangles(ctypes.Structure):
@@ -452,6 +456,11 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_frame_through", c_bool, [_D, _D, _D, _D]),
     ("cadaclysm_blacksmith_coloured", _SOLID, [_SOLID, c_uint32, c_double, c_double, c_double]),
     ("cadaclysm_blacksmith_colour", c_bool, [_SOLID, c_uint32, _D]),
+    ("cadaclysm_blacksmith_profile_coloured", _PROFILE, [_PROFILE, c_double, c_double, c_double]),
+    ("cadaclysm_blacksmith_profile_colour", c_bool, [_PROFILE, _D]),
+    ("cadaclysm_blacksmith_edges_coloured", _SOLID, [_SOLID, _U, c_size_t, c_double, c_double, c_double]),
+    ("cadaclysm_blacksmith_edge_colour", c_bool, [_SOLID, c_uint32, _D]),
+    ("cadaclysm_blacksmith_edge_polyline_colours", _Colours, [_SOLID, c_double]),
     ("cadaclysm_blacksmith_face_kind", c_char_p, [_SOLID, c_uint32]),
     ("cadaclysm_blacksmith_edge_count", c_uint32, [_SOLID]),
     ("cadaclysm_blacksmith_edge", c_bool, [_SOLID, c_uint32, POINTER(_Edge)]),
@@ -530,7 +539,7 @@ class _WasmLibrary:
     # for everything else
     _BOOLS = {"path_line_to", "path_arc_to", "path_bezier_to", "path_nurbs_to", "path_conic_to",
               "path_parabola_by_vertex", "path_parabola_by_focus", "sweep_path_line_to",
-              "sweep_path_arc", "slant_of_plane", "face_frame", "face_ref", "frame_midplane", "frame_through", "bounds", "bounds64", "edge", "colour", "manifold", "license_set",
+              "sweep_path_arc", "slant_of_plane", "face_frame", "face_ref", "frame_midplane", "frame_through", "bounds", "bounds64", "edge", "colour", "profile_colour", "edge_colour", "manifold", "license_set",
               "hit", "edge_curve", "intersection_chain", "intersection_curve", "intersection_overlap", "hits_piece",
               "fem_mesh_view", "fem_mesh_edge", "fem_mesh_vertex", "fem_mesh_open_edge", "fem_mesh_folded_edge",
               # its wasm export always throws ("the wasm writes no file"); `FemMesh.save_msh`
@@ -540,7 +549,7 @@ class _WasmLibrary:
               "fem_mesh_save_msh"}
     _FAILS = {"select_face": NONE, "leaked_edges": NONE, "unpaired_edges": NONE,
               "mesh": _Mesh(), "mesh64": _Mesh64(), "mesh_face_triangles": _FaceTriangles(), "edge_polylines": _Polylines(),
-              "profile_polylines": _Polylines()}
+              "profile_polylines": _Polylines(), "edge_polyline_colours": _Colours()}
     # results that C writes into an out-array of doubles at this position, and the
     # wasm returns as a typed array (`bounds` fills two, `edge` a record: see `_back`)
     _OUT = {"slant_of_plane": 3, "face_frame": 2, "face_ref": 2, "frame_midplane": 2, "frame_through": 3}
@@ -549,7 +558,7 @@ class _WasmLibrary:
     # the out-arguments above
     _DROP = {"profile_polygon": (1,), "path_nurbs_to": (2, 5), "join": (4,), "cut": (4,), "common": (4,),
              "split_sheet": (4,), "trim": (5,), "drop_faces": (2,), "profile_round": (3,), "profile_spline": (1,), "profile_chain": (1,), "profile_from_loops": (1,), "profile_piece_count": (2,), "profile_piece": (2,), "profile_trim_count": (2,), "profile_trim_chain": (2,), "loft_through": (2,), "loft_through_open": (2,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "thicken": (4,), "push_pull": (5,), "push_pull_faces": (2, 6), "split": (4,), "split_by_plane": (4,), "step": (1,), "step_assembly": (2, 5), "sat_text": (1,), "brep_text": (1,), "profile_text": (4,),
-             "slant_of_plane": (3,), "face_frame": (2,), "face_ref": (2,), "bounds": (2, 3), "bounds64": (2, 3), "edge": (2,), "colour": (2,), "manifold": (1,), "hit": (2,), "edge_curve": (2,),
+             "slant_of_plane": (3,), "face_frame": (2,), "face_ref": (2,), "bounds": (2, 3), "bounds64": (2, 3), "edge": (2,), "colour": (2,), "profile_colour": (1,), "edges_coloured": (2,), "edge_colour": (2,), "manifold": (1,), "hit": (2,), "edge_curve": (2,),
              "intersect": (4,), "intersection_chain": (2,), "intersection_curve": (2,), "intersection_overlap": (2,), "svg_text": (1,), "drawing_svg_text": (1, 3),
              "solid_profile_hits": (5,), "hits_piece": (2, 3, 4),
              # `fem_mesh`'s index counts the tuple `call` rewrites below, not the C call's:
@@ -799,11 +808,14 @@ class _WasmLibrary:
             for at, name in ((2, "a"), (3, "b"), (4, "brep_edge")):
                 args[at]._obj.value = int(getattr(result, name))
             return True
-        if short == "colour":   # the three doubles, or null where there is no colour: C's `false`
+        if short in ("colour", "profile_colour", "edge_colour"):   # three doubles, or null where there is no colour: C's `false`
             if result is None:
                 return False
-            args[2][0:3] = [float(v) for v in result]
+            out = args[1] if short == "profile_colour" else args[2]
+            out[0:3] = [float(v) for v in result]
             return True
+        if short == "edge_polyline_colours":   # the `Float64Array`, under the C struct's names
+            return _JsColours(result)
         if short == "manifold":   # eight counts, into C's `uint32_t` out-array
             args[1][0:8] = [int(v) for v in result]
             return True
@@ -841,6 +853,15 @@ class _JsArrays:
             self.vertex_count, self.index_count = len(self.positions) // 3, len(self.indices)
         if hasattr(self, "points"):
             self.point_count, self.polyline_count = len(self.points) // 3, len(self.offsets) - 1
+
+
+class _JsColours:
+    """An `edge_polyline_colours` result: the typed array as `rgb`, and `count` (`rgb` is
+    falsy when empty, as the C struct's null pointer is)."""
+
+    def __init__(self, js_array):
+        self.rgb = js_array if len(js_array) else None
+        self.count = len(js_array) // 3
 
 
 _library = None
@@ -1366,6 +1387,23 @@ class Profile:
 
     def translate(self, dx, dy) -> "Profile":
         return Profile(_lib().cadaclysm_blacksmith_translate_profile(self._handle, dx, dy))
+
+    def coloured(self, colour) -> "Profile":
+        """This outline coloured -- `colour` is "#rgb", "#rrggbb" or (r, g, b) in
+        0..1: how it is drawn. The verbs that make a profile from one carry it; a
+        solid made from it takes nothing (colour a solid with `Solid.coloured`)."""
+        r, g, b = _rgb(colour)
+        return Profile(_lib().cadaclysm_blacksmith_profile_coloured(self._handle, r, g, b))
+
+    @property
+    def colour(self) -> "tuple[float, float, float] | None":
+        """The outline's colour, (r, g, b) in 0..1, or None."""
+        out = (c_double * 3)()
+        if _lib().cadaclysm_blacksmith_profile_colour(self._handle, out):
+            return tuple(out)
+        if _text(_lib().cadaclysm_blacksmith_last_error()):
+            _fail("profile_colour")
+        return None
 
     def round(self, radius, corners=None, open=False) -> "Profile":  # noqa: A002, A003
         """This profile with its corners rounded by `radius`: where two straight
@@ -2489,6 +2527,44 @@ class Solid:
         """`face`'s colour as drawn -- its own, else the solid's -- or None."""
         return self._colour(self._face_or_none(face, "colour"))
 
+    def edges_coloured(self, colour, edges=None) -> "Solid":
+        """This solid with its edges coloured -- every edge, or with `edges` (`Edge`
+        objects or their indices, as `fillet` takes them) just those, whose colour
+        then wins over the all-edges one. An empty list colours no edge. A rigid
+        move keeps every edge colour; a boolean, fillet, chamfer or shell gives each
+        edge the colour of the input edge it lies on, and a new edge (a cut's rim, a
+        round's edges) the all-edges colour."""
+        r, g, b = _rgb(colour)
+        if edges is None:
+            return Solid(_lib().cadaclysm_blacksmith_edges_coloured(self._h(), None, 0, r, g, b))
+        which = [e.index if isinstance(e, Edge) else int(e) for e in edges]
+        arr = (c_uint32 * len(which))(*which)
+        return Solid(_lib().cadaclysm_blacksmith_edges_coloured(self._h(), arr, len(which), r, g, b))
+
+    def edge_colour(self, edge) -> "tuple[float, float, float] | None":
+        """Edge `edge`'s colour as drawn -- its own, else the solid's edge colour -- or None."""
+        index = edge.index if isinstance(edge, Edge) else operator.index(edge)
+        out = (c_double * 3)()
+        if _lib().cadaclysm_blacksmith_edge_colour(self._h(), index, out):
+            return tuple(out)
+        if _text(_lib().cadaclysm_blacksmith_last_error()):
+            _fail("edge_colour")
+        return None
+
+    def edge_polyline_colours(self, tolerance=0.05) -> "list[tuple[float, float, float] | None]":
+        """A colour per polyline of `edge_polylines(tolerance)`, as drawn: (r, g, b),
+        or None for a polyline on no coloured edge; an empty list where the solid has
+        no edge paint at all. Copied out -- but it fills the solid's cache at
+        `tolerance` first, exactly as `edge_polylines` does, so a view taken at
+        another tolerance stops being valid."""
+        c = _lib().cadaclysm_blacksmith_edge_polyline_colours(self._h(), tolerance)
+        if not c.rgb:
+            if _text(_lib().cadaclysm_blacksmith_last_error()):
+                _fail("edge_polyline_colours")
+            return []
+        values = [float(c.rgb[i]) for i in range(3 * c.count)]
+        return [None if values[3 * i] < 0 else (values[3 * i], values[3 * i + 1], values[3 * i + 2]) for i in range(c.count)]
+
     def _face_or_none(self, face, what: str) -> int:
         if face is None:
             return NONE
@@ -3549,11 +3625,14 @@ def _schema_text(schema):
 
 
 def write_step_text(solids, schema=None, unit="mm") -> str:
-    """`schema` is one of four things: `None` (the kernel's built-in AP203); the
+    """`schema` is one of four things: `None` (the kernel's built-in AP203, or AP242
+    when any solid or face is coloured -- AP203 has no colour entities); the
     path of a schema file (a string or `Path` with no newline in it, naming an
     existing file), read and sent as EXPRESS text; the bare name of a built-in
     schema (case-insensitive, e.g. `"AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF"`
-    -- an unknown name raises `BuildError`); or a custom schema's own EXPRESS text."""
+    -- an unknown name raises `BuildError`); or a custom schema's own EXPRESS text.
+    Colours (`coloured`) are written as STEP styling where the schema has it, so
+    `Node.colour` reads them back; a named schema without it writes the solids bare."""
     if unit not in UNITS:
         raise BuildError(f"unit must be one of {sorted(UNITS)}")
     handles = (c_void_p * len(solids))(*[s._h() for s in solids])
@@ -3569,7 +3648,7 @@ def write_step_text(solids, schema=None, unit="mm") -> str:
 
 
 def write_step(path, solids, schema=None, unit="mm") -> None:
-    """One STEP file (AP203 unless `schema` names another), each solid its own body.
+    """One STEP file (AP203 unless `schema` names another, AP242 if coloured), each solid its own body.
     `schema` as `write_step_text`."""
     _FsPath(path).write_text(write_step_text(solids, schema, unit), encoding="utf-8")
 

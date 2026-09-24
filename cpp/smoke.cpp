@@ -960,6 +960,67 @@ static Result<std::pair<bs::Solid, std::uint32_t>> solids() {
     CADACLYSM_TRY(plain_colour, plain.colour());
     EXPECT(!plain_colour, "an uncoloured solid has a colour");
 
+    // Profile colour: read back, carried by translate, not carried into a solid, the
+    // original left untouched, and an out-of-range triple refused.
+    CADACLYSM_TRY(outline_colour_before, outline.colour());
+    EXPECT(!outline_colour_before, "outline has a colour before anything coloured it");
+    CADACLYSM_TRY(gold_outline, outline.coloured({0.8, 0.6, 0.4}));
+    CADACLYSM_TRY(gold_outline_colour, gold_outline.colour());
+    EXPECT(gold_outline_colour == (bs::Vec3{0.8, 0.6, 0.4}), "profile coloured did not read back");
+    CADACLYSM_TRY(outline_colour_after, outline.colour());
+    EXPECT(!outline_colour_after, "coloured() on outline reached back into outline itself");
+    CADACLYSM_TRY(moved_outline, gold_outline.translate(1, 1));
+    CADACLYSM_TRY(moved_outline_colour, moved_outline.colour());
+    EXPECT(moved_outline_colour == gold_outline_colour, "a profile's colour did not carry through translate");
+    CADACLYSM_TRY(colour_frame, bs::Frame::xy());
+    CADACLYSM_TRY(extruded_from_gold, bs::Solid::extrude(gold_outline, colour_frame, 3));
+    CADACLYSM_TRY(extruded_colour, extruded_from_gold.colour());
+    EXPECT(!extruded_colour, "a profile's colour reached the solid extruded from it");
+    auto bad_profile_colour = outline.coloured({2, 0, 0});
+    EXPECT(!bad_profile_colour && bad_profile_colour.error().message == "profile_coloured: r, g and b must be in 0..1",
+           "profile coloured did not refuse a component out of 0..1");
+
+    // Edge colour: every edge, an override on some (which wins), an empty list colouring
+    // none, and edge_polyline_colours aligned with edge_polylines.
+    CADACLYSM_TRY(cube, bs::Solid::cuboid(10, 10, 10));
+    CADACLYSM_TRY(no_edge_colour, cube.edge_colour(0));
+    EXPECT(!no_edge_colour, "an uncoloured cube edge has a colour");
+    CADACLYSM_TRY(no_polyline_colours, cube.edge_polyline_colours());
+    EXPECT(no_polyline_colours.empty(), "an uncoloured cube has edge polyline colours");
+    CADACLYSM_TRY(all_gold_edges, cube.edges_coloured({0.8, 0.6, 0.4}));
+    CADACLYSM_TRY(cube_edges, cube.edges());
+    CADACLYSM_TRY(two_edges,
+                  all_gold_edges.edges_coloured({0.2, 0.4, 1.0}, std::vector<std::uint32_t>{cube_edges[0].index, 5}));
+    CADACLYSM_TRY(edge5_colour, two_edges.edge_colour(5));
+    EXPECT(edge5_colour == (bs::Vec3{0.2, 0.4, 1.0}), "edge 5's own colour did not win over the all-edges one");
+    CADACLYSM_TRY(edge1_colour, two_edges.edge_colour(1));
+    EXPECT(edge1_colour == (bs::Vec3{0.8, 0.6, 0.4}), "edge 1 did not read the all-edges colour");
+    CADACLYSM_TRY(moved_two_edges, two_edges.translate(1, 0, 0));
+    CADACLYSM_TRY(moved_edge5_colour, moved_two_edges.edge_colour(5));
+    EXPECT(moved_edge5_colour == (bs::Vec3{0.2, 0.4, 1.0}), "an edge colour did not carry through translate");
+    CADACLYSM_TRY(none_coloured, all_gold_edges.edges_coloured({1, 0, 0}, std::vector<std::uint32_t>{}));
+    CADACLYSM_TRY(edge0_after_empty, none_coloured.edge_colour(0));
+    EXPECT(edge0_after_empty == (bs::Vec3{0.8, 0.6, 0.4}), "an empty edge list coloured an edge");
+    CADACLYSM_TRY(edge_colours, two_edges.edge_polyline_colours());
+    CADACLYSM_TRY(two_edges_polylines, two_edges.edge_polylines());
+    EXPECT(edge_colours.size() == two_edges_polylines.size(),
+           "edge_polyline_colours does not align with edge_polylines");
+    bool a_polyline_read_blue = false;
+    for (const std::optional<bs::Vec3>& c : edge_colours) {
+        if (c && *c == bs::Vec3{0.2, 0.4, 1.0}) a_polyline_read_blue = true;
+    }
+    EXPECT(a_polyline_read_blue, "no edge polyline read back the edge-specific colour");
+    auto bad_edge = cube.edges_coloured({1, 0, 0}, std::vector<std::uint32_t>{12});
+    EXPECT(!bad_edge && bad_edge.error().message == "edges_coloured: edge 12 is not one of the solid's 12",
+           "edges_coloured did not refuse an edge the cube has not got");
+    auto bad_edge_colour = cube.edge_colour(12);
+    EXPECT(!bad_edge_colour && bad_edge_colour.error().message == "edge_colour: edge 12 is not one of the solid's 12",
+           "edge_colour did not refuse an edge the cube has not got");
+    auto bad_tolerance_colours = two_edges.edge_polyline_colours(-1);
+    EXPECT(!bad_tolerance_colours &&
+               bad_tolerance_colours.error().message == "edge_polyline_colours: tolerance must be positive and finite",
+           "edge_polyline_colours did not refuse a negative tolerance");
+
     // A face: the outline as a sheet, which pushed out is the plate again.
     CADACLYSM_TRY(xy, bs::Frame::xy());
     CADACLYSM_TRY(sheet, bs::Solid::face(outline, xy));

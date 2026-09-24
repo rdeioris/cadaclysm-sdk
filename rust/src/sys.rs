@@ -219,6 +219,8 @@ pub struct CadaclysmSurfaces {
     pub profile_count: u32,
     pub nurbs: *const f32,
     pub nurbs_count: u32,
+    pub shared: *const u32,
+    pub shared_count: u32,
 }
 
 entry_points! {

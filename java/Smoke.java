@@ -228,6 +228,26 @@ public final class Smoke {
                         fail("the colours did not carry through the join");
                 }
 
+                // Edge and profile colour: all of a plate's edges gold, then edge 0 blue over it;
+                // a profile carries its own colour too.
+                try (Blacksmith.Solid goldEdges = plate.edgesColoured(0.8, 0.6, 0.4);
+                     Blacksmith.Solid blueEdge = goldEdges.edgesColoured(new int[] { 0 }, 0.2, 0.4, 1.0);
+                     Blacksmith.Profile goldRect = Blacksmith.Profile.rect(10, 4).coloured(0.8, 0.6, 0.4)) {
+                    double[][] edgeColours = blueEdge.edgePolylineColours();
+                    System.out.println("edge 0=" + Arrays.toString(blueEdge.edgeColour(0)) + " edge 1=" + Arrays.toString(blueEdge.edgeColour(1))
+                            + " polylines=" + edgeColours.length + " rect=" + Arrays.toString(goldRect.colour()));
+                    if (!Arrays.equals(blueEdge.edgeColour(0), new double[] { 0.2, 0.4, 1.0 }) || !Arrays.equals(blueEdge.edgeColour(1), new double[] { 0.8, 0.6, 0.4 })
+                            || edgeColours.length == 0 || !Arrays.equals(goldRect.colour(), new double[] { 0.8, 0.6, 0.4 }) || plate.edgeColour(0) != null)
+                        fail("edge or profile colours");
+                    // An empty edges list colours no edge -- not "every edge" (which null would
+                    // mean, and Java has no overload for) -- so edge 0 stays blue and edge 1 gold.
+                    try (Blacksmith.Solid untouched = blueEdge.edgesColoured(new int[0], 0.1, 0.1, 0.1)) {
+                        if (!Arrays.equals(untouched.edgeColour(0), new double[] { 0.2, 0.4, 1.0 })
+                                || !Arrays.equals(untouched.edgeColour(1), new double[] { 0.8, 0.6, 0.4 }))
+                            fail("an empty edge list should colour nothing");
+                    }
+                }
+
                 // A face: the outline as a sheet, which pushed out is the plate again.
                 try (Blacksmith.Solid sheet = Blacksmith.Solid.face(outline, new double[] {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1});
                      Blacksmith.Solid pushed = sheet.extrudeFaces(6)) {

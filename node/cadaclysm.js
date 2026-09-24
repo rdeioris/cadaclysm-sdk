@@ -265,6 +265,8 @@ const CadaclysmSurfaces = koffi.struct('CadaclysmSurfaces', {
   profile_count: 'uint32_t',
   nurbs: 'const float *',
   nurbs_count: 'uint32_t',
+  shared: 'const uint32_t *',
+  shared_count: 'uint32_t',
 });
 const CadaclysmSvgOptions = koffi.struct('CadaclysmSvgOptions', {
   size: 'uint32_t',

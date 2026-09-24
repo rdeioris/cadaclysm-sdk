@@ -392,6 +392,42 @@ return function(t)
     t.raises(function() block:coloured("red") end, "coloured: a colour is")
   end)
 
+  t.test("profile and edge colours", function()
+    local rect = bs.Profile.rect(10, 4)
+    t.eq(rect.colour, nil)
+    local gold = rect:coloured("#cc9966")
+    t.ok(all_near(gold.colour, { 0.8, 0.6, 0.4 }, 1e-12))
+    t.eq(rect.colour, nil, "the original is untouched")
+    t.ok(all_near(gold:translate(1, 1).colour, { 0.8, 0.6, 0.4 }, 1e-12), "carried by a move")
+    t.raises(function() rect:coloured({ 2, 0, 0 }) end, "profile_coloured: r, g and b must be in 0%.%.1")
+    t.eq(bs.Solid.extrude(gold, XY, 3).colour, nil, "a profile's colour stays 2D")
+
+    local cube = bs.Solid.cuboid(10, 10, 10)
+    t.eq(cube:edge_colour(0), nil)
+    t.eq(#cube:edge_polyline_colours(), 0, "no edge paint: nothing to colour")
+    local all_gold = cube:edges_coloured("#cc9966")
+    local two = all_gold:edges_coloured({ 0.2, 0.4, 1 }, { cube.edges[1], 5 })
+    t.ok(all_near(two:edge_colour(5), { 0.2, 0.4, 1 }, 1e-12), "the edge's own")
+    t.ok(all_near(two:edge_colour(1), { 0.8, 0.6, 0.4 }, 1e-12), "the all-edges colour")
+    t.ok(all_near(two:translate(1, 0, 0):edge_colour(5), { 0.2, 0.4, 1 }, 1e-12))
+    -- An empty list colours no edge: it must not become null and colour everything.
+    t.ok(all_near(all_gold:edges_coloured({ 1, 0, 0 }, {}):edge_colour(0), { 0.8, 0.6, 0.4 }, 1e-12),
+      "an empty list coloured an edge")
+    t.raises(function() cube:edges_coloured("#f00", { 12 }) end,
+      "edges_coloured: edge 12 is not one of the solid's 12")
+    t.raises(function() cube:edge_colour(12) end, "edge_colour: edge 12 is not one of the solid's 12")
+    local colours = two:edge_polyline_colours()
+    t.eq(#colours, #two:edge_polylines())
+    local any_blue = false
+    for _, c in ipairs(colours) do
+      t.ok(c == false or all_near(c, { 0.8, 0.6, 0.4 }, 1e-12) or all_near(c, { 0.2, 0.4, 1 }, 1e-12))
+      if c ~= false and all_near(c, { 0.2, 0.4, 1 }, 1e-12) then any_blue = true end
+    end
+    t.ok(any_blue, "no polyline read back the edge-specific colour")
+    t.raises(function() two:edge_polyline_colours(-1) end,
+      "edge_polyline_colours: tolerance must be positive and finite")
+  end)
+
   t.test("the Workplane chain mirrors the Rust one", function()
     local plate = bs.Workplane.xy():extrude(plate_outline(), 6):solid()
     local pin = bs.Workplane.from_solid(plate):faces(bs.Selector.max(bs.Axis.Z)):workplane():cylinder(4, 10):solid()
@@ -885,6 +921,14 @@ return function(t)
       points = points + r.shape[1]
     end
     t.ok(#edges[1]:copy() == edges[1].size)
+    -- edge_polyline_colours reads the same cache as edge_polylines: asked at another
+    -- tolerance it must invalidate views taken from an earlier filling too, even where the
+    -- solid has no edge paint at all (the branch that copies out an empty colour list) --
+    -- the cache is still replaced under it.
+    t.eq(edges[1].valid, true)
+    box:edge_polyline_colours(0.5)
+    t.eq(edges[1].valid, false,
+      "edge_polyline_colours at a new tolerance did not invalidate the earlier edge_polylines view")
     -- Closing the solid invalidates every view; a copy lives on.
     box:close()
     t.raises(function() edges[1]:get(0) end, "closed")

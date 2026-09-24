@@ -787,6 +787,18 @@ public:
     Result<Profile> translate(double dx, double dy) const {
         return wrap(::cadaclysm_blacksmith_translate_profile(ptr(), dx, dy));
     }
+    // This outline coloured `rgb_value` in 0..1 (rgb("#rrggbb") reads hex): how it is
+    // drawn. The verbs that make a profile from one carry it; a solid made from it takes nothing.
+    Result<Profile> coloured(const Vec3& rgb_value) const {
+        return wrap(::cadaclysm_blacksmith_profile_coloured(ptr(), rgb_value[0], rgb_value[1], rgb_value[2]));
+    }
+    // The outline's colour, or nullopt.
+    Result<std::optional<Vec3>> colour() const {
+        Vec3 out{};
+        if (::cadaclysm_blacksmith_profile_colour(ptr(), out.data())) return std::optional<Vec3>(out);
+        if (!detail::text(::cadaclysm_blacksmith_last_error()).empty()) return detail::kernel_error("profile_colour");
+        return std::optional<Vec3>();
+    }
     // Corners between two straight segments rounded by `radius`: all of them, or the
     // boundary's `corners` (corner k is where segment k ends). `open` reads the profile
     // as an open chain whose two ends stay square.
@@ -1777,6 +1789,26 @@ public:
         state_->filled(tolerance);
         return EdgePolylines(detail::SolidRef(state_), data);
     }
+    // A colour per polyline of edge_polylines() at the same tolerance, as drawn: nullopt
+    // for a polyline on no coloured edge; empty where the solid has no edge paint at all.
+    // Copied out.
+    Result<std::vector<std::optional<Vec3>>> edge_polyline_colours(double tolerance = DEFAULT_TOLERANCE) const {
+        CadaclysmBlacksmithColours data = ::cadaclysm_blacksmith_edge_polyline_colours(raw_handle("edge_polyline_colours"), tolerance);
+        if (!data.rgb && !detail::text(::cadaclysm_blacksmith_last_error()).empty()) return detail::kernel_error("edge_polyline_colours");
+        // This call tessellates like every other cache reader, even to report "no paint": it
+        // can replace the cache a view taken earlier is still borrowing, so it must bump the
+        // generation those views check, even though this method copies its own result out and
+        // keeps nothing borrowed itself.
+        state_->filled(tolerance);
+        std::vector<std::optional<Vec3>> out;
+        if (!data.rgb) return out;
+        out.reserve(data.count);
+        for (std::uint32_t i = 0; i < data.count; ++i) {
+            const double* c = data.rgb + 3 * i;
+            if (c[0] < 0) out.emplace_back(std::nullopt); else out.emplace_back(Vec3{c[0], c[1], c[2]});
+        }
+        return out;
+    }
     // How many triangles each face meshed to at `tolerance`, one count per face in face
     // order; what a viewer colours a face by. Same cache and lifetime as mesh().
     Result<FaceTriangles> face_triangles(double tolerance = DEFAULT_TOLERANCE) const {
@@ -1891,6 +1923,23 @@ public:
     Result<std::optional<Vec3>> face_colour(std::uint32_t f) const {
         CADACLYSM_TRY(which, face_or_none(f, "colour"));
         return colour_of(which);
+    }
+    // This solid with its edges coloured `rgb_value`: every edge, or with `edge_indices`
+    // just those (as fillet takes them), whose colour then wins over the all-edges one; an
+    // empty vector colours none. Inherited as face colours are.
+    Result<Solid> edges_coloured(const Vec3& rgb_value, std::optional<std::vector<std::uint32_t>> edge_indices = std::nullopt) const {
+        if (!edge_indices) return wrap(::cadaclysm_blacksmith_edges_coloured(raw_handle("edges_coloured"), nullptr, 0, rgb_value[0], rgb_value[1], rgb_value[2]));
+        // An empty vector's data() may be null: a non-null pointer with count 0 colours none.
+        static const std::uint32_t none = 0;
+        const std::uint32_t* list = edge_indices->empty() ? &none : edge_indices->data();
+        return wrap(::cadaclysm_blacksmith_edges_coloured(raw_handle("edges_coloured"), list, edge_indices->size(), rgb_value[0], rgb_value[1], rgb_value[2]));
+    }
+    // Edge `e`'s colour as drawn -- its own, else the solid's edge colour -- or nullopt.
+    Result<std::optional<Vec3>> edge_colour(std::uint32_t e) const {
+        Vec3 out{};
+        if (::cadaclysm_blacksmith_edge_colour(raw_handle("edge_colour"), e, out.data())) return std::optional<Vec3>(out);
+        if (!detail::text(::cadaclysm_blacksmith_last_error()).empty()) return detail::kernel_error("edge_colour");
+        return std::optional<Vec3>();
     }
 
     // -- editing

@@ -435,6 +435,8 @@ class _Surfaces(ctypes.Structure):
         ("profile_count", c_uint32),
         ("nurbs", POINTER(c_float)),
         ("nurbs_count", c_uint32),
+        ("shared", POINTER(c_uint32)),
+        ("shared_count", c_uint32),
     ]
 
 

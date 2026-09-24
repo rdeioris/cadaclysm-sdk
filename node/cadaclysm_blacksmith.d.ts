@@ -96,6 +96,10 @@ export class Profile {
   common(other: Profile, tolerance?: number): Profile[];
   static text(text: string, size?: number, font?: string, halign?: 'left' | 'center' | 'right', valign?: 'baseline' | 'bottom' | 'center' | 'top', spacing?: number, direction?: 'ltr' | 'rtl', fontBytes?: Uint8Array | ArrayBuffer | null): Profile[];
   translate(dx: number, dy: number): Profile;
+  /** This outline coloured -- '#rgb', '#rrggbb' or [r, g, b] in 0..1: how it is drawn.
+   *  The verbs that make a profile from one carry it; a solid made from it takes nothing. */
+  coloured(colour: string | Iterable<number>): Profile;
+  readonly colour: [number, number, number] | null;
   round(radius: number, corners?: Iterable<number> | null, open?: boolean): Profile;
   /** This profile's own loops as SVG text, from directly above by default (`view: 'top'`) -- a sketch lies in z = 0, so its own plane already is the page. */
   svgText(options?: SvgOptions): string;
@@ -267,6 +271,10 @@ export class Solid {
   meshAsync(tolerance?: number): Promise<SolidMesh>;
   meshAsync64(tolerance?: number): Promise<SolidMesh64>;
   edgePolylines(tolerance?: number): Float32Array[];
+  /** A colour per polyline of `edgePolylines(tolerance)`, as drawn: [r, g, b], or null for a polyline
+   *  on no coloured edge; an empty array where the solid has no edge paint at all. Fills the solid's
+   *  cache at `tolerance`, as `edgePolylines` does. */
+  edgePolylineColours(tolerance?: number): Array<[number, number, number] | null>;
   /**
    * `schema`: null/undefined (the kernel's built-in AP203); the path of a schema file
    * (no newline in it, naming an existing file), read and sent as EXPRESS text; the
@@ -301,6 +309,13 @@ export class Solid {
   coloured(colour: string | Iterable<number>, face?: number | null): Solid;
   readonly colour: [number, number, number] | null;
   faceColour(face: number): [number, number, number] | null;
+  /** This solid with its edges coloured: every edge, or with `edges` (`Edge` objects or indices,
+   *  as `fillet` takes them) just those, whose colour then wins over the all-edges one. An empty
+   *  list colours no edge. Inherited as face colours are: a move keeps every one, a boolean or a
+   *  fillet gives each edge the colour of the input edge it lies on, a new edge the all-edges one. */
+  edgesColoured(colour: string | Iterable<number>, edges?: Iterable<Edge | number> | null): Solid;
+  /** Edge `edge`'s (an `Edge` or its index) colour as drawn -- its own, else the solid's edge colour -- or null. */
+  edgeColour(edge: Edge | number): [number, number, number] | null;
   edges(): Edge[];
   fillet(edges: Iterable<Edge | number>, radius: number, tolerance?: number, progress?: Progress | null): Solid;
   chamfer(edges: Iterable<Edge | number>, distance: number, tolerance?: number): Solid;

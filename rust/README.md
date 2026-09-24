@@ -93,8 +93,9 @@ wrappers document that; here the compiler enforces it.
 
 ## The license
 
-Without a license the libraries run in full and print a notice on every open and
-export. Put `cadaclysm.lic` beside your executable, set `CADACLYSM_LICENSE`, or
+Development, testing and evaluation are free: without a license the libraries run
+in full and print a notice on every open and export. When they run in production,
+a product, server or website license removes it. Put `cadaclysm.lic` beside your executable, set `CADACLYSM_LICENSE`, or
 call `cadaclysm_sdk::license(path_or_text)` -- and
 `cadaclysm_sdk::blacksmith::license(...)` for the kernel, which keeps its own
 license state.

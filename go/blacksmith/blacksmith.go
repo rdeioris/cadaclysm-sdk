@@ -1284,6 +1284,38 @@ func (p *Profile) Translate(dx, dy float64) (*Profile, error) {
 	return out, err
 }
 
+// Coloured is this outline coloured (r, g, b), each in 0..1 — how it is drawn. The verbs
+// that make a profile from one carry it; a solid made from it takes nothing.
+func (p *Profile) Coloured(r, g, b float64) (*Profile, error) {
+	defer pin()()
+	h, err := p.h()
+	if err != nil {
+		return nil, err
+	}
+	out, err := newProfile(C.cadaclysm_blacksmith_profile_coloured(h, C.double(r), C.double(g), C.double(b)), "profile_coloured")
+	runtime.KeepAlive(p)
+	return out, err
+}
+
+// Colour is the outline's colour, (r, g, b) in 0..1, and false where it has none.
+func (p *Profile) Colour() ([3]float64, bool, error) {
+	defer pin()()
+	h, err := p.h()
+	if err != nil {
+		return [3]float64{}, false, err
+	}
+	var out [3]float64
+	ok := bool(C.cadaclysm_blacksmith_profile_colour(h, doubles(&out[0])))
+	runtime.KeepAlive(p)
+	if !ok {
+		if lastError() != "" {
+			return [3]float64{}, false, failure("profile_colour")
+		}
+		return [3]float64{}, false, nil
+	}
+	return out, true, nil
+}
+
 // Round is this profile with its corners rounded by radius: where two straight segments
 // meet, both are cut back and an exact arc tangent to both put between them. corners nil
 // rounds every such corner, the holes' too (Python's None); otherwise it picks corners of
@@ -3499,6 +3531,40 @@ func (s *Solid) EdgePolylines(tolerance float64) (*Polylines, error) {
 	return p, nil
 }
 
+// EdgePolylineColours is a colour per polyline of EdgePolylines at the same tolerance,
+// as drawn — nil for a polyline on no coloured edge — and an empty slice where the solid
+// has no edge paint at all. Copied out.
+func (s *Solid) EdgePolylineColours(tolerance float64) ([]*[3]float64, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	raw := C.cadaclysm_blacksmith_edge_polyline_colours(h, C.double(tolerance))
+	runtime.KeepAlive(s)
+	if raw.rgb == nil && lastError() != "" {
+		return nil, failure("edge_polyline_colours")
+	}
+	// This call tessellates like every other cache reader, even to report "no paint": it can
+	// replace the cache a view taken earlier is still borrowing, so it must bump the
+	// generation those views check, even though this method copies its own result out and
+	// keeps nothing borrowed itself.
+	s.filled(tolerance)
+	if raw.rgb == nil {
+		return []*[3]float64{}, nil
+	}
+	values := unsafe.Slice((*float64)(unsafe.Pointer(raw.rgb)), int(raw.count)*3)
+	out := make([]*[3]float64, int(raw.count))
+	for i := range out {
+		if values[3*i] >= 0 {
+			c := [3]float64{values[3*i], values[3*i+1], values[3*i+2]}
+			out[i] = &c
+		}
+	}
+	runtime.KeepAlive(s)
+	return out, nil
+}
+
 // meshFaceTriangles is the kernel's mesh_face_triangles, kept for the viewer
 // follow-up: how many triangles each face meshed to at tolerance, in face order,
 // summing to Mesh(tolerance)'s triangle count. Copied out of the solid's cache.
@@ -3718,6 +3784,68 @@ func (s *Solid) colour(face C.uint32_t) ([3]float64, bool, error) {
 	if !ok {
 		if lastError() != "" {
 			return [3]float64{}, false, failure("colour")
+		}
+		return [3]float64{}, false, nil
+	}
+	return out, true, nil
+}
+
+// EdgesColoured is this solid with every edge coloured (r, g, b), each in 0..1 — Python's
+// edges_coloured with no edges. Inherited as face colours are: a move keeps every one, a
+// boolean or a fillet gives each edge the colour of the input edge it lies on, a new edge
+// the all-edges one.
+func (s *Solid) EdgesColoured(r, g, b float64) (*Solid, error) {
+	return s.edgesColoured(nil, 0, r, g, b)
+}
+
+// EdgesColouredPicked is this solid with edges (by index, as Fillet takes them) coloured,
+// a colour that wins over the all-edges one; an empty list colours none — Python's
+// edges_coloured(colour, edges).
+func (s *Solid) EdgesColouredPicked(edges []int, r, g, b float64) (*Solid, error) {
+	which, err := indices(edges)
+	if err != nil {
+		return nil, err
+	}
+	var first *C.uint32_t
+	if len(which) > 0 {
+		first = (*C.uint32_t)(unsafe.Pointer(&which[0]))
+	} else {
+		first = (*C.uint32_t)(unsafe.Pointer(&[]C.uint32_t{0}[0])) // non-null with count 0: none, not all
+	}
+	out, err := s.edgesColoured(first, len(which), r, g, b)
+	runtime.KeepAlive(which)
+	return out, err
+}
+
+func (s *Solid) edgesColoured(first *C.uint32_t, count int, r, g, b float64) (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_edges_coloured(h, first, C.size_t(count), C.double(r), C.double(g), C.double(b)), "edges_coloured")
+	runtime.KeepAlive(s)
+	return out, err
+}
+
+// EdgeColour is edge's colour as drawn — its own, else the solid's edge colour — and
+// false where there is none.
+func (s *Solid) EdgeColour(edge int) ([3]float64, bool, error) {
+	i, err := index(edge)
+	if err != nil {
+		return [3]float64{}, false, err
+	}
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return [3]float64{}, false, err
+	}
+	var out [3]float64
+	ok := bool(C.cadaclysm_blacksmith_edge_colour(h, i, doubles(&out[0])))
+	runtime.KeepAlive(s)
+	if !ok {
+		if lastError() != "" {
+			return [3]float64{}, false, failure("edge_colour")
 		}
 		return [3]float64{}, false, nil
 	}

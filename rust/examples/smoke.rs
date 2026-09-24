@@ -425,6 +425,24 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
     )?;
     check(Solid::cuboid(1.0, 1.0, 1.0).map_err(e)?.colour().map_err(e)?.is_none(), "an uncoloured solid has a colour")?;
 
+    // Edge colour: the plate's edges gold, edge 0 blue -- an edge's own colour wins over
+    // the all-edges one, and a plain read-back tells "no colour" from "a coloured edge".
+    let plate_gold_edges = plate.edges_coloured([0.8, 0.6, 0.4], None).map_err(e)?;
+    let mut plate_edges = plate_gold_edges.edges_coloured([0.2, 0.4, 1.0], Some(&[0])).map_err(e)?;
+    let edge0 = plate_edges.edge_colour(0).map_err(e)?;
+    let edge1 = plate_edges.edge_colour(1).map_err(e)?;
+    println!("edge0={edge0:?} edge1={edge1:?}");
+    check(edge0 == Some([0.2, 0.4, 1.0]), "edge 0 did not take its own picked colour")?;
+    check(edge1 == Some([0.8, 0.6, 0.4]), "edge 1 did not take the all-edges colour")?;
+    let edge_polyline_colours = plate_edges.edge_polyline_colours(0.05).map_err(e)?;
+    check(!edge_polyline_colours.is_empty(), "edge_polyline_colours was empty on a solid with edge paint")?;
+    let profile_colour = Profile::rect(10.0, 4.0).map_err(e)?.coloured([0.8, 0.6, 0.4]).map_err(e)?.colour().map_err(e)?;
+    check(profile_colour == Some([0.8, 0.6, 0.4]), "the profile did not keep its own colour")?;
+    check(plate.edge_colour(0).map_err(e)?.is_none(), "plate itself should not have gained an edge colour")?;
+    // An empty edge list colours no edge -- only a null list (`None`) colours every edge.
+    let none_coloured = Solid::cuboid(1.0, 1.0, 1.0).map_err(e)?.edges_coloured([0.8, 0.6, 0.4], Some(&[])).map_err(e)?;
+    check(none_coloured.edge_colour(0).map_err(e)?.is_none(), "an empty edge list coloured edge 0")?;
+
     // A face: the outline as a sheet, which pushed out is the plate again.
     let sheet = Solid::face(&outline, &Frame::xy([0.0; 3])).map_err(e)?;
     let pushed = sheet.extrude_faces(6.0).map_err(e)?;

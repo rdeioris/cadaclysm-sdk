@@ -118,6 +118,20 @@ func indices32(_ indices: [Int], _ what: String) throws -> [UInt32] {
     try indices.map { try index32($0, what) }
 }
 
+/// A colour as (r, g, b) in 0..1 from `"#rgb"` or `"#rrggbb"` (the `#` optional). Shared by
+/// `Profile.coloured(String)` and `Solid.coloured(String)`.
+func rgb(_ colour: String) throws -> SIMD3<Double> {
+    var hex = Substring(colour.trimmingCharacters(in: .whitespacesAndNewlines))
+    if hex.hasPrefix("#") { hex = hex.dropFirst() }
+    if hex.count == 3 || hex.count == 6, hex.allSatisfy({ $0.isASCII && $0.isHexDigit }) {
+        let six = hex.count == 3 ? String(hex.flatMap { [$0, $0] }) : String(hex)
+        let digits = Array(six)
+        let values = stride(from: 0, to: 6, by: 2).map { Double(Int(String(digits[$0...$0 + 1]), radix: 16)!) / 255 }
+        return SIMD3(values[0], values[1], values[2])
+    }
+    throw BuildError("coloured: a colour is \"#rgb\", \"#rrggbb\" or (r, g, b) in 0..1, not '\(colour)'")
+}
+
 /// Twelve numbers, as every call taking a frame reads them.
 func frameValues(_ values: [Double]) throws -> [Double] {
     guard values.count == 12 else { throw BuildError("frame: expected 12 numbers, got \(values.count)") }
@@ -646,6 +660,25 @@ public final class Profile {
     /// This outline moved by (`dx`, `dy`).
     public func translate(_ dx: Double, _ dy: Double) throws -> Profile {
         try Profile(cadaclysm_blacksmith_translate_profile(handle, dx, dy))
+    }
+
+    /// This outline coloured (r, g, b), each in 0..1: how it is drawn. The verbs that make a
+    /// profile from one carry it; a solid made from it takes nothing.
+    public func coloured(_ colour: SIMD3<Double>) throws -> Profile {
+        try Profile(cadaclysm_blacksmith_profile_coloured(handle, colour.x, colour.y, colour.z))
+    }
+
+    /// `coloured` with `"#rgb"` or `"#rrggbb"`.
+    public func coloured(_ colour: String) throws -> Profile { try coloured(try rgb(colour)) }
+
+    /// The outline's colour, (r, g, b) in 0..1, or nil.
+    public var colour: SIMD3<Double>? {
+        get throws {
+            var out = [Double](repeating: 0, count: 3)
+            if cadaclysm_blacksmith_profile_colour(handle, &out) { return SIMD3(out[0], out[1], out[2]) }
+            if !lastError().isEmpty { throw failure("profile_colour") }
+            return nil
+        }
     }
 
     /// Where this profile's curves cross, touch or run along `other`'s, both read in one
@@ -1703,16 +1736,59 @@ public final class Solid {
         return nil
     }
 
-    private func rgb(_ colour: String) throws -> SIMD3<Double> {
-        var hex = Substring(colour.trimmingCharacters(in: .whitespacesAndNewlines))
-        if hex.hasPrefix("#") { hex = hex.dropFirst() }
-        if hex.count == 3 || hex.count == 6, hex.allSatisfy({ $0.isASCII && $0.isHexDigit }) {
-            let six = hex.count == 3 ? String(hex.flatMap { [$0, $0] }) : String(hex)
-            let digits = Array(six)
-            let values = stride(from: 0, to: 6, by: 2).map { Double(Int(String(digits[$0...$0 + 1]), radix: 16)!) / 255 }
-            return SIMD3(values[0], values[1], values[2])
+    /// This solid with its edges coloured (r, g, b): every edge, or with `edges` (by index,
+    /// as `fillet` takes them) just those, whose colour then wins over the all-edges one; an
+    /// empty list colours none. Inherited as face colours are.
+    public func edgesColoured(_ colour: SIMD3<Double>, edges: [Int]? = nil) throws -> Solid {
+        guard let edges else {
+            return try Solid(cadaclysm_blacksmith_edges_coloured(try h(), nil, 0, colour.x, colour.y, colour.z))
         }
-        throw BuildError("coloured: a colour is \"#rgb\", \"#rrggbb\" or (r, g, b) in 0..1, not '\(colour)'")
+        let which = try indices32(edges, "edges_coloured")
+        return try which.withUnsafeBufferPointer { buffer in
+            // An empty list: a non-null pointer with count 0 colours none, as the C ABI reads it.
+            try Solid(cadaclysm_blacksmith_edges_coloured(try h(), buffer.baseAddress ?? UnsafePointer(bitPattern: 8)!, which.count, colour.x, colour.y, colour.z))
+        }
+    }
+
+    /// `edgesColoured` by `Edge`.
+    public func edgesColoured(_ colour: SIMD3<Double>, edges: [Edge]) throws -> Solid {
+        try edgesColoured(colour, edges: edges.map { $0.index })
+    }
+
+    /// `edgesColoured` with `"#rgb"` or `"#rrggbb"`.
+    public func edgesColoured(_ colour: String, edges: [Int]? = nil) throws -> Solid {
+        try edgesColoured(try rgb(colour), edges: edges)
+    }
+
+    /// Edge `edge`'s colour as drawn -- its own, else the solid's edge colour -- or nil.
+    public func edgeColour(_ edge: Int) throws -> SIMD3<Double>? {
+        let h = try h()
+        // `UInt32(edge)` below traps on a negative Int rather than throwing, so a negative or
+        // absurdly large index is caught here first -- with the same "not one of the solid's
+        // N" wording `faceOrNone` uses -- before it ever reaches that conversion.
+        guard edge >= 0, edge < Int(none) else {
+            throw BuildError("edge_colour: edge \(edge) is not one of the solid's \(cadaclysm_blacksmith_edge_count(h))")
+        }
+        var out = [Double](repeating: 0, count: 3)
+        if cadaclysm_blacksmith_edge_colour(h, UInt32(edge), &out) { return SIMD3(out[0], out[1], out[2]) }
+        if !lastError().isEmpty { throw failure("edge_colour") }
+        return nil
+    }
+
+    /// A colour per polyline of `edgePolylines` at the same tolerance, as drawn -- nil for a
+    /// polyline on no coloured edge -- and empty where the solid has no edge paint at all.
+    /// Copied out.
+    public func edgePolylineColours(tolerance: Double = 0.05) throws -> [SIMD3<Double>?] {
+        let raw = cadaclysm_blacksmith_edge_polyline_colours(try h(), tolerance)
+        if raw.rgb == nil, !lastError().isEmpty { throw failure("edge_polyline_colours") }
+        // This call tessellates like every other cache reader, even to report "no paint": it
+        // can replace the cache a view taken earlier is still borrowing, so it must bump the
+        // generation those views check, even though this method copies its own result out and
+        // keeps nothing borrowed itself.
+        _ = filled(tolerance)
+        guard let rgb = raw.rgb else { return [] }
+        let values = UnsafeBufferPointer(start: rgb, count: 3 * Int(raw.count))
+        return (0..<Int(raw.count)).map { i in values[3 * i] < 0 ? nil : SIMD3(values[3 * i], values[3 * i + 1], values[3 * i + 2]) }
     }
 
     // MARK: Edges and finishing

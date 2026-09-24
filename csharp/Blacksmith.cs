@@ -222,6 +222,16 @@ internal struct RawBlacksmithPolylines
     public uint PolylineCount;
 }
 
+/// <summary>`CadaclysmBlacksmithColours`: one colour per edge polyline, three doubles each
+/// (`-1` where the polyline is on no coloured edge); `Rgb` null and `Count` 0 where the solid
+/// has no edge paint.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawBlacksmithColours
+{
+    public IntPtr Rgb;
+    public uint Count;
+}
+
 /// <summary>`CadaclysmBlacksmithFaceTriangles`: triangles per face, in face order, over the
 /// solid's mesh at the same tolerance.</summary>
 [StructLayout(LayoutKind.Sequential)]
@@ -575,6 +585,9 @@ internal static class BlacksmithNative
         nuint count, [MarshalAs(UnmanagedType.I1)] bool open);
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_close_loop(ProfileHandle profile);
     [DllImport(Lib)] internal static extern RawBlacksmithPolylines cadaclysm_blacksmith_profile_polylines(ProfileHandle profile, double tolerance);
+    [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_coloured(ProfileHandle profile, double r, double g, double b);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_profile_colour(ProfileHandle profile, [Out] double[] outRgb);
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_chain(IntPtr[] pieces, nuint count,
         double tolerance);
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_from_loops(IntPtr[] loops, nuint count);
@@ -706,6 +719,10 @@ internal static class BlacksmithNative
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_coloured(SolidHandle solid, uint face, double r, double g, double b);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_colour(SolidHandle solid, uint face, [Out] double[] outRgb);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_edges_coloured(SolidHandle solid, uint[]? edges, nuint count, double r, double g, double b);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_edge_colour(SolidHandle solid, uint edge, [Out] double[] outRgb);
+    [DllImport(Lib)] internal static extern RawBlacksmithColours cadaclysm_blacksmith_edge_polyline_colours(SolidHandle solid, double tolerance);
     [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_edge_count(SolidHandle solid);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_edge(SolidHandle solid, uint i, out RawBlacksmithEdge outEdge);
@@ -1299,6 +1316,23 @@ public sealed class Profile : IDisposable
     /// <summary>This outline shifted by (`dx`, `dy`) in its own plane.</summary>
     public Profile Translate(double dx, double dy) =>
         new(BlacksmithNative.cadaclysm_blacksmith_translate_profile(Handle, dx, dy));
+
+    /// <summary>This outline coloured (`r`, `g`, `b`), each in 0..1: how it is drawn. The verbs
+    /// that make a profile from one carry it; a solid made from it takes nothing.</summary>
+    public Profile Coloured(double r, double g, double b) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_profile_coloured(Handle, r, g, b));
+
+    /// <summary>The outline's colour as { r, g, b } in 0..1, or null.</summary>
+    public double[]? Colour
+    {
+        get
+        {
+            var rgb = new double[3];
+            if (BlacksmithNative.cadaclysm_blacksmith_profile_colour(Handle, rgb)) return rgb;
+            if (Blacksmith.LastError().Length > 0) throw Blacksmith.Failure("profile_colour");
+            return null;
+        }
+    }
 
     /// <summary>This profile with its corners rounded by `radius`: where two straight segments
     /// meet, both are cut back and an exact arc tangent to both put between them. `corners`
@@ -2343,6 +2377,50 @@ public sealed class Solid : IDisposable
         if (BlacksmithNative.cadaclysm_blacksmith_colour(Handle, face, rgb)) return rgb;
         if (Blacksmith.LastError().Length > 0) throw Blacksmith.Failure("colour");
         return null;
+    }
+
+    /// <summary>This solid with its edges coloured (`r`, `g`, `b`): every edge, or with
+    /// <paramref name="edges"/> just those (by index, as <see cref="Fillet(IEnumerable{int}, double, double)"/>
+    /// takes them), whose colour then wins over the all-edges one. An empty list colours no edge.
+    /// Inherited as face colours are.</summary>
+    public Solid EdgesColoured(double r, double g, double b, IEnumerable<int>? edges = null)
+    {
+        if (edges is null) return new Solid(BlacksmithNative.cadaclysm_blacksmith_edges_coloured(Handle, null, 0, r, g, b));
+        var which = Indices(edges);
+        return new Solid(BlacksmithNative.cadaclysm_blacksmith_edges_coloured(Handle, which, (nuint)which.Length, r, g, b));
+    }
+
+    /// <summary><see cref="EdgesColoured(double, double, double, IEnumerable{int})"/> by <see cref="Edge"/>.</summary>
+    public Solid EdgesColoured(IEnumerable<Edge> edges, double r, double g, double b) =>
+        EdgesColoured(r, g, b, edges.Select(e => e.Index));
+
+    /// <summary>Edge `edge`'s colour as drawn -- its own, else the solid's edge colour -- or null.</summary>
+    public double[]? EdgeColour(int edge)
+    {
+        var rgb = new double[3];
+        if (BlacksmithNative.cadaclysm_blacksmith_edge_colour(Handle, Index(edge), rgb)) return rgb;
+        if (Blacksmith.LastError().Length > 0) throw Blacksmith.Failure("edge_colour");
+        return null;
+    }
+
+    /// <summary>A colour per polyline of <see cref="EdgePolylines"/> at the same tolerance, as
+    /// drawn: { r, g, b }, or null for a polyline on no coloured edge; an empty array where the
+    /// solid has no edge paint at all. Copied out.</summary>
+    public unsafe double[]?[] EdgePolylineColours(double tolerance = 0.05)
+    {
+        var raw = BlacksmithNative.cadaclysm_blacksmith_edge_polyline_colours(Handle, tolerance);
+        if (raw.Rgb == IntPtr.Zero && Blacksmith.LastError().Length > 0) throw Blacksmith.Failure("edge_polyline_colours");
+        // This call tessellates like every other cache reader, even to report "no paint": it
+        // can replace the cache a view taken earlier is still borrowing, so it must bump the
+        // generation those views check, even though this method copies its own result out and
+        // keeps nothing borrowed itself.
+        Filled(tolerance);
+        if (raw.Rgb == IntPtr.Zero) return Array.Empty<double[]?>();
+        var values = new ReadOnlySpan<double>((void*)raw.Rgb, 3 * (int)raw.Count);
+        var outColours = new double[]?[raw.Count];
+        for (var i = 0; i < outColours.Length; i++)
+            outColours[i] = values[3 * i] < 0 ? null : new[] { values[3 * i], values[3 * i + 1], values[3 * i + 2] };
+        return outColours;
     }
 
     /// <summary>The edges a fillet indexes, as <see cref="Edge"/> records (copied; safe to

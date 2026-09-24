@@ -475,6 +475,67 @@ func kernel(license string) {
 		fail("the colours did not carry through the join")
 	}
 
+	// Edge colour: the plate's edges gold, edge 0 blue -- an edge's own colour wins over
+	// the all-edges one, and a bare read-back tells "no colour" from "an error".
+	plateEdgesGold, err := plate.EdgesColoured(0.8, 0.6, 0.4)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer plateEdgesGold.Close()
+	plateEdges, err := plateEdgesGold.EdgesColouredPicked([]int{0}, 0.2, 0.4, 1.0)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer plateEdges.Close()
+	edge0Colour, ok, err := plateEdges.EdgeColour(0)
+	if err != nil || !ok {
+		fail(fmt.Sprintf("edge 0 has no colour (%v)", err))
+	}
+	edge1Colour, ok, err := plateEdges.EdgeColour(1)
+	if err != nil || !ok {
+		fail(fmt.Sprintf("edge 1 has no colour (%v)", err))
+	}
+	fmt.Printf("edge0=%v edge1=%v\n", edge0Colour, edge1Colour)
+	if edge0Colour != [3]float64{0.2, 0.4, 1.0} || edge1Colour != [3]float64{0.8, 0.6, 0.4} {
+		fail("edge colours did not come back as picked/all-edges")
+	}
+	edgePolylineColours, err := plateEdges.EdgePolylineColours(0.05)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(edgePolylineColours) == 0 {
+		fail("EdgePolylineColours was empty on a solid with edge paint")
+	}
+	rectProfile, err := blacksmith.Rect(10, 4)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer rectProfile.Close()
+	goldProfile, err := rectProfile.Coloured(0.8, 0.6, 0.4)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer goldProfile.Close()
+	profileColour, ok, err := goldProfile.Colour()
+	if err != nil || !ok {
+		fail(fmt.Sprintf("the coloured profile has no colour (%v)", err))
+	}
+	if profileColour != [3]float64{0.8, 0.6, 0.4} {
+		fail("the profile did not keep its own colour")
+	}
+	if _, ok, _ := plate.EdgeColour(0); ok {
+		fail("the original plate should not have gained an edge colour")
+	}
+	// An empty edge list colours no edge -- only a nil list colours every edge.
+	noneColoured, err := plate.EdgesColouredPicked([]int{}, 0.8, 0.6, 0.4)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer noneColoured.Close()
+	if _, ok, _ := noneColoured.EdgeColour(0); ok {
+		fail("an empty edge list coloured edge 0")
+	}
+
 	// A face: the outline as a sheet, which pushed out is the plate again.
 	sheet, err := blacksmith.Face(outline, blacksmith.Frame{0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1})
 	if err != nil {

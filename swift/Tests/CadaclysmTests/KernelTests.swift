@@ -739,6 +739,42 @@ final class KernelTests: XCTestCase {
         XCTAssertNotNil(refusal { _ = try block.coloured("#ＦＦＦ") })
     }
 
+    func testProfileAndEdgeColours() throws {
+        let rect = try Profile.rect(10, 4)
+        XCTAssertNil(try rect.colour)
+        let gold = try rect.coloured("#cc9966")
+        XCTAssertEqual(try gold.colour, [0.8, 0.6, 0.4])
+        XCTAssertNil(try rect.colour, "the original is untouched")
+        XCTAssertEqual(try gold.translate(1, 1).colour, [0.8, 0.6, 0.4], "carried by a move")
+        XCTAssertThrowsError(try rect.coloured([2, 0, 0])) { error in
+            XCTAssertTrue((error as? BuildError)?.message.hasPrefix("profile_coloured: r, g and b must be in 0..1") ?? false)
+        }
+        let xy = try Frame.xy()
+        XCTAssertNil(try Solid.extrude(gold, xy, 3).colour, "a profile's colour stays 2D")
+
+        let cube = try Solid.cuboid(10, 10, 10)
+        XCTAssertNil(try cube.edgeColour(0))
+        XCTAssertEqual(try cube.edgePolylineColours(), [], "no edge paint: nothing to colour")
+        let allGold = try cube.edgesColoured("#cc9966")
+        let two = try allGold.edgesColoured([0.2, 0.4, 1.0], edges: [try cube.edges[0].index, 5])
+        XCTAssertEqual(try two.edgeColour(5), [0.2, 0.4, 1.0], "the edge's own")
+        XCTAssertEqual(try two.edgeColour(1), [0.8, 0.6, 0.4], "the all-edges colour")
+        XCTAssertEqual(try two.translate(1, 0, 0).edgeColour(5), [0.2, 0.4, 1.0])
+        XCTAssertEqual(try allGold.edgesColoured([1, 0, 0], edges: []).edgeColour(0), [0.8, 0.6, 0.4],
+                       "an empty list colours nothing")
+        XCTAssertEqual(refusal { _ = try cube.edgesColoured("#f00", edges: [12]) },
+                       "edges_coloured: edge 12 is not one of the solid's 12")
+        XCTAssertEqual(refusal { _ = try cube.edgeColour(12) }, "edge_colour: edge 12 is not one of the solid's 12")
+        // Negative goes through Swift's own guard (UInt32(edge) would trap), not the library's.
+        XCTAssertEqual(refusal { _ = try cube.edgeColour(-1) }, "edge_colour: edge -1 is not one of the solid's 12")
+        let colours = try two.edgePolylineColours()
+        XCTAssertEqual(colours.count, try two.edgePolylines().count)
+        for c in colours { XCTAssertTrue(c == SIMD3(0.8, 0.6, 0.4) || c == SIMD3(0.2, 0.4, 1.0), "\(String(describing: c))") }
+        XCTAssertTrue(colours.contains(SIMD3(0.2, 0.4, 1.0)))
+        XCTAssertEqual(refusal { _ = try two.edgePolylineColours(tolerance: -1) },
+                       "edge_polyline_colours: tolerance must be positive and finite")
+    }
+
     /// The library reads a fixed number of weights whatever the array holds, so a wrong count
     /// is refused here rather than read past.
     func testWeightsOfTheWrongCountAreRefused() throws {

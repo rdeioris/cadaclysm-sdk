@@ -732,6 +732,25 @@ typedef struct CadaclysmSurfaces {
    */
   const float *nurbs;
   uint32_t nurbs_count;
+  /**
+   * One bit a point: whether the trim segment that *starts* at that point lies on an
+   * edge this body shares with another face. Bit `i` is `shared[i / 32] >> (i % 32)`,
+   * indexed as `points` is.
+   *
+   * **Which trims a renderer may draw past, and which it may not.** A face's trim is
+   * two things wearing one shape: an edge where this face meets another, and a
+   * boundary where the body ends -- a hole's rim, a sheet's edge, the outline of a
+   * letter. A renderer that clips the trim per pixel from an interpolated distance
+   * clips a hair short of the true edge, and where two faces meeting at an edge both
+   * clip short, the pixel between them shows whatever is behind. Drawing a hair *past*
+   * every trim closes that, and draws outside the body at every boundary. With this, a
+   * renderer widens where two faces are meant to meet and nowhere else.
+   *
+   * `null` with `shared_count` zero where nothing is known to be shared -- a builder
+   * that could not attribute the loops to edges, a hand-made face.
+   */
+  const uint32_t *shared;
+  uint32_t shared_count;
 } CadaclysmSurfaces;
 
 /**
@@ -2517,7 +2536,7 @@ bool cadaclysm_license_set(const char *text_or_path);
 
 /**
  * The license in use, as one line -- `customer=Acme Ltd expiry=2027-09-15
- * entitlements=import,kernel seats=20` -- or, without one, `unlicensed`
+ * entitlements=import,kernel scope=server plan=startup servers=1` -- or, without one, `unlicensed`
  * (`unlicensed -- <reason>` when a license was found but did not verify).
  * Never null. Borrowed, and good until the next call on this thread.
  */

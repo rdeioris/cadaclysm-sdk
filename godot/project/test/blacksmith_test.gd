@@ -370,6 +370,25 @@ func test_colours_are_set_read_back_and_inherited():
 	var painted_mesh := painted.array_mesh()
 	ok((painted_mesh.surface_get_material(0) as StandardMaterial3D).albedo_color.is_equal_approx(Color(0.8, 0.6, 0.4)), "the mesh is painted the solid's colour")
 
+func test_edge_colours_are_set_read_back_and_an_empty_list_colours_none():
+	var block := CadaclysmSolid.cuboid(10, 10, 10)
+	eq(block.edge_colour(0), null)
+	var gold_edges := block.edges_coloured("#cc9966")
+	ok(gold_edges.edge_colour(0).is_equal_approx(Color(0.8, 0.6, 0.4)), "edges_coloured(colour) should colour every edge")
+	eq(gold_edges.edges_coloured_with("#cc9966", null).edge_colour(0), gold_edges.edge_colour(0))
+	var picked := gold_edges.edges_coloured_with([0.2, 0.4, 1], [0])
+	ok(picked.edge_colour(0).is_equal_approx(Color(0.2, 0.4, 1)), str(picked.edge_colour(0)))
+	ok(picked.edge_colour(1).is_equal_approx(Color(0.8, 0.6, 0.4)), str(picked.edge_colour(1)))
+	ok(picked.edge_polyline_colours().size() > 0, "edge_polyline_colours was empty on a solid with edge paint")
+	var rect_colour: Variant = CadaclysmProfile.rect(10, 4).coloured("#cc9966").colour
+	ok(rect_colour.is_equal_approx(Color(0.8, 0.6, 0.4)), str(rect_colour))
+	# block is untouched -- edges_coloured returns a new solid, as coloured does.
+	eq(block.edge_colour(0), null)
+	# An empty edges list colours no edge -- only a null edges list (edges_coloured's own
+	# case) colours every edge.
+	var none_coloured := block.edges_coloured_with("#cc9966", [])
+	eq(none_coloured.edge_colour(0), null)
+
 func test_the_workplane_chain_mirrors_the_rust_one():
 	var plate := CadaclysmWorkplane.xy().extrude(plate_outline(), 6).solid()
 	var pin := CadaclysmWorkplane.from_solid(plate).faces(">Z").workplane().cylinder(4, 10).solid()

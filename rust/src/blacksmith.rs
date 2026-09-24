@@ -611,6 +611,26 @@ impl Profile {
         Profile::wrap(self.api, raw, "translate_profile")
     }
 
+    /// This outline coloured `(r, g, b)` in 0..1 (see [`rgb`] for hex): how it is drawn.
+    /// The verbs that make a profile from one carry it; a solid made from it takes nothing.
+    pub fn coloured(&self, colour: [f64; 3]) -> Result<Profile> {
+        let [r, g, b] = colour;
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_profile_coloured)(self.raw(), r, g, b) };
+        Profile::wrap(self.api, raw, "profile_coloured")
+    }
+
+    /// The outline's colour, or `None`.
+    pub fn colour(&self) -> Result<Option<[f64; 3]>> {
+        let mut out = [0.0; 3];
+        if unsafe { (self.api.cadaclysm_blacksmith_profile_colour)(self.raw(), out.as_mut_ptr()) } {
+            return Ok(Some(out));
+        }
+        if failed(self.api) {
+            return Err(fail(self.api, "profile_colour"));
+        }
+        Ok(None)
+    }
+
     /// This profile with its corners rounded by `radius` where two straight segments
     /// meet. `corners: None` rounds every such corner, the holes' too; a list picks
     /// corners of the boundary alone (corner `k` is where segment `k` ends). `open`
@@ -1863,6 +1883,31 @@ impl Solid {
         Ok(None)
     }
 
+    /// This solid with its edges coloured `(r, g, b)`: every edge with `edges` `None`, else
+    /// just those (by index, as [`Solid::fillet`] takes them), whose colour then wins over the
+    /// all-edges one; `Some(&[])` colours none. Inherited as face colours are.
+    pub fn edges_coloured(&self, colour: [f64; 3], edges: Option<&[u32]>) -> Result<Solid> {
+        let [r, g, b] = colour;
+        let (ptr, count) = match edges {
+            None => (std::ptr::null(), 0),
+            Some(list) => (list.as_ptr(), list.len()),
+        };
+        // `[].as_ptr()` is dangling but non-null: "none", as the C ABI reads it.
+        self.next(unsafe { (self.api.cadaclysm_blacksmith_edges_coloured)(self.raw(), ptr, count, r, g, b) }, "edges_coloured")
+    }
+
+    /// Edge `edge`'s colour as drawn -- its own, else the solid's edge colour -- or `None`.
+    pub fn edge_colour(&self, edge: u32) -> Result<Option<[f64; 3]>> {
+        let mut out = [0.0; 3];
+        if unsafe { (self.api.cadaclysm_blacksmith_edge_colour)(self.raw(), edge, out.as_mut_ptr()) } {
+            return Ok(Some(out));
+        }
+        if failed(self.api) {
+            return Err(fail(self.api, "edge_colour"));
+        }
+        Ok(None)
+    }
+
     // -- asking
 
     /// How many faces it has.
@@ -2112,6 +2157,22 @@ impl Solid {
             .windows(2)
             .map(|w| points.get(w[0] as usize..w[1] as usize).unwrap_or(&[]))
             .collect())
+    }
+
+    /// A colour per polyline of [`Solid::edge_polylines`] at the same tolerance, as drawn:
+    /// `None` for a polyline on no coloured edge; empty where the solid has no edge paint
+    /// at all. Copied out.
+    pub fn edge_polyline_colours(&mut self, tolerance: f64) -> Result<Vec<Option<[f64; 3]>>> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_edge_polyline_colours)(self.raw(), tolerance) };
+        if raw.rgb.is_null() {
+            if failed(self.api) {
+                return Err(fail(self.api, "edge_polyline_colours"));
+            }
+            return Ok(Vec::new());
+        }
+        // SAFETY: `count` triples live in the solid's cache until it is meshed again, as `mesh`.
+        let values = unsafe { std::slice::from_raw_parts(raw.rgb, 3 * raw.count as usize) };
+        Ok(values.chunks_exact(3).map(|c| (c[0] >= 0.0).then(|| [c[0], c[1], c[2]])).collect())
     }
 
     /// This solid as STEP text: AP203 unless `schema` names another -- see

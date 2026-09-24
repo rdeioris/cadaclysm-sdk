@@ -295,7 +295,10 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_lump_count", "cadaclysm_blacksmith_lump", "cadaclysm_blacksmith_face_count",
   "cadaclysm_blacksmith_select_face", "cadaclysm_blacksmith_face_frame", "cadaclysm_blacksmith_face_ref",
   "cadaclysm_blacksmith_find_face", "cadaclysm_blacksmith_coloured",
-  "cadaclysm_blacksmith_colour", "cadaclysm_blacksmith_face_kind", "cadaclysm_blacksmith_edge_count",
+  "cadaclysm_blacksmith_profile_coloured", "cadaclysm_blacksmith_profile_colour",
+  "cadaclysm_blacksmith_colour",
+  "cadaclysm_blacksmith_edges_coloured", "cadaclysm_blacksmith_edge_colour", "cadaclysm_blacksmith_edge_polyline_colours",
+  "cadaclysm_blacksmith_face_kind", "cadaclysm_blacksmith_edge_count",
   "cadaclysm_blacksmith_edge", "cadaclysm_blacksmith_edge_curve", "cadaclysm_blacksmith_mesh", "cadaclysm_blacksmith_mesh64", "cadaclysm_blacksmith_mesh_face_triangles",
   "cadaclysm_blacksmith_intersect", "cadaclysm_blacksmith_intersection_free", "cadaclysm_blacksmith_intersection_chain_count",
   "cadaclysm_blacksmith_intersection_chain", "cadaclysm_blacksmith_intersection_curve",
@@ -630,7 +633,8 @@ local function free_solid(p) lib().cadaclysm_blacksmith_solid_free(p) end
 --- A closed outline with holes, in its own x/y. Immutable; every method returns a new one.
 ---@class Profile
 local Profile = {}
-class(Profile)
+local Profile_get = {}
+class(Profile, Profile_get)
 M.Profile = Profile
 
 local function new_profile(handle, what)
@@ -830,6 +834,22 @@ end
 --- This profile moved by (`dx`, `dy`).
 function Profile:translate(dx, dy)
   return new_profile(lib().cadaclysm_blacksmith_translate_profile(self._handle, dx, dy))
+end
+
+--- This outline coloured -- `colour` is "#rgb", "#rrggbb" or {r, g, b} in 0..1: how
+--- it is drawn. The verbs that make a profile from one carry it; a solid made from it
+--- takes nothing.
+function Profile:coloured(colour)
+  local r, g, b = rgb(colour)
+  return new_profile(lib().cadaclysm_blacksmith_profile_coloured(self._handle, r, g, b))
+end
+
+--- The outline's colour, {r, g, b} in 0..1, or nil.
+function Profile_get.colour(self)
+  local out = ffi.new("double[3]")
+  if lib().cadaclysm_blacksmith_profile_colour(self._handle, out) then return { out[0], out[1], out[2] } end
+  if last_error() ~= "" then fail("profile_colour") end
+  return nil
 end
 
 --- Where this profile's curves cross, touch or run along `other`'s, both read
@@ -2073,6 +2093,16 @@ function Solid:find_face(face_ref, hint, tolerance)
   return found
 end
 
+-- edge_indices is needed by both fillet/chamfer and edges_coloured, so it is defined
+-- once here, ahead of the colour section that is the first to use it.
+local function edge_indices(edges)
+  local which = {}
+  for i, e in ipairs(edges) do
+    if type(e) == "table" and getmetatable(e) == Edge then which[i] = e.index else which[i] = e end
+  end
+  return uint32s(which, "edges")
+end
+
 -- -- colour
 
 function Solid:_face_or_none(face, what)
@@ -2108,6 +2138,51 @@ function Solid:face_colour(face)
   return self:_colour(self:_face_or_none(face, "colour"))
 end
 
+--- This solid with its edges coloured: every edge, or with `edges` (`Edge` records or
+--- indices, as `fillet` takes them) just those, whose colour then wins over the
+--- all-edges one; an empty list colours none. Inherited as face colours are.
+function Solid:edges_coloured(colour, edges)
+  local r, g, b = rgb(colour)
+  if edges == nil then
+    return new_solid(lib().cadaclysm_blacksmith_edges_coloured(self:_h(), nil, 0, r, g, b))
+  end
+  -- edge_indices -> uint32s never returns a null pointer, even for {}: a non-null
+  -- pointer with count 0 is "none", as the C ABI reads it.
+  local arr, n = edge_indices(edges)
+  return new_solid(lib().cadaclysm_blacksmith_edges_coloured(self:_h(), arr, n, r, g, b))
+end
+
+--- Edge `edge`'s (an `Edge` or its index) colour as drawn -- its own, else the solid's
+--- edge colour -- or nil.
+function Solid:edge_colour(edge)
+  local index = (type(edge) == "table" and getmetatable(edge) == Edge) and edge.index or edge
+  local out = ffi.new("double[3]")
+  if lib().cadaclysm_blacksmith_edge_colour(self:_h(), index, out) then return { out[0], out[1], out[2] } end
+  if last_error() ~= "" then fail("edge_colour") end
+  return nil
+end
+
+--- A colour per polyline of `edge_polylines(tolerance)`, as drawn: {r, g, b}, or
+--- `false` for a polyline on no coloured edge (a Lua array holds no nil); an empty
+--- array where the solid has no edge paint at all. Copied out.
+function Solid:edge_polyline_colours(tolerance)
+  if tolerance == nil then tolerance = 0.05 end
+  local c = lib().cadaclysm_blacksmith_edge_polyline_colours(self:_h(), tolerance)
+  if c.rgb == nil and last_error() ~= "" then fail("edge_polyline_colours") end
+  -- This call tessellates like every other cache reader, even to report "no paint": it can
+  -- replace the cache a view taken earlier is still borrowing, so it must bump the
+  -- generation those views check, even though this method copies its own result out and
+  -- keeps nothing borrowed itself.
+  self:_filled(tolerance)
+  if c.rgb == nil then return {} end
+  local out = {}
+  for i = 0, c.count - 1 do
+    local v = c.rgb + 3 * i
+    out[i + 1] = v[0] < 0 and false or { v[0], v[1], v[2] }
+  end
+  return out
+end
+
 --- The edges a fillet indexes, as `Edge` records (copied; safe to keep), a Lua array.
 function Solid_get.edges(self)
   local L, h = lib(), self:_h()
@@ -2135,14 +2210,6 @@ function Solid._edge_curve(L, h, i)
   if L.cadaclysm_blacksmith_edge_curve(h, i, raw) then return Curve.of(raw) end
   if last_error():find("has no exact curve", 1, true) then return nil end
   fail("edge_curve")
-end
-
-local function edge_indices(edges)
-  local which = {}
-  for i, e in ipairs(edges) do
-    if type(e) == "table" and getmetatable(e) == Edge then which[i] = e.index else which[i] = e end
-  end
-  return uint32s(which, "edges")
 end
 
 --- The edges (`Edge` records or their indices) rounded by `radius`.

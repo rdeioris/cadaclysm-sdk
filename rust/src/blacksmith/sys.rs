@@ -67,6 +67,16 @@ pub struct CadaclysmBlacksmithPolylines {
     pub polyline_count: u32,
 }
 
+/// One colour per edge polyline (`cadaclysm_blacksmith_edge_polyline_colours`): three
+/// doubles each, `-1` where the polyline is on no coloured edge; `rgb` null and `count` 0
+/// where the solid has no edge paint.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CadaclysmBlacksmithColours {
+    pub rgb: *const f64,
+    pub count: u32,
+}
+
 /// Triangles per face, in face order, over the mesh at the same tolerance.
 #[repr(C)]
 pub struct CadaclysmBlacksmithFaceTriangles {
@@ -300,6 +310,8 @@ entry_points! {
     fn cadaclysm_blacksmith_profile_trim_count(profile: *const Profile, cutters: *const *const Profile, count: usize, piece: u32, tolerance: f64) -> u32;
     fn cadaclysm_blacksmith_profile_trim_chain(profile: *const Profile, cutters: *const *const Profile, count: usize, piece: u32, index: u32, tolerance: f64) -> *mut Profile;
     fn cadaclysm_blacksmith_profile_polylines(profile: *const Profile, tolerance: f64) -> CadaclysmBlacksmithPolylines;
+    fn cadaclysm_blacksmith_profile_coloured(profile: *const Profile, r: f64, g: f64, b: f64) -> *mut Profile;
+    fn cadaclysm_blacksmith_profile_colour(profile: *const Profile, out: *mut f64) -> bool;
     fn cadaclysm_blacksmith_profile_with_hole(outer: *const Profile, hole: *const Profile) -> *mut Profile;
     fn cadaclysm_blacksmith_profile_hits(a: *const Profile, b: *const Profile, tolerance: f64) -> *mut Hits;
     fn cadaclysm_blacksmith_hits_free(hits: *mut Hits);
@@ -399,6 +411,7 @@ entry_points! {
     fn cadaclysm_blacksmith_rotate(solid: *const Solid, axis: *const f64, radians: f64) -> *mut Solid;
     fn cadaclysm_blacksmith_mirror(solid: *const Solid, plane: *const f64) -> *mut Solid;
     fn cadaclysm_blacksmith_coloured(solid: *const Solid, face: u32, r: f64, g: f64, b: f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_edges_coloured(solid: *const Solid, edges: *const u32, count: usize, r: f64, g: f64, b: f64) -> *mut Solid;
 
     fn cadaclysm_blacksmith_join(a: *const Solid, b: *const Solid, tolerance: f64, progress: Progress, user: *mut c_void) -> *mut Solid;
     fn cadaclysm_blacksmith_cut(a: *const Solid, b: *const Solid, tolerance: f64, progress: Progress, user: *mut c_void) -> *mut Solid;
@@ -477,6 +490,7 @@ entry_points! {
     fn cadaclysm_blacksmith_face_ref(solid: *const Solid, face: u32, out: *mut f64) -> bool;
     fn cadaclysm_blacksmith_find_face(solid: *const Solid, face_ref: *const f64, hint: i32, tolerance: f64) -> i32;
     fn cadaclysm_blacksmith_colour(solid: *const Solid, face: u32, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_edge_colour(solid: *const Solid, edge: u32, out: *mut f64) -> bool;
     fn cadaclysm_blacksmith_face_kind(solid: *const Solid, face: u32) -> *const c_char;
     fn cadaclysm_blacksmith_edge_count(solid: *const Solid) -> u32;
     fn cadaclysm_blacksmith_edge(solid: *const Solid, i: u32, out: *mut CadaclysmBlacksmithEdge) -> bool;
@@ -495,6 +509,7 @@ entry_points! {
     fn cadaclysm_blacksmith_mesh64(solid: *const Solid, tolerance: f64) -> CadaclysmBlacksmithMesh64;
     fn cadaclysm_blacksmith_mesh_face_triangles(solid: *const Solid, tolerance: f64) -> CadaclysmBlacksmithFaceTriangles;
     fn cadaclysm_blacksmith_edge_polylines(solid: *const Solid, tolerance: f64) -> CadaclysmBlacksmithPolylines;
+    fn cadaclysm_blacksmith_edge_polyline_colours(solid: *const Solid, tolerance: f64) -> CadaclysmBlacksmithColours;
     fn cadaclysm_blacksmith_bounds(solid: *const Solid, tolerance: f64, min: *mut f64, max: *mut f64) -> bool;
     fn cadaclysm_blacksmith_bounds64(solid: *const Solid, tolerance: f64, min: *mut f64, max: *mut f64) -> bool;
     fn cadaclysm_blacksmith_step(solids: *const *const Solid, count: usize, schema: *const c_char, unit: u32) -> *mut c_char;

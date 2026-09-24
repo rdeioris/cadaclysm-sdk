@@ -1159,7 +1159,7 @@ bool cadaclysm_blacksmith_license_set(const char *text_or_path);
 
 /**
  * The license in use, as one line -- `customer=Acme Ltd expiry=2027-09-15
- * entitlements=import,kernel seats=20` -- or, without one, `unlicensed`
+ * entitlements=import,kernel scope=server plan=startup servers=1` -- or, without one, `unlicensed`
  * (`unlicensed -- <reason>` when a license was found but did not verify).
  * Never null. Borrowed, and good until the next call on this thread.
  */
@@ -1286,12 +1286,15 @@ bool cadaclysm_blacksmith_bounds64(const struct CadaclysmBlacksmithSolid *solid,
 
 /**
  * `count` solids as one STEP part file, each its own `MANIFOLD_SOLID_BREP`,
- * through `cadaclysm_step_ap::write_breps`. `schema` is NULL for the built-in
- * AP203 (`CONFIG_CONTROL_DESIGN`), the name of a built-in schema
+ * through `cadaclysm_step_ap::write_breps_coloured`. `schema` is NULL for the
+ * built-in AP203 (`CONFIG_CONTROL_DESIGN`) -- or AP242 when any solid or face is
+ * coloured, since AP203's first edition has no entity to state a colour with -- the name of a built-in schema
  * (`AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF`, …; case-insensitive) --
  * a built-in schema must carry every entity the writer emits, as AP203 and
  * AP242 do and AP214's `AUTOMOTIVE_DESIGN` does not -- or the EXPRESS source
- * text of a custom schema. `unit` 0 = metre, 1 = millimetre, 2 = inch, and
+ * text of a custom schema. A solid's and its faces' colours are written as STEP
+ * styling (`STYLED_ITEM` over `COLOUR_RGB`) under a schema that has it, and
+ * left out under a named one that does not. `unit` 0 = metre, 1 = millimetre, 2 = inch, and
  * says what the solids' lengths are. The text is owned: release it with
  * [`cadaclysm_blacksmith_string_free`]. Null and `last_error` on failure.
  *

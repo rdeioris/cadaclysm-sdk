@@ -125,6 +125,12 @@ const CadaclysmBlacksmithPolylines = koffi.struct('CadaclysmBlacksmithPolylines'
   point_count: 'uint32_t',
   polyline_count: 'uint32_t',
 });
+// One colour per polyline of edgePolylines(tolerance): count 0 (rgb null) where
+// the solid has no edge paint at all; -1, -1, -1 for a polyline on no coloured edge.
+const CadaclysmBlacksmithColours = koffi.struct('CadaclysmBlacksmithColours', {
+  rgb: 'const double *',
+  count: 'uint32_t',
+});
 const CadaclysmBlacksmithFaceTriangles = koffi.struct('CadaclysmBlacksmithFaceTriangles', {
   counts: 'const uint32_t *',
   face_count: 'uint32_t',
@@ -247,10 +253,11 @@ function _wasmLibrary(w) {
   // handle, or a count the caller checks `last_error` on) for everything else
   const BOOLS = new Set(['path_line_to', 'path_arc_to', 'path_bezier_to', 'path_nurbs_to', 'path_conic_to', 'path_parabola_by_vertex',
     'path_parabola_by_focus', 'sweep_path_line_to', 'sweep_path_arc',
-    'slant_of_plane', 'face_frame', 'face_ref', 'frame_midplane', 'frame_through', 'bounds', 'bounds64', 'edge', 'colour', 'manifold', 'license_set', 'hit', 'edge_curve',
+    'slant_of_plane', 'face_frame', 'face_ref', 'frame_midplane', 'frame_through', 'bounds', 'bounds64', 'edge', 'colour', 'profile_colour', 'edge_colour', 'manifold', 'license_set', 'hit', 'edge_curve',
     'intersection_chain', 'intersection_curve', 'intersection_overlap', 'hits_piece']);
   const FAILS = { select_face: NONE, leaked_edges: NONE, unpaired_edges: NONE, mesh: { positions: null }, mesh64: { positions: null }, mesh_face_triangles: { counts: null },
-    edge_polylines: { offsets: null }, profile_polylines: { offsets: null }, step: null, sat_text: null, svg_text: null, drawing_svg_text: null, face_kind: null, brep_layout_id: null };
+    edge_polylines: { offsets: null }, profile_polylines: { offsets: null }, edge_polyline_colours: { rgb: null, count: 0 },
+    step: null, sat_text: null, svg_text: null, drawing_svg_text: null, face_kind: null, brep_layout_id: null };
   // results that C writes into an out-array of doubles at this position, and the
   // wasm returns as an array (`bounds` fills two, `edge` and `hit` a record: see `back`)
   const OUT = { slant_of_plane: 3, face_frame: 2, face_ref: 2, frame_midplane: 2, frame_through: 3 };
@@ -261,7 +268,7 @@ function _wasmLibrary(w) {
     profile_round: [3], profile_spline: [1], profile_chain: [1], profile_from_loops: [1], profile_piece_count: [2], profile_piece: [2],
     profile_trim_count: [2], profile_trim_chain: [2], loft_through: [2], loft_through_open: [2], fillet: [2, 6], chamfer: [2], shell: [3, 6],
     thicken: [4], push_pull: [5], push_pull_faces: [2, 6], split: [4], split_by_plane: [4], step: [1], sat_text: [1], svg_text: [1], drawing_svg_text: [1, 3], profile_text: [4],
-    slant_of_plane: [3], face_frame: [2], face_ref: [2], bounds: [2, 3], bounds64: [2, 3], edge: [2], colour: [2], manifold: [1], hit: [2], edge_curve: [2],
+    slant_of_plane: [3], face_frame: [2], face_ref: [2], bounds: [2, 3], bounds64: [2, 3], edge: [2], colour: [2], profile_colour: [1], edges_coloured: [2], edge_colour: [2], manifold: [1], hit: [2], edge_curve: [2],
     intersect: [4], intersection_chain: [2], intersection_curve: [2], intersection_overlap: [2],
     solid_profile_hits: [5], hits_piece: [2, 3, 4] };
   let error = null;
@@ -325,13 +332,14 @@ function _wasmLibrary(w) {
       raw.loop_offsets = result.loop_offsets; raw.loop_count = result.loop_offsets.length;
       return true;
     }
-    if (short === 'colour') { if (result == null) return false; args[2].set(result); return true; }
+    if (short === 'colour' || short === 'profile_colour' || short === 'edge_colour') { if (result == null) return false; args[short === 'profile_colour' ? 1 : 2].set(result); return true; }
     if (short === 'manifold') { args[1].set(result); return true; }
     if (short === 'bounds' || short === 'bounds64') { args[2].set(result.slice(0, 3)); args[3].set(result.slice(3, 6)); return true; }
     if (short in OUT) { args[OUT[short]].set(result); return true; }
     if (BOOLS.has(short)) return true;
     if (short === 'mesh' || short === 'mesh64') return { ...result, vertex_count: result.positions.length / 3, index_count: result.indices.length };
     if (short === 'edge_polylines' || short === 'profile_polylines') return { ...result, point_count: result.points.length / 3, polyline_count: result.offsets.length - 1 };
+    if (short === 'edge_polyline_colours') return { rgb: result.length ? result : null, count: result.length / 3 };
     if (short === 'mesh_face_triangles') return { counts: result, face_count: result.length };
     return result;
   }
@@ -410,6 +418,7 @@ function _lib() {
     mesh64: f('CadaclysmBlacksmithMesh64 cadaclysm_blacksmith_mesh64(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
     mesh_face_triangles: f('CadaclysmBlacksmithFaceTriangles cadaclysm_blacksmith_mesh_face_triangles(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
     edge_polylines: f('CadaclysmBlacksmithPolylines cadaclysm_blacksmith_edge_polylines(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
+    edge_polyline_colours: f('CadaclysmBlacksmithColours cadaclysm_blacksmith_edge_polyline_colours(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
     bounds: f('bool cadaclysm_blacksmith_bounds(const CadaclysmBlacksmithSolid *solid, double tolerance, _Out_ double *min, _Out_ double *max)'),
     bounds64: f('bool cadaclysm_blacksmith_bounds64(const CadaclysmBlacksmithSolid *solid, double tolerance, _Out_ double *min, _Out_ double *max)'),
     step: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_step(const CadaclysmBlacksmithSolid **solids, size_t count, const char *schema, uint32_t unit)'),
@@ -469,6 +478,8 @@ function _lib() {
     face_kind: f('const char *cadaclysm_blacksmith_face_kind(const CadaclysmBlacksmithSolid *solid, uint32_t face)'),
     coloured: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_coloured(const CadaclysmBlacksmithSolid *solid, uint32_t face, double r, double g, double b)'),
     colour: f('bool cadaclysm_blacksmith_colour(const CadaclysmBlacksmithSolid *solid, uint32_t face, _Out_ double *out)'),
+    edges_coloured: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_edges_coloured(const CadaclysmBlacksmithSolid *solid, const uint32_t *edges, size_t count, double r, double g, double b)'),
+    edge_colour: f('bool cadaclysm_blacksmith_edge_colour(const CadaclysmBlacksmithSolid *solid, uint32_t edge, _Out_ double *out)'),
     edge_count: f('uint32_t cadaclysm_blacksmith_edge_count(const CadaclysmBlacksmithSolid *solid)'),
     edge: f('bool cadaclysm_blacksmith_edge(const CadaclysmBlacksmithSolid *solid, uint32_t i, _Out_ CadaclysmBlacksmithEdge *out)'),
     edge_curve: f('bool cadaclysm_blacksmith_edge_curve(const CadaclysmBlacksmithSolid *solid, uint32_t i, _Out_ CadaclysmBlacksmithCurve *out)'),
@@ -509,6 +520,8 @@ function _lib() {
     extrude_faces: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_extrude_faces(const CadaclysmBlacksmithSolid *sheet, double height)'),
     place: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_place(const CadaclysmBlacksmithSolid *solid, const double *frame)'),
     translate_profile: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_translate_profile(const CadaclysmBlacksmithProfile *profile, double dx, double dy)'),
+    profile_coloured: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_coloured(const CadaclysmBlacksmithProfile *profile, double r, double g, double b)'),
+    profile_colour: f('bool cadaclysm_blacksmith_profile_colour(const CadaclysmBlacksmithProfile *profile, _Out_ double *out)'),
     profile_round: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_round(const CadaclysmBlacksmithProfile *profile, double radius, const uint32_t *corners, size_t count, bool open)'),
     profile_close_loop: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_close_loop(const CadaclysmBlacksmithProfile *profile)'),
     profile_polylines: f('CadaclysmBlacksmithPolylines cadaclysm_blacksmith_profile_polylines(const CadaclysmBlacksmithProfile *profile, double tolerance)'),
@@ -903,15 +916,32 @@ class Profile {
       String(halign), String(valign), spacing, String(direction)), 'profile_text');
   }
   translate(dx, dy) { return new Profile(_lib().translate_profile(this._handle, dx, dy)); }
+  /** This outline coloured -- `colour` is '#rgb', '#rrggbb' or [r, g, b] in 0..1: how it is drawn.
+   *  The verbs that make a profile from one carry it; a solid made from it takes nothing. */
+  coloured(colour) {
+    const [r, g, b] = _rgb(colour);
+    return new Profile(_lib().profile_coloured(this._handle, r, g, b));
+  }
+  /** The outline's colour as [r, g, b] in 0..1, or null. */
+  get colour() {
+    const out = new Float64Array(3);
+    if (_lib().profile_colour(this._handle, out)) return Array.from(out);
+    if (_lastError()) _fail('profile_colour');
+    return null;
+  }
   /**
    * Corners between two straight segments rounded by `radius`, with an exact tangent arc.
    * `corners` null rounds every one (the holes' too); otherwise it picks corners of the
    * boundary -- corner `k` is where segment `k` ends. `open` keeps an open chain's ends square.
    */
   round(radius, corners = null, open = false) {
-    // A picked list, even an empty one, is a non-null array: null means every corner.
+    // A picked list, even an empty one, is a non-null array: null means every corner -- and
+    // the empty case needs a different shape per backend, exactly as `Solid.edgesColoured`
+    // explains: koffi turns a zero-length array's pointer into null, which would round EVERY
+    // corner, while the wasm export reads the array's own length and so must be handed the
+    // empty array itself, or it rounds corner 0.
     const which = corners == null ? null : Uint32Array.from(Array.from(corners, Number));
-    const list = which == null ? null : which.length ? which : new Uint32Array(1);
+    const list = which == null ? null : which.length || _wasm() ? which : new Uint32Array(1);
     return new Profile(_lib().profile_round(this._handle, radius, list, which == null ? 0 : which.length, !!open));
   }
   /**
@@ -1408,6 +1438,17 @@ class Solid {
     for (let i = 0; i < p.polyline_count; i++) out.push(points.slice(offsets[i] * 3, offsets[i + 1] * 3));
     return out;
   }
+  /** A colour per polyline of `edgePolylines(tolerance)`, as drawn: [r, g, b], or null for a polyline
+   *  on no coloured edge; an empty array where the solid has no edge paint at all. Copied out, but
+   *  it fills the solid's cache at `tolerance` first, as `edgePolylines` does. */
+  edgePolylineColours(tolerance = 0.05) {
+    const c = _lib().edge_polyline_colours(this._handle, tolerance);
+    if (c.rgb == null) { if (_lastError()) _fail('edge_polyline_colours'); return []; }
+    const values = _doublesAt(c.rgb, 3 * c.count);
+    const out = [];
+    for (let i = 0; i < c.count; i++) out.push(values[3 * i] < 0 ? null : [values[3 * i], values[3 * i + 1], values[3 * i + 2]]);
+    return out;
+  }
   stepText(schema = null, unit = 'mm') { return writeStepText([this], schema, unit); }
   step(filePath, schema = null, unit = 'mm') { fs.writeFileSync(filePath, this.stepText(schema, unit), 'utf8'); }
   /** The solid as ACIS SAT text: analytic surfaces as their own records, splines and swept surfaces as exact NURBS. */
@@ -1488,6 +1529,30 @@ class Solid {
     const out = new Float64Array(3);
     if (_lib().colour(this._handle, face, out)) return Array.from(out);
     if (_lastError()) _fail('colour');
+    return null;
+  }
+  /** This solid with its edges coloured: every edge, or with `edges` (`Edge` objects or indices,
+   *  as `fillet` takes them) just those, whose colour then wins over the all-edges one. An empty
+   *  list colours no edge. Inherited as face colours are: a move keeps every one, a boolean or a
+   *  fillet gives each edge the colour of the input edge it lies on, a new edge the all-edges one. */
+  edgesColoured(colour, edges = null) {
+    const [r, g, b] = _rgb(colour);
+    if (edges == null) return new Solid(_lib().edges_coloured(this._handle, null, 0, r, g, b));
+    const which = Solid._edgeIndices(edges);
+    // A picked list, even an empty one, is a non-null array: null means every edge. The wasm side
+    // reads a Uint32Array's own length, so the real (possibly empty) array is exactly right; koffi
+    // instead turns a zero-length typed array's pointer into null regardless of the count passed
+    // beside it, so the native route needs a throwaway one-element array in its place -- `count`
+    // stays the real, zero, length, and the C side never reads that element back. `Profile.round`
+    // picks its corners the same way and needs the same branch.
+    const list = which.length || _wasm() ? which : new Uint32Array(1);
+    return new Solid(_lib().edges_coloured(this._handle, list, which.length, r, g, b));
+  }
+  /** Edge `edge`'s (an `Edge` or its index) colour as drawn -- its own, else the solid's edge colour -- or null. */
+  edgeColour(edge) {
+    const out = new Float64Array(3);
+    if (_lib().edge_colour(this._handle, edge instanceof Edge ? edge.index : Number(edge), out)) return Array.from(out);
+    if (_lastError()) _fail('edge_colour');
     return null;
   }
   /** The edges a fillet indexes, as `Edge` records (copied; safe to keep). */

@@ -264,6 +264,9 @@ typedef struct CadaclysmSurfaces {
 
   const float *nurbs;
   uint32_t nurbs_count;
+
+  const uint32_t *shared;
+  uint32_t shared_count;
 } CadaclysmSurfaces;
 
 typedef struct CadaclysmWindow {

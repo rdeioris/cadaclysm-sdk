@@ -769,11 +769,17 @@ impl CadaclysmFrame {
 #[class(no_init, base = RefCounted)]
 pub struct CadaclysmProfile {
     profile: bs::Profile,
+    #[var(get = get_colour, no_set)]
+    colour: PhantomVar<Variant>,
 }
 
 impl CadaclysmProfile {
+    fn wrap(profile: bs::Profile) -> Gd<CadaclysmProfile> {
+        Gd::from_object(CadaclysmProfile { profile, colour: PhantomVar::default() })
+    }
+
     fn made(result: sdk::Result<bs::Profile>) -> Option<Gd<CadaclysmProfile>> {
-        ok(result).map(|profile| Gd::from_object(CadaclysmProfile { profile }))
+        ok(result).map(Self::wrap)
     }
 
     fn joined(list: &AnyArray, what: &str, f: impl FnOnce(&[&bs::Profile]) -> sdk::Result<bs::Profile>) -> Option<Gd<CadaclysmProfile>> {
@@ -789,7 +795,7 @@ impl CadaclysmProfile {
         let Some(list) = object_list::<CadaclysmProfile>(list, what) else { return Array::new() };
         let guards: Vec<GdRef<CadaclysmProfile>> = list.iter().map(|p| p.bind()).collect();
         let refs: Vec<&bs::Profile> = guards.iter().map(|g| &g.profile).collect();
-        ok(f(&refs)).unwrap_or_default().into_iter().map(|profile| Gd::from_object(CadaclysmProfile { profile })).collect()
+        ok(f(&refs)).unwrap_or_default().into_iter().map(Self::wrap).collect()
     }
 }
 
@@ -915,6 +921,21 @@ impl CadaclysmProfile {
         Self::made(self.profile.translate(dx, dy))
     }
 
+    /// This outline coloured `colour` (a `Color`, `"#rrggbb"`, or three numbers in 0..1): how
+    /// it is drawn. The verbs that make a profile from one carry it; a solid made from it
+    /// takes nothing.
+    #[func]
+    fn coloured(&self, colour: Variant) -> Option<Gd<CadaclysmProfile>> {
+        let rgb = colour_arg(&colour)?;
+        Self::made(self.profile.coloured(rgb))
+    }
+
+    /// Its colour, or `null` where it has none.
+    #[func]
+    fn get_colour(&self) -> Variant {
+        ok(self.profile.colour()).map_or(Variant::nil(), colour_out)
+    }
+
     /// Where this profile's curves cross, touch or run along `other`'s, both read in one
     /// plane, as `CadaclysmHit`s ordered along this profile. Points closer than
     /// `tolerance` merge; two curves within `tolerance` of each other for longer than
@@ -936,7 +957,7 @@ impl CadaclysmProfile {
     #[func]
     fn common(&self, other: Gd<CadaclysmProfile>, #[opt(default = 1e-6)] tolerance: f64) -> Array<Gd<CadaclysmProfile>> {
         let shared = ok(self.profile.common(&other.bind().profile, tolerance));
-        shared.unwrap_or_default().into_iter().map(|profile| Gd::from_object(CadaclysmProfile { profile })).collect()
+        shared.unwrap_or_default().into_iter().map(Self::wrap).collect()
     }
 
     /// `text` set in a font, one profile per closed shape -- a letter with its counters
@@ -965,7 +986,7 @@ impl CadaclysmProfile {
         let bytes = font_bytes.to_vec();
         let set = ok(bs::Profile::text(&text.to_string(), size, &font.to_string(), &halign.to_string(), &valign.to_string(),
                                        spacing, &direction.to_string(), if bytes.is_empty() { None } else { Some(&bytes[..]) }));
-        set.unwrap_or_default().into_iter().map(|profile| Gd::from_object(CadaclysmProfile { profile })).collect()
+        set.unwrap_or_default().into_iter().map(Self::wrap).collect()
     }
 
     /// This profile with its corners rounded by `radius` where two straight segments
@@ -1578,7 +1599,7 @@ impl CadaclysmPiece {
             is_inside: piece.inside,
             from: piece.start,
             to: piece.end,
-            own: Gd::from_object(CadaclysmProfile { profile: piece.profile }),
+            own: CadaclysmProfile::wrap(piece.profile),
             inside: PhantomVar::default(),
             start: PhantomVar::default(),
             end: PhantomVar::default(),
@@ -2635,6 +2656,45 @@ impl CadaclysmSolid {
         colour.map_or(Variant::nil(), colour_out)
     }
 
+    /// This solid with every edge coloured `colour`. Inherited as face colours are: a
+    /// move keeps every one, a boolean or a fillet gives each edge the colour of the
+    /// input edge it lies on, a new edge the all-edges one. `#[opt(default = ...)]` has no
+    /// truly-immutable `Variant` to default `edges` to (unlike `coloured`'s `face: i64`),
+    /// so this is split as `svg_text`/`svg_text_with` are: call `edges_coloured_with` to
+    /// pick edges.
+    #[func]
+    fn edges_coloured(&self, colour: Variant) -> Option<Gd<CadaclysmSolid>> {
+        self.edges_coloured_with(colour, Variant::nil())
+    }
+
+    /// `edges_coloured`, with `edges` (`CadaclysmEdge`s or their indices, as `fillet`
+    /// takes them) picked: just those are coloured, a colour that wins over the
+    /// all-edges one; an empty list colours none, `null` every edge (`edges_coloured`'s
+    /// own case).
+    #[func]
+    fn edges_coloured_with(&self, colour: Variant, edges: Variant) -> Option<Gd<CadaclysmSolid>> {
+        let rgb = colour_arg(&colour)?;
+        if edges.is_nil() {
+            return self.then(|s| s.edges_coloured(rgb, None));
+        }
+        let edges = indices(&edges, "edges_coloured: edges")?;
+        self.then(|s| s.edges_coloured(rgb, Some(&edges)))
+    }
+
+    /// Edge `edge`'s colour as drawn -- its own, else the solid's edge colour -- or `null`.
+    #[func]
+    fn edge_colour(&self, edge: i64) -> Variant {
+        let Some(solid) = self.held() else { return Variant::nil() };
+        let colour = match u32::try_from(edge) {
+            Ok(e) => ok(solid.edge_colour(e)),
+            Err(_) => {
+                let count = solid.edges().map(|e| e.len()).unwrap_or_default();
+                fail(format!("edge_colour: edge {edge} is not one of the solid's {count}"))
+            }
+        };
+        colour.map_or(Variant::nil(), colour_out)
+    }
+
     // -- asking
 
     /// How many faces it has.
@@ -2765,6 +2825,15 @@ impl CadaclysmSolid {
     fn edge_polylines(&mut self, #[opt(default = 0.05)] tolerance: f64) -> Option<Gd<CadaclysmPolylines>> {
         let (positions, counts) = self.edge_runs(tolerance)?;
         Some(CadaclysmPolylines::from_runs(positions, counts))
+    }
+
+    /// A colour per polyline of `edge_polylines` at the same tolerance, as drawn: a `Color`,
+    /// or `null` for a polyline on no coloured edge; an empty array where the solid has no
+    /// edge paint at all. Fills the solid's cache at `tolerance`, as `edge_polylines` does.
+    #[func]
+    fn edge_polyline_colours(&mut self, #[opt(default = 0.05)] tolerance: f64) -> Array<Variant> {
+        let Some(colours) = self.held_mut().and_then(|s| ok(s.edge_polyline_colours(tolerance))) else { return Array::new() };
+        colours.into_iter().map(colour_out).collect()
     }
 
     /// Its triangles at `tolerance` as an `ArrayMesh`, wound for Godot, painted its
