@@ -210,6 +210,11 @@ typedef struct CadaclysmPolylines {
   uint32_t vertex_count;
 } CadaclysmPolylines;
 
+typedef struct CadaclysmEdgeColors {
+  const float *rgba;
+  uint32_t count;
+} CadaclysmEdgeColors;
+
 typedef struct CadaclysmBeziers {
   const float *points;
   const float *weights;
@@ -507,10 +512,35 @@ uint32_t cadaclysm_geometry_diagnostic_count(const struct CadaclysmScene *scene)
 
 const char *cadaclysm_geometry_diagnostic(const struct CadaclysmScene *scene, uint32_t index);
 
+uint32_t cadaclysm_link_count(const struct CadaclysmScene *scene);
+
+const char *cadaclysm_link_name(const struct CadaclysmScene *scene, uint32_t link);
+
+uint32_t cadaclysm_link_node_count(const struct CadaclysmScene *scene, uint32_t link);
+
+uint32_t cadaclysm_link_node(const struct CadaclysmScene *scene, uint32_t link, uint32_t index);
+
+uint32_t cadaclysm_joint_count(const struct CadaclysmScene *scene);
+
+const char *cadaclysm_joint_name(const struct CadaclysmScene *scene, uint32_t joint);
+
+uint32_t cadaclysm_joint_start(const struct CadaclysmScene *scene, uint32_t joint);
+
+uint32_t cadaclysm_joint_end(const struct CadaclysmScene *scene, uint32_t joint);
+
 struct CadaclysmPolylines cadaclysm_node_edges(const struct CadaclysmScene *scene, uint32_t node);
+
+struct CadaclysmEdgeColors cadaclysm_node_edge_colors(const struct CadaclysmScene *scene,
+                                                      uint32_t node);
 
 struct CadaclysmPolylines cadaclysm_node_surface_edges(const struct CadaclysmScene *scene,
                                                        uint32_t node);
+
+struct CadaclysmBeziers cadaclysm_node_surface_edge_beziers(const struct CadaclysmScene *scene,
+                                                            uint32_t node);
+
+struct CadaclysmEdgeColors cadaclysm_node_surface_edge_colors(const struct CadaclysmScene *scene,
+                                                              uint32_t node);
 
 struct CadaclysmPolylines cadaclysm_node_surface_isocurves(const struct CadaclysmScene *scene,
                                                            uint32_t node);

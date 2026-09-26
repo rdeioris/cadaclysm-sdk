@@ -85,6 +85,586 @@ static Result<std::vector<char>> read_file(const std::string& path) {
     return std::vector<char>(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
+// ---- the FEM surface mesh ------------------------------------------------------------
+
+// A placement carrying **both a rotation and a translation**: a quarter turn about z,
+// then 100 along x, as the reader's sixteen column-major doubles.
+//
+//     [ 0 -1  0 100 ]        so (x, y, z) -> (100 - y, x, z)
+//     [ 1  0  0   0 ]
+//     [ 0  0  1   0 ]
+//     [ 0  0  0   1 ]
+//
+// A translation alone cannot catch a composition-order bug: translate-then-rotate and
+// rotate-then-translate agree on every pure translation, and the transpose of the
+// identity is the identity. With the turn in it they disagree loudly -- this sends the
+// origin to (100, 0, 0) where the other order sends it to (0, 100, 0), and a transposed
+// 3x3 block sends what should be +y to -y.
+//
+// **A rotation only says something about a body that is not symmetric under it.**
+// Transposing the 3x3 block composes this transform with a 180-degree turn about z
+// through the placement's own origin, so a body centred on *its* own origin -- which
+// every `Solid::cuboid` is -- maps onto itself: the same corners, the same span, the same
+// printed line. So both halves below put the body off that axis **in the plane the turn
+// acts in** (a non-zero x or y): an offset purely along z, off the origin but on the
+// axis, leaves a transposed placement passing. `fem_kernel` is where that bites, and
+// `fem_reader`'s cube needs no care only because `cube.scad` spans 0..20 in x and y
+// rather than straddling the origin.
+static constexpr double TURNED[16] = {
+    0,   1, 0, 0,  // column 0: where x goes
+    -1,  0, 0, 0,  // column 1: where y goes
+    0,   0, 1, 0,  // column 2: where z goes
+    100, 0, 0, 1,  // column 3: the translation
+};
+
+// Where TURNED puts a point. `turned_frame` is the same transform written the kernel's
+// way -- twelve numbers rather than sixteen -- so both sides of the ABI are asserted
+// against this one map.
+static cadaclysm::Vec3 turned(const cadaclysm::Vec3& p) { return {100.0 - p[1], p[0], p[2]}; }
+
+// TURNED as the kernel's **twelve** numbers: an origin and where x, y and z go.
+// `Frame::of` checks them, so a left-handed or skewed slip here never reaches the mesher.
+static Result<bs::Frame> turned_frame() {
+    return bs::Frame::of({100, 0, 0, /* x -> */ 0, 1, 0, /* y -> */ -1, 0, 0, /* z -> */ 0, 0, 1});
+}
+
+static bool near_to(const cadaclysm::Vec3& a, const cadaclysm::Vec3& b) {
+    return std::fabs(a[0] - b[0]) < 1e-6 && std::fabs(a[1] - b[1]) < 1e-6 && std::fabs(a[2] - b[2]) < 1e-6;
+}
+
+// The box the nodes fill, for the placement checks.
+static std::pair<cadaclysm::Vec3, cadaclysm::Vec3> node_span(cadaclysm::Span<const double> nodes) {
+    cadaclysm::Vec3 lo{0, 0, 0}, hi{0, 0, 0};
+    for (std::size_t i = 0; i + 2 < nodes.size(); i += 3) {
+        for (std::size_t k = 0; k < 3; ++k) {
+            double v = nodes[i + k];
+            lo[k] = i == 0 ? v : std::min(lo[k], v);
+            hi[k] = i == 0 ? v : std::max(hi[k], v);
+        }
+    }
+    return {lo, hi};
+}
+
+static bool has_node(cadaclysm::Span<const double> nodes, const cadaclysm::Vec3& want) {
+    for (std::size_t i = 0; i + 2 < nodes.size(); i += 3) {
+        if (near_to({nodes[i], nodes[i + 1], nodes[i + 2]}, want)) return true;
+    }
+    return false;
+}
+
+// The eight corners of a box: every one is a B-rep vertex of a cuboid, and so a node.
+static std::vector<cadaclysm::Vec3> corners(const cadaclysm::Vec3& lo, const cadaclysm::Vec3& hi) {
+    std::vector<cadaclysm::Vec3> out;
+    for (double x : {lo[0], hi[0]}) {
+        for (double y : {lo[1], hi[1]}) {
+            for (double z : {lo[2], hi[2]}) out.push_back({x, y, z});
+        }
+    }
+    return out;
+}
+
+static std::string where(const cadaclysm::Vec3& p) {
+    char buffer[96];
+    std::snprintf(buffer, sizeof buffer, "(%g, %g, %g)", p[0], p[1], p[2]);
+    return buffer;
+}
+
+// Checks that hold of any FEM mesh, whichever side of the ABI built it -- a template, so
+// a member missing from one of the two classes is a compile error rather than an untested
+// half. The five flat arrays agree with each other and with the counts, every index is in
+// range, and every `node_entity` is bounded by the list its own `node_kind` names, which
+// is what tells those two arrays apart if they were ever filled from one pointer.
+template <class Fem>
+static Result<void> fem_arrays(const Fem& mesh, std::size_t edge_count, std::size_t vertex_count, const std::string& what) {
+    cadaclysm::Span<const double> nodes = mesh.nodes();
+    cadaclysm::Span<const std::uint32_t> triangles = mesh.triangles();
+    EXPECT(!nodes.empty() && !triangles.empty(), what + ": an empty mesh came back as success");
+    EXPECT(nodes.size() % 3 == 0 && triangles.size() % 3 == 0, what + ": the nodes or the triangles are not triples");
+    std::size_t node_count = nodes.size() / 3, triangle_count = triangles.size() / 3;
+    EXPECT(mesh.triangle_face().size() == triangle_count && mesh.node_kind().size() == node_count &&
+               mesh.node_entity().size() == node_count,
+           what + ": the arrays disagree -- " + std::to_string(node_count) + " nodes, " + std::to_string(triangle_count) +
+               " triangles, " + std::to_string(mesh.triangle_face().size()) + " triangle_face, " +
+               std::to_string(mesh.node_kind().size()) + " node_kind, " + std::to_string(mesh.node_entity().size()) + " node_entity");
+    for (std::uint32_t i : triangles) EXPECT(i < node_count, what + ": a triangle index points past the nodes");
+    for (std::uint32_t f : mesh.triangle_face()) {
+        EXPECT(f < mesh.face_count(), what + ": a triangle_face is not one of the body's " + std::to_string(mesh.face_count()) + " faces");
+    }
+    cadaclysm::Span<const std::uint32_t> kinds = mesh.node_kind(), entities = mesh.node_entity();
+    for (std::size_t i = 0; i < kinds.size(); ++i) {
+        std::size_t bound = 0;
+        switch (kinds[i]) {
+            case 0: bound = vertex_count; break;
+            case 1: bound = edge_count; break;
+            case 2: bound = mesh.face_count(); break;
+            default:
+                return Error{what + ": node " + std::to_string(i) + " has kind " + std::to_string(kinds[i]) +
+                             ", which is neither vertex, edge nor face"};
+        }
+        EXPECT(entities[i] < bound, what + ": node " + std::to_string(i) + " is on entity " + std::to_string(entities[i]) +
+                                        " of kind " + std::to_string(kinds[i]) + ", which has only " + std::to_string(bound));
+    }
+    return {};
+}
+
+// The `.msh` text and the file, on either side: the same bytes from the same writer, and
+// two asks giving two equal strings -- which on the reader's side means the wrapper copied
+// the library's borrowed slot out, and on the kernel's that it freed the owned string
+// without handing back a dangling one.
+template <class Fem>
+static Result<void> fem_msh(const Fem& mesh, const char* file, const std::string& what) {
+    CADACLYSM_TRY(text, mesh.msh_text());
+    CADACLYSM_TRY(again, mesh.msh_text());
+    EXPECT(text.rfind("$MeshFormat\n4.1 0 8\n", 0) == 0,
+           what + ": the .msh text does not open as Gmsh 4.1 ASCII: " + text.substr(0, std::min<std::size_t>(40, text.size())));
+    EXPECT(again == text, what + ": two asks for the same mesh's .msh text disagree");
+    std::string path = temp_file(file);
+    CADACLYSM_TRY_VOID(mesh.save_msh(path));
+    std::error_code size_error;
+    auto written = std::filesystem::file_size(cadaclysm::detail::fs_path(path), size_error);
+    EXPECT(!size_error && written >= text.size() / 2,
+           what + ": save_msh wrote " + std::to_string(written) + " bytes against " + std::to_string(text.size()) + " of text");
+    return {};
+}
+
+// # **Which count feeds which entry point** -- the census *wiring*, which nothing else here
+// pins. Every other FEM check proves a row is extracted correctly; none proves `open_edges()`
+// reads `open_edge_count` rows through `cadaclysm_fem_mesh_open_edge` rather than the folded
+// count or the folded call.
+//
+// `samples/open-sheet.scad` is the only body in this repository where both censuses are
+// non-empty and of different lengths: the B-rep path computes no census unless the topology is
+// closed (the documented "not asked" pair) and every closed body has none, while the mesh path
+// always computes one -- so a `polyhedron` with a flap over one of its own directed edges is
+// the way in. Six cracks, one fold, and the fold is not the first crack.
+static Result<void> fem_census_wiring(const std::string& sheet) {
+    CADACLYSM_TRY(scene, cadaclysm::open(sheet));
+    std::vector<cadaclysm::Node> bodies = scene.walk();
+    auto body = std::find_if(bodies.begin(), bodies.end(), [](const cadaclysm::Node& n) { return n.can_mesh(); });
+    EXPECT(body != bodies.end(), "fem census: open-sheet.scad has no meshable node");
+    CADACLYSM_TRY(mesh, body->fem_mesh());
+    EXPECT(mesh.nodes().size() == 5 * 3 && mesh.triangles().size() == 3 * 3 && mesh.from_mesh() && !mesh.watertight(),
+           "fem census: open-sheet.scad read " + std::to_string(mesh.nodes().size() / 3) + " nodes, " +
+               std::to_string(mesh.triangles().size() / 3) + " triangles, watertight " +
+               std::to_string(mesh.watertight() ? 1 : 0));
+    CADACLYSM_TRY(cracks, mesh.open_edges());
+    CADACLYSM_TRY(folds, mesh.folded_edges());
+    // The counts are what separate the two lists: a swapped count reads 1 where 6 belongs, and a
+    // swapped call cannot read row 1 of a one-row table at all.
+    EXPECT(cracks.size() == 6 && folds.size() == 1,
+           "fem census: " + std::to_string(cracks.size()) + " cracks and " + std::to_string(folds.size()) +
+               " folds, not 6 and 1");
+    // And the contents, which separates a wrapper that swapped both consistently.
+    EXPECT(folds[0] == (std::array<std::uint32_t, 3>{2, 0, cadaclysm::NONE}),
+           "fem census: the fold reads (" + std::to_string(folds[0][0]) + "," + std::to_string(folds[0][1]) + "," +
+               std::to_string(folds[0][2]) + "), not (2,0,NONE)");
+    EXPECT(cracks[0][0] == 1 && cracks[0][1] == 2,
+           "fem census: the first crack reads (" + std::to_string(cracks[0][0]) + "," +
+               std::to_string(cracks[0][1]) + "), not (1,2)");
+    std::printf("fem census: open-sheet.scad reads %zu cracks and %zu fold at (%u,%u)\n", cracks.size(), folds.size(),
+                folds[0][0], folds[0][1]);
+    return {};
+}
+
+// The reader's FEM mesh over a node with no B-rep: the **mesh-only** path, where
+// `from_mesh` is true, there are no edges and no vertices, and -- the trap the plan names
+// -- `fem_mesh_of_mesh` reads no options at all, so a tolerance or a size the B-rep path
+// refuses still comes back as a mesh.
+static Result<void> fem_reader(const cadaclysm::Scene& scene, bool is_cube) {
+    std::vector<cadaclysm::Node> bodies = scene.walk();
+    auto body = std::find_if(bodies.begin(), bodies.end(), [](const cadaclysm::Node& n) { return n.can_mesh(); });
+    EXPECT(body != bodies.end(), "fem: no meshable node");
+    CADACLYSM_TRY(mesh, body->fem_mesh());
+    CADACLYSM_TRY(edges, mesh.edges());
+    CADACLYSM_TRY(vertices, mesh.vertices());
+    CADACLYSM_TRY_VOID(fem_arrays(mesh, edges.size(), vertices.size(), "fem reader"));
+
+    // A mesh-only body: one face, every node on it, no topology at all -- and its census
+    // does run over the welded triangles, so an empty one here means "nothing found".
+    EXPECT(mesh.from_mesh(), "fem: a node with no brep did not report from_mesh");
+    cadaclysm::Span<const std::uint32_t> kinds = mesh.node_kind();
+    EXPECT(mesh.face_count() == 1 && edges.empty() && vertices.empty() &&
+               std::all_of(kinds.begin(), kinds.end(), [](std::uint32_t k) { return k == 2; }),
+           "fem: a from_mesh body has edges, vertices or a node off face 0");
+    CADACLYSM_TRY(open, mesh.open_edges());
+    CADACLYSM_TRY(folded, mesh.folded_edges());
+    EXPECT(mesh.watertight() && open.empty() && folded.empty(),
+           "fem: the cube's own mesh is not watertight with both censuses empty");
+    EXPECT(mesh.min_angle() > 0.0 && mesh.min_angle() <= 60.0 && mesh.worst_triangle() < mesh.triangles().size() / 3 &&
+               mesh.longest_edge() > 0.0,
+           "fem: the quality figures read " + std::to_string(mesh.min_angle()) + " deg, triangle " +
+               std::to_string(mesh.worst_triangle()) + ", longest " + std::to_string(mesh.longest_edge()));
+    if (is_cube) {
+        EXPECT(mesh.nodes().size() == 8 * 3 && mesh.triangles().size() == 12 * 3,
+               "fem: the cube meshed to " + std::to_string(mesh.nodes().size() / 3) + " nodes, " +
+                   std::to_string(mesh.triangles().size() / 3) + " triangles");
+    }
+    CADACLYSM_TRY_VOID(fem_msh(mesh, "cadaclysm-smoke-cpp-fem.msh", "fem"));
+    std::printf("fem reader: %zu nodes, %zu triangles, from_mesh=%d\n", mesh.nodes().size() / 3,
+                mesh.triangles().size() / 3, mesh.from_mesh() ? 1 : 0);
+
+    // The default tolerance is pinned in `fem_brep`, not here: **this body cannot see it.**
+    // A mesh-only body's mesher reads no options at all, so the cube meshes to the same 8
+    // nodes at 0.01 and at 0.05 alike -- which is exactly how one wrapper's wrong default
+    // survived seventy-five other tests. A defaults pin needs a body with curvature.
+
+    // The placement reaches the library, and in the right order. Catches: a placement
+    // dropped (the nodes stay where the body is), applied twice, transposed (+y for -y),
+    // or composed the other way round (the origin at (0, 100, 0), not (100, 0, 0)).
+    // Every node is checked, not one convenient point: a transpose leaves the corner at
+    // the origin correct.
+    std::array<double, 16> turn{};
+    for (std::size_t i = 0; i < 16; ++i) turn[i] = TURNED[i];
+    CADACLYSM_TRY(placed, body->fem_mesh(0.01, 0.0, turn));
+    CADACLYSM_TRY(plain, body->fem_mesh(0.01, 0.0));
+    EXPECT(placed.nodes().size() == plain.nodes().size(), "fem: the placement changed the node count");
+    std::pair<cadaclysm::Vec3, cadaclysm::Vec3> placed_box = node_span(placed.nodes());
+    cadaclysm::Span<const double> unplaced = plain.nodes();
+    for (std::size_t i = 0; i + 2 < unplaced.size(); i += 3) {
+        cadaclysm::Vec3 p{unplaced[i], unplaced[i + 1], unplaced[i + 2]};
+        EXPECT(has_node(placed.nodes(), turned(p)),
+               "fem: the placement did not send " + where(p) + " to " + where(turned(p)) + " -- the placed nodes span " +
+                   where(placed_box.first) + ".." + where(placed_box.second));
+    }
+    std::pair<cadaclysm::Vec3, cadaclysm::Vec3> plain_box = node_span(unplaced);
+    EXPECT(near_to(placed_box.first, turned({plain_box.first[0], plain_box.second[1], plain_box.first[2]})) &&
+               near_to(placed_box.second, turned({plain_box.second[0], plain_box.first[1], plain_box.second[2]})),
+           "fem: the placed nodes span " + where(placed_box.first) + ".." + where(placed_box.second) + ", not the turn of " +
+               where(plain_box.first) + ".." + where(plain_box.second));
+    std::printf("fem reader: the placement turns and moves %s..%s into %s..%s\n", where(plain_box.first).c_str(),
+                where(plain_box.second).c_str(), where(placed_box.first).c_str(), where(placed_box.second).c_str());
+
+    // **Neither `tolerance` nor `max_size` is checked by this wrapper**, and the mesh-only
+    // path reads neither: `fem_mesh_of_mesh` takes no options at all. Catches a wrapper
+    // that validated either field itself -- which passes every Python-shaped test and is
+    // wrong. The B-rep half of this contract is in `fem_brep`, where each *is* refused.
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    const std::pair<double, double> waved[] = {{0.0, 0.0}, {-1.0, 0.0}, {nan, 0.0}, {0.01, -1.0}, {0.01, nan}, {0.01, inf}};
+    for (const std::pair<double, double>& pair : waved) {
+        auto anyway = body->fem_mesh(pair.first, pair.second);
+        EXPECT(anyway.ok(), "fem: tolerance " + std::to_string(pair.first) + " max_size " + std::to_string(pair.second) +
+                           " was refused on the mesh-only path: " + (anyway ? std::string() : anyway.error().message));
+        EXPECT(!anyway->nodes().empty(), "fem: tolerance " + std::to_string(pair.first) + " max_size " +
+                                             std::to_string(pair.second) + " came back as an empty mesh");
+    }
+    std::puts("fem reader: tolerance 0/-1/NaN and max_size -1/NaN/+Inf all mesh on the mesh-only path");
+    return {};
+}
+
+// The FEM mesh is its **own** handle: `Scene::close` neither frees it nor stales it, so
+// every array still reads after the scene it was built through is gone. Catches a wrapper
+// that hung the mesh off the scene's state -- which every other view here does, and which
+// would make this read a freed block or trip the stale-view check.
+static Result<void> fem_outlives_its_scene(const std::string& path) {
+    std::vector<double> kept;
+    std::size_t triangles = 0;
+    {
+        CADACLYSM_TRY(scene, cadaclysm::open(path));
+        std::vector<cadaclysm::Node> bodies = scene.walk();
+        auto body = std::find_if(bodies.begin(), bodies.end(), [](const cadaclysm::Node& n) { return n.can_mesh(); });
+        EXPECT(body != bodies.end(), "fem: no meshable node");
+        CADACLYSM_TRY(mesh, body->fem_mesh());
+        scene.close();
+        EXPECT(!trips([&] { (void)mesh.nodes(); }),
+               "fem: a FEM mesh read after Scene::close tripped -- the mesh owns its arrays, so it must not borrow the "
+               "scene's state the way every other view here does");
+        cadaclysm::Span<const double> nodes = mesh.nodes();
+        EXPECT(!nodes.empty(), "fem: the nodes are empty after the scene closed");
+        kept.assign(nodes.begin(), nodes.end());
+        triangles = mesh.triangles().size() / 3;
+        CADACLYSM_TRY(edges, mesh.edges());
+        EXPECT(edges.empty(), "fem: the mesh-only body grew edges after the scene closed");
+        CADACLYSM_TRY(text, mesh.msh_text());
+        EXPECT(!text.empty(), "fem: the .msh text is empty after the scene closed");
+        EXPECT(!mesh.freed(), "fem: closing the scene freed the FEM mesh");
+    }
+    EXPECT(kept.size() % 3 == 0 && triangles > 0, "fem: the copy taken after the close is not a mesh");
+    std::printf("fem reader: %zu nodes and %zu triangles still read after Scene::close\n", kept.size() / 3, triangles);
+    return {};
+}
+
+// samples/edge-colours.stp sits beside the given sample and paints one edge teal
+// (0.1, 0.6, 0.55) on the body -- everything else, edge and surface-edge alike, stays
+// unstyled.
+static Result<void> edge_colours_check(const std::string& path) {
+    std::filesystem::path sibling = std::filesystem::path(path).parent_path() / "edge-colours.stp";
+    CADACLYSM_TRY(scene, cadaclysm::open(utf8(sibling)));
+    std::vector<cadaclysm::Node> bodies = scene.walk();
+    auto body = std::find_if(bodies.begin(), bodies.end(), [](const cadaclysm::Node& n) { return !n.edges().empty(); });
+    EXPECT(body != bodies.end(), "edge colours: no node with edges");
+    struct Row {
+        std::size_t count;
+        std::vector<std::optional<std::array<float, 4>>> colours;
+    };
+    std::vector<Row> rows{{body->edges().polyline_count(), body->edge_colours()},
+                           {body->surface_edges().polyline_count(), body->surface_edge_colours()}};
+    for (const Row& row : rows) {
+        EXPECT(row.colours.size() == row.count, "edge colours: entry count does not equal the polyline count");
+        std::size_t styled_count = 0;
+        std::optional<std::array<float, 4>> styled;
+        for (const auto& c : row.colours) {
+            if (c) {
+                ++styled_count;
+                styled = c;
+            }
+        }
+        EXPECT(styled_count == 1, "edge colours: not exactly one styled entry");
+        EXPECT(styled.has_value() && std::abs((*styled)[0] - 0.1f) <= 1e-6f && std::abs((*styled)[1] - 0.6f) <= 1e-6f &&
+                   std::abs((*styled)[2] - 0.55f) <= 1e-6f && std::abs((*styled)[3] - 1.0f) <= 1e-6f,
+               "edge colours: the styled entry is not (0.1, 0.6, 0.55, 1.0)");
+    }
+    std::printf("edge colours: one edge teal on %zu/%zu polylines\n", rows[0].count, rows[1].count);
+    return {};
+}
+
+// The reader's FEM mesh over a node **with** a B-rep: the path that carries topology, and
+// the one that refuses a bad tolerance.
+static Result<void> fem_brep(const cadaclysm::Scene& back) {
+    std::optional<cadaclysm::Node> body;
+    for (const cadaclysm::Placement& placement : back.placements()) {
+        cadaclysm::Node geometry = placement.geometry();
+        if (geometry.brep()) {
+            body = geometry;
+            break;
+        }
+    }
+    EXPECT(body.has_value(), "fem brep: no placement of the read-back STEP has a brep");
+    CADACLYSM_TRY(mesh, body->fem_mesh(0.05));
+    CADACLYSM_TRY(edges, mesh.edges());
+    CADACLYSM_TRY(vertices, mesh.vertices());
+    CADACLYSM_TRY_VOID(fem_arrays(mesh, edges.size(), vertices.size(), "fem brep"));
+
+    // The other half of the from_mesh proof: this body has a brep, and `watertight` is
+    // true for both bodies, so it is that flag which tells them apart rather than luck.
+    EXPECT(!mesh.from_mesh(), "fem brep: a body with a brep reported from_mesh");
+    EXPECT(mesh.face_count() == 15, "fem brep: the filleted part read back as " + std::to_string(mesh.face_count()) + " faces, not 15");
+    EXPECT(!edges.empty() && !vertices.empty(), "fem brep: a brep body has no edges or no vertices");
+    cadaclysm::Span<const std::uint32_t> kinds = mesh.node_kind();
+    for (std::uint32_t k = 0; k < 3; ++k) {
+        EXPECT(std::find(kinds.begin(), kinds.end(), k) != kinds.end(),
+               "fem brep: no node lies on an entity of kind " + std::to_string(k));
+    }
+
+    // `id` is the **body's own** edge id, not the index: the ids ascend, and at least one
+    // is not its own index -- which is what catches an id filled from the loop counter.
+    bool ascending = true, some_id_is_not_its_index = false;
+    for (std::size_t i = 0; i < edges.size(); ++i) {
+        if (i > 0) ascending = ascending && edges[i - 1].id < edges[i].id;
+        some_id_is_not_its_index = some_id_is_not_its_index || edges[i].id != static_cast<std::uint32_t>(i);
+    }
+    EXPECT(ascending, "fem brep: the edge ids do not ascend");
+    EXPECT(some_id_is_not_its_index, "fem brep: every edge id equals its own index -- id is the index, not the body's id");
+    std::size_t node_count = mesh.nodes().size() / 3;
+    for (std::size_t i = 0; i < edges.size(); ++i) {
+        const cadaclysm::FemEdge& edge = edges[i];
+        std::string which = "fem brep: edge " + std::to_string(i);
+        EXPECT(!edge.runs.empty() && edge.runs[0] == 0, which + "'s first run does not start at 0");
+        bool runs_ascend = true;
+        for (std::size_t r = 0; r < edge.runs.size(); ++r) {
+            runs_ascend = runs_ascend && edge.runs[r] < edge.nodes.size() && (r == 0 || edge.runs[r - 1] < edge.runs[r]);
+        }
+        EXPECT(runs_ascend, which + "'s runs do not ascend inside its " + std::to_string(edge.nodes.size()) + " nodes");
+        EXPECT(edge.chains().size() == edge.runs.size(), which + "'s chains() does not give one polyline per run");
+        std::size_t chained = 0;
+        for (cadaclysm::Span<const std::uint32_t> chain : edge.chains()) chained += chain.size();
+        EXPECT(chained == edge.nodes.size(), which + "'s chains() cover " + std::to_string(chained) + " of its " +
+                                                 std::to_string(edge.nodes.size()) + " nodes");
+        for (std::uint32_t n : edge.nodes) EXPECT(n < node_count, which + " names a node past the mesh");
+        // A closed body: every edge has two real faces, and neither is a sentinel.
+        EXPECT(edge.faces.first < mesh.face_count() && edge.faces.second < mesh.face_count(),
+               which + " bounds faces (" + std::to_string(edge.faces.first) + ", " + std::to_string(edge.faces.second) + ") of " +
+                   std::to_string(mesh.face_count()));
+        EXPECT(!edge.closed || edge.runs.size() == 1, which + " is closed with " + std::to_string(edge.runs.size()) + " runs");
+        if (edge.seam) EXPECT(edge.faces.first == edge.faces.second, which + " is a seam but bounds two different faces");
+        // The ends resolve through `vertices` to the chain's own first or last node --
+        // which is what tells `ends` from `faces`, both a pair a swap leaves in range.
+        for (std::uint32_t v : {edge.ends.first, edge.ends.second}) {
+            if (v == cadaclysm::NONE) continue;
+            EXPECT(v < vertices.size(), which + " ends at vertex " + std::to_string(v) + " of " + std::to_string(vertices.size()));
+            std::uint32_t at = vertices[v].node;
+            if (at == cadaclysm::NONE) continue;
+            EXPECT(!edge.nodes.empty() && (at == edge.nodes[0] || at == edge.nodes[edge.nodes.size() - 1]),
+                   which + "'s end vertex " + std::to_string(v) + " is node " + std::to_string(at) +
+                       ", which is neither end of its chain");
+        }
+    }
+    bool some_position = false, zeroed_without_one = true;
+    for (const cadaclysm::FemVertex& vertex : vertices) {
+        some_position = some_position || vertex.has_position;
+        zeroed_without_one = zeroed_without_one &&
+                             (vertex.has_position || vertex.point == (cadaclysm::Vec3{0, 0, 0}));
+    }
+    EXPECT(some_position, "fem brep: no vertex has a position");
+    EXPECT(zeroed_without_one, "fem brep: a vertex with no position carries a point that is not zeroed");
+    CADACLYSM_TRY(open, mesh.open_edges());
+    CADACLYSM_TRY(folded, mesh.folded_edges());
+    EXPECT(mesh.watertight() && open.empty() && folded.empty(),
+           "fem brep: the closed filleted part is not watertight with both censuses empty");
+    std::printf("fem brep: %zu nodes, %zu edges (edge 0 id=%u), %zu vertices, %u faces\n", mesh.nodes().size() / 3,
+                edges.size(), edges[0].id, vertices.size(), mesh.face_count());
+
+    // **The default tolerance is the library's own 0.01, not the 0.05 that `mesh` and its
+    // neighbours default to.** Pinned on this body because it is curved and exact: the
+    // mesh-only cube above meshes to 8 nodes at either figure, so a pin there would pass
+    // whatever the default was. All three assertions are needed -- the default must equal
+    // 0.01's count and must *not* equal 0.05's, which is what catches a wrapper that
+    // reached for the neighbouring default and handed a caller a five-times coarser mesh.
+    CADACLYSM_TRY(defaulted, body->fem_mesh());
+    CADACLYSM_TRY(at_hundredth, body->fem_mesh(0.01));
+    EXPECT(defaulted.nodes().size() == at_hundredth.nodes().size(),
+           "fem brep: fem_mesh() with no arguments is not fem_mesh(0.01) -- the default tolerance is not FemOptions::default()'s 0.01");
+    EXPECT(defaulted.nodes().size() != mesh.nodes().size(),
+           "fem brep: fem_mesh() and fem_mesh(0.05) agree on a curved body, so the default may be the neighbours' 0.05");
+    std::printf("fem brep: %zu nodes at the default tolerance, %zu at 0.05\n", defaulted.nodes().size() / 3,
+                mesh.nodes().size() / 3);
+
+    // The B-rep path **does** read the options, and refuses a bad tolerance in the
+    // library's own words -- which is what proves the wrapper surfaces the library's
+    // message rather than one of its own.
+    auto refused = body->fem_mesh(0.0);
+    EXPECT(!refused, "fem brep: tolerance 0 was accepted on the B-rep path");
+    EXPECT(refused.error().message.find("tolerance must be finite and > 0") != std::string::npos,
+           "fem brep: tolerance 0 was refused in other words: " + refused.error().message);
+    return {};
+}
+
+// The kernel's FEM mesh: the same surface over the kernel's own ABI, with the three
+// deliberate asymmetries -- an **owned** `.msh` string, a **twelve**-number placement,
+// and the licence notice on the writers rather than on the builder.
+static Result<void> fem_kernel(const bs::Solid& rounded, const bs::Solid& sheet) {
+    CADACLYSM_TRY(mesh, rounded.fem_mesh(0.05));
+    CADACLYSM_TRY(edges, mesh.edges());
+    CADACLYSM_TRY(vertices, mesh.vertices());
+    CADACLYSM_TRY_VOID(fem_arrays(mesh, edges.size(), vertices.size(), "kernel fem"));
+    EXPECT(!mesh.from_mesh(), "kernel fem: a solid reported from_mesh -- the kernel has no mesh path");
+    EXPECT(mesh.face_count() == 15, "kernel fem: the filleted part has " + std::to_string(mesh.face_count()) + " faces, not 15");
+    CADACLYSM_TRY(open, mesh.open_edges());
+    CADACLYSM_TRY(folded, mesh.folded_edges());
+    EXPECT(mesh.watertight() && open.empty() && folded.empty(),
+           "kernel fem: the filleted part is not watertight with both censuses empty");
+    CADACLYSM_TRY_VOID(fem_msh(mesh, "cadaclysm-smoke-cpp-kernel-fem.msh", "kernel fem"));
+    std::size_t node_count = mesh.nodes().size() / 3;
+    double longest = mesh.longest_edge();
+
+    // A progress callback reaches the library through the noexcept trampoline, and hears
+    // the two phases the ABI names.
+    std::size_t reports = 0;
+    bool meshing = false, welding = false;
+    CADACLYSM_TRY(watched, rounded.fem_mesh(0.05, 0.0, std::nullopt,
+                                            [&](std::string_view phase, std::size_t, std::size_t) {
+                                                ++reports;
+                                                meshing = meshing || phase == "meshing";
+                                                welding = welding || phase == "welding";
+                                            }));
+    EXPECT(reports > 0 && meshing && welding, "kernel fem: the progress callback did not hear both meshing and welding");
+    EXPECT(watched.nodes().size() == mesh.nodes().size(), "kernel fem: the watched mesh is not the same mesh");
+
+    // **The default tolerance is 0.01, `FemOptions::default()`'s -- not the kernel's own
+    // `DEFAULT_TOLERANCE` of 0.05 that every neighbouring method takes.** A wrapper that
+    // copied the neighbour gives a caller a five-times coarser solver mesh unasked.
+    CADACLYSM_TRY(defaulted, rounded.fem_mesh());
+    CADACLYSM_TRY(at_hundredth, rounded.fem_mesh(0.01));
+    EXPECT(defaulted.nodes().size() == at_hundredth.nodes().size(),
+           "kernel fem: fem_mesh() with no arguments is not fem_mesh(0.01) -- the default is not FemOptions::default()'s 0.01");
+    EXPECT(defaulted.nodes().size() != node_count,
+           "kernel fem: fem_mesh() and fem_mesh(0.05) agree, so the default may be the neighbours' 0.05");
+
+    // **A FEM mesh is not in the solid's tessellation cache**, so re-meshing the solid at
+    // another tolerance must not stale it: `Solid::fem_mesh` is the one array product here
+    // whose views carry no generation check. Catches that guard wired in by reflex from
+    // `Mesh`, where it belongs.
+    CADACLYSM_TRY(coarse, rounded.mesh(0.5));
+    std::uint32_t coarse_triangles = coarse.triangle_count();
+    CADACLYSM_TRY(kept, rounded.fem_mesh(0.05));
+    CADACLYSM_TRY(fine, rounded.mesh(0.05));
+    EXPECT(fine.triangle_count() != coarse_triangles,
+           "kernel fem: the two tolerances meshed the same -- the re-mesh did not happen");
+    EXPECT(!trips([&] { (void)kept.nodes(); }),
+           "kernel fem: a FEM mesh read after the solid was meshed again tripped -- a FEM mesh is its own handle, not a "
+           "product of the tessellation cache, so it must not carry Mesh's generation guard");
+    EXPECT(kept.nodes().size() / 3 == node_count, "kernel fem: a FEM mesh taken before a re-mesh reads a different node count after it");
+    CADACLYSM_TRY(kept_edges, kept.edges());
+    EXPECT(kept_edges.size() == edges.size(), "kernel fem: a FEM mesh's edges do not read after the solid was meshed again");
+    std::printf("kernel fem: %zu nodes, %zu edges, still readable across a re-mesh at another tolerance\n", node_count, edges.size());
+
+    // `max_size` adds nodes and shortens the longest edge -- but it **bounds the boundary
+    // and only targets the interior**, so the ceiling is checked loosely on purpose: a
+    // tighter pin would assert what the ABI does not promise (measured at 1.03x).
+    CADACLYSM_TRY(finer, rounded.fem_mesh(0.05, 3.0));
+    EXPECT(finer.nodes().size() > mesh.nodes().size() && finer.longest_edge() < longest,
+           "kernel fem: max_size 3 gave " + std::to_string(finer.nodes().size() / 3) + " nodes (was " + std::to_string(node_count) +
+               ") and a longest edge of " + std::to_string(finer.longest_edge()) + " (was " + std::to_string(longest) + ")");
+    EXPECT(finer.longest_edge() <= 3.0 * 1.05,
+           "kernel fem: max_size 3 left a " + std::to_string(finer.longest_edge()) + " edge, past even the 1.03x the spec measured");
+    std::printf("kernel fem: longest edge %g at max_size 0, %g at 3.0\n", longest, finer.longest_edge());
+
+    // The open sheet -- one face with a hole, so its rim is both the outer and the inner
+    // loop. `watertight` false with **both censuses empty** is the "not asked" trio, and
+    // every rim edge has a real face and the NONE sentinel for its second. Catches a
+    // wrapper that filled `face_b` with 0 where the ABI said NONE: 0 is a real face.
+    CADACLYSM_TRY(rim, sheet.fem_mesh(0.05));
+    CADACLYSM_TRY(rim_open, rim.open_edges());
+    CADACLYSM_TRY(rim_folded, rim.folded_edges());
+    EXPECT(!rim.watertight() && rim_open.empty() && rim_folded.empty(),
+           "kernel fem: the open sheet reads watertight=" + std::to_string(rim.watertight() ? 1 : 0) + " with " +
+               std::to_string(rim_open.size()) + " open and " + std::to_string(rim_folded.size()) +
+               " folded rows -- the 'not asked' trio is all three");
+    CADACLYSM_TRY(rim_edges, rim.edges());
+    EXPECT(!rim_edges.empty(), "kernel fem: the sheet has no edges");
+    for (std::size_t i = 0; i < rim_edges.size(); ++i) {
+        EXPECT(rim_edges[i].faces.first == 0 && rim_edges[i].faces.second == bs::NONE,
+               "kernel fem: the sheet's rim edge " + std::to_string(i) + " reads faces (" +
+                   std::to_string(rim_edges[i].faces.first) + ", " + std::to_string(rim_edges[i].faces.second) + "), not (0, NONE)");
+    }
+    std::printf("kernel fem: the sheet's %zu rim edges each bound face 0 and nothing else\n", rim_edges.size());
+
+    // The placement: **twelve** numbers as a Frame, where the reader takes sixteen
+    // column-major -- the same transform, asserted against the same expected map. A
+    // cuboid, because all eight of its corners are B-rep vertices and so certainly nodes,
+    // and **moved off the rotation's axis in the plane the turn acts in**: centred on its
+    // own origin the check is mathematically blind (see TURNED).
+    const cadaclysm::Vec3 size{20, 10, 4};
+    const cadaclysm::Vec3 off{30, 7, 5};
+    const cadaclysm::Vec3 box_lo{off[0] - size[0] / 2, off[1] - size[1] / 2, off[2] - size[2] / 2};
+    const cadaclysm::Vec3 box_hi{off[0] + size[0] / 2, off[1] + size[1] / 2, off[2] + size[2] / 2};
+    CADACLYSM_TRY(built, bs::Solid::cuboid(size[0], size[1], size[2]));
+    CADACLYSM_TRY(cuboid, built.translate(off[0], off[1], off[2]));
+    CADACLYSM_TRY(frame, turned_frame());
+    CADACLYSM_TRY(placed, cuboid.fem_mesh(0.05, 0.0, frame));
+    std::pair<cadaclysm::Vec3, cadaclysm::Vec3> placed_box = node_span(placed.nodes());
+    for (const cadaclysm::Vec3& corner : corners(box_lo, box_hi)) {
+        EXPECT(has_node(placed.nodes(), turned(corner)),
+               "kernel fem: the frame did not send the corner " + where(corner) + " to " + where(turned(corner)) +
+                   " -- the nodes span " + where(placed_box.first) + ".." + where(placed_box.second));
+    }
+    EXPECT(near_to(placed_box.first, turned({box_lo[0], box_hi[1], box_lo[2]})) &&
+               near_to(placed_box.second, turned({box_hi[0], box_lo[1], box_hi[2]})),
+           "kernel fem: the placed cuboid spans " + where(placed_box.first) + ".." + where(placed_box.second) + ", not the turn of " +
+               where(box_lo) + ".." + where(box_hi));
+    std::printf("kernel fem: the frame turns and moves the cuboid into %s..%s\n", where(placed_box.first).c_str(),
+                where(placed_box.second).c_str());
+
+    // A tolerance the mesher refuses, in its own words: the kernel has no mesh-only path,
+    // so unlike the reader every solid goes through the options.
+    auto refused = rounded.fem_mesh(0.0);
+    EXPECT(!refused, "kernel fem: tolerance 0 was accepted");
+    EXPECT(refused.error().message.find("tolerance must be finite and > 0") != std::string::npos,
+           "kernel fem: tolerance 0 was refused in other words: " + refused.error().message);
+    EXPECT(refused.error().origin == cadaclysm::Origin::kernel, "kernel fem: the refusal did not come from the kernel");
+
+    // Freed by hand, and the handle check holds in both modes -- it guards a pointer
+    // handed to C, as Meshlets' does, not a view, so it is not CADACLYSM_CHECKED's to
+    // switch off. A second free is a no-op.
+    CADACLYSM_TRY(doomed, rounded.fem_mesh(0.05));
+    doomed.free();
+    EXPECT(doomed.freed(), "kernel fem: free() did not free");
+    doomed.free();
+    EXPECT(trips([&] { (void)doomed.nodes(); }), "kernel fem: a read after free() did not trip");
+    EXPECT(trap::message.find("freed") != std::string::npos, "kernel fem: the trip does not say the mesh is freed");
+    return {};
+}
+
 static Result<void> save_checks(const cadaclysm::Scene& scene) {
     std::vector<cadaclysm::MeshFormat> formats = cadaclysm::mesh_formats();
     EXPECT(std::any_of(formats.begin(), formats.end(), [](const cadaclysm::MeshFormat& f) { return f.name == "stl"; }),
@@ -165,6 +745,32 @@ static Result<void> reader(const std::string& path) {
     EXPECT(std::any_of(labelled.begin(), labelled.end(), [](const cadaclysm::MeshFormat& f) { return f.name == "stl" && f.label == "STL (binary)"; }),
            "mesh format label is not the library's");
     std::printf("geometry diagnostics: %zu\n", scene.geometry_diagnostics().size());
+
+    // Kinematics: a file with no mechanism carries no links or joints; mechanism.stp,
+    // beside whatever sample this smoke was given, carries the fixed two-link one-joint
+    // mechanism.
+    if (is_cube) EXPECT(scene.links().empty() && scene.joints().empty(), "the cube has links or joints");
+    std::filesystem::path mechanism_path = cadaclysm::detail::fs_path(path).parent_path() / "mechanism.stp";
+    CADACLYSM_TRY(mechanism, cadaclysm::open(utf8(mechanism_path)));
+    std::vector<cadaclysm::Link> links = mechanism.links();
+    EXPECT(links.size() == 2 && links[0].name() == "base" && links[1].name() == "arm", "mechanism links are not [base, arm]");
+    for (const cadaclysm::Link& link : links) {
+        std::vector<cadaclysm::Node> link_nodes = link.nodes();
+        EXPECT(link_nodes.size() == 1 && link_nodes[0].name() == link.name(),
+               "link " + link.name() + " does not name exactly one node of its own name");
+    }
+    std::vector<cadaclysm::Joint> joints = mechanism.joints();
+    EXPECT(joints.size() == 1 && joints[0].name() == "hinge", "mechanism does not carry exactly one joint named hinge");
+    cadaclysm::Joint hinge = joints[0];
+    cadaclysm::Link hinge_start = hinge.start();
+    cadaclysm::Link hinge_end = hinge.end();
+    // The file's order, (arm, base): a swap into (parent, child) would fail here.
+    EXPECT(hinge_start.name() == "arm" && hinge_start.index() == 1 && hinge_end.name() == "base" && hinge_end.index() == 0,
+           "joint hinge reads start=" + hinge_start.name() + "#" + std::to_string(hinge_start.index()) +
+               " end=" + hinge_end.name() + "#" + std::to_string(hinge_end.index()));
+    std::printf("kinematics: links %zu, joints %zu, hinge %s->%s\n", links.size(), joints.size(), hinge_start.name().c_str(),
+                hinge_end.name().c_str());
+
     scene.forget_meshes();
     std::size_t rebuilt = 0;
     for (const cadaclysm::Node& node : scene.walk()) {
@@ -226,6 +832,8 @@ static Result<void> reader(const std::string& path) {
             EXPECT(!first->surface_pick({10, 10, 100}, {10, 10, -100}), "the cube picks through surfaces");
             EXPECT(first->bounds_placed().is_empty(), "the cube has surface bounds");
             EXPECT(first->bounds_placed64().is_empty(), "the cube has f64 surface bounds");
+            EXPECT(first->surface_edge_beziers().empty(), "the cube hands exact edges to the surface path");
+            EXPECT(first->edge_colours().empty() && first->surface_edge_colours().empty(), "the unpainted cube has edge colours");
         }
         EXPECT(first->is_meshed(), "the mesh asked for above is not held");
         CADACLYSM_TRY(fresh, cadaclysm::open(path));
@@ -234,6 +842,33 @@ static Result<void> reader(const std::string& path) {
         EXPECT(body != fresh_bodies.end() && !body->is_meshed(), "a fresh scene is already meshed");
         std::uint32_t built = fresh.realize_meshes(false);
         EXPECT(built > 0 && body->is_meshed(), "realize_meshes(false) did not build");
+    }
+    {
+        // A Rhino extrusion hands its exact edges to the surface path without meshing, in
+        // both conventions: unreal goes through the decorator that maps every getter into
+        // the caller's space. The fixture is the repository's, not an SDK checkout's, so
+        // this runs where found.
+        std::filesystem::path extrusions = cadaclysm::detail::fs_path(path).parent_path().parent_path() /
+                                           "crates" / "cadaclysm-acis" / "tests" / "fixtures" / "rhino" / "extrusion-objects.3dm";
+        std::error_code missing;
+        if (std::filesystem::exists(extrusions, missing)) {
+            for (cadaclysm::Convention convention : {cadaclysm::Convention::native, cadaclysm::Convention::unreal}) {
+                cadaclysm::OpenOptions options;
+                options.convention = static_cast<std::uint32_t>(convention);
+                CADACLYSM_TRY(surfaced, cadaclysm::open(utf8(extrusions), options));
+                int found = 0;
+                for (const cadaclysm::Node& n : surfaced.walk()) {
+                    if (!n.can_mesh() || n.surface_edges().empty()) continue;
+                    std::uint32_t exact = n.surface_edge_beziers().count();
+                    EXPECT(exact > 0 && !n.is_meshed(), "an extrusion's exact edges are not free");
+                    EXPECT(exact == n.edge_beziers().count(), "surface_edge_beziers is not edge_beziers' segments");
+                    ++found;
+                }
+                EXPECT(found > 0, "extrusion-objects.3dm has no surfaced extrusion");
+                std::printf("surface_edge_beziers (convention %u): %d extrusions, exact and unmeshed\n",
+                            static_cast<unsigned>(convention), found);
+            }
+        }
     }
     {
         // f64 twins: mesh64's counts and first position agree with mesh's, and
@@ -322,6 +957,13 @@ static Result<void> reader(const std::string& path) {
     EXPECT(yup.realized() == yup.realize_total(), "realize_all stopped short");
 
     CADACLYSM_TRY_VOID(save_checks(scene));
+    CADACLYSM_TRY_VOID(fem_reader(scene, is_cube));
+    if (is_cube) {
+        std::string sheet = path.substr(0, path.size() - std::string("cube.scad").size()) + "open-sheet.scad";
+        CADACLYSM_TRY_VOID(fem_census_wiring(sheet));
+    }
+    CADACLYSM_TRY_VOID(fem_outlives_its_scene(path));
+    CADACLYSM_TRY_VOID(edge_colours_check(path));
 
     CADACLYSM_TRY(unreal, cadaclysm::parse_convention(" Unreal+file-units "));
     EXPECT(unreal == (cadaclysm::Convention::unreal | cadaclysm::FILE_UNITS), "parse_convention misread unreal+file-units");
@@ -437,6 +1079,15 @@ static Result<void> sheet_verbs(const bs::Solid& plate) {
     auto refused = sheet.trim(away, bs::Keep::inside);
     EXPECT(!refused && refused.error().message.find("trim: nothing of the sheet lies inside the tool") != std::string::npos,
            "a trim with nothing inside was not refused with the kernel's message");
+
+    {
+        CADACLYSM_TRY(box, bs::Solid::cuboid(1, 2, 3));
+        CADACLYSM_TRY(big, box.scaled(2));
+        CADACLYSM_TRY(bb, big.bounds());
+        EXPECT(std::abs(bb.second[0] - bb.first[0] - 2.0) < 1e-9 && std::abs(bb.second[2] - bb.first[2] - 6.0) < 1e-9, "scaled bounds");
+        auto zero = box.scaled(0);
+        EXPECT(!zero && zero.error().message.rfind("scaled:", 0) == 0, "scaled(0) not refused");
+    }
 
     // Chain: an L's two sides, the second drawn back to front -- open, two walls;
     // closed, a triangle's three.
@@ -1097,6 +1748,8 @@ static Result<std::pair<bs::Solid, std::uint32_t>> solids() {
     auto nothing = empty.solid();
     EXPECT(!nothing && nothing.error().message == latched, "solid() did not report the latched error");
 
+    CADACLYSM_TRY_VOID(fem_kernel(rounded, sheet));
+
     // No schema: the kernel writes against its built-in AP203.
     CADACLYSM_TRY(text, rounded.step_text());
     EXPECT(text.rfind("ISO-10303-21;", 0) == 0, "step_text with no schema did not write valid STEP");
@@ -1209,6 +1862,7 @@ static Result<void> round_trip(bs::Solid rounded, std::uint32_t faces) {
     EXPECT(body.has_value(), "no placement of the read-back STEP has a brep");
     CADACLYSM_TRY(read, body->brep()->manifold());
     EXPECT(read.is_closed && read.faces == 15, "the read body is not the closed manifold written");
+    CADACLYSM_TRY_VOID(fem_brep(back));
     auto imported_made = bs::Solid::from_node(*body);
     if (!imported_made) return Error{"from_node: " + imported_made.error().message};
     bs::Solid imported = std::move(imported_made).value();

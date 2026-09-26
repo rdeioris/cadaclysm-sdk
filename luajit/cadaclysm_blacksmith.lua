@@ -285,6 +285,7 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_sweep", "cadaclysm_blacksmith_sweep_open", "cadaclysm_blacksmith_pipe",
   "cadaclysm_blacksmith_extrude_faces", "cadaclysm_blacksmith_face", "cadaclysm_blacksmith_face_sheet",
   "cadaclysm_blacksmith_drop_faces", "cadaclysm_blacksmith_place", "cadaclysm_blacksmith_translate",
+  "cadaclysm_blacksmith_scaled",
   "cadaclysm_blacksmith_rotate", "cadaclysm_blacksmith_mirror", "cadaclysm_blacksmith_join", "cadaclysm_blacksmith_cut",
   "cadaclysm_blacksmith_common", "cadaclysm_blacksmith_split_sheet", "cadaclysm_blacksmith_trim",
   "cadaclysm_blacksmith_fillet", "cadaclysm_blacksmith_chamfer", "cadaclysm_blacksmith_shell",
@@ -310,7 +311,16 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_string_free",
   "cadaclysm_blacksmith_from_brep", "cadaclysm_blacksmith_brep_layout_id",
   "cadaclysm_blacksmith_svg_options_init", "cadaclysm_blacksmith_svg_text", "cadaclysm_blacksmith_svg",
+  "cadaclysm_blacksmith_fem_options_init", "cadaclysm_blacksmith_fem_mesh",
+  "cadaclysm_blacksmith_fem_mesh_view", "cadaclysm_blacksmith_fem_mesh_edge",
+  "cadaclysm_blacksmith_fem_mesh_vertex", "cadaclysm_blacksmith_fem_mesh_open_edge",
+  "cadaclysm_blacksmith_fem_mesh_folded_edge", "cadaclysm_blacksmith_fem_mesh_msh_text",
+  "cadaclysm_blacksmith_fem_mesh_save_msh", "cadaclysm_blacksmith_fem_mesh_free",
   "cadaclysm_blacksmith_drawing_svg_text", "cadaclysm_blacksmith_drawing_svg",
+  "cadaclysm_blacksmith_named", "cadaclysm_blacksmith_solid_name",
+  "cadaclysm_blacksmith_assembly_new", "cadaclysm_blacksmith_assembly_free", "cadaclysm_blacksmith_assembly_name",
+  "cadaclysm_blacksmith_assembly_place_solid", "cadaclysm_blacksmith_assembly_place_assembly",
+  "cadaclysm_blacksmith_assembly_step",
 }
 
 local C
@@ -412,12 +422,43 @@ local function pairs_arg(points, what)
   return out, math.floor(n / 2)
 end
 
-local function uint32s(list, what)
-  local n = #list
-  local out = ffi.new("uint32_t[?]", math.max(n, 1))   -- never null: an empty list is not "none"
+-- Classes the list checker names in its refusals, filled in where each is defined
+-- (`Edge`, far below): `uint32s` is defined before them and cannot name them lexically.
+local named = {}
+
+-- A list argument as a uint32_t array, never null -- an empty list is not "none": `list`
+-- must be a list (a table that is not a record -- an Edge or a Solid is refused) and each
+-- item an index (a whole number, 0 to 4294967295) or, where `edges`, an Edge. Refused
+-- here, named, before the kernel is asked: one edge is `{ edge }`, never read as none
+-- (docs/superpowers/specs/2026-09-25-list-arguments-refused-clearly-design.md).
+local function uint32s(list, call, param, edges)
+  local function described(v)
+    if named.Edge and type(v) == "table" and getmetatable(v) == named.Edge then return "an Edge" end
+    return repr(v)
+  end
+  -- Its length is how many keys it has, not `#list`: Lua's `#` stops at any border, so
+  -- `{ 5, nil, 7 }` may read as one item and the 7 go missing. A key that is not a whole
+  -- number from 1 is a record's (an Edge, a Solid, `foo = "bar"`), so not a list. With
+  -- `n` keys, a hole anywhere leaves a place at or below `n` empty, so the loop below meets
+  -- it first and refuses it as a nil item -- never walking to, or sizing the array by, one
+  -- stray huge key.
+  local n, is_list = 0, type(list) == "table"
+  if is_list then
+    for k in pairs(list) do
+      if type(k) ~= "number" or k < 1 or k ~= math.floor(k) then is_list = false break end
+      n = n + 1
+    end
+  end
+  if not is_list then
+    raise(("%s: %s must be a list of %s, not %s"):format(call, param, edges and "Edge objects or indices" or "indices", described(list)))
+  end
+  local out = ffi.new("uint32_t[?]", math.max(n, 1))
   for i = 1, n do
-    local v = number(list[i], what)
-    if v < 0 or v ~= math.floor(v) then raise(what .. ": " .. repr(list[i]) .. " is not an index") end
+    local v = list[i]
+    if edges and named.Edge and type(v) == "table" and getmetatable(v) == named.Edge then v = v.index end
+    if type(v) ~= "number" or v < 0 or v > 4294967295 or v ~= math.floor(v) then
+      raise(("%s: %s[%d] is not %s: %s"):format(call, param, i, edges and "an Edge or an index" or "an index", described(list[i])))
+    end
     out[i - 1] = v
   end
   return out, n
@@ -621,6 +662,320 @@ end
 
 View.__tostring = function(self)
   return ("View(%s, shape=(%s))"):format(self.dtype, table.concat(self.shape, ", "))
+end
+
+-- ---- the FEM surface mesh --------------------------------------------------------
+
+--- One B-rep edge of a FEM mesh: the chain of nodes along it, and where that chain
+--- breaks. Plain data, copied out of the handle, so an edge outlives the mesh it came
+--- from -- a chain is tens of numbers where the flat arrays are millions.
+---
+--- `nodes` are this mesh's node indices in order along the edge, its end vertices
+--- included; a closed edge repeats no node. **`runs` says where the chain breaks**, as
+--- the ABI's own offsets into `nodes` **counting from zero**, where `nodes` is a Lua
+--- array counting from one -- so `chains()` does that arithmetic once rather than
+--- leaving every caller to. Read each chain as one polyline and join nothing across a
+--- run boundary: the two ends either side of one are two points of the edge with no
+--- mesh edge between them. `{0}` is the ordinary answer, and a caller reading `nodes`
+--- as one polyline without looking here silently jumps the gap.
+---
+--- `faces` is `{face_a, face_b}` and `ends` is `{end_a, end_b}`, the second of each
+--- `NONE` where there is none -- an open sheet's rim, or both ends at one vertex (a
+--- closed edge, a circle's rim, a full-turn seam). **`0` is a real face and a real
+--- vertex, not a sentinel.** Which end comes first is the first trim's direction and
+--- means nothing else. `ends` index `FemMesh.vertices` from zero, so the vertex of
+--- `e.ends[1]` is `mesh.vertices[e.ends[1] + 1]`.
+---
+--- `closed` where the nodes make one loop -- never where there is more than one run.
+--- `seam` where one face bounds the edge twice, a closed surface's seam rather than a
+--- real boundary; both `faces` are then that same face.
+---
+--- `id` is **the solid's own edge id**, not this mesh's edge index: `FemMesh.edges` is
+--- a densely renumbered subset of the solid's edges, ascending by id, with every edge
+--- collapsed to a point left out. Everything else that names an edge here means the
+--- index -- a `node_kind` of 1 read through `node_entity`, the third number of an
+--- `open_edges` or `folded_edges` row, and the `edge_<i>` physical group of
+--- `msh_text()`.
+---@class FemEdge
+---@field id integer  the solid's own B-rep edge id, not this mesh's edge index
+---@field nodes integer[]  this mesh's node indices along the edge
+---@field runs integer[]  where each run of `nodes` begins, from zero
+---@field faces integer[]  {face_a, face_b}, the second NONE on a rim
+---@field ends integer[]  {end_a, end_b}, into `FemMesh.vertices`, from zero
+---@field closed boolean
+---@field seam boolean
+local FemEdge = {}
+FemEdge.__index = FemEdge
+M.FemEdge = FemEdge
+FemEdge.__tostring = function(e)
+  return ("FemEdge(id=%d, nodes=%d, runs=%d, faces=(%d, %d), ends=(%d, %d), closed=%s, seam=%s)")
+    :format(e.id, #e.nodes, #e.runs, e.faces[1], e.faces[2], e.ends[1], e.ends[2],
+      tostring(e.closed), tostring(e.seam))
+end
+
+--- `nodes` broken at `runs`: a Lua array of Lua arrays of node indices, one per run,
+--- which together hold exactly `nodes` in order. One entry for the ordinary single-run
+--- edge, and the place the zero-based `runs` are turned into Lua's own one-based
+--- slices -- do that by hand and an off-by-one drops or repeats a node.
+function FemEdge:chains()
+  local out = {}
+  for k = 1, #self.runs do
+    local from, to = self.runs[k] + 1, self.runs[k + 1] or #self.nodes
+    local chain = {}
+    for i = from, to do chain[#chain + 1] = self.nodes[i] end
+    out[#out + 1] = chain
+  end
+  return out
+end
+
+--- One B-rep vertex of a FEM mesh: the node the mesh put there, if any, and where the
+--- topology says it is, if that is known. Plain data.
+---
+--- `node` is the mesh node at this vertex, or `NONE` where the mesh has none there.
+--- **A sentinel here is ordinary, not a fault**: the analysis rebuilds a vertex wherever
+--- two trims meet, and a pole's polyline runs give a sphere 48 of them where the mesh
+--- has 2 points, so a caller walking these skips the sentinel rather than treating it
+--- as a gap.
+---
+--- `point` is `{x, y, z}` where the vertex is, in the same space and under the same
+--- `placement` as `FemMesh.nodes` -- the solid's own vertex rather than a mesh node, so
+--- the two can differ by the mesher's rounding. **Meaningless unless `has_position`**:
+--- it is `{0, 0, 0}` then, which is a point no geometry has and which a solver would
+--- take for a node at the origin.
+---@class FemVertex
+---@field node integer  the mesh node there, or `NONE`
+---@field point number[]  {x, y, z}, meaningless unless `has_position`
+---@field has_position boolean
+local FemVertex = {}
+FemVertex.__index = FemVertex
+M.FemVertex = FemVertex
+FemVertex.__tostring = function(v)
+  return ("FemVertex(node=%d, point=(%g, %g, %g), has_position=%s)")
+    :format(v.node, v.point[1], v.point[2], v.point[3], tostring(v.has_position))
+end
+
+--- One solid meshed for a solver: nodes welded by bits, triangles wound outward, every
+--- node tagged with the lowest-dimension B-rep entity it lies on, and every crack
+--- reported rather than closed. What `solid:fem_mesh()` returns, and **owned by you**:
+--- `free()` it (the collector does otherwise).
+---
+--- **The five flat arrays are the library's own memory, lent as they are**: `nodes` is
+--- a `const double *`, three a node; `triangles` a `const uint32_t *`, three a triangle
+--- and counting from zero; `triangle_face`, `node_kind` and `node_entity`
+--- `const uint32_t *`, one per triangle or per node. No copy, which is what makes a
+--- million-element solver mesh affordable.
+---
+--- **This is the one array product here that is not the solid's**, and the difference
+--- matters. `Solid:mesh` hands back `View`s over the solid's tessellation cache, which
+--- a `close()` or a mesh at another tolerance replaces -- so a `View` checks a
+--- generation and raises once stale. A FEM mesh is **its own handle**: its pointers are
+--- built with it and never move, it is not in that cache, and neither closing the solid
+--- nor meshing it again at any tolerance touches it. So these are plain **fields** with
+--- no generation and no check, and reusing the `View` machine here would refuse reads
+--- the library never refuses.
+---
+--- **So hold the FemMesh for as long as you read one of its arrays.** Because they are
+--- fields rather than accessors, nothing here refuses a read after `free()`: a pointer
+--- taken out of one is a bare cdata pointer into memory the library has given back, and
+--- reading it reads whatever is there by then. Copy into a Lua table what must outlive
+--- the handle. The methods below *do* refuse, naming themselves. That is the same sharp
+--- edge the note at the top of this file documents for the solid's own views, and it is
+--- documented rather than enforced for the same reason.
+---
+--- `edges`, `vertices`, `open_edges` and `folded_edges` are computed when read, one C
+--- call a row, and are copies: read them once into a local rather than inside a loop.
+---@class FemMesh
+---@field nodes ffi.cdata*  const double *, 3 a node
+---@field node_count integer
+---@field triangles ffi.cdata*  const uint32_t *, 3 a triangle, from zero
+---@field triangle_count integer
+---@field triangle_face ffi.cdata*  const uint32_t *, one a triangle
+---@field node_kind ffi.cdata*  const uint32_t *, one a node: 0 a vertex, 1 an edge, 2 a face
+---@field node_entity ffi.cdata*  const uint32_t *, one a node, read by its `node_kind`
+---@field face_count integer  the solid's faces
+---@field watertight boolean
+---@field from_mesh boolean  always false here: every solid has a brep behind it
+---@field min_angle number  the smallest interior angle of any triangle, in degrees
+---@field worst_triangle integer  the triangle with that angle, into `triangles`
+---@field longest_edge number  the longest triangle edge, placed
+local FemMesh = {}
+local FemMesh_get = {}
+class(FemMesh, FemMesh_get)
+M.FemMesh = FemMesh
+
+local function free_fem_mesh(m) lib().cadaclysm_blacksmith_fem_mesh_free(m) end
+
+local function fem_handle(self)
+  local p = rawget(self, "_ptr")
+  if p == nil then raise("fem mesh: freed") end
+  return p
+end
+
+--- Whether `free()` has run.
+function FemMesh_get.freed(self) return rawget(self, "_ptr") == nil end
+
+--- Give the mesh back, and with it every array lent from it. Idempotent; the collector
+--- does it otherwise.
+function FemMesh:free()
+  local p = rawget(self, "_ptr")
+  if p ~= nil then
+    self._ptr = nil
+    ffi.gc(p, nil)
+    free_fem_mesh(p)
+  end
+end
+
+-- A `const uint32_t *` of `count` entries as a Lua array (from one) of the library's
+-- own numbers (from zero): a copy, so it outlives the handle.
+local function fem_indices(ptr, count)
+  local out = {}
+  for i = 0, count - 1 do out[i + 1] = ptr[i] end
+  return out
+end
+
+--- One `FemEdge` per B-rep edge, in the order a `node_kind` of 1 indexes them.
+--- **This list's own numbering, not the solid's**: each `FemEdge.id` carries the
+--- solid's own edge id.
+function FemMesh_get.edges(self)
+  local L, handle, out = lib(), fem_handle(self), {}
+  local raw = ffi.new("struct CadaclysmBlacksmithFemEdge")
+  for i = 0, self._edge_count - 1 do
+    if not L.cadaclysm_blacksmith_fem_mesh_edge(handle, i, raw) then fail("fem_mesh_edge " .. i) end
+    out[#out + 1] = setmetatable({
+      id = raw.id,
+      nodes = fem_indices(raw.nodes, raw.node_count),
+      runs = fem_indices(raw.runs, raw.run_count),
+      faces = { raw.face_a, raw.face_b },
+      ends = { raw.end_a, raw.end_b },
+      closed = raw.closed,
+      seam = raw.seam,
+    }, FemEdge)
+  end
+  return out
+end
+
+--- One `FemVertex` per B-rep vertex, in the order a `node_kind` of 0 indexes them.
+function FemMesh_get.vertices(self)
+  local L, handle, out = lib(), fem_handle(self), {}
+  local raw = ffi.new("struct CadaclysmBlacksmithFemVertex")
+  for i = 0, self._vertex_count - 1 do
+    if not L.cadaclysm_blacksmith_fem_mesh_vertex(handle, i, raw) then fail("fem_mesh_vertex " .. i) end
+    out[#out + 1] = setmetatable({
+      node = raw.node,
+      point = { raw.point[0], raw.point[1], raw.point[2] },
+      has_position = raw.has_position,
+    }, FemVertex)
+  end
+  return out
+end
+
+-- One flattened census, row by row: the shape `open_edges` and `folded_edges` share,
+-- so the two cannot drift.
+local function fem_census(self, row, count, what)
+  local handle = fem_handle(self)
+  local a, b, edge = ffi.new("uint32_t[1]"), ffi.new("uint32_t[1]"), ffi.new("uint32_t[1]")
+  local out = {}
+  for i = 0, count - 1 do
+    if not row(handle, i, a, b, edge) then fail(what .. " " .. i) end
+    out[#out + 1] = { a[0], b[0], edge[0] }
+  end
+  return out
+end
+
+--- Every crack, as `{a, b, brep_edge}`: a directed mesh edge `{a, b}` with no `{b, a}`,
+--- and the B-rep edge both nodes lie on, or `NONE` where they share none.
+---
+--- **Empty unless the solid's topology is closed**, whose mesh is otherwise not asked
+--- about at all -- an open sheet from `face`, `face_sheet`, `drop_faces` or
+--- `extrude_open` reports `watertight` false with this and `folded_edges` both empty,
+--- and *that trio together* says "not asked", not "nothing found".
+function FemMesh_get.open_edges(self)
+  local L = lib()
+  return fem_census(self, function(h, i, a, b, e) return L.cadaclysm_blacksmith_fem_mesh_open_edge(h, i, a, b, e) end,
+    self._open_edge_count, "fem_mesh_open_edge")
+end
+
+--- Every fold, as `open_edges` reports a crack: a directed mesh edge used by more than
+--- one triangle.
+---
+--- **A solid can be folded without being open** -- one no thicker than a line leaves no
+--- hole for an open edge to find -- and the closure census's own known-bad bodies are
+--- folds rather than open cracks, so a caller that checks only `open_edges` calls such a
+--- solid sound. Empty under the same rule as `open_edges`.
+function FemMesh_get.folded_edges(self)
+  local L = lib()
+  return fem_census(self, function(h, i, a, b, e) return L.cadaclysm_blacksmith_fem_mesh_folded_edge(h, i, a, b, e) end,
+    self._folded_edge_count, "fem_mesh_folded_edge")
+end
+
+--- The mesh as Gmsh 4.1 ASCII `.msh` text: an entity per B-rep vertex, edge and face,
+--- a volume where the solid closes, and a physical group naming each.
+---
+--- **On this side of the ABI the library's text is owned** and released here with
+--- `cadaclysm_blacksmith_string_free`, as every other text this library hands over
+--- (`step_text`, `sat_text`, `brep_text`, `svg_text`): two asks give two independent
+--- texts and neither dies with the handle. `cadaclysm.FemMesh.msh_text` is the other
+--- way round -- it borrows a slot on its own handle and must not be freed -- so a reader
+--- porting one side's reasoning onto the other leaks or double-frees.
+---
+--- **The unlicensed notice is printed here**, and on `save_msh`, this library noticing
+--- on its writers where the reader library notices in its own constructor and on
+--- neither `.msh` call. Raises `BuildError` for a mesh the writer refuses, naming the
+--- field it cannot honour, and for a freed handle.
+function FemMesh:msh_text()
+  local out = lib().cadaclysm_blacksmith_fem_mesh_msh_text(fem_handle(self))
+  if out == nil then fail("fem_mesh_msh_text") end
+  local result = ffi.string(out)
+  lib().cadaclysm_blacksmith_string_free(out)
+  return result
+end
+
+--- `msh_text()` written to `path` by the library itself: the same bytes from the same
+--- writer, straight to the file rather than through a string this side has to free.
+--- Raises `BuildError` for a mesh the writer refuses or a file it cannot write. The
+--- notice is printed here too; see `msh_text`.
+function FemMesh:save_msh(path)
+  if not lib().cadaclysm_blacksmith_fem_mesh_save_msh(fem_handle(self), tostring(path)) then
+    fail("fem_mesh_save_msh")
+  end
+end
+
+FemMesh.__tostring = function(m)
+  if rawget(m, "_ptr") == nil then return "FemMesh(freed)" end
+  return ("FemMesh(nodes=%d, triangles=%d, watertight=%s, from_mesh=%s)")
+    :format(m.node_count, m.triangle_count, tostring(m.watertight), tostring(m.from_mesh))
+end
+
+-- The handle wrapped, its view read once: every pointer in the view is built with the
+-- handle and good until it is freed (nothing in this ABI is built lazily), so asking
+-- again per field would be one C call per array for the same answer.
+local function fem_mesh(ptr)
+  local raw = ffi.new("struct CadaclysmBlacksmithFemMeshView")
+  if not lib().cadaclysm_blacksmith_fem_mesh_view(ptr, raw) then
+    local reason = last_error()
+    free_fem_mesh(ptr)
+    error(setmetatable({ message = reason ~= "" and reason or "fem_mesh_view" }, BuildError), 3)
+  end
+  return setmetatable({
+    _ptr = ffi.gc(ptr, free_fem_mesh),
+    nodes = raw.nodes,
+    node_count = raw.node_count,
+    triangles = raw.triangles,
+    triangle_count = raw.triangle_count,
+    triangle_face = raw.triangle_face,
+    node_kind = raw.node_kind,
+    node_entity = raw.node_entity,
+    face_count = raw.face_count,
+    _edge_count = raw.edge_count,
+    _vertex_count = raw.vertex_count,
+    _open_edge_count = raw.open_edge_count,
+    _folded_edge_count = raw.folded_edge_count,
+    watertight = raw.watertight,
+    from_mesh = raw.from_mesh,
+    min_angle = raw.min_angle,
+    worst_triangle = raw.worst_triangle,
+    longest_edge = raw.longest_edge,
+  }, FemMesh)
 end
 
 -- ---- profiles -----------------------------------------------------------------------
@@ -929,7 +1284,7 @@ end
 function Profile:round(radius, corners, open)
   if open == nil then open = false end
   local picked, count = nil, 0
-  if corners ~= nil then picked, count = uint32s(corners, "round") end
+  if corners ~= nil then picked, count = uint32s(corners, "round", "corners") end
   return new_profile(lib().cadaclysm_blacksmith_profile_round(self._handle, radius, picked, count, open and true or false))
 end
 
@@ -1643,7 +1998,7 @@ end
 --- repeats allowed): the rest keep their order. An open sheet unless nothing
 --- was dropped.
 function Solid:drop_faces(faces)
-  local arr, n = uint32s(faces, "drop_faces")
+  local arr, n = uint32s(faces, "drop_faces", "faces")
   return new_solid(lib().cadaclysm_blacksmith_drop_faces(self:_h(), arr, n))
 end
 
@@ -1660,6 +2015,11 @@ end
 --- This solid moved by (`dx`, `dy`, `dz`).
 function Solid:translate(dx, dy, dz)
   return new_solid(lib().cadaclysm_blacksmith_translate(self:_h(), dx, dy, dz))
+end
+
+--- This solid scaled by `factor` about the origin: every length times `factor`, exactly.
+function Solid:scaled(factor)
+  return new_solid(lib().cadaclysm_blacksmith_scaled(self:_h(), factor))
 end
 
 --- This solid turned `radians` about `axis` (a point and a direction).
@@ -1924,7 +2284,94 @@ function Solid_get.manifold(self)
   return Manifold.new(row)
 end
 
+-- -- naming
+
+--- This solid, named `name`. The name rides through an operation with exactly
+--- one source solid (`place`, `translate`, `rotate`, `mirror`, `scaled`,
+--- `coloured`, `edges_coloured`, `fillet`, `chamfer`, `shell`, `thicken`,
+--- `face_sheet`, `drop_faces`, `lump`, `trim`, `split_by_plane`, `push_pull`,
+--- and so on) and is dropped by one with two or more sources (`join`, `cut`,
+--- `common`, `split_sheet`, `split`) and by a fresh primitive or sweep. It is
+--- what `Assembly:place` defaults a placement's own name to, and the product
+--- name a lone named solid gets written into STEP (`step`/`step_text` --
+--- SAT and OCCT `.brep` have no product name to set). Raises `BuildError` for
+--- an empty name, or for `name` not a string.
+function Solid:named(name)
+  if type(name) ~= "string" then raise("named: expected a string, got " .. repr(name)) end
+  return new_solid(lib().cadaclysm_blacksmith_named(self:_h(), name))
+end
+
+--- This solid's name, or nil, as `named` set it, kept or dropped by whatever
+--- built this solid. **The library's borrowed pointer is null for both "no
+--- name" and a failure**, so this never reads `last_error` -- the same rule
+--- `text()` cannot honour (it maps null to `""`, losing the distinction), so
+--- this checks the raw pointer itself rather than going through it.
+function Solid_get.name(self)
+  local raw = lib().cadaclysm_blacksmith_solid_name(self:_h())
+  if raw == nil then return nil end
+  return ffi.string(raw)
+end
+
 -- -- out
+
+--- This solid meshed for a solver, as a `FemMesh`: nodes welded by bits, triangles
+--- wound outward, each node tagged with the lowest-dimension B-rep entity it lies on,
+--- and every crack reported rather than closed. **Owned by you**: `free()` it.
+---
+--- `tolerance` is the chordal tolerance in model units, finite and above zero (default
+--- 0.01, not `mesh`'s 0.05 -- this is not the tessellation cache and shares nothing
+--- with it), and **it alone governs how closely the mesh follows the geometry**.
+--- `max_size` is a size ceiling, finite and zero or more (default 0, no ceiling --
+--- curvature alone): **it bounds the boundary and targets the interior**, which is not a
+--- longest-element-edge guarantee. It adds boundary nodes without refining boundary
+--- geometry, and `FemMesh.longest_edge` is what the mesh actually came to -- the figure
+--- to check against it. Those two defaults are `FemOptions::default()`'s own, restated
+--- here so the signature says what a caller gets; the library's struct is still filled
+--- by `cadaclysm_blacksmith_fem_options_init` first, so a field added to it later
+--- defaults without this line being touched.
+---
+--- **Neither number is checked here**, on purpose: the reader library's `Node:fem_mesh`
+--- has a path (a node with no brep) that takes no options at all and accepts any value,
+--- and a wrapper that validated either field would refuse there what the library
+--- allows. Both are passed through and the library's own refusal is what a caller sees
+--- -- which on this side is every bad value, every solid here having a brep.
+---
+--- `placement` is a `Frame`, twelve numbers or four triples -- origin, x, y, z -- as
+--- every frame here, and nil for the identity, a solid meshed in its own coordinates
+--- being the common case; it is applied in double precision throughout. The reader's
+--- `Node:fem_mesh` takes **sixteen**, column-major, so a caller moving between the two
+--- reformats the placement.
+---
+--- `progress(phase, done, total)` hears **"meshing"** and **"welding"**. An opened phase
+--- is not a promise of a closed one: a refused call opens no phase at all, and a solid
+--- that meshes to no triangles reports "meshing" through to `1 of 1` and then raises
+--- with no "welding". A callback that raises fails this call rather than the process,
+--- as everywhere else here.
+---
+--- **A cracked body is not a failure**: it comes back with `FemMesh.watertight` false
+--- and its cracks in `FemMesh.open_edges` / `FemMesh.folded_edges`, and nothing is
+--- welded shut to make it look sound. Raises `BuildError` for a tolerance or `max_size`
+--- the mesher refuses, a placement that is not twelve finite numbers or is not
+--- invertible, a closed solid this module cannot mesh, and a solid that meshes to no
+--- triangles.
+---
+--- **No unlicensed notice here**: `FemMesh:msh_text` and `FemMesh:save_msh` print it,
+--- this library noticing on its writers rather than on its builders -- where the reader
+--- library notices in its own constructor and on neither `.msh` call.
+function Solid:fem_mesh(tolerance, max_size, placement, progress)
+  local handle = self:_h()
+  local frame = nil
+  if placement ~= nil then frame = frame_arg(placement) end
+  local o = ffi.new("struct CadaclysmBlacksmithFemOptions")
+  lib().cadaclysm_blacksmith_fem_options_init(o)
+  o.size = ffi.sizeof(o)
+  o.tolerance = tolerance == nil and 0.01 or tolerance
+  o.max_size = max_size == nil and 0.0 or max_size
+  local cb, done = progress_callback(progress, free_fem_mesh)
+  local h = done(lib().cadaclysm_blacksmith_fem_mesh(handle, frame, o, cb, nil))
+  if h == nil then fail("fem_mesh") end
+  return fem_mesh(h)
+end
 
 --- `positions, normals, indices` at `tolerance` (default 0.05): three views
 --- (float32 (n, 3), float32 (n, 3), uint32 (m)) into the solid's cache --
@@ -2095,12 +2542,8 @@ end
 
 -- edge_indices is needed by both fillet/chamfer and edges_coloured, so it is defined
 -- once here, ahead of the colour section that is the first to use it.
-local function edge_indices(edges)
-  local which = {}
-  for i, e in ipairs(edges) do
-    if type(e) == "table" and getmetatable(e) == Edge then which[i] = e.index else which[i] = e end
-  end
-  return uint32s(which, "edges")
+local function edge_indices(edges, call)
+  return uint32s(edges, call, "edges", true)
 end
 
 -- -- colour
@@ -2148,7 +2591,7 @@ function Solid:edges_coloured(colour, edges)
   end
   -- edge_indices -> uint32s never returns a null pointer, even for {}: a non-null
   -- pointer with count 0 is "none", as the C ABI reads it.
-  local arr, n = edge_indices(edges)
+  local arr, n = edge_indices(edges, "edges_coloured")
   return new_solid(lib().cadaclysm_blacksmith_edges_coloured(self:_h(), arr, n, r, g, b))
 end
 
@@ -2178,7 +2621,12 @@ function Solid:edge_polyline_colours(tolerance)
   local out = {}
   for i = 0, c.count - 1 do
     local v = c.rgb + 3 * i
-    out[i + 1] = v[0] < 0 and false or { v[0], v[1], v[2] }
+    -- Not `v[0] < 0 and false or {...}`: `false` is falsy, so that is always the table.
+    if v[0] < 0 then
+      out[i + 1] = false
+    else
+      out[i + 1] = { v[0], v[1], v[2] }
+    end
   end
   return out
 end
@@ -2216,7 +2664,7 @@ end
 --- `tolerance` defaults to 1e-6; `progress` as `join`'s.
 function Solid:fillet(edges, radius, tolerance, progress)
   if tolerance == nil then tolerance = 1e-6 end
-  local arr, n = edge_indices(edges)
+  local arr, n = edge_indices(edges, "fillet")
   local a = self:_h()
   local cb, done = progress_callback(progress)
   local h = done(lib().cadaclysm_blacksmith_fillet(a, arr, n, radius, tolerance, cb, nil))
@@ -2226,7 +2674,7 @@ end
 --- `fillet` with a flat bevel: each edge cut back `distance` along both its faces.
 function Solid:chamfer(edges, distance, tolerance)
   if tolerance == nil then tolerance = 1e-6 end
-  local arr, n = edge_indices(edges)
+  local arr, n = edge_indices(edges, "chamfer")
   return new_solid(lib().cadaclysm_blacksmith_chamfer(self:_h(), arr, n, distance, tolerance))
 end
 
@@ -2246,11 +2694,18 @@ function Solid:push_pull(face, distance, tolerance, progress)
   local a = self:_h()
   local cb, done = progress_callback(progress)
   local h
-  if type(face) == "table" then
-    local arr, n = uint32s(face, "push_pull")
-    h = done(lib().cadaclysm_blacksmith_push_pull_faces(a, arr, n, distance, tolerance, cb, nil))
-  else
+  local is_edge = named.Edge and type(face) == "table" and getmetatable(face) == named.Edge
+  if type(face) == "number" then
+    if face < 0 or face > 4294967295 or face ~= math.floor(face) then
+      raise(("push_pull: face must be a face index or a list of indices, not %s"):format(repr(face)))
+    end
     h = done(lib().cadaclysm_blacksmith_push_pull(a, face, distance, tolerance, cb, nil))
+  elseif face == nil or type(face) == "string" or is_edge then
+    local thing = is_edge and "an Edge" or repr(face)
+    raise(("push_pull: face must be a face index or a list of indices, not %s"):format(thing))
+  else
+    local arr, n = uint32s(face, "push_pull", "face")
+    h = done(lib().cadaclysm_blacksmith_push_pull_faces(a, arr, n, distance, tolerance, cb, nil))
   end
   return new_solid(h)
 end
@@ -2335,7 +2790,7 @@ end
 function Solid:shell(thickness, open, tolerance, progress)
   if open == nil then open = {} end
   if tolerance == nil then tolerance = 1e-6 end
-  local arr, n = uint32s(open, "shell")
+  local arr, n = uint32s(open, "shell", "open")
   local a = self:_h()
   local cb, done = progress_callback(progress)
   local h = done(lib().cadaclysm_blacksmith_shell(a, thickness, arr, n, tolerance, cb, nil))
@@ -2506,6 +2961,7 @@ end
 ---@field segments table[]  {{a, b}, ...}, each end {x, y, z}
 ---@field curve Curve|nil
 Edge = {}
+named.Edge = Edge
 local Edge_get = {}
 class(Edge, Edge_get)
 callable(Edge)
@@ -3137,6 +3593,119 @@ function M.write_brep(path, solids)
   local handles = ffi.new("const struct CadaclysmBlacksmithSolid *[?]", math.max(n, 1))
   for i = 1, n do handles[i - 1] = solid_handle(solids[i], "write_brep") end
   if not lib().cadaclysm_blacksmith_brep(handles, n, tostring(path)) then fail("brep") end
+end
+
+-- ---- assemblies -----------------------------------------------------------------------
+
+local function free_assembly(a) lib().cadaclysm_blacksmith_assembly_free(a) end
+
+--- A mutable tree of placements: a name, and zero or more solids or other
+--- assemblies placed in it at a frame. Unlike `Solid`, placing shares rather
+--- than copies -- placing one assembly under another does not snapshot it, so
+--- a later placement on the shared one shows up wherever it already sits.
+--- `close()` frees this handle; it does not free what was placed in it if
+--- that is still reachable from somewhere else (another assembly, or a
+--- variable still holding it). `Assembly.new(name)` or `Assembly(name)`.
+---@class Assembly
+local Assembly = {}
+local Assembly_get = {}
+class(Assembly, Assembly_get)
+callable(Assembly)
+M.Assembly = Assembly
+
+--- A new, empty assembly called `name`. Raises `BuildError` for `name` not a string.
+function Assembly.new(name)
+  if type(name) ~= "string" then raise("Assembly.new: expected a string, got " .. repr(name)) end
+  local h = checked(lib().cadaclysm_blacksmith_assembly_new(name), "assembly_new")
+  return setmetatable({ _handle = ffi.gc(h, free_assembly) }, Assembly)
+end
+
+function Assembly:_h()
+  local h = rawget(self, "_handle")
+  if h == nil then raise("assembly: closed") end
+  return h
+end
+
+--- This assembly's own name, given when it was made.
+function Assembly_get.name(self)
+  return text(lib().cadaclysm_blacksmith_assembly_name(self:_h()))
+end
+
+--- Place `thing` (a `Solid` or another `Assembly`) at `frame` (twelve numbers,
+--- four triples or a `Frame`, right-handed and orthonormal) in this assembly,
+--- called `name` -- or, left nil, `thing`'s own name (`Solid.name`, or
+--- "part" for an unnamed solid, or the placed assembly's own name), numbered
+--- past any already taken here ("bolt", "bolt 2", ...). An explicit `name`
+--- already taken here raises `BuildError`. Placing an assembly that is this
+--- one, or anywhere above this one in the tree already, raises, naming the
+--- cycle, since writing that out would never terminate. Returns the
+--- placement's name.
+function Assembly:place(thing, frame, name)
+  if name ~= nil and type(name) ~= "string" then raise("assembly: place's name must be nil or a string, got " .. repr(name)) end
+  local f = frame_arg(frame)
+  local h = self:_h()
+  local raw, what
+  if type(thing) == "table" and getmetatable(thing) == Solid then
+    raw = lib().cadaclysm_blacksmith_assembly_place_solid(h, thing:_h(), f, name)
+    what = "assembly_place_solid"
+  elseif type(thing) == "table" and getmetatable(thing) == Assembly then
+    raw = lib().cadaclysm_blacksmith_assembly_place_assembly(h, thing:_h(), f, name)
+    what = "assembly_place_assembly"
+  else
+    raise("assembly: place takes a Solid or an Assembly, got " .. repr(thing))
+  end
+  if raw == nil then fail(what) end
+  local result = ffi.string(raw)
+  lib().cadaclysm_blacksmith_string_free(raw)
+  return result
+end
+
+--- This assembly, and everything placed under it, as one STEP file: this
+--- assembly the root product, each sub-assembly and each distinct part (the
+--- same solid with the same paint and name) written once, each placement an
+--- occurrence named as it was placed. `schema` and `unit` as
+--- `write_step_text`. Raises `BuildError` where this assembly, or a
+--- sub-assembly reachable from it, places nothing -- a reader would never
+--- show it.
+function Assembly:step_text(schema, unit)
+  if unit == nil then unit = "mm" end
+  if UNITS[unit] == nil then raise("unit must be one of ['in', 'm', 'mm']") end
+  local out = lib().cadaclysm_blacksmith_assembly_step(self:_h(), schema_text(schema), UNITS[unit])
+  if out == nil then fail("assembly_step") end
+  local result = ffi.string(out)
+  lib().cadaclysm_blacksmith_string_free(out)
+  return result
+end
+
+--- Write this assembly to a STEP file at `path`; `schema` and `unit` as `step_text`.
+function Assembly:step(path, schema, unit)
+  if unit == nil then unit = "mm" end
+  write_text(path, self:step_text(schema, unit))
+end
+
+--- This assembly as a reader `Scene`, through STEP text and
+--- `cadaclysm.open_memory` -- `Solid:to_scene`'s own door, over the whole
+--- tree instead of one solid. Needs cadaclysm.lua and its library.
+function Assembly:to_scene(schema)
+  local cadaclysm = reader("to_scene")
+  return cadaclysm.open_memory(self:step_text(schema), "stp", schema_file(schema))
+end
+
+--- Free the handle now. Idempotent; does not free what was placed here if it
+--- is still reachable from elsewhere. The garbage collector does it
+--- otherwise.
+function Assembly:close()
+  local h = rawget(self, "_handle")
+  if h ~= nil then
+    self._handle = nil
+    ffi.gc(h, nil)
+    free_assembly(h)
+  end
+end
+
+Assembly.__tostring = function(self)
+  if rawget(self, "_handle") == nil then return "Assembly(closed)" end
+  return ("Assembly(%q)"):format(self.name)
 end
 
 -- ---- SVG ----------------------------------------------------------------------------

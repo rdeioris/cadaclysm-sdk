@@ -108,6 +108,15 @@ default `up` from, so it is always `"z"`): `Solid::svg_text`/`Solid::svg`, and
   same one `mesh()` makes -- that the scene itself is still open -- because a forget is
   not a close; using a held `Mesh64` after a forget without an intervening close is
   undefined behaviour, exactly as the C ABI documents for `cadaclysm_node_mesh64`.
+- **`FemMesh` owns its arrays, and the scene does not.** `Node::fem_mesh()` and
+  `Solid::fem_mesh()` hand back a handle of your own, move-only and freed when destroyed or
+  on `free()`. Its `Span`s belong to *it*: `Scene::close()` neither frees nor stales one,
+  meshing the body again does not either, and there is no generation check because a FEM
+  view's pointers are built with the handle and never move. Every accessor on it refuses a
+  freed handle **in both modes** -- the check guards a pointer handed to C, as `Meshlets`'
+  does, not a borrowed view's owner -- but a `Span` already in hand is a pointer and a
+  length from then on, so hold the `FemMesh` while you read one and copy anything that must
+  outlive it. A `FemEdge`'s `nodes` and `runs` borrow it the same way.
 - **Nodes and placements** are cheap handles, valid while their `Scene` is open.
 - Moving a `Scene`, `Solid` or `Profile` keeps every view into it valid.
 

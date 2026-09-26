@@ -1,6 +1,11 @@
 // The kernel module over the release library: Python's test_cadaclysm_blacksmith.py, the
 // parts that are not the reader's, plus the lifetimes and views only a native wrapper has.
-import Blacksmith
+//
+// @testable, not plain `import Blacksmith`: `Assembly.place(_:raw:name:)` (the raw,
+// unchecked twelve-number frame `testAssemblyFactsHoldAsPythonChecksThem` needs for fact
+// 7) is internal on purpose -- a mirrored frame is not something the public API should
+// invite -- so only a test target built with testability enabled can see it.
+@testable import Blacksmith
 import Cadaclysm
 import Foundation
 import XCTest
@@ -978,4 +983,342 @@ final class KernelTests: XCTestCase {
         let (lo64, _) = try far.boundsAt64(0.05)
         XCTAssertEqual(lo64.y, -2_600_001.987654321, accuracy: 1e-6)
     }
+
+    func testScaledMultipliesEveryLength() throws {
+        let big = try Solid.cuboid(1, 2, 3).scaled(2)
+        let (lo, hi) = try big.bounds
+        XCTAssertEqual(hi.x - lo.x, 2, accuracy: 1e-9)
+        XCTAssertEqual(hi.z - lo.z, 6, accuracy: 1e-9)
+        XCTAssertThrowsError(try big.scaled(0))
+    }
+
+    // ---- the FEM surface mesh ----------------------------------------------------------
+
+    /// A solid's FEM mesh: the kernel has no mesh-only path, so every solid goes through the
+    /// options and `fromMesh` is always false.
+    ///
+    /// Catches the five arrays lent at the wrong counts, `nodeKind`/`nodeEntity` read from each
+    /// other's pointers, and a summary figure taken off the wrong member of the view.
+    func testFemMeshOfASolid() throws {
+        let plate = try Solid.extrude(try plateOutline(), try Frame.xy(), 6)
+        let mesh = try plate.femMesh(tolerance: 0.05)
+        defer { mesh.free() }
+        XCTAssertFalse(mesh.fromMesh, "a solid reported from_mesh -- the kernel has no mesh path")
+        XCTAssertEqual(mesh.faceCount, UInt32(try plate.faces))
+        XCTAssertEqual(mesh.nodes.count % 3, 0)
+        XCTAssertEqual(mesh.triangles.count % 3, 0)
+        XCTAssertEqual(mesh.triangleFace.count, mesh.triangles.count / 3)
+        XCTAssertEqual(mesh.nodeKind.count, mesh.nodes.count / 3)
+        XCTAssertEqual(mesh.nodeEntity.count, mesh.nodes.count / 3)
+        XCTAssertTrue(mesh.triangles.allSatisfy { Int($0) < mesh.nodes.count / 3 })
+        XCTAssertTrue(mesh.triangleFace.allSatisfy { $0 < mesh.faceCount })
+        let edges = try mesh.edges
+        let vertices = try mesh.vertices
+        XCTAssertFalse(edges.isEmpty)
+        XCTAssertFalse(vertices.isEmpty)
+        // The kind is asked about before it is used as an index, so `nodeKind` read off the
+        // `nodeEntity` pointer fails by name here rather than as an out-of-range crash.
+        for (i, kind) in mesh.nodeKind.enumerated() {
+            guard kind < 3 else {
+                XCTFail("node \(i) has kind \(kind), which is neither vertex, edge nor face")
+                break
+            }
+            let bound = [vertices.count, edges.count, Int(mesh.faceCount)][Int(kind)]
+            XCTAssertLessThan(Int(mesh.nodeEntity[i]), bound, "node \(i) of kind \(kind)")
+        }
+        // A closed part: watertight with both censuses empty.
+        XCTAssertTrue(mesh.watertight)
+        XCTAssertEqual(try mesh.openEdges.count, 0)
+        XCTAssertEqual(try mesh.foldedEdges.count, 0)
+        XCTAssertGreaterThan(mesh.minAngle, 0)
+        XCTAssertLessThanOrEqual(mesh.minAngle, 60)
+        XCTAssertLessThan(Int(mesh.worstTriangle), mesh.triangles.count / 3)
+        XCTAssertGreaterThan(mesh.longestEdge, 0)
+        XCTAssertTrue(mesh.description.contains("watertight=true"), mesh.description)
+    }
+
+    /// **Re-meshing the solid does not stale a FEM mesh.** `Solid.mesh`'s views belong to one
+    /// filling of the solid's tessellation cache and die when it is refilled; a FEM mesh is its
+    /// own handle and is not in that cache at all -- and closing the solid is not the end of it
+    /// either, because the handle owns every array it lends.
+    ///
+    /// Catches reusing `CacheFilling` as the FEM mesh's `NativeMemoryOwner`, which is the
+    /// obvious move here and would give a caller a refusal the library never made.
+    func testAFemMeshSurvivesReMeshingAndClosingItsSolid() throws {
+        var plate: Solid? = try Solid.extrude(try plateOutline(), try Frame.xy(), 6)
+        let mesh = try plate!.femMesh(tolerance: 0.05)
+        let nodes = mesh.nodes
+        let first = nodes[0]
+        // The cache is filled, refilled at another tolerance and filled again: what stales
+        // every `Solid.mesh` view.
+        let view = try plate!.mesh(tolerance: 0.05)
+        _ = try plate!.mesh(tolerance: 0.5)
+        _ = try plate!.mesh(tolerance: 0.05)
+        XCTAssertTrue(view.isStale, "the tessellation view is the one that goes stale")
+        XCTAssertTrue(nodes.isValid, "re-meshing the solid staled the FEM mesh")
+        XCTAssertEqual(nodes[0], first)
+        // And the solid itself can go: the FEM handle owns everything it lends.
+        plate!.close()
+        plate = nil
+        XCTAssertTrue(nodes.isValid, "closing the solid staled the FEM mesh")
+        XCTAssertEqual(mesh.triangles.count % 3, 0)
+        XCTAssertGreaterThan(try mesh.edges.count, 0)
+        mesh.free()
+        XCTAssertFalse(nodes.isValid)
+        XCTAssertEqual(nodes.owner.nativeMemoryInvalidReason, "the FEM mesh is freed")
+    }
+
+    /// An open sheet -- one face with a hole, so its rim is both loops. `watertight` false with
+    /// **both censuses empty** is the "not asked" trio, and every rim edge bounds one real face
+    /// and carries the sentinel for its second.
+    ///
+    /// Catches a wrapper that normalised `face_b` to `0` where the ABI said the sentinel: `0`
+    /// is a real face, so that break reads as a rim edge bounded twice by face 0.
+    func testFemMeshOfAnOpenSheetReportsItsRimRatherThanACrack() throws {
+        let square = try Profile.rect(20, 20).withHole(try Profile.circle(4))
+        let sheet = try Solid.face(square, try Frame.xy())
+        let mesh = try sheet.femMesh(tolerance: 0.05)
+        defer { mesh.free() }
+        XCTAssertFalse(mesh.watertight)
+        XCTAssertEqual(try mesh.openEdges.count, 0, "the 'not asked' trio is all three")
+        XCTAssertEqual(try mesh.foldedEdges.count, 0, "the 'not asked' trio is all three")
+        let edges = try mesh.edges
+        XCTAssertFalse(edges.isEmpty)
+        for (i, edge) in edges.enumerated() {
+            XCTAssertEqual(edge.faces.0, 0, "the sheet's rim edge \(i)")
+            XCTAssertEqual(edge.faces.1, UInt32.max, "the sheet's rim edge \(i) bounds a second face")
+        }
+    }
+
+    /// `maxSize` adds nodes and shortens the longest edge -- but it **bounds the boundary and
+    /// only targets the interior**, so the check is loose on purpose: a tighter pin would assert
+    /// what the ABI does not promise (measured at 1.03x on an unevenly parameterised face).
+    /// `longestEdge` is the figure a solver caller checks.
+    func testMaxSizeShortensTheLongestEdgeWithoutPromisingIt() throws {
+        let plate = try Solid.extrude(try plateOutline(), try Frame.xy(), 6)
+        let coarse = try plate.femMesh(tolerance: 0.05)
+        defer { coarse.free() }
+        let finer = try plate.femMesh(tolerance: 0.05, maxSize: 3)
+        defer { finer.free() }
+        XCTAssertGreaterThan(finer.nodes.count, coarse.nodes.count)
+        XCTAssertLessThan(finer.longestEdge, coarse.longestEdge)
+        XCTAssertLessThanOrEqual(finer.longestEdge, 3 * 1.05,
+                                 "maxSize 3 left a \(finer.longestEdge) edge, past even the 1.03x measured")
+    }
+
+    /// **The kernel's `.msh` text is owned**, released by this wrapper with
+    /// `cadaclysm_blacksmith_string_free`, where the reader's is borrowed from a slot on its
+    /// handle. Two asks are two independent texts. A wrapper porting one side's convention onto
+    /// the other leaks or double-frees -- and a double free here takes the process down, so
+    /// asking twice is the proof.
+    func testFemMeshMshTextIsOwnedOnThisSide() throws {
+        let plate = try Solid.extrude(try plateOutline(), try Frame.xy(), 6)
+        let mesh = try plate.femMesh(tolerance: 0.05)
+        defer { mesh.free() }
+        let text = try mesh.mshText()
+        XCTAssertEqual(try mesh.mshText(), text)
+        XCTAssertTrue(text.hasPrefix("$MeshFormat\n4.1 0 8\n"), String(text.prefix(40)))
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent("cadaclysm-kernel-fem.msh").path
+        try mesh.saveMsh(path)
+        let written = ((try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber)?.intValue ?? 0
+        XCTAssertGreaterThanOrEqual(written, text.utf8.count / 2)
+    }
+
+    /// The placement: **twelve** numbers as a `Frame`, where the reader takes sixteen
+    /// column-major. The same transform as `turnedMatrix`, so `turned` is the one expected map
+    /// for both sides -- which makes that asymmetry something these tests prove. A cuboid,
+    /// because all eight of its corners are B-rep vertices and so certainly nodes.
+    ///
+    /// **The cuboid is moved off the rotation's axis, and the test is worthless without that.**
+    /// `Solid.cuboid` is centred where it is built, and transposing the frame's 3x3 axes block
+    /// composes this transform with a 180-degree turn about z through the frame's own origin --
+    /// a symmetry of an axis-centred box's corner set, which would leave the eight corners and
+    /// the span unchanged. **The condition is on x and y alone**: Task 4 measured an offset of
+    /// (0, 0, 5) leaving the transpose passing, and (30, 7, 5) catching it. At this offset the
+    /// right answer spans x 88..98, y 20..40 and the transposed one x 102..112, y -40..-20 --
+    /// disjoint in x, which is what earns the catch. The corner loop is defence in depth.
+    ///
+    /// Also catches the placement dropped (the nodes stay where the body is), applied twice, or
+    /// composed the other way round (the origin at (0, 100, 0), not (100, 0, 0)).
+    func testFemMeshFrameTurnsAndMovesEveryCorner() throws {
+        let (x, y, z) = (20.0, 10.0, 4.0)
+        let off = SIMD3<Double>(30, 7, 5)
+        let lo = off - SIMD3(x, y, z) / 2, hi = off + SIMD3(x, y, z) / 2
+        let cuboid = try Solid.cuboid(x, y, z).translate(off.x, off.y, off.z)
+        let frame = try Frame(SIMD3(100, 0, 0), SIMD3(0, 1, 0), SIMD3(-1, 0, 0), SIMD3(0, 0, 1))
+        let placed = try cuboid.femMesh(tolerance: 0.05, placement: frame)
+        defer { placed.free() }
+        let there = points(placed.nodes)
+        for corner in corners(lo, hi) {
+            let want = turned(corner)
+            XCTAssertTrue(there.contains { close($0, want, 1e-6) },
+                          "the frame did not send \(corner) to \(want) -- the nodes span \(span(placed.nodes))")
+        }
+        let (low, high) = span(placed.nodes)
+        XCTAssertTrue(close(low, SIMD3(88, 20, 3), 1e-6) && close(high, SIMD3(98, 40, 7), 1e-6), "\(low)..\(high)")
+        // The identity: a solid meshed in its own coordinates is the common case, and this is
+        // the one frame argument in this library that may be left out.
+        let own = try cuboid.femMesh(tolerance: 0.05)
+        defer { own.free() }
+        let (ownLow, ownHigh) = span(own.nodes)
+        XCTAssertTrue(close(ownLow, lo, 1e-6) && close(ownHigh, hi, 1e-6), "\(ownLow)..\(ownHigh)")
+    }
+
+    /// **`femMesh`'s defaults are `FemOptions::default()`'s** -- `tolerance: 0.01` and
+    /// `max_size: 0`, from `impl Default for FemOptions` in `crates/cadaclysm-brep/src/fem.rs`, the
+    /// same figures `cadaclysm_blacksmith_fem_options_init` writes. **Not `Solid.mesh`'s `0.05`**,
+    /// which is the *render* mesher's default and is the method directly above this one in the
+    /// wrapper: copying that neighbour gives a Swift caller a five-times coarser solver mesh than
+    /// the same call in every other language, and until this test nothing pinned it.
+    ///
+    /// Pinned against the figure rather than against the reader's default, so the slip is caught in
+    /// either module independently: the no-argument call must agree with an explicit `0.01`, must
+    /// come to the node count 0.01 is known to give, and must **disagree** with an explicit `0.05`
+    /// -- which is what says the first assertion has teeth. Measured on this plate through
+    /// `cadaclysm_blacksmith.py` on the same library: 1952 nodes at 0.01 against 864 at 0.05. A flat
+    /// body cannot tell the two apart at all (the reader's cube meshes to 8 nodes either way), which
+    /// is why the plate -- with its cylindrical hole and its slot -- is the body here.
+    func testFemMeshDefaultsAreTheLibrarysOwn() throws {
+        let plate = try Solid.extrude(try plateOutline(), try Frame.xy(), 6)
+        let byDefault = try plate.femMesh()
+        defer { byDefault.free() }
+        let stated = try plate.femMesh(tolerance: 0.01, maxSize: 0.0)
+        defer { stated.free() }
+        let renderDefault = try plate.femMesh(tolerance: 0.05)
+        defer { renderDefault.free() }
+        XCTAssertEqual(byDefault.nodes.count, stated.nodes.count, "the default tolerance is not 0.01")
+        XCTAssertEqual(byDefault.nodes.count, 1952 * 3, "0.01 no longer meshes this plate to 1952 nodes")
+        XCTAssertNotEqual(byDefault.nodes.count, renderDefault.nodes.count,
+                          "0.01 and 0.05 mesh this body alike, so this test cannot tell them apart")
+    }
+
+    /// The kernel refuses a bad tolerance in the library's own words: it has no mesh-only path,
+    /// so unlike the reader every solid goes through the options. **This wrapper checks neither
+    /// `tolerance` nor `maxSize` itself** -- whose words the message is in proves that.
+    func testFemMeshRefusesABadToleranceInTheLibrarysWords() throws {
+        let plate = try Solid.extrude(try plateOutline(), try Frame.xy(), 6)
+        XCTAssertEqual(refusal { _ = try plate.femMesh(tolerance: 0) },
+                       "fem_mesh: bad FEM mesh input: tolerance must be finite and > 0, got 0")
+        XCTAssertNotNil(refusal { _ = try plate.femMesh(tolerance: 0.05, maxSize: -1) })
+        plate.close()
+        XCTAssertEqual(refusal { _ = try plate.femMesh() }, "solid: closed")
+    }
+
+    // MARK: - Assemblies
+
+    /// The spec §5 assembly facts, over `_shared_assembly()`'s shape, at parity with the
+    /// Python reference's tests and Node's `blacksmith.test.js`: placement names ordered
+    /// and numbered past a taken one (fact 1), STEP entity counts (fact 2), the STEP text
+    /// naming every placement (fact 3), a late placement showing up wherever its
+    /// assembly is placed (fact 4), a cycle refused naming it (fact 5), a duplicate
+    /// explicit name refused (fact 6), a mirrored raw frame refused in the library's own
+    /// words (fact 7), an empty assembly refused at `stepText()` (fact 8), an assembly
+    /// placing an empty sub-assembly refused naming it (fact 9), `Solid.named`/`Solid.name`
+    /// (fact 10), and a read-back through the reader (fact 11).
+    func testAssemblyFactsHoldAsPythonChecksThem() throws {
+        let bolt = try Solid.cylinder(1, 6).named("bolt")
+        let plate = try Solid.cuboid(20, 10, 2).named("plate").coloured([1, 0.5, 0])
+
+        let bracket = try Assembly("bracket")
+        let platePlacement = try bracket.place(plate, try Frame.xy())
+        let bolt1Placement = try bracket.place(bolt, try Frame.xy([5, 5, 2]))
+        let bolt2Placement = try bracket.place(bolt, try Frame.xy([15, 5, 2]))
+        XCTAssertEqual(platePlacement, "plate")
+        XCTAssertEqual(bolt1Placement, "bolt")
+        XCTAssertEqual(bolt2Placement, "bolt 2")   // fact 1
+
+        let frame = try Assembly("frame")
+        let right = try Frame([100, 0, 0], [0, 1, 0], [-1, 0, 0], [0, 0, 1])
+        let leftPlacement = try frame.place(bracket, try Frame.xy(), name: "left")
+        let rightPlacement = try frame.place(bracket, right, name: "right")
+        let rootBoltPlacement = try frame.place(bolt, try Frame.xy([50, 50, 0]))
+        XCTAssertEqual(leftPlacement, "left")
+        XCTAssertEqual(rightPlacement, "right")
+        XCTAssertEqual(rootBoltPlacement, "bolt")   // fact 1
+
+        let frameStepText = try frame.stepText()
+        XCTAssertEqual(countOf(frameStepText, "=MANIFOLD_SOLID_BREP("), 2)
+        XCTAssertEqual(countOf(frameStepText, "=PRODUCT("), 4)
+        XCTAssertEqual(countOf(frameStepText, "=NEXT_ASSEMBLY_USAGE_OCCURRENCE("), 6)   // fact 2
+        XCTAssertTrue(frameStepText.contains("'left'") && frameStepText.contains("'right'")
+                       && frameStepText.contains("'bolt 2'"))   // fact 3
+
+        // Fact 11: read-back through the reader -- structure only. One root "frame" with
+        // three children: two "bracket" containers each holding plate/bolt/bolt, and one
+        // root-level "bolt". The world origins are Python's to check.
+        let scene = try Cadaclysm.openMemory(Data(frameStepText.utf8), format: "stp")
+        let roots = scene.roots
+        XCTAssertEqual(roots.count, 1)
+        if let root = roots.first {
+            XCTAssertEqual(root.name, "frame")
+            let rootChildren = root.children
+            XCTAssertEqual(rootChildren.count, 3)   // fact 11
+            let containers = rootChildren.filter { $0.name == "bracket" }
+            let rootBolts = rootChildren.filter { $0.name == "bolt" }
+            XCTAssertEqual(containers.count, 2)
+            XCTAssertEqual(rootBolts.count, 1)
+            for container in containers {
+                XCTAssertEqual(container.children.map(\.name).sorted(), ["bolt", "bolt", "plate"])
+            }
+        }
+        scene.close()
+
+        // Fact 4: a late placement into bracket shows up wherever bracket is placed.
+        _ = try bracket.place(bolt, try Frame.xy([10, 8, 2]))
+        XCTAssertEqual(countOf(try frame.stepText(), "=NEXT_ASSEMBLY_USAGE_OCCURRENCE("), 7)
+
+        // Fact 5: a cycle is refused, naming it.
+        XCTAssertEqual(refusal { _ = try bracket.place(frame, try Frame.xy()) }?.contains("bracket → frame → bracket"), true)
+
+        // Fact 6: an explicit name already taken is refused.
+        XCTAssertNotNil(refusal { _ = try frame.place(bracket, try Frame.xy(), name: "left") })
+
+        // Fact 7: a mirrored raw frame is refused in the library's own words, not
+        // `Frame.init`'s -- `place(_:raw:name:)` is the narrow unchecked route added for
+        // this, following `Solid.place(raw:)`'s own precedent for the same fact.
+        let mirrored = [0.0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, -1]
+        let refusedMessage = refusal { _ = try frame.place(bolt, raw: mirrored) }
+        XCTAssertEqual(refusedMessage?.contains("right-handed and orthonormal"), true, refusedMessage ?? "")
+
+        // Fact 8: an assembly placing nothing is refused at stepText().
+        let x = try Assembly("x")
+        XCTAssertNotNil(refusal { _ = try x.stepText() })
+        x.close()
+
+        // Fact 9: an assembly placing an empty sub-assembly is refused, naming it.
+        let outer = try Assembly("outer")
+        let hollow = try Assembly("hollow")
+        _ = try outer.place(hollow, try Frame.xy())
+        let hollowRefusal = refusal { _ = try outer.stepText() }
+        XCTAssertEqual(hollowRefusal?.contains("hollow"), true, hollowRefusal ?? "")
+        outer.close()
+        hollow.close()
+
+        // Fact 10: `Solid.named`/`Solid.name` -- the name rides through a one-source
+        // operation (place, coloured) and is dropped by a two-source one (join) or a
+        // fresh primitive.
+        XCTAssertEqual(try bolt.name, "bolt")
+        let placedBolt = try bolt.place(try Frame.xy([1, 2, 3]))
+        XCTAssertEqual(try placedBolt.name, "bolt")
+        let colouredBolt = try bolt.coloured([1, 0, 0])
+        XCTAssertEqual(try colouredBolt.name, "bolt")
+        let cube = try Solid.cuboid(1, 1, 1)
+        let joinedBolt = try bolt.join(cube)
+        XCTAssertNil(try joinedBolt.name)
+        XCTAssertNil(try Solid.cuboid(1, 1, 1).name)   // fact 10
+        XCTAssertNotNil(refusal { _ = try bolt.named("") })
+
+        frame.close()
+        bracket.close()
+    }
+}
+
+/// How many non-overlapping occurrences of `needle` appear in `haystack`.
+private func countOf(_ haystack: String, _ needle: String) -> Int {
+    var count = 0, from = haystack.startIndex
+    while let range = haystack.range(of: needle, range: from..<haystack.endIndex) {
+        count += 1
+        from = range.upperBound
+    }
+    return count
 }

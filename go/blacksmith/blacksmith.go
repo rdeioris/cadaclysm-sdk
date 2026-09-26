@@ -81,6 +81,12 @@
 // accessors return [ErrStaleView] instead. Call Copy on any view that must outlive
 // either. Strings are copied on the way out and are always safe.
 //
+// [FemMesh] is the exception on both counts: it is a handle of your own, its arrays borrow
+// from *it* rather than from the solid's cache, and neither closing the solid nor meshing it
+// again at another tolerance touches them — so it needs no ErrStaleView. They are
+// unsafe.Slice struct fields with no accessor, though, so hold the FemMesh itself while you
+// read them; its own doc comment says what that does and does not protect you from.
+//
 // # The chain mirrors the Rust Workplane
 //
 // A build call (Cuboid, Cylinder, Extrude, ExtrudeTapered, Revolve, Sweep, Loft) makes a
@@ -2463,6 +2469,419 @@ func (p *Polylines) Copy() ([][]float32, error) {
 	return out, nil
 }
 
+// ---- the FEM surface mesh -----------------------------------------------------------
+
+// FemEdge is one B-rep edge of a FEM mesh: the chain of nodes along it, and where that
+// chain breaks. Plain data, copied out of the handle, so an edge outlives the mesh it came
+// from where the flat arrays on [FemMesh] do not.
+//
+// Nodes are this mesh's node indices in order along the edge, its end vertices included; a
+// closed edge repeats no node. **Runs says where the chain breaks**: read
+// Nodes[Runs[i]:Runs[i+1]] (the last run to the end) as one polyline and join nothing
+// across a run boundary — the two ends either side of one are two points of the edge with no
+// mesh edge between them. One run beginning at 0 is the ordinary answer, and a caller
+// reading Nodes as one polyline without looking here jumps the gap silently.
+//
+// Faces is (face_a, face_b) and Ends is (end_a, end_b), the second of each ^uint32(0) —
+// CADACLYSM_BLACKSMITH_NONE, 0xFFFFFFFF — where there is none: an open sheet's rim, or both
+// ends at one vertex. **0 is a real face and a real vertex, not a sentinel**, and Faces
+// numbers the solid's faces as [Solid.FaceKind] does. Which end comes first is the first
+// trim's direction and means nothing else: the pair bounds the edge, it does not orient it.
+//
+// Closed where the nodes make one loop, never where there is more than one run. Seam where
+// one face bounds the edge twice, and both Faces are then that same face.
+//
+// ID is **the solid's own edge id, not this mesh's edge index**: FemMesh.Edges is a densely
+// renumbered subset of the solid's edges, with every edge collapsed to a point left out, so
+// a sphere — whose two pole runs collapse — reports its seam as edge 0 with an ID of 1. It is
+// not a row of [Solid.Edges] either, that table being the solid's edges grouped by geometry;
+// the id names the topological edge, which is what the .msh entities and the censuses speak
+// in. Everything else here that names an edge means the index.
+type FemEdge struct {
+	ID     uint32
+	Nodes  []uint32
+	Runs   []uint32
+	Faces  [2]uint32
+	Ends   [2]uint32
+	Closed bool
+	Seam   bool
+}
+
+// String is Python's FemEdge.__repr__: the lengths rather than the chains, which are what a
+// failure message wants.
+func (e FemEdge) String() string {
+	return fmt.Sprintf("FemEdge(id=%d, nodes=%d, runs=%d, faces=%v, ends=%v, closed=%v, seam=%v)",
+		e.ID, len(e.Nodes), len(e.Runs), e.Faces, e.Ends, e.Closed, e.Seam)
+}
+
+// FemVertex is one B-rep vertex of a FEM mesh: the node the mesh put there, if any, and
+// where the topology says it is, if that is known. Plain data.
+//
+// Node is the mesh node at this vertex, or ^uint32(0) where the mesh has none there. **A
+// sentinel here is ordinary, not a fault**: the analysis rebuilds a vertex wherever two
+// trims meet, so a sphere has 48 of them where the mesh has 2 points, and a caller walking
+// these skips the sentinel rather than reading it as a gap.
+//
+// Point is where the topology says the vertex is, in the same space and under the same
+// placement as FemMesh.Nodes. **Meaningless unless HasPosition**: it is all zeros then, a
+// point no geometry has and one a solver would take for a node at the origin.
+type FemVertex struct {
+	Node        uint32
+	Point       [3]float64
+	HasPosition bool
+}
+
+// String is Python's FemVertex.__repr__.
+func (v FemVertex) String() string {
+	return fmt.Sprintf("FemVertex(node=%d, point=%v, has_position=%v)", v.Node, v.Point, v.HasPosition)
+}
+
+// FemMesh is one solid meshed for a solver: nodes welded by bits — two mesh points are one
+// node only where their coordinates are the same doubles, so no tolerance ever merges two
+// distinct points and a crack stays a crack — triangles wound outward, every node tagged
+// with the lowest-dimension B-rep entity it lies on, and every crack reported rather than
+// closed. What [Solid.FemMesh] returns, and **owned by you**: Close it, or let the finalizer.
+//
+// # The arrays borrow, and the fields cannot refuse
+//
+// Nodes, Triangles, TriangleFace, NodeKind and NodeEntity are slices built with unsafe.Slice
+// straight over the library's own memory rather than copies, as [Mesh]'s are and for the same
+// reason: a solver mesh is megabytes. They are struct fields, handed over once, with no
+// accessor to guard them — **so nothing here refuses to read them after Close**, and a slice
+// read then is a slice over freed memory. There is no way in Go to mark a slice's backing
+// memory read-only or to tie its lifetime to the handle's, so this sharp edge is documented
+// rather than enforced, exactly as the package doc leaves it for the solid's own views. Copy
+// (append([]float64(nil), m.Nodes...)) anything that must outlive the mesh.
+//
+// That is why there is **no ErrStaleView here and no generation**: [Mesh] and [Polylines]
+// need one because the library replaces the solid's tessellation cache whole whenever it is
+// asked for another tolerance, while a FEM mesh's pointers are built with the handle and
+// never move. Meshing the solid again at any tolerance, and closing the solid itself, leave
+// a FEM mesh untouched — only Close on this object frees it.
+//
+// The six methods below *can* tell, because each hands the handle back to the library: Edges,
+// Vertices, OpenEdges, FoldedEdges, MshText and SaveMsh each return an error wrapping
+// [ErrClosed] once Close has run.
+//
+// **Hold the FemMesh itself while you read its arrays.** The arrays are fields of the handle,
+// so a program that keeps the *FemMesh keeps the memory: that is why they live here rather
+// than on a view struct of their own. What the collector can still free under you is a slice
+// copied out of a field by a program that then drops its last reference to the *FemMesh — the
+// finalizer runs, cadaclysm_blacksmith_fem_mesh_free is called, and nothing in the program
+// ever asked for it. Java and LuaJIT have the same hazard for the same reason; Go cannot
+// close it.
+type FemMesh struct {
+	handle *C.CadaclysmBlacksmithFemMesh
+
+	// Nodes is every node's position, three float64 each: placed by Solid.FemMesh's
+	// placement, in the solid's own coordinates otherwise.
+	Nodes []float64
+	// Triangles is three node indices a triangle, wound outward; a mirroring placement is
+	// wound back.
+	Triangles []uint32
+	// TriangleFace is which face each triangle lies on, one per triangle: the same faces
+	// Solid.FaceKind names.
+	TriangleFace []uint32
+	// NodeKind is what each node lies on — 0 a B-rep vertex, 1 an edge, 2 a face — one per
+	// node: the lowest-dimension entity it lies on, which is the .msh format's own
+	// classification rule. NodeEntity says which entity of that kind.
+	NodeKind []uint32
+	// NodeEntity is which vertex, edge or face each node lies on, read by the matching
+	// NodeKind: an index into Vertices, into Edges, or into the solid's faces.
+	NodeEntity []uint32
+
+	// FaceCount is the solid's faces — the same faces Solid.Faces counts.
+	FaceCount uint32
+	// Watertight is that the topology is closed and the welded mesh is too — every directed
+	// mesh edge paired with its reverse and none used twice. **False for every solid whose
+	// topology is not closed**; see OpenEdges for what an empty census beside a false here
+	// does and does not mean.
+	Watertight bool
+	// FromMesh is **always false here**, and kept so the two ABIs hand back one struct: a
+	// Solid always has a B-rep, so this library has no mesh-only body to report. The
+	// reader's Node.FemMesh sets it for a node with no B-rep, where it also says which space
+	// the mesh is in and whether the crack census spoke from the triangles alone; neither
+	// difference can arise on this side.
+	FromMesh bool
+	// MinAngle is the smallest interior angle of any triangle, in degrees. There is always
+	// one: a solid that meshed to no triangles is a refusal, not a mesh.
+	MinAngle float64
+	// WorstTriangle is the triangle with that angle, as an index into Triangles.
+	WorstTriangle uint32
+	// LongestEdge is the longest triangle edge, placed. **The figure to check against
+	// Solid.FemMesh's maxSize, and the only one that says what the mesh actually is**:
+	// maxSize bounds the boundary segments and merely targets the interior — 1.03 x maxSize
+	// was measured on a face whose parameters run unevenly — and one small enough beside the
+	// solid to reach the mesher's own piece and station ceilings is not honoured at all.
+	LongestEdge float64
+
+	// The counts the four row readers loop to. Not exported: the four hand back the rows
+	// themselves, and len() on those is the count, as it is everywhere else in this package.
+	edgeCount, vertexCount, openEdgeCount, foldedEdgeCount uint32
+}
+
+// femMeshFrom reads the view once and wraps the handle, freeing it if the view is refused.
+//
+// Read once, here, rather than per field: every pointer in the view is built with the handle
+// and never moves — nothing in this ABI is built lazily — so asking again would be one C call
+// for the same answer, and there is no filling generation to record as Solid.Mesh has.
+func femMeshFrom(handle *C.CadaclysmBlacksmithFemMesh) (*FemMesh, error) {
+	var raw C.CadaclysmBlacksmithFemMeshView
+	if !bool(C.cadaclysm_blacksmith_fem_mesh_view(handle, &raw)) {
+		err := failure("fem_mesh_view")
+		C.cadaclysm_blacksmith_fem_mesh_free(handle)
+		return nil, err
+	}
+	m := &FemMesh{
+		handle:          handle,
+		FaceCount:       uint32(raw.face_count),
+		Watertight:      bool(raw.watertight),
+		FromMesh:        bool(raw.from_mesh),
+		MinAngle:        float64(raw.min_angle),
+		WorstTriangle:   uint32(raw.worst_triangle),
+		LongestEdge:     float64(raw.longest_edge),
+		edgeCount:       uint32(raw.edge_count),
+		vertexCount:     uint32(raw.vertex_count),
+		openEdgeCount:   uint32(raw.open_edge_count),
+		foldedEdgeCount: uint32(raw.folded_edge_count),
+	}
+	nodes, triangles := int(raw.node_count), int(raw.triangle_count)
+	if nodes > 0 && raw.nodes != nil {
+		m.Nodes = unsafe.Slice((*float64)(unsafe.Pointer(raw.nodes)), nodes*3)
+		m.NodeKind = unsafe.Slice((*uint32)(unsafe.Pointer(raw.node_kind)), nodes)
+		m.NodeEntity = unsafe.Slice((*uint32)(unsafe.Pointer(raw.node_entity)), nodes)
+	}
+	if triangles > 0 && raw.triangles != nil {
+		m.Triangles = unsafe.Slice((*uint32)(unsafe.Pointer(raw.triangles)), triangles*3)
+		m.TriangleFace = unsafe.Slice((*uint32)(unsafe.Pointer(raw.triangle_face)), triangles)
+	}
+	runtime.SetFinalizer(m, (*FemMesh).finalize)
+	return m, nil
+}
+
+func (m *FemMesh) finalize() {
+	if m.handle != nil {
+		C.cadaclysm_blacksmith_fem_mesh_free(m.handle)
+		m.handle = nil
+	}
+}
+
+// h is the live handle, refusing to hand over a closed one, so a use-after-close returns an
+// error at the call site instead of passing a dangling pointer into the library. Every method
+// that hands the handle to C goes through it; the struct fields cannot, which is the sharp
+// edge [FemMesh] documents.
+func (m *FemMesh) h() (*C.CadaclysmBlacksmithFemMesh, error) {
+	if m == nil || m.handle == nil {
+		return nil, fmt.Errorf("fem mesh: %w", ErrClosed)
+	}
+	return m.handle, nil
+}
+
+// Closed is whether Close has already run. A nil *FemMesh — what a failed Solid.FemMesh
+// returns beside its error — counts as closed.
+func (m *FemMesh) Closed() bool { return m == nil || m.handle == nil }
+
+// Close gives the mesh back, and with it every slice on it. Idempotent, and a no-op on a nil
+// *FemMesh, so a Close deferred before the error is checked cannot panic. The error return is
+// always nil; it exists so a FemMesh satisfies io.Closer and defers like every other resource
+// here. The .msh texts are **not** freed with it: each is a Go string of its own.
+//
+// **The slices are not emptied and do not begin to refuse**: after this they are still slice
+// headers over memory the library has freed. See [FemMesh].
+func (m *FemMesh) Close() error {
+	if m == nil || m.handle == nil {
+		return nil
+	}
+	h := m.handle
+	m.handle = nil
+	runtime.SetFinalizer(m, nil)
+	C.cadaclysm_blacksmith_fem_mesh_free(h)
+	return nil
+}
+
+// copyFemIndices is n uint32 at p in memory of our own: what a FemEdge's Nodes and Runs hold,
+// so an edge read out of a mesh outlives the mesh. Cheap — an edge's chain is tens of numbers
+// where the flat arrays are millions, which is why these are copied and those lent.
+func copyFemIndices(p *C.uint32_t, n int) []uint32 {
+	if p == nil || n <= 0 {
+		return nil
+	}
+	return append([]uint32(nil), unsafe.Slice((*uint32)(unsafe.Pointer(p)), n)...)
+}
+
+// Edges is one [FemEdge] per B-rep edge, in the order a NodeKind of 1 indexes them.
+//
+// **Not Solid.Edges' numbering**: these are the manifold analysis's, ascending by edge id,
+// and each FemEdge.ID carries the solid's own. Built fresh on every call, one C call an edge,
+// so read it once and keep it.
+func (m *FemMesh) Edges() ([]FemEdge, error) {
+	defer pin()() // the calls and the lastError read after them on one OS thread
+	h, err := m.h()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]FemEdge, 0, m.edgeCount)
+	var raw C.CadaclysmBlacksmithFemEdge
+	for i := uint32(0); i < m.edgeCount; i++ {
+		if !bool(C.cadaclysm_blacksmith_fem_mesh_edge(h, C.uint32_t(i), &raw)) {
+			runtime.KeepAlive(m)
+			return nil, failure(fmt.Sprintf("fem_mesh_edge %d", i))
+		}
+		out = append(out, FemEdge{
+			ID:     uint32(raw.id),
+			Nodes:  copyFemIndices(raw.nodes, int(raw.node_count)),
+			Runs:   copyFemIndices(raw.runs, int(raw.run_count)),
+			Faces:  [2]uint32{uint32(raw.face_a), uint32(raw.face_b)},
+			Ends:   [2]uint32{uint32(raw.end_a), uint32(raw.end_b)},
+			Closed: bool(raw.closed),
+			Seam:   bool(raw.seam),
+		})
+	}
+	// The mesh must outlive the loop even if the caller dropped every other reference to it:
+	// a finalizer running here would free the handle the library is reading, exactly as one
+	// on a Solid would during a write.
+	runtime.KeepAlive(m)
+	return out, nil
+}
+
+// Vertices is one [FemVertex] per B-rep vertex, in the order a NodeKind of 0 indexes them.
+func (m *FemMesh) Vertices() ([]FemVertex, error) {
+	defer pin()()
+	h, err := m.h()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]FemVertex, 0, m.vertexCount)
+	var raw C.CadaclysmBlacksmithFemVertex
+	for i := uint32(0); i < m.vertexCount; i++ {
+		if !bool(C.cadaclysm_blacksmith_fem_mesh_vertex(h, C.uint32_t(i), &raw)) {
+			runtime.KeepAlive(m)
+			return nil, failure(fmt.Sprintf("fem_mesh_vertex %d", i))
+		}
+		out = append(out, FemVertex{
+			Node:        uint32(raw.node),
+			Point:       [3]float64{float64(raw.point[0]), float64(raw.point[1]), float64(raw.point[2])},
+			HasPosition: bool(raw.has_position),
+		})
+	}
+	runtime.KeepAlive(m)
+	return out, nil
+}
+
+// OpenEdges is every crack, as (a, b, brepEdge): a directed mesh edge (a, b) with no (b, a),
+// and the B-rep edge both nodes lie on or ^uint32(0) where they share none.
+//
+// **Empty unless the solid's topology is closed**, whose mesh is otherwise not asked about at
+// all: an open sheet from [Face], [Solid.FaceSheet], [Solid.DropFaces] or [ExtrudeOpen]
+// makes no claim to enclose anything, so its rim is not a crack. Such a solid reports
+// Watertight false with this and FoldedEdges both empty, and **that trio of answers together**
+// says "not asked", not "nothing found".
+//
+// **That rule holds here without exception**, where the reader package has one: every solid
+// has a B-rep behind it, so this library has no mesh-only body whose census speaks from the
+// triangles alone. See FromMesh.
+func (m *FemMesh) OpenEdges() ([][3]uint32, error) { return m.census(true) }
+
+// FoldedEdges is every fold, as OpenEdges reports a crack: a directed mesh edge used by more
+// than one triangle, once.
+//
+// **A solid can be folded without being open** — one no thicker than a line leaves no hole for
+// an open edge to find — and the closure census's own known-bad bodies are folds rather than
+// open cracks. A caller that checks OpenEdges alone calls such a solid sound. Empty under the
+// same rule as OpenEdges.
+func (m *FemMesh) FoldedEdges() ([][3]uint32, error) { return m.census(false) }
+
+// census is the shared body of OpenEdges and FoldedEdges, so the two cannot drift.
+//
+// A bool rather than a func value naming one of the two entry points: cgo's generated
+// bindings for a C function are call-only expressions, not first-class Go func values.
+func (m *FemMesh) census(openEdges bool) ([][3]uint32, error) {
+	defer pin()()
+	h, err := m.h()
+	if err != nil {
+		return nil, err
+	}
+	count, what := m.foldedEdgeCount, "fem_mesh_folded_edge"
+	if openEdges {
+		count, what = m.openEdgeCount, "fem_mesh_open_edge"
+	}
+	out := make([][3]uint32, 0, count)
+	for i := uint32(0); i < count; i++ {
+		var row [3]C.uint32_t
+		var ok C.bool
+		if openEdges {
+			ok = C.cadaclysm_blacksmith_fem_mesh_open_edge(h, C.uint32_t(i), &row[0], &row[1], &row[2])
+		} else {
+			ok = C.cadaclysm_blacksmith_fem_mesh_folded_edge(h, C.uint32_t(i), &row[0], &row[1], &row[2])
+		}
+		if !bool(ok) {
+			runtime.KeepAlive(m)
+			return nil, failure(fmt.Sprintf("%s %d", what, i))
+		}
+		out = append(out, [3]uint32{uint32(row[0]), uint32(row[1]), uint32(row[2])})
+	}
+	runtime.KeepAlive(m)
+	return out, nil
+}
+
+// MshText is the mesh as Gmsh 4.1 ASCII .msh text: an entity per B-rep vertex, edge and face,
+// a volume where the solid closes, and a physical group naming each.
+//
+// **On this side of the ABI the library's text is owned and handed over**, released here with
+// cadaclysm_blacksmith_string_free as every other text this library writes — [Solid.StepText],
+// [Solid.SatText], [Solid.BrepText]. Two asks give two independent texts, and neither dies
+// with the handle. The reader package's own MshText is the other way round: it borrows a slot
+// on its handle, replaced by the next call and gone with the mesh. A reader porting one side's
+// reasoning onto the other leaks or double-frees.
+//
+// **The unlicensed notice is printed here**, on this writer and on SaveMsh, and **not** by
+// [Solid.FemMesh]: meshing is not a licensed output and the .msh file is, which is where
+// Solid.SatText and Solid.BrepText put theirs too. The reader library notices in its
+// constructor instead and on neither .msh call; each matches its own siblings, so moving the
+// call to look like the other side breaks a convention.
+func (m *FemMesh) MshText() (string, error) {
+	defer pin()()
+	h, err := m.h()
+	if err != nil {
+		return "", err
+	}
+	text := C.cadaclysm_blacksmith_fem_mesh_msh_text(h)
+	runtime.KeepAlive(m)
+	if text == nil {
+		return "", failure("fem_mesh_msh_text")
+	}
+	defer C.cadaclysm_blacksmith_string_free(text)
+	return C.GoString(text), nil
+}
+
+// SaveMsh is MshText written to path, replacing any file there: the same bytes from the same
+// writer, straight to the file rather than through a string. Prints the unlicensed notice; see
+// MshText.
+func (m *FemMesh) SaveMsh(path string) error {
+	defer pin()()
+	h, err := m.h()
+	if err != nil {
+		return err
+	}
+	cp := C.CString(path)
+	defer C.free(unsafe.Pointer(cp))
+	ok := bool(C.cadaclysm_blacksmith_fem_mesh_save_msh(h, cp))
+	runtime.KeepAlive(m)
+	if !ok {
+		return failure(fmt.Sprintf("could not write %s", path))
+	}
+	return nil
+}
+
+// String is Python's FemMesh.__repr__.
+func (m *FemMesh) String() string {
+	if m.Closed() {
+		return "FemMesh(closed)"
+	}
+	return fmt.Sprintf("FemMesh(nodes=%d, triangles=%d, watertight=%v, from_mesh=%v)",
+		len(m.Nodes)/3, len(m.Triangles)/3, m.Watertight, m.FromMesh)
+}
+
 // ---- solids ----------------------------------------------------------------------------------------
 
 // Solid is an exact B-rep solid (or open sheet). Immutable; every operation returns a new
@@ -2983,6 +3402,18 @@ func (s *Solid) Translate(dx, dy, dz float64) (*Solid, error) {
 		return nil, err
 	}
 	out, err := newSolid(C.cadaclysm_blacksmith_translate(h, C.double(dx), C.double(dy), C.double(dz)), "solid")
+	runtime.KeepAlive(s)
+	return out, err
+}
+
+// Scaled is this solid scaled by factor about the origin: every length times factor, exactly.
+func (s *Solid) Scaled(factor float64) (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	out, err := newSolid(C.cadaclysm_blacksmith_scaled(h, C.double(factor)), "solid")
 	runtime.KeepAlive(s)
 	return out, err
 }
@@ -3510,6 +3941,72 @@ func (s *Solid) Mesh64(tolerance float64) (*Mesh64, error) {
 	return m, nil
 }
 
+// FemMesh is this solid meshed for a solver, as a [FemMesh]: nodes welded by bits, triangles
+// wound outward, each node tagged with the lowest-dimension B-rep entity it lies on, and
+// every crack reported rather than closed.
+//
+// tolerance is the chordal tolerance in model units, finite and above zero, and **it alone
+// governs how closely the mesh follows the geometry**. maxSize is a size ceiling, finite and
+// zero or more, 0 being no ceiling (curvature alone): **it bounds the boundary and targets
+// the interior**, which is not a longest-element-edge guarantee — it adds boundary nodes
+// without refining boundary geometry, and FemMesh.LongestEdge is what the mesh actually came
+// to, the figure to check against it. Go has no defaults, so Python's 0.01 and 0.0 are
+// spelled out at the call; the library's own struct is filled by
+// cadaclysm_blacksmith_fem_options_init first, so a field added to it later defaults without
+// this function being touched.
+//
+// **Neither number is checked here.** The mesher refuses a tolerance or a size it cannot use,
+// naming the field and the value, and a second validator in this wrapper would be a second
+// set of words for the same refusal. (The reader package's Node.FemMesh says the same and has
+// the stronger case: a mesh-only body there reads neither field at all.)
+//
+// placement is **twelve** numbers — a [Frame], origin then x, y, z, as every frame in this
+// package — and nil for the identity; it is applied in float64 throughout. This is the one
+// frame argument here that may be omitted, a solid meshed in its own coordinates being the
+// common case. The reader package's Node.FemMesh takes **sixteen**, column-major, so a caller
+// moving between the two reformats the placement; both being fixed-size array types, Go
+// refuses the wrong one at compile time where the other wrappers can only refuse it at run
+// time.
+//
+// The call runs silent: cadaclysm_blacksmith_fem_mesh takes a progress callback reporting the
+// phases "meshing" and "welding", and this package offers none, as it offers none for the
+// booleans, the fillet or the shell.
+//
+// **A cracked solid is not a failure**: it comes back with FemMesh.Watertight false and its
+// cracks in FemMesh.OpenEdges and FemMesh.FoldedEdges — **both**, a fold being as real a fault
+// as an open crack — and nothing is welded shut to make it look sound. Returns a *BuildError
+// for a closed solid, a tolerance or maxSize the mesher refuses, a placement that is not
+// invertible, a closed solid this module cannot mesh, and a solid that meshes to no triangles.
+//
+// No unlicensed notice here: FemMesh.MshText and FemMesh.SaveMsh print it, this library
+// noticing on its writers rather than on its builders.
+func (s *Solid) FemMesh(tolerance, maxSize float64, placement *Frame) (*FemMesh, error) {
+	defer pin()()
+	sh, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	var opts C.CadaclysmBlacksmithFemOptions
+	// init writes sizeof(CadaclysmBlacksmithFemOptions) bytes as the *library* knows that
+	// type, into the struct cgo declares from the header — one type, not two, which is why Go
+	// has no layout row in cadaclysm-capi/tests/bindings.rs to keep the two in step. size is
+	// then set to this header's own sizeof, which is what the growth rule asks of a caller.
+	C.cadaclysm_blacksmith_fem_options_init(&opts)
+	opts.size = C.size_t(unsafe.Sizeof(opts))
+	opts.tolerance = C.double(tolerance)
+	opts.max_size = C.double(maxSize)
+	var p *C.double
+	if placement != nil {
+		p = doubles(&placement[0])
+	}
+	h := C.cadaclysm_blacksmith_fem_mesh(sh, p, &opts, nil, nil)
+	runtime.KeepAlive(s)
+	if h == nil {
+		return nil, failure("fem_mesh")
+	}
+	return femMeshFrom(h)
+}
+
 // EdgePolylines is the feature edges at tolerance as polylines, views into the same cache
 // as Mesh, under the same rule.
 func (s *Solid) EdgePolylines(tolerance float64) (*Polylines, error) {
@@ -3726,6 +4223,52 @@ func (s *Solid) FaceFrame(face int) (Frame, error) {
 		return Frame{}, failure("face_frame")
 	}
 	return out, nil
+}
+
+// -- naming
+
+// Named is this solid, named name — Python's named. The name rides through an operation
+// with exactly one source solid (Place, Translate, Rotate, Mirror, Scaled, Coloured,
+// EdgesColoured, Fillet, Chamfer, Shell, Thicken, FaceSheet, DropFaces, a Lumps entry,
+// Trim, SplitByPlane, PushPull, and so on) and is dropped by one with two or more sources
+// (Join, Cut, Common, SplitSheet, Split) and by a fresh primitive or sweep. It is what
+// (*Assembly).PlaceSolid defaults a placement's own name to, and the product name a lone
+// named solid gets written into STEP (Step/StepText — SAT and OCCT .brep have no product
+// name to set). An empty name is refused.
+func (s *Solid) Named(name string) (*Solid, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	c := C.CString(name)
+	defer C.free(unsafe.Pointer(c))
+	out, err := newSolid(C.cadaclysm_blacksmith_named(h, c), "named")
+	runtime.KeepAlive(s)
+	return out, err
+}
+
+// Name is this solid's name, and whether it has one — what Named set, kept or dropped by
+// whatever built this solid (see Named). The library's borrowed pointer is null for both
+// "no name" and a failure, so this never consults last_error, same as Python's own name
+// reading raw or None; the pointer is read directly rather than through a text() helper
+// that would map null to "", which would erase the "no name" case. On a closed solid this
+// also returns ("", false), the same as no name; callers who need to tell the two apart
+// check Closed first.
+func (s *Solid) Name() (string, bool) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return "", false
+	}
+	p := C.cadaclysm_blacksmith_solid_name(h)
+	if p == nil {
+		runtime.KeepAlive(s)
+		return "", false
+	}
+	out := C.GoString(p)
+	runtime.KeepAlive(s)
+	return out, true
 }
 
 // -- colour
@@ -4391,6 +4934,213 @@ func (s *Solid) ToScene(schema string) (*cadaclysm.Scene, error) {
 		}
 	}
 	return cadaclysm.OpenMemory([]byte(text), "solid.stp", opts...)
+}
+
+// ---- assemblies -----------------------------------------------------------------------
+
+// Assembly is a mutable tree of placements: a name, and zero or more solids or other
+// assemblies placed in it at a frame — Python's Assembly, modelled on Path's handle life.
+// Unlike Solid, placing shares rather than copies: placing one assembly under another does
+// not snapshot it, so a later placement on the shared one shows up wherever it already
+// sits. Close it, or let the finalizer free it, as Path; closing an assembly does not free
+// what was placed in it if that is still reachable from somewhere else.
+type Assembly struct {
+	handle *C.CadaclysmBlacksmithAssembly
+}
+
+// NewAssembly is a new, empty assembly called name. An empty name is refused.
+func NewAssembly(name string) (*Assembly, error) {
+	defer pin()()
+	c := C.CString(name)
+	defer C.free(unsafe.Pointer(c))
+	h := C.cadaclysm_blacksmith_assembly_new(c)
+	if h == nil {
+		return nil, failure("assembly_new")
+	}
+	a := &Assembly{handle: h}
+	runtime.SetFinalizer(a, (*Assembly).finalize)
+	return a, nil
+}
+
+func (a *Assembly) finalize() {
+	if a.handle != nil {
+		C.cadaclysm_blacksmith_assembly_free(a.handle)
+		a.handle = nil
+	}
+}
+
+// h is the live handle, refusing to hand over a closed one, so a use-after-close returns
+// an error at the call site instead of passing a dangling pointer into the library.
+func (a *Assembly) h() (*C.CadaclysmBlacksmithAssembly, error) {
+	if a == nil || a.handle == nil {
+		return nil, fmt.Errorf("assembly: %w", ErrClosed)
+	}
+	return a.handle, nil
+}
+
+// Closed is whether Close has already run. A nil Assembly counts as closed.
+func (a *Assembly) Closed() bool { return a == nil || a.handle == nil }
+
+// Close gives the assembly back. Idempotent, and a no-op on a nil Assembly. Does not free
+// what was placed in it if that is still reachable from somewhere else. The error return
+// is always nil; it exists so an Assembly satisfies io.Closer and defers like every other
+// resource.
+func (a *Assembly) Close() error {
+	if a == nil || a.handle == nil {
+		return nil
+	}
+	h := a.handle
+	a.handle = nil
+	runtime.SetFinalizer(a, nil)
+	C.cadaclysm_blacksmith_assembly_free(h)
+	return nil
+}
+
+// Name is this assembly's own name, given when it was made — Python's name. Never fails on
+// a live assembly (the library never returns null here, unlike (*Solid).Name); "" on a
+// closed one, since the signature carries no error, the way (*Path).Closed reads a nil
+// receiver as closed rather than panicking.
+func (a *Assembly) Name() string {
+	defer pin()()
+	h, err := a.h()
+	if err != nil {
+		return ""
+	}
+	p := C.cadaclysm_blacksmith_assembly_name(h)
+	out := C.GoString(p)
+	runtime.KeepAlive(a)
+	return out
+}
+
+// placeResult turns the owned text PlaceSolid and PlaceAssembly get back into a Go string,
+// freeing the library's copy; NULL is a refusal, read from last_error. The callers make the
+// raw call and keep its operands alive; they pass an empty name as NULL (Python's None),
+// because the library refuses "" as an explicit empty name.
+func placeResult(raw *C.char, what string) (string, error) {
+	if raw == nil {
+		return "", failure(what)
+	}
+	defer C.cadaclysm_blacksmith_string_free(raw)
+	return C.GoString(raw), nil
+}
+
+// cName is name as the library's nullable name parameter takes it: nil for "", else a
+// freshly allocated C string the caller must free.
+func cName(name string) *C.char {
+	if name == "" {
+		return nil
+	}
+	return C.CString(name)
+}
+
+// PlaceSolid places solid at frame (must be right-handed and orthonormal) in this
+// assembly, called name — or, with name left empty, solid's own name (Solid.Name, or
+// "part" for an unnamed one), numbered past any already taken here ("bolt", "bolt 2",
+// ...). An explicit name already taken here is refused. Returns the placement's name —
+// Python's place, split as Go has no type-dispatching overload; see PlaceAssembly for
+// placing another assembly.
+func (a *Assembly) PlaceSolid(s *Solid, frame Frame, name string) (string, error) {
+	defer pin()()
+	ah, err := a.h()
+	if err != nil {
+		return "", err
+	}
+	sh, err := s.h()
+	if err != nil {
+		return "", err
+	}
+	c := cName(name)
+	if c != nil {
+		defer C.free(unsafe.Pointer(c))
+	}
+	raw := C.cadaclysm_blacksmith_assembly_place_solid(ah, sh, doubles(&frame[0]), c)
+	runtime.KeepAlive(a)
+	runtime.KeepAlive(s)
+	return placeResult(raw, "assembly_place_solid")
+}
+
+// PlaceAssembly places another assembly, placed, sharing it rather than copying it, as
+// PlaceSolid places a solid — name defaults to placed's own Name. Placing placed as this
+// assembly itself, or anywhere above this assembly in the tree already, is refused
+// (naming the cycle), since writing that out would never terminate. Returns the
+// placement's name.
+func (a *Assembly) PlaceAssembly(placed *Assembly, frame Frame, name string) (string, error) {
+	defer pin()()
+	ah, err := a.h()
+	if err != nil {
+		return "", err
+	}
+	ph, err := placed.h()
+	if err != nil {
+		return "", err
+	}
+	c := cName(name)
+	if c != nil {
+		defer C.free(unsafe.Pointer(c))
+	}
+	raw := C.cadaclysm_blacksmith_assembly_place_assembly(ah, ph, doubles(&frame[0]), c)
+	runtime.KeepAlive(a)
+	runtime.KeepAlive(placed)
+	return placeResult(raw, "assembly_place_assembly")
+}
+
+// StepText is this assembly, and everything placed under it, as one STEP file: this
+// assembly the root product, each sub-assembly and each distinct part (the same solid
+// with the same paint and name) written once, each placement an occurrence named as it
+// was placed. schema and unit as WriteStepText takes them. An assembly reachable from
+// this one, this one included, that places nothing is refused — a reader would never show
+// it.
+func (a *Assembly) StepText(schema, unit string) (string, error) {
+	defer pin()()
+	h, err := a.h()
+	if err != nil {
+		return "", err
+	}
+	code, ok := units[unit]
+	if !ok {
+		names := make([]string, 0, len(units))
+		for name := range units {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		return "", &BuildError{Message: fmt.Sprintf("unit must be one of %v", names)}
+	}
+	cs, err := schemaText(schema)
+	if err != nil {
+		return "", err
+	}
+	if cs != nil {
+		defer C.free(unsafe.Pointer(cs))
+	}
+	raw := C.cadaclysm_blacksmith_assembly_step(h, cs, C.uint32_t(code))
+	runtime.KeepAlive(a)
+	return placeResult(raw, "assembly_step")
+}
+
+// Step writes StepText to path.
+func (a *Assembly) Step(path, schema, unit string) error {
+	text, err := a.StepText(schema, unit)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(text), 0o644)
+}
+
+// ToScene is this assembly as a reader Scene, through STEP text and cadaclysm.OpenMemory —
+// Solid.ToScene's own door, over the whole tree instead of one solid. Needs the reader's
+// library built beside this one.
+func (a *Assembly) ToScene(schema string) (*cadaclysm.Scene, error) {
+	text, err := a.StepText(schema, "mm")
+	if err != nil {
+		return nil, err
+	}
+	var opts []cadaclysm.Option
+	if schema != "" && !containsNewline(schema) {
+		if info, err := os.Stat(schema); err == nil && !info.IsDir() {
+			opts = append(opts, cadaclysm.WithSchema(schema))
+		}
+	}
+	return cadaclysm.OpenMemory([]byte(text), "assembly.stp", opts...)
 }
 
 // ---- the workplane -------------------------------------------------------------------------------

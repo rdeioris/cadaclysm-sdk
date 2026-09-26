@@ -266,6 +266,17 @@ impl Frame {
         Frame::new(at(0), at(3), at(6), at(9))
     }
 
+    /// Twelve raw numbers as a `Frame`, **unchecked**: every other constructor refuses a
+    /// frame that is not square or not right-handed, which is exactly what a test of the
+    /// library's *own* "right-handed and orthonormal" refusal (a mirrored raw frame,
+    /// spec §5 fact 7) must get past -- `Frame::of` would catch a left-handed one first,
+    /// in this crate's own words, and the library's message would never be seen. Not for
+    /// building: nothing here checks the axes are even directions, let alone square.
+    #[doc(hidden)]
+    pub fn raw_unchecked(v: [f64; 12]) -> Frame {
+        Frame { v }
+    }
+
     /// The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line.
     pub fn midplane(a: &Frame, b: &Frame) -> Result<Frame> {
         let api = api()?;
@@ -1264,6 +1275,29 @@ impl Solid {
     /// Free it now rather than at the end of scope.
     pub fn close(self) {}
 
+    // -- naming
+
+    /// This solid, named `name`. The name rides through an operation with exactly one
+    /// source solid (`place`, `translate`, `coloured`, `fillet`, ...) and is dropped by
+    /// one with two or more (`join`, `cut`, `common`, ...) and by a fresh primitive or
+    /// sweep -- see [`Solid::name`]. It is what [`Assembly::place_solid`] defaults a
+    /// placement's own name to, and the product name a lone named solid gets when
+    /// written to STEP ([`Solid::step`]/[`Solid::step_text`]). Refused for an empty name.
+    pub fn named(&self, name: &str) -> Result<Solid> {
+        let name = c_text("name", name)?;
+        self.next(unsafe { (self.api.cadaclysm_blacksmith_named)(self.raw(), name.as_ptr()) }, "named")
+    }
+
+    /// This solid's name, or `None` if it has none -- what [`named`](Self::named) set,
+    /// kept or dropped by whatever built this solid. The C function's pointer is
+    /// borrowed and null for both "no name" and a failure, so this reads it directly
+    /// and never consults `last_error` -- `text()` would map null to `""`, which would
+    /// erase the "no name" case.
+    pub fn name(&self) -> Option<String> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_solid_name)(self.raw()) };
+        (!raw.is_null()).then(|| unsafe { text(raw) })
+    }
+
     // -- building
 
     pub fn cuboid(x: f64, y: f64, z: f64) -> Result<Solid> {
@@ -1560,6 +1594,11 @@ impl Solid {
 
     pub fn translate(&self, dx: f64, dy: f64, dz: f64) -> Result<Solid> {
         self.next(unsafe { (self.api.cadaclysm_blacksmith_translate)(self.raw(), dx, dy, dz) }, "translate")
+    }
+
+    /// This solid scaled by `factor` about the origin: every length times `factor`, exactly.
+    pub fn scaled(&self, factor: f64) -> Result<Solid> {
+        self.next(unsafe { (self.api.cadaclysm_blacksmith_scaled)(self.raw(), factor) }, "scaled")
     }
 
     pub fn rotate(&self, axis: &AxisLine, radians: f64) -> Result<Solid> {
@@ -2139,6 +2178,67 @@ impl Solid {
         }
     }
 
+    /// This solid meshed for a solver, as a [`FemMesh`]: nodes welded by bits -- two mesh
+    /// points are one node only where their coordinates are the same doubles, so no
+    /// tolerance ever merges two distinct points and a crack stays a crack -- triangles
+    /// wound outward, and every node tagged with the lowest-dimension B-rep entity it lies
+    /// on.
+    ///
+    /// `tolerance` is the chordal tolerance in model units, and **it alone governs how
+    /// closely the mesh follows the geometry**. `max_size` is a size ceiling, `0` for none
+    /// (curvature alone): it splits boundary segments to at most that length and lays
+    /// interior stations `max_size / √2` apart as a **target**, adding nodes without
+    /// refining the boundary geometry -- a caller that wants the rim nearer its curve lowers
+    /// the `tolerance`. [`FemMesh::longest_edge`] is what the mesh actually came to.
+    ///
+    /// **Neither is checked here**: both go through as given and the library refuses what it
+    /// will not take, in its own words. `0.01` and `0.0` are `FemOptions::default()`, filled
+    /// by `cadaclysm_blacksmith_fem_options_init` before either is set, so a field added to
+    /// that struct later defaults without this code being touched.
+    ///
+    /// `placement` is a [`Frame`] -- **twelve** numbers, origin, x, y, z, as every frame
+    /// here -- and `None` for the identity, a solid meshed in its own coordinates being the
+    /// common case. The reader library's [`crate::Node::fem_mesh`] takes **sixteen**,
+    /// column-major, so a caller moving between the two reformats the placement; both are
+    /// sized types here, so that confusion does not compile.
+    ///
+    /// `&self`, not `&mut self`: a FEM mesh is a handle of its own rather than a slice of
+    /// the tessellation cache, so unlike [`Solid::mesh`] it neither replaces that cache nor
+    /// is staled by it, and the solid stays free to be meshed, written or combined while one
+    /// is held.
+    ///
+    /// The call runs silent: the ABI takes a progress callback for its `meshing` and
+    /// `welding` phases, and this passes none, as every progress-taking call in this module
+    /// does.
+    ///
+    /// **A cracked solid is not a failure**: it comes back with [`FemMesh::watertight`]
+    /// false and its cracks in [`FemMesh::open_edges`] / [`FemMesh::folded_edges`], and
+    /// nothing is welded shut to make it look sound. An error for a tolerance or size the
+    /// mesher refuses, a placement that is not finite and invertible, a closed solid this
+    /// library cannot mesh, and a solid that meshes to no triangles at all.
+    ///
+    /// **No unlicensed notice here**: [`FemMesh::msh_text`] and [`FemMesh::save_msh`] print
+    /// it, this library noticing on its writers rather than on its builders -- where the
+    /// reader library notices in its own constructor and on neither `.msh` call.
+    pub fn fem_mesh(&self, tolerance: f64, max_size: f64, placement: Option<&Frame>) -> Result<FemMesh> {
+        let mut options = std::mem::MaybeUninit::<sys::CadaclysmBlacksmithFemOptions>::uninit();
+        unsafe { (self.api.cadaclysm_blacksmith_fem_options_init)(options.as_mut_ptr()) };
+        // SAFETY: `init` writes the library's whole `CadaclysmBlacksmithFemOptions`, which
+        // `cadaclysm-capi/tests/bindings.rs` pins to this crate's declaration field for field.
+        let mut options = unsafe { options.assume_init() };
+        // `size` is then this crate's own, which is what the growth rule asks of a caller.
+        options.size = std::mem::size_of::<sys::CadaclysmBlacksmithFemOptions>();
+        options.tolerance = tolerance;
+        options.max_size = max_size;
+        // The twelve doubles, or null for the identity -- the one frame argument in this
+        // library that may be left out.
+        let frame = placement.map(Frame::raw);
+        let matrix = frame.as_ref().map_or(ptr::null(), |f| f.as_ptr());
+        FemMesh::wrap(self.api, unsafe {
+            (self.api.cadaclysm_blacksmith_fem_mesh)(self.raw(), matrix, &options, NO_PROGRESS, ptr::null_mut())
+        })
+    }
+
     /// The feature edges at `tolerance`, one slice of points per polyline, borrowed
     /// from the cache as [`Solid::mesh`]'s triangles are.
     pub fn edge_polylines(&mut self, tolerance: f64) -> Result<Vec<&[[f32; 3]]>> {
@@ -2228,6 +2328,157 @@ impl Solid {
         }
         options.open_memory(text.as_bytes(), "stp")
     }
+}
+
+// ---- assemblies -------------------------------------------------------------------
+
+/// A mutable tree of placements: a name, and zero or more solids or other assemblies
+/// placed in it at a frame. `place_solid`/`place_assembly` return the placement's name so
+/// a caller can keep it. Unlike [`Solid`], placing shares rather than copies -- placing
+/// one assembly under another does not snapshot it, so a later placement on the shared
+/// one shows up wherever it already sits (see [`place_assembly`](Assembly::place_assembly)'s
+/// own note on cycles). Dropping one frees this handle; it does **not** free what was
+/// placed in it if that is still reachable from somewhere else.
+///
+/// `Send` but not `Sync`, as [`Path`]: the kernel's own `PLACING` lock makes one `place`
+/// call at a time safe from any thread, but nothing makes two threads placing into the
+/// same assembly *at once* safe together, so this crate does not claim it either.
+pub struct Assembly {
+    handle: NonNull<sys::CadaclysmBlacksmithAssembly>,
+    api: &'static Api,
+}
+
+unsafe impl Send for Assembly {}
+
+impl Drop for Assembly {
+    fn drop(&mut self) {
+        unsafe { (self.api.cadaclysm_blacksmith_assembly_free)(self.handle.as_ptr()) }
+    }
+}
+
+impl fmt::Debug for Assembly {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Assembly({:p})", self.handle)
+    }
+}
+
+impl Assembly {
+    /// The raw pointer every call takes -- `*mut`, since `place_solid`, `place_assembly`
+    /// and `Drop` all mutate through it; a call that only reads (`name`, `step_text`)
+    /// passes it where a `*const` is asked for, which a `*mut` coerces to.
+    fn raw(&self) -> *mut sys::CadaclysmBlacksmithAssembly {
+        self.handle.as_ptr()
+    }
+
+    /// A new, empty assembly called `name`. Refused for an empty name.
+    pub fn new(name: &str) -> Result<Assembly> {
+        let api = api()?;
+        let cname = c_text("name", name)?;
+        let raw = unsafe { (api.cadaclysm_blacksmith_assembly_new)(cname.as_ptr()) };
+        NonNull::new(raw).map(|handle| Assembly { handle, api }).ok_or_else(|| fail(api, "assembly_new"))
+    }
+
+    /// Free it now rather than at the end of scope.
+    pub fn close(self) {}
+
+    /// This assembly's own name, given when it was made.
+    pub fn name(&self) -> String {
+        unsafe { text((self.api.cadaclysm_blacksmith_assembly_name)(self.raw())) }
+    }
+
+    /// Place `s` at `frame` (must be right-handed and orthonormal) in this assembly,
+    /// called `name` -- or, with `name` `None`, `s`'s own name ([`Solid::name`], `"part"`
+    /// for an unnamed one), numbered past any already taken here (`"bolt"`, `"bolt 2"`,
+    /// ...). An explicit `name` already taken here is refused. Returns the placement's
+    /// name -- Python's `place`, split as this crate has no type-dispatching overload;
+    /// see [`place_assembly`](Self::place_assembly) for placing another assembly.
+    pub fn place_solid(&self, s: &Solid, frame: &Frame, name: Option<&str>) -> Result<String> {
+        let cname = name.map(|n| c_text("name", n)).transpose()?;
+        let raw = unsafe {
+            (self.api.cadaclysm_blacksmith_assembly_place_solid)(
+                self.raw(),
+                s.raw(),
+                frame.v.as_ptr(),
+                cname.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
+            )
+        };
+        place_result(self.api, raw, "assembly_place_solid")
+    }
+
+    /// As [`place_solid`](Self::place_solid), but placing another assembly, `placed`,
+    /// rather than a solid -- sharing it, not copying it, so a later placement on
+    /// `placed` (through this assembly or another) shows up wherever it is placed.
+    /// Placing `placed` as this assembly itself, or anywhere above this assembly in the
+    /// tree already, is refused, naming the cycle, since writing that out would never
+    /// terminate.
+    pub fn place_assembly(&self, placed: &Assembly, frame: &Frame, name: Option<&str>) -> Result<String> {
+        let cname = name.map(|n| c_text("name", n)).transpose()?;
+        let raw = unsafe {
+            (self.api.cadaclysm_blacksmith_assembly_place_assembly)(
+                self.raw(),
+                placed.raw(),
+                frame.v.as_ptr(),
+                cname.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
+            )
+        };
+        place_result(self.api, raw, "assembly_place_assembly")
+    }
+
+    /// This assembly, and everything placed under it, as one STEP file: this assembly
+    /// the root product, each sub-assembly and each distinct part written once, each
+    /// placement an occurrence named as it was placed. `schema` and `unit` as
+    /// [`Solid::step_text`]. Refused if this assembly, or a sub-assembly reachable from
+    /// it, places nothing -- a reader would never show it.
+    pub fn step_text(&self, schema: Option<&str>, unit: Unit) -> Result<String> {
+        let schema = match schema {
+            None => None,
+            Some(given) => Some(match schema_file(given) {
+                Some(file) => {
+                    let bytes = std::fs::read(&file).map_err(|e| Error::new(format!("schema {}: {e}", file.display())))?;
+                    CString::new(bytes).map_err(|_| Error::new(format!("schema {} contains a NUL byte", file.display())))?
+                }
+                None => c_text("schema", given)?,
+            }),
+        };
+        let raw = unsafe {
+            (self.api.cadaclysm_blacksmith_assembly_step)(self.raw(), schema.as_ref().map_or(ptr::null(), |s| s.as_ptr()), unit as u32)
+        };
+        if raw.is_null() {
+            return Err(fail(self.api, "assembly_step"));
+        }
+        let out = unsafe { text(raw as *const c_char) };
+        unsafe { (self.api.cadaclysm_blacksmith_string_free)(raw) };
+        Ok(out)
+    }
+
+    /// This assembly written to a STEP file at `path`.
+    pub fn step(&self, path: impl AsRef<FsPath>, schema: Option<&str>, unit: Unit) -> Result<()> {
+        let path = path.as_ref();
+        let text = self.step_text(schema, unit)?;
+        std::fs::write(path, text).map_err(|e| Error::new(format!("{}: {e}", path.display())))
+    }
+
+    /// This assembly as a reader [`Scene`], through STEP text -- see
+    /// [`Solid::to_scene`].
+    pub fn to_scene(&self, schema: Option<&str>) -> Result<Scene> {
+        let text = self.step_text(schema, Unit::Millimetre)?;
+        let mut options = OpenOptions::new();
+        if let Some(file) = schema.and_then(schema_file) {
+            options = options.schema(file);
+        }
+        options.open_memory(text.as_bytes(), "stp")
+    }
+}
+
+/// The owned text `place_solid`/`place_assembly` return -- the placement's name -- read
+/// out and freed; null and `last_error` on a refusal.
+fn place_result(api: &'static Api, raw: *mut c_char, what: &str) -> Result<String> {
+    if raw.is_null() {
+        return Err(fail(api, what));
+    }
+    let out = unsafe { text(raw) };
+    unsafe { (api.cadaclysm_blacksmith_string_free)(raw) };
+    Ok(out)
 }
 
 fn no_brep(what: &str) -> String {
@@ -2376,6 +2627,375 @@ impl<'a> Workplane<'a> {
             Some(Held::Borrowed(solid)) => solid.translate(0.0, 0.0, 0.0),
             None => Err(Error::new("solid: nothing was built (BuildError::Empty)")),
         }
+    }
+}
+
+// ---- the FEM surface mesh ---------------------------------------------------------
+
+/// One B-rep edge of a kernel FEM mesh: the chain of nodes along it, and where that chain
+/// breaks. The kernel's twin of [`crate::FemEdge`], field for field -- a separate type
+/// because this is a separate ABI whose header may move on its own, and because `faces`
+/// numbers *this* solid's faces.
+///
+/// `nodes` and `runs` are borrowed from the [`FemMesh`] they came from; `runs` says where
+/// the chain breaks, and [`FemEdge::chains`] does that walk. `faces` is
+/// `(face_a, face_b)` and `ends` is `(end_a, end_b)`, the second of each [`NONE`] where
+/// there is none -- an open sheet's rim, or both ends at one vertex. **`0` is a real face
+/// and a real vertex, not a sentinel.**
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FemEdge<'m> {
+    /// The **solid's own** edge id, not this mesh's edge index: [`FemMesh::edges`] is a
+    /// densely renumbered subset of the solid's edges with every edge collapsed to a point
+    /// left out, so a sphere -- whose two pole runs collapse -- reports its seam as edge 0
+    /// with an id of 1. Everything else here that names an edge means the index. It is not
+    /// a row of [`Solid::edges`] either: that table is the solid's edges grouped by
+    /// geometry, where this id names the topological edge the `.msh` entities and the
+    /// censuses speak in.
+    pub id: u32,
+    pub nodes: &'m [u32],
+    /// Where each connected run of `nodes` begins; `[0]` for one chain along the edge.
+    pub runs: &'m [u32],
+    /// `(face_a, face_b)`, numbering the solid's faces as [`Solid::face_kind`] does; the
+    /// second is [`NONE`] on an open sheet's rim.
+    pub faces: (u32, u32),
+    /// `(end_a, end_b)`, the second [`NONE`] where both ends are one vertex.
+    pub ends: (u32, u32),
+    /// The nodes make one loop. Never true where there is more than one run.
+    pub closed: bool,
+    /// Bounded twice by one face: a closed surface's seam. Both `faces` are then that face.
+    pub seam: bool,
+}
+
+impl<'m> FemEdge<'m> {
+    /// # Safety
+    /// `raw`'s `nodes` and `runs` must be null or point at their counts' worth of `u32`s
+    /// living for `'m`, which they do for as long as the [`FemMesh`] does.
+    unsafe fn from_raw(raw: &sys::CadaclysmBlacksmithFemEdge) -> FemEdge<'m> {
+        unsafe {
+            FemEdge {
+                id: raw.id,
+                nodes: borrowed(raw.nodes, raw.node_count as usize),
+                runs: borrowed(raw.runs, raw.run_count as usize),
+                faces: (raw.face_a, raw.face_b),
+                ends: (raw.end_a, raw.end_b),
+                closed: raw.closed,
+                seam: raw.seam,
+            }
+        }
+    }
+
+    /// Each connected run of `nodes` as its own polyline, in order along the edge: what
+    /// `runs` is for, and the only safe way to read the chain. One item is the ordinary
+    /// answer; join nothing across a boundary.
+    pub fn chains(&self) -> impl Iterator<Item = &'m [u32]> + '_ {
+        let nodes = self.nodes;
+        (0..self.runs.len()).map(move |i| {
+            let start = (self.runs[i] as usize).min(nodes.len());
+            let end = self.runs.get(i + 1).map_or(nodes.len(), |&r| (r as usize).min(nodes.len()));
+            &nodes[start..start.max(end)]
+        })
+    }
+}
+
+/// One B-rep vertex of a kernel FEM mesh: the kernel's twin of [`crate::FemVertex`]. Plain
+/// data, all of it copied out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FemVertex {
+    /// The mesh node at this vertex, or [`NONE`] where the mesh has none there -- **which
+    /// is ordinary, not a fault**: the analysis rebuilds a vertex wherever two trims meet,
+    /// so a sphere has 48 of them where the mesh has two points.
+    pub node: u32,
+    /// Where the vertex is, in the same space and under the same placement as
+    /// [`FemMesh::nodes`]. **Meaningless unless `has_position`**: zeroed then, a point no
+    /// geometry has and one a solver would read as a node at the origin.
+    pub point: [f64; 3],
+    pub has_position: bool,
+}
+
+impl FemVertex {
+    fn from_raw(raw: &sys::CadaclysmBlacksmithFemVertex) -> FemVertex {
+        FemVertex { node: raw.node, point: raw.point, has_position: raw.has_position }
+    }
+}
+
+/// One solid meshed for a solver: nodes welded by bits, triangles wound outward, every
+/// node tagged with the lowest-dimension B-rep entity it lies on, and every crack reported
+/// rather than closed. What [`Solid::fem_mesh`] returns.
+///
+/// **An owned handle, and it owns everything it lends.** Freed when dropped, or by
+/// [`FemMesh::free`]; it borrows nothing from the [`Solid`] it was built from, so
+/// [`Solid::close`] does not free it and meshing the solid again at another tolerance does
+/// not stale it -- unlike [`Solid::mesh`], whose slices come out of the cache that replaces.
+/// That is why [`Solid::fem_mesh`] takes `&self` where `Solid::mesh` takes `&mut self`.
+///
+/// Its five flat arrays are slices of the library's own memory borrowed from `&self`. Every
+/// other wrapper needs a run-time guard against a view read after the handle is freed, and
+/// none of them can guard a view *already in hand*; this one cannot compile:
+///
+/// ```compile_fail,E0505
+/// # use cadaclysm_sdk::blacksmith::Solid;
+/// # fn main() -> cadaclysm_sdk::Result<()> {
+/// let solid = Solid::cuboid(1.0, 1.0, 1.0)?;
+/// let mesh = solid.fem_mesh(0.05, 0.0, None)?;
+/// let nodes = mesh.nodes();
+/// mesh.free(); // error: `mesh` is still borrowed by `nodes`
+/// let _ = nodes.len();
+/// # Ok(())
+/// # }
+/// ```
+///
+/// **That block is documentation, not an assertion**, as its reader-library twin's own note
+/// says: `compile_fail` asks only that the snippet fail to compile and rustdoc never checks
+/// *what* failed. [`FemMesh::free`] taking the mesh by value is what makes the claim true.
+pub struct FemMesh {
+    handle: NonNull<sys::CadaclysmBlacksmithFemMesh>,
+    api: &'static Api,
+    /// Read once when the handle is made: every pointer in it is built with the handle and
+    /// never moves, so asking again per accessor would be one C call for the same answer.
+    view: sys::CadaclysmBlacksmithFemMeshView,
+}
+
+// The handle is owned outright and every accessor takes a `const` pointer, so it may move
+// to another thread. Not `Sync`, as a `Solid` is not: the conservative half of the same
+// rule, and nothing in this crate needs two threads reading one FEM mesh.
+unsafe impl Send for FemMesh {}
+
+impl FemMesh {
+    fn wrap(api: &'static Api, raw: *mut sys::CadaclysmBlacksmithFemMesh) -> Result<FemMesh> {
+        let handle = NonNull::new(raw).ok_or_else(|| fail(api, "fem_mesh"))?;
+        let mut view = std::mem::MaybeUninit::<sys::CadaclysmBlacksmithFemMeshView>::uninit();
+        if !unsafe { (api.cadaclysm_blacksmith_fem_mesh_view)(handle.as_ptr(), view.as_mut_ptr()) } {
+            let why = fail(api, "fem_mesh_view");
+            unsafe { (api.cadaclysm_blacksmith_fem_mesh_free)(handle.as_ptr()) };
+            return Err(why);
+        }
+        // SAFETY: the call returned true, so it wrote the whole struct.
+        Ok(FemMesh { handle, api, view: unsafe { view.assume_init() } })
+    }
+
+    fn raw(&self) -> *const sys::CadaclysmBlacksmithFemMesh {
+        self.handle.as_ptr()
+    }
+
+    // -- the flat arrays, borrowed from the handle
+
+    /// Every node's position: placed by [`Solid::fem_mesh`]'s placement, in the solid's own
+    /// coordinates otherwise.
+    pub fn nodes(&self) -> &[[f64; 3]] {
+        // SAFETY: the pointers were built with the handle and live until it is freed,
+        // which `&self` rules out for the life of the slice.
+        unsafe { groups64::<3>(self.view.nodes, self.view.node_count as usize).unwrap_or(&[]) }
+    }
+
+    /// Three node indices a triangle, wound outward -- a mirroring placement is wound back.
+    pub fn triangles(&self) -> &[[u32; 3]] {
+        // SAFETY: as `nodes`.
+        unsafe { borrowed(self.view.triangles.cast::<[u32; 3]>(), self.view.triangle_count as usize) }
+    }
+
+    /// Which face each triangle lies on, one per triangle: the same faces
+    /// [`Solid::face_kind`] names.
+    pub fn triangle_face(&self) -> &[u32] {
+        // SAFETY: as `nodes`.
+        unsafe { borrowed(self.view.triangle_face, self.view.triangle_count as usize) }
+    }
+
+    /// What each node lies on -- `0` a B-rep vertex, `1` an edge, `2` a face -- one per
+    /// node: the lowest-dimension entity it lies on, the `.msh` format's own rule.
+    /// [`FemMesh::node_entity`] says which entity of that kind.
+    pub fn node_kind(&self) -> &[u32] {
+        // SAFETY: as `nodes`.
+        unsafe { borrowed(self.view.node_kind, self.view.node_count as usize) }
+    }
+
+    /// Which vertex, edge or face each node lies on, read by the matching
+    /// [`FemMesh::node_kind`]: an index into [`FemMesh::vertices`], into
+    /// [`FemMesh::edges`], or into the solid's faces.
+    pub fn node_entity(&self) -> &[u32] {
+        // SAFETY: as `nodes`.
+        unsafe { borrowed(self.view.node_entity, self.view.node_count as usize) }
+    }
+
+    // -- the topology
+
+    /// The solid's faces -- the same faces [`Solid::faces`] counts.
+    pub fn face_count(&self) -> u32 {
+        self.view.face_count
+    }
+
+    /// One [`FemEdge`] per B-rep edge, in the order a [`FemMesh::node_kind`] of `1` indexes
+    /// them. **Not [`Solid::edges`]' numbering**: these are the manifold analysis's,
+    /// ascending by edge id.
+    pub fn edges(&self) -> Result<Vec<FemEdge<'_>>> {
+        (0..self.view.edge_count)
+            .map(|i| {
+                let mut raw = std::mem::MaybeUninit::<sys::CadaclysmBlacksmithFemEdge>::uninit();
+                if !unsafe { (self.api.cadaclysm_blacksmith_fem_mesh_edge)(self.raw(), i, raw.as_mut_ptr()) } {
+                    return Err(fail(self.api, "fem_mesh_edge"));
+                }
+                // SAFETY: the call returned true, so it wrote the whole struct; its two
+                // pointers belong to the handle, which `&self` holds for `'_`.
+                Ok(unsafe { FemEdge::from_raw(&raw.assume_init()) })
+            })
+            .collect()
+    }
+
+    /// One [`FemVertex`] per B-rep vertex, in the order a [`FemMesh::node_kind`] of `0`
+    /// indexes them.
+    pub fn vertices(&self) -> Result<Vec<FemVertex>> {
+        (0..self.view.vertex_count)
+            .map(|i| {
+                let mut raw = std::mem::MaybeUninit::<sys::CadaclysmBlacksmithFemVertex>::uninit();
+                if !unsafe { (self.api.cadaclysm_blacksmith_fem_mesh_vertex)(self.raw(), i, raw.as_mut_ptr()) } {
+                    return Err(fail(self.api, "fem_mesh_vertex"));
+                }
+                // SAFETY: the call returned true, so it wrote the whole struct.
+                Ok(FemVertex::from_raw(&unsafe { raw.assume_init() }))
+            })
+            .collect()
+    }
+
+    // -- the crack census
+
+    /// Every crack, as `(a, b, brep_edge)`: a directed mesh edge `(a, b)` with no `(b, a)`,
+    /// and the B-rep edge both nodes lie on or [`NONE`] where they share none.
+    ///
+    /// **Empty unless the solid's topology is closed**, whose mesh is otherwise not asked
+    /// about at all: an open sheet reports [`FemMesh::watertight`] false with this and
+    /// [`FemMesh::folded_edges`] both empty, and *that trio together* says "not asked",
+    /// not "nothing found". A sheet's rim is not a crack.
+    pub fn open_edges(&self) -> Result<Vec<(u32, u32, u32)>> {
+        self.census(self.api.cadaclysm_blacksmith_fem_mesh_open_edge, self.view.open_edge_count, "fem_mesh_open_edge")
+    }
+
+    /// Every fold, as [`FemMesh::open_edges`] reports a crack: a directed mesh edge used by
+    /// more than one triangle.
+    ///
+    /// **A solid can be folded without being open** -- one no thicker than a line leaves no
+    /// hole for an open edge to find -- and the closure census's own known-bad bodies are
+    /// folds rather than open cracks. A caller that checks [`FemMesh::open_edges`] alone
+    /// calls such a body sound.
+    pub fn folded_edges(&self) -> Result<Vec<(u32, u32, u32)>> {
+        self.census(self.api.cadaclysm_blacksmith_fem_mesh_folded_edge, self.view.folded_edge_count, "fem_mesh_folded_edge")
+    }
+
+    /// One flattened census, row by row: the shape both censuses share, so they cannot
+    /// drift.
+    fn census(
+        &self,
+        call: unsafe extern "C" fn(*const sys::CadaclysmBlacksmithFemMesh, u32, *mut u32, *mut u32, *mut u32) -> bool,
+        count: u32,
+        what: &str,
+    ) -> Result<Vec<(u32, u32, u32)>> {
+        (0..count)
+            .map(|i| {
+                let (mut a, mut b, mut edge) = (0u32, 0u32, 0u32);
+                if !unsafe { call(self.raw(), i, &mut a, &mut b, &mut edge) } {
+                    return Err(fail(self.api, what));
+                }
+                Ok((a, b, edge))
+            })
+            .collect()
+    }
+
+    // -- the summary
+
+    /// The welded mesh closes -- every directed mesh edge paired with its reverse and none
+    /// used twice -- and so does the topology behind it. **False for every solid whose
+    /// topology is not closed**, whose mesh is then not asked about; read
+    /// [`FemMesh::open_edges`] for what an empty census beside a false here means.
+    pub fn watertight(&self) -> bool {
+        self.view.watertight
+    }
+
+    /// Always false here: the kernel has no mesh fallback, every FEM mesh coming off an
+    /// exact B-rep. The reader library's [`crate::FemMesh::from_mesh`] is where this is the
+    /// flag that says which of two spaces -- and which of two census contracts -- a caller
+    /// is holding, and it is carried across so one FEM mesh reads the same on both sides.
+    pub fn from_mesh(&self) -> bool {
+        self.view.from_mesh
+    }
+
+    /// The smallest interior angle of any triangle, in degrees. There is always one: a
+    /// solid that meshed to no triangles is a refusal, not a mesh.
+    pub fn min_angle(&self) -> f64 {
+        self.view.min_angle
+    }
+
+    /// The triangle with that angle, as an index into [`FemMesh::triangles`].
+    pub fn worst_triangle(&self) -> u32 {
+        self.view.worst_triangle
+    }
+
+    /// The longest triangle edge, placed. **The figure to check against
+    /// [`Solid::fem_mesh`]'s `max_size`, and the only one that says what the mesh actually
+    /// is**: `max_size` bounds the boundary segments and merely *targets* the interior --
+    /// measured at 1.03x `max_size` on a face whose parameters run unevenly -- and one
+    /// small enough beside the body to reach the mesher's own piece and station ceilings is
+    /// not honoured at all.
+    pub fn longest_edge(&self) -> f64 {
+        self.view.longest_edge
+    }
+
+    // -- out
+
+    /// The mesh as Gmsh 4.1 ASCII `.msh` text: an entity per B-rep vertex, edge and face, a
+    /// volume where the body closes, and a physical group naming each.
+    ///
+    /// **On this side of the ABI the library's text is owned by the caller**, and this
+    /// releases it with `cadaclysm_blacksmith_string_free` before handing back a `String`
+    /// -- as every other kernel writer here does. The reader library's
+    /// [`crate::FemMesh::msh_text`] is the other way round: a borrowed slot on the handle,
+    /// replaced by the next call on it and freed with the mesh. A reader porting one side's
+    /// reasoning onto the other leaks or double-frees.
+    ///
+    /// **The unlicensed notice is printed here**, and on [`FemMesh::save_msh`] -- this
+    /// library notices on its writers, where the reader library notices in
+    /// [`crate::Node::fem_mesh`] and on neither `.msh` call. Each matches its own siblings.
+    ///
+    /// An error for a mesh the writer refuses, naming the field it cannot honour.
+    pub fn msh_text(&self) -> Result<String> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_fem_mesh_msh_text)(self.raw()) };
+        if raw.is_null() {
+            return Err(fail(self.api, "fem_mesh_msh_text"));
+        }
+        let owned = unsafe { text(raw as *const c_char) };
+        unsafe { (self.api.cadaclysm_blacksmith_string_free)(raw) };
+        Ok(owned)
+    }
+
+    /// [`FemMesh::msh_text`] written to `path` by the library itself: the same bytes from
+    /// the same writer, straight to the file. An error for a mesh the writer refuses or a
+    /// file it cannot write, naming the path. Notices as [`FemMesh::msh_text`] does.
+    pub fn save_msh(&self, path: impl AsRef<FsPath>) -> Result<()> {
+        let path = crate::c_path(path.as_ref())?;
+        if !unsafe { (self.api.cadaclysm_blacksmith_fem_mesh_save_msh)(self.raw(), path.as_ptr()) } {
+            return Err(fail(self.api, "fem_mesh_save_msh"));
+        }
+        Ok(())
+    }
+
+    /// Give the mesh back now rather than at the end of scope, as [`Solid::close`] does.
+    ///
+    /// **It takes the mesh by value, so no view can survive it and it cannot run twice.**
+    /// Every other wrapper needs "idempotent" and a freed guard because its `free` is a
+    /// method on a handle a caller still holds; here the compiler takes the handle away.
+    pub fn free(self) {}
+}
+
+impl Drop for FemMesh {
+    fn drop(&mut self) {
+        unsafe { (self.api.cadaclysm_blacksmith_fem_mesh_free)(self.handle.as_ptr()) }
+    }
+}
+
+impl fmt::Debug for FemMesh {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "FemMesh(nodes={}, triangles={}, watertight={}, faces={})",
+            self.view.node_count, self.view.triangle_count, self.view.watertight, self.view.face_count
+        )
     }
 }
 
@@ -2711,6 +3331,50 @@ mod tests {
         assert_eq!(std::mem::size_of::<sys::CadaclysmBlacksmithOverlap>(), 32);
     }
 
+    /// The kernel twin of the reader's `a_fem_edge_and_vertex_are_read_field_for_field`:
+    /// the same eleven and three fields, over the kernel's own structs. Needs no library.
+    ///
+    /// Catches what that one catches, and one thing it cannot: the two ABIs' FEM structs
+    /// are identical in layout, so a kernel `from_raw` that read the *reader's* fields
+    /// would compile and pass -- until the two headers diverge. Pinning both sides
+    /// separately is what keeps that honest.
+    #[test]
+    fn a_kernel_fem_edge_and_vertex_are_read_field_for_field() {
+        let nodes = [3u32, 4, 5, 6];
+        let runs = [0u32, 2];
+        let raw = sys::CadaclysmBlacksmithFemEdge {
+            id: 1,
+            nodes: nodes.as_ptr(),
+            node_count: nodes.len() as u32,
+            runs: runs.as_ptr(),
+            run_count: runs.len() as u32,
+            face_a: 0,
+            face_b: NONE,
+            end_a: 0,
+            end_b: 2,
+            closed: false,
+            seam: true,
+        };
+        let edge = unsafe { FemEdge::from_raw(&raw) };
+        assert_eq!((edge.id, edge.faces, edge.ends), (1, (0, NONE), (0, 2)));
+        assert_eq!(edge.nodes, nodes);
+        assert_eq!(edge.runs, runs);
+        assert!(!edge.closed && edge.seam);
+        assert_eq!(edge.chains().collect::<Vec<_>>(), [&nodes[..2], &nodes[2..]]);
+
+        let at = FemVertex::from_raw(&sys::CadaclysmBlacksmithFemVertex { node: 0, point: [-1.0, 2.0, -3.0], has_position: true });
+        assert_eq!((at.node, at.point, at.has_position), (0, [-1.0, 2.0, -3.0], true));
+        let none = FemVertex::from_raw(&sys::CadaclysmBlacksmithFemVertex { node: NONE, point: [0.0; 3], has_position: false });
+        assert!(none.node == NONE && !none.has_position);
+
+        // The kernel header's own sizes, which are the reader header's -- the two FEM
+        // struct families were published with the same layout on purpose.
+        assert_eq!(std::mem::size_of::<sys::CadaclysmBlacksmithFemOptions>(), 24);
+        assert_eq!(std::mem::size_of::<sys::CadaclysmBlacksmithFemMeshView>(), 104);
+        assert_eq!(std::mem::size_of::<sys::CadaclysmBlacksmithFemEdge>(), 56);
+        assert_eq!(std::mem::size_of::<sys::CadaclysmBlacksmithFemVertex>(), 40);
+    }
+
     /// The kernel twin of the reader's `mesh64_and_bounds64_keep_coordinates_far_from_the_origin`:
     /// a cuboid moved far out keeps its coordinates in `mesh64`/`bounds_at64`, where
     /// `mesh`/`bounds_at`'s `f32`-widened ones do not. Catches the same bug as that test,
@@ -2753,5 +3417,74 @@ mod tests {
             lo64[1],
             lo32[1]
         );
+    }
+
+    /// A solid built with no name has none; a fresh library-built one skips quietly
+    /// without a kernel library, as [`kernel_mesh64_and_bounds64_keep_coordinates_far_from_the_origin`]
+    /// does. Needs no library at all: `Solid::cuboid` fails cleanly and this test returns
+    /// early either way, but it is written the same shape as the others so it keeps
+    /// working once a library is present.
+    #[test]
+    fn an_unnamed_solid_has_no_name() {
+        let cube = match Solid::cuboid(1.0, 1.0, 1.0) {
+            Ok(cube) => cube,
+            Err(err) => {
+                eprintln!("skipped: {err} (no kernel library)");
+                return;
+            }
+        };
+        assert_eq!(cube.name(), None);
+        let named = cube.named("part").expect("named");
+        assert_eq!(named.name().as_deref(), Some("part"));
+        assert!(cube.named("").is_err(), "an empty name was accepted");
+    }
+
+    /// The spec §5 assembly facts, over a small build of `_shared_assembly()`'s shape:
+    /// placement names ordered and numbered past a taken one (fact 1), a cycle refused
+    /// naming it (fact 5), an explicit name taken twice refused (fact 6), a mirrored raw
+    /// frame refused in the library's own words rather than `Frame::new`'s (fact 7), an
+    /// assembly that places nothing refused at `step_text` (fact 8), and naming through
+    /// `place` (part of fact 10). Skips quietly without a kernel library, as the other
+    /// library-backed test in this module does.
+    #[test]
+    fn assembly_facts_hold_as_python_checks_them() {
+        let bolt = match Solid::cylinder(1.0, 6.0).and_then(|s| s.named("bolt")) {
+            Ok(bolt) => bolt,
+            Err(err) => {
+                eprintln!("skipped: {err} (no kernel library)");
+                return;
+            }
+        };
+        let plate = Solid::cuboid(20.0, 10.0, 2.0).and_then(|s| s.named("plate")).expect("plate");
+
+        let bracket = Assembly::new("bracket").expect("bracket");
+        bracket.place_solid(&plate, &Frame::xy([0.0; 3]), None).expect("place plate");
+        let first = bracket.place_solid(&bolt, &Frame::xy([5.0, 5.0, 2.0]), None).expect("place bolt 1");
+        let second = bracket.place_solid(&bolt, &Frame::xy([15.0, 5.0, 2.0]), None).expect("place bolt 2");
+        assert_eq!((first.as_str(), second.as_str()), ("bolt", "bolt 2")); // fact 1
+
+        let root = Assembly::new("frame").expect("frame");
+        root.place_assembly(&bracket, &Frame::xy([0.0; 3]), Some("left")).expect("place left");
+
+        // fact 5: a cycle is refused, naming it.
+        let cycle = bracket.place_assembly(&root, &Frame::xy([0.0; 3]), None);
+        assert!(cycle.unwrap_err().to_string().contains("bracket → frame → bracket"));
+
+        // fact 6: an explicit name already taken is refused.
+        assert!(root.place_assembly(&bracket, &Frame::xy([0.0; 3]), Some("left")).is_err());
+
+        // fact 7: a mirrored raw frame is refused in the library's own words, not
+        // `Frame::new`'s -- see `Frame::raw_unchecked`'s own doc.
+        let mirrored = Frame::raw_unchecked([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0]);
+        let refused = root.place_solid(&bolt, &mirrored, None).unwrap_err();
+        assert!(refused.to_string().contains("right-handed and orthonormal"), "{refused}");
+
+        // fact 8: an assembly placing nothing is refused at step_text().
+        assert!(Assembly::new("x").expect("x").step_text(None, Unit::Millimetre).is_err());
+
+        // part of fact 10: place keeps the solid's name as the placement's default.
+        assert_eq!(bolt.name().as_deref(), Some("bolt"));
+        let placed = bolt.place(&Frame::xy([1.0, 2.0, 3.0])).expect("place");
+        assert_eq!(placed.name().as_deref(), Some("bolt"));
     }
 }

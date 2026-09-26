@@ -117,6 +117,7 @@ class Path;
 class SweepPath;
 class Frame;
 class Solid;
+class Assembly;
 class Workplane;
 using Profiles = std::vector<std::reference_wrapper<const Profile>>;
 using Solids = std::vector<std::reference_wrapper<const Solid>>;
@@ -1418,6 +1419,315 @@ private:
     CadaclysmBlacksmithFaceTriangles raw_;
 };
 
+// ---- the FEM surface mesh -------------------------------------------------------------
+
+// One B-rep edge of a FEM mesh: the chain of nodes along it, and where that chain breaks.
+// The kernel's own twin of cadaclysm::FemEdge, over this library's own struct.
+//
+// The two arrays are spans into the FemMesh's own memory and die with it: FemMesh::edges()
+// checks the handle before it hands the list over, and a span already in hand is a pointer
+// and a length from then on. Copy anything that must outlive the mesh.
+struct FemEdge {
+    // The **solid's own** B-rep edge id, not this mesh's edge index: FemMesh::edges() is a
+    // densely renumbered subset of the solid's edges, ascending by id, with every edge
+    // collapsed to a point left out. Everything else here that names an edge means the
+    // *index*: a FemMesh::node_kind() of 1 read through FemMesh::node_entity(), the third
+    // number of a census row, and the `edge_<i>` physical group of FemMesh::msh_text().
+    // This is the one way back from any of them to the solid's own topology -- the numbers
+    // Solid::edges() uses.
+    std::uint32_t id = 0;
+    // This mesh's node indices in order along the edge, its end vertices included; a
+    // closed edge repeats no node.
+    Span<const std::uint32_t> nodes;
+    // Where each connected run of `nodes` begins; `[0]` for one chain along the whole
+    // edge. **Read nodes[runs[i] .. runs[i + 1]] (the last run to the end) as one polyline
+    // and join nothing across a boundary** -- chains() does that walk. The two ends either
+    // side of one are two points of the edge with no mesh edge between them.
+    Span<const std::uint32_t> runs;
+    // The two faces it bounds, the second NONE on an open sheet's rim. **`0` is a real
+    // face, not a sentinel.**
+    std::pair<std::uint32_t, std::uint32_t> faces{NONE, NONE};
+    // The two B-rep vertices its chain ends at, as FemMesh::vertices() indexes them, the
+    // second NONE where both ends are one vertex -- a closed edge, a circle's rim, a
+    // full-turn seam. **`0` is a real vertex, not a sentinel.** Which end comes first is
+    // the first trim's direction and means nothing else.
+    std::pair<std::uint32_t, std::uint32_t> ends{NONE, NONE};
+    // The nodes make one loop. False wherever `runs` is longer than one.
+    bool closed = false;
+    // Bounded twice by one face: a closed surface's seam rather than a real boundary. Both
+    // `faces` are then that same face.
+    bool seam = false;
+
+    // Each connected run of `nodes` as its own polyline, in order along the edge: what
+    // `runs` is for, and one row is the ordinary answer. The last run reaches the end of
+    // the chain. A run start past the chain -- which the library does not produce -- is
+    // clamped rather than read.
+    std::vector<Span<const std::uint32_t>> chains() const {
+        std::vector<Span<const std::uint32_t>> out;
+        out.reserve(runs.size());
+        for (std::size_t i = 0; i < runs.size(); ++i) {
+            std::size_t start = std::min(static_cast<std::size_t>(runs[i]), nodes.size());
+            std::size_t end = i + 1 < runs.size() ? std::min(static_cast<std::size_t>(runs[i + 1]), nodes.size()) : nodes.size();
+            out.push_back(nodes.subspan(start, end > start ? end - start : 0));
+        }
+        return out;
+    }
+};
+
+// One B-rep vertex of a FEM mesh: the node the mesh put there, if any, and where the
+// topology says it is, if that is known. Plain data, copied out of the handle.
+struct FemVertex {
+    // The mesh node at this vertex, or NONE where the mesh has none there. **A sentinel
+    // here is ordinary, not a fault**: the analysis rebuilds a vertex wherever two trims
+    // meet, and a pole's polyline runs give a sphere 48 of them where the mesh has 2
+    // points, so a caller walking these skips the sentinel rather than treating it as a gap.
+    std::uint32_t node = NONE;
+    // Where the vertex is, in the same space and under the same placement as
+    // FemMesh::nodes() -- the solid's own vertex rather than a mesh node, so the two can
+    // differ by the mesher's rounding. **Meaningless unless has_position**: it is zeroed
+    // then, a point no geometry has and one a solver would take for a node at the origin.
+    Vec3 point{};
+    // `point` was placed. False where every trim meeting at this vertex is a curve with no
+    // geometry to read an end off -- then there is **no position at all**.
+    bool has_position = false;
+};
+
+namespace detail {
+
+// One CadaclysmBlacksmithFemEdge as a FemEdge: the two arrays lent as spans, the pairs
+// paired. Tested over rows built by hand in tests/fem_test.cpp, because no fixture in this
+// repo has an edge whose chain breaks, or a closed or seam edge.
+inline FemEdge fem_edge_of(const CadaclysmBlacksmithFemEdge& raw) {
+    FemEdge out;
+    out.id = raw.id;
+    out.nodes = raw.nodes ? Span<const std::uint32_t>(raw.nodes, raw.node_count) : Span<const std::uint32_t>();
+    out.runs = raw.runs ? Span<const std::uint32_t>(raw.runs, raw.run_count) : Span<const std::uint32_t>();
+    out.faces = {raw.face_a, raw.face_b};
+    out.ends = {raw.end_a, raw.end_b};
+    out.closed = raw.closed;
+    out.seam = raw.seam;
+    return out;
+}
+
+// One CadaclysmBlacksmithFemVertex as a FemVertex: the three doubles copied, the flag
+// carried.
+inline FemVertex fem_vertex_of(const CadaclysmBlacksmithFemVertex& raw) {
+    FemVertex out;
+    out.node = raw.node;
+    for (int k = 0; k < 3; ++k) out.point[k] = raw.point[k];
+    out.has_position = raw.has_position;
+    return out;
+}
+
+}  // namespace detail
+
+// One solid meshed for a solver: nodes welded by bits, triangles wound outward, every node
+// tagged with the lowest-dimension B-rep entity it lies on, and every crack reported rather
+// than closed. What Solid::fem_mesh() returns, and **owned by you**: freed when destroyed,
+// or on free(). Move-only.
+//
+// A handle rather than a snapshot, and its big arrays are Spans into the library's own
+// memory, as Mesh's are and for the same reason: a solver mesh is megabytes, and copying it
+// to hand it over would cost that twice.
+//
+// **The owner of those spans is this object, not the solid, and it carries no generation
+// check.** This is the one array product here that Solid::mesh()'s rule does not apply to:
+// meshing the solid again at another tolerance replaces the tessellation cache a Mesh
+// borrows, and a FEM mesh is not in that cache -- it is a handle of its own, which nothing
+// but free() (or the destructor) ends. Closing the solid does not end it either.
+//
+// Every accessor below checks the handle first, and **in both modes**, not only under
+// CADACLYSM_CHECKED: what it guards is a pointer handed to C, as Meshlets::live() guards
+// one, rather than a borrowed view's owner. So a *call* on a freed mesh is caught. A span
+// already in hand is a pointer and a length from then on, and reading one after the free
+// reads freed memory with nothing to say so -- copy anything that must outlive the handle.
+class FemMesh {
+public:
+    FemMesh(FemMesh&&) noexcept = default;
+    FemMesh& operator=(FemMesh&&) noexcept = default;
+
+    // Whether free() has run (or this mesh has been moved from).
+    bool freed() const noexcept { return !ptr_; }
+    // Give the mesh back, and with it every span taken from it. Idempotent.
+    void free() noexcept { ptr_.reset(); }
+
+    // Every node's position, three doubles each: placed by Solid::fem_mesh()'s frame, in
+    // the solid's own coordinates otherwise. Every node is used by a triangle.
+    Span<const double> nodes() const {
+        const CadaclysmBlacksmithFemMeshView& r = view("blacksmith::FemMesh::nodes");
+        return r.nodes ? Span<const double>(r.nodes, static_cast<std::size_t>(r.node_count) * 3) : Span<const double>();
+    }
+    // Three node indices a triangle, wound outward -- a mirroring frame is wound back.
+    Span<const std::uint32_t> triangles() const {
+        const CadaclysmBlacksmithFemMeshView& r = view("blacksmith::FemMesh::triangles");
+        return r.triangles ? Span<const std::uint32_t>(r.triangles, static_cast<std::size_t>(r.triangle_count) * 3)
+                           : Span<const std::uint32_t>();
+    }
+    // The B-rep face each triangle lies on, one per triangle, into face_count() faces.
+    Span<const std::uint32_t> triangle_face() const {
+        const CadaclysmBlacksmithFemMeshView& r = view("blacksmith::FemMesh::triangle_face");
+        return r.triangle_face ? Span<const std::uint32_t>(r.triangle_face, r.triangle_count) : Span<const std::uint32_t>();
+    }
+    // What each node lies on -- `0` a B-rep vertex, `1` an edge, `2` a face -- one per
+    // node: the lowest-dimension entity it lies on, which is the `.msh` format's own
+    // classification rule. node_entity() says which entity of that kind.
+    Span<const std::uint32_t> node_kind() const {
+        const CadaclysmBlacksmithFemMeshView& r = view("blacksmith::FemMesh::node_kind");
+        return r.node_kind ? Span<const std::uint32_t>(r.node_kind, r.node_count) : Span<const std::uint32_t>();
+    }
+    // Which vertex, edge or face each node lies on, read by the matching node_kind(): an
+    // index into vertices(), into edges(), or into the solid's faces. One per node.
+    Span<const std::uint32_t> node_entity() const {
+        const CadaclysmBlacksmithFemMeshView& r = view("blacksmith::FemMesh::node_entity");
+        return r.node_entity ? Span<const std::uint32_t>(r.node_entity, r.node_count) : Span<const std::uint32_t>();
+    }
+
+    // The solid's faces; triangle_face() and a node_kind() of `2` index them -- the same
+    // numbering Solid::select_face and Solid::face_kind use.
+    std::uint32_t face_count() const { return view("blacksmith::FemMesh::face_count").face_count; }
+
+    // One FemEdge per B-rep edge, in the order a node_kind() of `1` indexes them. **This
+    // list's own numbering, not the solid's**: each FemEdge::id carries the solid's own
+    // edge id.
+    Result<std::vector<FemEdge>> edges() const {
+        const CadaclysmBlacksmithFemMesh* handle = live("blacksmith::FemMesh::edges");
+        std::vector<FemEdge> out;
+        out.reserve(view_.edge_count);
+        for (std::uint32_t i = 0; i < view_.edge_count; ++i) {
+            CadaclysmBlacksmithFemEdge raw{};
+            if (!::cadaclysm_blacksmith_fem_mesh_edge(handle, i, &raw)) return detail::kernel_error("fem mesh edge");
+            out.push_back(detail::fem_edge_of(raw));
+        }
+        return out;
+    }
+
+    // One FemVertex per B-rep vertex, in the order a node_kind() of `0` indexes them.
+    Result<std::vector<FemVertex>> vertices() const {
+        const CadaclysmBlacksmithFemMesh* handle = live("blacksmith::FemMesh::vertices");
+        std::vector<FemVertex> out;
+        out.reserve(view_.vertex_count);
+        for (std::uint32_t i = 0; i < view_.vertex_count; ++i) {
+            CadaclysmBlacksmithFemVertex raw{};
+            if (!::cadaclysm_blacksmith_fem_mesh_vertex(handle, i, &raw)) return detail::kernel_error("fem mesh vertex");
+            out.push_back(detail::fem_vertex_of(raw));
+        }
+        return out;
+    }
+
+    // Every crack, as `{a, b, brep_edge}`: a directed mesh edge (a, b) with no (b, a), and
+    // the B-rep edge both nodes lie on -- by FemEdge's own index, not its id -- or NONE
+    // where they share none.
+    //
+    // **Empty unless the solid's topology is closed**, whose mesh is otherwise not asked
+    // about at all: an open sheet reports watertight() false with this and folded_edges()
+    // *both* empty, and that trio together says "not asked", not "nothing found".
+    Result<std::vector<std::array<std::uint32_t, 3>>> open_edges() const {
+        const CadaclysmBlacksmithFemMesh* handle = live("blacksmith::FemMesh::open_edges");
+        return cadaclysm::detail::census_rows(
+            view_.open_edge_count,
+            [handle](std::uint32_t i, std::uint32_t* a, std::uint32_t* b, std::uint32_t* edge) {
+                return ::cadaclysm_blacksmith_fem_mesh_open_edge(handle, i, a, b, edge);
+            },
+            [](std::uint32_t i) { return detail::kernel_error(("fem mesh open edge " + std::to_string(i)).c_str()); });
+    }
+
+    // Every fold, as open_edges() reports a crack: a directed mesh edge used by more than
+    // one triangle. **A solid can be folded without being open** -- one no thicker than a
+    // line leaves no hole for an open edge to find, and the closure census's own known-bad
+    // bodies are folds rather than open cracks, so a caller that checks open_edges() alone
+    // calls such a body sound. Empty under the same rule.
+    Result<std::vector<std::array<std::uint32_t, 3>>> folded_edges() const {
+        const CadaclysmBlacksmithFemMesh* handle = live("blacksmith::FemMesh::folded_edges");
+        return cadaclysm::detail::census_rows(
+            view_.folded_edge_count,
+            [handle](std::uint32_t i, std::uint32_t* a, std::uint32_t* b, std::uint32_t* edge) {
+                return ::cadaclysm_blacksmith_fem_mesh_folded_edge(handle, i, a, b, edge);
+            },
+            [](std::uint32_t i) { return detail::kernel_error(("fem mesh folded edge " + std::to_string(i)).c_str()); });
+    }
+
+    // The welded mesh closes -- and so does the topology behind it. **False for every solid
+    // whose topology is not closed**, whose mesh is then not asked about at all; read
+    // open_edges() for what an empty census beside a false here does and does not mean.
+    bool watertight() const { return view("blacksmith::FemMesh::watertight").watertight; }
+
+    // Always false on this side: the kernel has no mesh-only path, every solid being an
+    // exact B-rep. The reader's own FemMesh sets it for a node that had no brep, and this
+    // is here so that a caller can read the two the same way.
+    bool from_mesh() const { return view("blacksmith::FemMesh::from_mesh").from_mesh; }
+
+    // The smallest interior angle of any triangle, in degrees. There is always one: a solid
+    // that meshed to no triangles is a refusal, not a mesh.
+    double min_angle() const { return view("blacksmith::FemMesh::min_angle").min_angle; }
+    // The triangle with that angle, as an index into triangles() by triple.
+    std::uint32_t worst_triangle() const { return view("blacksmith::FemMesh::worst_triangle").worst_triangle; }
+    // The longest triangle edge, placed.
+    //
+    // **The figure to check against Solid::fem_mesh()'s max_size, and the only one that
+    // says what the mesh actually is**: max_size bounds the boundary segments and merely
+    // *targets* the interior -- measured at 1.03 x max_size on a face whose parameters run
+    // unevenly -- and one small enough beside the body to reach the mesher's own piece and
+    // station ceilings is not honoured at all.
+    double longest_edge() const { return view("blacksmith::FemMesh::longest_edge").longest_edge; }
+
+    // The mesh as Gmsh 4.1 ASCII `.msh` text: an entity per B-rep vertex, edge and face, a
+    // volume where the solid closes, and a physical group naming each.
+    //
+    // **On this side the library's text is owned**, released here with
+    // `cadaclysm_blacksmith_string_free` as every other text this library hands over, and
+    // two asks give two independent texts -- where the reader library's own msh_text()
+    // borrows a slot on its handle instead and must not be freed. Nothing here has to free
+    // anything either way: what comes back is a std::string of your own.
+    //
+    // **Prints the unlicensed notice**, as save_msh() does: this library notices on its
+    // writers, where the reader library notices in Node::fem_mesh and on neither `.msh`
+    // call. Each matches its own siblings, so moving the call to look like the other side
+    // breaks a convention.
+    //
+    // An Error for a mesh the writer refuses, naming the field it cannot honour.
+    Result<std::string> msh_text() const {
+        char* text = ::cadaclysm_blacksmith_fem_mesh_msh_text(live("blacksmith::FemMesh::msh_text"));
+        if (!text) return detail::kernel_error("fem mesh msh_text");
+        std::string out(text);
+        ::cadaclysm_blacksmith_string_free(text);
+        return out;
+    }
+
+    // msh_text() written to `path` by the library itself, replacing any file there: the
+    // same bytes from the same writer, straight to the file rather than through a string.
+    // Prints the notice too; see msh_text().
+    Result<void> save_msh(const std::string& path) const {
+        if (!::cadaclysm_blacksmith_fem_mesh_save_msh(live("blacksmith::FemMesh::save_msh"), path.c_str())) {
+            return detail::kernel_error(("could not write " + path).c_str());
+        }
+        return {};
+    }
+
+private:
+    friend class Solid;
+    struct Free {
+        void operator()(CadaclysmBlacksmithFemMesh* mesh) const noexcept { ::cadaclysm_blacksmith_fem_mesh_free(mesh); }
+    };
+    FemMesh(CadaclysmBlacksmithFemMesh* handle, const CadaclysmBlacksmithFemMeshView& read) : ptr_(handle), view_(read) {}
+
+    // The handle, refusing a freed (or moved-from) one: a read after free() is a bug in the
+    // caller, not a recoverable state, exactly as Meshlets has it.
+    const CadaclysmBlacksmithFemMesh* live(const char* what) const {
+        if (!ptr_) cadaclysm::detail::bad_access(what, "the FEM mesh is freed");
+        return ptr_.get();
+    }
+    // The view, read once when the handle was made: every pointer in it is built with the
+    // handle and good until it is freed -- nothing in this ABI is built lazily -- so asking
+    // again per accessor would be one C call per array for the same answer.
+    const CadaclysmBlacksmithFemMeshView& view(const char* what) const {
+        live(what);
+        return view_;
+    }
+
+    std::unique_ptr<CadaclysmBlacksmithFemMesh, Free> ptr_;
+    CadaclysmBlacksmithFemMeshView view_{};
+};
+
 inline Result<std::string> write_step_text(const Solids& solids, const std::optional<std::string>& schema, Unit unit);
 inline Result<std::string> write_sat_text(const Solids& solids, Unit unit);
 inline Result<void> write_sat(const std::string& path, const Solids& solids, Unit unit);
@@ -1450,6 +1760,27 @@ public:
         if (state_) state_->close();
     }
     bool closed() const noexcept { return !state_ || !state_->live(); }
+
+    // -- naming
+    // This solid, named `name`. The name rides through an operation with exactly one
+    // source solid (place, translate, coloured, fillet, ...) and is dropped by one with
+    // two or more (join, cut, common, ...) and by a fresh primitive or sweep -- see
+    // name(). It is what Assembly::place_solid defaults a placement's own name to, and
+    // the product name a lone named solid gets when written to STEP (step/step_text).
+    // Refused for an empty name.
+    Result<Solid> named(std::string_view name) const {
+        std::string owned(name);
+        return wrap(::cadaclysm_blacksmith_named(raw_handle("named"), owned.c_str()));
+    }
+    // This solid's name, or nullopt if it has none -- what named() set, kept or dropped
+    // by whatever built this solid. The C function's pointer is borrowed and null for
+    // both "no name" and a failure, so this reads it directly and never consults
+    // last_error.
+    std::optional<std::string> name() const {
+        const char* raw = ::cadaclysm_blacksmith_solid_name(raw_handle("name"));
+        if (!raw) return std::nullopt;
+        return std::string(raw);
+    }
 
     // -- primitives
     static Result<Solid> cuboid(double x, double y, double z) { return wrap(::cadaclysm_blacksmith_cuboid(x, y, z)); }
@@ -1569,6 +1900,10 @@ public:
     Result<Solid> place(const Frame& frame) const { return place_raw(frame.raw().data()); }
     Result<Solid> translate(double dx, double dy, double dz) const {
         return wrap(::cadaclysm_blacksmith_translate(raw_handle("translate"), dx, dy, dz));
+    }
+    /// This solid scaled by `factor` about the origin: every length times `factor`, exactly.
+    Result<Solid> scaled(double factor) const {
+        return wrap(::cadaclysm_blacksmith_scaled(raw_handle("scaled"), factor));
     }
     Result<Solid> rotate(const AxisLine& axis, double radians) const {
         double raw_axis[6];
@@ -1783,6 +2118,77 @@ public:
         state_->filled(tolerance);
         return Mesh64(detail::SolidRef(state_), data);
     }
+    // This solid meshed for a solver, as a FemMesh: nodes welded by bits, triangles wound
+    // outward, each node tagged with the lowest-dimension B-rep entity it lies on, and every
+    // crack reported rather than closed. **Owned by the caller** -- it outlives this solid,
+    // and nothing but FemMesh::free() or its destructor gives it back.
+    //
+    // `tolerance` is the chordal tolerance in model units, finite and above zero, and **it
+    // alone governs how closely the mesh follows the geometry**. `max_size` is a size
+    // ceiling, finite and zero or more, `0` being no ceiling (curvature alone): **it bounds
+    // the boundary segments and merely targets the interior**, which is not a
+    // longest-element-edge guarantee -- it adds boundary nodes without refining boundary
+    // geometry, and FemMesh::longest_edge() is what the mesh actually came to, the figure to
+    // check against it.
+    //
+    // **`tolerance` defaults to FemOptions::default()'s 0.01, not to this header's own
+    // DEFAULT_TOLERANCE of 0.05** that mesh(), edge_polylines() and every other
+    // tolerance-taking call here takes: a solver mesh's default is the library's, and a
+    // wrapper that reached for the neighbour would hand a caller a five-times coarser mesh
+    // unasked. The library's struct is still filled by
+    // `cadaclysm_blacksmith_fem_options_init` first, so a field added to it later defaults
+    // without this line being touched; only these two are overwritten.
+    //
+    // `placement` is a Frame -- twelve numbers, origin, x, y, z -- and nothing for the
+    // identity. This is the one frame argument here that may be omitted, a solid meshed in
+    // its own coordinates being the common case where a sweep without a frame is nothing at
+    // all. The reader library's cadaclysm::Node::fem_mesh takes **sixteen** instead,
+    // column-major, so a caller moving between the two reformats the placement.
+    //
+    // `progress` hears the two phases **"meshing"** and **"welding"**, as the booleans'
+    // callbacks hear theirs. **An opened phase is not a promise of a closed one**: a call
+    // refused for its inputs opens no phase at all, and a solid that meshes to no triangles
+    // reports "meshing" through to 1 of 1 and then fails with **no "welding"** -- that close
+    // says the mesher finished, not that it produced something.
+    //
+    // **A cracked solid is not a failure**: it comes back with FemMesh::watertight() false
+    // and its cracks in FemMesh::open_edges() and FemMesh::folded_edges() -- *both* -- and
+    // nothing is welded shut to make it look sound. An Error for a tolerance or `max_size`
+    // the mesher refuses, a placement not invertible, and a solid that meshes to no
+    // triangles at all, carrying the library's own words for it. Neither number is checked
+    // here: the library checks both and names the field, and a second validator would be a
+    // second set of words for one refusal.
+    //
+    // **No unlicensed notice here**: FemMesh::msh_text() and FemMesh::save_msh() print it,
+    // this library noticing on its writers rather than on its builders.
+    //
+    // **It does not fill the tessellation cache**, so it neither stales a Mesh taken before
+    // it nor is staled by one taken after: read FemMesh.
+    Result<FemMesh> fem_mesh(double tolerance = 0.01, double max_size = 0.0,
+                             const std::optional<Frame>& placement = std::nullopt, const Progress& progress = {}) const {
+        const CadaclysmBlacksmithSolid* solid = raw_handle("fem_mesh");
+        CadaclysmBlacksmithFemOptions options{};
+        // `init` writes `sizeof(CadaclysmBlacksmithFemOptions)` bytes as the *library* knows
+        // that type; `size` is then set to this header's own sizeof, which is what the growth
+        // rule asks of a caller. Nothing is transcribed here -- this wrapper compiles against
+        // the library's own header -- so there is no layout to pin.
+        ::cadaclysm_blacksmith_fem_options_init(&options);
+        options.size = sizeof(CadaclysmBlacksmithFemOptions);
+        options.tolerance = tolerance;
+        options.max_size = max_size;
+        CadaclysmBlacksmithFemMesh* handle =
+            ::cadaclysm_blacksmith_fem_mesh(solid, placement ? placement->raw().data() : nullptr, &options,
+                                            detail::progress_fn(progress), detail::progress_user(progress));
+        if (!handle) return detail::kernel_error("fem_mesh");
+        CadaclysmBlacksmithFemMeshView read{};
+        if (!::cadaclysm_blacksmith_fem_mesh_view(handle, &read)) {
+            Error why = detail::kernel_error("fem mesh view");
+            ::cadaclysm_blacksmith_fem_mesh_free(handle);
+            return why;
+        }
+        return FemMesh(handle, read);
+    }
+
     Result<EdgePolylines> edge_polylines(double tolerance = DEFAULT_TOLERANCE) const {
         CadaclysmBlacksmithPolylines data = ::cadaclysm_blacksmith_edge_polylines(raw_handle("edge_polylines"), tolerance);
         if (!data.offsets) return detail::kernel_error("edge_polylines");
@@ -2039,6 +2445,7 @@ public:
 
 private:
     friend class Workplane;
+    friend class Assembly;
     friend Result<std::string> write_step_text(const Solids&, const std::optional<std::string>&, Unit);
     friend Result<std::string> write_sat_text(const Solids&, Unit);
     friend Result<void> write_sat(const std::string&, const Solids&, Unit);
@@ -2417,6 +2824,144 @@ inline Result<cadaclysm::Scene> Solid::to_scene(const std::optional<std::string>
     options.schema = detail::schema_file(schema);
     return cadaclysm::open_memory(text.data(), text.size(), "stp", options);
 }
+
+// ---- assemblies -------------------------------------------------------------------------
+
+// A mutable tree of placements: a name, and zero or more solids or other assemblies
+// placed in it at a frame. place_solid/place_assembly return the placement's name so a
+// caller can keep it. Unlike Solid, placing shares rather than copies -- placing one
+// assembly under another does not snapshot it, so a later placement on the shared one
+// shows up wherever it already sits (see place_assembly's own note on cycles). Move-only
+// and backed by a unique_ptr with a Free, as Path; but where Path latches its first
+// refused step, this returns each call's own Result<>, as Solid does, since nothing here
+// chains through an already-refused state. Destroying this frees this handle; it does
+// **not** free what was placed in it if that is still reachable from somewhere else.
+class Assembly {
+public:
+    Assembly(Assembly&&) noexcept = default;
+    Assembly& operator=(Assembly&&) noexcept = default;
+    Assembly(const Assembly&) = delete;
+    Assembly& operator=(const Assembly&) = delete;
+
+    // A new, empty assembly called `name`. Refused for an empty name.
+    static Result<Assembly> create(std::string_view name) {
+        std::string owned(name);
+        CadaclysmBlacksmithAssembly* raw = ::cadaclysm_blacksmith_assembly_new(owned.c_str());
+        if (!raw) return detail::kernel_error("assembly_new");
+        return Assembly(raw);
+    }
+
+    void close() noexcept { ptr_.reset(); }
+    bool closed() const noexcept { return !ptr_; }
+
+    // This assembly's own name, given when it was made.
+    std::string name() const { return detail::text(::cadaclysm_blacksmith_assembly_name(raw_handle("name"))); }
+
+    // Place `s` at `frame` (must be right-handed and orthonormal) in this assembly,
+    // called `name` -- or, with `name` nullopt, `s`'s own name (Solid::name, "part" for
+    // an unnamed one), numbered past any already taken here ("bolt", "bolt 2", ...). An
+    // explicit `name` already taken here is refused. Returns the placement's name --
+    // Python's place, split as this wrapper has no type-dispatching overload; see
+    // place_assembly for placing another assembly.
+    Result<std::string> place_solid(const Solid& s, const Frame& frame,
+                                    std::optional<std::string_view> name = std::nullopt) const {
+        return place_solid_raw(s, frame.raw().data(), name);
+    }
+    // place_solid, but placing another assembly, `placed`, rather than a solid --
+    // sharing it, not copying it, so a later placement on `placed` (through this
+    // assembly or another) shows up wherever it is placed. Placing `placed` as this
+    // assembly itself, or anywhere above this assembly in the tree already, is refused,
+    // naming the cycle, since writing that out would never terminate.
+    Result<std::string> place_assembly(const Assembly& placed, const Frame& frame,
+                                       std::optional<std::string_view> name = std::nullopt) const {
+        return place_assembly_raw(placed, frame.raw().data(), name);
+    }
+    // place_solid with a raw, unchecked twelve-number frame: a placement's mirror is a
+    // left-handed frame, which Frame::make refuses and the kernel takes -- following
+    // Solid::place_raw's own precedent for the same fact.
+    Result<std::string> place_solid_raw(const Solid& s, const double* frame12,
+                                        std::optional<std::string_view> name = std::nullopt) const {
+        std::optional<std::string> owned = name ? std::optional<std::string>(*name) : std::nullopt;
+        char* raw = ::cadaclysm_blacksmith_assembly_place_solid(raw_handle("assembly_place_solid"), s.raw_handle("place_solid"),
+                                                                 frame12, owned ? owned->c_str() : nullptr);
+        return place_result(raw, "assembly_place_solid");
+    }
+    Result<std::string> place_assembly_raw(const Assembly& placed, const double* frame12,
+                                           std::optional<std::string_view> name = std::nullopt) const {
+        std::optional<std::string> owned = name ? std::optional<std::string>(*name) : std::nullopt;
+        char* raw = ::cadaclysm_blacksmith_assembly_place_assembly(raw_handle("assembly_place_assembly"),
+                                                                    placed.raw_handle("place_assembly"), frame12,
+                                                                    owned ? owned->c_str() : nullptr);
+        return place_result(raw, "assembly_place_assembly");
+    }
+
+    // This assembly, and everything placed under it, as one STEP file: this assembly the
+    // root product, each sub-assembly and each distinct part written once, each
+    // placement an occurrence named as it was placed. `schema` and `unit` as
+    // Solid::step_text. Refused if this assembly, or a sub-assembly reachable from it,
+    // places nothing -- a reader would never show it.
+    Result<std::string> step_text(const std::optional<std::string>& schema = std::nullopt,
+                                  Unit unit = Unit::millimetre) const {
+        std::optional<std::string> schema_text;
+        if (schema) {
+            std::optional<std::string> file = detail::schema_file(schema);
+            if (file) {
+                std::ifstream in(cadaclysm::detail::fs_path(*file), std::ios::binary);
+                schema_text = std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            } else {
+                schema_text = *schema;
+            }
+        }
+        char* raw = ::cadaclysm_blacksmith_assembly_step(raw_handle("assembly_step"),
+                                                          schema_text ? schema_text->c_str() : nullptr,
+                                                          static_cast<std::uint32_t>(unit));
+        if (!raw) return detail::kernel_error("assembly_step");
+        std::string out(raw);
+        ::cadaclysm_blacksmith_string_free(raw);
+        return out;
+    }
+    // This assembly written to a STEP file at `path`.
+    Result<void> step(const std::string& path, const std::optional<std::string>& schema = std::nullopt,
+                      Unit unit = Unit::millimetre) const {
+        CADACLYSM_TRY(text, step_text(schema, unit));
+        std::ofstream out(cadaclysm::detail::fs_path(path), std::ios::binary);
+        if (!out) return detail::refuse("step: cannot write " + path);
+        out.write(text.data(), static_cast<std::streamsize>(text.size()));
+        if (!out) return detail::refuse("step: cannot write " + path);
+        return {};
+    }
+    // This assembly as a reader Scene, through STEP text -- see Solid::to_scene.
+    Result<cadaclysm::Scene> to_scene(const std::optional<std::string>& schema = std::nullopt) const {
+        CADACLYSM_TRY(text, step_text(schema));
+        cadaclysm::OpenOptions options;
+        options.schema = detail::schema_file(schema);
+        return cadaclysm::open_memory(text.data(), text.size(), "stp", options);
+    }
+
+    // The C handle, for code that calls the C ABI directly. Owned by this Assembly.
+    const CadaclysmBlacksmithAssembly* handle() const noexcept { return ptr_.get(); }
+
+private:
+    struct Free {
+        void operator()(CadaclysmBlacksmithAssembly* p) const noexcept { ::cadaclysm_blacksmith_assembly_free(p); }
+    };
+
+    explicit Assembly(CadaclysmBlacksmithAssembly* raw) : ptr_(raw) {}
+
+    static Result<std::string> place_result(char* raw, const char* what) {
+        if (!raw) return detail::kernel_error(what);
+        std::string out(raw);
+        ::cadaclysm_blacksmith_string_free(raw);
+        return out;
+    }
+
+    CadaclysmBlacksmithAssembly* raw_handle(const char* what) const {
+        if (!ptr_) cadaclysm::detail::bad_access(what, "the assembly is empty (moved from or closed)");
+        return ptr_.get();
+    }
+
+    std::unique_ptr<CadaclysmBlacksmithAssembly, Free> ptr_;
+};
 
 // ---- the chain --------------------------------------------------------------------------
 

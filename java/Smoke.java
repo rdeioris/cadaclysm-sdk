@@ -3,11 +3,19 @@
 // verdict: the release pipeline runs this against every library it ships.
 import java.io.IOException;
 import java.nio.FloatBuffer;
+import java.nio.IntBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
+// "try": a smoke builds things inside try-with-resources only to prove the call succeeds
+// or is refused, and never touches them after; and it closes the read-back STEP scene by
+// hand, early, to check a solid made from it (Solid.fromNode) outlives it. Both are the
+// point of the check, so javac's lint on them is off here and nowhere else.
+@SuppressWarnings("try")
 public final class Smoke {
     public static void main(String[] args) {
         String path = args.length > 0 ? args[0] : "samples/cube.scad";
@@ -59,6 +67,32 @@ public final class Smoke {
             if (!iges) fail("formats() lacks IGES iges;igs");
             if (Cad.meshFormats().stream().noneMatch(f -> f.name().equals("stl") && f.label().equals("STL (binary)"))) fail("mesh format label is not the library's");
             System.out.println("geometry diagnostics: " + scene.geometryDiagnostics().size());
+
+            // Kinematics: a file with no mechanism carries no links or joints; mechanism.stp,
+            // beside whatever sample this smoke was given, carries the fixed two-link
+            // one-joint mechanism.
+            if (path.endsWith("cube.scad") && (!scene.links().isEmpty() || !scene.joints().isEmpty())) fail("the cube scene has links or joints");
+            Path mechanismPath = Path.of(path).toAbsolutePath().getParent().resolve("mechanism.stp");
+            try (Cad.Scene mechanism = Cad.open(mechanismPath.toString())) {
+                List<Cad.Link> links = mechanism.links();
+                if (links.size() != 2 || !links.get(0).name().equals("base") || !links.get(1).name().equals("arm"))
+                    fail("mechanism links are not [base, arm]");
+                for (Cad.Link link : links) {
+                    List<Cad.Node> nodes = link.nodes();
+                    if (nodes.size() != 1 || !nodes.get(0).name().equals(link.name()))
+                        fail("link " + link.name() + " does not name exactly one node of its own name");
+                }
+                List<Cad.Joint> joints = mechanism.joints();
+                if (joints.size() != 1 || !joints.get(0).name().equals("hinge"))
+                    fail("mechanism does not carry exactly one joint named hinge");
+                Cad.Joint joint = joints.get(0);
+                Cad.Link start = joint.start(), end = joint.end();
+                // The file's order, (arm, base): a swap into (parent, child) would fail here.
+                if (!start.name().equals("arm") || start.index() != 1 || !end.name().equals("base") || end.index() != 0)
+                    fail("joint hinge reads start=" + start.name() + "#" + start.index() + " end=" + end.name() + "#" + end.index());
+                System.out.println("kinematics: links " + links.size() + ", joints " + joints.size()
+                        + ", hinge " + start.name() + "->" + end.name());
+            }
             scene.forgetMeshes();
             long rebuiltTriangles = 0;
             for (Cad.Node n : scene.walk()) { Cad.Mesh m = n.canMesh() ? n.mesh() : null; if (m != null) rebuiltTriangles += m.triangleCount(); }
@@ -121,12 +155,66 @@ public final class Smoke {
                 if (est != 12 || first.surfaceEdges().polylineCount() != 0 || first.surfaceProxyMesh(4) != null) fail("the cube has no surface products");
                 if (first.surfacePick(new double[] {10, 10, 100}, new double[] {10, 10, -100}) != null || !first.boundsPlaced(null).isEmpty()) fail("the cube picks or bounds through surfaces");
                 if (!first.boundsPlaced64(null).isEmpty()) fail("the cube's boundsPlaced64 is not empty");
+                if (first.surfaceEdgeBeziers().count() != 0) fail("the cube hands exact edges to the surface path");
+                if (first.edgeColours().length != 0 || first.surfaceEdgeColours().length != 0) fail("the unpainted cube has edge colours");
+            }
+            // Edge colours: samples/edge-colours.stp sits beside the given sample and paints
+            // one edge teal (0.1, 0.6, 0.55) on the body -- everything else, edge and
+            // surface-edge alike, stays unstyled.
+            try (Cad.Scene edgeColoursScene = Cad.open(Path.of(path).resolveSibling("edge-colours.stp").toString())) {
+                Cad.Node body = null;
+                for (Cad.Node n : edgeColoursScene.walk()) if (n.edges().polylineCount() > 0) { body = n; break; }
+                if (body == null) fail("edge colours: edge-colours.stp has no node with edges");
+                int[] counts = { body.edges().polylineCount(), body.surfaceEdges().polylineCount() };
+                float[][][] colours = { body.edgeColours(), body.surfaceEdgeColours() };
+                for (int i = 0; i < 2; i++) {
+                    if (colours[i].length != counts[i]) fail("edge colours: " + colours[i].length + " entries for " + counts[i] + " polylines");
+                    int styledCount = 0, nullCount = 0;
+                    float[] styled = null;
+                    for (float[] c : colours[i]) {
+                        if (c == null) nullCount++;
+                        else { styledCount++; styled = c; }
+                    }
+                    if (styledCount != 1 || nullCount != colours[i].length - 1) fail("edge colours: " + styledCount + " styled entries, not exactly one");
+                    if (Math.abs(styled[0] - 0.1f) > 1e-6 || Math.abs(styled[1] - 0.6f) > 1e-6
+                            || Math.abs(styled[2] - 0.55f) > 1e-6 || Math.abs(styled[3] - 1.0f) > 1e-6)
+                        fail("edge colours: the styled entry reads (" + styled[0] + "," + styled[1] + "," + styled[2] + "," + styled[3] + "), not (0.1,0.6,0.55,1.0)");
+                }
+                // The STEP body has surfaces to hand over, so this reads them through SURFACES,
+                // the layout cadaclysm_node_surfaces returns by value. A short one is written
+                // past silently -- the layout itself is pinned by tests/bindings.rs, not here.
+                int faces = body.surfaces().size();
+                if (faces == 0) fail("surfaces: the STEP body came back with no faces");
+                System.out.println("surfaces: " + faces + " face(s)");
             }
             try (Cad.Scene fresh = Cad.open(path)) {
                 Cad.Node body = null;
                 for (Cad.Node n : fresh.walk()) if (n.canMesh()) { body = n; break; }
                 if (body.isMeshed()) fail("a fresh scene is already meshed");
                 if (fresh.realizeMeshes(false) == 0 || !body.isMeshed()) fail("realizeMeshes(false) did not build");
+            }
+            // A Rhino extrusion hands its exact edges to the surface path without meshing, in
+            // both conventions: UNREAL goes through the decorator that maps every getter into
+            // the caller's space. The fixture is the repository's, not an SDK checkout's, so
+            // this runs where found.
+            Path sampleRoot = Path.of(path).toAbsolutePath().getParent().getParent();
+            Path extrusions = sampleRoot == null ? null : sampleRoot.resolve("crates/cadaclysm-acis/tests/fixtures/rhino/extrusion-objects.3dm");
+            if (extrusions != null && Files.exists(extrusions)) {
+                for (Cad.Convention convention : new Cad.Convention[] {Cad.Convention.NATIVE, Cad.Convention.UNREAL}) {
+                    Cad.OpenOptions options = new Cad.OpenOptions(convention, false, false, null, false, 0.0);
+                    try (Cad.Scene surfaced = Cad.open(extrusions.toString(), options)) {
+                        int found = 0;
+                        for (Cad.Node n : surfaced.walk()) {
+                            if (!n.canMesh() || n.surfaceEdges().polylineCount() == 0) continue;
+                            int exact = n.surfaceEdgeBeziers().count();
+                            if (exact == 0 || n.isMeshed()) fail("an extrusion's exact edges are not free");
+                            if (exact != n.edgeBeziers().count()) fail("surfaceEdgeBeziers is not edgeBeziers' segments");
+                            found++;
+                        }
+                        if (found == 0) fail("extrusion-objects.3dm has no surfaced extrusion");
+                        System.out.printf("surfaceEdgeBeziers (%s): %d extrusions, exact and unmeshed%n", convention, found);
+                    }
+                }
             }
 
             byte[] bytes = Files.readAllBytes(Path.of(path));
@@ -152,6 +240,8 @@ public final class Smoke {
             Path stl = Files.createTempFile("cadaclysm-smoke", ".stl");
             scene.roots().get(0).saveMesh(stl.toString(), "stl");
             if (Files.size(stl) < 84) fail("save_mesh wrote no triangles");
+
+            femReader(first, path);
 
             // SVG: the library's own camera, no viewer. fov = 200 is a refusal it words the
             // same way as the kernel's.
@@ -203,6 +293,7 @@ public final class Smoke {
             edgeCurves();
             intersections();
             solidHits();
+            assemblies();
             try (Blacksmith.Solid rounded = part.fillet(corners, 1.0)) {
                 released = rounded;
                 int faces = rounded.faces();
@@ -312,6 +403,9 @@ public final class Smoke {
                     }
                 }
 
+                femKernel(rounded, faces);
+                femBrep(step, faces);
+
                 // The same solid as SAT, written by the library itself, read back the same way.
                 Path sat = Files.createTempFile("cadaclysm-smoke", ".sat");
                 rounded.sat(sat.toString());
@@ -419,6 +513,13 @@ public final class Smoke {
                 System.out.printf("blacksmith f64 twins: mesh64 %d triangles, bounds64 max z %s%n", kMesh64.triangleCount(), kBounds64.max()[2]);
             }
 
+            try (Blacksmith.Solid box = Blacksmith.Solid.cuboid(1, 2, 3); Blacksmith.Solid big = box.scaled(2)) {
+                Blacksmith.Bounds bb = big.bounds();
+                if (Math.abs(bb.max()[0] - bb.min()[0] - 2) > 1e-9 || Math.abs(bb.max()[2] - bb.min()[2] - 6) > 1e-9) fail("scaled bounds");
+                try { box.scaled(0); fail("scaled(0) not refused"); }
+                catch (Blacksmith.BuildException e) { if (!e.getMessage().startsWith("scaled:")) fail("scaled message: " + e.getMessage()); }
+            }
+
             // Leaving the block closed `rounded`: a call on it now throws, and the scene
             // from toScene is its own document, still readable after the solid that made
             // it is gone.
@@ -436,6 +537,327 @@ public final class Smoke {
             }
             System.out.println("toScene ok, closed solid throws");
         }
+    }
+
+    // The FEM surface mesh, the reader's side. cube.scad carries no brep, so this is the
+    // mesh-only path: one face, every node on it, no B-rep topology at all, and the scene's own
+    // convention rather than the file's. Every check below names the wrong implementation it
+    // catches; `#` marks the ones a break-the-code proof was run against.
+    private static void femReader(Cad.Node first, String path) throws IOException {
+        try (Cad.FemMesh fem = first.femMesh(0.5)) {
+            int nodeCount = fem.nodes().remaining() / 3;
+            int triangleCount = fem.triangles().remaining() / 3;
+            if (fem.nodes().remaining() % 3 != 0 || fem.triangles().remaining() % 3 != 0 || nodeCount == 0)
+                fail("fem: the node and triangle buffers read " + fem.nodes().remaining() + " and " + fem.triangles().remaining());
+            // Catches `triangles` lent over `node_count` (or `nodes` over `triangle_count`): the
+            // buffers would be the wrong length and the indices would run past the nodes.
+            if (fem.triangleFace().remaining() != triangleCount) fail("fem: triangleFace is not one per triangle");
+            IntBuffer triangles = fem.triangles();
+            for (int i = 0; i < triangles.remaining(); i++)
+                if (triangles.get(i) < 0 || triangles.get(i) >= nodeCount)
+                    fail("fem: a triangle names node " + triangles.get(i) + " of " + nodeCount);
+            IntBuffer triangleFace = fem.triangleFace();
+            for (int i = 0; i < triangleFace.remaining(); i++)
+                if (triangleFace.get(i) < 0 || triangleFace.get(i) >= fem.faceCount())
+                    fail("fem: a triangle lies on face " + triangleFace.get(i) + " of " + fem.faceCount());
+            // Catches nodeKind and nodeEntity lent from each other's pointer: a kind would then be
+            // a face index and an entity a 0/1/2. Bounding each entity by the list its own kind
+            // names is what tells the two apart -- the widths cannot, both being one uint32 array
+            // per node.
+            if (fem.nodeKind().remaining() != nodeCount || fem.nodeEntity().remaining() != nodeCount)
+                fail("fem: nodeKind/nodeEntity are not one per node");
+            // Read once, outside the loop: every ask rebuilds the list from the handle at one C
+            // call an element, and the two are empty here only because this body has no B-rep
+            // topology.
+            List<Cad.FemEdge> edges = fem.edges();
+            List<Cad.FemVertex> vertices = fem.vertices();
+            IntBuffer kinds = fem.nodeKind(), entities = fem.nodeEntity();
+            for (int k = 0; k < nodeCount; k++) {
+                int kind = kinds.get(k), entity = entities.get(k);
+                int limit = switch (kind) {
+                    case 0 -> vertices.size();
+                    case 1 -> edges.size();
+                    case 2 -> fem.faceCount();
+                    default -> 0;
+                };
+                if (kind < 0 || kind > 2 || entity < 0 || entity >= limit)
+                    fail("fem: node " + k + " lies on kind " + kind + " entity " + entity + ", of " + limit);
+            }
+            if (fem.minAngle() <= 0 || fem.minAngle() >= 90 || fem.longestEdge() <= 0 || fem.worstTriangle() >= triangleCount)
+                fail("fem: the quality figures read " + fem);
+            if (path.endsWith("cube.scad")) {
+                // # Catches fromMesh read off the neighbouring `watertight` field -- true for this
+                // body too, so only a body where the two differ separates them (the B-rep below).
+                if (!fem.fromMesh() || fem.faceCount() != 1 || !edges.isEmpty() || !vertices.isEmpty())
+                    fail("fem: the cube reads " + fem + ", not a mesh-only body of one face");
+                for (int k = 0; k < nodeCount; k++)
+                    if (kinds.get(k) != 2 || entities.get(k) != 0) fail("fem: a mesh body's nodes all lie on face 0");
+                if (!fem.watertight() || !fem.openEdges().isEmpty() || !fem.foldedEdges().isEmpty())
+                    fail("fem: the closed cube reads " + fem.openEdges().size() + " cracks and " + fem.foldedEdges().size() + " folds");
+            }
+            String msh = fem.mshText();
+            if (!msh.startsWith("$MeshFormat") || !msh.contains("$Nodes")) fail("fem: mshText is not Gmsh 4.1 ASCII");
+            // The borrowed slot is copied into a String on the way through, so a second ask does
+            // not free the first answer: both are this program's own and both still read.
+            if (fem.mshText().length() != msh.length()) fail("fem: a second mshText disagrees with the first");
+            Path mshPath = Files.createTempFile("cadaclysm-smoke", ".msh");
+            fem.saveMsh(mshPath.toString());
+            if (Files.size(mshPath) < msh.length() / 2) fail("fem: saveMsh wrote less than mshText");
+            // The reader's placement is sixteen numbers, column-major; the kernel's is twelve. A
+            // caller handing one ABI the other's is refused here rather than read as garbage --
+            // and the length is the one thing a wrapper must check itself, the ABI seeing only a
+            // pointer.
+            try {
+                first.femMesh(0.5, 0.0, new double[12]);
+                fail("fem: a twelve-number placement was accepted");
+            } catch (Cad.CadaclysmException e) {
+                if (!e.getMessage().contains("16 numbers")) fail("fem: the placement refusal reads " + e.getMessage());
+            }
+            // A mesh-only body is meshed by a path that takes no options at all
+            // (`fem::fem_mesh_of_mesh`), so neither field is read here, let alone validated: a
+            // zero, a negative and a NaN all come back with the mesh. What is pinned is the
+            // wrapper's pass-through, not the mesher's checking -- a wrapper that validated
+            // `tolerance` or `maxSize` itself would refuse calls this ABI accepts. (Both *are*
+            // refused on a B-rep body; femBrep checks the tolerance half.)
+            double[][] unread = {{0, 0}, {-1, 0}, {Double.NaN, 0}, {0.5, -1}, {0.5, Double.NaN}, {0.5, Double.POSITIVE_INFINITY}};
+            for (double[] pair : unread) {
+                try (Cad.FemMesh any = first.femMesh(pair[0], pair[1])) {
+                    if (any.nodes().remaining() != nodeCount * 3)
+                        fail("fem: a mesh-only body read its options after all (tolerance " + pair[0]
+                                + ", maxSize " + pair[1] + " gave " + any + ")");
+                }
+            }
+            // # A freed handle refuses every accessor rather than reading the pointers it left
+            // behind: the view struct is cached, so an accessor that does not ask the handle first
+            // hands out a buffer over freed memory instead of throwing. The kernel's own sweep in
+            // femKernel is the twin -- the guard is per wrapper class, so proving one says nothing
+            // about the other.
+            //
+            // What this does *not* prove, because Java cannot: a buffer already in hand is a
+            // window on an address with no owner left to ask. Measured once while writing this,
+            // on the kernel side: a DoubleBuffer taken before free() and read after did not
+            // throw -- it read the freed block and handed back 1.29e-311 where the mesh had 4.0.
+            // Not checked here on purpose: a deliberate read of freed memory in the smoke the
+            // release pipeline runs on nine platforms is an intermittent crash waiting to
+            // happen. Both wrappers' docs say which half is guarded.
+            Cad.FemMesh staleReader = first.femMesh(0.5);
+            staleReader.free();
+            if (!staleReader.closed()) fail("fem: a freed mesh does not say so");
+            staleReader.free();   // idempotent
+            List<Runnable> reads = List.of(
+                    staleReader::nodes, staleReader::triangles, staleReader::triangleFace,
+                    staleReader::nodeKind, staleReader::nodeEntity, staleReader::faceCount,
+                    staleReader::edges, staleReader::vertices, staleReader::openEdges,
+                    staleReader::foldedEdges, staleReader::watertight, staleReader::fromMesh,
+                    staleReader::minAngle, staleReader::worstTriangle, staleReader::longestEdge,
+                    staleReader::mshText, () -> staleReader.saveMsh(mshPath.toString()));
+            if (reads.size() != 17) fail("fem: the freed sweep covers " + reads.size() + " reads, not 17");
+            for (Runnable read : reads) {
+                try {
+                    read.run();
+                    fail("fem: a freed mesh read anyway");
+                } catch (Cad.CadaclysmException e) {
+                    if (e.getMessage() == null || !e.getMessage().contains("freed")) fail("fem: a freed mesh said " + e.getMessage());
+                }
+            }
+            System.out.println("fem (reader): " + fem + ", minAngle " + fem.minAngle() + ", longestEdge " + fem.longestEdge()
+                    + "; a freed mesh refuses all seventeen reads");
+        }
+        if (path.endsWith("cube.scad")) femCensusWiring(Path.of(path).resolveSibling("open-sheet.scad"));
+    }
+
+    // # Which count feeds which entry point -- the census *wiring*, which nothing else here pins.
+    // Every other FEM check proves a row is extracted correctly; none proves openEdges() reads
+    // openEdgeCount rows through cadaclysm_fem_mesh_open_edge rather than the folded count or the
+    // folded call. samples/open-sheet.scad is the only body in this repository where both censuses
+    // are non-empty and of different lengths: the B-rep path computes no census unless the topology
+    // is closed (the documented "not asked" pair) and every closed body has none, while the mesh
+    // path always computes one -- so a polyhedron with a flap over one of its own directed edges is
+    // the way in. Six cracks, one fold, and the fold is not the first crack.
+    private static void femCensusWiring(Path sheet) {
+        try (Cad.Scene scene = Cad.open(sheet.toString())) {
+            Cad.Node body = null;
+            for (Cad.Node n : scene.walk()) if (n.canMesh()) { body = n; break; }
+            if (body == null) fail("fem census: open-sheet.scad has no meshable node");
+            try (Cad.FemMesh census = body.femMesh()) {
+                if (census.nodes().remaining() != 15 || census.triangles().remaining() != 9
+                        || !census.fromMesh() || census.watertight())
+                    fail("fem census: open-sheet.scad reads " + census + ", not five open, folded, mesh-only nodes");
+                List<int[]> cracks = census.openEdges(), folds = census.foldedEdges();
+                // The counts are what separate the two lists: a swapped count reads 1 where 6
+                // belongs, and a swapped call cannot read row 1 of a one-row table at all.
+                if (cracks.size() != 6 || folds.size() != 1)
+                    fail("fem census: " + cracks.size() + " cracks and " + folds.size() + " folds, not 6 and 1");
+                // And the contents, which separates a wrapper that swapped both consistently.
+                int[] fold = folds.get(0), crack = cracks.get(0);
+                if (fold[0] != 2 || fold[1] != 0 || fold[2] != -1)
+                    fail("fem census: the fold reads (" + fold[0] + "," + fold[1] + "," + fold[2] + "), not (2,0,NONE)");
+                if (crack[0] != 1 || crack[1] != 2)
+                    fail("fem census: the first crack reads (" + crack[0] + "," + crack[1] + "), not (1,2)");
+                System.out.println("fem census: open-sheet.scad reads " + cracks.size() + " cracks and "
+                        + folds.size() + " fold at (" + fold[0] + "," + fold[1] + ")");
+            }
+        }
+    }
+
+    // The FEM surface mesh on a B-rep body, read back from the STEP this run wrote: the topology
+    // the mesh-only body has none of -- edges with the body's own ids, vertices, and nodes on all
+    // three kinds of entity.
+    private static void femBrep(Path step, int faces) {
+        try (Cad.Scene back = Cad.open(step.toString())) {
+            Cad.Node body = null;
+            for (Cad.Node n : back.walk()) if (n.canMesh()) { body = n; break; }
+            if (body == null) fail("fem: the read-back STEP has no meshable body");
+            try (Cad.FemMesh fem = body.femMesh(0.5)) {
+                // # The other half of the fromMesh proof: false here where it was true on the
+                // cube, the neighbouring watertight being true for both.
+                if (fem.fromMesh() || !fem.watertight() || fem.faceCount() != faces)
+                    fail("fem: the read plate reads " + fem + ", not a closed B-rep of " + faces + " faces");
+                List<Cad.FemEdge> edges = fem.edges();
+                List<Cad.FemVertex> vertices = fem.vertices();
+                if (edges.isEmpty() || vertices.isEmpty()) fail("fem: a B-rep body carries edges and vertices");
+                Set<Integer> kinds = new HashSet<>();
+                IntBuffer nodeKind = fem.nodeKind();
+                for (int i = 0; i < nodeKind.remaining(); i++) kinds.add(nodeKind.get(i));
+                if (!kinds.equals(Set.of(0, 1, 2))) fail("fem: the plate's nodes lie on kinds " + kinds + ", not 0, 1 and 2");
+                // # `id` is the body's own B-rep edge id, not this list's index: the list is a
+                // densely renumbered subset ascending by id. Catches an `id` filled from the loop
+                // counter -- which a body whose ids happened to run 0, 1, 2 would hide, so both
+                // halves are checked.
+                boolean ascending = true, offIndex = false;
+                for (int i = 0; i < edges.size(); i++) {
+                    if (i > 0 && edges.get(i).id() < edges.get(i - 1).id()) ascending = false;
+                    if (edges.get(i).id() != i) offIndex = true;
+                }
+                if (!ascending) fail("fem: the edge ids do not ascend");
+                if (!offIndex) fail("fem: every edge id equals its own index -- id is the index, not the body's id");
+                int nodeCount = fem.nodes().remaining() / 3;
+                for (Cad.FemEdge edge : edges) {
+                    int[] runs = edge.runs(), nodes = edge.nodes();
+                    if (runs.length == 0 || runs[0] != 0 || runs[runs.length - 1] >= nodes.length)
+                        fail("fem: " + edge + "'s runs do not start at 0 inside its chain");
+                    for (int node : nodes) if (node < 0 || node >= nodeCount) fail("fem: " + edge + " names a node past the mesh");
+                    // # A closed body has no rim, so every edge has two faces and neither is the
+                    // NONE sentinel.
+                    if (edge.faces()[0] < 0 || edge.faces()[0] >= faces || edge.faces()[1] < 0 || edge.faces()[1] >= faces)
+                        fail("fem: " + edge + " on a closed body bounds faces " + Arrays.toString(edge.faces()) + " of " + faces);
+                    if (edge.closed() && runs.length > 1) fail("fem: " + edge + " is one loop with a broken chain");
+                    if (edge.seam() && edge.faces()[0] != edge.faces()[1]) fail("fem: " + edge + " is a seam whose two faces differ");
+                    // # The chain includes its end vertices, so the two ends name the nodes it
+                    // begins and finishes at -- which is what tells `ends` from `faces`, both a
+                    // pair of indices a swap would leave in range on a body of this shape.
+                    Set<Integer> ends = new HashSet<>();
+                    for (int end : edge.ends()) if (end != -1) ends.add(vertices.get(end).node());
+                    if (!ends.equals(new HashSet<>(List.of(nodes[0], nodes[nodes.length - 1]))))
+                        fail("fem: " + edge + " does not end at its own vertices");
+                }
+                boolean placed = false;
+                for (Cad.FemVertex vertex : vertices) {
+                    if (vertex.hasPosition()) placed = true;
+                    if (vertex.point().length != 3 || (vertex.node() != -1 && vertex.node() >= nodeCount))
+                        fail("fem: " + vertex + " is not a node of this mesh");
+                }
+                if (!placed) fail("fem: no vertex of the plate has a position");
+                // A B-rep body *does* have geometry to follow, so here the tolerance is read and
+                // refused -- in the library's own words, not a message this wrapper invented.
+                try {
+                    body.femMesh(0);
+                    fail("fem: a zero tolerance was accepted on a B-rep body");
+                } catch (Cad.CadaclysmException e) {
+                    if (!e.getMessage().contains("tolerance must be finite and > 0"))
+                        fail("fem: the tolerance refusal reads " + e.getMessage());
+                }
+                System.out.println("fem (read brep): " + fem + ", " + edges.size() + " edges, "
+                        + vertices.size() + " vertices, edge 0 " + edges.get(0));
+            }
+        }
+    }
+
+    // The kernel's own FEM mesh: the same solid through `cadaclysm_blacksmith_fem_mesh`, whose
+    // placement is twelve numbers and whose `.msh` text is owned rather than borrowed.
+    private static void femKernel(Blacksmith.Solid rounded, int faces) throws IOException {
+        Path mshPath = Files.createTempFile("cadaclysm-smoke-kernel", ".msh");
+        try (Blacksmith.FemMesh fem = rounded.femMesh(0.5)) {
+            if (fem.fromMesh() || !fem.watertight() || fem.faceCount() != faces || fem.nodes().remaining() == 0)
+                fail("kernel fem: the filleted part reads " + fem);
+            if (!fem.openEdges().isEmpty() || !fem.foldedEdges().isEmpty())
+                fail("kernel fem: a watertight solid reads " + fem.openEdges().size() + " cracks and " + fem.foldedEdges().size() + " folds");
+            // maxSize bounds the boundary segments and only targets the interior, so the figure a
+            // solver caller checks is longestEdge -- not the ceiling it asked for. Catches a
+            // wrapper that dropped maxSize on the floor: the mesh would not refine at all.
+            try (Blacksmith.FemMesh fine = rounded.femMesh(0.5, 3.0)) {
+                // 1.05 and not 3.0 exactly: the ceiling is not a guarantee (1.03 x was measured on
+                // a face whose parameters run unevenly), so a tighter pin here would assert
+                // something the ABI deliberately does not promise.
+                if (fine.longestEdge() > 3.0 * 1.05) fail("kernel fem: maxSize 3 came to longestEdge " + fine.longestEdge());
+                if (fine.nodes().remaining() <= fem.nodes().remaining() || fine.longestEdge() >= fem.longestEdge())
+                    fail("kernel fem: maxSize 3 gave " + fine.nodes().remaining() / 3 + " nodes and longestEdge "
+                            + fine.longestEdge() + ", no finer than " + fem.nodes().remaining() / 3 + "/" + fem.longestEdge());
+            }
+            String msh = fem.mshText();
+            if (!msh.startsWith("$MeshFormat")) fail("kernel fem: mshText is not Gmsh 4.1 ASCII");
+            // Owned on this side, not borrowed: two asks give two independent texts, each released
+            // by `cadaclysm_blacksmith_string_free` on the way out, and neither dies with the other
+            // or with the handle.
+            if (fem.mshText().length() != msh.length()) fail("kernel fem: a second mshText disagrees with the first");
+            fem.saveMsh(mshPath.toString());
+            if (Files.size(mshPath) < msh.length() / 2) fail("kernel fem: saveMsh wrote less than mshText");
+            // # The kernel's placement is twelve numbers where the reader's is sixteen.
+            try {
+                rounded.femMesh(0.5, 0.0, new double[16]);
+                fail("kernel fem: a sixteen-number placement was accepted");
+            } catch (Blacksmith.BuildException e) {
+                if (!e.getMessage().contains("12 numbers")) fail("kernel fem: the placement refusal reads " + e.getMessage());
+            }
+            try {
+                rounded.femMesh(0);
+                fail("kernel fem: a zero tolerance was accepted");
+            } catch (Blacksmith.BuildException expected) {
+                // the library's own refusal, not this wrapper's
+            }
+            System.out.println("kernel fem: " + fem + ", minAngle " + fem.minAngle() + ", longestEdge " + fem.longestEdge());
+        }
+        // An open sheet: the one body where the sentinel and the "not asked" census trio show.
+        try (Blacksmith.Profile square = Blacksmith.Profile.rect(20, 20);
+             Blacksmith.Solid sheet = Blacksmith.Solid.face(square, new double[] {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1});
+             Blacksmith.FemMesh sheetFem = sheet.femMesh(0.5)) {
+            // # watertight false with *both* censuses empty is "not asked", not "nothing found": a
+            // sheet makes no claim to enclose anything. A caller reading only openEdges cannot tell
+            // this from a sound body, which is why foldedEdges is checked beside it.
+            if (sheetFem.watertight() || !sheetFem.openEdges().isEmpty() || !sheetFem.foldedEdges().isEmpty())
+                fail("kernel fem: the sheet reads " + sheetFem + " rather than open with an unasked census");
+            // # Catches `face_b` filled with 0 instead of the NONE sentinel: every rim edge of a
+            // one-faced sheet bounds face 0 and nothing else, so a 0 there reads as a real second
+            // face -- a coherent wrong answer no field count or width can catch.
+            StringBuilder rim = new StringBuilder();
+            for (Blacksmith.FemEdge edge : sheetFem.edges()) rim.append(edge.faces()[0]).append("/").append(edge.faces()[1]).append("; ");
+            if (sheetFem.faceCount() != 1) fail("kernel fem: the sheet has " + sheetFem.faceCount() + " faces, not 1");
+            for (Blacksmith.FemEdge edge : sheetFem.edges())
+                if (edge.faces()[0] != 0 || edge.faces()[1] != -1) fail("kernel fem: the sheet's rim reads " + rim);
+            System.out.println("kernel fem: the sheet's rim reads " + rim);
+        }
+        // # The freed sweep, the kernel's own: seventeen reads, each refusing rather than reading
+        // the pointers the handle left behind.
+        Blacksmith.FemMesh stale = rounded.femMesh(0.5);
+        stale.free();
+        if (!stale.closed()) fail("kernel fem: a freed mesh does not say so");
+        stale.free();   // idempotent
+        List<Runnable> reads = List.of(
+                stale::nodes, stale::triangles, stale::triangleFace, stale::nodeKind,
+                stale::nodeEntity, stale::faceCount, stale::edges, stale::vertices,
+                stale::openEdges, stale::foldedEdges, stale::watertight, stale::fromMesh,
+                stale::minAngle, stale::worstTriangle, stale::longestEdge, stale::mshText,
+                () -> stale.saveMsh(mshPath.toString()));
+        if (reads.size() != 17) fail("kernel fem: the freed sweep covers " + reads.size() + " reads, not 17");
+        for (Runnable read : reads) {
+            try {
+                read.run();
+                fail("kernel fem: a freed mesh read anyway");
+            } catch (IllegalStateException e) {
+                if (e.getMessage() == null || !e.getMessage().contains("freed")) fail("kernel fem: a freed mesh said " + e.getMessage());
+            }
+        }
+        System.out.println("kernel fem: a freed mesh refuses all seventeen reads");
     }
 
     private static boolean near(float[] v, double x, double y, double z) {
@@ -642,6 +1064,133 @@ public final class Smoke {
 
     private static double norm(double[] v) {
         return Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    }
+
+    // Assemblies: Assembly, Solid.named and Solid.name, at parity with the Python reference's
+    // _shared_assembly() and the tests built on it.
+    private static void assemblies() {
+        try (Blacksmith.Solid asmBolt = Blacksmith.Solid.cylinder(1, 6).named("bolt");
+             Blacksmith.Solid asmPlate = Blacksmith.Solid.cuboid(20, 10, 2).named("plate").coloured(1, 0.5, 0);
+             Blacksmith.Assembly bracket = new Blacksmith.Assembly("bracket")) {
+            String platePlacement = bracket.place(asmPlate, Blacksmith.Frame.xy().toArray());
+            String bolt1Placement = bracket.place(asmBolt, Blacksmith.Frame.xy(new double[] {5, 5, 2}).toArray());
+            String bolt2Placement = bracket.place(asmBolt, Blacksmith.Frame.xy(new double[] {15, 5, 2}).toArray());
+            if (!platePlacement.equals("plate") || !bolt1Placement.equals("bolt") || !bolt2Placement.equals("bolt 2"))
+                fail("assembly: bracket placements were \"" + platePlacement + "\", \"" + bolt1Placement + "\", \"" + bolt2Placement + "\", not plate/bolt/bolt 2");
+
+            try (Blacksmith.Assembly asmFrame = new Blacksmith.Assembly("frame")) {
+                String leftPlacement = asmFrame.place(bracket, Blacksmith.Frame.xy(new double[] {0, 0, 0}).toArray(), "left");
+                String rightPlacement = asmFrame.place(bracket,
+                        new Blacksmith.Frame(new double[] {100, 0, 0}, new double[] {0, 1, 0}, new double[] {-1, 0, 0}, new double[] {0, 0, 1}).toArray(),
+                        "right");
+                String rootBoltPlacement = asmFrame.place(asmBolt, Blacksmith.Frame.xy(new double[] {50, 50, 0}).toArray());
+                if (!leftPlacement.equals("left") || !rightPlacement.equals("right") || !rootBoltPlacement.equals("bolt"))
+                    fail("assembly: frame placements were \"" + leftPlacement + "\", \"" + rightPlacement + "\", \"" + rootBoltPlacement + "\", not left/right/bolt");
+
+                String frameStepText = asmFrame.stepText();
+                int manifoldCount = countOf(frameStepText, "=MANIFOLD_SOLID_BREP(");
+                int productCount = countOf(frameStepText, "=PRODUCT(");
+                int nauoCount = countOf(frameStepText, "=NEXT_ASSEMBLY_USAGE_OCCURRENCE(");
+                if (manifoldCount != 2 || productCount != 4 || nauoCount != 6)
+                    fail("assembly: frame step_text has " + manifoldCount + " breps, " + productCount + " products, " + nauoCount + " NAUOs, not 2/4/6");
+                if (!frameStepText.contains("'left'") || !frameStepText.contains("'right'") || !frameStepText.contains("'bolt 2'"))
+                    fail("assembly: frame step_text is missing 'left', 'right' or 'bolt 2'");
+                System.out.println("assembly: frame writes " + manifoldCount + " breps, " + productCount + " products, " + nauoCount + " NAUOs");
+
+                // Read-back, through the same reader door as Solid.toScene -- structure only, at
+                // this (pre-late-placement) text: one root "frame", two "bracket" containers each
+                // holding plate/bolt/bolt, and one root-level "bolt". The world origins are
+                // Python's to check.
+                try (Cad.Scene readScene = Cad.openMemory(frameStepText.getBytes(java.nio.charset.StandardCharsets.UTF_8), "frame.stp")) {
+                    List<Cad.Node> roots = readScene.roots();
+                    if (roots.size() != 1 || !roots.get(0).name().equals("frame")) fail("assembly: the read-back root is not one node named \"frame\"");
+                    List<Cad.Node> rootChildren = roots.get(0).children();
+                    if (rootChildren.size() != 3) fail("assembly: the read-back root has " + rootChildren.size() + " children, not 3");
+                    List<Cad.Node> containers = rootChildren.stream().filter(c -> c.name().equals("bracket")).toList();
+                    List<Cad.Node> rootBolts = rootChildren.stream().filter(c -> c.name().equals("bolt")).toList();
+                    if (containers.size() != 2 || rootBolts.size() != 1)
+                        fail("assembly: the read-back root does not have two bracket containers and one bolt");
+                    for (Cad.Node container : containers) {
+                        List<String> names = container.children().stream().map(Cad.Node::name).sorted().toList();
+                        if (!names.equals(List.of("bolt", "bolt", "plate")))
+                            fail("assembly: a read-back bracket container does not hold plate, bolt, bolt");
+                    }
+                }
+                System.out.println("assembly: the read-back tree has one root, two bracket containers of plate+bolt+bolt, and one root bolt");
+
+                // A late placement into bracket shows up wherever bracket is placed (left and
+                // right both).
+                bracket.place(asmBolt, Blacksmith.Frame.xy(new double[] {10, 8, 2}).toArray());
+                int laterNauoCount = countOf(asmFrame.stepText(), "=NEXT_ASSEMBLY_USAGE_OCCURRENCE(");
+                if (laterNauoCount != 7) fail("assembly: a late placement gave " + laterNauoCount + " NAUOs, not 7");
+                System.out.println("assembly: a late placement into bracket shows up wherever it is placed");
+
+                // A cycle, a duplicate placement name, a mirrored frame, and an assembly (or one
+                // reachable from it) that places nothing are all refused.
+                try {
+                    bracket.place(asmFrame, Blacksmith.Frame.xy().toArray());
+                    fail("assembly: a cycle (bracket -> frame -> bracket) was accepted");
+                } catch (Blacksmith.BuildException e) {
+                    if (e.getMessage() == null || !e.getMessage().contains("bracket → frame → bracket")) fail("assembly: cycle message: " + e.getMessage());
+                }
+                try {
+                    asmFrame.place(bracket, Blacksmith.Frame.xy().toArray(), "left");
+                    fail("assembly: a duplicate placement name was accepted");
+                } catch (Blacksmith.BuildException e) {
+                    if (e.getMessage() == null || !e.getMessage().contains("left")) fail("assembly: duplicate name message: " + e.getMessage());
+                }
+                // A raw twelve-number frame, not the Frame type, which refuses a left-handed
+                // triple before place is ever called -- the one way to drive a mirrored frame
+                // into the ABI's own rigidity check.
+                try {
+                    asmFrame.place(bracket, new double[] {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, -1});
+                    fail("assembly: a mirrored raw frame was accepted");
+                } catch (Blacksmith.BuildException e) {
+                    if (e.getMessage() == null || !e.getMessage().contains("right-handed and orthonormal")) fail("assembly: mirrored frame message: " + e.getMessage());
+                }
+                try (Blacksmith.Assembly x = new Blacksmith.Assembly("x")) {
+                    x.stepText();
+                    fail("assembly: an empty assembly wrote step text");
+                } catch (Blacksmith.BuildException expected) {
+                    // the library's own refusal
+                }
+                try (Blacksmith.Assembly outer = new Blacksmith.Assembly("outer");
+                     Blacksmith.Assembly hollow = new Blacksmith.Assembly("hollow")) {
+                    outer.place(hollow, Blacksmith.Frame.xy().toArray());
+                    try {
+                        outer.stepText();
+                        fail("assembly: an assembly reachable from the root that places nothing wrote step text");
+                    } catch (Blacksmith.BuildException e) {
+                        if (e.getMessage() == null || !e.getMessage().contains("hollow")) fail("assembly: empty-reachable message: " + e.getMessage());
+                    }
+                }
+                System.out.println("assembly: a cycle, a duplicate name, a mirrored frame, and an empty assembly are all refused");
+            }
+
+            // Solid.named/Solid.name: the name rides through a one-source operation (place,
+            // coloured) and is dropped by a two-source one (join) or a fresh primitive.
+            if (!"bolt".equals(asmBolt.name())) fail("assembly: bolt.name() is not \"bolt\"");
+            try (Blacksmith.Solid placedBolt = asmBolt.place(Blacksmith.Frame.xy(new double[] {1, 2, 3}).toArray())) {
+                if (!"bolt".equals(placedBolt.name())) fail("assembly: bolt.place(...).name() is not \"bolt\"");
+            }
+            try (Blacksmith.Solid colouredBolt = asmBolt.coloured(1, 0, 0)) {
+                if (!"bolt".equals(colouredBolt.name())) fail("assembly: bolt.coloured(...).name() is not \"bolt\"");
+            }
+            try (Blacksmith.Solid cube = Blacksmith.Solid.cuboid(1, 1, 1);
+                 Blacksmith.Solid joinedBolt = asmBolt.join(cube)) {
+                if (joinedBolt.name() != null) fail("assembly: bolt.join(...).name() is not null");
+            }
+            try (Blacksmith.Solid freshCube = Blacksmith.Solid.cuboid(1, 1, 1)) {
+                if (freshCube.name() != null) fail("assembly: a fresh cuboid's name() is not null");
+            }
+            System.out.println("assembly: named()/name() ride through one-source operations and drop through two-source ones");
+        }
+    }
+
+    private static int countOf(String haystack, String needle) {
+        int count = 0;
+        for (int at = haystack.indexOf(needle); at >= 0; at = haystack.indexOf(needle, at + needle.length())) count++;
+        return count;
     }
 
     // Frames: built, checked, and passed wherever twelve numbers go.

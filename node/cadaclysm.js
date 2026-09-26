@@ -125,6 +125,7 @@ function libraryPath() {
 koffi.opaque('CadaclysmScene');
 koffi.opaque('CadaclysmBrep');
 koffi.opaque('CadaclysmMeshlets');
+koffi.opaque('CadaclysmFemMesh');
 const CadaclysmWindow = koffi.struct('CadaclysmWindow', {
   kind: 'uint32_t',
   handle: 'void *',
@@ -229,6 +230,10 @@ const CadaclysmPolylines = koffi.struct('CadaclysmPolylines', {
   polyline_count: 'uint32_t',
   vertex_count: 'uint32_t',
 });
+const CadaclysmEdgeColors = koffi.struct('CadaclysmEdgeColors', {
+  rgba: 'const float *',
+  count: 'uint32_t',
+});
 const CadaclysmBeziers = koffi.struct('CadaclysmBeziers', {
   points: 'const float *',
   weights: 'const float *',
@@ -282,6 +287,54 @@ const CadaclysmSvgOptions = koffi.struct('CadaclysmSvgOptions', {
   stroke: 'uint32_t',
   background: 'uint32_t',
   flags: 'uint32_t',
+});
+// The FEM surface mesh. `size` is how `CadaclysmFemOptions` grows, by
+// `CadaclysmOpenOptions`'s rule: `cadaclysm_fem_options_init` fills the library's
+// whole struct, and `femMesh` then writes this declaration's own `sizeof` into
+// `size`, so a field the library has and this block does not is written past what
+// the call reads. `tests/bindings.rs` pins all four of the structs below field for
+// field, widths included, which is what keeps that rule honest.
+const CadaclysmFemOptions = koffi.struct('CadaclysmFemOptions', {
+  size: 'size_t',
+  tolerance: 'double',
+  max_size: 'double',
+});
+const CadaclysmFemMeshView = koffi.struct('CadaclysmFemMeshView', {
+  nodes: 'const double *',
+  node_count: 'uint32_t',
+  triangles: 'const uint32_t *',
+  triangle_count: 'uint32_t',
+  triangle_face: 'const uint32_t *',
+  node_kind: 'const uint32_t *',
+  node_entity: 'const uint32_t *',
+  face_count: 'uint32_t',
+  edge_count: 'uint32_t',
+  vertex_count: 'uint32_t',
+  open_edge_count: 'uint32_t',
+  folded_edge_count: 'uint32_t',
+  watertight: 'bool',
+  from_mesh: 'bool',
+  min_angle: 'double',
+  worst_triangle: 'uint32_t',
+  longest_edge: 'double',
+});
+const CadaclysmFemEdge = koffi.struct('CadaclysmFemEdge', {
+  id: 'uint32_t',
+  nodes: 'const uint32_t *',
+  node_count: 'uint32_t',
+  runs: 'const uint32_t *',
+  run_count: 'uint32_t',
+  face_a: 'uint32_t',
+  face_b: 'uint32_t',
+  end_a: 'uint32_t',
+  end_b: 'uint32_t',
+  closed: 'bool',
+  seam: 'bool',
+});
+const CadaclysmFemVertex = koffi.struct('CadaclysmFemVertex', {
+  node: 'uint32_t',
+  point: koffi.array('double', 3),
+  has_position: 'bool',
 });
 
 // ---- the function table ----------------------------------------------------
@@ -345,6 +398,7 @@ function _lib() {
     bounds64: f('CadaclysmBounds64 cadaclysm_bounds64(const CadaclysmScene *scene)'),
     node_is_meshed: f('bool cadaclysm_node_is_meshed(const CadaclysmScene *scene, uint32_t node)'),
     node_surface_edges: f('CadaclysmPolylines cadaclysm_node_surface_edges(const CadaclysmScene *scene, uint32_t node)'),
+    node_surface_edge_beziers: f('CadaclysmBeziers cadaclysm_node_surface_edge_beziers(const CadaclysmScene *scene, uint32_t node)'),
     node_surface_isocurves: f('CadaclysmPolylines cadaclysm_node_surface_isocurves(const CadaclysmScene *scene, uint32_t node)'),
     node_surface_pick: f('bool cadaclysm_node_surface_pick(const CadaclysmScene *scene, uint32_t node, const double *from, const double *to, _Out_ double *out_point)'),
     node_surface_proxy_mesh: f('CadaclysmMesh cadaclysm_node_surface_proxy_mesh(const CadaclysmScene *scene, uint32_t node, uint32_t cells)'),
@@ -360,6 +414,8 @@ function _lib() {
     geometry_diagnostic_count: f('uint32_t cadaclysm_geometry_diagnostic_count(const CadaclysmScene *scene)'),
     geometry_diagnostic: f('const char *cadaclysm_geometry_diagnostic(const CadaclysmScene *scene, uint32_t index)'),
     node_edges: f('CadaclysmPolylines cadaclysm_node_edges(const CadaclysmScene *scene, uint32_t node)'),
+    node_edge_colors: f('CadaclysmEdgeColors cadaclysm_node_edge_colors(const CadaclysmScene *scene, uint32_t node)'),
+    node_surface_edge_colors: f('CadaclysmEdgeColors cadaclysm_node_surface_edge_colors(const CadaclysmScene *scene, uint32_t node)'),
     node_edge_beziers: f('CadaclysmBeziers cadaclysm_node_edge_beziers(const CadaclysmScene *scene, uint32_t node)'),
     node_surfaces: f('CadaclysmSurfaces cadaclysm_node_surfaces(const CadaclysmScene *scene, uint32_t node)'),
     surface_matrix: f('void cadaclysm_surface_matrix(const CadaclysmScene *scene, _Out_ float *out)'),
@@ -407,6 +463,31 @@ function _lib() {
     meshlet_indices: f('void cadaclysm_meshlet_indices(const CadaclysmMeshlets *handle, uint32_t index, _Out_ uint32_t *out)'),
     meshlet_children: f('void cadaclysm_meshlet_children(const CadaclysmMeshlets *handle, uint32_t index, _Out_ uint32_t *out)'),
     meshlets_free: f('void cadaclysm_meshlets_free(CadaclysmMeshlets *handle)'),
+    link_count: f('uint32_t cadaclysm_link_count(const CadaclysmScene *scene)'),
+    link_name: f('const char *cadaclysm_link_name(const CadaclysmScene *scene, uint32_t link)'),
+    link_node_count: f('uint32_t cadaclysm_link_node_count(const CadaclysmScene *scene, uint32_t link)'),
+    link_node: f('uint32_t cadaclysm_link_node(const CadaclysmScene *scene, uint32_t link, uint32_t index)'),
+    joint_count: f('uint32_t cadaclysm_joint_count(const CadaclysmScene *scene)'),
+    joint_name: f('const char *cadaclysm_joint_name(const CadaclysmScene *scene, uint32_t joint)'),
+    joint_start: f('uint32_t cadaclysm_joint_start(const CadaclysmScene *scene, uint32_t joint)'),
+    joint_end: f('uint32_t cadaclysm_joint_end(const CadaclysmScene *scene, uint32_t joint)'),
+    // The FEM surface mesh: a handle of the caller's own, and its accessors.
+    // `cadaclysm_fem_mesh_msh_text` returns a `const char *` **borrowed** from the
+    // handle -- a slot replaced by the next ask and gone when the mesh is freed --
+    // where the kernel library's twin returns an owned `char *` its wrapper has to
+    // release. koffi decodes a `const char *` into a JS string of its own on the
+    // way out, so nothing here frees anything and the borrowed slot's lifetime
+    // cannot be got wrong; see `FemMesh.mshText`.
+    fem_options_init: f('void cadaclysm_fem_options_init(_Out_ CadaclysmFemOptions *options)'),
+    node_fem_mesh: f('CadaclysmFemMesh *cadaclysm_node_fem_mesh(const CadaclysmScene *scene, uint32_t node, const double *placement, const CadaclysmFemOptions *options)'),
+    fem_mesh_free: f('void cadaclysm_fem_mesh_free(CadaclysmFemMesh *m)'),
+    fem_mesh_view: f('bool cadaclysm_fem_mesh_view(const CadaclysmFemMesh *m, _Out_ CadaclysmFemMeshView *out)'),
+    fem_mesh_edge: f('bool cadaclysm_fem_mesh_edge(const CadaclysmFemMesh *m, uint32_t i, _Out_ CadaclysmFemEdge *out)'),
+    fem_mesh_vertex: f('bool cadaclysm_fem_mesh_vertex(const CadaclysmFemMesh *m, uint32_t i, _Out_ CadaclysmFemVertex *out)'),
+    fem_mesh_open_edge: f('bool cadaclysm_fem_mesh_open_edge(const CadaclysmFemMesh *m, uint32_t i, _Out_ uint32_t *a, _Out_ uint32_t *b, _Out_ uint32_t *brep_edge)'),
+    fem_mesh_folded_edge: f('bool cadaclysm_fem_mesh_folded_edge(const CadaclysmFemMesh *m, uint32_t i, _Out_ uint32_t *a, _Out_ uint32_t *b, _Out_ uint32_t *brep_edge)'),
+    fem_mesh_msh_text: f('const char *cadaclysm_fem_mesh_msh_text(const CadaclysmFemMesh *m)'),
+    fem_mesh_save_msh: f('bool cadaclysm_fem_mesh_save_msh(const CadaclysmFemMesh *m, const char *path)'),
   };
   return library;
 }
@@ -421,14 +502,23 @@ function _floats(ptr, n) {
   if (ptr == null) return null;
   return n === 0 ? new Float32Array(0) : koffi.decode(ptr, 'float', n);
 }
-/** `n` uint32s at `ptr` as a fresh `Uint32Array`, or `null` for a null pointer. */
+/**
+ * `n` uint32s at `ptr` as a fresh `Uint32Array`, or `null` for a null pointer.
+ *
+ * A typed array in hand is handed straight back, as the kernel module's twin does
+ * for its wasm backend: here that is what lets `test/fem.test.js` push a C record
+ * built by hand through `_femEdgeOf`, the run arithmetic being reachable by no
+ * fixture in this repository.
+ */
 function _uint32s(ptr, n) {
   if (ptr == null) return null;
+  if (ArrayBuffer.isView(ptr)) return ptr;
   return n === 0 ? new Uint32Array(0) : koffi.decode(ptr, 'uint32_t', n);
 }
 /** `n` doubles at `ptr` as a fresh `Float64Array`, or `null` for a null pointer -- the f64 twin of `_floats`. */
 function _doubles(ptr, n) {
   if (ptr == null) return null;
+  if (ArrayBuffer.isView(ptr)) return ptr;
   return n === 0 ? new Float64Array(0) : koffi.decode(ptr, 'double', n);
 }
 
@@ -645,6 +735,15 @@ function _polylinesOf(raw) {
     _uint32s(raw.counts, raw.polyline_count) ?? new Uint32Array(0),
     raw.polyline_count, raw.vertex_count,
   );
+}
+
+/** A `CadaclysmEdgeColors` as `(number[] | null)[]`, one RGBA (or null, unstyled) per polyline. */
+function _edgeColoursOf(raw) {
+  if (!raw.rgba || !raw.count) return [];
+  const f = _floats(raw.rgba, raw.count * 4);
+  const out = [];
+  for (let i = 0; i < raw.count; i++) out.push(f[4 * i + 3] < 0 ? null : Array.from(f.slice(4 * i, 4 * i + 4)));
+  return out;
 }
 
 /** Rational cubic Bezier segments: 4 control points x 3 floats each, and 4 weights, per segment. */
@@ -882,6 +981,38 @@ class Placement {
   get transform() { return _rows(this.rawTransform); }
 }
 
+/**
+ * A rigid body of the file's mechanism: the nodes that move together when a
+ * joint moves it. From `Scene.links()`; borrows from the scene like `Node`.
+ */
+class Link {
+  constructor(scene, index) { this.scene = scene; this.index = index; }
+  equals(other) { return other instanceof Link && other.index === this.index && other.scene === this.scene; }
+  get name() { return _text(_lib().link_name(this.scene._handle, this.index)); }
+  /** The topmost node of each subtree this link moves, in node order: moving
+   *  these moves everything under them. */
+  nodes() {
+    const l = _lib(); const h = this.scene._handle;
+    const out = [];
+    for (let i = 0, n = l.link_node_count(h, this.index); i < n; i++) out.push(new Node(this.scene, l.link_node(h, this.index, i)));
+    return out;
+  }
+}
+
+/**
+ * A connection between two links of the file's mechanism. Topology only: how
+ * it moves is not read yet. From `Scene.joints()`.
+ */
+class Joint {
+  constructor(scene, index) { this.scene = scene; this.index = index; }
+  equals(other) { return other instanceof Joint && other.index === this.index && other.scene === this.scene; }
+  get name() { return _text(_lib().joint_name(this.scene._handle, this.index)); }
+  /** The link this joint starts at, in the file's order -- not a parent: a joint does not say which side moves. */
+  get start() { return new Link(this.scene, _lib().joint_start(this.scene._handle, this.index)); }
+  /** The link this joint ends at, in the file's order. */
+  get end() { return new Link(this.scene, _lib().joint_end(this.scene._handle, this.index)); }
+}
+
 // ---- nodes ------------------------------------------------------------------
 
 /**
@@ -966,6 +1097,58 @@ class Node {
   meshLod(level) { return _meshOf(_lib().node_mesh_lod(this.scene._handle, this.index, level)); }
   /** How far a level moved the surface, in the scene's units; what to pick levels by. */
   lodError(level) { return _lib().node_lod_error(this.scene._handle, this.index, level); }
+  /**
+   * This node's body meshed for a solver, as a `FemMesh`: nodes welded by bits,
+   * triangles wound outward, each node tagged with the lowest-dimension B-rep entity
+   * it lies on, and every crack reported rather than closed. **Owned by you** --
+   * `free()` it, or `using` it.
+   *
+   * `tolerance` is the chordal tolerance in model units, finite and above zero, and
+   * **it alone governs how closely the mesh follows the geometry**. `maxSize` is a
+   * size ceiling, finite and zero or more, 0 being no ceiling (curvature alone): **it
+   * bounds the boundary and targets the interior**, which is not a
+   * longest-element-edge guarantee. It adds boundary nodes without refining boundary
+   * geometry, and `FemMesh.longestEdge` is what the mesh actually came to -- the
+   * figure to check against it.
+   *
+   * Those two defaults are `FemOptions::default()`'s own, restated here so that the
+   * signature says what a caller gets. **They are not `mesh()`'s 0.05**: the
+   * library's struct is still filled by `cadaclysm_fem_options_init` first, so a
+   * field added to it later defaults without this line being touched; only these two
+   * are overwritten. `cadaclysm_blacksmith.js`'s `Solid.femMesh` restates the same
+   * pair.
+   *
+   * `placement` is 16 numbers, column-major, as `boundsPlaced` takes them (null for
+   * the identity), applied in double precision throughout. The kernel library's
+   * `Solid.femMesh` takes **twelve** instead -- origin, x, y, z -- so a caller moving
+   * between the two reformats the placement.
+   *
+   * **The space is the body's, not the scene's, for a B-rep -- and the scene's for a
+   * mesh**, which `FemMesh.fromMesh` is the flag for; read it there, because under a
+   * non-NATIVE convention the two are different spaces.
+   *
+   * Meshed in the part's own frame and following the hop from an instance to the
+   * shape it draws that `mesh()` follows, so a node instanced six times meshes once,
+   * where it is defined.
+   *
+   * **A cracked body is not a failure**: it comes back with `FemMesh.watertight`
+   * false and its cracks in `openEdges()` / `foldedEdges()`, and nothing is welded
+   * shut to make it look sound. Throws `CadaclysmError` for a tolerance or size the
+   * mesher refuses, a placement that is not 16 numbers or is not finite and
+   * invertible, a node with neither a brep nor a mesh (an assembly, a storey, a
+   * layer, an empty definition, a curve), and a body that meshes to no triangles at
+   * all.
+   *
+   * Prints the unlicensed notice once, here, and not again on either of `FemMesh`'s
+   * `.msh` calls.
+   */
+  femMesh(tolerance = 0.01, maxSize = 0.0, placement = null) {
+    const m = placement == null ? null : Float64Array.from(placement, Number);
+    if (m !== null && m.length !== 16) throw new CadaclysmError(`femMesh: a placement is 16 numbers, not ${m.length}`);
+    const pointer = _lib().node_fem_mesh(this.scene._handle, this.index, m, _femOptions(tolerance, maxSize));
+    if (!pointer) throw new CadaclysmError(_lastError() || 'fem_mesh');
+    return new FemMesh(pointer);
+  }
   surfaces() { return _surfacesOf(_lib().node_surfaces(this.scene._handle, this.index)); }
   /** Its exact B-rep, for `Solid.fromNode`, or null where it has none (a mesh, a curve, a CSG body, a JT or OpenSCAD part). */
   get brep() {
@@ -973,6 +1156,8 @@ class Node {
     return p ? new Brep(p) : null;
   }
   edges() { return _polylinesOf(_lib().node_edges(this.scene._handle, this.index)); }
+  /** One RGBA per polyline of edges(), null for an edge the file does not style; [] when nothing is. */
+  edgeColours() { return _edgeColoursOf(_lib().node_edge_colors(this.scene._handle, this.index)); }
   curves() { return _polylinesOf(_lib().node_curves(this.scene._handle, this.index)); }
   isocurves() { return _polylinesOf(_lib().node_isocurves(this.scene._handle, this.index)); }
   edgeBeziers() { return _beziersOf(_lib().node_edge_beziers(this.scene._handle, this.index)); }
@@ -1010,6 +1195,10 @@ class Node {
   get isMeshed() { return _lib().node_is_meshed(this.scene._handle, this.index); }
   /** Its face boundaries from its trimmed surfaces: the outline that costs no tessellation, in the surfaces' frame (`Scene.surfaceMatrix`); empty without surfaces. */
   surfaceEdges() { return _polylinesOf(_lib().node_surface_edges(this.scene._handle, this.index)); }
+  /** Its edges as the exact curves where the reader has them without meshing (a Rhino extrusion's rims are its profile), empty elsewhere: try it before `surfaceEdges`, whose trims are thinned to the mesh tolerance. The same segments as `edgeBeziers`, in the same space -- not the surfaces' frame. */
+  surfaceEdgeBeziers() { return _beziersOf(_lib().node_surface_edge_beziers(this.scene._handle, this.index)); }
+  /** edgeColours() for surfaceEdges(). */
+  surfaceEdgeColours() { return _edgeColoursOf(_lib().node_surface_edge_colors(this.scene._handle, this.index)); }
   /** Its isocurves from its trimmed surfaces, clipped to the trims, without meshing; in the surfaces' frame. */
   surfaceIsocurves() { return _polylinesOf(_lib().node_surface_isocurves(this.scene._handle, this.index)); }
   /** Where the segment `from`..`to` (in the surfaces' frame) first meets its surfaces, `[x, y, z]`, or null. */
@@ -1147,6 +1336,18 @@ class Scene {
   geometryDiagnostics() {
     const l = _lib(); const h = this._handle; const out = [];
     for (let i = 0, n = l.geometry_diagnostic_count(h); i < n; i++) out.push(_text(l.geometry_diagnostic(h, i)));
+    return out;
+  }
+  /** The file's mechanism: each rigid body, from `link_count`/`link_name`. */
+  links() {
+    const out = [];
+    for (let i = 0, n = _lib().link_count(this._handle); i < n; i++) out.push(new Link(this, i));
+    return out;
+  }
+  /** The file's mechanism: each connection between two links. */
+  joints() {
+    const out = [];
+    for (let i = 0, n = _lib().joint_count(this._handle); i < n; i++) out.push(new Joint(this, i));
     return out;
   }
   // -- nodes --
@@ -1309,6 +1510,334 @@ class Meshlets {
   [Symbol.for('nodejs.dispose')]() { this.free(); }
 }
 
+// ---- the FEM surface mesh ---------------------------------------------------
+
+/**
+ * One B-rep edge of a FEM mesh: the chain of nodes along it, and where that chain
+ * breaks. Plain data, copied out of the handle.
+ *
+ * `nodes` are this mesh's node indices in order along the edge, its end vertices
+ * included; a closed edge repeats no node. **`runs` says where the chain breaks**:
+ * read `nodes.subarray(runs[i], runs[i + 1])` (the last run to the end) as one
+ * polyline and join nothing across a run boundary -- `chains()` does exactly that.
+ * The two ends either side of a boundary are two points of the edge with no mesh
+ * edge between them: a crack along the edge, or a stretch of it the mesher sampled
+ * on one face only. `[0]` is the ordinary answer, and a caller reading `nodes` as
+ * one polyline without looking here silently jumps the gap.
+ *
+ * `faces` is `[faceA, faceB]` and `ends` is `[endA, endB]`, the second of each
+ * being `NONE` where there is none -- an open body's rim, or both ends at one
+ * vertex (a closed edge, a circle's rim, a full-turn seam). **`0` is a real face
+ * and a real vertex, not a sentinel.** Which end comes first is the first trim's
+ * direction and means nothing else: the pair bounds the edge, it does not orient
+ * it.
+ *
+ * `closed` where the nodes make one loop -- never where there is more than one
+ * run. `seam` where one face bounds the edge twice, a closed surface's seam rather
+ * than a real boundary; both `faces` are then that same face.
+ *
+ * `id` is **the body's own edge id**, not this mesh's edge index: `FemMesh.edges()`
+ * is a densely renumbered subset of the body's edges, ascending by id, with every
+ * edge collapsed to a point left out, so edge 0 of a STEP body's mesh routinely has
+ * an `id` in the hundreds. Everything else that names an edge here means the index
+ * -- a `nodeKind()` of 1 read through `nodeEntity()`, the third number of an
+ * `openEdges()` or `foldedEdges()` row, and the `edge_<i>` physical group of
+ * `mshText()` -- and this is the one way back from any of them to the topology the
+ * file wrote.
+ */
+class FemEdge {
+  constructor(id, nodes, runs, faces, ends, closed, seam) {
+    this.id = id; this.nodes = nodes; this.runs = runs;
+    this.faces = faces; this.ends = ends; this.closed = closed; this.seam = seam;
+  }
+  /**
+   * `nodes` cut into one polyline per run: `runs.length` of them, together holding
+   * every node once, and nothing joined across a boundary. Views into `nodes`
+   * (`subarray`), so they cost nothing.
+   */
+  chains() {
+    const out = [];
+    for (let i = 0; i < this.runs.length; i++) {
+      out.push(this.nodes.subarray(this.runs[i], i + 1 < this.runs.length ? this.runs[i + 1] : this.nodes.length));
+    }
+    return out;
+  }
+}
+
+/** A `CadaclysmFemEdge` as a `FemEdge`. */
+function _femEdgeOf(raw) {
+  return new FemEdge(
+    raw.id,
+    _uint32s(raw.nodes, raw.node_count) ?? new Uint32Array(0),
+    _uint32s(raw.runs, raw.run_count) ?? new Uint32Array(0),
+    [raw.face_a, raw.face_b], [raw.end_a, raw.end_b],
+    Boolean(raw.closed), Boolean(raw.seam),
+  );
+}
+
+/**
+ * One B-rep vertex of a FEM mesh: the node the mesh put there, if any, and where
+ * the topology says it is, if that is known. Plain data.
+ *
+ * `node` is the mesh node at this vertex, or `NONE` where the mesh has none there.
+ * **A sentinel here is ordinary, not a fault**: the analysis rebuilds a vertex
+ * wherever two trims meet, and a pole's polyline runs give a sphere 48 of them
+ * where the mesh has 2 points, so a caller walking these skips the sentinel rather
+ * than treating it as a gap.
+ *
+ * `point` is where the vertex is, in the same space and under the same placement as
+ * `FemMesh.nodes()` -- the file's own vertex rather than a mesh node, so the two can
+ * differ by the reader's rounding. **Meaningless unless `hasPosition`**: it is
+ * `[0, 0, 0]` then, which is a point no geometry has and which a solver would take
+ * for a node at the origin.
+ */
+class FemVertex {
+  constructor(node, point, hasPosition) { this.node = node; this.point = point; this.hasPosition = hasPosition; }
+}
+
+/** A `CadaclysmFemVertex` as a `FemVertex`. */
+function _femVertexOf(raw) {
+  return new FemVertex(raw.node, Float64Array.from(raw.point), Boolean(raw.has_position));
+}
+
+/**
+ * One flattened crack census, row by row: `read(i, a, b, edge)` fills three
+ * `Uint32Array`s of one and says whether it could. The shape `openEdges()` and
+ * `foldedEdges()` share, so the two cannot drift -- and a pure function, so
+ * `test/fem.test.js` can drive it over rows no fixture in this repository produces.
+ *
+ * `what` reads as prose here (`fem mesh open edge 3`), following `cadaclysm.py`'s own
+ * `_census`; the kernel module names the C entry point instead (`fem_mesh_open_edge 3`),
+ * following *its* Python twin. The two ABIs' wrappers word their refusals differently and
+ * each one matches its own side.
+ */
+function _censusRows(read, count, what) {
+  const a = new Uint32Array(1), b = new Uint32Array(1), edge = new Uint32Array(1);
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    if (!read(i, a, b, edge)) throw new CadaclysmError(_lastError() || `fem mesh ${what} ${i}`);
+    out.push([a[0], b[0], edge[0]]);
+  }
+  return out;
+}
+
+// The same backstop as a scene's and a `Meshlets`': a `FemMesh` the collector reaps
+// unfreed is freed then; `free()` is the contract.
+const _femFinalizer = typeof FinalizationRegistry === 'function'
+  ? new FinalizationRegistry((pointer) => { try { _lib().fem_mesh_free(pointer); } catch (_) { /* the process is going anyway */ } })
+  : null;
+
+/**
+ * One body meshed for a solver: nodes welded by bits, triangles wound outward,
+ * every node tagged with the lowest-dimension B-rep entity it lies on, and every
+ * crack reported rather than closed. Built by `Node.femMesh`, and **owned by
+ * you**: `free()` it, or `using` it where the runtime supports explicit resource
+ * management.
+ *
+ * **Every array here is a copy**, decoded at call time as `mesh()`'s typed arrays
+ * are, not a view into the library's memory -- this wrapper has no borrowed-view
+ * machinery at all. So an array in hand needs no care: it survives `free()`,
+ * `Scene.close()` and the collector, and nothing of the library's is left in it to
+ * go stale. The price is that each call copies again, so hold the array rather than
+ * asking twice in a loop.
+ *
+ * A handle rather than a snapshot all the same, because the *counts* and the
+ * records are read through it: a call on a freed mesh throws. The owner of the
+ * memory behind it is this object and not the scene -- `Scene.close()` neither
+ * frees a FEM mesh nor stales one, and meshing the body again does not either.
+ */
+class FemMesh {
+  constructor(pointer) {
+    this._pointer = pointer;
+    if (_femFinalizer) _femFinalizer.register(this, pointer, this);
+    // Read once, here. Every pointer in the view is built with the handle and good
+    // until it is freed (nothing in this ABI is built lazily), so asking again per
+    // accessor would be one C call per array for the same answer.
+    const raw = {};
+    if (!_lib().fem_mesh_view(pointer, raw)) {
+      const why = _lastError() || 'fem mesh view';
+      this.free();
+      throw new CadaclysmError(why);
+    }
+    this._raw = raw;
+  }
+  get _handle() { if (this._pointer === null) throw new CadaclysmError('fem mesh: freed'); return this._pointer; }
+  /** The view, the handle checked first: every pointer in it is the handle's, and a freed handle's point at nothing. */
+  get _live() { if (this._pointer === null) throw new CadaclysmError('fem mesh: freed'); return this._raw; }
+  /** Whether `free()` has run. */
+  get freed() { return this._pointer === null; }
+  /** Give the mesh back. Idempotent; the collector does it otherwise. Arrays already copied out are unaffected. */
+  free() {
+    if (this._pointer === null) return;
+    const p = this._pointer; this._pointer = null;
+    if (_femFinalizer) _femFinalizer.unregister(this);
+    _lib().fem_mesh_free(p);
+  }
+  [Symbol.for('nodejs.dispose')]() { this.free(); }
+  // -- the flat arrays, copied
+  /** Every node's position, three doubles each -- placed, and in the space `Node.femMesh` and `fromMesh` describe. */
+  nodes() { const raw = this._live; return _doubles(raw.nodes, raw.node_count * 3) ?? new Float64Array(0); }
+  /** Three node indices a triangle, wound outward. */
+  triangles() { const raw = this._live; return _uint32s(raw.triangles, raw.triangle_count * 3) ?? new Uint32Array(0); }
+  /** Which B-rep face each triangle lies on, one per triangle, into `faceCount`. */
+  triangleFace() { const raw = this._live; return _uint32s(raw.triangle_face, raw.triangle_count) ?? new Uint32Array(0); }
+  /** What each node lies on -- 0 a vertex, 1 an edge, 2 a face -- one per node: the lowest-dimension entity, as Gmsh classifies. `nodeEntity()` says which. */
+  nodeKind() { const raw = this._live; return _uint32s(raw.node_kind, raw.node_count) ?? new Uint32Array(0); }
+  /** Which vertex, edge or face each node lies on, by the matching `nodeKind()`: an index into `vertices()`, into `edges()`, or into the body's faces. */
+  nodeEntity() { const raw = this._live; return _uint32s(raw.node_entity, raw.node_count) ?? new Uint32Array(0); }
+  // -- the topology
+  /** The body's faces; `triangleFace()` and a `nodeKind()` of 2 index them. */
+  get faceCount() { return this._live.face_count; }
+  /**
+   * One `FemEdge` per B-rep edge, in the order a `nodeKind()` of 1 indexes them.
+   * Empty for a `fromMesh` body, which has no B-rep edges at all. **This list's own
+   * numbering, not the body's**: each `FemEdge.id` carries the body's own edge id.
+   */
+  edges() {
+    const l = _lib(), h = this._handle, out = [];
+    for (let i = 0, n = this._raw.edge_count; i < n; i++) {
+      const raw = {};
+      if (!l.fem_mesh_edge(h, i, raw)) throw new CadaclysmError(_lastError() || `fem mesh edge ${i}`);
+      out.push(_femEdgeOf(raw));
+    }
+    return out;
+  }
+  /** One `FemVertex` per B-rep vertex, in the order a `nodeKind()` of 0 indexes them. Empty for a `fromMesh` body. */
+  vertices() {
+    const l = _lib(), h = this._handle, out = [];
+    for (let i = 0, n = this._raw.vertex_count; i < n; i++) {
+      const raw = {};
+      if (!l.fem_mesh_vertex(h, i, raw)) throw new CadaclysmError(_lastError() || `fem mesh vertex ${i}`);
+      out.push(_femVertexOf(raw));
+    }
+    return out;
+  }
+  /**
+   * Every crack, as `[a, b, brepEdge]`: a directed mesh edge `(a, b)` with no
+   * `(b, a)`, and the B-rep edge both nodes lie on or `NONE` where they share none.
+   *
+   * **Empty unless the body's topology is closed -- for a B-rep body**, whose mesh
+   * is otherwise not asked about at all: such a body reports `watertight` false with
+   * this and `foldedEdges()` both empty, and *that trio together* says "not asked",
+   * not "nothing found".
+   *
+   * **A `fromMesh` body is the other case, and the opposite one.** A bare mesh
+   * carries no topology to say whether it ought to close, so its census always runs
+   * over the welded triangles: an open render mesh reports its cracks here with
+   * `watertight` false, a closed one reports `watertight` true, and an empty census
+   * there really does mean "nothing found".
+   */
+  openEdges() {
+    const l = _lib(), h = this._handle;
+    return _censusRows((i, a, b, e) => l.fem_mesh_open_edge(h, i, a, b, e), this._live.open_edge_count, 'open edge');
+  }
+  /**
+   * Every fold, as `openEdges()` reports a crack: a directed mesh edge used by more
+   * than one triangle.
+   *
+   * **A body can be folded without being open**, and the closure census's own pinned
+   * rows are folds rather than open cracks -- a solid no thicker than a line leaves
+   * no hole for an open edge to find. A caller that checks only `openEdges()` calls
+   * such a body sound.
+   */
+  foldedEdges() {
+    const l = _lib(), h = this._handle;
+    return _censusRows((i, a, b, e) => l.fem_mesh_folded_edge(h, i, a, b, e), this._live.folded_edge_count, 'folded edge');
+  }
+  // -- the summary
+  /**
+   * The welded mesh closes -- and, for a B-rep body, so does the topology behind it.
+   * **False for every B-rep body whose topology is not closed**, whose mesh is then
+   * not asked about at all. A `fromMesh` body has no topology to ask of, so this says
+   * only that its triangles close; `openEdges()` says what an empty census beside
+   * each does and does not mean.
+   */
+  get watertight() { return Boolean(this._live.watertight); }
+  /**
+   * This came from the scene's own mesh rather than from a brep: one face, every node
+   * on face 0, no edges and no vertices.
+   *
+   * **It is also which space the mesh is in.** A B-rep body's FEM mesh is in the
+   * file's own units and axes, whatever `Convention` the scene was opened with,
+   * because it is taken off the brep. A node with no brep falls back to the scene's
+   * mesh, which *is* converted, so it comes back in the scene's convention, wound
+   * counter-clockwise about the outward normal even where the convention winds the
+   * other way. Under a non-NATIVE convention those are two different spaces.
+   *
+   * **And it is which contract `watertight`, `openEdges()` and `foldedEdges()` are
+   * reporting under**: read `openEdges()`.
+   */
+  get fromMesh() { return Boolean(this._live.from_mesh); }
+  /** The smallest interior angle of any triangle, in degrees. */
+  get minAngle() { return this._live.min_angle; }
+  /** The triangle with that angle: an index into `triangles()`. */
+  get worstTriangle() { return this._live.worst_triangle; }
+  /**
+   * The longest triangle edge, placed. **The figure to check against
+   * `Node.femMesh`'s `maxSize`, and the only one that says what the mesh actually
+   * is**: `maxSize` bounds the boundary segments and merely targets the interior, and
+   * one small enough to hit the mesher's own piece and station ceilings is not
+   * honoured at all.
+   */
+  get longestEdge() { return this._live.longest_edge; }
+  // -- out
+  /**
+   * The mesh as Gmsh 4.1 ASCII `.msh` text: an entity per B-rep vertex, edge and
+   * face, a volume where the body closes, and a physical group naming each.
+   *
+   * **The library's text is borrowed from this handle** and replaced by the next
+   * call on it -- this ABI's convention, and the opposite of the kernel library's,
+   * where `cadaclysm_blacksmith_fem_mesh_msh_text` hands over an owned string to
+   * free. Nothing here has to free anything either way: koffi copies a `char *` into
+   * JavaScript on the way out, so what comes back is a string of your own that
+   * outlives the handle.
+   *
+   * **No unlicensed notice is printed here.** `Node.femMesh` gave it once when the
+   * mesh was built, and this ABI deliberately does not repeat it on either `.msh`
+   * call -- where the kernel library notices on both of its writers and *not* on its
+   * constructor. Each matches its own siblings, so moving the call to look like the
+   * other side would break a convention.
+   *
+   * Throws `CadaclysmError` for a mesh the writer refuses, naming the field it cannot
+   * honour, and for a freed handle.
+   */
+  mshText() {
+    const raw = _lib().fem_mesh_msh_text(this._handle);
+    if (raw == null) throw new CadaclysmError(_lastError() || 'msh text');
+    return String(raw);
+  }
+  /**
+   * `mshText()` written to `filePath` by the library itself: the same bytes from the
+   * same writer, straight to the file rather than through the borrowed slot, so a
+   * `mshText()` call on this handle from another thread cannot free the text under
+   * the write. No notice here either; see `mshText`.
+   */
+  saveMsh(filePath) {
+    if (!_lib().fem_mesh_save_msh(this._handle, String(filePath))) {
+      throw new CadaclysmError(_lastError() || `could not write ${filePath}`);
+    }
+  }
+  toString() {
+    if (this.freed) return 'FemMesh(freed)';
+    const raw = this._raw;
+    return `FemMesh(nodes=${raw.node_count}, triangles=${raw.triangle_count}, watertight=${Boolean(raw.watertight)}, fromMesh=${Boolean(raw.from_mesh)})`;
+  }
+}
+
+/** A `CadaclysmFemOptions` object: the library's own defaults, then `tolerance` and `maxSize`. */
+function _femOptions(tolerance, maxSize) {
+  const o = {};
+  // `init` writes `sizeof(CadaclysmFemOptions)` bytes as the *library* knows that
+  // type, into the struct declared above -- which is why `tests/bindings.rs` pins
+  // the two field for field. `size` is then set to this declaration's own sizeof,
+  // which is what the growth rule asks of a caller.
+  _lib().fem_options_init(o);
+  o.size = koffi.sizeof(CadaclysmFemOptions);
+  o.tolerance = Number(tolerance);
+  o.max_size = Number(maxSize);
+  return o;
+}
+
 // ---- the pickers -------------------------------------------------------------
 
 /** The library's own file dialog; null if cancelled or no dialog is available. Blocks. */
@@ -1457,7 +1986,9 @@ module.exports = {
   libraryPath, version, buildDate, license, licenseInfo, licenseNoticeCount, meshFormats, formats, lodLevels,
   svgOptionsDefaults,
   _lib, _text, _lastError, _floats, _uint32s, _doubles, _searchedPaths, _notFoundMessage,
-  Bounds, Bounds64, Attribute, Brep, Placement, Node, Scene, open, openMemory, _openRaw, openAsync, openMemoryAsync, declaredSchema, resolveSchema, _options, _rows, _attribute,
+  Bounds, Bounds64, Attribute, Brep, Placement, Node, Link, Joint, Scene, open, openMemory, _openRaw, openAsync, openMemoryAsync, declaredSchema, resolveSchema, _options, _rows, _attribute,
   Mesh, Mesh64, Polylines, Beziers, Beziers64, Face, Surfaces, Collision, CollisionHull, Meshlets, pickFile, pickSave,
+  FemMesh, FemEdge, FemVertex,
   _meshOf, _mesh64Of, _polylinesOf, _beziersOf, _beziers64Of, _surfacesOf, _svgOptions,
+  _femEdgeOf, _femVertexOf, _censusRows, _femOptions,
 };

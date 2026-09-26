@@ -75,8 +75,40 @@ if(CADACLYSM_LIBRARY_DIR)
   cadaclysm_smoke(cadaclysm_smoke 1)
   cadaclysm_smoke(cadaclysm_smoke_fast 0)
 
+  # The FEM records over rows built by hand: the branches no fixture in this repo
+  # reaches. It calls nothing in either library, but it includes both headers, so it
+  # links them as the header tests do and takes the DLLs beside it.
+  add_executable(cadaclysm_fem_test tests/fem_test.cpp)
+  target_link_libraries(cadaclysm_fem_test PRIVATE cadaclysm::blacksmith)
+  add_custom_command(TARGET cadaclysm_fem_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_fem_test>")
+  add_test(NAME fem_records COMMAND cadaclysm_fem_test)
+
+  # Assembly, Solid::named and Solid::name, over _shared_assembly()'s shape -- needs a
+  # license, as the smoke does, but no sample file.
+  add_executable(cadaclysm_assembly_test tests/assembly_test.cpp)
+  target_link_libraries(cadaclysm_assembly_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_assembly_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_assembly_test>")
+  add_test(NAME assembly COMMAND cadaclysm_assembly_test ${CADACLYSM_LICENSE})
+
   add_library(cadaclysm_header_reader OBJECT tests/include_reader.cpp)
   target_link_libraries(cadaclysm_header_reader PRIVATE cadaclysm::reader)
+
+  # Scene::links() / joints(): the mechanism facts against samples/mechanism.stp,
+  # found beside whichever sample CADACLYSM_SAMPLE names.
+  if(CADACLYSM_SAMPLE)
+    add_executable(cadaclysm_kinematics_test tests/kinematics_test.cpp)
+    target_link_libraries(cadaclysm_kinematics_test PRIVATE cadaclysm::reader)
+    add_custom_command(TARGET cadaclysm_kinematics_test POST_BUILD
+      COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+              "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE_DIR:cadaclysm_kinematics_test>")
+    add_test(NAME kinematics COMMAND cadaclysm_kinematics_test "${CADACLYSM_SAMPLE}")
+  endif()
 
   add_library(cadaclysm_header_kernel OBJECT tests/include_kernel.cpp)
   target_link_libraries(cadaclysm_header_kernel PRIVATE cadaclysm::blacksmith)

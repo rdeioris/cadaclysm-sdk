@@ -1,6 +1,6 @@
 //! The kernel: `CadaclysmBlacksmith` (the library's own functions), `CadaclysmFrame`, `CadaclysmProfile`,
-//! `CadaclysmPath`, `CadaclysmSweepPath`, `CadaclysmSolid`, `CadaclysmEdge`, `CadaclysmHit`, `CadaclysmSpot` and
-//! `CadaclysmWorkplane`.
+//! `CadaclysmPath`, `CadaclysmSweepPath`, `CadaclysmSolid`, `CadaclysmAssembly`, `CadaclysmEdge`, `CadaclysmHit`,
+//! `CadaclysmSpot`, `CadaclysmWorkplane` and `CadaclysmSolidFemMesh`.
 //!
 //! The kernel works in doubles, in the model's own units (millimetres, as a rule), so
 //! every point it takes is a `Variant`: a `Vector2`/`Vector3` (or the `i` kinds), or an
@@ -15,6 +15,8 @@
 //!
 //! Solids are immutable: every operation returns a new `CadaclysmSolid`, or `null` with the
 //! reason in `Cadaclysm.last_error()`.
+use std::cell::RefCell;
+
 use cadaclysm_sdk as sdk;
 use godot::classes::ArrayMesh;
 use godot::obj::GdRef;
@@ -155,7 +157,17 @@ fn indices(v: &Variant, what: &str) -> Option<Vec<u32>> {
     }
 }
 
-/// A frame: a `CadaclysmFrame`, a `Transform3D`, twelve numbers or four triples.
+/// A frame: a `CadaclysmFrame`, a `Transform3D`, twelve numbers or four triples. As
+/// Python's `_frame` -- twelve raw numbers go through **unchecked**
+/// (`bs::Frame::raw_unchecked`), the kernel's own call left to refuse them: only
+/// `CadaclysmFrame.create` (and `.at`) checks square, unit, right-handed axes at
+/// construction. `CadaclysmFrame.of` re-checks a raw array itself, on top of this
+/// helper, since it -- unlike every other frame-taking call -- **is** the checked
+/// constructor for one; see its own doc. This is what lets spec §5 fact 7 (a mirrored
+/// raw frame refused "right-handed and orthonormal", in the library's own words) reach
+/// `CadaclysmAssembly.place` at all -- a checked path would catch it first, as
+/// `CadaclysmFrame.create` does, in this crate's own "left-handed" wording, and the
+/// library's message would never be seen.
 fn frame(v: &Variant, what: &str) -> Option<bs::Frame> {
     if let Ok(frame) = v.try_to::<Gd<CadaclysmFrame>>() {
         return Some(frame.bind().frame);
@@ -167,7 +179,7 @@ fn frame(v: &Variant, what: &str) -> Option<bs::Frame> {
         Some(values) if values.len() == 12 => {
             let mut raw = [0.0; 12];
             raw.copy_from_slice(&values);
-            ok(bs::Frame::of(raw))
+            Some(bs::Frame::raw_unchecked(raw))
         }
         Some(values) => fail(format!("{what}: expected 12 numbers, got {}", values.len())),
         None => fail(format!("{what}: expected a CadaclysmFrame, a Transform3D or 12 numbers, not {v}")),
@@ -688,10 +700,16 @@ impl CadaclysmFrame {
     }
 
     /// Twelve numbers -- origin, x, y, z -- (or four triples, or a `Transform3D`) checked
-    /// as `create` checks them.
+    /// as `create` checks them. `frame()` itself reads a raw array **unchecked**
+    /// (`bs::Frame::raw_unchecked`, so a kernel call taking a frame is refused in the
+    /// kernel's own words, spec §5 fact 7) -- `of` re-validates through the checked
+    /// `bs::Frame::of` before wrapping, since unlike every other frame-taking call this
+    /// one **is** the checked constructor for a raw array, as Python's `Frame.of` is
+    /// (it builds through the checked `Frame(...)`).
     #[func]
     fn of(raw: Variant) -> Option<Gd<CadaclysmFrame>> {
         let f = frame(&raw, "Frame.of")?;
+        ok(bs::Frame::of(f.raw()))?;
         clear_error();
         Some(CadaclysmFrame::wrap(f))
     }
@@ -2051,6 +2069,8 @@ pub struct CadaclysmSolid {
     manifold: PhantomVar<VarDictionary>,
     #[var(get = get_closed, no_set)]
     closed: PhantomVar<bool>,
+    #[var(get = get_name, no_set)]
+    name: PhantomVar<GString>,
 }
 
 type Made = sdk::Result<bs::Solid>;
@@ -2065,6 +2085,7 @@ impl CadaclysmSolid {
             colour: PhantomVar::default(),
             manifold: PhantomVar::default(),
             closed: PhantomVar::default(),
+            name: PhantomVar::default(),
         })
     }
 
@@ -2416,6 +2437,12 @@ impl CadaclysmSolid {
         self.then(|s| s.translate(dx, dy, dz))
     }
 
+    /// This solid scaled by `factor` about the origin: every length times `factor`, exactly.
+    #[func]
+    fn scaled(&self, factor: f64) -> Option<Gd<CadaclysmSolid>> {
+        self.then(|s| s.scaled(factor))
+    }
+
     /// This solid turned `radians` about the axis through `axis_point` along
     /// `axis_direction`.
     #[func]
@@ -2429,6 +2456,22 @@ impl CadaclysmSolid {
     fn mirror(&self, plane: Variant) -> Option<Gd<CadaclysmSolid>> {
         let f = frame(&plane, "mirror: plane")?;
         self.then(|s| s.mirror(&f))
+    }
+
+    // -- naming
+
+    /// This solid, named `name` -- see `name`. Refused for an empty name.
+    #[func]
+    fn named(&self, name: GString) -> Option<Gd<CadaclysmSolid>> {
+        self.then(|s| s.named(&name.to_string()))
+    }
+
+    /// This solid's name, or `""` where it has none -- Godot has no null string, unlike
+    /// `bs::Solid::name`'s own `Option<String>`, so a closed solid (also `""` here) and
+    /// an unnamed one read the same; `CadaclysmSolid.closed` tells them apart.
+    #[func]
+    fn get_name(&self) -> GString {
+        gs(self.held().and_then(|s| s.name()).unwrap_or_default())
     }
 
     // -- combining
@@ -2820,6 +2863,51 @@ impl CadaclysmSolid {
         Some(CadaclysmMesh::wrap(mesh.copy()))
     }
 
+    /// This solid meshed for a solver, as a `CadaclysmSolidFemMesh`: nodes welded by bits,
+    /// triangles wound outward, every node tagged with the lowest-dimension B-rep entity
+    /// it lies on, and every crack reported rather than closed. `null` for a tolerance or
+    /// size the mesher refuses, a closed solid it cannot mesh, or one that meshes to no
+    /// triangles; `Cadaclysm.last_error()` says which.
+    ///
+    /// `tolerance` is how far the mesh may stray from the exact surface, and `max_size` an
+    /// upper bound on element size (`0` for none). **Both default to
+    /// `FemOptions::default()`'s own figures, `0.01` and `0`** -- not to the `0.05`
+    /// `CadaclysmBlacksmith.default_tolerance` gives every neighbouring call here. Neither
+    /// is checked by this extension: both go through as given and the library refuses what
+    /// it will not take, in its own words. A solver mesh nearer its curve lowers the
+    /// `tolerance`, where `max_size` only makes the elements smaller;
+    /// `CadaclysmSolidFemMesh.longest_edge` is what the mesh came to.
+    ///
+    /// **Unlike `mesh`, this does not touch the solid's tessellation cache**: the FEM mesh
+    /// is a handle of its own, so meshing the solid again at another tolerance leaves it
+    /// untouched, and the solid stays free to be meshed, written or combined while one is
+    /// held.
+    ///
+    /// `fem_mesh_placed` is the same call with a placement: a frame, as every frame
+    /// argument here -- a `CadaclysmFrame`, a `Transform3D`, **twelve** numbers or four
+    /// triples. The reader's `CadaclysmNode.fem_mesh_placed` takes **sixteen**,
+    /// column-major, so a caller moving between the two reformats it.
+    ///
+    /// **A cracked solid is not a failure**: it comes back with
+    /// `CadaclysmSolidFemMesh.watertight` false and its cracks in `open_edges` and
+    /// `folded_edges`. **No unlicensed notice here**: this library prints it on
+    /// `CadaclysmSolidFemMesh.msh_text` and `save_msh`, noticing on its writers where the
+    /// reader library notices in its own constructor.
+    #[func]
+    fn fem_mesh(&self, #[opt(default = 0.01)] tolerance: f64, #[opt(default = 0.0)] max_size: f64) -> Option<Gd<CadaclysmSolidFemMesh>> {
+        let mesh = ok(self.held()?.fem_mesh(tolerance, max_size, None))?;
+        Some(CadaclysmSolidFemMesh::wrap(mesh))
+    }
+
+    /// `fem_mesh`, placed: a frame -- a `CadaclysmFrame`, a `Transform3D`, twelve numbers
+    /// or four triples. See there.
+    #[func]
+    fn fem_mesh_placed(&self, tolerance: f64, max_size: f64, placement: Variant) -> Option<Gd<CadaclysmSolidFemMesh>> {
+        let placed = frame(&placement, "fem_mesh_placed: placement")?;
+        let mesh = ok(self.held()?.fem_mesh(tolerance, max_size, Some(&placed)))?;
+        Some(CadaclysmSolidFemMesh::wrap(mesh))
+    }
+
     /// Its feature edges at `tolerance`, as polylines.
     #[func]
     fn edge_polylines(&mut self, #[opt(default = 0.05)] tolerance: f64) -> Option<Gd<CadaclysmPolylines>> {
@@ -2952,6 +3040,128 @@ impl CadaclysmSolid {
     }
 }
 
+// ---- CadaclysmAssembly --------------------------------------------------------------------
+
+/// A mutable tree of placements: a name, and zero or more solids or other assemblies
+/// placed in it at a frame. Placing shares rather than copies, as `bs::Assembly` -- a
+/// later placement on an already-placed assembly shows up wherever it sits. `new` is
+/// GDScript's own reserved name, so the constructor is `create`, as `CadaclysmFrame`'s
+/// is.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmAssembly {
+    base: Base<RefCounted>,
+    assembly: Option<bs::Assembly>,
+    #[var(get = get_name, no_set)]
+    name: PhantomVar<GString>,
+}
+
+impl CadaclysmAssembly {
+    fn made(result: sdk::Result<bs::Assembly>) -> Option<Gd<CadaclysmAssembly>> {
+        let assembly = ok(result)?;
+        Some(Gd::from_init_fn(|base| CadaclysmAssembly { base, assembly: Some(assembly), name: PhantomVar::default() }))
+    }
+
+    fn held(&self) -> Option<&bs::Assembly> {
+        match &self.assembly {
+            Some(assembly) => Some(assembly),
+            None => fail("assembly: closed"),
+        }
+    }
+
+    /// This assembly's STEP text; `schema`/`unit` as `CadaclysmSolid.step_text` takes them.
+    fn own_step_text(&self, schema: &GString, unit: &GString) -> Option<String> {
+        let unit = step_unit(unit)?;
+        let schema = schema_arg(schema);
+        ok(self.held()?.step_text(schema.as_deref(), unit))
+    }
+
+    /// `thing` (a `CadaclysmSolid` or a `CadaclysmAssembly`) placed at `f`, named `name`
+    /// where it is not empty -- Godot has no null default, so `place` reads `""` as
+    /// Python's `name=None`. Tried as a solid first, then an assembly, since a
+    /// `Gd<CadaclysmSolid>` never casts to `Gd<CadaclysmAssembly>` or back (`try_to`
+    /// checks the Godot class, not just the Rust type), so the order between the two
+    /// does not matter -- exactly one ever matches.
+    fn placed(&self, thing: &Variant, f: &bs::Frame, name: Option<&str>) -> Option<String> {
+        let assembly = self.held()?;
+        if let Ok(solid) = thing.try_to::<Gd<CadaclysmSolid>>() {
+            let solid = solid.bind();
+            return ok(assembly.place_solid(solid.held()?, f, name));
+        }
+        if let Ok(placed) = thing.try_to::<Gd<CadaclysmAssembly>>() {
+            let placed = placed.bind();
+            return ok(assembly.place_assembly(placed.held()?, f, name));
+        }
+        fail(format!("place: expected a CadaclysmSolid or a CadaclysmAssembly, not {thing}"))
+    }
+}
+
+#[godot_api]
+impl CadaclysmAssembly {
+    /// A new, empty assembly called `name`. Refused for an empty name.
+    #[func]
+    fn create(name: GString) -> Option<Gd<CadaclysmAssembly>> {
+        Self::made(bs::Assembly::new(&name.to_string()))
+    }
+
+    /// This assembly's own name, given when it was made.
+    #[func]
+    fn get_name(&self) -> GString {
+        gs(self.held().map(|a| a.name()).unwrap_or_default())
+    }
+
+    /// Place `thing` (a `CadaclysmSolid` or another `CadaclysmAssembly`) at `frame` in
+    /// this assembly, called `name` -- or, `name` left `""`, `thing`'s own name (its
+    /// `CadaclysmSolid.name`, `"part"` for an unnamed one, or the placed assembly's own
+    /// name), numbered past any already taken here (`"bolt"`, `"bolt 2"`, ...). `frame`
+    /// must be right-handed and orthonormal, or the call fails. An explicit `name`
+    /// already taken here fails. Placing an assembly that is this one, or anywhere above
+    /// this one in the tree already, fails naming the cycle. Returns the placement's
+    /// name, or `""` on failure -- check `Cadaclysm.last_error()`.
+    #[func]
+    fn place(&self, thing: Variant, frame: Variant, #[opt(default = "")] name: GString) -> GString {
+        let Some(f) = self::frame(&frame, "place: frame") else { return GString::new() };
+        let name = name.to_string();
+        let name = (!name.is_empty()).then_some(name.as_str());
+        gs(self.placed(&thing, &f, name).unwrap_or_default())
+    }
+
+    /// This assembly, and everything placed under it, as one STEP file: this assembly
+    /// the root product, each sub-assembly and each distinct part written once, each
+    /// placement an occurrence named as it was placed. `schema` and `unit` as
+    /// `CadaclysmSolid.step_text` takes them. `""` on failure -- an assembly reachable
+    /// from this one, this one included, that places nothing fails, since a reader would
+    /// never show it.
+    #[func]
+    fn step_text(&self, #[opt(default = "")] schema: GString, #[opt(default = "mm")] unit: GString) -> GString {
+        gs(self.own_step_text(&schema, &unit).unwrap_or_default())
+    }
+
+    /// This assembly written to a STEP file at `path`.
+    #[func]
+    fn step(&self, path: GString, #[opt(default = "")] schema: GString, #[opt(default = "mm")] unit: GString) -> bool {
+        match self.own_step_text(&schema, &unit) {
+            Some(text) => write_text(&path, text),
+            None => false,
+        }
+    }
+
+    /// This assembly as a reader `CadaclysmScene`, through STEP text: see
+    /// `CadaclysmSolid.to_scene`.
+    #[func]
+    fn to_scene(&self, #[opt(default = "")] schema: GString) -> Option<Gd<CadaclysmScene>> {
+        let schema = schema_arg(&schema);
+        ok(self.held()?.to_scene(schema.as_deref())).map(CadaclysmScene::wrap)
+    }
+
+    /// Free it now; later calls fail with "closed". Does not free what was placed in it
+    /// if that is still reachable from somewhere else.
+    #[func]
+    fn close(&mut self) {
+        self.assembly = None;
+    }
+}
+
 // ---- CadaclysmWorkplane ------------------------------------------------------------------
 
 /// The fluent chain: a frame, the solid built so far, and the face last picked. A
@@ -3010,10 +3220,14 @@ impl CadaclysmWorkplane {
         CadaclysmWorkplane::start(bs::Frame::yz([0.0; 3]), None)
     }
 
-    /// A chain on `frame` (a `CadaclysmFrame`, a `Transform3D` or twelve numbers).
+    /// A chain on `frame` (a `CadaclysmFrame`, a `Transform3D` or twelve numbers). Re-checked
+    /// through `bs::Frame::of`, same as `CadaclysmFrame.of`: `self::frame` itself reads raw
+    /// numbers unchecked, and `get_frame` hands the held frame back out as a `CadaclysmFrame`,
+    /// so a frame built here must be as checked as one built any other way.
     #[func]
     fn on(frame: Variant) -> Option<Gd<CadaclysmWorkplane>> {
         let f = self::frame(&frame, "Workplane.on: frame")?;
+        ok(bs::Frame::of(f.raw()))?;
         clear_error();
         Some(CadaclysmWorkplane::start(f, None))
     }
@@ -3103,6 +3317,285 @@ impl CadaclysmWorkplane {
         match &self.solid {
             Some(solid) => Some(solid.clone()),
             None => fail("solid: nothing was built (BuildError::Empty)"),
+        }
+    }
+}
+
+// ---- CadaclysmSolidFemMesh ---------------------------------------------------------------
+
+/// One solid meshed for a solver: nodes welded by bits, triangles wound outward, every
+/// node tagged with the lowest-dimension B-rep entity it lies on, and every crack
+/// reported rather than closed. What `CadaclysmSolid.fem_mesh` returns.
+///
+/// **A handle of its own.** `CadaclysmSolid.close` neither frees it nor stales it, and
+/// neither does meshing the solid again at another tolerance -- unlike
+/// `CadaclysmSolid.mesh`, whose triangles come out of the solid's tessellation cache.
+/// `release()` hands it back early; letting the last reference go does the same.
+///
+/// **A class of its own, spelled `CadaclysmSolidFemMesh`**, because Godot's class names
+/// are one global namespace and the reader library has a FEM mesh too
+/// (`CadaclysmFemMesh`, off `CadaclysmNode.fem_mesh`). The two carry the same properties,
+/// hand over the same Dictionaries, and read the same on both pages; they are two classes
+/// here for the same reason they are two types in every other wrapper -- two libraries,
+/// two handles -- and the differences between the two ABIs are noted where they bite
+/// (`msh_text`).
+///
+/// Every array is a copy, as `CadaclysmMesh`'s are, so nothing taken from it can go
+/// stale; `nodes` and a vertex's `point` come over as **doubles**, the kernel working in
+/// doubles and Godot's `Vector3` holding floats.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmSolidFemMesh {
+    mesh: RefCell<Option<bs::FemMesh>>,
+    #[var(get = get_nodes, no_set)]
+    nodes: PhantomVar<PackedFloat64Array>,
+    #[var(get = get_triangles, no_set)]
+    triangles: PhantomVar<PackedInt32Array>,
+    #[var(get = get_triangle_face, no_set)]
+    triangle_face: PhantomVar<PackedInt32Array>,
+    #[var(get = get_node_kind, no_set)]
+    node_kind: PhantomVar<PackedInt32Array>,
+    #[var(get = get_node_entity, no_set)]
+    node_entity: PhantomVar<PackedInt32Array>,
+    #[var(get = get_face_count, no_set)]
+    face_count: PhantomVar<i64>,
+    #[var(get = get_edges, no_set)]
+    edges: PhantomVar<Array<VarDictionary>>,
+    #[var(get = get_vertices, no_set)]
+    vertices: PhantomVar<Array<VarDictionary>>,
+    #[var(get = get_open_edges, no_set)]
+    open_edges: PhantomVar<Array<PackedInt64Array>>,
+    #[var(get = get_folded_edges, no_set)]
+    folded_edges: PhantomVar<Array<PackedInt64Array>>,
+    #[var(get = get_watertight, no_set)]
+    watertight: PhantomVar<bool>,
+    #[var(get = get_from_mesh, no_set)]
+    from_mesh: PhantomVar<bool>,
+    #[var(get = get_min_angle, no_set)]
+    min_angle: PhantomVar<f64>,
+    #[var(get = get_worst_triangle, no_set)]
+    worst_triangle: PhantomVar<i64>,
+    #[var(get = get_longest_edge, no_set)]
+    longest_edge: PhantomVar<f64>,
+    #[var(get = get_released, no_set)]
+    released: PhantomVar<bool>,
+}
+
+impl CadaclysmSolidFemMesh {
+    fn wrap(mesh: bs::FemMesh) -> Gd<CadaclysmSolidFemMesh> {
+        Gd::from_object(CadaclysmSolidFemMesh {
+            mesh: RefCell::new(Some(mesh)),
+            nodes: PhantomVar::default(),
+            triangles: PhantomVar::default(),
+            triangle_face: PhantomVar::default(),
+            node_kind: PhantomVar::default(),
+            node_entity: PhantomVar::default(),
+            face_count: PhantomVar::default(),
+            edges: PhantomVar::default(),
+            vertices: PhantomVar::default(),
+            open_edges: PhantomVar::default(),
+            folded_edges: PhantomVar::default(),
+            watertight: PhantomVar::default(),
+            from_mesh: PhantomVar::default(),
+            min_angle: PhantomVar::default(),
+            worst_triangle: PhantomVar::default(),
+            longest_edge: PhantomVar::default(),
+            released: PhantomVar::default(),
+        })
+    }
+
+    /// `f` on the mesh, its answer **by value**: the SDK lends its arrays from the handle,
+    /// so a getter copies inside the closure and the borrow ends with it. The reader's
+    /// `CadaclysmFemMesh::with` is the same shape over the other library's handle.
+    fn with<R>(&self, f: impl FnOnce(&bs::FemMesh) -> R) -> Option<R> {
+        match self.mesh.borrow().as_ref() {
+            Some(mesh) => Some(f(mesh)),
+            None => fail("the FEM mesh was released"),
+        }
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmSolidFemMesh {
+    fn to_string(&self) -> GString {
+        let text = self.with(|m| {
+            format!("FemMesh(nodes={}, triangles={}, watertight={}, from_mesh={})", m.nodes().len(), m.triangles().len(), m.watertight(), m.from_mesh())
+        });
+        // Clears the error for the reason `CadaclysmFemMesh::to_string` gives, and at the
+        // same cost: these two are the only `to_string`s in the module that do.
+        clear_error();
+        gs(text.unwrap_or_else(|| "FemMesh(released)".to_string()))
+    }
+}
+
+#[godot_api]
+impl CadaclysmSolidFemMesh {
+    /// Every node's position, three doubles a node: placed by
+    /// `CadaclysmSolid.fem_mesh_placed`'s frame, in the solid's own coordinates otherwise.
+    /// Every node is used by at least one triangle.
+    #[func]
+    fn get_nodes(&self) -> PackedFloat64Array {
+        self.with(|m| reader::fem_nodes(m.nodes())).unwrap_or_default()
+    }
+
+    /// Three node indices a triangle, wound outward -- a mirroring frame is wound back.
+    /// Not turned round for Godot: these are a solver's triangles, not a mesh to draw.
+    #[func]
+    fn get_triangles(&self) -> PackedInt32Array {
+        self.with(|m| reader::fem_triangles(m.triangles())).unwrap_or_default()
+    }
+
+    /// Which face each triangle lies on, one per triangle: the same faces
+    /// `CadaclysmSolid.face_kind` names.
+    #[func]
+    fn get_triangle_face(&self) -> PackedInt32Array {
+        self.with(|m| reader::fem_indices(m.triangle_face())).unwrap_or_default()
+    }
+
+    /// What each node lies on -- `0` a B-rep vertex, `1` an edge, `2` a face -- one per
+    /// node: the lowest-dimension entity it lies on, which is the `.msh` format's own
+    /// classification rule. `node_entity` says which entity of that kind.
+    #[func]
+    fn get_node_kind(&self) -> PackedInt32Array {
+        self.with(|m| reader::fem_indices(m.node_kind())).unwrap_or_default()
+    }
+
+    /// Which vertex, edge or face each node lies on, read by the matching `node_kind`: an
+    /// index into `vertices`, into `edges`, or into the solid's faces.
+    #[func]
+    fn get_node_entity(&self) -> PackedInt32Array {
+        self.with(|m| reader::fem_indices(m.node_entity())).unwrap_or_default()
+    }
+
+    /// The solid's faces -- the same faces `CadaclysmSolid.faces` counts.
+    #[func]
+    fn get_face_count(&self) -> i64 {
+        self.with(|m| i64::from(m.face_count())).unwrap_or_default()
+    }
+
+    /// One Dictionary per B-rep edge -- `id`, `nodes`, `runs`, `faces`, `ends`, `closed`,
+    /// `seam` -- in the order a `node_kind` of `1` indexes them. **Not
+    /// `CadaclysmSolid.edges`' numbering**: these are the manifold analysis's, ascending
+    /// by edge id. One call to the library per edge, so read it once into a variable.
+    #[func]
+    fn get_edges(&self) -> Array<VarDictionary> {
+        let rows = self.with(|m| {
+            ok(m.edges()).map(|edges| edges.iter().map(|e| reader::fem_edge(e.id, e.nodes, e.runs, e.faces, e.ends, e.closed, e.seam)).collect())
+        });
+        rows.flatten().unwrap_or_default()
+    }
+
+    /// One Dictionary per B-rep vertex -- `node`, `point`, `has_position` -- in the order
+    /// a `node_kind` of `0` indexes them.
+    #[func]
+    fn get_vertices(&self) -> Array<VarDictionary> {
+        let rows = self.with(|m| ok(m.vertices()).map(|found| found.iter().map(|v| reader::fem_vertex(v.node, v.point, v.has_position)).collect()));
+        rows.flatten().unwrap_or_default()
+    }
+
+    /// Every crack, as `[a, b, brep_edge]`: a directed mesh edge `(a, b)` with no
+    /// `(b, a)`, and the B-rep edge both nodes lie on or `NONE` (4294967295) where they
+    /// share none. **Empty unless the solid's topology is closed**, an open sheet making
+    /// no claim to check: such a solid reports `watertight` false with this and
+    /// `folded_edges` both empty, and that trio together says "not asked", not "nothing
+    /// found".
+    #[func]
+    fn get_open_edges(&self) -> Array<PackedInt64Array> {
+        self.with(|m| ok(m.open_edges()).map(|rows| reader::fem_census(&rows))).flatten().unwrap_or_default()
+    }
+
+    /// Every fold, as `open_edges` reports a crack: a directed mesh edge used by more than
+    /// one triangle. **A solid can be folded without being open** -- one no thicker than a
+    /// line leaves no hole for an open edge to find -- so a caller that checks
+    /// `open_edges` alone calls such a solid sound. Empty under the same rule.
+    #[func]
+    fn get_folded_edges(&self) -> Array<PackedInt64Array> {
+        self.with(|m| ok(m.folded_edges()).map(|rows| reader::fem_census(&rows))).flatten().unwrap_or_default()
+    }
+
+    /// The welded mesh closes -- every directed mesh edge paired with its reverse and none
+    /// used twice -- and so does the topology behind it. **False for every solid whose
+    /// topology is not closed**, whose mesh is then not asked about; read `open_edges` for
+    /// what an empty census beside a false here does and does not mean.
+    #[func]
+    fn get_watertight(&self) -> bool {
+        self.with(|m| m.watertight()).unwrap_or_default()
+    }
+
+    /// Always false here: this library has no mesh-only path, every FEM mesh coming off a
+    /// solid's own faces. It is on the class so the two libraries' FEM meshes read the
+    /// same, and it is what the reader's `CadaclysmFemMesh.from_mesh` reports for a node
+    /// with no B-rep.
+    #[func]
+    fn get_from_mesh(&self) -> bool {
+        self.with(|m| m.from_mesh()).unwrap_or_default()
+    }
+
+    /// The smallest interior angle of any triangle, in degrees. There is always one: a
+    /// solid that meshed to no triangles is a refusal, not a mesh.
+    #[func]
+    fn get_min_angle(&self) -> f64 {
+        self.with(|m| m.min_angle()).unwrap_or_default()
+    }
+
+    /// The triangle with that angle, as an index into `triangles`.
+    #[func]
+    fn get_worst_triangle(&self) -> i64 {
+        self.with(|m| i64::from(m.worst_triangle())).unwrap_or_default()
+    }
+
+    /// The longest triangle edge, placed. **The figure to check against
+    /// `CadaclysmSolid.fem_mesh`'s `max_size`, and the only one that says what the mesh
+    /// actually is**: `max_size` bounds the boundary segments and merely targets the
+    /// interior -- measured at 1.03x on a face whose parameters run unevenly -- and one
+    /// small enough beside the solid to reach the mesher's own ceilings is not honoured at
+    /// all.
+    #[func]
+    fn get_longest_edge(&self) -> f64 {
+        self.with(|m| m.longest_edge()).unwrap_or_default()
+    }
+
+    /// Whether `release` has run.
+    #[func]
+    fn get_released(&self) -> bool {
+        self.mesh.borrow().is_none()
+    }
+
+    /// The mesh as Gmsh 4.1 ASCII `.msh` text: an entity per B-rep vertex, edge and face,
+    /// a volume where the solid closes, and a physical group naming each. `""` for a mesh
+    /// the writer refuses, naming the field it cannot honour, and for a released handle.
+    ///
+    /// **On this side of the ABI the library's text is owned** -- released by the wrapper
+    /// (`cadaclysm_blacksmith_string_free`), two asks giving two independent texts. The
+    /// reader library's `CadaclysmFemMesh.msh_text` is the other way round, a slot
+    /// borrowed from the handle; a reader porting one side's reasoning onto the other leaks
+    /// or double-frees.
+    ///
+    /// **The unlicensed notice is printed here**, and by `save_msh`, and **not** by
+    /// `CadaclysmSolid.fem_mesh`: this library notices on its writers where the reader
+    /// library notices in its own constructor.
+    #[func]
+    fn msh_text(&self) -> GString {
+        gs(self.with(|m| ok(m.msh_text())).flatten().unwrap_or_default())
+    }
+
+    /// `msh_text` written to `path` by the library itself: the same bytes from the same
+    /// writer. A `user://` path works, and `res://` in the editor -- an exported game's
+    /// `res://` lives inside its pack, which nothing can write to. False for a mesh the
+    /// writer refuses or a file it cannot write.
+    #[func]
+    fn save_msh(&self, path: GString) -> bool {
+        self.with(|m| ok(m.save_msh(os_path(&path)))).flatten().is_some()
+    }
+
+    /// Hand the mesh back now rather than when the last reference goes, as
+    /// `CadaclysmBrep.release` does. Idempotent; every accessor then fails with
+    /// "released". Nothing taken from it goes stale -- every array was a copy.
+    #[func]
+    fn release(&self) {
+        if let Some(mesh) = self.mesh.borrow_mut().take() {
+            // By value, as the SDK's `free` takes it: dropping the handle is the free.
+            mesh.free();
         }
     }
 }

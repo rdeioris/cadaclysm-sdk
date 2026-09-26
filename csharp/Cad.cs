@@ -23,6 +23,14 @@
 //
 // Strings are the easy half: every `char *` this ABI returns is marshalled into a copied
 // `string` on the way out, so `Node.Name` and friends outlive anything.
+//
+// `FemMesh` is the one borrowed view whose owner is **not** the scene. It is a handle of your
+// own (`Node.FemMesh(..)`, disposed by a `using`), and its spans belong to that handle: closing
+// the scene neither frees nor stales one, and only `FemMesh.Free()` — or the `using` that runs
+// it — invalidates them. The guard is the same one the scene's views have, and no stronger: a
+// span **asked for** after that throws, while one already in hand goes on reading the freed
+// block and hands back plausible numbers. So `ToArray()` anything that must outlive the
+// handle, exactly as `Mesh.Copy()` is for the scene.
 using System.Globalization;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -316,6 +324,77 @@ internal struct RawSvgOptions
     public uint Flags;
 }
 
+/// <summary>`CadaclysmFemOptions`. Field order and `Size` are the whole contract, as <see
+/// cref="RawOpenOptions"/> above: `cadaclysm_fem_options_init` fills the library's <em>whole</em>
+/// struct, so this must be at least as long as the header's and may never reorder. A field the
+/// library has and this one does not is written past what <see cref="Node.FemMesh"/> allocated,
+/// which is the `CadaclysmOpenOptions` overrun the pin in `tests/bindings.rs` exists for.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawFemOptions
+{
+    public nuint Size;
+    public double Tolerance;
+    public double MaxSize;
+}
+
+/// <summary>`CadaclysmFemMeshView`. Every pointer here is borrowed from the FEM handle and dies
+/// with it; the counts are in elements, so `Nodes` holds `NodeCount * 3` doubles and `Triangles`
+/// `TriangleCount * 3` indices. Pinned against the header by `tests/bindings.rs`, which is the
+/// only thing standing between a missing field here and reading `MinAngle` out of
+/// `Watertight`.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawFemMeshView
+{
+    public IntPtr Nodes;
+    public uint NodeCount;
+    public IntPtr Triangles;
+    public uint TriangleCount;
+    public IntPtr TriangleFace;
+    public IntPtr NodeKind;
+    public IntPtr NodeEntity;
+    public uint FaceCount;
+    public uint EdgeCount;
+    public uint VertexCount;
+    public uint OpenEdgeCount;
+    public uint FoldedEdgeCount;
+    // One byte in C, four in C# unless it is told otherwise -- and `MinAngle` below is what a
+    // missing hint would be read out of.
+    [MarshalAs(UnmanagedType.I1)] public bool Watertight;
+    [MarshalAs(UnmanagedType.I1)] public bool FromMesh;
+    public double MinAngle;
+    public uint WorstTriangle;
+    public double LongestEdge;
+}
+
+/// <summary>`CadaclysmFemEdge`: one B-rep edge's node chain. Pinned by `tests/bindings.rs`.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawFemEdge
+{
+    public uint Id;
+    public IntPtr Nodes;
+    public uint NodeCount;
+    public IntPtr Runs;
+    public uint RunCount;
+    public uint FaceA;
+    public uint FaceB;
+    public uint EndA;
+    public uint EndB;
+    [MarshalAs(UnmanagedType.I1)] public bool Closed;
+    [MarshalAs(UnmanagedType.I1)] public bool Seam;
+}
+
+/// <summary>`CadaclysmFemVertex`. `Point` is a fixed buffer of three doubles, not a pointer: the
+/// vertex's own position, copied into the struct. Pinned by `tests/bindings.rs`.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct RawFemVertex
+{
+    public uint Node;
+    public fixed double Point[3];
+    [MarshalAs(UnmanagedType.I1)] public bool HasPosition;
+}
+
 [StructLayout(LayoutKind.Sequential)]
 internal struct RawPolylines
 {
@@ -323,6 +402,13 @@ internal struct RawPolylines
     public IntPtr Counts;
     public uint PolylineCount;
     public uint VertexCount;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawEdgeColors
+{
+    public IntPtr Rgba;
+    public uint Count;
 }
 
 // Field order must match the header's CadaclysmBeziers exactly; pinned by bindings.rs.
@@ -384,9 +470,9 @@ internal struct RawAttribute
     [MarshalAs(UnmanagedType.I1)] public bool Boolean;
 }
 
-/// <summary>`CadaclysmSurfaces`. Not pinned against the header by `tests/bindings.rs` (only
-/// Mesh, Polylines and OpenOptions are), but built to the same field order regardless.
-/// </summary>
+/// <summary>`CadaclysmSurfaces`, returned by value from `cadaclysm_node_surfaces`: a copy that
+/// stops short is a return buffer the callee writes past, so every field is here whether this
+/// binding reads it or not. Pinned against the header by `tests/bindings.rs`.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal struct RawSurfaces
 {
@@ -400,6 +486,8 @@ internal struct RawSurfaces
     public uint ProfileCount;
     public IntPtr Nurbs;
     public uint NurbsCount;
+    public IntPtr Shared;
+    public uint SharedCount;
 }
 
 /// <summary>`CadaclysmFace`. Read only through a raw pointer into `RawSurfaces.Faces` — never
@@ -488,6 +576,20 @@ internal sealed class MeshletsHandle : CadaclysmHandle
     protected override bool ReleaseHandle()
     {
         Native.cadaclysm_meshlets_free(handle);
+        return true;
+    }
+}
+
+/// <summary>`CadaclysmFemMesh *`, freed by `cadaclysm_fem_mesh_free`.</summary>
+internal sealed class FemMeshHandle : CadaclysmHandle
+{
+    public FemMeshHandle()
+    {
+    }
+
+    protected override bool ReleaseHandle()
+    {
+        Native.cadaclysm_fem_mesh_free(handle);
         return true;
     }
 }
@@ -598,9 +700,14 @@ internal static class Loader
     }
 }
 
-/// <summary>Every entry point in `include/cadaclysm.h` this binding declares — the same 58
-/// Python's `cadaclysm.py` does, no more and no less; `tests/bindings.rs` compares the two
-/// sets by name.</summary>
+/// <summary>Every entry point in `include/cadaclysm.h` this binding declares — the same set
+/// Python's `cadaclysm.py` does, no more and no less;
+/// `tests/bindings.rs`'s `parity_languages_declare_everything_python_does` is what holds the
+/// two sets equal, and prints the figure as a coverage table when asked
+/// (`CADACLYSM_COVERAGE_OUT=…`).</summary>
+/// <remarks>This sentence said "the same 58" until 2026-09-24, by which time the header
+/// declared 121. A count written into prose is checked by nothing and goes stale silently, so
+/// the figure now lives only where it is derived.</remarks>
 internal static class Native
 {
     private const string Lib = "cadaclysm_capi";
@@ -685,6 +792,8 @@ internal static class Native
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_node_is_meshed(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_surface_edges(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern RawBeziers cadaclysm_node_surface_edge_beziers(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern RawEdgeColors cadaclysm_node_surface_edge_colors(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_surface_isocurves(SceneHandle scene, uint node);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_node_surface_pick(SceneHandle scene, uint node, double[] from, double[] to, [Out] double[] outPoint);
@@ -706,7 +815,16 @@ internal static class Native
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_diagnostic(SceneHandle scene, uint index);
     [DllImport(Lib)] internal static extern uint cadaclysm_geometry_diagnostic_count(SceneHandle scene);
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_geometry_diagnostic(SceneHandle scene, uint index);
+    [DllImport(Lib)] internal static extern uint cadaclysm_link_count(SceneHandle scene);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_link_name(SceneHandle scene, uint link);
+    [DllImport(Lib)] internal static extern uint cadaclysm_link_node_count(SceneHandle scene, uint link);
+    [DllImport(Lib)] internal static extern uint cadaclysm_link_node(SceneHandle scene, uint link, uint index);
+    [DllImport(Lib)] internal static extern uint cadaclysm_joint_count(SceneHandle scene);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_joint_name(SceneHandle scene, uint joint);
+    [DllImport(Lib)] internal static extern uint cadaclysm_joint_start(SceneHandle scene, uint joint);
+    [DllImport(Lib)] internal static extern uint cadaclysm_joint_end(SceneHandle scene, uint joint);
     [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_edges(SceneHandle scene, uint node);
+    [DllImport(Lib)] internal static extern RawEdgeColors cadaclysm_node_edge_colors(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_curves(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_isocurves(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawBeziers cadaclysm_node_edge_beziers(SceneHandle scene, uint node);
@@ -733,6 +851,30 @@ internal static class Native
     [DllImport(Lib)] internal static extern void cadaclysm_meshlet_normals(MeshletsHandle handle, uint index, [Out] float[] outNormals);
     [DllImport(Lib)] internal static extern void cadaclysm_meshlet_indices(MeshletsHandle handle, uint index, [Out] uint[] outIndices);
     [DllImport(Lib)] internal static extern void cadaclysm_meshlet_children(MeshletsHandle handle, uint index, [Out] uint[] outChildren);
+    // The FEM surface mesh: one handle per meshed body, freed by the caller. `msh_text` comes
+    // back as an `IntPtr` and is marshalled into a `string` of ours, which is what makes the
+    // borrowed-slot lifetime `cadaclysm_fem_mesh_msh_text` documents a non-issue here -- see
+    // <see cref="FemMesh.MshText"/>.
+    [DllImport(Lib)] internal static extern void cadaclysm_fem_options_init(ref RawFemOptions options);
+    [DllImport(Lib)] internal static extern FemMeshHandle cadaclysm_node_fem_mesh(SceneHandle scene, uint node,
+        double[]? placement, ref RawFemOptions options);
+    [DllImport(Lib)] internal static extern void cadaclysm_fem_mesh_free(IntPtr mesh);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_fem_mesh_view(FemMeshHandle mesh, ref RawFemMeshView outView);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_fem_mesh_edge(FemMeshHandle mesh, uint index, ref RawFemEdge outEdge);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_fem_mesh_vertex(FemMeshHandle mesh, uint index, ref RawFemVertex outVertex);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_fem_mesh_open_edge(FemMeshHandle mesh, uint index,
+        out uint outA, out uint outB, out uint outBrepEdge);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_fem_mesh_folded_edge(FemMeshHandle mesh, uint index,
+        out uint outA, out uint outB, out uint outBrepEdge);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_fem_mesh_msh_text(FemMeshHandle mesh);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_fem_mesh_save_msh(FemMeshHandle mesh,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path);
     [DllImport(Lib)] internal static extern void cadaclysm_forget_meshes(SceneHandle scene);
     [DllImport(Lib)] internal static extern void cadaclysm_svg_options_init(ref RawSvgOptions options);
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_scene_svg_text(SceneHandle scene, ref RawSvgOptions options);
@@ -1322,6 +1464,72 @@ public sealed class Placement
     }
 }
 
+/// <summary>A rigid body of the file's mechanism: the nodes that move together when a joint
+/// moves it. From <see cref="Scene.Links"/>; borrows from the scene like <see cref="Node"/>.
+/// </summary>
+public sealed class Link : IEquatable<Link>
+{
+    public Scene Scene { get; }
+    public uint Index { get; }
+
+    internal Link(Scene scene, uint index)
+    {
+        Scene = scene;
+        Index = index;
+    }
+
+    /// <summary>The link's name as the file gives it.</summary>
+    public string Name => Marshal.PtrToStringUTF8(Native.cadaclysm_link_name(Scene.Handle, Index)) ?? "";
+
+    /// <summary>The topmost node of each subtree this link moves, in node order: moving these
+    /// moves everything under them.</summary>
+    public IReadOnlyList<Node> Nodes
+    {
+        get
+        {
+            var count = Native.cadaclysm_link_node_count(Scene.Handle, Index);
+            var found = new List<Node>((int)count);
+            for (uint i = 0; i < count; i++)
+                found.Add(new Node(Scene, Native.cadaclysm_link_node(Scene.Handle, Index, i)));
+            return found;
+        }
+    }
+
+    public bool Equals(Link? other) => other is not null && other.Index == Index && ReferenceEquals(other.Scene, Scene);
+    public override bool Equals(object? obj) => Equals(obj as Link);
+    public override int GetHashCode() => HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(Scene), Index);
+    public override string ToString() => $"<Link {Index} {Name}>";
+}
+
+/// <summary>A connection between two links of the file's mechanism. Topology only: how it
+/// moves is not read yet. From <see cref="Scene.Joints"/>.</summary>
+public sealed class Joint : IEquatable<Joint>
+{
+    public Scene Scene { get; }
+    public uint Index { get; }
+
+    internal Joint(Scene scene, uint index)
+    {
+        Scene = scene;
+        Index = index;
+    }
+
+    /// <summary>The joint's name as the file gives it.</summary>
+    public string Name => Marshal.PtrToStringUTF8(Native.cadaclysm_joint_name(Scene.Handle, Index)) ?? "";
+
+    /// <summary>The link this joint starts at, in the file's order -- not a parent: a
+    /// mechanism may be a network with loops.</summary>
+    public Link Start => new(Scene, Native.cadaclysm_joint_start(Scene.Handle, Index));
+
+    /// <summary>The link this joint ends at.</summary>
+    public Link End => new(Scene, Native.cadaclysm_joint_end(Scene.Handle, Index));
+
+    public bool Equals(Joint? other) => other is not null && other.Index == Index && ReferenceEquals(other.Scene, Scene);
+    public override bool Equals(object? obj) => Equals(obj as Joint);
+    public override int GetHashCode() => HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(Scene), Index);
+    public override string ToString() => $"<Joint {Index} {Name}>";
+}
+
 /// <summary>A body's exact B-rep -- the trimmed surfaces its mesh is cut from -- shared with
 /// the scene rather than copied: a reference of this object's own, given back by
 /// <see cref="Dispose"/>. Nothing here reads it; it is for the blacksmith library, which
@@ -1482,6 +1690,391 @@ public sealed class Meshlets : IDisposable
     public void Free() => Handle.Dispose();
 
     public void Dispose() => Free();
+}
+
+/// <summary>One B-rep edge of a FEM mesh: the chain of nodes along it, and where that chain
+/// breaks. Plain data, copied out of the handle -- a C# `ReadOnlySpan&lt;T&gt;` cannot be a field
+/// of a class, so these two arrays are yours where <see cref="FemMesh.Nodes"/> and its siblings
+/// are borrowed.</summary>
+public sealed class FemEdge
+{
+    internal FemEdge(uint id, uint[] nodes, uint[] runs, (uint A, uint B) faces, (uint A, uint B) ends,
+                     bool closed, bool seam)
+    {
+        Id = id;
+        Nodes = nodes;
+        Runs = runs;
+        Faces = faces;
+        Ends = ends;
+        Closed = closed;
+        Seam = seam;
+    }
+
+    /// <summary>The <strong>body's own</strong> B-rep edge id -- `LoopTrim.edge` on the brep <see
+    /// cref="Node.Brep"/> hands over, the number the file gave the edge.</summary>
+    /// <remarks><strong>Not this mesh's edge index, and on a read body rarely equal to it.</strong>
+    /// <see cref="FemMesh.Edges"/> is a densely renumbered <em>subset</em> of the body's edges --
+    /// ascending by id, with every edge collapsed to a point left out -- so edge 0 of a STEP
+    /// body's mesh routinely reports an id in the hundreds. Everything else that names an edge
+    /// means the <em>index</em>: a <see cref="FemMesh.NodeKind"/> of 1 read through <see
+    /// cref="FemMesh.NodeEntity"/>, the third number of an <see cref="FemMesh.OpenEdges"/> or
+    /// <see cref="FemMesh.FoldedEdges"/> row, and the `edge_&lt;i&gt;` physical group of <see
+    /// cref="FemMesh.MshText"/>. This is the one way back from any of them to the topology the
+    /// file wrote.</remarks>
+    public uint Id { get; }
+
+    /// <summary>This mesh's node indices in order along the edge, its end vertices included; a
+    /// closed edge repeats no node.</summary>
+    public uint[] Nodes { get; }
+
+    /// <summary>Where each connected run of <see cref="Nodes"/> begins; `[0]` for one chain along
+    /// the whole edge.</summary>
+    /// <remarks><strong>Read `Nodes[Runs[i]..Runs[i + 1]]` (the last run to the end) as one
+    /// polyline and join nothing across a boundary.</strong> The two ends either side of one are
+    /// two points of the edge with no mesh edge between them -- a crack along the edge, or a
+    /// stretch of it the mesher sampled on one face only. One run is the ordinary answer, and a
+    /// caller reading <see cref="Nodes"/> as one polyline without looking here silently jumps the
+    /// gap.</remarks>
+    public uint[] Runs { get; }
+
+    /// <summary>The two faces it bounds, `B` being `uint.MaxValue` on an open body's rim.
+    /// </summary>
+    /// <remarks><strong>`0` is a real face, not a sentinel</strong>: an edge whose second face is
+    /// face 0 reads `Faces.B == 0`. A non-manifold edge's third and further faces are not here;
+    /// <see cref="Brep.Manifold"/> is where the whole list of them is read.</remarks>
+    public (uint A, uint B) Faces { get; }
+
+    /// <summary>The two B-rep vertices its chain ends at, as <see cref="FemMesh.Vertices"/>
+    /// indexes them, `B` being `uint.MaxValue` where both ends are one vertex -- a closed edge, a
+    /// circle's rim, a full-turn seam.</summary>
+    /// <remarks><strong>`0` is a real vertex, not a sentinel.</strong> Which end is `A` is the
+    /// first trim's direction and means nothing else: the pair bounds the edge, it does not
+    /// orient it.</remarks>
+    public (uint A, uint B) Ends { get; }
+
+    /// <summary>The nodes make one loop. False wherever <see cref="Runs"/> is longer than one.
+    /// </summary>
+    public bool Closed { get; }
+
+    /// <summary>Bounded twice by one face: a closed surface's seam rather than a real boundary.
+    /// <see cref="Faces"/>'s two are then the same face.</summary>
+    public bool Seam { get; }
+
+    public override string ToString() =>
+        $"FemEdge(id={Id}, nodes={Nodes.Length}, runs={Runs.Length}, faces=({Faces.A},{Faces.B}), " +
+        $"ends=({Ends.A},{Ends.B}), closed={Closed}, seam={Seam})";
+}
+
+/// <summary>One B-rep vertex of a FEM mesh: the node the mesh put there, if any, and where the
+/// topology says it is, if that is known. Plain data, copied out of the handle.</summary>
+public sealed class FemVertex
+{
+    internal FemVertex(uint node, double[] point, bool hasPosition)
+    {
+        Node = node;
+        Point = point;
+        HasPosition = hasPosition;
+    }
+
+    /// <summary>The mesh node at this vertex, or `uint.MaxValue` where the mesh has none there.
+    /// </summary>
+    /// <remarks><strong>A sentinel here is ordinary, not a fault.</strong> The analysis rebuilds
+    /// a vertex wherever two trims meet, and a pole's polyline runs give a sphere 48 of them
+    /// where the mesh has 2 points; a caller walking these skips the sentinel rather than
+    /// treating it as a gap.</remarks>
+    public uint Node { get; }
+
+    /// <summary>Where the vertex is -- three doubles, in the same space and under the same
+    /// placement as <see cref="FemMesh.Nodes"/>.</summary>
+    /// <remarks><strong>Meaningless unless <see cref="HasPosition"/></strong>: it is all zeros
+    /// then, a point no geometry has and one a solver would take for a node at the origin. The
+    /// file's own vertex rather than a mesh node, so the two can differ by the reader's rounding.
+    /// </remarks>
+    public double[] Point { get; }
+
+    /// <summary><see cref="Point"/> was placed. False where every trim meeting at this vertex is
+    /// a curve with no geometry to read an end off -- then there is <strong>no position at
+    /// all</strong>.</summary>
+    public bool HasPosition { get; }
+
+    public override string ToString() =>
+        $"FemVertex(node={Node}, point=({Point[0]},{Point[1]},{Point[2]}), hasPosition={HasPosition})";
+}
+
+/// <summary>One body meshed for a solver: nodes welded by bits, triangles wound outward, every
+/// node tagged with the lowest-dimension B-rep entity it lies on, and every crack reported rather
+/// than closed. What <see cref="Node.FemMesh"/> returns, and <strong>owned by you</strong>:
+/// dispose it (a `using`), or <see cref="Free"/> it.</summary>
+/// <remarks>A handle rather than a snapshot, and its big arrays are `ReadOnlySpan&lt;T&gt;` views
+/// into the library's own memory, exactly as <see cref="Mesh"/>'s are and for the same reason: a
+/// solver mesh is megabytes, and copying it to hand it over would cost that twice.
+///
+/// <para><strong>The owner of these views is this object, not the scene.</strong> That is the one
+/// thing this class does differently from every other view in this binding: <see
+/// cref="Scene.Close"/> does not free a FEM mesh and does not stale one, and meshing the body
+/// again does not either -- only <see cref="Free"/> (or the `using` that runs it) does. There is
+/// no generation check here as the kernel's mesh views have: a FEM view's pointers are built with
+/// the handle and never move.</para>
+///
+/// <para><strong>What the guard does and does not do.</strong> Every accessor below asks the
+/// handle first, so a span <em>asked for</em> after <see cref="Free"/> throws. A span already in
+/// hand is not protected and cannot be: a `ReadOnlySpan&lt;T&gt;` is a bare pointer and a length,
+/// with nothing left to check by the time it is indexed -- it goes on reading the freed block and
+/// hands back numbers that look like the mesh. So call `ToArray()` on any span that must outlive
+/// the handle, and read the rest inside the `using`.</para></remarks>
+public sealed class FemMesh : IDisposable
+{
+    internal FemMeshHandle Handle { get; }
+
+    /// <summary>The view, read once in the constructor. Every pointer in it is built with the
+    /// handle and good until it is freed -- nothing in this ABI is built lazily -- so asking again
+    /// per property would be one C call per array for the same answer.</summary>
+    private readonly RawFemMeshView _raw;
+
+    internal FemMesh(FemMeshHandle handle)
+    {
+        Handle = handle;
+        var raw = new RawFemMeshView();
+        if (!Native.cadaclysm_fem_mesh_view(handle, ref raw))
+        {
+            var why = Cadaclysm.LastErrorOr("fem mesh view");
+            handle.Dispose();
+            throw new CadaclysmException(why);
+        }
+        _raw = raw;
+    }
+
+    /// <summary>The handle, refusing a freed one: every pointer in the cached view is the
+    /// handle's, and a freed handle's point at nothing.</summary>
+    private FemMeshHandle Live => Handle.IsClosed ? throw new CadaclysmException("fem mesh: freed") : Handle;
+
+    /// <summary>The cached view, the handle checked first. Every read below goes through this, so
+    /// no accessor can hand out a pointer the handle no longer owns.</summary>
+    private RawFemMeshView Raw
+    {
+        get
+        {
+            _ = Live;
+            return _raw;
+        }
+    }
+
+    public bool Freed => Handle.IsClosed;
+
+    /// <summary>A span over the FEM handle's own memory, the owner checked first -- <see
+    /// cref="Mesh"/>'s `View` with this mesh in the scene's place. No generation check: unlike the
+    /// kernel's tessellation cache, a FEM view's pointers never move.</summary>
+    private unsafe ReadOnlySpan<T> View<T>(IntPtr at, uint length)
+    {
+        _ = Live;
+        return at == IntPtr.Zero ? ReadOnlySpan<T>.Empty : new ReadOnlySpan<T>((void*)at, (int)length);
+    }
+
+    /// <summary>Every node's position, three doubles each -- placed, and in the space <see
+    /// cref="Node.FemMesh"/> and <see cref="FromMesh"/> describe. Every node is used by at least
+    /// one triangle.</summary>
+    public ReadOnlySpan<double> Nodes => View<double>(_raw.Nodes, _raw.NodeCount * 3);
+
+    /// <summary>Three node indices a triangle, wound outward -- a mirroring placement is wound
+    /// back.</summary>
+    public ReadOnlySpan<uint> Triangles => View<uint>(_raw.Triangles, _raw.TriangleCount * 3);
+
+    /// <summary>The B-rep face each triangle lies on, one per triangle, into <see
+    /// cref="FaceCount"/> faces.</summary>
+    public ReadOnlySpan<uint> TriangleFace => View<uint>(_raw.TriangleFace, _raw.TriangleCount);
+
+    /// <summary>What each node lies on -- `0` a B-rep vertex, `1` an edge, `2` a face -- one per
+    /// node: the lowest-dimension entity it lies on, which is the `.msh` format's own
+    /// classification rule. <see cref="NodeEntity"/> says which entity of that kind.</summary>
+    public ReadOnlySpan<uint> NodeKind => View<uint>(_raw.NodeKind, _raw.NodeCount);
+
+    /// <summary>Which vertex, edge or face each node lies on, read by the matching <see
+    /// cref="NodeKind"/>: an index into <see cref="Vertices"/>, into <see cref="Edges"/>, or into
+    /// the body's faces. One per node.</summary>
+    public ReadOnlySpan<uint> NodeEntity => View<uint>(_raw.NodeEntity, _raw.NodeCount);
+
+    /// <summary>The body's faces; <see cref="TriangleFace"/> and a <see cref="NodeKind"/> of `2`
+    /// index them. The same faces <see cref="Node.Surfaces"/> hands over, in the same order.
+    /// </summary>
+    public uint FaceCount => Raw.FaceCount;
+
+    /// <summary>One <see cref="FemEdge"/> per B-rep edge, in the order a <see cref="NodeKind"/> of
+    /// `1` indexes them. Empty for a <see cref="FromMesh"/> body, which has no B-rep edges at all.
+    /// </summary>
+    /// <remarks><strong>This list's own numbering, not the body's</strong>: each <see
+    /// cref="FemEdge.Id"/> carries the body's own edge id.</remarks>
+    public IReadOnlyList<FemEdge> Edges
+    {
+        get
+        {
+            var handle = Live;
+            var edges = new List<FemEdge>((int)_raw.EdgeCount);
+            for (var i = 0u; i < _raw.EdgeCount; i++)
+            {
+                var raw = new RawFemEdge();
+                if (!Native.cadaclysm_fem_mesh_edge(handle, i, ref raw))
+                    throw new CadaclysmException(Cadaclysm.LastErrorOr($"fem mesh edge {i}"));
+                edges.Add(new FemEdge(raw.Id, Uints(raw.Nodes, raw.NodeCount), Uints(raw.Runs, raw.RunCount),
+                    (raw.FaceA, raw.FaceB), (raw.EndA, raw.EndB), raw.Closed, raw.Seam));
+            }
+            return edges;
+        }
+    }
+
+    /// <summary>One <see cref="FemVertex"/> per B-rep vertex, in the order a <see
+    /// cref="NodeKind"/> of `0` indexes them. Empty for a <see cref="FromMesh"/> body.</summary>
+    public IReadOnlyList<FemVertex> Vertices
+    {
+        get
+        {
+            var handle = Live;
+            var vertices = new List<FemVertex>((int)_raw.VertexCount);
+            for (var i = 0u; i < _raw.VertexCount; i++)
+            {
+                var raw = new RawFemVertex();
+                if (!Native.cadaclysm_fem_mesh_vertex(handle, i, ref raw))
+                    throw new CadaclysmException(Cadaclysm.LastErrorOr($"fem mesh vertex {i}"));
+                vertices.Add(new FemVertex(raw.Node, PointOf(raw), raw.HasPosition));
+            }
+            return vertices;
+        }
+    }
+
+    /// <summary>Every crack, as `(A, B, BrepEdge)`: a directed mesh edge `(A, B)` with no `(B, A)`,
+    /// and the B-rep edge both nodes lie on or `uint.MaxValue` where they share none.</summary>
+    /// <remarks><strong>Empty unless the body's topology is closed -- for a B-rep body</strong>,
+    /// whose mesh is otherwise not asked about at all: such a body reports <see
+    /// cref="Watertight"/> false with this and <see cref="FoldedEdges"/> <em>both</em> empty, and
+    /// that trio together says "not asked", not "nothing found".
+    ///
+    /// <para><strong>A <see cref="FromMesh"/> body is the other case, and the opposite one.</strong>
+    /// A bare mesh carries no topology to say whether it ought to close, so its census always runs
+    /// over the welded triangles: an open render mesh reports its cracks here with <see
+    /// cref="Watertight"/> false, a closed one reports it true, and an empty census there really
+    /// does mean "nothing found".</para></remarks>
+    public IReadOnlyList<(uint A, uint B, uint BrepEdge)> OpenEdges =>
+        Census(Native.cadaclysm_fem_mesh_open_edge, Raw.OpenEdgeCount, "open edge");
+
+    /// <summary>Every fold, as <see cref="OpenEdges"/> reports a crack: a directed mesh edge used
+    /// by more than one triangle.</summary>
+    /// <remarks><strong>A body can be folded without being open</strong> -- a solid no thicker
+    /// than a line leaves no hole for an open edge to find -- and the closure census's own known-bad
+    /// bodies are folds rather than open cracks. A caller that checks <see cref="OpenEdges"/> alone
+    /// calls such a body sound. Empty under the same rule as <see cref="OpenEdges"/>.</remarks>
+    public IReadOnlyList<(uint A, uint B, uint BrepEdge)> FoldedEdges =>
+        Census(Native.cadaclysm_fem_mesh_folded_edge, Raw.FoldedEdgeCount, "folded edge");
+
+    /// <summary>The library's census readers have one shape, so the two lists cannot drift.
+    /// </summary>
+    private delegate bool CensusRow(FemMeshHandle mesh, uint index, out uint a, out uint b, out uint brepEdge);
+
+    private IReadOnlyList<(uint A, uint B, uint BrepEdge)> Census(CensusRow row, uint count, string what)
+    {
+        var handle = Live;
+        var rows = new List<(uint, uint, uint)>((int)count);
+        for (var i = 0u; i < count; i++)
+        {
+            if (!row(handle, i, out var a, out var b, out var brepEdge))
+                throw new CadaclysmException(Cadaclysm.LastErrorOr($"fem mesh {what} {i}"));
+            rows.Add((a, b, brepEdge));
+        }
+        return rows;
+    }
+
+    /// <summary>The welded mesh closes -- and, for a B-rep body, so does the topology behind it.
+    /// <strong>False for every B-rep body whose topology is not closed</strong>, whose mesh is then
+    /// not asked about at all; read <see cref="OpenEdges"/> for what an empty census beside a false
+    /// here does and does not mean.</summary>
+    /// <remarks>A <see cref="FromMesh"/> body has no topology to ask of, so this says only that its
+    /// triangles close: a closed render mesh reports true with nothing exact behind it at all.
+    /// </remarks>
+    public bool Watertight => Raw.Watertight;
+
+    /// <summary>This came from the scene's own mesh rather than from a brep: one face, every node
+    /// on face `0`, no edges and no vertices.</summary>
+    /// <remarks><strong>It is also which space the mesh is in.</strong> A B-rep body's FEM mesh is
+    /// in the <em>file's own units and axes</em>, whatever <see cref="Convention"/> the scene was
+    /// opened with, because it is taken off the brep. A node with no brep falls back to the scene's
+    /// mesh, which <em>is</em> converted, so it comes back in the scene's convention, wound
+    /// counter-clockwise about the outward normal even where the convention winds the other way.
+    /// Under a non-Native convention those are two different spaces.
+    ///
+    /// <para>It is also which contract <see cref="Watertight"/> and the two censuses are reporting
+    /// under: read <see cref="OpenEdges"/>.</para></remarks>
+    public bool FromMesh => Raw.FromMesh;
+
+    /// <summary>The smallest interior angle of any triangle, in degrees. There is always one: a
+    /// body that meshed to no triangles is a refusal, not a mesh.</summary>
+    public double MinAngle => Raw.MinAngle;
+
+    /// <summary>The triangle with that angle, as an index into <see cref="Triangles"/> by triple.
+    /// </summary>
+    public uint WorstTriangle => Raw.WorstTriangle;
+
+    /// <summary>The longest triangle edge, placed.</summary>
+    /// <remarks><strong>The figure to check against <see cref="Node.FemMesh"/>'s `maxSize`, and the
+    /// only one that says what the mesh actually is.</strong> `maxSize` bounds the boundary segments
+    /// and merely <em>targets</em> the interior: measured at 1.03 x `maxSize` on a face whose
+    /// parameters run unevenly, where a full-size boundary piece met a much shorter one left by
+    /// halving. One small enough beside the body to reach the mesher's own piece and station
+    /// ceilings is not honoured at all. A caller that asked for an element size reads this to find
+    /// out whether it got one.</remarks>
+    public double LongestEdge => Raw.LongestEdge;
+
+    /// <summary>The mesh as Gmsh 4.1 ASCII `.msh` text: an entity per B-rep vertex, edge and face,
+    /// a volume where the body closes, and a physical group naming each.</summary>
+    /// <remarks><strong>The library's text is borrowed from this handle</strong> and replaced by the
+    /// next call on it -- this ABI's convention, and the opposite of the kernel library's, where
+    /// `Cadaclysm.Blacksmith.FemMesh.MshText` is handed an owned string to free. Nothing here has to
+    /// free anything either way: the `char *` is marshalled into a `string` of your own on the way
+    /// out, which outlives the handle.
+    ///
+    /// <para><strong>No unlicensed notice is printed here.</strong> <see cref="Node.FemMesh"/> gave
+    /// it once when the mesh was built, and this ABI deliberately does not repeat it on either
+    /// `.msh` call -- where the kernel library notices on both of its writers and <em>not</em> on
+    /// its builder. Each matches its own siblings, so moving the call to look like the other side
+    /// breaks a convention.</para>
+    ///
+    /// <para>Throws <see cref="CadaclysmException"/> for a mesh the writer refuses, naming the
+    /// field it cannot honour, and for a freed handle.</para></remarks>
+    public string MshText()
+    {
+        var raw = Native.cadaclysm_fem_mesh_msh_text(Live);
+        if (raw == IntPtr.Zero) throw new CadaclysmException(Cadaclysm.LastErrorOr("msh text"));
+        return Marshal.PtrToStringUTF8(raw) ?? "";
+    }
+
+    /// <summary><see cref="MshText"/> written to <paramref name="path"/> by the library itself: the
+    /// same bytes from the same writer, straight to the file rather than through the borrowed slot,
+    /// so a <see cref="MshText"/> call on this handle from another thread cannot free the text under
+    /// the write. Throws for a mesh the writer refuses or a file it cannot write, naming the path.
+    /// No notice here either; see <see cref="MshText"/>.</summary>
+    public void SaveMsh(string path)
+    {
+        if (!Native.cadaclysm_fem_mesh_save_msh(Live, path))
+            throw new CadaclysmException(Cadaclysm.LastErrorOr($"could not write {path}"));
+    }
+
+    /// <summary>Give the mesh back, and with it every span taken from it. Idempotent.</summary>
+    public void Free() => Handle.Dispose();
+
+    public void Dispose() => Free();
+
+    /// <summary>A vertex's own three doubles, out of the fixed buffer the struct holds them in --
+    /// the one read here that needs `unsafe`, kept off <see cref="Vertices"/>'s own signature.
+    /// </summary>
+    private static unsafe double[] PointOf(RawFemVertex raw) =>
+        new[] { raw.Point[0], raw.Point[1], raw.Point[2] };
+
+    /// <summary>`count` uint32s at `at`, copied out: a <see cref="FemEdge"/>'s chain cannot hold a
+    /// span, so these two are copies where the mesh's own arrays are views.</summary>
+    private static unsafe uint[] Uints(IntPtr at, uint count) =>
+        at == IntPtr.Zero ? Array.Empty<uint>() : new ReadOnlySpan<uint>((void*)at, (int)count).ToArray();
+
+    public override string ToString() =>
+        Freed ? "FemMesh(freed)"
+            : $"FemMesh(nodes={_raw.NodeCount}, triangles={_raw.TriangleCount}, " +
+              $"watertight={_raw.Watertight}, fromMesh={_raw.FromMesh})";
 }
 
 /// <summary>One node of the document: an assembly, a shape, a placement.</summary>
@@ -1746,6 +2339,65 @@ public sealed class Node : IEquatable<Node>
     /// scene's units -- what to pick a level by. Zero at level 0.</summary>
     public float LodError(uint level) => Native.cadaclysm_node_lod_error(Scene.Handle, Index, level);
 
+    /// <summary>This node's body meshed for a solver, as a <see cref="Cadaclysm.FemMesh"/>: nodes
+    /// welded by bits, triangles wound outward, each node tagged with the lowest-dimension B-rep
+    /// entity it lies on, and every crack reported rather than closed. Owned by the caller --
+    /// dispose it.</summary>
+    /// <param name="tolerance">The chordal tolerance in model units, finite and above zero.
+    /// <strong>It alone governs how closely the mesh follows the geometry.</strong></param>
+    /// <param name="maxSize">A size ceiling in model units, finite and zero or more, `0` being no
+    /// ceiling (curvature alone). <strong>It bounds the boundary segments and merely targets the
+    /// interior</strong>, which is not a longest-element-edge guarantee: it adds boundary nodes
+    /// without refining boundary geometry, and <see cref="Cadaclysm.FemMesh.LongestEdge"/> is what
+    /// the mesh actually came to -- the figure to check against this.</param>
+    /// <param name="placement">16 numbers, column-major, as <see cref="BoundsPlaced"/> takes them
+    /// (null for the identity), applied in `double` throughout. The kernel library's
+    /// `Solid.FemMesh` takes <strong>twelve</strong> instead -- origin, x, y, z -- so a caller
+    /// moving between the two reformats the placement.</param>
+    /// <remarks>Those two defaults are `FemOptions::default()`'s own, restated here so that the
+    /// signature says what a caller gets. The library's struct is still filled by
+    /// `cadaclysm_fem_options_init` first, so a field added to it later defaults without this line
+    /// being touched; only these two are overwritten.
+    ///
+    /// <para><strong>The space is the body's, not the scene's, for a B-rep -- and the scene's for a
+    /// mesh</strong>, which <see cref="Cadaclysm.FemMesh.FromMesh"/> is the flag for; read it
+    /// there, because under a non-Native <see cref="Convention"/> the two are different spaces.
+    /// Meshed in the part's own frame and following the hop from an instance to the shape it draws
+    /// that <see cref="Mesh"/> follows, so a node instanced six times meshes once.</para>
+    ///
+    /// <para><strong>A cracked body is not a failure</strong>: it comes back with <see
+    /// cref="Cadaclysm.FemMesh.Watertight"/> false and its cracks in <see
+    /// cref="Cadaclysm.FemMesh.OpenEdges"/> and <see cref="Cadaclysm.FemMesh.FoldedEdges"/> --
+    /// <em>both</em> -- and nothing is welded shut to make it look sound. Throws <see
+    /// cref="CadaclysmException"/> for a tolerance or size the mesher refuses, a placement that is
+    /// not 16 numbers or is not finite and invertible, a node with neither a brep nor a mesh (an
+    /// assembly, a storey, a layer, an empty definition, a curve), and a body that meshes to no
+    /// triangles at all -- carrying the library's own words for it.</para>
+    ///
+    /// <para>Prints the unlicensed notice once, here, and not again on either of the mesh's `.msh`
+    /// calls.</para></remarks>
+    public FemMesh FemMesh(double tolerance = 0.01, double maxSize = 0.0, double[]? placement = null)
+    {
+        if (placement is not null && placement.Length != 16)
+            throw new CadaclysmException($"fem_mesh: a placement is 16 numbers, not {placement.Length}");
+        var options = new RawFemOptions();
+        // `init` writes `sizeof(CadaclysmFemOptions)` bytes as the *library* knows that type, into
+        // the struct `RawFemOptions` declares -- which is why `tests/bindings.rs` pins the two
+        // field for field. `Size` is then set to this binding's own sizeof, which is what the
+        // growth rule asks of a caller.
+        Native.cadaclysm_fem_options_init(ref options);
+        options.Size = (nuint)Marshal.SizeOf<RawFemOptions>();
+        options.Tolerance = tolerance;
+        options.MaxSize = maxSize;
+        var handle = Native.cadaclysm_node_fem_mesh(Scene.Handle, Index, placement, ref options);
+        if (handle.IsInvalid)
+        {
+            handle.Dispose();
+            throw new CadaclysmException(Cadaclysm.LastErrorOr("fem_mesh"));
+        }
+        return new FemMesh(handle);
+    }
+
     /// <summary>Its exact B-rep, for `Cadaclysm.Blacksmith.Solid.FromNode` to operate on, or
     /// null where it has none (a mesh, a curve, a CSG body, a JT or OpenSCAD part). Shared
     /// with the scene, not copied; see <see cref="Cadaclysm.Brep"/>.</summary>
@@ -1816,6 +2468,23 @@ public sealed class Node : IEquatable<Node>
 
     /// <summary>Its feature edges, as polylines to draw an overlay from.</summary>
     public Polylines Edges => new(Scene, Native.cadaclysm_node_edges(Scene.Handle, Index));
+
+    /// <summary>One RGBA per polyline of <see cref="Edges"/>, null for an edge the file does
+    /// not style; empty when nothing is styled.</summary>
+    public float[]?[] EdgeColours => ColoursOf(Native.cadaclysm_node_edge_colors(Scene.Handle, Index));
+    /// <summary><see cref="EdgeColours"/> for <see cref="SurfaceEdges"/>.</summary>
+    public float[]?[] SurfaceEdgeColours => ColoursOf(Native.cadaclysm_node_surface_edge_colors(Scene.Handle, Index));
+
+    static float[]?[] ColoursOf(RawEdgeColors raw)
+    {
+        if (raw.Rgba == IntPtr.Zero || raw.Count == 0) return Array.Empty<float[]?>();
+        var flat = new float[raw.Count * 4];
+        System.Runtime.InteropServices.Marshal.Copy(raw.Rgba, flat, 0, flat.Length);
+        var out_ = new float[]?[raw.Count];
+        for (var i = 0; i < raw.Count; i++)
+            out_[i] = flat[4 * i + 3] < 0 ? null : flat[(4 * i)..(4 * i + 4)];
+        return out_;
+    }
 
     /// <summary>Its free curves, as polylines. A 2D drawing is all of these.</summary>
     public Polylines Curves => new(Scene, Native.cadaclysm_node_curves(Scene.Handle, Index));
@@ -1889,6 +2558,13 @@ public sealed class Node : IEquatable<Node>
     /// tessellation, where <see cref="Edges"/> meshes the part. In the surfaces' own frame (see
     /// <see cref="Scene.SurfaceMatrix"/>); empty without surfaces.</summary>
     public Polylines SurfaceEdges => new(Scene, Native.cadaclysm_node_surface_edges(Scene.Handle, Index));
+
+    /// <summary>Its edges as the exact curves, where the reader has them without meshing -- a Rhino
+    /// extrusion's rims are its profile -- and empty everywhere else, so a caller drawing from
+    /// surfaces tries this before <see cref="SurfaceEdges"/>, whose trims are thinned to the mesh
+    /// tolerance. The same segments as <see cref="EdgeBeziers"/>, in the same space: not the
+    /// surfaces' frame, so no <see cref="Scene.SurfaceMatrix"/>.</summary>
+    public Beziers SurfaceEdgeBeziers => new(Scene, Native.cadaclysm_node_surface_edge_beziers(Scene.Handle, Index));
 
     /// <summary>Its isocurves taken from its trimmed surfaces and clipped to the trims, without
     /// meshing; a flat face gets none. In the surfaces' frame; empty without surfaces.</summary>
@@ -2059,6 +2735,32 @@ public sealed class Scene : IDisposable
             var found = new List<string>((int)count);
             for (uint i = 0; i < count; i++)
                 found.Add(Marshal.PtrToStringUTF8(Native.cadaclysm_geometry_diagnostic(Handle, i)) ?? "");
+            return found;
+        }
+    }
+
+    /// <summary>The rigid bodies of the file's mechanism, in the file's order; empty for a
+    /// file that records none.</summary>
+    public IReadOnlyList<Link> Links
+    {
+        get
+        {
+            var count = Native.cadaclysm_link_count(Handle);
+            var found = new List<Link>((int)count);
+            for (uint i = 0; i < count; i++) found.Add(new Link(this, i));
+            return found;
+        }
+    }
+
+    /// <summary>The connections between the links, in the file's order; empty for a file that
+    /// records none.</summary>
+    public IReadOnlyList<Joint> Joints
+    {
+        get
+        {
+            var count = Native.cadaclysm_joint_count(Handle);
+            var found = new List<Joint>((int)count);
+            for (uint i = 0; i < count; i++) found.Add(new Joint(this, i));
             return found;
         }
     }

@@ -38,6 +38,17 @@
 // `IllegalStateException` instead. Call `copy()` on any view that must outlive either.
 // Strings are copied on the way out and are always safe.
 //
+// `Solid.femMesh` is the exception: a `FemMesh` is a handle of your own, and its buffers borrow
+// from *it* rather than from the solid or from the tessellation cache. Closing the solid neither
+// frees one nor stales one, and meshing the solid again does not either -- only `FemMesh.free()`
+// (or `close()`, or the `Cleaner`) does, which is why it carries no generation check. Every
+// accessor on it asks its handle first, so a buffer **asked for** after the free throws
+// `IllegalStateException`; a buffer **already in hand** is a window on an address with no owner
+// left to ask, and reads the freed block instead -- measured: 1.29e-311 where the mesh had 4.0,
+// no throw. Copy anything that must outlive the handle,
+// and keep the `FemMesh` itself reachable while you read its buffers -- a buffer alone does not,
+// and the `Cleaner` frees what is unreachable.
+//
 // ## The chain mirrors the Rust `Workplane`
 //
 // A build call (`cuboid`, `cylinder`, `extrude`, `extrudeTapered`, `revolve`, `sweep`,
@@ -269,6 +280,75 @@ public final class Blacksmith {
             ValueLayout.JAVA_INT.withName("flags"),
             MemoryLayout.paddingLayout(4));
 
+    /**
+     * {@code CadaclysmBlacksmithFemOptions}. {@code cadaclysm_blacksmith_fem_options_init} fills
+     * the library's <em>whole</em> struct, so this layout must be at least as long as the
+     * header's or init writes past what {@link Solid#femMesh(double, double, double[])}
+     * allocated, and it may never reorder. Pinned field for field <em>and width for width</em>,
+     * with its field count, by {@code tests/bindings.rs}.
+     */
+    private static final MemoryLayout FEM_OPTIONS = MemoryLayout.structLayout(
+            ValueLayout.JAVA_LONG.withName("size"),
+            ValueLayout.JAVA_DOUBLE.withName("tolerance"),
+            ValueLayout.JAVA_DOUBLE.withName("max_size"));
+
+    // CadaclysmBlacksmithFemMeshView: every pointer here is borrowed from the FEM handle, not
+    // from the solid's tessellation cache, and dies with `cadaclysm_blacksmith_fem_mesh_free`.
+    // The paddings are a C compiler's: four bytes after each count a pointer follows, two after
+    // the two bools to land `min_angle` on eight, four after `worst_triangle`. `structLayout`
+    // refuses a misaligned field, so a missing padding fails the build here -- but a padding in
+    // the wrong place still aligns, which is what bindings.rs pins.
+    private static final MemoryLayout FEM_MESH_VIEW = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("nodes"),
+            ValueLayout.JAVA_INT.withName("node_count"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("triangles"),
+            ValueLayout.JAVA_INT.withName("triangle_count"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("triangle_face"),
+            ValueLayout.ADDRESS.withName("node_kind"),
+            ValueLayout.ADDRESS.withName("node_entity"),
+            ValueLayout.JAVA_INT.withName("face_count"),
+            ValueLayout.JAVA_INT.withName("edge_count"),
+            ValueLayout.JAVA_INT.withName("vertex_count"),
+            ValueLayout.JAVA_INT.withName("open_edge_count"),
+            ValueLayout.JAVA_INT.withName("folded_edge_count"),
+            ValueLayout.JAVA_BOOLEAN.withName("watertight"),
+            ValueLayout.JAVA_BOOLEAN.withName("from_mesh"),
+            MemoryLayout.paddingLayout(2),
+            ValueLayout.JAVA_DOUBLE.withName("min_angle"),
+            ValueLayout.JAVA_INT.withName("worst_triangle"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.JAVA_DOUBLE.withName("longest_edge"));
+
+    // CadaclysmBlacksmithFemEdge: one B-rep edge's node chain, filled in by
+    // `cadaclysm_blacksmith_fem_mesh_edge`; `nodes` and `runs` point into the handle and are
+    // read out as arrays of our own (see FemEdge).
+    private static final MemoryLayout FEM_EDGE = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("id"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("nodes"),
+            ValueLayout.JAVA_INT.withName("node_count"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("runs"),
+            ValueLayout.JAVA_INT.withName("run_count"),
+            ValueLayout.JAVA_INT.withName("face_a"),
+            ValueLayout.JAVA_INT.withName("face_b"),
+            ValueLayout.JAVA_INT.withName("end_a"),
+            ValueLayout.JAVA_INT.withName("end_b"),
+            ValueLayout.JAVA_BOOLEAN.withName("closed"),
+            ValueLayout.JAVA_BOOLEAN.withName("seam"),
+            MemoryLayout.paddingLayout(2));
+
+    // CadaclysmBlacksmithFemVertex: `point` is three doubles held in the struct itself rather
+    // than a pointer, so it is one sequenceLayout -- the shape POINT's own coordinates have.
+    private static final MemoryLayout FEM_VERTEX = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("node"),
+            MemoryLayout.paddingLayout(4),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("point"),
+            ValueLayout.JAVA_BOOLEAN.withName("has_position"),
+            MemoryLayout.paddingLayout(7));
+
     /** A named field's byte offset in one of the struct layouts above. */
     private static long offset(MemoryLayout struct, String field) {
         return struct.byteOffset(MemoryLayout.PathElement.groupElement(field));
@@ -288,14 +368,17 @@ public final class Blacksmith {
             EXTRUDE_TAPERED, EXTRUDE_OPEN_TAPERED, EXTRUDE_BETWEEN, EXTRUDE_OPEN_BETWEEN,
             SLANT_OF_PLANE, FRAME_MIDPLANE, FRAME_THROUGH, LOFT, LOFT_OPEN, LOFT_THROUGH, LOFT_THROUGH_OPEN, REVOLVE, REVOLVE_OPEN, REVOLVE_IN_PLANE, REVOLVE_OPEN_IN_PLANE, SWEEP_PATH_BEGIN,
             SWEEP_PATH_LINE_TO, SWEEP_PATH_ARC, SWEEP_PATH_ALONG, SWEEP_PATH_FREE, SWEEP, SWEEP_OPEN,
-            EXTRUDE_FACES, FACE, FACE_SHEET, DROP_FACES, PLACE, TRANSLATE, ROTATE, MIRROR, JOIN, CUT,
+            EXTRUDE_FACES, FACE, FACE_SHEET, DROP_FACES, PLACE, TRANSLATE, SCALED, ROTATE, MIRROR, JOIN, CUT,
             COMMON, SPLIT_SHEET, TRIM, FILLET, CHAMFER,
             SHELL, THICKEN, PUSH_PULL, PUSH_PULL_FACES, MERGE_FLUSH, REFILLET, UNFILLET, RECHAMFER, UNCHAMFER, COIL, PIPE, SPLIT, SPLIT_BY_PLANE, LUMP_COUNT, LUMP, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_REF, FIND_FACE, FACE_KIND, COLOURED, COLOUR,
             PROFILE_COLOURED, PROFILE_COLOUR, EDGES_COLOURED, EDGE_COLOUR, EDGE_POLYLINE_COLOURS,
             EDGE_COUNT, EDGE_AT, EDGE_CURVE, INTERSECT, INTERSECTION_FREE, INTERSECTION_CHAIN_COUNT, INTERSECTION_CHAIN, INTERSECTION_CURVE, INTERSECTION_OVERLAP_COUNT, INTERSECTION_OVERLAP, MESH_AT, MESH_FACE_TRIANGLES,
             EDGE_POLYLINES, BOUNDS, LEAKED_EDGES, UNPAIRED_EDGES, MANIFOLD, STEP, SAT_TEXT, SAT, BREP_TEXT, BREP, STRING_FREE, FROM_BREP,
             BREP_LAYOUT_ID, SVG_OPTIONS_INIT, SVG_TEXT, SVG, DRAWING_SVG_TEXT, DRAWING_SVG,
-            MESH_AT64, BOUNDS64;
+            MESH_AT64, BOUNDS64,
+            FEM_OPTIONS_INIT, SOLID_FEM_MESH, FEM_VIEW, FEM_EDGE_AT, FEM_VERTEX_AT,
+            FEM_OPEN_EDGE, FEM_FOLDED_EDGE, FEM_MSH_TEXT, FEM_SAVE_MSH, FEM_FREE,
+            NAMED, SOLID_NAME, ASSEMBLY_NEW, ASSEMBLY_FREE, ASSEMBLY_NAME, ASSEMBLY_PLACE_SOLID, ASSEMBLY_PLACE_ASSEMBLY, ASSEMBLY_STEP;
 
     static {
         SymbolLookup lib = library();
@@ -393,6 +476,7 @@ public final class Blacksmith {
         DROP_FACES = bind(linker, lib, "cadaclysm_blacksmith_drop_faces", FunctionDescriptor.of(A, A, A, L));
         PLACE = bind(linker, lib, "cadaclysm_blacksmith_place", FunctionDescriptor.of(A, A, A));
         TRANSLATE = bind(linker, lib, "cadaclysm_blacksmith_translate", FunctionDescriptor.of(A, A, D, D, D));
+        SCALED = bind(linker, lib, "cadaclysm_blacksmith_scaled", FunctionDescriptor.of(A, A, D));
         ROTATE = bind(linker, lib, "cadaclysm_blacksmith_rotate", FunctionDescriptor.of(A, A, A, D));
         MIRROR = bind(linker, lib, "cadaclysm_blacksmith_mirror", FunctionDescriptor.of(A, A, A));
         JOIN = bind(linker, lib, "cadaclysm_blacksmith_join", FunctionDescriptor.of(A, A, A, D, A, A));
@@ -462,6 +546,30 @@ public final class Blacksmith {
         DRAWING_SVG = bind(linker, lib, "cadaclysm_blacksmith_drawing_svg", FunctionDescriptor.of(B, A, L, A, L, A, A));
         MESH_AT64 = bind(linker, lib, "cadaclysm_blacksmith_mesh64", FunctionDescriptor.of(MESH64, A, D));
         BOUNDS64 = bind(linker, lib, "cadaclysm_blacksmith_bounds64", FunctionDescriptor.of(B, A, D, A, A));
+        // The FEM surface mesh. `cadaclysm_blacksmith_fem_mesh` takes a progress callback and a
+        // user pointer, both passed null here as every other progress-taking entry point in this
+        // file is (see the header's Ownership note): an upcall stub over the C callback is out of
+        // this binding's scope. `..._fem_mesh_msh_text` hands back an **owned** string, released
+        // with STRING_FREE like every other text here -- the reader library's twin borrows from a
+        // slot on its handle and must not be freed.
+        FEM_OPTIONS_INIT = bind(linker, lib, "cadaclysm_blacksmith_fem_options_init", FunctionDescriptor.ofVoid(A));
+        SOLID_FEM_MESH = bind(linker, lib, "cadaclysm_blacksmith_fem_mesh", FunctionDescriptor.of(A, A, A, A, A, A));
+        FEM_VIEW = bind(linker, lib, "cadaclysm_blacksmith_fem_mesh_view", FunctionDescriptor.of(B, A, A));
+        FEM_EDGE_AT = bind(linker, lib, "cadaclysm_blacksmith_fem_mesh_edge", FunctionDescriptor.of(B, A, I, A));
+        FEM_VERTEX_AT = bind(linker, lib, "cadaclysm_blacksmith_fem_mesh_vertex", FunctionDescriptor.of(B, A, I, A));
+        FEM_OPEN_EDGE = bind(linker, lib, "cadaclysm_blacksmith_fem_mesh_open_edge", FunctionDescriptor.of(B, A, I, A, A, A));
+        FEM_FOLDED_EDGE = bind(linker, lib, "cadaclysm_blacksmith_fem_mesh_folded_edge", FunctionDescriptor.of(B, A, I, A, A, A));
+        FEM_MSH_TEXT = bind(linker, lib, "cadaclysm_blacksmith_fem_mesh_msh_text", FunctionDescriptor.of(A, A));
+        FEM_SAVE_MSH = bind(linker, lib, "cadaclysm_blacksmith_fem_mesh_save_msh", FunctionDescriptor.of(B, A, A));
+        FEM_FREE = bind(linker, lib, "cadaclysm_blacksmith_fem_mesh_free", FunctionDescriptor.ofVoid(A));
+        NAMED = bind(linker, lib, "cadaclysm_blacksmith_named", FunctionDescriptor.of(A, A, A));
+        SOLID_NAME = bind(linker, lib, "cadaclysm_blacksmith_solid_name", FunctionDescriptor.of(A, A));
+        ASSEMBLY_NEW = bind(linker, lib, "cadaclysm_blacksmith_assembly_new", FunctionDescriptor.of(A, A));
+        ASSEMBLY_FREE = bind(linker, lib, "cadaclysm_blacksmith_assembly_free", FunctionDescriptor.ofVoid(A));
+        ASSEMBLY_NAME = bind(linker, lib, "cadaclysm_blacksmith_assembly_name", FunctionDescriptor.of(A, A));
+        ASSEMBLY_PLACE_SOLID = bind(linker, lib, "cadaclysm_blacksmith_assembly_place_solid", FunctionDescriptor.of(A, A, A, A, A));
+        ASSEMBLY_PLACE_ASSEMBLY = bind(linker, lib, "cadaclysm_blacksmith_assembly_place_assembly", FunctionDescriptor.of(A, A, A, A, A));
+        ASSEMBLY_STEP = bind(linker, lib, "cadaclysm_blacksmith_assembly_step", FunctionDescriptor.of(A, A, A, I));
     }
 
     @SuppressWarnings("restricted") // downcallHandle: every entry point here is the published ABI.
@@ -2301,6 +2409,451 @@ public final class Blacksmith {
     public record Bounds(double[] min, double[] max) {
     }
 
+    // ---- the FEM surface mesh ---------------------------------------------------------
+
+    /**
+     * One B-rep edge of a FEM mesh: the chain of nodes along it, and where that chain breaks.
+     * Plain data, copied out of the handle -- {@code nodes} and {@code runs} are arrays of your
+     * own where {@link FemMesh#nodes()} and its siblings are views, because the ABI hands these
+     * over one edge at a time and a record cannot hold a buffer whose owner may be freed under
+     * it. Python copies them into tuples for the same reason.
+     *
+     * <p>{@code nodes} are this mesh's node indices in order along the edge, its end vertices
+     * included; a closed edge repeats no node. <b>{@code runs} says where the chain breaks</b>:
+     * read {@code nodes[runs[i] .. runs[i + 1]]} (the last run to the end) as one polyline and
+     * join nothing across a run boundary. The two ends either side of one are two points of the
+     * edge with no mesh edge between them. {@code [0]} is the ordinary answer, and a caller
+     * reading {@code nodes} as one polyline without looking here jumps the gap silently.
+     *
+     * <p>{@code faces} is {@code (face_a, face_b)} and {@code ends} is {@code (end_a, end_b)},
+     * two ints each as {@link Edge#faces()} is: the second of each is the
+     * {@code CADACLYSM_BLACKSMITH_NONE} sentinel where there is none -- an open body's rim, or
+     * both ends at one vertex (a closed edge, a circle's rim, a full-turn seam). NONE is
+     * {@code 0xFFFFFFFF}, read into a Java {@code int} as <b>-1</b>, the way {@link Spot}'s
+     * fields read it. <b>{@code 0} is a real face and a real vertex, not a sentinel.</b> Which
+     * end comes first is the first trim's direction and means nothing else: the pair bounds the
+     * edge, it does not orient it.
+     *
+     * <p>{@code closed} where the nodes make one loop, never where {@code runs} has more than
+     * one; {@code seam} where one face bounds the edge twice, and both {@code faces} are then
+     * that same face.
+     *
+     * <p>{@code id} is <b>the body's own B-rep edge id</b>, not this mesh's edge index:
+     * {@link FemMesh#edges()} is a densely renumbered subset of the body's edges, ascending by
+     * id, with every edge collapsed to a point left out. Everything else that names an edge means
+     * the <em>index</em> -- a {@link FemMesh#nodeKind()} of 1 read through
+     * {@link FemMesh#nodeEntity()}, the third int of a {@link FemMesh#openEdges()} or
+     * {@link FemMesh#foldedEdges()} row, and the {@code edge_N} physical group of
+     * {@link FemMesh#mshText()} -- and this is the one way back from any of them to the topology
+     * behind the solid.
+     */
+    public record FemEdge(int id, int[] nodes, int[] runs, int[] faces, int[] ends, boolean closed, boolean seam) {
+        @Override
+        public String toString() {
+            return "FemEdge(id=" + id + ", nodes=" + nodes.length + ", runs=" + runs.length
+                    + ", faces=" + Arrays.toString(faces) + ", ends=" + Arrays.toString(ends)
+                    + ", closed=" + closed + ", seam=" + seam + ")";
+        }
+    }
+
+    /**
+     * One B-rep vertex of a FEM mesh: the node the mesh put there, if any, and where the
+     * topology says it is, if that is known. Plain data.
+     *
+     * <p>{@code node} is the mesh node at this vertex, or -1
+     * ({@code CADACLYSM_BLACKSMITH_NONE}) where the mesh has none there. <b>A sentinel here is
+     * ordinary, not a fault</b>: the analysis rebuilds a vertex wherever two trims meet, and a
+     * pole's polyline runs give a sphere 48 of them where the mesh has 2 points, so a caller
+     * walking these skips the sentinel rather than treating it as a gap.
+     *
+     * <p>{@code point} is where the vertex is, three doubles, in the same space and under the
+     * same placement as {@link FemMesh#nodes()}. <b>Meaningless unless {@code hasPosition}</b>:
+     * it is all zeros then, a point no geometry has and one a solver would read as a node at the
+     * origin.
+     */
+    public record FemVertex(int node, double[] point, boolean hasPosition) {
+        @Override
+        public String toString() {
+            return "FemVertex(node=" + node + ", point=" + Arrays.toString(point) + ", hasPosition=" + hasPosition + ")";
+        }
+    }
+
+    /**
+     * One solid meshed for a solver: nodes welded by bits, triangles wound outward, every node
+     * tagged with the lowest-dimension B-rep entity it lies on, and every crack reported rather
+     * than closed. What {@link Solid#femMesh(double, double, double[])} returns, and <b>owned by
+     * you</b>: close it (a try-with-resources), {@link #free()} it, or let the {@link Cleaner} do
+     * it when it is unreachable.
+     *
+     * <p>A handle rather than a snapshot, and its big arrays are read-only
+     * {@link DoubleBuffer}/{@link IntBuffer} views over the library's own memory, as
+     * {@link Mesh}'s are and for the same reason: a solver mesh is megabytes, and copying it to
+     * hand it over would cost that twice.
+     *
+     * <p><b>The owner of these buffers is this object, not the solid.</b> {@link Solid#close()}
+     * neither frees a FEM mesh nor stales one, and meshing the solid again at another tolerance
+     * does not either -- which is why this class has <em>no</em> generation check where
+     * {@link Mesh} and {@link Mesh64} have {@link Solid#checkCache}: a FEM view's pointers
+     * are built with the handle and never move.
+     *
+     * <p><b>What the guard does and does not do.</b> Every accessor below asks the handle first,
+     * so a buffer <em>asked for</em> after {@link #free()} throws {@link IllegalStateException}.
+     * A buffer <em>already in hand</em> is not protected and cannot be: a read-only NIO buffer
+     * cut from a reinterpreted address is a window with no owner left to ask. It reads the freed
+     * block instead, and hands back whatever is there by then: measured once, a
+     * {@link DoubleBuffer} taken before the free and read after gave {@code 1.29e-311} where the
+     * mesh had {@code 4.0} -- it does <em>not</em> throw, and it does not reliably give the old
+     * numbers either. Copy anything that must outlive the handle, and hold this object while you
+     * read its buffers: a buffer alone does not keep it reachable, so a {@code FemMesh} the
+     * program has finished with can be collected -- and freed by the {@link Cleaner} -- under a
+     * buffer still being read.
+     */
+    public static final class FemMesh implements AutoCloseable {
+        private final Handle handle;
+        private final Cleaner.Cleanable cleanable;
+
+        // The view, read once in the constructor: every pointer in it is built with the handle
+        // and good until it is freed, so asking again per accessor would be one C call per array
+        // for the same answer.
+        private final long nodes, triangles, triangleFace, nodeKind, nodeEntity;
+        private final int nodeCount, triangleCount, faceCount, edgeCount, vertexCount;
+        private final int openEdgeCount, foldedEdgeCount, worstTriangle;
+        private final boolean watertight, fromMesh;
+        private final double minAngle, longestEdge;
+
+        private FemMesh(MemorySegment raw) {
+            handle = new Handle(FEM_FREE, "fem mesh: freed", checked(raw, "fem_mesh"));
+            cleanable = CLEANER.register(this, handle);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(FEM_MESH_VIEW);
+                MemorySegment h = handle.live();
+                if (!call(() -> (boolean) FEM_VIEW.invokeExact(h, out))) {
+                    BuildException why = failure("fem_mesh_view");
+                    free();
+                    throw why;
+                }
+                nodes = out.get(ValueLayout.ADDRESS, offset(FEM_MESH_VIEW, "nodes")).address();
+                triangles = out.get(ValueLayout.ADDRESS, offset(FEM_MESH_VIEW, "triangles")).address();
+                triangleFace = out.get(ValueLayout.ADDRESS, offset(FEM_MESH_VIEW, "triangle_face")).address();
+                nodeKind = out.get(ValueLayout.ADDRESS, offset(FEM_MESH_VIEW, "node_kind")).address();
+                nodeEntity = out.get(ValueLayout.ADDRESS, offset(FEM_MESH_VIEW, "node_entity")).address();
+                nodeCount = out.get(ValueLayout.JAVA_INT, offset(FEM_MESH_VIEW, "node_count"));
+                triangleCount = out.get(ValueLayout.JAVA_INT, offset(FEM_MESH_VIEW, "triangle_count"));
+                faceCount = out.get(ValueLayout.JAVA_INT, offset(FEM_MESH_VIEW, "face_count"));
+                edgeCount = out.get(ValueLayout.JAVA_INT, offset(FEM_MESH_VIEW, "edge_count"));
+                vertexCount = out.get(ValueLayout.JAVA_INT, offset(FEM_MESH_VIEW, "vertex_count"));
+                openEdgeCount = out.get(ValueLayout.JAVA_INT, offset(FEM_MESH_VIEW, "open_edge_count"));
+                foldedEdgeCount = out.get(ValueLayout.JAVA_INT, offset(FEM_MESH_VIEW, "folded_edge_count"));
+                watertight = out.get(ValueLayout.JAVA_BOOLEAN, offset(FEM_MESH_VIEW, "watertight"));
+                fromMesh = out.get(ValueLayout.JAVA_BOOLEAN, offset(FEM_MESH_VIEW, "from_mesh"));
+                minAngle = out.get(ValueLayout.JAVA_DOUBLE, offset(FEM_MESH_VIEW, "min_angle"));
+                worstTriangle = out.get(ValueLayout.JAVA_INT, offset(FEM_MESH_VIEW, "worst_triangle"));
+                longestEdge = out.get(ValueLayout.JAVA_DOUBLE, offset(FEM_MESH_VIEW, "longest_edge"));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Whether {@link #free()} has run. */
+        public boolean closed() {
+            return handle.closed();
+        }
+
+        /** Give the mesh back, and with it every buffer taken from it. Idempotent; the
+         *  {@link Cleaner} or the try-with-resources does it otherwise. A {@code .msh} text
+         *  already read is <em>not</em> given back with it: each is a {@code String} of your
+         *  own. */
+        public void free() {
+            cleanable.clean();
+        }
+
+        @Override
+        public void close() {
+            free();
+        }
+
+        /** Every node's position, three doubles each -- placed by
+         *  {@link Solid#femMesh(double, double, double[])}'s frame. Every node is used by at
+         *  least one triangle. */
+        public DoubleBuffer nodes() {
+            try {
+                handle.live();
+                return doubleView(nodes, nodeCount * 3L);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Three node indices a triangle, wound outward -- a mirroring placement is wound
+         *  back. */
+        public IntBuffer triangles() {
+            try {
+                handle.live();
+                return intView(triangles, triangleCount * 3L);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The B-rep face each triangle lies on, one per triangle, into {@link #faceCount()}
+         *  faces -- numbered as {@link Solid#selectFace(Selector)} and {@link Solid#faceKind}
+         *  number them. */
+        public IntBuffer triangleFace() {
+            try {
+                handle.live();
+                return intView(triangleFace, triangleCount);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** What each node lies on -- 0 a B-rep vertex, 1 an edge, 2 a face -- one per node: the
+         *  lowest-dimension entity it lies on, which is the {@code .msh} format's own
+         *  classification rule. {@link #nodeEntity()} says which entity of that kind. */
+        public IntBuffer nodeKind() {
+            try {
+                handle.live();
+                return intView(nodeKind, nodeCount);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Which vertex, edge or face each node lies on, read by the matching
+         *  {@link #nodeKind()}: an index into {@link #vertices()}, into {@link #edges()}, or into
+         *  the solid's faces. One per node. */
+        public IntBuffer nodeEntity() {
+            try {
+                handle.live();
+                return intView(nodeEntity, nodeCount);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The solid's faces; {@link #triangleFace()} and a {@link #nodeKind()} of 2 index
+         *  them. */
+        public int faceCount() {
+            handle.live();
+            return faceCount;
+        }
+
+        /** One {@link FemEdge} per B-rep edge, in the order a {@link #nodeKind()} of 1 indexes
+         *  them.
+         *
+         *  <p><b>This list's own numbering, not the solid's</b>: each {@link FemEdge#id()}
+         *  carries the body's own edge id. Built afresh on every ask, one C call an edge, so read
+         *  it once and keep the list. */
+        public List<FemEdge> edges() {
+            MemorySegment h = handle.live();
+            List<FemEdge> out = new ArrayList<>(edgeCount);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment raw = arena.allocate(FEM_EDGE);
+                for (int i = 0; i < edgeCount; i++) {
+                    int at = i;
+                    if (!call(() -> (boolean) FEM_EDGE_AT.invokeExact(h, at, raw))) throw failure("fem_mesh_edge");
+                    out.add(new FemEdge(
+                            raw.get(ValueLayout.JAVA_INT, offset(FEM_EDGE, "id")),
+                            chain(raw, "nodes", "node_count"),
+                            chain(raw, "runs", "run_count"),
+                            new int[] {raw.get(ValueLayout.JAVA_INT, offset(FEM_EDGE, "face_a")),
+                                       raw.get(ValueLayout.JAVA_INT, offset(FEM_EDGE, "face_b"))},
+                            new int[] {raw.get(ValueLayout.JAVA_INT, offset(FEM_EDGE, "end_a")),
+                                       raw.get(ValueLayout.JAVA_INT, offset(FEM_EDGE, "end_b"))},
+                            raw.get(ValueLayout.JAVA_BOOLEAN, offset(FEM_EDGE, "closed")),
+                            raw.get(ValueLayout.JAVA_BOOLEAN, offset(FEM_EDGE, "seam"))));
+                }
+            } finally {
+                keep(this);
+            }
+            return out;
+        }
+
+        /** One int array out of a {@code FEM_EDGE} pointer/count pair, copied through this
+         *  file's own {@code intView}: the record outlives the {@link Arena} the struct was read
+         *  in, so its chain cannot be lent. */
+        private static int[] chain(MemorySegment raw, String pointer, String count) {
+            long at = raw.get(ValueLayout.ADDRESS, offset(FEM_EDGE, pointer)).address();
+            int n = raw.get(ValueLayout.JAVA_INT, offset(FEM_EDGE, count));
+            return toArray(intView(at, n));
+        }
+
+        /** One {@link FemVertex} per B-rep vertex, in the order a {@link #nodeKind()} of 0
+         *  indexes them. Built afresh on every ask. */
+        public List<FemVertex> vertices() {
+            MemorySegment h = handle.live();
+            List<FemVertex> out = new ArrayList<>(vertexCount);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment raw = arena.allocate(FEM_VERTEX);
+                for (int i = 0; i < vertexCount; i++) {
+                    int at = i;
+                    if (!call(() -> (boolean) FEM_VERTEX_AT.invokeExact(h, at, raw))) throw failure("fem_mesh_vertex");
+                    out.add(new FemVertex(
+                            raw.get(ValueLayout.JAVA_INT, offset(FEM_VERTEX, "node")),
+                            raw.asSlice(offset(FEM_VERTEX, "point"), 3L * Double.BYTES).toArray(ValueLayout.JAVA_DOUBLE),
+                            raw.get(ValueLayout.JAVA_BOOLEAN, offset(FEM_VERTEX, "has_position"))));
+                }
+            } finally {
+                keep(this);
+            }
+            return out;
+        }
+
+        /**
+         * Every crack, as {@code {a, b, brepEdge}}: a directed mesh edge {@code (a, b)} with no
+         * {@code (b, a)}, and the B-rep edge <em>index</em> both nodes lie on, or -1 where they
+         * share none.
+         *
+         * <p><b>Empty unless the body's topology is closed</b>, whose mesh is otherwise not asked
+         * about at all: an open body -- a sheet, a shell the file wrote open -- makes no claim to
+         * enclose anything, so its rim is not a crack. Such a body reports {@link #watertight()}
+         * false with this and {@link #foldedEdges()} <em>both</em> empty, and that trio together
+         * says "not asked", not "nothing found".
+         */
+        public List<int[]> openEdges() {
+            return census(FEM_OPEN_EDGE, openEdgeCount, "fem_mesh_open_edge");
+        }
+
+        /**
+         * Every fold, as {@link #openEdges()} reports a crack: a directed mesh edge used by more
+         * than one triangle.
+         *
+         * <p><b>A body can be folded without being open</b> -- a solid no thicker than a line
+         * leaves no hole for an open edge to find -- and the closure census's own known-bad bodies
+         * are folds rather than open cracks. A caller that checks {@link #openEdges()} alone calls
+         * such a body sound. Empty under the same rule as {@link #openEdges()}.
+         */
+        public List<int[]> foldedEdges() {
+            return census(FEM_FOLDED_EDGE, foldedEdgeCount, "fem_mesh_folded_edge");
+        }
+
+        /** The library's two census readers have one shape, so the two lists cannot drift. */
+        private List<int[]> census(MethodHandle row, int count, String what) {
+            MemorySegment h = handle.live();
+            List<int[]> out = new ArrayList<>(count);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment triple = arena.allocate(ValueLayout.JAVA_INT, 3);
+                MemorySegment a = triple.asSlice(0, Integer.BYTES);
+                MemorySegment b = triple.asSlice(Integer.BYTES, Integer.BYTES);
+                MemorySegment edge = triple.asSlice(2L * Integer.BYTES, Integer.BYTES);
+                for (int i = 0; i < count; i++) {
+                    int at = i;
+                    if (!call(() -> (boolean) row.invokeExact(h, at, a, b, edge))) throw failure(what);
+                    out.add(triple.toArray(ValueLayout.JAVA_INT));
+                }
+            } finally {
+                keep(this);
+            }
+            return out;
+        }
+
+        /** The welded mesh closes -- and so does the topology behind it. <b>False for every body
+         *  whose topology is not closed</b>, whose mesh is then not asked about at all; read
+         *  {@link #openEdges()} for what an empty census beside a false here does and does not
+         *  mean. */
+        public boolean watertight() {
+            handle.live();
+            return watertight;
+        }
+
+        /** Whether this came from a bare mesh rather than from a brep -- always false on this
+         *  side of the ABI, a {@link Solid} always having one. The reader library's
+         *  {@code Cad.Node.femMesh} sets it for a node with no brep (a JT, an STL, an OpenSCAD
+         *  part), and there it also says which space the mesh is in. Here it is carried so the two
+         *  wrappers read the same, field for field. */
+        public boolean fromMesh() {
+            handle.live();
+            return fromMesh;
+        }
+
+        /** The smallest interior angle of any triangle, in degrees. There is always one: a body
+         *  that meshed to no triangles is a refusal, not a mesh. */
+        public double minAngle() {
+            handle.live();
+            return minAngle;
+        }
+
+        /** The triangle with that angle, as an index into {@link #triangles()} by triple. */
+        public int worstTriangle() {
+            handle.live();
+            return worstTriangle;
+        }
+
+        /** The longest triangle edge, placed.
+         *
+         *  <p><b>The figure to check against {@code maxSize}, and the only one that says what the
+         *  mesh actually is.</b> {@code maxSize} bounds the boundary segments and merely
+         *  <em>targets</em> the interior: measured at 1.03 x {@code maxSize} on a face whose
+         *  parameters run unevenly, where a full-size boundary piece met a much shorter one left
+         *  by halving. One small enough beside the body to reach the mesher's own piece and
+         *  station ceilings is not honoured at all. A caller that asked for an element size reads
+         *  this to find out whether it got one -- and {@code tolerance} alone, not
+         *  {@code maxSize}, decides how closely the boundary follows the geometry. */
+        public double longestEdge() {
+            handle.live();
+            return longestEdge;
+        }
+
+        /**
+         * The mesh as Gmsh 4.1 ASCII {@code .msh} text: an entity per B-rep vertex, edge and
+         * face, a volume where the body closes, and a physical group naming each.
+         *
+         * <p><b>The library's text is owned</b>, as every other text this library hands over, and
+         * is released here with {@code cadaclysm_blacksmith_string_free} once it has been copied
+         * into a {@code String}: two asks give two independent texts, and a text already read
+         * outlives {@link #free()}. The reader library's {@code Cad.FemMesh.mshText} is the other
+         * way round -- a slot borrowed from its handle, freed by nothing -- so a reader porting
+         * one side's reasoning onto the other leaks or double-frees.
+         *
+         * <p><b>The unlicensed notice is printed here</b>, on this writer and on
+         * {@link #saveMsh(String)}, and <em>not</em> by
+         * {@link Solid#femMesh(double, double, double[])} -- where the reader library notices on
+         * its builder and on neither writer. Each matches its own siblings.
+         *
+         * <p>Throws {@link BuildException} for a mesh the writer refuses, naming the field it
+         * cannot honour, and {@link IllegalStateException} for a freed handle.
+         */
+        public String mshText() {
+            MemorySegment h = handle.live();
+            MemorySegment raw;
+            try {
+                raw = call(() -> (MemorySegment) FEM_MSH_TEXT.invokeExact(h));
+            } finally {
+                keep(this);
+            }
+            if (raw.address() == 0) throw failure("fem_mesh_msh_text");
+            try {
+                return string(raw);
+            } finally {
+                call(() -> {
+                    STRING_FREE.invokeExact(raw);
+                    return null;
+                });
+            }
+        }
+
+        /** {@link #mshText()} written to {@code path} by the library itself: the same bytes from
+         *  the same writer, straight to the file rather than through a string. Throws for a mesh
+         *  the writer refuses or a file it cannot write. The notice is given here too; see
+         *  {@link #mshText()}. */
+        public void saveMsh(String path) {
+            MemorySegment h = handle.live();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment cPath = arena.allocateFrom(path);
+                if (!call(() -> (boolean) FEM_SAVE_MSH.invokeExact(h, cPath))) throw failure("fem_mesh_save_msh");
+            } finally {
+                keep(this);
+            }
+        }
+
+        @Override
+        public String toString() {
+            return closed() ? "FemMesh(freed)"
+                    : "FemMesh(nodes=" + nodeCount + ", triangles=" + triangleCount
+                            + ", watertight=" + watertight + ", fromMesh=" + fromMesh + ")";
+        }
+    }
+
     /**
      * An exact B-rep solid (or open sheet). Immutable; every operation returns a new one.
      * Close it to free it; the cleaner does so otherwise.
@@ -2729,6 +3282,16 @@ public final class Blacksmith {
             try {
                 MemorySegment h = handle();
                 return new Solid(call(() -> (MemorySegment) TRANSLATE.invokeExact(h, dx, dy, dz)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** This solid scaled by {@code factor} about the origin: every length times it, exactly. */
+        public Solid scaled(double factor) {
+            try {
+                MemorySegment h = handle();
+                return new Solid(call(() -> (MemorySegment) SCALED.invokeExact(h, factor)));
             } finally {
                 keep(this);
             }
@@ -3228,6 +3791,84 @@ public final class Blacksmith {
                 MemorySegment raw = call(() -> (MemorySegment) MESH_AT64.invokeExact(allocator, h, tolerance));
                 if (raw.get(ValueLayout.ADDRESS, offset(MESH64, "positions")).address() == 0) throw failure("mesh64");
                 return new Mesh64(this, tolerance, filled(tolerance), raw);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #femMesh(double, double, double[])} with every default: the chordal
+         *  tolerance 0.01, no size ceiling, no placement. */
+        public FemMesh femMesh() {
+            return femMesh(0.01, 0.0, null);
+        }
+
+        /** {@link #femMesh(double, double, double[])} at this chordal tolerance, with no size
+         *  ceiling and no placement. */
+        public FemMesh femMesh(double tolerance) {
+            return femMesh(tolerance, 0.0, null);
+        }
+
+        /** {@link #femMesh(double, double, double[])} with no placement. */
+        public FemMesh femMesh(double tolerance, double maxSize) {
+            return femMesh(tolerance, maxSize, null);
+        }
+
+        /**
+         * This solid meshed for a solver, as a {@link FemMesh}: nodes welded by bits, triangles
+         * wound outward, each node tagged with the lowest-dimension B-rep entity it lies on, and
+         * every crack reported rather than closed. <b>Owned by you</b> -- close it (a
+         * try-with-resources) or {@link FemMesh#free()} it -- and it outlives this solid.
+         *
+         * <p>{@code tolerance} is the chordal tolerance in model units, finite and above zero,
+         * and <b>it alone governs how closely the mesh follows the geometry</b>. {@code maxSize}
+         * is a size ceiling, finite and zero or more, 0 being no ceiling (curvature alone):
+         * <b>it bounds the boundary and targets the interior</b>, which is not a
+         * longest-element-edge guarantee -- it adds boundary nodes without refining boundary
+         * geometry, and {@link FemMesh#longestEdge()} is what the mesh actually came to, the
+         * figure to check against it.
+         *
+         * <p>Those two defaults are {@code FemOptions::default()}'s own, restated here so the
+         * signature says what a caller gets; the library's struct is still filled by
+         * {@code cadaclysm_blacksmith_fem_options_init} first, so a field added to it later
+         * defaults without this line being touched. <b>Neither is checked here</b>: both are
+         * passed through and the library decides, which is the only way a wrapper agrees with an
+         * ABI whose mesh-only path (on the reader's side) reads no options at all. The
+         * placement's length is the one thing this wrapper must check, the ABI receiving only a
+         * pointer.
+         *
+         * <p>{@code placement} is null (the identity) or <b>twelve</b> numbers -- origin, x, y, z,
+         * as every frame argument here, refused by the same {@code frame: expected 12 numbers}
+         * check. The reader library's {@code Cad.Node.femMesh} takes <b>sixteen</b>,
+         * column-major, so a caller moving between the two reformats the placement.
+         *
+         * <p>The progress callback the C ABI offers is not passed: as with
+         * {@link #join(Solid)} and the rest, every call here runs silent.
+         *
+         * <p><b>A cracked body is not a failure</b>: it comes back with
+         * {@link FemMesh#watertight()} false and its cracks in {@link FemMesh#openEdges()} /
+         * {@link FemMesh#foldedEdges()} -- <em>both</em> lists, a fold being as real a fault as an
+         * open crack -- and nothing is welded shut to make it look sound. Throws
+         * {@link BuildException} for a tolerance or {@code maxSize} the mesher refuses, a
+         * placement that is not finite and invertible, and a body that meshes to no triangles at
+         * all. <b>No unlicensed notice here</b>: this side gives it on
+         * {@link FemMesh#mshText()} and {@link FemMesh#saveMsh(String)} instead.
+         */
+        public FemMesh femMesh(double tolerance, double maxSize, double[] placement) {
+            double[] matrix = placement == null ? null : frame(placement);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment options = arena.allocate(FEM_OPTIONS);
+                call(() -> {
+                    FEM_OPTIONS_INIT.invokeExact(options);
+                    return null;
+                });
+                options.set(ValueLayout.JAVA_LONG, offset(FEM_OPTIONS, "size"), FEM_OPTIONS.byteSize());
+                options.set(ValueLayout.JAVA_DOUBLE, offset(FEM_OPTIONS, "tolerance"), tolerance);
+                options.set(ValueLayout.JAVA_DOUBLE, offset(FEM_OPTIONS, "max_size"), maxSize);
+                MemorySegment frame = matrix == null
+                        ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_DOUBLE, matrix);
+                MemorySegment h = handle();
+                return new FemMesh(call(() -> (MemorySegment) SOLID_FEM_MESH.invokeExact(
+                        h, frame, options, MemorySegment.NULL, MemorySegment.NULL)));
             } finally {
                 keep(this);
             }
@@ -3890,6 +4531,43 @@ public final class Blacksmith {
             }
         }
 
+        // -- naming
+
+        /** This solid, named {@code name}. The name rides through an operation with exactly one
+         *  source solid ({@link #place}, {@link #translate}, {@link #coloured(double, double,
+         *  double)}, {@link #fillet}, ...) and is dropped by one with two or more ({@link #join},
+         *  {@link #cut}, {@link #common}, ...) and by a fresh primitive or sweep -- see {@link
+         *  #name()}. It is what {@link Assembly#place(Solid, double[], String)} defaults a
+         *  placement's own name to, and the product name a lone named solid gets when written to
+         *  STEP ({@link #step(String)}/{@link #stepText()}). Refused for an empty name. */
+        public Solid named(String name) {
+            try {
+                MemorySegment h = handle();
+                try (Arena arena = Arena.ofConfined()) {
+                    MemorySegment n = arena.allocateFrom(name);
+                    return new Solid(call(() -> (MemorySegment) NAMED.invokeExact(h, n)));
+                }
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** This solid's name, or null if it has none -- what {@link #named} set, kept or dropped
+         *  by whatever built this solid (see {@link #named}). The library's borrowed pointer is
+         *  null for both "no name" and a failure, so this never consults {@code last_error} --
+         *  same as Python's own {@code name} -- and it reads the pointer itself rather than
+         *  through {@link Blacksmith#string}, which maps null to "" and would erase the
+         *  distinction. */
+        public String name() {
+            try {
+                MemorySegment h = handle();
+                MemorySegment raw = call(() -> (MemorySegment) SOLID_NAME.invokeExact(h));
+                return raw.address() == 0 ? null : string(raw);
+            } finally {
+                keep(this);
+            }
+        }
+
         // -- from files
 
         /** {@link #fromNode(Cad.Scene, Cad.Node, boolean)}, placed. */
@@ -4059,6 +4737,176 @@ public final class Blacksmith {
             String schemaPath = at != null && Files.isRegularFile(at) ? schema : null;
             Cad.OpenOptions options = new Cad.OpenOptions(Cad.Convention.NATIVE, false, false, schemaPath, false, 0.0);
             return Cad.openMemory(bytes, "solid.stp", options);
+        }
+    }
+
+    // ---- assemblies -------------------------------------------------------------------------
+
+    /** A mutable tree of placements: a name, and zero or more solids or other assemblies placed
+     *  in it at a frame. Unlike {@link Solid}, placing shares rather than copies -- placing one
+     *  assembly under another does not snapshot it, so a later placement on the shared one shows
+     *  up wherever it already sits. Close it when done, or let the {@link Cleaner} do it when this
+     *  object is collected -- closing an assembly does not free what was placed in it if that is
+     *  still reachable from somewhere else. */
+    public static final class Assembly implements AutoCloseable {
+        private final Handle handle;
+        private final Cleaner.Cleanable cleanable;
+
+        /** A new, empty assembly called {@code name}. Refused (thrown) for an empty name. */
+        public Assembly(String name) {
+            MemorySegment raw;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment n = arena.allocateFrom(name);
+                raw = call(() -> (MemorySegment) ASSEMBLY_NEW.invokeExact(n));
+            }
+            handle = new Handle(ASSEMBLY_FREE, "assembly: closed", checked(raw, "assembly"));
+            cleanable = CLEANER.register(this, handle);
+        }
+
+        MemorySegment handle() {
+            return handle.live();
+        }
+
+        public boolean closed() {
+            return handle.closed();
+        }
+
+        /** Give the assembly back. Idempotent. Does not free what was placed in it. */
+        @Override
+        public void close() {
+            cleanable.clean();
+        }
+
+        /** This assembly's own name, given when it was made. Never null, unlike {@link
+         *  Solid#name()}: an assembly always has the name it was constructed with. */
+        public String name() {
+            try {
+                MemorySegment h = handle();
+                return string(call(() -> (MemorySegment) ASSEMBLY_NAME.invokeExact(h)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #place(Solid, double[], String)} with no explicit name. */
+        public String place(Solid solid, double[] frame) {
+            return place(solid, frame, null);
+        }
+
+        /** Place {@code solid} at {@code frame} (twelve numbers, right-handed and orthonormal) in
+         *  this assembly, called {@code name} -- or, left null, {@code solid}'s own name ({@link
+         *  Solid#name()}, or "part" for an unnamed one), numbered past any already taken here
+         *  ("bolt", "bolt 2", ...). An explicit name already taken here throws. Returns the
+         *  placement's name. */
+        public String place(Solid solid, double[] frame, String name) {
+            double[] f = frame(frame);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment fs = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, f);
+                MemorySegment n = name == null ? MemorySegment.NULL : arena.allocateFrom(name);
+                MemorySegment h = handle();
+                MemorySegment s = solid.handle();
+                MemorySegment raw = call(() -> (MemorySegment) ASSEMBLY_PLACE_SOLID.invokeExact(h, s, fs, n));
+                if (raw.address() == 0) throw failure("assembly_place_solid");
+                try {
+                    return string(raw);
+                } finally {
+                    call(() -> {
+                        STRING_FREE.invokeExact(raw);
+                        return null;
+                    });
+                }
+            } finally {
+                keep(this, solid);
+            }
+        }
+
+        /** {@link #place(Assembly, double[], String)} with no explicit name. */
+        public String place(Assembly placed, double[] frame) {
+            return place(placed, frame, null);
+        }
+
+        /** Place another assembly, {@code placed}, sharing it rather than copying it, as {@link
+         *  #place(Solid, double[], String)} places a solid -- {@code name} defaults to {@code
+         *  placed}'s own {@link #name()}. Placing {@code placed} as itself, or anywhere above this
+         *  assembly in the tree already, throws (naming the cycle), since writing that out would
+         *  never terminate. Returns the placement's name. */
+        public String place(Assembly placed, double[] frame, String name) {
+            double[] f = frame(frame);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment fs = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, f);
+                MemorySegment n = name == null ? MemorySegment.NULL : arena.allocateFrom(name);
+                MemorySegment h = handle();
+                MemorySegment p = placed.handle();
+                MemorySegment raw = call(() -> (MemorySegment) ASSEMBLY_PLACE_ASSEMBLY.invokeExact(h, p, fs, n));
+                if (raw.address() == 0) throw failure("assembly_place_assembly");
+                try {
+                    return string(raw);
+                } finally {
+                    call(() -> {
+                        STRING_FREE.invokeExact(raw);
+                        return null;
+                    });
+                }
+            } finally {
+                keep(this, placed);
+            }
+        }
+
+        /** {@link #stepText(String, String)} with no schema (the built-in AP203), in millimetres. */
+        public String stepText() {
+            return stepText(null, "mm");
+        }
+
+        /** This assembly, and everything placed under it, as one STEP file: this assembly the
+         *  root product, each sub-assembly and each distinct part (the same solid with the same
+         *  paint and name) written once, each placement an occurrence named as it was placed. See
+         *  {@link Blacksmith#writeStepText}. Throws where this assembly, or a sub-assembly
+         *  reachable from it, places nothing -- a reader would never show it. */
+        public String stepText(String schema, String unit) {
+            int code = unitCode(unit);
+            try (Arena arena = Arena.ofConfined()) {
+                String text = schemaText(schema);
+                MemorySegment schemaSeg = text == null ? MemorySegment.NULL : arena.allocateFrom(text);
+                MemorySegment h = handle();
+                MemorySegment raw = call(() -> (MemorySegment) ASSEMBLY_STEP.invokeExact(h, schemaSeg, code));
+                if (raw.address() == 0) throw failure("assembly_step");
+                try {
+                    return string(raw);
+                } finally {
+                    call(() -> {
+                        STRING_FREE.invokeExact(raw);
+                        return null;
+                    });
+                }
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #step(String, String, String)} with no schema (the built-in AP203), in millimetres. */
+        public void step(String path) {
+            step(path, null, "mm");
+        }
+
+        /** This assembly written as a STEP file (AP203 unless {@code schema} names another). */
+        public void step(String path, String schema, String unit) {
+            writeText(path, stepText(schema, unit));
+        }
+
+        /** {@link #toScene(String)} with the built-in AP203. */
+        public Cad.Scene toScene() {
+            return toScene(null);
+        }
+
+        /** This assembly as a reader {@link Cad.Scene}, through STEP text and {@link
+         *  Cad#openMemory} -- {@link Solid#toScene(String)}'s own door, over the whole tree
+         *  instead of one solid. */
+        public Cad.Scene toScene(String schema) {
+            byte[] bytes = stepText(schema, "mm").getBytes(StandardCharsets.UTF_8);
+            java.nio.file.Path at = schema != null && schema.indexOf('\n') < 0 ? schemaFilePath(schema) : null;
+            String schemaPath = at != null && Files.isRegularFile(at) ? schema : null;
+            Cad.OpenOptions options = new Cad.OpenOptions(Cad.Convention.NATIVE, false, false, schemaPath, false, 0.0);
+            return Cad.openMemory(bytes, "assembly.stp", options);
         }
     }
 
@@ -4392,13 +5240,6 @@ public final class Blacksmith {
             return new Frame(origin, new double[]{0, 1, 0}, new double[]{0, 0, 1}, new double[]{1, 0, 0});
         }
 
-        /**
-         * The plane through {@code origin} square to {@code normal} (the frame's z). Its x
-         * axis is world X laid onto that plane, or world Y when the normal is within about
-         * 25° of X, the axes {@link Solid#faceFrame} gives a face facing {@code normal} -- so a
-         * normal along +Z, -Y or +X gives exactly {@link #xy}, {@link #xz} or
-         * {@link #yz}.
-         */
         /** The plane midway between the planes of frames a and b: halfway between parallel planes, on a's axes; for planes that meet, the plane bisecting them through the line they meet on, its x along that line. */
         public static Frame midplane(Frame a, Frame b) {
             try (Arena arena = Arena.ofConfined()) {
@@ -4425,6 +5266,13 @@ public final class Blacksmith {
             }
         }
 
+        /**
+         * The plane through {@code origin} square to {@code normal} (the frame's z). Its x
+         * axis is world X laid onto that plane, or world Y when the normal is within about
+         * 25° of X, the axes {@link Solid#faceFrame} gives a face facing {@code normal} -- so a
+         * normal along +Z, -Y or +X gives exactly {@link #xy}, {@link #xz} or
+         * {@link #yz}.
+         */
         public static Frame at(double[] origin, double[] normal) {
             double[] z = unit(normal, "Frame.at: normal");
             return at(origin, z, Math.abs(z[0]) <= 0.9 ? new double[]{1, 0, 0} : new double[]{0, 1, 0});

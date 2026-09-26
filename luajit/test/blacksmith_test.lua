@@ -181,6 +181,15 @@ return function(t)
     part:close()   -- idempotent
   end)
 
+  t.test("scaled multiplies every length", function()
+    local big = bs.Solid.cuboid(1, 2, 3):scaled(2)
+    local b = big:bounds_at(0.05)
+    t.ok(math.abs(b[2][1] - b[1][1] - 2) < 1e-9 and math.abs(b[2][3] - b[1][3] - 6) < 1e-9, "scaled bounds")
+    local e = t.raises(function() return big:scaled(0) end, "scaled:")
+    t.ok(is_build_error(e))
+    big:close()
+  end)
+
   t.test("svg: solid text, a file, several solids' groups, up defaults to z, fov=200 refused", function()
     local plate = bs.Solid.extrude(plate_outline(), XY, 6)
     local text = plate:svg_text()
@@ -424,6 +433,19 @@ return function(t)
       if c ~= false and all_near(c, { 0.2, 0.4, 1 }, 1e-12) then any_blue = true end
     end
     t.ok(any_blue, "no polyline read back the edge-specific colour")
+    -- One edge painted, no all-edges colour: every other polyline is on no coloured edge.
+    local one = cube:edges_coloured({ 0.2, 0.4, 1 }, { 5 })
+    local painted, unpainted = 0, 0
+    for _, c in ipairs(one:edge_polyline_colours()) do
+      if c == false then
+        unpainted = unpainted + 1
+      else
+        t.ok(all_near(c, { 0.2, 0.4, 1 }, 1e-12), "a painted polyline read back another colour")
+        painted = painted + 1
+      end
+    end
+    t.ok(painted >= 1, "the painted edge's polyline came back unpainted")
+    t.ok(unpainted >= 1, "an unpainted polyline came back as a colour, not false")
     t.raises(function() two:edge_polyline_colours(-1) end,
       "edge_polyline_colours: tolerance must be positive and finite")
   end)
@@ -1159,6 +1181,271 @@ return function(t)
     end, "^nurbs_to: 2 weights for 3 control points %(the current point and 2 given%); give one per point$")
   end)
 
+  -- A quarter turn about z then 100 along x, as the twelve numbers a Frame is here
+  -- (origin, x, y, z) rather than the reader's sixteen: (x, y, z) -> (100 - y, x, z).
+  local TURNED = bs.Frame({ 100, 0, 0 }, { 0, 1, 0 }, { -1, 0, 0 }, { 0, 0, 1 })
+  local function turned(x, y, z) return 100 - y, x, z end
+
+  t.test("a solid's FEM mesh: the plate's arrays, its census, its quality and its owned .msh text", function()
+    local plate = bs.Solid.extrude(plate_outline(), XY, 6)
+    local mesh = plate:fem_mesh(0.05)
+    t.eq(getmetatable(mesh), bs.FemMesh)
+    t.eq(mesh.face_count, 12)
+    t.eq(mesh.node_count, 864)
+    t.eq(mesh.triangle_count, 1732)
+    t.eq(#mesh.edges, 30)
+    t.eq(#mesh.vertices, 20)
+    t.eq(mesh.watertight, true)
+    t.eq(mesh.from_mesh, false, "every solid here has a brep behind it")
+    t.eq(#mesh.open_edges, 0)
+    t.eq(#mesh.folded_edges, 0)
+    t.ok(mesh.min_angle > 0 and mesh.min_angle < 60, tostring(mesh.min_angle))
+    t.near(mesh.longest_edge, 80.22468448052632, 1e-9)
+    t.ok(mesh.worst_triangle < mesh.triangle_count)
+    for i = 0, mesh.triangle_count * 3 - 1 do
+      t.ok(mesh.triangles[i] < mesh.node_count, "a triangle index past the nodes")
+    end
+    for i = 0, mesh.triangle_count - 1 do
+      t.ok(mesh.triangle_face[i] < mesh.face_count, "a triangle_face past the faces")
+    end
+    -- Read once: `edges` and `vertices` are fields computed when read, one ABI call a row.
+    local edges, vertices = mesh.edges, mesh.vertices
+    local kinds = {}
+    for i = 0, mesh.node_count - 1 do
+      local kind, entity = mesh.node_kind[i], mesh.node_entity[i]
+      kinds[kind] = true
+      local bound = (kind == 0 and #vertices) or (kind == 1 and #edges) or (kind == 2 and mesh.face_count)
+      t.ok(bound and entity < bound, ("node %d: kind %d entity %d"):format(i, kind, entity))
+    end
+    t.ok(kinds[0] and kinds[1] and kinds[2], "a solid's nodes lie on vertices, edges and faces")
+    -- This library's text is **owned** and released here, where the reader's is a
+    -- borrowed slot on its own handle: two asks are two independent strings, so the
+    -- second must read the same length and neither may have been freed under the other.
+    local msh = mesh:msh_text()
+    t.eq(msh:sub(1, 11), "$MeshFormat")
+    local again = mesh:msh_text()
+    t.eq(#again, #msh, "a second msh_text read a different length: the first was freed under it")
+    t.eq(again:sub(1, 11), "$MeshFormat")
+    local path = t.tmp("plate-fem.msh")
+    mesh:save_msh(path)
+    local f = assert(io.open(path, "rb"))
+    local written = f:read("*a")
+    f:close()
+    t.ok(#written >= #msh / 2, ("save_msh wrote %d bytes where msh_text is %d"):format(#written, #msh))
+    t.eq(mesh.freed, false)
+    mesh:free()
+    mesh:free()
+    t.eq(mesh.freed, true)
+    t.ok(tostring(mesh):match("freed"), tostring(mesh))
+    local calls = {
+      function() return mesh:msh_text() end,
+      function() return mesh:save_msh(t.tmp("never-written.msh")) end,
+      function() return mesh.edges end,
+      function() return mesh.vertices end,
+      function() return mesh.open_edges end,
+      function() return mesh.folded_edges end,
+    }
+    t.eq(#calls, 6, "a call that takes the handle was added without being swept here")
+    for _, call in ipairs(calls) do
+      local err = t.raises(call, "fem mesh: freed")
+      t.ok(is_build_error(err), tostring(err))
+    end
+    -- Not refused, and documented rather than enforced: the arrays and the summary are
+    -- plain fields filled when the mesh was built. Nothing here dereferences one.
+    t.eq(mesh.node_count, 864, "the counts are Lua numbers of our own and outlive the handle")
+    t.ok(mesh.nodes ~= nil, "the pointer field is still there, and now points at freed memory")
+    plate:close()
+  end)
+
+  t.test("max_size bounds the boundary and only targets the interior", function()
+    local plate = bs.Solid.extrude(plate_outline(), XY, 6)
+    local plain = plate:fem_mesh(0.05)
+    local capped = plate:fem_mesh(0.05, 3.0)
+    t.ok(capped.node_count > plain.node_count,
+      ("max_size 3 gave %d nodes against %d"):format(capped.node_count, plain.node_count))
+    t.ok(capped.longest_edge < plain.longest_edge)
+    -- Loose on purpose: max_size bounds the boundary segments and merely *targets* the
+    -- interior (measured at 1.03x on an unevenly parameterised face), so a tighter pin
+    -- would assert what the ABI does not promise.
+    t.ok(capped.longest_edge <= 3.0 * 1.05, tostring(capped.longest_edge))
+    plain:free(); capped:free()
+    plate:close()
+  end)
+
+  t.test("a cylinder's seam edge, and an open sheet's rim: both faces, and the census not asked", function()
+    local cyl = bs.Solid.cylinder(5, 10)
+    local mesh = cyl:fem_mesh(0.05)
+    t.eq(mesh.face_count, 3)
+    t.eq(#mesh.edges, 5)
+    t.eq(#mesh.vertices, 4)
+    t.eq(mesh.watertight, true)
+    local seams = 0
+    for i, e in ipairs(mesh.edges) do
+      t.ok(e.faces[1] ~= bs.NONE and e.faces[2] ~= bs.NONE,
+        ("edge %d of a closed solid bounds only one face"):format(i - 1))
+      if e.seam then
+        seams = seams + 1
+        t.eq(e.faces[1], e.faces[2], "a seam is one face bounding its edge twice")
+      end
+    end
+    t.eq(seams, 1, "a cylinder's wall has one seam")
+    for _, v in ipairs(mesh.vertices) do
+      t.eq(v.has_position, true)
+      t.near(math.sqrt(v.point[1] * v.point[1] + v.point[2] * v.point[2]), 5, 1e-9, "a rim vertex off the cylinder")
+    end
+    mesh:free()
+    cyl:close()
+    -- An open sheet: watertight false with **both** censuses empty, which is the trio
+    -- that says "not asked", and every rim edge with one real face and NONE beside it.
+    local sheet = bs.Solid.face(bs.Profile.rect(40, 20):with_hole(bs.Profile.circle(4)), XY)
+    local rim = sheet:fem_mesh(0.05)
+    t.eq(rim.face_count, 1)
+    t.eq(rim.watertight, false)
+    t.eq(#rim.open_edges, 0, "an open body's rim is not a crack, so the census is not run")
+    t.eq(#rim.folded_edges, 0)
+    t.eq(#rim.edges, 6)
+    for i, e in ipairs(rim.edges) do
+      t.eq(e.faces[1], 0, ("rim edge %d does not lie on face 0"):format(i - 1))
+      t.eq(e.faces[2], bs.NONE, ("rim edge %d reads a second face: 0 is a real face, NONE is the sentinel"):format(i - 1))
+    end
+    rim:free()
+    sheet:close()
+  end)
+
+  t.test("a Frame places a solid's FEM mesh, twelve numbers or four triples, and a bad tolerance raises", function()
+    -- 20 x 10 x 4, **translated off the axis of the turn in the plane it acts in**: a
+    -- cuboid is centred on the origin, and for a quarter turn about z a transposed 3x3
+    -- block is then the correct map composed with a 180-degree turn about the frame's
+    -- own origin -- a symmetry of a centred, axis-aligned corner set, so the check goes
+    -- blind. An offset along z alone does not fix it: it must be in x or y.
+    local box = bs.Solid.cuboid(20, 10, 4):translate(30, 7, 5)
+    local plain = box:fem_mesh(0.05)
+    local function span(mesh)
+      local min, max = { math.huge, math.huge, math.huge }, { -math.huge, -math.huge, -math.huge }
+      for i = 0, mesh.node_count - 1 do
+        for k = 1, 3 do
+          local v = mesh.nodes[3 * i + k - 1]
+          min[k], max[k] = math.min(min[k], v), math.max(max[k], v)
+        end
+      end
+      return ("%g %g %g %g %g %g"):format(min[1], min[2], min[3], max[1], max[2], max[3])
+    end
+    t.eq(plain.node_count, 8)
+    t.eq(span(plain), "20 2 3 40 12 7", "the unplaced cuboid is not where translate put it")
+    local placed = box:fem_mesh(0.05, 0, TURNED)
+    t.eq(placed.node_count, 8)
+    -- Every corner at its image. Transposed, the spans are disjoint in x
+    -- (102..112 against 88..98), so any one corner catches it; the loop is depth.
+    for i = 0, plain.node_count - 1 do
+      local x, y, z = plain.nodes[3 * i], plain.nodes[3 * i + 1], plain.nodes[3 * i + 2]
+      local ex, ey, ez = turned(x, y, z)
+      local found = false
+      for k = 0, placed.node_count - 1 do
+        if math.abs(placed.nodes[3 * k] - ex) < 1e-9 and math.abs(placed.nodes[3 * k + 1] - ey) < 1e-9
+          and math.abs(placed.nodes[3 * k + 2] - ez) < 1e-9 then
+          found = true
+          break
+        end
+      end
+      t.ok(found, ("the frame did not send (%g, %g, %g) to (%g, %g, %g) -- the placed nodes span %s")
+        :format(x, y, z, ex, ey, ez, span(placed)))
+    end
+    t.eq(span(placed), "88 20 3 98 40 7", "the placed nodes do not span the turn of the box")
+    -- The same frame as twelve bare numbers and as four triples: `frame_arg`'s three forms.
+    local flat = box:fem_mesh(0.05, 0, { 100, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, 1 })
+    local triples = box:fem_mesh(0.05, 0, { { 100, 0, 0 }, { 0, 1, 0 }, { -1, 0, 0 }, { 0, 0, 1 } })
+    t.eq(span(flat), span(placed))
+    t.eq(span(triples), span(placed))
+    t.raises(function() box:fem_mesh(0.05, 0, { 1, 2, 3 }) end, "frame: expected 12 numbers, got 3")
+    plain:free(); placed:free(); flat:free(); triples:free()
+    -- Every solid here has a brep, so this side refuses what the reader's mesh-only
+    -- path passes through -- in the library's own words.
+    t.raises(function() box:fem_mesh(0) end, "tolerance must be finite and > 0")
+    t.raises(function() box:fem_mesh(0.05, -1) end, "max_size must be finite and >= 0")
+    box:close()
+    t.raises(function() box:fem_mesh(0.05) end, "solid: closed")
+  end)
+
+  t.test("a FEM mesh progress callback hears meshing and welding, and one that raises fails the call", function()
+    local plate = bs.Solid.extrude(plate_outline(), XY, 6)
+    local phases = {}
+    local mesh = plate:fem_mesh(0.05, 0, nil, function(phase, done, total)
+      phases[phase] = true
+      t.ok(done <= total, ("%s: %s of %s"):format(phase, tostring(done), tostring(total)))
+    end)
+    t.ok(phases.meshing, "no meshing phase was reported")
+    t.ok(phases.welding, "no welding phase was reported")
+    mesh:free()
+    local err = t.raises(function()
+      plate:fem_mesh(0.05, 0, nil, function() error("stop here") end)
+    end, "stop here")
+    t.ok(err ~= nil)
+    t.eq(plate.faces, 12, "the library is fine after a callback raised")
+    plate:close()
+  end)
+
+  t.test("a FEM mesh is its own handle: re-meshing and closing its solid leave it alone", function()
+    local plate = bs.Solid.extrude(plate_outline(), XY, 6)
+    local positions = plate:mesh(0.05)
+    local mesh = plate:fem_mesh(0.05)
+    local first = mesh.nodes[0]
+    -- Meshing again at another tolerance replaces the tessellation cache, which stales
+    -- every view of it -- asserted here in the same breath, so the next line means
+    -- something. A FEM mesh is its own handle and is not in that cache, so it is
+    -- untouched: a wrapper that reused the generation guard here would refuse a read
+    -- the library never refuses.
+    plate:mesh(0.5)
+    t.eq(positions.valid, false, "the tessellation view should be stale")
+    t.raises(function() return positions.pointer end, "the view is stale")
+    t.eq(mesh.nodes[0], first)
+    t.eq(mesh.node_count, 864)
+    t.ok(#mesh:msh_text() > 0)
+    t.eq(#mesh.edges, 30)
+    plate:close()
+    -- And the solid does not own it: closing the solid neither frees nor stales it.
+    t.eq(mesh.nodes[0], first)
+    t.eq(mesh.node_count, 864)
+    t.ok(#mesh:msh_text() > 0, "the mesh stopped writing once its solid closed")
+    t.eq(#mesh.vertices, 20)
+    mesh:free()
+  end)
+
+  t.test("a FEM mesh held keeps its own arrays alive under collection pressure", function()
+    local box = bs.Solid.cuboid(10, 10, 10)
+    local kept = box:fem_mesh(0.05)
+    local first = kept.nodes[0]
+    for i = 1, 40 do
+      local other = bs.Solid.cuboid(1, 1, 1):translate(i, 0, 0):fem_mesh(0.05)
+      if i % 2 == 0 then other:free() end       -- the rest are left to the collector
+      bs.Profile.rect(1, 1)
+    end
+    for _ = 1, 3 do collectgarbage() end
+    t.eq(kept.freed, false)
+    t.eq(kept.nodes[0], first, "the arrays moved or were freed under a mesh still held")
+    t.ok(#kept:msh_text() > 0)
+    kept:free()
+    box:close()
+    t.eq(bs.Solid.cuboid(1, 1, 1).faces, 6, "the library is fine after the collector freed everything")
+  end)
+
+  t.test("FemEdge:chains cuts the chain where runs says, turning the ABI's zero-based offsets into Lua's own slices", function()
+    -- Directly, because no fixture here has a broken chain: an edge's `runs` are the
+    -- ABI's offsets **from zero** into a Lua array that counts **from one**, and a
+    -- single-run edge cannot tell a wrong conversion from a right one (index 0 of a Lua
+    -- array is nil, and appending nil appends nothing). Two runs can.
+    local function chains(nodes, runs)
+      local out = {}
+      for _, chain in ipairs(setmetatable({ nodes = nodes, runs = runs }, bs.FemEdge):chains()) do
+        out[#out + 1] = table.concat(chain, ",")
+      end
+      return table.concat(out, " | ")
+    end
+    t.eq(chains({ 5, 6, 7, 8, 9 }, { 0 }), "5,6,7,8,9", "one run is the whole chain")
+    t.eq(chains({ 5, 6, 7, 8, 9 }, { 0, 2 }), "5,6 | 7,8,9", "a break at offset 2 cuts after the second node")
+    t.eq(chains({ 5, 6, 7, 8, 9 }, { 0, 1, 4 }), "5 | 6,7,8 | 9")
+    t.eq(chains({ 5, 6 }, { 0, 1 }), "5 | 6")
+  end)
+
   t.test("a reflector is drawn and revolved from a parabola", function()
     -- A dish 100 wide, focal length 20, opening up: from rim to rim on the parabola,
     -- closed by the rim line, revolved about the axis -- one NURBS wall, watertight.
@@ -1182,5 +1469,227 @@ return function(t)
       "^hyperbola_to: the weight must be over 1 %(1 is a parabola, under 1 an ellipse%)$")
     t.raises(function() bs.Profile.parabola({ 0, 0 }, { 0, 0 }, 1, -1, 1) end,
       "^path_parabola: the axis direction is zero$")
+  end)
+
+  -- Assemblies: Assembly, Solid:named and Solid.name, at parity with the Python
+  -- reference's _shared_assembly() and the tests built on it.
+  t.test("an assembly places parts and sub-assemblies, numbers duplicate names, "
+    .. "writes STEP once per part, and refuses a cycle, a duplicate name, a mirrored frame and an empty assembly", function()
+    local bolt = bs.Solid.cylinder(1, 6):named("bolt")
+    local plate = bs.Solid.cuboid(20, 10, 2):named("plate"):coloured({ 1, 0.5, 0 })
+    local bracket = bs.Assembly("bracket")
+    local plate_placement = bracket:place(plate, XY)
+    local bolt1_placement = bracket:place(bolt, { 5, 5, 2, 1, 0, 0, 0, 1, 0, 0, 0, 1 })
+    local bolt2_placement = bracket:place(bolt, { 15, 5, 2, 1, 0, 0, 0, 1, 0, 0, 0, 1 })
+    t.eq(plate_placement, "plate")
+    t.eq(bolt1_placement, "bolt")
+    t.eq(bolt2_placement, "bolt 2")   -- fact 1
+
+    local frame = bs.Assembly("frame")
+    local left_placement = frame:place(bracket, { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 }, "left")
+    local right_placement = frame:place(bracket, { 100, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, 1 }, "right")
+    local root_bolt_placement = frame:place(bolt, { 50, 50, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 })
+    t.eq(left_placement, "left")
+    t.eq(right_placement, "right")
+    t.eq(root_bolt_placement, "bolt")   -- fact 1
+
+    local frame_step_text = frame:step_text()
+    local function count_of(haystack, needle)
+      local n, start = 0, 1
+      while true do
+        local from = haystack:find(needle, start, true)
+        if not from then return n end
+        n, start = n + 1, from + #needle
+      end
+    end
+    t.eq(count_of(frame_step_text, "=MANIFOLD_SOLID_BREP("), 2)
+    t.eq(count_of(frame_step_text, "=PRODUCT("), 4)
+    t.eq(count_of(frame_step_text, "=NEXT_ASSEMBLY_USAGE_OCCURRENCE("), 6)   -- fact 2
+    t.ok(frame_step_text:find("'left'", 1, true) and frame_step_text:find("'right'", 1, true)
+      and frame_step_text:find("'bolt 2'", 1, true))   -- fact 3
+
+    -- Read-back, through the same reader door as Solid:to_scene -- structure only, at this
+    -- (pre-late-placement) text: one root "frame", two "bracket" containers each holding
+    -- plate/bolt/bolt, and one root-level "bolt". The world origins are Python's to check.
+    local cad = require("cadaclysm")
+    local read_scene = cad.open_memory(frame_step_text, "stp", nil, "frame.stp")
+    local roots = read_scene.roots
+    t.eq(#roots, 1)
+    t.eq(roots[1].name, "frame")
+    local root_children = roots[1].children
+    t.eq(#root_children, 3)   -- fact 11
+    local containers, root_bolts = {}, {}
+    for _, c in ipairs(root_children) do
+      if c.name == "bracket" then containers[#containers + 1] = c end
+      if c.name == "bolt" then root_bolts[#root_bolts + 1] = c end
+    end
+    t.eq(#containers, 2)
+    t.eq(#root_bolts, 1)
+    for _, container in ipairs(containers) do
+      local names = {}
+      for _, c in ipairs(container.children) do names[#names + 1] = c.name end
+      table.sort(names)
+      t.eq(table.concat(names, ","), "bolt,bolt,plate")
+    end
+
+    -- A late placement into bracket shows up wherever bracket is placed (left and right both).
+    bracket:place(bolt, { 10, 8, 2, 1, 0, 0, 0, 1, 0, 0, 0, 1 })
+    t.eq(count_of(frame:step_text(), "=NEXT_ASSEMBLY_USAGE_OCCURRENCE("), 7)   -- fact 4
+
+    -- A cycle, a duplicate placement name, a mirrored raw frame, and an assembly (or one
+    -- reachable from it) that places nothing are all refused.
+    local e = t.raises(function() bracket:place(frame, XY) end)
+    t.ok(is_build_error(e) and e.message:find("bracket → frame → bracket", 1, true), e.message)   -- fact 5
+    e = t.raises(function() frame:place(bracket, XY, "left") end)
+    t.ok(is_build_error(e) and e.message:find("left", 1, true), e.message)   -- fact 6
+    -- A raw twelve-number mirrored frame, not `Frame`, which refuses a left-handed frame
+    -- first -- the one way to drive a mirrored frame into the ABI's own check.
+    e = t.raises(function() frame:place(bracket, { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, -1 }) end)
+    t.ok(is_build_error(e) and e.message:find("right-handed and orthonormal", 1, true), e.message)   -- fact 7
+    local x = bs.Assembly("x")
+    e = t.raises(function() x:step_text() end)
+    t.ok(is_build_error(e))   -- fact 8
+    x:close()
+    local outer = bs.Assembly("outer")
+    local hollow = bs.Assembly("hollow")
+    outer:place(hollow, XY)
+    e = t.raises(function() outer:step_text() end)
+    t.ok(is_build_error(e) and e.message:find("hollow", 1, true), e.message)   -- fact 9
+    outer:close()
+    hollow:close()
+
+    -- Solid:named/Solid.name: the name rides through a one-source operation (place,
+    -- coloured) and is dropped by a two-source one (join) or a fresh primitive.
+    t.eq(bolt.name, "bolt")
+    local placed_bolt = bolt:place(XY)
+    t.eq(placed_bolt.name, "bolt")
+    placed_bolt:close()
+    local coloured_bolt = bolt:coloured({ 1, 0, 0 })
+    t.eq(coloured_bolt.name, "bolt")
+    coloured_bolt:close()
+    local cube = bs.Solid.cuboid(1, 1, 1)
+    local joined_bolt = bolt:join(cube)
+    t.eq(joined_bolt.name, nil)
+    joined_bolt:close()
+    cube:close()
+    t.eq(bs.Solid.cuboid(1, 1, 1).name, nil)   -- fact 10
+
+    -- Solid:named, Assembly.new and Assembly:place all require a string name (or, for
+    -- place, nil) -- a non-string used to be silently coerced through `tostring` (named,
+    -- Assembly.new) or passed raw to the FFI (place).
+    e = t.raises(function() bolt:named(nil) end)
+    t.ok(is_build_error(e) and e.message:find("expected a string", 1, true), e.message)
+    e = t.raises(function() bolt:named(42) end)
+    t.ok(is_build_error(e) and e.message:find("expected a string", 1, true), e.message)
+    e = t.raises(function() bs.Assembly(nil) end)
+    t.ok(is_build_error(e) and e.message:find("expected a string", 1, true), e.message)
+    e = t.raises(function() bs.Assembly(42) end)
+    t.ok(is_build_error(e) and e.message:find("expected a string", 1, true), e.message)
+    e = t.raises(function() bracket:place(bolt, XY, 42) end)
+    t.ok(is_build_error(e) and e.message:find("nil or a string", 1, true), e.message)
+
+    frame:close()
+    bracket:close()
+    bolt:close()
+    plate:close()
+  end)
+
+  -- One edge, face or corner where a list is taken is refused, named, before the kernel is
+  -- asked (docs/superpowers/specs/2026-09-25-list-arguments-refused-clearly-design.md): this
+  -- wrapper once read `fillet(edge, 1)` as no edges.
+  t.test("a list argument refuses one edge, face or corner, or a bad item, by name", function()
+    local cube = bs.Solid.cuboid(10, 10, 10)
+    local edge = cube.edges[1]
+    local cases = {
+      { "fillet", "edges", true, function(x) return cube:fillet(x, 0.5) end },
+      { "chamfer", "edges", true, function(x) return cube:chamfer(x, 0.5) end },
+      { "edges_coloured", "edges", true, function(x) return cube:edges_coloured("#f00", x) end },
+      { "drop_faces", "faces", false, function(x) return cube:drop_faces(x) end },
+      { "shell", "open", false, function(x) return cube:shell(1, x) end },
+      { "push_pull", "face", false, function(x) return cube:push_pull(x, 1) end },
+      { "round", "corners", false, function(x) return bs.Profile.rect(10, 10):round(1, x) end },
+    }
+    local function says(err, text)
+      local message = type(err) == "table" and err.message or tostring(err)
+      if message ~= text then error(("expected %q, got %q"):format(text, message), 2) end
+    end
+    for _, c in ipairs(cases) do
+      local call, param, edges, run = c[1], c[2], c[3], c[4]
+      local items = edges and "Edge objects or indices" or "indices"
+      local item = edges and "an Edge or an index" or "an index"
+      -- push_pull's own single form refuses a non-index by its own message (see
+      -- "push_pull's single face is a face index, or refused by name" below), not the
+      -- list checker's wording.
+      if call == "push_pull" then
+        says(t.raises(function() run(edge) end), "push_pull: face must be a face index or a list of indices, not an Edge")
+      else
+        says(t.raises(function() run(edge) end), ("%s: %s must be a list of %s, not an Edge"):format(call, param, items))
+      end
+      if call ~= "push_pull" then   -- one face index is push_pull's own single form
+        says(t.raises(function() run(5) end), ("%s: %s must be a list of %s, not 5"):format(call, param, items))
+      end
+      if call == "push_pull" then
+        says(t.raises(function() run("abc") end), "push_pull: face must be a face index or a list of indices, not 'abc'")
+      else
+        says(t.raises(function() run("abc") end), ("%s: %s must be a list of %s, not 'abc'"):format(call, param, items))
+      end
+      says(t.raises(function() run({ "abc" }) end), ("%s: %s[1] is not %s: 'abc'"):format(call, param, item))
+      says(t.raises(function() run({ 0, 2.5 }) end), ("%s: %s[2] is not %s: 2.5"):format(call, param, item))
+      says(t.raises(function() run({ -1 }) end), ("%s: %s[1] is not %s: -1"):format(call, param, item))
+      says(t.raises(function() run({ 2 ^ 32 }) end), ("%s: %s[1] is not %s: 4294967296"):format(call, param, item))
+    end
+    if cube:drop_faces({ 0, 1 }).faces ~= 4 then error("drop_faces({0, 1}) should leave 4 faces") end
+    if not (cube:fillet({ edge, 1 }, 0.5).faces > 6) then error("fillet({edge, 1}) should round two edges") end
+    -- An Edge inside a non-edge list names itself "an Edge", not its table repr.
+    says(t.raises(function() cube:drop_faces({ edge }) end), "drop_faces: faces[1] is not an index: an Edge")
+  end)
+
+  -- push_pull's face is one face index or a list of them; anything else -- a
+  -- non-integral number, an out-of-range whole number, a string, an Edge or nil -- is
+  -- refused by push_pull's own name, not the list checker's wording.
+  t.test("push_pull's single face is a face index, or refused by name", function()
+    local cube = bs.Solid.cuboid(10, 10, 10)
+    local edge = cube.edges[1]
+    local function says(err, text)
+      local message = type(err) == "table" and err.message or tostring(err)
+      if message ~= text then error(("expected %q, got %q"):format(text, message), 2) end
+    end
+    local function message(thing)
+      return ("push_pull: face must be a face index or a list of indices, not %s"):format(thing)
+    end
+    says(t.raises(function() cube:push_pull(2.5, 1) end), message("2.5"))
+    says(t.raises(function() cube:push_pull(-1, 1) end), message("-1"))
+    says(t.raises(function() cube:push_pull(2 ^ 32, 1) end), message("4294967296"))
+    says(t.raises(function() cube:push_pull("abc", 1) end), message("'abc'"))
+    says(t.raises(function() cube:push_pull(edge, 1) end), message("an Edge"))
+    says(t.raises(function() cube:push_pull(nil, 1) end), message("nil"))
+    t.eq(cube:push_pull(0, 1).faces, 6)
+    t.eq(cube:push_pull({ 0 }, 1).faces, 6)
+  end)
+
+  -- Lua's `#` stops at a border, so `{ 5, nil, 7 }` can read as one item and the 7 go
+  -- missing without a word; and a list's named keys were ignored. A hole is refused at
+  -- its first missing place, a named key as not a list.
+  t.test("a list argument with a hole or a named key is refused, not shortened", function()
+    local cube = bs.Solid.cuboid(10, 10, 10)
+    local function says(err, text)
+      local message = type(err) == "table" and err.message or tostring(err)
+      if message ~= text then error(("expected %q, got %q"):format(text, message), 2) end
+    end
+    for _, c in ipairs({
+      { "drop_faces", "faces", "indices", "an index", function(x) return cube:drop_faces(x) end },
+      { "fillet", "edges", "Edge objects or indices", "an Edge or an index", function(x) return cube:fillet(x, 0.5) end },
+      { "shell", "open", "indices", "an index", function(x) return cube:shell(1, x) end },
+      { "round", "corners", "indices", "an index", function(x) return bs.Profile.rect(10, 10):round(1, x) end },
+    }) do
+      local call, param, items, item, run = c[1], c[2], c[3], c[4], c[5]
+      says(t.raises(function() run({ 5, nil, 1 }) end), ("%s: %s[2] is not %s: nil"):format(call, param, item))
+      says(t.raises(function() run({ [1] = 0, [3] = 1 }) end), ("%s: %s[2] is not %s: nil"):format(call, param, item))
+      -- One stray huge index is a hole at its first missing place, found without walking
+      -- to it (or sizing an array by it: a billion would be gigabytes, and a plain Lua error).
+      says(t.raises(function() run({ [1] = 0, [1000000000] = 1 }) end), ("%s: %s[2] is not %s: nil"):format(call, param, item))
+      local keyed = { 0, 1, foo = "bar" }
+      says(t.raises(function() run(keyed) end), ("%s: %s must be a list of %s, not %s"):format(call, param, items, tostring(keyed)))
+    end
   end)
 end

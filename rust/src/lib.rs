@@ -168,6 +168,16 @@ unsafe fn groups64<'a, const N: usize>(pointer: *const f64, count: usize) -> Opt
     (!pointer.is_null()).then(|| unsafe { borrowed(pointer.cast::<[f64; N]>(), count) })
 }
 
+/// One RGBA per polyline, copied out; `None` for an edge the file does not style, so "no
+/// style" and "styled black" stay distinct. Empty for `{null, 0}` -- nothing styled.
+fn colours_of(raw: sys::CadaclysmEdgeColors) -> Vec<Option<[f32; 4]>> {
+    unsafe { groups::<4>(raw.rgba, raw.count as usize) }
+        .unwrap_or(&[])
+        .iter()
+        .map(|c| (c[3] >= 0.0).then_some(*c))
+        .collect()
+}
+
 /// A column-major 4x4 as rows, so `m[row][column]` reads as the textbooks write it.
 fn rows<T: Copy + Into<f64>>(column_major: &[T; 16]) -> [[f64; 4]; 4] {
     let mut out = [[0.0; 4]; 4];
@@ -1110,6 +1120,437 @@ impl fmt::Debug for Meshlets {
     }
 }
 
+// ---- the FEM surface mesh ---------------------------------------------------------
+
+/// One B-rep edge of a FEM mesh: the chain of nodes along it, and where that chain
+/// breaks. The numbers are copied out; `nodes` and `runs` are borrowed from the
+/// [`FemMesh`], as its own arrays are.
+///
+/// `nodes` are the mesh's node indices in order along the edge, its end vertices
+/// included; a closed edge repeats no node. **`runs` says where the chain breaks**: read
+/// `nodes[runs[i]..runs[i + 1]]` (the last run to the end) as one polyline and join
+/// nothing across a boundary -- the two ends either side of one are two points of the
+/// edge with no mesh edge between them, a crack along the edge or a stretch of it the
+/// mesher sampled on one face only. [`FemEdge::chains`] does that walk; `[0]` is the
+/// ordinary answer, and reading `nodes` as one polyline without looking here jumps the
+/// gap silently.
+///
+/// `faces` is `(face_a, face_b)` and `ends` is `(end_a, end_b)`, the second of each
+/// [`NONE`] where there is none -- an open body's rim, or both ends at one vertex (a
+/// closed edge, a circle's rim, a full-turn seam). **`0` is a real face and a real
+/// vertex, not a sentinel.** Which end comes first is the first trim's direction and
+/// means nothing else: the pair bounds the edge, it does not orient it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FemEdge<'m> {
+    /// The **body's own** edge id -- not this mesh's edge index, and on a read body
+    /// rarely equal to it. [`FemMesh::edges`] is a densely renumbered subset of the
+    /// body's edges, ascending by id, with every edge collapsed to a point left out, so
+    /// edge 0 of a STEP body's mesh routinely reports an id in the hundreds. Everything
+    /// else here that names an edge means the *index* -- a [`FemMesh::node_kind`] of 1
+    /// read through [`FemMesh::node_entity`], the third number of a census row, and the
+    /// `edge_<i>` physical group of [`FemMesh::msh_text`] -- and this is the one way back
+    /// from any of them to the topology the file wrote.
+    pub id: u32,
+    pub nodes: &'m [u32],
+    /// Where each connected run of `nodes` begins; `[0]` for one chain along the edge.
+    pub runs: &'m [u32],
+    /// `(face_a, face_b)`, the second [`NONE`] on an open body's rim.
+    pub faces: (u32, u32),
+    /// `(end_a, end_b)`, the second [`NONE`] where both ends are one vertex.
+    pub ends: (u32, u32),
+    /// The nodes make one loop. Never true where there is more than one run.
+    pub closed: bool,
+    /// Bounded twice by one face: a closed surface's seam, not a real boundary. Both
+    /// `faces` are then that same face.
+    pub seam: bool,
+}
+
+impl<'m> FemEdge<'m> {
+    /// # Safety
+    /// `raw`'s `nodes` and `runs` must be null or point at their counts' worth of `u32`s
+    /// living for `'m` -- which they do for as long as the [`FemMesh`] they came from.
+    unsafe fn from_raw(raw: &sys::CadaclysmFemEdge) -> FemEdge<'m> {
+        unsafe {
+            FemEdge {
+                id: raw.id,
+                nodes: borrowed(raw.nodes, raw.node_count as usize),
+                runs: borrowed(raw.runs, raw.run_count as usize),
+                faces: (raw.face_a, raw.face_b),
+                ends: (raw.end_a, raw.end_b),
+                closed: raw.closed,
+                seam: raw.seam,
+            }
+        }
+    }
+
+    /// Each connected run of `nodes` as its own polyline, in order along the edge: what
+    /// `runs` is for. One item is the ordinary answer.
+    pub fn chains(&self) -> impl Iterator<Item = &'m [u32]> + '_ {
+        let nodes = self.nodes;
+        (0..self.runs.len()).map(move |i| {
+            let start = (self.runs[i] as usize).min(nodes.len());
+            let end = self.runs.get(i + 1).map_or(nodes.len(), |&r| (r as usize).min(nodes.len()));
+            &nodes[start..start.max(end)]
+        })
+    }
+}
+
+/// One B-rep vertex of a FEM mesh: the node the mesh put there, if any, and where the
+/// topology says it is, if that is known. Plain data, all of it copied out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FemVertex {
+    /// The mesh node at this vertex, or [`NONE`] where the mesh has none there.
+    ///
+    /// **A sentinel here is ordinary, not a fault**: the analysis rebuilds a vertex
+    /// wherever two trims meet, and a pole's polyline runs give a sphere 48 of them where
+    /// the mesh has 2 points, so a caller walking these skips the sentinel rather than
+    /// treating it as a gap.
+    pub node: u32,
+    /// Where the vertex is, in the same space and under the same placement as
+    /// [`FemMesh::nodes`] -- the file's own vertex rather than a mesh node, so the two can
+    /// differ by the reader's rounding. **Meaningless unless `has_position`**: it is
+    /// zeroed then, a point no geometry has and one a solver would read as a node at the
+    /// origin.
+    pub point: [f64; 3],
+    /// `point` was read and placed. False where every trim meeting at this vertex is a
+    /// curve with no geometry to read an end off -- reported as this flag rather than as a
+    /// plausible-looking `(0, 0, 0)`.
+    pub has_position: bool,
+}
+
+impl FemVertex {
+    fn from_raw(raw: &sys::CadaclysmFemVertex) -> FemVertex {
+        FemVertex { node: raw.node, point: raw.point, has_position: raw.has_position }
+    }
+}
+
+/// One body meshed for a solver: nodes welded by bits, triangles wound outward, every
+/// node tagged with the lowest-dimension B-rep entity it lies on, and every crack
+/// reported rather than closed. What [`Node::fem_mesh`] returns.
+///
+/// **An owned handle, and it owns everything it lends.** Freed when dropped, or by
+/// [`FemMesh::free`]; it borrows nothing from the [`Scene`] it was built through, so it
+/// needs no lifetime of its own and outlives the scene's close -- which is why it is the
+/// one thing in this crate a `Scene` does not hold.
+///
+/// Its five flat arrays are **slices of the library's own memory** borrowed from `&self`,
+/// as [`Node::mesh`]'s are borrowed from the scene: a solver mesh is megabytes, and
+/// copying it to hand it over would cost that twice. Here that costs nothing to get
+/// right. Every other wrapper needs a run-time guard against a view read after the
+/// handle is freed -- and none of them can guard a view *already in hand*, which is
+/// measured to read freed memory. This one cannot compile:
+///
+/// ```compile_fail,E0505
+/// # fn main() -> cadaclysm_sdk::Result<()> {
+/// let scene = cadaclysm_sdk::open("part.stp")?;
+/// let mesh = scene.roots()[0].fem_mesh(0.01, 0.0, None)?;
+/// let nodes = mesh.nodes();
+/// mesh.free(); // error: `mesh` is still borrowed by `nodes`
+/// let _ = nodes.len();
+/// # Ok(())
+/// # }
+/// ```
+///
+/// **That block is documentation, not an assertion.** `compile_fail` asks only that the
+/// snippet fail to compile and rustdoc never checks *what* failed, so a typo in it would
+/// pass too: it pins the claim no more firmly than this sentence does. What makes the claim
+/// true is [`FemMesh::free`] taking the mesh by value, and the block is here so a reader
+/// sees the shape of the refusal.
+///
+/// `.to_vec()` on anything that must outlive the handle.
+pub struct FemMesh {
+    pointer: NonNull<sys::CadaclysmFemMesh>,
+    api: &'static Api,
+    /// Read once, when the handle is made: every pointer in it is built with the handle
+    /// and never moves (nothing in this ABI is built lazily), so asking again per
+    /// accessor would be one C call for the same answer.
+    view: sys::CadaclysmFemMeshView,
+}
+
+// The handle is owned outright and every accessor of it takes a `const` pointer, so it
+// may move to another thread. Not `Sync`: the `.msh` text is a slot on the handle, and
+// two threads asking for it at once free each other's text -- the ABI says so.
+unsafe impl Send for FemMesh {}
+
+impl FemMesh {
+    /// The handle a `*_fem_mesh` call returned, with its view read once -- or the
+    /// library's own reason for the null.
+    fn wrap(api: &'static Api, pointer: *mut sys::CadaclysmFemMesh) -> Result<FemMesh> {
+        let pointer = NonNull::new(pointer).ok_or_else(|| {
+            let reason = last_error(api);
+            Error::new(if reason.is_empty() { "fem_mesh".to_string() } else { reason })
+        })?;
+        let mut view = std::mem::MaybeUninit::<sys::CadaclysmFemMeshView>::uninit();
+        if !unsafe { (api.cadaclysm_fem_mesh_view)(pointer.as_ptr(), view.as_mut_ptr()) } {
+            let reason = last_error(api);
+            unsafe { (api.cadaclysm_fem_mesh_free)(pointer.as_ptr()) };
+            return Err(Error::new(if reason.is_empty() { "fem mesh view".to_string() } else { reason }));
+        }
+        // SAFETY: the call returned true, so it wrote the whole struct.
+        Ok(FemMesh { pointer, api, view: unsafe { view.assume_init() } })
+    }
+
+    fn raw(&self) -> *const sys::CadaclysmFemMesh {
+        self.pointer.as_ptr()
+    }
+
+    // -- the flat arrays, borrowed from the handle
+
+    /// Every node's position, placed, in the space [`Node::fem_mesh`] and
+    /// [`FemMesh::from_mesh`] describe. Every node is used by at least one triangle.
+    pub fn nodes(&self) -> &[[f64; 3]] {
+        // SAFETY: the pointers were built with the handle and live until it is freed,
+        // which `&self` rules out for the life of the slice.
+        unsafe { groups64::<3>(self.view.nodes, self.view.node_count as usize).unwrap_or(&[]) }
+    }
+
+    /// Three node indices a triangle, wound outward -- a mirroring placement is wound
+    /// back. Grouped, not flat, unlike [`Mesh::indices`]: the ABI's array *is*
+    /// `[u32; 3]` a triangle, and a solver reads triangles rather than an index buffer.
+    pub fn triangles(&self) -> &[[u32; 3]] {
+        // SAFETY: as `nodes`.
+        unsafe { borrowed(self.view.triangles.cast::<[u32; 3]>(), self.view.triangle_count as usize) }
+    }
+
+    /// Which B-rep face each triangle lies on, one per triangle, into the body's
+    /// [`FemMesh::face_count`] faces.
+    pub fn triangle_face(&self) -> &[u32] {
+        // SAFETY: as `nodes`.
+        unsafe { borrowed(self.view.triangle_face, self.view.triangle_count as usize) }
+    }
+
+    /// What each node lies on -- `0` a B-rep vertex, `1` an edge, `2` a face -- one per
+    /// node: the lowest-dimension entity it lies on, which is the `.msh` format's own
+    /// classification rule. [`FemMesh::node_entity`] says which entity of that kind.
+    pub fn node_kind(&self) -> &[u32] {
+        // SAFETY: as `nodes`.
+        unsafe { borrowed(self.view.node_kind, self.view.node_count as usize) }
+    }
+
+    /// Which vertex, edge or face each node lies on, read by the matching
+    /// [`FemMesh::node_kind`]: an index into [`FemMesh::vertices`], into
+    /// [`FemMesh::edges`], or into the body's faces.
+    pub fn node_entity(&self) -> &[u32] {
+        // SAFETY: as `nodes`.
+        unsafe { borrowed(self.view.node_entity, self.view.node_count as usize) }
+    }
+
+    // -- the topology
+
+    /// The body's faces; [`FemMesh::triangle_face`] and a [`FemMesh::node_kind`] of `2`
+    /// index them. **The same faces [`Node::surfaces`] hands over**, in the same order, so
+    /// a caller reads a triangle's surface and its trims from there.
+    pub fn face_count(&self) -> u32 {
+        self.view.face_count
+    }
+
+    /// One [`FemEdge`] per B-rep edge, in the order a [`FemMesh::node_kind`] of `1`
+    /// indexes them. Empty for a [`FemMesh::from_mesh`] body, which has no B-rep edges at
+    /// all.
+    ///
+    /// **This list's own numbering, not the body's**: each [`FemEdge::id`] carries the
+    /// body's own edge id.
+    pub fn edges(&self) -> Result<Vec<FemEdge<'_>>> {
+        (0..self.view.edge_count)
+            .map(|i| {
+                let mut raw = std::mem::MaybeUninit::<sys::CadaclysmFemEdge>::uninit();
+                if !unsafe { (self.api.cadaclysm_fem_mesh_edge)(self.raw(), i, raw.as_mut_ptr()) } {
+                    let reason = last_error(self.api);
+                    return Err(Error::new(if reason.is_empty() { format!("fem mesh edge {i}") } else { reason }));
+                }
+                // SAFETY: the call returned true, so it wrote the whole struct; its two
+                // pointers belong to the handle, which `&self` holds for `'_`.
+                Ok(unsafe { FemEdge::from_raw(&raw.assume_init()) })
+            })
+            .collect()
+    }
+
+    /// One [`FemVertex`] per B-rep vertex, in the order a [`FemMesh::node_kind`] of `0`
+    /// indexes them. Empty for a [`FemMesh::from_mesh`] body.
+    pub fn vertices(&self) -> Result<Vec<FemVertex>> {
+        (0..self.view.vertex_count)
+            .map(|i| {
+                let mut raw = std::mem::MaybeUninit::<sys::CadaclysmFemVertex>::uninit();
+                if !unsafe { (self.api.cadaclysm_fem_mesh_vertex)(self.raw(), i, raw.as_mut_ptr()) } {
+                    let reason = last_error(self.api);
+                    return Err(Error::new(if reason.is_empty() { format!("fem mesh vertex {i}") } else { reason }));
+                }
+                // SAFETY: the call returned true, so it wrote the whole struct.
+                Ok(FemVertex::from_raw(&unsafe { raw.assume_init() }))
+            })
+            .collect()
+    }
+
+    // -- the crack census
+
+    /// Every crack, as `(a, b, brep_edge)`: a directed mesh edge `(a, b)` with no
+    /// `(b, a)`, and the B-rep edge both nodes lie on or [`NONE`] where they share none.
+    ///
+    /// **Empty unless the body's topology is closed -- for a B-rep body**, whose mesh is
+    /// otherwise not asked about at all: such a body reports [`FemMesh::watertight`]
+    /// false with this and [`FemMesh::folded_edges`] both empty, and *that trio together*
+    /// says "not asked", not "nothing found".
+    ///
+    /// **A [`FemMesh::from_mesh`] body is the other case, and the opposite one.** A bare
+    /// mesh carries no topology to say whether it ought to close, so its census always
+    /// runs over the welded triangles, and an empty one there really does mean "nothing
+    /// found".
+    pub fn open_edges(&self) -> Result<Vec<(u32, u32, u32)>> {
+        self.census(self.api.cadaclysm_fem_mesh_open_edge, self.view.open_edge_count, "open edge")
+    }
+
+    /// Every fold, as [`FemMesh::open_edges`] reports a crack: a directed mesh edge used
+    /// by more than one triangle.
+    ///
+    /// **A body can be folded without being open** -- a solid no thicker than a line
+    /// leaves no hole for an open edge to find -- and the closure census's own known-bad
+    /// bodies are folds rather than open cracks. A caller that checks
+    /// [`FemMesh::open_edges`] alone calls such a body sound. Empty under the same rule.
+    pub fn folded_edges(&self) -> Result<Vec<(u32, u32, u32)>> {
+        self.census(self.api.cadaclysm_fem_mesh_folded_edge, self.view.folded_edge_count, "folded edge")
+    }
+
+    /// One flattened census, row by row: the shape [`FemMesh::open_edges`] and
+    /// [`FemMesh::folded_edges`] share, so the two cannot drift.
+    fn census(
+        &self,
+        call: unsafe extern "C" fn(*const sys::CadaclysmFemMesh, u32, *mut u32, *mut u32, *mut u32) -> bool,
+        count: u32,
+        what: &str,
+    ) -> Result<Vec<(u32, u32, u32)>> {
+        (0..count)
+            .map(|i| {
+                let (mut a, mut b, mut edge) = (0u32, 0u32, 0u32);
+                if !unsafe { call(self.raw(), i, &mut a, &mut b, &mut edge) } {
+                    let reason = last_error(self.api);
+                    return Err(Error::new(if reason.is_empty() { format!("fem mesh {what} {i}") } else { reason }));
+                }
+                Ok((a, b, edge))
+            })
+            .collect()
+    }
+
+    // -- the summary
+
+    /// The welded mesh closes -- every directed mesh edge paired with its reverse and none
+    /// used twice -- and, for a B-rep body, so does the topology behind it. **False for
+    /// every B-rep body whose topology is not closed**, whose mesh is then not asked
+    /// about; read [`FemMesh::open_edges`] for what an empty census beside a false here
+    /// does and does not mean.
+    ///
+    /// A [`FemMesh::from_mesh`] body has no topology to ask of, so this says only that its
+    /// triangles close: a closed render mesh reports true with nothing exact behind it.
+    pub fn watertight(&self) -> bool {
+        self.view.watertight
+    }
+
+    /// This came from the scene's own mesh rather than from a brep: one face, every node
+    /// on face `0`, no edges and no vertices.
+    ///
+    /// **It is also which space the mesh is in.** A B-rep body's FEM mesh is in the file's
+    /// own units and axes, whatever [`Convention`] the scene was opened with, because it
+    /// is taken off the brep -- and a brep is in the file's own space for the reason
+    /// [`Brep`] gives. A node with no brep falls back to the scene's mesh, which **is**
+    /// converted, so that one comes back in the scene's convention, wound
+    /// counter-clockwise about the outward normal even where the convention winds the
+    /// other way. Under a non-native convention those are two different spaces.
+    ///
+    /// **And it is which contract the census is reporting under**: read
+    /// [`FemMesh::open_edges`].
+    pub fn from_mesh(&self) -> bool {
+        self.view.from_mesh
+    }
+
+    /// The smallest interior angle of any triangle, in degrees. There is always one: a
+    /// body that meshed to no triangles is a refusal, not a mesh.
+    pub fn min_angle(&self) -> f64 {
+        self.view.min_angle
+    }
+
+    /// The triangle with that angle, as an index into [`FemMesh::triangles`].
+    pub fn worst_triangle(&self) -> u32 {
+        self.view.worst_triangle
+    }
+
+    /// The longest triangle edge, placed. **The figure to check against
+    /// [`Node::fem_mesh`]'s `max_size`, and the only one that says what the mesh actually
+    /// is**: `max_size` bounds the boundary segments and merely *targets* the interior --
+    /// measured at 1.03x `max_size` on a face whose parameters run unevenly -- and one
+    /// small enough beside the body to reach the mesher's own piece and station ceilings
+    /// is not honoured at all.
+    pub fn longest_edge(&self) -> f64 {
+        self.view.longest_edge
+    }
+
+    // -- out
+
+    /// The mesh as Gmsh 4.1 ASCII `.msh` text: an entity per B-rep vertex, edge and face,
+    /// a volume where the body closes, and a physical group naming each.
+    ///
+    /// **On this side of the ABI the library's text is borrowed** -- a slot on this
+    /// handle, replaced by the next call on it and gone when the mesh is freed. It is
+    /// copied into a `String` here, so what comes back is the caller's own and outlives
+    /// the handle; nothing has to be freed. The kernel library's
+    /// [`blacksmith::FemMesh::msh_text`] is the other way round: an owned string, released
+    /// by that wrapper with `cadaclysm_blacksmith_string_free`. A reader porting one
+    /// side's reasoning onto the other leaks or double-frees.
+    ///
+    /// **No unlicensed notice is printed here.** [`Node::fem_mesh`] gave it once when the
+    /// mesh was built, and this ABI deliberately does not repeat it on either `.msh` call
+    /// -- where the kernel library notices on both of its writers and *not* on its
+    /// builder. Each matches its own siblings.
+    ///
+    /// An error for a mesh the writer refuses, naming the field it cannot honour.
+    pub fn msh_text(&self) -> Result<String> {
+        let raw = unsafe { (self.api.cadaclysm_fem_mesh_msh_text)(self.raw()) };
+        if raw.is_null() {
+            let reason = last_error(self.api);
+            return Err(Error::new(if reason.is_empty() { "msh text".to_string() } else { reason }));
+        }
+        // Copied, not freed: the pointer is the handle's own slot.
+        Ok(unsafe { text(raw) })
+    }
+
+    /// [`FemMesh::msh_text`] written to `path` by the library itself: the same bytes from
+    /// the same writer, straight to the file rather than through the borrowed slot, so a
+    /// text asked of this handle on another thread cannot be freed under the write.
+    ///
+    /// An error for a mesh the writer refuses or a file it cannot write, naming the path.
+    /// No notice here either; see [`FemMesh::msh_text`].
+    pub fn save_msh(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = c_path(path.as_ref())?;
+        if !unsafe { (self.api.cadaclysm_fem_mesh_save_msh)(self.raw(), path.as_ptr()) } {
+            let reason = last_error(self.api);
+            return Err(Error::new(if reason.is_empty() { "save_msh".to_string() } else { reason }));
+        }
+        Ok(())
+    }
+
+    /// Give the mesh back now rather than at the end of scope, as [`Brep::release`] and
+    /// [`blacksmith::Solid::close`] do.
+    ///
+    /// **It takes the mesh by value, so no view can survive it and it cannot run twice.**
+    /// Every other wrapper needs "idempotent" and a freed guard because its `free` is a
+    /// method on a handle a caller still holds; here the compiler takes the handle away.
+    pub fn free(self) {}
+}
+
+impl Drop for FemMesh {
+    fn drop(&mut self) {
+        unsafe { (self.api.cadaclysm_fem_mesh_free)(self.pointer.as_ptr()) }
+    }
+}
+
+impl fmt::Debug for FemMesh {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "FemMesh(nodes={}, triangles={}, watertight={}, from_mesh={})",
+            self.view.node_count, self.view.triangle_count, self.view.watertight, self.view.from_mesh
+        )
+    }
+}
+
 /// Whether a brep's faces make a manifold, as plain data ([`Brep::manifold`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Manifold {
@@ -1197,6 +1638,120 @@ impl<'s> Placement<'s> {
 impl fmt::Debug for Placement<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Placement(index={}, geometry={})", self.index, self.geometry().index)
+    }
+}
+
+// ---- links and joints ---------------------------------------------------------------
+
+/// A rigid body of the file's mechanism: the nodes that move together when a joint
+/// moves it. From [`Scene::links`]; borrows from the scene like [`Node`].
+#[derive(Clone, Copy)]
+pub struct Link<'s> {
+    scene: &'s Scene,
+    index: u32,
+}
+
+// Identity is the pair, so the same link from two lookups is equal and can key a map.
+impl PartialEq for Link<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.index == other.index && std::ptr::eq(self.scene, other.scene)
+    }
+}
+
+impl Eq for Link<'_> {}
+
+impl Hash for Link<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (self.scene as *const Scene).hash(state);
+        self.index.hash(state);
+    }
+}
+
+impl fmt::Debug for Link<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<Link {} {}>", self.index, self.name())
+    }
+}
+
+impl<'s> Link<'s> {
+    pub fn scene(&self) -> &'s Scene {
+        self.scene
+    }
+
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+
+    /// The link's name as the file gives it.
+    pub fn name(&self) -> String {
+        unsafe { text((self.scene.api.cadaclysm_link_name)(self.scene.raw(), self.index)) }
+    }
+
+    /// The topmost node of each subtree this link moves, in node order: moving these
+    /// moves everything under them.
+    pub fn nodes(&self) -> Vec<Node<'s>> {
+        let api = self.scene.api;
+        let count = unsafe { (api.cadaclysm_link_node_count)(self.scene.raw(), self.index) };
+        (0..count)
+            .map(|i| Node { scene: self.scene, index: unsafe { (api.cadaclysm_link_node)(self.scene.raw(), self.index, i) } })
+            .collect()
+    }
+}
+
+/// A connection between two links of the file's mechanism. Topology only: how it
+/// moves is not read yet. From [`Scene::joints`].
+#[derive(Clone, Copy)]
+pub struct Joint<'s> {
+    scene: &'s Scene,
+    index: u32,
+}
+
+impl PartialEq for Joint<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.index == other.index && std::ptr::eq(self.scene, other.scene)
+    }
+}
+
+impl Eq for Joint<'_> {}
+
+impl Hash for Joint<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (self.scene as *const Scene).hash(state);
+        self.index.hash(state);
+    }
+}
+
+impl fmt::Debug for Joint<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<Joint {} {}>", self.index, self.name())
+    }
+}
+
+impl<'s> Joint<'s> {
+    pub fn scene(&self) -> &'s Scene {
+        self.scene
+    }
+
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+
+    /// The joint's name as the file gives it.
+    pub fn name(&self) -> String {
+        unsafe { text((self.scene.api.cadaclysm_joint_name)(self.scene.raw(), self.index)) }
+    }
+
+    /// The link this joint starts at, in the file's order -- not a parent: a
+    /// mechanism may be a network with loops.
+    pub fn start(&self) -> Link<'s> {
+        let index = unsafe { (self.scene.api.cadaclysm_joint_start)(self.scene.raw(), self.index) };
+        Link { scene: self.scene, index }
+    }
+
+    /// The link this joint ends at, in the file's order.
+    pub fn end(&self) -> Link<'s> {
+        let index = unsafe { (self.scene.api.cadaclysm_joint_end)(self.scene.raw(), self.index) };
+        Link { scene: self.scene, index }
     }
 }
 
@@ -1457,6 +2012,63 @@ impl<'s> Node<'s> {
         }
     }
 
+    /// This node's body meshed for a solver, as a [`FemMesh`]: nodes welded by bits -- two
+    /// mesh points are one node only where their coordinates are the same doubles, so no
+    /// tolerance ever merges two distinct points and a crack stays a crack -- triangles
+    /// wound outward, and every node tagged with the lowest-dimension B-rep entity it lies
+    /// on.
+    ///
+    /// `tolerance` is the chordal tolerance in model units, finite and above zero, and
+    /// **it alone governs how closely the mesh follows the geometry**. `max_size` is a size
+    /// ceiling, finite and zero or more, `0` being no ceiling (curvature alone): **it
+    /// bounds the boundary and targets the interior**, which is not a longest-element-edge
+    /// guarantee -- it adds boundary nodes without refining boundary geometry, and
+    /// [`FemMesh::longest_edge`] is what the mesh actually came to.
+    ///
+    /// **Neither is checked here.** On the mesh-only path below, the library reads no
+    /// options at all: a `tolerance` of 0, -1 or NaN and a `max_size` of -1 or NaN all
+    /// come back as a mesh, while the B-rep path refuses each in its own words. A wrapper
+    /// that validated either field would pass every test written against the B-rep path
+    /// and be wrong; both go through as given. `0.01` and `0.0` are `FemOptions::default()`
+    /// -- the library's struct is still filled by `cadaclysm_fem_options_init` first, so a
+    /// field added to it later defaults without this code being touched.
+    ///
+    /// `placement` is **sixteen** numbers, column-major, as [`Node::bounds_placed`] takes
+    /// them (`None` for the identity), applied in `f64` throughout. The kernel library's
+    /// [`blacksmith::Solid::fem_mesh`] takes **twelve** instead -- a [`blacksmith::Frame`]:
+    /// origin, x, y, z -- so a caller moving between the two reformats the placement. Both
+    /// are sized types here, so that confusion does not compile.
+    ///
+    /// **The space is the body's, not the scene's, for a B-rep -- and the scene's for a
+    /// mesh**, which [`FemMesh::from_mesh`] is the flag for; read it there, because under a
+    /// non-native convention the two are different spaces. Meshed in the part's own frame,
+    /// following the hop from an instance to the shape it draws that [`Node::mesh`]
+    /// follows, so a node instanced six times meshes once.
+    ///
+    /// **A cracked body is not a failure**: it comes back with [`FemMesh::watertight`]
+    /// false and its cracks in [`FemMesh::open_edges`] / [`FemMesh::folded_edges`], and
+    /// nothing is welded shut to make it look sound. An error for a tolerance or size the
+    /// mesher refuses, a placement that is not finite and invertible, a node with neither a
+    /// brep nor a mesh (an assembly, a storey, a layer, an empty definition, a curve), and
+    /// a body that meshes to no triangles at all.
+    ///
+    /// Prints the unlicensed notice once, here, and not again on either of [`FemMesh`]'s
+    /// `.msh` calls.
+    pub fn fem_mesh(&self, tolerance: f64, max_size: f64, placement: Option<&[f64; 16]>) -> Result<FemMesh> {
+        let api = self.scene.api;
+        let mut options = std::mem::MaybeUninit::<sys::CadaclysmFemOptions>::uninit();
+        unsafe { (api.cadaclysm_fem_options_init)(options.as_mut_ptr()) };
+        // SAFETY: `init` writes the library's whole `CadaclysmFemOptions`, which
+        // `tests/bindings.rs` pins to this crate's declaration field for field.
+        let mut options = unsafe { options.assume_init() };
+        // `size` is then this crate's own, which is what the growth rule asks of a caller.
+        options.size = std::mem::size_of::<sys::CadaclysmFemOptions>();
+        options.tolerance = tolerance;
+        options.max_size = max_size;
+        let matrix = placement.map_or(std::ptr::null(), |m| m.as_ptr());
+        FemMesh::wrap(api, unsafe { (api.cadaclysm_node_fem_mesh)(self.scene.raw(), self.index, matrix, &options) })
+    }
+
     /// Its triangles at a coarser level of detail: 0 is [`Node::mesh`] itself, 1 up to
     /// [`lod_levels`] each about a quarter of the triangles of the one before, and past
     /// that empty. Every level shares the level-0 vertices -- the same `positions`, only
@@ -1520,6 +2132,12 @@ impl<'s> Node<'s> {
     /// Its feature edges, as polylines to draw an overlay from.
     pub fn edges(&self) -> Polylines<'s> {
         Polylines::from_raw(self.call(self.scene.api.cadaclysm_node_edges))
+    }
+
+    /// One RGBA per polyline of [`edges`](Self::edges), `None` for an edge the file does
+    /// not style; empty when nothing is styled.
+    pub fn edge_colours(&self) -> Vec<Option<[f32; 4]>> {
+        colours_of(self.call(self.scene.api.cadaclysm_node_edge_colors))
     }
 
     /// Its free curves, as polylines. A 2D drawing is all of these.
@@ -1643,6 +2261,20 @@ impl<'s> Node<'s> {
     /// (see [`Scene::surface_matrix`]); empty without surfaces.
     pub fn surface_edges(&self) -> Polylines<'s> {
         Polylines::from_raw(self.call(self.scene.api.cadaclysm_node_surface_edges))
+    }
+
+    /// Its edges as the exact curves, where the reader has them without meshing -- a
+    /// Rhino extrusion's rims are its profile -- and empty everywhere else, so a caller
+    /// drawing from surfaces tries this before [`Node::surface_edges`], whose trims are
+    /// thinned to the mesh tolerance. The same segments as [`Node::edge_beziers`], in the
+    /// same space: not the surfaces' frame, so no [`Scene::surface_matrix`].
+    pub fn surface_edge_beziers(&self) -> Beziers<'s> {
+        Beziers::from_raw(self.call(self.scene.api.cadaclysm_node_surface_edge_beziers))
+    }
+
+    /// [`edge_colours`](Self::edge_colours) for [`surface_edges`](Self::surface_edges).
+    pub fn surface_edge_colours(&self) -> Vec<Option<[f32; 4]>> {
+        colours_of(self.call(self.scene.api.cadaclysm_node_surface_edge_colors))
     }
 
     /// Its isocurves taken from its trimmed surfaces and clipped to the trims, without
@@ -2010,6 +2642,20 @@ impl Scene {
     pub fn geometry_diagnostics(&self) -> Vec<String> {
         let count = unsafe { (self.api.cadaclysm_geometry_diagnostic_count)(self.raw()) };
         (0..count).map(|i| unsafe { text((self.api.cadaclysm_geometry_diagnostic)(self.raw(), i)) }).collect()
+    }
+
+    /// The file's mechanism, as rigid bodies -- see [`Link`]. Empty where the file
+    /// names no kinematic links.
+    pub fn links(&self) -> Vec<Link<'_>> {
+        let count = unsafe { (self.api.cadaclysm_link_count)(self.raw()) };
+        (0..count).map(|index| Link { scene: self, index }).collect()
+    }
+
+    /// The file's mechanism, as connections between links -- see [`Joint`]. Empty
+    /// where the file names no kinematic joints.
+    pub fn joints(&self) -> Vec<Joint<'_>> {
+        let count = unsafe { (self.api.cadaclysm_joint_count)(self.raw()) };
+        (0..count).map(|index| Joint { scene: self, index }).collect()
     }
 
     /// The archive member this was read from, or `None` for a plain file: `open` on a
@@ -2476,6 +3122,64 @@ mod tests {
         let flag = Attribute { name: "Locked".into(), kind: ValueKind::Boolean, value: Value::Boolean(true) };
         assert_eq!(flag.text(), "true");
         assert!(flag.truthy());
+    }
+
+    /// A FEM edge and vertex are read out of the raw structs field for field, with the
+    /// header's own layout under them. Needs no library: the two `from_raw`s are pure.
+    ///
+    /// Catches: `faces` and `ends` read from each other's fields (both a pair of `u32` a
+    /// swap leaves in range), `face_b`/`end_b` filled with `0` where the ABI said
+    /// [`NONE`] (`0` is a real face and a real vertex), `nodes` and `runs` lent from one
+    /// pointer, and a `point` read as anything but three doubles in order.
+    #[test]
+    fn a_fem_edge_and_vertex_are_read_field_for_field() {
+        let nodes = [7u32, 8, 9, 10, 11];
+        let runs = [0u32, 3];
+        let raw = sys::CadaclysmFemEdge {
+            id: 19,
+            nodes: nodes.as_ptr(),
+            node_count: nodes.len() as u32,
+            runs: runs.as_ptr(),
+            run_count: runs.len() as u32,
+            face_a: 0,
+            face_b: NONE,
+            end_a: 4,
+            end_b: 0,
+            closed: false,
+            seam: true,
+        };
+        let edge = unsafe { FemEdge::from_raw(&raw) };
+        // The id is the body's own, not the index it was read at.
+        assert_eq!(edge.id, 19);
+        assert_eq!(edge.nodes, nodes);
+        assert_eq!(edge.runs, runs);
+        // `0` is a real face and a real vertex; only the second of each pair is ever NONE.
+        assert_eq!(edge.faces, (0, NONE));
+        assert_eq!(edge.ends, (4, 0));
+        assert!(!edge.closed && edge.seam);
+        // Each run as its own polyline, the last to the end -- what `runs` is for.
+        assert_eq!(edge.chains().collect::<Vec<_>>(), [&nodes[..3], &nodes[3..]]);
+        let one = sys::CadaclysmFemEdge { run_count: 1, closed: true, ..raw };
+        let one = unsafe { FemEdge::from_raw(&one) };
+        assert_eq!(one.chains().collect::<Vec<_>>(), [&nodes[..]]);
+
+        let at = sys::CadaclysmFemVertex { node: 0, point: [1.5, -2.5, 3.5], has_position: true };
+        let at = FemVertex::from_raw(&at);
+        // Node 0 is a real node, not a sentinel -- and the point is in x, y, z order.
+        assert_eq!((at.node, at.point, at.has_position), (0, [1.5, -2.5, 3.5], true));
+        let none = sys::CadaclysmFemVertex { node: NONE, point: [0.0; 3], has_position: false };
+        let none = FemVertex::from_raw(&none);
+        assert!(none.node == NONE && !none.has_position && none.point == [0.0; 3]);
+
+        // The header's own sizes, which `#[repr(C)]` reproduces: a wrong scalar width
+        // shifts every field after it without changing a name (`tests/bindings.rs` pins
+        // the fields; this pins what they add up to). Taken from a C compiler over the
+        // header's own four declarations, not from these -- 24, 104, 56, 40 -- so the
+        // padding is the ABI's rather than a restatement of what Rust happened to do.
+        assert_eq!(std::mem::size_of::<sys::CadaclysmFemOptions>(), 24);
+        assert_eq!(std::mem::size_of::<sys::CadaclysmFemMeshView>(), 104);
+        assert_eq!(std::mem::size_of::<sys::CadaclysmFemEdge>(), 56);
+        assert_eq!(std::mem::size_of::<sys::CadaclysmFemVertex>(), 40);
     }
 
     /// Far out, `f64` keeps what `f32` cannot: a corner at y = -2600000.987654321 is

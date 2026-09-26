@@ -1027,6 +1027,330 @@ public struct Slant: Equatable, CustomStringConvertible, ExpressibleByFloatLiter
     public var description: String { "Slant(\(at), (\(grad.x), \(grad.y)))" }
 }
 
+// MARK: - The FEM surface mesh
+
+/// One B-rep edge of a FEM mesh: the chain of nodes along it, and where that chain breaks. The
+/// numbers are copied out; `nodes` and `runs` are `NativeArray` views borrowed from the `FemMesh`,
+/// as its own arrays are, and go with it.
+///
+/// `nodes` are this mesh's node indices in order along the edge, its end vertices included; a
+/// closed edge repeats no node. **`runs` says where the chain breaks**: read
+/// `nodes[runs[i] ..< runs[i + 1]]` (the last run to the end) as one polyline and join nothing
+/// across a boundary -- the two ends either side of one are two points of the edge with no mesh
+/// edge between them. `[0]` is the ordinary answer, and reading `nodes` as one polyline without
+/// looking here jumps the gap silently.
+///
+/// `faces` is `(face_a, face_b)` and `ends` is `(end_a, end_b)`, the second of each `UInt32.max`
+/// (the ABI's NONE) where there is none -- an open body's rim, or both ends at one vertex.
+/// **`0` is a real face and a real vertex, not a sentinel.** Which end comes first is the first
+/// trim's direction and means nothing else: the pair bounds the edge, it does not orient it.
+public struct FemEdge {
+    /// The **body's own** edge id -- not this mesh's edge index. `FemMesh.edges` is a densely
+    /// renumbered subset of the solid's edges, ascending by id, with every edge collapsed to a
+    /// point left out. Everything else here that names an edge means the *index* -- a
+    /// `FemMesh.nodeKind` of 1 read through `FemMesh.nodeEntity`, the third number of a census
+    /// row, and the `edge_<i>` physical group of `FemMesh.mshText()` -- and this is the one way
+    /// back from any of them to the solid's own topology.
+    public let id: UInt32
+    /// The edge's nodes in order along it, its end vertices included.
+    public let nodes: NativeArray<UInt32>
+    /// Where each connected run of `nodes` begins; `[0]` for one chain along the whole edge.
+    public let runs: NativeArray<UInt32>
+    /// `(face_a, face_b)`, the second `UInt32.max` on an open body's rim.
+    public let faces: (UInt32, UInt32)
+    /// `(end_a, end_b)`, the second `UInt32.max` where both ends are one vertex.
+    public let ends: (UInt32, UInt32)
+    /// The nodes make one loop. Never true where there is more than one run.
+    public let closed: Bool
+    /// Bounded twice by one face: a closed surface's seam, not a real boundary. Both `faces` are
+    /// then that same face.
+    public let seam: Bool
+
+    init(_ raw: CadaclysmBlacksmithFemEdge, _ owner: FemMesh) {
+        id = raw.id
+        nodes = NativeArray(owner: owner, base: raw.nodes, count: Int(raw.node_count))
+        runs = NativeArray(owner: owner, base: raw.runs, count: Int(raw.run_count))
+        faces = (raw.face_a, raw.face_b)
+        ends = (raw.end_a, raw.end_b)
+        closed = raw.closed
+        seam = raw.seam
+    }
+}
+
+extension FemEdge: CustomStringConvertible {
+    public var description: String {
+        "FemEdge(id=\(id), nodes=\(nodes.count), runs=\(runs.count), faces=\(faces), ends=\(ends), "
+            + "closed=\(closed), seam=\(seam))"
+    }
+}
+
+/// One B-rep vertex of a FEM mesh: the node the mesh put there, if any, and where the topology
+/// says it is, if that is known. Plain data, all of it copied out.
+public struct FemVertex: Equatable, CustomStringConvertible {
+    /// The mesh node at this vertex, or `UInt32.max` (the ABI's NONE) where the mesh has none
+    /// there. **A sentinel here is ordinary, not a fault**: the analysis rebuilds a vertex
+    /// wherever two trims meet, and a pole's polyline runs give a sphere 48 of them where the
+    /// mesh has 2 points, so a caller walking these skips the sentinel rather than treating it as
+    /// a gap.
+    public let node: UInt32
+    /// Where the vertex is, in the same space and under the same placement as `FemMesh.nodes`.
+    /// **Meaningless unless `hasPosition`**: it is all zeros then, a point no geometry has and one
+    /// a solver would read as a node at the origin.
+    public let point: SIMD3<Double>
+    /// `point` was read and placed. False where every trim meeting at this vertex is a curve with
+    /// no geometry to read an end off -- reported as this flag rather than as a plausible-looking
+    /// `(0, 0, 0)`.
+    public let hasPosition: Bool
+
+    init(_ raw: CadaclysmBlacksmithFemVertex) {
+        node = raw.node
+        point = SIMD3(raw.point.0, raw.point.1, raw.point.2)
+        hasPosition = raw.has_position
+    }
+
+    public var description: String {
+        "FemVertex(node=\(node), point=\(point), hasPosition=\(hasPosition))"
+    }
+}
+
+/// One solid meshed for a solver: nodes welded by bits, triangles wound outward, every node tagged
+/// with the lowest-dimension B-rep entity it lies on, and every crack reported rather than closed.
+/// What `Solid.femMesh` returns, and **owned by you**: `free()` it, or let the last reference to
+/// it go.
+///
+/// **A handle rather than a snapshot, and it owns everything it lends.** The five flat arrays are
+/// `NativeArray` views into the library's own memory, as `Solid.mesh`'s are and for the same
+/// reason -- a solver mesh is megabytes -- but with one difference that matters: **a FEM mesh is
+/// not in the solid's tessellation cache**, so meshing the solid again at another tolerance
+/// (which stales every `Mesh` and `Polylines` view) leaves it alone, and neither does
+/// `Solid.close()`. The owner of every view here is **this object**, and `free()` is what ends
+/// them -- or the last reference to it going.
+///
+/// So a view cannot outlive the memory it reads: it holds this object, which keeps the handle
+/// alive, and it checks the owner before every element it hands over -- a read after `free()` traps
+/// rather than touching freed memory, and it traps on the **read**, not only when the array is
+/// asked for (measured, in a release build). Asking for a view after `free()` traps there and then,
+/// as reading any property of a closed `Solid` does. `copy()` on anything that must outlive the
+/// mesh anyway, or `Array(view)`.
+public final class FemMesh: NativeMemoryOwner {
+    private var handle: OpaquePointer?
+    /// Read once, when the handle is made: every pointer in the view is built with the handle and
+    /// never moves (nothing in this ABI is built lazily), so asking again per accessor would be
+    /// one C call for the same answer.
+    private let raw: CadaclysmBlacksmithFemMeshView
+
+    init(_ made: OpaquePointer?) throws {
+        let handle = try checked(made, "fem_mesh")
+        var view = CadaclysmBlacksmithFemMeshView()
+        guard cadaclysm_blacksmith_fem_mesh_view(handle, &view) else {
+            let reason = failure("fem mesh view")
+            cadaclysm_blacksmith_fem_mesh_free(handle)
+            throw reason
+        }
+        self.handle = handle
+        raw = view
+    }
+
+    deinit { free() }
+
+    /// "the FEM mesh is freed" once `free()` has run, else nil: what the views this mesh lent
+    /// check before every read.
+    public var nativeMemoryInvalidReason: String? { handle == nil ? "the FEM mesh is freed" : nil }
+
+    /// Whether `free()` has run.
+    public var freed: Bool { handle == nil }
+
+    /// Give the mesh back, and with it every view taken from it -- the same word `Solid.close()`
+    /// uses for a solid, and the same word the reader library's FEM mesh uses, so one FEM mesh is
+    /// released the same way on both sides of the ABI. Idempotent; the last reference going does
+    /// the same. The `.msh` texts already handed over are **not** freed with it: each is a
+    /// `String` of the caller's own.
+    public func free() {
+        guard let handle = handle else { return }
+        self.handle = nil
+        cadaclysm_blacksmith_fem_mesh_free(handle)
+    }
+
+    private func h(_ member: String = #function) throws -> OpaquePointer {
+        guard let handle = handle else { throw BuildError("FemMesh.\(member): the FEM mesh is freed") }
+        return handle
+    }
+
+    /// A view of this mesh's own memory. Asked for after `free()` it **traps**, as reading any
+    /// property of a closed `Solid` does in this wrapper and for the same reason: the alternative
+    /// is handing back a pointer into freed memory. A view taken while the mesh was alive traps
+    /// too, on the read rather than here -- `NativeArray` asks its owner before every element.
+    private func view<Element>(_ base: UnsafePointer<Element>?, _ count: Int,
+                               _ member: String = #function) -> NativeArray<Element> {
+        guard handle != nil else { preconditionFailure("FemMesh.\(member): the FEM mesh is freed") }
+        return NativeArray(owner: self, base: base, count: count)
+    }
+
+    // -- the flat arrays, borrowed from this handle
+
+    /// Every node's position, three doubles each: placed by `Solid.femMesh`'s placement, in the
+    /// solid's own coordinates otherwise. Every node is used by at least one triangle.
+    public var nodes: NativeArray<Double> { view(raw.nodes, Int(raw.node_count) * 3) }
+
+    /// Three node indices a triangle, wound outward -- a mirroring placement is wound back.
+    public var triangles: NativeArray<UInt32> { view(raw.triangles, Int(raw.triangle_count) * 3) }
+
+    /// Which face each triangle lies on, one per triangle: the same faces `Solid.faceKind` names.
+    public var triangleFace: NativeArray<UInt32> { view(raw.triangle_face, Int(raw.triangle_count)) }
+
+    /// What each node lies on -- `0` a B-rep vertex, `1` an edge, `2` a face -- one per node: the
+    /// lowest-dimension entity it lies on, which is the `.msh` format's own classification rule.
+    /// `nodeEntity` says which entity of that kind.
+    public var nodeKind: NativeArray<UInt32> { view(raw.node_kind, Int(raw.node_count)) }
+
+    /// Which vertex, edge or face each node lies on, read by the matching `nodeKind`: an index
+    /// into `vertices`, into `edges`, or into the solid's faces.
+    public var nodeEntity: NativeArray<UInt32> { view(raw.node_entity, Int(raw.node_count)) }
+
+    // -- the topology
+
+    /// The solid's faces; `triangleFace` and a `nodeKind` of `2` index them.
+    public var faceCount: UInt32 { raw.face_count }
+
+    /// One `FemEdge` per B-rep edge, in the order a `nodeKind` of `1` indexes them. **This list's
+    /// own numbering, not the solid's**: each `FemEdge.id` carries the solid's own edge id.
+    public var edges: [FemEdge] {
+        get throws {
+            let handle = try h()
+            return try (0..<raw.edge_count).map { i in
+                var out = CadaclysmBlacksmithFemEdge()
+                guard cadaclysm_blacksmith_fem_mesh_edge(handle, i, &out) else {
+                    throw failure("fem mesh edge \(i)")
+                }
+                return FemEdge(out, self)
+            }
+        }
+    }
+
+    /// One `FemVertex` per B-rep vertex, in the order a `nodeKind` of `0` indexes them.
+    public var vertices: [FemVertex] {
+        get throws {
+            let handle = try h()
+            return try (0..<raw.vertex_count).map { i in
+                var out = CadaclysmBlacksmithFemVertex()
+                guard cadaclysm_blacksmith_fem_mesh_vertex(handle, i, &out) else {
+                    throw failure("fem mesh vertex \(i)")
+                }
+                return FemVertex(out)
+            }
+        }
+    }
+
+    // -- the crack census
+
+    /// Every crack, as `(a, b, brepEdge)`: a directed mesh edge `(a, b)` with no `(b, a)`, and the
+    /// B-rep edge both nodes lie on or `UInt32.max` where they share none.
+    ///
+    /// **Empty unless the solid's topology is closed**, whose mesh is otherwise not asked about at
+    /// all: such a body reports `watertight` false with this and `foldedEdges` both empty, and
+    /// *that trio together* says "not asked", not "nothing found". An open sheet's rim is not a
+    /// crack.
+    public var openEdges: [(UInt32, UInt32, UInt32)] {
+        get throws { try census({ cadaclysm_blacksmith_fem_mesh_open_edge($0, $1, $2, $3, $4) }, raw.open_edge_count, "open edge") }
+    }
+
+    /// Every fold, as `openEdges` reports a crack: a directed mesh edge used by more than one
+    /// triangle.
+    ///
+    /// **A body can be folded without being open** -- a solid no thicker than a line leaves no
+    /// hole for an open edge to find -- and the closure census's own known-bad bodies are folds
+    /// rather than open cracks. A caller that checks `openEdges` alone calls such a body sound.
+    /// Empty under the same rule.
+    public var foldedEdges: [(UInt32, UInt32, UInt32)] {
+        get throws { try census({ cadaclysm_blacksmith_fem_mesh_folded_edge($0, $1, $2, $3, $4) }, raw.folded_edge_count, "folded edge") }
+    }
+
+    /// One flattened census, row by row: the shape `openEdges` and `foldedEdges` share, so the two
+    /// cannot drift.
+    ///
+    /// Both call sites wrap the C function in a closure rather than passing it by value. That
+    /// is not style: `cadaclysm-capi/tests/bindings.rs`'s parity gate reads a wrapper's calls as
+    /// `cadaclysm_blacksmith_...(`, so a bare function reference is a use the gate cannot see --
+    /// measured, when the FEM names came off `PARITY_PENDING_KERNEL` and Swift alone was
+    /// reported as lacking these two.
+    private func census(_ call: (OpaquePointer?, UInt32, UnsafeMutablePointer<UInt32>?,
+                                UnsafeMutablePointer<UInt32>?, UnsafeMutablePointer<UInt32>?) -> Bool,
+                        _ count: UInt32, _ what: String) throws -> [(UInt32, UInt32, UInt32)] {
+        let handle = try h()
+        return try (0..<count).map { i in
+            var a: UInt32 = 0, b: UInt32 = 0, edge: UInt32 = 0
+            guard call(handle, i, &a, &b, &edge) else { throw failure("fem mesh \(what) \(i)") }
+            return (a, b, edge)
+        }
+    }
+
+    // -- the summary
+
+    /// The welded mesh closes -- every directed mesh edge paired with its reverse and none used
+    /// twice -- and so does the topology behind it. **False for every solid whose topology is not
+    /// closed**, whose mesh is then not asked about; read `openEdges` for what an empty census
+    /// beside a false here does and does not mean.
+    public var watertight: Bool { raw.watertight }
+
+    /// Always false here: this library has no mesh-only path, so every FEM mesh comes off exact
+    /// geometry. The reader's `cadaclysm_node_fem_mesh` sets it for a node with no brep.
+    public var fromMesh: Bool { raw.from_mesh }
+
+    /// The smallest interior angle of any triangle, in degrees. There is always one: a solid that
+    /// meshed to no triangles is a refusal, not a mesh.
+    public var minAngle: Double { raw.min_angle }
+
+    /// The triangle with that angle, as an index into `triangles` (three entries each).
+    public var worstTriangle: UInt32 { raw.worst_triangle }
+
+    /// The longest triangle edge, placed. **The figure to check against `Solid.femMesh`'s
+    /// `maxSize`, and the only one that says what the mesh actually is**: `maxSize` bounds the
+    /// boundary segments and merely *targets* the interior -- measured at 1.03x `maxSize` on a
+    /// face whose parameters run unevenly -- and one small enough beside the body to reach the
+    /// mesher's own piece and station ceilings is not honoured at all. A caller that asked for an
+    /// element size reads this to find out whether it got one.
+    public var longestEdge: Double { raw.longest_edge }
+
+    // -- out
+
+    /// The mesh as Gmsh 4.1 ASCII `.msh` text: an entity per B-rep vertex, edge and face, a volume
+    /// where the body closes, and a physical group naming each.
+    ///
+    /// **On this side of the ABI the library's text is owned**, and this wrapper releases it with
+    /// `cadaclysm_blacksmith_string_free` as it does every other text this library hands over --
+    /// so two asks are two independent texts, and one stays good after `free()`. The reader
+    /// library's `Cadaclysm.FemMesh.mshText()` is the other way round: a slot borrowed from its
+    /// handle, which must **not** be freed. A reader porting one side's reasoning onto the other
+    /// leaks or double-frees.
+    ///
+    /// **Prints the unlicensed notice**, as `saveMsh` does and as this library's other writers do
+    /// -- and unlike `Solid.femMesh`, which does not: this library notices on its writers where
+    /// the reader library notices in its constructor and on neither `.msh` call.
+    ///
+    /// Throws for a mesh the writer refuses, naming the field it cannot honour, and for a freed
+    /// handle.
+    public func mshText() throws -> String {
+        guard let raw = cadaclysm_blacksmith_fem_mesh_msh_text(try h()) else { throw failure("fem_mesh_msh_text") }
+        defer { cadaclysm_blacksmith_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    /// `mshText()` written to `path` by the library itself: the same bytes from the same writer,
+    /// straight to the file rather than through a string. Throws for a mesh the writer refuses or
+    /// a file it cannot write. Prints the unlicensed notice, as `mshText()` does.
+    public func saveMsh(_ path: String) throws {
+        guard cadaclysm_blacksmith_fem_mesh_save_msh(try h(), path) else { throw failure("fem_mesh_save_msh") }
+    }
+}
+
+extension FemMesh: CustomStringConvertible {
+    public var description: String {
+        freed ? "FemMesh(freed)"
+            : "FemMesh(nodes=\(raw.node_count), triangles=\(raw.triangle_count), "
+                + "watertight=\(raw.watertight), fromMesh=\(raw.from_mesh))"
+    }
+}
+
 // MARK: - Solids
 
 /// An exact B-rep solid (or open sheet): planes, cylinders, cones, spheres, tori and NURBS,
@@ -1075,6 +1399,29 @@ public final class Solid {
     /// Whether a view cut from filling `generation` may still read.
     func cacheHolds(_ generation: Int) -> Bool {
         handle != nil && cacheGeneration == generation
+    }
+
+    // MARK: Naming
+
+    /// This solid, named `name`. The name rides through an operation with exactly one
+    /// source solid (`place`, `translate`, `coloured`, `fillet`, ...) and is dropped by
+    /// one with two or more (`join`, `cut`, `common`, ...) and by a fresh primitive or
+    /// sweep -- see `name`. It is what `Assembly.place` defaults a placement's own name
+    /// to, and the product name a lone named solid gets when written to STEP (`step`/
+    /// `stepText`). Refused for an empty name.
+    public func named(_ name: String) throws -> Solid {
+        try Solid(cadaclysm_blacksmith_named(try h(), name))
+    }
+
+    /// This solid's name, or nil if it has none -- what `named` set, kept or dropped by
+    /// whatever built this solid. The C function's pointer is borrowed and null for both
+    /// "no name" and a failure, so this reads it directly and never calls `text()`, which
+    /// would map null to `""` and erase the "no name" case.
+    public var name: String? {
+        get throws {
+            guard let raw = cadaclysm_blacksmith_solid_name(try h()) else { return nil }
+            return String(cString: raw)
+        }
     }
 
     // MARK: Primitives
@@ -1298,6 +1645,11 @@ public final class Solid {
     /// Moved by (`dx`, `dy`, `dz`).
     public func translate(_ dx: Double, _ dy: Double, _ dz: Double) throws -> Solid {
         try Solid(cadaclysm_blacksmith_translate(try h(), dx, dy, dz))
+    }
+
+    /// This solid scaled by `factor` about the origin: every length times `factor`, exactly.
+    public func scaled(_ factor: Double) throws -> Solid {
+        try Solid(cadaclysm_blacksmith_scaled(try h(), factor))
     }
 
     /// Turned `radians` about `axis` (a point and a direction).
@@ -1595,6 +1947,75 @@ public final class Solid {
             let raw = cadaclysm_blacksmith_mesh_face_triangles(try h(), tolerance)
             guard let counts = raw.counts else { throw failure("mesh_face_triangles") }
             return Array(UnsafeBufferPointer(start: counts, count: Int(raw.face_count)))
+        }
+    }
+
+    /// This solid meshed for a solver, as a `FemMesh`: nodes welded by bits -- two mesh points are
+    /// one node only where their coordinates are the same doubles, so no tolerance ever merges two
+    /// distinct points and a crack stays a crack -- triangles wound outward, and every node tagged
+    /// with the lowest-dimension B-rep entity it lies on.
+    ///
+    /// **It is its own handle, not a view of this solid.** `Solid.mesh` fills the solid's
+    /// tessellation cache and lends views into that filling; this returns a `FemMesh` that owns
+    /// everything it lends, so meshing the solid again at another tolerance does not stale it and
+    /// neither does `close()`.
+    ///
+    /// `tolerance` is the chordal tolerance in model units, finite and above zero, and **it alone
+    /// governs how closely the mesh follows the geometry**. `maxSize` is a size ceiling, finite and
+    /// zero or more, `0` being no ceiling (curvature alone): **it bounds the boundary and targets
+    /// the interior**, which is not a longest-element-edge guarantee -- it adds boundary nodes
+    /// without refining boundary geometry, and `FemMesh.longestEdge` is what the mesh actually came
+    /// to, the figure a solver caller checks.
+    ///
+    /// **Neither is checked here**: both go through as given and the library refuses what it
+    /// cannot honour, in its own words. This side has no mesh-only path, so every solid goes
+    /// through the options -- where the reader's `Node.femMesh` on a body with no brep reads
+    /// neither, and a wrapper that validated either field would be wrong there. `0.01` and `0.0`
+    /// are `FemOptions::default()`'s own figures, restated here so the signature says what a
+    /// caller gets; the library's struct is still filled by `cadaclysm_blacksmith_fem_options_init`
+    /// first, so a field added to it later defaults without this code being touched.
+    ///
+    /// **`0.01`, not `Solid.mesh`'s `0.05`.** The render mesher's default and the solver mesher's
+    /// are different figures, and the two methods sit next to each other, so copying the neighbour
+    /// gives a caller a mesh five times coarser than the same call in every other wrapper. Pinned
+    /// by `testFemMeshDefaultsAreTheLibrarysOwn`.
+    ///
+    /// `placement` is a `Frame` -- **twelve** numbers: origin, x, y, z, as every frame argument
+    /// here -- and nil for the identity; it is applied in `Double` throughout. This is the one
+    /// frame argument in this library that may be left out, a solid meshed in its own coordinates
+    /// being the common case. The reader library's `Node.femMesh` takes **sixteen**, column-major,
+    /// so a caller moving between the two reformats the placement; a `Frame` checks its own axes
+    /// when it is built, so the confusion cannot arise as a length here.
+    ///
+    /// **A cracked body is not a failure**: it comes back with `FemMesh.watertight` false and its
+    /// cracks in `FemMesh.openEdges` / `FemMesh.foldedEdges`, folded edges as prominent as open
+    /// ones, and nothing is welded shut to make it look sound. Throws for a tolerance or `maxSize`
+    /// the mesher refuses, a placement not finite or not invertible, a closed solid this library
+    /// cannot mesh, and a solid that meshes to no triangles at all.
+    ///
+    /// **No unlicensed notice here**: `FemMesh.mshText()` and `FemMesh.saveMsh` print it, this
+    /// library noticing on its writers rather than on its builders -- where the reader library
+    /// notices in its own constructor and on neither `.msh` call.
+    public func femMesh(tolerance: Double = 0.01, maxSize: Double = 0.0,
+                        placement: Frame? = nil) throws -> FemMesh {
+        var options = CadaclysmBlacksmithFemOptions()
+        // `init` writes `sizeof(CadaclysmBlacksmithFemOptions)` bytes as the *library* knows that
+        // type, into the struct this package's own copy of the header declares -- the two are the
+        // same declaration, the header being imported rather than transcribed. `size` is then set
+        // to this header's sizeof, which is what the growth rule asks of a caller.
+        cadaclysm_blacksmith_fem_options_init(&options)
+        options.size = MemoryLayout<CadaclysmBlacksmithFemOptions>.size
+        options.tolerance = tolerance
+        options.max_size = maxSize
+        let handle = try h()
+        // nil, never an empty array: the ABI reads null as the identity and refuses a
+        // zero-length frame as twelve numbers it did not get.
+        return try withUnsafePointer(to: &options) { opts in
+            try FemMesh(placement.map { frame in
+                frame.values.withUnsafeBufferPointer {
+                    cadaclysm_blacksmith_fem_mesh(handle, $0.baseAddress, opts, nil, nil)
+                }
+            } ?? cadaclysm_blacksmith_fem_mesh(handle, nil, opts, nil, nil))
         }
     }
 
@@ -2086,6 +2507,132 @@ public final class Solid {
         let text = try stepText(schema: schema)
         return try Cadaclysm.openMemory(Data(text.utf8), format: "stp", schema: schemaPath)
     }
+}
+
+// MARK: - Assemblies
+
+/// A mutable tree of placements: a name, and zero or more solids or other assemblies
+/// placed in it at a frame. `place` returns the placement's name so a caller can keep
+/// it. Unlike `Solid`, placing shares rather than copies -- placing one assembly under
+/// another does not snapshot it, so a later placement on the shared one shows up
+/// wherever it already sits (see `place(_:_:name:)`'s own note on cycles). `close()`
+/// frees this handle; it does **not** free what was placed in it if that is still
+/// reachable from somewhere else.
+public final class Assembly {
+    private var handle: OpaquePointer?
+
+    /// A new, empty assembly called `name`. Refused for an empty name.
+    public init(_ name: String) throws {
+        handle = try checked(cadaclysm_blacksmith_assembly_new(name), "assembly_new")
+    }
+
+    deinit { close() }
+
+    /// Free the assembly now. Idempotent; every call on it afterwards throws.
+    public func close() {
+        if let handle { cadaclysm_blacksmith_assembly_free(handle) }
+        handle = nil
+    }
+
+    /// Whether `close()` has run.
+    public var isClosed: Bool { handle == nil }
+
+    func h() throws -> OpaquePointer {
+        guard let handle else { throw BuildError("assembly: closed") }
+        return handle
+    }
+
+    /// This assembly's own name, given when it was made.
+    public var name: String { get throws { text(cadaclysm_blacksmith_assembly_name(try h())) } }
+
+    /// Place `solid` at `frame` (must be right-handed and orthonormal) in this assembly,
+    /// called `name` -- or, with `name` nil, `solid`'s own name (`Solid.name`, `"part"`
+    /// for an unnamed one), numbered past any already taken here (`"bolt"`, `"bolt 2"`,
+    /// ...). An explicit `name` already taken here is refused. Returns the placement's
+    /// name.
+    @discardableResult
+    public func place(_ solid: Solid, _ frame: Frame, name: String? = nil) throws -> String {
+        try place(solid, raw: frame.values, name: name)
+    }
+
+    /// As `place(_:_:name:)`, but placing another assembly, `assembly`, rather than a
+    /// solid -- sharing it, not copying it, so a later placement on `assembly` (through
+    /// this assembly or another) shows up wherever it is placed. Placing `assembly` as
+    /// this assembly itself, or anywhere above this assembly in the tree already, is
+    /// refused, naming the cycle, since writing that out would never terminate.
+    @discardableResult
+    public func place(_ assembly: Assembly, _ frame: Frame, name: String? = nil) throws -> String {
+        try place(assembly, raw: frame.values, name: name)
+    }
+
+    /// `place(_:_:name:)` with a raw, unchecked twelve-number frame: a placement's
+    /// mirror is a left-handed frame, which `Frame`'s own initialiser refuses and the
+    /// kernel takes -- the same unchecked route `Solid.place(raw:)` uses for the same
+    /// fact, so a mirrored frame reaches the library's own check rather than `Frame`'s.
+    @discardableResult
+    func place(_ solid: Solid, raw frame: [Double], name: String? = nil) throws -> String {
+        let raw = try withOptionalCString(name) { cname in
+            cadaclysm_blacksmith_assembly_place_solid(try h(), try solid.h(), try frameValues(frame), cname)
+        }
+        return try placeResult(raw, "assembly_place_solid")
+    }
+
+    @discardableResult
+    func place(_ assembly: Assembly, raw frame: [Double], name: String? = nil) throws -> String {
+        let raw = try withOptionalCString(name) { cname in
+            cadaclysm_blacksmith_assembly_place_assembly(try h(), try assembly.h(), try frameValues(frame), cname)
+        }
+        return try placeResult(raw, "assembly_place_assembly")
+    }
+
+    /// This assembly, and everything placed under it, as one STEP file: this assembly
+    /// the root product, each sub-assembly and each distinct part written once, each
+    /// placement an occurrence named as it was placed. `schema` and `unit` as
+    /// `Solid.stepText`. Refused if this assembly, or a sub-assembly reachable from it,
+    /// places nothing -- a reader would never show it.
+    public func stepText(schema: String? = nil, unit: String = "mm") throws -> String {
+        guard let code = units[unit] else { throw BuildError("unit must be one of ['in', 'm', 'mm']") }
+        let handle = try h()
+        let schemaText = try schemaBytes(schema)
+        let raw: UnsafeMutablePointer<CChar>?
+        if let schemaText {
+            raw = schemaText.withUnsafeBufferPointer {
+                cadaclysm_blacksmith_assembly_step(handle, $0.baseAddress, code)
+            }
+        } else {
+            raw = cadaclysm_blacksmith_assembly_step(handle, nil, code)
+        }
+        guard let raw else { throw failure("assembly_step") }
+        defer { cadaclysm_blacksmith_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    /// This assembly written to a STEP file at `path`.
+    public func step(_ path: String, schema: String? = nil, unit: String = "mm") throws {
+        let text = try stepText(schema: schema, unit: unit)
+        try text.write(toFile: path, atomically: true, encoding: .utf8)
+    }
+
+    /// This assembly as a reader `Scene`, through STEP text -- see `Solid.toScene`.
+    public func toScene(schema: String? = nil) throws -> Scene {
+        let schemaPath = schema.flatMap { !$0.contains("\n") && isFile($0) ? $0 : nil }
+        let text = try stepText(schema: schema)
+        return try Cadaclysm.openMemory(Data(text.utf8), format: "stp", schema: schemaPath)
+    }
+}
+
+/// The owned text `Assembly.place` returns -- the placement's name -- read out and
+/// freed; throws on a refusal.
+private func placeResult(_ raw: UnsafeMutablePointer<CChar>?, _ what: String) throws -> String {
+    guard let raw else { throw failure(what) }
+    defer { cadaclysm_blacksmith_string_free(raw) }
+    return String(cString: raw)
+}
+
+/// Runs `body` with `text` as a NUL-terminated C string, or nil where `text` is nil.
+private func withOptionalCString<R>(_ text: String?, _ body: (UnsafePointer<CChar>?) throws -> R) throws -> R {
+    guard let text else { return try body(nil) }
+    return try text.withCString { try body($0) }
 }
 
 /// The three world axes `Selector.max` and `Selector.min` take.

@@ -121,6 +121,11 @@ func test_solids_build_transform_combine_mesh_bound_and_write_step():
 		s.close()
 	refuses(func(): return CadaclysmSolid.cuboid(-1, 1, 1), "cuboid")
 	eq(CadaclysmSolid.cuboid(-1, 1, 1), null)
+	var big := CadaclysmSolid.cuboid(1, 2, 3).scaled(2)
+	ok(big != null, "scaled")
+	var bb: AABB = big.bounds_at(0.05)
+	ok(absf(bb.size.x - 2.0) < 1e-5 and absf(bb.size.z - 6.0) < 1e-5, "scaled bounds")
+	eq(CadaclysmSolid.cuboid(1, 1, 1).scaled(0), null)
 	var pin := CadaclysmSolid.cylinder(4, 10).translate(0, 0, 6).rotate([0, 0, 0], [0, 0, 1], 0.1).place(XY).mirror(XY)
 	ok(pin.faces > 0)
 	var part := plate.join(CadaclysmSolid.cuboid(6, 6, 20).translate(30, 10, -5), 0.05)
@@ -420,6 +425,19 @@ func test_a_frame_is_built_checked_and_passed_where_twelve_numbers_go():
 	ok(CadaclysmFrame.create([0, 0, 0], [3, 0, 0], [0, 2, 0], [0, 0, 9]).is_equal_approx(CadaclysmFrame.xy()), "normalised")
 	refuses(func(): return CadaclysmFrame.create([0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 0, 1]), "not square")
 	refuses(func(): return CadaclysmFrame.create([0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, -1]), "left-handed")
+	# `Frame.of` is, unlike every other frame-taking call, itself the checked
+	# constructor for a raw array (as Python's `Frame.of` builds through the checked
+	# `Frame(...)`), so a mirrored array is refused here too -- in this crate's own
+	# "left-handed" wording, since `of` never reaches the kernel to say "right-handed
+	# and orthonormal" (only `CadaclysmAssembly.place`'s raw, unchecked path does, spec
+	# §5 fact 7). Round-trip regression: `frame()`'s raw-array path moved to
+	# `bs::Frame::raw_unchecked` for `place`'s sake and silently carried `of` along with
+	# it, until `of` re-validated its own result.
+	refuses(func(): return CadaclysmFrame.of([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, -1]), "left-handed")
+	# `Workplane.on` shares `frame()` with every other frame-taking call, so a raw array
+	# reaches it unchecked too -- it must re-validate through `bs::Frame::of` the same way
+	# `Frame.of` does, or a mirrored raw frame would silently become the workplane's frame.
+	refuses(func(): return CadaclysmWorkplane.on([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, -1]), "left-handed")
 	refuses(func(): return CadaclysmFrame.at([0, 0, 0], [0, 0, 0]), "no direction")
 	refuses(func(): return CadaclysmFrame.at([0, 0, 0], [0, 0, 1], Vector3(0, 0, -2)), "along the normal")
 	ok(str(CadaclysmFrame.xy()).begins_with("Frame(origin="), str(CadaclysmFrame.xy()))
@@ -1001,3 +1019,455 @@ func test_two_circles_share_one_lens_of_arcs():
 	eq(a.common(b.translate(100, 0)).size(), 0)
 	refuses(func(): return a.common(b, 0.0), "profile_common: tolerance must be positive and finite")
 	eq(a.common(b, 0.0).size(), 0, "empty on failure")
+
+# ---- the FEM surface mesh -------------------------------------------------------------
+#
+# `CadaclysmSolid.fem_mesh`, and the three places the two ABIs deliberately disagree: an
+# owned `.msh` string here against a borrowed slot on the reader, **twelve** placement
+# numbers against sixteen, and which call prints the unlicensed notice. The reader's side
+# is in reader_test.gd, which carries the twins of the helpers below -- as the two suites
+# already do for `all_near`, each file running on its own.
+#
+# There are no synthetic record tests, unlike the Python, Node and LuaJIT suites: an edge
+# comes over as a Dictionary of straight field copies with no `chains()` helper, so this
+# wrapper has no index arithmetic of its own to test as a pure function. The sheet's
+# `faces == [0, NONE]` below, the cylinder's seam and rims, and the field-by-field walk in
+# reader_test.gd are what stand in for them -- between them they catch a sentinel
+# normalised to `0`, the two flags swapped, and `ends` filled from `faces`.
+
+const FEM_NONE := 4294967295
+
+# A placement carrying both a rotation and a translation -- a quarter turn about z, then
+# 100 along x -- as the kernel's **twelve** numbers: an origin, then where x, y and z go.
+# reader_test.gd's `TURNED` is the same transform as the reader's sixteen column-major
+# doubles, and both suites assert it against the one map `turned` below, which is what
+# makes the twelve-against-sixteen asymmetry something these tests prove rather than
+# merely state. See `TURNED` there for why a translation alone would prove nothing.
+const TURNED_FRAME := [100, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, 1]
+
+func turned(p: Array) -> Array:
+	return [100 - p[1], p[0], p[2]]
+
+func fem_points(nodes: PackedFloat64Array) -> Array:
+	var out := []
+	for i in range(0, nodes.size() - 2, 3):
+		out.append([nodes[i], nodes[i + 1], nodes[i + 2]])
+	return out
+
+func fem_near(a: Array, b: Array) -> bool:
+	for k in 3:
+		if absf(a[k] - b[k]) > 1e-6:
+			return false
+	return true
+
+func fem_has(nodes: PackedFloat64Array, want: Array) -> bool:
+	for p in fem_points(nodes):
+		if fem_near(p, want):
+			return true
+	return false
+
+func fem_span(nodes: PackedFloat64Array) -> Array:
+	var points := fem_points(nodes)
+	if points.is_empty():
+		return [[0, 0, 0], [0, 0, 0]]
+	var lo: Array = points[0].duplicate()
+	var hi: Array = points[0].duplicate()
+	for p in points:
+		for k in 3:
+			lo[k] = minf(lo[k], p[k])
+			hi[k] = maxf(hi[k], p[k])
+	return [lo, hi]
+
+func fem_span_is(nodes: PackedFloat64Array, lo: Array, hi: Array, what: String) -> bool:
+	var span := fem_span(nodes)
+	return ok(fem_near(span[0], lo) and fem_near(span[1], hi),
+		"%s: the nodes span %s..%s, expected %s..%s" % [what, span[0], span[1], lo, hi])
+
+# The eight corners of a box -- every one a B-rep vertex of a cuboid, and so a node.
+func fem_corners(lo: Array, hi: Array) -> Array:
+	var out := []
+	for x in [lo[0], hi[0]]:
+		for y in [lo[1], hi[1]]:
+			for z in [lo[2], hi[2]]:
+				out.append([x, y, z])
+	return out
+
+# The twin of reader_test.gd's: the five flat arrays agree with each other and with the
+# counts, every index is in range, and every `node_entity` is bounded by the list its own
+# `node_kind` names -- which is what tells those two arrays apart if they were ever filled
+# from one pointer.
+func fem_arrays(mesh, what: String) -> Array:
+	var nodes: PackedFloat64Array = mesh.nodes
+	var triangles: PackedInt32Array = mesh.triangles
+	ok(nodes.size() > 0 and triangles.size() > 0, "%s: an empty mesh came back as success" % what)
+	eq(nodes.size() % 3, 0, "%s: the nodes are not triples" % what)
+	eq(triangles.size() % 3, 0, "%s: the triangles are not triples" % what)
+	var node_count := nodes.size() / 3
+	var triangle_count := triangles.size() / 3
+	eq(mesh.triangle_face.size(), triangle_count, "%s: triangle_face is not one per triangle" % what)
+	eq(mesh.node_kind.size(), node_count, "%s: node_kind is not one per node" % what)
+	eq(mesh.node_entity.size(), node_count, "%s: node_entity is not one per node" % what)
+	for i in triangles:
+		ok(i < node_count, "%s: a triangle index points past the nodes" % what)
+	for f in mesh.triangle_face:
+		ok(f < mesh.face_count, "%s: a triangle_face is not one of the %d faces" % [what, mesh.face_count])
+	var kinds: PackedInt32Array = mesh.node_kind
+	var entities: PackedInt32Array = mesh.node_entity
+	var edge_count: int = mesh.edges.size()
+	var vertex_count: int = mesh.vertices.size()
+	for i in node_count:
+		var bound := -1
+		match kinds[i]:
+			0: bound = vertex_count
+			1: bound = edge_count
+			2: bound = mesh.face_count
+		if not ok(bound != -1, "%s: node %d has kind %d, which is neither vertex, edge nor face" % [what, i, kinds[i]]):
+			continue
+		ok(entities[i] < bound, "%s: node %d is on entity %d of kind %d, which has only %d" % [what, i, entities[i], kinds[i], bound])
+	return [node_count, triangle_count]
+
+# **This library's `.msh` text is an owned string** -- `cadaclysm_blacksmith_string_free`
+# at the ABI -- where the reader's is a slot borrowed from the handle. Two asks is what
+# separates the two conventions at run time: a missed free leaks silently and no test in
+# this repository would see it, while a doubled one takes the process down before the
+# first ask returns, which turns a whole test file into a crash.
+func fem_msh(mesh, file: String, what: String) -> String:
+	var text: String = mesh.msh_text()
+	ok(text.begins_with("$MeshFormat\n4.1 0 8\n"), "%s: the .msh text does not open as Gmsh 4.1 ASCII: %s" % [what, text.left(40)])
+	eq(mesh.msh_text(), text, "%s: two asks for the same mesh's .msh text disagree" % what)
+	var out := tmp(file)
+	ok(mesh.save_msh(out), "%s: save_msh failed: %s" % [what, Cadaclysm.last_error()])
+	ok(FileAccess.get_file_as_bytes(out).size() >= text.length() / 2,
+		"%s: save_msh wrote %d bytes against %d of text" % [what, FileAccess.get_file_as_bytes(out).size(), text.length()])
+	return text
+
+# A curved, closed solid: the same body the reader's B-rep test reads back from STEP, and
+# the one every other wrapper's FEM tests use. Ten faces.
+func rounded_box() -> CadaclysmSolid:
+	var box := CadaclysmSolid.cuboid(20, 20, 10)
+	var vertical := box.edges.filter(func(e): return e.is_line and absf(e.direction.z) > 0.99)
+	return box.fillet(vertical, 2)
+
+func test_fem_the_kernel_meshes_a_solid_and_survives_a_re_mesh():
+	var rounded := rounded_box()
+	if not ok(rounded != null, "kernel fem: " + Cadaclysm.last_error()):
+		return
+	var mesh: CadaclysmSolidFemMesh = rounded.fem_mesh(0.05)
+	if not ok(mesh != null, "kernel fem: " + Cadaclysm.last_error()):
+		return
+	var counts := fem_arrays(mesh, "kernel fem")
+	eq(mesh.from_mesh, false, "kernel fem: a solid reported from_mesh -- the kernel has no mesh path")
+	eq(mesh.face_count, 10, "kernel fem: the rounded box has %d faces, not 10" % mesh.face_count)
+	eq(mesh.face_count, rounded.faces, "kernel fem: face_count is not the solid's own face count")
+	eq(mesh.watertight, true)
+	eq(mesh.open_edges.size(), 0)
+	eq(mesh.folded_edges.size(), 0)
+	var edges := mesh.edges
+	var vertices := mesh.vertices
+	ok(edges.size() > 0 and vertices.size() > 0, "kernel fem: a closed solid has no edges or no vertices")
+	for i in edges.size():
+		var e: Dictionary = edges[i]
+		var which := "kernel fem: edge %d" % i
+		if i > 0:
+			ok(edges[i - 1]["id"] < e["id"], "kernel fem: the edge ids do not ascend")
+		eq(e["runs"][0], 0, which + "'s first run does not start at 0")
+		for n in e["nodes"]:
+			ok(n < counts[0], which + " names a node past the mesh")
+		ok(e["faces"][0] < mesh.face_count and e["faces"][1] < mesh.face_count,
+			"%s bounds faces %s of %d -- a closed solid's every edge has two real ones" % [which, e["faces"], mesh.face_count])
+		# The ends resolve through `vertices` to the chain's own first or last node, which
+		# is what tells `ends` from `faces`: both a pair of numbers a swap leaves in range.
+		for v in e["ends"]:
+			if v == FEM_NONE:
+				continue
+			if not ok(v < vertices.size(), "%s ends at vertex %d of %d" % [which, v, vertices.size()]):
+				continue
+			var at: int = vertices[v]["node"]
+			if at == FEM_NONE:
+				continue
+			ok(at == e["nodes"][0] or at == e["nodes"][e["nodes"].size() - 1],
+				"%s's end vertex %d is node %d, which is neither end of its chain" % [which, v, at])
+	var positioned := false
+	for v in vertices:
+		eq(v["point"].size(), 3, "kernel fem: a vertex point is not three doubles")
+		if v["has_position"]:
+			positioned = true
+	ok(positioned, "kernel fem: no vertex has a position")
+	fem_msh(mesh, "kernel.msh", "kernel fem")
+	ok(str(mesh).begins_with("FemMesh(nodes=%d, triangles=%d" % [counts[0], counts[1]]), str(mesh))
+	var longest: float = mesh.longest_edge
+
+	# **The default is 0.01, `FemOptions::default()`'s -- not the kernel's own
+	# `default_tolerance` of 0.05 that every neighbouring method takes.**
+	var defaulted: CadaclysmSolidFemMesh = rounded.fem_mesh()
+	var hundredth: CadaclysmSolidFemMesh = rounded.fem_mesh(0.01)
+	eq(defaulted.nodes.size(), hundredth.nodes.size(),
+		"kernel fem: fem_mesh() is not fem_mesh(0.01) -- the default is not FemOptions::default()'s 0.01")
+	ok(defaulted.nodes.size() != mesh.nodes.size(),
+		"kernel fem: fem_mesh() and fem_mesh(0.05) agree, so the default may be the neighbours' 0.05")
+
+	# **A FEM mesh is not in the solid's tessellation cache**, so meshing the solid again
+	# at another tolerance must not stale it: it is the one array product here whose
+	# arrays carry no generation check. Catches that guard wired in by reflex from `mesh`,
+	# where it belongs. 2.0 against 0.01, not 0.5 against 0.05: measured in task 8, this
+	# body's render mesh is the same 1172 triangles anywhere from 2.0 down to 0.05 (the
+	# mesher's own division floor), so a narrower pair would leave the re-mesh unproven.
+	var coarse: int = rounded.mesh(2).index_count
+	var kept: CadaclysmSolidFemMesh = rounded.fem_mesh(0.05)
+	ok(rounded.mesh(0.01).index_count != coarse, "kernel fem: the two tolerances meshed the same -- the re-mesh did not happen")
+	eq(kept.nodes.size() / 3, counts[0],
+		"kernel fem: a FEM mesh read after the solid was meshed again gives another node count -- a FEM mesh is its own handle, not a product of the tessellation cache")
+	eq(kept.edges.size(), edges.size(), "kernel fem: a FEM mesh's edges do not read after the solid was meshed again")
+	ok(kept.msh_text().length() > 0, "kernel fem: the .msh text does not read after the solid was meshed again")
+
+	# `max_size` adds nodes and shortens the longest edge -- but it **bounds the boundary
+	# and only targets the interior**, so the ceiling is checked loosely on purpose: a
+	# tighter pin would assert what the ABI does not promise (measured at 1.03x).
+	var finer: CadaclysmSolidFemMesh = rounded.fem_mesh(0.05, 3)
+	ok(finer.nodes.size() > mesh.nodes.size(), "kernel fem: max_size 3 gave %d nodes, was %d" % [finer.nodes.size() / 3, counts[0]])
+	ok(finer.longest_edge < longest, "kernel fem: max_size 3 left the longest edge at %s, was %s" % [finer.longest_edge, longest])
+	ok(finer.longest_edge <= 3 * 1.05, "kernel fem: max_size 3 left a %s edge, past even the 1.03x the spec measured" % finer.longest_edge)
+
+	# A tolerance the mesher refuses, in its own words: the kernel has no mesh-only path,
+	# so unlike the reader every solid goes through the options.
+	refuses(func(): return rounded.fem_mesh(0), "tolerance must be finite and > 0")
+	refuses(func(): return rounded.fem_mesh(0.05, NAN), "max_size")
+
+	# Released by hand; every call then fails, and a second release is a no-op.
+	mesh.release()
+	eq(mesh.released, true)
+	mesh.release()
+	eq(mesh.nodes.size(), 0)
+	ok(Cadaclysm.last_error().contains("released"), Cadaclysm.last_error())
+	eq(mesh.msh_text(), "")
+	# The FEM mesh is not the solid's: closing the solid neither frees nor stales one.
+	var own: CadaclysmSolidFemMesh = rounded.fem_mesh(0.05)
+	rounded.close()
+	eq(own.nodes.size() / 3, counts[0], "kernel fem: closing the solid changed the FEM mesh")
+	own.release()
+
+func test_fem_the_kernel_placement_is_twelve_numbers():
+	# A cuboid, because all eight of its corners are B-rep vertices and so certainly
+	# nodes, and **moved off the rotation's axis in the plane the turn acts in**: centred
+	# on that axis the check is mathematically blind (see reader_test.gd's TURNED).
+	var size := [20.0, 10.0, 4.0]
+	var off := [30.0, 7.0, 5.0]
+	var lo := []
+	var hi := []
+	for k in 3:
+		lo.append(off[k] - size[k] / 2)
+		hi.append(off[k] + size[k] / 2)
+	var cuboid := CadaclysmSolid.cuboid(size[0], size[1], size[2]).translate(off[0], off[1], off[2])
+	var placed: CadaclysmSolidFemMesh = cuboid.fem_mesh_placed(0.05, 0, TURNED_FRAME)
+	if not ok(placed != null, "kernel fem: " + Cadaclysm.last_error()):
+		return
+	for corner in fem_corners(lo, hi):
+		ok(fem_has(placed.nodes, turned(corner)),
+			"kernel fem: the frame did not send the corner %s to %s -- the nodes span %s" % [corner, turned(corner), fem_span(placed.nodes)])
+	fem_span_is(placed.nodes, [88, 20, 3], [98, 40, 7], "kernel fem placed")
+	# Twelve numbers here where the reader takes sixteen, and every other frame form this
+	# library takes: four triples, a `CadaclysmFrame`, or a `Transform3D`.
+	fem_span_is(cuboid.fem_mesh_placed(0.05, 0, [[100, 0, 0], [0, 1, 0], [-1, 0, 0], [0, 0, 1]]).nodes, [88, 20, 3], [98, 40, 7], "kernel fem placed by triples")
+	fem_span_is(cuboid.fem_mesh_placed(0.05, 0, CadaclysmFrame.of(TURNED_FRAME)).nodes, [88, 20, 3], [98, 40, 7], "kernel fem placed by a CadaclysmFrame")
+	fem_span_is(cuboid.fem_mesh_placed(0.05, 0, Transform3D(Basis(Vector3(0, 1, 0), Vector3(-1, 0, 0), Vector3(0, 0, 1)), Vector3(100, 0, 0))).nodes,
+		[88, 20, 3], [98, 40, 7], "kernel fem placed by a Transform3D")
+	# The identity, spelled out: the solid meshed in its own coordinates, as no placement
+	# at all does.
+	fem_span_is(cuboid.fem_mesh_placed(0.05, 0, CadaclysmFrame.xy()).nodes, lo, hi, "kernel fem placed by the world frame")
+	fem_span_is(cuboid.fem_mesh(0.05).nodes, lo, hi, "kernel fem unplaced")
+	# The reader's sixteen are refused here, by length, before the library sees them.
+	refuses(func(): return cuboid.fem_mesh_placed(0.05, 0, [0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 100, 0, 0, 1]), "expected 12 numbers, got 16")
+	cuboid.close()
+
+func test_fem_an_open_sheet_is_the_not_asked_trio():
+	# One face with a hole, so its rim is both the outer and the inner loop.
+	var sheet := CadaclysmSolid.face(CadaclysmProfile.rect(80, 40).with_hole(CadaclysmProfile.circle(4)), XY)
+	var mesh: CadaclysmSolidFemMesh = sheet.fem_mesh(0.05)
+	if not ok(mesh != null, "kernel fem: " + Cadaclysm.last_error()):
+		return
+	# `watertight` false with **both censuses empty** is the "not asked" trio: all three
+	# together, which is why the two censuses are as prominent here as the flag.
+	eq(mesh.watertight, false)
+	eq(mesh.open_edges.size(), 0, "kernel fem: an open sheet is not asked about, so its rim is not a crack")
+	eq(mesh.folded_edges.size(), 0)
+	eq(mesh.face_count, 1)
+	var edges := mesh.edges
+	ok(edges.size() > 0, "kernel fem: the sheet has no edges")
+	for i in edges.size():
+		# Catches a wrapper that filled `face_b` with 0 where the ABI said NONE: 0 is a
+		# real face, and the sheet's only one. This is also the one assertion that would
+		# catch the sentinel narrowed into a PackedInt32Array, where it reads as -1.
+		eq(edges[i]["faces"], PackedInt64Array([0, FEM_NONE]),
+			"kernel fem: the sheet's rim edge %d reads faces %s, not [0, %d]" % [i, edges[i]["faces"], FEM_NONE])
+	mesh.release()
+	sheet.close()
+
+func test_fem_a_cylinder_has_a_seam_edge_and_no_closed_one():
+	# A cylinder is the shape that tells `closed` from `seam`, and **measured, not assumed**:
+	# the manifold analysis gives this solid's 3 edges as 5 -- each rim circle split in two
+	# at its two vertices, ends (0, 1) and (1, 0), plus the seam up the side with 2 nodes,
+	# `faces` (0, 0) and `seam` true. So **no edge here is `closed`**: a rim is two open
+	# halves, not one loop. `closed == true` is one of the three branches no fixture in this
+	# repository reaches (the plan records the other two), so it is pinned at zero rather
+	# than asserted to exist.
+	#
+	# The pair of counts is what catches the two flags read from each other's field: swap
+	# them and this body reports one closed edge and no seam, so both `eq`s below fail. A
+	# closed box would show nothing -- every edge of one is neither.
+	var cyl := CadaclysmSolid.cylinder(5, 10)
+	var mesh: CadaclysmSolidFemMesh = cyl.fem_mesh(0.05)
+	if not ok(mesh != null, "kernel fem: " + Cadaclysm.last_error()):
+		return
+	var seams := 0
+	var loops := 0
+	for e in mesh.edges:
+		if e["seam"]:
+			seams += 1
+			eq(e["faces"][0], e["faces"][1], "kernel fem: a seam edge bounds two different faces")
+			eq(e["closed"], false, "kernel fem: the cylinder's seam is a closed loop")
+		if e["closed"]:
+			loops += 1
+			eq(e["runs"].size(), 1, "kernel fem: a closed edge has more than one run")
+			eq(e["ends"][1], FEM_NONE, "kernel fem: a closed edge's second end is not NONE")
+	eq(seams, 1, "kernel fem: the cylinder has %d seam edges, not its one -- `seam` may be reading another field" % seams)
+	eq(loops, 0, "kernel fem: %d edges of the cylinder report `closed`, where the analysis splits each rim in two -- `closed` may be reading another field" % loops)
+	eq(mesh.edges.size(), 5, "kernel fem: the cylinder's 3 edges came back as %d, not the 5 the analysis splits them into" % mesh.edges.size())
+	mesh.release()
+	cyl.close()
+
+# The assembly facts (spec §5), ported from the Node/LuaJIT/Rust suites and
+# test_cadaclysm_blacksmith.py's `_shared_assembly()`: a named bolt and a coloured named
+# plate, a bracket placing the plate once and the bolt twice, and a top assembly placing
+# the bracket twice (mirrored the second time) and the bolt once more. Returns
+# [bolt, plate, bracket, frame]; fact 1 (the placement names) is asserted here, since
+# every other fact starts from this same tree.
+func _shared_assembly() -> Array:
+	var bolt := CadaclysmSolid.cylinder(1, 6).named("bolt")
+	var plate := CadaclysmSolid.cuboid(20, 10, 2).named("plate").coloured([1.0, 0.5, 0.0])
+	var bracket := CadaclysmAssembly.create("bracket")
+	bracket.place(plate, XY)
+	var bolt_name_1 := bracket.place(bolt, CadaclysmFrame.xy(Vector3(5, 5, 2)))
+	var bolt_name_2 := bracket.place(bolt, CadaclysmFrame.xy(Vector3(15, 5, 2)))
+	eq(bolt_name_1, "bolt", "bracket's own first bolt")
+	eq(bolt_name_2, "bolt 2", "bracket's own second bolt")
+	var frame := CadaclysmAssembly.create("frame")
+	var mirrored := CadaclysmFrame.create([100, 0, 0], [0, 1, 0], [-1, 0, 0], [0, 0, 1])
+	var left := frame.place(bracket, CadaclysmFrame.xy(Vector3.ZERO), "left")
+	var right := frame.place(bracket, mirrored, "right")
+	var root_bolt := frame.place(bolt, CadaclysmFrame.xy(Vector3(50, 50, 0)))
+	eq(left, "left", "fact 1: left")
+	eq(right, "right", "fact 1: right")
+	eq(root_bolt, "bolt", "fact 1: the root bolt")
+	return [bolt, plate, bracket, frame]
+
+func test_an_assembly_writes_each_part_and_sub_assembly_once():
+	var shared := _shared_assembly()
+	var frame: CadaclysmAssembly = shared[3]
+	var text := frame.step_text()
+	# Fact 2: two breps (bolt, plate), four products (bracket, frame, bolt, plate), six
+	# occurrences (left, its bolt, its bolt 2, right, its bolt, its bolt 2 -- the root
+	# bolt is placed directly under frame, so it is the frame product's own NAUO too,
+	# already counted among the six alongside frame's two bracket placements... spec §5
+	# counts frame -> {left, right, bolt} and each bracket -> {plate, bolt, bolt 2}: 3 + 3).
+	eq(text.count("=MANIFOLD_SOLID_BREP("), 2, "step_text() breps")
+	eq(text.count("=PRODUCT("), 4, "step_text() products")
+	eq(text.count("=NEXT_ASSEMBLY_USAGE_OCCURRENCE("), 6, "step_text() NAUOs")
+	# Fact 3.
+	ok(text.contains("'left'"), "step_text() is missing 'left'")
+	ok(text.contains("'right'"), "step_text() is missing 'right'")
+	ok(text.contains("'bolt 2'"), "step_text() is missing 'bolt 2'")
+
+func test_an_assembly_reads_back_as_its_tree_at_its_frames():
+	# Fact 11, structure only (world origins are Python's to check): the root named
+	# "frame" with three children -- two "bracket" containers (the reader keys a
+	# container by its placement, not by the product it shares, so "left" and "right"
+	# come back as two distinct nodes) each holding one "plate" and two "bolt"s, plus one
+	# more "bolt" directly under the root.
+	var shared := _shared_assembly()
+	var frame: CadaclysmAssembly = shared[3]
+	var scene := frame.to_scene()
+	if not ok(scene != null, "to_scene: " + Cadaclysm.last_error()):
+		return
+	var roots := scene.roots
+	eq(roots.size(), 1)
+	var root: CadaclysmNode = roots[0]
+	eq(root.name, "frame")
+	var children := root.children
+	eq(children.size(), 3, "two bracket placements and the root bolt")
+	var containers := []
+	var root_bolts := []
+	for c in children:
+		if c.name == "bracket":
+			containers.append(c)
+		elif c.name == "bolt":
+			root_bolts.append(c)
+	eq(containers.size(), 2)
+	eq(root_bolts.size(), 1)
+	for container in containers:
+		var names := []
+		for c in container.children:
+			names.append(c.name)
+		names.sort()
+		eq(names, ["bolt", "bolt", "plate"], "a read-back bracket holds one plate and two bolts")
+	scene.close()
+
+func test_a_late_placement_shows_wherever_the_assembly_is_placed():
+	# Fact 4: one more bolt into the bracket, then a fresh count of 7 NAUOs -- placing
+	# shares, not copies, so the bracket's growth shows up through both of `frame`'s
+	# placements of it.
+	var shared := _shared_assembly()
+	var bolt: CadaclysmSolid = shared[0]
+	var bracket: CadaclysmAssembly = shared[2]
+	var frame: CadaclysmAssembly = shared[3]
+	bracket.place(bolt, CadaclysmFrame.xy(Vector3(5, 15, 2)))
+	eq(frame.step_text().count("=NEXT_ASSEMBLY_USAGE_OCCURRENCE("), 7)
+
+func test_an_assembly_refuses_a_cycle_a_duplicate_a_mirror_and_emptiness():
+	var shared := _shared_assembly()
+	var bolt: CadaclysmSolid = shared[0]
+	var bracket: CadaclysmAssembly = shared[2]
+	var frame: CadaclysmAssembly = shared[3]
+	# Fact 5: placing "frame" (which already places "bracket" as "left" and "right")
+	# into "bracket" closes a cycle: bracket -> frame -> bracket.
+	refuses(func(): return bracket.place(frame, XY), "bracket → frame → bracket")
+	# Fact 6: an explicit name already taken is refused.
+	refuses(func(): return frame.place(bracket, XY, "left"), "left")
+	# Fact 7: a mirrored **raw** twelve-number frame -- not a CadaclysmFrame, which
+	# refuses a left-handed triple itself, before `place` is ever called. A plain array
+	# of numbers goes through `place`'s own `frame()` reader unchecked, so this is the
+	# one way to drive a mirrored frame past GDScript and into the library's own
+	# "right-handed and orthonormal" refusal.
+	refuses(func(): return frame.place(bracket, [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, -1]), "right-handed and orthonormal")
+	# Fact 8: an assembly that places nothing is refused at step_text().
+	refuses(func(): return CadaclysmAssembly.create("x").step_text())
+	# Fact 9: an outer assembly placing an empty sub-assembly is refused, naming it, even
+	# though the empty one is not the root itself.
+	var hollow := CadaclysmAssembly.create("hollow")
+	var outer := CadaclysmAssembly.create("outer")
+	outer.place(hollow, XY)
+	refuses(func(): return outer.step_text(), "hollow")
+
+func test_place_refuses_a_thing_that_is_neither_a_solid_nor_an_assembly():
+	var top := CadaclysmAssembly.create("top")
+	refuses(func(): return top.place("not a solid", XY), "expected a CadaclysmSolid or a CadaclysmAssembly")
+
+func test_a_solids_name_rides_through_a_one_source_step_and_drops_at_two():
+	# Fact 10: name rides through an operation with one source solid, is dropped by one
+	# with two or more, and a fresh primitive has none -- Godot's `""` standing in for
+	# Python's `None` (`CadaclysmSolid.closed` tells "no name" from "closed" apart).
+	var bolt := CadaclysmSolid.cylinder(1, 6).named("bolt")
+	eq(bolt.name, "bolt")
+	eq(bolt.place(CadaclysmFrame.xy(Vector3(1, 2, 3))).name, "bolt", "place(...) keeps the name")
+	eq(bolt.coloured([0.2, 0.2, 0.2]).name, "bolt", "coloured(...) keeps the name")
+	var cube := CadaclysmSolid.cuboid(1, 1, 1)
+	eq(bolt.join(cube).name, "", "join(...) has two sources, so the name is dropped")
+	eq(cube.name, "", "a fresh cuboid has no name")
+	refuses(func(): return cube.named(""), "name")
+
+func test_assembly_create_close_and_get_name():
+	refuses(func(): return CadaclysmAssembly.create(""), "name")
+	var top := CadaclysmAssembly.create("top")
+	eq(top.name, "top")
+	top.close()
+	eq(top.name, "", "a closed assembly reads its name as \"\"")
+	refuses(func(): return top.place(CadaclysmSolid.cuboid(1, 1, 1), XY), "closed")

@@ -1,5 +1,6 @@
 //! The reader: `Cadaclysm` (the library's own functions), `CadaclysmScene`, `CadaclysmNode`,
-//! `CadaclysmPlacement`, `CadaclysmMesh`, `CadaclysmPolylines` and `CadaclysmBrep`.
+//! `CadaclysmPlacement`, `CadaclysmMesh`, `CadaclysmPolylines`, `CadaclysmBrep` and
+//! `CadaclysmFemMesh`.
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -50,6 +51,53 @@ pub(crate) fn transform(m: [f64; 16]) -> Transform3D {
     Transform3D::new(Basis::from_cols(column(0), column(1), column(2)), column(3))
 }
 
+/// A `Transform3D` as sixteen doubles, column-major: its basis columns, its origin, and
+/// the affine bottom row filled in -- the inverse of `transform` above, so a transform
+/// read off `CadaclysmNode.transform` goes straight back into `CadaclysmNode.fem_mesh`.
+fn matrix(t: Transform3D) -> [f64; 16] {
+    let mut m = [0.0; 16];
+    for (c, axis) in [t.basis.col_a(), t.basis.col_b(), t.basis.col_c(), t.origin].iter().enumerate() {
+        m[4 * c] = f64::from(axis.x);
+        m[4 * c + 1] = f64::from(axis.y);
+        m[4 * c + 2] = f64::from(axis.z);
+    }
+    m[15] = 1.0;
+    m
+}
+
+/// A reader placement: a `Transform3D`, or sixteen numbers column-major (a
+/// `PackedFloat64Array` or an array, which keep a double where a `Transform3D` holds
+/// floats).
+///
+/// **The length is checked here** because the ABI is handed a bare pointer and cannot:
+/// sixteen on this side, where the kernel's `CadaclysmSolid.fem_mesh` takes a frame's
+/// **twelve**, so a caller moving between the two reformats the placement rather than
+/// having it read short.
+fn placement16(v: &Variant, what: &str) -> Option<[f64; 16]> {
+    if v.get_type() == VariantType::TRANSFORM3D {
+        return Some(matrix(v.to::<Transform3D>()));
+    }
+    let values: Vec<f64> = match v.get_type() {
+        VariantType::PACKED_FLOAT64_ARRAY => v.to::<PackedFloat64Array>().as_slice().to_vec(),
+        VariantType::PACKED_FLOAT32_ARRAY => v.to::<PackedFloat32Array>().as_slice().iter().map(|&x| f64::from(x)).collect(),
+        VariantType::ARRAY => {
+            let items = v.try_to::<AnyArray>().ok()?;
+            let mut out = Vec::with_capacity(items.len());
+            for item in items.iter_shared() {
+                out.push(ok(number(&item, what))?);
+            }
+            out
+        }
+        _ => return fail(format!("{what}: expected a Transform3D or 16 numbers, not {v}")),
+    };
+    if values.len() != 16 {
+        return fail(format!("{what}: expected 16 numbers, got {}", values.len()));
+    }
+    let mut m = [0.0; 16];
+    m.copy_from_slice(&values);
+    Some(m)
+}
+
 pub(crate) fn aabb(min: [f32; 3], max: [f32; 3]) -> Aabb {
     Aabb::new(vector3(min), vector3(max) - vector3(min))
 }
@@ -90,6 +138,71 @@ fn face(f: &sdk::Face<'_>) -> VarDictionary {
         f.loops.iter().map(|l| l.iter().map(|p| Vector2::new(p[0], p[1])).collect::<PackedVector2Array>()).collect();
     let quads = |rows: &[[f32; 4]]| rows.iter().map(|r| Vector4::new(r[0], r[1], r[2], r[3])).collect::<PackedVector4Array>();
     dict(&[("kind", (f.kind as i64).to_variant()), ("kind_name", f.kind_name().to_variant()), ("reversed", f.reversed.to_variant()), ("transposed", f.transposed.to_variant()), ("origin", vector3(f.origin).to_variant()), ("ax", vector3(f.ax).to_variant()), ("ay", vector3(f.ay).to_variant()), ("az", vector3(f.az).to_variant()), ("domain", Vector4::new(f.domain[0], f.domain[1], f.domain[2], f.domain[3]).to_variant()), ("scalars", Vector4::new(f.scalars[0], f.scalars[1], f.scalars[2], f.scalars[3]).to_variant()), ("loops", loops.to_variant()), ("profile", quads(f.profile).to_variant()), ("profile2", quads(f.profile2).to_variant()), ("nurbs", PackedFloat32Array::from(f.nurbs).to_variant())])
+}
+
+// ---- the FEM surface mesh's plain data ----------------------------------------------
+//
+// These five build what both FEM classes hand over -- this module's `CadaclysmFemMesh`
+// and the kernel's `CadaclysmSolidFemMesh` -- and they take plain numbers rather than
+// either library's records, so the two sides cannot drift in what they call a key or in
+// which width a field comes over as. Nothing here borrows: a Godot array is always a copy.
+
+/// Node positions as flat doubles, three a node. **Doubles, not a `PackedVector3Array`**:
+/// a solver mesh is the one product here whose whole point is the f64 the library
+/// computed, and Godot's `Vector3` holds floats -- the same reason the kernel's
+/// `raw_points` and `CadaclysmNode.raw_transform` exist.
+pub(crate) fn fem_nodes(points: &[[f64; 3]]) -> PackedFloat64Array {
+    points.iter().flatten().copied().collect()
+}
+
+/// Node indices: a count or an index, never the `NONE` sentinel, so an int32 holds them
+/// as `CadaclysmMesh.indices` does.
+pub(crate) fn fem_indices(values: &[u32]) -> PackedInt32Array {
+    values.iter().map(|&i| i as i32).collect()
+}
+
+/// Three node indices a triangle, flattened as `CadaclysmMesh.indices` is -- and **not**
+/// wound round for Godot: these are the library's own triangles for a solver to read, not
+/// something to draw.
+pub(crate) fn fem_triangles(triangles: &[[u32; 3]]) -> PackedInt32Array {
+    triangles.iter().flatten().map(|&i| i as i32).collect()
+}
+
+/// A pair that may hold the `NONE` sentinel (4294967295) -- an edge's `faces` or `ends`.
+/// **Int64, not Int32**: the sentinel does not fit an int32, where it would read as -1.
+fn fem_pair(pair: (u32, u32)) -> PackedInt64Array {
+    PackedInt64Array::from(&[i64::from(pair.0), i64::from(pair.1)][..])
+}
+
+/// One census row, `(a, b, brep_edge)`: two node indices and the B-rep edge both lie on,
+/// or `NONE`. Int64 for the sentinel, as `fem_pair` is.
+pub(crate) fn fem_census(rows: &[(u32, u32, u32)]) -> Array<PackedInt64Array> {
+    rows.iter().map(|&(a, b, edge)| PackedInt64Array::from(&[i64::from(a), i64::from(b), i64::from(edge)][..])).collect()
+}
+
+/// One B-rep edge of a FEM mesh, as a Dictionary: `id` (the **body's** own edge id),
+/// `nodes`, `runs`, `faces`, `ends`, `closed`, `seam`.
+pub(crate) fn fem_edge(id: u32, nodes: &[u32], runs: &[u32], faces: (u32, u32), ends: (u32, u32), closed: bool, seam: bool) -> VarDictionary {
+    dict(&[
+        ("id", i64::from(id).to_variant()),
+        ("nodes", fem_indices(nodes).to_variant()),
+        ("runs", fem_indices(runs).to_variant()),
+        ("faces", fem_pair(faces).to_variant()),
+        ("ends", fem_pair(ends).to_variant()),
+        ("closed", closed.to_variant()),
+        ("seam", seam.to_variant()),
+    ])
+}
+
+/// One B-rep vertex of a FEM mesh, as a Dictionary: `node` (the mesh node there, or
+/// `NONE`), `point` (three doubles, in the same space as the nodes) and `has_position`,
+/// without which `point` is a meaningless zero rather than the origin.
+pub(crate) fn fem_vertex(node: u32, point: [f64; 3], has_position: bool) -> VarDictionary {
+    dict(&[
+        ("node", i64::from(node).to_variant()),
+        ("point", PackedFloat64Array::from(&point[..]).to_variant()),
+        ("has_position", has_position.to_variant()),
+    ])
 }
 
 pub(crate) fn manifold(m: sdk::Manifold) -> VarDictionary {
@@ -384,6 +497,10 @@ pub struct CadaclysmScene {
     roots: PhantomVar<Array<Gd<CadaclysmNode>>>,
     #[var(get = get_placements, no_set)]
     placements: PhantomVar<Array<Gd<CadaclysmPlacement>>>,
+    #[var(get = get_links, no_set)]
+    links: PhantomVar<Array<Gd<CadaclysmLink>>>,
+    #[var(get = get_joints, no_set)]
+    joints: PhantomVar<Array<Gd<CadaclysmJoint>>>,
     #[var(get = get_realized, no_set)]
     realized: PhantomVar<i64>,
     #[var(get = get_realize_total, no_set)]
@@ -412,6 +529,8 @@ impl CadaclysmScene {
             nodes: PhantomVar::default(),
             roots: PhantomVar::default(),
             placements: PhantomVar::default(),
+            links: PhantomVar::default(),
+            joints: PhantomVar::default(),
             realized: PhantomVar::default(),
             realize_total: PhantomVar::default(),
         })
@@ -601,6 +720,22 @@ impl CadaclysmScene {
         (0..count as u32).map(|i| CadaclysmPlacement::wrap(self.shared.clone(), i)).collect()
     }
 
+    /// The file's mechanism, as rigid bodies. Empty where the file names no kinematic
+    /// links.
+    #[func]
+    fn get_links(&self) -> Array<Gd<CadaclysmLink>> {
+        let count = with_scene(&self.shared, |s| s.links().len()).unwrap_or_default();
+        (0..count as u32).map(|i| CadaclysmLink::wrap(self.shared.clone(), i)).collect()
+    }
+
+    /// The file's mechanism, as connections between links. Empty where the file names
+    /// no kinematic joints.
+    #[func]
+    fn get_joints(&self) -> Array<Gd<CadaclysmJoint>> {
+        let count = with_scene(&self.shared, |s| s.joints().len()).unwrap_or_default();
+        (0..count as u32).map(|i| CadaclysmJoint::wrap(self.shared.clone(), i)).collect()
+    }
+
     /// Mesh every body now (in parallel inside the library) rather than one by one on
     /// first use. Returns how many were meshed.
     #[func]
@@ -756,6 +891,8 @@ pub struct CadaclysmNode {
     brep: PhantomVar<Option<Gd<CadaclysmBrep>>>,
     #[var(get = get_edges, no_set)]
     edges: PhantomVar<Option<Gd<CadaclysmPolylines>>>,
+    #[var(get = get_edge_colours, no_set)]
+    edge_colours: PhantomVar<Array<Variant>>,
     #[var(get = get_curves, no_set)]
     curves: PhantomVar<Option<Gd<CadaclysmPolylines>>>,
     #[var(get = get_isocurves, no_set)]
@@ -791,6 +928,7 @@ impl CadaclysmNode {
             surfaces: PhantomVar::default(),
             brep: PhantomVar::default(),
             edges: PhantomVar::default(),
+            edge_colours: PhantomVar::default(),
             curves: PhantomVar::default(),
             isocurves: PhantomVar::default(),
         })
@@ -810,6 +948,13 @@ impl CadaclysmNode {
 
     fn polylines(&self, f: impl FnOnce(sdk::Node<'_>) -> sdk::Polylines<'_>) -> Option<Gd<CadaclysmPolylines>> {
         self.with(|n| CadaclysmPolylines::copy(&f(n)))
+    }
+
+    /// `fem_mesh` and `fem_mesh_placed`, which differ only in the placement: neither
+    /// `tolerance` nor `max_size` is checked here -- see `fem_mesh`'s own doc.
+    fn built_fem_mesh(&self, tolerance: f64, max_size: f64, placement: Option<[f64; 16]>) -> Option<Gd<CadaclysmFemMesh>> {
+        let built = self.with(|n| ok(n.fem_mesh(tolerance, max_size, placement.as_ref()))).flatten()?;
+        Some(CadaclysmFemMesh::wrap(built))
     }
 }
 
@@ -961,6 +1106,20 @@ impl CadaclysmNode {
         self.polylines(|n| n.edges())
     }
 
+    /// One `Color` per polyline of `edges`, `null` for an edge the file does not style;
+    /// empty when nothing is styled.
+    #[func]
+    fn get_edge_colours(&self) -> Array<Variant> {
+        self.with(|n| n.edge_colours())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| match c {
+                Some([r, g, b, a]) => Color::from_rgba(r, g, b, a).to_variant(),
+                None => Variant::nil(),
+            })
+            .collect()
+    }
+
     /// Its free curves (sketches, wires, axes), as polylines.
     #[func]
     fn get_curves(&self) -> Option<Gd<CadaclysmPolylines>> {
@@ -1026,6 +1185,54 @@ impl CadaclysmNode {
         mesh.surface_set_material(0, &meshes::material_for(colour, vertex));
         clear_error();
         Some(mesh)
+    }
+
+    /// This node's body meshed for a solver, as a `CadaclysmFemMesh`: nodes welded by
+    /// bits, triangles wound outward, every node tagged with the lowest-dimension B-rep
+    /// entity it lies on, and every crack reported rather than closed. `null` for a node
+    /// with neither a B-rep nor a mesh, or a body the mesher refuses;
+    /// `Cadaclysm.last_error()` says which.
+    ///
+    /// `tolerance` is how far the mesh may stray from the exact surface, in the body's
+    /// own units, and `max_size` an upper bound on element size (`0` for none). **Both
+    /// default to `FemOptions::default()`'s own figures, `0.01` and `0`** -- not to the
+    /// `0.05` that `CadaclysmSolid.mesh` and `edge_polylines` take. Neither is checked
+    /// here: a body with no B-rep goes down a path that reads no options at all, where
+    /// even a tolerance of `0` returns a mesh, so both go through as given and the
+    /// library refuses what it will not take, in its own words.
+    /// `CadaclysmFemMesh.longest_edge` is what the mesh actually came to.
+    ///
+    /// `fem_mesh_placed` is the same call with a placement, which `fem_mesh` leaves out:
+    /// a `Transform3D`, or **sixteen** numbers column-major (a `PackedFloat64Array` or an
+    /// array, which keep a double where a `Transform3D` holds floats). It is a second
+    /// entry point rather than a third argument because Godot has no null default for
+    /// one. The kernel's `CadaclysmSolid.fem_mesh_placed` takes a frame's **twelve**
+    /// instead, so a caller moving between the two reformats it; the length is checked
+    /// here, the ABI being handed only a pointer.
+    ///
+    /// **Which space the mesh is in depends on where it came from**, which
+    /// `CadaclysmFemMesh.from_mesh` is the flag for: a B-rep body's mesh is in the file's
+    /// own units and axes whatever convention the scene was opened with, while a node with
+    /// no B-rep falls back to the scene's own triangles, which **are** converted. Under
+    /// Godot's default y-up those are two different spaces.
+    ///
+    /// **A cracked body is not a failure**: it comes back with
+    /// `CadaclysmFemMesh.watertight` false and its cracks in
+    /// `CadaclysmFemMesh.open_edges` and `folded_edges`, and nothing is welded shut to
+    /// make it look sound.
+    ///
+    /// **The unlicensed notice is printed here**, once, and on neither of the two `.msh`
+    /// calls -- where the kernel library is the other way round.
+    #[func]
+    fn fem_mesh(&self, #[opt(default = 0.01)] tolerance: f64, #[opt(default = 0.0)] max_size: f64) -> Option<Gd<CadaclysmFemMesh>> {
+        self.built_fem_mesh(tolerance, max_size, None)
+    }
+
+    /// `fem_mesh`, placed: a `Transform3D`, or sixteen numbers column-major. See there.
+    #[func]
+    fn fem_mesh_placed(&self, tolerance: f64, max_size: f64, placement: Variant) -> Option<Gd<CadaclysmFemMesh>> {
+        let matrix = placement16(&placement, "fem_mesh_placed: placement")?;
+        self.built_fem_mesh(tolerance, max_size, Some(matrix))
     }
 
     /// Its edges (and free curves) as a `lines` `ArrayMesh`, in its own frame; `null`
@@ -1106,6 +1313,127 @@ impl CadaclysmPlacement {
     #[func]
     fn get_raw_transform(&self) -> PackedFloat64Array {
         self.with(|p| PackedFloat64Array::from(&p.raw_transform()[..])).unwrap_or_default()
+    }
+}
+
+// ---- CadaclysmLink -----------------------------------------------------------------------
+
+/// A rigid body of the file's mechanism: the nodes that move together when a joint
+/// moves it. From `CadaclysmScene.links`.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmLink {
+    shared: Shared,
+    index: u32,
+    #[var(rename = index, get = get_index, no_set)]
+    index_: PhantomVar<i64>,
+    #[var(get = get_name, no_set)]
+    name: PhantomVar<GString>,
+    #[var(get = get_nodes, no_set)]
+    nodes: PhantomVar<Array<Gd<CadaclysmNode>>>,
+}
+
+impl CadaclysmLink {
+    fn wrap(shared: Shared, index: u32) -> Gd<CadaclysmLink> {
+        Gd::from_object(CadaclysmLink {
+            shared,
+            index,
+            index_: PhantomVar::default(),
+            name: PhantomVar::default(),
+            nodes: PhantomVar::default(),
+        })
+    }
+
+    fn with<R>(&self, f: impl FnOnce(&sdk::Link<'_>) -> R) -> Option<R> {
+        with_scene(&self.shared, |s| s.links().get(self.index as usize).map(f)).flatten()
+    }
+}
+
+#[godot_api]
+impl CadaclysmLink {
+    #[func]
+    fn get_index(&self) -> i64 {
+        self.index as i64
+    }
+
+    /// The link's name as the file gives it.
+    #[func]
+    fn get_name(&self) -> GString {
+        gs(self.with(|l| l.name()).unwrap_or_default())
+    }
+
+    /// The topmost node of each subtree this link moves, in node order: moving these
+    /// moves everything under them.
+    #[func]
+    fn get_nodes(&self) -> Array<Gd<CadaclysmNode>> {
+        self.with(|l| l.nodes().iter().map(|n| n.index()).collect::<Vec<u32>>())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|i| CadaclysmNode::wrap(self.shared.clone(), i))
+            .collect()
+    }
+}
+
+// ---- CadaclysmJoint ----------------------------------------------------------------------
+
+/// A connection between two links of the file's mechanism. Topology only: how it
+/// moves is not read yet. From `CadaclysmScene.joints`.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmJoint {
+    shared: Shared,
+    index: u32,
+    #[var(rename = index, get = get_index, no_set)]
+    index_: PhantomVar<i64>,
+    #[var(get = get_name, no_set)]
+    name: PhantomVar<GString>,
+    #[var(get = get_start, no_set)]
+    start: PhantomVar<Option<Gd<CadaclysmLink>>>,
+    #[var(get = get_end, no_set)]
+    end: PhantomVar<Option<Gd<CadaclysmLink>>>,
+}
+
+impl CadaclysmJoint {
+    fn wrap(shared: Shared, index: u32) -> Gd<CadaclysmJoint> {
+        Gd::from_object(CadaclysmJoint {
+            shared,
+            index,
+            index_: PhantomVar::default(),
+            name: PhantomVar::default(),
+            start: PhantomVar::default(),
+            end: PhantomVar::default(),
+        })
+    }
+
+    fn with<R>(&self, f: impl FnOnce(&sdk::Joint<'_>) -> R) -> Option<R> {
+        with_scene(&self.shared, |s| s.joints().get(self.index as usize).map(f)).flatten()
+    }
+}
+
+#[godot_api]
+impl CadaclysmJoint {
+    #[func]
+    fn get_index(&self) -> i64 {
+        self.index as i64
+    }
+
+    /// The joint's name as the file gives it.
+    #[func]
+    fn get_name(&self) -> GString {
+        gs(self.with(|j| j.name()).unwrap_or_default())
+    }
+
+    /// The link this joint starts at, in the file's order -- not a parent: a
+    /// mechanism may be a network with loops.
+    #[func]
+    fn get_start(&self) -> Option<Gd<CadaclysmLink>> {
+        self.with(|j| j.start().index()).map(|i| CadaclysmLink::wrap(self.shared.clone(), i))
+    }
+
+    /// The link this joint ends at, in the file's order.
+    #[func]
+    fn get_end(&self) -> Option<Gd<CadaclysmLink>> {
+        self.with(|j| j.end().index()).map(|i| CadaclysmLink::wrap(self.shared.clone(), i))
     }
 }
 
@@ -1367,5 +1695,293 @@ impl CadaclysmBrep {
     #[func]
     fn release(&self) {
         self.brep.borrow_mut().take();
+    }
+}
+
+// ---- CadaclysmFemMesh --------------------------------------------------------------------
+
+/// One body meshed for a solver: nodes welded by bits, triangles wound outward, every
+/// node tagged with the lowest-dimension B-rep entity it lies on, and every crack
+/// reported rather than closed. What `CadaclysmNode.fem_mesh` returns.
+///
+/// **A handle of its own, and it owns the library memory it reads from.** A
+/// `CadaclysmScene.close` neither frees it nor stales it, so it outlives the scene it was
+/// built through -- the one thing in this extension that does. `release()` hands it back
+/// early; letting the last reference go does the same.
+///
+/// **Every array here is a copy**, as `CadaclysmMesh`'s and `CadaclysmPolylines`' are:
+/// Godot's packed arrays have nowhere to point into the library's memory, so one already
+/// in hand cannot go stale and needs no `copy()`. The price runs the other way -- each ask
+/// copies again -- so hold the array rather than reading `nodes` inside a loop.
+///
+/// `nodes` and a vertex's `point` come over as **doubles**, not `Vector3`s: what a solver
+/// wants is the f64 the library computed, and Godot's `Vector3` holds floats.
+///
+/// ```gdscript
+/// var mesh := node.fem_mesh(0.01)
+/// print(mesh.nodes.size() / 3, " nodes, watertight: ", mesh.watertight)
+/// mesh.save_msh("user://part.msh")
+/// mesh.release()
+/// ```
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmFemMesh {
+    mesh: RefCell<Option<sdk::FemMesh>>,
+    #[var(get = get_nodes, no_set)]
+    nodes: PhantomVar<PackedFloat64Array>,
+    #[var(get = get_triangles, no_set)]
+    triangles: PhantomVar<PackedInt32Array>,
+    #[var(get = get_triangle_face, no_set)]
+    triangle_face: PhantomVar<PackedInt32Array>,
+    #[var(get = get_node_kind, no_set)]
+    node_kind: PhantomVar<PackedInt32Array>,
+    #[var(get = get_node_entity, no_set)]
+    node_entity: PhantomVar<PackedInt32Array>,
+    #[var(get = get_face_count, no_set)]
+    face_count: PhantomVar<i64>,
+    #[var(get = get_edges, no_set)]
+    edges: PhantomVar<Array<VarDictionary>>,
+    #[var(get = get_vertices, no_set)]
+    vertices: PhantomVar<Array<VarDictionary>>,
+    #[var(get = get_open_edges, no_set)]
+    open_edges: PhantomVar<Array<PackedInt64Array>>,
+    #[var(get = get_folded_edges, no_set)]
+    folded_edges: PhantomVar<Array<PackedInt64Array>>,
+    #[var(get = get_watertight, no_set)]
+    watertight: PhantomVar<bool>,
+    #[var(get = get_from_mesh, no_set)]
+    from_mesh: PhantomVar<bool>,
+    #[var(get = get_min_angle, no_set)]
+    min_angle: PhantomVar<f64>,
+    #[var(get = get_worst_triangle, no_set)]
+    worst_triangle: PhantomVar<i64>,
+    #[var(get = get_longest_edge, no_set)]
+    longest_edge: PhantomVar<f64>,
+    #[var(get = get_released, no_set)]
+    released: PhantomVar<bool>,
+}
+
+impl CadaclysmFemMesh {
+    fn wrap(mesh: sdk::FemMesh) -> Gd<CadaclysmFemMesh> {
+        Gd::from_object(CadaclysmFemMesh {
+            mesh: RefCell::new(Some(mesh)),
+            nodes: PhantomVar::default(),
+            triangles: PhantomVar::default(),
+            triangle_face: PhantomVar::default(),
+            node_kind: PhantomVar::default(),
+            node_entity: PhantomVar::default(),
+            face_count: PhantomVar::default(),
+            edges: PhantomVar::default(),
+            vertices: PhantomVar::default(),
+            open_edges: PhantomVar::default(),
+            folded_edges: PhantomVar::default(),
+            watertight: PhantomVar::default(),
+            from_mesh: PhantomVar::default(),
+            min_angle: PhantomVar::default(),
+            worst_triangle: PhantomVar::default(),
+            longest_edge: PhantomVar::default(),
+            released: PhantomVar::default(),
+        })
+    }
+
+    /// `f` on the mesh, its answer **by value**: the SDK lends its arrays from the handle,
+    /// so a getter copies inside the closure and the borrow ends with it -- which is what
+    /// lets every accessor here hand back a Godot array of its own. `CadaclysmBrep::with`
+    /// is the same shape over the same kind of handle.
+    fn with<R>(&self, f: impl FnOnce(&sdk::FemMesh) -> R) -> Option<R> {
+        match self.mesh.borrow().as_ref() {
+            Some(mesh) => Some(f(mesh)),
+            None => fail("the FEM mesh was released"),
+        }
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmFemMesh {
+    fn to_string(&self) -> GString {
+        let text = self.with(|m| {
+            format!("FemMesh(nodes={}, triangles={}, watertight={}, from_mesh={})", m.nodes().len(), m.triangles().len(), m.watertight(), m.from_mesh())
+        });
+        // The only `to_string` in this module that clears the error, and deliberately:
+        // `with` on a released handle reports "released" through `fail`, so `print(mesh)`
+        // would leave an error no call of the caller's own made. The cost is that
+        // `print(mesh)` also clears an error left by an earlier call, which the module's
+        // other `to_string`s do not -- read `Cadaclysm.last_error()` before printing.
+        clear_error();
+        gs(text.unwrap_or_else(|| "FemMesh(released)".to_string()))
+    }
+}
+
+#[godot_api]
+impl CadaclysmFemMesh {
+    /// Every node's position, three doubles a node, placed by `CadaclysmNode.fem_mesh`'s
+    /// placement and in the space `from_mesh` names. Every node is used by at least one
+    /// triangle.
+    #[func]
+    fn get_nodes(&self) -> PackedFloat64Array {
+        self.with(|m| fem_nodes(m.nodes())).unwrap_or_default()
+    }
+
+    /// Three node indices a triangle, wound outward -- a mirroring placement is wound
+    /// back. Not turned round for Godot: these are a solver's triangles, not a mesh to
+    /// draw.
+    #[func]
+    fn get_triangles(&self) -> PackedInt32Array {
+        self.with(|m| fem_triangles(m.triangles())).unwrap_or_default()
+    }
+
+    /// Which B-rep face each triangle lies on, one per triangle, into the body's
+    /// `face_count` faces.
+    #[func]
+    fn get_triangle_face(&self) -> PackedInt32Array {
+        self.with(|m| fem_indices(m.triangle_face())).unwrap_or_default()
+    }
+
+    /// What each node lies on -- `0` a B-rep vertex, `1` an edge, `2` a face -- one per
+    /// node: the lowest-dimension entity it lies on, which is the `.msh` format's own
+    /// classification rule. `node_entity` says which entity of that kind.
+    #[func]
+    fn get_node_kind(&self) -> PackedInt32Array {
+        self.with(|m| fem_indices(m.node_kind())).unwrap_or_default()
+    }
+
+    /// Which vertex, edge or face each node lies on, read by the matching `node_kind`: an
+    /// index into `vertices`, into `edges`, or into the body's faces.
+    #[func]
+    fn get_node_entity(&self) -> PackedInt32Array {
+        self.with(|m| fem_indices(m.node_entity())).unwrap_or_default()
+    }
+
+    /// The body's faces; `triangle_face` and a `node_kind` of `2` index them. **The same
+    /// faces `CadaclysmNode.surfaces` hands over**, in the same order.
+    #[func]
+    fn get_face_count(&self) -> i64 {
+        self.with(|m| i64::from(m.face_count())).unwrap_or_default()
+    }
+
+    /// One Dictionary per B-rep edge -- `id`, `nodes`, `runs`, `faces`, `ends`, `closed`,
+    /// `seam` -- in the order a `node_kind` of `1` indexes them. Empty for a `from_mesh`
+    /// body, which has no B-rep edges at all. One call to the library per edge, so read it
+    /// once into a variable.
+    #[func]
+    fn get_edges(&self) -> Array<VarDictionary> {
+        let rows = self.with(|m| {
+            ok(m.edges()).map(|edges| edges.iter().map(|e| fem_edge(e.id, e.nodes, e.runs, e.faces, e.ends, e.closed, e.seam)).collect())
+        });
+        rows.flatten().unwrap_or_default()
+    }
+
+    /// One Dictionary per B-rep vertex -- `node`, `point`, `has_position` -- in the order
+    /// a `node_kind` of `0` indexes them. Empty for a `from_mesh` body.
+    #[func]
+    fn get_vertices(&self) -> Array<VarDictionary> {
+        let rows = self.with(|m| ok(m.vertices()).map(|found| found.iter().map(|v| fem_vertex(v.node, v.point, v.has_position)).collect()));
+        rows.flatten().unwrap_or_default()
+    }
+
+    /// Every crack, as `[a, b, brep_edge]`: a directed mesh edge `(a, b)` with no
+    /// `(b, a)`, and the B-rep edge both nodes lie on or `NONE` (4294967295) where they
+    /// share none. **Empty unless the body's topology is closed -- for a B-rep body**,
+    /// whose mesh is otherwise not asked about at all: such a body reports `watertight`
+    /// false with this and `folded_edges` both empty, and that trio together says "not
+    /// asked", not "nothing found". A `from_mesh` body is the other case: its census
+    /// always runs over the welded triangles, so an empty one there really does mean
+    /// nothing found.
+    #[func]
+    fn get_open_edges(&self) -> Array<PackedInt64Array> {
+        self.with(|m| ok(m.open_edges()).map(|rows| fem_census(&rows))).flatten().unwrap_or_default()
+    }
+
+    /// Every fold, as `open_edges` reports a crack: a directed mesh edge used by more than
+    /// one triangle. **A body can be folded without being open** -- a solid no thicker
+    /// than a line leaves no hole for an open edge to find -- so a caller that checks
+    /// `open_edges` alone calls such a body sound. Empty under the same rule.
+    #[func]
+    fn get_folded_edges(&self) -> Array<PackedInt64Array> {
+        self.with(|m| ok(m.folded_edges()).map(|rows| fem_census(&rows))).flatten().unwrap_or_default()
+    }
+
+    /// The welded mesh closes -- every directed mesh edge paired with its reverse and none
+    /// used twice -- and, for a B-rep body, so does the topology behind it. **False for
+    /// every B-rep body whose topology is not closed**, whose mesh is then not asked
+    /// about; read `open_edges` for what an empty census beside a false here does and does
+    /// not mean.
+    #[func]
+    fn get_watertight(&self) -> bool {
+        self.with(|m| m.watertight()).unwrap_or_default()
+    }
+
+    /// This came from the scene's own mesh rather than from a B-rep: one face, every node
+    /// on face `0`, no edges and no vertices. **It is also which space the mesh is in**,
+    /// and which contract the census is reporting under -- see `CadaclysmNode.fem_mesh`.
+    #[func]
+    fn get_from_mesh(&self) -> bool {
+        self.with(|m| m.from_mesh()).unwrap_or_default()
+    }
+
+    /// The smallest interior angle of any triangle, in degrees. There is always one: a
+    /// body that meshed to no triangles is a refusal, not a mesh.
+    #[func]
+    fn get_min_angle(&self) -> f64 {
+        self.with(|m| m.min_angle()).unwrap_or_default()
+    }
+
+    /// The triangle with that angle, as an index into `triangles`.
+    #[func]
+    fn get_worst_triangle(&self) -> i64 {
+        self.with(|m| i64::from(m.worst_triangle())).unwrap_or_default()
+    }
+
+    /// The longest triangle edge, placed. **The figure to check against
+    /// `CadaclysmNode.fem_mesh`'s `max_size`, and the only one that says what the mesh
+    /// actually is**: `max_size` bounds the boundary segments and merely targets the
+    /// interior -- measured at 1.03x on a face whose parameters run unevenly -- and one
+    /// small enough beside the body to reach the mesher's own ceilings is not honoured at
+    /// all.
+    #[func]
+    fn get_longest_edge(&self) -> f64 {
+        self.with(|m| m.longest_edge()).unwrap_or_default()
+    }
+
+    /// Whether `release` has run.
+    #[func]
+    fn get_released(&self) -> bool {
+        self.mesh.borrow().is_none()
+    }
+
+    /// The mesh as Gmsh 4.1 ASCII `.msh` text: an entity per B-rep vertex, edge and face,
+    /// a volume where the body closes, and a physical group naming each. `""` for a mesh
+    /// the writer refuses, naming the field it cannot honour, and for a released handle.
+    ///
+    /// **On this side of the ABI the library's text is borrowed** -- a slot on the handle,
+    /// replaced by the next call on it -- and copied out here, so what comes back is
+    /// Godot's own. The kernel library's `CadaclysmSolidFemMesh.msh_text` is the other way
+    /// round, an owned string its own wrapper releases; a reader porting one side's
+    /// reasoning onto the other leaks or double-frees. No unlicensed notice is printed
+    /// here or by `save_msh`: `CadaclysmNode.fem_mesh` gave it when the mesh was built.
+    #[func]
+    fn msh_text(&self) -> GString {
+        gs(self.with(|m| ok(m.msh_text())).flatten().unwrap_or_default())
+    }
+
+    /// `msh_text` written to `path` by the library itself: the same bytes from the same
+    /// writer, straight to the file rather than through the borrowed slot. A `user://` path
+    /// works, and `res://` in the editor -- an exported game's `res://` lives inside its
+    /// pack, which nothing can write to. False for a mesh the writer refuses or a file it
+    /// cannot write.
+    #[func]
+    fn save_msh(&self, path: GString) -> bool {
+        self.with(|m| ok(m.save_msh(os_path(&path)))).flatten().is_some()
+    }
+
+    /// Hand the mesh back now rather than when the last reference goes, as
+    /// `CadaclysmBrep.release` does. Idempotent; every accessor then fails with
+    /// "released". Nothing taken from it goes stale -- every array was a copy.
+    #[func]
+    fn release(&self) {
+        if let Some(mesh) = self.mesh.borrow_mut().take() {
+            // By value, as the SDK's `free` takes it: dropping the handle is the free.
+            mesh.free();
+        }
     }
 }

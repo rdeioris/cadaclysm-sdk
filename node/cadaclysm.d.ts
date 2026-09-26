@@ -174,6 +174,24 @@ export class Placement {
   readonly rawTransform: Float64Array; readonly transform: number[][];
 }
 
+/** A rigid body of the file's mechanism: the nodes that move together when a joint moves it. */
+export class Link {
+  private constructor();
+  scene: Scene; index: number;
+  equals(other: unknown): boolean;
+  readonly name: string;
+  nodes(): Node[];
+}
+
+/** A connection between two links of the file's mechanism. Topology only. */
+export class Joint {
+  private constructor();
+  scene: Scene; index: number;
+  equals(other: unknown): boolean;
+  readonly name: string;
+  readonly start: Link; readonly end: Link;
+}
+
 export class Node {
   private constructor();
   scene: Scene; index: number;
@@ -195,12 +213,21 @@ export class Node {
   mesh64(): Mesh64 | null;
   meshLod(level: number): Mesh;
   lodError(level: number): number;
+  /**
+   * This node's body meshed for a solver, as a `FemMesh` **owned by the caller**:
+   * `free()` it, or `using` it. `tolerance` and `maxSize` default to
+   * `FemOptions::default()`'s own **0.01 and 0**, not `mesh()`'s 0.05; `placement` is
+   * 16 numbers, column-major, as `boundsPlaced` takes them, where the kernel's
+   * `Solid.femMesh` takes twelve. Prints the unlicensed notice once, here.
+   */
+  femMesh(tolerance?: number, maxSize?: number, placement?: ArrayLike<number> | null): FemMesh;
   meshAsync(): Promise<Mesh>;
   meshAsync64(): Promise<Mesh64 | null>;
   meshLodAsync(level: number): Promise<Mesh>;
   surfaces(): Surfaces;
   readonly brep: Brep | null;
   edges(): Polylines; curves(): Polylines; isocurves(): Polylines;
+  edgeColours(): (number[] | null)[];
   edgeBeziers(): Beziers; curveBeziers(): Beziers; isocurveBeziers(): Beziers;
   edgeBeziers64(): Beziers64; curveBeziers64(): Beziers64; isocurveBeziers64(): Beziers64;
   collision(hullBudget?: number): Collision | null;
@@ -208,7 +235,8 @@ export class Node {
   boundsPlaced(placement?: ArrayLike<number> | null): Bounds;
   boundsPlaced64(placement?: ArrayLike<number> | null): Bounds64;
   readonly isMeshed: boolean;
-  surfaceEdges(): Polylines; surfaceIsocurves(): Polylines;
+  surfaceEdges(): Polylines; surfaceEdgeBeziers(): Beziers; surfaceIsocurves(): Polylines;
+  surfaceEdgeColours(): (number[] | null)[];
   surfacePick(from: ArrayLike<number>, to: ArrayLike<number>): number[] | null;
   surfaceProxyMesh(cells: number): Mesh;
   readonly triangleEstimate: number;
@@ -234,6 +262,7 @@ export class Scene {
   walk(): IterableIterator<Node>;
   query(filter: string): number[];
   placements(): Placement[];
+  links(): Link[]; joints(): Joint[];
   realizeAll(): number;
   realizeAllAsync(): Promise<number>;
   realizeMeshes(skipSurfaced?: boolean): number;
@@ -261,4 +290,63 @@ export class Meshlets {
   meshlet(i: number): Meshlet;
   free(): void;
   [Symbol.dispose](): void;
+}
+
+/**
+ * One B-rep edge of a `FemMesh`: `nodes` in order along the edge, `runs` saying where
+ * the chain breaks (`chains()` cuts it), `faces` and `ends` (`[a, b]`, the second
+ * `NONE` where there is none -- `0` is a real face and a real vertex), `closed`, `seam`,
+ * and `id`, the **body's own** edge id rather than this mesh's index.
+ */
+export class FemEdge {
+  private constructor();
+  id: number;
+  nodes: Uint32Array; runs: Uint32Array;
+  faces: [number, number]; ends: [number, number];
+  closed: boolean; seam: boolean;
+  /** `nodes` cut into one polyline per run, as views into it; nothing joined across a run boundary. */
+  chains(): Uint32Array[];
+}
+/**
+ * One B-rep vertex of a `FemMesh`: `node` is the mesh node there or `NONE` (ordinary,
+ * not a fault), `point` where the topology says it is -- **meaningless unless
+ * `hasPosition`**, when it is all zeros.
+ */
+export class FemVertex {
+  private constructor();
+  node: number;
+  point: Float64Array;
+  hasPosition: boolean;
+}
+/**
+ * One body meshed for a solver: what `Node.femMesh` returns, **owned by the caller**.
+ * Every array is a fresh copy decoded at call time, as `Node.mesh()`'s typed arrays are
+ * -- so one in hand survives `free()`, `Scene.close()` and the collector, and nothing of
+ * the library's is left in it to go stale. A call on a freed handle throws.
+ */
+export class FemMesh {
+  private constructor();
+  readonly freed: boolean;
+  free(): void;
+  [Symbol.dispose](): void;
+  nodes(): Float64Array;
+  triangles(): Uint32Array;
+  triangleFace(): Uint32Array;
+  nodeKind(): Uint32Array;
+  nodeEntity(): Uint32Array;
+  readonly faceCount: number;
+  edges(): FemEdge[];
+  vertices(): FemVertex[];
+  /** Every crack, as `[a, b, brepEdge]`; `brepEdge` is `NONE` where the two nodes share none. */
+  openEdges(): [number, number, number][];
+  /** Every fold, as `openEdges` reports a crack. A body can be folded without being open. */
+  foldedEdges(): [number, number, number][];
+  readonly watertight: boolean;
+  readonly fromMesh: boolean;
+  readonly minAngle: number;
+  readonly worstTriangle: number;
+  readonly longestEdge: number;
+  /** Gmsh 4.1 ASCII `.msh` text. The library's is borrowed from the handle here; koffi copies it out, so this string is yours. No unlicensed notice -- `Node.femMesh` gave it. */
+  mshText(): string;
+  saveMsh(path: string): void;
 }

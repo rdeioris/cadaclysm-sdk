@@ -229,6 +229,7 @@ local ENTRY_POINTS = {
   "cadaclysm_node_mesh64",
   "cadaclysm_node_surfaces", "cadaclysm_node_brep",
   "cadaclysm_node_edges", "cadaclysm_node_curves", "cadaclysm_node_isocurves",
+  "cadaclysm_node_edge_colors", "cadaclysm_node_surface_edge_colors",
   "cadaclysm_brep_layout_id", "cadaclysm_brep_manifold", "cadaclysm_brep_release",
   "cadaclysm_mesh_format_count", "cadaclysm_mesh_format", "cadaclysm_mesh_format_extension",
   "cadaclysm_pick_file",
@@ -240,7 +241,7 @@ local ENTRY_POINTS = {
   "cadaclysm_node_edge_beziers64", "cadaclysm_node_curve_beziers64", "cadaclysm_node_isocurve_beziers64",
   "cadaclysm_node_collision", "cadaclysm_node_collision_hull",
   "cadaclysm_node_bounds_placed", "cadaclysm_node_bounds_placed64", "cadaclysm_node_is_meshed",
-  "cadaclysm_node_surface_edges", "cadaclysm_node_surface_isocurves",
+  "cadaclysm_node_surface_edges", "cadaclysm_node_surface_edge_beziers", "cadaclysm_node_surface_isocurves",
   "cadaclysm_node_surface_pick", "cadaclysm_node_surface_proxy_mesh",
   "cadaclysm_node_triangle_estimate", "cadaclysm_realize_meshes",
   "cadaclysm_meshlets_build", "cadaclysm_meshlets_count", "cadaclysm_meshlets_free",
@@ -248,8 +249,14 @@ local ENTRY_POINTS = {
   "cadaclysm_meshlet_group", "cadaclysm_meshlet_error", "cadaclysm_meshlet_child_count",
   "cadaclysm_meshlet_positions", "cadaclysm_meshlet_normals", "cadaclysm_meshlet_indices",
   "cadaclysm_meshlet_children",
+  "cadaclysm_fem_options_init", "cadaclysm_node_fem_mesh", "cadaclysm_fem_mesh_view",
+  "cadaclysm_fem_mesh_edge", "cadaclysm_fem_mesh_vertex", "cadaclysm_fem_mesh_open_edge",
+  "cadaclysm_fem_mesh_folded_edge", "cadaclysm_fem_mesh_msh_text",
+  "cadaclysm_fem_mesh_save_msh", "cadaclysm_fem_mesh_free",
   "cadaclysm_svg_options_init", "cadaclysm_scene_svg_text", "cadaclysm_scene_svg",
   "cadaclysm_node_svg_text", "cadaclysm_node_svg",
+  "cadaclysm_link_count", "cadaclysm_link_name", "cadaclysm_link_node_count", "cadaclysm_link_node",
+  "cadaclysm_joint_count", "cadaclysm_joint_name", "cadaclysm_joint_start", "cadaclysm_joint_end",
 }
 
 local C
@@ -689,6 +696,21 @@ local function polylines(scene, raw)
   }, Polylines)
 end
 
+--- One RGBA table per polyline of a `CadaclysmEdgeColors`, `false` for a polyline the
+--- file does not style (Lua arrays cannot hold `nil` holes; this is the convention
+--- `blacksmith.edge_polyline_colours` also uses), copied out as plain Lua tables.
+local function edge_colours(raw)
+  if raw.rgba == nil or raw.count == 0 then return {} end
+  local out = {}
+  for i = 0, raw.count - 1 do
+    local v = raw.rgba + 4 * i
+    -- Not the `cond and false or x` idiom: that breaks when the true branch's
+    -- own value is `false`, which is exactly this line's "unstyled" case.
+    if v[3] < 0 then out[i + 1] = false else out[i + 1] = { v[0], v[1], v[2], v[3] } end
+  end
+  return out
+end
+
 --- Edges, curves or isocurves as cubic Bézier curves, exact where the file's curves
 --- were: `points` is `const float *`, four control points a curve, three floats each
 --- (`count * 12`); `weights` is `const float *`, one a control point (`count * 4`), all
@@ -1031,6 +1053,337 @@ function Meshlets:meshlet(i)
   }
 end
 
+-- ---- the FEM surface mesh ---------------------------------------------------------
+
+--- One B-rep edge of a FEM mesh: the chain of nodes along it, and where that chain
+--- breaks. Plain data, copied out of the handle, so an edge outlives the mesh it came
+--- from -- a chain is tens of numbers where the flat arrays are millions.
+---
+--- `nodes` are this mesh's node indices in order along the edge, its end vertices
+--- included; a closed edge repeats no node. **`runs` says where the chain breaks**, as
+--- the ABI's own offsets into `nodes` **counting from zero**, where `nodes` is a Lua
+--- array counting from one -- so `chains()` does that arithmetic once rather than
+--- leaving every caller to. Read each chain as one polyline and join nothing across a
+--- run boundary: the two ends either side of one are two points of the edge with no
+--- mesh edge between them, a crack along the edge or a stretch of it the mesher
+--- sampled on one face only. `{0}` is the ordinary answer, and a caller reading
+--- `nodes` as one polyline without looking here silently jumps the gap.
+---
+--- `faces` is `{face_a, face_b}` and `ends` is `{end_a, end_b}`, the second of each
+--- `cadaclysm.NONE` where there is none -- an open body's rim, or both ends at one
+--- vertex (a closed edge, a circle's rim, a full-turn seam). **`0` is a real face and
+--- a real vertex, not a sentinel.** Which end comes first is the first trim's
+--- direction and means nothing else: the pair bounds the edge, it does not orient it.
+--- `ends` index `FemMesh.edges`' own `vertices` list from zero, so the vertex of
+--- `e.ends[1]` is `mesh.vertices[e.ends[1] + 1]`.
+---
+--- `closed` where the nodes make one loop -- never where there is more than one run.
+--- `seam` where one face bounds the edge twice, a closed surface's seam rather than a
+--- real boundary; both `faces` are then that same face.
+---
+--- `id` is **the body's own edge id**, not this mesh's edge index: `FemMesh.edges` is
+--- a densely renumbered subset of the body's edges, ascending by id, with every edge
+--- collapsed to a point left out, so edge 0 of a STEP body's mesh routinely has an
+--- `id` in the hundreds. Everything else that names an edge here means the index -- a
+--- `node_kind` of 1 read through `node_entity`, the third number of an `open_edges` or
+--- `folded_edges` row, and the `edge_<i>` physical group of `msh_text()` -- and this is
+--- the one way back from any of them to the topology the file wrote.
+---@class FemEdge
+---@field id integer  the body's own B-rep edge id, not this mesh's edge index
+---@field nodes integer[]  this mesh's node indices along the edge
+---@field runs integer[]  where each run of `nodes` begins, from zero
+---@field faces integer[]  {face_a, face_b}, the second NONE on a rim
+---@field ends integer[]  {end_a, end_b}, into `FemMesh.vertices`, from zero
+---@field closed boolean
+---@field seam boolean
+local FemEdge = {}
+FemEdge.__index = FemEdge
+M.FemEdge = FemEdge
+FemEdge.__tostring = function(e)
+  return ("FemEdge(id=%d, nodes=%d, runs=%d, faces=(%d, %d), ends=(%d, %d), closed=%s, seam=%s)")
+    :format(e.id, #e.nodes, #e.runs, e.faces[1], e.faces[2], e.ends[1], e.ends[2],
+      tostring(e.closed), tostring(e.seam))
+end
+
+--- `nodes` broken at `runs`: a Lua array of Lua arrays of node indices, one per run,
+--- which together hold exactly `nodes` in order. One entry for the ordinary
+--- single-run edge, and the place the zero-based `runs` are turned into Lua's own
+--- one-based slices -- do that by hand and an off-by-one drops or repeats a node.
+function FemEdge:chains()
+  local out = {}
+  for k = 1, #self.runs do
+    local from, to = self.runs[k] + 1, self.runs[k + 1] or #self.nodes
+    local chain = {}
+    for i = from, to do chain[#chain + 1] = self.nodes[i] end
+    out[#out + 1] = chain
+  end
+  return out
+end
+
+--- One B-rep vertex of a FEM mesh: the node the mesh put there, if any, and where the
+--- topology says it is, if that is known. Plain data.
+---
+--- `node` is the mesh node at this vertex, or `cadaclysm.NONE` where the mesh has none
+--- there. **A sentinel here is ordinary, not a fault**: the analysis rebuilds a vertex
+--- wherever two trims meet, and a pole's polyline runs give a sphere 48 of them where
+--- the mesh has 2 points, so a caller walking these skips the sentinel rather than
+--- treating it as a gap.
+---
+--- `point` is `{x, y, z}` where the vertex is, in the same space and under the same
+--- placement as `FemMesh.nodes` -- the file's own vertex rather than a mesh node, so
+--- the two can differ by the reader's rounding. **Meaningless unless `has_position`**:
+--- it is `{0, 0, 0}` then, which is a point no geometry has and which a solver would
+--- take for a node at the origin.
+---@class FemVertex
+---@field node integer  the mesh node there, or `cadaclysm.NONE`
+---@field point number[]  {x, y, z}, meaningless unless `has_position`
+---@field has_position boolean
+local FemVertex = {}
+FemVertex.__index = FemVertex
+M.FemVertex = FemVertex
+FemVertex.__tostring = function(v)
+  return ("FemVertex(node=%d, point=(%g, %g, %g), has_position=%s)")
+    :format(v.node, v.point[1], v.point[2], v.point[3], tostring(v.has_position))
+end
+
+--- One body meshed for a solver: nodes welded by bits, triangles wound outward, every
+--- node tagged with the lowest-dimension B-rep entity it lies on, and every crack
+--- reported rather than closed. What `node:fem_mesh()` returns, and **owned by you**:
+--- `free()` it (the collector does otherwise).
+---
+--- **The five flat arrays are the library's own memory, lent as they are**: `nodes` is
+--- a `const double *`, three a node; `triangles` a `const uint32_t *`, three a
+--- triangle and counting from zero; `triangle_face`, `node_kind` and `node_entity`
+--- `const uint32_t *` one per triangle or per node. No copy, which is what makes a
+--- million-element solver mesh affordable. They are **fields filled when the mesh was
+--- built**, as a `Mesh`'s are, with the mesh itself standing where a `Mesh`'s `scene`
+--- stands: the owner of every one of them is this object and not the scene, so
+--- `scene:close()` neither frees this mesh nor stales it, and neither does meshing the
+--- body again -- only `free()`, or the collector reclaiming the handle.
+---
+--- **So hold the FemMesh for as long as you read one of its arrays.** Because they are
+--- plain fields rather than accessors, nothing here refuses a read after `free()`: a
+--- pointer taken out of one is a bare cdata pointer into memory the library has given
+--- back, and reading it reads whatever is there by then. There is no `copy()` here, as
+--- `Mesh` has: read the numbers you want into a Lua table while the mesh is still yours.
+--- The methods below *do* refuse, naming themselves. This is the same sharp edge the
+--- note at the top of this file documents for the scene's own views, and it is
+--- documented rather than enforced for the same reason.
+---
+--- `edges`, `vertices`, `open_edges` and `folded_edges` are computed when read, one C
+--- call a row, and are copies: read them once into a local rather than inside a loop.
+---@class FemMesh
+---@field nodes ffi.cdata*  const double *, 3 a node
+---@field node_count integer
+---@field triangles ffi.cdata*  const uint32_t *, 3 a triangle, from zero
+---@field triangle_count integer
+---@field triangle_face ffi.cdata*  const uint32_t *, one a triangle
+---@field node_kind ffi.cdata*  const uint32_t *, one a node: 0 a vertex, 1 an edge, 2 a face
+---@field node_entity ffi.cdata*  const uint32_t *, one a node, read by its `node_kind`
+---@field face_count integer  the body's faces
+---@field watertight boolean
+---@field from_mesh boolean
+---@field min_angle number  the smallest interior angle of any triangle, in degrees
+---@field worst_triangle integer  the triangle with that angle, into `triangles`
+---@field longest_edge number  the longest triangle edge, placed
+local FemMesh_get = {}
+local FemMesh = class(FemMesh_get)
+M.FemMesh = FemMesh
+
+local function fem_handle(self)
+  local p = rawget(self, "_ptr")
+  if p == nil then fail("fem mesh: freed", 3) end
+  return p
+end
+
+--- Whether `free()` has run.
+function FemMesh_get.freed(self) return rawget(self, "_ptr") == nil end
+
+--- Give the mesh back, and with it every array lent from it. Idempotent; the collector
+--- does it otherwise.
+function FemMesh:free()
+  local p = rawget(self, "_ptr")
+  if p ~= nil then
+    self._ptr = nil
+    ffi.gc(p, nil)
+    lib().cadaclysm_fem_mesh_free(p)
+  end
+end
+
+-- A `const uint32_t *` of `count` entries as a Lua array (from one) of the library's
+-- own numbers (from zero): a copy, so it outlives the handle.
+local function fem_indices(ptr, count)
+  local out = {}
+  for i = 0, count - 1 do out[i + 1] = ptr[i] end
+  return out
+end
+
+--- One `FemEdge` per B-rep edge, in the order a `node_kind` of 1 indexes them. Empty
+--- for a `from_mesh` body, which has no B-rep edges at all. **This list's own
+--- numbering, not the body's**: each `FemEdge.id` carries the body's own edge id.
+function FemMesh_get.edges(self)
+  local L, handle, raw, out = lib(), fem_handle(self), ffi.new("struct CadaclysmFemEdge"), {}
+  for i = 0, self._edge_count - 1 do
+    if not L.cadaclysm_fem_mesh_edge(handle, i, raw) then
+      local reason = last_error()
+      fail(reason ~= "" and reason or ("fem mesh edge " .. i), 2)
+    end
+    out[#out + 1] = setmetatable({
+      id = raw.id,
+      nodes = fem_indices(raw.nodes, raw.node_count),
+      runs = fem_indices(raw.runs, raw.run_count),
+      faces = { raw.face_a, raw.face_b },
+      ends = { raw.end_a, raw.end_b },
+      closed = raw.closed,
+      seam = raw.seam,
+    }, FemEdge)
+  end
+  return out
+end
+
+--- One `FemVertex` per B-rep vertex, in the order a `node_kind` of 0 indexes them.
+--- Empty for a `from_mesh` body.
+function FemMesh_get.vertices(self)
+  local L, handle, raw, out = lib(), fem_handle(self), ffi.new("struct CadaclysmFemVertex"), {}
+  for i = 0, self._vertex_count - 1 do
+    if not L.cadaclysm_fem_mesh_vertex(handle, i, raw) then
+      local reason = last_error()
+      fail(reason ~= "" and reason or ("fem mesh vertex " .. i), 2)
+    end
+    out[#out + 1] = setmetatable({
+      node = raw.node,
+      point = { raw.point[0], raw.point[1], raw.point[2] },
+      has_position = raw.has_position,
+    }, FemVertex)
+  end
+  return out
+end
+
+-- One flattened census, row by row: the shape `open_edges` and `folded_edges` share,
+-- so the two cannot drift.
+local function fem_census(self, row, count, what)
+  local handle = fem_handle(self)
+  local a, b, edge = ffi.new("uint32_t[1]"), ffi.new("uint32_t[1]"), ffi.new("uint32_t[1]")
+  local out = {}
+  for i = 0, count - 1 do
+    if not row(handle, i, a, b, edge) then
+      local reason = last_error()
+      fail(reason ~= "" and reason or (what .. " " .. i), 3)
+    end
+    out[#out + 1] = { a[0], b[0], edge[0] }
+  end
+  return out
+end
+
+--- Every crack, as `{a, b, brep_edge}`: a directed mesh edge `{a, b}` with no `{b, a}`,
+--- and the B-rep edge both nodes lie on, or `cadaclysm.NONE` where they share none.
+---
+--- **Empty unless the body's topology is closed -- for a B-rep body**, whose mesh is
+--- otherwise not asked about at all: such a body reports `watertight` false with this
+--- and `folded_edges` both empty, and *that trio together* says "not asked", not
+--- "nothing found".
+---
+--- **A `from_mesh` body is the other case, and the opposite one.** A bare mesh carries
+--- no topology to say whether it ought to close, so its census always runs over the
+--- welded triangles: an open render mesh reports its cracks here with `watertight`
+--- false, a closed one reports `watertight` true, and an empty census there really
+--- does mean "nothing found".
+function FemMesh_get.open_edges(self)
+  local L = lib()
+  return fem_census(self, function(h, i, a, b, e) return L.cadaclysm_fem_mesh_open_edge(h, i, a, b, e) end,
+    self._open_edge_count, "fem mesh open edge")
+end
+
+--- Every fold, as `open_edges` reports a crack: a directed mesh edge used by more than
+--- one triangle.
+---
+--- **A body can be folded without being open**, and the closure census's own pinned
+--- rows are folds rather than open cracks -- a solid no thicker than a line leaves no
+--- hole for an open edge to find. A caller that checks only `open_edges` calls such a
+--- body sound. Empty under the same rule as `open_edges`.
+function FemMesh_get.folded_edges(self)
+  local L = lib()
+  return fem_census(self, function(h, i, a, b, e) return L.cadaclysm_fem_mesh_folded_edge(h, i, a, b, e) end,
+    self._folded_edge_count, "fem mesh folded edge")
+end
+
+--- The mesh as Gmsh 4.1 ASCII `.msh` text: an entity per B-rep vertex, edge and face,
+--- a volume where the body closes, and a physical group naming each.
+---
+--- **On this side of the ABI the library's text is borrowed** -- a slot on this handle,
+--- replaced by the next call on it and gone when the mesh is freed. It is copied out
+--- here, so what you hold is a Lua string of your own that outlives the handle, and
+--- nothing has to be freed. `cadaclysm_blacksmith.FemMesh.msh_text` is the other way
+--- round: an owned string the wrapper releases, two asks giving two independent texts.
+--- A reader porting one side's reasoning onto the other leaks or double-frees.
+---
+--- **No unlicensed notice is printed here.** `node:fem_mesh()` gave it once when the
+--- mesh was built, and this ABI deliberately does not repeat it on either `.msh` call
+--- -- where the kernel library notices on both of its writers and *not* on its
+--- builder. Each matches its own siblings, so moving the call to look like the other
+--- side would break a convention.
+---
+--- Raises `CadaclysmError` for a mesh the writer refuses, naming the field it cannot
+--- honour, and for a freed handle.
+function FemMesh:msh_text()
+  local p = lib().cadaclysm_fem_mesh_msh_text(fem_handle(self))
+  if p == nil then
+    local reason = last_error()
+    fail(reason ~= "" and reason or "msh text", 2)
+  end
+  return ffi.string(p)
+end
+
+--- `msh_text()` written to `path` by the library itself: the same bytes from the same
+--- writer, straight to the file rather than through the borrowed slot, so a
+--- `msh_text()` call on this handle from another thread cannot free the text under the
+--- write. Raises `CadaclysmError` for a mesh the writer refuses or a file it cannot
+--- write, naming the path. No notice here either; see `msh_text`.
+function FemMesh:save_msh(path)
+  if not lib().cadaclysm_fem_mesh_save_msh(fem_handle(self), tostring(path)) then
+    local reason = last_error()
+    fail(reason ~= "" and reason or ("could not write " .. tostring(path)), 2)
+  end
+end
+
+FemMesh.__tostring = function(m)
+  if rawget(m, "_ptr") == nil then return "FemMesh(freed)" end
+  return ("FemMesh(nodes=%d, triangles=%d, watertight=%s, from_mesh=%s)")
+    :format(m.node_count, m.triangle_count, tostring(m.watertight), tostring(m.from_mesh))
+end
+
+-- The handle wrapped, its view read once: every pointer in the view is built with the
+-- handle and good until it is freed (nothing in this ABI is built lazily), so asking
+-- again per field would be one C call per array for the same answer.
+local function fem_mesh(ptr)
+  local raw = ffi.new("struct CadaclysmFemMeshView")
+  if not lib().cadaclysm_fem_mesh_view(ptr, raw) then
+    local reason = last_error()
+    lib().cadaclysm_fem_mesh_free(ptr)
+    fail(reason ~= "" and reason or "fem mesh view", 3)
+  end
+  return setmetatable({
+    _ptr = ffi.gc(ptr, lib().cadaclysm_fem_mesh_free),
+    nodes = null_to_nil(raw.nodes),
+    node_count = raw.node_count,
+    triangles = null_to_nil(raw.triangles),
+    triangle_count = raw.triangle_count,
+    triangle_face = null_to_nil(raw.triangle_face),
+    node_kind = null_to_nil(raw.node_kind),
+    node_entity = null_to_nil(raw.node_entity),
+    face_count = raw.face_count,
+    _edge_count = raw.edge_count,
+    _vertex_count = raw.vertex_count,
+    _open_edge_count = raw.open_edge_count,
+    _folded_edge_count = raw.folded_edge_count,
+    watertight = raw.watertight,
+    from_mesh = raw.from_mesh,
+    min_angle = raw.min_angle,
+    worst_triangle = raw.worst_triangle,
+    longest_edge = raw.longest_edge,
+  }, FemMesh)
+end
+
 -- ---- svg -----------------------------------------------------------------------------
 
 --- The seven camera angles `svg_text`/`svg`'s `view=` understands, as (azimuth,
@@ -1221,6 +1574,9 @@ function Node_get.brep(self)
 end
 --- Its feature edges, as polylines to draw an overlay from.
 function Node_get.edges(self) return polylines(self.scene, lib().cadaclysm_node_edges(h(self), self.index)) end
+--- One RGBA table per polyline of `edges`, `false` for an edge the file does not
+--- style; empty when nothing is styled.
+function Node_get.edge_colours(self) return edge_colours(lib().cadaclysm_node_edge_colors(h(self), self.index)) end
 --- Its free curves, as polylines. A 2D drawing is all of these.
 function Node_get.curves(self) return polylines(self.scene, lib().cadaclysm_node_curves(h(self), self.index)) end
 --- Its interior surface lines, as polylines, so a curved face reads as curved.
@@ -1300,6 +1656,13 @@ function Node_get.is_meshed(self) return lib().cadaclysm_node_is_meshed(h(self),
 --- Its face boundaries from its trimmed surfaces: the outline that costs no tessellation,
 --- in the surfaces' frame (`scene.surface_matrix`); empty without surfaces.
 function Node_get.surface_edges(self) return polylines(self.scene, lib().cadaclysm_node_surface_edges(h(self), self.index)) end
+--- Its edges as the exact curves, where the reader has them without meshing (a Rhino
+--- extrusion's rims are its profile), and empty everywhere else: try it before
+--- `surface_edges`, whose trims are thinned to the mesh tolerance. The same segments as
+--- `edge_beziers`, in the same space -- not the surfaces' frame, so no `surface_matrix`.
+function Node_get.surface_edge_beziers(self) return beziers(self.scene, lib().cadaclysm_node_surface_edge_beziers(h(self), self.index)) end
+--- `edge_colours` for `surface_edges`.
+function Node_get.surface_edge_colours(self) return edge_colours(lib().cadaclysm_node_surface_edge_colors(h(self), self.index)) end
 --- Its isocurves from its trimmed surfaces, clipped to the trims, without meshing.
 function Node_get.surface_isocurves(self) return polylines(self.scene, lib().cadaclysm_node_surface_isocurves(h(self), self.index)) end
 --- Where the segment `from`..`to` (each `{x, y, z}`, in the surfaces' frame) first meets
@@ -1315,6 +1678,68 @@ function Node:surface_proxy_mesh(cells) return mesh(self.scene, lib().cadaclysm_
 --- About how many triangles `mesh` would give, without building it; -1 where the
 --- reader cannot say. Treat -1 as unknown, never as zero.
 function Node_get.triangle_estimate(self) return tonumber(lib().cadaclysm_node_triangle_estimate(h(self), self.index)) end
+
+--- This node's body meshed for a solver, as a `FemMesh`: nodes welded by bits,
+--- triangles wound outward, each node tagged with the lowest-dimension B-rep entity it
+--- lies on, and every crack reported rather than closed. **Owned by you**: `free()` it.
+---
+--- `tolerance` is the chordal tolerance in model units, finite and above zero (default
+--- 0.01), and **it alone governs how closely the mesh follows the geometry**.
+--- `max_size` is a size ceiling, finite and zero or more (default 0, no ceiling --
+--- curvature alone): **it bounds the boundary and targets the interior**, which is not
+--- a longest-element-edge guarantee. It adds boundary nodes without refining boundary
+--- geometry, and `FemMesh.longest_edge` is what the mesh actually came to -- the figure
+--- to check against it. Those two defaults are `FemOptions::default()`'s own, restated
+--- here so the signature says what a caller gets; the library's struct is still filled
+--- by `cadaclysm_fem_options_init` first, so a field added to it later defaults without
+--- this line being touched.
+---
+--- **Neither number is checked here**, on purpose: a node with no brep is meshed by a
+--- call that takes no options at all, so a `tolerance` of 0 or NaN and a `max_size` of
+--- -1 or NaN all come back with a mesh there, where the brep path refuses each. The
+--- library is the one that knows which path it took, so both are passed through and its
+--- own refusal is what a caller sees.
+---
+--- `placement` is 16 numbers, column-major, as `bounds_placed` takes them (nil for the
+--- identity), applied in double precision throughout. Its length *is* checked here,
+--- because the ABI receives only a pointer and cannot. `cadaclysm_blacksmith`'s
+--- `Solid:fem_mesh` takes **twelve** instead -- origin, x, y, z -- so a caller moving
+--- between the two reformats the placement.
+---
+--- **The space is the body's, not the scene's, for a B-rep -- and the scene's for a
+--- mesh**, which `FemMesh.from_mesh` is the flag for; read it there, because under a
+--- non-native convention the two are different spaces.
+---
+--- Meshed in the part's own frame and following the hop from an instance to the shape
+--- it draws that `mesh` follows, so a node instanced six times meshes once.
+---
+--- **A cracked body is not a failure**: it comes back with `FemMesh.watertight` false
+--- and its cracks in `FemMesh.open_edges` / `FemMesh.folded_edges`, and nothing is
+--- welded shut to make it look sound. Raises `CadaclysmError` for a tolerance or size
+--- the mesher refuses, a placement that is not 16 numbers or is not finite and
+--- invertible, a node with neither a brep nor a mesh (an assembly, a storey, a layer,
+--- an empty definition, a curve), and a body that meshes to no triangles at all.
+---
+--- Prints the unlicensed notice once, here, and not again on either of `FemMesh`'s
+--- `.msh` calls.
+function Node:fem_mesh(tolerance, max_size, placement)
+  local m = nil
+  if placement ~= nil then
+    if #placement ~= 16 then fail("fem_mesh: a placement is 16 numbers, not " .. #placement, 2) end
+    m = ffi.new("double[16]", placement)
+  end
+  local o = ffi.new("struct CadaclysmFemOptions")
+  lib().cadaclysm_fem_options_init(o)
+  o.size = ffi.sizeof(o)
+  o.tolerance = tolerance == nil and 0.01 or tolerance
+  o.max_size = max_size == nil and 0.0 or max_size
+  local p = lib().cadaclysm_node_fem_mesh(h(self), self.index, m, o)
+  if p == nil then
+    local reason = last_error()
+    fail(reason ~= "" and reason or "fem_mesh", 2)
+  end
+  return fem_mesh(p)
+end
 
 --- Write this node's mesh to `path`; `fmt` is one of `mesh_formats()` (default "stl").
 function Node:save_mesh(path, fmt)
@@ -1393,6 +1818,55 @@ function Placement_get.raw_transform(self)
 end
 Placement.__tostring = function(self) return ("Placement(index=%d)"):format(self.index) end
 
+-- ---- links and joints -------------------------------------------------------------
+
+--- A rigid body of the file's mechanism: the nodes that move together when a joint
+--- moves it. From `Scene.links`; borrows from the scene like `Node`.
+local Link_get = {}
+---@class Link
+---@field scene Scene
+---@field index integer  from zero
+local Link = class(Link_get)
+M.Link = Link
+
+local function link(scene, index) return setmetatable({ scene = scene, index = index }, Link) end
+
+--- Its name, as the file gives it.
+function Link_get.name(self) return text(lib().cadaclysm_link_name(h(self), self.index)) end
+--- The topmost node of each subtree it moves, in node order: moving these moves
+--- everything under them.
+function Link_get.nodes(self)
+  local out, handle = {}, h(self)
+  for i = 0, lib().cadaclysm_link_node_count(handle, self.index) - 1 do
+    out[#out + 1] = node(self.scene, lib().cadaclysm_link_node(handle, self.index, i))
+  end
+  return out
+end
+Link.__eq = function(a, b) return a.scene == b.scene and a.index == b.index end
+Link.__tostring = function(self) return ("<Link %d %s>"):format(self.index, self.name) end
+
+--- A connection between two links of the file's mechanism. Topology only: how it
+--- moves is not read yet. From `Scene.joints`.
+local Joint_get = {}
+---@class Joint
+---@field scene Scene
+---@field index integer  from zero
+local Joint = class(Joint_get)
+M.Joint = Joint
+
+local function joint(scene, index) return setmetatable({ scene = scene, index = index }, Joint) end
+
+--- Its name, as the file gives it.
+function Joint_get.name(self) return text(lib().cadaclysm_joint_name(h(self), self.index)) end
+--- The link it starts at, in the file's order -- not a parent: a mechanism may be a
+--- network with loops.
+function Joint_get.start(self) return link(self.scene, lib().cadaclysm_joint_start(h(self), self.index)) end
+--- The link it ends at, in the file's order. `end_`, not `end`, which is a Lua keyword
+--- -- as with `Path:end_`.
+function Joint_get.end_(self) return link(self.scene, lib().cadaclysm_joint_end(h(self), self.index)) end
+Joint.__eq = function(a, b) return a.scene == b.scene and a.index == b.index end
+Joint.__tostring = function(self) return ("<Joint %d %s>"):format(self.index, self.name) end
+
 -- ---- the scene ---------------------------------------------------------------------
 
 --- An open document: `path`, `schema_path` (the `.exp` used, or nil) and
@@ -1457,6 +1931,19 @@ function Scene_get.diagnostics(self)
   for i = 0, L.cadaclysm_diagnostic_count(handle) - 1 do
     out[#out + 1] = text(L.cadaclysm_diagnostic(handle, i))
   end
+  return out
+end
+--- The rigid bodies of the file's mechanism, in the file's order.
+function Scene_get.links(self)
+  local L, handle, out = lib(), self:handle(), {}
+  for i = 0, L.cadaclysm_link_count(handle) - 1 do out[#out + 1] = link(self, i) end
+  return out
+end
+--- The connections between those links, in the file's order. Topology only: how a
+--- joint moves is not read yet.
+function Scene_get.joints(self)
+  local L, handle, out = lib(), self:handle(), {}
+  for i = 0, L.cadaclysm_joint_count(handle) - 1 do out[#out + 1] = joint(self, i) end
   return out
 end
 --- What the reader built but the geometry stage could not finish: a face that would

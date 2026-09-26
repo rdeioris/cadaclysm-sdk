@@ -6,7 +6,7 @@ imports like a `.glb`; or open files at run time, in the editor or an exported g
 
 | Where | What it is |
 | --- | --- |
-| `src/` | The extension, in Rust (godot-rust) over the `cadaclysm-sdk` crate: `CadaclysmScene`, `CadaclysmNode`, `CadaclysmPlacement`, `CadaclysmMesh`, `CadaclysmPolylines`, `CadaclysmBrep`, the kernel's `CadaclysmSolid`, `CadaclysmProfile`, `CadaclysmFrame`..., and `CadaclysmImporter` |
+| `src/` | The extension, in Rust (godot-rust) over the `cadaclysm-sdk` crate: `CadaclysmScene`, `CadaclysmNode`, `CadaclysmPlacement`, `CadaclysmMesh`, `CadaclysmPolylines`, `CadaclysmBrep`, `CadaclysmFemMesh`, the kernel's `CadaclysmSolid`, `CadaclysmProfile`, `CadaclysmFrame`, `CadaclysmSolidFemMesh`..., and `CadaclysmImporter` |
 | `project/addons/cadaclysm/` | The addon to copy into a project: the `.gdextension` file, `CadaclysmOrbitCamera`, and `bin/<platform>/` with the libraries |
 | `project/examples/` | `part` (a model turning on a stand), `drawing` (a three-view sheet in 2D), `forge` (a parametric flange built by the kernel), `nut` (the logo's nut, built by the kernel), `viewer` (the file's tree beside the model) |
 | `project/test/` | The tests (`run.gd`), and `bench.gd` for timing a big model |

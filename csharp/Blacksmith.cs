@@ -32,6 +32,14 @@
 // filling of the cache it was cut from and throws instead. Call `Copy()` on any view that
 // must outlive either. Strings are copied on the way out and are always safe.
 //
+// `FemMesh` is the one array product that is **not** the solid's. `Solid.FemMesh(..)` hands back a
+// handle of its own, and its spans belong to that handle: neither the solid's dispose nor meshing
+// it again touches them, and only `FemMesh.Free()` — or the `using` that runs it — invalidates
+// them. The guard is weaker than `Solid.Mesh`'s, and deliberately so: a span **asked for** after
+// that throws, while one already in hand goes on reading the freed block and hands back plausible
+// numbers, a `ReadOnlySpan<T>` having nothing left to check once it is made. `ToArray()` anything
+// that must outlive the handle.
+//
 // ## The chain mirrors the Rust `Workplane`
 //
 // A build call (`Cuboid`, `Cylinder`, `Extrude`, `ExtrudeTapered`, `Revolve`, `Sweep`,
@@ -364,6 +372,76 @@ internal struct RawBlacksmithSvgOptions
     public uint Flags;
 }
 
+/// <summary>`CadaclysmBlacksmithFemOptions`. Field order and `Size` are the whole contract, as
+/// <see cref="RawBlacksmithSvgOptions"/> above: `cadaclysm_blacksmith_fem_options_init` fills the
+/// library's <em>whole</em> struct, so this must match the header field for field and may never
+/// reorder. A field the library has and this one does not is written past what <see
+/// cref="Solid.FemMesh"/> allocated. `tests/bindings.rs` pins it against
+/// `cadaclysm_blacksmith.h`.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawBlacksmithFemOptions
+{
+    public nuint Size;
+    public double Tolerance;
+    public double MaxSize;
+}
+
+/// <summary>`CadaclysmBlacksmithFemMeshView`: every pointer borrowed from the FEM handle and dead
+/// with it, the counts in elements (`Nodes` holds `NodeCount * 3` doubles). Pinned against the
+/// header by `cadaclysm-capi/tests/bindings.rs`, which is the only thing between a missing field
+/// here and reading `MinAngle` out of `Watertight`.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawBlacksmithFemMeshView
+{
+    public IntPtr Nodes;
+    public uint NodeCount;
+    public IntPtr Triangles;
+    public uint TriangleCount;
+    public IntPtr TriangleFace;
+    public IntPtr NodeKind;
+    public IntPtr NodeEntity;
+    public uint FaceCount;
+    public uint EdgeCount;
+    public uint VertexCount;
+    public uint OpenEdgeCount;
+    public uint FoldedEdgeCount;
+    // One byte in C, four in C# unless it is told otherwise -- and `MinAngle` below is what a
+    // missing hint would be read out of.
+    [MarshalAs(UnmanagedType.I1)] public bool Watertight;
+    [MarshalAs(UnmanagedType.I1)] public bool FromMesh;
+    public double MinAngle;
+    public uint WorstTriangle;
+    public double LongestEdge;
+}
+
+/// <summary>`CadaclysmBlacksmithFemEdge`: one B-rep edge's node chain. Pinned by
+/// `tests/bindings.rs`.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawBlacksmithFemEdge
+{
+    public uint Id;
+    public IntPtr Nodes;
+    public uint NodeCount;
+    public IntPtr Runs;
+    public uint RunCount;
+    public uint FaceA;
+    public uint FaceB;
+    public uint EndA;
+    public uint EndB;
+    [MarshalAs(UnmanagedType.I1)] public bool Closed;
+    [MarshalAs(UnmanagedType.I1)] public bool Seam;
+}
+
+/// <summary>`CadaclysmBlacksmithFemVertex`. `Point` is three doubles in the struct, not a pointer.
+/// Pinned by `tests/bindings.rs`.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct RawBlacksmithFemVertex
+{
+    public uint Node;
+    public fixed double Point[3];
+    [MarshalAs(UnmanagedType.I1)] public bool HasPosition;
+}
+
 // ---- the handles the ABI hands out ------------------------------------------------------
 //
 // One `SafeHandle` a kind, each knowing its own free. `Path`'s is the one the library can
@@ -467,6 +545,38 @@ internal sealed class SolidHandle : CadaclysmHandle
     }
 }
 
+/// <summary>`CadaclysmBlacksmithAssembly *`. Freeing it does **not** free what is placed inside
+/// it: the C ABI's own note, since a placed assembly shares its data (`Arc`) rather than being
+/// copied, so a sub-assembly placed under two parents outlives either one's handle.</summary>
+internal sealed class AssemblyHandle : CadaclysmHandle
+{
+    public AssemblyHandle()
+    {
+    }
+
+    protected override bool ReleaseHandle()
+    {
+        BlacksmithNative.cadaclysm_blacksmith_assembly_free(handle);
+        return true;
+    }
+}
+
+/// <summary>`CadaclysmBlacksmithFemMesh *`, freed by `cadaclysm_blacksmith_fem_mesh_free`. The
+/// `.msh` texts are not freed with it: each is an owned string this binding has already released.
+/// </summary>
+internal sealed class FemMeshHandle : CadaclysmHandle
+{
+    public FemMeshHandle()
+    {
+    }
+
+    protected override bool ReleaseHandle()
+    {
+        BlacksmithNative.cadaclysm_blacksmith_fem_mesh_free(handle);
+        return true;
+    }
+}
+
 // ---- the library ----------------------------------------------------------------------
 
 /// <summary>Finds and loads the kernel library by `cadaclysm_blacksmith.py`'s own rule,
@@ -497,7 +607,7 @@ internal static class BlacksmithLoader
             throw new BuildException($"CADACLYSM_BLACKSMITH_LIBRARY={over} names nothing that exists");
         }
 
-        var here = System.IO.Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+        var here = System.IO.Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
         var ancestors = new List<string>();
         for (var dir = here; !string.IsNullOrEmpty(dir); dir = System.IO.Path.GetDirectoryName(dir))
             ancestors.Add(dir);
@@ -548,6 +658,13 @@ internal static class BlacksmithNative
     // The frees take the raw pointer: they are what each handle's `ReleaseHandle` calls.
     [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_solid_free(IntPtr solid);
     [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_profile_free(IntPtr profile);
+    // `named` returns a new solid, like every other single-source build call; `solid_name`
+    // returns a **borrowed** name (good until `solid` is freed) or null, unlike the always-owned
+    // text this library otherwise hands back -- `Solid.Name` reads it directly rather than
+    // through `Text`, which maps null to "" and would lose the distinction from an empty name.
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_named(SolidHandle solid,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_solid_name(SolidHandle solid);
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_rect(double w, double h);
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_circle(double r);
     [DllImport(Lib)] internal static extern ProfileHandle cadaclysm_blacksmith_profile_slot(double cx, double cy, double length, double r);
@@ -673,6 +790,7 @@ internal static class BlacksmithNative
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_drop_faces(SolidHandle solid, uint[] faces, nuint count);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_place(SolidHandle solid, double[] frame);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_translate(SolidHandle solid, double dx, double dy, double dz);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_scaled(SolidHandle solid, double factor);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_rotate(SolidHandle solid, double[] axis, double radians);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_mirror(SolidHandle solid, double[] plane);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_join(SolidHandle a, SolidHandle b, double tolerance,
@@ -747,6 +865,30 @@ internal static class BlacksmithNative
     internal static extern bool cadaclysm_blacksmith_bounds(SolidHandle solid, double tolerance, [Out] double[] min, [Out] double[] max);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_bounds64(SolidHandle solid, double tolerance, [Out] double[] min, [Out] double[] max);
+    // The FEM surface mesh: one handle per meshed solid, freed by the caller. `progress` and
+    // `user` are always null here, as every other progress-taking entry point in this binding is
+    // (see the file header). `msh_text` returns an **owned** `char *`, released with
+    // `cadaclysm_blacksmith_string_free` -- the opposite of the reader library's borrowed slot.
+    [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_fem_options_init(ref RawBlacksmithFemOptions options);
+    [DllImport(Lib)] internal static extern FemMeshHandle cadaclysm_blacksmith_fem_mesh(SolidHandle solid,
+        double[]? placement, ref RawBlacksmithFemOptions options, IntPtr progress, IntPtr user);
+    [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_fem_mesh_free(IntPtr mesh);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_fem_mesh_view(FemMeshHandle mesh, ref RawBlacksmithFemMeshView outView);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_fem_mesh_edge(FemMeshHandle mesh, uint index, ref RawBlacksmithFemEdge outEdge);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_fem_mesh_vertex(FemMeshHandle mesh, uint index, ref RawBlacksmithFemVertex outVertex);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_fem_mesh_open_edge(FemMeshHandle mesh, uint index,
+        out uint outA, out uint outB, out uint outBrepEdge);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_fem_mesh_folded_edge(FemMeshHandle mesh, uint index,
+        out uint outA, out uint outB, out uint outBrepEdge);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_fem_mesh_msh_text(FemMeshHandle mesh);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_fem_mesh_save_msh(FemMeshHandle mesh,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path);
     [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_leaked_edges(SolidHandle solid, double tolerance);
     [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_unpaired_edges(SolidHandle solid, double tolerance);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
@@ -763,6 +905,20 @@ internal static class BlacksmithNative
     [DllImport(Lib)] internal static extern bool cadaclysm_blacksmith_brep(IntPtr[] solids, nuint count,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string path);
     [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_string_free(IntPtr s);
+    // `assembly_name` is **borrowed**, like `solid_name`, but never null (an assembly always has
+    // the name it was made with) -- read through `Text`, as `version`/`license_info` are.
+    // `assembly_place_solid`/`assembly_place_assembly` and `assembly_step` return **owned**
+    // text, freed with `cadaclysm_blacksmith_string_free` like `step`'s.
+    [DllImport(Lib)] internal static extern AssemblyHandle cadaclysm_blacksmith_assembly_new(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+    [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_assembly_free(IntPtr assembly);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_assembly_name(AssemblyHandle assembly);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_assembly_place_solid(AssemblyHandle assembly,
+        SolidHandle solid, double[] frame, [MarshalAs(UnmanagedType.LPUTF8Str)] string? name);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_assembly_place_assembly(AssemblyHandle assembly,
+        AssemblyHandle placed, double[] frame, [MarshalAs(UnmanagedType.LPUTF8Str)] string? name);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_assembly_step(AssemblyHandle assembly,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? schema, uint unit);
     [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_svg_options_init(ref RawBlacksmithSvgOptions options);
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_svg_text(IntPtr[] solids, nuint count, ref RawBlacksmithSvgOptions options);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
@@ -794,6 +950,15 @@ public static class Blacksmith
     {
         ["m"] = 0, ["mm"] = 1, ["in"] = 2,
     };
+
+    /// <summary>"m"/"mm"/"in" as the library's own unit code, for anything that writes STEP --
+    /// shared with <see cref="Assembly.StepText"/> so both read the one table.</summary>
+    internal static uint UnitCode(string unit)
+    {
+        if (!Units.TryGetValue(unit, out var unitCode))
+            throw new BuildException($"unit must be one of {string.Join(", ", Units.Keys.OrderBy(k => k, StringComparer.Ordinal))}");
+        return unitCode;
+    }
 
     /// <summary>The version of the library actually loaded, which is the one worth reporting.
     /// </summary>
@@ -838,7 +1003,7 @@ public static class Blacksmith
         // Python takes the repository root as a fixed number of parents above its own file;
         // this assembly sits under a bin/ directory of varying depth, so every ancestor is
         // tried -- the SDK layout and this repository's both keep `schemas/` at the top.
-        var assembly = Assembly.GetExecutingAssembly().Location;
+        var assembly = System.Reflection.Assembly.GetExecutingAssembly().Location;
         for (var dir = System.IO.Path.GetDirectoryName(assembly); dir is not null; dir = System.IO.Path.GetDirectoryName(dir))
             candidates.Add(System.IO.Path.Combine(dir, "schemas", "ap203.exp"));
         foreach (var candidate in candidates)
@@ -1043,8 +1208,8 @@ public static class Blacksmith
 
     /// <summary>`schema` is null (the built-in AP203), the path of a schema file, a
     /// built-in schema's name, or a custom schema's own EXPRESS text -- see
-    /// <see cref="WriteStepText"/>.</summary>
-    private static string? SchemaText(string? schema)
+    /// <see cref="WriteStepText"/> and <see cref="Assembly.StepText"/>.</summary>
+    internal static string? SchemaText(string? schema)
     {
         if (schema is null) return null;
         if (!schema.Contains('\n') && File.Exists(schema)) return File.ReadAllText(schema);
@@ -1794,6 +1959,370 @@ public sealed class BlacksmithPolylines
     }
 }
 
+/// <summary>One B-rep edge of a FEM mesh: the chain of nodes along it, and where that chain
+/// breaks. Plain data, copied out of the handle -- a C# `ReadOnlySpan&lt;T&gt;` cannot be a field
+/// of a class, so these two arrays are yours where <see cref="FemMesh.Nodes"/> and its siblings
+/// are borrowed.</summary>
+public sealed class FemEdge
+{
+    internal FemEdge(uint id, uint[] nodes, uint[] runs, (uint A, uint B) faces, (uint A, uint B) ends,
+                     bool closed, bool seam)
+    {
+        Id = id;
+        Nodes = nodes;
+        Runs = runs;
+        Faces = faces;
+        Ends = ends;
+        Closed = closed;
+        Seam = seam;
+    }
+
+    /// <summary>The <strong>solid's own</strong> B-rep edge id, not this mesh's edge index.
+    /// </summary>
+    /// <remarks><see cref="FemMesh.Edges"/> is a densely renumbered subset of the solid's edges,
+    /// ascending by id, with every edge collapsed to a point left out -- so a sphere, whose two
+    /// pole runs collapse, reports its seam as edge 0 with an id of 1. Everything else that names
+    /// an edge means the <em>index</em>: a <see cref="FemMesh.NodeKind"/> of 1 read through <see
+    /// cref="FemMesh.NodeEntity"/>, the third number of a <see cref="FemMesh.OpenEdges"/> or <see
+    /// cref="FemMesh.FoldedEdges"/> row, and the `edge_&lt;i&gt;` physical group of <see
+    /// cref="FemMesh.MshText"/>. It is not a row of <see cref="Solid.Edges"/> either, that table
+    /// being the solid's edges grouped by geometry; the id names the topological edge.</remarks>
+    public uint Id { get; }
+
+    /// <summary>This mesh's node indices in order along the edge, its end vertices included; a
+    /// closed edge repeats no node.</summary>
+    public uint[] Nodes { get; }
+
+    /// <summary>Where each connected run of <see cref="Nodes"/> begins; `[0]` for one chain along
+    /// the whole edge.</summary>
+    /// <remarks><strong>Read `Nodes[Runs[i]..Runs[i + 1]]` (the last run to the end) as one
+    /// polyline and join nothing across a boundary.</strong> The two ends either side of one are
+    /// two points of the edge with no mesh edge between them. One run is the ordinary answer, and a
+    /// caller reading <see cref="Nodes"/> as one polyline without looking here silently jumps the
+    /// gap.</remarks>
+    public uint[] Runs { get; }
+
+    /// <summary>The two faces it bounds, `B` being `uint.MaxValue` on an open sheet's rim --
+    /// <strong>`0` is a real face, not a sentinel.</strong></summary>
+    /// <remarks>These number the solid's faces as <see cref="Solid.FaceKind"/> does.</remarks>
+    public (uint A, uint B) Faces { get; }
+
+    /// <summary>The two B-rep vertices its chain ends at, as <see cref="FemMesh.Vertices"/>
+    /// indexes them, `B` being `uint.MaxValue` where both ends are one vertex -- a closed edge, a
+    /// circle's rim, a full-turn seam. <strong>`0` is a real vertex, not a sentinel.</strong>
+    /// Which end is `A` is the first trim's direction and means nothing else.</summary>
+    public (uint A, uint B) Ends { get; }
+
+    /// <summary>The nodes make one loop. False wherever <see cref="Runs"/> is longer than one.
+    /// </summary>
+    public bool Closed { get; }
+
+    /// <summary>Bounded twice by one face: a closed surface's seam rather than a real boundary.
+    /// <see cref="Faces"/>'s two are then that same face.</summary>
+    public bool Seam { get; }
+
+    public override string ToString() =>
+        $"FemEdge(id={Id}, nodes={Nodes.Length}, runs={Runs.Length}, faces=({Faces.A},{Faces.B}), " +
+        $"ends=({Ends.A},{Ends.B}), closed={Closed}, seam={Seam})";
+}
+
+/// <summary>One B-rep vertex of a FEM mesh: the node the mesh put there, if any, and where the
+/// topology says it is, if that is known. Plain data, copied out of the handle.</summary>
+public sealed class FemVertex
+{
+    internal FemVertex(uint node, double[] point, bool hasPosition)
+    {
+        Node = node;
+        Point = point;
+        HasPosition = hasPosition;
+    }
+
+    /// <summary>The mesh node at this vertex, or `uint.MaxValue` where the mesh has none there --
+    /// <strong>ordinary rather than a fault</strong>: the analysis rebuilds a vertex wherever two
+    /// trims meet, and a pole's polyline runs give a sphere 48 of them where the mesh has 2 points,
+    /// so a caller walking these skips the sentinel rather than treating it as a gap.</summary>
+    public uint Node { get; }
+
+    /// <summary>Where the vertex is -- three doubles, in the same space and under the same
+    /// placement as <see cref="FemMesh.Nodes"/>. <strong>Meaningless unless <see
+    /// cref="HasPosition"/></strong>: it is all zeros then, a point no geometry has and one a
+    /// solver would take for a node at the origin.</summary>
+    public double[] Point { get; }
+
+    /// <summary><see cref="Point"/> was placed.</summary>
+    public bool HasPosition { get; }
+
+    public override string ToString() =>
+        $"FemVertex(node={Node}, point=({Point[0]},{Point[1]},{Point[2]}), hasPosition={HasPosition})";
+}
+
+/// <summary>One solid meshed for a solver: nodes welded by bits, triangles wound outward, every
+/// node tagged with the lowest-dimension B-rep entity it lies on, and every crack reported rather
+/// than closed. What <see cref="Solid.FemMesh"/> returns, and <strong>owned by you</strong>:
+/// dispose it (a `using`), or <see cref="Free"/> it.</summary>
+/// <remarks>A handle rather than a snapshot, as a <see cref="Solid"/> is, and its big arrays are
+/// `ReadOnlySpan&lt;T&gt;` views into the library's own memory, as <see cref="BlacksmithMesh"/>'s
+/// are and for the same reason: a solver mesh is megabytes.
+///
+/// <para><strong>The owner of these views is this object, not the solid.</strong> <see
+/// cref="Solid.Dispose"/> does not free a FEM mesh, and meshing the solid again at another
+/// tolerance does not stale one -- so this class carries none of the generation machinery <see
+/// cref="BlacksmithMesh"/> has (see <see cref="Solid.CheckCache"/>): a FEM view's pointers are
+/// built with the handle and never move.</para>
+///
+/// <para><strong>What the guard does and does not do.</strong> Every accessor below asks the
+/// handle first, so a span <em>asked for</em> after <see cref="Free"/> throws. A span already in
+/// hand is not protected and cannot be: a `ReadOnlySpan&lt;T&gt;` is a bare pointer and a length,
+/// with nothing left to check by the time it is indexed -- it goes on reading the freed block and
+/// hands back numbers that look like the mesh. <see cref="BlacksmithMesh"/>'s generation check is
+/// no different in this respect, and neither is the reader's. So call `ToArray()` on any span that
+/// must outlive the handle, and read the rest inside the `using`.</para>
+///
+/// <para>It is <see cref="Free"/> here where a <see cref="Solid"/> has <see
+/// cref="Solid.Dispose"/>: this follows the reader library's `FemMesh` and `Meshlets`, so one FEM
+/// mesh is released the same way on both sides of the ABI.</para></remarks>
+public sealed class FemMesh : IDisposable
+{
+    internal FemMeshHandle Handle { get; }
+
+    /// <summary>The view, read once in the constructor: every pointer in it is built with the
+    /// handle and good until it is freed, nothing in this ABI being built lazily.</summary>
+    private readonly RawBlacksmithFemMeshView _raw;
+
+    internal FemMesh(FemMeshHandle handle)
+    {
+        Handle = Blacksmith.Checked(handle, "fem_mesh");
+        var raw = new RawBlacksmithFemMeshView();
+        if (!BlacksmithNative.cadaclysm_blacksmith_fem_mesh_view(Handle, ref raw))
+        {
+            var why = Blacksmith.Failure("fem_mesh_view");
+            Handle.Dispose();
+            throw why;
+        }
+        _raw = raw;
+    }
+
+    /// <summary>The handle, refusing a freed one: every pointer in the cached view is the
+    /// handle's, and a freed handle's point at nothing.</summary>
+    private FemMeshHandle Live => Handle.IsClosed ? throw new BuildException("fem mesh: freed") : Handle;
+
+    /// <summary>The cached view, the handle checked first. Every read below goes through this.
+    /// </summary>
+    private RawBlacksmithFemMeshView Raw
+    {
+        get
+        {
+            _ = Live;
+            return _raw;
+        }
+    }
+
+    public bool Freed => Handle.IsClosed;
+
+    /// <summary>A span over the FEM handle's own memory, the owner checked first. No generation
+    /// check: unlike the solid's tessellation cache, a FEM view's pointers never move.</summary>
+    private unsafe ReadOnlySpan<T> View<T>(IntPtr at, uint length)
+    {
+        _ = Live;
+        return at == IntPtr.Zero ? ReadOnlySpan<T>.Empty : new ReadOnlySpan<T>((void*)at, (int)length);
+    }
+
+    /// <summary>Every node's position, three doubles each: placed by <see cref="Solid.FemMesh"/>'s
+    /// placement, in the solid's own coordinates otherwise.</summary>
+    public ReadOnlySpan<double> Nodes => View<double>(_raw.Nodes, _raw.NodeCount * 3);
+
+    /// <summary>Three node indices a triangle, wound outward -- a mirroring placement is wound
+    /// back.</summary>
+    public ReadOnlySpan<uint> Triangles => View<uint>(_raw.Triangles, _raw.TriangleCount * 3);
+
+    /// <summary>The face each triangle lies on, one per triangle: the same faces <see
+    /// cref="Solid.FaceKind"/> names.</summary>
+    public ReadOnlySpan<uint> TriangleFace => View<uint>(_raw.TriangleFace, _raw.TriangleCount);
+
+    /// <summary>What each node lies on -- `0` a B-rep vertex, `1` an edge, `2` a face -- one per
+    /// node: the lowest-dimension entity it lies on, which is the `.msh` format's own
+    /// classification rule. <see cref="NodeEntity"/> says which entity of that kind.</summary>
+    public ReadOnlySpan<uint> NodeKind => View<uint>(_raw.NodeKind, _raw.NodeCount);
+
+    /// <summary>Which vertex, edge or face each node lies on, read by the matching <see
+    /// cref="NodeKind"/>: an index into <see cref="Vertices"/>, into <see cref="Edges"/>, or into
+    /// the solid's faces. One per node.</summary>
+    public ReadOnlySpan<uint> NodeEntity => View<uint>(_raw.NodeEntity, _raw.NodeCount);
+
+    /// <summary>The solid's faces -- the same faces <see cref="Solid.Faces"/> counts.</summary>
+    public uint FaceCount => Raw.FaceCount;
+
+    /// <summary>One <see cref="FemEdge"/> per B-rep edge, in the order a <see cref="NodeKind"/> of
+    /// `1` indexes them. <strong>Not <see cref="Solid.Edges"/>' numbering</strong>, and not the
+    /// solid's own edge ids either -- each <see cref="FemEdge.Id"/> carries that.</summary>
+    public IReadOnlyList<FemEdge> Edges
+    {
+        get
+        {
+            var handle = Live;
+            var edges = new List<FemEdge>((int)_raw.EdgeCount);
+            for (var i = 0u; i < _raw.EdgeCount; i++)
+            {
+                var raw = new RawBlacksmithFemEdge();
+                if (!BlacksmithNative.cadaclysm_blacksmith_fem_mesh_edge(handle, i, ref raw))
+                    throw Blacksmith.Failure($"fem_mesh_edge {i}");
+                edges.Add(new FemEdge(raw.Id, Uints(raw.Nodes, raw.NodeCount), Uints(raw.Runs, raw.RunCount),
+                    (raw.FaceA, raw.FaceB), (raw.EndA, raw.EndB), raw.Closed, raw.Seam));
+            }
+            return edges;
+        }
+    }
+
+    /// <summary>One <see cref="FemVertex"/> per B-rep vertex, in the order a <see
+    /// cref="NodeKind"/> of `0` indexes them.</summary>
+    public IReadOnlyList<FemVertex> Vertices
+    {
+        get
+        {
+            var handle = Live;
+            var vertices = new List<FemVertex>((int)_raw.VertexCount);
+            for (var i = 0u; i < _raw.VertexCount; i++)
+            {
+                var raw = new RawBlacksmithFemVertex();
+                if (!BlacksmithNative.cadaclysm_blacksmith_fem_mesh_vertex(handle, i, ref raw))
+                    throw Blacksmith.Failure($"fem_mesh_vertex {i}");
+                vertices.Add(new FemVertex(raw.Node, PointOf(raw), raw.HasPosition));
+            }
+            return vertices;
+        }
+    }
+
+    /// <summary>Every crack, as `(A, B, BrepEdge)`: a directed mesh edge `(A, B)` with no `(B, A)`,
+    /// and the B-rep edge both nodes lie on or `uint.MaxValue` where they share none.</summary>
+    /// <remarks><strong>Empty unless the solid's topology is closed</strong>, whose mesh is
+    /// otherwise not asked about at all -- an open sheet from <see cref="Solid.Face"/>, <see
+    /// cref="Solid.FaceSheet"/>, <see cref="Solid.DropFaces"/> or <see cref="Solid.ExtrudeOpen"/>
+    /// reports <see cref="Watertight"/> false with this and <see cref="FoldedEdges"/> <em>both</em>
+    /// empty, and that trio together says "not asked", not "nothing found".</remarks>
+    public IReadOnlyList<(uint A, uint B, uint BrepEdge)> OpenEdges =>
+        Census(BlacksmithNative.cadaclysm_blacksmith_fem_mesh_open_edge, Raw.OpenEdgeCount, "fem_mesh_open_edge");
+
+    /// <summary>Every fold, as <see cref="OpenEdges"/> reports a crack: a directed mesh edge used
+    /// by more than one triangle.</summary>
+    /// <remarks><strong>A solid can be folded without being open</strong> -- one no thicker than a
+    /// line leaves no hole for an open edge to find -- so a caller that checks <see
+    /// cref="OpenEdges"/> alone calls such a body sound.</remarks>
+    public IReadOnlyList<(uint A, uint B, uint BrepEdge)> FoldedEdges =>
+        Census(BlacksmithNative.cadaclysm_blacksmith_fem_mesh_folded_edge, Raw.FoldedEdgeCount, "fem_mesh_folded_edge");
+
+    /// <summary>The library's two census readers have one shape, so the two lists cannot drift.
+    /// </summary>
+    private delegate bool CensusRow(FemMeshHandle mesh, uint index, out uint a, out uint b, out uint brepEdge);
+
+    private IReadOnlyList<(uint A, uint B, uint BrepEdge)> Census(CensusRow row, uint count, string what)
+    {
+        var handle = Live;
+        var rows = new List<(uint, uint, uint)>((int)count);
+        for (var i = 0u; i < count; i++)
+        {
+            if (!row(handle, i, out var a, out var b, out var brepEdge)) throw Blacksmith.Failure($"{what} {i}");
+            rows.Add((a, b, brepEdge));
+        }
+        return rows;
+    }
+
+    /// <summary>The topology is closed and the welded mesh is too. <strong>False for every solid
+    /// whose topology is not closed</strong>; see <see cref="OpenEdges"/> for what an empty census
+    /// beside a false here does and does not mean.</summary>
+    public bool Watertight => Raw.Watertight;
+
+    /// <summary><strong>Always false here</strong>, and kept so the two ABIs' views are one struct:
+    /// a <see cref="Solid"/> always has a brep behind it, so this library has no mesh-only body to
+    /// report.</summary>
+    /// <remarks>The reader library's `Node.FemMesh` sets it for a node with no brep (a JT, an STL,
+    /// an OpenSCAD body), where it also says which space the mesh is in -- here there is only one
+    /// space, the solid's own under the placement -- and where a true one means the census speaks
+    /// from the triangles alone rather than from a topology. <strong>That second difference cannot
+    /// arise here</strong>, so <see cref="OpenEdges"/>' "empty unless the topology is closed" holds
+    /// without exception on this side of the ABI.</remarks>
+    public bool FromMesh => Raw.FromMesh;
+
+    /// <summary>The smallest interior angle of any triangle, in degrees. There is always one: a
+    /// solid that meshed to no triangles is a refusal, not a mesh.</summary>
+    public double MinAngle => Raw.MinAngle;
+
+    /// <summary>The triangle with that angle, as an index into <see cref="Triangles"/> by triple.
+    /// </summary>
+    public uint WorstTriangle => Raw.WorstTriangle;
+
+    /// <summary>The longest triangle edge, placed.</summary>
+    /// <remarks><strong>The figure to check against <see cref="Solid.FemMesh"/>'s `maxSize`, and
+    /// the only one that says what the mesh actually is.</strong> `maxSize` bounds the boundary
+    /// segments and merely <em>targets</em> the interior: measured at 1.03 x `maxSize` on a face
+    /// whose parameters run unevenly. One small enough beside the solid to reach the mesher's own
+    /// piece and station ceilings is not honoured at all.</remarks>
+    public double LongestEdge => Raw.LongestEdge;
+
+    /// <summary>The mesh as Gmsh 4.1 ASCII `.msh` text: an entity per B-rep vertex, edge and face,
+    /// a volume where the solid closes, and a physical group naming each.</summary>
+    /// <remarks><strong>The library's text is owned and released here</strong> with
+    /// `cadaclysm_blacksmith_string_free`, as every other text this library hands over (<see
+    /// cref="Solid.StepText"/>, <see cref="Solid.SatText"/>, <see cref="Solid.BrepText"/>, <see
+    /// cref="Solid.SvgText"/>). Two asks give two independent texts, and neither dies with the
+    /// handle. The reader library's `FemMesh.MshText` is the other way round -- it borrows from a
+    /// slot on its own handle and must not be freed -- so a reader porting one side's reasoning
+    /// onto the other leaks or double-frees.
+    ///
+    /// <para><strong>The unlicensed notice is printed here</strong>, on this writer and on <see
+    /// cref="SaveMsh"/>, and <em>not</em> by <see cref="Solid.FemMesh"/>: meshing is not a licensed
+    /// output and the `.msh` file is, which is where <see cref="Solid.SatText"/> and <see
+    /// cref="Solid.BrepText"/> put theirs too. The reader library notices in its builder instead
+    /// and on neither `.msh` call; each matches its own siblings, so moving the call to look like
+    /// the other side breaks a convention.</para>
+    ///
+    /// <para>Throws <see cref="BuildException"/> for a mesh the writer refuses, naming the field it
+    /// cannot honour, and for a freed handle.</para></remarks>
+    public string MshText()
+    {
+        var raw = BlacksmithNative.cadaclysm_blacksmith_fem_mesh_msh_text(Live);
+        if (raw == IntPtr.Zero) throw Blacksmith.Failure("fem_mesh_msh_text");
+        try
+        {
+            return Marshal.PtrToStringUTF8(raw) ?? "";
+        }
+        finally
+        {
+            BlacksmithNative.cadaclysm_blacksmith_string_free(raw);
+        }
+    }
+
+    /// <summary><see cref="MshText"/> written to <paramref name="path"/>, replacing any file there,
+    /// by the library itself. Throws for a mesh the writer refuses or a file it cannot write,
+    /// naming the path. Prints the unlicensed notice; see <see cref="MshText"/>.</summary>
+    public void SaveMsh(string path)
+    {
+        if (!BlacksmithNative.cadaclysm_blacksmith_fem_mesh_save_msh(Live, path))
+            throw Blacksmith.Failure($"fem_mesh_save_msh: {path}");
+    }
+
+    /// <summary>Give the mesh back, and with it every span taken from it. Idempotent. The `.msh`
+    /// texts are not freed with it: each is already a `string` of yours.</summary>
+    public void Free() => Handle.Dispose();
+
+    public void Dispose() => Free();
+
+    /// <summary>A vertex's own three doubles, out of the fixed buffer the struct holds them in --
+    /// the one read here that needs `unsafe`, kept off <see cref="Vertices"/>'s own signature.
+    /// </summary>
+    private static unsafe double[] PointOf(RawBlacksmithFemVertex raw) =>
+        new[] { raw.Point[0], raw.Point[1], raw.Point[2] };
+
+    /// <summary>`count` uint32s at `at`, copied out: a <see cref="FemEdge"/>'s chain cannot hold a
+    /// span, so those two are copies where the mesh's own arrays are views.</summary>
+    private static unsafe uint[] Uints(IntPtr at, uint count) =>
+        at == IntPtr.Zero ? Array.Empty<uint>() : new ReadOnlySpan<uint>((void*)at, (int)count).ToArray();
+
+    public override string ToString() =>
+        Freed ? "FemMesh(freed)"
+            : $"FemMesh(nodes={_raw.NodeCount}, triangles={_raw.TriangleCount}, " +
+              $"watertight={_raw.Watertight}, fromMesh={_raw.FromMesh})";
+}
+
 /// <summary>An exact B-rep solid (or open sheet). Immutable; every operation returns a new
 /// one. Dispose it to free it; the runtime does so otherwise, through its handle.</summary>
 public sealed class Solid : IDisposable
@@ -2011,6 +2540,10 @@ public sealed class Solid : IDisposable
 
     public Solid Translate(double dx, double dy, double dz) =>
         new(BlacksmithNative.cadaclysm_blacksmith_translate(Handle, dx, dy, dz));
+
+    /// <summary>This solid scaled by <paramref name="factor"/> about the origin: every length times it, exactly.</summary>
+    public Solid Scaled(double factor) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_scaled(Handle, factor));
 
     /// <summary>This solid turned `radians` about `axis` (six numbers: a point and a
     /// direction).</summary>
@@ -2250,6 +2783,35 @@ public sealed class Solid : IDisposable
         }
     }
 
+    // -- naming
+
+    /// <summary>This solid, named <paramref name="name"/>. The name rides through an operation
+    /// with exactly one source solid (<see cref="Place"/>, <see cref="Translate"/>,
+    /// <see cref="Coloured"/>, <see cref="Fillet"/>, ...) and is dropped by one with two or more
+    /// (<see cref="Join"/>, <see cref="Cut"/>, <see cref="Common"/>, ...) and by a fresh
+    /// primitive or sweep -- see <see cref="Name"/>. It is what <see cref="Assembly.Place"/>
+    /// defaults a placement's own name to, and the product name a lone named solid gets when
+    /// written to STEP (<see cref="Step"/>/<see cref="StepText"/>). Refused for an empty name.
+    /// </summary>
+    public Solid Named(string name) => new(BlacksmithNative.cadaclysm_blacksmith_named(Handle, name));
+
+    /// <summary>This solid's name, or null if it has none -- what <see cref="Named"/> set, kept
+    /// or dropped by whatever built this solid (see <see cref="Named"/>). The library's borrowed
+    /// pointer is null for both "no name" and a failure, so this never consults `last_error` --
+    /// same as Python's own `name` -- and it reads the pointer itself rather than through
+    /// <see cref="Blacksmith.Text"/>, which maps null to "" and would erase the distinction.
+    /// </summary>
+    public string? Name
+    {
+        get
+        {
+            var raw = BlacksmithNative.cadaclysm_blacksmith_solid_name(Handle);
+            var result = raw == IntPtr.Zero ? null : Marshal.PtrToStringUTF8(raw);
+            GC.KeepAlive(this);
+            return result;
+        }
+    }
+
     // -- out
 
     /// <summary>The triangles at `tolerance`, as views into the solid's cache. See the file
@@ -2269,6 +2831,62 @@ public sealed class Solid : IDisposable
         var raw = BlacksmithNative.cadaclysm_blacksmith_mesh64(Handle, tolerance);
         if (raw.Positions == IntPtr.Zero) throw Blacksmith.Failure("mesh64");
         return new BlacksmithMesh64(this, tolerance, Filled(tolerance), raw);
+    }
+
+    /// <summary>This solid meshed for a solver, as a <see cref="Cadaclysm.Blacksmith.FemMesh"/>:
+    /// nodes welded by bits, triangles wound outward, each node tagged with the lowest-dimension
+    /// B-rep entity it lies on, and every crack reported rather than closed. Owned by the caller --
+    /// dispose it. <strong>Not a view into this solid's tessellation cache</strong>: a handle of its
+    /// own, which meshing this solid again does not touch.</summary>
+    /// <param name="tolerance">The chordal tolerance in model units, finite and above zero.
+    /// <strong>It alone governs how closely the mesh follows the geometry.</strong></param>
+    /// <param name="maxSize">A size ceiling in model units, finite and zero or more, `0` being no
+    /// ceiling (curvature alone). <strong>It bounds the boundary segments and merely targets the
+    /// interior</strong>, which is not a longest-element-edge guarantee: it adds nodes without
+    /// refining boundary geometry, and <see cref="Cadaclysm.Blacksmith.FemMesh.LongestEdge"/> is
+    /// what the mesh actually came to -- the figure to check against this.</param>
+    /// <param name="placement">Twelve numbers -- origin, x, y, z, as every frame in this binding
+    /// (<see cref="Frame.ToArray"/>) -- or null for the identity, applied in `double` throughout.
+    /// This is the one frame argument here that may be left out, a solid meshed in its own
+    /// coordinates being the common case. The reader library's `Node.FemMesh` takes
+    /// <strong>sixteen</strong>, column-major, so a caller moving between the two reformats the
+    /// placement.</param>
+    /// <remarks>Those two defaults are `FemOptions::default()`'s own, restated here so that the
+    /// signature says what a caller gets; the library's struct is still filled by
+    /// `cadaclysm_blacksmith_fem_options_init` first, so a field added to it later defaults without
+    /// this line being touched.
+    ///
+    /// <para>The library's two progress phases ("meshing" and "welding") are not offered here, as
+    /// no progress callback in this binding is -- see the file header. Every call runs silent.</para>
+    ///
+    /// <para><strong>A cracked solid is not a failure</strong>: it comes back with <see
+    /// cref="Cadaclysm.Blacksmith.FemMesh.Watertight"/> false and its cracks in <see
+    /// cref="Cadaclysm.Blacksmith.FemMesh.OpenEdges"/> and <see
+    /// cref="Cadaclysm.Blacksmith.FemMesh.FoldedEdges"/> -- <em>both</em> -- and nothing is welded
+    /// shut to make it look sound. Throws <see cref="BuildException"/> for a tolerance or `maxSize`
+    /// the mesher refuses, a placement that is not twelve finite numbers or is not invertible, a
+    /// closed solid this library cannot mesh, and a solid that meshes to no triangles -- carrying
+    /// the library's own words for it.</para>
+    ///
+    /// <para><strong>No unlicensed notice here</strong>: <see
+    /// cref="Cadaclysm.Blacksmith.FemMesh.MshText"/> and <see
+    /// cref="Cadaclysm.Blacksmith.FemMesh.SaveMsh"/> print it, this library noticing on its writers
+    /// rather than on its builders -- where the reader library notices in its own builder and on
+    /// neither `.msh` call.</para></remarks>
+    public FemMesh FemMesh(double tolerance = 0.01, double maxSize = 0.0, double[]? placement = null)
+    {
+        var frame = placement is null ? null : Blacksmith.Frame(placement);
+        var options = new RawBlacksmithFemOptions();
+        // `init` writes `sizeof(CadaclysmBlacksmithFemOptions)` bytes as the *library* knows that
+        // type, into the struct `RawBlacksmithFemOptions` declares -- which is why
+        // `cadaclysm-capi/tests/bindings.rs` pins the two field for field. `Size` is then this
+        // binding's own sizeof, which is what the growth rule asks of a caller.
+        BlacksmithNative.cadaclysm_blacksmith_fem_options_init(ref options);
+        options.Size = (nuint)Marshal.SizeOf<RawBlacksmithFemOptions>();
+        options.Tolerance = tolerance;
+        options.MaxSize = maxSize;
+        return new FemMesh(BlacksmithNative.cadaclysm_blacksmith_fem_mesh(Handle, frame, ref options,
+            IntPtr.Zero, IntPtr.Zero));
     }
 
     /// <summary>The feature edges as polylines, views into the same cache as
@@ -2724,6 +3342,125 @@ public sealed class Solid : IDisposable
         var schemaPath = schema is not null && !schema.Contains('\n') && File.Exists(schema) ? schema : null;
         var bytes = Encoding.UTF8.GetBytes(StepText(schema));
         return global::Cadaclysm.Cadaclysm.OpenMemory(bytes, "solid.stp", "stp", schema: schemaPath);
+    }
+}
+
+// ---- assemblies ---------------------------------------------------------------------------
+
+/// <summary>A mutable tree of placements: a name, and zero or more solids or other assemblies
+/// placed in it at a frame. <see cref="Place"/> returns the placement's name (<paramref
+/// name="name"/>, or a default -- see its own doc) so a caller can keep it. Unlike
+/// <see cref="Solid"/>, placing shares rather than copies: placing one assembly under another
+/// does not snapshot it, so a later <see cref="Place"/> on the shared one shows up wherever it
+/// already sits (see <see cref="Place"/>'s own note on cycles). <see cref="Dispose"/> frees this
+/// handle now; the garbage collector does otherwise -- it does <em>not</em> free what was placed
+/// here if that is still reachable from somewhere else (an assembly's data is shared, per the C
+/// ABI's own doc).</summary>
+public sealed class Assembly : IDisposable
+{
+    private readonly AssemblyHandle _handle;
+
+    public Assembly(string name)
+    {
+        _handle = Blacksmith.Checked(BlacksmithNative.cadaclysm_blacksmith_assembly_new(name), "assembly");
+    }
+
+    /// <summary>The handle, refusing to hand over a disposed one, so a use-after-dispose throws
+    /// at the call site instead of passing a dangling pointer into the library.</summary>
+    internal AssemblyHandle Handle => !_handle.IsClosed ? _handle : throw new ObjectDisposedException(nameof(Assembly), "assembly: closed");
+
+    public bool Closed => _handle.IsClosed;
+
+    /// <summary>Give the assembly back. Idempotent. Does not free what was placed in it.</summary>
+    public void Dispose() => _handle.Dispose();
+
+    /// <summary>This assembly's own name, given when it was made. Never null: the library's
+    /// borrowed pointer is read through <see cref="Blacksmith.Text"/>, unlike <see
+    /// cref="Solid.Name"/>, since an assembly always has the name it was constructed with.
+    /// </summary>
+    public string Name
+    {
+        get
+        {
+            var result = Blacksmith.Text(BlacksmithNative.cadaclysm_blacksmith_assembly_name(Handle));
+            GC.KeepAlive(this);
+            return result;
+        }
+    }
+
+    /// <summary>Place <paramref name="solid"/> at <paramref name="frame"/> (twelve numbers,
+    /// right-handed and orthonormal) in this assembly, called <paramref name="name"/> -- or,
+    /// left null, <paramref name="solid"/>'s own name (<see cref="Solid.Name"/>, or "part" for
+    /// an unnamed one), numbered past any already taken here ("bolt", "bolt 2", ...). An
+    /// explicit name already taken here throws. Returns the placement's name.</summary>
+    public string Place(Solid solid, double[] frame, string? name = null)
+    {
+        var raw = BlacksmithNative.cadaclysm_blacksmith_assembly_place_solid(Handle, solid.Handle, Blacksmith.Frame(frame), name);
+        if (raw == IntPtr.Zero) throw Blacksmith.Failure("assembly_place_solid");
+        try
+        {
+            return Marshal.PtrToStringUTF8(raw) ?? "";
+        }
+        finally
+        {
+            BlacksmithNative.cadaclysm_blacksmith_string_free(raw);
+        }
+    }
+
+    /// <summary>Place another assembly, <paramref name="placed"/>, sharing it rather than
+    /// copying it, as <see cref="Place(Solid,double[],string?)"/> places a solid -- <paramref
+    /// name="name"/> defaults to <paramref name="placed"/>'s own <see cref="Name"/>. Placing
+    /// <paramref name="placed"/> as itself, or anywhere above this assembly in the tree
+    /// already, throws (naming the cycle), since writing that out would never terminate.
+    /// Returns the placement's name.</summary>
+    public string Place(Assembly placed, double[] frame, string? name = null)
+    {
+        var raw = BlacksmithNative.cadaclysm_blacksmith_assembly_place_assembly(Handle, placed.Handle, Blacksmith.Frame(frame), name);
+        if (raw == IntPtr.Zero) throw Blacksmith.Failure("assembly_place_assembly");
+        try
+        {
+            return Marshal.PtrToStringUTF8(raw) ?? "";
+        }
+        finally
+        {
+            BlacksmithNative.cadaclysm_blacksmith_string_free(raw);
+        }
+    }
+
+    /// <summary>This assembly, and everything placed under it, as one STEP file: this assembly
+    /// the root product, each sub-assembly and each distinct part (the same solid with the same
+    /// paint and name) written once, each placement an occurrence named as it was placed. See
+    /// <see cref="Blacksmith.WriteStepText"/> for <paramref name="schema"/> and <paramref
+    /// name="unit"/>. Throws where this assembly, or a sub-assembly reachable from it, places
+    /// nothing -- a reader would never show it.</summary>
+    public string StepText(string? schema = null, string unit = "mm")
+    {
+        var unitCode = Blacksmith.UnitCode(unit);
+        var raw = BlacksmithNative.cadaclysm_blacksmith_assembly_step(Handle, Blacksmith.SchemaText(schema), unitCode);
+        if (raw == IntPtr.Zero) throw Blacksmith.Failure("assembly_step");
+        try
+        {
+            return Marshal.PtrToStringUTF8(raw) ?? "";
+        }
+        finally
+        {
+            BlacksmithNative.cadaclysm_blacksmith_string_free(raw);
+        }
+    }
+
+    /// <summary><see cref="StepText"/> written to a file.</summary>
+    public void Step(string path, string? schema = null, string unit = "mm") =>
+        File.WriteAllText(path, StepText(schema, unit), new UTF8Encoding(false));
+
+    /// <summary>This assembly as a reader <see cref="Scene"/>, through STEP text and <see
+    /// cref="global::Cadaclysm.Cadaclysm.OpenMemory"/> -- <see cref="Solid.ToScene"/>'s own
+    /// door, over the whole tree instead of one solid. Needs the reader's library built beside
+    /// this one.</summary>
+    public Scene ToScene(string? schema = null)
+    {
+        var schemaPath = schema is not null && !schema.Contains('\n') && File.Exists(schema) ? schema : null;
+        var bytes = Encoding.UTF8.GetBytes(StepText(schema));
+        return global::Cadaclysm.Cadaclysm.OpenMemory(bytes, "assembly.stp", "stp", schema: schemaPath);
     }
 }
 

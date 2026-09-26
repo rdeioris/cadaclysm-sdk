@@ -99,7 +99,7 @@ if TYPE_CHECKING:   # names the annotations use; imported when used, never at lo
     import numpy
 
 __all__ = [
-    "Axis", "BuildError", "Chain", "Curve", "Edge", "FemEdge", "FemMesh", "FemVertex", "Frame", "Hit", "Intersection", "Manifold", "Overlap", "Path", "Piece",
+    "Assembly", "Axis", "BuildError", "Chain", "Curve", "Edge", "FemEdge", "FemMesh", "FemVertex", "Frame", "Hit", "Intersection", "Manifold", "Overlap", "Path", "Piece",
     "Profile", "Selector", "Slant", "Solid", "SolidHits", "Spot", "SweepPath", "Workplane",
     "brep_layout_id", "build_date", "default_schema", "library_path", "license", "license_info", "license_notice_count",
     "version",
@@ -107,7 +107,7 @@ __all__ = [
 ]
 
 # This file's own version (the workspace's); `version()` is the loaded library's.
-__version__ = "0.7.1"
+__version__ = "0.8.0"
 
 NONE = 0xFFFFFFFF
 UNITS = {"m": 0, "mm": 1, "in": 2}
@@ -336,6 +336,7 @@ _HITS = c_void_p
 _INTERSECTION = c_void_p
 _FEM = c_void_p
 _PROFILE_LIST = c_void_p
+_ASSEMBLY = c_void_p
 
 _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_last_error", c_char_p, []),
@@ -345,6 +346,8 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_build_date", c_char_p, []),
     ("cadaclysm_blacksmith_version", c_char_p, []),
     ("cadaclysm_blacksmith_solid_free", None, [_SOLID]),
+    ("cadaclysm_blacksmith_named", _SOLID, [_SOLID, c_char_p]),
+    ("cadaclysm_blacksmith_solid_name", c_char_p, [_SOLID]),
     ("cadaclysm_blacksmith_profile_free", None, [_PROFILE]),
     ("cadaclysm_blacksmith_profile_rect", _PROFILE, [c_double, c_double]),
     ("cadaclysm_blacksmith_profile_circle", _PROFILE, [c_double]),
@@ -425,6 +428,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_drop_faces", _SOLID, [_SOLID, _U, c_size_t]),
     ("cadaclysm_blacksmith_place", _SOLID, [_SOLID, _D]),
     ("cadaclysm_blacksmith_translate", _SOLID, [_SOLID, c_double, c_double, c_double]),
+    ("cadaclysm_blacksmith_scaled", _SOLID, [_SOLID, c_double]),
     ("cadaclysm_blacksmith_rotate", _SOLID, [_SOLID, _D, c_double]),
     ("cadaclysm_blacksmith_mirror", _SOLID, [_SOLID, _D]),
     ("cadaclysm_blacksmith_join", _SOLID, [_SOLID, _SOLID, c_double, _PROGRESS, c_void_p]),
@@ -495,6 +499,14 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_string_free", None, [c_void_p]),
     ("cadaclysm_blacksmith_from_brep", _SOLID, [c_void_p, c_char_p]),
     ("cadaclysm_blacksmith_brep_layout_id", c_char_p, []),
+    ("cadaclysm_blacksmith_assembly_new", _ASSEMBLY, [c_char_p]),
+    ("cadaclysm_blacksmith_assembly_free", None, [_ASSEMBLY]),
+    ("cadaclysm_blacksmith_assembly_name", c_char_p, [_ASSEMBLY]),
+    ("cadaclysm_blacksmith_assembly_place_solid", c_void_p, [_ASSEMBLY, _SOLID, _D, c_char_p]),
+    ("cadaclysm_blacksmith_assembly_place_assembly", c_void_p, [_ASSEMBLY, _ASSEMBLY, _D, c_char_p]),
+    ("cadaclysm_blacksmith_assembly_step", c_void_p, [_ASSEMBLY, c_char_p, c_uint32]),
+    ("cadaclysm_blacksmith_assembly_link", c_bool, [_ASSEMBLY, c_char_p, POINTER(c_char_p), c_size_t]),
+    ("cadaclysm_blacksmith_assembly_joint", c_bool, [_ASSEMBLY, c_char_p, c_char_p, c_char_p]),
     # The FEM surface mesh: one handle per meshed solid, freed by the caller. Its
     # `.msh` text is **owned** (`c_void_p`, then `string_free`), as every other text
     # this library hands over -- unlike the reader library's, which borrows from a
@@ -539,7 +551,7 @@ class _WasmLibrary:
     # for everything else
     _BOOLS = {"path_line_to", "path_arc_to", "path_bezier_to", "path_nurbs_to", "path_conic_to",
               "path_parabola_by_vertex", "path_parabola_by_focus", "sweep_path_line_to",
-              "sweep_path_arc", "slant_of_plane", "face_frame", "face_ref", "frame_midplane", "frame_through", "bounds", "bounds64", "edge", "colour", "profile_colour", "edge_colour", "manifold", "license_set",
+              "sweep_path_arc", "slant_of_plane", "face_frame", "face_ref", "frame_midplane", "frame_through", "bounds", "bounds64", "edge", "colour", "profile_colour", "edge_colour", "manifold", "license_set", "assembly_link", "assembly_joint",
               "hit", "edge_curve", "intersection_chain", "intersection_curve", "intersection_overlap", "hits_piece",
               "fem_mesh_view", "fem_mesh_edge", "fem_mesh_vertex", "fem_mesh_open_edge", "fem_mesh_folded_edge",
               # its wasm export always throws ("the wasm writes no file"); `FemMesh.save_msh`
@@ -557,7 +569,7 @@ class _WasmLibrary:
     # count (a typed array knows its length), the progress `user` pointer, and
     # the out-arguments above
     _DROP = {"profile_polygon": (1,), "path_nurbs_to": (2, 5), "join": (4,), "cut": (4,), "common": (4,),
-             "split_sheet": (4,), "trim": (5,), "drop_faces": (2,), "profile_round": (3,), "profile_spline": (1,), "profile_chain": (1,), "profile_from_loops": (1,), "profile_piece_count": (2,), "profile_piece": (2,), "profile_trim_count": (2,), "profile_trim_chain": (2,), "loft_through": (2,), "loft_through_open": (2,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "thicken": (4,), "push_pull": (5,), "push_pull_faces": (2, 6), "split": (4,), "split_by_plane": (4,), "step": (1,), "step_assembly": (2, 5), "sat_text": (1,), "brep_text": (1,), "profile_text": (4,),
+             "split_sheet": (4,), "trim": (5,), "drop_faces": (2,), "profile_round": (3,), "profile_spline": (1,), "profile_chain": (1,), "profile_from_loops": (1,), "profile_piece_count": (2,), "profile_piece": (2,), "profile_trim_count": (2,), "profile_trim_chain": (2,), "loft_through": (2,), "loft_through_open": (2,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "thicken": (4,), "push_pull": (5,), "push_pull_faces": (2, 6), "split": (4,), "split_by_plane": (4,), "step": (1,), "step_assembly": (2, 5), "assembly_link": (3,), "sat_text": (1,), "brep_text": (1,), "profile_text": (4,),
              "slant_of_plane": (3,), "face_frame": (2,), "face_ref": (2,), "bounds": (2, 3), "bounds64": (2, 3), "edge": (2,), "colour": (2,), "profile_colour": (1,), "edges_coloured": (2,), "edge_colour": (2,), "manifold": (1,), "hit": (2,), "edge_curve": (2,),
              "intersect": (4,), "intersection_chain": (2,), "intersection_curve": (2,), "intersection_overlap": (2,), "svg_text": (1,), "drawing_svg_text": (1, 3),
              "solid_profile_hits": (5,), "hits_piece": (2, 3, 4),
@@ -566,7 +578,12 @@ class _WasmLibrary:
              "fem_mesh": (5,), "fem_mesh_view": (1,), "fem_mesh_edge": (2,), "fem_mesh_vertex": (2,),
              "fem_mesh_open_edge": (2, 3, 4), "fem_mesh_folded_edge": (2, 3, 4)}
     # strings the C side returns as `const char*`, and the module decodes
-    _TEXTS = {"version", "build_date", "face_kind", "license_info", "brep_layout_id"}
+    # `solid_name`'s wasm export returns an empty string for an unnamed solid
+    # (see its own doc comment in crates/cadaclysm-wasm/src/blacksmith.rs), and
+    # `str(result).encode()` below turns that into `b""` -- falsy exactly like
+    # the `None` a null `const char*` decodes to on the native backend, so
+    # every call site's `if raw` reads the same on both.
+    _TEXTS = {"version", "build_date", "face_kind", "license_info", "brep_layout_id", "assembly_name", "solid_name"}
 
     def __init__(self):
         import js
@@ -958,6 +975,32 @@ def _rgb(colour):
     raise BuildError(f'coloured: a colour is "#rgb", "#rrggbb" or (r, g, b) in 0..1, not {colour!r}')
 
 
+def _indices(value, call, param, edges=False):
+    """A list argument as indices: `value` must be a list -- any iterable but a string, a
+    number or an `Edge` -- and each item an index (a whole number, 0 to 4294967295) or,
+    where `edges`, an `Edge`. Refused here, named, before the kernel is asked: one edge is
+    `[edge]`, never read as none (docs/superpowers/specs/2026-09-25-list-arguments-refused-clearly-design.md)."""
+    what = "Edge objects or indices" if edges else "indices"
+    if isinstance(value, (str, bytes, numbers.Number, Edge)) or not hasattr(value, "__iter__"):
+        thing = "an Edge" if isinstance(value, Edge) else repr(value)
+        raise TypeError(f"{call}: {param} must be a list of {what}, not {thing}")
+    item_is = "an Edge or an index" if edges else "an index"
+    out = []
+    for i, item in enumerate(value):
+        if edges and isinstance(item, Edge):
+            out.append(item.index)
+            continue
+        try:
+            k = operator.index(item)
+        except TypeError:
+            shown = "an Edge" if isinstance(item, Edge) else repr(item)
+            raise TypeError(f"{call}: {param}[{i}] is not {item_is}: {shown}") from None
+        if not 0 <= k <= 0xFFFFFFFF:
+            raise ValueError(f"{call}: {param}[{i}] is not {item_is}: {k}")
+        out.append(k)
+    return out
+
+
 def _checked(handle, what: str):
     if not handle:
         _fail(what)
@@ -1171,13 +1214,24 @@ def _viewer():
                               "cadaclysm_blacksmith.py -- reinstall cadaclysm", name="cadaclysm_viewer")
 
 
-def _edges_as_polylines(runs):
-    """A list of (k,3) runs as the loader's (points, counts) pair."""
+def _edges_as_polylines(runs, colours=None):
+    """A list of (k,3) runs as the loader's (points, counts, matrix, rgb) batches: one
+    batch in the viewer's own edge colour, or, given `colours` (an rgb or None per
+    run, as `Solid.edge_polyline_colours` hands them), one batch per colour in the
+    order the colours first appear, None being the viewer's own."""
     import numpy as np
 
     if not runs:
         return []
-    return [(np.concatenate(runs), np.array([len(r) for r in runs], "u4"), None, None)]
+    # An empty `colours` is `Solid.edge_polyline_colours`'s own "nothing painted" (the
+    # `colours or [None] * len(runs)` below takes it the same as None); anything else has
+    # to be one per run.
+    if colours and len(colours) != len(runs):
+        raise ValueError(f"edge colours: {len(colours)} for {len(runs)} polylines")
+    groups = {}
+    for run, rgb in zip(runs, colours or [None] * len(runs)):
+        groups.setdefault(rgb, []).append(run)
+    return [(np.concatenate(g), np.array([len(r) for r in g], "u4"), None, rgb) for rgb, g in groups.items()]
 
 
 def _lines_only(options):
@@ -1420,7 +1474,7 @@ class Profile:
         if corners is None:
             picked, count = None, 0
         else:
-            ks = [int(k) for k in corners]
+            ks = _indices(corners, "round", "corners")
             picked, count = (c_uint32 * len(ks))(*ks), len(ks)
         return Profile(_lib().cadaclysm_blacksmith_profile_round(self._handle, radius, picked, count, bool(open)))
 
@@ -1470,17 +1524,22 @@ class Profile:
         offsets = [p.offsets[i] for i in range(p.polyline_count + 1)]
         return [points[a:b] for a, b in zip(offsets, offsets[1:])]
 
+    def _lines(self, tolerance):
+        """The outline as the loader's polyline batch, in the profile's colour."""
+        runs = self.polylines(tolerance)
+        return _edges_as_polylines(runs, [self.colour] * len(runs))
+
     def show(self, tolerance=0.05, **options) -> None:
         """Draw the outline and holes with the viewer in use, from the top by default.
         Keywords as `Solid.show`; `edges=` is accepted and ignored, the lines being the
         whole picture."""
         _not_in_the_notebook()
-        _draw(self, "show", [], _edges_as_polylines(self.polylines(tolerance)), "top", _lines_only(options))
+        _draw(self, "show", [], self._lines(tolerance), "top", _lines_only(options))
 
     def view(self, tolerance=0.05, **options):
         """Orbit the outline with the viewer in use; returns (azimuth, elevation, zoom)."""
         _not_in_the_notebook()
-        return _draw(self, "view", [], _edges_as_polylines(self.polylines(tolerance)), "top", _lines_only(options))
+        return _draw(self, "view", [], self._lines(tolerance), "top", _lines_only(options))
 
     def svg(self, path=None, *, view="top", **words) -> "str | None":
         """This profile's own loops as SVG, from directly above by default -- a
@@ -1745,6 +1804,24 @@ class Solid:
         if not self._handle:
             raise BuildError("solid: closed")
         return self._handle
+
+    # -- naming
+    def named(self, name: str) -> "Solid":
+        """This solid, named `name`. The name rides through an operation with
+        exactly one source solid (`place`, `translate`, `coloured`, `fillet`, ...)
+        and is dropped by one with two or more (`join`, `cut`, `common`, ...) and
+        by a fresh primitive or sweep -- see `Solid.name`. It is what `Assembly.place`
+        defaults a placement's own name to, and the product name a lone named
+        solid gets when written to STEP (`step`/`step_text`). Refused for an
+        empty name."""
+        return Solid(_lib().cadaclysm_blacksmith_named(self._h(), name.encode("utf-8")))
+
+    @property
+    def name(self) -> "str | None":
+        """This solid's name, or `None` if it has none -- what `named` set, kept
+        or dropped by whatever built this solid (see `named`)."""
+        raw = _lib().cadaclysm_blacksmith_solid_name(self._h())
+        return raw.decode("utf-8") if raw else None
 
     # -- building
     @staticmethod
@@ -2036,7 +2113,7 @@ class Solid:
         keep their surfaces, loops and curves, in their order, so an index into
         the result is this one's with the dropped ones closed up. An open sheet
         unless nothing was dropped."""
-        ks = [int(k) for k in faces]
+        ks = _indices(faces, "drop_faces", "faces")
         return Solid(_lib().cadaclysm_blacksmith_drop_faces(self._h(), (c_uint32 * len(ks))(*ks), len(ks)))
 
     def extrude_faces(self, height) -> "Solid":
@@ -2047,6 +2124,11 @@ class Solid:
 
     def translate(self, dx, dy, dz) -> "Solid":
         return Solid(_lib().cadaclysm_blacksmith_translate(self._h(), dx, dy, dz))
+
+    def scaled(self, factor) -> "Solid":
+        """This solid scaled by `factor` about the origin: every length times
+        `factor`, exactly. `factor` must be positive and finite."""
+        return Solid(_lib().cadaclysm_blacksmith_scaled(self._h(), factor))
 
     def rotate(self, axis, radians) -> "Solid":
         return Solid(_lib().cadaclysm_blacksmith_rotate(self._h(), _axis(axis), radians))
@@ -2401,7 +2483,8 @@ class Solid:
 
     def _drawn(self, tolerance, options):
         positions, normals, indices = self.mesh(tolerance)
-        edges = _edges_as_polylines(self.edge_polylines(tolerance)) if options.get("edges", True) else []
+        edges = (_edges_as_polylines(self.edge_polylines(tolerance), self.edge_polyline_colours(tolerance))
+                 if options.get("edges", True) else [])
         whole = self.colour
         colours = [self.face_colour(f) for f in range(self.faces)]
         if all(c == whole for c in colours):
@@ -2537,7 +2620,7 @@ class Solid:
         r, g, b = _rgb(colour)
         if edges is None:
             return Solid(_lib().cadaclysm_blacksmith_edges_coloured(self._h(), None, 0, r, g, b))
-        which = [e.index if isinstance(e, Edge) else int(e) for e in edges]
+        which = _indices(edges, "edges_coloured", "edges", edges=True)
         arr = (c_uint32 * len(which))(*which)
         return Solid(_lib().cadaclysm_blacksmith_edges_coloured(self._h(), arr, len(which), r, g, b))
 
@@ -2612,7 +2695,7 @@ class Solid:
 
     def fillet(self, edges, radius, tolerance=1e-6, progress=None) -> "Solid":
         """`edges`: `Edge` objects or their indices."""
-        which = [e.index if isinstance(e, Edge) else int(e) for e in edges]
+        which = _indices(edges, "fillet", "edges", edges=True)
         arr = (c_uint32 * len(which))(*which)
         cb, _keep = _progress(progress)
         return Solid(_lib().cadaclysm_blacksmith_fillet(self._h(), arr, len(which), radius, tolerance, cb, None))
@@ -2620,7 +2703,7 @@ class Solid:
     def chamfer(self, edges, distance, tolerance=1e-6) -> "Solid":
         """`fillet` with a flat bevel: each edge cut back `distance` along both
         its faces. `edges`: `Edge` objects or their indices."""
-        which = [e.index if isinstance(e, Edge) else int(e) for e in edges]
+        which = _indices(edges, "chamfer", "edges", edges=True)
         arr = (c_uint32 * len(which))(*which)
         return Solid(_lib().cadaclysm_blacksmith_chamfer(self._h(), arr, len(which), distance, tolerance))
 
@@ -2640,9 +2723,16 @@ class Solid:
         is the box 5 taller and 5 wider. A face on the same curved surface as one
         before it, and joined to it, moved with that one and is not pushed twice."""
         cb, _keep = _progress(progress)
-        if isinstance(face, int):
-            return Solid(_lib().cadaclysm_blacksmith_push_pull(self._h(), face, distance, tolerance, cb, None))
-        which = [int(f) for f in face]
+        # One face is an index on its own (a numpy integer too); anything else is the list form.
+        if isinstance(face, numbers.Integral) and not isinstance(face, bool):
+            k = operator.index(face)
+            if not 0 <= k <= 0xFFFFFFFF:
+                raise ValueError(f"push_pull: face must be a face index or a list of indices, not {k}")
+            return Solid(_lib().cadaclysm_blacksmith_push_pull(self._h(), k, distance, tolerance, cb, None))
+        if face is None or isinstance(face, (bool, str, bytes, Edge)) or isinstance(face, numbers.Number):
+            thing = "an Edge" if isinstance(face, Edge) else repr(face)
+            raise TypeError(f"push_pull: face must be a face index or a list of indices, not {thing}")
+        which = _indices(face, "push_pull", "face")
         arr = (c_uint32 * len(which))(*which)
         return Solid(_lib().cadaclysm_blacksmith_push_pull_faces(self._h(), arr, len(which), distance, tolerance, cb, None))
 
@@ -2703,7 +2793,7 @@ class Solid:
 
     def shell(self, thickness, open=(), tolerance=1e-6, progress=None) -> "Solid":  # noqa: A002
         """`open`: face indices removed so the hollow is reachable."""
-        which = [int(f) for f in open]
+        which = _indices(open, "shell", "open")
         arr = (c_uint32 * len(which))(*which)
         cb, _keep = _progress(progress)
         return Solid(_lib().cadaclysm_blacksmith_shell(self._h(), thickness, arr, len(which), tolerance, cb, None))
@@ -2723,6 +2813,132 @@ class Solid:
         reader is given the schema's **path** only when it names an existing file,
         since it carries every built-in schema itself and there is no file here to
         read a `FILE_SCHEMA` line out of."""
+        try:
+            import cadaclysm
+        except ImportError:
+            raise ImportError(
+                "to_scene needs the reader module: put crates/cadaclysm-capi/examples on sys.path "
+                "and build its library with `cargo build --release -p cadaclysm-capi`"
+            ) from None
+        schema_path = _schema_file(schema)
+        return cadaclysm.open_memory(self.step_text(schema).encode(), "stp", schema=schema_path)
+
+
+class Assembly:
+    """A mutable tree of placements: a name, and zero or more solids or other
+    assemblies placed in it at a frame. `place` returns the placement's name
+    (`name`, or a default -- see below) so a caller can keep it. Unlike
+    `Solid`, placing shares rather than copies: placing one assembly under
+    another does not snapshot it, so a later `place` on the shared one shows
+    up wherever it already sits (see `place`'s own note on cycles). `close()`
+    frees this handle; so does leaving a `with` block or the garbage
+    collector -- it does **not** free what was placed here if that is still
+    reachable from somewhere else (an assembly's `Arc`, shared, per the C
+    ABI's own doc)."""
+
+    __slots__ = ("_handle",)
+
+    def __init__(self, name: str):
+        self._handle = _checked(_lib().cadaclysm_blacksmith_assembly_new(name.encode("utf-8")), "assembly")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+    def __del__(self):
+        self.close()
+
+    def close(self) -> None:
+        h, self._handle = getattr(self, "_handle", None), None
+        if h and _library is not None:
+            _library.cadaclysm_blacksmith_assembly_free(h)
+
+    def _h(self):
+        if not self._handle:
+            raise BuildError("assembly: closed")
+        return self._handle
+
+    @property
+    def name(self) -> str:
+        return _text(_lib().cadaclysm_blacksmith_assembly_name(self._h()))
+
+    def place(self, thing: "Solid | Assembly", frame, name: "str | None" = None) -> str:
+        """Place `thing` (a `Solid` or another `Assembly`) at `frame` (twelve
+        numbers, right-handed and orthonormal) in this assembly, called `name`
+        -- or, with `name` left as `None`, `thing`'s own name (`thing.name` for
+        a `Solid`, `"part"` for an unnamed one, or the placed assembly's
+        `name`), numbered past any already taken here (`"bolt"`, `"bolt 2"`,
+        ...). An explicit `name` already taken here is refused. Placing an
+        assembly that is this one, or anywhere above this one in the tree
+        already, is refused (`BuildError` naming the cycle), since writing
+        that out would never terminate. Returns the placement's name."""
+        raw = name.encode("utf-8") if name is not None else None
+        if isinstance(thing, Assembly):
+            text = _lib().cadaclysm_blacksmith_assembly_place_assembly(self._h(), thing._h(), _frame(frame), raw)
+        elif isinstance(thing, Solid):
+            text = _lib().cadaclysm_blacksmith_assembly_place_solid(self._h(), thing._h(), _frame(frame), raw)
+        else:
+            raise BuildError(f"place: a Solid or an Assembly, not {type(thing).__name__}")
+        if not text:
+            _fail("assembly_place")
+        if _WASM:
+            return text   # the wasm returns the text itself, nothing to free
+        try:
+            return ctypes.string_at(text).decode("utf-8")
+        finally:
+            _lib().cadaclysm_blacksmith_string_free(text)
+
+    def link(self, name: str, placements) -> None:
+        """Declare a rigid link `name` over placements of this assembly, by their names
+        (any iterable of str). Written as an AP242 kinematic link when the assembly is
+        written; see spec 2026-09-25-blacksmith-mechanisms-design.md for the rules."""
+        if isinstance(placements, (str, bytes)):
+            raise TypeError("link: placements are a list of names, not one string")
+        names = [str(p) for p in placements]
+        raw = (c_char_p * len(names))(*[n.encode("utf-8") for n in names])
+        if not _lib().cadaclysm_blacksmith_assembly_link(self._h(), name.encode("utf-8"), raw, len(names)):
+            _fail("assembly_link")
+
+    def joint(self, name: str, start: str, end: str) -> None:
+        """Connect this assembly's links `start` and `end` (kept in that order), as an
+        AP242 kinematic joint."""
+        if not _lib().cadaclysm_blacksmith_assembly_joint(
+            self._h(), name.encode("utf-8"), start.encode("utf-8"), end.encode("utf-8")
+        ):
+            _fail("assembly_joint")
+
+    def step_text(self, schema=None, unit="mm") -> str:
+        """This assembly, and everything placed under it, as one STEP file: this
+        assembly the root product, each sub-assembly and each distinct part (the
+        same solid with the same paint and name) written once, each placement an
+        occurrence named as it was placed (`write_step_assembly_text`'s shape,
+        built from a tree instead of a flat placement list). `schema` and `unit`
+        as `Solid.step_text`. Refused (`BuildError`) if this assembly, or a
+        sub-assembly reachable from it, places nothing -- a reader would never
+        show it."""
+        if unit not in UNITS:
+            raise BuildError(f"unit must be one of {sorted(UNITS)}")
+        text = _lib().cadaclysm_blacksmith_assembly_step(self._h(), _schema_text(schema), UNITS[unit])
+        if not text:
+            _fail("assembly_step")
+        if _WASM:
+            return text   # the wasm returns the text itself, nothing to free
+        try:
+            return ctypes.string_at(text).decode("utf-8")
+        finally:
+            _lib().cadaclysm_blacksmith_string_free(text)
+
+    def step(self, path, schema=None, unit="mm") -> None:
+        """`step_text` written to `path`."""
+        _FsPath(path).write_text(self.step_text(schema, unit), encoding="utf-8")
+
+    def to_scene(self, schema=None) -> "cadaclysm.Scene":
+        """This assembly as a reader `Scene`, through STEP text and
+        `cadaclysm.open_memory` -- `Solid.to_scene`'s own door, over the whole
+        tree instead of one solid. Needs `cadaclysm.py` importable and its
+        library built."""
         try:
             import cadaclysm
         except ImportError:
@@ -3626,13 +3842,14 @@ def _schema_text(schema):
 
 def write_step_text(solids, schema=None, unit="mm") -> str:
     """`schema` is one of four things: `None` (the kernel's built-in AP203, or AP242
-    when any solid or face is coloured -- AP203 has no colour entities); the
+    when any solid, face or edge is coloured -- AP203 has no colour entities); the
     path of a schema file (a string or `Path` with no newline in it, naming an
     existing file), read and sent as EXPRESS text; the bare name of a built-in
     schema (case-insensitive, e.g. `"AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF"`
     -- an unknown name raises `BuildError`); or a custom schema's own EXPRESS text.
-    Colours (`coloured`) are written as STEP styling where the schema has it, so
-    `Node.colour` reads them back; a named schema without it writes the solids bare."""
+    Colours (`coloured`, `edges_coloured`) are written as STEP styling where the
+    schema has it, so `Node.colour` reads a solid's back; a named schema without it
+    writes the solids bare."""
     if unit not in UNITS:
         raise BuildError(f"unit must be one of {sorted(UNITS)}")
     handles = (c_void_p * len(solids))(*[s._h() for s in solids])

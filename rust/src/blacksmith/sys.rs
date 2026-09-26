@@ -20,6 +20,15 @@ pub struct CadaclysmBlacksmithSolid {
     _private: [u8; 0],
 }
 
+/// A mutable tree of placements -- a name, and zero or more solids or other assemblies
+/// placed in it at a frame. Opaque; freed with `cadaclysm_blacksmith_assembly_free`, which
+/// does not free what was placed in it if that is still reachable from somewhere else, as
+/// placing shares the placed handle's data rather than copying it.
+#[repr(C)]
+pub struct CadaclysmBlacksmithAssembly {
+    _private: [u8; 0],
+}
+
 /// A closed outline with holes, or an open chain. Opaque.
 #[repr(C)]
 pub struct CadaclysmBlacksmithProfile {
@@ -256,10 +265,84 @@ pub struct CadaclysmBlacksmithProfileList {
     _private: [u8; 0],
 }
 
+/// One solid meshed for a solver. Opaque: owned, and freed with
+/// `cadaclysm_blacksmith_fem_mesh_free`. Every pointer any accessor writes is borrowed
+/// from it -- **except** the `.msh` text, which is the caller's and is released with
+/// `cadaclysm_blacksmith_string_free`, where the reader library's is a borrowed slot on
+/// its own handle.
+#[repr(C)]
+pub struct CadaclysmBlacksmithFemMesh {
+    _private: [u8; 0],
+}
+
+/// `CadaclysmBlacksmithFemOptions`, the kernel's twin of `CadaclysmFemOptions`: `size` is
+/// the struct's growth room, filled by `cadaclysm_blacksmith_fem_options_init` as
+/// `CadaclysmBlacksmithSvgOptions` is filled by its own init.
+#[repr(C)]
+pub struct CadaclysmBlacksmithFemOptions {
+    pub size: usize,
+    pub tolerance: f64,
+    pub max_size: f64,
+}
+
+/// `CadaclysmBlacksmithFemMeshView`: the flat arrays of one FEM mesh and its summary, every
+/// pointer borrowed from the handle and read once when it is made.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CadaclysmBlacksmithFemMeshView {
+    pub nodes: *const f64,
+    pub node_count: u32,
+    pub triangles: *const u32,
+    pub triangle_count: u32,
+    pub triangle_face: *const u32,
+    pub node_kind: *const u32,
+    pub node_entity: *const u32,
+    pub face_count: u32,
+    pub edge_count: u32,
+    pub vertex_count: u32,
+    pub open_edge_count: u32,
+    pub folded_edge_count: u32,
+    pub watertight: bool,
+    pub from_mesh: bool,
+    pub min_angle: f64,
+    pub worst_triangle: u32,
+    pub longest_edge: f64,
+}
+
+/// `CadaclysmBlacksmithFemEdge`: one B-rep edge of a FEM mesh. `id` is the **solid's own**
+/// edge id; `face_b` and `end_b` are [`CADACLYSM_BLACKSMITH_NONE`] where there is none, and
+/// `0` is a real face and a real vertex.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CadaclysmBlacksmithFemEdge {
+    pub id: u32,
+    pub nodes: *const u32,
+    pub node_count: u32,
+    pub runs: *const u32,
+    pub run_count: u32,
+    pub face_a: u32,
+    pub face_b: u32,
+    pub end_a: u32,
+    pub end_b: u32,
+    pub closed: bool,
+    pub seam: bool,
+}
+
+/// `CadaclysmBlacksmithFemVertex`: one B-rep vertex of a FEM mesh. `point` is zeroed and
+/// meaningless unless `has_position`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CadaclysmBlacksmithFemVertex {
+    pub node: u32,
+    pub point: [f64; 3],
+    pub has_position: bool,
+}
+
 /// `CadaclysmBlacksmithProgress`: `(phase, done, total, user)`, or null for none.
 pub type CadaclysmBlacksmithProgress = Option<unsafe extern "C" fn(*const c_char, usize, usize, *mut c_void)>;
 
 type Solid = CadaclysmBlacksmithSolid;
+type Assembly = CadaclysmBlacksmithAssembly;
 type Profile = CadaclysmBlacksmithProfile;
 type Path2 = CadaclysmBlacksmithPath;
 type SweepPath = CadaclysmBlacksmithSweepPath;
@@ -267,6 +350,7 @@ type Progress = CadaclysmBlacksmithProgress;
 type Hits = CadaclysmBlacksmithHits;
 type Intersection = CadaclysmBlacksmithIntersection;
 type ProfileList = CadaclysmBlacksmithProfileList;
+type Fem = CadaclysmBlacksmithFemMesh;
 
 entry_points! {
     Api, ENTRY_POINTS;
@@ -408,6 +492,7 @@ entry_points! {
     fn cadaclysm_blacksmith_drop_faces(solid: *const Solid, faces: *const u32, count: usize) -> *mut Solid;
     fn cadaclysm_blacksmith_place(solid: *const Solid, frame: *const f64) -> *mut Solid;
     fn cadaclysm_blacksmith_translate(solid: *const Solid, dx: f64, dy: f64, dz: f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_scaled(solid: *const Solid, factor: f64) -> *mut Solid;
     fn cadaclysm_blacksmith_rotate(solid: *const Solid, axis: *const f64, radians: f64) -> *mut Solid;
     fn cadaclysm_blacksmith_mirror(solid: *const Solid, plane: *const f64) -> *mut Solid;
     fn cadaclysm_blacksmith_coloured(solid: *const Solid, face: u32, r: f64, g: f64, b: f64) -> *mut Solid;
@@ -520,6 +605,22 @@ entry_points! {
     fn cadaclysm_blacksmith_svg_options_init(options: *mut CadaclysmBlacksmithSvgOptions);
     fn cadaclysm_blacksmith_svg_text(solids: *const *const Solid, count: usize, options: *const CadaclysmBlacksmithSvgOptions) -> *mut c_char;
     fn cadaclysm_blacksmith_svg(solids: *const *const Solid, count: usize, path: *const c_char, options: *const CadaclysmBlacksmithSvgOptions) -> bool;
+    fn cadaclysm_blacksmith_fem_options_init(options: *mut CadaclysmBlacksmithFemOptions);
+    fn cadaclysm_blacksmith_fem_mesh(
+        solid: *const Solid,
+        placement: *const f64,
+        options: *const CadaclysmBlacksmithFemOptions,
+        progress: Progress,
+        user: *mut c_void
+    ) -> *mut Fem;
+    fn cadaclysm_blacksmith_fem_mesh_view(m: *const Fem, out: *mut CadaclysmBlacksmithFemMeshView) -> bool;
+    fn cadaclysm_blacksmith_fem_mesh_edge(m: *const Fem, i: u32, out: *mut CadaclysmBlacksmithFemEdge) -> bool;
+    fn cadaclysm_blacksmith_fem_mesh_vertex(m: *const Fem, i: u32, out: *mut CadaclysmBlacksmithFemVertex) -> bool;
+    fn cadaclysm_blacksmith_fem_mesh_open_edge(m: *const Fem, i: u32, a: *mut u32, b: *mut u32, brep_edge: *mut u32) -> bool;
+    fn cadaclysm_blacksmith_fem_mesh_folded_edge(m: *const Fem, i: u32, a: *mut u32, b: *mut u32, brep_edge: *mut u32) -> bool;
+    fn cadaclysm_blacksmith_fem_mesh_msh_text(m: *const Fem) -> *mut c_char;
+    fn cadaclysm_blacksmith_fem_mesh_save_msh(m: *const Fem, path: *const c_char) -> bool;
+    fn cadaclysm_blacksmith_fem_mesh_free(m: *mut Fem);
     // The additive pair a drawing takes solids and profiles together through -- see
     // `crate::blacksmith::svg_text_of`/`svg_of`.
     fn cadaclysm_blacksmith_drawing_svg_text(
@@ -537,6 +638,25 @@ entry_points! {
         path: *const c_char,
         options: *const CadaclysmBlacksmithSvgOptions
     ) -> bool;
+
+    fn cadaclysm_blacksmith_named(solid: *const Solid, name: *const c_char) -> *mut Solid;
+    fn cadaclysm_blacksmith_solid_name(solid: *const Solid) -> *const c_char;
+    fn cadaclysm_blacksmith_assembly_new(name: *const c_char) -> *mut Assembly;
+    fn cadaclysm_blacksmith_assembly_free(assembly: *mut Assembly);
+    fn cadaclysm_blacksmith_assembly_name(assembly: *const Assembly) -> *const c_char;
+    fn cadaclysm_blacksmith_assembly_place_solid(
+        assembly: *mut Assembly,
+        solid: *const Solid,
+        frame: *const f64,
+        name: *const c_char
+    ) -> *mut c_char;
+    fn cadaclysm_blacksmith_assembly_place_assembly(
+        assembly: *mut Assembly,
+        placed: *const Assembly,
+        frame: *const f64,
+        name: *const c_char
+    ) -> *mut c_char;
+    fn cadaclysm_blacksmith_assembly_step(assembly: *const Assembly, schema: *const c_char, unit: u32) -> *mut c_char;
 }
 
 // ---- loading --------------------------------------------------------------------

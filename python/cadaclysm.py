@@ -74,6 +74,8 @@ __all__ = [
     "FemEdge",
     "FemMesh",
     "FemVertex",
+    "Joint",
+    "Link",
     "Manifold",
     "Mesh",
     "Meshlet",
@@ -348,6 +350,16 @@ class _Polylines(ctypes.Structure):
     ]
 
 
+class _EdgeColors(ctypes.Structure):
+    #: `CadaclysmEdgeColors`: four floats per polyline of the matching `_Polylines`.
+    #: Pinned against the header by `tests/bindings.rs`; `Node.edge_colours` /
+    #: `surface_edge_colours` read it.
+    _fields_ = [
+        ("rgba", POINTER(c_float)),
+        ("count", c_uint32),
+    ]
+
+
 class _Beziers(ctypes.Structure):
     #: `CadaclysmBeziers`: four control points a curve (`count * 12` floats) and four
     #: weights a curve (`count * 4`). Pinned against the header by `tests/bindings.rs`.
@@ -589,6 +601,8 @@ _ENTRY_POINTS = [
     ("cadaclysm_node_bounds_placed64", _Bounds64, [c_void_p, c_uint32, POINTER(c_double)]),
     ("cadaclysm_node_is_meshed", c_bool, [c_void_p, c_uint32]),
     ("cadaclysm_node_surface_edges", _Polylines, [c_void_p, c_uint32]),
+    ("cadaclysm_node_surface_edge_beziers", _Beziers, [c_void_p, c_uint32]),
+    ("cadaclysm_node_surface_edge_colors", _EdgeColors, [c_void_p, c_uint32]),
     ("cadaclysm_node_surface_isocurves", _Polylines, [c_void_p, c_uint32]),
     ("cadaclysm_node_surface_pick", c_bool,
      [c_void_p, c_uint32, POINTER(c_double), POINTER(c_double), POINTER(c_double)]),
@@ -609,7 +623,16 @@ _ENTRY_POINTS = [
     ("cadaclysm_diagnostic", c_char_p, [c_void_p, c_uint32]),
     ("cadaclysm_geometry_diagnostic_count", c_uint32, [c_void_p]),
     ("cadaclysm_geometry_diagnostic", c_char_p, [c_void_p, c_uint32]),
+    ("cadaclysm_link_count", c_uint32, [c_void_p]),
+    ("cadaclysm_link_name", c_char_p, [c_void_p, c_uint32]),
+    ("cadaclysm_link_node_count", c_uint32, [c_void_p, c_uint32]),
+    ("cadaclysm_link_node", c_uint32, [c_void_p, c_uint32, c_uint32]),
+    ("cadaclysm_joint_count", c_uint32, [c_void_p]),
+    ("cadaclysm_joint_name", c_char_p, [c_void_p, c_uint32]),
+    ("cadaclysm_joint_start", c_uint32, [c_void_p, c_uint32]),
+    ("cadaclysm_joint_end", c_uint32, [c_void_p, c_uint32]),
     ("cadaclysm_node_edges", _Polylines, [c_void_p, c_uint32]),
+    ("cadaclysm_node_edge_colors", _EdgeColors, [c_void_p, c_uint32]),
     ("cadaclysm_node_curves", _Polylines, [c_void_p, c_uint32]),
     ("cadaclysm_node_isocurves", _Polylines, [c_void_p, c_uint32]),
     ("cadaclysm_node_edge_beziers", _Beziers, [c_void_p, c_uint32]),
@@ -1410,6 +1433,85 @@ class Placement:
 
     def __repr__(self):
         return f"Placement(index={self.index}, geometry={self.geometry.index})"
+
+
+class Link:
+    """A rigid body of the file's mechanism: the nodes that move together when a joint
+    moves it. From `Scene.links`; borrows from the scene like `Node`."""
+
+    __slots__ = ("scene", "index")
+
+    def __init__(self, scene: "Scene", index: int):
+        self.scene = scene
+        self.index = index
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, Link)
+            and other.index == self.index
+            and other.scene is self.scene
+        )
+
+    def __hash__(self):
+        return hash((id(self.scene), self.index))
+
+    def __repr__(self):
+        return f"<Link {self.index} {self.name}>"
+
+    @property
+    def name(self) -> str:
+        """The link's name as the file gives it."""
+        return _text(_lib().cadaclysm_link_name(self.scene._handle, self.index))
+
+    @property
+    def nodes(self) -> "list[Node]":
+        """The topmost node of each subtree this link moves, in node order: moving these
+        moves everything under them."""
+        library, handle = _lib(), self.scene._handle
+        return [
+            Node(self.scene, library.cadaclysm_link_node(handle, self.index, i))
+            for i in range(library.cadaclysm_link_node_count(handle, self.index))
+        ]
+
+
+class Joint:
+    """A connection between two links of the file's mechanism. Topology only: how it
+    moves is not read yet. From `Scene.joints`."""
+
+    __slots__ = ("scene", "index")
+
+    def __init__(self, scene: "Scene", index: int):
+        self.scene = scene
+        self.index = index
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, Joint)
+            and other.index == self.index
+            and other.scene is self.scene
+        )
+
+    def __hash__(self):
+        return hash((id(self.scene), self.index))
+
+    def __repr__(self):
+        return f"<Joint {self.index} {self.name}>"
+
+    @property
+    def name(self) -> str:
+        """The joint's name as the file gives it."""
+        return _text(_lib().cadaclysm_joint_name(self.scene._handle, self.index))
+
+    @property
+    def start(self) -> Link:
+        """The link this joint starts at, in the file's order -- not a parent: a
+        mechanism may be a network with loops."""
+        return Link(self.scene, _lib().cadaclysm_joint_start(self.scene._handle, self.index))
+
+    @property
+    def end(self) -> Link:
+        """The link this joint ends at."""
+        return Link(self.scene, _lib().cadaclysm_joint_end(self.scene._handle, self.index))
 
 
 # ---- drawing ----------------------------------------------------------------
@@ -2502,6 +2604,24 @@ class Node:
         return self._polylines(_lib().cadaclysm_node_edges)
 
     @property
+    def edge_colours(self) -> "list":
+        """One RGBA per polyline of `edges`, `None` for an edge the file does not style;
+        empty when nothing is styled."""
+        return self._edge_colours(_lib().cadaclysm_node_edge_colors)
+
+    @property
+    def surface_edge_colours(self) -> "list":
+        """`edge_colours` for `surface_edges`."""
+        return self._edge_colours(_lib().cadaclysm_node_surface_edge_colors)
+
+    def _edge_colours(self, fn) -> "list":
+        raw = fn(self.scene._handle, self.index)
+        if not raw.rgba or not raw.count:
+            return []
+        flat = raw.rgba[: raw.count * 4]
+        return [None if flat[4 * i + 3] < 0 else tuple(flat[4 * i: 4 * i + 4]) for i in range(raw.count)]
+
+    @property
     def curves(self) -> Polylines:
         """Its free curves, as polylines. A 2D drawing is all of these."""
         return self._polylines(_lib().cadaclysm_node_curves)
@@ -2627,6 +2747,15 @@ class Node:
         frame (see `Scene.surface_matrix`); empty without surfaces. A shared edge
         appears once from each face."""
         return self._polylines(_lib().cadaclysm_node_surface_edges)
+
+    @property
+    def surface_edge_beziers(self) -> Beziers:
+        """Its edges as the exact curves, where the reader has them without meshing
+        -- a Rhino extrusion's rims are its profile -- and empty everywhere else, so
+        a caller drawing from surfaces tries this before `surface_edges`, whose trims
+        are thinned to the mesh tolerance. The same segments as `edge_beziers`, in
+        the same space: not the surfaces' frame, so no `Scene.surface_matrix`."""
+        return self._beziers(_lib().cadaclysm_node_surface_edge_beziers)
 
     @property
     def surface_isocurves(self) -> Polylines:
@@ -2873,6 +3002,18 @@ class Scene:
             _text(library.cadaclysm_diagnostic(handle, i))
             for i in range(library.cadaclysm_diagnostic_count(handle))
         ]
+
+    @property
+    def links(self) -> "list[Link]":
+        """The rigid bodies of the file's mechanism, in the file's order; empty for a file
+        that records none."""
+        return [Link(self, i) for i in range(_lib().cadaclysm_link_count(self._handle))]
+
+    @property
+    def joints(self) -> "list[Joint]":
+        """The connections between the links, in the file's order; empty for a file that
+        records none."""
+        return [Joint(self, i) for i in range(_lib().cadaclysm_joint_count(self._handle))]
 
     @property
     def geometry_diagnostics(self) -> "list[str]":

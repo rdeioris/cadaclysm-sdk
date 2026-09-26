@@ -581,6 +581,17 @@ typedef struct CadaclysmPolylines {
 } CadaclysmPolylines;
 
 /**
+ * A part's per-polyline edge colours: four floats per polyline of the matching
+ * [`CadaclysmPolylines`] (`cadaclysm_node_edges` / `cadaclysm_node_surface_edges`), in
+ * its order, `-1, -1, -1, -1` for an edge the file does not style. `{NULL, 0}` when
+ * nothing on the part is styled. Borrows from the scene.
+ */
+typedef struct CadaclysmEdgeColors {
+  const float *rgba;
+  uint32_t count;
+} CadaclysmEdgeColors;
+
+/**
  * A set of rational cubic Bézier segments. Both pointers borrow from the scene.
  *
  * `points` holds `count * 4 * 3` floats — four control points to a segment,
@@ -913,7 +924,7 @@ typedef struct CadaclysmFemMeshView {
   /**
    * The body's faces; `triangle_face` and a `node_kind` of 2 index them. **The same faces
    * [`cadaclysm_node_surfaces`](crate::cadaclysm_node_surfaces) hands over**, in the same
-   * order and numbered the same way -- measured over `as1-ac-214.stp` nodes 1, 3 and 4, where
+   * order and numbered the same way -- measured over `as1-ac-214.stp` nodes 1, 3 and 5, where
    * this count and that list's own length agree at 18, 16 and 16, both in the file's own
    * frame. So a caller reads a triangle's surface, and its trims, from there.
    */
@@ -1988,6 +1999,76 @@ uint32_t cadaclysm_geometry_diagnostic_count(const struct CadaclysmScene *scene)
 const char *cadaclysm_geometry_diagnostic(const struct CadaclysmScene *scene, uint32_t index);
 
 /**
+ * How many kinematic links the file describes: rigid bodies of a mechanism, each moving
+ * the nodes [`cadaclysm_link_node`] lists. 0 for a file that records no mechanism, which
+ * is every format but STEP today.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_link_count(const struct CadaclysmScene *scene);
+
+/**
+ * A link's name as the file gives it, or null past the end. Borrows from the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+const char *cadaclysm_link_name(const struct CadaclysmScene *scene, uint32_t link);
+
+/**
+ * How many nodes a link moves: the topmost node of each subtree it owns, so moving
+ * them moves everything under them. 0 past the end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_link_node_count(const struct CadaclysmScene *scene, uint32_t link);
+
+/**
+ * One of them, in ascending node order, or [`CADACLYSM_NONE`] past either end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_link_node(const struct CadaclysmScene *scene, uint32_t link, uint32_t index);
+
+/**
+ * How many joints the file's mechanism has: connections between two links. Topology
+ * only; how a joint moves is not read yet.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_joint_count(const struct CadaclysmScene *scene);
+
+/**
+ * A joint's name as the file gives it, or null past the end. Borrows from the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+const char *cadaclysm_joint_name(const struct CadaclysmScene *scene, uint32_t joint);
+
+/**
+ * The link a joint starts at, as an index for [`cadaclysm_link_name`] and
+ * [`cadaclysm_link_node`], or [`CADACLYSM_NONE`] past the end. The file's order, not
+ * parent and child: a mechanism may be a network with loops.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_joint_start(const struct CadaclysmScene *scene, uint32_t joint);
+
+/**
+ * The link a joint ends at, as [`cadaclysm_joint_start`] gives its other end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_joint_end(const struct CadaclysmScene *scene, uint32_t joint);
+
+/**
  * This part's feature edges, as polylines to draw an overlay from.
  *
  * Flattened by the document at the part's own scale — capi does not choose a
@@ -2002,6 +2083,16 @@ const char *cadaclysm_geometry_diagnostic(const struct CadaclysmScene *scene, ui
  * `scene` must be null or a handle from [`cadaclysm_open`].
  */
 struct CadaclysmPolylines cadaclysm_node_edges(const struct CadaclysmScene *scene, uint32_t node);
+
+/**
+ * This part's edge colours, one per polyline of [`cadaclysm_node_edges`] -- see
+ * [`CadaclysmEdgeColors`]. Built with the edges, in the same cache.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+struct CadaclysmEdgeColors cadaclysm_node_edge_colors(const struct CadaclysmScene *scene,
+                                                      uint32_t node);
 
 /**
  * This part's face boundaries, taken from its trimmed surfaces. Both pointers borrow from
@@ -2032,6 +2123,40 @@ struct CadaclysmPolylines cadaclysm_node_edges(const struct CadaclysmScene *scen
  */
 struct CadaclysmPolylines cadaclysm_node_surface_edges(const struct CadaclysmScene *scene,
                                                        uint32_t node);
+
+/**
+ * This part's edges as the exact curves, **where the reader has them without meshing** --
+ * and empty everywhere else, so a caller drawing from surfaces tries this first and falls
+ * back to [`cadaclysm_node_surface_edges`]. Borrowed from the scene until it is closed.
+ *
+ * **Why the trims are not always the answer.** [`cadaclysm_node_surface_edges`] exists
+ * because a B-rep reader's exact edges come out of the mesher, so asking
+ * [`cadaclysm_node_edge_beziers`] for them meshes the body a surface-drawn caller skipped
+ * meshing. But the trims are thinned to the mesh tolerance, so on the exact surface they
+ * cut chords across a crest the surface rounds -- on `curve.3dm`'s corrugated sheet, at
+ * 0.46% of the profile, plainly. A part whose edges are simply the curves the reader read
+ * -- a Rhino extrusion's rims are its profile, carried to either end -- has them for
+ * nothing, and hands them over here.
+ *
+ * When not empty, the same segments [`cadaclysm_node_edge_beziers`] returns, in the same
+ * convention -- **not** the surfaces' own frame the trims are in, so they take no
+ * [`cadaclysm_surface_matrix`]. Asking never meshes the part.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+struct CadaclysmBeziers cadaclysm_node_surface_edge_beziers(const struct CadaclysmScene *scene,
+                                                            uint32_t node);
+
+/**
+ * This part's surface edge colours, one per polyline of [`cadaclysm_node_surface_edges`] --
+ * see [`CadaclysmEdgeColors`]. Built with the surface edges, in the same cache.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+struct CadaclysmEdgeColors cadaclysm_node_surface_edge_colors(const struct CadaclysmScene *scene,
+                                                              uint32_t node);
 
 /**
  * This part's isocurves, taken from its trimmed surfaces and clipped to the trims. Both

@@ -1042,6 +1042,94 @@ public struct Placement: Hashable, CustomStringConvertible {
     public var description: String { "Placement(index: \(index))" }
 }
 
+// ---- links and joints --------------------------------------------------------------------------
+
+/// A rigid body of the file's mechanism: the nodes that move together when a joint moves it.
+/// From `Scene.links`; borrows from the scene like `Node`.
+public struct Link: Hashable, CustomStringConvertible {
+    /// The scene it belongs to.
+    public let scene: Scene
+    /// Its index in `Scene.links`.
+    public let index: Int
+
+    /// The link `index` of `scene`.
+    public init(_ scene: Scene, _ index: Int) {
+        precondition(index >= 0 && index <= Int(UInt32.max), "Link: index \(index) out of range")
+        self.scene = scene
+        self.index = index
+    }
+
+    private var raw: UInt32 { UInt32(index) }
+
+    /// The link's name as the file gives it.
+    public var name: String { borrowed(cadaclysm_link_name(scene.live("Link"), raw)) }
+
+    /// The topmost node of each subtree this link moves, in node order: moving these moves
+    /// everything under them.
+    public var nodes: [Node] {
+        let handle = scene.live("Link")
+        return (0..<cadaclysm_link_node_count(handle, raw)).map {
+            Node(scene, Int(cadaclysm_link_node(handle, raw, $0)))
+        }
+    }
+
+    /// Same scene, same index.
+    public static func == (lhs: Link, rhs: Link) -> Bool {
+        lhs.scene === rhs.scene && lhs.index == rhs.index
+    }
+
+    /// Hashes the scene's identity and the index.
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(ObjectIdentifier(scene))
+        hasher.combine(index)
+    }
+
+    /// `Link(index: …)`.
+    public var description: String { "Link(index: \(index))" }
+}
+
+/// A connection between two links of the file's mechanism. Topology only: how it moves is not
+/// read yet. From `Scene.joints`.
+public struct Joint: Hashable, CustomStringConvertible {
+    /// The scene it belongs to.
+    public let scene: Scene
+    /// Its index in `Scene.joints`.
+    public let index: Int
+
+    /// The joint `index` of `scene`.
+    public init(_ scene: Scene, _ index: Int) {
+        precondition(index >= 0 && index <= Int(UInt32.max), "Joint: index \(index) out of range")
+        self.scene = scene
+        self.index = index
+    }
+
+    private var raw: UInt32 { UInt32(index) }
+
+    /// The joint's name as the file gives it.
+    public var name: String { borrowed(cadaclysm_joint_name(scene.live("Joint"), raw)) }
+
+    /// The link this joint starts at, in the file's order -- not a parent: a mechanism may be
+    /// a network with loops.
+    public var start: Link { Link(scene, Int(cadaclysm_joint_start(scene.live("Joint"), raw))) }
+
+    /// The link this joint ends at.
+    public var end: Link { Link(scene, Int(cadaclysm_joint_end(scene.live("Joint"), raw))) }
+
+    /// Same scene, same index.
+    public static func == (lhs: Joint, rhs: Joint) -> Bool {
+        lhs.scene === rhs.scene && lhs.index == rhs.index
+    }
+
+    /// Hashes the scene's identity and the index.
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(ObjectIdentifier(scene))
+        hasher.combine(index)
+    }
+
+    /// `Joint(index: …)`.
+    public var description: String { "Joint(index: \(index))" }
+}
+
 // ---- breps ------------------------------------------------------------------------------------
 
 /// A body's exact B-rep -- the trimmed surfaces its mesh is cut from -- shared with the scene
@@ -1203,6 +1291,370 @@ public final class Meshlets {
         children.withUnsafeMutableBufferPointer { cadaclysm_meshlet_children(h, idx, $0.baseAddress) }
         return Meshlet(index: i, level: Int(cadaclysm_meshlet_level(h, idx)), group: Int(cadaclysm_meshlet_group(h, idx)),
                        error: cadaclysm_meshlet_error(h, idx), positions: positions, normals: normals, indices: indices, children: children)
+    }
+}
+
+// ---- the FEM surface mesh ------------------------------------------------------------------------
+
+/// One B-rep edge of a FEM mesh: the chain of nodes along it, and where that chain breaks. The
+/// numbers are copied out; `nodes` and `runs` are `NativeArray` views borrowed from the `FemMesh`,
+/// as its own arrays are, and go with it.
+///
+/// `nodes` are this mesh's node indices in order along the edge, its end vertices included; a
+/// closed edge repeats no node. **`runs` says where the chain breaks**: read
+/// `nodes[runs[i] ..< runs[i + 1]]` (the last run to the end) as one polyline and join nothing
+/// across a boundary -- the two ends either side of one are two points of the edge with no mesh
+/// edge between them, a crack along the edge or a stretch of it the mesher sampled on one face
+/// only. `[0]` is the ordinary answer, and reading `nodes` as one polyline without looking here
+/// jumps the gap silently.
+///
+/// `faces` is `(face_a, face_b)` and `ends` is `(end_a, end_b)`, the second of each `UInt32.max`
+/// (the ABI's NONE) where there is none -- an open body's rim, or both ends at one vertex (a
+/// closed edge, a circle's rim, a full-turn seam). **`0` is a real face and a real vertex, not a
+/// sentinel.** Which end comes first is the first trim's direction and means nothing else: the
+/// pair bounds the edge, it does not orient it.
+public struct FemEdge {
+    /// The **body's own** edge id -- not this mesh's edge index, and on a read body rarely equal
+    /// to it. `FemMesh.edges` is a densely renumbered subset of the body's edges, ascending by
+    /// id, with every edge collapsed to a point left out, so edge 0 of a STEP body's mesh
+    /// routinely reports an id in the hundreds. Everything else here that names an edge means the
+    /// *index* -- a `FemMesh.nodeKind` of 1 read through `FemMesh.nodeEntity`, the third number
+    /// of a census row, and the `edge_<i>` physical group of `FemMesh.mshText()` -- and this is
+    /// the one way back from any of them to the topology the file wrote.
+    public let id: UInt32
+    /// The edge's nodes in order along it, its end vertices included.
+    public let nodes: NativeArray<UInt32>
+    /// Where each connected run of `nodes` begins; `[0]` for one chain along the whole edge.
+    public let runs: NativeArray<UInt32>
+    /// `(face_a, face_b)`, the second `UInt32.max` on an open body's rim.
+    public let faces: (UInt32, UInt32)
+    /// `(end_a, end_b)`, the second `UInt32.max` where both ends are one vertex.
+    public let ends: (UInt32, UInt32)
+    /// The nodes make one loop. Never true where there is more than one run.
+    public let closed: Bool
+    /// Bounded twice by one face: a closed surface's seam, not a real boundary. Both `faces` are
+    /// then that same face.
+    public let seam: Bool
+
+    init(_ raw: CadaclysmFemEdge, _ owner: FemMesh) {
+        id = raw.id
+        nodes = NativeArray(owner: owner, base: raw.nodes, count: Int(raw.node_count))
+        runs = NativeArray(owner: owner, base: raw.runs, count: Int(raw.run_count))
+        faces = (raw.face_a, raw.face_b)
+        ends = (raw.end_a, raw.end_b)
+        closed = raw.closed
+        seam = raw.seam
+    }
+}
+
+extension FemEdge: CustomStringConvertible {
+    public var description: String {
+        "FemEdge(id=\(id), nodes=\(nodes.count), runs=\(runs.count), faces=\(faces), ends=\(ends), "
+            + "closed=\(closed), seam=\(seam))"
+    }
+}
+
+/// One B-rep vertex of a FEM mesh: the node the mesh put there, if any, and where the topology
+/// says it is, if that is known. Plain data, all of it copied out.
+public struct FemVertex: Equatable, CustomStringConvertible {
+    /// The mesh node at this vertex, or `UInt32.max` (the ABI's NONE) where the mesh has none
+    /// there.
+    ///
+    /// **A sentinel here is ordinary, not a fault**: the analysis rebuilds a vertex wherever two
+    /// trims meet, and a pole's polyline runs give a sphere 48 of them where the mesh has 2
+    /// points, so a caller walking these skips the sentinel rather than treating it as a gap.
+    public let node: UInt32
+    /// Where the vertex is, in the same space and under the same placement as `FemMesh.nodes` --
+    /// the file's own vertex rather than a mesh node, so the two can differ by the reader's
+    /// rounding. **Meaningless unless `hasPosition`**: it is all zeros then, a point no geometry
+    /// has and one a solver would read as a node at the origin.
+    public let point: SIMD3<Double>
+    /// `point` was read and placed. False where every trim meeting at this vertex is a curve with
+    /// no geometry to read an end off -- reported as this flag rather than as a plausible-looking
+    /// `(0, 0, 0)`.
+    public let hasPosition: Bool
+
+    init(_ raw: CadaclysmFemVertex) {
+        node = raw.node
+        point = SIMD3(raw.point.0, raw.point.1, raw.point.2)
+        hasPosition = raw.has_position
+    }
+
+    public var description: String {
+        "FemVertex(node=\(node), point=\(point), hasPosition=\(hasPosition))"
+    }
+}
+
+/// One body meshed for a solver: nodes welded by bits, triangles wound outward, every node tagged
+/// with the lowest-dimension B-rep entity it lies on, and every crack reported rather than
+/// closed. What `Node.femMesh` returns, and **owned by you**: `free()` it, or let the last
+/// reference to it go.
+///
+/// **A handle rather than a snapshot, and it owns everything it lends.** The five flat arrays are
+/// `NativeArray` views into the library's own memory, as `Node.mesh`'s are and for the same
+/// reason -- a solver mesh is megabytes, and copying it to hand it over would cost that twice --
+/// but the owner of every one of them is **this object** rather than the `Scene`:
+/// `Scene.close()` neither frees a FEM mesh nor stales one, meshing the body again does not
+/// either, and a FEM mesh outlives the scene it was built through. Only `free()` ends its views,
+/// or the last reference to it going.
+///
+/// So a view **cannot** outlive the memory it reads: it holds this object, which keeps the handle
+/// alive, and it checks the owner before every element it hands over -- a read after `free()` traps
+/// rather than touching freed memory, and it traps on the **read**, not only when the array is
+/// asked for (measured, in a release build). Asking for a view after `free()` traps there and
+/// then, as reading any property of a closed `Scene` does. That is what most of the other wrappers
+/// cannot do: their view is the platform's own array type with nowhere to hold a reference back to
+/// the handle, so a collector can free it under a live view. `copy()` on anything that must
+/// outlive the mesh anyway, or `Array(view)`.
+public final class FemMesh: NativeMemoryOwner {
+    private var handle: OpaquePointer?
+    /// Read once, when the handle is made: every pointer in the view is built with the handle and
+    /// never moves (nothing in this ABI is built lazily), so asking again per accessor would be
+    /// one C call for the same answer.
+    private let raw: CadaclysmFemMeshView
+
+    /// The handle a `cadaclysm_node_fem_mesh` call returned, with its view read once -- or the
+    /// library's own reason, the handle given back first.
+    init(handle: OpaquePointer) throws {
+        var view = CadaclysmFemMeshView()
+        guard cadaclysm_fem_mesh_view(handle, &view) else {
+            let reason = lastErrorOr("fem mesh view")
+            cadaclysm_fem_mesh_free(handle)
+            throw CadaclysmError(reason)
+        }
+        self.handle = handle
+        raw = view
+    }
+
+    deinit { free() }
+
+    /// "the FEM mesh is freed" once `free()` has run, else nil: what the views this mesh lent
+    /// check before every read.
+    public var nativeMemoryInvalidReason: String? { handle == nil ? "the FEM mesh is freed" : nil }
+
+    /// Whether `free()` has run.
+    public var freed: Bool { handle == nil }
+
+    /// Give the mesh back, and with it every view taken from it. Idempotent; the last reference
+    /// going does the same.
+    public func free() {
+        guard let handle = handle else { return }
+        self.handle = nil
+        cadaclysm_fem_mesh_free(handle)
+    }
+
+    /// The handle, or the error a throwing member reports for a freed mesh.
+    private func live(_ member: String = #function) throws -> OpaquePointer {
+        guard let handle = handle else { throw CadaclysmError("FemMesh.\(member): the FEM mesh is freed") }
+        return handle
+    }
+
+    /// A view of this mesh's own memory. Asked for after `free()` it **traps**, as reading any
+    /// property of a closed `Scene` or a freed `Meshlets` does in this wrapper and for the same
+    /// reason: the alternative is handing back a pointer into freed memory. A view taken while the
+    /// mesh was alive traps too, on the read rather than here -- `NativeArray` asks its owner
+    /// before every element.
+    private func view<Element>(_ base: UnsafePointer<Element>?, _ count: Int,
+                               _ member: String = #function) -> NativeArray<Element> {
+        guard handle != nil else { preconditionFailure("FemMesh.\(member): the FEM mesh is freed") }
+        return NativeArray(owner: self, base: base, count: count)
+    }
+
+    // -- the flat arrays, borrowed from this handle
+
+    /// Every node's position, three doubles each -- placed, and in the space `Node.femMesh` and
+    /// `fromMesh` describe. Every node is used by at least one triangle.
+    public var nodes: NativeArray<Double> { view(raw.nodes, Int(raw.node_count) * 3) }
+
+    /// Three node indices a triangle, wound outward -- a mirroring placement is wound back.
+    public var triangles: NativeArray<UInt32> { view(raw.triangles, Int(raw.triangle_count) * 3) }
+
+    /// Which B-rep face each triangle lies on, one per triangle, into the body's `faceCount`
+    /// faces.
+    public var triangleFace: NativeArray<UInt32> { view(raw.triangle_face, Int(raw.triangle_count)) }
+
+    /// What each node lies on -- `0` a B-rep vertex, `1` an edge, `2` a face -- one per node: the
+    /// lowest-dimension entity it lies on, which is the `.msh` format's own classification rule.
+    /// `nodeEntity` says which entity of that kind.
+    public var nodeKind: NativeArray<UInt32> { view(raw.node_kind, Int(raw.node_count)) }
+
+    /// Which vertex, edge or face each node lies on, read by the matching `nodeKind`: an index
+    /// into `vertices`, into `edges`, or into the body's faces.
+    public var nodeEntity: NativeArray<UInt32> { view(raw.node_entity, Int(raw.node_count)) }
+
+    // -- the topology
+
+    /// The body's faces; `triangleFace` and a `nodeKind` of `2` index them. **The same faces
+    /// `Node.surfaces` hands over**, in the same order, so a caller reads a triangle's surface
+    /// and its trims from there.
+    public var faceCount: UInt32 { raw.face_count }
+
+    /// One `FemEdge` per B-rep edge, in the order a `nodeKind` of `1` indexes them. Empty for a
+    /// `fromMesh` body, which has no B-rep edges at all.
+    ///
+    /// **This list's own numbering, not the body's**: each `FemEdge.id` carries the body's own
+    /// edge id.
+    public var edges: [FemEdge] {
+        get throws {
+            let handle = try live()
+            return try (0..<raw.edge_count).map { i in
+                var out = CadaclysmFemEdge()
+                guard cadaclysm_fem_mesh_edge(handle, i, &out) else {
+                    throw CadaclysmError(lastErrorOr("fem mesh edge \(i)"))
+                }
+                return FemEdge(out, self)
+            }
+        }
+    }
+
+    /// One `FemVertex` per B-rep vertex, in the order a `nodeKind` of `0` indexes them. Empty for
+    /// a `fromMesh` body.
+    public var vertices: [FemVertex] {
+        get throws {
+            let handle = try live()
+            return try (0..<raw.vertex_count).map { i in
+                var out = CadaclysmFemVertex()
+                guard cadaclysm_fem_mesh_vertex(handle, i, &out) else {
+                    throw CadaclysmError(lastErrorOr("fem mesh vertex \(i)"))
+                }
+                return FemVertex(out)
+            }
+        }
+    }
+
+    // -- the crack census
+
+    /// Every crack, as `(a, b, brepEdge)`: a directed mesh edge `(a, b)` with no `(b, a)`, and
+    /// the B-rep edge both nodes lie on or `UInt32.max` where they share none.
+    ///
+    /// **Empty unless the body's topology is closed -- for a B-rep body**, whose mesh is
+    /// otherwise not asked about at all: such a body reports `watertight` false with this and
+    /// `foldedEdges` both empty, and *that trio together* says "not asked", not "nothing found".
+    ///
+    /// **A `fromMesh` body is the other case, and the opposite one.** A bare mesh carries no
+    /// topology to say whether it ought to close, so its census always runs over the welded
+    /// triangles, and an empty one there really does mean "nothing found".
+    public var openEdges: [(UInt32, UInt32, UInt32)] {
+        get throws { try census({ cadaclysm_fem_mesh_open_edge($0, $1, $2, $3, $4) }, raw.open_edge_count, "open edge") }
+    }
+
+    /// Every fold, as `openEdges` reports a crack: a directed mesh edge used by more than one
+    /// triangle.
+    ///
+    /// **A body can be folded without being open** -- a solid no thicker than a line leaves no
+    /// hole for an open edge to find -- and the closure census's own known-bad bodies are folds
+    /// rather than open cracks. A caller that checks `openEdges` alone calls such a body sound.
+    /// Empty under the same rule.
+    public var foldedEdges: [(UInt32, UInt32, UInt32)] {
+        get throws { try census({ cadaclysm_fem_mesh_folded_edge($0, $1, $2, $3, $4) }, raw.folded_edge_count, "folded edge") }
+    }
+
+    /// One flattened census, row by row: the shape `openEdges` and `foldedEdges` share, so the
+    /// two cannot drift.
+    ///
+    /// Both call sites wrap the C function in a closure rather than passing it by value. That
+    /// is not style: `cadaclysm-capi/tests/bindings.rs`'s parity gate reads a wrapper's calls as
+    /// `cadaclysm_...(`, so a bare function reference is a use the gate cannot see -- measured,
+    /// when the FEM names came off `PARITY_PENDING_READER` and Swift alone was reported as
+    /// lacking these two.
+    private func census(_ call: (OpaquePointer?, UInt32, UnsafeMutablePointer<UInt32>?,
+                                UnsafeMutablePointer<UInt32>?, UnsafeMutablePointer<UInt32>?) -> Bool,
+                        _ count: UInt32, _ what: String) throws -> [(UInt32, UInt32, UInt32)] {
+        let handle = try live()
+        return try (0..<count).map { i in
+            var a: UInt32 = 0, b: UInt32 = 0, edge: UInt32 = 0
+            guard call(handle, i, &a, &b, &edge) else {
+                throw CadaclysmError(lastErrorOr("fem mesh \(what) \(i)"))
+            }
+            return (a, b, edge)
+        }
+    }
+
+    // -- the summary
+
+    /// The welded mesh closes -- every directed mesh edge paired with its reverse and none used
+    /// twice -- and, for a B-rep body, so does the topology behind it. **False for every B-rep
+    /// body whose topology is not closed**, whose mesh is then not asked about; read `openEdges`
+    /// for what an empty census beside a false here does and does not mean.
+    ///
+    /// A `fromMesh` body has no topology to ask of, so this says only that its triangles close: a
+    /// closed render mesh reports true with nothing exact behind it at all.
+    public var watertight: Bool { raw.watertight }
+
+    /// This came from the scene's own mesh rather than from a brep: one face, every node on face
+    /// `0`, no edges and no vertices.
+    ///
+    /// **It is also which space the mesh is in.** A B-rep body's FEM mesh is in the file's own
+    /// units and axes, whatever `Convention` the scene was opened with, because it is taken off
+    /// the brep -- and a brep is in the file's own space for the reason `Brep` gives. A node with
+    /// no brep falls back to the scene's mesh, which **is** converted, so that one comes back in
+    /// the scene's convention, wound counter-clockwise about the outward normal even where the
+    /// convention winds the other way. Under a non-native convention those are two different
+    /// spaces.
+    ///
+    /// **And it is which contract the census is reporting under**: read `openEdges`.
+    public var fromMesh: Bool { raw.from_mesh }
+
+    /// The smallest interior angle of any triangle, in degrees. There is always one: a body that
+    /// meshed to no triangles is a refusal, not a mesh.
+    public var minAngle: Double { raw.min_angle }
+
+    /// The triangle with that angle, as an index into `triangles` (three entries each).
+    public var worstTriangle: UInt32 { raw.worst_triangle }
+
+    /// The longest triangle edge, placed. **The figure to check against `Node.femMesh`'s
+    /// `maxSize`, and the only one that says what the mesh actually is**: `maxSize` bounds the
+    /// boundary segments and merely *targets* the interior -- measured at 1.03x `maxSize` on a
+    /// face whose parameters run unevenly -- and one small enough beside the body to reach the
+    /// mesher's own piece and station ceilings is not honoured at all. A caller that asked for an
+    /// element size reads this to find out whether it got one.
+    public var longestEdge: Double { raw.longest_edge }
+
+    // -- out
+
+    /// The mesh as Gmsh 4.1 ASCII `.msh` text: an entity per B-rep vertex, edge and face, a
+    /// volume where the body closes, and a physical group naming each.
+    ///
+    /// **On this side of the ABI the library's text is borrowed** -- a slot on this handle,
+    /// replaced by the next call on it and gone when the mesh is freed. It is copied into a
+    /// `String` here, so what comes back is the caller's own and outlives the handle; nothing has
+    /// to be freed. The kernel library's `Blacksmith.FemMesh.mshText()` is the other way round:
+    /// an owned string, released by that wrapper with `cadaclysm_blacksmith_string_free`. A
+    /// reader porting one side's reasoning onto the other leaks or double-frees.
+    ///
+    /// **No unlicensed notice is printed here.** `Node.femMesh` gave it once when the mesh was
+    /// built, and this ABI deliberately does not repeat it on either `.msh` call -- where the
+    /// kernel library notices on both of its writers and *not* on its builder. Each matches its
+    /// own siblings.
+    ///
+    /// Throws for a mesh the writer refuses, naming the field it cannot honour, and for a freed
+    /// handle.
+    public func mshText() throws -> String {
+        guard let text = cadaclysm_fem_mesh_msh_text(try live()) else {
+            throw CadaclysmError(lastErrorOr("msh text"))
+        }
+        // Copied, not freed: the pointer is the handle's own slot.
+        return String(cString: text)
+    }
+
+    /// `mshText()` written to `path` by the library itself: the same bytes from the same writer,
+    /// straight to the file rather than through the borrowed slot, so a text asked of this handle
+    /// on another thread cannot be freed under the write.
+    ///
+    /// Throws for a mesh the writer refuses or a file it cannot write, naming the path. No notice
+    /// here either; see `mshText()`.
+    public func saveMsh(_ path: String) throws {
+        guard cadaclysm_fem_mesh_save_msh(try live(), path) else {
+            throw CadaclysmError(lastErrorOr("could not write \(path)"))
+        }
+    }
+}
+
+extension FemMesh: CustomStringConvertible {
+    public var description: String {
+        freed ? "FemMesh(freed)"
+            : "FemMesh(nodes=\(raw.node_count), triangles=\(raw.triangle_count), "
+                + "watertight=\(raw.watertight), fromMesh=\(raw.from_mesh))"
     }
 }
 
@@ -1394,6 +1846,72 @@ public struct Node: Hashable, CustomStringConvertible {
     /// level by. Zero at level 0.
     public func lodError(_ level: Int) -> Float { cadaclysm_node_lod_error(live(), raw, UInt32(level)) }
 
+    /// This node's body meshed for a solver, as a `FemMesh`: nodes welded by bits -- two mesh
+    /// points are one node only where their coordinates are the same doubles, so no tolerance
+    /// ever merges two distinct points and a crack stays a crack -- triangles wound outward, and
+    /// every node tagged with the lowest-dimension B-rep entity it lies on.
+    ///
+    /// `tolerance` is the chordal tolerance in model units, finite and above zero, and **it alone
+    /// governs how closely the mesh follows the geometry**. `maxSize` is a size ceiling, finite
+    /// and zero or more, `0` being no ceiling (curvature alone): **it bounds the boundary and
+    /// targets the interior**, which is not a longest-element-edge guarantee -- it adds boundary
+    /// nodes without refining boundary geometry, and `FemMesh.longestEdge` is what the mesh
+    /// actually came to, the figure a solver caller checks.
+    ///
+    /// **Neither is checked here.** On the mesh-only path below the library reads no options at
+    /// all: a `tolerance` of 0, -1 or NaN and a `maxSize` of -1 or NaN all come back as a mesh,
+    /// while the B-rep path refuses each in its own words. A wrapper that validated either field
+    /// would pass every test written against the B-rep path and be wrong; both go through as
+    /// given. `0.01` and `0.0` are `FemOptions::default()`'s own figures, restated here so the
+    /// signature says what a caller gets -- the library's struct is still filled by
+    /// `cadaclysm_fem_options_init` first, so a field added to it later defaults without this
+    /// code being touched.
+    ///
+    /// `placement` is **sixteen** numbers, column-major, as `boundsPlaced` takes them (nil for
+    /// the identity), applied in `Double` throughout. The kernel library's `Solid.femMesh` takes
+    /// **twelve** instead -- a `Frame`: origin, x, y, z -- so a caller moving between the two
+    /// reformats the placement. The length is the one thing this wrapper checks itself, because
+    /// the ABI is handed a bare pointer and cannot.
+    ///
+    /// **The space is the body's, not the scene's, for a B-rep -- and the scene's for a mesh**,
+    /// which `FemMesh.fromMesh` is the flag for; read it there, because under a non-native
+    /// convention the two are different spaces. Meshed in the part's own frame, following the hop
+    /// from an instance to the shape it draws that `mesh` follows, so a node instanced six times
+    /// meshes once.
+    ///
+    /// **A cracked body is not a failure**: it comes back with `FemMesh.watertight` false and its
+    /// cracks in `FemMesh.openEdges` / `FemMesh.foldedEdges`, folded edges as prominent as open
+    /// ones, and nothing is welded shut to make it look sound. Throws for a tolerance or size the
+    /// mesher refuses, a placement that is not sixteen finite and invertible numbers, a node with
+    /// neither a brep nor a mesh (an assembly, a storey, a layer, an empty definition, a curve),
+    /// and a body that meshes to no triangles at all.
+    ///
+    /// Prints the unlicensed notice once, here, and not again on either of `FemMesh`'s `.msh`
+    /// calls.
+    public func femMesh(tolerance: Double = 0.01, maxSize: Double = 0.0,
+                        placement: [Double]? = nil) throws -> FemMesh {
+        if let placement = placement, placement.count != 16 {
+            throw CadaclysmError("femMesh: a placement is 16 numbers, not \(placement.count)")
+        }
+        var options = CadaclysmFemOptions()
+        // `init` writes `sizeof(CadaclysmFemOptions)` bytes as the *library* knows that type,
+        // into the struct this package's own copy of the header declares -- the two are the same
+        // declaration, the header being imported rather than transcribed. `size` is then set to
+        // this header's sizeof, which is what the growth rule asks of a caller.
+        cadaclysm_fem_options_init(&options)
+        options.size = MemoryLayout<CadaclysmFemOptions>.size
+        options.tolerance = tolerance
+        options.max_size = maxSize
+        let handle = try withUnsafePointer(to: &options) { opts -> OpaquePointer in
+            let made: OpaquePointer? = placement.map { matrix in
+                matrix.withUnsafeBufferPointer { cadaclysm_node_fem_mesh(live(), raw, $0.baseAddress, opts) }
+            } ?? cadaclysm_node_fem_mesh(live(), raw, nil, opts)
+            guard let made = made else { throw CadaclysmError(lastErrorOr("fem_mesh")) }
+            return made
+        }
+        return try FemMesh(handle: handle)
+    }
+
     /// Its faces as exact surfaces plus the trim loops that cut them, each in the surface's own
     /// (u, v). Nothing is meshed for it. Empty where the reader has no parametric description.
     /// In the file's frame -- see `Scene.surfaceMatrix`.
@@ -1440,6 +1958,20 @@ public struct Node: Hashable, CustomStringConvertible {
 
     /// Its feature edges as polylines, for an outline overlay. Builds the geometry if needed.
     public var edges: Polylines { polylines(cadaclysm_node_edges(live(), raw)) }
+
+    private func colours(_ got: CadaclysmEdgeColors) -> [SIMD4<Float>?] {
+        guard let rgba = got.rgba, got.count > 0 else { return [] }
+        let buffer = UnsafeBufferPointer(start: rgba, count: Int(got.count) * 4)
+        return (0..<Int(got.count)).map { i -> SIMD4<Float>? in
+            let w = buffer[4 * i + 3]
+            guard w >= 0 else { return nil }
+            return SIMD4(buffer[4 * i], buffer[4 * i + 1], buffer[4 * i + 2], w)
+        }
+    }
+
+    /// One RGBA per polyline of `edges`, nil for an edge the file does not style; empty when
+    /// nothing is styled.
+    public var edgeColours: [SIMD4<Float>?] { colours(cadaclysm_node_edge_colors(live(), raw)) }
 
     /// Its free curves as polylines; a 2D drawing is all of these.
     public var curves: Polylines { polylines(cadaclysm_node_curves(live(), raw)) }
@@ -1534,6 +2066,16 @@ public struct Node: Hashable, CustomStringConvertible {
     /// tessellation, where `edges` meshes the part. In the surfaces' own frame (see
     /// `Scene.surfaceMatrix`); empty without surfaces.
     public var surfaceEdges: Polylines { polylines(cadaclysm_node_surface_edges(live(), raw)) }
+
+    /// Its edges as the exact curves, where the reader has them without meshing -- a Rhino
+    /// extrusion's rims are its profile -- and empty everywhere else, so a caller drawing from
+    /// surfaces tries this before `surfaceEdges`, whose trims are thinned to the mesh
+    /// tolerance. The same segments as `edgeBeziers`, in the same space: not the surfaces'
+    /// frame, so no `Scene.surfaceMatrix`.
+    public var surfaceEdgeBeziers: Beziers { beziers(cadaclysm_node_surface_edge_beziers(live(), raw)) }
+
+    /// `edgeColours` for `surfaceEdges`.
+    public var surfaceEdgeColours: [SIMD4<Float>?] { colours(cadaclysm_node_surface_edge_colors(live(), raw)) }
 
     /// Its isocurves taken from its trimmed surfaces and clipped to the trims, without meshing;
     /// a flat face gets none. In the surfaces' frame; empty without surfaces.
@@ -1858,6 +2400,17 @@ public final class Scene: NativeMemoryOwner, CustomStringConvertible {
     public var geometryDiagnostics: [String] {
         let handle = live()
         return (0..<cadaclysm_geometry_diagnostic_count(handle)).map { borrowed(cadaclysm_geometry_diagnostic(handle, $0)) }
+    }
+
+    /// Every rigid body of the file's mechanism. Empty for a file that records no mechanism.
+    public var links: [Link] {
+        (0..<Int(cadaclysm_link_count(live()))).map { Link(self, $0) }
+    }
+
+    /// Every connection between two links of the file's mechanism. Empty for a file that
+    /// records no mechanism.
+    public var joints: [Joint] {
+        (0..<Int(cadaclysm_joint_count(live()))).map { Joint(self, $0) }
     }
 
     /// The archive member this was read from, or nil for a plain file.

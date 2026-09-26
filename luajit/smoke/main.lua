@@ -75,6 +75,256 @@ local function fmt(v)
   return table.concat(out, ", ")
 end
 
+-- A quarter turn about z then 100 along x: the reader takes it as sixteen
+-- column-major numbers, the kernel as twelve (origin, x, y, z). (x, y, z) -> (100 - y, x, z).
+local TURNED_16 = { 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 100, 0, 0, 1 }
+local TURNED_12 = { 100, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, 1 }
+local function turned(x, y, z) return 100 - y, x, z end
+
+-- The box of a FEM mesh's nodes, as one printable line.
+local function fem_span(mesh)
+  local min, max = { math.huge, math.huge, math.huge }, { -math.huge, -math.huge, -math.huge }
+  for i = 0, mesh.node_count - 1 do
+    for k = 1, 3 do
+      local v = mesh.nodes[3 * i + k - 1]
+      min[k], max[k] = math.min(min[k], v), math.max(max[k], v)
+    end
+  end
+  return ("(%s)..(%s)"):format(fmt(min), fmt(max))
+end
+
+-- Every node of `plain` must reappear in `placed` at `turned(node)`. What catches a
+-- placement dropped, doubled or transposed: the bodies here sit off the axis of the
+-- turn in the plane it acts in, which is what makes a transpose visible at all.
+local function fem_placement_reached(what, plain, placed)
+  if placed.node_count ~= plain.node_count then
+    error(("%s: the placement changed the node count, %d against %d"):format(what, placed.node_count, plain.node_count))
+  end
+  for i = 0, plain.node_count - 1 do
+    local x, y, z = plain.nodes[3 * i], plain.nodes[3 * i + 1], plain.nodes[3 * i + 2]
+    local ex, ey, ez = turned(x, y, z)
+    local found = false
+    for k = 0, placed.node_count - 1 do
+      if math.abs(placed.nodes[3 * k] - ex) < 1e-9 and math.abs(placed.nodes[3 * k + 1] - ey) < 1e-9
+        and math.abs(placed.nodes[3 * k + 2] - ez) < 1e-9 then
+        found = true
+        break
+      end
+    end
+    if not found then
+      error(("%s: the placement did not send (%g, %g, %g) to (%g, %g, %g) -- the placed nodes span %s")
+        :format(what, x, y, z, ex, ey, ez, fem_span(placed)))
+    end
+  end
+end
+
+-- What every FEM mesh must say about itself, whichever ABI built it.
+local function fem_sound(what, mesh)
+  if mesh.nodes == nil or mesh.triangles == nil or mesh.node_count == 0 or mesh.triangle_count == 0 then
+    error(what .. ": a FEM mesh with no nodes or no triangles is a refusal, not a mesh")
+  end
+  for i = 0, mesh.triangle_count * 3 - 1 do
+    if mesh.triangles[i] >= mesh.node_count then error(what .. ": a triangle index past the nodes") end
+  end
+  for i = 0, mesh.triangle_count - 1 do
+    if mesh.triangle_face[i] >= mesh.face_count then error(what .. ": a triangle_face past the faces") end
+  end
+  -- Read once: `edges` and `vertices` are fields computed when read, one ABI call a row.
+  local edges, vertices = mesh.edges, mesh.vertices
+  for i = 0, mesh.node_count - 1 do
+    local kind, entity = mesh.node_kind[i], mesh.node_entity[i]
+    local bound = (kind == 0 and #vertices) or (kind == 1 and #edges) or (kind == 2 and mesh.face_count)
+    if not bound or entity >= bound then
+      error(("%s: node %d has kind %s entity %s, which its own kind cannot index")
+        :format(what, i, tostring(kind), tostring(entity)))
+    end
+  end
+  if not (mesh.min_angle > 0 and mesh.min_angle <= 60) then
+    error(what .. ": min_angle " .. tostring(mesh.min_angle))
+  end
+  if not (mesh.longest_edge > 0) or mesh.worst_triangle >= mesh.triangle_count then
+    error(what .. ": longest_edge " .. tostring(mesh.longest_edge) .. " worst " .. tostring(mesh.worst_triangle))
+  end
+  for i, e in ipairs(edges) do
+    if #e.runs < 1 or e.runs[1] ~= 0 or #e.nodes < 2 then
+      error(("%s: edge %d's chain does not start at 0"):format(what, i - 1))
+    end
+    for _, n in ipairs(e.nodes) do
+      if n >= mesh.node_count then error(("%s: edge %d names node %d"):format(what, i - 1, n)) end
+    end
+    local rebuilt = {}
+    for _, chain in ipairs(e:chains()) do
+      for _, n in ipairs(chain) do rebuilt[#rebuilt + 1] = n end
+    end
+    if table.concat(rebuilt, ",") ~= table.concat(e.nodes, ",") then
+      error(("%s: edge %d's chains do not rebuild its nodes"):format(what, i - 1))
+    end
+  end
+  for _, row in ipairs(mesh.open_edges) do
+    if row[1] >= mesh.node_count or row[2] >= mesh.node_count then
+      error(what .. ": an open_edges row names a node past the mesh")
+    end
+  end
+  for _, row in ipairs(mesh.folded_edges) do
+    if row[1] >= mesh.node_count or row[2] >= mesh.node_count then
+      error(what .. ": a folded_edges row names a node past the mesh")
+    end
+  end
+  local msh = mesh:msh_text()
+  if msh:sub(1, 11) ~= "$MeshFormat" or not msh:find("4.1 0 8", 1, true) then
+    error(what .. ": msh_text is not Gmsh 4.1 ASCII: " .. msh:sub(1, 40))
+  end
+  -- Asked twice: the reader's text is a borrowed slot on the handle and the kernel's an
+  -- owned string this wrapper frees, and the only way to tell either convention went
+  -- wrong at run time is to ask the same handle again and compare.
+  if #mesh:msh_text() ~= #msh then error(what .. ": a second msh_text read a different length") end
+  local path = tmp("cadaclysm-smoke-luajit-fem.msh")
+  mesh:save_msh(path)
+  local f = assert(io.open(path, "rb"))
+  local written = f:read("*a")
+  f:close()
+  if #written < #msh / 2 then
+    error(("%s: save_msh wrote %d bytes where msh_text is %d"):format(what, #written, #msh))
+  end
+  return msh
+end
+
+-- A freed handle refuses every call that takes it, and nothing below reads a field of one.
+local function fem_freed_refuses(what, mesh)
+  mesh:free()
+  mesh:free()
+  if not mesh.freed then error(what .. ": freed is false after free()") end
+  local calls = {
+    function() return mesh:msh_text() end,
+    function() return mesh:save_msh(tmp("cadaclysm-smoke-luajit-never.msh")) end,
+    function() return mesh.edges end,
+    function() return mesh.vertices end,
+    function() return mesh.open_edges end,
+    function() return mesh.folded_edges end,
+  }
+  for i, call in ipairs(calls) do
+    local ok, err = pcall(call)
+    if ok or not tostring(err):find("fem mesh: freed", 1, true) then
+      error(("%s: call %d on a freed mesh gave %s"):format(what, i, tostring(err)))
+    end
+  end
+end
+
+-- The reader's FEM mesh: this node's body meshed for a solver. `telling` says whether
+-- this body can tell a transposed placement from the right one: only a body sitting off
+-- the axis the turn acts about, **in the plane it turns in**, can. cube.scad spans 0..20
+-- in x and y and can; a cuboid centred on the origin cannot, because for a quarter turn
+-- about z the transpose is then the correct map composed with a 180-degree turn, which an
+-- axis-aligned corner set is invariant under.
+local function fem_reader(cad, node, telling)
+  local mesh = node:fem_mesh()
+  local msh = fem_sound("fem", mesh)
+  say(("fem: %s, %d faces, watertight=%s from_mesh=%s longest=%.4f, %d bytes of .msh")
+    :format(tostring(mesh), mesh.face_count, tostring(mesh.watertight), tostring(mesh.from_mesh),
+      mesh.longest_edge, #msh))
+  if mesh.from_mesh then
+    if #mesh.edges ~= 0 or #mesh.vertices ~= 0 then error("fem: a from_mesh body has no brep edges or vertices") end
+    -- `fem_mesh_of_mesh` takes no options at all, so on this path neither field is
+    -- read: a wrapper that checked either itself passes every other check here.
+    local nan, inf = 0 / 0, math.huge
+    for _, pair in ipairs({ { 0, 0 }, { -1, 0 }, { nan, 0 }, { 0.01, -1 }, { 0.01, nan }, { 0.01, inf } }) do
+      local ok, other = pcall(function() return node:fem_mesh(pair[1], pair[2]) end)
+      if not ok then
+        error(("fem: tolerance %s max_size %s was refused on the mesh-only path: %s")
+          :format(tostring(pair[1]), tostring(pair[2]), tostring(other)))
+      end
+      other:free()
+    end
+  else
+    local ok, err = pcall(function() return node:fem_mesh(0) end)
+    if ok or not tostring(err):find("tolerance must be finite and > 0", 1, true) then
+      error("fem: a zero tolerance on a brep body was accepted or refused in other words: " .. tostring(err))
+    end
+  end
+  -- A placement of sixteen numbers, and its length checked here because the ABI sees
+  -- only a pointer. Twelve is the mistake a caller moving between the two ABIs makes.
+  if telling then
+    local short_ok, short_err = pcall(function() return node:fem_mesh(0.01, 0, { 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 }) end)
+    if short_ok or not tostring(short_err):find("a placement is 16 numbers, not 12", 1, true) then
+      error("fem: the kernel's twelve numbers were taken as a placement: " .. tostring(short_err))
+    end
+    local placed = node:fem_mesh(0.01, 0, TURNED_16)
+    fem_placement_reached("fem", mesh, placed)
+    say("fem: the placement turned the nodes to " .. fem_span(placed))
+    placed:free()
+  end
+  -- A FEM mesh is its own handle, not part of the scene's mesh cache: forgetting the
+  -- meshes leaves it alone, where it stales a Mesh64.
+  node.scene:forget_meshes()
+  if mesh.node_count == 0 or #mesh:msh_text() == 0 then error("fem: forget_meshes touched the FEM mesh") end
+  fem_freed_refuses("fem", mesh)
+end
+
+-- The kernel's FEM mesh: a solid meshed for a solver, and an open sheet's rim.
+local function fem_kernel(bs)
+  local box = bs.Solid.cuboid(20, 10, 4):translate(30, 7, 5)
+  local phases = {}
+  local mesh = box:fem_mesh(0.05, 0, nil, function(phase) phases[phase] = true end)
+  fem_sound("kernel fem", mesh)
+  if not (phases.meshing and phases.welding) then error("kernel fem: progress heard neither meshing nor welding") end
+  if not mesh.watertight or #mesh.open_edges ~= 0 or #mesh.folded_edges ~= 0 then
+    error("kernel fem: a cuboid is watertight with no cracks, but reads " .. tostring(mesh))
+  end
+  if mesh.from_mesh then error("kernel fem: every solid here has a brep, so from_mesh is always false") end
+  for i, e in ipairs(mesh.edges) do
+    if e.faces[1] == bs.NONE or e.faces[2] == bs.NONE then
+      error(("kernel fem: edge %d of a closed solid bounds only one face"):format(i - 1))
+    end
+  end
+  -- The frame is **twelve** numbers here, and the body sits off the axis of the turn in
+  -- the plane it acts in: a cuboid is centred on its own origin, and for a quarter turn
+  -- about z a transposed 3x3 block is then the correct map composed with a 180-degree
+  -- turn, which an axis-aligned corner set is invariant under. Moved by (30, 7, 5) the
+  -- two image boxes are disjoint in x: 88..98 correct against 102..112 transposed.
+  local placed = box:fem_mesh(0.05, 0, TURNED_12)
+  fem_placement_reached("kernel fem", mesh, placed)
+  say(("kernel fem: %s, span %s -> %s"):format(tostring(mesh), fem_span(mesh), fem_span(placed)))
+  placed:free()
+  local capped = box:fem_mesh(0.05, 3.0)
+  if capped.node_count <= mesh.node_count or capped.longest_edge > 3.0 * 1.05 then
+    error(("kernel fem: max_size 3 gave %d nodes and longest_edge %s")
+      :format(capped.node_count, tostring(capped.longest_edge)))
+  end
+  say(("kernel fem: max_size 3 -> %d nodes, longest_edge %.4f"):format(capped.node_count, capped.longest_edge))
+  capped:free()
+  -- Every solid here has a brep, so this side refuses what the reader's mesh-only path
+  -- passes through, in the library's own words.
+  local ok, err = pcall(function() return box:fem_mesh(0) end)
+  if ok or not tostring(err):find("tolerance must be finite and > 0", 1, true) then
+    error("kernel fem: a zero tolerance was accepted or refused in other words: " .. tostring(err))
+  end
+  -- An open sheet: watertight false with **both** censuses empty -- the trio that says
+  -- "not asked" -- and every rim edge with one real face and NONE beside it.
+  local sheet = bs.Solid.face(bs.Profile.rect(40, 20):with_hole(bs.Profile.circle(4)), { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 })
+  local rim = sheet:fem_mesh(0.05)
+  if rim.watertight or #rim.open_edges ~= 0 or #rim.folded_edges ~= 0 then
+    error("kernel fem: the sheet reads " .. tostring(rim) .. ", not watertight=false with both censuses empty")
+  end
+  for i, e in ipairs(rim.edges) do
+    if e.faces[1] ~= 0 or e.faces[2] ~= bs.NONE then
+      error(("kernel fem: the sheet's rim edge %d reads faces %s/%s -- 0 is a real face, NONE is the sentinel")
+        :format(i - 1, tostring(e.faces[1]), tostring(e.faces[2])))
+    end
+  end
+  say(("kernel fem: the sheet's %d rim edges each bound one face"):format(#rim.edges))
+  rim:free()
+  sheet:close()
+  -- A FEM mesh is its own handle: re-meshing the solid at another tolerance stales
+  -- every view of its tessellation and leaves this untouched.
+  box:mesh(0.5)
+  if mesh.node_count == 0 or #mesh.edges == 0 or #mesh:msh_text() == 0 then
+    error("kernel fem: re-meshing the solid staled the FEM mesh")
+  end
+  box:close()
+  if mesh.node_count == 0 or #mesh:msh_text() == 0 then error("kernel fem: closing the solid staled the FEM mesh") end
+  fem_freed_refuses("kernel fem", mesh)
+end
+
 local function main()
   local ffi = require("ffi")
   local cad = require("cadaclysm")
@@ -139,6 +389,15 @@ local function main()
   if fov_ok then error("scene svg: fov=200 was accepted") end
   say("svg: scene and node text, file written, fov=200 refused")
 
+  -- Links and joints: the cube names neither; mechanism.stp, beside it, has the shared
+  -- mechanism facts (two links, one joint, read the same way in every wrapper).
+  if sample:match("cube%.scad$") and (#scene.links ~= 0 or #scene.joints ~= 0) then
+    error("the cube's links and joints are not empty")
+  end
+
+  -- The FEM surface mesh: this node's body meshed for a solver.
+  if first_meshed then fem_reader(cad, first_meshed, true) end
+
   scene:close()
   if sample:match("cube%.scad$") then
     for i = 1, 3 do
@@ -146,6 +405,23 @@ local function main()
         error("the cube did not come back as a 20-unit cube of 12 triangles")
       end
     end
+    local dir = absolute(sample):match("^(.*)/[^/]*$")
+    local mechanism = cad.open(dir .. "/mechanism.stp")
+    local links, joints = mechanism.links, mechanism.joints
+    if #links ~= 2 or links[1].name ~= "base" or links[2].name ~= "arm" then
+      error("mechanism.stp: links are not [base, arm]")
+    end
+    for _, l in ipairs(links) do
+      if #l.nodes ~= 1 or l.nodes[1].name ~= l.name then
+        error("mechanism.stp: link " .. l.name .. " does not name one node of its own name")
+      end
+    end
+    if #joints ~= 1 or joints[1].name ~= "hinge" or joints[1].start.name ~= "arm"
+      or joints[1].start.index ~= 1 or joints[1].end_.name ~= "base" or joints[1].end_.index ~= 0 then
+      error("mechanism.stp: the hinge joint did not read as arm(1) -> base(0)")
+    end
+    mechanism:close()
+    say("links and joints: mechanism.stp read as base/arm/hinge, cube empty")
   end
 
   -- The builder: an exact B-rep solid, its faces and its box.
@@ -222,6 +498,9 @@ local function main()
   local built = cad.open_memory(text, "stp", nil, "cuboid.stp")
   local bb = built.bounds
   say(("scene: %d nodes, bounds min=(%s) max=(%s)"):format(built.node_count, fmt(bb.min), fmt(bb.max)))
+  -- The same again on a real B-rep body -- this run's own STEP, read back -- which is the
+  -- half that takes the brep path and so refuses a bad tolerance rather than ignoring it.
+  fem_reader(cad, built.nodes[1], false)
   local size = bb.size
   local got = ("%d,%d,%d"):format(math.floor(size[1] + 0.5), math.floor(size[2] + 0.5), math.floor(size[3] + 0.5))
   built:close()
@@ -346,6 +625,9 @@ local function main()
     error(("solid hits: the middle piece spans x %s .. %s"):format(span[1][1], span[2][1]))
   end
   say(("solid hits: %s; %s"):format(tostring(pierced), tostring(pieces[2])))
+
+  -- The kernel's FEM mesh: a solid meshed for a solver, and an open sheet's rim.
+  fem_kernel(bs)
 end
 
 local ok, err = pcall(main)

@@ -9,10 +9,10 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use cadaclysm_sdk::blacksmith::{
-    self, Axis, Curve, Frame, Intersection, Keep, Path as Outline, Profile, Selector, Solid, SolidHits, SweepPath, Unit, Workplane, DEFAULT_TOLERANCE,
-    FILLET_TOLERANCE,
+    self, Assembly, Axis, Curve, Frame, Intersection, Keep, Path as Outline, Profile, Selector, Solid, SolidHits, SweepPath, Unit, Workplane,
+    DEFAULT_TOLERANCE, FILLET_TOLERANCE,
 };
-use cadaclysm_sdk::{Convention, OpenOptions, Scene, SvgOptions};
+use cadaclysm_sdk::{Convention, Link, Node, OpenOptions, Scene, SvgOptions};
 
 fn main() -> ExitCode {
     match run() {
@@ -57,7 +57,11 @@ fn run() -> Result<(), String> {
             bounds.min == [0.0; 3] && bounds.max == [20.0; 3] && triangles == 12,
             "the cube did not come back as a 20-unit cube of 12 triangles",
         )?;
+        check(scene.links().is_empty() && scene.joints().is_empty(), "the cube has links or joints")?;
     }
+
+    // The mechanism facts, from mechanism.stp beside the sample this smoke was given.
+    mechanism_checks(&path)?;
 
     // The reader's own extras: a query, the diagnostics, the placements.
     let matched = scene.query("class == solid").map_err(e)?;
@@ -103,9 +107,32 @@ fn run() -> Result<(), String> {
     check(estimate > 0 || estimate == -1, "triangle estimate is neither a count nor -1")?;
     if path.ends_with("cube.scad") {
         check(estimate == 12 && first.surface_edges().is_empty() && first.surface_proxy_mesh(4).is_empty(), "the cube has no surface products")?;
+        check(first.surface_edge_beziers().is_empty(), "the cube hands exact edges to the surface path")?;
         check(first.surface_pick([10.0, 10.0, 100.0], [10.0, 10.0, -100.0]).is_none() && first.bounds_placed(None).is_empty(), "the cube picks or bounds through surfaces")?;
         check(first.bounds_placed64(None).is_empty(), "the cube bounds_placed64 through surfaces")?;
+        check(first.edge_colours().is_empty() && first.surface_edge_colours().is_empty(), "the unpainted cube has edge colours")?;
     }
+
+    // Edge colours: samples/edge-colours.stp sits beside the given sample and paints one
+    // edge teal (0.1, 0.6, 0.55) on the body -- everything else, edge and surface-edge
+    // alike, stays unstyled.
+    let edge_colours_path = Path::new(&path).with_file_name("edge-colours.stp");
+    let edge_colours_scene = cadaclysm_sdk::open(&edge_colours_path).map_err(e)?;
+    let body = edge_colours_scene.walk().find(|n| n.edges().polyline_count() > 0).ok_or("no edged body in edge-colours.stp")?;
+    for (count, colours) in [
+        (body.edges().polyline_count(), body.edge_colours()),
+        (body.surface_edges().polyline_count(), body.surface_edge_colours()),
+    ] {
+        check(colours.len() == count, "edge colours: entry count does not equal polyline count")?;
+        let styled: Vec<_> = colours.iter().flatten().collect();
+        check(styled.len() == 1, "edge colours: not exactly one styled entry")?;
+        let c = styled[0];
+        check(
+            (c[0] - 0.1).abs() < 1e-6 && (c[1] - 0.6).abs() < 1e-6 && (c[2] - 0.55).abs() < 1e-6 && (c[3] - 1.0).abs() < 1e-6,
+            "edge colours: the styled entry is not (0.1, 0.6, 0.55, 1.0)",
+        )?;
+    }
+    drop(edge_colours_scene);
 
     // f64 twins: mesh64's counts and first position agree with mesh's, and bounds64's
     // max widens to bounds's, on both the node and the scene.
@@ -131,6 +158,25 @@ fn run() -> Result<(), String> {
     let body = fresh.walk().find(|n| n.can_mesh()).ok_or("no meshable node")?;
     check(!body.is_meshed(), "a fresh scene is already meshed")?;
     check(fresh.realize_meshes(false) > 0 && body.is_meshed(), "realize_meshes(false) did not build")?;
+
+    // A Rhino extrusion hands its exact edges to the surface path without meshing, in both
+    // conventions: UNREAL goes through the decorator that maps every getter into the caller's
+    // space. The fixture is the repository's, not an SDK checkout's, so this runs where found.
+    let extrusions = Path::new(&path).parent().and_then(Path::parent).map(|root| root.join("crates/cadaclysm-acis/tests/fixtures/rhino/extrusion-objects.3dm"));
+    if let Some(extrusions) = extrusions.filter(|p| p.exists()) {
+        for convention in [Convention::Native, Convention::Unreal] {
+            let scene = OpenOptions::new().convention(convention).open(&extrusions).map_err(e)?;
+            let mut found = 0;
+            for node in scene.walk().filter(|n| n.can_mesh() && !n.surface_edges().is_empty()) {
+                let exact = node.surface_edge_beziers().count();
+                check(exact > 0 && !node.is_meshed(), "an extrusion's exact edges are not free")?;
+                check(exact == node.edge_beziers().count(), "surface_edge_beziers is not edge_beziers' segments")?;
+                found += 1;
+            }
+            check(found > 0, "extrusion-objects.3dm has no surfaced extrusion")?;
+            println!("surface_edge_beziers ({convention:?}): {found} extrusions, exact and unmeshed");
+        }
+    }
     println!("placements: {}", scene.placements().len());
     if is_cube {
         check(!matched.is_empty(), "class == solid matched nothing in the cube")?;
@@ -163,6 +209,10 @@ fn run() -> Result<(), String> {
     check(yup.realized() == yup.realize_total(), "realize_all stopped short")?;
 
     save_checks(&scene)?;
+    fem_reader(&scene, is_cube)?;
+    if is_cube {
+        fem_census_wiring(&Path::new(&path).with_file_name("open-sheet.scad"))?;
+    }
 
     // SVG: the library's own camera, no viewer -- a scene and a node each write a
     // wireframe.
@@ -410,6 +460,7 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
 
     sheet_verbs(&plate)?;
     frames()?;
+    assemblies()?;
 
     // Colour: a gold plate joined with a blue pin -- gold overall, the pin's top blue.
     let gold = plate.coloured([0.8, 0.6, 0.4], None).map_err(e)?;
@@ -453,6 +504,9 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
         "the outline's face did not push out to the plate",
     )?;
 
+    // The kernel's FEM mesh: the closed filleted part, and the sheet whose rim is open.
+    fem_kernel(&rounded, &sheet)?;
+
     // The mesh borrows the solid's cache; meshing again needs the borrow to have ended,
     // which the compiler enforces -- here the two meshes are taken one after the other.
     let coarse = rounded.mesh(0.5).map_err(e)?.triangle_count();
@@ -493,6 +547,7 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
     let step = std::env::temp_dir().join("cadaclysm-smoke-rust.stp");
     rounded.step(&step, None, Unit::Millimetre).map_err(e)?;
     let back = cadaclysm_sdk::open(&step).map_err(|err| format!("step read back: {err}"))?;
+    fem_brep(&back)?;
     let b = back.bounds();
     println!("step read back: bounds max={:?}", b.max);
     // The plate is 80 x 40 x 6, centred on the origin, and the pin adds 10.
@@ -588,6 +643,19 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
     // Split by a plane across the plate's length: two bodies, front first.
     let halves = plate.split_by_plane(&Frame::yz([0.0; 3]), DEFAULT_TOLERANCE).map_err(e)?;
     check(halves.len() == 2, &format!("split_by_plane gave {} bodies, not 2", halves.len()))?;
+
+    // Scaled: every length times factor, exactly; a non-positive or non-finite factor is refused.
+    let big = Solid::cuboid(1.0, 2.0, 3.0).map_err(e)?.scaled(2.0).map_err(e)?;
+    let (lo, hi) = big.bounds().map_err(e)?;
+    check(
+        (hi[0] - lo[0] - 2.0).abs() < 1e-9 && (hi[2] - lo[2] - 6.0).abs() < 1e-9,
+        "scaled bounds",
+    )?;
+    check(
+        big.scaled(0.0).unwrap_err().to_string().starts_with("scaled:"),
+        "scaled(0) not refused",
+    )?;
+
     println!("kernel: OK");
     Ok(())
 }
@@ -714,6 +782,690 @@ fn frames() -> Result<(), String> {
         Frame::new([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0]).is_err(),
         "a left-handed frame was accepted",
     )?;
+    Ok(())
+}
+
+/// The mechanism facts, identical in every language: two links `base` and `arm`, each
+/// naming one node of the same name; one joint `hinge` from `arm` (index 1) to `base`
+/// (index 0). `mechanism.stp` sits beside whatever sample this smoke was given.
+fn mechanism_checks(sample_path: &str) -> Result<(), String> {
+    let e = |e: cadaclysm_sdk::Error| e.to_string();
+    let samples = Path::new(sample_path).parent().unwrap_or_else(|| Path::new("."));
+    let mechanism = cadaclysm_sdk::open(samples.join("mechanism.stp")).map_err(e)?;
+
+    let links = mechanism.links();
+    let names: Vec<String> = links.iter().map(Link::name).collect();
+    check(names == ["base", "arm"], &format!("mechanism: link names are {names:?}, not [base, arm]"))?;
+    for link in &links {
+        let nodes = link.nodes();
+        check(nodes.len() == 1 && nodes[0].name() == link.name(), &format!("mechanism: link {} does not name its one node", link.name()))?;
+    }
+
+    let joints = mechanism.joints();
+    check(joints.len() == 1, &format!("mechanism: {} joints, not 1", joints.len()))?;
+    let hinge = &joints[0];
+    check(hinge.name() == "hinge", &format!("mechanism: joint name is {}, not hinge", hinge.name()))?;
+    let (start, end) = (hinge.start(), hinge.end());
+    check(
+        start.name() == "arm" && start.index() == 1 && end.name() == "base" && end.index() == 0,
+        &format!("mechanism: hinge runs {}({}) -> {}({}), not arm(1) -> base(0)", start.name(), start.index(), end.name(), end.index()),
+    )?;
+    println!("mechanism: links {names:?}, hinge {}({}) -> {}({})", start.name(), start.index(), end.name(), end.index());
+    Ok(())
+}
+
+/// The eleven assembly facts spec §5 asserts, built as Python's `_shared_assembly()`
+/// does: a bolt and a coloured plate, a bracket placing the plate once and the bolt
+/// twice, and a top assembly placing the bracket twice (mirrored the second time) and
+/// the bolt once more.
+fn assemblies() -> Result<(), String> {
+    let e = |e: cadaclysm_sdk::Error| format!("assemblies: {e}");
+    let origin = |p: [f64; 3]| Frame::xy(p);
+
+    let bolt = Solid::cylinder(1.0, 6.0).and_then(|s| s.named("bolt")).map_err(e)?;
+    let plate = Solid::cuboid(20.0, 10.0, 2.0)
+        .and_then(|s| s.named("plate"))
+        .and_then(|s| s.coloured([1.0, 0.5, 0.0], None))
+        .map_err(e)?;
+
+    let bracket = Assembly::new("bracket").map_err(e)?;
+    bracket.place_solid(&plate, &Frame::xy([0.0; 3]), None).map_err(e)?;
+    let bolt_name_1 = bracket.place_solid(&bolt, &origin([5.0, 5.0, 2.0]), None).map_err(e)?;
+    let bolt_name_2 = bracket.place_solid(&bolt, &origin([15.0, 5.0, 2.0]), None).map_err(e)?;
+    check((bolt_name_1.as_str(), bolt_name_2.as_str()) == ("bolt", "bolt 2"), &format!("bracket's own bolts named {bolt_name_1:?}, {bolt_name_2:?}"))?;
+
+    let mirrored = Frame::new([100.0, 0.0, 0.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]).map_err(e)?;
+    let frame = Assembly::new("frame").map_err(e)?;
+    let left = frame.place_assembly(&bracket, &Frame::xy([0.0; 3]), Some("left")).map_err(e)?;
+    let right = frame.place_assembly(&bracket, &mirrored, Some("right")).map_err(e)?;
+    let root_bolt = frame.place_solid(&bolt, &origin([50.0, 50.0, 0.0]), None).map_err(e)?;
+    // Fact 1: the placement names, in placing order.
+    check(
+        (left.as_str(), right.as_str(), root_bolt.as_str()) == ("left", "right", "bolt"),
+        &format!("placement names read {left:?}, {right:?}, {root_bolt:?}"),
+    )?;
+
+    // Fact 2 and 3: the STEP text's counts and the placement names it carries.
+    let text = frame.step_text(None, Unit::Millimetre).map_err(e)?;
+    let count = |needle: &str| text.matches(needle).count();
+    check(
+        count("=MANIFOLD_SOLID_BREP(") == 2 && count("=PRODUCT(") == 4 && count("=NEXT_ASSEMBLY_USAGE_OCCURRENCE(") == 6,
+        &format!(
+            "frame.step_text() has {} breps, {} products, {} NAUOs, not 2/4/6",
+            count("=MANIFOLD_SOLID_BREP("),
+            count("=PRODUCT("),
+            count("=NEXT_ASSEMBLY_USAGE_OCCURRENCE(")
+        ),
+    )?;
+    check(
+        text.contains("'left'") && text.contains("'right'") && text.contains("'bolt 2'"),
+        "frame.step_text() is missing 'left', 'right' or 'bolt 2'",
+    )?;
+
+    // Fact 11: read-back through the reader, at this pre-fact-4 text -- the root named
+    // "frame" with three children: two "bracket" containers, each holding plate, bolt,
+    // bolt, plus one bolt. Opened from the `text` already captured above (not a fresh
+    // `step_text()`), since fact 4 below adds a bolt that would change the count.
+    let readback = cadaclysm_sdk::open_memory(text.as_bytes(), "stp").map_err(e)?;
+    let root = readback.roots().into_iter().next().ok_or("assemblies: to_scene's read-back has no root node")?;
+    check(root.name() == "frame", &format!("the read-back root is named {:?}, not \"frame\"", root.name()))?;
+    let children = root.children();
+    check(children.len() == 3, &format!("the read-back root has {} children, not 3", children.len()))?;
+    let brackets: Vec<_> = children.iter().filter(|c| c.name() == "bracket").collect();
+    let root_bolts: Vec<_> = children.iter().filter(|c| c.name() == "bolt").collect();
+    check(
+        brackets.len() == 2 && root_bolts.len() == 1,
+        &format!("the read-back root's children are named {:?}", children.iter().map(Node::name).collect::<Vec<_>>()),
+    )?;
+    for bracket_node in &brackets {
+        let grandchildren = bracket_node.children();
+        let names: Vec<String> = grandchildren.iter().map(Node::name).collect();
+        let (plates, bolts) = (names.iter().filter(|n| n.as_str() == "plate").count(), names.iter().filter(|n| n.as_str() == "bolt").count());
+        check(plates == 1 && bolts == 2, &format!("a read-back bracket holds {names:?}, not one plate and two bolts"))?;
+    }
+    drop(readback);
+
+    // Fact 4: one more bolt into the bracket, then a fresh count of 7 NAUOs.
+    bracket.place_solid(&bolt, &origin([5.0, 15.0, 2.0]), None).map_err(e)?;
+    let text2 = frame.step_text(None, Unit::Millimetre).map_err(e)?;
+    check(
+        text2.matches("=NEXT_ASSEMBLY_USAGE_OCCURRENCE(").count() == 7,
+        &format!("after one more bolt, step_text() has {} NAUOs, not 7", text2.matches("=NEXT_ASSEMBLY_USAGE_OCCURRENCE(").count()),
+    )?;
+
+    // Fact 5: a cycle is refused, naming it.
+    let cycle = bracket.place_assembly(&frame, &Frame::xy([0.0; 3]), None);
+    let cycle_message = cycle.err().map(|err| err.to_string()).unwrap_or_default();
+    check(
+        cycle_message.contains("bracket → frame → bracket"),
+        &format!("placing frame into bracket did not name the cycle: {cycle_message:?}"),
+    )?;
+
+    // Fact 6: an explicit name already taken is refused.
+    check(
+        frame.place_assembly(&bracket, &Frame::xy([0.0; 3]), Some("left")).is_err(),
+        "placing the bracket again as 'left' was accepted",
+    )?;
+
+    // Fact 7: a mirrored raw twelve-number frame is refused on handedness -- in the
+    // library's own words, not `Frame::new`'s ("left-handed"). `Frame::of` would hit
+    // that same check first, so this goes through `Frame::raw_unchecked` (doc-hidden,
+    // for exactly this: handing the library a frame this crate would otherwise refuse
+    // before it is ever sent).
+    let raw_mirror = Frame::raw_unchecked([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0]);
+    let raw_message = frame.place_solid(&bolt, &raw_mirror, None).err().map(|err| err.to_string()).unwrap_or_default();
+    check(
+        raw_message.contains("right-handed and orthonormal"),
+        &format!("a mirrored raw frame was not refused for handedness: {raw_message:?}"),
+    )?;
+
+    // Fact 8: an assembly that places nothing is refused at step_text().
+    let empty = Assembly::new("x").map_err(e)?;
+    check(empty.step_text(None, Unit::Millimetre).is_err(), "Assembly(\"x\").step_text() was accepted")?;
+
+    // Fact 9: an outer assembly placing an empty sub-assembly is refused, naming it.
+    let hollow = Assembly::new("hollow").map_err(e)?;
+    let outer = Assembly::new("outer").map_err(e)?;
+    outer.place_assembly(&hollow, &Frame::xy([0.0; 3]), None).map_err(e)?;
+    let hollow_message = outer.step_text(None, Unit::Millimetre).err().map(|err| err.to_string()).unwrap_or_default();
+    check(hollow_message.contains("hollow"), &format!("placing an empty sub-assembly did not name it: {hollow_message:?}"))?;
+
+    // Fact 10: name rides through a one-source operation, is dropped by a two-source
+    // one, and a fresh primitive has none.
+    check(bolt.name().as_deref() == Some("bolt"), "bolt.name is not \"bolt\"")?;
+    check(bolt.place(&Frame::xy([1.0, 2.0, 3.0])).map_err(e)?.name().as_deref() == Some("bolt"), "bolt.place(...).name did not keep \"bolt\"")?;
+    check(bolt.coloured([0.2, 0.2, 0.2], None).map_err(e)?.name().as_deref() == Some("bolt"), "bolt.coloured(...).name did not keep \"bolt\"")?;
+    let cube = Solid::cuboid(1.0, 1.0, 1.0).map_err(e)?;
+    check(bolt.join(&cube, DEFAULT_TOLERANCE).map_err(e)?.name().is_none(), "bolt.join(cube).name is not None")?;
+    check(Solid::cuboid(1.0, 1.0, 1.0).map_err(e)?.name().is_none(), "cuboid(1,1,1).name is not None")?;
+
+    println!("assemblies: 11 facts checked (placement names, STEP counts, cycles, naming, read-back structure)");
+    Ok(())
+}
+
+// ---- the FEM surface mesh ----------------------------------------------------------
+
+/// A placement carrying **both a rotation and a translation**: a quarter turn about z,
+/// then a move of 100 along x, as the sixteen column-major doubles
+/// [`cadaclysm_sdk::Node::bounds_placed`] takes. Rows, as the textbooks write them:
+///
+/// ```text
+/// [ 0 -1  0 100 ]
+/// [ 1  0  0   0 ]
+/// [ 0  0  1   0 ]
+/// [ 0  0  0   1 ]
+/// ```
+///
+/// Rust's placement is a **sized type** (`&[f64; 16]` here, `&Frame` on the kernel), so
+/// the sixteen-versus-twelve confusion C# and Java check for at run time does not compile
+/// and there is no refusal to assert. What replaces it is this: a translation alone catches
+/// a placement dropped, doubled or transposed, but **not one composed in the wrong order**
+/// -- translate-then-rotate and rotate-then-translate agree on every pure translation. With
+/// the turn in it they disagree loudly: this maps the origin to (100, 0, 0) where the other
+/// order maps it to (0, 100, 0), and a transposed rotation sends what should be +y to -y.
+///
+/// **A rotation only tells you something about a body that is not symmetric under it.**
+/// Transposing the 3x3 block composes this transform with a 180-degree turn about z through
+/// the placement's own origin, so a body whose centre lands on that axis maps onto itself and
+/// the check sees nothing -- which every `Solid::cuboid` does, being centred where it is built.
+///
+/// **What the body needs is a centre off the rotation's axis, in the plane the rotation acts
+/// in.** This turn is about z, so it is the centre's **x or y** that must be non-zero; a z
+/// offset lies along the axis and buys nothing whatever. Measured: with the transpose applied
+/// and the kernel cuboid moved to (0, 0, 5) -- off the literal origin, but purely along the
+/// axis -- the smoke still passes at exit 0. So "move the body off the origin" is the wrong
+/// rule to copy; "off the rotation's axis, in the plane it turns in" is the right one. See
+/// `fem_kernel`, which is where the trap bites.
+const TURNED: [f64; 16] = [
+    0.0, 1.0, 0.0, 0.0, // column 0: where x goes
+    -1.0, 0.0, 0.0, 0.0, // column 1: where y goes
+    0.0, 0.0, 1.0, 0.0, // column 2: where z goes
+    100.0, 0.0, 0.0, 1.0, // column 3: the translation
+];
+
+/// Where [`TURNED`] puts a point: `(x, y, z)` -> `(100 - y, x, z)`. The kernel's
+/// [`turned_frame`] is the same transform written the kernel's way, so both sides of the
+/// ABI are checked against this one map -- which is what makes the sixteen-versus-twelve
+/// asymmetry a thing the smoke proves rather than a thing it only says.
+fn turned(p: [f64; 3]) -> [f64; 3] {
+    [100.0 - p[1], p[0], p[2]]
+}
+
+/// [`TURNED`] as the kernel's **twelve** numbers: an origin and the three axes x, y and z
+/// go to. `Frame::new` checks them, so a left-handed or skewed mistake here never reaches
+/// the library.
+fn turned_frame() -> Result<Frame, String> {
+    Frame::new([100.0, 0.0, 0.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0])
+        .map_err(|err| format!("fem: the turned frame: {err}"))
+}
+
+fn near(a: [f64; 3], b: [f64; 3]) -> bool {
+    (0..3).all(|i| (a[i] - b[i]).abs() < 1e-9)
+}
+
+/// The box a set of nodes fills, for comparing a placed mesh against a hand-computed one.
+fn span(nodes: &[[f64; 3]]) -> ([f64; 3], [f64; 3]) {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for p in nodes {
+        for i in 0..3 {
+            lo[i] = lo[i].min(p[i]);
+            hi[i] = hi[i].max(p[i]);
+        }
+    }
+    (lo, hi)
+}
+
+/// The eight corners of a box, for the placement checks: every one of them is a B-rep
+/// vertex of a cuboid and so a node of its FEM mesh.
+fn corners(lo: [f64; 3], hi: [f64; 3]) -> Vec<[f64; 3]> {
+    let mut out = Vec::new();
+    for x in [lo[0], hi[0]] {
+        for y in [lo[1], hi[1]] {
+            for z in [lo[2], hi[2]] {
+                out.push([x, y, z]);
+            }
+        }
+    }
+    out
+}
+
+/// Checks that hold of any FEM mesh, whichever side of the ABI built it: the five flat
+/// arrays agree with each other and with the counts, every index is in range, and every
+/// `node_entity` is bounded by the list its own `node_kind` names -- which is what tells
+/// the two arrays apart if they were ever read from one pointer.
+fn fem_arrays(
+    nodes: &[[f64; 3]],
+    triangles: &[[u32; 3]],
+    triangle_face: &[u32],
+    node_kind: &[u32],
+    node_entity: &[u32],
+    face_count: u32,
+    edge_count: usize,
+    vertex_count: usize,
+    what: &str,
+) -> Result<(), String> {
+    check(!nodes.is_empty() && !triangles.is_empty(), &format!("{what}: an empty mesh came back as success"))?;
+    check(
+        triangle_face.len() == triangles.len() && node_kind.len() == nodes.len() && node_entity.len() == nodes.len(),
+        &format!(
+            "{what}: the arrays disagree -- {} nodes, {} triangles, {} triangle_face, {} node_kind, {} node_entity",
+            nodes.len(),
+            triangles.len(),
+            triangle_face.len(),
+            node_kind.len(),
+            node_entity.len()
+        ),
+    )?;
+    check(
+        triangles.iter().flatten().all(|&i| (i as usize) < nodes.len()),
+        &format!("{what}: a triangle index points past the nodes"),
+    )?;
+    check(
+        triangle_face.iter().all(|&f| f < face_count),
+        &format!("{what}: a triangle_face is not one of the body's {face_count} faces"),
+    )?;
+    for (i, (&kind, &entity)) in node_kind.iter().zip(node_entity).enumerate() {
+        let bound = match kind {
+            0 => vertex_count,
+            1 => edge_count,
+            2 => face_count as usize,
+            other => return Err(format!("{what}: node {i} has kind {other}, which is neither vertex, edge nor face")),
+        };
+        check(
+            (entity as usize) < bound,
+            &format!("{what}: node {i} is on entity {entity} of kind {kind}, which has only {bound}"),
+        )?;
+    }
+    Ok(())
+}
+
+/// **Which count feeds which entry point** -- the census *wiring*, which nothing else here
+/// pins. Every other FEM check proves a row is extracted correctly; none proves
+/// [`FemMesh::open_edges`] reads `open_edge_count` rows through `cadaclysm_fem_mesh_open_edge`
+/// rather than the folded count or the folded call.
+///
+/// `samples/open-sheet.scad` is the only body in this repository where both censuses are
+/// non-empty and of different lengths: the B-rep path computes no census unless the topology is
+/// closed (the documented "not asked" pair) and every closed body has none, while the mesh path
+/// always computes one -- so a `polyhedron` with a flap over one of its own directed edges is the
+/// way in. Six cracks, one fold, and the fold is not the first crack.
+fn fem_census_wiring(sheet: &Path) -> Result<(), String> {
+    let e = |err: cadaclysm_sdk::Error| format!("fem census: {err}");
+    let scene = cadaclysm_sdk::open(sheet).map_err(e)?;
+    let node = scene.walk().find(|n| n.can_mesh()).ok_or("fem census: no meshable node")?;
+    let mesh = node.fem_mesh(0.01, 0.0, None).map_err(e)?;
+    check(
+        mesh.nodes().len() == 5 && mesh.triangles().len() == 3 && mesh.from_mesh() && !mesh.watertight(),
+        &format!("fem census: open-sheet.scad read {} nodes, {} triangles, watertight={}", mesh.nodes().len(), mesh.triangles().len(), mesh.watertight()),
+    )?;
+    let (cracks, folds) = (mesh.open_edges().map_err(e)?, mesh.folded_edges().map_err(e)?);
+    // The counts are what separate the two lists: a swapped count reads 1 where 6 belongs, and a
+    // swapped call cannot read row 1 of a one-row table at all.
+    check(
+        cracks.len() == 6 && folds.len() == 1,
+        &format!("fem census: {} cracks and {} folds, not 6 and 1", cracks.len(), folds.len()),
+    )?;
+    // And the contents, which separates a wrapper that swapped both consistently.
+    check(folds[0] == (2, 0, cadaclysm_sdk::NONE), &format!("fem census: the fold reads {:?}, not (2, 0, NONE)", folds[0]))?;
+    check((cracks[0].0, cracks[0].1) == (1, 2), &format!("fem census: the first crack reads {:?}, not (1, 2, NONE)", cracks[0]))?;
+    println!("fem census: open-sheet.scad reads {} cracks and {} fold at ({}, {})", cracks.len(), folds.len(), folds[0].0, folds[0].1);
+    Ok(())
+}
+
+/// The reader's FEM mesh over a node with no B-rep: the **mesh-only** path, where
+/// `from_mesh` is true, there are no edges and no vertices, and -- the trap the plan
+/// names -- `fem_mesh_of_mesh` reads no options at all, so a tolerance or a size the
+/// B-rep path refuses still comes back as a mesh.
+fn fem_reader(scene: &Scene, is_cube: bool) -> Result<(), String> {
+    let e = |err: cadaclysm_sdk::Error| format!("fem: {err}");
+    let node = scene.walk().find(|n| n.can_mesh()).ok_or("fem: no meshable node")?;
+    let mesh = node.fem_mesh(0.01, 0.0, None).map_err(e)?;
+
+    let (nodes, triangles) = (mesh.nodes(), mesh.triangles());
+    let edges = mesh.edges().map_err(e)?;
+    let vertices = mesh.vertices().map_err(e)?;
+    fem_arrays(
+        nodes,
+        triangles,
+        mesh.triangle_face(),
+        mesh.node_kind(),
+        mesh.node_entity(),
+        mesh.face_count(),
+        edges.len(),
+        vertices.len(),
+        "fem reader",
+    )?;
+    // A mesh-only body: one face, every node on it, no topology at all -- and the census
+    // does run over the welded triangles, so an empty one here means "nothing found".
+    check(mesh.from_mesh(), "fem: a node with no brep did not report from_mesh")?;
+    check(
+        mesh.face_count() == 1 && edges.is_empty() && vertices.is_empty() && mesh.node_kind().iter().all(|&k| k == 2),
+        "fem: a from_mesh body has edges, vertices or a node off face 0",
+    )?;
+    check(
+        mesh.watertight() && mesh.open_edges().map_err(e)?.is_empty() && mesh.folded_edges().map_err(e)?.is_empty(),
+        "fem: the cube's own mesh is not watertight with both censuses empty",
+    )?;
+    check(
+        mesh.min_angle() > 0.0 && mesh.min_angle() <= 60.0 && (mesh.worst_triangle() as usize) < triangles.len() && mesh.longest_edge() > 0.0,
+        &format!("fem: the quality figures read {} deg, triangle {}, longest {}", mesh.min_angle(), mesh.worst_triangle(), mesh.longest_edge()),
+    )?;
+    if is_cube {
+        check(nodes.len() == 8 && triangles.len() == 12, &format!("fem: the cube meshed to {} nodes, {} triangles", nodes.len(), triangles.len()))?;
+    }
+
+    // The `.msh` text: on this side of the ABI it is borrowed from the handle, and the
+    // wrapper copies it into a `String` on the way out -- so asking twice gives two
+    // strings of the caller's own, and the second ask does not free the first.
+    let text = mesh.msh_text().map_err(e)?;
+    let again = mesh.msh_text().map_err(e)?;
+    check(text.starts_with("$MeshFormat\n4.1 0 8\n"), &format!("fem: the .msh text does not open as Gmsh 4.1 ASCII: {:?}", &text[..text.len().min(40)]))?;
+    check(again == text, "fem: two asks for the same mesh's .msh text disagree")?;
+    let msh = std::env::temp_dir().join("cadaclysm-smoke-rust-fem.msh");
+    mesh.save_msh(&msh).map_err(e)?;
+    let written = std::fs::metadata(&msh).map_err(|err| format!("fem: {err}"))?.len();
+    check(written as usize >= text.len() / 2, &format!("fem: save_msh wrote {written} bytes against {} of text", text.len()))?;
+    println!("fem reader: {} nodes, {} triangles, from_mesh={}, {} bytes of .msh", nodes.len(), triangles.len(), mesh.from_mesh(), written);
+    // Dropped by name, not left to the end of the block: a `Vec<FemEdge<'_>>` borrows the
+    // mesh until it is dropped, so `free()` -- which takes the mesh by value -- does not
+    // compile while one is still in scope. That refusal is this language's whole guard.
+    drop(edges);
+    drop(vertices);
+    mesh.free();
+
+    // The placement reaches the library, and in the right order. Catches: a placement
+    // dropped (the nodes stay where the body is), applied twice, transposed (+y for -y),
+    // or composed the other way round (the origin at (0, 100, 0), not (100, 0, 0)).
+    //
+    // This half needs no care about where the body sits: `cube.scad` spans 0..20 in x and y
+    // rather than straddling the z axis the turn is about, so its corner set is not invariant
+    // under the 180-degree turn a transposed 3x3 block composes in (see `TURNED`). The kernel
+    // half has to move its cuboid for exactly that reason.
+    //
+    // Every node is checked rather than one convenient point, which is defence in depth
+    // rather than what earns the catch: at either half's offset the two image spans are
+    // already disjoint, so one point -- or the span check by itself -- catches a transpose
+    // too. It is the offset that does the work, and a later reader keeping the loop while
+    // centring the body would be blind again.
+    let placed = node.fem_mesh(0.01, 0.0, Some(&TURNED)).map_err(e)?;
+    let plain = node.fem_mesh(0.01, 0.0, None).map_err(e)?;
+    check(placed.nodes().len() == plain.nodes().len(), "fem: the placement changed the node count")?;
+    for p in plain.nodes() {
+        let want = turned(*p);
+        check(
+            placed.nodes().iter().any(|q| near(*q, want)),
+            &format!("fem: the placement did not send {p:?} to {want:?} -- the placed nodes span {:?}", span(placed.nodes())),
+        )?;
+    }
+    let (lo, hi) = span(placed.nodes());
+    let (plain_lo, plain_hi) = span(plain.nodes());
+    check(
+        near(lo, turned([plain_lo[0], plain_hi[1], plain_lo[2]])) && near(hi, turned([plain_hi[0], plain_lo[1], plain_hi[2]])),
+        &format!("fem: the placed nodes span {lo:?}..{hi:?}, not the turn of {plain_lo:?}..{plain_hi:?}"),
+    )?;
+    println!("fem reader: the placement turns and moves {plain_lo:?}..{plain_hi:?} into {lo:?}..{hi:?}");
+    placed.free();
+    plain.free();
+
+    // **Neither `tolerance` nor `max_size` is checked by this wrapper**, and the mesh-only
+    // path reads neither: `fem_mesh_of_mesh` takes no options at all. Catches a wrapper
+    // that validated either field itself -- which passes every Python-shaped test and is
+    // wrong. The B-rep half of this contract is in `fem_brep`, where each of these *is*
+    // refused, in the library's own words.
+    for (tolerance, max_size) in [(0.0, 0.0), (-1.0, 0.0), (f64::NAN, 0.0), (0.01, -1.0), (0.01, f64::NAN), (0.01, f64::INFINITY)] {
+        match node.fem_mesh(tolerance, max_size, None) {
+            Ok(mesh) => check(
+                !mesh.nodes().is_empty(),
+                &format!("fem: tolerance {tolerance} max_size {max_size} came back as an empty mesh"),
+            )?,
+            Err(err) => return Err(format!("fem: tolerance {tolerance} max_size {max_size} was refused on the mesh-only path: {err}")),
+        }
+    }
+    println!("fem reader: tolerance 0/-1/NaN and max_size -1/NaN/+Inf all mesh on the mesh-only path");
+    Ok(())
+}
+
+/// The reader's FEM mesh over a node **with** a B-rep: the path that carries topology, and
+/// the one that refuses a bad tolerance.
+fn fem_brep(scene: &Scene) -> Result<(), String> {
+    let e = |err: cadaclysm_sdk::Error| format!("fem brep: {err}");
+    let node = scene
+        .placements()
+        .into_iter()
+        .map(|p| p.geometry())
+        .find(|node| node.brep().is_some())
+        .ok_or("fem brep: no placement of the read-back STEP has a brep")?;
+    let mesh = node.fem_mesh(0.05, 0.0, None).map_err(e)?;
+    let edges = mesh.edges().map_err(e)?;
+    let vertices = mesh.vertices().map_err(e)?;
+    fem_arrays(
+        mesh.nodes(),
+        mesh.triangles(),
+        mesh.triangle_face(),
+        mesh.node_kind(),
+        mesh.node_entity(),
+        mesh.face_count(),
+        edges.len(),
+        vertices.len(),
+        "fem brep",
+    )?;
+    // The other half of the `from_mesh` proof: this body has a brep, and `watertight` is
+    // true for both bodies, so it is `from_mesh` that tells them apart rather than luck.
+    check(!mesh.from_mesh(), "fem brep: a body with a brep reported from_mesh")?;
+    check(mesh.face_count() == 15, &format!("fem brep: the filleted part read back as {} faces, not 15", mesh.face_count()))?;
+    check(!edges.is_empty() && !vertices.is_empty(), "fem brep: a brep body has no edges or no vertices")?;
+    check(
+        (0..3).all(|k| mesh.node_kind().contains(&k)),
+        &format!("fem brep: the nodes do not cover all three kinds: {:?}", mesh.node_kind().iter().take(8).collect::<Vec<_>>()),
+    )?;
+
+    // `id` is the **body's own** edge id, not the index. The ids ascend, and at least one
+    // is not its own index -- which is what catches an `id` filled from the loop counter.
+    check(edges.windows(2).all(|w| w[0].id < w[1].id), "fem brep: the edge ids do not ascend")?;
+    check(
+        edges.iter().enumerate().any(|(i, edge)| edge.id != i as u32),
+        "fem brep: every edge id equals its own index -- id is the index, not the body's id",
+    )?;
+    for (i, edge) in edges.iter().enumerate() {
+        check(edge.runs.first() == Some(&0), &format!("fem brep: edge {i}'s first run does not start at 0: {:?}", edge.runs))?;
+        check(
+            edge.runs.windows(2).all(|w| w[0] < w[1]) && edge.runs.iter().all(|&r| (r as usize) < edge.nodes.len()),
+            &format!("fem brep: edge {i}'s runs {:?} do not ascend inside its {} nodes", edge.runs, edge.nodes.len()),
+        )?;
+        check(
+            edge.nodes.iter().all(|&n| (n as usize) < mesh.nodes().len()),
+            &format!("fem brep: edge {i} names a node past the mesh"),
+        )?;
+        // A closed body: every edge has two real faces, and neither is a sentinel.
+        check(
+            edge.faces.0 < mesh.face_count() && edge.faces.1 < mesh.face_count(),
+            &format!("fem brep: edge {i} bounds faces {:?} of {}", edge.faces, mesh.face_count()),
+        )?;
+        check(!edge.closed || edge.runs.len() == 1, &format!("fem brep: edge {i} is closed with {} runs", edge.runs.len()))?;
+        if edge.seam {
+            check(edge.faces.0 == edge.faces.1, &format!("fem brep: edge {i} is a seam but bounds {:?}", edge.faces))?;
+        }
+        // The ends resolve through `vertices` to the chain's own first and last node --
+        // which is what tells `ends` from `faces`, both a pair of u32 a swap leaves in range.
+        let ends = [edge.ends.0, edge.ends.1].into_iter().filter(|&v| v != cadaclysm_sdk::NONE);
+        for v in ends {
+            let at = vertices.get(v as usize).ok_or_else(|| format!("fem brep: edge {i} ends at vertex {v} of {}", vertices.len()))?;
+            if at.node != cadaclysm_sdk::NONE {
+                check(
+                    Some(&at.node) == edge.nodes.first() || Some(&at.node) == edge.nodes.last(),
+                    &format!("fem brep: edge {i}'s end vertex {v} is node {} , which is neither end of its chain", at.node),
+                )?;
+            }
+        }
+    }
+    check(vertices.iter().any(|v| v.has_position), "fem brep: no vertex has a position")?;
+    check(
+        vertices.iter().all(|v| v.has_position || v.point == [0.0; 3]),
+        "fem brep: a vertex with no position carries a point that is not zeroed",
+    )?;
+    check(
+        mesh.watertight() && mesh.open_edges().map_err(e)?.is_empty() && mesh.folded_edges().map_err(e)?.is_empty(),
+        "fem brep: the closed filleted part is not watertight with both censuses empty",
+    )?;
+    println!(
+        "fem brep: {} nodes, {} edges (edge 0 id={}), {} vertices, {} faces",
+        mesh.nodes().len(),
+        edges.len(),
+        edges[0].id,
+        vertices.len(),
+        mesh.face_count()
+    );
+    drop(edges);
+    drop(vertices);
+    mesh.free();
+
+    // The B-rep path **does** read the options, and refuses a bad tolerance in the
+    // library's own words -- which is what proves the wrapper surfaces the library's
+    // message rather than one of its own.
+    match node.fem_mesh(0.0, 0.0, None) {
+        Err(err) if err.to_string().contains("tolerance must be finite and > 0") => {}
+        other => return Err(format!("fem brep: tolerance 0 was accepted or refused in other words: {:?}", other.map(|m| m.nodes().len()))),
+    }
+    Ok(())
+}
+
+/// The kernel's FEM mesh: the same surface over the kernel's own ABI, with the three
+/// deliberate asymmetries -- an **owned** `.msh` string, a **twelve**-number placement,
+/// and the licence notice on the writers rather than the builder.
+fn fem_kernel(rounded: &Solid, sheet: &Solid) -> Result<(), String> {
+    let e = |err: cadaclysm_sdk::Error| format!("kernel fem: {err}");
+    let mesh = rounded.fem_mesh(0.05, 0.0, None).map_err(e)?;
+    let edges = mesh.edges().map_err(e)?;
+    let vertices = mesh.vertices().map_err(e)?;
+    fem_arrays(
+        mesh.nodes(),
+        mesh.triangles(),
+        mesh.triangle_face(),
+        mesh.node_kind(),
+        mesh.node_entity(),
+        mesh.face_count(),
+        edges.len(),
+        vertices.len(),
+        "kernel fem",
+    )?;
+    check(!mesh.from_mesh(), "kernel fem: a solid reported from_mesh -- the kernel has no mesh path")?;
+    check(mesh.face_count() == 15, &format!("kernel fem: the filleted part has {} faces, not 15", mesh.face_count()))?;
+    check(
+        mesh.watertight() && mesh.open_edges().map_err(e)?.is_empty() && mesh.folded_edges().map_err(e)?.is_empty(),
+        "kernel fem: the filleted part is not watertight with both censuses empty",
+    )?;
+    let (node_count, longest) = (mesh.nodes().len(), mesh.longest_edge());
+    drop(edges);
+    drop(vertices);
+    mesh.free();
+
+    // `max_size` adds nodes and shortens the longest edge -- but it **bounds the boundary
+    // and only targets the interior**, so the check is loose on purpose: a tighter pin
+    // would assert what the ABI does not promise (measured at 1.03x on an unevenly
+    // parameterised face).
+    let finer = rounded.fem_mesh(0.05, 3.0, None).map_err(e)?;
+    check(
+        finer.nodes().len() > node_count && finer.longest_edge() < longest,
+        &format!("kernel fem: max_size 3 gave {} nodes (was {node_count}) and a longest edge of {} (was {longest})", finer.nodes().len(), finer.longest_edge()),
+    )?;
+    check(
+        finer.longest_edge() <= 3.0 * 1.05,
+        &format!("kernel fem: max_size 3 left a {} edge, past even the 1.03x the spec measured", finer.longest_edge()),
+    )?;
+    println!("kernel fem: {node_count} nodes at max_size 0, {} at 3.0 (longest {} -> {})", finer.nodes().len(), longest, finer.longest_edge());
+    finer.free();
+
+    // The **owned** `.msh` text: the kernel hands over a string the wrapper frees, where
+    // the reader's is borrowed from the handle. Two asks are two independent strings, and
+    // a reader porting one side's reasoning onto the other leaks or double-frees.
+    let mesh = rounded.fem_mesh(0.05, 0.0, None).map_err(e)?;
+    let text = mesh.msh_text().map_err(e)?;
+    check(mesh.msh_text().map_err(e)? == text, "kernel fem: two asks for the .msh text disagree")?;
+    check(text.starts_with("$MeshFormat\n4.1 0 8\n"), "kernel fem: the .msh text does not open as Gmsh 4.1 ASCII")?;
+    let msh = std::env::temp_dir().join("cadaclysm-smoke-rust-kernel-fem.msh");
+    mesh.save_msh(&msh).map_err(e)?;
+    check(
+        std::fs::metadata(&msh).map_err(|err| format!("kernel fem: {err}"))?.len() as usize >= text.len() / 2,
+        "kernel fem: save_msh wrote much less than the text",
+    )?;
+    mesh.free();
+
+    // The open sheet -- one face with a hole, so its rim is both the outer and the inner
+    // loop. `watertight` false with **both censuses empty** is the "not asked" trio, and
+    // every rim edge has a real face and the NONE sentinel for its second. Catches a
+    // wrapper that filled `face_b` with 0 where the ABI said NONE: 0 is a real face.
+    let rim = sheet.fem_mesh(0.05, 0.0, None).map_err(e)?;
+    check(
+        !rim.watertight() && rim.open_edges().map_err(e)?.is_empty() && rim.folded_edges().map_err(e)?.is_empty(),
+        &format!(
+            "kernel fem: the open sheet reads watertight={} with {} open and {} folded rows -- the 'not asked' trio is all three",
+            rim.watertight(),
+            rim.open_edges().map_err(e)?.len(),
+            rim.folded_edges().map_err(e)?.len()
+        ),
+    )?;
+    let rim_edges = rim.edges().map_err(e)?;
+    check(!rim_edges.is_empty(), "kernel fem: the sheet has no edges")?;
+    for (i, edge) in rim_edges.iter().enumerate() {
+        check(
+            edge.faces == (0, blacksmith::NONE),
+            &format!("kernel fem: the sheet's rim edge {i} reads faces {:?}, not (0, NONE)", edge.faces),
+        )?;
+    }
+    println!("kernel fem: the sheet's {} rim edges each bound face 0 and nothing else", rim_edges.len());
+    drop(rim_edges);
+    rim.free();
+
+    // The placement: **twelve** numbers as a `Frame`, where the reader takes sixteen
+    // column-major. The same transform as `TURNED`, so `turned` is the one expected map
+    // for both sides. A cuboid, because all eight of its corners are B-rep vertices and
+    // so certainly nodes.
+    //
+    // **The body is moved off the rotation's axis, and the test is worthless without that.**
+    // `Solid::cuboid` is centred where it is built, and a rotation carries no information
+    // about a body symmetric under it: transposing the frame's 3x3 axes block composes this
+    // transform with a 180-degree turn about z **through the frame's own origin**, and a box
+    // whose centre lands on that axis maps onto itself -- the same eight corners, the same
+    // span, the same printed line. That is not a weak assertion, it is a mathematically
+    // blind one.
+    //
+    // **The condition is on x and y alone.** The turn acts in the xy-plane, so it is blind
+    // exactly when the body's centre lands on the axis -- when its x and y map to the frame
+    // origin's -- and its z never enters the question. Measured, with the transpose applied:
+    // an offset of (0, 0, 5) is off the literal origin, purely along the axis, and the smoke
+    // passes at exit 0; (30, 7, 5) catches it. **So a non-zero x or y is what is required,
+    // and a z offset buys nothing.** With this one the right answer spans x 88..98, y 20..40
+    // and the transposed one x 102..112, y -40..-20 -- boxes already disjoint in x, which is
+    // what earns the catch. `fem_reader`'s cube needs no such care because `cube.scad` spans
+    // 0..20 in x and y rather than straddling the axis.
+    let (x, y, z) = (20.0, 10.0, 4.0);
+    let off = [30.0, 7.0, 5.0];
+    let box_lo = [off[0] - x / 2.0, off[1] - y / 2.0, off[2] - z / 2.0];
+    let box_hi = [off[0] + x / 2.0, off[1] + y / 2.0, off[2] + z / 2.0];
+    let cuboid = Solid::cuboid(x, y, z).and_then(|s| s.translate(off[0], off[1], off[2])).map_err(e)?;
+    let placed = cuboid.fem_mesh(0.05, 0.0, Some(&turned_frame()?)).map_err(e)?;
+    for corner in corners(box_lo, box_hi) {
+        let want = turned(corner);
+        check(
+            placed.nodes().iter().any(|q| near(*q, want)),
+            &format!("kernel fem: the frame did not send the corner {corner:?} to {want:?} -- the nodes span {:?}", span(placed.nodes())),
+        )?;
+    }
+    let (lo, hi) = span(placed.nodes());
+    check(
+        near(lo, turned([box_lo[0], box_hi[1], box_lo[2]])) && near(hi, turned([box_hi[0], box_lo[1], box_hi[2]])),
+        &format!("kernel fem: the placed cuboid spans {lo:?}..{hi:?}, not the turn of {box_lo:?}..{box_hi:?}"),
+    )?;
+    println!("kernel fem: the frame turns and moves the cuboid into {lo:?}..{hi:?}");
+    placed.free();
+
+    // A tolerance the mesher refuses, in its own words -- the kernel has no mesh-only
+    // path, so unlike the reader every solid goes through the options.
+    match rounded.fem_mesh(0.0, 0.0, None) {
+        Err(err) if err.to_string().contains("tolerance must be finite and > 0") => {}
+        other => return Err(format!("kernel fem: tolerance 0 was accepted or refused in other words: {:?}", other.map(|m| m.nodes().len()))),
+    }
     Ok(())
 }
 

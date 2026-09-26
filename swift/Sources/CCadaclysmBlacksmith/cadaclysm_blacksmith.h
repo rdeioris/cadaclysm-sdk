@@ -55,6 +55,26 @@
 #define CADACLYSM_BLACKSMITH_SVG_POLYLINES 8
 
 /**
+ * A named tree of placed solids and sub-assemblies, written together as one
+ * STEP file through [`cadaclysm_blacksmith_assembly_step`].
+ *
+ * Mutable: [`cadaclysm_blacksmith_assembly_place_solid`] and
+ * [`cadaclysm_blacksmith_assembly_place_assembly`] add to it. A `place` call
+ * must not run at the same time as any other call on the same assembly, or on
+ * one placed anywhere below it -- placing an assembly does not copy it, it
+ * shares the same handle's data (`Arc`), so a sub-assembly placed under two
+ * parents is one piece of shared, mutable state and every caller of `place`
+ * on it (through whichever parent) must serialise with every other. Placing
+ * one assembly into another is additionally serialised process-wide, so two
+ * threads placing `a` into `b` and `b` into `a` at once cannot both pass the
+ * cycle check before either has recorded its placement. Freeing a handle does
+ * not free an assembly that is still placed elsewhere: what a handle owns is
+ * one reference to shared data, and the data lives until the last reference
+ * -- placed or not -- lets go of it.
+ */
+typedef struct CadaclysmBlacksmithAssembly CadaclysmBlacksmithAssembly;
+
+/**
  * One solid meshed for a solver: opaque, owned, and freed with
  * [`cadaclysm_blacksmith_fem_mesh_free`].
  *
@@ -77,8 +97,9 @@ typedef struct CadaclysmBlacksmithIntersection CadaclysmBlacksmithIntersection;
 
 /**
  * An outline under construction: a start point and the segments drawn so far.
- * The one mutable object in this library; [`cadaclysm_blacksmith_path_end`]
- * consumes it.
+ * A mutable object, like `CadaclysmBlacksmithSweepPath` and
+ * `CadaclysmBlacksmithAssembly`; unlike them, [`cadaclysm_blacksmith_path_end`]
+ * consumes this one rather than leaving it live to be added to again.
  */
 typedef struct CadaclysmBlacksmithPath CadaclysmBlacksmithPath;
 
@@ -677,6 +698,136 @@ void cadaclysm_blacksmith_solid_free(struct CadaclysmBlacksmithSolid *solid);
  * `profile` must have come from this library and not have been freed already.
  */
 void cadaclysm_blacksmith_profile_free(struct CadaclysmBlacksmithProfile *profile);
+
+/**
+ * `solid`, named `name` -- see [`cadaclysm_blacksmith_solid_name`] and, for what
+ * a name is used for, `cadaclysm-blacksmith-abi`'s `assembly` module. Refused
+ * (null, `last_error`) for an empty name; a name cannot contain a NUL, since it
+ * is read as a NUL-terminated C string in the first place.
+ *
+ * # Safety
+ * `solid` live; `name` a NUL-terminated UTF-8 string.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_named(const struct CadaclysmBlacksmithSolid *solid,
+                                                            const char *name);
+
+/**
+ * `solid`'s name, or null when it has none. Borrowed: good until `solid` is
+ * freed, and must not be freed itself.
+ *
+ * # Safety
+ * `solid` live.
+ */
+const char *cadaclysm_blacksmith_solid_name(const struct CadaclysmBlacksmithSolid *solid);
+
+/**
+ * A new, empty assembly called `name`. Free it with
+ * [`cadaclysm_blacksmith_assembly_free`]. Null and `last_error` for an empty
+ * name.
+ *
+ * # Safety
+ * `name` a NUL-terminated UTF-8 string.
+ */
+struct CadaclysmBlacksmithAssembly *cadaclysm_blacksmith_assembly_new(const char *name);
+
+/**
+ * Release an assembly handle. Null is a no-op. Does **not** free the assembly
+ * itself if it is still placed somewhere else (see the handle's own doc) --
+ * only this one reference to it.
+ *
+ * # Safety
+ * `assembly` must have come from this library and not have been freed
+ * already.
+ */
+void cadaclysm_blacksmith_assembly_free(struct CadaclysmBlacksmithAssembly *assembly);
+
+/**
+ * `assembly`'s name. Borrowed: good until `assembly` is freed, and must not
+ * be freed itself.
+ *
+ * # Safety
+ * `assembly` live.
+ */
+const char *cadaclysm_blacksmith_assembly_name(const struct CadaclysmBlacksmithAssembly *assembly);
+
+/**
+ * Place `solid` at `frame` (twelve doubles, as every `frame` argument; must be
+ * right-handed and orthonormal) in `assembly`, called `name` -- or, with
+ * `name` null, `solid`'s own name (`"part"` if it has none), numbered past
+ * any already taken in `assembly` (`"bolt"`, `"bolt 2"`, ...). An explicit
+ * `name` already taken in `assembly` is refused. Returns the placement's
+ * name, owned: free it with [`cadaclysm_blacksmith_string_free`]. Null and
+ * `last_error` on failure.
+ *
+ * # Safety
+ * `assembly` and `solid` live; `frame` twelve doubles; `name` null or a
+ * NUL-terminated UTF-8 string.
+ */
+char *cadaclysm_blacksmith_assembly_place_solid(struct CadaclysmBlacksmithAssembly *assembly,
+                                                const struct CadaclysmBlacksmithSolid *solid,
+                                                const double *frame,
+                                                const char *name);
+
+/**
+ * As [`cadaclysm_blacksmith_assembly_place_solid`], but placing another
+ * assembly, `placed`, rather than a solid -- sharing it, not copying it, so a
+ * later `place` on `placed` (through this parent or another) shows up
+ * wherever it is placed. Refused (null, `last_error` naming the cycle) if
+ * `placed` is `assembly` itself or anywhere above it in the tree already,
+ * since writing that out would never terminate.
+ *
+ * # Safety
+ * `assembly` and `placed` live; `frame` twelve doubles; `name` null or a
+ * NUL-terminated UTF-8 string.
+ */
+char *cadaclysm_blacksmith_assembly_place_assembly(struct CadaclysmBlacksmithAssembly *assembly,
+                                                   const struct CadaclysmBlacksmithAssembly *placed,
+                                                   const double *frame,
+                                                   const char *name);
+
+/**
+ * `assembly`, and everything placed under it, as one STEP file: `assembly`
+ * the root product, each sub-assembly and each distinct part (the same solid
+ * with the same paint and name) written once, each placement an occurrence
+ * named as it was placed. `schema` and `unit` as for
+ * [`cadaclysm_blacksmith_step`]. The text is owned: release it with
+ * [`cadaclysm_blacksmith_string_free`]. Null and `last_error` on failure --
+ * including an assembly reachable from this one that places nothing, since a
+ * reader would never show it.
+ *
+ * # Safety
+ * `assembly` live; `schema` null or a NUL-terminated string.
+ */
+char *cadaclysm_blacksmith_assembly_step(const struct CadaclysmBlacksmithAssembly *assembly,
+                                         const char *schema,
+                                         uint32_t unit);
+
+/**
+ * Declare a rigid link `name` over this assembly's placements named in `placements`
+ * (`placement_count` of them). False, with `last_error` saying why, when a rule of
+ * `Assembly.link` refuses it; the assembly is then unchanged.
+ *
+ * # Safety
+ * `assembly` a live assembly; `name` and each of `placements`' `placement_count`
+ * entries NUL-terminated UTF-8; `placements` may be null only when the count is 0.
+ */
+bool cadaclysm_blacksmith_assembly_link(struct CadaclysmBlacksmithAssembly *assembly,
+                                        const char *name,
+                                        const char *const *placements,
+                                        size_t placement_count);
+
+/**
+ * Connect this assembly's links `start` and `end` (kept in that order) as a joint
+ * called `name`. False, with `last_error` saying why, when a rule of `Assembly.joint`
+ * refuses it; the assembly is then unchanged.
+ *
+ * # Safety
+ * `assembly` a live assembly; `name`, `start` and `end` NUL-terminated UTF-8.
+ */
+bool cadaclysm_blacksmith_assembly_joint(struct CadaclysmBlacksmithAssembly *assembly,
+                                         const char *name,
+                                         const char *start,
+                                         const char *end);
 
 /**
  * Fill `options` with `size` set and every default in place: a chordal tolerance and no size
@@ -1287,13 +1438,13 @@ bool cadaclysm_blacksmith_bounds64(const struct CadaclysmBlacksmithSolid *solid,
 /**
  * `count` solids as one STEP part file, each its own `MANIFOLD_SOLID_BREP`,
  * through `cadaclysm_step_ap::write_breps_coloured`. `schema` is NULL for the
- * built-in AP203 (`CONFIG_CONTROL_DESIGN`) -- or AP242 when any solid or face is
+ * built-in AP203 (`CONFIG_CONTROL_DESIGN`) -- or AP242 when any solid, face or edge is
  * coloured, since AP203's first edition has no entity to state a colour with -- the name of a built-in schema
  * (`AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF`, …; case-insensitive) --
  * a built-in schema must carry every entity the writer emits, as AP203 and
  * AP242 do and AP214's `AUTOMOTIVE_DESIGN` does not -- or the EXPRESS source
- * text of a custom schema. A solid's and its faces' colours are written as STEP
- * styling (`STYLED_ITEM` over `COLOUR_RGB`) under a schema that has it, and
+ * text of a custom schema. A solid's, its faces' and its edges' colours are written
+ * as STEP styling (`STYLED_ITEM` over `COLOUR_RGB`) under a schema that has it, and
  * left out under a named one that does not. `unit` 0 = metre, 1 = millimetre, 2 = inch, and
  * says what the solids' lengths are. The text is owned: release it with
  * [`cadaclysm_blacksmith_string_free`]. Null and `last_error` on failure.
@@ -1458,7 +1609,9 @@ bool cadaclysm_blacksmith_drawing_svg(const struct CadaclysmBlacksmithSolid *con
  * Release a string this library handed over as owned (`cadaclysm_blacksmith_step`,
  * `cadaclysm_blacksmith_step_assembly`, `cadaclysm_blacksmith_sat_text`,
  * `cadaclysm_blacksmith_brep_text`, `cadaclysm_blacksmith_svg_text`,
- * `cadaclysm_blacksmith_drawing_svg_text`, `cadaclysm_blacksmith_fem_mesh_msh_text`).
+ * `cadaclysm_blacksmith_drawing_svg_text`, `cadaclysm_blacksmith_fem_mesh_msh_text`,
+ * `cadaclysm_blacksmith_assembly_place_solid`, `cadaclysm_blacksmith_assembly_place_assembly`,
+ * `cadaclysm_blacksmith_assembly_step`).
  * Null is a no-op.
  *
  * **This list is the whole of it, and it is where a caller comes to find out whether a
@@ -2534,6 +2687,17 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_translate(const struct Cad
                                                                 double dx,
                                                                 double dy,
                                                                 double dz);
+
+/**
+ * `solid` scaled by `factor` about the origin: every length times `factor`,
+ * exactly, colours kept. NULL and `last_error` for a factor that is not positive
+ * and finite, or a curve with no exact scaled form.
+ *
+ * # Safety
+ * `solid` a live solid or NULL.
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_scaled(const struct CadaclysmBlacksmithSolid *solid,
+                                                             double factor);
 
 /**
  * `solid` turned `radians` about `axis` (a point and a direction).

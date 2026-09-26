@@ -147,6 +147,39 @@ ACIS records, splines and swept surfaces as exact NURBS, in the layout Rhino's
 own exporter writes. `sat()` and `writeSat` have the library write the file,
 so a refusal names it.
 
+## A mesh for a solver
+
+`node.femMesh()` on the reader and `solid.femMesh()` on the kernel give a
+`FemMesh`: nodes welded by bits, triangles wound outward, every node tagged with
+the lowest-dimension B-rep entity it lies on, every crack reported rather than
+closed, and Gmsh 4.1 `.msh` out.
+
+```js
+const fem = solid.femMesh(0.01);            // the default: FemOptions::default()'s, not mesh()'s 0.05
+try {
+  console.log(fem.nodes().length / 3, 'nodes,', fem.triangles().length / 3, 'triangles');
+  console.log(fem.watertight, fem.openEdges(), fem.foldedEdges());   // the "not asked" trio is all three
+  for (const edge of fem.edges()) for (const chain of edge.chains()) drawPolyline(chain);
+  fem.saveMsh('part.msh');
+} finally { fem.free(); }
+```
+
+Three things worth knowing:
+
+* **It is a handle of your own**, not a product of the scene or of the solid's
+  tessellation cache: `free()` it (or `using` it), and neither `scene.close()`,
+  `solid.close()` nor meshing the body again at another tolerance touches it.
+* **Every array is a copy**, decoded at call time as `mesh()`'s are -- this
+  binding hands out no views at all -- so what you hold survives the free and
+  needs no `slice()`. Each ask copies again, so hold the array rather than
+  calling `nodes()` inside a loop.
+* **The two libraries differ on purpose.** The reader's `placement` is sixteen
+  column-major numbers, the kernel's a `Frame` or twelve; the reader prints the
+  unlicensed notice when the mesh is built and the kernel when the `.msh` is
+  written; and the kernel's `.msh` text is an owned string this wrapper
+  releases, where the reader's is a slot borrowed from the handle. Neither shows
+  in a signature, and both are documented on the members themselves.
+
 ## Drawing SVG
 
 `Scene.svgText(options)`/`Scene.svg(path, options)` (and `Node`'s own, in its

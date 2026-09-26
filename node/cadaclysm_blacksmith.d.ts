@@ -211,6 +211,8 @@ export class Solid {
   trimAsync(tool: Solid, keep?: 'outside' | 'inside', tolerance?: number, progress?: Progress | null): Promise<Solid>;
   place(frame: FrameLike): Solid;
   translate(dx: number, dy: number, dz: number): Solid;
+  /** This solid scaled by `factor` about the origin: every length times `factor`, exactly. */
+  scaled(factor: number): Solid;
   rotate(axis: AxisLine, radians: number): Solid;
   mirror(plane: FrameLike): Solid;
   join(other: Solid, tolerance?: number, progress?: Progress | null, merge?: boolean): Solid;
@@ -276,6 +278,15 @@ export class Solid {
    *  cache at `tolerance`, as `edgePolylines` does. */
   edgePolylineColours(tolerance?: number): Array<[number, number, number] | null>;
   /**
+   * This solid meshed for a solver, as a `FemMesh` **owned by the caller**: `free()`
+   * it, or `using` it. `tolerance` and `maxSize` default to `FemOptions::default()`'s
+   * own **0.01 and 0**, not the 0.05 every other tolerance here takes; `placement` is a
+   * `Frame` or **twelve** numbers, where the reader's `Node.femMesh` takes sixteen
+   * column-major. `progress` hears `'meshing'` and `'welding'`. No unlicensed notice
+   * here -- `FemMesh.mshText` and `FemMesh.saveMsh` print it.
+   */
+  femMesh(tolerance?: number, maxSize?: number, placement?: FrameLike | null, progress?: Progress | null): FemMesh;
+  /**
    * `schema`: null/undefined (the kernel's built-in AP203); the path of a schema file
    * (no newline in it, naming an existing file), read and sent as EXPRESS text; the
    * bare name of a built-in schema (case-insensitive, e.g.
@@ -306,6 +317,11 @@ export class Solid {
   faceRef(face: number): number[];
   /** The face `faceRef` refers to, `hint` the index it had; null where it is gone. */
   findFace(faceRef: Iterable<number>, hint?: number | null, tolerance?: number): number | null;
+  /** This solid, named `name`. The name rides through a one-source operation (`place`, `coloured`, ...),
+   *  dropped by a two-source one (`join`, `cut`, `common`, ...) or a fresh primitive; see `name`. */
+  named(name: string): Solid;
+  /** This solid's name, or null if it has none -- what `named` set, kept or dropped by whatever built this solid. */
+  readonly name: string | null;
   coloured(colour: string | Iterable<number>, face?: number | null): Solid;
   readonly colour: [number, number, number] | null;
   faceColour(face: number): [number, number, number] | null;
@@ -344,6 +360,30 @@ export class Solid {
   static openAll(path: string): Solid[];
 }
 export function brepLayoutId(): string;
+
+/**
+ * A mutable tree of placements: a name, and zero or more solids or other assemblies placed in
+ * it at a frame. Unlike `Solid`, placing shares rather than copies. `close()` frees this
+ * handle; it does not free what was placed in it if that is still reachable elsewhere.
+ */
+export class Assembly {
+  constructor(name: string);
+  readonly closed: boolean;
+  close(): void;
+  [Symbol.dispose](): void;
+  readonly name: string;
+  /**
+   * Place `thing` (a `Solid` or another `Assembly`) at `frame` in this assembly, called `name`
+   * -- or, left null, `thing`'s own name (`Solid.name`, `"part"` for an unnamed solid, or the
+   * placed assembly's own `name`), numbered past any already taken here (`"bolt"`, `"bolt 2"`,
+   * ...). Throws for a duplicate explicit name or a cycle. Returns the placement's name.
+   */
+  place(thing: Solid | Assembly, frame: FrameLike, name?: string | null): string;
+  stepText(schema?: string | null, unit?: Unit): string;
+  step(path: string, schema?: string | null, unit?: Unit): void;
+  /** This assembly as a reader `Scene`, through STEP text; see `Solid.toScene`. */
+  toScene(schema?: string | null): Scene;
+}
 
 export class Selector {
   static max(axis: AxisValue): Selector;
@@ -472,6 +512,67 @@ export function writeSat(path: string, solids: Iterable<Solid>, unit?: Unit): vo
 /** Several solids as one `.brep`, each its own solid under one compound. */
 export function writeBrepText(solids: Iterable<Solid>): string;
 export function writeBrep(path: string, solids: Iterable<Solid>): void;
+/**
+ * One B-rep edge of a `FemMesh`: `nodes` in order along the edge, `runs` saying where
+ * the chain breaks (`chains()` cuts it), `faces` and `ends` (`[a, b]`, the second
+ * `NONE` where there is none -- `0` is a real face and a real vertex), `closed`, `seam`,
+ * and `id`, the **solid's own** edge id rather than this mesh's index or a row of
+ * `Solid.edges()`.
+ */
+export class FemEdge {
+  private constructor();
+  id: number;
+  nodes: Uint32Array; runs: Uint32Array;
+  faces: [number, number]; ends: [number, number];
+  closed: boolean; seam: boolean;
+  /** `nodes` cut into one polyline per run, as views into it; nothing joined across a run boundary. */
+  chains(): Uint32Array[];
+}
+/**
+ * One B-rep vertex of a `FemMesh`: `node` is the mesh node there or `NONE` (ordinary,
+ * not a fault), `point` where the topology says it is -- **meaningless unless
+ * `hasPosition`**, when it is all zeros.
+ */
+export class FemVertex {
+  private constructor();
+  node: number;
+  point: Float64Array;
+  hasPosition: boolean;
+}
+/**
+ * One solid meshed for a solver: what `Solid.femMesh` returns, **owned by the caller**.
+ * Every array is a fresh copy decoded at call time, as `Solid.mesh`'s typed arrays are
+ * -- so one in hand survives `free()`, `Solid.close()` and the collector, and neither
+ * closing the solid nor meshing it again at another tolerance touches this handle. A
+ * call on a freed handle throws.
+ */
+export class FemMesh {
+  private constructor();
+  readonly freed: boolean;
+  free(): void;
+  [Symbol.dispose](): void;
+  nodes(): Float64Array;
+  triangles(): Uint32Array;
+  triangleFace(): Uint32Array;
+  nodeKind(): Uint32Array;
+  nodeEntity(): Uint32Array;
+  readonly faceCount: number;
+  edges(): FemEdge[];
+  vertices(): FemVertex[];
+  /** Every crack, as `[a, b, brepEdge]`; `brepEdge` is `NONE` where the two nodes share none. Empty unless the solid's topology is closed. */
+  openEdges(): [number, number, number][];
+  /** Every fold, as `openEdges` reports a crack. A solid can be folded without being open. */
+  foldedEdges(): [number, number, number][];
+  readonly watertight: boolean;
+  /** Always false here: a `Solid` always has a B-rep, so this library has no mesh-only body. */
+  readonly fromMesh: boolean;
+  readonly minAngle: number;
+  readonly worstTriangle: number;
+  readonly longestEdge: number;
+  /** Gmsh 4.1 ASCII `.msh` text. **Owned** on this side of the ABI and released by this wrapper, where the reader's is borrowed from its handle; prints the unlicensed notice. */
+  mshText(): string;
+  saveMsh(path: string): void;
+}
 /** A `Solid` or a `Profile`: what `writeSvgText`/`writeSvg` draw, split by type before the call. */
 export type Drawable = Solid | Profile;
 /**

@@ -502,8 +502,417 @@ return function(t)
     scene:close()
   end)
 
+  t.test("surface_edge_beziers: an extrusion's exact edges, a B-rep's none", function()
+    local path = t.fixture("crates/cadaclysm-acis/tests/fixtures/rhino/extrusion-objects.3dm")
+    local brep = assembly()
+    if not path or not brep then return end
+    -- Both conventions: UNREAL goes through the decorator that maps every getter into the
+    -- caller's space, which must forward this answer rather than fall back to the trims.
+    for _, convention in ipairs({ cadaclysm.Convention.NATIVE, cadaclysm.Convention.UNREAL }) do
+      local scene = cadaclysm.open(path, nil, convention)
+      local extrusions = 0
+      for node in scene:walk() do
+        if node.can_mesh and node.surface_edges.polyline_count > 0 then
+          extrusions = extrusions + 1
+          local exact = node.surface_edge_beziers
+          t.ok(exact.count > 0, convention .. ": an extrusion's exact edges are free")
+          t.eq(node.is_meshed, false)
+          t.eq(exact.count, node.edge_beziers.count)
+        end
+      end
+      t.ok(extrusions > 0, "the fixture is here for its extrusion objects")
+      scene:close()
+    end
+    -- A B-rep's exact edges come out of the mesher, so it offers none and stays unmeshed.
+    local scene = cadaclysm.open(brep)
+    local bracket = scene.nodes[2]
+    t.eq(bracket.surface_edge_beziers.count, 0)
+    t.eq(bracket.is_meshed, false)
+    scene:close()
+  end)
+
+  -- A quarter turn about z then 100 along x, as the sixteen column-major doubles
+  -- `fem_mesh` takes (the order `bounds_placed` takes too): (x, y, z) -> (100 - y, x, z).
+  local TURNED = { 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 100, 0, 0, 1 }
+  local function turned(x, y, z) return 100 - y, x, z end
+
+  -- Which count feeds which entry point -- the census *wiring*, which nothing else pins. Every
+  -- other FEM test proves a row is extracted correctly; none proves `open_edges` reads
+  -- `_open_edge_count` rows through `cadaclysm_fem_mesh_open_edge` rather than the folded count
+  -- or the folded call.
+  --
+  -- `samples/open-sheet.scad` is the only body in this repository where both censuses are
+  -- non-empty and of different lengths: the B-rep path computes no census unless the topology is
+  -- closed (the documented "not asked" pair) and every closed body has none, while the mesh path
+  -- always computes one -- so a `polyhedron` with a flap over one of its own directed edges is
+  -- the way in. Six cracks, one fold, and the fold is not the first crack.
+  --
+  -- Catches: `open_edges` wired to the folded count (1 row where 6 belong), to the folded call
+  -- (row 1 of a one-row table cannot be read at all, so it raises), or both consistently (the
+  -- contents then disagree).
+  t.test("a FEM census reads its own count through its own entry point", function()
+    local scene = cadaclysm.open(t.fixture("samples/open-sheet.scad"))
+    local mesh = scene.nodes[1]:fem_mesh()
+    t.eq(mesh.node_count, 5)
+    t.eq(mesh.triangle_count, 3)
+    t.eq(mesh.from_mesh, true)
+    t.eq(mesh.watertight, false)
+    local cracks, folds = mesh.open_edges, mesh.folded_edges
+    t.eq(#cracks, 6, "the sheet and its flap leave six boundary edges")
+    t.eq(#folds, 1, "the flap shares one directed edge with the sheet")
+    t.eq(folds[1][1], 2)
+    t.eq(folds[1][2], 0)
+    t.eq(folds[1][3], cadaclysm.NONE, "a mesh-only body's rows name no brep edge")
+    t.eq(cracks[1][1], 1)
+    t.eq(cracks[1][2], 2)
+    mesh:free()
+    scene:close()
+  end)
+
+  t.test("a node's FEM mesh: the mesh-only cube's arrays, census, quality and .msh text", function()
+    local scene = cadaclysm.open(t.fixture("samples/cube.scad"))
+    local mesh = scene.nodes[1]:fem_mesh()
+    t.eq(getmetatable(mesh), cadaclysm.FemMesh)
+    t.eq(mesh.node_count, 8)
+    t.eq(mesh.triangle_count, 12)
+    t.eq(mesh.face_count, 1)
+    t.eq(mesh.from_mesh, true, "cube.scad is a CSG body with no brep, so the mesh is the scene's own")
+    t.eq(mesh.watertight, true)
+    t.eq(#mesh.edges, 0, "a from_mesh body has no brep edges at all")
+    t.eq(#mesh.vertices, 0)
+    t.eq(#mesh.open_edges, 0)
+    t.eq(#mesh.folded_edges, 0)
+    t.near(mesh.min_angle, 45, 1e-9)
+    t.near(mesh.longest_edge, 28.284271247461902, 1e-9)
+    t.eq(mesh.worst_triangle, 0)
+    -- The five arrays are the library's own memory, lent as pointers with their counts
+    -- beside them -- as a Mesh's are, and 0-based for the same reason.
+    t.ok(mesh.nodes ~= nil and mesh.triangles ~= nil)
+    local lo, hi = math.huge, -math.huge
+    for i = 0, mesh.node_count * 3 - 1 do
+      lo, hi = math.min(lo, mesh.nodes[i]), math.max(hi, mesh.nodes[i])
+    end
+    t.eq(lo, 0); t.eq(hi, 20)
+    for i = 0, mesh.triangle_count * 3 - 1 do
+      t.ok(mesh.triangles[i] < mesh.node_count, "a triangle index past the nodes")
+    end
+    for i = 0, mesh.triangle_count - 1 do
+      t.ok(mesh.triangle_face[i] < mesh.face_count, "a triangle_face past the faces")
+    end
+    for i = 0, mesh.node_count - 1 do
+      -- One face and every node on it: this is what tells node_kind from node_entity
+      -- if the two were ever lent from one pointer.
+      t.eq(mesh.node_kind[i], 2, "every node of a from_mesh body lies on a face")
+      t.eq(mesh.node_entity[i], 0, "and on face 0, the only one")
+    end
+    -- Gmsh 4.1 ASCII. The library's text is a borrowed slot on this handle, copied out
+    -- on the way, so a second ask reads the same bytes rather than a freed pointer.
+    local msh = mesh:msh_text()
+    t.eq(msh:sub(1, 11), "$MeshFormat")
+    t.ok(msh:find("4.1 0 8", 1, true), msh:sub(1, 40))
+    t.eq(#mesh:msh_text(), #msh, "a second msh_text read a different length")
+    local path = t.tmp("cube-fem.msh")
+    mesh:save_msh(path)
+    local f = assert(io.open(path, "rb"))
+    local written = f:read("*a")
+    f:close()
+    t.ok(#written >= #msh / 2, ("save_msh wrote %d bytes where msh_text is %d"):format(#written, #msh))
+    -- Freeing is idempotent, and every call that takes the handle refuses afterwards.
+    t.eq(mesh.freed, false)
+    mesh:free()
+    mesh:free()
+    t.eq(mesh.freed, true)
+    t.ok(tostring(mesh):match("freed"), tostring(mesh))
+    local calls = {
+      function() return mesh:msh_text() end,
+      function() return mesh:save_msh(t.tmp("never-written.msh")) end,
+      function() return mesh.edges end,
+      function() return mesh.vertices end,
+      function() return mesh.open_edges end,
+      function() return mesh.folded_edges end,
+    }
+    t.eq(#calls, 6, "a call that takes the handle was added without being swept here")
+    for _, call in ipairs(calls) do
+      local err = t.raises(call, "fem mesh: freed")
+      t.eq(getmetatable(err), cadaclysm.CadaclysmError)
+    end
+    -- And what is *not* refused, which this wrapper documents rather than enforces: the
+    -- arrays and the summary are plain fields filled when the mesh was built, so they
+    -- read on after the free -- the numbers still true, the pointers dangling. Nothing
+    -- here dereferences one; that read was measured outside the suite.
+    t.eq(mesh.node_count, 8, "the counts are Lua numbers of our own and outlive the handle")
+    t.ok(mesh.nodes ~= nil, "the pointer field is still there, and now points at freed memory")
+    scene:close()
+  end)
+
+  t.test("fem_mesh validates neither tolerance nor max_size on the mesh-only path", function()
+    local scene = cadaclysm.open(t.fixture("samples/cube.scad"))
+    local node = scene.nodes[1]
+    local nan, inf = 0 / 0, math.huge
+    -- `fem_mesh_of_mesh` takes no FemOptions at all, so a body with no brep comes back
+    -- whatever these say, where the brep path refuses each. A wrapper that checked
+    -- either field itself would pass every other test here and be wrong.
+    for _, pair in ipairs({ { 0, 0 }, { -1, 0 }, { nan, 0 }, { 0.01, -1 }, { 0.01, nan }, { 0.01, inf } }) do
+      local mesh = node:fem_mesh(pair[1], pair[2])
+      t.eq(mesh.node_count, 8, ("tolerance %s, max_size %s"):format(tostring(pair[1]), tostring(pair[2])))
+      mesh:free()
+    end
+    scene:close()
+  end)
+
+  t.test("a FEM mesh placement is sixteen numbers, and it reaches the library", function()
+    local scene = cadaclysm.open(t.fixture("samples/cube.scad"))
+    local node = scene.nodes[1]
+    t.raises(function() node:fem_mesh(0.01, 0, { 1, 2, 3 }) end, "fem_mesh: a placement is 16 numbers, not 3")
+    -- The mistake a caller moving between the two ABIs makes: the kernel's twelve.
+    t.raises(function() node:fem_mesh(0.01, 0, { 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 }) end,
+      "fem_mesh: a placement is 16 numbers, not 12")
+    local plain, placed = node:fem_mesh(), node:fem_mesh(0.01, 0, TURNED)
+    t.eq(placed.node_count, plain.node_count)
+    -- Every unplaced node must reappear at its image. cube.scad spans 0..20 in x and y,
+    -- so the body does not straddle the axis this turn acts about: transposing the 3x3
+    -- block sends it to x 102..120 rather than 80..100, and that offset from the axis
+    -- *in the plane the turn acts in* is what earns the catch. The loop over all eight
+    -- is defence in depth. Do not "simplify" this to a body centred on the axis.
+    for i = 0, plain.node_count - 1 do
+      local x, y, z = plain.nodes[3 * i], plain.nodes[3 * i + 1], plain.nodes[3 * i + 2]
+      local ex, ey, ez = turned(x, y, z)
+      local found = false
+      for k = 0, placed.node_count - 1 do
+        if math.abs(placed.nodes[3 * k] - ex) < 1e-9 and math.abs(placed.nodes[3 * k + 1] - ey) < 1e-9
+          and math.abs(placed.nodes[3 * k + 2] - ez) < 1e-9 then
+          found = true
+          break
+        end
+      end
+      t.ok(found, ("the placement did not send (%g, %g, %g) to (%g, %g, %g)"):format(x, y, z, ex, ey, ez))
+    end
+    local min, max = { math.huge, math.huge, math.huge }, { -math.huge, -math.huge, -math.huge }
+    for i = 0, placed.node_count - 1 do
+      for k = 1, 3 do
+        local v = placed.nodes[3 * i + k - 1]
+        min[k], max[k] = math.min(min[k], v), math.max(max[k], v)
+      end
+    end
+    t.eq(("%g %g %g %g %g %g"):format(min[1], min[2], min[3], max[1], max[2], max[3]),
+      "80 0 0 100 20 20", "the placed nodes do not span the turn of the cube")
+    plain:free(); placed:free()
+    scene:close()
+  end)
+
+  t.test("a B-rep body's FEM mesh: edge chains, vertices, the body's own edge ids and a closed census", function()
+    local path = t.fixture("android/app/src/debug/assets/as1-ac-214.stp")
+    if not path then return end
+    local scene = cadaclysm.open(path)
+    local mesh = scene.nodes[2]:fem_mesh(0.05)
+    t.eq(mesh.from_mesh, false, "a STEP body is meshed off its brep")
+    t.eq(mesh.face_count, 18)
+    t.eq(mesh.node_count, 2564)
+    t.eq(mesh.triangle_count, 5148)
+    t.eq(mesh.watertight, true)
+    t.eq(#mesh.open_edges, 0)
+    t.eq(#mesh.folded_edges, 0)
+    local edges, vertices = mesh.edges, mesh.vertices
+    t.eq(#edges, 48)
+    t.eq(#vertices, 32)
+    -- All three kinds, each node's entity bounded by the list its own kind names.
+    local kinds = {}
+    for i = 0, mesh.node_count - 1 do
+      local kind, entity = mesh.node_kind[i], mesh.node_entity[i]
+      kinds[kind] = true
+      local bound = (kind == 0 and #vertices) or (kind == 1 and #edges) or (kind == 2 and mesh.face_count)
+      t.ok(bound and entity < bound, ("node %d: kind %d entity %d"):format(i, kind, entity))
+    end
+    t.ok(kinds[0] and kinds[1] and kinds[2], "a brep body's nodes lie on vertices, edges and faces")
+    -- `id` is the body's own edge id, not this list's index: the ids ascend, none of
+    -- them equals its own index, and the first is already past the edge count.
+    local previous = -1
+    for i, e in ipairs(edges) do
+      t.eq(getmetatable(e), cadaclysm.FemEdge)
+      t.ok(e.id > previous, ("edge ids do not ascend at %d: %d after %d"):format(i, e.id, previous))
+      previous = e.id
+      t.ok(e.id ~= i - 1, ("edge %d's id equals its own index -- id is the index, not the body's id"):format(i - 1))
+    end
+    t.eq(edges[1].id, 89)
+    t.ok(edges[1].id > #edges, "edge 0's id is the file's own number, not a small index")
+    -- Every edge: one chain starting at 0, every node in range, and -- the body being
+    -- closed -- two real faces. `0` is a real face, so NONE is the only sentinel.
+    for i, e in ipairs(edges) do
+      t.ok(#e.runs >= 1 and e.runs[1] == 0, ("edge %d's runs do not start at 0"):format(i - 1))
+      t.ok(#e.nodes >= 2, ("edge %d has %d nodes"):format(i - 1, #e.nodes))
+      for _, n in ipairs(e.nodes) do
+        t.ok(n < mesh.node_count, ("edge %d names node %d of %d"):format(i - 1, n, mesh.node_count))
+      end
+      -- `runs` holds the ABI's own 0-based offsets into a 1-based Lua array, so
+      -- `chains()` does that arithmetic once: its pieces rebuild `nodes` exactly and
+      -- there is one per run, which is what catches an off-by-one in either direction.
+      local rebuilt, chains = {}, e:chains()
+      for _, chain in ipairs(chains) do
+        for _, n in ipairs(chain) do rebuilt[#rebuilt + 1] = n end
+      end
+      t.eq(#chains, #e.runs, ("edge %d: %d chains for %d runs"):format(i - 1, #chains, #e.runs))
+      t.eq(table.concat(rebuilt, ","), table.concat(e.nodes, ","),
+        ("edge %d's chains do not rebuild its nodes"):format(i - 1))
+      t.ok(e.faces[1] ~= cadaclysm.NONE and e.faces[2] ~= cadaclysm.NONE,
+        ("edge %d of a closed body bounds only one face"):format(i - 1))
+      t.ok(e.faces[1] < mesh.face_count and e.faces[2] < mesh.face_count)
+      -- `ends` and `faces` are both a pair of uint32 a swap would leave in range: the
+      -- one check that separates them is resolving `ends` through `vertices` to the
+      -- chain's own first and last node.
+      t.eq(e.closed, false)
+      local a, b = vertices[e.ends[1] + 1], vertices[e.ends[2] + 1]
+      t.ok(a ~= nil and b ~= nil, ("edge %d's ends are not vertex indices"):format(i - 1))
+      local first, last = e.nodes[1], e.nodes[#e.nodes]
+      t.ok((a.node == first and b.node == last) or (a.node == last and b.node == first),
+        ("edge %d: ends %d/%d resolve to nodes %d/%d, not the chain's %d/%d"):format(
+          i - 1, e.ends[1], e.ends[2], a.node, b.node, first, last))
+    end
+    local positioned = 0
+    for _, v in ipairs(vertices) do
+      t.eq(getmetatable(v), cadaclysm.FemVertex)
+      if v.has_position then
+        positioned = positioned + 1
+        t.eq(#v.point, 3)
+      end
+      t.ok(v.node == cadaclysm.NONE or v.node < mesh.node_count)
+    end
+    t.eq(positioned, 32, "every vertex of this body has a position")
+    mesh:free()
+    -- The brep path refuses what the mesh-only path passes through, in the library's
+    -- own words -- which is what proves the wrapper surfaces cadaclysm_last_error.
+    t.raises(function() scene.nodes[2]:fem_mesh(0) end, "tolerance must be finite and > 0")
+    t.raises(function() scene.nodes[2]:fem_mesh(0.05, -1) end, "max_size must be finite and >= 0")
+    t.raises(function() scene.nodes[1]:fem_mesh(0.05) end, "neither a brep nor a mesh")
+    scene:close()
+  end)
+
+  t.test("a FEM mesh is its own handle: re-meshing the node and closing the scene leave it alone", function()
+    local scene = cadaclysm.open(t.fixture("samples/cube.scad"))
+    local node = scene.nodes[1]
+    t.eq(node.mesh.index_count, 36)
+    local mesh = node:fem_mesh()
+    -- A FEM mesh is not in the scene's mesh cache, so nothing the scene does to that
+    -- cache can stale it: forgetting the meshes frees what a Mesh64 points into and
+    -- leaves this untouched. A wrapper that reused the tessellation guard here would
+    -- refuse a read the library never refuses.
+    scene:forget_meshes()
+    t.eq(node.mesh.index_count, 36)
+    t.eq(mesh.nodes[0], 0)
+    t.eq(mesh.node_count, 8)
+    t.eq(#mesh:msh_text() > 0, true)
+    scene:close()
+    -- And the scene does not own it either: a closed scene neither frees nor stales it.
+    t.eq(mesh.node_count, 8)
+    t.eq(mesh.triangles[0] < 8, true)
+    t.ok(#mesh:msh_text() > 0, "the mesh stopped writing once its scene closed")
+    mesh:free()
+  end)
+
+  t.test("a FEM mesh held keeps its own arrays alive under collection pressure", function()
+    local scene = cadaclysm.open(t.fixture("samples/cube.scad"))
+    local node = scene.nodes[1]
+    local kept = node:fem_mesh()
+    local first = kept.nodes[0]
+    for i = 1, 60 do
+      local other = node:fem_mesh(0.01 * (1 + i % 3))
+      if i % 2 == 0 then other:free() end       -- the rest are left to the collector
+    end
+    for _ = 1, 3 do collectgarbage() end
+    t.eq(kept.freed, false)
+    t.eq(kept.nodes[0], first, "the arrays moved or were freed under a mesh still held")
+    t.eq(kept.node_count, 8)
+    t.ok(#kept:msh_text() > 0)
+    kept:free()
+    scene:close()
+  end)
+
+  t.test("FemEdge:chains cuts the chain where runs says, turning the ABI's zero-based offsets into Lua's own slices", function()
+    -- Directly, because no fixture here has a broken chain: an edge's `runs` are the
+    -- ABI's offsets **from zero** into a Lua array that counts **from one**, and a
+    -- single-run edge cannot tell a wrong conversion from a right one (index 0 of a Lua
+    -- array is nil, and appending nil appends nothing). Two runs can.
+    local function chains(nodes, runs)
+      local out = {}
+      for _, chain in ipairs(setmetatable({ nodes = nodes, runs = runs }, cadaclysm.FemEdge):chains()) do
+        out[#out + 1] = table.concat(chain, ",")
+      end
+      return table.concat(out, " | ")
+    end
+    t.eq(chains({ 5, 6, 7, 8, 9 }, { 0 }), "5,6,7,8,9", "one run is the whole chain")
+    t.eq(chains({ 5, 6, 7, 8, 9 }, { 0, 2 }), "5,6 | 7,8,9", "a break at offset 2 cuts after the second node")
+    t.eq(chains({ 5, 6, 7, 8, 9 }, { 0, 1, 4 }), "5 | 6,7,8 | 9")
+    t.eq(chains({ 5, 6 }, { 0, 1 }), "5 | 6")
+  end)
+
   t.test("ffi types are the header's", function()
     t.eq(ffi.sizeof("CadaclysmOpenOptions"), ffi.abi("64bit") and 96 or ffi.sizeof("CadaclysmOpenOptions"))
     t.eq(ffi.sizeof("CadaclysmMesh"), ffi.abi("64bit") and 48 or ffi.sizeof("CadaclysmMesh"))
+  end)
+
+  t.test("links and joints: the mechanism facts", function()
+    local scene = cadaclysm.open(t.fixture("samples/mechanism.stp"))
+    local links = scene.links
+    t.eq(#links, 2)
+    t.eq(links[1].name, "base")
+    t.eq(links[2].name, "arm")
+    for _, l in ipairs(links) do
+      t.eq(#l.nodes, 1)
+      t.eq(l.nodes[1].name, l.name)
+    end
+    local joints = scene.joints
+    t.eq(#joints, 1)
+    local joint = joints[1]
+    t.eq(joint.name, "hinge")
+    t.eq(joint.start.name, "arm")
+    t.eq(joint.start.index, 1)
+    t.eq(joint.end_.name, "base")
+    t.eq(joint.end_.index, 0)
+    scene:close()
+  end)
+
+  t.test("links and joints: empty on the cube", function()
+    local scene = cadaclysm.open(t.fixture("samples/cube.scad"))
+    t.eq(#scene.links, 0)
+    t.eq(#scene.joints, 0)
+    scene:close()
+  end)
+
+  local function is_teal(c)
+    return c ~= false and math.abs(c[1] - 0.1) < 1e-6 and math.abs(c[2] - 0.6) < 1e-6 and math.abs(c[3] - 0.55) < 1e-6
+  end
+
+  t.test("edge colours follow the edges", function()
+    local path = t.fixture("samples/edge-colours.stp")
+    local scene = cadaclysm.open(path)
+    local body
+    for _, n in ipairs(scene.nodes) do
+      if n.edges.polyline_count > 0 then body = n; break end
+    end
+    t.ok(body ~= nil, "no node with edges in edge-colours.stp")
+    local pairs_to_check = { { body.edges, body.edge_colours }, { body.surface_edges, body.surface_edge_colours } }
+    for _, pair in ipairs(pairs_to_check) do
+      local edges, colours = pair[1], pair[2]
+      t.eq(#colours, edges.polyline_count)
+      local teal_count, none_count = 0, 0
+      for _, c in ipairs(colours) do
+        if is_teal(c) then teal_count = teal_count + 1 end
+        if c == false then none_count = none_count + 1 end
+      end
+      t.eq(teal_count, 1)
+      t.eq(none_count, #colours - 1)
+      local styled
+      for _, c in ipairs(colours) do if c ~= false then styled = c; break end end
+      t.near(styled[1], 0.1, 1e-6); t.near(styled[2], 0.6, 1e-6); t.near(styled[3], 0.55, 1e-6); t.near(styled[4], 1.0, 1e-6)
+    end
+    scene:close()
+  end)
+
+  t.test("an unpainted file has no edge colours", function()
+    local scene = cadaclysm.open(t.fixture("samples/cube.scad"))
+    for _, n in ipairs(scene.nodes) do
+      t.eq(#n.edge_colours, 0)
+      t.eq(#n.surface_edge_colours, 0)
+    end
+    scene:close()
   end)
 end

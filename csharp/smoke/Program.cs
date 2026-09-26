@@ -1,5 +1,6 @@
 // Open one file through the C# binding and check what comes back; then build the
 // blacksmith's plate and read it back through the reader. Exit code is the verdict.
+using System.Text;
 using Cadaclysm;
 using Cadaclysm.Blacksmith;
 
@@ -35,6 +36,25 @@ var formats = Cadaclysm.Cadaclysm.Formats();
 if (!formats.Any(f => f.Name == "IGES" && f.Extensions.SequenceEqual(new[] { "iges", "igs" }))) return Fail("formats() lacks IGES iges;igs");
 if (Cadaclysm.Cadaclysm.MeshFormats().First(f => f.Name == "stl").Label != "STL (binary)") return Fail("mesh format label is not the library's");
 Console.WriteLine($"geometry diagnostics: {scene.GeometryDiagnostics.Count}");
+// Kinematics: a file with no mechanism carries no links or joints; mechanism.stp, beside
+// whatever sample this smoke was given, carries the fixed two-link one-joint mechanism.
+if (path.EndsWith("cube.scad") && (scene.Links.Count != 0 || scene.Joints.Count != 0)) return Fail("the cube scene has links or joints");
+var mechanismPath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path))!, "mechanism.stp");
+using (var mechanism = Cadaclysm.Cadaclysm.Open(mechanismPath))
+{
+    var links = mechanism.Links;
+    if (!links.Select(l => l.Name).SequenceEqual(new[] { "base", "arm" })) return Fail("mechanism links are not [base, arm]");
+    foreach (var link in links)
+        if (!link.Nodes.Select(n => n.Name).SequenceEqual(new[] { link.Name }) || !ReferenceEquals(link.Scene, mechanism))
+            return Fail($"link {link.Name} does not name exactly one node of its own name");
+    var joints = mechanism.Joints;
+    if (joints.Count != 1 || joints[0].Name != "hinge") return Fail("mechanism does not carry exactly one joint named hinge");
+    var joint = joints[0];
+    // The file's order, (arm, base): a swap into (parent, child) would fail here.
+    if (joint.Start.Name != "arm" || joint.Start.Index != 1 || joint.End.Name != "base" || joint.End.Index != 0)
+        return Fail($"joint hinge reads start={joint.Start.Name}#{joint.Start.Index} end={joint.End.Name}#{joint.End.Index}");
+    Console.WriteLine($"kinematics: links {links.Count}, joints {joints.Count}, hinge {joint.Start.Name}->{joint.End.Name}");
+}
 scene.ForgetMeshes();
 if (scene.Query("class == solid").Count == 0 || scene.Walk().Where(n => n.CanMesh).Sum(n => (long)(n.Mesh?.TriangleCount ?? 0)) != triangles) return Fail("forget_meshes did not rebuild");
 if (Cadaclysm.Cadaclysm.LodLevels() != 3) return Fail("lod levels is not 3");
@@ -87,6 +107,34 @@ if (path.EndsWith("cube.scad"))
     if (first.TriangleEstimate != 12 || !first.SurfaceEdges.Positions.IsEmpty || first.SurfaceProxyMesh(4) is not null) return Fail("the cube has no surface products");
     if (first.SurfacePick(new double[] { 10, 10, 100 }, new double[] { 10, 10, -100 }) is not null || !first.BoundsPlaced().IsEmpty) return Fail("the cube picks or bounds through surfaces");
     if (!first.BoundsPlaced64().IsEmpty) return Fail("the cube's boundsPlaced64 is not empty");
+    if (first.SurfaceEdgeBeziers.Count != 0) return Fail("the cube hands exact edges to the surface path");
+    if (first.EdgeColours.Length != 0 || first.SurfaceEdgeColours.Length != 0) return Fail("the unpainted cube has edge colours");
+}
+// Edge colours: samples/edge-colours.stp sits beside the given sample and paints one edge
+// teal (0.1, 0.6, 0.55) on the body -- everything else, edge and surface-edge alike, stays
+// unstyled.
+var edgeColoursPath = System.IO.Path.Combine(
+    System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path)) ?? ".", "edge-colours.stp");
+using (var edgeColoursScene = Cadaclysm.Cadaclysm.Open(edgeColoursPath))
+{
+    var body = edgeColoursScene.Walk().First(n => n.Edges.PolylineCount > 0);
+    foreach (var (count, colours) in new (uint, float[]?[])[]
+             { (body.Edges.PolylineCount, body.EdgeColours), (body.SurfaceEdges.PolylineCount, body.SurfaceEdgeColours) })
+    {
+        if (colours.Length != count) return Fail($"edge colours: {colours.Length} entries for {count} polylines");
+        var styled = colours.Where(c => c is not null).ToList();
+        if (styled.Count != 1 || colours.Count(c => c is null) != colours.Length - 1)
+            return Fail($"edge colours: {styled.Count} styled entries, not exactly one");
+        var c = styled[0]!;
+        if (Math.Abs(c[0] - 0.1f) > 1e-6 || Math.Abs(c[1] - 0.6f) > 1e-6 || Math.Abs(c[2] - 0.55f) > 1e-6 || Math.Abs(c[3] - 1.0f) > 1e-6)
+            return Fail($"edge colours: the styled entry reads ({c[0]},{c[1]},{c[2]},{c[3]}), not (0.1,0.6,0.55,1.0)");
+    }
+    // The STEP body has surfaces to hand over, so this reads them through RawSurfaces -- which
+    // `cadaclysm_node_surfaces` returns by value. A copy shorter than the header's is written
+    // past, and silently: the 80-byte copy passed this line, so the layout itself is pinned by
+    // tests/bindings.rs, not here.
+    if (body.Surfaces.Count == 0) return Fail("surfaces: the STEP body came back with no faces");
+    Console.WriteLine($"surfaces: {body.Surfaces.Count} face(s)");
 }
 using (var fresh = Cadaclysm.Cadaclysm.Open(path))
 {
@@ -94,6 +142,28 @@ using (var fresh = Cadaclysm.Cadaclysm.Open(path))
     if (body.IsMeshed) return Fail("a fresh scene is already meshed");
     var built = fresh.RealizeMeshes(skipSurfaced: false);
     if (built == 0 || !body.IsMeshed) return Fail("RealizeMeshes(false) did not build");
+}
+// A Rhino extrusion hands its exact edges to the surface path without meshing, in both
+// conventions: Unreal goes through the decorator that maps every getter into the caller's
+// space. The fixture is the repository's, not an SDK checkout's, so this runs where found.
+var sampleRoot = System.IO.Path.GetDirectoryName(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path)));
+var extrusions = sampleRoot is null ? null : System.IO.Path.Combine(sampleRoot, "crates", "cadaclysm-acis", "tests", "fixtures", "rhino", "extrusion-objects.3dm");
+if (extrusions is not null && File.Exists(extrusions))
+{
+    foreach (var convention in new[] { Convention.Native, Convention.Unreal })
+    {
+        using var surfaced = Cadaclysm.Cadaclysm.Open(extrusions, convention);
+        var found = 0;
+        foreach (var node in surfaced.Walk().Where(n => n.CanMesh && !n.SurfaceEdges.Positions.IsEmpty))
+        {
+            var exact = node.SurfaceEdgeBeziers.Count;
+            if (exact == 0 || node.IsMeshed) return Fail("an extrusion's exact edges are not free");
+            if (exact != node.EdgeBeziers.Count) return Fail("SurfaceEdgeBeziers is not EdgeBeziers' segments");
+            found++;
+        }
+        if (found == 0) return Fail("extrusion-objects.3dm has no surfaced extrusion");
+        Console.WriteLine($"SurfaceEdgeBeziers ({convention}): {found} extrusions, exact and unmeshed");
+    }
 }
 Mesh? borrowed;
 using (var again = Cadaclysm.Cadaclysm.OpenMemory(File.ReadAllBytes(path), System.IO.Path.GetFileName(path)))
@@ -228,6 +298,14 @@ using var outline = rect.WithHole(hole);
     if (apart.Chains.Count != 0 || apart.Overlaps.Count != 0) return Fail($"intersect: pipes apart read {apart}");
     try { pipeA.Intersect(pipeB, 0.0); return Fail("intersect: a zero tolerance was accepted"); }
     catch (BuildException e) when (e.Message.Contains("intersect: tolerance must be positive and finite")) { }
+    using (var box = Solid.Cuboid(1, 2, 3))
+    using (var big = box.Scaled(2))
+    {
+        var (min, max) = big.Bounds;
+        if (Math.Abs(max[0] - min[0] - 2) > 1e-9 || Math.Abs(max[2] - min[2] - 6) > 1e-9) throw new Exception("scaled bounds");
+        try { box.Scaled(0); throw new Exception("scaled(0) not refused"); }
+        catch (BuildException e) when (e.Message.StartsWith("scaled:")) { }
+    }
     using var lower = Solid.Cylinder(1, 4);
     using var upper = Solid.Cylinder(1, 4).Translate(0, 0, 2);
     var shared = lower.Intersect(upper, tol);
@@ -561,6 +639,347 @@ using (var back = Cadaclysm.Cadaclysm.Open(brepPath))
     if (Math.Abs(b.Max[2] - 16) > 0.01 || Math.Abs(b.Max[0] - 40) > 0.01) return Fail("the .brep did not read back as the plate with its pin");
 }
 
+// The FEM surface mesh, both sides of the ABI. Every check below names the wrong
+// implementation it catches; `#` marks the ones a break-the-code proof was run against.
+{
+    // A mesh-only body -- cube.scad carries no brep -- so: one face, every node on it, no
+    // B-rep topology at all, and the scene's own convention rather than the file's.
+    using var femMesh = first.FemMesh(tolerance: 0.5);
+    var nodeCount = femMesh.Nodes.Length / 3;
+    if (femMesh.Nodes.Length % 3 != 0 || femMesh.Triangles.Length % 3 != 0 || nodeCount == 0)
+        return Fail($"fem: the node and triangle arrays read {femMesh.Nodes.Length} and {femMesh.Triangles.Length}");
+    // Catches `Triangles` lent over `NodeCount` (or `Nodes` over `TriangleCount`): the spans
+    // would then be the wrong length and the indices would run past the nodes.
+    if (femMesh.Triangles.Length != femMesh.TriangleFace.Length * 3) return Fail("fem: triangleFace is not one per triangle");
+    foreach (var index in femMesh.Triangles) if (index >= nodeCount) return Fail($"fem: a triangle names node {index} of {nodeCount}");
+    foreach (var face in femMesh.TriangleFace) if (face >= femMesh.FaceCount) return Fail($"fem: a triangle lies on face {face} of {femMesh.FaceCount}");
+    // Catches NodeKind and NodeEntity lent from each other's pointer: a kind would then be a
+    // face index and an entity a 0/1/2. Bounding each entity by the list its own kind names is
+    // what tells the two apart -- the widths alone cannot, both being uint32 arrays of nodes.
+    if (femMesh.NodeKind.Length != nodeCount || femMesh.NodeEntity.Length != nodeCount) return Fail("fem: nodeKind/nodeEntity are not one per node");
+    // Read once, outside the loop: every ask rebuilds the list from the handle at one C call an
+    // element, and the two are 0 long here only because this body has no B-rep topology.
+    var (femEdges, femVertices) = (femMesh.Edges, femMesh.Vertices);
+    for (var k = 0; k < nodeCount; k++)
+    {
+        var (kind, entity) = (femMesh.NodeKind[k], femMesh.NodeEntity[k]);
+        var limit = kind switch { 0 => (uint)femVertices.Count, 1 => (uint)femEdges.Count, 2 => femMesh.FaceCount, _ => 0u };
+        if (kind > 2 || entity >= limit) return Fail($"fem: node {k} lies on kind {kind} entity {entity}, of {limit}");
+    }
+    if (femMesh.MinAngle <= 0 || femMesh.MinAngle >= 90 || femMesh.LongestEdge <= 0
+        || femMesh.WorstTriangle >= femMesh.Triangles.Length / 3)
+        return Fail($"fem: the quality figures read {femMesh}");
+    if (path.EndsWith("cube.scad"))
+    {
+        // # Catches FromMesh read off the neighbouring `Watertight` field -- which is true for
+        // this body too, so only a body where the two differ separates them (the B-rep below).
+        if (!femMesh.FromMesh || femMesh.FaceCount != 1 || femEdges.Count != 0 || femVertices.Count != 0)
+            return Fail($"fem: the cube reads {femMesh}, not a mesh-only body of one face");
+        foreach (var kind in femMesh.NodeKind) if (kind != 2) return Fail("fem: a mesh body's nodes all lie on face 0");
+        if (!femMesh.Watertight || femMesh.OpenEdges.Count != 0 || femMesh.FoldedEdges.Count != 0)
+            return Fail($"fem: the closed cube reads {femMesh.OpenEdges.Count} cracks and {femMesh.FoldedEdges.Count} folds");
+    }
+    var msh = femMesh.MshText();
+    if (!msh.StartsWith("$MeshFormat") || !msh.Contains("$Nodes")) return Fail("fem: mshText is not Gmsh 4.1 ASCII");
+    // The borrowed slot is copied out on the way through, so a second ask does not free the
+    // first answer: both strings are this program's own and both still read.
+    if (femMesh.MshText().Length != msh.Length) return Fail("fem: a second mshText disagrees with the first");
+    var mshPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cadaclysm-smoke.msh");
+    femMesh.SaveMsh(mshPath);
+    if (new FileInfo(mshPath).Length < msh.Length / 2) return Fail("fem: saveMsh wrote less than mshText");
+    // The reader's placement is sixteen numbers, column-major; the kernel's is twelve. A
+    // caller handing one ABI the other's is refused here rather than read as garbage.
+    try { first.FemMesh(placement: new double[12]); return Fail("fem: a twelve-number placement was accepted"); }
+    catch (CadaclysmException e) when (e.Message.Contains("16 numbers")) { }
+    // A mesh-only body is meshed by a path that takes **no options at all**
+    // (`fem::fem_mesh_of_mesh`), so neither field is read here, let alone validated: a zero, a
+    // negative and a NaN all come back with the mesh. The rule pinned is the wrapper's, not the
+    // mesher's -- a wrapper that validated `tolerance` or `maxSize` itself, instead of passing
+    // them through and letting the library decide, would refuse calls this ABI accepts. (Both
+    // *are* refused on a B-rep body, which the block below checks, so this is a pass-through
+    // check and not a claim that the numbers are unchecked everywhere.)
+    foreach (var (why, mesh) in new (string, global::Cadaclysm.FemMesh)[]
+             {
+                 ("tolerance 0", first.FemMesh(tolerance: 0)),
+                 ("tolerance -1", first.FemMesh(tolerance: -1)),
+                 ("tolerance NaN", first.FemMesh(tolerance: double.NaN)),
+                 ("maxSize -1", first.FemMesh(maxSize: -1)),
+                 ("maxSize NaN", first.FemMesh(maxSize: double.NaN)),
+                 ("maxSize infinity", first.FemMesh(maxSize: double.PositiveInfinity)),
+             })
+        using (mesh)
+            if (mesh.Nodes.Length != femMesh.Nodes.Length)
+                return Fail($"fem: a mesh-only body read its options after all ({why} gave {mesh})");
+    // # A freed handle refuses every accessor rather than reading the pointers it left behind:
+    // the view is cached, so a property that does not ask the handle first hands out a span over
+    // freed memory instead of throwing. The kernel's own sweep, thirty lines down, is the twin --
+    // the guard is per wrapper class, so proving one says nothing about the other.
+    //
+    // What this does *not* prove, because C# cannot: a span already in hand is a bare pointer and
+    // a length, and it goes on reading the freed block. Only *asking for* one is guarded.
+    var staleReader = first.FemMesh(tolerance: 0.5);
+    staleReader.Free();
+    if (!staleReader.Freed) return Fail("fem: a freed mesh does not say so");
+    staleReader.Free();   // idempotent
+    foreach (var read in new Action[]
+             {
+                 () => { _ = staleReader.Nodes; }, () => { _ = staleReader.Triangles; },
+                 () => { _ = staleReader.TriangleFace; }, () => { _ = staleReader.NodeKind; },
+                 () => { _ = staleReader.NodeEntity; }, () => { _ = staleReader.FaceCount; },
+                 () => { _ = staleReader.Edges; }, () => { _ = staleReader.Vertices; },
+                 () => { _ = staleReader.OpenEdges; }, () => { _ = staleReader.FoldedEdges; },
+                 () => { _ = staleReader.Watertight; }, () => { _ = staleReader.FromMesh; },
+                 () => { _ = staleReader.MinAngle; }, () => { _ = staleReader.WorstTriangle; },
+                 () => { _ = staleReader.LongestEdge; }, () => staleReader.MshText(),
+                 () => staleReader.SaveMsh(mshPath),
+             })
+    {
+        try { read(); return Fail("fem: a freed mesh read anyway"); }
+        catch (CadaclysmException e) when (e.Message.Contains("freed")) { }
+    }
+    Console.WriteLine($"fem (reader): {femMesh}, minAngle {femMesh.MinAngle:F2}, longestEdge {femMesh.LongestEdge:F3};"
+                      + " a freed mesh refuses all seventeen reads");
+}
+// # Which count feeds which entry point -- the census *wiring*, which nothing else here pins.
+// Every other FEM check proves a row is extracted correctly; none proves `OpenEdges` reads
+// `open_edge_count` rows through `cadaclysm_fem_mesh_open_edge` rather than the folded count or
+// the folded call. `samples/open-sheet.scad` is the only body in this repository where both
+// censuses are non-empty and of different lengths: the B-rep path computes no census unless the
+// topology is closed (the documented "not asked" pair) and every closed body has none, while
+// the mesh path always computes one -- so a `polyhedron` with a flap over one of its own
+// directed edges is the way in. Six cracks, one fold, and the fold is not the first crack.
+if (path.EndsWith("cube.scad"))
+{
+    var sheetPath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(path)!, "open-sheet.scad");
+    using var sheetScene = Cadaclysm.Cadaclysm.Open(sheetPath);
+    using var census = sheetScene.Walk().First(n => n.CanMesh).FemMesh();
+    if (census.Nodes.Length != 15 || census.Triangles.Length != 9 || !census.FromMesh || census.Watertight)
+        return Fail($"fem census: open-sheet.scad reads {census}, not five open, folded, mesh-only nodes");
+    // The counts are what separate the two lists: a swapped count reads 1 where 6 belongs, and a
+    // swapped call cannot read row 1 of a one-row table at all.
+    if (census.OpenEdges.Count != 6 || census.FoldedEdges.Count != 1)
+        return Fail($"fem census: {census.OpenEdges.Count} cracks and {census.FoldedEdges.Count} folds, not 6 and 1");
+    // And the contents, which is what separates a wrapper that swapped both consistently.
+    var (fold, crack) = (census.FoldedEdges[0], census.OpenEdges[0]);
+    if (fold.A != 2 || fold.B != 0 || fold.BrepEdge != uint.MaxValue)
+        return Fail($"fem census: the fold reads ({fold.A},{fold.B},{fold.BrepEdge}), not (2,0,NONE)");
+    if (crack.A != 1 || crack.B != 2) return Fail($"fem census: the first crack reads ({crack.A},{crack.B}), not (1,2)");
+    Console.WriteLine($"fem census: open-sheet.scad reads {census.OpenEdges.Count} cracks"
+                      + $" and {census.FoldedEdges.Count} fold at ({fold.A},{fold.B})");
+}
+// A B-rep body, read back from the STEP this run wrote: the topology the mesh-only body has
+// none of -- edges with their own ids, vertices, and nodes on all three kinds of entity.
+using (var back = Cadaclysm.Cadaclysm.Open(step))
+{
+    var body = back.Walk().First(n => n.CanMesh);
+    using var fem = body.FemMesh(tolerance: 0.5);
+    // # The other half of the FromMesh proof: false here where it was true above.
+    if (fem.FromMesh || !fem.Watertight || fem.FaceCount != (uint)rounded.Faces)
+        return Fail($"fem: the read plate reads {fem}, not a closed B-rep of {rounded.Faces} faces");
+    if (fem.Edges.Count == 0 || fem.Vertices.Count == 0) return Fail("fem: a B-rep body carries edges and vertices");
+    var kinds = new HashSet<uint>();
+    foreach (var kind in fem.NodeKind) kinds.Add(kind);
+    if (!kinds.SetEquals(new uint[] { 0, 1, 2 })) return Fail($"fem: the plate's nodes lie on kinds {string.Join(",", kinds)}, not 0, 1 and 2");
+    // # `Id` is the body's own B-rep edge id, not this list's index: the list is a densely
+    // renumbered subset ascending by id. Catches an `Id` filled from the loop counter -- which
+    // a body whose ids happened to run 0, 1, 2 would hide, so both halves are checked.
+    // Read once: every ask rebuilds the list from the handle, one C call an edge.
+    var (edges, vertices) = (fem.Edges, fem.Vertices);
+    var ids = edges.Select(e => e.Id).ToArray();
+    if (!ids.SequenceEqual(ids.OrderBy(i => i))) return Fail($"fem: the edge ids do not ascend: {string.Join(",", ids)}");
+    if (!ids.Where((id, at) => id != at).Any()) return Fail("fem: every edge id equals its own index -- Id is the index, not the body's id");
+    foreach (var edge in edges)
+    {
+        if (edge.Runs.Length == 0 || edge.Runs[0] != 0 || edge.Runs[^1] >= edge.Nodes.Length)
+            return Fail($"fem: {edge}'s runs do not start at 0 inside its chain");
+        foreach (var node in edge.Nodes) if (node >= fem.Nodes.Length / 3) return Fail($"fem: {edge} names a node past the mesh");
+        // # A closed body has no rim, so every edge has two faces and neither is the sentinel.
+        if (edge.Faces.A >= fem.FaceCount || edge.Faces.B >= fem.FaceCount)
+            return Fail($"fem: {edge} on a closed body bounds faces {edge.Faces.A} and {edge.Faces.B} of {fem.FaceCount}");
+        if (edge.Closed && edge.Runs.Length > 1) return Fail($"fem: {edge} is one loop with a broken chain");
+        if (edge.Seam && edge.Faces.A != edge.Faces.B) return Fail($"fem: {edge} is a seam whose two faces differ");
+        // # The chain includes its end vertices, so the two ends name the nodes the chain
+        // begins and finishes at -- which is what tells `Ends` from `Faces`, both being a pair
+        // of uints that a swap would leave in range on a body of this shape.
+        var ends = new[] { edge.Ends.A, edge.Ends.B }.Where(v => v != uint.MaxValue).Select(v => vertices[(int)v].Node).ToHashSet();
+        if (!ends.SetEquals(new[] { edge.Nodes[0], edge.Nodes[^1] })) return Fail($"fem: {edge} does not end at its own vertices");
+    }
+    if (!vertices.Any(v => v.HasPosition)) return Fail("fem: no vertex of the plate has a position");
+    foreach (var vertex in vertices)
+        if (vertex.Point.Length != 3 || vertex.Node != uint.MaxValue && vertex.Node >= fem.Nodes.Length / 3)
+            return Fail($"fem: {vertex} is not a node of this mesh");
+    // A B-rep body *does* have geometry to follow, so here the tolerance is read and refused --
+    // in the library's own words, not a message this wrapper invented.
+    try { body.FemMesh(tolerance: 0); return Fail("fem: a zero tolerance was accepted on a B-rep body"); }
+    catch (CadaclysmException e) when (e.Message.Contains("tolerance must be finite and > 0")) { }
+    Console.WriteLine($"fem (read brep): {fem}, {edges.Count} edges, {vertices.Count} vertices, edge 0 {edges[0]}");
+}
+// The kernel's own: the same solid meshed through `cadaclysm_blacksmith_fem_mesh`, whose
+// placement is twelve numbers and whose `.msh` text is owned rather than borrowed.
+{
+    var xy = new double[] { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    using var fem = rounded.FemMesh(tolerance: 0.5);
+    if (fem.FromMesh || !fem.Watertight || fem.FaceCount != (uint)rounded.Faces || fem.Nodes.Length == 0)
+        return Fail($"kernel fem: the filleted part reads {fem}");
+    if (fem.OpenEdges.Count != 0 || fem.FoldedEdges.Count != 0) return Fail($"kernel fem: a watertight solid reads {fem.OpenEdges.Count} cracks");
+    // `max_size` bounds the boundary segments and only targets the interior, so the figure a
+    // solver caller checks is LongestEdge -- not the ceiling it asked for. Catches a wrapper
+    // that dropped `maxSize` on the floor (the mesh would not refine at all).
+    using var fine = rounded.FemMesh(tolerance: 0.5, maxSize: 3.0);
+    // 1.05 and not 3.0 exactly: the ceiling is not a guarantee (1.03 x was measured on a face
+    // whose parameters run unevenly), so a tighter pin here would assert something the ABI
+    // deliberately does not promise.
+    if (fine.LongestEdge > 3.0 * 1.05) return Fail($"kernel fem: maxSize 3 came to longestEdge {fine.LongestEdge}");
+    if (fine.Nodes.Length <= fem.Nodes.Length || fine.LongestEdge >= fem.LongestEdge)
+        return Fail($"kernel fem: maxSize 3 gave {fine.Nodes.Length / 3} nodes and longestEdge {fine.LongestEdge}, no finer than {fem.Nodes.Length / 3}/{fem.LongestEdge}");
+    // An open sheet: the one body where the sentinel and the "not asked" census trio show.
+    using var openSheet = Solid.Face(Profile.Rect(20, 20), xy);
+    using var sheetFem = openSheet.FemMesh(tolerance: 0.5);
+    // # Watertight false with *both* censuses empty is "not asked", not "nothing found": a
+    // sheet makes no claim to enclose anything. A caller reading only OpenEdges cannot tell
+    // this from a sound body, which is why FoldedEdges is checked beside it.
+    if (sheetFem.Watertight || sheetFem.OpenEdges.Count != 0 || sheetFem.FoldedEdges.Count != 0)
+        return Fail($"kernel fem: the sheet reads {sheetFem} rather than open with an unasked census");
+    // # Catches `face_b` filled with `0` instead of the NONE sentinel: every rim edge of a
+    // one-faced sheet bounds face 0 and nothing else, so a 0 there reads as a real second
+    // face -- a coherent wrong answer that no count or width can catch.
+    var rim = sheetFem.Edges;
+    if (sheetFem.FaceCount != 1 || !rim.All(e => e.Faces.A == 0 && e.Faces.B == uint.MaxValue))
+        return Fail($"kernel fem: the sheet's rim reads {string.Join("; ", rim.Select(e => $"{e.Faces.A}/{e.Faces.B}"))}");
+    var kernelMsh = fem.MshText();
+    if (!kernelMsh.StartsWith("$MeshFormat")) return Fail("kernel fem: mshText is not Gmsh 4.1 ASCII");
+    // Owned on this side, not borrowed: two asks give two independent texts, and neither dies
+    // with the other or with the handle.
+    if (fem.MshText().Length != kernelMsh.Length) return Fail("kernel fem: a second mshText disagrees with the first");
+    var kernelMshPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cadaclysm-smoke-kernel.msh");
+    fem.SaveMsh(kernelMshPath);
+    if (new FileInfo(kernelMshPath).Length < kernelMsh.Length / 2) return Fail("kernel fem: saveMsh wrote less than mshText");
+    // # The kernel's placement is twelve numbers where the reader's is sixteen.
+    try { rounded.FemMesh(placement: new double[16]); return Fail("kernel fem: a sixteen-number placement was accepted"); }
+    catch (BuildException e) when (e.Message.Contains("12 numbers")) { }
+    try { rounded.FemMesh(tolerance: 0); return Fail("kernel fem: a zero tolerance was accepted"); }
+    catch (BuildException) { }
+    Console.WriteLine($"kernel fem: {fem}, maxSize 3 -> {fine.Nodes.Length / 3} nodes, longestEdge {fine.LongestEdge:F3}");
+    // # A freed handle refuses every accessor rather than reading the pointers it left behind:
+    // the view is cached, so a property that does not ask the handle first hands out a span
+    // over freed memory instead of throwing.
+    var freed = rounded.FemMesh(tolerance: 0.5);
+    freed.Free();
+    if (!freed.Freed) return Fail("kernel fem: a freed mesh does not say so");
+    freed.Free();   // idempotent
+    foreach (var read in new Action[]
+             {
+                 () => { _ = freed.Nodes; }, () => { _ = freed.Triangles; }, () => { _ = freed.TriangleFace; },
+                 () => { _ = freed.NodeKind; }, () => { _ = freed.NodeEntity; }, () => { _ = freed.FaceCount; },
+                 () => { _ = freed.Edges; }, () => { _ = freed.Vertices; }, () => { _ = freed.OpenEdges; },
+                 () => { _ = freed.FoldedEdges; }, () => { _ = freed.Watertight; }, () => { _ = freed.FromMesh; },
+                 () => { _ = freed.MinAngle; }, () => { _ = freed.WorstTriangle; }, () => { _ = freed.LongestEdge; },
+                 () => freed.MshText(), () => freed.SaveMsh(kernelMshPath),
+             })
+    {
+        try { read(); return Fail("kernel fem: a freed mesh read anyway"); }
+        catch (BuildException e) when (e.Message.Contains("freed")) { }
+    }
+    Console.WriteLine("kernel fem: a freed mesh refuses all seventeen reads");
+}
+
+// Assemblies: Assembly, Solid.Named and Solid.Name, at parity with the Python reference's
+// _shared_assembly() and the tests built on it.
+{
+    using var asmBolt = Solid.Cylinder(1, 6).Named("bolt");
+    using var asmPlate = Solid.Cuboid(20, 10, 2).Named("plate").Coloured(1, 0.5, 0);
+    using var bracket = new Assembly("bracket");
+    var platePlacement = bracket.Place(asmPlate, Frame.Xy());
+    var bolt1Placement = bracket.Place(asmBolt, Frame.Xy((5, 5, 2)));
+    var bolt2Placement = bracket.Place(asmBolt, Frame.Xy((15, 5, 2)));
+    if (platePlacement != "plate" || bolt1Placement != "bolt" || bolt2Placement != "bolt 2")
+        return Fail($"assembly: bracket placements were \"{platePlacement}\", \"{bolt1Placement}\", \"{bolt2Placement}\", not plate/bolt/bolt 2");
+
+    using var asmFrame = new Assembly("frame");
+    var leftPlacement = asmFrame.Place(bracket, Frame.Xy((0, 0, 0)), "left");
+    var rightPlacement = asmFrame.Place(bracket, new Frame((100, 0, 0), (0, 1, 0), (-1, 0, 0), (0, 0, 1)), "right");
+    var rootBoltPlacement = asmFrame.Place(asmBolt, Frame.Xy((50, 50, 0)));
+    if (leftPlacement != "left" || rightPlacement != "right" || rootBoltPlacement != "bolt")
+        return Fail($"assembly: frame placements were \"{leftPlacement}\", \"{rightPlacement}\", \"{rootBoltPlacement}\", not left/right/bolt");
+
+    var frameStepText = asmFrame.StepText();
+    var manifoldCount = CountOf(frameStepText, "=MANIFOLD_SOLID_BREP(");
+    var productCount = CountOf(frameStepText, "=PRODUCT(");
+    var nauoCount = CountOf(frameStepText, "=NEXT_ASSEMBLY_USAGE_OCCURRENCE(");
+    if (manifoldCount != 2 || productCount != 4 || nauoCount != 6)
+        return Fail($"assembly: frame step_text has {manifoldCount} breps, {productCount} products, {nauoCount} NAUOs, not 2/4/6");
+    if (!frameStepText.Contains("'left'") || !frameStepText.Contains("'right'") || !frameStepText.Contains("'bolt 2'"))
+        return Fail("assembly: frame step_text is missing 'left', 'right' or 'bolt 2'");
+    Console.WriteLine($"assembly: frame writes {manifoldCount} breps, {productCount} products, {nauoCount} NAUOs");
+
+    // Read-back, through the same reader door as Solid.ToScene -- structure only, at this
+    // (pre-late-placement) text: one root "frame", two "bracket" containers each holding
+    // plate/bolt/bolt, and one root-level "bolt". The world origins are Python's to check.
+    using (var readScene = Cadaclysm.Cadaclysm.OpenMemory(Encoding.UTF8.GetBytes(frameStepText), "frame.stp"))
+    {
+        var roots = readScene.Roots;
+        if (roots.Count != 1 || roots[0].Name != "frame") return Fail("assembly: the read-back root is not one node named \"frame\"");
+        var rootChildren = roots[0].Children;
+        if (rootChildren.Count != 3) return Fail($"assembly: the read-back root has {rootChildren.Count} children, not 3");
+        var containers = rootChildren.Where(c => c.Name == "bracket").ToList();
+        var rootBolts = rootChildren.Where(c => c.Name == "bolt").ToList();
+        if (containers.Count != 2 || rootBolts.Count != 1)
+            return Fail("assembly: the read-back root does not have two bracket containers and one bolt");
+        foreach (var container in containers)
+        {
+            var names = container.Children.Select(c => c.Name).OrderBy(n => n, StringComparer.Ordinal).ToList();
+            if (!names.SequenceEqual(new[] { "bolt", "bolt", "plate" }))
+                return Fail("assembly: a read-back bracket container does not hold plate, bolt, bolt");
+        }
+    }
+    Console.WriteLine("assembly: the read-back tree has one root, two bracket containers of plate+bolt+bolt, and one root bolt");
+
+    // A late placement into bracket shows up wherever bracket is placed (left and right both).
+    bracket.Place(asmBolt, Frame.Xy((10, 8, 2)));
+    var laterNauoCount = CountOf(asmFrame.StepText(), "=NEXT_ASSEMBLY_USAGE_OCCURRENCE(");
+    if (laterNauoCount != 7) return Fail($"assembly: a late placement gave {laterNauoCount} NAUOs, not 7");
+    Console.WriteLine("assembly: a late placement into bracket shows up wherever it is placed");
+
+    // A cycle, a duplicate placement name, a mirrored frame, and an assembly (or one reachable
+    // from it) that places nothing are all refused.
+    try { bracket.Place(asmFrame, Frame.Xy()); return Fail("assembly: a cycle (bracket -> frame -> bracket) was accepted"); }
+    catch (BuildException e) when (e.Message.Contains("bracket → frame → bracket")) { }
+    try { asmFrame.Place(bracket, Frame.Xy(), "left"); return Fail("assembly: a duplicate placement name was accepted"); }
+    catch (BuildException e) when (e.Message.Contains("left")) { }
+    // A raw twelve-number frame, not the Frame type, which refuses a left-handed triple
+    // before Place is ever called -- the one way to drive a mirrored frame into the ABI's
+    // own rigidity check.
+    try
+    {
+        asmFrame.Place(bracket, new[] { 0.0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, -1 });
+        return Fail("assembly: a mirrored raw frame was accepted");
+    }
+    catch (BuildException e) when (e.Message.Contains("right-handed and orthonormal")) { }
+    try { new Assembly("x").StepText(); return Fail("assembly: an empty assembly wrote step text"); }
+    catch (BuildException) { }
+    using (var outer = new Assembly("outer"))
+    using (var hollow = new Assembly("hollow"))
+    {
+        outer.Place(hollow, Frame.Xy());
+        try { outer.StepText(); return Fail("assembly: an assembly reachable from the root that places nothing wrote step text"); }
+        catch (BuildException e) when (e.Message.Contains("hollow")) { }
+    }
+    Console.WriteLine("assembly: a cycle, a duplicate name, a mirrored frame, and an empty assembly are all refused");
+
+    // Solid.Named/Solid.Name: the name rides through a one-source operation (Place, Coloured)
+    // and is dropped by a two-source one (Join) or a fresh primitive.
+    if (asmBolt.Name != "bolt") return Fail("assembly: bolt.Name is not \"bolt\"");
+    using (var placedBolt = asmBolt.Place(Frame.Xy((1, 2, 3))))
+        if (placedBolt.Name != "bolt") return Fail("assembly: bolt.Place(...).Name is not \"bolt\"");
+    using (var colouredBolt = asmBolt.Coloured(1, 0, 0))
+        if (colouredBolt.Name != "bolt") return Fail("assembly: bolt.Coloured(...).Name is not \"bolt\"");
+    using (var joinedBolt = asmBolt.Join(Solid.Cuboid(1, 1, 1)))
+        if (joinedBolt.Name is not null) return Fail("assembly: bolt.Join(...).Name is not null");
+    using (var freshCube = Solid.Cuboid(1, 1, 1))
+        if (freshCube.Name is not null) return Fail("assembly: a fresh cuboid's Name is not null");
+    Console.WriteLine("assembly: Named/Name ride through one-source operations and drop through two-source ones");
+}
+
 // SVG: the library's own camera, no viewer -- the reader (a scene, a node) and the kernel
 // (a solid) each write a wireframe. `fov = 200` is a refusal both ABIs word the same way.
 var svgText = scene.SvgText();
@@ -609,3 +1028,4 @@ return 0;
 
 static int Fail(string why) { Console.Error.WriteLine(why); return 1; }
 static double Norm(double[] v) => Math.Sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+static int CountOf(string haystack, string needle) => (haystack.Length - haystack.Replace(needle, "").Length) / needle.Length;

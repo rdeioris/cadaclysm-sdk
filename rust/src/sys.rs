@@ -43,6 +43,14 @@ pub struct CadaclysmMeshlets {
     _private: [u8; 0],
 }
 
+/// One body meshed for a solver. Opaque: owned, and freed with
+/// `cadaclysm_fem_mesh_free`. Every pointer any accessor of it writes is borrowed from
+/// it and dies with it.
+#[repr(C)]
+pub struct CadaclysmFemMesh {
+    _private: [u8; 0],
+}
+
 /// `CadaclysmOpenOptions`. `size` is the whole compatibility contract: the library
 /// reads only the fields `size` says are there, so a caller built against an older
 /// header is safe against a newer library. This crate therefore fills the struct
@@ -122,6 +130,14 @@ pub struct CadaclysmPolylines {
     pub counts: *const u32,
     pub polyline_count: u32,
     pub vertex_count: u32,
+}
+
+/// One RGBA per polyline of [`CadaclysmPolylines`] (same order); alpha `< 0` marks an
+/// unstyled edge. `{null, 0}` where nothing is styled.
+#[repr(C)]
+pub struct CadaclysmEdgeColors {
+    pub rgba: *const f32,
+    pub count: u32,
 }
 
 #[repr(C)]
@@ -205,6 +221,76 @@ pub struct CadaclysmSvgOptions {
     pub stroke: u32,
     pub background: u32,
     pub flags: u32,
+}
+
+/// `CadaclysmFemOptions`. `size` is the struct's growth room, as [`CadaclysmOpenOptions`]
+/// above -- and like [`CadaclysmSvgOptions`], this crate fills it by calling
+/// `cadaclysm_fem_options_init` first (so a field added to the struct later defaults
+/// without this crate being touched), then sets `size` to *its own* `sizeof` and overrides
+/// `tolerance` and `max_size`. That init writes the **library's** `sizeof` bytes, so this
+/// declaration must stay at least as long as the library's -- which is what
+/// `cadaclysm-capi/tests/bindings.rs` pins, field by field and width by width.
+#[repr(C)]
+pub struct CadaclysmFemOptions {
+    pub size: usize,
+    pub tolerance: f64,
+    pub max_size: f64,
+}
+
+/// `CadaclysmFemMeshView`: the flat arrays of one FEM mesh and its summary, read once when
+/// the handle is made. Every pointer is **borrowed from the handle** -- nothing here is a
+/// copy, and nothing is built by the call that hands it over.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CadaclysmFemMeshView {
+    pub nodes: *const f64,
+    pub node_count: u32,
+    pub triangles: *const u32,
+    pub triangle_count: u32,
+    pub triangle_face: *const u32,
+    pub node_kind: *const u32,
+    pub node_entity: *const u32,
+    pub face_count: u32,
+    pub edge_count: u32,
+    pub vertex_count: u32,
+    pub open_edge_count: u32,
+    pub folded_edge_count: u32,
+    pub watertight: bool,
+    pub from_mesh: bool,
+    pub min_angle: f64,
+    pub worst_triangle: u32,
+    pub longest_edge: f64,
+}
+
+/// `CadaclysmFemEdge`: one B-rep edge of a FEM mesh, filled by `cadaclysm_fem_mesh_edge`.
+/// `id` is the **body's own** edge id; `face_b` and `end_b` are [`CADACLYSM_NONE`] where
+/// there is none, and `0` is a real face and a real vertex.
+///
+/// The one FEM struct with no `size` field, so it cannot grow after a release.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CadaclysmFemEdge {
+    pub id: u32,
+    pub nodes: *const u32,
+    pub node_count: u32,
+    pub runs: *const u32,
+    pub run_count: u32,
+    pub face_a: u32,
+    pub face_b: u32,
+    pub end_a: u32,
+    pub end_b: u32,
+    pub closed: bool,
+    pub seam: bool,
+}
+
+/// `CadaclysmFemVertex`: one B-rep vertex of a FEM mesh. `point` is meaningless -- and
+/// zeroed -- unless `has_position`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CadaclysmFemVertex {
+    pub node: u32,
+    pub point: [f64; 3],
+    pub has_position: bool,
 }
 
 #[repr(C)]
@@ -294,6 +380,7 @@ entry_points! {
     fn cadaclysm_node_bounds_placed64(scene: *const CadaclysmScene, node: u32, placement: *const f64) -> CadaclysmBounds64;
     fn cadaclysm_node_is_meshed(scene: *const CadaclysmScene, node: u32) -> bool;
     fn cadaclysm_node_surface_edges(scene: *const CadaclysmScene, node: u32) -> CadaclysmPolylines;
+    fn cadaclysm_node_surface_edge_beziers(scene: *const CadaclysmScene, node: u32) -> CadaclysmBeziers;
     fn cadaclysm_node_surface_isocurves(scene: *const CadaclysmScene, node: u32) -> CadaclysmPolylines;
     fn cadaclysm_node_surface_pick(scene: *const CadaclysmScene, node: u32, from: *const f64, to: *const f64, out_point: *mut f64) -> bool;
     fn cadaclysm_node_surface_proxy_mesh(scene: *const CadaclysmScene, node: u32, cells: u32) -> CadaclysmMesh;
@@ -314,6 +401,8 @@ entry_points! {
     fn cadaclysm_geometry_diagnostic_count(scene: *const CadaclysmScene) -> u32;
     fn cadaclysm_geometry_diagnostic(scene: *const CadaclysmScene, index: u32) -> *const c_char;
     fn cadaclysm_node_edges(scene: *const CadaclysmScene, node: u32) -> CadaclysmPolylines;
+    fn cadaclysm_node_edge_colors(scene: *const CadaclysmScene, node: u32) -> CadaclysmEdgeColors;
+    fn cadaclysm_node_surface_edge_colors(scene: *const CadaclysmScene, node: u32) -> CadaclysmEdgeColors;
     fn cadaclysm_node_curves(scene: *const CadaclysmScene, node: u32) -> CadaclysmPolylines;
     fn cadaclysm_node_isocurves(scene: *const CadaclysmScene, node: u32) -> CadaclysmPolylines;
     fn cadaclysm_node_edge_beziers(scene: *const CadaclysmScene, node: u32) -> CadaclysmBeziers;
@@ -346,6 +435,29 @@ entry_points! {
     fn cadaclysm_scene_svg(scene: *const CadaclysmScene, path: *const c_char, options: *const CadaclysmSvgOptions) -> bool;
     fn cadaclysm_node_svg_text(scene: *const CadaclysmScene, node: u32, options: *const CadaclysmSvgOptions) -> *const c_char;
     fn cadaclysm_node_svg(scene: *const CadaclysmScene, node: u32, path: *const c_char, options: *const CadaclysmSvgOptions) -> bool;
+    fn cadaclysm_link_count(scene: *const CadaclysmScene) -> u32;
+    fn cadaclysm_link_name(scene: *const CadaclysmScene, link: u32) -> *const c_char;
+    fn cadaclysm_link_node_count(scene: *const CadaclysmScene, link: u32) -> u32;
+    fn cadaclysm_link_node(scene: *const CadaclysmScene, link: u32, index: u32) -> u32;
+    fn cadaclysm_joint_count(scene: *const CadaclysmScene) -> u32;
+    fn cadaclysm_joint_name(scene: *const CadaclysmScene, joint: u32) -> *const c_char;
+    fn cadaclysm_joint_start(scene: *const CadaclysmScene, joint: u32) -> u32;
+    fn cadaclysm_joint_end(scene: *const CadaclysmScene, joint: u32) -> u32;
+    fn cadaclysm_fem_options_init(options: *mut CadaclysmFemOptions);
+    fn cadaclysm_node_fem_mesh(
+        scene: *const CadaclysmScene,
+        node: u32,
+        placement: *const f64,
+        options: *const CadaclysmFemOptions
+    ) -> *mut CadaclysmFemMesh;
+    fn cadaclysm_fem_mesh_view(m: *const CadaclysmFemMesh, out: *mut CadaclysmFemMeshView) -> bool;
+    fn cadaclysm_fem_mesh_edge(m: *const CadaclysmFemMesh, i: u32, out: *mut CadaclysmFemEdge) -> bool;
+    fn cadaclysm_fem_mesh_vertex(m: *const CadaclysmFemMesh, i: u32, out: *mut CadaclysmFemVertex) -> bool;
+    fn cadaclysm_fem_mesh_open_edge(m: *const CadaclysmFemMesh, i: u32, a: *mut u32, b: *mut u32, brep_edge: *mut u32) -> bool;
+    fn cadaclysm_fem_mesh_folded_edge(m: *const CadaclysmFemMesh, i: u32, a: *mut u32, b: *mut u32, brep_edge: *mut u32) -> bool;
+    fn cadaclysm_fem_mesh_msh_text(m: *const CadaclysmFemMesh) -> *const c_char;
+    fn cadaclysm_fem_mesh_save_msh(m: *const CadaclysmFemMesh, path: *const c_char) -> bool;
+    fn cadaclysm_fem_mesh_free(m: *mut CadaclysmFemMesh);
 }
 
 // ---- loading --------------------------------------------------------------------

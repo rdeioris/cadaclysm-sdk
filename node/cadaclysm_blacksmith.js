@@ -25,7 +25,10 @@
  */
 const fs = require('node:fs');
 const path = require('node:path');
-const koffi = require('koffi') ?? _noKoffi();
+// Node's `require` throws where koffi is not installed, and the wasm route has no use for
+// it: kept as the reason `_lib()` gives if it is asked for the native library after all.
+let _koffiMissing = null;
+const koffi = (() => { try { return require('koffi'); } catch (e) { _koffiMissing = e; return null; } })() ?? _noKoffi();
 
 class BuildError extends Error {
   constructor(message) { super(message); this.name = 'BuildError'; }
@@ -95,6 +98,8 @@ function defaultSchema() {
 // Declared by the header's names, in the header's field order, one field per
 // line: `tests/bindings.rs` compares these blocks with the header.
 
+koffi.opaque('CadaclysmBlacksmithAssembly');
+koffi.opaque('CadaclysmBlacksmithFemMesh');
 koffi.opaque('CadaclysmBlacksmithHits');
 koffi.opaque('CadaclysmBlacksmithIntersection');
 koffi.opaque('CadaclysmBlacksmithPath');
@@ -199,6 +204,57 @@ const CadaclysmBlacksmithOverlap = koffi.struct('CadaclysmBlacksmithOverlap', {
   point_count: 'uint32_t',
   loop_count: 'uint32_t',
 });
+// The FEM surface mesh, the kernel's twins of the reader's four. `size` is how
+// `CadaclysmBlacksmithFemOptions` grows: the library's own
+// `cadaclysm_blacksmith_fem_options_init` fills the whole struct and `femMesh` then
+// writes this declaration's `sizeof` into `size`, so a field the library has and
+// this block does not is written past what the call reads. Pinned field for field,
+// widths included, by `cadaclysm-capi/tests/bindings.rs`'s
+// `the_node_kernel_binding_matches_the_header` -- the reader crate's, which reads this
+// library's header too. `cadaclysm-blacksmith-capi`'s own Node list is the older, weaker
+// check (names and pointer-ness, no widths), which is why these four are pinned there.
+const CadaclysmBlacksmithFemOptions = koffi.struct('CadaclysmBlacksmithFemOptions', {
+  size: 'size_t',
+  tolerance: 'double',
+  max_size: 'double',
+});
+const CadaclysmBlacksmithFemMeshView = koffi.struct('CadaclysmBlacksmithFemMeshView', {
+  nodes: 'const double *',
+  node_count: 'uint32_t',
+  triangles: 'const uint32_t *',
+  triangle_count: 'uint32_t',
+  triangle_face: 'const uint32_t *',
+  node_kind: 'const uint32_t *',
+  node_entity: 'const uint32_t *',
+  face_count: 'uint32_t',
+  edge_count: 'uint32_t',
+  vertex_count: 'uint32_t',
+  open_edge_count: 'uint32_t',
+  folded_edge_count: 'uint32_t',
+  watertight: 'bool',
+  from_mesh: 'bool',
+  min_angle: 'double',
+  worst_triangle: 'uint32_t',
+  longest_edge: 'double',
+});
+const CadaclysmBlacksmithFemEdge = koffi.struct('CadaclysmBlacksmithFemEdge', {
+  id: 'uint32_t',
+  nodes: 'const uint32_t *',
+  node_count: 'uint32_t',
+  runs: 'const uint32_t *',
+  run_count: 'uint32_t',
+  face_a: 'uint32_t',
+  face_b: 'uint32_t',
+  end_a: 'uint32_t',
+  end_b: 'uint32_t',
+  closed: 'bool',
+  seam: 'bool',
+});
+const CadaclysmBlacksmithFemVertex = koffi.struct('CadaclysmBlacksmithFemVertex', {
+  node: 'uint32_t',
+  point: koffi.array('double', 3),
+  has_position: 'bool',
+});
 const CadaclysmBlacksmithProgress = koffi.proto('void CadaclysmBlacksmithProgress(const char *phase, size_t done, size_t total, void *user)');
 const CadaclysmBlacksmithSvgOptions = koffi.struct('CadaclysmBlacksmithSvgOptions', {
   size: 'uint32_t',
@@ -226,10 +282,19 @@ function _wasm() {
   return w && typeof w.cadaclysm_blacksmith_version === 'function' ? w : null;
 }
 
-/** What `koffi` is where there is none (a browser): the type declarations run against it and keep nothing. */
+/**
+ * What `koffi` is where there is none (a browser): the type declarations run against it
+ * and keep nothing.
+ *
+ * Every member a declaration touches **at module load** has to be here, or the file
+ * throws before `_lib()` is ever reached. `array` is one (`CadaclysmBlacksmithFemVertex`'s
+ * fixed `point`), and it was missing until `web/test/notebook-javascript.mjs` found it;
+ * `sizeof` is asked for only inside `_femOptions`, which does not ask it under the wasm,
+ * but it costs nothing to answer.
+ */
 function _noKoffi() {
   const none = () => null;
-  return { opaque: none, struct: none, proto: none, disposable: none, load: none, decode: none, address: none, as: none };
+  return { opaque: none, struct: none, proto: none, disposable: none, load: none, decode: none, address: none, as: none, array: none, sizeof: none };
 }
 
 /**
@@ -254,10 +319,18 @@ function _wasmLibrary(w) {
   const BOOLS = new Set(['path_line_to', 'path_arc_to', 'path_bezier_to', 'path_nurbs_to', 'path_conic_to', 'path_parabola_by_vertex',
     'path_parabola_by_focus', 'sweep_path_line_to', 'sweep_path_arc',
     'slant_of_plane', 'face_frame', 'face_ref', 'frame_midplane', 'frame_through', 'bounds', 'bounds64', 'edge', 'colour', 'profile_colour', 'edge_colour', 'manifold', 'license_set', 'hit', 'edge_curve',
-    'intersection_chain', 'intersection_curve', 'intersection_overlap', 'hits_piece']);
+    'intersection_chain', 'intersection_curve', 'intersection_overlap', 'hits_piece',
+    'fem_mesh_view', 'fem_mesh_edge', 'fem_mesh_vertex', 'fem_mesh_open_edge', 'fem_mesh_folded_edge',
+    // Its wasm export always throws ("the wasm writes no file"); `FemMesh.saveMsh`
+    // never reaches it in the notebook, writing `mshText()` through the page's own
+    // `fs` as `step`/`sat`/`svg` do, so this is the shape a direct `_lib()` call
+    // would still get right rather than a path this module takes.
+    'fem_mesh_save_msh']);
   const FAILS = { select_face: NONE, leaked_edges: NONE, unpaired_edges: NONE, mesh: { positions: null }, mesh64: { positions: null }, mesh_face_triangles: { counts: null },
     edge_polylines: { offsets: null }, profile_polylines: { offsets: null }, edge_polyline_colours: { rgb: null, count: 0 },
-    step: null, sat_text: null, svg_text: null, drawing_svg_text: null, face_kind: null, brep_layout_id: null };
+    step: null, sat_text: null, svg_text: null, drawing_svg_text: null, face_kind: null, brep_layout_id: null,
+    fem_mesh_msh_text: null, solid_name: null, assembly_name: null, assembly_place_solid: null,
+    assembly_place_assembly: null, assembly_step: null };
   // results that C writes into an out-array of doubles at this position, and the
   // wasm returns as an array (`bounds` fills two, `edge` and `hit` a record: see `back`)
   const OUT = { slant_of_plane: 3, face_frame: 2, face_ref: 2, frame_midplane: 2, frame_through: 3 };
@@ -270,7 +343,11 @@ function _wasmLibrary(w) {
     thicken: [4], push_pull: [5], push_pull_faces: [2, 6], split: [4], split_by_plane: [4], step: [1], sat_text: [1], svg_text: [1], drawing_svg_text: [1, 3], profile_text: [4],
     slant_of_plane: [3], face_frame: [2], face_ref: [2], bounds: [2, 3], bounds64: [2, 3], edge: [2], colour: [2], profile_colour: [1], edges_coloured: [2], edge_colour: [2], manifold: [1], hit: [2], edge_curve: [2],
     intersect: [4], intersection_chain: [2], intersection_curve: [2], intersection_overlap: [2],
-    solid_profile_hits: [5], hits_piece: [2, 3, 4] };
+    solid_profile_hits: [5], hits_piece: [2, 3, 4],
+    // `fem_mesh`'s index counts the tuple `call` rewrites below, not the C call's:
+    // the options struct becomes two scalars, so `user` has moved from 4 to 5.
+    fem_mesh: [5], fem_mesh_view: [1], fem_mesh_edge: [2], fem_mesh_vertex: [2],
+    fem_mesh_open_edge: [2, 3, 4], fem_mesh_folded_edge: [2, 3, 4] };
   let error = null;
   /** A `WebAssembly.RuntimeError`: the wasm trapped (a panic aborts, the tables stay borrowed), which no `last_error` can stand for. */
   const trapped = (e) => typeof WebAssembly !== 'undefined' && e instanceof WebAssembly.RuntimeError;
@@ -332,6 +409,40 @@ function _wasmLibrary(w) {
       raw.loop_offsets = result.loop_offsets; raw.loop_count = result.loop_offsets.length;
       return true;
     }
+    if (short === 'fem_mesh_view') {
+      // The arrays and the summary, into the out-struct at args[1]. The typed arrays
+      // are handed on as they are: `_doublesAt`/`_uint32s` read a typed array the
+      // same way they read a pointer, so `FemMesh`'s accessors need no branch of
+      // their own. The wasm object carries the counts the C struct does.
+      const raw = args[1];
+      for (const name of ['nodes', 'triangles', 'triangle_face', 'node_kind', 'node_entity', 'node_count', 'triangle_count',
+        'face_count', 'edge_count', 'vertex_count', 'open_edge_count', 'folded_edge_count',
+        'watertight', 'from_mesh', 'min_angle', 'worst_triangle', 'longest_edge']) raw[name] = result[name];
+      return true;
+    }
+    if (short === 'fem_mesh_edge') {
+      // The record, into the out-struct at args[2]. The counts are the arrays' own
+      // lengths: the wasm object carries no `node_count`/`run_count`, a typed array
+      // knowing its own length.
+      const raw = args[2];
+      raw.id = result.id;
+      raw.nodes = result.nodes; raw.node_count = result.nodes.length;
+      raw.runs = result.runs; raw.run_count = result.runs.length;
+      raw.face_a = result.face_a; raw.face_b = result.face_b;
+      raw.end_a = result.end_a; raw.end_b = result.end_b;
+      raw.closed = result.closed; raw.seam = result.seam;
+      return true;
+    }
+    if (short === 'fem_mesh_vertex') {
+      const raw = args[2];
+      raw.node = result.node; raw.point = result.point; raw.has_position = result.has_position;
+      return true;
+    }
+    if (short === 'fem_mesh_open_edge' || short === 'fem_mesh_folded_edge') {
+      // A census row, into the three one-element `Uint32Array`s at args[2..4].
+      args[2][0] = result.a; args[3][0] = result.b; args[4][0] = result.brep_edge;
+      return true;
+    }
     if (short === 'colour' || short === 'profile_colour' || short === 'edge_colour') { if (result == null) return false; args[short === 'profile_colour' ? 1 : 2].set(result); return true; }
     if (short === 'manifold') { args[1].set(result); return true; }
     if (short === 'bounds' || short === 'bounds64') { args[2].set(result.slice(0, 3)); args[3].set(result.slice(3, 6)); return true; }
@@ -363,6 +474,16 @@ function _wasmLibrary(w) {
       const call = (...args) => {
         error = null;
         if (short === 'select_face' && args[2] == null) args[2] = new Float64Array(0);   // the direction, unread for kinds 0/1/3
+        if (short === 'fem_mesh') {
+          // cadaclysm_blacksmith_fem_mesh(solid, frame, tolerance, max_size, progress)
+          // in crates/cadaclysm-wasm/src/blacksmith.rs: the options struct (args[2], the
+          // plain object `_femOptions` built) becomes its two fields, because the export
+          // takes them as scalars and has no options-init to fill a struct. `frame` stays
+          // as it is -- `null` for the identity, which that export reads as the identity;
+          // never a zero-length array, which it refuses as a frame of no numbers.
+          const o = args[2];
+          args = [args[0], args[1], o.tolerance, o.max_size, args[3], args[4]];
+        }
         if (short === 'svg_text') {
           // cadaclysm_blacksmith_svg_text(solids: &[u32], words: &[f64]) in
           // crates/cadaclysm-wasm/src/blacksmith.rs: `args[2]` (the plain object
@@ -396,6 +517,7 @@ function _lib() {
   if (library) return library;
   const w = _wasm();
   if (w) { library = _wasmLibrary(w); return library; }
+  if (_koffiMissing) throw _koffiMissing;
   const l = koffi.load(libraryPath());
   const f = (proto) => l.func(proto);
   const string_free = f('void cadaclysm_blacksmith_string_free(void *s)');
@@ -405,6 +527,12 @@ function _lib() {
     last_error: f('const char *cadaclysm_blacksmith_last_error(void)'),
     version: f('const char *cadaclysm_blacksmith_version(void)'),
     solid_free: f('void cadaclysm_blacksmith_solid_free(CadaclysmBlacksmithSolid *solid)'),
+    // `named` returns a fresh handle (an owned pointer, not owned text); `solid_name` is a
+    // **borrowed** `const char *` into the solid's own slot, so it is declared `const char *`,
+    // never `CadaclysmBlacksmithOwnedString` -- that would hand the slot to `string_free` and
+    // double-free it (see `the_node_kernel_binding_frees_every_owned_string`).
+    named: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_named(const CadaclysmBlacksmithSolid *solid, const char *name)'),
+    solid_name: f('const char *cadaclysm_blacksmith_solid_name(const CadaclysmBlacksmithSolid *solid)'),
     from_brep: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_from_brep(const void *brep, const char *layout_id)'),
     brep_layout_id: f('const char *cadaclysm_blacksmith_brep_layout_id(void)'),
     profile_free: f('void cadaclysm_blacksmith_profile_free(CadaclysmBlacksmithProfile *profile)'),
@@ -429,6 +557,24 @@ function _lib() {
     svg_options_init: f('void cadaclysm_blacksmith_svg_options_init(_Out_ CadaclysmBlacksmithSvgOptions *options)'),
     svg_text: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_svg_text(const CadaclysmBlacksmithSolid **solids, size_t count, const CadaclysmBlacksmithSvgOptions *options)'),
     svg: f('bool cadaclysm_blacksmith_svg(const CadaclysmBlacksmithSolid **solids, size_t count, const char *path, const CadaclysmBlacksmithSvgOptions *options)'),
+    // The FEM surface mesh: a handle of the caller's own, and its accessors.
+    // `cadaclysm_blacksmith_fem_mesh_msh_text` returns an **owned** `char *` -- this
+    // library's convention, as `step`/`sat_text`/`brep_text` above -- where the
+    // reader library's twin borrows a slot on its handle and frees nothing. So it is
+    // declared as the same `CadaclysmBlacksmithOwnedString`: koffi decodes the string
+    // and hands the pointer back to `cadaclysm_blacksmith_string_free`, once. Getting
+    // that wrong leaks silently in one direction and takes the process down in the
+    // other, which is why `test/fem.test.js` asks one handle for its text twice.
+    fem_options_init: f('void cadaclysm_blacksmith_fem_options_init(_Out_ CadaclysmBlacksmithFemOptions *options)'),
+    fem_mesh: f('CadaclysmBlacksmithFemMesh *cadaclysm_blacksmith_fem_mesh(const CadaclysmBlacksmithSolid *solid, const double *placement, const CadaclysmBlacksmithFemOptions *options, CadaclysmBlacksmithProgress *progress, void *user)'),
+    fem_mesh_free: f('void cadaclysm_blacksmith_fem_mesh_free(CadaclysmBlacksmithFemMesh *m)'),
+    fem_mesh_view: f('bool cadaclysm_blacksmith_fem_mesh_view(const CadaclysmBlacksmithFemMesh *m, _Out_ CadaclysmBlacksmithFemMeshView *out)'),
+    fem_mesh_edge: f('bool cadaclysm_blacksmith_fem_mesh_edge(const CadaclysmBlacksmithFemMesh *m, uint32_t i, _Out_ CadaclysmBlacksmithFemEdge *out)'),
+    fem_mesh_vertex: f('bool cadaclysm_blacksmith_fem_mesh_vertex(const CadaclysmBlacksmithFemMesh *m, uint32_t i, _Out_ CadaclysmBlacksmithFemVertex *out)'),
+    fem_mesh_open_edge: f('bool cadaclysm_blacksmith_fem_mesh_open_edge(const CadaclysmBlacksmithFemMesh *m, uint32_t i, _Out_ uint32_t *a, _Out_ uint32_t *b, _Out_ uint32_t *brep_edge)'),
+    fem_mesh_folded_edge: f('bool cadaclysm_blacksmith_fem_mesh_folded_edge(const CadaclysmBlacksmithFemMesh *m, uint32_t i, _Out_ uint32_t *a, _Out_ uint32_t *b, _Out_ uint32_t *brep_edge)'),
+    fem_mesh_msh_text: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_fem_mesh_msh_text(const CadaclysmBlacksmithFemMesh *m)'),
+    fem_mesh_save_msh: f('bool cadaclysm_blacksmith_fem_mesh_save_msh(const CadaclysmBlacksmithFemMesh *m, const char *path)'),
     // `drawing_svg_text`/`drawing_svg`: `svg_text`/`svg` with a second handle list, the
     // profiles on the same page (Task 5a, 2026-09-23) -- refusing in the same words
     // (both read "svg" as their own `what`, not "drawing_svg"), so `writeSvgText`/
@@ -536,6 +682,7 @@ function _lib() {
     drop_faces: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_drop_faces(const CadaclysmBlacksmithSolid *solid, const uint32_t *faces, size_t count)'),
     trim: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_trim(const CadaclysmBlacksmithSolid *sheet, const CadaclysmBlacksmithSolid *tool, bool keep_inside, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     translate: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_translate(const CadaclysmBlacksmithSolid *solid, double dx, double dy, double dz)'),
+    scaled: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_scaled(const CadaclysmBlacksmithSolid *solid, double factor)'),
     rotate: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_rotate(const CadaclysmBlacksmithSolid *solid, const double *axis, double radians)'),
     mirror: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_mirror(const CadaclysmBlacksmithSolid *solid, const double *plane)'),
     join: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_join(const CadaclysmBlacksmithSolid *a, const CadaclysmBlacksmithSolid *b, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
@@ -565,6 +712,14 @@ function _lib() {
     sweep: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sweep(const CadaclysmBlacksmithProfile *profile, const double *frame, const CadaclysmBlacksmithSweepPath *path)'),
     sweep_open: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sweep_open(const CadaclysmBlacksmithProfile *profile, const double *frame, const CadaclysmBlacksmithSweepPath *path)'),
     pipe: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_pipe(const CadaclysmBlacksmithSweepPath *path, double radius, double thickness)'),
+    // -- assemblies: `assembly_name` borrows, like `solid_name`; the three that follow return
+    // owned text (the placement's or the file's), freed the same way `step`/`sat_text` are.
+    assembly_new: f('CadaclysmBlacksmithAssembly *cadaclysm_blacksmith_assembly_new(const char *name)'),
+    assembly_free: f('void cadaclysm_blacksmith_assembly_free(CadaclysmBlacksmithAssembly *assembly)'),
+    assembly_name: f('const char *cadaclysm_blacksmith_assembly_name(const CadaclysmBlacksmithAssembly *assembly)'),
+    assembly_place_solid: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_assembly_place_solid(CadaclysmBlacksmithAssembly *assembly, const CadaclysmBlacksmithSolid *solid, const double *frame, const char *name)'),
+    assembly_place_assembly: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_assembly_place_assembly(CadaclysmBlacksmithAssembly *assembly, CadaclysmBlacksmithAssembly *placed, const double *frame, const char *name)'),
+    assembly_step: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_assembly_step(const CadaclysmBlacksmithAssembly *assembly, const char *schema, uint32_t unit)'),
   };
   return library;
 }
@@ -597,6 +752,30 @@ function _rgb(colour) {
     if (v.length === 3) return v;
   }
   throw new BuildError(`coloured: a colour is "#rgb", "#rrggbb" or (r, g, b) in 0..1, not ${JSON.stringify(colour)}`);
+}
+// A list argument as indices: `value` must be a list -- any iterable but a string -- and
+// each item an index (a whole number, 0 to 4294967295) or, where `edges`, an `Edge`.
+// Refused here, named, before the kernel is asked: one edge is `[edge]`, never read as none
+// (docs/superpowers/specs/2026-09-25-list-arguments-refused-clearly-design.md).
+function _indices(value, call, param, edges = false) {
+  const described = (v) => (v instanceof Edge ? 'an Edge'
+    : typeof v === 'string' ? JSON.stringify(v)
+    // An array or other non-string iterable item prints its own way (`String([1])`
+    // is "1"; a list of Edges is "[object Object],..."), not the item's own kind.
+    : (v != null && typeof v !== 'number' && typeof v !== 'boolean' && typeof v[Symbol.iterator] === 'function') ? 'a list'
+    : String(v));
+  if (value == null || typeof value === 'string' || typeof value[Symbol.iterator] !== 'function') {
+    throw new TypeError(`${call}: ${param} must be a list of ${edges ? 'Edge objects or indices' : 'indices'}, not ${described(value)}`);
+  }
+  const out = [];
+  let i = 0;
+  for (const item of value) {
+    if (edges && item instanceof Edge) out.push(item.index);
+    else if (typeof item === 'number' && Number.isInteger(item) && item >= 0 && item <= 0xffffffff) out.push(item);
+    else throw new TypeError(`${call}: ${param}[${i}] is not ${edges ? 'an Edge or an index' : 'an index'}: ${described(item)}`);
+    i++;
+  }
+  return Uint32Array.from(out);
 }
 /** A face index for the C call, NONE for the whole solid; a negative one would wrap to NONE. */
 function _faceOrNone(solid, face, what) {
@@ -940,7 +1119,7 @@ class Profile {
     // explains: koffi turns a zero-length array's pointer into null, which would round EVERY
     // corner, while the wasm export reads the array's own length and so must be handed the
     // empty array itself, or it rounds corner 0.
-    const which = corners == null ? null : Uint32Array.from(Array.from(corners, Number));
+    const which = corners == null ? null : _indices(corners, 'round', 'corners');
     const list = which == null ? null : which.length || _wasm() ? which : new Uint32Array(1);
     return new Profile(_lib().profile_round(this._handle, radius, list, which == null ? 0 : which.length, !!open));
   }
@@ -1203,7 +1382,7 @@ class Solid {
   faceSheet(face) { return new Solid(_lib().face_sheet(this._handle, face)); }
   /** Without the faces at `faces`; the rest keep their order. */
   dropFaces(faces) {
-    const which = Uint32Array.from(Array.from(faces, Number));
+    const which = _indices(faces, 'dropFaces', 'faces');
     return new Solid(_lib().drop_faces(this._handle, which, which.length));
   }
   /**
@@ -1218,6 +1397,8 @@ class Solid {
   // -- moving
   place(frame) { return new Solid(_lib().place(this._handle, _frame(frame))); }
   translate(dx, dy, dz) { return new Solid(_lib().translate(this._handle, dx, dy, dz)); }
+  /** This solid scaled by `factor` about the origin: every length times `factor`, exactly. */
+  scaled(factor) { return new Solid(_lib().scaled(this._handle, factor)); }
   rotate(axis, radians) { return new Solid(_lib().rotate(this._handle, _axis(axis), radians)); }
   /** Mirror across a plane given as a frame (origin, x, y, z; the plane is spanned by x and y). */
   mirror(plane) { return new Solid(_lib().mirror(this._handle, _frame(plane))); }
@@ -1438,6 +1619,53 @@ class Solid {
     for (let i = 0; i < p.polyline_count; i++) out.push(points.slice(offsets[i] * 3, offsets[i + 1] * 3));
     return out;
   }
+  /**
+   * This solid meshed for a solver, as a `FemMesh`: nodes welded by bits -- two mesh
+   * points are one node only where their coordinates are the same doubles, so no
+   * tolerance ever merges two distinct points and a crack stays a crack -- triangles
+   * wound outward, and every node tagged with the lowest-dimension B-rep entity it lies
+   * on. **Owned by you**: `free()` it, or `using` it.
+   *
+   * `tolerance` is the chordal tolerance in model units, finite and above zero, and
+   * **it alone governs how closely the mesh follows the geometry**. `maxSize` is a size
+   * ceiling, `0` for none (curvature alone): it splits boundary segments to at most
+   * that length and lays interior stations `maxSize / √2` apart as a **target**, and it
+   * adds nodes without refining the boundary geometry -- a caller that wants the rim
+   * nearer its curve lowers the `tolerance`. `FemMesh.longestEdge` is what the mesh
+   * actually came to, and the figure to check.
+   *
+   * Those two defaults are `FemOptions::default()`'s own, **not the 0.05 that `mesh`
+   * and every other tolerance here default to**, and they are restated in this
+   * signature because there is nothing to ask in a browser: the wasm kernel has no
+   * `fem_options_init` export. The DLL's own init is still called where there is one,
+   * so a field added to the struct later defaults without this line being touched.
+   *
+   * `placement` is a `Frame` or **twelve** numbers -- origin, x, y, z -- as every frame
+   * here, and null for the identity, a solid meshed in its own coordinates being the
+   * common case. The reader library's `Node.femMesh` takes **sixteen**, column-major,
+   * so a caller moving between the two reformats the placement.
+   *
+   * `progress(phase, done, total)` hears **`'meshing'`** and **`'welding'`**. An opened
+   * phase is not a promise of a closed one: a refused call opens no phase at all, and a
+   * solid that meshes to no triangles reports `meshing` through to `1 of 1` and then
+   * throws with no `welding`.
+   *
+   * **A cracked solid is not a failure**: it comes back with `FemMesh.watertight` false
+   * and its cracks in `openEdges()` / `foldedEdges()`, and nothing is welded shut to
+   * make it look sound. Throws `BuildError` for a tolerance or `maxSize` the mesher
+   * refuses, a placement that is not twelve finite numbers or is not invertible, a
+   * closed solid this library cannot mesh, and a solid that meshes to no triangles.
+   *
+   * **No unlicensed notice here**: `FemMesh.mshText` and `FemMesh.saveMsh` print it,
+   * this library noticing on its writers rather than on its builders -- where the
+   * reader library notices in its own constructor and on neither `.msh` call.
+   */
+  femMesh(tolerance = 0.01, maxSize = 0.0, placement = null, progress = null) {
+    // null, never an empty array: the wasm export reads `null` as the identity and
+    // refuses a zero-length frame as twelve numbers it did not get.
+    const frame = placement == null ? null : _frame(placement);
+    return new FemMesh(_lib().fem_mesh(this._handle, frame, _femOptions(tolerance, maxSize), _progress(progress), null));
+  }
   /** A colour per polyline of `edgePolylines(tolerance)`, as drawn: [r, g, b], or null for a polyline
    *  on no coloured edge; an empty array where the solid has no edge paint at all. Copied out, but
    *  it fills the solid's cache at `tolerance` first, as `edgePolylines` does. */
@@ -1512,6 +1740,24 @@ class Solid {
     if (found === -2) _fail('find_face');
     return found < 0 ? null : found;
   }
+  // -- naming
+  /**
+   * This solid, named `name`. The name rides through an operation with exactly one source
+   * solid (`place`, `translate`, `coloured`, `fillet`, ...) and is dropped by one with two or
+   * more (`join`, `cut`, `common`, ...) and by a fresh primitive or sweep -- see `name`. It is
+   * what `Assembly.place` defaults a placement's own name to, and the product name a lone named
+   * solid gets when written to STEP (`step`/`stepText`). Refused for an empty name.
+   */
+  named(name) { return new Solid(_lib().named(this._handle, name)); }
+  /**
+   * This solid's name, or null if it has none -- what `named` set, kept or dropped by whatever
+   * built this solid (see `named`). The library's borrowed pointer is null for both "no name"
+   * and a failure, so this never consults `last_error` -- same as Python's own `.name` -- and it
+   * reads the raw result itself rather than through `_text`, which maps null to `''` and would
+   * erase the distinction. Over the wasm route the export returns `''` for "no name" instead of
+   * null (there is no null `const char *` there), so both are folded the same way: `raw ? ... : null`.
+   */
+  get name() { const raw = _lib().solid_name(this._handle); return raw ? String(raw) : null; }
   // -- colour
   /** This solid coloured -- `colour` is '#rgb', '#rrggbb' or [r, g, b] in 0..1 -- or with `face`
    *  just that face, whose colour then wins over the solid's. What is made from a coloured solid
@@ -1538,7 +1784,7 @@ class Solid {
   edgesColoured(colour, edges = null) {
     const [r, g, b] = _rgb(colour);
     if (edges == null) return new Solid(_lib().edges_coloured(this._handle, null, 0, r, g, b));
-    const which = Solid._edgeIndices(edges);
+    const which = _indices(edges, 'edgesColoured', 'edges', true);
     // A picked list, even an empty one, is a non-null array: null means every edge. The wasm side
     // reads a Uint32Array's own length, so the real (possibly empty) array is exactly right; koffi
     // instead turns a zero-length typed array's pointer into null regardless of the count passed
@@ -1579,14 +1825,13 @@ class Solid {
     if (/has no exact curve/.test(_lastError())) return null;
     _fail('edge_curve');
   }
-  static _edgeIndices(edges) { return Uint32Array.from(Array.from(edges, (e) => (e instanceof Edge ? e.index : Number(e)))); }
   /** `edges`: `Edge` objects or their indices. */
   fillet(edges, radius, tolerance = 1e-6, progress = null) {
-    const which = Solid._edgeIndices(edges);
+    const which = _indices(edges, 'fillet', 'edges', true);
     return new Solid(_lib().fillet(this._handle, which, which.length, radius, tolerance, _progress(progress), null));
   }
   chamfer(edges, distance, tolerance = 1e-6) {
-    const which = Solid._edgeIndices(edges);
+    const which = _indices(edges, 'chamfer', 'edges', true);
     return new Solid(_lib().chamfer(this._handle, which, which.length, distance, tolerance));
   }
   /** `open`: face indices removed so the hollow is reachable. */
@@ -1604,9 +1849,16 @@ class Solid {
    */
   pushPull(face, distance, tolerance = 0.05, progress = null) {
     if (typeof face === 'number') {
-      return new Solid(_lib().push_pull(this._handle, face, distance, tolerance, _progress(progress), null));
+      if (Number.isInteger(face) && face >= 0 && face <= 0xffffffff) {
+        return new Solid(_lib().push_pull(this._handle, face, distance, tolerance, _progress(progress), null));
+      }
+      throw new TypeError(`pushPull: face must be a face index or a list of indices, not ${face}`);
     }
-    const which = Uint32Array.from(Array.from(face, Number));
+    if (face == null || typeof face === 'string' || face instanceof Edge || typeof face[Symbol.iterator] !== 'function') {
+      const described = face instanceof Edge ? 'an Edge' : typeof face === 'string' ? JSON.stringify(face) : String(face);
+      throw new TypeError(`pushPull: face must be a face index or a list of indices, not ${described}`);
+    }
+    const which = _indices(face, 'pushPull', 'face');
     return new Solid(_lib().push_pull_faces(this._handle, which, which.length, distance, tolerance, _progress(progress), null));
   }
   /**
@@ -1654,7 +1906,7 @@ class Solid {
   /** The chamfer `face` belongs to taken off, the faces beside it sharp again -- the delete of a chamfer face. */
   unchamfer(face) { return new Solid(_lib().unchamfer(this._handle, face)); }
   shell(thickness, open = [], tolerance = 1e-6, progress = null) {
-    const which = Uint32Array.from(Array.from(open, Number));
+    const which = _indices(open, 'shell', 'open');
     return new Solid(_lib().shell(this._handle, thickness, which, which.length, tolerance, _progress(progress), null));
   }
   /**
@@ -1680,9 +1932,9 @@ class Solid {
   async cutAsync(other, tolerance = 0.05, progress = null) { return Solid._wrap(await this._async('cutAsync', { op: 'combine', which: 'cut', b: _addressOf(other._handle), tolerance }, [other], progress)); }
   async commonAsync(other, tolerance = 0.05, progress = null) { return Solid._wrap(await this._async('commonAsync', { op: 'combine', which: 'common', b: _addressOf(other._handle), tolerance }, [other], progress)); }
   async splitSheetAsync(tool, tolerance = 0.05, progress = null) { return Solid._wrap(await this._async('splitSheetAsync', { op: 'combine', which: 'split_sheet', b: _addressOf(tool._handle), tolerance }, [tool], progress)); }
-  async filletAsync(edges, radius, tolerance = 1e-6, progress = null) { return Solid._wrap(await this._async('filletAsync', { op: 'fillet', edges: Solid._edgeIndices(edges), radius, tolerance }, [], progress)); }
-  async chamferAsync(edges, distance, tolerance = 1e-6) { return Solid._wrap(await this._async('chamferAsync', { op: 'chamfer', edges: Solid._edgeIndices(edges), distance, tolerance })); }
-  async shellAsync(thickness, open = [], tolerance = 1e-6, progress = null) { return Solid._wrap(await this._async('shellAsync', { op: 'shell', thickness, open: Uint32Array.from(Array.from(open, Number)), tolerance }, [], progress)); }
+  async filletAsync(edges, radius, tolerance = 1e-6, progress = null) { return Solid._wrap(await this._async('filletAsync', { op: 'fillet', edges: _indices(edges, 'filletAsync', 'edges', true), radius, tolerance }, [], progress)); }
+  async chamferAsync(edges, distance, tolerance = 1e-6) { return Solid._wrap(await this._async('chamferAsync', { op: 'chamfer', edges: _indices(edges, 'chamferAsync', 'edges', true), distance, tolerance })); }
+  async shellAsync(thickness, open = [], tolerance = 1e-6, progress = null) { return Solid._wrap(await this._async('shellAsync', { op: 'shell', thickness, open: _indices(open, 'shellAsync', 'open'), tolerance }, [], progress)); }
   async thickenAsync(thickness, tolerance = 1e-6, progress = null) { return Solid._wrap(await this._async('thickenAsync', { op: 'thicken', thickness, tolerance }, [], progress)); }
   async trimAsync(tool, keep = 'outside', tolerance = 0.05, progress = null) {
     Solid._keep(keep);
@@ -1809,6 +2061,77 @@ class Solid {
   }
 }
 
+const _assemblyFinalizer = typeof FinalizationRegistry === 'function'
+  ? new FinalizationRegistry((h) => { try { _lib().assembly_free(h); } catch (_) { /* exiting */ } }) : null;
+
+/**
+ * A mutable tree of placements: a name, and zero or more solids or other assemblies placed in
+ * it at a frame. Unlike `Solid`, placing shares rather than copies -- placing one assembly
+ * under another does not snapshot it, so a later placement on the shared one shows up wherever
+ * it already sits. `close()` frees this handle; it does not free what was placed in it if that
+ * is still reachable from somewhere else (another assembly, or a variable still holding it).
+ */
+class Assembly {
+  constructor(name) {
+    this._handle = _checked(_lib().assembly_new(name), 'assembly_new');
+    if (_assemblyFinalizer) _assemblyFinalizer.register(this, this._handle, this);
+  }
+  get _live() {
+    if (!this._handle) throw new BuildError('assembly: closed');
+    return this._handle;
+  }
+  get closed() { return this._handle === null; }
+  close() {
+    if (this._handle === null) return;
+    const h = this._handle; this._handle = null;
+    if (_assemblyFinalizer) _assemblyFinalizer.unregister(this);
+    _lib().assembly_free(h);
+  }
+  [Symbol.for('nodejs.dispose')]() { this.close(); }
+  /** This assembly's own name, given when it was made. */
+  get name() { return _text(_lib().assembly_name(this._live)); }
+  /**
+   * Place `thing` (a `Solid` or another `Assembly`) at `frame` (twelve numbers, right-handed
+   * and orthonormal) in this assembly, called `name` -- or, left null, `thing`'s own name
+   * (`Solid.name`, or `"part"` for an unnamed solid, or the placed assembly's own `name`),
+   * numbered past any already taken here (`"bolt"`, `"bolt 2"`, ...). An explicit `name`
+   * already taken here throws. Placing an assembly that is this one, or anywhere above this
+   * one in the tree already, throws, naming the cycle, since writing that out would never
+   * terminate. Returns the placement's name.
+   */
+  place(thing, frame, name = null) {
+    const f = _frame(frame);
+    let raw, what;
+    if (thing instanceof Solid) { raw = _lib().assembly_place_solid(this._live, thing._handle, f, name); what = 'assembly_place_solid'; }
+    else if (thing instanceof Assembly) { raw = _lib().assembly_place_assembly(this._live, thing._live, f, name); what = 'assembly_place_assembly'; }
+    else throw new BuildError('assembly: place takes a Solid or an Assembly');
+    if (raw == null) _fail(what);
+    return String(raw);
+  }
+  /**
+   * This assembly, and everything placed under it, as one STEP file: this assembly the root
+   * product, each sub-assembly and each distinct part (the same solid with the same paint and
+   * name) written once, each placement an occurrence named as it was placed. `schema` and
+   * `unit` as `writeStepText`. Throws where this assembly, or a sub-assembly reachable from it,
+   * places nothing -- a reader would never show it.
+   */
+  stepText(schema = null, unit = 'mm') {
+    if (!(unit in UNITS)) throw new BuildError(`unit must be one of ${Object.keys(UNITS).sort().join(', ')}`);
+    const text = _lib().assembly_step(this._live, _schemaText(schema), UNITS[unit]);
+    if (text == null) _fail('assembly_step');
+    return text;
+  }
+  /** `stepText` written to `filePath`. */
+  step(filePath, schema = null, unit = 'mm') { fs.writeFileSync(filePath, this.stepText(schema, unit), 'utf8'); }
+  /** This assembly as a reader `Scene`, through STEP text and `cadaclysm.openMemory` -- `Solid.toScene`'s own door, over the whole tree instead of one solid. */
+  toScene(schema = null) {
+    let cad;
+    try { cad = require('./cadaclysm'); } catch (e) { throw new BuildError(`toScene needs the reader module beside this file: ${e.message}`); }
+    const schemaPath = schema != null && _isSchemaFile(String(schema)) ? String(schema) : null;
+    return cad.openMemory(this.stepText(schema), 'stp', { schema: schemaPath, name: 'assembly.stp' });
+  }
+}
+
 function _reader(what) {
   try { return require('./cadaclysm'); } catch (e) { throw new BuildError(`${what} needs the reader module beside this file: ${e.message}`); }
 }
@@ -1827,6 +2150,305 @@ function _fromBrep(node, what) {
 }
 /** How the loaded library lays a brep out in memory; `Solid.fromNode` works only where it equals the reader's `Brep.layoutId()`. */
 function brepLayoutId() { return _text(_lib().brep_layout_id()); }
+
+// ---- the FEM surface mesh -------------------------------------------------------
+
+/**
+ * One B-rep edge of a FEM mesh: the chain of nodes along it, and where that chain
+ * breaks. Plain data, copied out of the handle.
+ *
+ * `nodes` are this mesh's node indices in order along the edge, its end vertices
+ * included; a closed edge repeats no node. **`runs` says where the chain breaks**:
+ * read `nodes.subarray(runs[i], runs[i + 1])` (the last run to the end) as one
+ * polyline and join nothing across a run boundary -- `chains()` does exactly that.
+ * The two ends either side of a boundary are two points of the edge with no mesh
+ * edge between them. `[0]` is the ordinary answer, and a caller reading `nodes` as
+ * one polyline without looking here silently jumps the gap.
+ *
+ * `faces` is `[faceA, faceB]` and `ends` is `[endA, endB]`, the second of each being
+ * `NONE` where there is none -- an open sheet's rim, or both ends at one vertex.
+ * **`0` is a real face and a real vertex, not a sentinel**, and `faces` numbers the
+ * solid's faces as `Solid.faceKind` does. `closed` where the nodes make one loop,
+ * never with more than one run; `seam` where one face bounds the edge twice, and both
+ * `faces` are then that same face.
+ *
+ * `id` is **the solid's own edge id**, not this mesh's edge index: `FemMesh.edges()`
+ * is a densely renumbered subset of the solid's edges, with every edge collapsed to a
+ * point left out, so a sphere -- whose two pole runs collapse -- reports its seam as
+ * edge 0 with an `id` of 1. Everything else that names an edge means the index. It is
+ * not a row of `Solid.edges()` either, that table being the solid's edges grouped by
+ * geometry; the id names the topological edge, which is what the `.msh` entities and
+ * the censuses speak in.
+ */
+class FemEdge {
+  constructor(id, nodes, runs, faces, ends, closed, seam) {
+    this.id = id; this.nodes = nodes; this.runs = runs;
+    this.faces = faces; this.ends = ends; this.closed = closed; this.seam = seam;
+  }
+  /**
+   * `nodes` cut into one polyline per run: `runs.length` of them, together holding
+   * every node once, and nothing joined across a boundary. Views into `nodes`
+   * (`subarray`), so they cost nothing.
+   */
+  chains() {
+    const out = [];
+    for (let i = 0; i < this.runs.length; i++) {
+      out.push(this.nodes.subarray(this.runs[i], i + 1 < this.runs.length ? this.runs[i + 1] : this.nodes.length));
+    }
+    return out;
+  }
+}
+
+/** A `CadaclysmBlacksmithFemEdge` as a `FemEdge`. */
+function _femEdgeOf(raw) {
+  return new FemEdge(
+    raw.id,
+    _uint32s(raw.nodes, raw.node_count) ?? new Uint32Array(0),
+    _uint32s(raw.runs, raw.run_count) ?? new Uint32Array(0),
+    [raw.face_a, raw.face_b], [raw.end_a, raw.end_b],
+    Boolean(raw.closed), Boolean(raw.seam),
+  );
+}
+
+/**
+ * One B-rep vertex of a FEM mesh: the node the mesh put there, if any, and where the
+ * topology says it is, if that is known. Plain data.
+ *
+ * `node` is the mesh node at this vertex, or `NONE` where the mesh has none there.
+ * **A sentinel here is ordinary, not a fault**: the analysis rebuilds a vertex
+ * wherever two trims meet, so a sphere has 48 of them where the mesh has 2 points,
+ * and a caller walking these skips the sentinel rather than treating it as a gap.
+ *
+ * `point` is where the topology says the vertex is, in the same space and under the
+ * same placement as `FemMesh.nodes()`. **Meaningless unless `hasPosition`**: it is
+ * `[0, 0, 0]` then, a point no geometry has and one a solver would read as a node at
+ * the origin.
+ */
+class FemVertex {
+  constructor(node, point, hasPosition) { this.node = node; this.point = point; this.hasPosition = hasPosition; }
+}
+
+/** A `CadaclysmBlacksmithFemVertex` as a `FemVertex`. */
+function _femVertexOf(raw) {
+  return new FemVertex(raw.node, Float64Array.from(raw.point), Boolean(raw.has_position));
+}
+
+/**
+ * One flattened crack census, row by row: `read(i, a, b, edge)` fills three
+ * `Uint32Array`s of one and says whether it could. The shape `openEdges()` and
+ * `foldedEdges()` share, so the two cannot drift -- and a pure function, so
+ * `test/fem.test.js` can drive it over rows no fixture in this repository produces.
+ *
+ * `what` is the C entry point's own name, as every other refusal in this module spells
+ * one (`fem_mesh_edge 3`) and as `cadaclysm_blacksmith.py`'s own `_census` does. The
+ * reader module says `fem mesh open edge 3` instead, following *its* Python twin: the two
+ * ABIs' wrappers word their errors differently, and each one matches its own side.
+ */
+function _censusRows(read, count, what) {
+  const a = new Uint32Array(1), b = new Uint32Array(1), edge = new Uint32Array(1);
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    if (!read(i, a, b, edge)) _fail(`${what} ${i}`);
+    out.push([a[0], b[0], edge[0]]);
+  }
+  return out;
+}
+
+// The same backstop as a `Solid`'s: a `FemMesh` the collector reaps unfreed is freed
+// then; `free()` is the contract.
+const _femFinalizer = typeof FinalizationRegistry === 'function'
+  ? new FinalizationRegistry((h) => { try { _lib().fem_mesh_free(h); } catch (_) { /* exiting */ } }) : null;
+
+/**
+ * One solid meshed for a solver: nodes welded by bits, triangles wound outward, every
+ * node tagged with the lowest-dimension B-rep entity it lies on, and every crack
+ * reported rather than closed. Built by `Solid.femMesh`, and **owned by you**:
+ * `free()` it, or `using` it where the runtime supports explicit resource management.
+ *
+ * **Every array here is a copy**, decoded at call time as `Solid.mesh`'s typed arrays
+ * are, not a view into the library's memory -- this wrapper has no borrowed-view
+ * machinery at all. So an array in hand needs no care: it survives `free()`,
+ * `Solid.close()` and the collector. The price is that each call copies again, so hold
+ * the array rather than asking twice in a loop.
+ *
+ * A handle rather than a snapshot all the same, because the counts and the records are
+ * read through it: a call on a freed mesh throws. The memory behind it is **this**
+ * object's and not the solid's -- `Solid.close()` does not free a FEM mesh, and the
+ * solid's tessellation cache, meshed again at another tolerance, does not touch it.
+ * `Solid.mesh`'s views are the other shape, and are stale after either.
+ */
+class FemMesh {
+  constructor(handle) {
+    this._pointer = _checked(handle, 'fem_mesh');
+    if (_femFinalizer) _femFinalizer.register(this, handle, this);
+    // Read once, here: every pointer in the view is built with the handle and good
+    // until it is freed, so asking again per accessor would be one C call per array
+    // for the same answer.
+    const raw = {};
+    if (!_lib().fem_mesh_view(this._pointer, raw)) {
+      const why = _lastError() || 'fem_mesh_view';
+      this.free();
+      throw new BuildError(why);
+    }
+    this._raw = raw;
+  }
+  get _handle() { if (this._pointer === null) throw new BuildError('fem mesh: freed'); return this._pointer; }
+  /** The view, the handle checked first: every pointer in it is the handle's, and a freed handle's point at nothing. */
+  get _live() { if (this._pointer === null) throw new BuildError('fem mesh: freed'); return this._raw; }
+  /** Whether `free()` has run. */
+  get freed() { return this._pointer === null; }
+  /** Give the mesh back. Idempotent; the collector does it otherwise. Arrays already copied out are unaffected. */
+  free() {
+    if (this._pointer === null) return;
+    const h = this._pointer; this._pointer = null;
+    if (_femFinalizer) _femFinalizer.unregister(this);
+    _lib().fem_mesh_free(h);
+  }
+  [Symbol.for('nodejs.dispose')]() { this.free(); }
+  // -- the flat arrays, copied
+  /** Every node's position, three doubles each: placed by `Solid.femMesh`'s placement, in the solid's own coordinates otherwise. */
+  nodes() { const raw = this._live; return _doublesAt(raw.nodes, raw.node_count * 3) ?? new Float64Array(0); }
+  /** Three node indices a triangle, wound outward -- a mirroring placement is wound back. */
+  triangles() { const raw = this._live; return _uint32s(raw.triangles, raw.triangle_count * 3) ?? new Uint32Array(0); }
+  /** Which face each triangle lies on, one per triangle: the same faces `Solid.faceKind` names. */
+  triangleFace() { const raw = this._live; return _uint32s(raw.triangle_face, raw.triangle_count) ?? new Uint32Array(0); }
+  /** What each node lies on -- 0 a vertex, 1 an edge, 2 a face -- one per node: the lowest-dimension entity, as Gmsh classifies. `nodeEntity()` says which. */
+  nodeKind() { const raw = this._live; return _uint32s(raw.node_kind, raw.node_count) ?? new Uint32Array(0); }
+  /** Which vertex, edge or face each node lies on, by the matching `nodeKind()`: an index into `vertices()`, into `edges()`, or into the solid's faces. */
+  nodeEntity() { const raw = this._live; return _uint32s(raw.node_entity, raw.node_count) ?? new Uint32Array(0); }
+  // -- the topology
+  /** The solid's faces -- the same faces `Solid.faces` counts. */
+  get faceCount() { return this._live.face_count; }
+  /**
+   * One `FemEdge` per B-rep edge, in the order a `nodeKind()` of 1 indexes them.
+   * **Not `Solid.edges()`' numbering**: these are the manifold analysis's, ascending
+   * by edge id.
+   */
+  edges() {
+    const l = _lib(), h = this._handle, out = [];
+    for (let i = 0, n = this._raw.edge_count; i < n; i++) {
+      const raw = {};
+      if (!l.fem_mesh_edge(h, i, raw)) _fail(`fem_mesh_edge ${i}`);
+      out.push(_femEdgeOf(raw));
+    }
+    return out;
+  }
+  /** One `FemVertex` per B-rep vertex, in the order a `nodeKind()` of 0 indexes them. */
+  vertices() {
+    const l = _lib(), h = this._handle, out = [];
+    for (let i = 0, n = this._raw.vertex_count; i < n; i++) {
+      const raw = {};
+      if (!l.fem_mesh_vertex(h, i, raw)) _fail(`fem_mesh_vertex ${i}`);
+      out.push(_femVertexOf(raw));
+    }
+    return out;
+  }
+  /**
+   * Every crack, as `[a, b, brepEdge]`: a directed mesh edge `(a, b)` with no
+   * `(b, a)`, and the B-rep edge both nodes lie on or `NONE` where they share none.
+   *
+   * **Empty unless the solid's topology is closed**, whose mesh is otherwise not asked
+   * about at all: an open sheet from `Solid.face`, `faceSheet`, `dropFaces` or
+   * `extrudeOpen` makes no claim to enclose anything, so its rim is not a crack. Such
+   * a solid reports `watertight` false with this and `foldedEdges()` both empty, and
+   * **that trio of answers together** says "not asked", not "nothing found". That rule
+   * holds here without exception, where the reader library has one: every solid has a
+   * B-rep behind it, so this library has no mesh-only body.
+   */
+  openEdges() {
+    const l = _lib(), h = this._handle;
+    return _censusRows((i, a, b, e) => l.fem_mesh_open_edge(h, i, a, b, e), this._live.open_edge_count, 'fem_mesh_open_edge');
+  }
+  /**
+   * Every fold, as `openEdges()` reports a crack: a directed mesh edge used by more
+   * than one triangle.
+   *
+   * **A solid can be folded without being open** -- one no thicker than a line leaves
+   * no hole for an open edge to find -- and the closure census's own known-bad bodies
+   * are folds rather than open cracks. A caller that checks `openEdges()` alone calls
+   * such a solid sound. Empty under the same rule.
+   */
+  foldedEdges() {
+    const l = _lib(), h = this._handle;
+    return _censusRows((i, a, b, e) => l.fem_mesh_folded_edge(h, i, a, b, e), this._live.folded_edge_count, 'fem_mesh_folded_edge');
+  }
+  // -- the summary
+  /** The topology is closed and the welded mesh is too. **False for every solid whose topology is not closed**; read `openEdges()` for what an empty census beside a false here does and does not mean. */
+  get watertight() { return Boolean(this._live.watertight); }
+  /**
+   * **Always false here**, and kept so the two ABIs hand back one struct: a `Solid`
+   * always has a B-rep, so this library has no mesh-only body to report. The reader's
+   * `Node.femMesh` sets it for a node with no B-rep, where it also says which space the
+   * mesh is in and whether the crack census spoke from the triangles alone.
+   */
+  get fromMesh() { return Boolean(this._live.from_mesh); }
+  /** The smallest interior angle of any triangle, in degrees. */
+  get minAngle() { return this._live.min_angle; }
+  /** The triangle with that angle: an index into `triangles()`. */
+  get worstTriangle() { return this._live.worst_triangle; }
+  /**
+   * The longest triangle edge, placed. **The figure to check against `Solid.femMesh`'s
+   * `maxSize`, and the only one that says what the mesh actually is**: `maxSize` bounds
+   * the boundary segments and merely targets the interior, and one small enough to reach
+   * the mesher's own piece and station ceilings is not honoured at all.
+   */
+  get longestEdge() { return this._live.longest_edge; }
+  // -- out
+  /**
+   * The mesh as Gmsh 4.1 ASCII `.msh` text: an entity per B-rep vertex, edge and face,
+   * a volume where the solid closes, and a physical group naming each.
+   *
+   * **On this side of the ABI the library's text is owned and handed over**, released
+   * by this wrapper as every other text this library writes -- `stepText`, `satText`,
+   * `brepText`. Two asks give two independent texts, and neither dies with the handle.
+   * The reader library's own `mshText` is the other way round: it borrows a slot on its
+   * handle, replaced by the next call and gone with the mesh. A reader porting one
+   * side's reasoning onto the other leaks or double-frees.
+   *
+   * **The unlicensed notice is printed here**, on this writer and on `saveMsh`, and
+   * **not** by `Solid.femMesh`: meshing is not a licensed output and the `.msh` file is,
+   * which is where `satText` and `brepText` put theirs too. The reader library notices
+   * in its constructor instead and on neither `.msh` call.
+   *
+   * Throws `BuildError` for a mesh the writer refuses, naming the field it cannot
+   * honour, and for a freed handle.
+   */
+  mshText() {
+    const text = _lib().fem_mesh_msh_text(this._handle);
+    if (text == null) _fail('fem_mesh_msh_text');
+    return text;
+  }
+  /** `mshText()` written to `filePath` by the library itself, replacing any file there. Prints the unlicensed notice; see `mshText`. */
+  saveMsh(filePath) {
+    if (!_lib().fem_mesh_save_msh(this._handle, String(filePath))) _fail(`fem_mesh_save_msh: ${filePath}`);
+  }
+  toString() {
+    if (this.freed) return 'FemMesh(freed)';
+    const raw = this._raw;
+    return `FemMesh(nodes=${raw.node_count}, triangles=${raw.triangle_count}, watertight=${Boolean(raw.watertight)})`;
+  }
+}
+
+/** A `CadaclysmBlacksmithFemOptions` object: the library's own defaults, then `tolerance` and `maxSize`. */
+function _femOptions(tolerance, maxSize) {
+  const o = {};
+  // `init` writes `sizeof(CadaclysmBlacksmithFemOptions)` bytes as the *library* knows
+  // that type, into the struct declared at the top of this file -- which is why
+  // `tests/bindings.rs` pins the two field for field. `size` is then set to this
+  // declaration's own sizeof, which is what the growth rule asks of a caller.
+  //
+  // Neither happens in a browser: the wasm has no `fem_options_init` export (its
+  // `fem_mesh` takes the two numbers as scalars, both set below), exactly as
+  // `_svgOptions` finds for `svg_options_init`, and there is no koffi there to ask a
+  // struct's size of. `size` is dropped by the shim, so leaving it out costs nothing.
+  if (!_wasm()) {
+    _lib().fem_options_init(o);
+    o.size = koffi.sizeof(CadaclysmBlacksmithFemOptions);
+  }
+  o.tolerance = Number(tolerance);
+  o.max_size = Number(maxSize);
+  return o;
+}
 
 // ---- selecting ------------------------------------------------------------------
 
@@ -2228,6 +2850,8 @@ module.exports = {
   BuildError, NONE, UNITS, Axis, SvgView,
   libraryPath, defaultSchema, version, buildDate, license, licenseInfo, licenseNoticeCount, brepLayoutId,
   svgOptionsDefaults,
-  Frame, Profile, Path, SweepPath, Slant, Solid, Selector, Edge, Curve, Intersection, Chain, Overlap, Hit, Spot, SolidHits, Piece, Workplane, writeStep, writeStepText, writeSat, writeSatText, writeBrep, writeBrepText, writeSvg, writeSvgText,
+  Frame, Profile, Path, SweepPath, Slant, Solid, Assembly, Selector, Edge, Curve, Intersection, Chain, Overlap, Hit, Spot, SolidHits, Piece, Workplane, writeStep, writeStepText, writeSat, writeSatText, writeBrep, writeBrepText, writeSvg, writeSvgText,
+  FemMesh, FemEdge, FemVertex,
   _lib, _lastError, _frame, _axis, _progress, _searchedPaths, _notFoundMessage, _floats, _uint32s, _doublesAt, _svgOptions,
+  _femEdgeOf, _femVertexOf, _censusRows, _femOptions,
 };

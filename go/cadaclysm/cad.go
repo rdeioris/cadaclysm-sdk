@@ -25,6 +25,12 @@
 // to tie its lifetime to the scene's, so this sharp edge is documented rather than
 // enforced, exactly as it is left in the Python client this package mirrors.
 //
+// [FemMesh] is the one thing here that does not borrow from the scene: it is a handle of
+// your own, and its arrays borrow from *it* — [Scene.Close] neither frees one nor stales one,
+// and neither does [Scene.ForgetMeshes]. They are unsafe.Slice struct fields there too, with
+// the same sharp edge and for the same reason, so hold the FemMesh itself while you read
+// them; its own doc comment says what that does and does not protect you from.
+//
 // Strings are the easy half: every char* this ABI returns is copied into a Go string on
 // the way out through C.GoString, so Node.Name and friends outlive anything.
 //
@@ -1026,6 +1032,66 @@ func (p *Placement) Transform() [16]float64 {
 	return out
 }
 
+// ---- kinematics -------------------------------------------------------------------------
+
+// Link is a rigid body of the file's mechanism: the nodes that move together when a
+// joint moves it. From Scene.Links; other formats record none. Unlike Placement, this
+// keeps no Scene accessor of its own: a caller keeps the *Scene it opened, the same way
+// Placement and Node already ask it to.
+type Link struct {
+	scene *Scene
+	index uint32
+}
+
+// Index is this link's position in Scene.Links() -- Python's link.index, a public
+// attribute there for the same reason this is a method here: a caller keying a map of
+// links, or comparing against the file's own numbering, needs a stable identity.
+func (l *Link) Index() uint32 { return l.index }
+
+// Name is the link's own name, as the file gives it.
+func (l *Link) Name() string {
+	return C.GoString(C.cadaclysm_link_name(l.scene.h(), C.uint32_t(l.index)))
+}
+
+// Nodes are the topmost node of each subtree the link moves, in node order: moving
+// these moves everything under them.
+func (l *Link) Nodes() []*Node {
+	h := l.scene.h()
+	n := uint32(C.cadaclysm_link_node_count(h, C.uint32_t(l.index)))
+	out := make([]*Node, n)
+	for i := uint32(0); i < n; i++ {
+		out[i] = &Node{scene: l.scene, index: uint32(C.cadaclysm_link_node(h, C.uint32_t(l.index), C.uint32_t(i)))}
+	}
+	return out
+}
+
+// Joint is a connection between two links. Its two ends keep the file's order, not a
+// parent and a child, since a mechanism may be a network with loops. From Scene.Joints.
+type Joint struct {
+	scene *Scene
+	index uint32
+}
+
+// Index is this joint's position in Scene.Joints() -- Python's joint.index, a public
+// attribute there for the same reason this is a method here: a caller keying a map of
+// joints, or comparing against the file's own numbering, needs a stable identity.
+func (j *Joint) Index() uint32 { return j.index }
+
+// Name is the joint's own name, as the file gives it.
+func (j *Joint) Name() string {
+	return C.GoString(C.cadaclysm_joint_name(j.scene.h(), C.uint32_t(j.index)))
+}
+
+// Start is the link this joint starts at, in the file's order.
+func (j *Joint) Start() *Link {
+	return &Link{scene: j.scene, index: uint32(C.cadaclysm_joint_start(j.scene.h(), C.uint32_t(j.index)))}
+}
+
+// End is the link this joint ends at, as Start gives its other end.
+func (j *Joint) End() *Link {
+	return &Link{scene: j.scene, index: uint32(C.cadaclysm_joint_end(j.scene.h(), C.uint32_t(j.index)))}
+}
+
 // ---- breps -------------------------------------------------------------------------------
 
 // Brep is a body's exact B-rep -- the trimmed surfaces its mesh is cut from -- shared with
@@ -1228,6 +1294,438 @@ func (m *Meshlets) Meshlet(i int) Meshlet {
 		C.cadaclysm_meshlet_children(h, idx, (*C.uint32_t)(unsafe.Pointer(&out.Children[0])))
 	}
 	return out
+}
+
+// ---- the FEM surface mesh -----------------------------------------------------------
+
+// FemEdge is one B-rep edge of a FEM mesh: the chain of nodes along it, and where that
+// chain breaks. Plain data, copied out of the handle, so an edge outlives the mesh it came
+// from where the flat arrays on [FemMesh] do not.
+//
+// Nodes are this mesh's node indices in order along the edge, its end vertices included; a
+// closed edge repeats no node. **Runs says where the chain breaks**: read
+// Nodes[Runs[i]:Runs[i+1]] (the last run to the end) as one polyline and join nothing
+// across a run boundary — the two ends either side of one are two points of the edge with
+// no mesh edge between them, a crack along the edge or a stretch of it the mesher sampled
+// on one face only. One run beginning at 0 is the ordinary answer, and a caller reading
+// Nodes as one polyline without looking here jumps the gap silently.
+//
+// Faces is (face_a, face_b) and Ends is (end_a, end_b), the second of each ^uint32(0) —
+// CADACLYSM_NONE, 0xFFFFFFFF — where there is none: an open body's rim, or both ends at one
+// vertex (a closed edge, a circle's rim, a full-turn seam). **0 is a real face and a real
+// vertex, not a sentinel.** Which end comes first is the first trim's direction and means
+// nothing else: the pair bounds the edge, it does not orient it.
+//
+// Closed where the nodes make one loop, never where there is more than one run. Seam where
+// one face bounds the edge twice — a closed surface's seam rather than a real boundary — and
+// both Faces are then that same face.
+//
+// ID is **the body's own B-rep edge id, not this mesh's edge index**: FemMesh.Edges is a
+// densely renumbered subset of the body's edges, ascending by id, with every edge collapsed
+// to a point left out, so edge 0 of a STEP body's mesh routinely has an ID in the hundreds.
+// Everything else here that names an edge means the index — a NodeKind of 1 read through
+// NodeEntity, the third number of an OpenEdges or FoldedEdges row, and the edge_<i> physical
+// group of MshText — and this is the one way back from any of them to the topology the file
+// wrote.
+type FemEdge struct {
+	ID     uint32
+	Nodes  []uint32
+	Runs   []uint32
+	Faces  [2]uint32
+	Ends   [2]uint32
+	Closed bool
+	Seam   bool
+}
+
+// String is Python's FemEdge.__repr__: the lengths rather than the chains, which are what a
+// failure message wants.
+func (e FemEdge) String() string {
+	return fmt.Sprintf("FemEdge(id=%d, nodes=%d, runs=%d, faces=%v, ends=%v, closed=%v, seam=%v)",
+		e.ID, len(e.Nodes), len(e.Runs), e.Faces, e.Ends, e.Closed, e.Seam)
+}
+
+// FemVertex is one B-rep vertex of a FEM mesh: the node the mesh put there, if any, and
+// where the topology says it is, if that is known. Plain data.
+//
+// Node is the mesh node at this vertex, or ^uint32(0) where the mesh has none there. **A
+// sentinel here is ordinary, not a fault**: the analysis rebuilds a vertex wherever two
+// trims meet, and a pole's polyline runs give a sphere 48 of them where the mesh has 2
+// points, so a caller walking these skips the sentinel rather than reading it as a gap.
+//
+// Point is where the vertex is, in the same space and under the same placement as
+// FemMesh.Nodes — the file's own vertex rather than a mesh node, so the two can differ by
+// the reader's rounding. **Meaningless unless HasPosition**: it is all zeros then, a point
+// no geometry has and one a solver would take for a node at the origin.
+type FemVertex struct {
+	Node        uint32
+	Point       [3]float64
+	HasPosition bool
+}
+
+// String is Python's FemVertex.__repr__.
+func (v FemVertex) String() string {
+	return fmt.Sprintf("FemVertex(node=%d, point=%v, has_position=%v)", v.Node, v.Point, v.HasPosition)
+}
+
+// FemMesh is one body meshed for a solver: nodes welded by bits — two mesh points are one
+// node only where their coordinates are the same doubles, so no tolerance ever merges two
+// distinct points and a crack stays a crack — triangles wound outward, every node tagged
+// with the lowest-dimension B-rep entity it lies on, and every crack reported rather than
+// closed. What [Node.FemMesh] returns, and **owned by you**: Close it, or let the finalizer.
+//
+// # The arrays borrow, and the fields cannot refuse
+//
+// Nodes, Triangles, TriangleFace, NodeKind and NodeEntity are slices built with unsafe.Slice
+// straight over the library's own memory rather than copies, exactly as [Mesh]'s and
+// [Mesh64]'s are and for the reason the package doc gives: a solver mesh is megabytes, and
+// copying it to hand it over would cost that twice. They are struct fields, handed over
+// once, with no accessor to guard them — **so nothing here refuses to read them after
+// Close**, and a slice read then is a slice over freed memory. There is no way in Go to mark
+// a slice's backing memory read-only or to tie its lifetime to the handle's, so this sharp
+// edge is documented rather than enforced, exactly as the package doc leaves it for the
+// scene and exactly as the Python client this package mirrors leaves the same case. Copy
+// (append([]float64(nil), m.Nodes...)) anything that must outlive the mesh.
+//
+// The eight methods below *can* tell, because each hands the handle back to the library:
+// Edges, Vertices, OpenEdges, FoldedEdges, MshText and SaveMsh each return a
+// *CadaclysmError saying "fem mesh: freed" once Close has run.
+//
+// **Hold the FemMesh itself while you read its arrays.** The arrays are fields of the
+// handle, so a program that keeps the *FemMesh keeps the memory: that is why they live here
+// rather than on a view struct of their own. What the collector can still free under you is
+// a slice copied out of a field by a program that then drops its last reference to the
+// *FemMesh — the finalizer runs, cadaclysm_fem_mesh_free is called, and nothing in the
+// program ever asked for it. Java and LuaJIT have the same hazard for the same reason; Go
+// cannot close it.
+//
+// # Its own lifetime, not the scene's
+//
+// [Scene.Close] neither frees a FEM mesh nor stales one, and [Scene.ForgetMeshes] does not
+// either: the handle owns its arrays outright, where [Mesh]'s borrow the scene's. Only Close
+// on this object, or the finalizer, frees them.
+type FemMesh struct {
+	handle *C.CadaclysmFemMesh
+
+	// Nodes is every node's position, three float64 each — placed, and in the space
+	// Node.FemMesh and FromMesh describe. Every node is used by at least one triangle.
+	Nodes []float64
+	// Triangles is three node indices a triangle, wound outward; a mirroring placement is
+	// wound back.
+	Triangles []uint32
+	// TriangleFace is which B-rep face each triangle lies on, one per triangle, into the
+	// body's FaceCount faces.
+	TriangleFace []uint32
+	// NodeKind is what each node lies on — 0 a B-rep vertex, 1 an edge, 2 a face — one per
+	// node: the lowest-dimension entity it lies on, which is the .msh format's own
+	// classification rule. NodeEntity says which entity of that kind.
+	NodeKind []uint32
+	// NodeEntity is which vertex, edge or face each node lies on, read by the matching
+	// NodeKind: an index into Vertices, into Edges, or into the body's faces.
+	NodeEntity []uint32
+
+	// FaceCount is the body's faces; TriangleFace and a NodeKind of 2 index them. The same
+	// faces Node.Surfaces hands over, in the same order.
+	FaceCount uint32
+	// Watertight is that the welded mesh closes — every directed mesh edge paired with its
+	// reverse and none used twice — and, for a B-rep body, that the topology behind it does
+	// too. **False for every B-rep body whose topology is not closed**, whose mesh is then
+	// not asked about at all; see OpenEdges for what an empty census beside a false here
+	// does and does not mean. A FromMesh body has no topology to ask of, so this says only
+	// that its triangles close.
+	Watertight bool
+	// FromMesh is that this came from the scene's own mesh rather than from a brep: one
+	// face, every node on face 0, no edges and no vertices.
+	//
+	// **It is also which space the mesh is in.** A B-rep body's FEM mesh is in the file's own
+	// units and axes, whatever Convention the scene was opened with, because it is taken off
+	// the brep — and a brep is in the file's own space for the reason Node.Brep gives. A node
+	// with no brep falls back to the scene's mesh, which *is* converted, so that one comes
+	// back in the scene's convention, wound counter-clockwise about the outward normal even
+	// where the convention winds the other way. Under a convention other than the native one
+	// those are two different spaces, so a caller mixing these nodes with Node.Transform on
+	// a Y-up scene gets a rotated part unless it reads this.
+	//
+	// **And it is which contract the census is reporting under**: see OpenEdges.
+	FromMesh bool
+	// MinAngle is the smallest interior angle of any triangle, in degrees. There is always
+	// one: a body that meshed to no triangles is a refusal, not a mesh.
+	MinAngle float64
+	// WorstTriangle is the triangle with that angle, as an index into Triangles.
+	WorstTriangle uint32
+	// LongestEdge is the longest triangle edge, placed. **The figure to check against
+	// Node.FemMesh's maxSize, and the only one that says what the mesh actually is**: maxSize
+	// bounds the boundary segments and merely targets the interior — 1.03 x maxSize was
+	// measured on a face whose parameters run unevenly — and one small enough beside the body
+	// to reach the mesher's own piece and station ceilings is not honoured at all.
+	LongestEdge float64
+
+	// The counts the four row readers loop to. Not exported: Edges/Vertices/OpenEdges/
+	// FoldedEdges hand back the rows themselves, and len() on those is the count, as it is
+	// everywhere else in this package.
+	edgeCount, vertexCount, openEdgeCount, foldedEdgeCount uint32
+}
+
+// femMeshFrom reads the view once and wraps the handle, freeing it if the view is refused.
+//
+// Read once, here, rather than per field: every pointer in the view is built with the handle
+// and never moves — nothing in this ABI is built lazily — so asking again would be one C
+// call for the same answer. There is no generation to check either, which is what the kernel
+// package's Mesh needs for the solid's tessellation cache and what a FEM mesh has no
+// equivalent of.
+func femMeshFrom(handle *C.CadaclysmFemMesh) (*FemMesh, error) {
+	var raw C.CadaclysmFemMeshView
+	if !bool(C.cadaclysm_fem_mesh_view(handle, &raw)) {
+		why := lastErrorOr("fem mesh view")
+		C.cadaclysm_fem_mesh_free(handle)
+		return nil, &CadaclysmError{Message: why}
+	}
+	m := &FemMesh{
+		handle:          handle,
+		FaceCount:       uint32(raw.face_count),
+		Watertight:      bool(raw.watertight),
+		FromMesh:        bool(raw.from_mesh),
+		MinAngle:        float64(raw.min_angle),
+		WorstTriangle:   uint32(raw.worst_triangle),
+		LongestEdge:     float64(raw.longest_edge),
+		edgeCount:       uint32(raw.edge_count),
+		vertexCount:     uint32(raw.vertex_count),
+		openEdgeCount:   uint32(raw.open_edge_count),
+		foldedEdgeCount: uint32(raw.folded_edge_count),
+	}
+	nodes, triangles := int(raw.node_count), int(raw.triangle_count)
+	if nodes > 0 && raw.nodes != nil {
+		m.Nodes = unsafe.Slice((*float64)(unsafe.Pointer(raw.nodes)), nodes*3)
+		m.NodeKind = unsafe.Slice((*uint32)(unsafe.Pointer(raw.node_kind)), nodes)
+		m.NodeEntity = unsafe.Slice((*uint32)(unsafe.Pointer(raw.node_entity)), nodes)
+	}
+	if triangles > 0 && raw.triangles != nil {
+		m.Triangles = unsafe.Slice((*uint32)(unsafe.Pointer(raw.triangles)), triangles*3)
+		m.TriangleFace = unsafe.Slice((*uint32)(unsafe.Pointer(raw.triangle_face)), triangles)
+	}
+	runtime.SetFinalizer(m, (*FemMesh).Close)
+	return m, nil
+}
+
+// h is the live handle, refusing to hand over a freed one, so a use-after-free returns an
+// error at the call site instead of passing a dangling pointer into the library. Every
+// method that hands the handle to C goes through it; the struct fields cannot, which is the
+// sharp edge [FemMesh] documents.
+func (m *FemMesh) h() (*C.CadaclysmFemMesh, error) {
+	if m == nil || m.handle == nil {
+		return nil, &CadaclysmError{Message: "fem mesh: freed"}
+	}
+	return m.handle, nil
+}
+
+// Closed is whether Close has run. A nil *FemMesh — what a failed Node.FemMesh returns
+// beside its error — counts as closed.
+func (m *FemMesh) Closed() bool { return m == nil || m.handle == nil }
+
+// Close gives the mesh back, and with it every slice on it and the .msh text the library
+// holds for it. Idempotent, and a no-op on a nil *FemMesh, so a Close deferred before the
+// error is checked cannot panic. The error return is always nil; it exists so a FemMesh
+// defers like every other resource here and satisfies io.Closer, as [Brep] and the kernel
+// package's Solid do.
+//
+// **The slices are not emptied and do not begin to refuse**: after this they are still slice
+// headers over memory the library has freed. See [FemMesh].
+func (m *FemMesh) Close() error {
+	if m == nil || m.handle == nil {
+		return nil
+	}
+	h := m.handle
+	m.handle = nil
+	runtime.SetFinalizer(m, nil)
+	C.cadaclysm_fem_mesh_free(h)
+	return nil
+}
+
+// copyFemIndices is n uint32 at p in memory of our own: what a FemEdge's Nodes and Runs
+// hold, so an edge read out of a mesh outlives the mesh. Cheap — an edge's chain is tens of
+// numbers where the flat arrays are millions, which is why these are copied and those lent.
+func copyFemIndices(p *C.uint32_t, n int) []uint32 {
+	if p == nil || n <= 0 {
+		return nil
+	}
+	return append([]uint32(nil), unsafe.Slice((*uint32)(unsafe.Pointer(p)), n)...)
+}
+
+// Edges is one [FemEdge] per B-rep edge, in the order a NodeKind of 1 indexes them. Empty
+// for a FromMesh body, which has no B-rep edges at all.
+//
+// **This list's own numbering, not the body's**: each FemEdge.ID carries the body's own edge
+// id. Built fresh on every call, one C call an edge, so read it once and keep it.
+func (m *FemMesh) Edges() ([]FemEdge, error) {
+	defer pin()() // the calls and the lastError read after them on one OS thread
+	h, err := m.h()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]FemEdge, 0, m.edgeCount)
+	var raw C.CadaclysmFemEdge
+	for i := uint32(0); i < m.edgeCount; i++ {
+		if !bool(C.cadaclysm_fem_mesh_edge(h, C.uint32_t(i), &raw)) {
+			runtime.KeepAlive(m)
+			return nil, &CadaclysmError{Message: lastErrorOr(fmt.Sprintf("fem mesh edge %d", i))}
+		}
+		out = append(out, FemEdge{
+			ID:     uint32(raw.id),
+			Nodes:  copyFemIndices(raw.nodes, int(raw.node_count)),
+			Runs:   copyFemIndices(raw.runs, int(raw.run_count)),
+			Faces:  [2]uint32{uint32(raw.face_a), uint32(raw.face_b)},
+			Ends:   [2]uint32{uint32(raw.end_a), uint32(raw.end_b)},
+			Closed: bool(raw.closed),
+			Seam:   bool(raw.seam),
+		})
+	}
+	// The mesh must outlive the loop even if the caller dropped every other reference to it:
+	// a finalizer running here would free the handle the library is reading. Java's
+	// reachabilityFence, in Go's spelling.
+	runtime.KeepAlive(m)
+	return out, nil
+}
+
+// Vertices is one [FemVertex] per B-rep vertex, in the order a NodeKind of 0 indexes them.
+// Empty for a FromMesh body.
+func (m *FemMesh) Vertices() ([]FemVertex, error) {
+	defer pin()()
+	h, err := m.h()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]FemVertex, 0, m.vertexCount)
+	var raw C.CadaclysmFemVertex
+	for i := uint32(0); i < m.vertexCount; i++ {
+		if !bool(C.cadaclysm_fem_mesh_vertex(h, C.uint32_t(i), &raw)) {
+			runtime.KeepAlive(m)
+			return nil, &CadaclysmError{Message: lastErrorOr(fmt.Sprintf("fem mesh vertex %d", i))}
+		}
+		out = append(out, FemVertex{
+			Node:        uint32(raw.node),
+			Point:       [3]float64{float64(raw.point[0]), float64(raw.point[1]), float64(raw.point[2])},
+			HasPosition: bool(raw.has_position),
+		})
+	}
+	runtime.KeepAlive(m)
+	return out, nil
+}
+
+// OpenEdges is every crack, as (a, b, brepEdge): a directed mesh edge (a, b) with no (b, a),
+// and the B-rep edge both nodes lie on or ^uint32(0) where they share none.
+//
+// **Empty unless the body's topology is closed — for a B-rep body**, whose mesh is otherwise
+// not asked about at all. The census asks whether a body that ought to enclose a solid does,
+// and an open one — a sheet, a bag of surfaces, a shell the file itself wrote open — makes no
+// such claim to check: its rim is not a crack. So such a body reports Watertight false with
+// this and FoldedEdges both empty, and **that trio of answers together** says "not asked",
+// not "nothing found".
+//
+// **A FromMesh body is the exception, and the opposite case.** A bare mesh carries no
+// topology to say whether it ought to close, so its census always runs over the welded
+// triangles: an open one lists its cracks here with Watertight false, a closed one reports
+// Watertight true with no topology consulted at all, and an empty census there really does
+// mean "nothing found".
+func (m *FemMesh) OpenEdges() ([][3]uint32, error) { return m.census(true) }
+
+// FoldedEdges is every fold, as OpenEdges reports a crack: a directed mesh edge used by more
+// than one triangle, once.
+//
+// **A body can be folded without being open** — a solid no thicker than a line leaves no hole
+// for an open edge to find — and the closure census's own known-bad bodies are folds rather
+// than open cracks. A caller that checks OpenEdges alone calls such a body sound. Empty
+// under the same rule as OpenEdges.
+func (m *FemMesh) FoldedEdges() ([][3]uint32, error) { return m.census(false) }
+
+// census is the shared body of OpenEdges and FoldedEdges, so the two cannot drift.
+//
+// A bool rather than a func value naming one of the two entry points: cgo's generated
+// bindings for a C function are call-only expressions, not first-class Go func values, the
+// same reason polylinesFrom above takes an already-called struct.
+func (m *FemMesh) census(openEdges bool) ([][3]uint32, error) {
+	defer pin()()
+	h, err := m.h()
+	if err != nil {
+		return nil, err
+	}
+	count, what := m.foldedEdgeCount, "folded edge"
+	if openEdges {
+		count, what = m.openEdgeCount, "open edge"
+	}
+	out := make([][3]uint32, 0, count)
+	for i := uint32(0); i < count; i++ {
+		var row [3]C.uint32_t
+		var ok C.bool
+		if openEdges {
+			ok = C.cadaclysm_fem_mesh_open_edge(h, C.uint32_t(i), &row[0], &row[1], &row[2])
+		} else {
+			ok = C.cadaclysm_fem_mesh_folded_edge(h, C.uint32_t(i), &row[0], &row[1], &row[2])
+		}
+		if !bool(ok) {
+			runtime.KeepAlive(m)
+			return nil, &CadaclysmError{Message: lastErrorOr(fmt.Sprintf("fem mesh %s %d", what, i))}
+		}
+		out = append(out, [3]uint32{uint32(row[0]), uint32(row[1]), uint32(row[2])})
+	}
+	runtime.KeepAlive(m)
+	return out, nil
+}
+
+// MshText is the mesh as Gmsh 4.1 ASCII .msh text: an entity per B-rep vertex, edge and
+// face, a volume where the body closes, and a physical group naming each.
+//
+// **The library's text is borrowed from this handle** and replaced by the next call on it —
+// this ABI's convention, and the opposite of the kernel package's, where
+// cadaclysm_blacksmith_fem_mesh_msh_text hands over an owned string the wrapper releases
+// with cadaclysm_blacksmith_string_free. Nothing here has to free anything either way:
+// C.GoString copies the char* into a Go string on the way out, so what comes back is a
+// string of your own that outlives the handle. A reader porting one side's reasoning onto
+// the other leaks or double-frees.
+//
+// **No unlicensed notice is printed here.** [Node.FemMesh] gave it once when the mesh was
+// built, and this ABI deliberately does not repeat it on either .msh call — where the kernel
+// library notices on both of its writers and *not* on its builder. Each matches its own
+// siblings, so moving the call to look like the other side breaks a convention.
+func (m *FemMesh) MshText() (string, error) {
+	defer pin()()
+	h, err := m.h()
+	if err != nil {
+		return "", err
+	}
+	p := C.cadaclysm_fem_mesh_msh_text(h)
+	runtime.KeepAlive(m)
+	if p == nil {
+		return "", &CadaclysmError{Message: lastErrorOr("msh text")}
+	}
+	return C.GoString(p), nil
+}
+
+// SaveMsh is MshText written to path by the library itself: the same bytes from the same
+// writer, straight to the file rather than through the borrowed slot, so a MshText call on
+// this handle from another goroutine cannot free the text under the write. No notice here
+// either; see MshText.
+func (m *FemMesh) SaveMsh(path string) error {
+	defer pin()()
+	h, err := m.h()
+	if err != nil {
+		return err
+	}
+	cp := C.CString(path)
+	defer C.free(unsafe.Pointer(cp))
+	ok := bool(C.cadaclysm_fem_mesh_save_msh(h, cp))
+	runtime.KeepAlive(m)
+	if !ok {
+		return &CadaclysmError{Message: lastErrorOr(fmt.Sprintf("could not write %s", path))}
+	}
+	return nil
+}
+
+// String is Python's FemMesh.__repr__.
+func (m *FemMesh) String() string {
+	if m.Closed() {
+		return "FemMesh(closed)"
+	}
+	return fmt.Sprintf("FemMesh(nodes=%d, triangles=%d, watertight=%v, from_mesh=%v)",
+		len(m.Nodes)/3, len(m.Triangles)/3, m.Watertight, m.FromMesh)
 }
 
 // ---- nodes ------------------------------------------------------------------------------
@@ -1518,6 +2016,71 @@ func (n *Node) Mesh64() (*Mesh64, error) {
 	return meshFrom64(C.cadaclysm_node_mesh64(n.scene.h(), C.uint32_t(n.index))), nil
 }
 
+// FemMesh is this node's body meshed for a solver, as a [FemMesh]: nodes welded by bits,
+// triangles wound outward, each node tagged with the lowest-dimension B-rep entity it lies
+// on, and every crack reported rather than closed. Meshed in the part's own frame and
+// following the hop from an instance to the shape it draws that Mesh follows, so a node
+// instanced six times meshes once, where it is defined.
+//
+// tolerance is the chordal tolerance in model units, finite and above zero, and **it alone
+// governs how closely the mesh follows the geometry**. maxSize is a size ceiling, finite and
+// zero or more, 0 being no ceiling (curvature alone): **it bounds the boundary and targets
+// the interior**, which is not a longest-element-edge guarantee — it adds boundary nodes
+// without refining boundary geometry, and FemMesh.LongestEdge is what the mesh actually came
+// to, the figure to check against it. Go has no defaults, so Python's 0.01 and 0.0 are
+// spelled out at the call; the library's own struct is filled by cadaclysm_fem_options_init
+// first, so a field added to it later defaults without this function being touched.
+//
+// **Neither number is checked here.** cadaclysm_node_fem_mesh refuses a tolerance or a size
+// it cannot use, naming the field and the value, and a mesh-only body goes through
+// fem_mesh_of_mesh, which takes no options at all and so reads neither — a tolerance of 0,
+// -1 or NaN and a maxSize of -1 or NaN all come back with a mesh there. A wrapper that
+// validated either field itself would refuse calls this ABI accepts.
+//
+// placement is 16 numbers, column-major, as [Node.BoundsPlaced] takes them (nil for the
+// identity), applied in float64 throughout. The kernel package's Solid.FemMesh takes
+// **twelve** instead — a blacksmith.Frame, origin then x, y, z — so a caller moving between
+// the two reformats the placement; both being fixed-size array types, Go refuses the wrong
+// one at compile time where the other wrappers can only refuse it at run time.
+//
+// **The space is the body's own for a B-rep and the scene's for a mesh**, which
+// FemMesh.FromMesh is the flag for: under a convention other than the native one those are
+// two different spaces. Read it there.
+//
+// **A cracked body is not a failure**: it comes back with FemMesh.Watertight false and its
+// cracks in FemMesh.OpenEdges and FemMesh.FoldedEdges — **both**, a fold being as real a
+// fault as an open crack — and nothing is welded shut to make it look sound. Returns a
+// *CadaclysmError for a closed scene, a tolerance or size the mesher refuses, a placement
+// that is not finite and invertible, a node with neither a brep nor a mesh (an assembly, a
+// storey, a layer, an empty definition, a curve), and a body that meshes to no triangles at
+// all.
+//
+// Prints the unlicensed notice once, here, and not again on either of FemMesh's .msh calls.
+func (n *Node) FemMesh(tolerance, maxSize float64, placement *[16]float64) (*FemMesh, error) {
+	if err := n.scene.closedError(); err != nil {
+		return nil, err
+	}
+	defer pin()() // the call and the lastError read after it on one OS thread
+	var opts C.CadaclysmFemOptions
+	// init writes sizeof(CadaclysmFemOptions) bytes as the *library* knows that type, into
+	// the struct cgo declares from the header — one type, not two, which is why Go has no
+	// layout row in tests/bindings.rs to keep the two in step. size is then set to this
+	// header's own sizeof, which is what the growth rule asks of a caller.
+	C.cadaclysm_fem_options_init(&opts)
+	opts.size = C.size_t(unsafe.Sizeof(opts))
+	opts.tolerance = C.double(tolerance)
+	opts.max_size = C.double(maxSize)
+	var p *C.double
+	if placement != nil {
+		p = (*C.double)(unsafe.Pointer(&placement[0]))
+	}
+	h := C.cadaclysm_node_fem_mesh(n.scene.h(), C.uint32_t(n.index), p, &opts)
+	if h == nil {
+		return nil, &CadaclysmError{Message: lastErrorOr("fem_mesh")}
+	}
+	return femMeshFrom(h)
+}
+
 // MeshLod is this node's triangles at a coarser level of detail: 0 is Mesh itself, 1 up
 // to LodLevels each about a quarter of the triangles of the one before, and past that
 // nil. Every level shares the level-0 vertices -- the same Positions, only Indices
@@ -1634,6 +2197,26 @@ func polylinesFrom(raw C.CadaclysmPolylines) *Polylines {
 // Edges is this node's feature edges, as polylines to draw an overlay from.
 func (n *Node) Edges() *Polylines {
 	return polylinesFrom(C.cadaclysm_node_edges(n.scene.h(), C.uint32_t(n.index)))
+}
+
+// EdgeColours is one RGBA per polyline of Edges, nil for an edge the file does not
+// style; empty when nothing is styled.
+func (n *Node) EdgeColours() [][]float32 {
+	return edgeColoursFrom(C.cadaclysm_node_edge_colors(n.scene.h(), C.uint32_t(n.index)))
+}
+
+func edgeColoursFrom(raw C.CadaclysmEdgeColors) [][]float32 {
+	if raw.rgba == nil || raw.count == 0 {
+		return [][]float32{}
+	}
+	flat := unsafe.Slice((*float32)(unsafe.Pointer(raw.rgba)), int(raw.count)*4)
+	out := make([][]float32, raw.count)
+	for i := range out {
+		if flat[4*i+3] >= 0 {
+			out[i] = append([]float32(nil), flat[4*i:4*i+4]...)
+		}
+	}
+	return out
 }
 
 // Curves is this node's free curves, as polylines. A 2D drawing is all of these.
@@ -1763,6 +2346,20 @@ func (n *Node) IsMeshed() bool { return bool(C.cadaclysm_node_is_meshed(n.scene.
 // (see Scene.SurfaceMatrix); empty without surfaces.
 func (n *Node) SurfaceEdges() *Polylines {
 	return polylinesFrom(C.cadaclysm_node_surface_edges(n.scene.h(), C.uint32_t(n.index)))
+}
+
+// SurfaceEdgeBeziers is its edges as the exact curves, where the reader has them without
+// meshing -- a Rhino extrusion's rims are its profile -- and empty everywhere else, so a
+// caller drawing from surfaces tries this before SurfaceEdges, whose trims are thinned to
+// the mesh tolerance. The same segments as EdgeBeziers, in the same space: not the
+// surfaces' frame, so no Scene.SurfaceMatrix.
+func (n *Node) SurfaceEdgeBeziers() *Beziers {
+	return beziersFrom(C.cadaclysm_node_surface_edge_beziers(n.scene.h(), C.uint32_t(n.index)))
+}
+
+// SurfaceEdgeColours is EdgeColours for SurfaceEdges.
+func (n *Node) SurfaceEdgeColours() [][]float32 {
+	return edgeColoursFrom(C.cadaclysm_node_surface_edge_colors(n.scene.h(), C.uint32_t(n.index)))
 }
 
 // SurfaceIsocurves is its isocurves taken from its trimmed surfaces and clipped to the
@@ -1960,6 +2557,27 @@ func (s *Scene) GeometryDiagnostics() []string {
 	out := make([]string, n)
 	for i := uint32(0); i < n; i++ {
 		out[i] = C.GoString(C.cadaclysm_geometry_diagnostic(s.h(), C.uint32_t(i)))
+	}
+	return out
+}
+
+// Links are the rigid bodies of the file's mechanism, in the file's order. A file with
+// no mechanism gives none.
+func (s *Scene) Links() []*Link {
+	n := uint32(C.cadaclysm_link_count(s.h()))
+	out := make([]*Link, n)
+	for i := uint32(0); i < n; i++ {
+		out[i] = &Link{scene: s, index: i}
+	}
+	return out
+}
+
+// Joints are the connections between the links, in the file's order.
+func (s *Scene) Joints() []*Joint {
+	n := uint32(C.cadaclysm_joint_count(s.h()))
+	out := make([]*Joint, n)
+	for i := uint32(0); i < n; i++ {
+		out[i] = &Joint{scene: s, index: i}
 	}
 	return out
 }

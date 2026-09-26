@@ -2,6 +2,10 @@
 // cadaclysm.py has: Scene, Node, Placement and the values they hand back. Every call
 // that can fail returns a Result; nothing throws. Strings are copies; arrays borrow
 // from their Scene and die with it (README.md, "Lifetimes").
+//
+// FemMesh is the one borrowed view whose owner is not the Scene: it is a handle of your
+// own (Node::fem_mesh), and its spans belong to that handle, so closing the scene neither
+// frees nor stales one, and only FemMesh::free() -- or its destructor -- does.
 #ifndef CADACLYSM_HPP
 #define CADACLYSM_HPP
 
@@ -57,6 +61,8 @@ enum class ValueKind : std::uint32_t { none = 0, text = 1, integer = 2, real = 3
 
 class Node;
 class Placement;
+class Link;
+class Joint;
 class Scene;
 
 namespace detail {
@@ -919,6 +925,359 @@ private:
     std::unique_ptr<CadaclysmMeshlets, Free> ptr_;
 };
 
+// ---- the FEM surface mesh -------------------------------------------------------------
+
+// One B-rep edge of a FEM mesh: the chain of nodes along it, and where that chain breaks.
+//
+// The two arrays are spans into the FemMesh's own memory, as Face's are into the scene's,
+// and they die with it: FemMesh::edges() checks the handle before it hands the list over,
+// and a span already in hand is a pointer and a length from then on. Copy anything that
+// must outlive the mesh.
+struct FemEdge {
+    // The **body's own** B-rep edge id -- `LoopTrim::edge` on the brep Node::brep hands
+    // over, the number the file gave the edge.
+    //
+    // **Not this mesh's edge index, and on a read body rarely equal to it.**
+    // FemMesh::edges() is a densely renumbered *subset* of the body's edges -- ascending
+    // by id, with every edge collapsed to a point left out -- so edge 0 of a STEP body's
+    // mesh routinely reports an id in the hundreds. Everything else here that names an
+    // edge means the *index*: a FemMesh::node_kind() of 1 read through
+    // FemMesh::node_entity(), the third number of an open or folded census row, and the
+    // `edge_<i>` physical group of FemMesh::msh_text(). This is the one way back from any
+    // of them to the topology the file wrote.
+    std::uint32_t id = 0;
+    // This mesh's node indices in order along the edge, its end vertices included; a
+    // closed edge repeats no node.
+    Span<const std::uint32_t> nodes;
+    // Where each connected run of `nodes` begins; `[0]` for one chain along the whole
+    // edge. **Read nodes[runs[i] .. runs[i + 1]] (the last run to the end) as one
+    // polyline and join nothing across a boundary** -- chains() does that walk. The two
+    // ends either side of one are two points of the edge with no mesh edge between them:
+    // a crack along the edge, or a stretch of it the mesher sampled on one face only.
+    Span<const std::uint32_t> runs;
+    // The two faces it bounds, the second NONE on an open body's rim. **`0` is a real
+    // face, not a sentinel.** A non-manifold edge's third and further faces are not here;
+    // Brep::manifold() is where the whole list of them is read.
+    std::pair<std::uint32_t, std::uint32_t> faces{NONE, NONE};
+    // The two B-rep vertices its chain ends at, as FemMesh::vertices() indexes them, the
+    // second NONE where both ends are one vertex -- a closed edge, a circle's rim, a
+    // full-turn seam. **`0` is a real vertex, not a sentinel.** Which end comes first is
+    // the first trim's direction and means nothing else: the pair bounds the edge, it
+    // does not orient it.
+    std::pair<std::uint32_t, std::uint32_t> ends{NONE, NONE};
+    // The nodes make one loop. False wherever `runs` is longer than one.
+    bool closed = false;
+    // Bounded twice by one face: a closed surface's seam rather than a real boundary.
+    // Both `faces` are then that same face.
+    bool seam = false;
+
+    // Each connected run of `nodes` as its own polyline, in order along the edge: what
+    // `runs` is for, and one row is the ordinary answer. The last run reaches the end of
+    // the chain. A run start past the chain -- which the library does not produce -- is
+    // clamped rather than read.
+    std::vector<Span<const std::uint32_t>> chains() const {
+        std::vector<Span<const std::uint32_t>> out;
+        out.reserve(runs.size());
+        for (std::size_t i = 0; i < runs.size(); ++i) {
+            std::size_t start = std::min(static_cast<std::size_t>(runs[i]), nodes.size());
+            std::size_t end = i + 1 < runs.size() ? std::min(static_cast<std::size_t>(runs[i + 1]), nodes.size()) : nodes.size();
+            out.push_back(nodes.subspan(start, end > start ? end - start : 0));
+        }
+        return out;
+    }
+};
+
+// One B-rep vertex of a FEM mesh: the node the mesh put there, if any, and where the
+// topology says it is, if that is known. Plain data, copied out of the handle.
+struct FemVertex {
+    // The mesh node at this vertex, or NONE where the mesh has none there.
+    //
+    // **A sentinel here is ordinary, not a fault.** The analysis rebuilds a vertex
+    // wherever two trims meet, and a pole's polyline runs give a sphere 48 of them where
+    // the mesh has 2 points; a caller walking these skips the sentinel rather than
+    // treating it as a gap.
+    std::uint32_t node = NONE;
+    // Where the vertex is, in the same space and under the same placement as
+    // FemMesh::nodes(). The file's own vertex rather than a mesh node, so the two can
+    // differ by the reader's rounding. **Meaningless unless has_position**: it is zeroed
+    // then, a point no geometry has and one a solver would take for a node at the origin.
+    Vec3 point{};
+    // `point` was placed. False where every trim meeting at this vertex is a curve with
+    // no geometry to read an end off -- then there is **no position at all**, reported as
+    // this flag rather than as a plausible-looking (0, 0, 0).
+    bool has_position = false;
+};
+
+namespace detail {
+
+// One CadaclysmFemEdge as a FemEdge: the two arrays lent as spans, the pairs paired.
+// Tested over rows built by hand in tests/fem_test.cpp, because no fixture in this repo
+// has an edge whose chain breaks, or a closed or seam edge.
+inline FemEdge fem_edge_of(const CadaclysmFemEdge& raw) {
+    FemEdge out;
+    out.id = raw.id;
+    out.nodes = raw.nodes ? Span<const std::uint32_t>(raw.nodes, raw.node_count) : Span<const std::uint32_t>();
+    out.runs = raw.runs ? Span<const std::uint32_t>(raw.runs, raw.run_count) : Span<const std::uint32_t>();
+    out.faces = {raw.face_a, raw.face_b};
+    out.ends = {raw.end_a, raw.end_b};
+    out.closed = raw.closed;
+    out.seam = raw.seam;
+    return out;
+}
+
+// One CadaclysmFemVertex as a FemVertex: the three doubles copied, the flag carried.
+inline FemVertex fem_vertex_of(const CadaclysmFemVertex& raw) {
+    FemVertex out;
+    out.node = raw.node;
+    for (int k = 0; k < 3; ++k) out.point[k] = raw.point[k];
+    out.has_position = raw.has_position;
+    return out;
+}
+
+// One crack or fold census, row by row: `row(i, &a, &b, &brep_edge)` fills row i and says
+// whether it could, and `fail(i)` words the refusal. The shape open_edges() and
+// folded_edges() share -- on both sides of the ABI -- so the four cannot drift. Tested
+// over a synthetic `row` in tests/fem_test.cpp: every fixture in this repo is either
+// closed and clean, where both censuses are empty, or an open sheet, where they are not
+// asked, so nothing else here reaches this arithmetic at all.
+template <class Row, class Fail>
+Result<std::vector<std::array<std::uint32_t, 3>>> census_rows(std::uint32_t count, Row row, Fail fail) {
+    std::vector<std::array<std::uint32_t, 3>> out;
+    out.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        std::array<std::uint32_t, 3> at{};
+        if (!row(i, &at[0], &at[1], &at[2])) return fail(i);
+        out.push_back(at);
+    }
+    return out;
+}
+
+}  // namespace detail
+
+// One body meshed for a solver: nodes welded by bits, triangles wound outward, every node
+// tagged with the lowest-dimension B-rep entity it lies on, and every crack reported
+// rather than closed. What Node::fem_mesh() returns, and **owned by you**: freed when
+// destroyed, or on free(). Move-only, as Meshlets is.
+//
+// A handle rather than a snapshot, and its big arrays are Spans into the library's own
+// memory, exactly as Mesh's are and for the same reason: a solver mesh is megabytes, and
+// copying it to hand it over would cost that twice.
+//
+// **The owner of those spans is this object, not the scene.** That is the one thing this
+// class does differently from every other view in this header: Scene::close() neither
+// frees a FEM mesh nor stales one, and meshing the body again does not either -- only
+// free() (or the destructor) does. There is no generation check here as the kernel's mesh
+// views have: a FEM view's pointers are built with the handle and never move.
+//
+// Every accessor below checks the handle first, and **in both modes**, not only under
+// CADACLYSM_CHECKED: what it guards is a pointer handed to C, as Meshlets::live() guards
+// one, rather than a borrowed view's owner. So a *call* on a freed mesh is caught. A span
+// already in hand is a pointer and a length from then on, and reading one after the free
+// reads freed memory with nothing to say so -- copy anything that must outlive the handle.
+class FemMesh {
+public:
+    FemMesh(FemMesh&&) noexcept = default;
+    FemMesh& operator=(FemMesh&&) noexcept = default;
+
+    // Whether free() has run (or this mesh has been moved from).
+    bool freed() const noexcept { return !ptr_; }
+    // Give the mesh back, and with it every span taken from it. Idempotent.
+    void free() noexcept { ptr_.reset(); }
+
+    // Every node's position, three doubles each -- placed, and in the space
+    // Node::fem_mesh() and from_mesh() describe. Every node is used by a triangle.
+    Span<const double> nodes() const {
+        const CadaclysmFemMeshView& r = view("FemMesh::nodes");
+        return r.nodes ? Span<const double>(r.nodes, static_cast<std::size_t>(r.node_count) * 3) : Span<const double>();
+    }
+    // Three node indices a triangle, wound outward -- a mirroring placement is wound back.
+    Span<const std::uint32_t> triangles() const {
+        const CadaclysmFemMeshView& r = view("FemMesh::triangles");
+        return r.triangles ? Span<const std::uint32_t>(r.triangles, static_cast<std::size_t>(r.triangle_count) * 3)
+                           : Span<const std::uint32_t>();
+    }
+    // The B-rep face each triangle lies on, one per triangle, into face_count() faces.
+    Span<const std::uint32_t> triangle_face() const {
+        const CadaclysmFemMeshView& r = view("FemMesh::triangle_face");
+        return r.triangle_face ? Span<const std::uint32_t>(r.triangle_face, r.triangle_count) : Span<const std::uint32_t>();
+    }
+    // What each node lies on -- `0` a B-rep vertex, `1` an edge, `2` a face -- one per
+    // node: the lowest-dimension entity it lies on, which is the `.msh` format's own
+    // classification rule. node_entity() says which entity of that kind.
+    Span<const std::uint32_t> node_kind() const {
+        const CadaclysmFemMeshView& r = view("FemMesh::node_kind");
+        return r.node_kind ? Span<const std::uint32_t>(r.node_kind, r.node_count) : Span<const std::uint32_t>();
+    }
+    // Which vertex, edge or face each node lies on, read by the matching node_kind(): an
+    // index into vertices(), into edges(), or into the body's faces. One per node.
+    Span<const std::uint32_t> node_entity() const {
+        const CadaclysmFemMeshView& r = view("FemMesh::node_entity");
+        return r.node_entity ? Span<const std::uint32_t>(r.node_entity, r.node_count) : Span<const std::uint32_t>();
+    }
+
+    // The body's faces; triangle_face() and a node_kind() of `2` index them. The same
+    // faces Node::surfaces() hands over, in the same order.
+    std::uint32_t face_count() const { return view("FemMesh::face_count").face_count; }
+
+    // One FemEdge per B-rep edge, in the order a node_kind() of `1` indexes them. Empty
+    // for a from_mesh() body, which has no B-rep edges at all. **This list's own
+    // numbering, not the body's**: each FemEdge::id carries the body's own edge id.
+    Result<std::vector<FemEdge>> edges() const {
+        const CadaclysmFemMesh* handle = live("FemMesh::edges");
+        std::vector<FemEdge> out;
+        out.reserve(view_.edge_count);
+        for (std::uint32_t i = 0; i < view_.edge_count; ++i) {
+            CadaclysmFemEdge raw{};
+            if (!::cadaclysm_fem_mesh_edge(handle, i, &raw)) return detail::reader_error("fem mesh edge");
+            out.push_back(detail::fem_edge_of(raw));
+        }
+        return out;
+    }
+
+    // One FemVertex per B-rep vertex, in the order a node_kind() of `0` indexes them.
+    // Empty for a from_mesh() body.
+    Result<std::vector<FemVertex>> vertices() const {
+        const CadaclysmFemMesh* handle = live("FemMesh::vertices");
+        std::vector<FemVertex> out;
+        out.reserve(view_.vertex_count);
+        for (std::uint32_t i = 0; i < view_.vertex_count; ++i) {
+            CadaclysmFemVertex raw{};
+            if (!::cadaclysm_fem_mesh_vertex(handle, i, &raw)) return detail::reader_error("fem mesh vertex");
+            out.push_back(detail::fem_vertex_of(raw));
+        }
+        return out;
+    }
+
+    // Every crack, as `{a, b, brep_edge}`: a directed mesh edge (a, b) with no (b, a), and
+    // the B-rep edge both nodes lie on -- by FemEdge's own index, not its id -- or NONE
+    // where they share none.
+    //
+    // **Empty unless the body's topology is closed, for a B-rep body**, whose mesh is
+    // otherwise not asked about at all: such a body reports watertight() false with this
+    // and folded_edges() *both* empty, and that trio together says "not asked", not
+    // "nothing found".
+    //
+    // **A from_mesh() body is the other case, and the opposite one.** A bare mesh carries
+    // no topology to say whether it ought to close, so its census always runs over the
+    // welded triangles: an open render mesh reports its cracks here with watertight()
+    // false, a closed one reports it true, and an empty census there really does mean
+    // "nothing found".
+    Result<std::vector<std::array<std::uint32_t, 3>>> open_edges() const {
+        const CadaclysmFemMesh* handle = live("FemMesh::open_edges");
+        return detail::census_rows(
+            view_.open_edge_count,
+            [handle](std::uint32_t i, std::uint32_t* a, std::uint32_t* b, std::uint32_t* edge) {
+                return ::cadaclysm_fem_mesh_open_edge(handle, i, a, b, edge);
+            },
+            [](std::uint32_t i) { return detail::reader_error(("fem mesh open edge " + std::to_string(i)).c_str()); });
+    }
+
+    // Every fold, as open_edges() reports a crack: a directed mesh edge used by more than
+    // one triangle. **A body can be folded without being open** -- a solid no thicker than
+    // a line leaves no hole for an open edge to find, and the closure census's own
+    // known-bad bodies are folds rather than open cracks, so a caller that checks
+    // open_edges() alone calls such a body sound. Empty under the same rule.
+    Result<std::vector<std::array<std::uint32_t, 3>>> folded_edges() const {
+        const CadaclysmFemMesh* handle = live("FemMesh::folded_edges");
+        return detail::census_rows(
+            view_.folded_edge_count,
+            [handle](std::uint32_t i, std::uint32_t* a, std::uint32_t* b, std::uint32_t* edge) {
+                return ::cadaclysm_fem_mesh_folded_edge(handle, i, a, b, edge);
+            },
+            [](std::uint32_t i) { return detail::reader_error(("fem mesh folded edge " + std::to_string(i)).c_str()); });
+    }
+
+    // The welded mesh closes -- and, for a B-rep body, so does the topology behind it.
+    // **False for every B-rep body whose topology is not closed**, whose mesh is then not
+    // asked about at all; read open_edges() for what an empty census beside a false here
+    // does and does not mean. A from_mesh() body has no topology to ask of, so this says
+    // only that its triangles close.
+    bool watertight() const { return view("FemMesh::watertight").watertight; }
+
+    // This came from the scene's own mesh rather than from a brep: one face, every node on
+    // face `0`, no edges and no vertices.
+    //
+    // **It is also which space the mesh is in.** A B-rep body's FEM mesh is in the file's
+    // own units and axes, whatever Convention the scene was opened with, because it is
+    // taken off the brep. A node with no brep falls back to the scene's mesh, which *is*
+    // converted, so it comes back in the scene's convention, wound counter-clockwise about
+    // the outward normal even where the convention winds the other way. Under a non-native
+    // convention those are two different spaces. It is also which contract watertight()
+    // and the two censuses are reporting under: read open_edges().
+    bool from_mesh() const { return view("FemMesh::from_mesh").from_mesh; }
+
+    // The smallest interior angle of any triangle, in degrees. There is always one: a body
+    // that meshed to no triangles is a refusal, not a mesh.
+    double min_angle() const { return view("FemMesh::min_angle").min_angle; }
+    // The triangle with that angle, as an index into triangles() by triple.
+    std::uint32_t worst_triangle() const { return view("FemMesh::worst_triangle").worst_triangle; }
+    // The longest triangle edge, placed.
+    //
+    // **The figure to check against Node::fem_mesh()'s max_size, and the only one that
+    // says what the mesh actually is**: max_size bounds the boundary segments and merely
+    // *targets* the interior -- measured at 1.03 x max_size on a face whose parameters run
+    // unevenly -- and one small enough beside the body to reach the mesher's own piece and
+    // station ceilings is not honoured at all.
+    double longest_edge() const { return view("FemMesh::longest_edge").longest_edge; }
+
+    // The mesh as Gmsh 4.1 ASCII `.msh` text: an entity per B-rep vertex, edge and face, a
+    // volume where the body closes, and a physical group naming each.
+    //
+    // **The library's text is borrowed from this handle** and replaced by the next call on
+    // it -- this ABI's convention, and the opposite of the kernel library's, where
+    // blacksmith::FemMesh::msh_text() is handed an owned string to free. Nothing here has
+    // to free anything either way: the `char *` is copied into a std::string on the way
+    // out, which outlives the handle.
+    //
+    // **No unlicensed notice is printed here.** Node::fem_mesh() gave it once when the
+    // mesh was built, and this ABI deliberately does not repeat it on either `.msh` call --
+    // where the kernel library notices on both of its writers and *not* on its builder.
+    // Each matches its own siblings, so moving the call to look like the other side breaks
+    // a convention.
+    //
+    // An Error for a mesh the writer refuses, naming the field it cannot honour.
+    Result<std::string> msh_text() const {
+        const char* text = ::cadaclysm_fem_mesh_msh_text(live("FemMesh::msh_text"));
+        if (!text) return detail::reader_error("msh text");
+        return std::string(text);
+    }
+
+    // msh_text() written to `path` by the library itself: the same bytes from the same
+    // writer, straight to the file rather than through the borrowed slot, so a msh_text()
+    // call on this handle from another thread cannot free the text under the write. No
+    // notice here either; see msh_text().
+    Result<void> save_msh(const std::string& path) const {
+        if (!::cadaclysm_fem_mesh_save_msh(live("FemMesh::save_msh"), path.c_str())) {
+            return detail::reader_error(("could not write " + path).c_str());
+        }
+        return {};
+    }
+
+private:
+    friend class Node;
+    struct Free {
+        void operator()(CadaclysmFemMesh* mesh) const noexcept { ::cadaclysm_fem_mesh_free(mesh); }
+    };
+    FemMesh(CadaclysmFemMesh* handle, const CadaclysmFemMeshView& read) : ptr_(handle), view_(read) {}
+
+    // The handle, refusing a freed (or moved-from) one: a read after free() is a bug in
+    // the caller, not a recoverable state, exactly as Meshlets has it.
+    const CadaclysmFemMesh* live(const char* what) const {
+        if (!ptr_) detail::bad_access(what, "the FEM mesh is freed");
+        return ptr_.get();
+    }
+    // The view, read once when the handle was made: every pointer in it is built with the
+    // handle and good until it is freed -- nothing in this ABI is built lazily -- so asking
+    // again per accessor would be one C call per array for the same answer.
+    const CadaclysmFemMeshView& view(const char* what) const {
+        live(what);
+        return view_;
+    }
+
+    std::unique_ptr<CadaclysmFemMesh, Free> ptr_;
+    CadaclysmFemMeshView view_{};
+};
+
 namespace detail {
 inline bool truthy(const Attribute& attribute) {
     if (const auto* s = std::get_if<std::string>(&attribute.value)) return !s->empty();
@@ -1176,7 +1535,75 @@ public:
     // How far mesh_lod(level) moved the surface, in the scene's units; zero at level 0.
     float lod_error(std::uint32_t level) const { return ::cadaclysm_node_lod_error(h(), index_, level); }
 
+    // This node's body meshed for a solver, as a FemMesh: nodes welded by bits, triangles
+    // wound outward, each node tagged with the lowest-dimension B-rep entity it lies on,
+    // and every crack reported rather than closed. **Owned by the caller** -- it outlives
+    // the scene, and nothing but free() or its destructor gives it back.
+    //
+    // `tolerance` is the chordal tolerance in model units, finite and above zero, and **it
+    // alone governs how closely the mesh follows the geometry**. `max_size` is a size
+    // ceiling, finite and zero or more, `0` being no ceiling (curvature alone): **it bounds
+    // the boundary segments and merely targets the interior**, which is not a
+    // longest-element-edge guarantee -- it adds boundary nodes without refining boundary
+    // geometry, and FemMesh::longest_edge() is what the mesh actually came to, the figure
+    // to check against this.
+    //
+    // **Those two defaults are FemOptions::default()'s own**, restated here so that the
+    // signature says what a caller gets -- and 0.01 is not the 0.05 that mesh() and its
+    // neighbours default to. The library's struct is still filled by
+    // `cadaclysm_fem_options_init` first, so a field added to it later defaults without
+    // this line being touched; only these two are overwritten.
+    //
+    // `placement` is 16 numbers, column-major, as bounds_placed() takes them (nothing for
+    // the identity), applied in `double` throughout. The kernel library's
+    // blacksmith::Solid::fem_mesh takes **twelve** instead -- origin, x, y, z -- so a
+    // caller moving between the two reformats the placement.
+    //
+    // **The space is the body's, not the scene's, for a B-rep -- and the scene's for a
+    // mesh**, which FemMesh::from_mesh() is the flag for; read it there, because under a
+    // non-native Convention the two are different spaces. Meshed in the part's own frame
+    // and following the hop from an instance to the shape it draws that mesh() follows, so
+    // a node instanced six times meshes once.
+    //
+    // **A cracked body is not a failure**: it comes back with FemMesh::watertight() false
+    // and its cracks in FemMesh::open_edges() and FemMesh::folded_edges() -- *both* -- and
+    // nothing is welded shut to make it look sound. An Error for a tolerance or size the
+    // mesher refuses, a placement that is not finite and invertible, a node with neither a
+    // brep nor a mesh (an assembly, a storey, a layer, an empty definition, a curve), and a
+    // body that meshes to no triangles at all, carrying the library's own words for it.
+    // Neither `tolerance` nor `max_size` is checked here: the mesh-only path reads neither
+    // (its mesher takes no options at all), so a wrapper that refused either would refuse
+    // calls the library answers.
+    //
+    // Prints the unlicensed notice once, here, and not again on either of the mesh's
+    // `.msh` calls.
+    Result<FemMesh> fem_mesh(double tolerance = 0.01, double max_size = 0.0,
+                             const std::optional<std::array<double, 16>>& placement = std::nullopt) const {
+        CadaclysmFemOptions options{};
+        // `init` writes `sizeof(CadaclysmFemOptions)` bytes as the *library* knows that
+        // type; `size` is then set to this header's own sizeof, which is what the growth
+        // rule asks of a caller. Nothing is transcribed here -- this wrapper compiles
+        // against the library's own header -- so there is no layout to pin.
+        ::cadaclysm_fem_options_init(&options);
+        options.size = sizeof(CadaclysmFemOptions);
+        options.tolerance = tolerance;
+        options.max_size = max_size;
+        CadaclysmFemMesh* handle =
+            ::cadaclysm_node_fem_mesh(h(), index_, placement ? placement->data() : nullptr, &options);
+        if (!handle) return detail::reader_error("fem_mesh");
+        CadaclysmFemMeshView read{};
+        if (!::cadaclysm_fem_mesh_view(handle, &read)) {
+            Error why = detail::reader_error("fem mesh view");
+            ::cadaclysm_fem_mesh_free(handle);
+            return why;
+        }
+        return FemMesh(handle, read);
+    }
+
     Polylines edges() const { return Polylines(scene_, ::cadaclysm_node_edges(h(), index_)); }
+    // One RGBA per polyline of edges(), empty optional for an edge the file does not
+    // style; empty vector when nothing is styled.
+    std::vector<std::optional<std::array<float, 4>>> edge_colours() const { return colours_of(::cadaclysm_node_edge_colors(h(), index_)); }
     Polylines curves() const { return Polylines(scene_, ::cadaclysm_node_curves(h(), index_)); }
     // Isocurves across the faces, so a curved face reads as curved.
     Polylines isocurves() const { return Polylines(scene_, ::cadaclysm_node_isocurves(h(), index_)); }
@@ -1306,6 +1733,15 @@ public:
     // The node's edges from its trim loops, without meshing, in the surfaces' frame
     // (Scene::surface_matrix). Empty for a node without surfaces.
     Polylines surface_edges() const { return Polylines(scene_, ::cadaclysm_node_surface_edges(h(), index_)); }
+    // edge_colours() for surface_edges().
+    std::vector<std::optional<std::array<float, 4>>> surface_edge_colours() const { return colours_of(::cadaclysm_node_surface_edge_colors(h(), index_)); }
+
+    // Its edges as the exact curves, where the reader has them without meshing -- a Rhino
+    // extrusion's rims are its profile -- and empty everywhere else, so a caller drawing
+    // from surfaces tries this before surface_edges(), whose trims are thinned to the mesh
+    // tolerance. The same segments as edge_beziers(), in the same space: not the surfaces'
+    // frame, so no Scene::surface_matrix.
+    Beziers surface_edge_beziers() const { return Beziers(scene_, ::cadaclysm_node_surface_edge_beziers(h(), index_)); }
     // Isocurves the same way.
     Polylines surface_isocurves() const { return Polylines(scene_, ::cadaclysm_node_surface_isocurves(h(), index_)); }
 
@@ -1355,6 +1791,7 @@ public:
 
 private:
     friend class Placement;
+    friend class Link;
     friend class Scene;
     friend struct detail::Access;
 
@@ -1382,6 +1819,25 @@ private:
             b.max[i] = raw.max[i];
         }
         return b;
+    }
+
+    // One RGBA per polyline, copied out; an edge the file does not style comes back as
+    // an empty optional rather than a zeroed colour, so "no style" and "styled black"
+    // stay distinct. Empty vector for {nullptr, 0} -- nothing styled -- not one entry a
+    // polyline.
+    static std::vector<std::optional<std::array<float, 4>>> colours_of(const CadaclysmEdgeColors& raw) {
+        std::vector<std::optional<std::array<float, 4>>> out;
+        if (!raw.rgba || raw.count == 0) return out;
+        out.reserve(raw.count);
+        for (std::uint32_t i = 0; i < raw.count; ++i) {
+            const float* c = raw.rgba + 4 * static_cast<std::size_t>(i);
+            if (c[3] < 0) {
+                out.emplace_back(std::nullopt);
+            } else {
+                out.push_back(std::array<float, 4>{c[0], c[1], c[2], c[3]});
+            }
+        }
+        return out;
     }
 
     detail::Ref<detail::SceneState> scene_;
@@ -1421,6 +1877,71 @@ private:
     friend class Scene;
     Placement(detail::Ref<detail::SceneState> scene, std::uint32_t which) : scene_(std::move(scene)), index_(which) {}
     const CadaclysmScene* h() const { return scene_.get("Placement").handle; }
+
+    detail::Ref<detail::SceneState> scene_;
+    std::uint32_t index_ = 0;
+};
+
+// A rigid body of the file's mechanism: the nodes that move together when a joint
+// moves it. From Scene::links; borrows from the scene like Node.
+class Link {
+public:
+    std::uint32_t index() const noexcept { return index_; }
+
+    // The link's name as the file gives it.
+    std::string name() const { return detail::text(::cadaclysm_link_name(h(), index_)); }
+
+    // The topmost node of each subtree this link moves, in node order: moving these
+    // moves everything under them.
+    std::vector<Node> nodes() const {
+        const CadaclysmScene* scene = h();
+        std::uint32_t count = ::cadaclysm_link_node_count(scene, index_);
+        std::vector<Node> out;
+        out.reserve(count);
+        for (std::uint32_t i = 0; i < count; ++i) out.push_back(Node(scene_, ::cadaclysm_link_node(scene, index_, i)));
+        return out;
+    }
+
+    bool operator==(const Link& other) const noexcept {
+        return index_ == other.index_ && scene_.identity() == other.scene_.identity();
+    }
+    bool operator!=(const Link& other) const noexcept { return !(*this == other); }
+
+private:
+    friend class Scene;
+    friend class Joint;
+    Link(detail::Ref<detail::SceneState> scene, std::uint32_t which) : scene_(std::move(scene)), index_(which) {}
+    const CadaclysmScene* h() const { return scene_.get("Link").handle; }
+
+    detail::Ref<detail::SceneState> scene_;
+    std::uint32_t index_ = 0;
+};
+
+// A connection between two links of the file's mechanism. Topology only: how it
+// moves is not read yet. From Scene::joints.
+class Joint {
+public:
+    std::uint32_t index() const noexcept { return index_; }
+
+    // The joint's name as the file gives it.
+    std::string name() const { return detail::text(::cadaclysm_joint_name(h(), index_)); }
+
+    // The link this joint starts at, in the file's order -- not a parent: a
+    // mechanism may be a network with loops.
+    Link start() const { return Link(scene_, ::cadaclysm_joint_start(h(), index_)); }
+
+    // The link this joint ends at, in the file's order.
+    Link end() const { return Link(scene_, ::cadaclysm_joint_end(h(), index_)); }
+
+    bool operator==(const Joint& other) const noexcept {
+        return index_ == other.index_ && scene_.identity() == other.scene_.identity();
+    }
+    bool operator!=(const Joint& other) const noexcept { return !(*this == other); }
+
+private:
+    friend class Scene;
+    Joint(detail::Ref<detail::SceneState> scene, std::uint32_t which) : scene_(std::move(scene)), index_(which) {}
+    const CadaclysmScene* h() const { return scene_.get("Joint").handle; }
 
     detail::Ref<detail::SceneState> scene_;
     std::uint32_t index_ = 0;
@@ -1578,6 +2099,26 @@ public:
         out.reserve(count);
         detail::Ref<detail::SceneState> r = ref();
         for (std::uint32_t i = 0; i < count; ++i) out.push_back(Placement(r, i));
+        return out;
+    }
+
+    // The file's mechanism: rigid bodies and the joints between them. Empty when the
+    // file names no mechanism.
+    std::vector<Link> links() const {
+        std::uint32_t count = ::cadaclysm_link_count(h());
+        std::vector<Link> out;
+        out.reserve(count);
+        detail::Ref<detail::SceneState> r = ref();
+        for (std::uint32_t i = 0; i < count; ++i) out.push_back(Link(r, i));
+        return out;
+    }
+
+    std::vector<Joint> joints() const {
+        std::uint32_t count = ::cadaclysm_joint_count(h());
+        std::vector<Joint> out;
+        out.reserve(count);
+        detail::Ref<detail::SceneState> r = ref();
+        for (std::uint32_t i = 0; i < count; ++i) out.push_back(Joint(r, i));
         return out;
     }
 

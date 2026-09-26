@@ -28,6 +28,23 @@
 // Strings are the easy half: every `char *` this ABI returns is copied into a `String` on the
 // way out, so `Node.name()` and friends outlive anything.
 //
+// ## One exception: FemMesh owns its own memory
+//
+// `FemMesh` (`Node.femMesh(..)`) is the one borrowed view here whose owner is **not** the
+// scene. It is a handle of your own -- close it (a try-with-resources) or let the `Cleaner`
+// free it -- and its buffers belong to that handle: `Scene.close()` neither frees one nor
+// stales one, and meshing the body again does not either. Only `FemMesh.free()`, or the
+// `Cleaner` finding the mesh unreachable, does.
+//
+// Every accessor on it asks the handle first, so a buffer **asked for** after `free()` throws
+// `CadaclysmException`. A buffer **already in hand** is not protected and cannot be: a
+// read-only NIO buffer over a reinterpreted address is a window with no owner left to ask, so
+// it reads the freed block instead -- measured: 1.29e-311 where the mesh had 4.0, no throw.
+// Copy anything that must outlive the handle
+// (`nodes().get(new double[..])`), and hold the `FemMesh` itself for as long as you read its
+// buffers -- a buffer alone does not keep it reachable, and the `Cleaner` frees what is
+// unreachable.
+//
 // FFM is final since JDK 22 (JEP 454), which is what this file is written against: it needs
 // JDK 22 or later. No compiler flags; run with --enable-native-access=ALL-UNNAMED to silence
 // the restricted-method warning.
@@ -173,6 +190,13 @@ public final class Cad {
             ValueLayout.JAVA_INT.withName("polyline_count"),
             ValueLayout.JAVA_INT.withName("vertex_count"));
 
+    // CadaclysmEdgeColors: a pointer then a count, padded to 8, as BEZIERS is; pinned by
+    // bindings.rs.
+    private static final MemoryLayout EDGE_COLORS = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("rgba"),
+            ValueLayout.JAVA_INT.withName("count"),
+            MemoryLayout.paddingLayout(4));
+
     // CadaclysmBeziers: two pointers then a count, padded to 8; pinned by bindings.rs.
     private static final MemoryLayout BEZIERS = MemoryLayout.structLayout(
             ValueLayout.ADDRESS.withName("points"),
@@ -246,10 +270,11 @@ public final class Cad {
             ValueLayout.JAVA_INT.withName("nurbs_start"),
             ValueLayout.JAVA_INT.withName("nurbs_count"));
 
-    // CadaclysmSurfaces: a pointer then a count, five times over. Each count needs four bytes
-    // of padding to bring the next pointer back onto an eight-byte boundary -- not pinned by
-    // bindings.rs (only Mesh, Polylines and OpenOptions are), but built to the header's own
-    // field order regardless.
+    // CadaclysmSurfaces: a pointer then a count, six times over. Each count needs four bytes
+    // of padding to bring the next pointer back onto an eight-byte boundary. This is the
+    // return layout of cadaclysm_node_surfaces, so a copy that stops short is a buffer the
+    // callee writes past: every field is here whether Node.surfaces reads it or not. Pinned,
+    // offsets and size included, by bindings.rs.
     private static final MemoryLayout SURFACES = MemoryLayout.structLayout(
             ValueLayout.ADDRESS.withName("faces"),
             ValueLayout.JAVA_INT.withName("face_count"),
@@ -265,7 +290,80 @@ public final class Cad {
             MemoryLayout.paddingLayout(4),
             ValueLayout.ADDRESS.withName("nurbs"),
             ValueLayout.JAVA_INT.withName("nurbs_count"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("shared"),
+            ValueLayout.JAVA_INT.withName("shared_count"),
             MemoryLayout.paddingLayout(4));
+
+    /**
+     * {@code CadaclysmFemOptions}. Field order and {@code size} are the whole contract, as
+     * {@link #OPEN_OPTIONS} above: {@code cadaclysm_fem_options_init} fills the library's
+     * <em>whole</em> struct, so a field the library has and this layout does not is written
+     * past what {@link Node#femMesh(double, double, double[])} allocated. It may never
+     * reorder; pinned field for field, and width for width, by {@code tests/bindings.rs}.
+     */
+    private static final MemoryLayout FEM_OPTIONS = MemoryLayout.structLayout(
+            ValueLayout.JAVA_LONG.withName("size"),
+            ValueLayout.JAVA_DOUBLE.withName("tolerance"),
+            ValueLayout.JAVA_DOUBLE.withName("max_size"));
+
+    // CadaclysmFemMeshView: every pointer here is borrowed from the FEM handle rather than
+    // from the scene, and dies with `cadaclysm_fem_mesh_free`. The paddings are the ones a C
+    // compiler inserts: four bytes after each count that a pointer follows, two after the two
+    // bools to bring `min_angle` onto eight, and four after `worst_triangle` before
+    // `longest_edge`. `structLayout` refuses a misaligned field, so a missing padding is a
+    // build failure here rather than a silent misread -- but a padding in the *wrong place*
+    // still aligns, which is what bindings.rs pins.
+    private static final MemoryLayout FEM_MESH_VIEW = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("nodes"),
+            ValueLayout.JAVA_INT.withName("node_count"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("triangles"),
+            ValueLayout.JAVA_INT.withName("triangle_count"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("triangle_face"),
+            ValueLayout.ADDRESS.withName("node_kind"),
+            ValueLayout.ADDRESS.withName("node_entity"),
+            ValueLayout.JAVA_INT.withName("face_count"),
+            ValueLayout.JAVA_INT.withName("edge_count"),
+            ValueLayout.JAVA_INT.withName("vertex_count"),
+            ValueLayout.JAVA_INT.withName("open_edge_count"),
+            ValueLayout.JAVA_INT.withName("folded_edge_count"),
+            ValueLayout.JAVA_BOOLEAN.withName("watertight"),
+            ValueLayout.JAVA_BOOLEAN.withName("from_mesh"),
+            MemoryLayout.paddingLayout(2),
+            ValueLayout.JAVA_DOUBLE.withName("min_angle"),
+            ValueLayout.JAVA_INT.withName("worst_triangle"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.JAVA_DOUBLE.withName("longest_edge"));
+
+    // CadaclysmFemEdge: one B-rep edge's node chain, filled in by
+    // `cadaclysm_fem_mesh_edge`. `nodes` and `runs` are pointers into the handle, read out
+    // as arrays of our own (see FemEdge).
+    private static final MemoryLayout FEM_EDGE = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("id"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("nodes"),
+            ValueLayout.JAVA_INT.withName("node_count"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("runs"),
+            ValueLayout.JAVA_INT.withName("run_count"),
+            ValueLayout.JAVA_INT.withName("face_a"),
+            ValueLayout.JAVA_INT.withName("face_b"),
+            ValueLayout.JAVA_INT.withName("end_a"),
+            ValueLayout.JAVA_INT.withName("end_b"),
+            ValueLayout.JAVA_BOOLEAN.withName("closed"),
+            ValueLayout.JAVA_BOOLEAN.withName("seam"),
+            MemoryLayout.paddingLayout(2));
+
+    // CadaclysmFemVertex: `point` is three doubles held in the struct itself, not a pointer,
+    // so it is one sequenceLayout -- the shape BOUNDS64's own min/max have.
+    private static final MemoryLayout FEM_VERTEX = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("node"),
+            MemoryLayout.paddingLayout(4),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("point"),
+            ValueLayout.JAVA_BOOLEAN.withName("has_position"),
+            MemoryLayout.paddingLayout(7));
 
     // ---- loading the library, and every entry point ----------------------------------
 
@@ -288,11 +386,16 @@ public final class Cad {
             MESHLETS_BUILD, MESHLETS_COUNT, MESHLETS_FREE, MESHLET_TRIANGLE_COUNT, MESHLET_VERTEX_COUNT,
             MESHLET_LEVEL, MESHLET_GROUP, MESHLET_ERROR, MESHLET_CHILD_COUNT, MESHLET_POSITIONS,
             MESHLET_NORMALS, MESHLET_INDICES, MESHLET_CHILDREN,
-            NODE_BOUNDS_PLACED, NODE_IS_MESHED, NODE_SURFACE_EDGES, NODE_SURFACE_ISOCURVES,
+            NODE_BOUNDS_PLACED, NODE_IS_MESHED, NODE_SURFACE_EDGES, NODE_SURFACE_EDGE_BEZIERS, NODE_SURFACE_ISOCURVES,
             NODE_SURFACE_PICK, NODE_SURFACE_PROXY_MESH, NODE_TRIANGLE_ESTIMATE, REALIZE_MESHES,
             SVG_OPTIONS_INIT, SCENE_SVG_TEXT, SCENE_SVG, NODE_SVG_TEXT, NODE_SVG,
             NODE_MESH64, NODE_EDGE_BEZIERS64, NODE_CURVE_BEZIERS64, NODE_ISOCURVE_BEZIERS64,
-            NODE_BOUNDS64, NODE_BOUNDS_PLACED64, BOUNDS64_ALL;
+            NODE_BOUNDS64, NODE_BOUNDS_PLACED64, BOUNDS64_ALL,
+            LINK_COUNT, LINK_NAME, LINK_NODE_COUNT, LINK_NODE,
+            JOINT_COUNT, JOINT_NAME, JOINT_START, JOINT_END,
+            FEM_OPTIONS_INIT, NODE_FEM_MESH, FEM_VIEW, FEM_EDGE_AT, FEM_VERTEX_AT,
+            FEM_OPEN_EDGE, FEM_FOLDED_EDGE, FEM_MSH_TEXT, FEM_SAVE_MSH, FEM_FREE,
+            NODE_EDGE_COLORS, NODE_SURFACE_EDGE_COLORS;
 
     static {
         SymbolLookup lib = Loader.resolve(Loader.CAPI_LIBRARY);
@@ -356,6 +459,7 @@ public final class Cad {
         DIAGNOSTIC_COUNT = bind(linker, lib, "cadaclysm_diagnostic_count", FunctionDescriptor.of(I, A));
         DIAGNOSTIC = bind(linker, lib, "cadaclysm_diagnostic", FunctionDescriptor.of(A, A, I));
         NODE_EDGES = bind(linker, lib, "cadaclysm_node_edges", FunctionDescriptor.of(POLYLINES, A, I));
+        NODE_EDGE_COLORS = bind(linker, lib, "cadaclysm_node_edge_colors", FunctionDescriptor.of(EDGE_COLORS, A, I));
         NODE_CURVES = bind(linker, lib, "cadaclysm_node_curves", FunctionDescriptor.of(POLYLINES, A, I));
         NODE_ISOCURVES = bind(linker, lib, "cadaclysm_node_isocurves", FunctionDescriptor.of(POLYLINES, A, I));
         REALIZE_ALL = bind(linker, lib, "cadaclysm_realize_all", FunctionDescriptor.of(I, A));
@@ -398,11 +502,26 @@ public final class Cad {
         NODE_BOUNDS_PLACED = bind(linker, lib, "cadaclysm_node_bounds_placed", FunctionDescriptor.of(BOUNDS, A, I, A));
         NODE_IS_MESHED = bind(linker, lib, "cadaclysm_node_is_meshed", FunctionDescriptor.of(B, A, I));
         NODE_SURFACE_EDGES = bind(linker, lib, "cadaclysm_node_surface_edges", FunctionDescriptor.of(POLYLINES, A, I));
+        NODE_SURFACE_EDGE_BEZIERS = bind(linker, lib, "cadaclysm_node_surface_edge_beziers", FunctionDescriptor.of(BEZIERS, A, I));
+        NODE_SURFACE_EDGE_COLORS = bind(linker, lib, "cadaclysm_node_surface_edge_colors", FunctionDescriptor.of(EDGE_COLORS, A, I));
         NODE_SURFACE_ISOCURVES = bind(linker, lib, "cadaclysm_node_surface_isocurves", FunctionDescriptor.of(POLYLINES, A, I));
         NODE_SURFACE_PICK = bind(linker, lib, "cadaclysm_node_surface_pick", FunctionDescriptor.of(B, A, I, A, A, A));
         NODE_SURFACE_PROXY_MESH = bind(linker, lib, "cadaclysm_node_surface_proxy_mesh", FunctionDescriptor.of(MESH, A, I, I));
         NODE_TRIANGLE_ESTIMATE = bind(linker, lib, "cadaclysm_node_triangle_estimate", FunctionDescriptor.of(L, A, I));
         REALIZE_MESHES = bind(linker, lib, "cadaclysm_realize_meshes", FunctionDescriptor.of(I, A, I));
+        // The FEM surface mesh. `cadaclysm_fem_mesh_msh_text` hands back a pointer into a slot
+        // on the handle, not an owned string, so nothing here frees it -- the kernel library's
+        // twin is the other way round. See FemMesh.mshText.
+        FEM_OPTIONS_INIT = bind(linker, lib, "cadaclysm_fem_options_init", FunctionDescriptor.ofVoid(A));
+        NODE_FEM_MESH = bind(linker, lib, "cadaclysm_node_fem_mesh", FunctionDescriptor.of(A, A, I, A, A));
+        FEM_VIEW = bind(linker, lib, "cadaclysm_fem_mesh_view", FunctionDescriptor.of(B, A, A));
+        FEM_EDGE_AT = bind(linker, lib, "cadaclysm_fem_mesh_edge", FunctionDescriptor.of(B, A, I, A));
+        FEM_VERTEX_AT = bind(linker, lib, "cadaclysm_fem_mesh_vertex", FunctionDescriptor.of(B, A, I, A));
+        FEM_OPEN_EDGE = bind(linker, lib, "cadaclysm_fem_mesh_open_edge", FunctionDescriptor.of(B, A, I, A, A, A));
+        FEM_FOLDED_EDGE = bind(linker, lib, "cadaclysm_fem_mesh_folded_edge", FunctionDescriptor.of(B, A, I, A, A, A));
+        FEM_MSH_TEXT = bind(linker, lib, "cadaclysm_fem_mesh_msh_text", FunctionDescriptor.of(A, A));
+        FEM_SAVE_MSH = bind(linker, lib, "cadaclysm_fem_mesh_save_msh", FunctionDescriptor.of(B, A, A));
+        FEM_FREE = bind(linker, lib, "cadaclysm_fem_mesh_free", FunctionDescriptor.ofVoid(A));
         SVG_OPTIONS_INIT = bind(linker, lib, "cadaclysm_svg_options_init", FunctionDescriptor.ofVoid(A));
         SCENE_SVG_TEXT = bind(linker, lib, "cadaclysm_scene_svg_text", FunctionDescriptor.of(A, A, A));
         SCENE_SVG = bind(linker, lib, "cadaclysm_scene_svg", FunctionDescriptor.of(B, A, A, A));
@@ -415,6 +534,14 @@ public final class Cad {
         NODE_BOUNDS64 = bind(linker, lib, "cadaclysm_node_bounds64", FunctionDescriptor.of(BOUNDS64, A, I));
         NODE_BOUNDS_PLACED64 = bind(linker, lib, "cadaclysm_node_bounds_placed64", FunctionDescriptor.of(BOUNDS64, A, I, A));
         BOUNDS64_ALL = bind(linker, lib, "cadaclysm_bounds64", FunctionDescriptor.of(BOUNDS64, A));
+        LINK_COUNT = bind(linker, lib, "cadaclysm_link_count", FunctionDescriptor.of(I, A));
+        LINK_NAME = bind(linker, lib, "cadaclysm_link_name", FunctionDescriptor.of(A, A, I));
+        LINK_NODE_COUNT = bind(linker, lib, "cadaclysm_link_node_count", FunctionDescriptor.of(I, A, I));
+        LINK_NODE = bind(linker, lib, "cadaclysm_link_node", FunctionDescriptor.of(I, A, I, I));
+        JOINT_COUNT = bind(linker, lib, "cadaclysm_joint_count", FunctionDescriptor.of(I, A));
+        JOINT_NAME = bind(linker, lib, "cadaclysm_joint_name", FunctionDescriptor.of(A, A, I));
+        JOINT_START = bind(linker, lib, "cadaclysm_joint_start", FunctionDescriptor.of(I, A, I));
+        JOINT_END = bind(linker, lib, "cadaclysm_joint_end", FunctionDescriptor.of(I, A, I));
     }
 
     @SuppressWarnings("restricted") // downcallHandle: every entry point here is the published ABI.
@@ -2136,6 +2263,499 @@ public final class Cad {
         }
     }
 
+    // ---- the FEM surface mesh ---------------------------------------------------------
+
+    /**
+     * One B-rep edge of a FEM mesh: the chain of nodes along it, and where that chain breaks.
+     * Plain data, copied out of the handle -- {@code nodes} and {@code runs} are arrays of
+     * your own where {@link FemMesh#nodes()} and its siblings are views, because the ABI hands
+     * these over one edge at a time and a record cannot hold a buffer whose owner may be freed
+     * under it. Python copies them into tuples for the same reason.
+     *
+     * <p>{@code nodes} are this mesh's node indices in order along the edge, its end vertices
+     * included; a closed edge repeats no node. <b>{@code runs} says where the chain breaks</b>:
+     * read {@code nodes[runs[i] .. runs[i + 1]]} (the last run to the end) as one polyline and
+     * join nothing across a run boundary. The two ends either side of one are two points of the
+     * edge with no mesh edge between them -- a crack along the edge, or a stretch of it the
+     * mesher sampled on one face only. {@code [0]} is the ordinary answer, and a caller reading
+     * {@code nodes} as one polyline without looking here jumps the gap silently.
+     *
+     * <p>{@code faces} is {@code (face_a, face_b)} and {@code ends} is {@code (end_a, end_b)},
+     * two ints each, as {@code Blacksmith.Edge.faces} is: the second of each is the
+     * {@code CADACLYSM_NONE} sentinel where there is none -- an open body's rim, or both ends
+     * at one vertex (a closed edge, a circle's rim, a full-turn seam). NONE is
+     * {@code 0xFFFFFFFF}, read into a Java {@code int} as <b>-1</b>, the way
+     * {@code Blacksmith.Spot}'s fields read it. <b>{@code 0} is a real face and a real vertex,
+     * not a sentinel.</b> Which end comes first is the first trim's direction and means nothing
+     * else: the pair bounds the edge, it does not orient it.
+     *
+     * <p>{@code closed} where the nodes make one loop, never where {@code runs} has more than
+     * one; {@code seam} where one face bounds the edge twice -- a closed surface's seam rather
+     * than a real boundary, and both {@code faces} are then that same face.
+     *
+     * <p>{@code id} is <b>the body's own B-rep edge id</b>, not this mesh's edge index:
+     * {@link FemMesh#edges()} is a densely renumbered subset of the body's edges, ascending by
+     * id, with every edge collapsed to a point left out, so edge 0 of a STEP body's mesh
+     * routinely has an {@code id} in the hundreds. Everything else that names an edge means the
+     * <em>index</em> -- a {@link FemMesh#nodeKind()} of 1 read through
+     * {@link FemMesh#nodeEntity()}, the third int of a {@link FemMesh#openEdges()} or
+     * {@link FemMesh#foldedEdges()} row, and the {@code edge_N} physical group of
+     * {@link FemMesh#mshText()} -- and this is the one way back from any of them to the
+     * topology the file wrote.
+     */
+    public record FemEdge(int id, int[] nodes, int[] runs, int[] faces, int[] ends, boolean closed, boolean seam) {
+        @Override
+        public String toString() {
+            return "FemEdge(id=" + id + ", nodes=" + nodes.length + ", runs=" + runs.length
+                    + ", faces=" + Arrays.toString(faces) + ", ends=" + Arrays.toString(ends)
+                    + ", closed=" + closed + ", seam=" + seam + ")";
+        }
+    }
+
+    /**
+     * One B-rep vertex of a FEM mesh: the node the mesh put there, if any, and where the
+     * topology says it is, if that is known. Plain data.
+     *
+     * <p>{@code node} is the mesh node at this vertex, or -1 ({@code CADACLYSM_NONE}) where the
+     * mesh has none there. <b>A sentinel here is ordinary, not a fault</b>: the analysis
+     * rebuilds a vertex wherever two trims meet, and a pole's polyline runs give a sphere 48 of
+     * them where the mesh has 2 points, so a caller walking these skips the sentinel rather than
+     * treating it as a gap.
+     *
+     * <p>{@code point} is where the vertex is, three doubles, in the same space and under the
+     * same placement as {@link FemMesh#nodes()} -- the file's own vertex rather than a mesh
+     * node, so the two can differ by the reader's rounding. <b>Meaningless unless
+     * {@code hasPosition}</b>: it is all zeros then, a point no geometry has and one a solver
+     * would read as a node at the origin.
+     */
+    public record FemVertex(int node, double[] point, boolean hasPosition) {
+        @Override
+        public String toString() {
+            return "FemVertex(node=" + node + ", point=" + Arrays.toString(point) + ", hasPosition=" + hasPosition + ")";
+        }
+    }
+
+    /** The one handle a {@link FemMesh} holds, freed once by the {@link Cleaner} or by
+     *  {@link FemMesh#free()}; the address is zeroed first, exactly as
+     *  {@link MeshletsReference} does it, and for the same two-ways-over reason. */
+    private static final class FemMeshReference implements Runnable {
+        private long address;
+
+        FemMeshReference(long address) {
+            this.address = address;
+        }
+
+        @Override
+        public void run() {
+            long a = address;
+            address = 0;
+            if (a == 0) return;
+            try {
+                FEM_FREE.invokeExact(MemorySegment.ofAddress(a));
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+    }
+
+    /**
+     * One body meshed for a solver: nodes welded by bits, triangles wound outward, every node
+     * tagged with the lowest-dimension B-rep entity it lies on, and every crack reported rather
+     * than closed. What {@link Node#femMesh(double, double, double[])} returns, and <b>owned by
+     * you</b>: close it (a try-with-resources), {@link #free()} it, or let the {@link Cleaner}
+     * do it.
+     *
+     * <p>A handle rather than a snapshot, and its big arrays are read-only
+     * {@link DoubleBuffer}/{@link IntBuffer} views over the library's own memory, exactly as
+     * {@link Mesh}'s are and for the same reason: a solver mesh is megabytes, and copying it to
+     * hand it over would cost that twice.
+     *
+     * <p><b>The owner of these buffers is this object, not the scene.</b> That is the one thing
+     * this class does differently from every other view in this binding: {@link Scene#close()}
+     * neither frees a FEM mesh nor stales one, and meshing the body again does not either.
+     * There is no generation check as {@code Blacksmith.Mesh} has: a FEM view's pointers are
+     * built with the handle and never move.
+     *
+     * <p><b>What the guard does and does not do.</b> Every accessor below asks the handle
+     * first, so a buffer <em>asked for</em> after {@link #free()} throws
+     * {@link CadaclysmException}. A buffer <em>already in hand</em> is not protected and cannot
+     * be: a read-only NIO buffer cut from a reinterpreted address is a window with no owner left
+     * to ask. It reads the freed block instead, and hands back whatever is there by then:
+     * measured once on this ABI's kernel twin, a {@link DoubleBuffer} taken before the free and
+     * read after gave {@code 1.29e-311} where the mesh had {@code 4.0} -- it does <em>not</em>
+     * throw, and it does not reliably give the old numbers either. Copy anything that must
+     * outlive the handle ({@code nodes().get(new double[..])}), and read the rest inside the
+     * try-with-resources.
+     *
+     * <p>And hold this object itself while you read its buffers: a buffer alone does not keep it
+     * reachable, so a {@code FemMesh} the program has finished with can be collected -- and
+     * freed by the {@link Cleaner} -- while a buffer taken from it is still being read.
+     */
+    public static final class FemMesh implements AutoCloseable {
+        private final FemMeshReference reference;
+        private final Cleaner.Cleanable cleanable;
+
+        // The view, read once in the constructor. Every pointer in it is built with the handle
+        // and good until it is freed -- nothing in this ABI is built lazily -- so asking again
+        // per accessor would be one C call per array for the same answer.
+        private final long nodes, triangles, triangleFace, nodeKind, nodeEntity;
+        private final int nodeCount, triangleCount, faceCount, edgeCount, vertexCount;
+        private final int openEdgeCount, foldedEdgeCount, worstTriangle;
+        private final boolean watertight, fromMesh;
+        private final double minAngle, longestEdge;
+
+        private FemMesh(MemorySegment raw) {
+            reference = new FemMeshReference(raw.address());
+            cleanable = CLEANER.register(this, reference);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(FEM_MESH_VIEW);
+                boolean ok;
+                try {
+                    ok = (boolean) FEM_VIEW.invokeExact(raw, out);
+                } catch (Throwable t) {
+                    throw new RuntimeException(t);
+                }
+                if (!ok) {
+                    String why = lastErrorOr("fem mesh view");
+                    free();
+                    throw new CadaclysmException(why);
+                }
+                nodes = out.get(ValueLayout.ADDRESS, offset(FEM_MESH_VIEW, "nodes")).address();
+                triangles = out.get(ValueLayout.ADDRESS, offset(FEM_MESH_VIEW, "triangles")).address();
+                triangleFace = out.get(ValueLayout.ADDRESS, offset(FEM_MESH_VIEW, "triangle_face")).address();
+                nodeKind = out.get(ValueLayout.ADDRESS, offset(FEM_MESH_VIEW, "node_kind")).address();
+                nodeEntity = out.get(ValueLayout.ADDRESS, offset(FEM_MESH_VIEW, "node_entity")).address();
+                nodeCount = out.get(ValueLayout.JAVA_INT, offset(FEM_MESH_VIEW, "node_count"));
+                triangleCount = out.get(ValueLayout.JAVA_INT, offset(FEM_MESH_VIEW, "triangle_count"));
+                faceCount = out.get(ValueLayout.JAVA_INT, offset(FEM_MESH_VIEW, "face_count"));
+                edgeCount = out.get(ValueLayout.JAVA_INT, offset(FEM_MESH_VIEW, "edge_count"));
+                vertexCount = out.get(ValueLayout.JAVA_INT, offset(FEM_MESH_VIEW, "vertex_count"));
+                openEdgeCount = out.get(ValueLayout.JAVA_INT, offset(FEM_MESH_VIEW, "open_edge_count"));
+                foldedEdgeCount = out.get(ValueLayout.JAVA_INT, offset(FEM_MESH_VIEW, "folded_edge_count"));
+                watertight = out.get(ValueLayout.JAVA_BOOLEAN, offset(FEM_MESH_VIEW, "watertight"));
+                fromMesh = out.get(ValueLayout.JAVA_BOOLEAN, offset(FEM_MESH_VIEW, "from_mesh"));
+                minAngle = out.get(ValueLayout.JAVA_DOUBLE, offset(FEM_MESH_VIEW, "min_angle"));
+                worstTriangle = out.get(ValueLayout.JAVA_INT, offset(FEM_MESH_VIEW, "worst_triangle"));
+                longestEdge = out.get(ValueLayout.JAVA_DOUBLE, offset(FEM_MESH_VIEW, "longest_edge"));
+            }
+        }
+
+        /** The handle, refusing a freed one: every pointer in the cached view is the handle's,
+         *  and a freed handle's point at nothing. */
+        private MemorySegment handle() {
+            if (reference.address == 0) throw new CadaclysmException("fem mesh: freed");
+            return MemorySegment.ofAddress(reference.address);
+        }
+
+        /** Whether {@link #free()} has run. */
+        public boolean closed() {
+            return reference.address == 0;
+        }
+
+        /** Give the mesh back, and with it every buffer taken from it. Idempotent; the
+         *  {@link Cleaner} or the try-with-resources does it otherwise. */
+        public void free() {
+            cleanable.clean();
+        }
+
+        @Override
+        public void close() {
+            free();
+        }
+
+        /** Every node's position, three doubles each -- placed, and in the space
+         *  {@link Node#femMesh(double, double, double[])} and {@link #fromMesh()} describe.
+         *  Every node is used by at least one triangle. */
+        public DoubleBuffer nodes() {
+            handle();
+            return doubleView(nodes, nodeCount * 3L);
+        }
+
+        /** Three node indices a triangle, wound outward -- a mirroring placement is wound
+         *  back. */
+        public IntBuffer triangles() {
+            handle();
+            return intView(triangles, triangleCount * 3L);
+        }
+
+        /** The B-rep face each triangle lies on, one per triangle, into {@link #faceCount()}
+         *  faces. */
+        public IntBuffer triangleFace() {
+            handle();
+            return intView(triangleFace, triangleCount);
+        }
+
+        /** What each node lies on -- 0 a B-rep vertex, 1 an edge, 2 a face -- one per node: the
+         *  lowest-dimension entity it lies on, which is the {@code .msh} format's own
+         *  classification rule. {@link #nodeEntity()} says which entity of that kind. */
+        public IntBuffer nodeKind() {
+            handle();
+            return intView(nodeKind, nodeCount);
+        }
+
+        /** Which vertex, edge or face each node lies on, read by the matching
+         *  {@link #nodeKind()}: an index into {@link #vertices()}, into {@link #edges()}, or
+         *  into the body's faces. One per node. */
+        public IntBuffer nodeEntity() {
+            handle();
+            return intView(nodeEntity, nodeCount);
+        }
+
+        /** The body's faces; {@link #triangleFace()} and a {@link #nodeKind()} of 2 index them.
+         *  The same faces {@link Node#surfaces()} hands over, in the same order. */
+        public int faceCount() {
+            handle();
+            return faceCount;
+        }
+
+        /** One {@link FemEdge} per B-rep edge, in the order a {@link #nodeKind()} of 1 indexes
+         *  them; empty for a {@link #fromMesh()} body, which has no B-rep edges at all.
+         *
+         *  <p><b>This list's own numbering, not the body's</b>: each {@link FemEdge#id()}
+         *  carries the body's own edge id. Built afresh on every ask, one C call an edge, so
+         *  read it once and keep the list. */
+        public List<FemEdge> edges() {
+            MemorySegment h = handle();
+            List<FemEdge> out = new ArrayList<>(edgeCount);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment raw = arena.allocate(FEM_EDGE);
+                for (int i = 0; i < edgeCount; i++) {
+                    boolean ok;
+                    try {
+                        ok = (boolean) FEM_EDGE_AT.invokeExact(h, i, raw);
+                    } catch (Throwable t) {
+                        throw new RuntimeException(t);
+                    }
+                    if (!ok) throw new CadaclysmException(lastErrorOr("fem mesh edge " + i));
+                    out.add(new FemEdge(
+                            raw.get(ValueLayout.JAVA_INT, offset(FEM_EDGE, "id")),
+                            chain(raw, "nodes", "node_count"),
+                            chain(raw, "runs", "run_count"),
+                            new int[] {raw.get(ValueLayout.JAVA_INT, offset(FEM_EDGE, "face_a")),
+                                       raw.get(ValueLayout.JAVA_INT, offset(FEM_EDGE, "face_b"))},
+                            new int[] {raw.get(ValueLayout.JAVA_INT, offset(FEM_EDGE, "end_a")),
+                                       raw.get(ValueLayout.JAVA_INT, offset(FEM_EDGE, "end_b"))},
+                            raw.get(ValueLayout.JAVA_BOOLEAN, offset(FEM_EDGE, "closed")),
+                            raw.get(ValueLayout.JAVA_BOOLEAN, offset(FEM_EDGE, "seam"))));
+                }
+            } finally {
+                java.lang.ref.Reference.reachabilityFence(this);
+            }
+            return out;
+        }
+
+        /** One int array out of a {@code FEM_EDGE} pointer/count pair, copied: an edge's chain
+         *  cannot be lent, the record outliving the {@link Arena} the struct was read in. */
+        private static int[] chain(MemorySegment raw, String pointer, String count) {
+            long at = raw.get(ValueLayout.ADDRESS, offset(FEM_EDGE, pointer)).address();
+            int n = raw.get(ValueLayout.JAVA_INT, offset(FEM_EDGE, count));
+            return at == 0 ? new int[0] : intArray(at, n);
+        }
+
+        /** One {@link FemVertex} per B-rep vertex, in the order a {@link #nodeKind()} of 0
+         *  indexes them; empty for a {@link #fromMesh()} body. Built afresh on every ask. */
+        public List<FemVertex> vertices() {
+            MemorySegment h = handle();
+            List<FemVertex> out = new ArrayList<>(vertexCount);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment raw = arena.allocate(FEM_VERTEX);
+                for (int i = 0; i < vertexCount; i++) {
+                    boolean ok;
+                    try {
+                        ok = (boolean) FEM_VERTEX_AT.invokeExact(h, i, raw);
+                    } catch (Throwable t) {
+                        throw new RuntimeException(t);
+                    }
+                    if (!ok) throw new CadaclysmException(lastErrorOr("fem mesh vertex " + i));
+                    out.add(new FemVertex(
+                            raw.get(ValueLayout.JAVA_INT, offset(FEM_VERTEX, "node")),
+                            raw.asSlice(offset(FEM_VERTEX, "point"), 3L * Double.BYTES).toArray(ValueLayout.JAVA_DOUBLE),
+                            raw.get(ValueLayout.JAVA_BOOLEAN, offset(FEM_VERTEX, "has_position"))));
+                }
+            } finally {
+                java.lang.ref.Reference.reachabilityFence(this);
+            }
+            return out;
+        }
+
+        /**
+         * Every crack, as {@code {a, b, brepEdge}}: a directed mesh edge {@code (a, b)} with no
+         * {@code (b, a)}, and the B-rep edge <em>index</em> both nodes lie on, or -1 where they
+         * share none.
+         *
+         * <p><b>Empty unless the body's topology is closed -- for a B-rep body</b>, whose mesh
+         * is otherwise not asked about at all: such a body reports {@link #watertight()} false
+         * with this and {@link #foldedEdges()} <em>both</em> empty, and that trio together says
+         * "not asked", not "nothing found".
+         *
+         * <p><b>A {@link #fromMesh()} body is the other case, and the opposite one.</b> A bare
+         * mesh carries no topology to say whether it ought to close, so its census always runs
+         * over the welded triangles: an open one lists its cracks here with
+         * {@link #watertight()} false, a closed one reports it true, and an empty census there
+         * really does mean "nothing found".
+         */
+        public List<int[]> openEdges() {
+            return census(FEM_OPEN_EDGE, openEdgeCount, "open edge");
+        }
+
+        /**
+         * Every fold, as {@link #openEdges()} reports a crack: a directed mesh edge used by more
+         * than one triangle.
+         *
+         * <p><b>A body can be folded without being open</b> -- a solid no thicker than a line
+         * leaves no hole for an open edge to find -- and the closure census's own known-bad
+         * bodies are folds rather than open cracks. A caller that checks {@link #openEdges()}
+         * alone calls such a body sound. Empty under the same rule as {@link #openEdges()}.
+         */
+        public List<int[]> foldedEdges() {
+            return census(FEM_FOLDED_EDGE, foldedEdgeCount, "folded edge");
+        }
+
+        /** The library's two census readers have one shape, so the two lists cannot drift. */
+        private List<int[]> census(MethodHandle row, int count, String what) {
+            MemorySegment h = handle();
+            List<int[]> out = new ArrayList<>(count);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment triple = arena.allocate(ValueLayout.JAVA_INT, 3);
+                for (int i = 0; i < count; i++) {
+                    MemorySegment a = triple.asSlice(0, Integer.BYTES);
+                    MemorySegment b = triple.asSlice(Integer.BYTES, Integer.BYTES);
+                    MemorySegment edge = triple.asSlice(2L * Integer.BYTES, Integer.BYTES);
+                    boolean ok;
+                    try {
+                        ok = (boolean) row.invokeExact(h, i, a, b, edge);
+                    } catch (Throwable t) {
+                        throw new RuntimeException(t);
+                    }
+                    if (!ok) throw new CadaclysmException(lastErrorOr("fem mesh " + what + " " + i));
+                    out.add(triple.toArray(ValueLayout.JAVA_INT));
+                }
+            } finally {
+                java.lang.ref.Reference.reachabilityFence(this);
+            }
+            return out;
+        }
+
+        /** The welded mesh closes -- and, for a B-rep body, so does the topology behind it.
+         *  <b>False for every B-rep body whose topology is not closed</b>, whose mesh is then
+         *  not asked about at all; read {@link #openEdges()} for what an empty census beside a
+         *  false here does and does not mean. A {@link #fromMesh()} body has no topology to ask
+         *  of, so this says only that its triangles close. */
+        public boolean watertight() {
+            handle();
+            return watertight;
+        }
+
+        /** This came from the scene's own mesh rather than from a brep: one face, every node on
+         *  face 0, no edges and no vertices.
+         *
+         *  <p><b>It is also which space the mesh is in.</b> A B-rep body's FEM mesh is in the
+         *  <em>file's own units and axes</em>, whatever convention the scene was opened with,
+         *  because it is taken off the brep. A node with no brep falls back to the scene's mesh,
+         *  which <em>is</em> converted, so it comes back in the scene's convention, wound
+         *  counter-clockwise about the outward normal even where the convention winds the other
+         *  way. Under a non-NATIVE convention those are two different spaces.
+         *
+         *  <p>And it is which contract {@link #watertight()} and the two censuses are reporting
+         *  under: read {@link #openEdges()}. */
+        public boolean fromMesh() {
+            handle();
+            return fromMesh;
+        }
+
+        /** The smallest interior angle of any triangle, in degrees. There is always one: a body
+         *  that meshed to no triangles is a refusal, not a mesh. */
+        public double minAngle() {
+            handle();
+            return minAngle;
+        }
+
+        /** The triangle with that angle, as an index into {@link #triangles()} by triple. */
+        public int worstTriangle() {
+            handle();
+            return worstTriangle;
+        }
+
+        /** The longest triangle edge, placed.
+         *
+         *  <p><b>The figure to check against {@code maxSize}, and the only one that says what
+         *  the mesh actually is.</b> {@code maxSize} bounds the boundary segments and merely
+         *  <em>targets</em> the interior: measured at 1.03 x {@code maxSize} on a face whose
+         *  parameters run unevenly, where a full-size boundary piece met a much shorter one left
+         *  by halving. One small enough beside the body to reach the mesher's own piece and
+         *  station ceilings is not honoured at all. A caller that asked for an element size reads
+         *  this to find out whether it got one -- and {@code tolerance} alone, not
+         *  {@code maxSize}, decides how closely the boundary follows the geometry. */
+        public double longestEdge() {
+            handle();
+            return longestEdge;
+        }
+
+        /**
+         * The mesh as Gmsh 4.1 ASCII {@code .msh} text: an entity per B-rep vertex, edge and
+         * face, a volume where the body closes, and a physical group naming each.
+         *
+         * <p><b>The library's text is borrowed from this handle</b> and replaced by the next call
+         * on it -- this ABI's convention, and the opposite of the kernel library's, where
+         * {@code Blacksmith.FemMesh.mshText} is handed an owned string to free with
+         * {@code cadaclysm_blacksmith_string_free}. Nothing here has to free anything either
+         * way: the {@code char *} is copied into a {@code String} of your own on the way out,
+         * which outlives the handle. A reader porting one side's reasoning onto the other leaks
+         * or double-frees.
+         *
+         * <p><b>No unlicensed notice is printed here.</b>
+         * {@link Node#femMesh(double, double, double[])} gave it once when the mesh was built,
+         * and this ABI deliberately does not repeat it on either {@code .msh} call -- where the
+         * kernel library notices on both of its writers and <em>not</em> on its builder. Each
+         * matches its own siblings, so moving the call to look like the other side breaks a
+         * convention.
+         *
+         * <p>Throws {@link CadaclysmException} for a mesh the writer refuses, naming the field it
+         * cannot honour, and for a freed handle.
+         */
+        public String mshText() {
+            MemorySegment h = handle();
+            try {
+                MemorySegment raw = (MemorySegment) FEM_MSH_TEXT.invokeExact(h);
+                if (raw.address() == 0) throw new CadaclysmException(lastErrorOr("msh text"));
+                return string(raw);
+            } catch (CadaclysmException e) {
+                throw e;
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            } finally {
+                java.lang.ref.Reference.reachabilityFence(this);
+            }
+        }
+
+        /** {@link #mshText()} written to {@code path} by the library itself: the same bytes from
+         *  the same writer, straight to the file rather than through the borrowed slot, so a
+         *  {@link #mshText()} call on this handle from another thread cannot free the text under
+         *  the write. Throws for a mesh the writer refuses or a file it cannot write, naming the
+         *  path. No notice here either; see {@link #mshText()}. */
+        public void saveMsh(String path) {
+            MemorySegment h = handle();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment cPath = arena.allocateFrom(path);
+                boolean ok = (boolean) FEM_SAVE_MSH.invokeExact(h, cPath);
+                if (!ok) throw new CadaclysmException(lastErrorOr("could not write " + path));
+            } catch (CadaclysmException e) {
+                throw e;
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            } finally {
+                java.lang.ref.Reference.reachabilityFence(this);
+            }
+        }
+
+        @Override
+        public String toString() {
+            return closed() ? "FemMesh(freed)"
+                    : "FemMesh(nodes=" + nodeCount + ", triangles=" + triangleCount
+                            + ", watertight=" + watertight + ", fromMesh=" + fromMesh + ")";
+        }
+    }
+
     public static final class Placement {
         private final Scene scene;
         private final int index;
@@ -2201,6 +2821,116 @@ public final class Cad {
             PLACEMENT_TRANSFORM.invokeExact(scene, index, out);
         } catch (Throwable t) {
             throw new RuntimeException(t);
+        }
+    }
+
+    // ---- Link / Joint -----------------------------------------------------------------
+
+    /**
+     * A rigid body of the file's mechanism: the nodes that move together when a joint moves
+     * it. From {@link Scene#links()} -- a STEP file's kinematic links; other formats record
+     * none.
+     */
+    public static final class Link {
+        private final Scene scene;
+        private final int index;
+
+        private Link(Scene scene, int index) {
+            this.scene = scene;
+            this.index = index;
+        }
+
+        public Scene scene() {
+            return scene;
+        }
+
+        /** Its position in {@link Scene#links()}. */
+        public int index() {
+            return index;
+        }
+
+        /** Its name, as the file gives it. */
+        public String name() {
+            return string(invokeStringAt(LINK_NAME, scene.handle(), index));
+        }
+
+        /** The topmost node of each subtree this link moves, in node order: moving these
+         *  moves everything under them. */
+        public List<Node> nodes() {
+            MemorySegment h = scene.handle();
+            int count = invokeIntAt(LINK_NODE_COUNT, h, index);
+            List<Node> found = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) found.add(new Node(scene, invokeIntAt(LINK_NODE, h, index, i)));
+            return found;
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            return obj instanceof Link other && other.index == index && other.scene == scene;
+        }
+
+        @Override
+        public int hashCode() {
+            return System.identityHashCode(scene) * 31 + index;
+        }
+
+        @Override
+        public String toString() {
+            return "<Link " + index + " " + name() + ">";
+        }
+    }
+
+    /**
+     * A connection between two links of the file's mechanism. Its two ends keep the file's
+     * order, not a parent and a child, since a mechanism may be a network with loops. How a
+     * joint moves (its pair) is not read yet. From {@link Scene#joints()}.
+     */
+    public static final class Joint {
+        private final Scene scene;
+        private final int index;
+
+        private Joint(Scene scene, int index) {
+            this.scene = scene;
+            this.index = index;
+        }
+
+        public Scene scene() {
+            return scene;
+        }
+
+        /** Its position in {@link Scene#joints()}. */
+        public int index() {
+            return index;
+        }
+
+        /** Its name, as the file gives it. */
+        public String name() {
+            return string(invokeStringAt(JOINT_NAME, scene.handle(), index));
+        }
+
+        /** The link it starts at. */
+        public Link start() {
+            return new Link(scene, invokeIntAt(JOINT_START, scene.handle(), index));
+        }
+
+        /** The link it ends at. */
+        public Link end() {
+            return new Link(scene, invokeIntAt(JOINT_END, scene.handle(), index));
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            return obj instanceof Joint other && other.index == index && other.scene == scene;
+        }
+
+        @Override
+        public int hashCode() {
+            return System.identityHashCode(scene) * 31 + index;
+        }
+
+        @Override
+        public String toString() {
+            return "<Joint " + index + " " + name() + ">";
         }
     }
 
@@ -2506,6 +3236,90 @@ public final class Cad {
             }
         }
 
+        /** {@link #femMesh(double, double, double[])} with every default: the chordal
+         *  tolerance 0.01, no size ceiling, no placement. */
+        public FemMesh femMesh() {
+            return femMesh(0.01, 0.0, null);
+        }
+
+        /** {@link #femMesh(double, double, double[])} at this chordal tolerance, with no size
+         *  ceiling and no placement. */
+        public FemMesh femMesh(double tolerance) {
+            return femMesh(tolerance, 0.0, null);
+        }
+
+        /** {@link #femMesh(double, double, double[])} with no placement. */
+        public FemMesh femMesh(double tolerance, double maxSize) {
+            return femMesh(tolerance, maxSize, null);
+        }
+
+        /**
+         * This node's body meshed for a solver, as a {@link FemMesh}: nodes welded by bits,
+         * triangles wound outward, each node tagged with the lowest-dimension B-rep entity it
+         * lies on, and every crack reported rather than closed. <b>Owned by you</b> -- close it
+         * (a try-with-resources) or {@link FemMesh#free()} it.
+         *
+         * <p>{@code tolerance} is the chordal tolerance in model units, finite and above zero,
+         * and <b>it alone governs how closely the mesh follows the geometry</b>.
+         * {@code maxSize} is a size ceiling, finite and zero or more, 0 being no ceiling
+         * (curvature alone): <b>it bounds the boundary and targets the interior</b>, which is
+         * not a longest-element-edge guarantee -- it adds boundary nodes without refining
+         * boundary geometry, and {@link FemMesh#longestEdge()} is what the mesh actually came
+         * to, the figure to check against it.
+         *
+         * <p>Those two defaults are {@code FemOptions::default()}'s own, restated here so the
+         * signature says what a caller gets. The library's struct is still filled by
+         * {@code cadaclysm_fem_options_init} first, so a field added to it later defaults
+         * without this line being touched; only these two are overwritten. <b>Neither is
+         * checked here</b>: a mesh-only body is meshed by a path that reads no options at all,
+         * so a zero, a negative or a NaN comes back with a mesh there and is refused on a B-rep
+         * body -- a wrapper that validated either field would refuse calls this ABI accepts. The
+         * placement's length is the one thing this wrapper must check, the ABI receiving only a
+         * pointer.
+         *
+         * <p>{@code placement} is 16 numbers, column-major, as
+         * {@link #boundsPlaced(double[])} takes them (null for the identity), applied in
+         * {@code double} throughout. The kernel library's {@code Solid.femMesh} takes
+         * <b>twelve</b> instead -- origin, x, y, z -- so a caller moving between the two
+         * reformats the placement.
+         *
+         * <p><b>The space is the body's, not the scene's, for a B-rep -- and the scene's for a
+         * mesh</b>, which {@link FemMesh#fromMesh()} is the flag for; read it there, because
+         * under a non-NATIVE convention the two are different spaces. Meshed in the part's own
+         * frame and following the hop from an instance to the shape it draws that {@link #mesh()}
+         * follows, so a node instanced six times meshes once, where it is defined.
+         *
+         * <p><b>A cracked body is not a failure</b>: it comes back with
+         * {@link FemMesh#watertight()} false and its cracks in {@link FemMesh#openEdges()} /
+         * {@link FemMesh#foldedEdges()} -- <em>both</em> lists, a fold being as real a fault as
+         * an open crack -- and nothing is welded shut to make it look sound. Throws
+         * {@link CadaclysmException} for a tolerance or size the mesher refuses, a placement that
+         * is not 16 numbers or is not finite and invertible, a node with neither a brep nor a
+         * mesh (an assembly, a storey, a layer, an empty definition, a curve), and a body that
+         * meshes to nothing. <b>The unlicensed notice is printed here</b>, once, and not again
+         * on either of the mesh's {@code .msh} calls.
+         */
+        public FemMesh femMesh(double tolerance, double maxSize, double[] placement) {
+            if (placement != null && placement.length != 16)
+                throw new CadaclysmException("fem_mesh: a placement is 16 numbers, not " + placement.length);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment options = arena.allocate(FEM_OPTIONS);
+                FEM_OPTIONS_INIT.invokeExact(options);
+                options.set(ValueLayout.JAVA_LONG, offset(FEM_OPTIONS, "size"), FEM_OPTIONS.byteSize());
+                options.set(ValueLayout.JAVA_DOUBLE, offset(FEM_OPTIONS, "tolerance"), tolerance);
+                options.set(ValueLayout.JAVA_DOUBLE, offset(FEM_OPTIONS, "max_size"), maxSize);
+                MemorySegment matrix = placement == null
+                        ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_DOUBLE, placement);
+                MemorySegment raw = (MemorySegment) NODE_FEM_MESH.invokeExact(scene.handle(), index, matrix, options);
+                if (raw.address() == 0) throw new CadaclysmException(lastErrorOr("fem_mesh"));
+                return new FemMesh(raw);
+            } catch (CadaclysmException e) {
+                throw e;
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
         private Mesh meshOf(MemorySegment raw) {
             long positions = raw.get(ValueLayout.ADDRESS, offset(MESH, "positions")).address();
             long normals = raw.get(ValueLayout.ADDRESS, offset(MESH, "normals")).address();
@@ -2559,6 +3373,12 @@ public final class Cad {
             return polylinesOf(NODE_EDGES);
         }
 
+        /** One RGBA per polyline of {@link #edges()}, null for an edge the file does not
+         *  style; empty when nothing is styled. */
+        public float[][] edgeColours() {
+            return coloursOf(NODE_EDGE_COLORS);
+        }
+
         /** Its free curves, as polylines. A 2D drawing is all of these. */
         public Polylines curves() {
             return polylinesOf(NODE_CURVES);
@@ -2576,6 +3396,27 @@ public final class Cad {
                 MemorySegment raw = (MemorySegment) function.invokeExact(allocator,
                         scene.handle(), index);
                 return buildPolylines(scene, raw);
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
+        @SuppressWarnings("restricted") // reinterpret: `count` says how far `rgba` reaches.
+        private float[][] coloursOf(MethodHandle function) {
+            try (Arena arena = Arena.ofConfined()) {
+                SegmentAllocator allocator = SegmentAllocator.prefixAllocator(arena.allocate(EDGE_COLORS));
+                MemorySegment raw = (MemorySegment) function.invokeExact(allocator,
+                        scene.handle(), index);
+                MemorySegment rgba = raw.get(ValueLayout.ADDRESS, offset(EDGE_COLORS, "rgba"));
+                int count = raw.get(ValueLayout.JAVA_INT, offset(EDGE_COLORS, "count"));
+                if (rgba.address() == 0 || count == 0) return new float[0][];
+                float[] flat = rgba.reinterpret(4L * count * Float.BYTES).toArray(ValueLayout.JAVA_FLOAT);
+                float[][] out = new float[count][];
+                for (int i = 0; i < count; i++) {
+                    out[i] = flat[4 * i + 3] < 0 ? null
+                            : new float[] { flat[4 * i], flat[4 * i + 1], flat[4 * i + 2], flat[4 * i + 3] };
+                }
+                return out;
             } catch (Throwable t) {
                 throw new RuntimeException(t);
             }
@@ -2725,6 +3566,20 @@ public final class Cad {
             return polylinesOf(NODE_SURFACE_EDGES);
         }
 
+        /** Its edges as the exact curves, where the reader has them without meshing -- a Rhino
+         *  extrusion's rims are its profile -- and empty everywhere else, so a caller drawing
+         *  from surfaces tries this before {@link #surfaceEdges()}, whose trims are thinned to
+         *  the mesh tolerance. The same segments as {@link #edgeBeziers()}, in the same space:
+         *  not the surfaces' frame, so no {@link Scene#surfaceMatrix()}. */
+        public Beziers surfaceEdgeBeziers() {
+            return beziersOf(NODE_SURFACE_EDGE_BEZIERS);
+        }
+
+        /** {@link #edgeColours()} for {@link #surfaceEdges()}. */
+        public float[][] surfaceEdgeColours() {
+            return coloursOf(NODE_SURFACE_EDGE_COLORS);
+        }
+
         /** Its isocurves taken from its trimmed surfaces and clipped to the trims, without
          *  meshing; a flat face gets none. In the surfaces' frame; empty without surfaces. */
         public Polylines surfaceIsocurves() {
@@ -2811,6 +3666,15 @@ public final class Cad {
     private static int invokeNodeChild(MemorySegment scene, int node, int i) {
         try {
             return (int) NODE_CHILD.invokeExact(scene, node, i);
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
+
+    /** Two int arguments past the scene handle -- {@code cadaclysm_link_node}'s (link, index). */
+    private static int invokeIntAt(MethodHandle h, MemorySegment scene, int a, int b) {
+        try {
+            return (int) h.invokeExact(scene, a, b);
         } catch (Throwable t) {
             throw new RuntimeException(t);
         }
@@ -3018,6 +3882,24 @@ public final class Cad {
             int count = invokeIntOf(DIAGNOSTIC_COUNT, handle());
             List<String> found = new ArrayList<>(count);
             for (int i = 0; i < count; i++) found.add(string(invokeStringAt(DIAGNOSTIC, handle(), i)));
+            return found;
+        }
+
+        /** The rigid bodies of the file's mechanism, in the file's order: each names the
+         *  nodes that move together. Empty for a file that records none. */
+        public List<Link> links() {
+            int count = invokeIntOf(LINK_COUNT, handle());
+            List<Link> found = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) found.add(new Link(this, i));
+            return found;
+        }
+
+        /** The connections between those links, in the file's order. Topology only: how a
+         *  joint moves is not read yet. */
+        public List<Joint> joints() {
+            int count = invokeIntOf(JOINT_COUNT, handle());
+            List<Joint> found = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) found.add(new Joint(this, i));
             return found;
         }
 

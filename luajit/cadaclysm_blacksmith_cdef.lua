@@ -12,6 +12,8 @@ static const uint32_t CADACLYSM_BLACKSMITH_SVG_ISOCURVES = 4;
 
 static const uint32_t CADACLYSM_BLACKSMITH_SVG_POLYLINES = 8;
 
+typedef struct CadaclysmBlacksmithAssembly CadaclysmBlacksmithAssembly;
+
 typedef struct CadaclysmBlacksmithFemMesh CadaclysmBlacksmithFemMesh;
 
 typedef struct CadaclysmBlacksmithHits CadaclysmBlacksmithHits;
@@ -256,6 +258,41 @@ const char *cadaclysm_blacksmith_version(void);
 void cadaclysm_blacksmith_solid_free(struct CadaclysmBlacksmithSolid *solid);
 
 void cadaclysm_blacksmith_profile_free(struct CadaclysmBlacksmithProfile *profile);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_named(const struct CadaclysmBlacksmithSolid *solid,
+                                                            const char *name);
+
+const char *cadaclysm_blacksmith_solid_name(const struct CadaclysmBlacksmithSolid *solid);
+
+struct CadaclysmBlacksmithAssembly *cadaclysm_blacksmith_assembly_new(const char *name);
+
+void cadaclysm_blacksmith_assembly_free(struct CadaclysmBlacksmithAssembly *assembly);
+
+const char *cadaclysm_blacksmith_assembly_name(const struct CadaclysmBlacksmithAssembly *assembly);
+
+char *cadaclysm_blacksmith_assembly_place_solid(struct CadaclysmBlacksmithAssembly *assembly,
+                                                const struct CadaclysmBlacksmithSolid *solid,
+                                                const double *frame,
+                                                const char *name);
+
+char *cadaclysm_blacksmith_assembly_place_assembly(struct CadaclysmBlacksmithAssembly *assembly,
+                                                   const struct CadaclysmBlacksmithAssembly *placed,
+                                                   const double *frame,
+                                                   const char *name);
+
+char *cadaclysm_blacksmith_assembly_step(const struct CadaclysmBlacksmithAssembly *assembly,
+                                         const char *schema,
+                                         uint32_t unit);
+
+bool cadaclysm_blacksmith_assembly_link(struct CadaclysmBlacksmithAssembly *assembly,
+                                        const char *name,
+                                        const char *const *placements,
+                                        size_t placement_count);
+
+bool cadaclysm_blacksmith_assembly_joint(struct CadaclysmBlacksmithAssembly *assembly,
+                                         const char *name,
+                                         const char *start,
+                                         const char *end);
 
 void cadaclysm_blacksmith_fem_options_init(struct CadaclysmBlacksmithFemOptions *options);
 
@@ -777,6 +814,9 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_translate(const struct Cad
                                                                 double dx,
                                                                 double dy,
                                                                 double dz);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_scaled(const struct CadaclysmBlacksmithSolid *solid,
+                                                             double factor);
 
 struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_rotate(const struct CadaclysmBlacksmithSolid *solid,
                                                              const double *axis,
