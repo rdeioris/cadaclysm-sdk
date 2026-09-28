@@ -1088,8 +1088,8 @@ public struct Link: Hashable, CustomStringConvertible {
     public var description: String { "Link(index: \(index))" }
 }
 
-/// A connection between two links of the file's mechanism. Topology only: how it moves is not
-/// read yet. From `Scene.joints`.
+/// A connection between two links of the file's mechanism, and, when the file names one, the
+/// kinematic pair saying how it moves. From `Scene.joints`.
 public struct Joint: Hashable, CustomStringConvertible {
     /// The scene it belongs to.
     public let scene: Scene
@@ -1115,6 +1115,13 @@ public struct Joint: Hashable, CustomStringConvertible {
     /// The link this joint ends at.
     public var end: Link { Link(scene, Int(cadaclysm_joint_end(scene.live("Joint"), raw))) }
 
+    /// How this joint moves: the kinematic pair naming it, or nil when the file gives it none.
+    public var pair: Pair? {
+        let kind = cadaclysm_joint_pair_kind(scene.live("Joint"), raw)
+        guard let kind = PairKind(rawValue: kind) else { return nil }
+        return Pair(scene, raw, kind)
+    }
+
     /// Same scene, same index.
     public static func == (lhs: Joint, rhs: Joint) -> Bool {
         lhs.scene === rhs.scene && lhs.index == rhs.index
@@ -1128,6 +1135,154 @@ public struct Joint: Hashable, CustomStringConvertible {
 
     /// `Joint(index: …)`.
     public var description: String { "Joint(index: \(index))" }
+}
+
+// ---- pairs, freedoms and states ----------------------------------------------------------
+
+/// Which kind of relative motion a `Pair` allows -- `CadaclysmPairKind`.
+public enum PairKind: Int32, Sendable {
+    case revolute = 0
+    case prismatic = 1
+    case cylindrical = 2
+    case spherical = 3
+    case sphericalWithPin = 4
+    case planar = 5
+    case universal = 6
+    case homokinetic = 7
+    case screw = 8
+    case fullyConstrained = 9
+    case unconstrained = 10
+    case lowOrder = 11
+    case other = 12
+}
+
+/// Which motion a `Freedom` is -- `CadaclysmMotion`.
+public enum Motion: UInt32, Sendable {
+    case rotation = 0
+    case translation = 1
+}
+
+/// Which contact-frame axis a `Freedom` is about or along -- `CadaclysmFreedomAxis`.
+public enum FreedomAxis: UInt32, Sendable {
+    case x = 0
+    case y = 1
+    case z = 2
+}
+
+/// One degree of freedom of a `Pair`: which motion, about or along which contact-frame axis,
+/// and its optional range. From `Pair.freedoms()`.
+public struct Freedom: Hashable, Sendable {
+    public let motion: Motion
+    public let axis: FreedomAxis
+    /// Radians, or the scene's length unit; nil when unbounded.
+    public let lower: Double?
+    /// Radians, or the scene's length unit; nil when unbounded.
+    public let upper: Double?
+
+    fileprivate init(_ raw: CadaclysmFreedom) {
+        motion = Motion(rawValue: raw.motion) ?? .rotation
+        axis = FreedomAxis(rawValue: raw.axis) ?? .x
+        lower = raw.has_lower ? raw.lower : nil
+        upper = raw.has_upper ? raw.upper : nil
+    }
+}
+
+/// A kinematic pair: the kind of relative motion a joint allows between its two links --
+/// `Joint.pair`.
+public struct Pair {
+    private let scene: Scene
+    private let joint: UInt32
+    /// One of thirteen kinds.
+    public let kind: PairKind
+
+    fileprivate init(_ scene: Scene, _ joint: UInt32, _ kind: PairKind) {
+        self.scene = scene
+        self.joint = joint
+        self.kind = kind
+    }
+
+    /// The pair's entity type name (`"GEAR_PAIR"`), for `.other`; nil otherwise.
+    public var typeName: String? {
+        guard let raw = cadaclysm_joint_pair_type(scene.live("Pair"), joint) else { return nil }
+        return String(cString: raw)
+    }
+
+    /// Its pitch -- length per revolution, in the scene's units -- for `.screw`; nil otherwise.
+    public var pitch: Double? {
+        let raw = cadaclysm_joint_pair_pitch(scene.live("Pair"), joint)
+        return raw.isNaN ? nil : raw
+    }
+
+    /// Both contact frames as sixteen column-major doubles each -- `Node.rawTransform`'s layout.
+    private var rawFrames: ([Double], [Double]) {
+        var start = [Double](repeating: 0, count: 16)
+        var end = [Double](repeating: 0, count: 16)
+        cadaclysm_joint_pair_frames(scene.live("Pair"), joint, &start, &end)
+        return (start, end)
+    }
+
+    /// The pair's contact frame fixed in its joint's `start` link, in world coordinates at the
+    /// file's rest pose, as sixteen column-major doubles -- `Node.rawTransform`'s layout.
+    public var rawFrameStart: [Double] { rawFrames.0 }
+
+    /// The pair's contact frame fixed in its joint's `end` link, as sixteen column-major
+    /// doubles.
+    public var rawFrameEnd: [Double] { rawFrames.1 }
+
+    /// `rawFrameStart` as rows, like `Node.transform`.
+    public var frameStart: [[Double]] { rowMajor(rawFrameStart) }
+
+    /// `rawFrameEnd` as rows, like `Node.transform`.
+    public var frameEnd: [[Double]] { rowMajor(rawFrameEnd) }
+
+    /// Its degrees of freedom, in the reader's per-kind order. A `State`'s values compose in
+    /// this order.
+    public func freedoms() -> [Freedom] {
+        let handle = scene.live("Pair")
+        let count = cadaclysm_joint_freedom_count(handle, joint)
+        var out: [Freedom] = []
+        out.reserveCapacity(Int(count))
+        for i in 0..<count {
+            var raw = CadaclysmFreedom()
+            if cadaclysm_joint_freedom(handle, joint, i, &raw) {
+                out.append(Freedom(raw))
+            }
+        }
+        return out
+    }
+}
+
+/// One row of a `State`: the joint it sets, and one value per freedom of its pair, in the
+/// pair's freedom order.
+public struct StateValue {
+    public let joint: Joint?
+    public let values: [Double]
+}
+
+/// A named pose of the file's mechanism: a `MECHANISM_STATE_REPRESENTATION`. From
+/// `Scene.states`.
+public struct State {
+    public let index: Int
+    public let name: String
+    /// One row per joint this state sets, in file order.
+    public let values: [StateValue]
+}
+
+private func readState(_ scene: Scene, _ index: UInt32) -> State {
+    let handle = scene.live("State")
+    let name = borrowed(cadaclysm_state_name(handle, index))
+    let rowCount = cadaclysm_state_value_count(handle, index)
+    var rows: [StateValue] = []
+    rows.reserveCapacity(Int(rowCount))
+    for row in 0..<rowCount {
+        var jointIndex: UInt32 = noneIndex
+        let n = cadaclysm_state_value(handle, index, row, &jointIndex, nil, 0)
+        var values = [Double](repeating: 0, count: Int(n))
+        cadaclysm_state_value(handle, index, row, &jointIndex, &values, n)
+        let joint = jointIndex == noneIndex ? nil : Joint(scene, Int(jointIndex))
+        rows.append(StateValue(joint: joint, values: values))
+    }
+    return State(index: Int(index), name: name, values: rows)
 }
 
 // ---- breps ------------------------------------------------------------------------------------
@@ -1567,6 +1722,28 @@ public final class FemMesh: NativeMemoryOwner {
                 throw CadaclysmError(lastErrorOr("fem mesh \(what) \(i)"))
             }
             return (a, b, edge)
+        }
+    }
+
+    /// Every pair of triangles that pass through each other, as `(a, b)` with `a < b`, sorted:
+    /// an edge of one through the other's interior. Their B-rep faces are `triangleFace[a]` and
+    /// `[b]`.
+    ///
+    /// **Computed for every body, open or closed.** The census `watertight`, `openEdges` and
+    /// `foldedEdges` report is topological and cannot see a surface passing through itself; a
+    /// mesh is ready for a volume mesher when it is `watertight` **and** this is empty -- Gmsh
+    /// refuses one that crosses. A copy.
+    public var crossings: [(UInt32, UInt32)] {
+        get throws {
+            let handle = try live()
+            let count = cadaclysm_fem_mesh_crossing_count(handle)
+            return try (0..<count).map { i in
+                var a: UInt32 = 0, b: UInt32 = 0
+                guard cadaclysm_fem_mesh_crossing(handle, i, &a, &b) else {
+                    throw CadaclysmError(lastErrorOr("fem mesh crossing \(i)"))
+                }
+                return (a, b)
+            }
         }
     }
 
@@ -2345,6 +2522,10 @@ public final class Scene: NativeMemoryOwner, CustomStringConvertible {
     /// Whether `close()` has run.
     public var closed: Bool { handle == nil }
 
+    /// The `CadaclysmScene*`, for native libraries that take it (cadaclysm_render_add_scene).
+    /// Borrowed: valid while this Scene is open; nil once closed.
+    public var unsafeHandle: OpaquePointer? { handle }
+
     /// Give the document back. Idempotent. Every view still held traps when read afterwards.
     public func close() {
         guard let handle = handle else { return }
@@ -2411,6 +2592,13 @@ public final class Scene: NativeMemoryOwner, CustomStringConvertible {
     /// records no mechanism.
     public var joints: [Joint] {
         (0..<Int(cadaclysm_joint_count(live()))).map { Joint(self, $0) }
+    }
+
+    /// The file's named mechanism states, e.g. STEP's `MECHANISM_STATE_REPRESENTATION`. Empty
+    /// for a file that records none.
+    public var states: [State] {
+        let handle = live()
+        return (0..<cadaclysm_state_count(handle)).map { readState(self, $0) }
     }
 
     /// The archive member this was read from, or nil for a plain file.

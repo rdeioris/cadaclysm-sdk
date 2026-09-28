@@ -134,6 +134,20 @@ inline Error kernel_error(const char* fallback) {
     return Error{std::move(message), Origin::kernel};
 }
 
+// kernel_error for a call routed through cadaclysm_blacksmith_tessellation: that entry
+// point fails with a leading "tessellation:" naming itself, not the caller, so this
+// rewrites that prefix back to `name` -- the C-level name the caller reported before it
+// held a tessellation of its own -- leaving the rest of the library's message untouched.
+inline Error tessellation_error(const char* name) {
+    std::string message = text(::cadaclysm_blacksmith_last_error());
+    static const std::string prefix = "tessellation:";
+    if (message.compare(0, prefix.size(), prefix) == 0) {
+        message = std::string(name) + ":" + message.substr(prefix.size());
+    }
+    if (message.empty()) message = name;
+    return Error{std::move(message), Origin::kernel};
+}
+
 inline Error refuse(std::string message) { return Error{std::move(message), Origin::kernel}; }
 
 // `options` packed into a CadaclysmBlacksmithSvgOptions: `view` fills
@@ -1215,27 +1229,19 @@ struct SolidHits {
 
 namespace detail {
 
-// What a Solid owns. The library keeps one tessellation per solid and replaces it
-// whenever mesh, edge_polylines or bounds_at is asked for a different tolerance; each
-// replacement bumps the generation, so a view into the old one knows it is stale.
+// What a Solid owns: just the handle. The library keeps one tessellation cache per
+// solid and replaces it whenever mesh, edge_polylines or bounds_at is asked for a
+// different tolerance -- but a tessellation view no longer borrows that cache; it
+// holds one of its own (HeldTessellation, below), so nothing here needs a generation
+// to track that replacement.
 struct SolidState {
     CadaclysmBlacksmithSolid* handle = nullptr;
-    std::uint64_t generation = 0;
-    std::optional<double> cache_tolerance;
 
     bool live() const noexcept { return handle != nullptr; }
     void close() noexcept {
         if (handle) {
             ::cadaclysm_blacksmith_solid_free(handle);
             handle = nullptr;
-            ++generation;
-        }
-    }
-    // A call just tessellated at `tolerance`: a new filling if it differs from the last.
-    void filled(double tolerance) noexcept {
-        if (!cache_tolerance || *cache_tolerance != tolerance) {
-            cache_tolerance = tolerance;
-            ++generation;
         }
     }
     SolidState() = default;
@@ -1244,7 +1250,37 @@ struct SolidState {
     ~SolidState() { close(); }
 };
 
-using SolidRef = cadaclysm::detail::Ref<SolidState>;
+// A tessellation held by a view: one `CadaclysmBlacksmithTessellation`, freed once,
+// outliving any re-mesh of the solid it came from and that solid's own close(). A
+// view's `Held` is a shared_ptr so copying a Mesh/Mesh64/EdgePolylines/FaceTriangles
+// shares the same handle rather than tessellating again.
+struct HeldTessellation {
+    CadaclysmBlacksmithTessellation* handle;
+    explicit HeldTessellation(CadaclysmBlacksmithTessellation* h) noexcept : handle(h) {}
+    ~HeldTessellation() { ::cadaclysm_blacksmith_tessellation_free(handle); }
+    HeldTessellation(const HeldTessellation&) = delete;
+    HeldTessellation& operator=(const HeldTessellation&) = delete;
+};
+using Held = std::shared_ptr<const HeldTessellation>;
+
+// Declared, not used: `cadaclysm_blacksmith_mesh`/`_mesh64`/`_mesh_face_triangles`/
+// `_edge_polylines` are the raw entry points Solid::mesh() and its three neighbours called
+// before each held a tessellation of its own (HeldTessellation, above). Nothing in this
+// wrapper calls them any more -- but Python's Pyodide build still does, since there is
+// nothing to hold under wasm, its JS arrays being copies anyway
+// (cadaclysm_blacksmith.py, the `_WASM` branch) -- and the SDK's cross-language parity
+// check requires every wrapper on its PARITY list to declare whatever Python does. Kept
+// unreachable, the way the new tessellation entry points stay declared and unused in Node
+// and Rust, and the way Node's own `defaultSchema()` stays for the same gate.
+[[maybe_unused]] inline void legacy_tessellation_entry_points_for_parity(const CadaclysmBlacksmithSolid* solid,
+                                                                          double tolerance) {
+    if (solid == nullptr) {
+        (void)::cadaclysm_blacksmith_mesh(solid, tolerance);
+        (void)::cadaclysm_blacksmith_mesh64(solid, tolerance);
+        (void)::cadaclysm_blacksmith_mesh_face_triangles(solid, tolerance);
+        (void)::cadaclysm_blacksmith_edge_polylines(solid, tolerance);
+    }
+}
 
 inline void slant_raw(const Slant& slant, double (&out)[3]) {
     out[0] = slant.at;
@@ -1261,8 +1297,9 @@ inline void axis_raw(const AxisLine& axis, double (&out)[6]) {
 
 }  // namespace detail
 
-// A solid's triangles, borrowed from its tessellation cache: valid until the solid is
-// closed or meshed at another tolerance. copy() for arrays that must outlive that.
+// A solid's triangles, from a tessellation this view owns: outlives any later
+// re-mesh of the solid at another tolerance, and the solid's own close(). copy() for
+// arrays you would rather own outright than keep this view alive for.
 class Mesh {
 public:
     Span<const float> positions() const {
@@ -1295,20 +1332,21 @@ public:
 
 private:
     friend class Solid;
-    Mesh(detail::SolidRef solid, const CadaclysmBlacksmithMesh& data) : solid_(std::move(solid)), raw_(data) {}
+    Mesh(detail::Held held, const CadaclysmBlacksmithMesh& data) : held_(std::move(held)), raw_(data) {}
     const CadaclysmBlacksmithMesh& raw() const {
-        solid_.get("blacksmith::Mesh");
+#if CADACLYSM_CHECKED
+        if (!held_) cadaclysm::detail::bad_access("blacksmith::Mesh", "the mesh is empty (moved from)");
+#endif
         return raw_;
     }
 
-    detail::SolidRef solid_;
+    detail::Held held_;
     CadaclysmBlacksmithMesh raw_;
 };
 
-// Mesh in `double`, from the same tessellation cache -- the same triangles and
-// indices, Mesh's `float` positions and normals being exactly these narrowed. Borrowed
-// like Mesh, under the same rule: valid until the solid is closed or meshed again at a
-// different tolerance (checked the same way Mesh is, through the solid's generation).
+// Mesh in `double`, from the same held tessellation -- the same triangles and
+// indices, Mesh's `float` positions and normals being exactly these narrowed. Owns
+// its tessellation exactly like Mesh, under the same rule.
 class Mesh64 {
 public:
     Span<const double> positions() const {
@@ -1341,17 +1379,20 @@ public:
 
 private:
     friend class Solid;
-    Mesh64(detail::SolidRef solid, const CadaclysmBlacksmithMesh64& data) : solid_(std::move(solid)), raw_(data) {}
+    Mesh64(detail::Held held, const CadaclysmBlacksmithMesh64& data) : held_(std::move(held)), raw_(data) {}
     const CadaclysmBlacksmithMesh64& raw() const {
-        solid_.get("blacksmith::Mesh64");
+#if CADACLYSM_CHECKED
+        if (!held_) cadaclysm::detail::bad_access("blacksmith::Mesh64", "the mesh64 is empty (moved from)");
+#endif
         return raw_;
     }
 
-    detail::SolidRef solid_;
+    detail::Held held_;
     CadaclysmBlacksmithMesh64 raw_;
 };
 
-// A solid's feature edges as polylines, borrowed like Mesh: row i is 3 floats a point.
+// A solid's feature edges as polylines, from a tessellation this view owns exactly
+// like Mesh: row i is 3 floats a point.
 class EdgePolylines {
 public:
     std::size_t size() const { return raw().polyline_count; }
@@ -1378,20 +1419,22 @@ public:
 
 private:
     friend class Solid;
-    EdgePolylines(detail::SolidRef solid, const CadaclysmBlacksmithPolylines& data) : solid_(std::move(solid)), raw_(data) {}
+    EdgePolylines(detail::Held held, const CadaclysmBlacksmithPolylines& data) : held_(std::move(held)), raw_(data) {}
     const CadaclysmBlacksmithPolylines& raw() const {
-        solid_.get("blacksmith::EdgePolylines");
+#if CADACLYSM_CHECKED
+        if (!held_) cadaclysm::detail::bad_access("blacksmith::EdgePolylines", "the edge polylines are empty (moved from)");
+#endif
         return raw_;
     }
 
-    detail::SolidRef solid_;
+    detail::Held held_;
     CadaclysmBlacksmithPolylines raw_;
 };
 
 // How many triangles each face contributed to the mesh at the same tolerance, one count
 // per face in face order: the mesh's triangles run face by face, so face f's are the
 // counts[f] after the first sum(counts[0..f]), and the counts sum to the mesh's
-// triangle count. Borrowed like Mesh.
+// triangle count. Owns a tessellation exactly like Mesh.
 class FaceTriangles {
 public:
     Span<const std::uint32_t> counts() const {
@@ -1409,13 +1452,15 @@ public:
 
 private:
     friend class Solid;
-    FaceTriangles(detail::SolidRef solid, const CadaclysmBlacksmithFaceTriangles& data) : solid_(std::move(solid)), raw_(data) {}
+    FaceTriangles(detail::Held held, const CadaclysmBlacksmithFaceTriangles& data) : held_(std::move(held)), raw_(data) {}
     const CadaclysmBlacksmithFaceTriangles& raw() const {
-        solid_.get("blacksmith::FaceTriangles");
+#if CADACLYSM_CHECKED
+        if (!held_) cadaclysm::detail::bad_access("blacksmith::FaceTriangles", "the face triangles are empty (moved from)");
+#endif
         return raw_;
     }
 
-    detail::SolidRef solid_;
+    detail::Held held_;
     CadaclysmBlacksmithFaceTriangles raw_;
 };
 
@@ -1531,10 +1576,11 @@ inline FemVertex fem_vertex_of(const CadaclysmBlacksmithFemVertex& raw) {
 // to hand it over would cost that twice.
 //
 // **The owner of those spans is this object, not the solid, and it carries no generation
-// check.** This is the one array product here that Solid::mesh()'s rule does not apply to:
-// meshing the solid again at another tolerance replaces the tessellation cache a Mesh
-// borrows, and a FEM mesh is not in that cache -- it is a handle of its own, which nothing
-// but free() (or the destructor) ends. Closing the solid does not end it either.
+// check -- and neither do Mesh, Mesh64, EdgePolylines or FaceTriangles any more.** Those
+// four now each hold a tessellation of their own too (HeldTessellation, above), so a
+// FEM mesh is no longer the one array product here without a generation guard: it never
+// was in the solid's tessellation cache to begin with -- it is a handle of its own, which
+// nothing but free() (or the destructor) ends. Closing the solid does not end it either.
 //
 // Every accessor below checks the handle first, and **in both modes**, not only under
 // CADACLYSM_CHECKED: what it guards is a pointer handed to C, as Meshlets::live() guards
@@ -1644,6 +1690,24 @@ public:
                 return ::cadaclysm_blacksmith_fem_mesh_folded_edge(handle, i, a, b, edge);
             },
             [](std::uint32_t i) { return detail::kernel_error(("fem mesh folded edge " + std::to_string(i)).c_str()); });
+    }
+
+    // Every pair of triangles that pass through each other, as {a, b} with a < b,
+    // sorted: an edge of one through the other's interior. Their B-rep faces are
+    // triangle_face()[a] and [b].
+    //
+    // **Computed for every solid, open or closed.** The census watertight(), open_edges()
+    // and folded_edges() report is topological and cannot see a surface passing through
+    // itself; a mesh is ready for a volume mesher when it is watertight() **and** this is
+    // empty -- Gmsh refuses one that crosses. A copy.
+    Result<std::vector<std::array<std::uint32_t, 2>>> crossings() const {
+        const CadaclysmBlacksmithFemMesh* handle = live("blacksmith::FemMesh::crossings");
+        return cadaclysm::detail::crossing_rows(
+            ::cadaclysm_blacksmith_fem_mesh_crossing_count(handle),
+            [handle](std::uint32_t i, std::uint32_t* a, std::uint32_t* b) {
+                return ::cadaclysm_blacksmith_fem_mesh_crossing(handle, i, a, b);
+            },
+            [](std::uint32_t i) { return detail::kernel_error(("fem mesh crossing " + std::to_string(i)).c_str()); });
     }
 
     // The welded mesh closes -- and so does the topology behind it. **False for every solid
@@ -1790,6 +1854,11 @@ public:
     static Result<Solid> torus(double major, double minor) { return wrap(::cadaclysm_blacksmith_torus(major, minor)); }
     static Result<Solid> wedge(double x, double y, double z, double top_x) {
         return wrap(::cadaclysm_blacksmith_wedge(x, y, z, top_x));
+    }
+    // A right pyramid of `sides` sides (at least 3): its base the regular polygon of circumradius `r`
+    // on z=0, its first corner on +x, its tip at (0, 0, `h`).
+    static Result<Solid> pyramid(std::uint32_t sides, double r, double h) {
+        return wrap(::cadaclysm_blacksmith_pyramid(sides, r, h));
     }
 
     // -- from profiles
@@ -2060,15 +2129,23 @@ public:
         if (!kind) return detail::kernel_error("face_kind");
         return std::string(kind);
     }
-    // bounds_at(DEFAULT_TOLERANCE).
-    Result<std::pair<Vec3, Vec3>> bounds() const { return bounds_at(DEFAULT_TOLERANCE); }
+    // The solid's axis-aligned box, at the same cost whatever its size: its mesh at a
+    // thousandth of its own extent, in `double`, so the box is inside the exact one and
+    // short of it by at most that. Worked out once per solid, apart from the tessellation
+    // `mesh` caches. `bounds_at` is the box of the mesh at a tolerance you name.
+    Result<std::pair<Vec3, Vec3>> bounds() const {
+        Vec3 lo{}, hi{};
+        if (!::cadaclysm_blacksmith_box(raw_handle("box"), lo.data(), hi.data())) {
+            return detail::kernel_error("box");
+        }
+        return std::make_pair(lo, hi);
+    }
     // Axis-aligned (min, max) over the cached tessellation at `tolerance`.
     Result<std::pair<Vec3, Vec3>> bounds_at(double tolerance) const {
         Vec3 lo{}, hi{};
         if (!::cadaclysm_blacksmith_bounds(raw_handle("bounds"), tolerance, lo.data(), hi.data())) {
             return detail::kernel_error("bounds");
         }
-        state_->filled(tolerance);
         return std::make_pair(lo, hi);
     }
     // bounds_at(tolerance), taken from the tessellation cache's own unnarrowed
@@ -2079,7 +2156,6 @@ public:
         if (!::cadaclysm_blacksmith_bounds64(raw_handle("bounds64"), tolerance, lo.data(), hi.data())) {
             return detail::kernel_error("bounds64");
         }
-        state_->filled(tolerance);
         return std::make_pair(lo, hi);
     }
     // Edges of a mesh at `tolerance` not bound by exactly two triangles; 0 when closed.
@@ -2105,18 +2181,18 @@ public:
 
     // -- out
     Result<Mesh> mesh(double tolerance = DEFAULT_TOLERANCE) const {
-        CadaclysmBlacksmithMesh data = ::cadaclysm_blacksmith_mesh(raw_handle("mesh"), tolerance);
-        if (!data.positions) return detail::kernel_error("mesh");
-        state_->filled(tolerance);
-        return Mesh(detail::SolidRef(state_), data);
+        CadaclysmBlacksmithTessellation* held = ::cadaclysm_blacksmith_tessellation(raw_handle("mesh"), tolerance);
+        if (!held) return detail::tessellation_error("mesh");
+        detail::Held owned = std::make_shared<const detail::HeldTessellation>(held);
+        return Mesh(std::move(owned), ::cadaclysm_blacksmith_tessellation_mesh(held));
     }
-    // mesh(tolerance), from the same cache, unnarrowed: the same triangles and
-    // indices, mesh()'s `float` positions and normals being exactly these narrowed.
+    // mesh(tolerance), from the same held tessellation, unnarrowed: the same triangles
+    // and indices, mesh()'s `float` positions and normals being exactly these narrowed.
     Result<Mesh64> mesh64(double tolerance = DEFAULT_TOLERANCE) const {
-        CadaclysmBlacksmithMesh64 data = ::cadaclysm_blacksmith_mesh64(raw_handle("mesh64"), tolerance);
-        if (!data.positions) return detail::kernel_error("mesh64");
-        state_->filled(tolerance);
-        return Mesh64(detail::SolidRef(state_), data);
+        CadaclysmBlacksmithTessellation* held = ::cadaclysm_blacksmith_tessellation(raw_handle("mesh64"), tolerance);
+        if (!held) return detail::tessellation_error("mesh64");
+        detail::Held owned = std::make_shared<const detail::HeldTessellation>(held);
+        return Mesh64(std::move(owned), ::cadaclysm_blacksmith_tessellation_mesh64(held));
     }
     // This solid meshed for a solver, as a FemMesh: nodes welded by bits, triangles wound
     // outward, each node tagged with the lowest-dimension B-rep entity it lies on, and every
@@ -2162,8 +2238,9 @@ public:
     // **No unlicensed notice here**: FemMesh::msh_text() and FemMesh::save_msh() print it,
     // this library noticing on its writers rather than on its builders.
     //
-    // **It does not fill the tessellation cache**, so it neither stales a Mesh taken before
-    // it nor is staled by one taken after: read FemMesh.
+    // **It does not fill the tessellation cache**, so it has nothing to do with a Mesh
+    // either way: a Mesh owns a held tessellation of its own now and cannot be staled at
+    // all, by fem_mesh or anything else -- read FemMesh.
     Result<FemMesh> fem_mesh(double tolerance = 0.01, double max_size = 0.0,
                              const std::optional<Frame>& placement = std::nullopt, const Progress& progress = {}) const {
         const CadaclysmBlacksmithSolid* solid = raw_handle("fem_mesh");
@@ -2190,10 +2267,10 @@ public:
     }
 
     Result<EdgePolylines> edge_polylines(double tolerance = DEFAULT_TOLERANCE) const {
-        CadaclysmBlacksmithPolylines data = ::cadaclysm_blacksmith_edge_polylines(raw_handle("edge_polylines"), tolerance);
-        if (!data.offsets) return detail::kernel_error("edge_polylines");
-        state_->filled(tolerance);
-        return EdgePolylines(detail::SolidRef(state_), data);
+        CadaclysmBlacksmithTessellation* held = ::cadaclysm_blacksmith_tessellation(raw_handle("edge_polylines"), tolerance);
+        if (!held) return detail::tessellation_error("edge_polylines");
+        detail::Held owned = std::make_shared<const detail::HeldTessellation>(held);
+        return EdgePolylines(std::move(owned), ::cadaclysm_blacksmith_tessellation_edge_polylines(held));
     }
     // A colour per polyline of edge_polylines() at the same tolerance, as drawn: nullopt
     // for a polyline on no coloured edge; empty where the solid has no edge paint at all.
@@ -2201,11 +2278,6 @@ public:
     Result<std::vector<std::optional<Vec3>>> edge_polyline_colours(double tolerance = DEFAULT_TOLERANCE) const {
         CadaclysmBlacksmithColours data = ::cadaclysm_blacksmith_edge_polyline_colours(raw_handle("edge_polyline_colours"), tolerance);
         if (!data.rgb && !detail::text(::cadaclysm_blacksmith_last_error()).empty()) return detail::kernel_error("edge_polyline_colours");
-        // This call tessellates like every other cache reader, even to report "no paint": it
-        // can replace the cache a view taken earlier is still borrowing, so it must bump the
-        // generation those views check, even though this method copies its own result out and
-        // keeps nothing borrowed itself.
-        state_->filled(tolerance);
         std::vector<std::optional<Vec3>> out;
         if (!data.rgb) return out;
         out.reserve(data.count);
@@ -2216,12 +2288,12 @@ public:
         return out;
     }
     // How many triangles each face meshed to at `tolerance`, one count per face in face
-    // order; what a viewer colours a face by. Same cache and lifetime as mesh().
+    // order; what a viewer colours a face by. From the same held tessellation as mesh().
     Result<FaceTriangles> face_triangles(double tolerance = DEFAULT_TOLERANCE) const {
-        CadaclysmBlacksmithFaceTriangles data = ::cadaclysm_blacksmith_mesh_face_triangles(raw_handle("face_triangles"), tolerance);
-        if (!data.counts) return detail::kernel_error("mesh_face_triangles");
-        state_->filled(tolerance);
-        return FaceTriangles(detail::SolidRef(state_), data);
+        CadaclysmBlacksmithTessellation* held = ::cadaclysm_blacksmith_tessellation(raw_handle("face_triangles"), tolerance);
+        if (!held) return detail::tessellation_error("mesh_face_triangles");
+        detail::Held owned = std::make_shared<const detail::HeldTessellation>(held);
+        return FaceTriangles(std::move(owned), ::cadaclysm_blacksmith_tessellation_face_triangles(held));
     }
     // `schema`: none (the built-in AP203), a schema file's path, a built-in schema's
     // name, or a custom schema's EXPRESS text.
@@ -2893,6 +2965,36 @@ public:
                                                                     placed.raw_handle("place_assembly"), frame12,
                                                                     owned ? owned->c_str() : nullptr);
         return place_result(raw, "assembly_place_assembly");
+    }
+
+    // Declare a rigid link called `name` over `placements` -- names of placements of this
+    // assembly itself, not of assemblies placed in it. An empty name, a name already
+    // taken by a link here, no placements, a placement named twice, one this assembly
+    // does not have, or one already in another link is refused and leaves the assembly as
+    // it was. Written as an AP242 kinematic link; a mechanism anywhere in the tree makes
+    // AP242 the default schema of step_text.
+    Result<void> link(std::string_view name, const std::vector<std::string>& placements) const {
+        std::string owned_name(name);
+        std::vector<const char*> pointers;
+        pointers.reserve(placements.size());
+        for (const std::string& p : placements) pointers.push_back(p.c_str());
+        if (!::cadaclysm_blacksmith_assembly_link(raw_handle("assembly_link"), owned_name.c_str(),
+                                                   pointers.empty() ? nullptr : pointers.data(), pointers.size())) {
+            return detail::kernel_error("assembly_link");
+        }
+        return {};
+    }
+    // Connect this assembly's links `start` and `end`, kept in that order, as a joint
+    // called `name`. An empty name, a name taken by another joint here, a link this
+    // assembly does not have, a link joined to itself, or a (start, end) pair already
+    // joined is refused; the reverse pair is a different joint.
+    Result<void> joint(std::string_view name, std::string_view start, std::string_view end) const {
+        std::string owned_name(name), owned_start(start), owned_end(end);
+        if (!::cadaclysm_blacksmith_assembly_joint(raw_handle("assembly_joint"), owned_name.c_str(), owned_start.c_str(),
+                                                    owned_end.c_str())) {
+            return detail::kernel_error("assembly_joint");
+        }
+        return {};
     }
 
     // This assembly, and everything placed under it, as one STEP file: this assembly the

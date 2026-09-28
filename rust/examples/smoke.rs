@@ -461,6 +461,7 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
     sheet_verbs(&plate)?;
     frames()?;
     assemblies()?;
+    mechanisms()?;
 
     // Colour: a gold plate joined with a blue pin -- gold overall, the pin's top blue.
     let gold = plate.coloured([0.8, 0.6, 0.4], None).map_err(e)?;
@@ -811,6 +812,46 @@ fn mechanism_checks(sample_path: &str) -> Result<(), String> {
         &format!("mechanism: hinge runs {}({}) -> {}({}), not arm(1) -> base(0)", start.name(), start.index(), end.name(), end.index()),
     )?;
     println!("mechanism: links {names:?}, hinge {}({}) -> {}({})", start.name(), start.index(), end.name(), end.index());
+
+    // The pair: revolute about Z, ranged -1.5..1.5, both contact frames at (0, 0, 100).
+    let pair = hinge.pair().ok_or_else(|| "mechanism: hinge has no pair".to_string())?;
+    check(pair.kind() == cadaclysm_sdk::PairKind::Revolute, &format!("mechanism: hinge's pair is {:?}, not revolute", pair.kind()))?;
+    check(pair.type_name().is_none(), "mechanism: a revolute pair has a type name")?;
+    check(pair.pitch().is_none(), "mechanism: a revolute pair has a pitch")?;
+    for raw in [pair.raw_frame_start(), pair.raw_frame_end()] {
+        check(
+            (raw[12] - 0.0).abs() < 1e-9 && (raw[13] - 0.0).abs() < 1e-9 && (raw[14] - 100.0).abs() < 1e-9,
+            &format!("mechanism: a pair frame's origin is not (0, 0, 100): {raw:?}"),
+        )?;
+        check(
+            (raw[8] - 0.0).abs() < 1e-9 && (raw[9] - 0.0).abs() < 1e-9 && (raw[10] - 1.0).abs() < 1e-9,
+            &format!("mechanism: a pair frame's z axis is not (0, 0, 1): {raw:?}"),
+        )?;
+    }
+    let freedoms = pair.freedoms();
+    check(freedoms.len() == 1, &format!("mechanism: pair has {} freedoms, not 1", freedoms.len()))?;
+    check(
+        freedoms[0].motion == cadaclysm_sdk::Motion::Rotation && freedoms[0].axis == cadaclysm_sdk::FreedomAxis::Z,
+        &format!("mechanism: freedom is {:?}, not rotation about z", freedoms[0]),
+    )?;
+    check(
+        freedoms[0].lower.map(|l| (l - -1.5).abs() < 1e-9).unwrap_or(false) && freedoms[0].upper.map(|u| (u - 1.5).abs() < 1e-9).unwrap_or(false),
+        &format!("mechanism: freedom range is {:?}..{:?}, not -1.5..1.5", freedoms[0].lower, freedoms[0].upper),
+    )?;
+
+    // The state: one named "open", one row (hinge, [0.5]).
+    let states = mechanism.states();
+    check(states.len() == 1, &format!("mechanism: {} states, not 1", states.len()))?;
+    check(states[0].index == 0 && states[0].name == "open", &format!("mechanism: state is ({}, {:?}), not (0, \"open\")", states[0].index, states[0].name))?;
+    check(states[0].values.len() == 1, &format!("mechanism: state has {} rows, not 1", states[0].values.len()))?;
+    let row = &states[0].values[0];
+    check(row.joint.name() == "hinge" && row.joint.index() == 0, &format!("mechanism: state row joint is {}({}), not hinge(0)", row.joint.name(), row.joint.index()))?;
+    check(row.values.len() == 1 && (row.values[0] - 0.5).abs() < 1e-9, &format!("mechanism: state row values are {:?}, not [0.5]", row.values))?;
+    println!("mechanism: pair {:?}, freedoms {}, states {}", pair.kind(), freedoms.len(), states.len());
+
+    // A file with no mechanism has no joints, links or states.
+    let cube = cadaclysm_sdk::open(sample_path).map_err(e)?;
+    check(cube.links().is_empty() && cube.joints().is_empty() && cube.states().is_empty(), "mechanism: cube has links, joints or states")?;
     Ok(())
 }
 
@@ -940,6 +981,113 @@ fn assemblies() -> Result<(), String> {
     check(Solid::cuboid(1.0, 1.0, 1.0).map_err(e)?.name().is_none(), "cuboid(1,1,1).name is not None")?;
 
     println!("assemblies: 11 facts checked (placement names, STEP counts, cycles, naming, read-back structure)");
+    Ok(())
+}
+
+/// `Assembly::link`/`Assembly::joint`, at parity with the Python reference's
+/// `_mechanism()` and its two mechanism tests -- see Node's `test/blacksmith.test.js`
+/// for the same facts worked out, and this crate's own `blacksmith::tests` for the
+/// same build in test form.
+fn mechanisms() -> Result<(), String> {
+    let e = |e: cadaclysm_sdk::Error| format!("mechanisms: {e}");
+    let at = |p: [f64; 3]| Frame::xy(p);
+
+    let bolt = Solid::cylinder(1.0, 6.0).and_then(|s| s.named("bolt")).map_err(e)?;
+    let plate = Solid::cuboid(20.0, 10.0, 2.0).and_then(|s| s.named("plate")).map_err(e)?;
+
+    let bracket = Assembly::new("bracket").map_err(e)?;
+    bracket.place_solid(&plate, &Frame::xy([0.0; 3]), None).map_err(e)?;
+    bracket.place_solid(&bolt, &at([5.0, 5.0, 2.0]), None).map_err(e)?;
+    bracket.place_solid(&bolt, &at([15.0, 5.0, 2.0]), None).map_err(e)?;
+    bracket.link("fixed", &["plate"]).map_err(e)?;
+    bracket.link("bolts", &["bolt", "bolt 2"]).map_err(e)?;
+    bracket.joint("screw", "fixed", "bolts").map_err(e)?;
+
+    let arm = Assembly::new("arm").map_err(e)?;
+    arm.place_solid(&plate, &Frame::xy([0.0; 3]), Some("base")).map_err(e)?;
+    arm.place_assembly(&bracket, &at([0.0, 0.0, 10.0]), Some("upper")).map_err(e)?;
+    arm.place_solid(&bolt, &at([5.0, 5.0, 2.0]), Some("pin")).map_err(e)?;
+    arm.link("ground", &["base"]).map_err(e)?;
+    arm.link("upper arm", &["upper", "pin"]).map_err(e)?;
+    arm.joint("shoulder", "ground", "upper arm").map_err(e)?;
+
+    // Fact 1: the default schema (no explicit schema) carries the kinematic entities.
+    let text = arm.step_text(None, Unit::Millimetre).map_err(e)?;
+    let count = |needle: &str| text.matches(needle).count();
+    check(text.contains("AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF"), "arm.step_text() is not AP242")?;
+    check(
+        count("=KINEMATIC_LINK(") == 4
+            && count("=RIGID_LINK_REPRESENTATION(") == 6
+            && count("=CONTEXT_DEPENDENT_KINEMATIC_LINK_REPRESENTATION(") == 6
+            && count("=KINEMATIC_JOINT(") == 2
+            && count("=KINEMATIC_TOPOLOGY_STRUCTURE(") == 2,
+        "arm.step_text()'s kinematic entity counts are not 4/6/6/2/2",
+    )?;
+
+    // Fact 2: an explicit schema without kinematic entities is refused.
+    let no_kinematics = arm.step_text(Some("config_control_design"), Unit::Millimetre).err().map(|err| err.to_string()).unwrap_or_default();
+    check(
+        no_kinematics.contains("no kinematic entities"),
+        &format!("config_control_design was not refused for lacking kinematic entities: {no_kinematics:?}"),
+    )?;
+
+    // Fact 3: each of the eleven refusals raises with exactly its message, and
+    // afterwards the STEP text (with `FILE_NAME(` lines stripped) is unchanged.
+    let no_stamp = |text: &str| text.lines().filter(|line| !line.starts_with("FILE_NAME(")).collect::<Vec<_>>().join("\n");
+    let before = no_stamp(&arm.step_text(None, Unit::Millimetre).map_err(e)?);
+    let refusals: Vec<(Box<dyn Fn() -> Result<(), cadaclysm_sdk::Error>>, &str)> = vec![
+        (Box::new(|| arm.link("", &["base"])), "link: a name cannot be empty"),
+        (Box::new(|| arm.link("ground", &["base"])), "link: assembly 'arm' already has a link named 'ground'"),
+        (Box::new(|| arm.link("free", &[])), "link: link 'free' names no placements"),
+        (Box::new(|| arm.link("free", &["base", "base"])), "link: link 'free' names placement 'base' twice"),
+        (Box::new(|| arm.link("free", &["bolt"])), "link: assembly 'arm' has no placement named 'bolt'"),
+        (
+            Box::new(|| arm.link("free", &["pin"])),
+            "link: placement 'pin' of assembly 'arm' is already in link 'upper arm'",
+        ),
+        (Box::new(|| arm.joint("", "ground", "upper arm")), "joint: a name cannot be empty"),
+        (
+            Box::new(|| arm.joint("shoulder", "upper arm", "ground")),
+            "joint: assembly 'arm' already has a joint named 'shoulder'",
+        ),
+        (Box::new(|| arm.joint("wrist", "ground", "hand")), "joint: assembly 'arm' has no link named 'hand'"),
+        (Box::new(|| arm.joint("wrist", "ground", "ground")), "joint: joint 'wrist' joins link 'ground' to itself"),
+        (
+            Box::new(|| arm.joint("wrist", "ground", "upper arm")),
+            "joint: assembly 'arm' already joins 'ground' to 'upper arm'",
+        ),
+    ];
+    for (call, message) in &refusals {
+        let got = call().err().map(|err| err.to_string()).unwrap_or_default();
+        check(got == *message, &format!("refusal message was {got:?}, not {message:?}"))?;
+    }
+    check(
+        no_stamp(&arm.step_text(None, Unit::Millimetre).map_err(e)?) == before,
+        "arm.step_text() changed across the eleven refused calls",
+    )?;
+
+    // Fact 5: read-back through `to_scene`. Checked ahead of fact 4's reverse "back"
+    // joint, so the joint list below is exactly the two joints the fixture built.
+    let scene = arm.to_scene(None).map_err(e)?;
+    let link_names: Vec<String> = scene.links().iter().map(|l| l.name()).collect();
+    check(link_names == ["fixed", "bolts", "ground", "upper arm"], "arm.to_scene()'s link names are wrong")?;
+    let node_counts: Vec<usize> = scene.links().iter().map(|l| l.nodes().len()).collect();
+    check(node_counts == [1, 2, 1, 2], "arm.to_scene()'s link node counts are not 1/2/1/2")?;
+    let joint_facts: Vec<(String, u32, u32)> =
+        scene.joints().iter().map(|j| (j.name(), j.start().index(), j.end().index())).collect();
+    check(
+        joint_facts == [("screw".to_string(), 0, 1), ("shoulder".to_string(), 2, 3)],
+        "arm.to_scene()'s joints are not (screw, 0, 1) and (shoulder, 2, 3)",
+    )?;
+    check(
+        !scene.diagnostics().iter().any(|d| d.starts_with("kinematics:")),
+        "arm.to_scene() has a kinematics: diagnostic",
+    )?;
+
+    // Fact 4: the reverse pair is a new joint.
+    arm.joint("back", "upper arm", "ground").map_err(e)?;
+
+    println!("mechanisms: 5 facts checked (kinematic STEP counts, eleven exact refusals, unchanged file, reverse joint, Scene read-back)");
     Ok(())
 }
 
@@ -1110,6 +1258,40 @@ fn fem_census_wiring(sheet: &Path) -> Result<(), String> {
     check(folds[0] == (2, 0, cadaclysm_sdk::NONE), &format!("fem census: the fold reads {:?}, not (2, 0, NONE)", folds[0]))?;
     check((cracks[0].0, cracks[0].1) == (1, 2), &format!("fem census: the first crack reads {:?}, not (1, 2, NONE)", cracks[0]))?;
     println!("fem census: open-sheet.scad reads {} cracks and {} fold at ({}, {})", cracks.len(), folds.len(), folds[0].0, folds[0].1);
+
+    // Crossings: `samples/dented-box.stp` is a closed B-rep box whose top dips through its
+    // own floor, 296 pairs measured 2026-09-26 -- once through this reader, and once
+    // through the kernel's own open of the same file, which must agree with it.
+    let dented_path = sheet.with_file_name("dented-box.stp");
+    let dented_scene = cadaclysm_sdk::open(&dented_path).map_err(e)?;
+    let dented_node = dented_scene.walk().find(|n| n.can_mesh()).ok_or("fem crossings: no meshable node in dented-box.stp")?;
+    let dented_mesh = dented_node.fem_mesh(0.01, 0.0, None).map_err(e)?;
+    check(
+        dented_mesh.watertight() && !dented_mesh.from_mesh(),
+        "fem crossings: dented-box.stp is not a watertight brep",
+    )?;
+    let dented_crossings = dented_mesh.crossings().map_err(e)?;
+    check(
+        dented_crossings.len() == 296,
+        &format!("fem crossings: dented-box.stp reads {} pairs, not 296", dented_crossings.len()),
+    )?;
+    check(
+        dented_crossings[0].0 < dented_crossings[0].1,
+        &format!("fem crossings: the first pair reads {:?}, not a < b", dented_crossings[0]),
+    )?;
+
+    let kernel_dented = Solid::open(&dented_path, None).map_err(|err| format!("fem crossings: {err}"))?;
+    let kernel_dented_mesh = kernel_dented.fem_mesh(0.01, 0.0, None).map_err(e)?;
+    let kernel_dented_crossings = kernel_dented_mesh.crossings().map_err(e)?;
+    check(
+        kernel_dented_crossings.len() == 296,
+        &format!("kernel fem crossings: dented-box.stp reads {} pairs, not 296", kernel_dented_crossings.len()),
+    )?;
+    println!(
+        "fem crossings: dented-box.stp reads {} pairs through the reader and {} through the kernel",
+        dented_crossings.len(),
+        kernel_dented_crossings.len()
+    );
     Ok(())
 }
 
@@ -1144,8 +1326,8 @@ fn fem_reader(scene: &Scene, is_cube: bool) -> Result<(), String> {
         "fem: a from_mesh body has edges, vertices or a node off face 0",
     )?;
     check(
-        mesh.watertight() && mesh.open_edges().map_err(e)?.is_empty() && mesh.folded_edges().map_err(e)?.is_empty(),
-        "fem: the cube's own mesh is not watertight with both censuses empty",
+        mesh.watertight() && mesh.open_edges().map_err(e)?.is_empty() && mesh.folded_edges().map_err(e)?.is_empty() && mesh.crossings().map_err(e)?.is_empty(),
+        "fem: the cube's own mesh is not watertight with both censuses empty and no crossings",
     )?;
     check(
         mesh.min_angle() > 0.0 && mesh.min_angle() <= 60.0 && (mesh.worst_triangle() as usize) < triangles.len() && mesh.longest_edge() > 0.0,
@@ -1305,8 +1487,8 @@ fn fem_brep(scene: &Scene) -> Result<(), String> {
         "fem brep: a vertex with no position carries a point that is not zeroed",
     )?;
     check(
-        mesh.watertight() && mesh.open_edges().map_err(e)?.is_empty() && mesh.folded_edges().map_err(e)?.is_empty(),
-        "fem brep: the closed filleted part is not watertight with both censuses empty",
+        mesh.watertight() && mesh.open_edges().map_err(e)?.is_empty() && mesh.folded_edges().map_err(e)?.is_empty() && mesh.crossings().map_err(e)?.is_empty(),
+        "fem brep: the closed filleted part is not watertight with both censuses empty and no crossings",
     )?;
     println!(
         "fem brep: {} nodes, {} edges (edge 0 id={}), {} vertices, {} faces",
@@ -1352,8 +1534,8 @@ fn fem_kernel(rounded: &Solid, sheet: &Solid) -> Result<(), String> {
     check(!mesh.from_mesh(), "kernel fem: a solid reported from_mesh -- the kernel has no mesh path")?;
     check(mesh.face_count() == 15, &format!("kernel fem: the filleted part has {} faces, not 15", mesh.face_count()))?;
     check(
-        mesh.watertight() && mesh.open_edges().map_err(e)?.is_empty() && mesh.folded_edges().map_err(e)?.is_empty(),
-        "kernel fem: the filleted part is not watertight with both censuses empty",
+        mesh.watertight() && mesh.open_edges().map_err(e)?.is_empty() && mesh.folded_edges().map_err(e)?.is_empty() && mesh.crossings().map_err(e)?.is_empty(),
+        "kernel fem: the filleted part is not watertight with both censuses empty and no crossings",
     )?;
     let (node_count, longest) = (mesh.nodes().len(), mesh.longest_edge());
     drop(edges);

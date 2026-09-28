@@ -125,7 +125,7 @@ return function(t)
       t.eq(r.size % 3, 0)
     end
     for _, s in ipairs({ bs.Solid.cuboid(1, 2, 3), bs.Solid.cylinder(1, 2), bs.Solid.cone(1, 2), bs.Solid.sphere(1),
-      bs.Solid.torus(3, 1), bs.Solid.wedge(2, 2, 2, 1) }) do
+      bs.Solid.torus(3, 1), bs.Solid.wedge(2, 2, 2, 1), bs.Solid.pyramid(4, 1, 2) }) do
       t.ok(s.faces > 0)
       s:close()
     end
@@ -895,7 +895,7 @@ return function(t)
     t.eq(e.message, "profile_text: the font bytes are not a font")
   end)
 
-  t.test("mesh and edge views borrow the cache and refuse to read once stale", function()
+  t.test("mesh and edge views own their tessellation: a re-mesh, bounds_at, edge_polyline_colours and the solid's close leave them reading the same numbers", function()
     local ball = bs.Solid.sphere(5)
     local positions, normals, indices = ball:mesh(0.05)
     t.ok(positions.pointer ~= nil)
@@ -908,30 +908,32 @@ return function(t)
     t.eq(positions.pointer[3], positions:get(3), "the raw pointer reads what get does")
     local kept = indices:copy()
     t.eq(#kept, indices.size)
-    -- The same tolerance again is the same cache: the first views still read.
+    local kept_p0, kept_n0, kept_i0 = positions:get(0), normals:get(0), indices:get(0)
+    -- The same tolerance again is a fresh held tessellation of its own.
     local again = ball:mesh(0.05)
     t.eq(again.size, positions.size)
     t.eq(positions:get(0), again:get(0))
-    t.eq(positions.valid, true)
-    -- Another tolerance replaces the cache: the old views refuse.
+    t.ok(positions.valid)
+    -- Another tolerance re-meshes the solid's own cache; the views held above own their
+    -- tessellation, so nothing about them changes.
     local coarse = ball:mesh(0.5)
     t.ok(coarse.size < positions.size, "coarser is fewer vertices")
-    t.eq(positions.valid, false)
-    local e = t.raises(function() return positions.pointer end, "the view is stale")
-    t.ok(is_build_error(e))
-    t.raises(function() indices:get(0) end, "stale")
-    t.raises(function() normals:copy() end, "stale")
-    -- Back at 0.05 is a new filling: the first views stay stale, the new one reads.
+    t.ok(positions.valid)
+    t.eq(positions:get(0), kept_p0)
+    t.eq(indices:get(0), kept_i0)
+    t.eq(normals:get(0), kept_n0)
+    -- Back at 0.05 is yet another held tessellation of its own: the earlier ones read on.
     local back = ball:mesh(0.05)
-    t.raises(function() positions:get(0) end, "stale")
-    t.raises(function() coarse:get(0) end, "stale")
+    t.eq(positions:get(0), kept_p0)
+    t.ok(coarse.valid)
     t.eq(back.size, again.size)
-    -- bounds and edge polylines share the cache.
+    -- bounds_at and edge_polylines mesh the solid's own cache too; views already held
+    -- ignore it.
     local runs = ball:edge_polylines(0.05)
-    t.eq(back.valid, true, "the same tolerance keeps the mesh")
+    t.ok(back.valid, "the same tolerance keeps reading fine")
     ball:bounds_at(0.2)
-    t.eq(back.valid, false, "bounds at another tolerance re-meshes")
-    for _, r in ipairs(runs) do t.eq(r.valid, false) end
+    t.ok(back.valid, "bounds_at at another tolerance does not touch a view already held")
+    for _, r in ipairs(runs) do t.ok(r.valid) end
     local box = bs.Solid.cuboid(10, 10, 10)
     local edges = box:edge_polylines(0.05)
     t.eq(#edges, 12)
@@ -943,17 +945,21 @@ return function(t)
       points = points + r.shape[1]
     end
     t.ok(#edges[1]:copy() == edges[1].size)
-    -- edge_polyline_colours reads the same cache as edge_polylines: asked at another
-    -- tolerance it must invalidate views taken from an earlier filling too, even where the
-    -- solid has no edge paint at all (the branch that copies out an empty colour list) --
-    -- the cache is still replaced under it.
-    t.eq(edges[1].valid, true)
+    -- edge_polyline_colours reads the solid's own cache too, at another tolerance, even
+    -- where the solid has no edge paint at all (the branch that copies out an empty
+    -- colour list): the view held from edge_polylines above owns its own tessellation and
+    -- keeps reading regardless.
+    local edge0_first = edges[1]:get(0)
+    t.ok(edges[1].valid)
     box:edge_polyline_colours(0.5)
-    t.eq(edges[1].valid, false,
-      "edge_polyline_colours at a new tolerance did not invalidate the earlier edge_polylines view")
-    -- Closing the solid invalidates every view; a copy lives on.
+    t.ok(edges[1].valid,
+      "edge_polyline_colours at a new tolerance touched the earlier edge_polylines view")
+    t.eq(edges[1]:get(0), edge0_first)
+    -- Closing the solid does not touch a view already held: it owns its tessellation, not
+    -- the solid's.
     box:close()
-    t.raises(function() edges[1]:get(0) end, "closed")
+    t.eq(edges[1]:get(0), edge0_first)
+    t.ok(edges[1].valid)
     t.eq(#kept, indices.size)
     t.raises(function() box:mesh() end, "solid: closed")
   end)
@@ -980,9 +986,12 @@ return function(t)
       t.near(lo64[k], lo32[k], 1e-6)
       t.near(hi64[k], hi32[k], 1e-6)
     end
-    -- Another tolerance replaces the shared cache: mesh64's views go stale too.
+    -- Another tolerance re-meshes the solid's own cache; mesh64's held tessellation is its
+    -- own and keeps reading.
+    local kept_p64_0 = p64:get(0)
     ball:mesh(0.5)
-    t.raises(function() return p64:get(0) end, "stale")
+    t.eq(p64:get(0), kept_p64_0)
+    t.ok(p64.valid)
     ball:close()
     t.raises(function() ball:mesh64() end, "solid: closed")
   end)
@@ -1008,7 +1017,7 @@ return function(t)
     far:close()
   end)
 
-  t.test("a view keeps its solid alive under collection pressure", function()
+  t.test("a view keeps its tessellation alive under collection pressure", function()
     local positions, _, indices = bs.Solid.sphere(3):mesh(0.1)   -- the solid itself is dropped
     local views = {}
     for i = 1, 300 do
@@ -1018,7 +1027,7 @@ return function(t)
       bs.SweepPath.at({ 0, 0, 0 }):line_to({ 0, 0, 1 })
     end
     for _ = 1, 3 do collectgarbage() end
-    t.eq(positions.valid, true)
+    t.ok(positions.valid)
     local x, y, z = positions:row(0)
     t.near(math.sqrt(x * x + y * y + z * z), 3, 0.11)
     t.eq(#indices:copy(), indices.size)
@@ -1191,14 +1200,16 @@ return function(t)
     local mesh = plate:fem_mesh(0.05)
     t.eq(getmetatable(mesh), bs.FemMesh)
     t.eq(mesh.face_count, 12)
-    t.eq(mesh.node_count, 864)
-    t.eq(mesh.triangle_count, 1732)
+    -- 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound): 864 -> 504 nodes, 1732 -> 1012 triangles.
+    t.eq(mesh.node_count, 504)
+    t.eq(mesh.triangle_count, 1012)
     t.eq(#mesh.edges, 30)
     t.eq(#mesh.vertices, 20)
     t.eq(mesh.watertight, true)
     t.eq(mesh.from_mesh, false, "every solid here has a brep behind it")
     t.eq(#mesh.open_edges, 0)
     t.eq(#mesh.folded_edges, 0)
+    t.eq(#mesh.crossings, 0)
     t.ok(mesh.min_angle > 0 and mesh.min_angle < 60, tostring(mesh.min_angle))
     t.near(mesh.longest_edge, 80.22468448052632, 1e-9)
     t.ok(mesh.worst_triangle < mesh.triangle_count)
@@ -1244,17 +1255,34 @@ return function(t)
       function() return mesh.vertices end,
       function() return mesh.open_edges end,
       function() return mesh.folded_edges end,
+      function() return mesh.crossings end,
     }
-    t.eq(#calls, 6, "a call that takes the handle was added without being swept here")
+    t.eq(#calls, 7, "a call that takes the handle was added without being swept here")
     for _, call in ipairs(calls) do
       local err = t.raises(call, "fem mesh: freed")
       t.ok(is_build_error(err), tostring(err))
     end
     -- Not refused, and documented rather than enforced: the arrays and the summary are
     -- plain fields filled when the mesh was built. Nothing here dereferences one.
-    t.eq(mesh.node_count, 864, "the counts are Lua numbers of our own and outlive the handle")
+    -- 864 -> 504 on 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound).
+    t.eq(mesh.node_count, 504, "the counts are Lua numbers of our own and outlive the handle")
     t.ok(mesh.nodes ~= nil, "the pointer field is still there, and now points at freed memory")
     plate:close()
+  end)
+
+  t.test("fem crossings through the kernel's own open of a file", function()
+    -- `samples/dented-box.stp` is a closed B-rep box whose top dips through its own
+    -- floor, 296 pairs measured 2026-09-26 -- the same number the reader test "a FEM
+    -- census reads its own count through its own entry point" reads over the same file,
+    -- which must agree with it.
+    local solid = bs.Solid.open(t.fixture("samples/dented-box.stp"))
+    local mesh = solid:fem_mesh()
+    t.eq(mesh.watertight, true)
+    local crossings = mesh.crossings
+    t.eq(#crossings, 296)
+    t.ok(crossings[1][1] < crossings[1][2], "the first pair is not a < b")
+    mesh:free()
+    solid:close()
   end)
 
   t.test("max_size bounds the boundary and only targets the interior", function()
@@ -1387,24 +1415,24 @@ return function(t)
   t.test("a FEM mesh is its own handle: re-meshing and closing its solid leave it alone", function()
     local plate = bs.Solid.extrude(plate_outline(), XY, 6)
     local positions = plate:mesh(0.05)
+    local kept_p0 = positions:get(0)
     local mesh = plate:fem_mesh(0.05)
     local first = mesh.nodes[0]
-    -- Meshing again at another tolerance replaces the tessellation cache, which stales
-    -- every view of it -- asserted here in the same breath, so the next line means
-    -- something. A FEM mesh is its own handle and is not in that cache, so it is
-    -- untouched: a wrapper that reused the generation guard here would refuse a read
-    -- the library never refuses.
+    -- Meshing again at another tolerance re-meshes the solid's own cache -- asserted here
+    -- in the same breath, so the next lines mean something. The tessellation view owns
+    -- its tessellation and is untouched by it, exactly as a FEM mesh -- its own handle,
+    -- not in that cache -- always was.
     plate:mesh(0.5)
-    t.eq(positions.valid, false, "the tessellation view should be stale")
-    t.raises(function() return positions.pointer end, "the view is stale")
+    t.eq(positions:get(0), kept_p0, "the tessellation view should still read")
+    t.ok(positions.valid)
     t.eq(mesh.nodes[0], first)
-    t.eq(mesh.node_count, 864)
+    t.eq(mesh.node_count, 504)  -- 864 -> 504 on 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound)
     t.ok(#mesh:msh_text() > 0)
     t.eq(#mesh.edges, 30)
     plate:close()
     -- And the solid does not own it: closing the solid neither frees nor stales it.
     t.eq(mesh.nodes[0], first)
-    t.eq(mesh.node_count, 864)
+    t.eq(mesh.node_count, 504)  -- 864 -> 504 on 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound)
     t.ok(#mesh:msh_text() > 0, "the mesh stopped writing once its solid closed")
     t.eq(#mesh.vertices, 20)
     mesh:free()
@@ -1589,6 +1617,131 @@ return function(t)
     t.ok(is_build_error(e) and e.message:find("nil or a string", 1, true), e.message)
 
     frame:close()
+    bracket:close()
+    bolt:close()
+    plate:close()
+  end)
+
+  -- Mechanisms: Assembly:link and Assembly:joint, at parity with the Python
+  -- reference's _mechanism() and its two mechanism tests in test_cadaclysm_blacksmith.py
+  -- (also ported at node/test/blacksmith.test.js).
+  local function mechanism()
+    local bolt = bs.Solid.cylinder(1, 6):named("bolt")
+    local plate = bs.Solid.cuboid(20, 10, 2):named("plate")
+    local bracket = bs.Assembly("bracket")
+    bracket:place(plate, XY)
+    bracket:place(bolt, { 5, 5, 2, 1, 0, 0, 0, 1, 0, 0, 0, 1 })
+    bracket:place(bolt, { 15, 5, 2, 1, 0, 0, 0, 1, 0, 0, 0, 1 })
+    bracket:link("fixed", { "plate" })
+    bracket:link("bolts", { "bolt", "bolt 2" })
+    bracket:joint("screw", "fixed", "bolts")
+    local arm = bs.Assembly("arm")
+    arm:place(plate, XY, "base")
+    arm:place(bracket, { 0, 0, 10, 1, 0, 0, 0, 1, 0, 0, 0, 1 }, "upper")
+    arm:place(bolt, { 5, 5, 2, 1, 0, 0, 0, 1, 0, 0, 0, 1 }, "pin")
+    arm:link("ground", { "base" })
+    arm:link("upper arm", { "upper", "pin" })
+    arm:joint("shoulder", "ground", "upper arm")
+    return bolt, plate, bracket, arm
+  end
+
+  -- `text` with every `FILE_NAME(` line dropped, so the FILE_NAME timestamp does not
+  -- make two writes of the same assembly look different.
+  local function no_stamp(text)
+    local out = {}
+    for line in (text .. "\n"):gmatch("(.-)\n") do
+      if line:sub(1, 10) ~= "FILE_NAME(" then out[#out + 1] = line end
+    end
+    return table.concat(out, "\n")
+  end
+
+  t.test("a mechanism is written as AP242 kinematic topology, its eleven bad links and "
+    .. "joints are refused with their exact message and change nothing, and a bare "
+    .. "string is refused before any call", function()
+    local bolt, plate, bracket, arm = mechanism()
+
+    local function count_of(haystack, needle)
+      local n, start = 0, 1
+      while true do
+        local from = haystack:find(needle, start, true)
+        if not from then return n end
+        n, start = n + 1, from + #needle
+      end
+    end
+
+    -- Fact 1: the default schema (no explicit schema) carries the kinematic entities.
+    local arm_step_text = arm:step_text()
+    t.ok(arm_step_text:find("AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF", 1, true))
+    t.eq(count_of(arm_step_text, "=KINEMATIC_LINK("), 4)
+    t.eq(count_of(arm_step_text, "=RIGID_LINK_REPRESENTATION("), 6)
+    t.eq(count_of(arm_step_text, "=CONTEXT_DEPENDENT_KINEMATIC_LINK_REPRESENTATION("), 6)
+    t.eq(count_of(arm_step_text, "=KINEMATIC_JOINT("), 2)
+    t.eq(count_of(arm_step_text, "=KINEMATIC_TOPOLOGY_STRUCTURE("), 2)
+
+    -- Fact 2: an explicit schema without kinematic entities is refused.
+    local e = t.raises(function() arm:step_text("config_control_design") end)
+    t.ok(is_build_error(e) and e.message:find("no kinematic entities", 1, true), e.message)
+
+    -- Fact 3: each of the eleven refusals raises with exactly its message, and
+    -- afterwards the STEP text (with FILE_NAME( lines stripped) is unchanged.
+    local before = no_stamp(arm:step_text())
+    local refusals = {
+      { function() arm:link("", { "base" }) end, "link: a name cannot be empty" },
+      { function() arm:link("ground", { "base" }) end, "link: assembly 'arm' already has a link named 'ground'" },
+      { function() arm:link("free", {}) end, "link: link 'free' names no placements" },
+      { function() arm:link("free", { "base", "base" }) end, "link: link 'free' names placement 'base' twice" },
+      { function() arm:link("free", { "bolt" }) end, "link: assembly 'arm' has no placement named 'bolt'" },
+      { function() arm:link("free", { "pin" }) end,
+        "link: placement 'pin' of assembly 'arm' is already in link 'upper arm'" },
+      { function() arm:joint("", "ground", "upper arm") end, "joint: a name cannot be empty" },
+      { function() arm:joint("shoulder", "upper arm", "ground") end,
+        "joint: assembly 'arm' already has a joint named 'shoulder'" },
+      { function() arm:joint("wrist", "ground", "hand") end, "joint: assembly 'arm' has no link named 'hand'" },
+      { function() arm:joint("wrist", "ground", "ground") end, "joint: joint 'wrist' joins link 'ground' to itself" },
+      { function() arm:joint("wrist", "ground", "upper arm") end,
+        "joint: assembly 'arm' already joins 'ground' to 'upper arm'" },
+    }
+    for _, pair in ipairs(refusals) do
+      local call, message = pair[1], pair[2]
+      local err = t.raises(call)
+      t.ok(is_build_error(err) and err.message == message, err.message)
+    end
+    t.eq(no_stamp(arm:step_text()), before)
+
+    -- A bare string, not a table, is refused with BuildError before any call -- `link("free",
+    -- "base")` would otherwise walk the string's own bytes as if it were `{"b", "a", "s", "e"}`.
+    e = t.raises(function() arm:link("free", "base") end)
+    t.ok(is_build_error(e) and e.message == "link: placements must be a list of names, not 'base'", e.message)
+    -- A bad item is refused by position (1-based, as Lua counts).
+    e = t.raises(function() arm:link("free", { "base", 5 }) end)
+    t.ok(is_build_error(e) and e.message == "link: placements[2] is not a name: 5", e.message)
+
+    -- Fact 5: read-back through to_scene, once the reader's Scene exposes links and joints
+    -- (the reader's kinematics ABI, claude/kinematic-abi, now on this branch). Checked
+    -- before fact 4's "back" joint, still on this same arm, so the read-back sees exactly
+    -- the two joints the fixture built ("screw", "shoulder"), not a third.
+    local scene = arm:to_scene()
+    local link_names, node_counts = {}, {}
+    for i, l in ipairs(scene.links) do
+      link_names[i] = l.name
+      node_counts[i] = #l.nodes
+    end
+    t.eq(table.concat(link_names, ","), "fixed,bolts,ground,upper arm")
+    t.eq(table.concat(node_counts, ","), "1,2,1,2")
+    local joint_rows = {}
+    for i, j in ipairs(scene.joints) do
+      joint_rows[i] = j.name .. "," .. j.start.index .. "," .. j.end_.index
+    end
+    t.eq(table.concat(joint_rows, ";"), "screw,0,1;shoulder,2,3")
+    for _, d in ipairs(scene.diagnostics) do
+      t.ok(d:sub(1, 11) ~= "kinematics:", d)
+    end
+    scene:close()
+
+    -- Fact 4: the reverse pair is a new joint.
+    arm:joint("back", "upper arm", "ground")
+
+    arm:close()
     bracket:close()
     bolt:close()
     plate:close()

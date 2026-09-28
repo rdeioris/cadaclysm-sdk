@@ -1092,6 +1092,205 @@ func (j *Joint) End() *Link {
 	return &Link{scene: j.scene, index: uint32(C.cadaclysm_joint_end(j.scene.h(), C.uint32_t(j.index)))}
 }
 
+// PairKind is how a pair constrains its two links -- CadaclysmPairKind in the header.
+type PairKind uint32
+
+const (
+	PairRevolute         = PairKind(C.CADACLYSM_PAIR_REVOLUTE)
+	PairPrismatic        = PairKind(C.CADACLYSM_PAIR_PRISMATIC)
+	PairCylindrical      = PairKind(C.CADACLYSM_PAIR_CYLINDRICAL)
+	PairSpherical        = PairKind(C.CADACLYSM_PAIR_SPHERICAL)
+	PairSphericalWithPin = PairKind(C.CADACLYSM_PAIR_SPHERICAL_WITH_PIN)
+	PairPlanar           = PairKind(C.CADACLYSM_PAIR_PLANAR)
+	PairUniversal        = PairKind(C.CADACLYSM_PAIR_UNIVERSAL)
+	PairHomokinetic      = PairKind(C.CADACLYSM_PAIR_HOMOKINETIC)
+	PairScrew            = PairKind(C.CADACLYSM_PAIR_SCREW)
+	PairFullyConstrained = PairKind(C.CADACLYSM_PAIR_FULLY_CONSTRAINED)
+	PairUnconstrained    = PairKind(C.CADACLYSM_PAIR_UNCONSTRAINED)
+	PairLowOrder         = PairKind(C.CADACLYSM_PAIR_LOW_ORDER)
+	PairOther            = PairKind(C.CADACLYSM_PAIR_OTHER)
+)
+
+// Motion is which kind of motion a freedom allows -- CadaclysmMotion in the header.
+type Motion uint32
+
+const (
+	MotionRotation    = Motion(C.CADACLYSM_MOTION_ROTATION)
+	MotionTranslation = Motion(C.CADACLYSM_MOTION_TRANSLATION)
+)
+
+// FreedomAxis is which contact-frame axis a freedom is about or along --
+// CadaclysmFreedomAxis in the header.
+type FreedomAxis uint32
+
+const (
+	FreedomX = FreedomAxis(C.CADACLYSM_FREEDOM_X)
+	FreedomY = FreedomAxis(C.CADACLYSM_FREEDOM_Y)
+	FreedomZ = FreedomAxis(C.CADACLYSM_FREEDOM_Z)
+)
+
+// Freedom is one of a pair's degrees of freedom: which motion, about or along which
+// contact-frame axis, and its optional range. An unbounded end comes back as (0, false),
+// this package's idiom for an optional number (as Convention's OR-in flags are for an
+// optional modifier).
+type Freedom struct {
+	Motion Motion
+	Axis   FreedomAxis
+	Lower  float64
+	// HasLower is false when Lower is unbounded; read Lower only when this is true.
+	HasLower bool
+	Upper    float64
+	// HasUpper is false when Upper is unbounded; read Upper only when this is true.
+	HasUpper bool
+}
+
+// freedomOf converts one C.CadaclysmFreedom -- cgo reads the type straight from the
+// header -- into a Freedom.
+func freedomOf(raw C.CadaclysmFreedom) Freedom {
+	return Freedom{
+		Motion:   Motion(raw.motion),
+		Axis:     FreedomAxis(raw.axis),
+		Lower:    float64(raw.lower),
+		HasLower: bool(raw.has_lower),
+		Upper:    float64(raw.upper),
+		HasUpper: bool(raw.has_upper),
+	}
+}
+
+// Pair is how a joint's two links move relative to each other: its kind, its two contact
+// frames (one per link, in the joint's own file) and its degrees of freedom. From
+// Joint.Pair; nil when the joint has none.
+type Pair struct {
+	scene *Scene
+	joint uint32
+
+	Kind PairKind
+	// TypeName is the pair's entity type name, for PairOther; "" otherwise.
+	TypeName string
+	// HasTypeName is false when TypeName does not apply; read TypeName only when this
+	// is true.
+	HasTypeName bool
+	// Pitch is the pair's length-per-revolution, for PairScrew; meaningless otherwise.
+	Pitch float64
+	// HasPitch is false when Pitch does not apply; read Pitch only when this is true.
+	HasPitch bool
+}
+
+func (p *Pair) rawFrames() (start, end [16]float64) {
+	var rawStart, rawEnd [16]C.double
+	C.cadaclysm_joint_pair_frames(p.scene.h(), C.uint32_t(p.joint),
+		(*C.double)(unsafe.Pointer(&rawStart[0])), (*C.double)(unsafe.Pointer(&rawEnd[0])))
+	for i := range rawStart {
+		start[i] = float64(rawStart[i])
+		end[i] = float64(rawEnd[i])
+	}
+	return start, end
+}
+
+// RawFrameStart is the pair's start contact frame, sixteen doubles in the ABI's own
+// column-major order -- Node.RawTransform's layout.
+func (p *Pair) RawFrameStart() [16]float64 { start, _ := p.rawFrames(); return start }
+
+// RawFrameEnd is the pair's end contact frame, sixteen doubles in the ABI's own
+// column-major order -- Node.RawTransform's layout.
+func (p *Pair) RawFrameEnd() [16]float64 { _, end := p.rawFrames(); return end }
+
+// rowMajor turns a RawFrameStart/RawFrameEnd's column-major sixteen into
+// Node.Transform's row-major layout.
+func rowMajor(raw [16]float64) [16]float64 {
+	var out [16]float64
+	for col := 0; col < 4; col++ {
+		for row := 0; row < 4; row++ {
+			out[row*4+col] = raw[col*4+row]
+		}
+	}
+	return out
+}
+
+// FrameStart is RawFrameStart in row-major order, as Node.Transform is to
+// Node.RawTransform.
+func (p *Pair) FrameStart() [16]float64 { return rowMajor(p.RawFrameStart()) }
+
+// FrameEnd is RawFrameEnd in row-major order, as Node.Transform is to Node.RawTransform.
+func (p *Pair) FrameEnd() [16]float64 { return rowMajor(p.RawFrameEnd()) }
+
+// Freedoms is the pair's degrees of freedom, in the reader's per-kind order.
+func (p *Pair) Freedoms() []Freedom {
+	n := uint32(C.cadaclysm_joint_freedom_count(p.scene.h(), C.uint32_t(p.joint)))
+	out := make([]Freedom, n)
+	for i := uint32(0); i < n; i++ {
+		var raw C.CadaclysmFreedom
+		C.cadaclysm_joint_freedom(p.scene.h(), C.uint32_t(p.joint), C.uint32_t(i), &raw)
+		out[i] = freedomOf(raw)
+	}
+	return out
+}
+
+// Pair is how this joint's two links move relative to each other, or nil when the joint
+// has none.
+func (j *Joint) Pair() *Pair {
+	kind := int32(C.cadaclysm_joint_pair_kind(j.scene.h(), C.uint32_t(j.index)))
+	if kind < 0 {
+		return nil
+	}
+	p := &Pair{scene: j.scene, joint: j.index, Kind: PairKind(kind)}
+	if typeName := C.cadaclysm_joint_pair_type(j.scene.h(), C.uint32_t(j.index)); typeName != nil {
+		p.TypeName = C.GoString(typeName)
+		p.HasTypeName = true
+	}
+	if pitch := float64(C.cadaclysm_joint_pair_pitch(j.scene.h(), C.uint32_t(j.index))); !math.IsNaN(pitch) {
+		p.Pitch = pitch
+		p.HasPitch = true
+	}
+	return p
+}
+
+// StateValue is one row of a State: the joint it sets and the values it sets on that
+// joint's pair's freedoms, in freedom order.
+type StateValue struct {
+	Joint  *Joint
+	Values []float64
+}
+
+// State is one named mechanism state the file records: a set of freedom values for some
+// of its joints. From Scene.States.
+type State struct {
+	Index uint32
+	Name  string
+	// Values is this state's rows, in the file's order.
+	Values []StateValue
+}
+
+// States is every named mechanism state the file records, in the file's order. A file
+// with no mechanism gives none.
+func (s *Scene) States() []State {
+	h := s.h()
+	n := uint32(C.cadaclysm_state_count(h))
+	out := make([]State, n)
+	for i := uint32(0); i < n; i++ {
+		st := State{Index: i, Name: C.GoString(C.cadaclysm_state_name(h, C.uint32_t(i)))}
+		rows := uint32(C.cadaclysm_state_value_count(h, C.uint32_t(i)))
+		st.Values = make([]StateValue, rows)
+		for r := uint32(0); r < rows; r++ {
+			var joint C.uint32_t
+			count := uint32(C.cadaclysm_state_value(h, C.uint32_t(i), C.uint32_t(r), &joint, nil, 0))
+			values := make([]C.double, count)
+			var valuesPtr *C.double
+			if count > 0 {
+				valuesPtr = (*C.double)(unsafe.Pointer(&values[0]))
+			}
+			C.cadaclysm_state_value(h, C.uint32_t(i), C.uint32_t(r), &joint, valuesPtr, C.uint32_t(count))
+			floats := make([]float64, count)
+			for k, v := range values {
+				floats[k] = float64(v)
+			}
+			st.Values[r] = StateValue{Joint: &Joint{scene: s, index: uint32(joint)}, Values: floats}
+		}
+		out[i] = st
+	}
+	return out
+}
+
 // ---- breps -------------------------------------------------------------------------------
 
 // Brep is a body's exact B-rep -- the trimmed surfaces its mesh is cut from -- shared with
@@ -1665,6 +1864,34 @@ func (m *FemMesh) census(openEdges bool) ([][3]uint32, error) {
 			return nil, &CadaclysmError{Message: lastErrorOr(fmt.Sprintf("fem mesh %s %d", what, i))}
 		}
 		out = append(out, [3]uint32{uint32(row[0]), uint32(row[1]), uint32(row[2])})
+	}
+	runtime.KeepAlive(m)
+	return out, nil
+}
+
+// Crossings is every pair of triangles that pass through each other, as (a, b) with a < b,
+// sorted: an edge of one through the other's interior. Their B-rep faces are
+// TriangleFace[a] and TriangleFace[b].
+//
+// **Computed for every body, open or closed.** The census Watertight, OpenEdges and
+// FoldedEdges report is topological and cannot see a surface passing through itself; a mesh
+// is ready for a volume mesher when it is Watertight **and** this is empty — Gmsh refuses one
+// that crosses. A copy.
+func (m *FemMesh) Crossings() ([][2]uint32, error) {
+	defer pin()()
+	h, err := m.h()
+	if err != nil {
+		return nil, err
+	}
+	count := uint32(C.cadaclysm_fem_mesh_crossing_count(h))
+	out := make([][2]uint32, 0, count)
+	for i := uint32(0); i < count; i++ {
+		var row [2]C.uint32_t
+		if !bool(C.cadaclysm_fem_mesh_crossing(h, C.uint32_t(i), &row[0], &row[1])) {
+			runtime.KeepAlive(m)
+			return nil, &CadaclysmError{Message: lastErrorOr(fmt.Sprintf("fem mesh crossing %d", i))}
+		}
+		out = append(out, [2]uint32{uint32(row[0]), uint32(row[1])})
 	}
 	runtime.KeepAlive(m)
 	return out, nil

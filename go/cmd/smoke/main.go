@@ -9,6 +9,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"sort"
 	"strings"
 
@@ -99,8 +101,8 @@ func main() {
 	// Kinematics: a file with no mechanism carries no links or joints; mechanism.stp,
 	// beside whatever sample this smoke was given, carries the fixed two-link one-joint
 	// mechanism.
-	if filepath.Base(path) == "cube.scad" && (len(scene.Links()) != 0 || len(scene.Joints()) != 0) {
-		fail("the cube scene has links or joints")
+	if filepath.Base(path) == "cube.scad" && (len(scene.Links()) != 0 || len(scene.Joints()) != 0 || len(scene.States()) != 0) {
+		fail("the cube scene has links, joints or states")
 	}
 	absPath, aperr := filepath.Abs(path)
 	if aperr != nil {
@@ -132,6 +134,38 @@ func main() {
 		fail(fmt.Sprintf("joint hinge reads start=%s#%d end=%s#%d", start.Name(), start.Index(), end.Name(), end.Index()))
 	}
 	fmt.Printf("kinematics: links %d, joints %d, hinge %s->%s\n", len(links), len(joints), start.Name(), end.Name())
+
+	// The pair facts: mechanism.stp's hinge is a revolute pair, both contact frames at
+	// (0, 0, 100) with z axis (0, 0, 1), one freedom (rotation about z, ranged
+	// [-1.5, 1.5]), and one state "open" setting the hinge to [0.5].
+	pair := joint.Pair()
+	if pair == nil {
+		fail("joint hinge has no pair")
+	}
+	if pair.Kind != cadaclysm.PairRevolute || pair.HasTypeName || pair.HasPitch {
+		fail("joint hinge's pair is not a bare revolute (kind, type name or pitch wrong)")
+	}
+	for _, frame := range [][16]float64{pair.FrameStart(), pair.FrameEnd()} {
+		origin := [3]float64{frame[3], frame[7], frame[11]}
+		zAxis := [3]float64{frame[2], frame[6], frame[10]}
+		if math.Abs(origin[0]-0) > 1e-9 || math.Abs(origin[1]-0) > 1e-9 || math.Abs(origin[2]-100) > 1e-9 ||
+			math.Abs(zAxis[0]-0) > 1e-9 || math.Abs(zAxis[1]-0) > 1e-9 || math.Abs(zAxis[2]-1) > 1e-9 {
+			fail("a hinge contact frame is not origin (0,0,100) with z axis (0,0,1)")
+		}
+	}
+	freedoms := pair.Freedoms()
+	if len(freedoms) != 1 || freedoms[0].Motion != cadaclysm.MotionRotation || freedoms[0].Axis != cadaclysm.FreedomZ ||
+		!freedoms[0].HasLower || !freedoms[0].HasUpper ||
+		math.Abs(freedoms[0].Lower-(-1.5)) > 1e-9 || math.Abs(freedoms[0].Upper-1.5) > 1e-9 {
+		fail("the hinge's freedom is not one rotation about z ranged [-1.5, 1.5]")
+	}
+	states := mechanism.States()
+	if len(states) != 1 || states[0].Name != "open" || len(states[0].Values) != 1 ||
+		states[0].Values[0].Joint.Index() != 0 || len(states[0].Values[0].Values) != 1 ||
+		math.Abs(states[0].Values[0].Values[0]-0.5) > 1e-9 {
+		fail("mechanism does not carry exactly one state 'open' setting hinge to [0.5]")
+	}
+	fmt.Printf("pair: %v, freedoms %d, states %d\n", pair.Kind, len(freedoms), len(states))
 	mechanism.Close()
 	scene.ForgetMeshes()
 	rebuiltTriangles := 0
@@ -684,30 +718,47 @@ func kernel(license string) {
 		fail("the outline's face did not push out to the plate")
 	}
 
-	// A mesh view is tied to one filling of the solid's cache: meshing at another
-	// tolerance and back again replaces that memory, and the first view must refuse to
-	// read it rather than hand back a slice over freed memory.
+	// A mesh view owns a held tessellation of its own now: neither meshing the solid
+	// again at another tolerance nor closing the solid frees the memory it reads.
 	first, err := rounded.Mesh(0.05)
 	if err != nil {
 		fail(err.Error())
 	}
 	triangles0 := first.TriangleCount()
-	if _, err := first.Positions(); err != nil {
-		fail("a fresh mesh view refused to read: " + err.Error())
-	}
+	kept := append([]float32(nil), mustPositions(first)...)
 	if _, err := rounded.Mesh(0.5); err != nil {
 		fail(err.Error())
 	}
-	if _, err := rounded.Mesh(0.05); err != nil {
+	if _, err := rounded.Mesh(0.01); err != nil {
 		fail(err.Error())
 	}
-	if _, err := first.Positions(); !errors.Is(err, blacksmith.ErrStaleView) {
-		fail("a stale mesh view read freed memory after meshing at 0.05, 0.5, 0.05")
+	afterRemesh, err := first.Positions()
+	if err != nil || !slices.Equal(afterRemesh, kept) {
+		fail("a held mesh view changed under a re-mesh at another tolerance")
 	}
-	fmt.Printf("mesh at 0.05: %d triangles; the first view is stale after 0.05, 0.5, 0.05\n", triangles0)
+	runtime.KeepAlive(first)
+
+	// A held view also outlives the solid it was cut from: a cuboid's mesh read after
+	// Close must equal its earlier read.
+	heldCuboid, err := blacksmith.Cuboid(3, 4, 5)
+	if err != nil {
+		fail(err.Error())
+	}
+	heldCuboidMesh, err := heldCuboid.Mesh(blacksmith.DefaultTolerance)
+	if err != nil {
+		fail(err.Error())
+	}
+	heldCuboidKept := append([]float32(nil), mustPositions(heldCuboidMesh)...)
+	heldCuboid.Close()
+	afterClose, err := heldCuboidMesh.Positions()
+	if err != nil || !slices.Equal(afterClose, heldCuboidKept) {
+		fail("a held mesh view changed after the solid it was cut from was closed")
+	}
+	runtime.KeepAlive(heldCuboidMesh)
+	fmt.Printf("mesh at 0.05: %d triangles; a held view survives re-mesh at 0.5, 0.01 and the solid's Close\n", triangles0)
 
 	// f64 twins on the kernel: mesh64 shares mesh's cache and bounds64 the same
-	// tessellation, unnarrowed. rounded's cache is filled at 0.05 by the view test above.
+	// tessellation, unnarrowed.
 	kMesh32, err := rounded.Mesh(0.05)
 	if err != nil {
 		fail(err.Error())
@@ -974,6 +1025,7 @@ func kernel(license string) {
 	fmt.Println("blacksmith scaled: bounds tripled, non-positive factor refused")
 
 	assembly()
+	mechanism()
 }
 
 // assembly is Assembly, Solid.Named and Solid.Name, at parity with the Python reference's
@@ -1206,9 +1258,213 @@ func assembly() {
 	fmt.Println("assembly: Named/Name ride through one-source operations and drop through two-source ones")
 }
 
+// mechanism is Assembly.Link/Assembly.Joint, at parity with the Python reference's
+// _mechanism() and its tests (test_a_mechanism_is_written_as_ap242_kinematic_topology,
+// test_every_bad_link_or_joint_is_refused_and_changes_nothing).
+func mechanism() {
+	mechBoltRaw, err := blacksmith.Cylinder(1, 6)
+	if err != nil {
+		fail(err.Error())
+	}
+	mechBolt, err := mechBoltRaw.Named("bolt")
+	if err != nil {
+		fail(err.Error())
+	}
+	mechBoltRaw.Close()
+	defer mechBolt.Close()
+	mechPlateRaw, err := blacksmith.Cuboid(20, 10, 2)
+	if err != nil {
+		fail(err.Error())
+	}
+	mechPlate, err := mechPlateRaw.Named("plate") // uncoloured
+	if err != nil {
+		fail(err.Error())
+	}
+	mechPlateRaw.Close()
+	defer mechPlate.Close()
+
+	bracket, err := blacksmith.NewAssembly("bracket")
+	if err != nil {
+		fail(err.Error())
+	}
+	defer bracket.Close()
+	if _, err := bracket.PlaceSolid(mechPlate, blacksmith.FrameXY([3]float64{}), ""); err != nil {
+		fail(err.Error())
+	}
+	if _, err := bracket.PlaceSolid(mechBolt, blacksmith.FrameXY([3]float64{5, 5, 2}), ""); err != nil {
+		fail(err.Error())
+	}
+	if _, err := bracket.PlaceSolid(mechBolt, blacksmith.FrameXY([3]float64{15, 5, 2}), ""); err != nil {
+		fail(err.Error())
+	}
+	if err := bracket.Link("fixed", []string{"plate"}); err != nil {
+		fail(err.Error())
+	}
+	if err := bracket.Link("bolts", []string{"bolt", "bolt 2"}); err != nil {
+		fail(err.Error())
+	}
+	if err := bracket.Joint("screw", "fixed", "bolts"); err != nil {
+		fail(err.Error())
+	}
+
+	arm, err := blacksmith.NewAssembly("arm")
+	if err != nil {
+		fail(err.Error())
+	}
+	defer arm.Close()
+	if _, err := arm.PlaceSolid(mechPlate, blacksmith.FrameXY([3]float64{}), "base"); err != nil {
+		fail(err.Error())
+	}
+	if _, err := arm.PlaceAssembly(bracket, blacksmith.FrameXY([3]float64{0, 0, 10}), "upper"); err != nil {
+		fail(err.Error())
+	}
+	if _, err := arm.PlaceSolid(mechBolt, blacksmith.FrameXY([3]float64{5, 5, 2}), "pin"); err != nil {
+		fail(err.Error())
+	}
+	if err := arm.Link("ground", []string{"base"}); err != nil {
+		fail(err.Error())
+	}
+	if err := arm.Link("upper arm", []string{"upper", "pin"}); err != nil {
+		fail(err.Error())
+	}
+	if err := arm.Joint("shoulder", "ground", "upper arm"); err != nil {
+		fail(err.Error())
+	}
+
+	// Fact 1: the default schema (no explicit schema) carries the kinematic entities.
+	armStepText, err := arm.StepText("", "mm")
+	if err != nil {
+		fail(err.Error())
+	}
+	if !strings.Contains(armStepText, "AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF") {
+		fail("mechanism: arm.StepText() does not name AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF")
+	}
+	linkCount := strings.Count(armStepText, "=KINEMATIC_LINK(")
+	rigidCount := strings.Count(armStepText, "=RIGID_LINK_REPRESENTATION(")
+	cdklrCount := strings.Count(armStepText, "=CONTEXT_DEPENDENT_KINEMATIC_LINK_REPRESENTATION(")
+	jointCount := strings.Count(armStepText, "=KINEMATIC_JOINT(")
+	topoCount := strings.Count(armStepText, "=KINEMATIC_TOPOLOGY_STRUCTURE(")
+	if linkCount != 4 || rigidCount != 6 || cdklrCount != 6 || jointCount != 2 || topoCount != 2 {
+		fail(fmt.Sprintf("mechanism: arm.StepText() has %d links, %d rigid reps, %d context-dependent reps, %d joints, %d topologies, not 4/6/6/2/2",
+			linkCount, rigidCount, cdklrCount, jointCount, topoCount))
+	}
+	fmt.Printf("mechanism: arm.StepText() writes %d links, %d rigid reps, %d context-dependent reps, %d joints, %d topologies\n",
+		linkCount, rigidCount, cdklrCount, jointCount, topoCount)
+
+	// Fact 2: an explicit schema without kinematic entities is refused.
+	if _, err := arm.StepText("config_control_design", "mm"); err == nil || !strings.Contains(err.Error(), "no kinematic entities") {
+		fail(fmt.Sprintf("mechanism: config_control_design was not refused right: %v", err))
+	}
+	fmt.Println("mechanism: an explicit schema without kinematic entities is refused")
+
+	// Fact 3: each of the eleven refusals raises with exactly its message, and afterwards
+	// the STEP text (with FILE_NAME( lines stripped) is unchanged.
+	noStamp := func(text string) string {
+		lines := strings.Split(text, "\n")
+		kept := lines[:0]
+		for _, l := range lines {
+			if !strings.HasPrefix(l, "FILE_NAME(") {
+				kept = append(kept, l)
+			}
+		}
+		return strings.Join(kept, "\n")
+	}
+	before, err := arm.StepText("", "mm")
+	if err != nil {
+		fail(err.Error())
+	}
+	before = noStamp(before)
+	refusals := []struct {
+		Call    func() error
+		Message string
+	}{
+		{func() error { return arm.Link("", []string{"base"}) }, "link: a name cannot be empty"},
+		{func() error { return arm.Link("ground", []string{"base"}) }, "link: assembly 'arm' already has a link named 'ground'"},
+		{func() error { return arm.Link("free", []string{}) }, "link: link 'free' names no placements"},
+		{func() error { return arm.Link("free", []string{"base", "base"}) }, "link: link 'free' names placement 'base' twice"},
+		{func() error { return arm.Link("free", []string{"bolt"}) }, "link: assembly 'arm' has no placement named 'bolt'"},
+		{func() error { return arm.Link("free", []string{"pin"}) }, "link: placement 'pin' of assembly 'arm' is already in link 'upper arm'"},
+		{func() error { return arm.Joint("", "ground", "upper arm") }, "joint: a name cannot be empty"},
+		{func() error { return arm.Joint("shoulder", "upper arm", "ground") }, "joint: assembly 'arm' already has a joint named 'shoulder'"},
+		{func() error { return arm.Joint("wrist", "ground", "hand") }, "joint: assembly 'arm' has no link named 'hand'"},
+		{func() error { return arm.Joint("wrist", "ground", "ground") }, "joint: joint 'wrist' joins link 'ground' to itself"},
+		{func() error { return arm.Joint("wrist", "ground", "upper arm") }, "joint: assembly 'arm' already joins 'ground' to 'upper arm'"},
+	}
+	for _, r := range refusals {
+		err := r.Call()
+		if err == nil {
+			fail(fmt.Sprintf("mechanism: %q was accepted", r.Message))
+		}
+		if err.Error() != r.Message {
+			fail(fmt.Sprintf("mechanism: got %q, not %q", err.Error(), r.Message))
+		}
+	}
+	after, err := arm.StepText("", "mm")
+	if err != nil {
+		fail(err.Error())
+	}
+	if noStamp(after) != before {
+		fail("mechanism: a refused link or joint changed the assembly")
+	}
+	fmt.Println("mechanism: all eleven bad links and joints are refused with their exact message, unchanged")
+
+	// Fact 5: read-back through the reader, before fact 4 adds "back" -- arm.ToScene("")
+	// carries the same links and joints back in, by name and node count, with no
+	// kinematics diagnostic. (The Python reference checks this on a fresh _mechanism()
+	// build, i.e. before the reverse-pair joint exists; done here in place, ahead of
+	// fact 4, so it sees the same two joints.)
+	mechScene, err := arm.ToScene("")
+	if err != nil {
+		fail(err.Error())
+	}
+	mechLinks := mechScene.Links()
+	if len(mechLinks) != 4 {
+		fail(fmt.Sprintf("mechanism: read-back has %d links, not 4", len(mechLinks)))
+	}
+	wantNames := []string{"fixed", "bolts", "ground", "upper arm"}
+	wantNodes := []int{1, 2, 1, 2}
+	for i, l := range mechLinks {
+		if l.Name() != wantNames[i] {
+			fail(fmt.Sprintf("mechanism: read-back link %d is %q, not %q", i, l.Name(), wantNames[i]))
+		}
+		if len(l.Nodes()) != wantNodes[i] {
+			fail(fmt.Sprintf("mechanism: read-back link %q has %d nodes, not %d", l.Name(), len(l.Nodes()), wantNodes[i]))
+		}
+	}
+	mechJoints := mechScene.Joints()
+	if len(mechJoints) != 2 ||
+		mechJoints[0].Name() != "screw" || mechJoints[0].Start().Index() != 0 || mechJoints[0].End().Index() != 1 ||
+		mechJoints[1].Name() != "shoulder" || mechJoints[1].Start().Index() != 2 || mechJoints[1].End().Index() != 3 {
+		fail("mechanism: read-back joints are not (screw, 0, 1) and (shoulder, 2, 3)")
+	}
+	for _, d := range mechScene.Diagnostics() {
+		if strings.HasPrefix(d, "kinematics:") {
+			fail("mechanism: read-back carries a kinematics: diagnostic")
+		}
+	}
+	mechScene.Close()
+	fmt.Println("mechanism: read-back through arm.ToScene() matches links, joints and diagnostics")
+
+	// Fact 4: the reverse pair is a new joint.
+	if err := arm.Joint("back", "upper arm", "ground"); err != nil {
+		fail(err.Error())
+	}
+	fmt.Println("mechanism: the reverse pair (\"back\") is accepted as a new joint")
+}
+
 func fail(why string) {
 	fmt.Fprintln(os.Stderr, why)
 	os.Exit(1)
+}
+
+// mustPositions is Mesh.Positions with the error folded into fail, for a smoke check
+// that just wants the slice.
+func mustPositions(m *blacksmith.Mesh) []float32 {
+	p, err := m.Positions()
+	if err != nil {
+		fail(err.Error())
+	}
+	return p
 }
 
 // femNone is the ABI's "no such thing" sentinel as the FEM accessors hand it over:
@@ -1303,8 +1559,12 @@ func femReader(node *cadaclysm.Node, path string) {
 				fail("fem: a mesh body's nodes all lie on face 0")
 			}
 		}
-		if !mesh.Watertight || len(open) != 0 || len(folded) != 0 {
-			fail(fmt.Sprintf("fem: the closed cube reads %d cracks and %d folds", len(open), len(folded)))
+		crossings, err := mesh.Crossings()
+		if err != nil {
+			fail("fem: " + err.Error())
+		}
+		if !mesh.Watertight || len(open) != 0 || len(folded) != 0 || len(crossings) != 0 {
+			fail(fmt.Sprintf("fem: the closed cube reads %d cracks, %d folds and %d crossings", len(open), len(folded), len(crossings)))
 		}
 	}
 	msh, err := mesh.MshText()
@@ -1385,11 +1645,12 @@ func femReader(node *cadaclysm.Node, path string) {
 		func() error { _, e := spent.Vertices(); return e },
 		func() error { _, e := spent.OpenEdges(); return e },
 		func() error { _, e := spent.FoldedEdges(); return e },
+		func() error { _, e := spent.Crossings(); return e },
 		func() error { _, e := spent.MshText(); return e },
 		func() error { return spent.SaveMsh(mshPath) },
 	}
-	if len(reads) != 6 {
-		fail("fem: the closed-handle sweep is not all six calls that take the handle")
+	if len(reads) != 7 {
+		fail("fem: the closed-handle sweep is not all seven calls that take the handle")
 	}
 	for i, read := range reads {
 		err := read()
@@ -1400,10 +1661,11 @@ func femReader(node *cadaclysm.Node, path string) {
 			fail(fmt.Sprintf("fem: closed read %d refused with %T, not a *CadaclysmError", i, err))
 		}
 	}
-	fmt.Printf("fem (reader): %v, minAngle %.2f, longestEdge %.3f; a closed mesh refuses all six calls\n",
+	fmt.Printf("fem (reader): %v, minAngle %.2f, longestEdge %.3f; a closed mesh refuses all seven calls\n",
 		mesh, mesh.MinAngle, mesh.LongestEdge)
 	if strings.HasSuffix(path, "cube.scad") {
 		femCensusWiring(filepath.Join(filepath.Dir(path), "open-sheet.scad"))
+		femCrossings(filepath.Join(filepath.Dir(path), "dented-box.stp"))
 	}
 }
 
@@ -1461,6 +1723,64 @@ func femCensusWiring(sheet string) {
 	}
 	fmt.Printf("fem census: open-sheet.scad reads %d cracks and %d fold at (%d,%d)\n",
 		len(cracks), len(folds), folds[0][0], folds[0][1])
+}
+
+// femCrossings pins samples/dented-box.stp: a closed B-rep box whose top dips through its
+// own floor, 296 pairs measured 2026-09-26 -- once through this reader, and once through
+// the kernel's own open of the same file, which must agree with it.
+func femCrossings(dentedBox string) {
+	scene, err := cadaclysm.Open(dentedBox)
+	if err != nil {
+		fail("fem crossings: " + err.Error())
+	}
+	defer scene.Close()
+	var body *cadaclysm.Node
+	for _, n := range scene.Walk() {
+		if n.CanMesh() {
+			body = n
+			break
+		}
+	}
+	if body == nil {
+		fail("fem crossings: dented-box.stp has no meshable node")
+	}
+	mesh, err := body.FemMesh(0.01, 0, nil)
+	if err != nil {
+		fail("fem crossings: " + err.Error())
+	}
+	defer mesh.Close()
+	if !mesh.Watertight || mesh.FromMesh {
+		fail("fem crossings: dented-box.stp reads " + mesh.String() + ", not a watertight brep")
+	}
+	crossings, err := mesh.Crossings()
+	if err != nil {
+		fail("fem crossings: " + err.Error())
+	}
+	if len(crossings) != 296 {
+		fail(fmt.Sprintf("fem crossings: dented-box.stp reads %d pairs, not 296", len(crossings)))
+	}
+	if crossings[0][0] >= crossings[0][1] {
+		fail(fmt.Sprintf("fem crossings: the first pair reads %v, not a < b", crossings[0]))
+	}
+	kernelSolid, err := blacksmith.Open(dentedBox)
+	if err != nil {
+		fail("kernel fem crossings: " + err.Error())
+	}
+	defer kernelSolid.Close()
+	kernelMesh, err := kernelSolid.FemMesh(0.01, 0, nil)
+	if err != nil {
+		fail("kernel fem crossings: " + err.Error())
+	}
+	defer kernelMesh.Close()
+	kernelCrossings, err := kernelMesh.Crossings()
+	if err != nil {
+		fail("kernel fem crossings: " + err.Error())
+	}
+	if len(kernelCrossings) != 296 {
+		fail(fmt.Sprintf("kernel fem crossings: dented-box.stp reads %d pairs, not 296", len(kernelCrossings)))
+	}
+	fmt.Printf("fem crossings: dented-box.stp reads %d pairs through the reader and %d through the kernel\n",
+		len(crossings), len(kernelCrossings))
 }
 
 // femBrep is the reader's other half: a **B-rep** body, read back from the STEP this run
@@ -1608,8 +1928,12 @@ func femKernel(rounded, sheet *blacksmith.Solid, faces int) {
 	if err != nil {
 		fail("kernel fem: " + err.Error())
 	}
-	if len(open) != 0 || len(folded) != 0 {
-		fail(fmt.Sprintf("kernel fem: a watertight solid reads %d cracks and %d folds", len(open), len(folded)))
+	crossings, err := mesh.Crossings()
+	if err != nil {
+		fail("kernel fem: " + err.Error())
+	}
+	if len(open) != 0 || len(folded) != 0 || len(crossings) != 0 {
+		fail(fmt.Sprintf("kernel fem: a watertight solid reads %d cracks, %d folds and %d crossings", len(open), len(folded), len(crossings)))
 	}
 	// maxSize bounds the boundary segments and only *targets* the interior, so the figure a
 	// solver caller checks is LongestEdge, not the ceiling it asked for. Catches a wrapper
@@ -1727,18 +2051,19 @@ func femKernel(rounded, sheet *blacksmith.Solid, faces int) {
 		func() error { _, e := spent.Vertices(); return e },
 		func() error { _, e := spent.OpenEdges(); return e },
 		func() error { _, e := spent.FoldedEdges(); return e },
+		func() error { _, e := spent.Crossings(); return e },
 		func() error { _, e := spent.MshText(); return e },
 		func() error { return spent.SaveMsh(kernelMshPath) },
 	}
-	if len(reads) != 6 {
-		fail("kernel fem: the closed-handle sweep is not all six calls that take the handle")
+	if len(reads) != 7 {
+		fail("kernel fem: the closed-handle sweep is not all seven calls that take the handle")
 	}
 	for i, read := range reads {
 		if err := read(); !errors.Is(err, blacksmith.ErrClosed) {
 			fail(fmt.Sprintf("kernel fem: closed read %d refused with %v, not ErrClosed", i, err))
 		}
 	}
-	fmt.Printf("kernel fem: %v, maxSize 3 -> %d nodes, longestEdge %.3f; the sheet's rim reads 0/NONE; a closed mesh refuses all six calls\n",
+	fmt.Printf("kernel fem: %v, maxSize 3 -> %d nodes, longestEdge %.3f; the sheet's rim reads 0/NONE; a closed mesh refuses all seven calls\n",
 		mesh, len(fine.Nodes)/3, fine.LongestEdge)
 }
 

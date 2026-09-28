@@ -272,6 +272,8 @@ const CadaclysmSurfaces = koffi.struct('CadaclysmSurfaces', {
   nurbs_count: 'uint32_t',
   shared: 'const uint32_t *',
   shared_count: 'uint32_t',
+  duplicate: 'const uint32_t *',
+  duplicate_count: 'uint32_t',
 });
 const CadaclysmSvgOptions = koffi.struct('CadaclysmSvgOptions', {
   size: 'uint32_t',
@@ -335,6 +337,16 @@ const CadaclysmFemVertex = koffi.struct('CadaclysmFemVertex', {
   node: 'uint32_t',
   point: koffi.array('double', 3),
   has_position: 'bool',
+});
+// One of a pair's degrees of freedom (kinematic pairs, states -- task 6): which
+// motion, about or along which contact-frame axis, and its optional range.
+const CadaclysmFreedom = koffi.struct('CadaclysmFreedom', {
+  motion: 'uint32_t',
+  axis: 'uint32_t',
+  has_lower: 'bool',
+  lower: 'double',
+  has_upper: 'bool',
+  upper: 'double',
 });
 
 // ---- the function table ----------------------------------------------------
@@ -471,6 +483,18 @@ function _lib() {
     joint_name: f('const char *cadaclysm_joint_name(const CadaclysmScene *scene, uint32_t joint)'),
     joint_start: f('uint32_t cadaclysm_joint_start(const CadaclysmScene *scene, uint32_t joint)'),
     joint_end: f('uint32_t cadaclysm_joint_end(const CadaclysmScene *scene, uint32_t joint)'),
+    // Kinematic pairs, freedoms and mechanism states (task 6): how a joint moves, and
+    // the named poses a file records.
+    joint_pair_kind: f('int32_t cadaclysm_joint_pair_kind(const CadaclysmScene *scene, uint32_t joint)'),
+    joint_pair_type: f('const char *cadaclysm_joint_pair_type(const CadaclysmScene *scene, uint32_t joint)'),
+    joint_pair_pitch: f('double cadaclysm_joint_pair_pitch(const CadaclysmScene *scene, uint32_t joint)'),
+    joint_pair_frames: f('bool cadaclysm_joint_pair_frames(const CadaclysmScene *scene, uint32_t joint, _Out_ double *out_start, _Out_ double *out_end)'),
+    joint_freedom_count: f('uint32_t cadaclysm_joint_freedom_count(const CadaclysmScene *scene, uint32_t joint)'),
+    joint_freedom: f('bool cadaclysm_joint_freedom(const CadaclysmScene *scene, uint32_t joint, uint32_t index, _Out_ CadaclysmFreedom *out)'),
+    state_count: f('uint32_t cadaclysm_state_count(const CadaclysmScene *scene)'),
+    state_name: f('const char *cadaclysm_state_name(const CadaclysmScene *scene, uint32_t state)'),
+    state_value_count: f('uint32_t cadaclysm_state_value_count(const CadaclysmScene *scene, uint32_t state)'),
+    state_value: f('uint32_t cadaclysm_state_value(const CadaclysmScene *scene, uint32_t state, uint32_t row, _Out_ uint32_t *joint, _Out_ double *values, uint32_t capacity)'),
     // The FEM surface mesh: a handle of the caller's own, and its accessors.
     // `cadaclysm_fem_mesh_msh_text` returns a `const char *` **borrowed** from the
     // handle -- a slot replaced by the next ask and gone when the mesh is freed --
@@ -486,6 +510,8 @@ function _lib() {
     fem_mesh_vertex: f('bool cadaclysm_fem_mesh_vertex(const CadaclysmFemMesh *m, uint32_t i, _Out_ CadaclysmFemVertex *out)'),
     fem_mesh_open_edge: f('bool cadaclysm_fem_mesh_open_edge(const CadaclysmFemMesh *m, uint32_t i, _Out_ uint32_t *a, _Out_ uint32_t *b, _Out_ uint32_t *brep_edge)'),
     fem_mesh_folded_edge: f('bool cadaclysm_fem_mesh_folded_edge(const CadaclysmFemMesh *m, uint32_t i, _Out_ uint32_t *a, _Out_ uint32_t *b, _Out_ uint32_t *brep_edge)'),
+    fem_mesh_crossing_count: f('uint32_t cadaclysm_fem_mesh_crossing_count(const CadaclysmFemMesh *m)'),
+    fem_mesh_crossing: f('bool cadaclysm_fem_mesh_crossing(const CadaclysmFemMesh *m, uint32_t i, _Out_ uint32_t *a, _Out_ uint32_t *b)'),
     fem_mesh_msh_text: f('const char *cadaclysm_fem_mesh_msh_text(const CadaclysmFemMesh *m)'),
     fem_mesh_save_msh: f('bool cadaclysm_fem_mesh_save_msh(const CadaclysmFemMesh *m, const char *path)'),
   };
@@ -1000,8 +1026,8 @@ class Link {
 }
 
 /**
- * A connection between two links of the file's mechanism. Topology only: how
- * it moves is not read yet. From `Scene.joints()`.
+ * A connection between two links of the file's mechanism, and, when the file
+ * names one, the kinematic pair saying how it moves. From `Scene.joints()`.
  */
 class Joint {
   constructor(scene, index) { this.scene = scene; this.index = index; }
@@ -1011,6 +1037,104 @@ class Joint {
   get start() { return new Link(this.scene, _lib().joint_start(this.scene._handle, this.index)); }
   /** The link this joint ends at, in the file's order. */
   get end() { return new Link(this.scene, _lib().joint_end(this.scene._handle, this.index)); }
+  /** How this joint moves: the kinematic pair naming it, or null when the file gives it none. */
+  get pair() {
+    const l = _lib(); const h = this.scene._handle;
+    const kind = l.joint_pair_kind(h, this.index);
+    if (kind < 0) return null;
+    const typeName = l.joint_pair_type(h, this.index);
+    const pitchRaw = l.joint_pair_pitch(h, this.index);
+    const rawStart = new Float64Array(16); const rawEnd = new Float64Array(16);
+    l.joint_pair_frames(h, this.index, rawStart, rawEnd);
+    const freedoms = [];
+    for (let i = 0, n = l.joint_freedom_count(h, this.index); i < n; i++) {
+      const raw = {};
+      if (!l.joint_freedom(h, this.index, i, raw)) continue;
+      freedoms.push(new Freedom(
+        _MOTIONS[raw.motion], _AXES[raw.axis],
+        raw.has_lower ? raw.lower : null,
+        raw.has_upper ? raw.upper : null,
+      ));
+    }
+    return new Pair(
+      _PAIR_KIND_NAMES[kind], typeName == null ? null : String(typeName),
+      Number.isNaN(pitchRaw) ? null : pitchRaw,
+      _rows(rawStart), _rows(rawEnd), rawStart, rawEnd, freedoms,
+    );
+  }
+}
+
+// ---- pairs, freedoms and states ----------------------------------------------
+
+const _PAIR_KIND_NAMES = [
+  'revolute', 'prismatic', 'cylindrical', 'spherical', 'spherical_with_pin',
+  'planar', 'universal', 'homokinetic', 'screw', 'fully_constrained',
+  'unconstrained', 'low_order', 'other',
+];
+const _MOTIONS = ['rotation', 'translation'];
+const _AXES = ['x', 'y', 'z'];
+
+/** One degree of freedom of a `Pair`: which motion, about or along which
+ *  contact-frame axis, and its optional range. From `Pair.freedoms()`. */
+class Freedom {
+  constructor(motion, axis, lower, upper) { this.motion = motion; this.axis = axis; this.lower = lower; this.upper = upper; }
+}
+
+/**
+ * A kinematic pair: the kind of relative motion a joint allows between its two
+ * links -- what `Joint.pair` returns.
+ */
+class Pair {
+  constructor(kind, typeName, pitch, frameStart, frameEnd, rawFrameStart, rawFrameEnd, freedoms) {
+    /** One of thirteen kinds: `revolute`, `prismatic`, `cylindrical`, `spherical`,
+     *  `spherical_with_pin`, `planar`, `universal`, `homokinetic`, `screw`,
+     *  `fully_constrained`, `unconstrained`, `low_order`, `other`. */
+    this.kind = kind;
+    /** For `other`: the pair's entity type name (`GEAR_PAIR`). null otherwise. */
+    this.typeName = typeName;
+    /** For `screw`: its pitch, a length per revolution in the scene's units. null otherwise. */
+    this.pitch = pitch;
+    /** The pair's contact frame fixed in its joint's `start` link, like `Node.transform`. */
+    this.frameStart = frameStart;
+    /** The pair's contact frame fixed in its joint's `end` link. */
+    this.frameEnd = frameEnd;
+    /** `frameStart` in the ABI's own column-major order, as 16 doubles -- like `Node.rawTransform`. */
+    this.rawFrameStart = rawFrameStart;
+    /** `frameEnd` in the ABI's own column-major order, as 16 doubles. */
+    this.rawFrameEnd = rawFrameEnd;
+    this._freedoms = freedoms;
+  }
+  /** Its degrees of freedom, in the reader's per-kind order, each a `Freedom`. A
+   *  `State`'s values compose in this order. */
+  freedoms() { return this._freedoms; }
+}
+
+/** One row of a `State`: the joint it sets, and the values it sets it to. */
+class StateValue {
+  constructor(joint, values) { this.joint = joint; this.values = values; }
+}
+
+/**
+ * A named pose of the file's mechanism: a `MECHANISM_STATE_REPRESENTATION`.
+ * From `Scene.states()`.
+ */
+class State {
+  constructor(index, name, values) { this.index = index; this.name = name; this.values = values; }
+}
+
+function _readState(scene, index) {
+  const l = _lib(); const h = scene._handle;
+  const name = _text(l.state_name(h, index));
+  const rows = [];
+  for (let row = 0, n = l.state_value_count(h, index); row < n; row++) {
+    const jointOut = new Uint32Array(1);
+    const count = l.state_value(h, index, row, jointOut, null, 0);
+    const values = new Float64Array(count);
+    l.state_value(h, index, row, jointOut, values, count);
+    const joint = jointOut[0] === NONE ? null : new Joint(scene, jointOut[0]);
+    rows.push(new StateValue(joint, Array.from(values)));
+  }
+  return new State(index, name, rows);
 }
 
 // ---- nodes ------------------------------------------------------------------
@@ -1348,6 +1472,13 @@ class Scene {
   joints() {
     const out = [];
     for (let i = 0, n = _lib().joint_count(this._handle); i < n; i++) out.push(new Joint(this, i));
+    return out;
+  }
+  /** The file's named mechanism states, e.g. STEP's `MECHANISM_STATE_REPRESENTATION`.
+   *  Empty for a file that records none. */
+  states() {
+    const out = [];
+    for (let i = 0, n = _lib().state_count(this._handle); i < n; i++) out.push(_readState(this, i));
     return out;
   }
   // -- nodes --
@@ -1744,6 +1875,27 @@ class FemMesh {
     const l = _lib(), h = this._handle;
     return _censusRows((i, a, b, e) => l.fem_mesh_folded_edge(h, i, a, b, e), this._live.folded_edge_count, 'folded edge');
   }
+  /**
+   * Every pair of triangles that pass through each other, as `[a, b]` with `a < b`,
+   * sorted: an edge of one through the other's interior. Their B-rep faces are
+   * `triangleFace()[a]` and `[b]`.
+   *
+   * **Computed for every body, open or closed.** The census `watertight`,
+   * `openEdges()` and `foldedEdges()` report is topological and cannot see a surface
+   * passing through itself; a mesh is ready for a volume mesher when it is
+   * `watertight` **and** this is empty -- Gmsh refuses one that crosses. A copy.
+   */
+  crossings() {
+    const l = _lib(), h = this._handle;
+    const count = l.fem_mesh_crossing_count(h);
+    const a = new Uint32Array(1), b = new Uint32Array(1);
+    const out = [];
+    for (let i = 0; i < count; i++) {
+      if (!l.fem_mesh_crossing(h, i, a, b)) throw new CadaclysmError(_lastError() || `fem mesh crossing ${i}`);
+      out.push([a[0], b[0]]);
+    }
+    return out;
+  }
   // -- the summary
   /**
    * The welded mesh closes -- and, for a B-rep body, so does the topology behind it.
@@ -1986,7 +2138,7 @@ module.exports = {
   libraryPath, version, buildDate, license, licenseInfo, licenseNoticeCount, meshFormats, formats, lodLevels,
   svgOptionsDefaults,
   _lib, _text, _lastError, _floats, _uint32s, _doubles, _searchedPaths, _notFoundMessage,
-  Bounds, Bounds64, Attribute, Brep, Placement, Node, Link, Joint, Scene, open, openMemory, _openRaw, openAsync, openMemoryAsync, declaredSchema, resolveSchema, _options, _rows, _attribute,
+  Bounds, Bounds64, Attribute, Brep, Placement, Node, Link, Joint, Pair, Freedom, State, StateValue, Scene, open, openMemory, _openRaw, openAsync, openMemoryAsync, declaredSchema, resolveSchema, _options, _rows, _attribute,
   Mesh, Mesh64, Polylines, Beziers, Beziers64, Face, Surfaces, Collision, CollisionHull, Meshlets, pickFile, pickSave,
   FemMesh, FemEdge, FemVertex,
   _meshOf, _mesh64Of, _polylinesOf, _beziersOf, _beziers64Of, _surfacesOf, _svgOptions,

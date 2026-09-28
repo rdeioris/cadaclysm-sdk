@@ -180,6 +180,12 @@ pub(crate) fn fem_census(rows: &[(u32, u32, u32)]) -> Array<PackedInt64Array> {
     rows.iter().map(|&(a, b, edge)| PackedInt64Array::from(&[i64::from(a), i64::from(b), i64::from(edge)][..])).collect()
 }
 
+/// One crossing row, `(a, b)`: two triangle indices, `a < b`. `fem_census`'s shape with
+/// no third field -- Int64 to match it, though neither number here is ever `NONE`.
+pub(crate) fn fem_crossings(rows: &[(u32, u32)]) -> Array<PackedInt64Array> {
+    rows.iter().map(|&(a, b)| PackedInt64Array::from(&[i64::from(a), i64::from(b)][..])).collect()
+}
+
 /// One B-rep edge of a FEM mesh, as a Dictionary: `id` (the **body's** own edge id),
 /// `nodes`, `runs`, `faces`, `ends`, `closed`, `seam`.
 pub(crate) fn fem_edge(id: u32, nodes: &[u32], runs: &[u32], faces: (u32, u32), ends: (u32, u32), closed: bool, seam: bool) -> VarDictionary {
@@ -501,6 +507,8 @@ pub struct CadaclysmScene {
     links: PhantomVar<Array<Gd<CadaclysmLink>>>,
     #[var(get = get_joints, no_set)]
     joints: PhantomVar<Array<Gd<CadaclysmJoint>>>,
+    #[var(get = get_states, no_set)]
+    states: PhantomVar<Array<Gd<CadaclysmState>>>,
     #[var(get = get_realized, no_set)]
     realized: PhantomVar<i64>,
     #[var(get = get_realize_total, no_set)]
@@ -531,6 +539,7 @@ impl CadaclysmScene {
             placements: PhantomVar::default(),
             links: PhantomVar::default(),
             joints: PhantomVar::default(),
+            states: PhantomVar::default(),
             realized: PhantomVar::default(),
             realize_total: PhantomVar::default(),
         })
@@ -734,6 +743,19 @@ impl CadaclysmScene {
     fn get_joints(&self) -> Array<Gd<CadaclysmJoint>> {
         let count = with_scene(&self.shared, |s| s.joints().len()).unwrap_or_default();
         (0..count as u32).map(|i| CadaclysmJoint::wrap(self.shared.clone(), i)).collect()
+    }
+
+    /// The file's named mechanism states. Empty where the file names none.
+    #[func]
+    fn get_states(&self) -> Array<Gd<CadaclysmState>> {
+        let raw = with_scene(&self.shared, |s| {
+            s.states()
+                .into_iter()
+                .map(|st| (st.index, st.name, st.values.into_iter().map(|v| (v.joint.index(), v.values)).collect::<Vec<_>>()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+        raw.into_iter().map(|(index, name, values)| CadaclysmState::wrap(self.shared.clone(), index, name, values)).collect()
     }
 
     /// Mesh every body now (in parallel inside the library) rather than one by one on
@@ -1376,8 +1398,7 @@ impl CadaclysmLink {
 
 // ---- CadaclysmJoint ----------------------------------------------------------------------
 
-/// A connection between two links of the file's mechanism. Topology only: how it
-/// moves is not read yet. From `CadaclysmScene.joints`.
+/// A connection between two links of the file's mechanism. From `CadaclysmScene.joints`.
 #[derive(GodotClass)]
 #[class(no_init, base = RefCounted)]
 pub struct CadaclysmJoint {
@@ -1391,6 +1412,8 @@ pub struct CadaclysmJoint {
     start: PhantomVar<Option<Gd<CadaclysmLink>>>,
     #[var(get = get_end, no_set)]
     end: PhantomVar<Option<Gd<CadaclysmLink>>>,
+    #[var(get = get_pair, no_set)]
+    pair: PhantomVar<Option<Gd<CadaclysmPair>>>,
 }
 
 impl CadaclysmJoint {
@@ -1402,6 +1425,7 @@ impl CadaclysmJoint {
             name: PhantomVar::default(),
             start: PhantomVar::default(),
             end: PhantomVar::default(),
+            pair: PhantomVar::default(),
         })
     }
 
@@ -1434,6 +1458,292 @@ impl CadaclysmJoint {
     #[func]
     fn get_end(&self) -> Option<Gd<CadaclysmLink>> {
         self.with(|j| j.end().index()).map(|i| CadaclysmLink::wrap(self.shared.clone(), i))
+    }
+
+    /// How this joint moves: the kinematic pair naming it, or `null` when the file
+    /// gives it none.
+    #[func]
+    fn get_pair(&self) -> Option<Gd<CadaclysmPair>> {
+        self.with(|j| j.pair().is_some()).unwrap_or(false).then(|| CadaclysmPair::wrap(self.shared.clone(), self.index))
+    }
+}
+
+// ---- CadaclysmPair, CadaclysmFreedom, CadaclysmState --------------------------------------
+
+/// `sdk::PairKind`'s name, as `CadaclysmPair.kind` and every other reader wrapper spell it.
+fn pair_kind_name(kind: sdk::PairKind) -> &'static str {
+    match kind {
+        sdk::PairKind::Revolute => "revolute",
+        sdk::PairKind::Prismatic => "prismatic",
+        sdk::PairKind::Cylindrical => "cylindrical",
+        sdk::PairKind::Spherical => "spherical",
+        sdk::PairKind::SphericalWithPin => "spherical_with_pin",
+        sdk::PairKind::Planar => "planar",
+        sdk::PairKind::Universal => "universal",
+        sdk::PairKind::Homokinetic => "homokinetic",
+        sdk::PairKind::Screw => "screw",
+        sdk::PairKind::FullyConstrained => "fully_constrained",
+        sdk::PairKind::Unconstrained => "unconstrained",
+        sdk::PairKind::LowOrder => "low_order",
+        sdk::PairKind::Other => "other",
+    }
+}
+
+/// A kinematic pair: the kind of relative motion a joint allows between its two links.
+/// From `CadaclysmJoint.pair`.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmPair {
+    shared: Shared,
+    joint: u32,
+    #[var(get = get_kind, no_set)]
+    kind: PhantomVar<GString>,
+    #[var(get = get_type_name, no_set)]
+    type_name: PhantomVar<GString>,
+    #[var(get = get_pitch, no_set)]
+    pitch: PhantomVar<f64>,
+    #[var(get = get_frame_start, no_set)]
+    frame_start: PhantomVar<Transform3D>,
+    #[var(get = get_frame_end, no_set)]
+    frame_end: PhantomVar<Transform3D>,
+    #[var(get = get_raw_frame_start, no_set)]
+    raw_frame_start: PhantomVar<PackedFloat64Array>,
+    #[var(get = get_raw_frame_end, no_set)]
+    raw_frame_end: PhantomVar<PackedFloat64Array>,
+    #[var(get = get_freedoms, no_set)]
+    freedoms: PhantomVar<Array<Gd<CadaclysmFreedom>>>,
+}
+
+impl CadaclysmPair {
+    fn wrap(shared: Shared, joint: u32) -> Gd<CadaclysmPair> {
+        Gd::from_object(CadaclysmPair {
+            shared,
+            joint,
+            kind: PhantomVar::default(),
+            type_name: PhantomVar::default(),
+            pitch: PhantomVar::default(),
+            frame_start: PhantomVar::default(),
+            frame_end: PhantomVar::default(),
+            raw_frame_start: PhantomVar::default(),
+            raw_frame_end: PhantomVar::default(),
+            freedoms: PhantomVar::default(),
+        })
+    }
+
+    fn with<R>(&self, f: impl FnOnce(&sdk::Pair<'_>) -> R) -> Option<R> {
+        with_scene(&self.shared, |s| s.joints().get(self.joint as usize).and_then(|j| j.pair()).map(|p| f(&p))).flatten()
+    }
+}
+
+#[godot_api]
+impl CadaclysmPair {
+    /// One of thirteen kinds: `revolute`, `prismatic`, `cylindrical`, `spherical`,
+    /// `spherical_with_pin`, `planar`, `universal`, `homokinetic`, `screw`,
+    /// `fully_constrained`, `unconstrained`, `low_order`, `other`.
+    #[func]
+    fn get_kind(&self) -> GString {
+        gs(self.with(|p| pair_kind_name(p.kind())).unwrap_or(""))
+    }
+
+    /// For `other`: the pair's entity type name (`GEAR_PAIR`). `""` otherwise --
+    /// Godot has no null string.
+    #[func]
+    fn get_type_name(&self) -> GString {
+        gs(self.with(|p| p.type_name()).flatten().unwrap_or_default())
+    }
+
+    /// For `screw`: its pitch, a length per revolution in the scene's units. `NAN`
+    /// otherwise.
+    #[func]
+    fn get_pitch(&self) -> f64 {
+        self.with(|p| p.pitch()).flatten().unwrap_or(f64::NAN)
+    }
+
+    /// The pair's contact frame fixed in its joint's `start` link, in world
+    /// coordinates at the file's rest pose.
+    #[func]
+    fn get_frame_start(&self) -> Transform3D {
+        self.with(|p| transform(p.raw_frame_start())).unwrap_or(Transform3D::IDENTITY)
+    }
+
+    /// The pair's contact frame fixed in its joint's `end` link.
+    #[func]
+    fn get_frame_end(&self) -> Transform3D {
+        self.with(|p| transform(p.raw_frame_end())).unwrap_or(Transform3D::IDENTITY)
+    }
+
+    /// `frame_start` as sixteen numbers, column-major -- like `CadaclysmNode.raw_transform`.
+    #[func]
+    fn get_raw_frame_start(&self) -> PackedFloat64Array {
+        self.with(|p| PackedFloat64Array::from(&p.raw_frame_start()[..])).unwrap_or_default()
+    }
+
+    /// `frame_end` as sixteen numbers, column-major.
+    #[func]
+    fn get_raw_frame_end(&self) -> PackedFloat64Array {
+        self.with(|p| PackedFloat64Array::from(&p.raw_frame_end()[..])).unwrap_or_default()
+    }
+
+    /// Its degrees of freedom, in the reader's per-kind order. A `CadaclysmState`'s
+    /// values compose in this order.
+    #[func]
+    fn get_freedoms(&self) -> Array<Gd<CadaclysmFreedom>> {
+        self.with(|p| p.freedoms()).unwrap_or_default().into_iter().map(CadaclysmFreedom::wrap).collect()
+    }
+}
+
+/// One degree of freedom of a `CadaclysmPair`: which motion, about or along which
+/// contact-frame axis, and its optional range. From `CadaclysmPair.freedoms`.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmFreedom {
+    motion: sdk::Motion,
+    axis: sdk::FreedomAxis,
+    lower: Option<f64>,
+    upper: Option<f64>,
+    #[var(rename = motion, get = get_motion, no_set)]
+    motion_: PhantomVar<GString>,
+    #[var(rename = axis, get = get_axis, no_set)]
+    axis_: PhantomVar<GString>,
+    #[var(rename = lower, get = get_lower, no_set)]
+    lower_: PhantomVar<f64>,
+    #[var(rename = upper, get = get_upper, no_set)]
+    upper_: PhantomVar<f64>,
+}
+
+impl CadaclysmFreedom {
+    fn wrap(freedom: sdk::Freedom) -> Gd<CadaclysmFreedom> {
+        Gd::from_object(CadaclysmFreedom {
+            motion: freedom.motion,
+            axis: freedom.axis,
+            lower: freedom.lower,
+            upper: freedom.upper,
+            motion_: PhantomVar::default(),
+            axis_: PhantomVar::default(),
+            lower_: PhantomVar::default(),
+            upper_: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl CadaclysmFreedom {
+    /// `"rotation"` or `"translation"`.
+    #[func]
+    fn get_motion(&self) -> GString {
+        gs(match self.motion {
+            sdk::Motion::Rotation => "rotation",
+            sdk::Motion::Translation => "translation",
+        })
+    }
+
+    /// `"x"`, `"y"` or `"z"`: the contact frames' axis the motion is about or along.
+    #[func]
+    fn get_axis(&self) -> GString {
+        gs(match self.axis {
+            sdk::FreedomAxis::X => "x",
+            sdk::FreedomAxis::Y => "y",
+            sdk::FreedomAxis::Z => "z",
+        })
+    }
+
+    /// The lower limit -- radians for a rotation, a length for a translation -- or
+    /// `NAN` for unbounded. Godot has no null number.
+    #[func]
+    fn get_lower(&self) -> f64 {
+        self.lower.unwrap_or(f64::NAN)
+    }
+
+    /// The upper limit, or `NAN` for unbounded.
+    #[func]
+    fn get_upper(&self) -> f64 {
+        self.upper.unwrap_or(f64::NAN)
+    }
+}
+
+/// One row of a `CadaclysmState`: the joint it sets, and one value per freedom of its
+/// pair, in the pair's freedom order. From `CadaclysmState.values`.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmStateValue {
+    shared: Shared,
+    joint: u32,
+    values: Vec<f64>,
+    #[var(rename = joint, get = get_joint, no_set)]
+    joint_: PhantomVar<Gd<CadaclysmJoint>>,
+    #[var(rename = values, get = get_values, no_set)]
+    values_: PhantomVar<PackedFloat64Array>,
+}
+
+impl CadaclysmStateValue {
+    fn wrap(shared: Shared, joint: u32, values: Vec<f64>) -> Gd<CadaclysmStateValue> {
+        Gd::from_object(CadaclysmStateValue { shared, joint, values, joint_: PhantomVar::default(), values_: PhantomVar::default() })
+    }
+}
+
+#[godot_api]
+impl CadaclysmStateValue {
+    /// The joint this row sets.
+    #[func]
+    fn get_joint(&self) -> Gd<CadaclysmJoint> {
+        CadaclysmJoint::wrap(self.shared.clone(), self.joint)
+    }
+
+    /// One value per freedom of the joint's pair, in the pair's freedom order.
+    #[func]
+    fn get_values(&self) -> PackedFloat64Array {
+        PackedFloat64Array::from(&self.values[..])
+    }
+}
+
+/// A named pose of the file's mechanism: a `MECHANISM_STATE_REPRESENTATION`. From
+/// `CadaclysmScene.states`.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmState {
+    shared: Shared,
+    index: u32,
+    name: String,
+    values: Vec<(u32, Vec<f64>)>,
+    #[var(rename = index, get = get_index, no_set)]
+    index_: PhantomVar<i64>,
+    #[var(rename = name, get = get_name, no_set)]
+    name_: PhantomVar<GString>,
+    #[var(rename = values, get = get_values, no_set)]
+    values_: PhantomVar<Array<Gd<CadaclysmStateValue>>>,
+}
+
+impl CadaclysmState {
+    fn wrap(shared: Shared, index: u32, name: String, values: Vec<(u32, Vec<f64>)>) -> Gd<CadaclysmState> {
+        Gd::from_object(CadaclysmState {
+            shared,
+            index,
+            name,
+            values,
+            index_: PhantomVar::default(),
+            name_: PhantomVar::default(),
+            values_: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl CadaclysmState {
+    #[func]
+    fn get_index(&self) -> i64 {
+        self.index as i64
+    }
+
+    /// Its name, as the file gives it.
+    #[func]
+    fn get_name(&self) -> GString {
+        gs(&self.name)
+    }
+
+    /// One row per joint this state sets, in file order.
+    #[func]
+    fn get_values(&self) -> Array<Gd<CadaclysmStateValue>> {
+        self.values.iter().map(|(joint, values)| CadaclysmStateValue::wrap(self.shared.clone(), *joint, values.clone())).collect()
     }
 }
 
@@ -1747,6 +2057,8 @@ pub struct CadaclysmFemMesh {
     open_edges: PhantomVar<Array<PackedInt64Array>>,
     #[var(get = get_folded_edges, no_set)]
     folded_edges: PhantomVar<Array<PackedInt64Array>>,
+    #[var(get = get_crossings, no_set)]
+    crossings: PhantomVar<Array<PackedInt64Array>>,
     #[var(get = get_watertight, no_set)]
     watertight: PhantomVar<bool>,
     #[var(get = get_from_mesh, no_set)]
@@ -1775,6 +2087,7 @@ impl CadaclysmFemMesh {
             vertices: PhantomVar::default(),
             open_edges: PhantomVar::default(),
             folded_edges: PhantomVar::default(),
+            crossings: PhantomVar::default(),
             watertight: PhantomVar::default(),
             from_mesh: PhantomVar::default(),
             min_angle: PhantomVar::default(),
@@ -1899,6 +2212,19 @@ impl CadaclysmFemMesh {
     #[func]
     fn get_folded_edges(&self) -> Array<PackedInt64Array> {
         self.with(|m| ok(m.folded_edges()).map(|rows| fem_census(&rows))).flatten().unwrap_or_default()
+    }
+
+    /// Every pair of triangles that pass through each other, as `[a, b]` with `a < b`,
+    /// sorted: an edge of one through the other's interior. Their B-rep faces are
+    /// `triangle_face[a]` and `[b]`.
+    ///
+    /// **Computed for every body, open or closed.** The census `watertight`, `open_edges`
+    /// and `folded_edges` report is topological and cannot see a surface passing through
+    /// itself; a mesh is ready for a volume mesher when it is `watertight` **and** this is
+    /// empty -- Gmsh refuses one that crosses. A copy.
+    #[func]
+    fn get_crossings(&self) -> Array<PackedInt64Array> {
+        self.with(|m| ok(m.crossings()).map(|rows| fem_crossings(&rows))).flatten().unwrap_or_default()
     }
 
     /// The welded mesh closes -- every directed mesh edge paired with its reverse and none

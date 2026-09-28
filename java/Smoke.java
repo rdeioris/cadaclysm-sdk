@@ -71,7 +71,8 @@ public final class Smoke {
             // Kinematics: a file with no mechanism carries no links or joints; mechanism.stp,
             // beside whatever sample this smoke was given, carries the fixed two-link
             // one-joint mechanism.
-            if (path.endsWith("cube.scad") && (!scene.links().isEmpty() || !scene.joints().isEmpty())) fail("the cube scene has links or joints");
+            if (path.endsWith("cube.scad") && (!scene.links().isEmpty() || !scene.joints().isEmpty() || !scene.states().isEmpty()))
+                fail("the cube scene has links, joints or states");
             Path mechanismPath = Path.of(path).toAbsolutePath().getParent().resolve("mechanism.stp");
             try (Cad.Scene mechanism = Cad.open(mechanismPath.toString())) {
                 List<Cad.Link> links = mechanism.links();
@@ -92,6 +93,34 @@ public final class Smoke {
                     fail("joint hinge reads start=" + start.name() + "#" + start.index() + " end=" + end.name() + "#" + end.index());
                 System.out.println("kinematics: links " + links.size() + ", joints " + joints.size()
                         + ", hinge " + start.name() + "->" + end.name());
+
+                // The pair: revolute about Z, ranged -1.5..1.5, both contact frames at (0, 0, 100).
+                Cad.Pair pair = joint.pair();
+                if (pair == null || pair.kind() != Cad.PairKind.REVOLUTE) fail("hinge has no pair, or it is not revolute");
+                if (pair.typeName() != null || pair.pitch() != null) fail("a revolute pair has a type name or a pitch");
+                for (double[] frame : new double[][]{pair.rawFrameStart(), pair.rawFrameEnd()}) {
+                    if (!close(frame[12], 0.0) || !close(frame[13], 0.0) || !close(frame[14], 100.0))
+                        fail("a pair frame's origin is not (0, 0, 100)");
+                    if (!close(frame[8], 0.0) || !close(frame[9], 0.0) || !close(frame[10], 1.0))
+                        fail("a pair frame's z axis is not (0, 0, 1)");
+                }
+                List<Cad.Freedom> freedoms = pair.freedoms();
+                if (freedoms.size() != 1 || freedoms.get(0).motion() != Cad.Motion.ROTATION || freedoms.get(0).axis() != Cad.FreedomAxis.Z)
+                    fail("the hinge's freedom is not one rotation about z");
+                Double lower = freedoms.get(0).lower(), upper = freedoms.get(0).upper();
+                if (lower == null || upper == null || !close(lower, -1.5) || !close(upper, 1.5))
+                    fail("the hinge's freedom range is not [-1.5, 1.5]");
+
+                // The state: one named "open", one row (hinge, [0.5]).
+                List<Cad.State> states = mechanism.states();
+                if (states.size() != 1 || states.get(0).index() != 0 || !states.get(0).name().equals("open"))
+                    fail("mechanism does not carry exactly one state named open");
+                List<Cad.StateValue> values = states.get(0).values();
+                if (values.size() != 1 || values.get(0).joint() == null || !values.get(0).joint().name().equals("hinge")
+                        || values.get(0).joint().index() != 0
+                        || values.get(0).values().length != 1 || !close(values.get(0).values()[0], 0.5))
+                    fail("state open does not set hinge to [0.5]");
+                System.out.println("pair: " + pair.kind() + ", freedoms " + freedoms.size() + ", states " + states.size());
             }
             scene.forgetMeshes();
             long rebuiltTriangles = 0;
@@ -294,6 +323,7 @@ public final class Smoke {
             intersections();
             solidHits();
             assemblies();
+            mechanism();
             try (Blacksmith.Solid rounded = part.fillet(corners, 1.0)) {
                 released = rounded;
                 int faces = rounded.faces();
@@ -473,26 +503,27 @@ public final class Smoke {
                 float[] sceneMax = scene.bounds().max();
                 if (!near(sceneMax, 40, 20, 16)) fail("toScene's bounds disagree: " + Arrays.toString(sceneMax));
 
-                // The stale-view rule: a mesh view is tied to one filling of the solid's
-                // cache. Meshing at another tolerance replaces the cache, and coming back to
-                // the first tolerance fills it afresh rather than restoring the old memory,
-                // so the first view must refuse to read even though its tolerance is current.
+                // A mesh view owns a held tessellation of its own: meshing the solid again at
+                // another tolerance leaves an already-taken view untouched -- nothing about it
+                // goes stale.
                 Blacksmith.Mesh first = rounded.mesh(0.05);
                 int triangles = first.triangleCount();
                 FloatBuffer positions = first.positions();
                 if (positions.remaining() != first.vertexCount() * 3) fail("the mesh view is the wrong length");
+                float[] kept = first.copy().positions();
                 rounded.mesh(0.5);
-                Blacksmith.Mesh third = rounded.mesh(0.05);
-                if (third.positions().remaining() != positions.remaining()) fail("re-meshing at 0.05 changed the mesh");
-                boolean stale;
-                try {
-                    first.positions();
-                    stale = false;
-                } catch (IllegalStateException e) {
-                    stale = true;
+                rounded.mesh(0.01);
+                if (!Arrays.equals(first.copy().positions(), kept)) fail("a held mesh view changed under a re-mesh at another tolerance");
+                System.out.println("triangles=" + triangles);
+
+                // ...and the solid closing does not touch it either: the view's handle, not
+                // the solid's cache, is what the pointers actually borrow from.
+                try (Blacksmith.Solid meshBox = Blacksmith.Solid.cuboid(1, 2, 3)) {
+                    Blacksmith.Mesh boxMesh = meshBox.mesh(0.05);
+                    float boxKept = boxMesh.positions().get(0);
+                    meshBox.close();
+                    if (boxMesh.positions().get(0) != boxKept) fail("a held mesh view changed when its solid was closed");
                 }
-                if (!stale) fail("a view from before a tolerance change still reads");
-                System.out.println("triangles=" + triangles + " stale view throws=" + stale);
 
                 // f64 twins on the kernel: mesh64 shares mesh's cache and bounds64 the same
                 // tessellation's unnarrowed positions.
@@ -592,8 +623,9 @@ public final class Smoke {
                     fail("fem: the cube reads " + fem + ", not a mesh-only body of one face");
                 for (int k = 0; k < nodeCount; k++)
                     if (kinds.get(k) != 2 || entities.get(k) != 0) fail("fem: a mesh body's nodes all lie on face 0");
-                if (!fem.watertight() || !fem.openEdges().isEmpty() || !fem.foldedEdges().isEmpty())
-                    fail("fem: the closed cube reads " + fem.openEdges().size() + " cracks and " + fem.foldedEdges().size() + " folds");
+                if (!fem.watertight() || !fem.openEdges().isEmpty() || !fem.foldedEdges().isEmpty() || !fem.crossings().isEmpty())
+                    fail("fem: the closed cube reads " + fem.openEdges().size() + " cracks, " + fem.foldedEdges().size()
+                            + " folds and " + fem.crossings().size() + " crossings");
             }
             String msh = fem.mshText();
             if (!msh.startsWith("$MeshFormat") || !msh.contains("$Nodes")) fail("fem: mshText is not Gmsh 4.1 ASCII");
@@ -648,10 +680,10 @@ public final class Smoke {
                     staleReader::nodes, staleReader::triangles, staleReader::triangleFace,
                     staleReader::nodeKind, staleReader::nodeEntity, staleReader::faceCount,
                     staleReader::edges, staleReader::vertices, staleReader::openEdges,
-                    staleReader::foldedEdges, staleReader::watertight, staleReader::fromMesh,
+                    staleReader::foldedEdges, staleReader::crossings, staleReader::watertight, staleReader::fromMesh,
                     staleReader::minAngle, staleReader::worstTriangle, staleReader::longestEdge,
                     staleReader::mshText, () -> staleReader.saveMsh(mshPath.toString()));
-            if (reads.size() != 17) fail("fem: the freed sweep covers " + reads.size() + " reads, not 17");
+            if (reads.size() != 18) fail("fem: the freed sweep covers " + reads.size() + " reads, not 18");
             for (Runnable read : reads) {
                 try {
                     read.run();
@@ -661,9 +693,12 @@ public final class Smoke {
                 }
             }
             System.out.println("fem (reader): " + fem + ", minAngle " + fem.minAngle() + ", longestEdge " + fem.longestEdge()
-                    + "; a freed mesh refuses all seventeen reads");
+                    + "; a freed mesh refuses all eighteen reads");
         }
-        if (path.endsWith("cube.scad")) femCensusWiring(Path.of(path).resolveSibling("open-sheet.scad"));
+        if (path.endsWith("cube.scad")) {
+            femCensusWiring(Path.of(path).resolveSibling("open-sheet.scad"));
+            femCrossings(Path.of(path).resolveSibling("dented-box.stp"));
+        }
     }
 
     // # Which count feeds which entry point -- the census *wiring*, which nothing else here pins.
@@ -696,6 +731,34 @@ public final class Smoke {
                     fail("fem census: the first crack reads (" + crack[0] + "," + crack[1] + "), not (1,2)");
                 System.out.println("fem census: open-sheet.scad reads " + cracks.size() + " cracks and "
                         + folds.size() + " fold at (" + fold[0] + "," + fold[1] + ")");
+            }
+        }
+    }
+
+    // Crossings: samples/dented-box.stp is a closed B-rep box whose top dips through its own
+    // floor, 296 pairs measured 2026-09-26 -- once through this reader, and once through the
+    // kernel's own open of the same file, which must agree with it.
+    private static void femCrossings(Path dentedBox) {
+        try (Cad.Scene scene = Cad.open(dentedBox.toString())) {
+            Cad.Node body = null;
+            for (Cad.Node n : scene.walk()) if (n.canMesh()) { body = n; break; }
+            if (body == null) fail("fem crossings: dented-box.stp has no meshable node");
+            try (Cad.FemMesh fem = body.femMesh()) {
+                if (!fem.watertight() || fem.fromMesh())
+                    fail("fem crossings: dented-box.stp reads " + fem + ", not a watertight brep");
+                List<int[]> crossings = fem.crossings();
+                if (crossings.size() != 296) fail("fem crossings: dented-box.stp reads " + crossings.size() + " pairs, not 296");
+                int[] first = crossings.get(0);
+                if (first[0] >= first[1])
+                    fail("fem crossings: the first pair reads (" + first[0] + "," + first[1] + "), not a < b");
+                try (Blacksmith.Solid kernelSolid = Blacksmith.Solid.open(dentedBox.toString());
+                     Blacksmith.FemMesh kernelFem = kernelSolid.femMesh()) {
+                    List<int[]> kernelCrossings = kernelFem.crossings();
+                    if (kernelCrossings.size() != 296)
+                        fail("kernel fem crossings: dented-box.stp reads " + kernelCrossings.size() + " pairs, not 296");
+                    System.out.println("fem crossings: dented-box.stp reads " + crossings.size()
+                            + " pairs through the reader and " + kernelCrossings.size() + " through the kernel");
+                }
             }
         }
     }
@@ -780,8 +843,9 @@ public final class Smoke {
         try (Blacksmith.FemMesh fem = rounded.femMesh(0.5)) {
             if (fem.fromMesh() || !fem.watertight() || fem.faceCount() != faces || fem.nodes().remaining() == 0)
                 fail("kernel fem: the filleted part reads " + fem);
-            if (!fem.openEdges().isEmpty() || !fem.foldedEdges().isEmpty())
-                fail("kernel fem: a watertight solid reads " + fem.openEdges().size() + " cracks and " + fem.foldedEdges().size() + " folds");
+            if (!fem.openEdges().isEmpty() || !fem.foldedEdges().isEmpty() || !fem.crossings().isEmpty())
+                fail("kernel fem: a watertight solid reads " + fem.openEdges().size() + " cracks, "
+                        + fem.foldedEdges().size() + " folds and " + fem.crossings().size() + " crossings");
             // maxSize bounds the boundary segments and only targets the interior, so the figure a
             // solver caller checks is longestEdge -- not the ceiling it asked for. Catches a
             // wrapper that dropped maxSize on the floor: the mesh would not refine at all.
@@ -845,10 +909,10 @@ public final class Smoke {
         List<Runnable> reads = List.of(
                 stale::nodes, stale::triangles, stale::triangleFace, stale::nodeKind,
                 stale::nodeEntity, stale::faceCount, stale::edges, stale::vertices,
-                stale::openEdges, stale::foldedEdges, stale::watertight, stale::fromMesh,
+                stale::openEdges, stale::foldedEdges, stale::crossings, stale::watertight, stale::fromMesh,
                 stale::minAngle, stale::worstTriangle, stale::longestEdge, stale::mshText,
                 () -> stale.saveMsh(mshPath.toString()));
-        if (reads.size() != 17) fail("kernel fem: the freed sweep covers " + reads.size() + " reads, not 17");
+        if (reads.size() != 18) fail("kernel fem: the freed sweep covers " + reads.size() + " reads, not 18");
         for (Runnable read : reads) {
             try {
                 read.run();
@@ -857,7 +921,7 @@ public final class Smoke {
                 if (e.getMessage() == null || !e.getMessage().contains("freed")) fail("kernel fem: a freed mesh said " + e.getMessage());
             }
         }
-        System.out.println("kernel fem: a freed mesh refuses all seventeen reads");
+        System.out.println("kernel fem: a freed mesh refuses all eighteen reads");
     }
 
     private static boolean near(float[] v, double x, double y, double z) {
@@ -1187,6 +1251,125 @@ public final class Smoke {
         }
     }
 
+    // Assembly.link / Assembly.joint, at parity with the Python reference's _mechanism() and
+    // its tests (test_a_mechanism_is_written_as_ap242_kinematic_topology,
+    // test_every_bad_link_or_joint_is_refused_and_changes_nothing).
+    private static void mechanism() {
+        try (Blacksmith.Solid mechBolt = Blacksmith.Solid.cylinder(1, 6).named("bolt");
+             Blacksmith.Solid mechPlate = Blacksmith.Solid.cuboid(20, 10, 2).named("plate"); // uncoloured
+             Blacksmith.Assembly bracket = new Blacksmith.Assembly("bracket");
+             Blacksmith.Assembly arm = new Blacksmith.Assembly("arm")) {
+            bracket.place(mechPlate, Blacksmith.Frame.xy().toArray());
+            bracket.place(mechBolt, Blacksmith.Frame.xy(new double[] {5, 5, 2}).toArray());
+            bracket.place(mechBolt, Blacksmith.Frame.xy(new double[] {15, 5, 2}).toArray());
+            bracket.link("fixed", "plate");
+            bracket.link("bolts", "bolt", "bolt 2");
+            bracket.joint("screw", "fixed", "bolts");
+
+            arm.place(mechPlate, Blacksmith.Frame.xy().toArray(), "base");
+            arm.place(bracket, Blacksmith.Frame.xy(new double[] {0, 0, 10}).toArray(), "upper");
+            arm.place(mechBolt, Blacksmith.Frame.xy(new double[] {5, 5, 2}).toArray(), "pin");
+            arm.link("ground", "base");
+            arm.link("upper arm", "upper", "pin");
+            arm.joint("shoulder", "ground", "upper arm");
+
+            // Fact 1: the default schema (no explicit schema) carries the kinematic entities.
+            String armStepText = arm.stepText();
+            if (!armStepText.contains("AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF"))
+                fail("mechanism: arm.stepText() does not name AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF");
+            int linkCount = countOf(armStepText, "=KINEMATIC_LINK(");
+            int rigidCount = countOf(armStepText, "=RIGID_LINK_REPRESENTATION(");
+            int cdklrCount = countOf(armStepText, "=CONTEXT_DEPENDENT_KINEMATIC_LINK_REPRESENTATION(");
+            int jointCount = countOf(armStepText, "=KINEMATIC_JOINT(");
+            int topoCount = countOf(armStepText, "=KINEMATIC_TOPOLOGY_STRUCTURE(");
+            if (linkCount != 4 || rigidCount != 6 || cdklrCount != 6 || jointCount != 2 || topoCount != 2)
+                fail("mechanism: arm.stepText() has " + linkCount + " links, " + rigidCount + " rigid reps, " + cdklrCount
+                        + " context-dependent reps, " + jointCount + " joints, " + topoCount + " topologies, not 4/6/6/2/2");
+            System.out.println("mechanism: arm.stepText() writes " + linkCount + " links, " + rigidCount + " rigid reps, "
+                    + cdklrCount + " context-dependent reps, " + jointCount + " joints, " + topoCount + " topologies");
+
+            // Fact 2: an explicit schema without kinematic entities is refused.
+            try {
+                arm.stepText("config_control_design", "mm");
+                fail("mechanism: config_control_design was not refused");
+            } catch (Blacksmith.BuildException e) {
+                if (e.getMessage() == null || !e.getMessage().contains("no kinematic entities"))
+                    fail("mechanism: config_control_design was not refused right: " + e.getMessage());
+            }
+            System.out.println("mechanism: an explicit schema without kinematic entities is refused");
+
+            // Fact 3: each of the eleven refusals raises with exactly its message, and afterwards
+            // the STEP text (with FILE_NAME( lines stripped) is unchanged.
+            String before = noStamp(arm.stepText());
+            record Refusal(Runnable call, String message) {}
+            List<Refusal> refusals = List.of(
+                    new Refusal(() -> arm.link("", "base"), "link: a name cannot be empty"),
+                    new Refusal(() -> arm.link("ground", "base"), "link: assembly 'arm' already has a link named 'ground'"),
+                    new Refusal(() -> arm.link("free"), "link: link 'free' names no placements"),
+                    new Refusal(() -> arm.link("free", "base", "base"), "link: link 'free' names placement 'base' twice"),
+                    new Refusal(() -> arm.link("free", "bolt"), "link: assembly 'arm' has no placement named 'bolt'"),
+                    new Refusal(() -> arm.link("free", "pin"), "link: placement 'pin' of assembly 'arm' is already in link 'upper arm'"),
+                    new Refusal(() -> arm.joint("", "ground", "upper arm"), "joint: a name cannot be empty"),
+                    new Refusal(() -> arm.joint("shoulder", "upper arm", "ground"), "joint: assembly 'arm' already has a joint named 'shoulder'"),
+                    new Refusal(() -> arm.joint("wrist", "ground", "hand"), "joint: assembly 'arm' has no link named 'hand'"),
+                    new Refusal(() -> arm.joint("wrist", "ground", "ground"), "joint: joint 'wrist' joins link 'ground' to itself"),
+                    new Refusal(() -> arm.joint("wrist", "ground", "upper arm"), "joint: assembly 'arm' already joins 'ground' to 'upper arm'"));
+            for (Refusal r : refusals) {
+                try {
+                    r.call().run();
+                    fail("mechanism: \"" + r.message() + "\" was accepted");
+                } catch (Blacksmith.BuildException e) {
+                    if (!r.message().equals(e.getMessage())) fail("mechanism: got \"" + e.getMessage() + "\", not \"" + r.message() + "\"");
+                }
+            }
+            String after = noStamp(arm.stepText());
+            if (!after.equals(before)) fail("mechanism: a refused link or joint changed the assembly");
+            System.out.println("mechanism: all eleven bad links and joints are refused with their exact message, unchanged");
+
+            // Fact 5: read-back through the reader, before fact 4 adds "back" -- arm.toScene()
+            // carries the same links and joints back in, by name and node count, with no
+            // kinematics diagnostic. (The Python reference checks this on a fresh
+            // _mechanism() build, i.e. before the reverse-pair joint exists; done here in
+            // place, ahead of fact 4, so it sees the same two joints.)
+            try (Cad.Scene mechScene = arm.toScene()) {
+                List<Cad.Link> mechLinks = mechScene.links();
+                String[] wantNames = {"fixed", "bolts", "ground", "upper arm"};
+                int[] wantNodes = {1, 2, 1, 2};
+                if (mechLinks.size() != wantNames.length) fail("mechanism: read-back has " + mechLinks.size() + " links, not " + wantNames.length);
+                for (int i = 0; i < mechLinks.size(); i++) {
+                    Cad.Link link = mechLinks.get(i);
+                    if (!link.name().equals(wantNames[i])) fail("mechanism: read-back link " + i + " is \"" + link.name() + "\", not \"" + wantNames[i] + "\"");
+                    if (link.nodes().size() != wantNodes[i]) fail("mechanism: read-back link \"" + link.name() + "\" has " + link.nodes().size() + " nodes, not " + wantNodes[i]);
+                }
+                List<Cad.Joint> mechJoints = mechScene.joints();
+                if (mechJoints.size() != 2
+                        || !mechJoints.get(0).name().equals("screw") || mechJoints.get(0).start().index() != 0 || mechJoints.get(0).end().index() != 1
+                        || !mechJoints.get(1).name().equals("shoulder") || mechJoints.get(1).start().index() != 2 || mechJoints.get(1).end().index() != 3)
+                    fail("mechanism: read-back joints are not (screw, 0, 1) and (shoulder, 2, 3)");
+                for (String d : mechScene.diagnostics())
+                    if (d.startsWith("kinematics:")) fail("mechanism: read-back carries a kinematics: diagnostic");
+                System.out.println("mechanism: read-back through arm.toScene() matches links, joints and diagnostics");
+            }
+
+            // Fact 4: the reverse pair is a new joint.
+            arm.joint("back", "upper arm", "ground");
+            System.out.println("mechanism: the reverse pair (\"back\") is accepted as a new joint");
+        }
+    }
+
+    // A refused link or joint changes nothing: STEP text compared with every FILE_NAME( line
+    // removed, since that line carries a timestamp.
+    private static String noStamp(String text) {
+        StringBuilder kept = new StringBuilder();
+        for (String line : text.split("\n", -1)) {
+            if (!line.startsWith("FILE_NAME(")) {
+                if (kept.length() > 0) kept.append('\n');
+                kept.append(line);
+            }
+        }
+        return kept.toString();
+    }
+
     private static int countOf(String haystack, String needle) {
         int count = 0;
         for (int at = haystack.indexOf(needle); at >= 0; at = haystack.indexOf(needle, at + needle.length())) count++;
@@ -1349,5 +1532,9 @@ public final class Smoke {
     private static void fail(String why) {
         System.err.println(why);
         System.exit(1);
+    }
+
+    private static boolean close(double a, double b) {
+        return Math.abs(a - b) <= 1e-9;
     }
 }

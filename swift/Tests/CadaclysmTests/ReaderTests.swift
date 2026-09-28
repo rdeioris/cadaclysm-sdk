@@ -27,6 +27,7 @@ private func sample(_ relative: String) throws -> String {
 private let cube = "samples/cube.scad"
 private let mechanism = "samples/mechanism.stp"
 private let openSheet = "samples/open-sheet.scad"
+private let dentedBox = "samples/dented-box.stp"
 private let blocks = "crates/cadaclysm-acis/tests/fixtures/rhino/block-instances.3dm"
 private let attributed = "crates/cadaclysm-acis/tests/fixtures/fusion/attributed.stp"
 private let assembly = "android/app/src/debug/assets/as1-ac-214.stp"
@@ -303,8 +304,9 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(plate.generator, "brep")
         XCTAssertEqual(plate.depth, 1)
         XCTAssertEqual(plate.colour, SIMD4(1, 0, 0, 1))
-        XCTAssertEqual(plate.mesh.vertexCount, 2652)
-        XCTAssertEqual(plate.mesh.triangleCount, 4092)
+        // 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound): 2652 -> 2100 vertices, 4092 -> 2988 triangles.
+        XCTAssertEqual(plate.mesh.vertexCount, 2100)
+        XCTAssertEqual(plate.mesh.triangleCount, 2988)
         let edges = plate.edges
         XCTAssertEqual(edges.polylineCount, 48)
         XCTAssertEqual(edges.vertexCount, 648)
@@ -397,6 +399,15 @@ final class ReaderTests: XCTestCase {
         }
         XCTAssertThrowsError(try scene.svgText(SvgOptions(margin: -1)))
         XCTAssertThrowsError(try node.svgText(SvgOptions(fov: 200)))
+    }
+
+    /// The escape hatch native libraries take (cadaclysm_render_add_scene): the live handle
+    /// while open, nil once closed -- never a dangling pointer.
+    func testUnsafeHandleIsNilOnceClosed() throws {
+        let scene = try Cadaclysm.open(try sample(cube))
+        XCTAssertNotNil(scene.unsafeHandle)
+        scene.close()
+        XCTAssertNil(scene.unsafeHandle)
     }
 
     func testCopyOutlivesClose() throws {
@@ -664,11 +675,12 @@ final class ReaderTests: XCTestCase {
         let bracket = scene.nodes[1], pin = scene.nodes[2]
         XCTAssertFalse(bracket.isMeshed)
         XCTAssertEqual(bracket.triangleEstimate, 18)
-        XCTAssertEqual(pin.triangleEstimate, 480)
+        XCTAssertEqual(pin.triangleEstimate, 468)  // 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound): 480 -> 468
         XCTAssertEqual(bracket.surfaceEdges.polylineCount, 12)
         XCTAssertEqual(bracket.surfaceEdges.vertexCount, 24)
         XCTAssertTrue(bracket.surfaceIsocurves.isEmpty)
-        XCTAssertEqual(pin.surfaceIsocurves.polylineCount, 3)
+        // Three rings and three rulings (6 since 53759bef; the rulings were dropped at the trim boundary).
+        XCTAssertEqual(pin.surfaceIsocurves.polylineCount, 6)
         let proxy = bracket.surfaceProxyMesh(cells: 4)
         XCTAssertEqual(proxy.vertexCount, 150)
         XCTAssertEqual(proxy.indexCount, 576)
@@ -687,7 +699,8 @@ final class ReaderTests: XCTestCase {
 
     /// The mechanism facts, identical in every language: two links `base` and `arm`, each
     /// naming one node of the same name; one joint `hinge` from `arm` (index 1) to `base`
-    /// (index 0).
+    /// (index 0). Also the joint's pair (revolute, ranged, both contact frames at
+    /// (0, 0, 100)) and the file's one named state ("open": hinge set to 0.5).
     func testMechanismLinksAndJoints() throws {
         let scene = try Cadaclysm.open(try sample(mechanism))
         defer { scene.close() }
@@ -705,6 +718,38 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(hinge.start.index, 1)
         XCTAssertEqual(hinge.end.name, "base")
         XCTAssertEqual(hinge.end.index, 0)
+
+        // The pair: revolute about Z, ranged -1.5..1.5, both contact frames at (0, 0, 100).
+        guard let pair = hinge.pair else { return XCTFail("hinge has no pair") }
+        XCTAssertEqual(pair.kind, .revolute)
+        XCTAssertNil(pair.typeName)
+        XCTAssertNil(pair.pitch)
+        for raw in [pair.rawFrameStart, pair.rawFrameEnd] {
+            XCTAssertEqual(raw[12], 0, accuracy: 1e-9)
+            XCTAssertEqual(raw[13], 0, accuracy: 1e-9)
+            XCTAssertEqual(raw[14], 100, accuracy: 1e-9)
+            XCTAssertEqual(raw[8], 0, accuracy: 1e-9)
+            XCTAssertEqual(raw[9], 0, accuracy: 1e-9)
+            XCTAssertEqual(raw[10], 1, accuracy: 1e-9)
+        }
+        let freedoms = pair.freedoms()
+        XCTAssertEqual(freedoms.count, 1)
+        XCTAssertEqual(freedoms[0].motion, .rotation)
+        XCTAssertEqual(freedoms[0].axis, .z)
+        XCTAssertEqual(freedoms[0].lower ?? .nan, -1.5, accuracy: 1e-9)
+        XCTAssertEqual(freedoms[0].upper ?? .nan, 1.5, accuracy: 1e-9)
+
+        // The state: one named "open", one row (hinge, [0.5]).
+        let states = scene.states
+        XCTAssertEqual(states.count, 1)
+        XCTAssertEqual(states[0].index, 0)
+        XCTAssertEqual(states[0].name, "open")
+        XCTAssertEqual(states[0].values.count, 1)
+        let row = states[0].values[0]
+        XCTAssertEqual(row.joint?.name, "hinge")
+        XCTAssertEqual(row.joint?.index, 0)
+        XCTAssertEqual(row.values.count, 1)
+        XCTAssertEqual(row.values.first ?? .nan, 0.5, accuracy: 1e-9)
     }
 
     func testCubeHasNoLinksOrJoints() throws {
@@ -712,6 +757,7 @@ final class ReaderTests: XCTestCase {
         defer { scene.close() }
         XCTAssertTrue(scene.links.isEmpty)
         XCTAssertTrue(scene.joints.isEmpty)
+        XCTAssertTrue(scene.states.isEmpty)
     }
 
     /// A Rhino extrusion's edges are its profile's own curves, so the surface path gets them
@@ -807,6 +853,20 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(folds[0].2, UInt32.max, "a mesh-only body's rows name no B-rep edge")
         XCTAssertEqual(cracks[0].0, 1)
         XCTAssertEqual(cracks[0].1, 2)
+
+        // Crossings: `samples/dented-box.stp` is a closed B-rep box whose top dips through its
+        // own floor, 296 pairs measured 2026-09-26. `open_edge_count` and `folded_edge_count`
+        // are both 0 for this watertight body, so a `crossings` wired to either of those
+        // (rather than its own live `cadaclysm_fem_mesh_crossing_count`) reads 0 here, not 296.
+        let dentedScene = try Cadaclysm.open(try sample(dentedBox))
+        defer { dentedScene.close() }
+        let dentedMesh = try XCTUnwrap(dentedScene.nodes.first { $0.canMesh }).femMesh()
+        defer { dentedMesh.free() }
+        XCTAssertTrue(dentedMesh.watertight)
+        XCTAssertFalse(dentedMesh.fromMesh)
+        let crossings = try dentedMesh.crossings
+        XCTAssertEqual(crossings.count, 296)
+        XCTAssertLessThan(crossings[0].0, crossings[0].1, "the first pair is not a < b")
     }
 
     /// The cube's own mesh through `Node.femMesh`: a `from_mesh` body, so one face, every node
@@ -840,6 +900,7 @@ final class ReaderTests: XCTestCase {
         XCTAssertTrue(mesh.watertight)
         XCTAssertEqual(try mesh.openEdges.count, 0)
         XCTAssertEqual(try mesh.foldedEdges.count, 0)
+        XCTAssertEqual(try mesh.crossings.count, 0)
         XCTAssertGreaterThan(mesh.minAngle, 0)
         XCTAssertLessThanOrEqual(mesh.minAngle, 60)
         XCTAssertLessThan(mesh.worstTriangle, 12)
@@ -1009,10 +1070,11 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(mesh.faceCount, 18)
         XCTAssertEqual(try mesh.edges.count, 48)
         XCTAssertEqual(try mesh.vertices.count, 32)
-        // A closed body: watertight with both censuses empty.
+        // A closed body: watertight with both censuses empty, and no crossings.
         XCTAssertTrue(mesh.watertight)
         XCTAssertEqual(try mesh.openEdges.count, 0)
         XCTAssertEqual(try mesh.foldedEdges.count, 0)
+        XCTAssertEqual(try mesh.crossings.count, 0)
         let edges = try mesh.edges
         let vertices = try mesh.vertices
         XCTAssertFalse(edges.isEmpty)
@@ -1059,7 +1121,8 @@ final class ReaderTests: XCTestCase {
     /// wrong on its own and still be caught: the no-argument call must agree with an explicit `0.01`,
     /// must come to the node count `0.01` is known to give, and must **disagree** with an explicit
     /// `0.05` -- which is what says the first assertion has teeth. Measured through `cadaclysm.py`
-    /// on the same library: 5636 nodes at 0.01 against 2564 at 0.05.
+    /// on the same library: 3404 nodes at 0.01 against 1484 at 0.05 (5636 and 2564 until
+    /// 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound)).
     ///
     /// **The cube cannot do this job**, and the last two assertions say why: a flat mesh-only body
     /// meshes to 8 nodes at either tolerance, so a defaults test written against it would pass
@@ -1075,7 +1138,7 @@ final class ReaderTests: XCTestCase {
         let renderDefault = try node.femMesh(tolerance: 0.05)
         defer { renderDefault.free() }
         XCTAssertEqual(byDefault.nodes.count, stated.nodes.count, "the default tolerance is not 0.01")
-        XCTAssertEqual(byDefault.nodes.count, 5636 * 3, "0.01 no longer meshes this body to 5636 nodes")
+        XCTAssertEqual(byDefault.nodes.count, 3404 * 3, "0.01 no longer meshes this body to 3404 nodes")
         XCTAssertNotEqual(byDefault.nodes.count, renderDefault.nodes.count,
                           "0.01 and 0.05 mesh this body alike, so this test cannot tell them apart")
 

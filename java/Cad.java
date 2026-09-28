@@ -293,6 +293,9 @@ public final class Cad {
             MemoryLayout.paddingLayout(4),
             ValueLayout.ADDRESS.withName("shared"),
             ValueLayout.JAVA_INT.withName("shared_count"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("duplicate"),
+            ValueLayout.JAVA_INT.withName("duplicate_count"),
             MemoryLayout.paddingLayout(4));
 
     /**
@@ -365,6 +368,18 @@ public final class Cad {
             ValueLayout.JAVA_BOOLEAN.withName("has_position"),
             MemoryLayout.paddingLayout(7));
 
+    // CadaclysmFreedom: each 1-byte bool is followed by 7 padding bytes to bring the next
+    // double back onto an eight-byte boundary, the same rule ATTRIBUTE and FEM_VERTEX follow.
+    private static final MemoryLayout FREEDOM = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("motion"),
+            ValueLayout.JAVA_INT.withName("axis"),
+            ValueLayout.JAVA_BOOLEAN.withName("has_lower"),
+            MemoryLayout.paddingLayout(7),
+            ValueLayout.JAVA_DOUBLE.withName("lower"),
+            ValueLayout.JAVA_BOOLEAN.withName("has_upper"),
+            MemoryLayout.paddingLayout(7),
+            ValueLayout.JAVA_DOUBLE.withName("upper"));
+
     // ---- loading the library, and every entry point ----------------------------------
 
     private static final MethodHandle LAST_ERROR, VERSION, LICENSE_SET, LICENSE_INFO,
@@ -393,8 +408,10 @@ public final class Cad {
             NODE_BOUNDS64, NODE_BOUNDS_PLACED64, BOUNDS64_ALL,
             LINK_COUNT, LINK_NAME, LINK_NODE_COUNT, LINK_NODE,
             JOINT_COUNT, JOINT_NAME, JOINT_START, JOINT_END,
+            JOINT_PAIR_KIND, JOINT_PAIR_TYPE, JOINT_PAIR_PITCH, JOINT_PAIR_FRAMES,
+            JOINT_FREEDOM_COUNT, JOINT_FREEDOM, STATE_COUNT, STATE_NAME, STATE_VALUE_COUNT, STATE_VALUE,
             FEM_OPTIONS_INIT, NODE_FEM_MESH, FEM_VIEW, FEM_EDGE_AT, FEM_VERTEX_AT,
-            FEM_OPEN_EDGE, FEM_FOLDED_EDGE, FEM_MSH_TEXT, FEM_SAVE_MSH, FEM_FREE,
+            FEM_OPEN_EDGE, FEM_FOLDED_EDGE, FEM_CROSSING_COUNT, FEM_CROSSING, FEM_MSH_TEXT, FEM_SAVE_MSH, FEM_FREE,
             NODE_EDGE_COLORS, NODE_SURFACE_EDGE_COLORS;
 
     static {
@@ -519,6 +536,8 @@ public final class Cad {
         FEM_VERTEX_AT = bind(linker, lib, "cadaclysm_fem_mesh_vertex", FunctionDescriptor.of(B, A, I, A));
         FEM_OPEN_EDGE = bind(linker, lib, "cadaclysm_fem_mesh_open_edge", FunctionDescriptor.of(B, A, I, A, A, A));
         FEM_FOLDED_EDGE = bind(linker, lib, "cadaclysm_fem_mesh_folded_edge", FunctionDescriptor.of(B, A, I, A, A, A));
+        FEM_CROSSING_COUNT = bind(linker, lib, "cadaclysm_fem_mesh_crossing_count", FunctionDescriptor.of(I, A));
+        FEM_CROSSING = bind(linker, lib, "cadaclysm_fem_mesh_crossing", FunctionDescriptor.of(B, A, I, A, A));
         FEM_MSH_TEXT = bind(linker, lib, "cadaclysm_fem_mesh_msh_text", FunctionDescriptor.of(A, A));
         FEM_SAVE_MSH = bind(linker, lib, "cadaclysm_fem_mesh_save_msh", FunctionDescriptor.of(B, A, A));
         FEM_FREE = bind(linker, lib, "cadaclysm_fem_mesh_free", FunctionDescriptor.ofVoid(A));
@@ -542,6 +561,16 @@ public final class Cad {
         JOINT_NAME = bind(linker, lib, "cadaclysm_joint_name", FunctionDescriptor.of(A, A, I));
         JOINT_START = bind(linker, lib, "cadaclysm_joint_start", FunctionDescriptor.of(I, A, I));
         JOINT_END = bind(linker, lib, "cadaclysm_joint_end", FunctionDescriptor.of(I, A, I));
+        JOINT_PAIR_KIND = bind(linker, lib, "cadaclysm_joint_pair_kind", FunctionDescriptor.of(I, A, I));
+        JOINT_PAIR_TYPE = bind(linker, lib, "cadaclysm_joint_pair_type", FunctionDescriptor.of(A, A, I));
+        JOINT_PAIR_PITCH = bind(linker, lib, "cadaclysm_joint_pair_pitch", FunctionDescriptor.of(D, A, I));
+        JOINT_PAIR_FRAMES = bind(linker, lib, "cadaclysm_joint_pair_frames", FunctionDescriptor.of(B, A, I, A, A));
+        JOINT_FREEDOM_COUNT = bind(linker, lib, "cadaclysm_joint_freedom_count", FunctionDescriptor.of(I, A, I));
+        JOINT_FREEDOM = bind(linker, lib, "cadaclysm_joint_freedom", FunctionDescriptor.of(B, A, I, I, A));
+        STATE_COUNT = bind(linker, lib, "cadaclysm_state_count", FunctionDescriptor.of(I, A));
+        STATE_NAME = bind(linker, lib, "cadaclysm_state_name", FunctionDescriptor.of(A, A, I));
+        STATE_VALUE_COUNT = bind(linker, lib, "cadaclysm_state_value_count", FunctionDescriptor.of(I, A, I));
+        STATE_VALUE = bind(linker, lib, "cadaclysm_state_value", FunctionDescriptor.of(I, A, I, I, A, A, I));
     }
 
     @SuppressWarnings("restricted") // downcallHandle: every entry point here is the published ABI.
@@ -2263,6 +2292,15 @@ public final class Cad {
         }
     }
 
+    /** A double from a {@code (handle, uint32_t index)} entry point. */
+    private static double invokeDoubleAt(MethodHandle function, MemorySegment handle, int index) {
+        try {
+            return (double) function.invokeExact(handle, index);
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
+
     // ---- the FEM surface mesh ---------------------------------------------------------
 
     /**
@@ -2611,6 +2649,44 @@ public final class Cad {
             return census(FEM_FOLDED_EDGE, foldedEdgeCount, "folded edge");
         }
 
+        /**
+         * Every pair of triangles that pass through each other, as {@code {a, b}} with
+         * {@code a < b}, sorted: an edge of one through the other's interior. Their B-rep
+         * faces are {@link #triangleFace()}{@code [a]} and {@code [b]}.
+         *
+         * <p><b>Computed for every body, open or closed.</b> The census {@link #watertight()},
+         * {@link #openEdges()} and {@link #foldedEdges()} report is topological and cannot see
+         * a surface passing through itself; a mesh is ready for a volume mesher when it is
+         * {@link #watertight()} <b>and</b> this is empty -- Gmsh refuses one that crosses. A
+         * copy.
+         */
+        public List<int[]> crossings() {
+            MemorySegment h = handle();
+            List<int[]> out;
+            try {
+                int count = invokeIntOf(FEM_CROSSING_COUNT, h);
+                out = new ArrayList<>(count);
+                try (Arena arena = Arena.ofConfined()) {
+                    MemorySegment pair = arena.allocate(ValueLayout.JAVA_INT, 2);
+                    for (int i = 0; i < count; i++) {
+                        MemorySegment a = pair.asSlice(0, Integer.BYTES);
+                        MemorySegment b = pair.asSlice(Integer.BYTES, Integer.BYTES);
+                        boolean ok;
+                        try {
+                            ok = (boolean) FEM_CROSSING.invokeExact(h, i, a, b);
+                        } catch (Throwable t) {
+                            throw new RuntimeException(t);
+                        }
+                        if (!ok) throw new CadaclysmException(lastErrorOr("fem mesh crossing " + i));
+                        out.add(pair.toArray(ValueLayout.JAVA_INT));
+                    }
+                }
+            } finally {
+                java.lang.ref.Reference.reachabilityFence(this);
+            }
+            return out;
+        }
+
         /** The library's two census readers have one shape, so the two lists cannot drift. */
         private List<int[]> census(MethodHandle row, int count, String what) {
             MemorySegment h = handle();
@@ -2882,8 +2958,8 @@ public final class Cad {
 
     /**
      * A connection between two links of the file's mechanism. Its two ends keep the file's
-     * order, not a parent and a child, since a mechanism may be a network with loops. How a
-     * joint moves (its pair) is not read yet. From {@link Scene#joints()}.
+     * order, not a parent and a child, since a mechanism may be a network with loops. From
+     * {@link Scene#joints()}.
      */
     public static final class Joint {
         private final Scene scene;
@@ -2918,6 +2994,32 @@ public final class Cad {
             return new Link(scene, invokeIntAt(JOINT_END, scene.handle(), index));
         }
 
+        /** How this joint moves, or null when the file gives it no pair. */
+        public Pair pair() {
+            int kind = invokeIntAt(JOINT_PAIR_KIND, scene.handle(), index);
+            if (kind < 0) return null;
+            String typeName = stringOrNull(invokeStringAt(JOINT_PAIR_TYPE, scene.handle(), index));
+            double pitchRaw = invokeDoubleAt(JOINT_PAIR_PITCH, scene.handle(), index);
+            Double pitch = Double.isNaN(pitchRaw) ? null : pitchRaw;
+            double[] rawStart;
+            double[] rawEnd;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment start = arena.allocate(ValueLayout.JAVA_DOUBLE, 16);
+                MemorySegment end = arena.allocate(ValueLayout.JAVA_DOUBLE, 16);
+                boolean ok = (boolean) JOINT_PAIR_FRAMES.invokeExact(scene.handle(), index, start, end);
+                if (!ok) throw new CadaclysmException("joint " + index + " reports a pair kind but no frames");
+                rawStart = start.toArray(ValueLayout.JAVA_DOUBLE);
+                rawEnd = end.toArray(ValueLayout.JAVA_DOUBLE);
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+            int freedomCount = invokeIntAt(JOINT_FREEDOM_COUNT, scene.handle(), index);
+            List<Freedom> freedoms = new ArrayList<>(freedomCount);
+            for (int i = 0; i < freedomCount; i++) freedoms.add(readFreedom(scene.handle(), index, i));
+            return new Pair(PairKind.of(kind), typeName, pitch, toRowMajor(rawStart), toRowMajor(rawEnd),
+                    rawStart, rawEnd, List.copyOf(freedoms));
+        }
+
         @Override
         public boolean equals(Object obj) {
             return obj instanceof Joint other && other.index == index && other.scene == scene;
@@ -2931,6 +3033,117 @@ public final class Cad {
         @Override
         public String toString() {
             return "<Joint " + index + " " + name() + ">";
+        }
+    }
+
+    // ---- Pair, Freedom and State ------------------------------------------------------------
+
+    /**
+     * A {@link CadaclysmPairKind} value naming how a {@link Joint} moves. Values match the
+     * header's {@code CADACLYSM_PAIR_*} order exactly, so {@link #of(int)} can index straight
+     * into {@link #values()}.
+     */
+    public enum PairKind {
+        REVOLUTE, PRISMATIC, CYLINDRICAL, SPHERICAL, SPHERICAL_WITH_PIN, PLANAR, UNIVERSAL,
+        HOMOKINETIC, SCREW, FULLY_CONSTRAINED, UNCONSTRAINED, LOW_ORDER, OTHER;
+
+        static PairKind of(int raw) {
+            PairKind[] values = values();
+            if (raw < 0 || raw >= values.length) throw new CadaclysmException("unknown pair kind " + raw);
+            return values[raw];
+        }
+    }
+
+    /** One of {@link CadaclysmMotion}'s values, in the header's order. */
+    public enum Motion {
+        ROTATION, TRANSLATION;
+
+        static Motion of(int raw) {
+            Motion[] values = values();
+            if (raw < 0 || raw >= values.length) throw new CadaclysmException("unknown motion " + raw);
+            return values[raw];
+        }
+    }
+
+    /** One of {@link CadaclysmFreedomAxis}'s values, in the header's order. */
+    public enum FreedomAxis {
+        X, Y, Z;
+
+        static FreedomAxis of(int raw) {
+            FreedomAxis[] values = values();
+            if (raw < 0 || raw >= values.length) throw new CadaclysmException("unknown freedom axis " + raw);
+            return values[raw];
+        }
+    }
+
+    /**
+     * One of a pair's degrees of freedom: which motion, about or along which contact-frame
+     * axis, and its optional range. {@code lower}/{@code upper} are null when the pair has no
+     * limit on that side.
+     */
+    public record Freedom(Motion motion, FreedomAxis axis, Double lower, Double upper) {}
+
+    private static Freedom readFreedom(MemorySegment scene, int joint, int i) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(FREEDOM);
+            boolean ok = (boolean) JOINT_FREEDOM.invokeExact(scene, joint, i, out);
+            if (!ok) throw new CadaclysmException("joint " + joint + " has no freedom " + i);
+            Motion motion = Motion.of(out.get(ValueLayout.JAVA_INT, offset(FREEDOM, "motion")));
+            FreedomAxis axis = FreedomAxis.of(out.get(ValueLayout.JAVA_INT, offset(FREEDOM, "axis")));
+            boolean hasLower = out.get(ValueLayout.JAVA_BOOLEAN, offset(FREEDOM, "has_lower"));
+            double lower = out.get(ValueLayout.JAVA_DOUBLE, offset(FREEDOM, "lower"));
+            boolean hasUpper = out.get(ValueLayout.JAVA_BOOLEAN, offset(FREEDOM, "has_upper"));
+            double upper = out.get(ValueLayout.JAVA_DOUBLE, offset(FREEDOM, "upper"));
+            return new Freedom(motion, axis, hasLower ? lower : null, hasUpper ? upper : null);
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
+
+    /**
+     * How a {@link Joint} moves: its kind, its two contact frames, and its degrees of freedom.
+     * From {@link Joint#pair()}.
+     *
+     * <p>{@code typeName} is set only for {@link PairKind#OTHER} (the file's entity name, e.g.
+     * {@code "GEAR_PAIR"}); {@code pitch} only for {@link PairKind#SCREW} (length per
+     * revolution). Both are null otherwise. {@code frameStart}/{@code frameEnd} are the two
+     * contact frames as row-major 4x4 matrices, exactly as {@link Node#transform()} renders one;
+     * {@code rawFrameStart}/{@code rawFrameEnd} are the same frames in the ABI's own
+     * column-major sixteen-double form, as {@link Node#rawTransform()} gives.
+     */
+    public record Pair(PairKind kind, String typeName, Double pitch,
+                        double[][] frameStart, double[][] frameEnd,
+                        double[] rawFrameStart, double[] rawFrameEnd,
+                        List<Freedom> freedoms) {}
+
+    /** One row of a {@link State}: a joint the state sets, and the values it sets it to. */
+    public record StateValue(Joint joint, double[] values) {}
+
+    /** A named mechanism state the file records, e.g. STEP's
+     *  {@code MECHANISM_STATE_REPRESENTATION}. From {@link Scene#states()}. */
+    public record State(int index, String name, List<StateValue> values) {}
+
+    private static State readState(Scene scene, int index) {
+        String name = string(invokeStringAt(STATE_NAME, scene.handle(), index));
+        int rowCount = invokeIntAt(STATE_VALUE_COUNT, scene.handle(), index);
+        List<StateValue> values = new ArrayList<>(rowCount);
+        for (int row = 0; row < rowCount; row++) values.add(readStateValue(scene, index, row));
+        return new State(index, name, List.copyOf(values));
+    }
+
+    private static StateValue readStateValue(Scene scene, int state, int row) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment jointOut = arena.allocate(ValueLayout.JAVA_INT);
+            int count = (int) STATE_VALUE.invokeExact(scene.handle(), state, row, jointOut, MemorySegment.NULL, 0);
+            MemorySegment valuesOut = arena.allocate(ValueLayout.JAVA_DOUBLE, Math.max(1, count));
+            int written = (int) STATE_VALUE.invokeExact(scene.handle(), state, row, jointOut, valuesOut, count);
+            int jointIndex = jointOut.get(ValueLayout.JAVA_INT, 0);
+            double[] values = valuesOut.toArray(ValueLayout.JAVA_DOUBLE);
+            if (written != values.length) values = java.util.Arrays.copyOf(values, written);
+            Joint joint = jointIndex == NONE ? null : new Joint(scene, jointIndex);
+            return new StateValue(joint, values);
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
         }
     }
 
@@ -3894,12 +4107,21 @@ public final class Cad {
             return found;
         }
 
-        /** The connections between those links, in the file's order. Topology only: how a
-         *  joint moves is not read yet. */
+        /** The connections between those links, in the file's order; see {@link Joint#pair()}
+         *  for how each one moves. */
         public List<Joint> joints() {
             int count = invokeIntOf(JOINT_COUNT, handle());
             List<Joint> found = new ArrayList<>(count);
             for (int i = 0; i < count; i++) found.add(new Joint(this, i));
+            return found;
+        }
+
+        /** The named mechanism states the file records, e.g. STEP's
+         *  {@code MECHANISM_STATE_REPRESENTATION}. Empty for a file that records none. */
+        public List<State> states() {
+            int count = invokeIntOf(STATE_COUNT, handle());
+            List<State> found = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) found.add(readState(this, i));
             return found;
         }
 

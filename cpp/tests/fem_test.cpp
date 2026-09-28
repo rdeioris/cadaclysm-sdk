@@ -183,6 +183,41 @@ static void census_cases() {
     check(empty.ok() && empty.value().empty(), "census: no rows did not come back as an empty list");
 }
 
+// crossings()'s rows, over a synthetic reader: `crossing_rows` is its own helper, two
+// fields where `census_rows` has three -- a crossing names no B-rep edge. Every fixture
+// in this repo now has a real one (`samples/dented-box.stp`, through the smoke), so this
+// is no longer the only way to reach the arithmetic, but it stays as the fast,
+// library-free check on the extraction itself.
+static void crossing_cases() {
+    const std::array<std::uint32_t, 2> want[] = {{1, 2}, {8, 41}, {0, 9}};
+    auto row = [&](std::uint32_t i, std::uint32_t* a, std::uint32_t* b) {
+        *a = want[i][0];
+        *b = want[i][1];
+        return true;
+    };
+    auto fail = [](std::uint32_t i) { return cadaclysm::Error{"row " + std::to_string(i)}; };
+    cadaclysm::Result<std::vector<std::array<std::uint32_t, 2>>> rows = cadaclysm::detail::crossing_rows(3, row, fail);
+    check(rows.ok(), "crossing: three good rows came back as a failure");
+    if (rows.ok()) {
+        const std::vector<std::array<std::uint32_t, 2>>& got = rows.value();
+        check(got.size() == 3, "crossing: not one row per count");
+        bool same = got.size() == 3;
+        for (std::size_t i = 0; same && i < 3; ++i) same = got[i] == want[i];
+        check(same, "crossing: the rows are not (a, b), in order");
+    }
+
+    // A refused row is the wrapper's error, not a short list quietly returned.
+    auto refuse = [](std::uint32_t i, std::uint32_t*, std::uint32_t*) { return i < 1; };
+    cadaclysm::Result<std::vector<std::array<std::uint32_t, 2>>> stopped = cadaclysm::detail::crossing_rows(4, refuse, fail);
+    check(!stopped.ok(), "crossing: a refused row came back as success");
+    if (!stopped.ok()) check(stopped.error().message == "row 1", "crossing: the refusal does not name the row that failed");
+
+    // Zero rows is an empty list, not a failure: the ordinary answer for a body with no
+    // self-crossings.
+    cadaclysm::Result<std::vector<std::array<std::uint32_t, 2>>> empty = cadaclysm::detail::crossing_rows(0, row, fail);
+    check(empty.ok() && empty.value().empty(), "crossing: no rows did not come back as an empty list");
+}
+
 int main() {
     edge_cases<CadaclysmFemEdge, cadaclysm::FemEdge>(
         [](const CadaclysmFemEdge& raw) { return cadaclysm::detail::fem_edge_of(raw); }, "reader FemEdge");
@@ -193,6 +228,7 @@ int main() {
     vertex_cases<CadaclysmBlacksmithFemVertex, bs::FemVertex>(
         [](const CadaclysmBlacksmithFemVertex& raw) { return bs::detail::fem_vertex_of(raw); }, "kernel FemVertex");
     census_cases();
+    crossing_cases();
 
     // The two ABIs' sentinels are one value, which is what lets a caller move a row
     // between the two sides without translating it.

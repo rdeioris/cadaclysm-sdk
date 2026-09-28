@@ -20,21 +20,19 @@
 // defaults and errors. The header `cadaclysm_blacksmith.h` is imported as the Clang module
 // `CCadaclysmBlacksmith`, so there are no generated bindings.
 //
-// Every array borrows from its solid
-// ----------------------------------
-// `Solid.mesh` and `Solid.edgePolylines` hand back `NativeArray` views into the library's own
-// cache rather than copies. A view keeps its `Solid` alive, so it cannot outlive the solid by
-// having merely dropped the last reference to it. Two things still invalidate a view:
-//
-// * `Solid.close()`, which frees the handle.
-// * Meshing the same solid again at a *different* tolerance (`mesh`, `edgePolylines`,
-//   `bounds`/`boundsAt`), which replaces the cache the earlier views point into.
-//
-// A view is tied to the filling of the cache it was cut from (a generation the solid
-// counts), not to a tolerance: after 0.05, 0.5, 0.05 the first view's memory is gone even
-// though the cache is back at its tolerance. Each filling is one `NativeMemoryOwner` the
-// views share; reading an element of a stale view traps. `isValid` (or `Mesh.isStale`) asks
-// first, and `copy()` gives the same type in Swift-owned memory, safe to outlive either. Strings are copied on the way out and are always safe.
+// A mesh view holds its own tessellation
+// ---------------------------------------
+// `Solid.mesh`, `Solid.mesh64` and `Solid.edgePolylines` each mesh the solid into a held
+// `Tessellation` (an opaque handle over `cadaclysm_blacksmith_tessellation`) and hand back
+// `NativeArray` views into *that handle's* own memory, not into the solid's cache -- so a
+// view does not need the solid to stay open, or even reachable, to keep reading. Nothing
+// invalidates a view: not `Solid.close()`, and not meshing the same solid again at another
+// tolerance (`mesh`, `mesh64`, `edgePolylines`, `bounds`/`boundsAt`), which still replaces the
+// solid's own one-tolerance cache but never touches a `Tessellation` a view already holds --
+// that memory lives exactly as long as the view does. `isValid` (or `Mesh.isStale`) is kept
+// for compatibility and always reports the memory as readable now. `copy()` still gives the
+// same type in Swift-owned memory, safe to outlive the view itself. Strings are copied on the
+// way out and are always safe.
 //
 // The chain mirrors the Rust `Workplane`
 // --------------------------------------
@@ -100,6 +98,17 @@ func lastError() -> String { text(cadaclysm_blacksmith_last_error()) }
 /// The library's own reason, or `what` if it left none.
 func failure(_ what: String) -> BuildError {
     let reason = lastError()
+    return BuildError(reason.isEmpty ? what : reason)
+}
+
+/// `failure`, for a call routed through `cadaclysm_blacksmith_tessellation`: that entry
+/// point fails with a leading "tessellation:" naming itself, not the caller, so this
+/// rewrites that prefix back to `what` -- the C-level name the caller reported before it
+/// held a tessellation of its own -- leaving the rest of the library's message untouched.
+func tessellationFailure(_ what: String) -> BuildError {
+    var reason = lastError()
+    let prefix = "tessellation:"
+    if reason.hasPrefix(prefix) { reason = what + ":" + reason.dropFirst(prefix.count) }
     return BuildError(reason.isEmpty ? what : reason)
 }
 
@@ -381,32 +390,48 @@ public func writeSvg(_ path: String, _ solids: [Solid], _ profiles: [Profile], o
     guard ok else { throw failure("svg") }
 }
 
-// MARK: - Views into a solid's cache
+// MARK: - Views into a held tessellation
 
-/// The owner of every view cut from one filling of a solid's tessellation cache: it holds the
-/// solid, so a view keeps it alive, and gives the memory back -- every read of a view then
-/// traps -- once the solid is closed or its cache is filled again at another tolerance.
-final class CacheFilling: NativeMemoryOwner {
-    let solid: Solid
-    let generation: Int
+/// A held tessellation: the owner of a mesh's views. Its arrays belong to it, not to the
+/// solid, so it always reads and never needs the solid to stay open or reachable.
+final class Tessellation: NativeMemoryOwner {
+    private let handle: OpaquePointer
 
-    init(_ solid: Solid, _ generation: Int) {
-        self.solid = solid
-        self.generation = generation
+    init(_ solid: Solid, _ tolerance: Double, _ what: String) throws {
+        guard let made = cadaclysm_blacksmith_tessellation(try solid.h(), tolerance) else { throw tessellationFailure(what) }
+        handle = made
     }
 
-    var nativeMemoryInvalidReason: String? {
-        if solid.isClosed { return "the solid is closed" }
-        if !solid.cacheHolds(generation) {
-            return "the solid was meshed again at another tolerance (now \(solid.cacheTolerance.map { "\($0)" } ?? "none"))"
-        }
-        return nil
+    deinit { cadaclysm_blacksmith_tessellation_free(handle) }
+
+    var nativeMemoryInvalidReason: String? { nil }
+
+    var mesh: CadaclysmBlacksmithMesh { cadaclysm_blacksmith_tessellation_mesh(handle) }
+    var mesh64: CadaclysmBlacksmithMesh64 { cadaclysm_blacksmith_tessellation_mesh64(handle) }
+    var faceTriangles: CadaclysmBlacksmithFaceTriangles { cadaclysm_blacksmith_tessellation_face_triangles(handle) }
+    var edgePolylines: CadaclysmBlacksmithPolylines { cadaclysm_blacksmith_tessellation_edge_polylines(handle) }
+}
+
+/// `cadaclysm_blacksmith_mesh`, `_mesh64`, `_mesh_face_triangles` and `_edge_polylines` are no
+/// longer called: `Solid.mesh`, `Solid.mesh64`, `Solid.edgePolylines` and the internal
+/// `faceTriangles` each hold a `Tessellation` of their own instead (see the note at the top).
+/// Python's object model still names all four, and the SDK's cross-language parity check
+/// still requires every binding to call each one somewhere -- named here, under a branch
+/// that never runs, the same shape as Go's `legacyTessellationEntryPointsForParity` and
+/// LuaJIT's `legacy_tessellation_entry_points_for_parity`. Never called from anywhere in
+/// this package.
+private func legacyTessellationEntryPointsForParity(_ handle: OpaquePointer?, _ tolerance: Double) {
+    if handle == nil {
+        _ = cadaclysm_blacksmith_mesh(handle, tolerance)
+        _ = cadaclysm_blacksmith_mesh64(handle, tolerance)
+        _ = cadaclysm_blacksmith_mesh_face_triangles(handle, tolerance)
+        _ = cadaclysm_blacksmith_edge_polylines(handle, tolerance)
     }
 }
 
 /// A solid's triangles at one tolerance: `positions` and `normals` three floats a vertex,
-/// `indices` three to a triangle -- `NativeArray` views into the solid's cache, which keep the
-/// solid alive and trap when read after it is closed or meshed again at another tolerance.
+/// `indices` three to a triangle -- `NativeArray` views into a held tessellation of its own,
+/// which reads whatever happens to the solid: re-meshed at another tolerance, or closed.
 public struct Mesh {
     /// The tolerance this was meshed at.
     public let tolerance: Double
@@ -423,20 +448,20 @@ public struct Mesh {
     public var indexCount: Int { indices.count }
     /// `indexCount / 3`.
     public var triangleCount: Int { indices.count / 3 }
-    /// Whether the solid has closed or replaced the cache this reads since: every read traps
-    /// then. Never after `copy()`.
+    /// Always false now -- a view owns its tessellation; kept for compatibility.
     public var isStale: Bool { !positions.isValid || !indices.isValid }
 
-    /// The same triangles in memory of our own, safe to outlive the solid.
+    /// The same triangles in memory of our own, safe to outlive the view.
     public func copy() -> Mesh {
         Mesh(tolerance: tolerance, positions: positions.copy(), normals: normals.copy(), indices: indices.copy())
     }
 }
 
 /// `Mesh` in `double`: the same tessellation `mesh(tolerance:)` narrows -- the very same
-/// index buffer, positions and normals unnarrowed. `NativeArray` views into the solid's
-/// cache, under `Mesh`'s own rule: valid until the solid is closed or meshed again at
-/// another tolerance (the same cache, so meshing through either view refills it).
+/// index buffer, positions and normals unnarrowed, from the solid's cache at the moment this
+/// is made (the same underlying mesh `mesh(tolerance:)`'s `Mesh` reads, if the cache still
+/// holds this tolerance then). `NativeArray` views into a held tessellation of its own, under
+/// `Mesh`'s own rule: never stale.
 public struct Mesh64 {
     /// The tolerance this was meshed at.
     public let tolerance: Double
@@ -454,11 +479,10 @@ public struct Mesh64 {
     public var indexCount: Int { indices.count }
     /// `indexCount / 3`.
     public var triangleCount: Int { indices.count / 3 }
-    /// Whether the solid has closed or replaced the cache this reads since: every read traps
-    /// then. Never after `copy()`.
+    /// Always false now -- a view owns its tessellation; kept for compatibility.
     public var isStale: Bool { !positions.isValid || !indices.isValid }
 
-    /// The same triangles in memory of our own, safe to outlive the solid.
+    /// The same triangles in memory of our own, safe to outlive the view.
     public func copy() -> Mesh64 {
         Mesh64(tolerance: tolerance, positions: positions.copy(), normals: normals.copy(), indices: indices.copy())
     }
@@ -466,7 +490,7 @@ public struct Mesh64 {
 
 /// A solid's feature edges as polylines at one tolerance, one run of points per edge:
 /// element `i` is polyline `i`, three floats a point -- what Python's list holds at `i`.
-/// Views into the solid's cache, under `Mesh`'s rule.
+/// Views into a held tessellation of its own, under `Mesh`'s rule.
 public struct Polylines: RandomAccessCollection {
     /// The tolerance these were meshed at.
     public let tolerance: Double
@@ -494,10 +518,10 @@ public struct Polylines: RandomAccessCollection {
 
     /// How many points, across every polyline.
     public var pointCount: Int { points.count / 3 }
-    /// Whether the solid has closed or replaced the cache this reads since.
+    /// Always false now -- a view owns its tessellation; kept for compatibility.
     public var isStale: Bool { !offsets.isValid }
 
-    /// The same polylines in memory of our own, safe to outlive the solid.
+    /// The same polylines in memory of our own, safe to outlive the view.
     public func copy() -> Polylines {
         Polylines(tolerance: tolerance, points: points.copy(), offsets: offsets.copy(), count: count)
     }
@@ -1120,11 +1144,13 @@ public struct FemVertex: Equatable, CustomStringConvertible {
 ///
 /// **A handle rather than a snapshot, and it owns everything it lends.** The five flat arrays are
 /// `NativeArray` views into the library's own memory, as `Solid.mesh`'s are and for the same
-/// reason -- a solver mesh is megabytes -- but with one difference that matters: **a FEM mesh is
-/// not in the solid's tessellation cache**, so meshing the solid again at another tolerance
-/// (which stales every `Mesh` and `Polylines` view) leaves it alone, and neither does
-/// `Solid.close()`. The owner of every view here is **this object**, and `free()` is what ends
-/// them -- or the last reference to it going.
+/// reason -- a solver mesh is megabytes. It shares with a `Mesh` or `Polylines` view the one
+/// property that matters most, owning what it lends rather than borrowing from the solid, so
+/// meshing the solid again at another tolerance leaves it alone, and so does `Solid.close()` --
+/// but **a FEM mesh is not in the solid's tessellation cache at all**, where a `Mesh` or
+/// `Polylines` view still holds a `Tessellation` cut from that cache at the moment it was made.
+/// The owner of every view here is **this object**, and `free()` is what ends them -- or the
+/// last reference to it going.
 ///
 /// So a view cannot outlive the memory it reads: it holds this object, which keeps the handle
 /// alive, and it checks the owner before every element it hands over -- a read after `free()` traps
@@ -1284,6 +1310,28 @@ public final class FemMesh: NativeMemoryOwner {
         }
     }
 
+    /// Every pair of triangles that pass through each other, as `(a, b)` with `a < b`, sorted:
+    /// an edge of one through the other's interior. Their B-rep faces are `triangleFace[a]` and
+    /// `[b]`.
+    ///
+    /// **Computed for every solid, open or closed.** The census `watertight`, `openEdges` and
+    /// `foldedEdges` report is topological and cannot see a surface passing through itself; a
+    /// mesh is ready for a volume mesher when it is `watertight` **and** this is empty -- Gmsh
+    /// refuses one that crosses. A copy.
+    public var crossings: [(UInt32, UInt32)] {
+        get throws {
+            let handle = try h()
+            let count = cadaclysm_blacksmith_fem_mesh_crossing_count(handle)
+            return try (0..<count).map { i in
+                var a: UInt32 = 0, b: UInt32 = 0
+                guard cadaclysm_blacksmith_fem_mesh_crossing(handle, i, &a, &b) else {
+                    throw failure("fem mesh crossing \(i)")
+                }
+                return (a, b)
+            }
+        }
+    }
+
     // -- the summary
 
     /// The welded mesh closes -- every directed mesh edge paired with its reverse and none used
@@ -1359,20 +1407,15 @@ extension FemMesh: CustomStringConvertible {
 public final class Solid {
     private var handle: OpaquePointer?
 
-    /// The tolerance the library's tessellation cache was last filled at (nil before any of
-    /// `mesh`, `edgePolylines` and `boundsAt` ran), and how many times it has been filled. A
-    /// view checks the filling it was cut from, never the tolerance.
-    private(set) var cacheTolerance: Double?
-    private var cacheGeneration = 0
-
     init(_ raw: OpaquePointer?, _ what: String = "solid") throws {
         handle = try checked(raw, what)
     }
 
     deinit { close() }
 
-    /// Free the solid now. Idempotent; every view still held traps on its next read, and
-    /// every call on the solid throws.
+    /// Free the solid now. Idempotent; every call on the solid throws after. A `Mesh`,
+    /// `Mesh64` or `Polylines` view already handed out reads on regardless -- it holds a
+    /// `Tessellation` of its own, not this handle.
     public func close() {
         if let handle { cadaclysm_blacksmith_solid_free(handle) }
         handle = nil
@@ -1384,21 +1427,6 @@ public final class Solid {
     func h() throws -> OpaquePointer {
         guard let handle else { throw BuildError("solid: closed") }
         return handle
-    }
-
-    /// Record that a call just tessellated at `tolerance`: a new filling if it differs from
-    /// the one the cache held. Returns the generation a view made now belongs to.
-    private func filled(_ tolerance: Double) -> Int {
-        if cacheTolerance != tolerance {
-            cacheTolerance = tolerance
-            cacheGeneration += 1
-        }
-        return cacheGeneration
-    }
-
-    /// Whether a view cut from filling `generation` may still read.
-    func cacheHolds(_ generation: Int) -> Bool {
-        handle != nil && cacheGeneration == generation
     }
 
     // MARK: Naming
@@ -1454,6 +1482,12 @@ public final class Solid {
     /// A box whose top face is `topX` long instead of `x`: a ramp.
     public static func wedge(_ x: Double, _ y: Double, _ z: Double, _ topX: Double) throws -> Solid {
         try Solid(cadaclysm_blacksmith_wedge(x, y, z, topX))
+    }
+
+    /// A right pyramid of `sides` sides (at least 3): its base the regular polygon of
+    /// circumradius `r` on z=0, its first corner on +x, its tip at (0, 0, `h`).
+    public static func pyramid(_ sides: Int, _ r: Double, _ h: Double) throws -> Solid {
+        try Solid(cadaclysm_blacksmith_pyramid(UInt32(clamping: sides), r, h))
     }
 
     // MARK: From a profile
@@ -1828,9 +1862,17 @@ public final class Solid {
         return text(raw)
     }
 
-    /// `boundsAt(0.05)` -- the bounds of the tessellation at tolerance 0.05.
+    /// The solid's axis-aligned box, at the same cost whatever its size: its mesh at a
+    /// thousandth of its own extent, in `Double`, so the box is inside the exact one and short
+    /// of it by at most that. Worked out once per solid, apart from the tessellation `mesh`
+    /// caches. `boundsAt` is the box of the mesh at a tolerance you name.
     public var bounds: (min: SIMD3<Double>, max: SIMD3<Double>) {
-        get throws { try boundsAt(0.05) }
+        get throws {
+            var lo = [Double](repeating: 0, count: 3)
+            var hi = [Double](repeating: 0, count: 3)
+            if !cadaclysm_blacksmith_box(try h(), &lo, &hi) { throw failure("box") }
+            return (SIMD3(lo[0], lo[1], lo[2]), SIMD3(hi[0], hi[1], hi[2]))
+        }
     }
 
     /// The solid's axis-aligned bounds, over the positions of its cached tessellation at
@@ -1840,7 +1882,6 @@ public final class Solid {
         var lo = [Double](repeating: 0, count: 3)
         var hi = [Double](repeating: 0, count: 3)
         if !cadaclysm_blacksmith_bounds(try h(), tolerance, &lo, &hi) { throw failure("bounds") }
-        _ = filled(tolerance)
         return (SIMD3(lo[0], lo[1], lo[2]), SIMD3(hi[0], hi[1], hi[2]))
     }
 
@@ -1857,7 +1898,6 @@ public final class Solid {
         var lo = [Double](repeating: 0, count: 3)
         var hi = [Double](repeating: 0, count: 3)
         if !cadaclysm_blacksmith_bounds64(try h(), tolerance, &lo, &hi) { throw failure("bounds64") }
-        _ = filled(tolerance)
         return (SIMD3(lo[0], lo[1], lo[2]), SIMD3(hi[0], hi[1], hi[2]))
     }
 
@@ -1898,12 +1938,13 @@ public final class Solid {
 
     // MARK: Output
 
-    /// The triangles at `tolerance`, as views into the solid's cache: valid until the solid
-    /// is closed or meshed again at a different tolerance; `copy()` what must outlive either.
+    /// The triangles at `tolerance`, as views into a held tessellation of their own: never
+    /// stale, whatever happens to the solid after. `copy()` puts the same triangles in memory
+    /// of Swift's own, safe to outlive the `Mesh` value itself too.
     public func mesh(tolerance: Double = 0.05) throws -> Mesh {
-        let raw = cadaclysm_blacksmith_mesh(try h(), tolerance)
+        let owner = try Tessellation(self, tolerance, "mesh")
+        let raw = owner.mesh
         if raw.positions == nil { throw failure("mesh") }
-        let owner = CacheFilling(self, filled(tolerance))
         let floats = Int(raw.vertex_count) * 3
         return Mesh(tolerance: tolerance,
                     positions: NativeArray(owner: owner, base: raw.positions, count: floats),
@@ -1912,13 +1953,12 @@ public final class Solid {
     }
 
     /// `mesh(tolerance:)` in `double`: the very same index buffer, positions and normals
-    /// unnarrowed -- from the same cache, under the same rule as `mesh(tolerance:)`: valid
-    /// until the solid is closed or meshed again at another tolerance; `copy()` what must
-    /// outlive either.
+    /// unnarrowed -- its own held tessellation, under the same rule as `mesh(tolerance:)`:
+    /// never stale.
     public func mesh64(tolerance: Double = 0.05) throws -> Mesh64 {
-        let raw = cadaclysm_blacksmith_mesh64(try h(), tolerance)
+        let owner = try Tessellation(self, tolerance, "mesh64")
+        let raw = owner.mesh64
         if raw.positions == nil { throw failure("mesh64") }
-        let owner = CacheFilling(self, filled(tolerance))
         let doubles = Int(raw.vertex_count) * 3
         return Mesh64(tolerance: tolerance,
                      positions: NativeArray(owner: owner, base: raw.positions, count: doubles),
@@ -1927,11 +1967,11 @@ public final class Solid {
     }
 
     /// The feature edges as polylines at `tolerance`, one run of points per edge -- views into
-    /// the same cache as `mesh`, under the same rule.
+    /// a held tessellation of their own, under `mesh(tolerance:)`'s rule.
     public func edgePolylines(tolerance: Double = 0.05) throws -> Polylines {
-        let raw = cadaclysm_blacksmith_edge_polylines(try h(), tolerance)
+        let owner = try Tessellation(self, tolerance, "edge_polylines")
+        let raw = owner.edgePolylines
         if raw.offsets == nil { throw failure("edge_polylines") }
-        let owner = CacheFilling(self, filled(tolerance))
         let count = Int(raw.polyline_count)
         return Polylines(tolerance: tolerance,
                          points: NativeArray(owner: owner, base: raw.points, count: Int(raw.point_count) * 3),
@@ -1941,10 +1981,12 @@ public final class Solid {
 
     /// The kernel's `mesh_face_triangles`, kept for the viewer follow-up (as Go keeps it): how
     /// many triangles each face meshed to at `tolerance`, in face order, summing to `mesh`'s
-    /// triangle count at the same tolerance -- copied out of the solid's cache.
+    /// triangle count at the same tolerance -- copied out of a held tessellation of its own, so
+    /// nothing here depends on the solid's cache surviving the call.
     func faceTriangles(tolerance: Double = 0.05) throws -> [UInt32] {
-        try withExtendedLifetime(self) { () throws -> [UInt32] in
-            let raw = cadaclysm_blacksmith_mesh_face_triangles(try h(), tolerance)
+        let owner = try Tessellation(self, tolerance, "mesh_face_triangles")
+        return try withExtendedLifetime(owner) { () throws -> [UInt32] in
+            let raw = owner.faceTriangles
             guard let counts = raw.counts else { throw failure("mesh_face_triangles") }
             return Array(UnsafeBufferPointer(start: counts, count: Int(raw.face_count)))
         }
@@ -1955,10 +1997,9 @@ public final class Solid {
     /// distinct points and a crack stays a crack -- triangles wound outward, and every node tagged
     /// with the lowest-dimension B-rep entity it lies on.
     ///
-    /// **It is its own handle, not a view of this solid.** `Solid.mesh` fills the solid's
-    /// tessellation cache and lends views into that filling; this returns a `FemMesh` that owns
-    /// everything it lends, so meshing the solid again at another tolerance does not stale it and
-    /// neither does `close()`.
+    /// **It is its own handle, not a view of this solid.** `Solid.mesh` hands back views into its
+    /// own held tessellation; this returns a `FemMesh` that owns everything it lends the same way,
+    /// so meshing the solid again at another tolerance does not stale it and neither does `close()`.
     ///
     /// `tolerance` is the chordal tolerance in model units, finite and above zero, and **it alone
     /// governs how closely the mesh follows the geometry**. `maxSize` is a size ceiling, finite and
@@ -2202,11 +2243,10 @@ public final class Solid {
     public func edgePolylineColours(tolerance: Double = 0.05) throws -> [SIMD3<Double>?] {
         let raw = cadaclysm_blacksmith_edge_polyline_colours(try h(), tolerance)
         if raw.rgb == nil, !lastError().isEmpty { throw failure("edge_polyline_colours") }
-        // This call tessellates like every other cache reader, even to report "no paint": it
-        // can replace the cache a view taken earlier is still borrowing, so it must bump the
-        // generation those views check, even though this method copies its own result out and
-        // keeps nothing borrowed itself.
-        _ = filled(tolerance)
+        // This call tessellates like every other cache reader, even to report "no paint", and
+        // can still replace the solid's own one-tolerance cache -- but a `Mesh`/`Polylines`
+        // view taken earlier holds a `Tessellation` of its own now, not that cache, so nothing
+        // needs recording here any more: this method copies its own result out too.
         guard let rgb = raw.rgb else { return [] }
         let values = UnsafeBufferPointer(start: rgb, count: 3 * Int(raw.count))
         return (0..<Int(raw.count)).map { i in values[3 * i] < 0 ? nil : SIMD3(values[3 * i], values[3 * i + 1], values[3 * i + 2]) }
@@ -2585,6 +2625,31 @@ public final class Assembly {
         return try placeResult(raw, "assembly_place_assembly")
     }
 
+    /// Declare a rigid link called `name` over `placements` -- names of placements of
+    /// this assembly itself, not of assemblies placed in it. An empty name, a name
+    /// already taken by a link here, no placements, a placement named twice, one this
+    /// assembly does not have, or one already in another link is refused and leaves the
+    /// assembly as it was. Written as an AP242 kinematic link; a mechanism anywhere in
+    /// the tree makes AP242 the default schema of `stepText`.
+    public func link(_ name: String, _ placements: [String]) throws {
+        let handle = try h()
+        try withCStrings(placements) { pointers in
+            let ok = pointers.withUnsafeBufferPointer { buffer in
+                cadaclysm_blacksmith_assembly_link(handle, name, buffer.baseAddress, buffer.count)
+            }
+            guard ok else { throw failure("assembly_link") }
+        }
+    }
+
+    /// Connect this assembly's links `start` and `end`, kept in that order, as a joint
+    /// called `name`. An empty name, a name taken by another joint here, a link this
+    /// assembly does not have, a link joined to itself, or a (start, end) pair already
+    /// joined is refused; the reverse pair is a different joint.
+    public func joint(_ name: String, _ start: String, _ end: String) throws {
+        let handle = try h()
+        guard cadaclysm_blacksmith_assembly_joint(handle, name, start, end) else { throw failure("assembly_joint") }
+    }
+
     /// This assembly, and everything placed under it, as one STEP file: this assembly
     /// the root product, each sub-assembly and each distinct part written once, each
     /// placement an occurrence named as it was placed. `schema` and `unit` as
@@ -2633,6 +2698,15 @@ private func placeResult(_ raw: UnsafeMutablePointer<CChar>?, _ what: String) th
 private func withOptionalCString<R>(_ text: String?, _ body: (UnsafePointer<CChar>?) throws -> R) throws -> R {
     guard let text else { return try body(nil) }
     return try text.withCString { try body($0) }
+}
+
+/// Runs `body` with one C string per element of `strings`, every one kept alive for the
+/// whole call: `withCString`'s own scope only covers one string, so a list is built with
+/// `strdup`, freed in a `defer` regardless of how `body` returns or throws.
+private func withCStrings<R>(_ strings: [String], _ body: ([UnsafePointer<CChar>?]) throws -> R) rethrows -> R {
+    let pointers: [UnsafeMutablePointer<CChar>?] = strings.map { strdup($0) }
+    defer { pointers.forEach { free($0) } }
+    return try body(pointers.map { UnsafePointer($0) })
 }
 
 /// The three world axes `Selector.max` and `Selector.min` take.

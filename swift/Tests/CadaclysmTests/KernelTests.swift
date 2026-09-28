@@ -83,7 +83,8 @@ final class KernelTests: XCTestCase {
         XCTAssertTrue(m.description.contains("is_closed=true"))
         XCTAssertEqual(try cube.unpairedEdges(), 0)
         for solid in [try Solid.sphere(3), try Solid.cylinder(2, 5), try Solid.cone(2, 5),
-                      try Solid.torus(5, 1), try Solid.wedge(4, 4, 4, 2)] {
+                      try Solid.torus(5, 1), try Solid.wedge(4, 4, 4, 2),
+                      try Solid.pyramid(4, 2, 4)] {
             XCTAssertTrue(try solid.isWatertight())
         }
         let (clo, chi) = try Solid.cylinder(2, 5).boundsAt(0.01)
@@ -894,55 +895,70 @@ final class KernelTests: XCTestCase {
     }
 
     func testMeshViewsAndTheirCopies() throws {
-        var plate: Solid? = try Solid.extrude(try plateOutline(), try Frame.xy(), 6)
-        let mesh = try plate!.mesh(tolerance: 0.05)
+        let plate = try Solid.extrude(try plateOutline(), try Frame.xy(), 6)
+        let mesh = try plate.mesh(tolerance: 0.05)
         XCTAssertEqual(mesh.positions.count, mesh.vertexCount * 3)
         XCTAssertEqual(mesh.normals.count, mesh.positions.count)
         XCTAssertEqual(mesh.indexCount % 3, 0)
         XCTAssertGreaterThan(mesh.triangleCount, 0)
         XCTAssertTrue(mesh.indices.allSatisfy { Int($0) < mesh.vertexCount })
-        let lines = try plate!.edgePolylines(tolerance: 0.05)
+        let lines = try plate.edgePolylines(tolerance: 0.05)
         XCTAssertGreaterThanOrEqual(lines.count, 12)
         XCTAssertTrue(lines.allSatisfy { $0.count % 3 == 0 && $0.count >= 6 })
         XCTAssertEqual(lines.reduce(0) { $0 + $1.count }, lines.pointCount * 3)
         let meshCopy = mesh.copy()
         let linesCopy = lines.copy()
         let firstRun = Array(lines[0])
-        // A view keeps its solid alive: dropping the last reference does not free it.
+        let firstPosition = Array(mesh.positions)
+
+        // A view holds its own tessellation, not the solid: it does not need the solid to stay
+        // reachable, so the last reference to a solid going may free it right away even with a
+        // live view outstanding.
         weak var alive: Solid?
-        alive = plate
-        plate = nil
-        XCTAssertNotNil(alive, "the views hold the solid")
+        var liveView: Blacksmith.Mesh?
+        do {
+            let temporary = try Solid.extrude(try plateOutline(), try Frame.xy(), 6)
+            liveView = try temporary.mesh(tolerance: 0.05)
+            alive = temporary
+        }
+        XCTAssertNil(alive, "a view does not keep its solid alive")
+        XCTAssertGreaterThan(liveView?.triangleCount ?? 0, 0)
+
+        // Closed, the views still read exactly what they read before -- they own their own
+        // tessellation, not the solid's cache.
+        plate.close()
         XCTAssertFalse(mesh.isStale)
-        // Closed, the views go stale and the copies do not.
-        alive!.close()
-        XCTAssertTrue(mesh.isStale && !mesh.positions.isValid && lines.isStale)
+        XCTAssertFalse(lines.isStale)
+        XCTAssertEqual(Array(mesh.positions), firstPosition)
+        XCTAssertTrue(mesh.indices.allSatisfy { Int($0) < mesh.vertexCount })
+        XCTAssertEqual(Array(lines[0]), firstRun)
         XCTAssertFalse(meshCopy.isStale)
         XCTAssertEqual(meshCopy.positions.count, mesh.positions.count)
         XCTAssertTrue(meshCopy.indices.allSatisfy { Int($0) < meshCopy.vertexCount })
         XCTAssertEqual(Array(linesCopy[0]), firstRun)
         XCTAssertEqual(linesCopy.count, lines.count)
-        XCTAssertEqual(refusal { _ = try alive!.faces }, "solid: closed")
-        XCTAssertEqual(refusal { _ = try alive!.mesh() }, "solid: closed")
+        XCTAssertEqual(refusal { _ = try plate.faces }, "solid: closed")
+        XCTAssertEqual(refusal { _ = try plate.mesh() }, "solid: closed")
     }
 
-    func testAViewGoesStaleWhenItsSolidIsMeshedAtAnotherTolerance() throws {
+    /// **Catches:** a view built over the legacy `cadaclysm_blacksmith_mesh`/`_edge_polylines`
+    /// calls against the solid's own cache, with an owner that never invalidates -- exactly the
+    /// break check in the task brief. A held tessellation must survive re-meshing the solid at
+    /// any number of other tolerances, and the span read from it before must still compare
+    /// equal after.
+    func testAViewOutlivesAReMeshAtAnotherTolerance() throws {
         let plate = try Solid.extrude(try plateOutline(), try Frame.xy(), 6)
         let fine = try plate.mesh(tolerance: 0.05)
-        let fineLines = try plate.edgePolylines(tolerance: 0.05)
-        let firstRun = fineLines[0]   // a polyline cut now goes stale with the rest
-        XCTAssertFalse(fine.isStale || fineLines.isStale, "the polylines share the mesh's filling")
-        let again = try plate.mesh(tolerance: 0.05)
-        XCTAssertFalse(fine.isStale, "the same tolerance reuses the cache")
-        XCTAssertEqual(again.indexCount, fine.indexCount)
-        let coarse = try plate.mesh(tolerance: 0.5)
-        XCTAssertLessThan(coarse.indexCount, fine.indexCount)
-        XCTAssertTrue(fine.isStale && !fine.positions.isValid && !firstRun.isValid && fineLines.isStale)
-        XCTAssertFalse(coarse.isStale)
-        _ = try plate.boundsAt(0.05)
-        XCTAssertTrue(coarse.isStale, "bounds fill the same cache")
-        XCTAssertTrue(fine.isStale, "back at 0.05 is a new filling: the first view's memory is gone")
-        XCTAssertFalse(try plate.mesh(tolerance: 0.05).isStale)
+        XCTAssertFalse(fine.isStale)
+        let span = Array(fine.positions)
+        _ = try plate.mesh(tolerance: 0.5)
+        XCTAssertFalse(fine.isStale, "a held tessellation is not staled by meshing the solid again")
+        XCTAssertEqual(Array(fine.positions), span)
+        _ = try plate.boundsAt(0.2)
+        XCTAssertFalse(fine.isStale, "a held tessellation is not staled by bounds at another tolerance")
+        _ = try plate.mesh(tolerance: 0.01)
+        XCTAssertFalse(fine.isStale, "not even back at a tolerance the cache once held (0.05, 0.5, 0.2, 0.01)")
+        XCTAssertEqual(Array(fine.positions), span)
     }
 
     func testMesh64AndBounds64AgreeWithF32OnSmallCoordinates() throws {
@@ -1026,10 +1042,11 @@ final class KernelTests: XCTestCase {
             let bound = [vertices.count, edges.count, Int(mesh.faceCount)][Int(kind)]
             XCTAssertLessThan(Int(mesh.nodeEntity[i]), bound, "node \(i) of kind \(kind)")
         }
-        // A closed part: watertight with both censuses empty.
+        // A closed part: watertight with both censuses empty, and no crossings.
         XCTAssertTrue(mesh.watertight)
         XCTAssertEqual(try mesh.openEdges.count, 0)
         XCTAssertEqual(try mesh.foldedEdges.count, 0)
+        XCTAssertEqual(try mesh.crossings.count, 0)
         XCTAssertGreaterThan(mesh.minAngle, 0)
         XCTAssertLessThanOrEqual(mesh.minAngle, 60)
         XCTAssertLessThan(Int(mesh.worstTriangle), mesh.triangles.count / 3)
@@ -1037,24 +1054,25 @@ final class KernelTests: XCTestCase {
         XCTAssertTrue(mesh.description.contains("watertight=true"), mesh.description)
     }
 
-    /// **Re-meshing the solid does not stale a FEM mesh.** `Solid.mesh`'s views belong to one
-    /// filling of the solid's tessellation cache and die when it is refilled; a FEM mesh is its
-    /// own handle and is not in that cache at all -- and closing the solid is not the end of it
-    /// either, because the handle owns every array it lends.
+    /// **Re-meshing the solid does not stale a FEM mesh either.** A FEM mesh is its own handle
+    /// and is not in the solid's tessellation cache at all -- and closing the solid is not the
+    /// end of it either, because the handle owns every array it lends. A `Solid.mesh` view now
+    /// shares that much with it (it holds a `Tessellation` of its own too), so this test also
+    /// pins that a re-mesh does not stale `view` below.
     ///
-    /// Catches reusing `CacheFilling` as the FEM mesh's `NativeMemoryOwner`, which is the
+    /// Catches reusing `Tessellation` as the FEM mesh's `NativeMemoryOwner`, which is the
     /// obvious move here and would give a caller a refusal the library never made.
     func testAFemMeshSurvivesReMeshingAndClosingItsSolid() throws {
         var plate: Solid? = try Solid.extrude(try plateOutline(), try Frame.xy(), 6)
         let mesh = try plate!.femMesh(tolerance: 0.05)
         let nodes = mesh.nodes
         let first = nodes[0]
-        // The cache is filled, refilled at another tolerance and filled again: what stales
-        // every `Solid.mesh` view.
+        // Meshed, meshed again at another tolerance, and meshed again: what would have staled
+        // every `Solid.mesh` view before this task.
         let view = try plate!.mesh(tolerance: 0.05)
         _ = try plate!.mesh(tolerance: 0.5)
         _ = try plate!.mesh(tolerance: 0.05)
-        XCTAssertTrue(view.isStale, "the tessellation view is the one that goes stale")
+        XCTAssertFalse(view.isStale, "a tessellation view owns its mesh")
         XCTAssertTrue(nodes.isValid, "re-meshing the solid staled the FEM mesh")
         XCTAssertEqual(nodes[0], first)
         // And the solid itself can go: the FEM handle owns everything it lends.
@@ -1175,7 +1193,8 @@ final class KernelTests: XCTestCase {
     /// either module independently: the no-argument call must agree with an explicit `0.01`, must
     /// come to the node count 0.01 is known to give, and must **disagree** with an explicit `0.05`
     /// -- which is what says the first assertion has teeth. Measured on this plate through
-    /// `cadaclysm_blacksmith.py` on the same library: 1952 nodes at 0.01 against 864 at 0.05. A flat
+    /// `cadaclysm_blacksmith.py` on the same library: 1208 nodes at 0.01 against 504 at 0.05 (1952 and 864
+    /// until 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound)). A flat
     /// body cannot tell the two apart at all (the reader's cube meshes to 8 nodes either way), which
     /// is why the plate -- with its cylindrical hole and its slot -- is the body here.
     func testFemMeshDefaultsAreTheLibrarysOwn() throws {
@@ -1187,7 +1206,7 @@ final class KernelTests: XCTestCase {
         let renderDefault = try plate.femMesh(tolerance: 0.05)
         defer { renderDefault.free() }
         XCTAssertEqual(byDefault.nodes.count, stated.nodes.count, "the default tolerance is not 0.01")
-        XCTAssertEqual(byDefault.nodes.count, 1952 * 3, "0.01 no longer meshes this plate to 1952 nodes")
+        XCTAssertEqual(byDefault.nodes.count, 1208 * 3, "0.01 no longer meshes this plate to 1208 nodes")
         XCTAssertNotEqual(byDefault.nodes.count, renderDefault.nodes.count,
                           "0.01 and 0.05 mesh this body alike, so this test cannot tell them apart")
     }
@@ -1311,6 +1330,88 @@ final class KernelTests: XCTestCase {
         frame.close()
         bracket.close()
     }
+
+    /// `Assembly.link`/`Assembly.joint`, at parity with the Python reference's
+    /// `_mechanism()` and its two mechanism tests in `test_cadaclysm_blacksmith.py` --
+    /// see Node's `test/blacksmith.test.js` and Rust's `mod tests` for the same facts
+    /// worked out.
+    func testMechanismFactsHoldAsTheSharedSpecChecksThem() throws {
+        let bolt = try Solid.cylinder(1, 6).named("bolt")
+        let plate = try Solid.cuboid(20, 10, 2).named("plate")
+
+        let bracket = try Assembly("bracket")
+        _ = try bracket.place(plate, try Frame.xy())
+        _ = try bracket.place(bolt, try Frame.xy([5, 5, 2]))
+        _ = try bracket.place(bolt, try Frame.xy([15, 5, 2]))
+        try bracket.link("fixed", ["plate"])
+        try bracket.link("bolts", ["bolt", "bolt 2"])
+        try bracket.joint("screw", "fixed", "bolts")
+
+        let arm = try Assembly("arm")
+        _ = try arm.place(plate, try Frame.xy(), name: "base")
+        _ = try arm.place(bracket, try Frame.xy([0, 0, 10]), name: "upper")
+        _ = try arm.place(bolt, try Frame.xy([5, 5, 2]), name: "pin")
+        try arm.link("ground", ["base"])
+        try arm.link("upper arm", ["upper", "pin"])
+        try arm.joint("shoulder", "ground", "upper arm")
+
+        // Fact 1: the default schema (no explicit schema) carries the kinematic entities.
+        let step = try arm.stepText()
+        XCTAssertTrue(step.contains("AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF"))
+        XCTAssertEqual(countOf(step, "=KINEMATIC_LINK("), 4)
+        XCTAssertEqual(countOf(step, "=RIGID_LINK_REPRESENTATION("), 6)
+        XCTAssertEqual(countOf(step, "=CONTEXT_DEPENDENT_KINEMATIC_LINK_REPRESENTATION("), 6)
+        XCTAssertEqual(countOf(step, "=KINEMATIC_JOINT("), 2)
+        XCTAssertEqual(countOf(step, "=KINEMATIC_TOPOLOGY_STRUCTURE("), 2)
+
+        // Fact 2: an explicit schema without kinematic entities is refused.
+        let schemaRefusal = refusal { _ = try arm.stepText(schema: "config_control_design") }
+        XCTAssertEqual(schemaRefusal?.contains("no kinematic entities"), true, schemaRefusal ?? "")
+
+        // Fact 3: each of the eleven refusals raises with exactly its message, and
+        // afterwards the STEP text (with `FILE_NAME(` lines stripped) is unchanged.
+        let before = noStamp(try arm.stepText())
+        let refusals: [(() throws -> Void, String)] = [
+            ({ try arm.link("", ["base"]) }, "link: a name cannot be empty"),
+            ({ try arm.link("ground", ["base"]) }, "link: assembly 'arm' already has a link named 'ground'"),
+            ({ try arm.link("free", []) }, "link: link 'free' names no placements"),
+            ({ try arm.link("free", ["base", "base"]) }, "link: link 'free' names placement 'base' twice"),
+            ({ try arm.link("free", ["bolt"]) }, "link: assembly 'arm' has no placement named 'bolt'"),
+            ({ try arm.link("free", ["pin"]) }, "link: placement 'pin' of assembly 'arm' is already in link 'upper arm'"),
+            ({ try arm.joint("", "ground", "upper arm") }, "joint: a name cannot be empty"),
+            ({ try arm.joint("shoulder", "upper arm", "ground") }, "joint: assembly 'arm' already has a joint named 'shoulder'"),
+            ({ try arm.joint("wrist", "ground", "hand") }, "joint: assembly 'arm' has no link named 'hand'"),
+            ({ try arm.joint("wrist", "ground", "ground") }, "joint: joint 'wrist' joins link 'ground' to itself"),
+            ({ try arm.joint("wrist", "ground", "upper arm") }, "joint: assembly 'arm' already joins 'ground' to 'upper arm'"),
+        ]
+        for (call, message) in refusals {
+            let message2 = refusal(call)
+            XCTAssertEqual(message2, message)
+        }
+        XCTAssertEqual(noStamp(try arm.stepText()), before)
+
+        // Fact 5: read-back through `toScene`. Checked ahead of fact 4's reverse "back"
+        // joint, so the joint list below is exactly the two joints the fixture built.
+        let scene = try arm.toScene()
+        XCTAssertEqual(scene.links.map { $0.name }, ["fixed", "bolts", "ground", "upper arm"])
+        XCTAssertEqual(scene.links.map { $0.nodes.count }, [1, 2, 1, 2])
+        let jointFacts = scene.joints.map { ($0.name, $0.start.index, $0.end.index) }
+        let expectedJoints = [("screw", 0, 1), ("shoulder", 2, 3)]
+        XCTAssertTrue(jointFacts.elementsEqual(expectedJoints, by: { $0 == $1 }))
+        XCTAssertFalse(scene.diagnostics.contains { $0.hasPrefix("kinematics:") })
+        scene.close()
+
+        // Fact 4: the reverse pair is a new joint.
+        try arm.joint("back", "upper arm", "ground")
+    }
+}
+
+/// `text` with every `FILE_NAME(` line removed -- what fact 3 compares before and after
+/// the eleven refusals, since only the timestamp line should ever move.
+private func noStamp(_ text: String) -> String {
+    text.split(separator: "\n", omittingEmptySubsequences: false)
+        .filter { !$0.hasPrefix("FILE_NAME(") }
+        .joined(separator: "\n")
 }
 
 /// How many non-overlapping occurrences of `needle` appear in `haystack`.

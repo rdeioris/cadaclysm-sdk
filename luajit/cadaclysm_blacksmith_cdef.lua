@@ -20,15 +20,29 @@ typedef struct CadaclysmBlacksmithHits CadaclysmBlacksmithHits;
 
 typedef struct CadaclysmBlacksmithIntersection CadaclysmBlacksmithIntersection;
 
+typedef struct CadaclysmBlacksmithJob CadaclysmBlacksmithJob;
+
+typedef struct CadaclysmBlacksmithOperations CadaclysmBlacksmithOperations;
+
 typedef struct CadaclysmBlacksmithPath CadaclysmBlacksmithPath;
 
 typedef struct CadaclysmBlacksmithProfile CadaclysmBlacksmithProfile;
 
 typedef struct CadaclysmBlacksmithProfileList CadaclysmBlacksmithProfileList;
 
+typedef struct CadaclysmBlacksmithPrograms CadaclysmBlacksmithPrograms;
+
+typedef struct CadaclysmBlacksmithReport CadaclysmBlacksmithReport;
+
 typedef struct CadaclysmBlacksmithSolid CadaclysmBlacksmithSolid;
 
+typedef struct CadaclysmBlacksmithStock CadaclysmBlacksmithStock;
+
 typedef struct CadaclysmBlacksmithSweepPath CadaclysmBlacksmithSweepPath;
+
+typedef struct CadaclysmBlacksmithTessellation CadaclysmBlacksmithTessellation;
+
+typedef struct CadaclysmBlacksmithTool CadaclysmBlacksmithTool;
 
 typedef struct CadaclysmBlacksmithFemOptions {
 
@@ -294,6 +308,161 @@ bool cadaclysm_blacksmith_assembly_joint(struct CadaclysmBlacksmithAssembly *ass
                                          const char *start,
                                          const char *end);
 
+struct CadaclysmBlacksmithTool *cadaclysm_blacksmith_tool_flat(uint32_t number,
+                                                               double diameter,
+                                                               double flute_length,
+                                                               double feed,
+                                                               double plunge,
+                                                               double rpm);
+
+struct CadaclysmBlacksmithTool *cadaclysm_blacksmith_tool_ball(uint32_t number,
+                                                               double diameter,
+                                                               double flute_length,
+                                                               double feed,
+                                                               double plunge,
+                                                               double rpm);
+
+struct CadaclysmBlacksmithTool *cadaclysm_blacksmith_tool_drill(uint32_t number,
+                                                                double diameter,
+                                                                double flute_length,
+                                                                double feed,
+                                                                double rpm);
+
+struct CadaclysmBlacksmithTool *cadaclysm_blacksmith_tool_with_ramp_angle(const struct CadaclysmBlacksmithTool *t,
+                                                                          double degrees);
+
+void cadaclysm_blacksmith_tool_free(struct CadaclysmBlacksmithTool *t);
+
+struct CadaclysmBlacksmithStock *cadaclysm_blacksmith_stock_box(double min_x,
+                                                                double min_y,
+                                                                double min_z,
+                                                                double max_x,
+                                                                double max_y,
+                                                                double max_z);
+
+struct CadaclysmBlacksmithStock *cadaclysm_blacksmith_stock_around(const struct CadaclysmBlacksmithSolid *s,
+                                                                   double margin);
+
+void cadaclysm_blacksmith_stock_free(struct CadaclysmBlacksmithStock *s);
+
+struct CadaclysmBlacksmithJob *cadaclysm_blacksmith_job_new(const struct CadaclysmBlacksmithStock *stock,
+                                                            double safe_z);
+
+bool cadaclysm_blacksmith_job_set_clearance(struct CadaclysmBlacksmithJob *j, double clearance);
+
+bool cadaclysm_blacksmith_job_set_tolerance(struct CadaclysmBlacksmithJob *j, double tolerance);
+
+bool cadaclysm_blacksmith_job_set_spindle_dwell(struct CadaclysmBlacksmithJob *j, double seconds);
+
+bool cadaclysm_blacksmith_job_set_name(struct CadaclysmBlacksmithJob *j, const char *name);
+
+bool cadaclysm_blacksmith_job_set_resolution(struct CadaclysmBlacksmithJob *j, double resolution);
+
+bool cadaclysm_blacksmith_job_face(struct CadaclysmBlacksmithJob *j,
+                                   const struct CadaclysmBlacksmithTool *t,
+                                   double z,
+                                   double stepover,
+                                   double stepdown);
+
+bool cadaclysm_blacksmith_job_contour(struct CadaclysmBlacksmithJob *j,
+                                      const struct CadaclysmBlacksmithTool *t,
+                                      const struct CadaclysmBlacksmithProfile *p,
+                                      double top,
+                                      double bottom,
+                                      uint32_t side,
+                                      double stepdown,
+                                      bool climb,
+                                      bool open);
+
+bool cadaclysm_blacksmith_job_pocket(struct CadaclysmBlacksmithJob *j,
+                                     const struct CadaclysmBlacksmithTool *t,
+                                     const struct CadaclysmBlacksmithProfile *p,
+                                     double top,
+                                     double bottom,
+                                     double stepover,
+                                     double stepdown);
+
+bool cadaclysm_blacksmith_job_drill(struct CadaclysmBlacksmithJob *j,
+                                    const struct CadaclysmBlacksmithTool *t,
+                                    const double *xy,
+                                    size_t count,
+                                    double top,
+                                    double bottom,
+                                    double peck);
+
+struct CadaclysmBlacksmithPrograms *cadaclysm_blacksmith_job_gcode(const struct CadaclysmBlacksmithJob *j);
+
+struct CadaclysmBlacksmithPrograms *cadaclysm_blacksmith_job_camotics(const struct CadaclysmBlacksmithJob *j,
+                                                                      const char *stem);
+
+void cadaclysm_blacksmith_job_free(struct CadaclysmBlacksmithJob *j);
+
+uint32_t cadaclysm_blacksmith_programs_count(const struct CadaclysmBlacksmithPrograms *l);
+
+uint32_t cadaclysm_blacksmith_programs_tool(const struct CadaclysmBlacksmithPrograms *l,
+                                            uint32_t i);
+
+const char *cadaclysm_blacksmith_programs_name(const struct CadaclysmBlacksmithPrograms *l,
+                                               uint32_t i);
+
+const char *cadaclysm_blacksmith_programs_text(const struct CadaclysmBlacksmithPrograms *l,
+                                               uint32_t i);
+
+void cadaclysm_blacksmith_programs_free(struct CadaclysmBlacksmithPrograms *l);
+
+struct CadaclysmBlacksmithReport *cadaclysm_blacksmith_job_machine(struct CadaclysmBlacksmithJob *j,
+                                                                   const struct CadaclysmBlacksmithSolid *part,
+                                                                   const struct CadaclysmBlacksmithTool *end_mill,
+                                                                   const struct CadaclysmBlacksmithTool *const *drills,
+                                                                   size_t drill_count,
+                                                                   double stepover,
+                                                                   double stepdown,
+                                                                   double skin,
+                                                                   double peck);
+
+uint32_t cadaclysm_blacksmith_report_count(const struct CadaclysmBlacksmithReport *r);
+
+const char *cadaclysm_blacksmith_report_kind(const struct CadaclysmBlacksmithReport *r, uint32_t i);
+
+bool cadaclysm_blacksmith_report_at(const struct CadaclysmBlacksmithReport *r,
+                                    uint32_t i,
+                                    double *out);
+
+double cadaclysm_blacksmith_report_size(const struct CadaclysmBlacksmithReport *r, uint32_t i);
+
+const char *cadaclysm_blacksmith_report_reason(const struct CadaclysmBlacksmithReport *r,
+                                               uint32_t i);
+
+struct CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_report_region(const struct CadaclysmBlacksmithReport *r,
+                                                                          uint32_t i);
+
+const char *cadaclysm_blacksmith_report_text(const struct CadaclysmBlacksmithReport *r);
+
+void cadaclysm_blacksmith_report_free(struct CadaclysmBlacksmithReport *r);
+
+struct CadaclysmBlacksmithOperations *cadaclysm_blacksmith_job_operations(const struct CadaclysmBlacksmithJob *j);
+
+uint32_t cadaclysm_blacksmith_operations_count(const struct CadaclysmBlacksmithOperations *l);
+
+const char *cadaclysm_blacksmith_operations_kind(const struct CadaclysmBlacksmithOperations *l,
+                                                 uint32_t i);
+
+uint32_t cadaclysm_blacksmith_operations_tool(const struct CadaclysmBlacksmithOperations *l,
+                                              uint32_t i);
+
+uint32_t cadaclysm_blacksmith_operations_param_count(const struct CadaclysmBlacksmithOperations *l,
+                                                     uint32_t i);
+
+const char *cadaclysm_blacksmith_operations_param_name(const struct CadaclysmBlacksmithOperations *l,
+                                                       uint32_t i,
+                                                       uint32_t k);
+
+double cadaclysm_blacksmith_operations_param_value(const struct CadaclysmBlacksmithOperations *l,
+                                                   uint32_t i,
+                                                   uint32_t k);
+
+void cadaclysm_blacksmith_operations_free(struct CadaclysmBlacksmithOperations *l);
+
 void cadaclysm_blacksmith_fem_options_init(struct CadaclysmBlacksmithFemOptions *options);
 
 struct CadaclysmBlacksmithFemMesh *cadaclysm_blacksmith_fem_mesh(const struct CadaclysmBlacksmithSolid *solid,
@@ -326,6 +495,13 @@ bool cadaclysm_blacksmith_fem_mesh_folded_edge(const struct CadaclysmBlacksmithF
                                                uint32_t *a,
                                                uint32_t *b,
                                                uint32_t *brep_edge);
+
+uint32_t cadaclysm_blacksmith_fem_mesh_crossing_count(const struct CadaclysmBlacksmithFemMesh *m);
+
+bool cadaclysm_blacksmith_fem_mesh_crossing(const struct CadaclysmBlacksmithFemMesh *m,
+                                            uint32_t i,
+                                            uint32_t *a,
+                                            uint32_t *b);
 
 char *cadaclysm_blacksmith_fem_mesh_msh_text(const struct CadaclysmBlacksmithFemMesh *m);
 
@@ -411,6 +587,19 @@ struct CadaclysmBlacksmithFaceTriangles cadaclysm_blacksmith_mesh_face_triangles
 struct CadaclysmBlacksmithPolylines cadaclysm_blacksmith_edge_polylines(const struct CadaclysmBlacksmithSolid *solid,
                                                                         double tolerance);
 
+struct CadaclysmBlacksmithTessellation *cadaclysm_blacksmith_tessellation(const struct CadaclysmBlacksmithSolid *solid,
+                                                                          double tolerance);
+
+void cadaclysm_blacksmith_tessellation_free(struct CadaclysmBlacksmithTessellation *tessellation);
+
+struct CadaclysmBlacksmithMesh cadaclysm_blacksmith_tessellation_mesh(const struct CadaclysmBlacksmithTessellation *tessellation);
+
+struct CadaclysmBlacksmithMesh64 cadaclysm_blacksmith_tessellation_mesh64(const struct CadaclysmBlacksmithTessellation *tessellation);
+
+struct CadaclysmBlacksmithFaceTriangles cadaclysm_blacksmith_tessellation_face_triangles(const struct CadaclysmBlacksmithTessellation *tessellation);
+
+struct CadaclysmBlacksmithPolylines cadaclysm_blacksmith_tessellation_edge_polylines(const struct CadaclysmBlacksmithTessellation *tessellation);
+
 struct CadaclysmBlacksmithColours cadaclysm_blacksmith_edge_polyline_colours(const struct CadaclysmBlacksmithSolid *solid,
                                                                              double tolerance);
 
@@ -426,6 +615,10 @@ bool cadaclysm_blacksmith_bounds64(const struct CadaclysmBlacksmithSolid *solid,
                                    double tolerance,
                                    double *min,
                                    double *max);
+
+bool cadaclysm_blacksmith_box(const struct CadaclysmBlacksmithSolid *solid,
+                              double *min,
+                              double *max);
 
 char *cadaclysm_blacksmith_step(const struct CadaclysmBlacksmithSolid *const *solids,
                                 size_t count,
@@ -638,6 +831,17 @@ struct CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_profile_common(const
                                                                            const struct CadaclysmBlacksmithProfile *b,
                                                                            double tolerance);
 
+struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_to_arcs(const struct CadaclysmBlacksmithProfile *p,
+                                                                        double tolerance);
+
+struct CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_profile_offset(const struct CadaclysmBlacksmithProfile *p,
+                                                                           double distance,
+                                                                           double tolerance);
+
+struct CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_solid_section(const struct CadaclysmBlacksmithSolid *s,
+                                                                          double z,
+                                                                          double tolerance);
+
 uint32_t cadaclysm_blacksmith_profile_list_count(const struct CadaclysmBlacksmithProfileList *list);
 
 struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_list_get(const struct CadaclysmBlacksmithProfileList *list,
@@ -708,6 +912,8 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_wedge(double x,
                                                             double y,
                                                             double z,
                                                             double top_x);
+
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_pyramid(uint32_t sides, double r, double h);
 
 struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_extrude(const struct CadaclysmBlacksmithProfile *profile,
                                                               const double *frame,

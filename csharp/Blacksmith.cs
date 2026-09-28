@@ -21,24 +21,29 @@
 // where the loader looks by default (see `BlacksmithLoader`). `CADACLYSM_LIBRARY` is the
 // reader's, as it is in Python.
 //
-// ## Every array borrows from its solid
+// ## Every mesh view owns its own tessellation
 //
-// `Solid.Mesh` and `Solid.EdgePolylines` hand back `ReadOnlySpan<T>` views into the library's
-// own cache rather than copies, as the reader's `Mesh` does. Two things invalidate a view:
-// disposing the solid, which frees the handle; and meshing the same solid again (through
-// `Mesh`, `EdgePolylines` or `BoundsAt`) at a *different* tolerance, which replaces the cache
-// the earlier views point into -- and going back to the first tolerance does not bring the
-// old memory back. Python reads freed memory in either case; here the view remembers which
-// filling of the cache it was cut from and throws instead. Call `Copy()` on any view that
-// must outlive either. Strings are copied on the way out and are always safe.
+// `Solid.Mesh`, `Solid.Mesh64` and `Solid.EdgePolylines` hand back `ReadOnlySpan<T>` views into
+// the library's own memory, as the reader's `Mesh` does -- but not into the solid's cache.
+// Each call takes out a *held* tessellation of its own (`cadaclysm_blacksmith_tessellation`)
+// and the view keeps that handle alive, so disposing the solid or meshing it again at another
+// tolerance -- through `Mesh`, `Mesh64`, `EdgePolylines` or `BoundsAt` -- never touches a view
+// already in hand: nothing about it goes stale. Only the view itself going unreachable frees
+// its handle, same as `FemMesh` below. A span **asked for** afterwards throws
+// `ObjectDisposedException`; one already in hand goes on reading the freed block and hands back
+// plausible numbers, a `ReadOnlySpan<T>` having nothing left to check once it is made -- so
+// `GC.KeepAlive` the view while a span cut from it is still in use. `Copy()` gives memory of
+// your own, safe to outlive the view. Strings are copied on the way out and are always safe.
+// A view pins its *whole* tessellation -- positions, normals, indices, edges, face counts, in
+// both precisions -- not just the array you asked for, until the view itself is disposed or
+// collected; release waits for the garbage collector unless you `Dispose()` it yourself. For
+// data that must outlive the view, `Copy()` it and drop the view.
 //
-// `FemMesh` is the one array product that is **not** the solid's. `Solid.FemMesh(..)` hands back a
-// handle of its own, and its spans belong to that handle: neither the solid's dispose nor meshing
-// it again touches them, and only `FemMesh.Free()` — or the `using` that runs it — invalidates
-// them. The guard is weaker than `Solid.Mesh`'s, and deliberately so: a span **asked for** after
-// that throws, while one already in hand goes on reading the freed block and hands back plausible
-// numbers, a `ReadOnlySpan<T>` having nothing left to check once it is made. `ToArray()` anything
-// that must outlive the handle.
+// `FemMesh` is the one array product that is **not** the solid's, and never was: `Solid.FemMesh(..)`
+// hands back a handle of its own, and its spans belong to that handle: neither the solid's dispose
+// nor meshing it again touches them, and only `FemMesh.Free()` -- or the `using` that runs it, or
+// the handle going unreachable -- invalidates them. `ToArray()` anything that must outlive the
+// handle.
 //
 // ## The chain mirrors the Rust `Workplane`
 //
@@ -577,6 +582,24 @@ internal sealed class FemMeshHandle : CadaclysmHandle
     }
 }
 
+/// <summary>`CadaclysmBlacksmithTessellation *`, freed by `cadaclysm_blacksmith_tessellation_free`.
+/// A held tessellation: one solid meshed at one tolerance, kept alive on its own regardless of
+/// what happens to the solid afterwards -- re-meshed at another tolerance, or disposed. <see
+/// cref="BlacksmithMesh"/>, <see cref="BlacksmithMesh64"/> and <see cref="BlacksmithPolylines"/>
+/// each hold one of these instead of the solid itself.</summary>
+internal sealed class TessellationHandle : CadaclysmHandle
+{
+    public TessellationHandle()
+    {
+    }
+
+    protected override bool ReleaseHandle()
+    {
+        BlacksmithNative.cadaclysm_blacksmith_tessellation_free(handle);
+        return true;
+    }
+}
+
 // ---- the library ----------------------------------------------------------------------
 
 /// <summary>Finds and loads the kernel library by `cadaclysm_blacksmith.py`'s own rule,
@@ -741,6 +764,7 @@ internal static class BlacksmithNative
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_sphere(double r);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_torus(double major, double minor);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_wedge(double x, double y, double z, double topX);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_pyramid(uint sides, double r, double h);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_extrude(ProfileHandle profile, double[] frame, double height);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_extrude_open(ProfileHandle profile, double[] frame, double height);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_extrude_tapered(ProfileHandle profile, double[] frame, double height,
@@ -861,10 +885,20 @@ internal static class BlacksmithNative
     [DllImport(Lib)] internal static extern RawBlacksmithMesh64 cadaclysm_blacksmith_mesh64(SolidHandle solid, double tolerance);
     [DllImport(Lib)] internal static extern RawBlacksmithFaceTriangles cadaclysm_blacksmith_mesh_face_triangles(SolidHandle solid, double tolerance);
     [DllImport(Lib)] internal static extern RawBlacksmithPolylines cadaclysm_blacksmith_edge_polylines(SolidHandle solid, double tolerance);
+    // A held tessellation: one solid meshed at one tolerance, on a handle of its own so that
+    // the views cut from it stay valid regardless of what happens to the solid afterwards.
+    [DllImport(Lib)] internal static extern TessellationHandle cadaclysm_blacksmith_tessellation(SolidHandle solid, double tolerance);
+    [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_tessellation_free(IntPtr tessellation);
+    [DllImport(Lib)] internal static extern RawBlacksmithMesh cadaclysm_blacksmith_tessellation_mesh(TessellationHandle tessellation);
+    [DllImport(Lib)] internal static extern RawBlacksmithMesh64 cadaclysm_blacksmith_tessellation_mesh64(TessellationHandle tessellation);
+    [DllImport(Lib)] internal static extern RawBlacksmithFaceTriangles cadaclysm_blacksmith_tessellation_face_triangles(TessellationHandle tessellation);
+    [DllImport(Lib)] internal static extern RawBlacksmithPolylines cadaclysm_blacksmith_tessellation_edge_polylines(TessellationHandle tessellation);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_bounds(SolidHandle solid, double tolerance, [Out] double[] min, [Out] double[] max);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_bounds64(SolidHandle solid, double tolerance, [Out] double[] min, [Out] double[] max);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_box(SolidHandle solid, [Out] double[] min, [Out] double[] max);
     // The FEM surface mesh: one handle per meshed solid, freed by the caller. `progress` and
     // `user` are always null here, as every other progress-taking entry point in this binding is
     // (see the file header). `msh_text` returns an **owned** `char *`, released with
@@ -885,6 +919,10 @@ internal static class BlacksmithNative
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_fem_mesh_folded_edge(FemMeshHandle mesh, uint index,
         out uint outA, out uint outB, out uint outBrepEdge);
+    [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_fem_mesh_crossing_count(FemMeshHandle mesh);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_fem_mesh_crossing(FemMeshHandle mesh, uint index,
+        out uint outA, out uint outB);
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_fem_mesh_msh_text(FemMeshHandle mesh);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_fem_mesh_save_msh(FemMeshHandle mesh,
@@ -919,6 +957,21 @@ internal static class BlacksmithNative
         AssemblyHandle placed, double[] frame, [MarshalAs(UnmanagedType.LPUTF8Str)] string? name);
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_assembly_step(AssemblyHandle assembly,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? schema, uint unit);
+    // `placements` is a raw `IntPtr[]` of UTF-8 C strings: the CLR's marshaller refuses
+    // `LPArray(ArraySubType = LPUTF8Str)` ("Invalid managed/unmanaged type combination"), so
+    // `Assembly.Link` allocates each string with `Marshal.StringToCoTaskMemUTF8` and frees them
+    // itself, once each, in a `finally` -- the per-string allocations and the array itself all
+    // stay alive for exactly the call. `placements` may be null only when `count` is 0 (an
+    // empty list still reaches C as count 0, not a null array, so the kernel's own "names no
+    // placements" refusal comes back rather than a marshalling failure). Both refuse (false)
+    // and leave the assembly unchanged, with the reason in `last_error`, like `license_set`.
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_assembly_link(AssemblyHandle a,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string name, IntPtr[]? placements, nuint count);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_assembly_joint(AssemblyHandle a,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string name, [MarshalAs(UnmanagedType.LPUTF8Str)] string start,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string end);
     [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_svg_options_init(ref RawBlacksmithSvgOptions options);
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_svg_text(IntPtr[] solids, nuint count, ref RawBlacksmithSvgOptions options);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
@@ -1230,6 +1283,19 @@ public static class Blacksmith
         return new BuildException(reason.Length > 0 ? reason : what);
     }
 
+    /// <summary><see cref="Failure"/> for a call routed through
+    /// `cadaclysm_blacksmith_tessellation`: that entry point fails with a leading
+    /// "tessellation:" naming itself, not the caller, so this rewrites that prefix back to
+    /// `what` -- the C-level name the caller reported before it held a tessellation of its
+    /// own -- leaving the rest of the library's message untouched.</summary>
+    internal static BuildException TessellationFailure(string what)
+    {
+        var reason = LastError();
+        const string prefix = "tessellation:";
+        if (reason.StartsWith(prefix, StringComparison.Ordinal)) reason = what + ":" + reason.Substring(prefix.Length);
+        return new BuildException(reason.Length > 0 ? reason : what);
+    }
+
     /// <summary>The handle a build call returned, or the library's reason it returned none.
     /// (A null handle is an invalid `SafeHandle`, which the runtime never frees.)</summary>
     /// <summary>`count` xyz triples at `at`, copied out as one array a point.</summary>
@@ -1243,6 +1309,11 @@ public static class Blacksmith
 
     internal static T Checked<T>(T handle, string what) where T : CadaclysmHandle =>
         !handle.IsInvalid ? handle : throw Failure(what);
+
+    /// <summary><see cref="Checked{T}"/> for a `cadaclysm_blacksmith_tessellation` handle: see
+    /// <see cref="TessellationFailure"/>.</summary>
+    internal static T TessellationChecked<T>(T handle, string what) where T : CadaclysmHandle =>
+        !handle.IsInvalid ? handle : throw TessellationFailure(what);
 
     private static double[] Doubles(double[]? values, int count, string what)
     {
@@ -1747,33 +1818,33 @@ public readonly struct Slant
 
 // ---- solids -----------------------------------------------------------------------------
 
-/// <summary>The same triangles in memory of our own, safe to outlive the solid.</summary>
+/// <summary>The same triangles in memory of our own, safe to outlive the view they were copied
+/// from.</summary>
 public sealed record BlacksmithMeshData(float[] Positions, float[] Normals, uint[] Indices);
 
-/// <summary>A solid's triangles -- views over the library's own cache at one tolerance, valid
-/// until the solid is disposed or meshed again at another tolerance (see the file header).
+/// <summary>A solid's triangles -- a view over a held tessellation of its own (see the file
+/// header): it owns its filling, so nothing about the solid afterwards touches it. A span read
+/// from it does not keep this reachable -- <see cref="GC.KeepAlive"/> it while one is in hand.
 /// </summary>
 /// <remarks><see cref="Positions"/> and <see cref="Normals"/> are `(VertexCount * 3)` floats,
 /// <see cref="Indices"/> is `(IndexCount)`, three to a triangle.</remarks>
 public sealed class BlacksmithMesh
 {
     private readonly RawBlacksmithMesh _raw;
+    private readonly TessellationHandle _held;
 
-    /// <summary>The solid this borrows from.</summary>
+    /// <summary>The solid this view was meshed from; the view's arrays do not depend on it --
+    /// they stay valid after the solid is disposed or meshed again.</summary>
     public Solid Solid { get; }
 
     /// <summary>The tolerance this was meshed at.</summary>
     public double Tolerance { get; }
 
-    /// <summary>Which filling of the solid's cache this reads -- see <see cref="Solid.CheckCache"/>.
-    /// </summary>
-    private readonly int _generation;
-
-    internal BlacksmithMesh(Solid solid, double tolerance, int generation, RawBlacksmithMesh raw)
+    internal BlacksmithMesh(Solid solid, TessellationHandle held, double tolerance, RawBlacksmithMesh raw)
     {
         Solid = solid;
+        _held = held;
         Tolerance = tolerance;
-        _generation = generation;
         _raw = raw;
     }
 
@@ -1781,11 +1852,16 @@ public sealed class BlacksmithMesh
     public int IndexCount => (int)_raw.IndexCount;
     public int TriangleCount => (int)(_raw.IndexCount / 3);
 
+    private void CheckHeld()
+    {
+        if (_held.IsClosed) throw new ObjectDisposedException(nameof(BlacksmithMesh), "mesh: freed");
+    }
+
     public unsafe ReadOnlySpan<float> Positions
     {
         get
         {
-            Solid.CheckCache(_generation);
+            CheckHeld();
             return _raw.Positions == IntPtr.Zero
                 ? ReadOnlySpan<float>.Empty
                 : new ReadOnlySpan<float>((void*)_raw.Positions, (int)(_raw.VertexCount * 3));
@@ -1796,7 +1872,7 @@ public sealed class BlacksmithMesh
     {
         get
         {
-            Solid.CheckCache(_generation);
+            CheckHeld();
             return _raw.Normals == IntPtr.Zero
                 ? ReadOnlySpan<float>.Empty
                 : new ReadOnlySpan<float>((void*)_raw.Normals, (int)(_raw.VertexCount * 3));
@@ -1807,47 +1883,44 @@ public sealed class BlacksmithMesh
     {
         get
         {
-            Solid.CheckCache(_generation);
+            CheckHeld();
             return _raw.Indices == IntPtr.Zero
                 ? ReadOnlySpan<uint>.Empty
                 : new ReadOnlySpan<uint>((void*)_raw.Indices, (int)_raw.IndexCount);
         }
     }
 
-    /// <summary>The same triangles in memory of our own, safe to outlive the solid.</summary>
+    /// <summary>The same triangles in memory of our own, safe to outlive this view.</summary>
     public BlacksmithMeshData Copy() => new(Positions.ToArray(), Normals.ToArray(), Indices.ToArray());
 }
 
 /// <summary>A <see cref="BlacksmithMesh64"/> in memory of your own.</summary>
 public sealed record BlacksmithMeshData64(double[] Positions, double[] Normals, uint[] Indices);
 
-/// <summary>[`cadaclysm_blacksmith_mesh64`]: the same tessellation as <see
-/// cref="BlacksmithMesh"/>, from the same cache -- meshing at another tolerance (through
-/// <see cref="Solid.Mesh"/>, <see cref="Solid.Mesh64"/>, <see cref="Solid.EdgePolylines"/>,
-/// <see cref="Solid.BoundsAt"/> or <see cref="Solid.BoundsAt64"/>) invalidates this the same
-/// way it invalidates <see cref="BlacksmithMesh"/>.</summary>
+/// <summary>[`cadaclysm_blacksmith_tessellation_mesh64`]: the same tessellation as <see
+/// cref="BlacksmithMesh"/> -- a view over its own held tessellation, unaffected by anything
+/// done to the solid afterwards. A span read from it does not keep this reachable -- <see
+/// cref="GC.KeepAlive"/> it while one is in hand.</summary>
 /// <remarks><see cref="Positions"/> and <see cref="Normals"/> are `(VertexCount * 3)`
 /// doubles, <see cref="Indices"/> is `(IndexCount)`, the very pointer <see
 /// cref="BlacksmithMesh"/> gives.</remarks>
 public sealed class BlacksmithMesh64
 {
     private readonly RawBlacksmithMesh64 _raw;
+    private readonly TessellationHandle _held;
 
-    /// <summary>The solid this borrows from.</summary>
+    /// <summary>The solid this view was meshed from; the view's arrays do not depend on it --
+    /// they stay valid after the solid is disposed or meshed again.</summary>
     public Solid Solid { get; }
 
     /// <summary>The tolerance this was meshed at.</summary>
     public double Tolerance { get; }
 
-    /// <summary>Which filling of the solid's cache this reads -- see <see cref="Solid.CheckCache"/>.
-    /// </summary>
-    private readonly int _generation;
-
-    internal BlacksmithMesh64(Solid solid, double tolerance, int generation, RawBlacksmithMesh64 raw)
+    internal BlacksmithMesh64(Solid solid, TessellationHandle held, double tolerance, RawBlacksmithMesh64 raw)
     {
         Solid = solid;
+        _held = held;
         Tolerance = tolerance;
-        _generation = generation;
         _raw = raw;
     }
 
@@ -1855,11 +1928,16 @@ public sealed class BlacksmithMesh64
     public int IndexCount => (int)_raw.IndexCount;
     public int TriangleCount => (int)(_raw.IndexCount / 3);
 
+    private void CheckHeld()
+    {
+        if (_held.IsClosed) throw new ObjectDisposedException(nameof(BlacksmithMesh64), "mesh64: freed");
+    }
+
     public unsafe ReadOnlySpan<double> Positions
     {
         get
         {
-            Solid.CheckCache(_generation);
+            CheckHeld();
             return _raw.Positions == IntPtr.Zero
                 ? ReadOnlySpan<double>.Empty
                 : new ReadOnlySpan<double>((void*)_raw.Positions, (int)(_raw.VertexCount * 3));
@@ -1870,7 +1948,7 @@ public sealed class BlacksmithMesh64
     {
         get
         {
-            Solid.CheckCache(_generation);
+            CheckHeld();
             return _raw.Normals == IntPtr.Zero
                 ? ReadOnlySpan<double>.Empty
                 : new ReadOnlySpan<double>((void*)_raw.Normals, (int)(_raw.VertexCount * 3));
@@ -1881,45 +1959,53 @@ public sealed class BlacksmithMesh64
     {
         get
         {
-            Solid.CheckCache(_generation);
+            CheckHeld();
             return _raw.Indices == IntPtr.Zero
                 ? ReadOnlySpan<uint>.Empty
                 : new ReadOnlySpan<uint>((void*)_raw.Indices, (int)_raw.IndexCount);
         }
     }
 
-    /// <summary>The same triangles in memory of our own, safe to outlive the solid.</summary>
+    /// <summary>The same triangles in memory of our own, safe to outlive this view.</summary>
     public BlacksmithMeshData64 Copy() => new(Positions.ToArray(), Normals.ToArray(), Indices.ToArray());
 }
 
-/// <summary>A solid's feature edges as polylines -- views over the library's own cache at one
-/// tolerance, under the same lifetime rule as <see cref="BlacksmithMesh"/>. Polyline `i` is
+/// <summary>A solid's feature edges as polylines -- a view over its own held tessellation,
+/// under the same lifetime rule as <see cref="BlacksmithMesh"/>. Polyline `i` is
 /// `Points[Offsets[i] * 3 .. Offsets[i + 1] * 3]`, three floats a point.</summary>
 public sealed class BlacksmithPolylines
 {
     private readonly RawBlacksmithPolylines _raw;
+    private readonly TessellationHandle _held;
 
+    /// <summary>The solid this view was meshed from; the view's arrays do not depend on it --
+    /// they stay valid after the solid is disposed or meshed again.</summary>
     public Solid Solid { get; }
-    public double Tolerance { get; }
-    private readonly int _generation;
 
-    internal BlacksmithPolylines(Solid solid, double tolerance, int generation, RawBlacksmithPolylines raw)
+    public double Tolerance { get; }
+
+    internal BlacksmithPolylines(Solid solid, TessellationHandle held, double tolerance, RawBlacksmithPolylines raw)
     {
         Solid = solid;
+        _held = held;
         Tolerance = tolerance;
-        _generation = generation;
         _raw = raw;
     }
 
     public int PointCount => (int)_raw.PointCount;
     public int PolylineCount => (int)_raw.PolylineCount;
 
+    private void CheckHeld()
+    {
+        if (_held.IsClosed) throw new ObjectDisposedException(nameof(BlacksmithPolylines), "edge_polylines: freed");
+    }
+
     /// <summary>`(PointCount * 3)` floats, the polylines end to end.</summary>
     public unsafe ReadOnlySpan<float> Points
     {
         get
         {
-            Solid.CheckCache(_generation);
+            CheckHeld();
             return _raw.Points == IntPtr.Zero
                 ? ReadOnlySpan<float>.Empty
                 : new ReadOnlySpan<float>((void*)_raw.Points, (int)(_raw.PointCount * 3));
@@ -1932,7 +2018,7 @@ public sealed class BlacksmithPolylines
     {
         get
         {
-            Solid.CheckCache(_generation);
+            CheckHeld();
             return _raw.Offsets == IntPtr.Zero
                 ? ReadOnlySpan<uint>.Empty
                 : new ReadOnlySpan<uint>((void*)_raw.Offsets, (int)(_raw.PolylineCount + 1));
@@ -1950,7 +2036,7 @@ public sealed class BlacksmithPolylines
     }
 
     /// <summary>Every polyline in memory of our own, one `(k * 3)` array each, safe to outlive
-    /// the solid.</summary>
+    /// this view.</summary>
     public float[][] Copy()
     {
         var polylines = new float[PolylineCount][];
@@ -2066,16 +2152,16 @@ public sealed class FemVertex
 ///
 /// <para><strong>The owner of these views is this object, not the solid.</strong> <see
 /// cref="Solid.Dispose"/> does not free a FEM mesh, and meshing the solid again at another
-/// tolerance does not stale one -- so this class carries none of the generation machinery <see
-/// cref="BlacksmithMesh"/> has (see <see cref="Solid.CheckCache"/>): a FEM view's pointers are
-/// built with the handle and never move.</para>
+/// tolerance does not touch one either -- a FEM view's pointers are built with the handle and
+/// never move. <see cref="BlacksmithMesh"/> now owns its own tessellation the same way, so
+/// there is no generation machinery anywhere in this file any more (see the file header).</para>
 ///
 /// <para><strong>What the guard does and does not do.</strong> Every accessor below asks the
 /// handle first, so a span <em>asked for</em> after <see cref="Free"/> throws. A span already in
 /// hand is not protected and cannot be: a `ReadOnlySpan&lt;T&gt;` is a bare pointer and a length,
 /// with nothing left to check by the time it is indexed -- it goes on reading the freed block and
-/// hands back numbers that look like the mesh. <see cref="BlacksmithMesh"/>'s generation check is
-/// no different in this respect, and neither is the reader's. So call `ToArray()` on any span that
+/// hands back numbers that look like the mesh. <see cref="BlacksmithMesh"/>'s own guard is no
+/// different in this respect, and neither is the reader's. So call `ToArray()` on any span that
 /// must outlive the handle, and read the rest inside the `using`.</para>
 ///
 /// <para>It is <see cref="Free"/> here where a <see cref="Solid"/> has <see
@@ -2210,6 +2296,31 @@ public sealed class FemMesh : IDisposable
     public IReadOnlyList<(uint A, uint B, uint BrepEdge)> FoldedEdges =>
         Census(BlacksmithNative.cadaclysm_blacksmith_fem_mesh_folded_edge, Raw.FoldedEdgeCount, "fem_mesh_folded_edge");
 
+    /// <summary>Every pair of triangles that pass through each other, as `(A, B)` with `A &lt;
+    /// B`, sorted: an edge of one through the other's interior. Their B-rep faces are <see
+    /// cref="TriangleFace"/>`[A]` and `[B]`.</summary>
+    /// <remarks><strong>Computed for every body, open or closed.</strong> The census <see
+    /// cref="Watertight"/>, <see cref="OpenEdges"/> and <see cref="FoldedEdges"/> report is
+    /// topological and cannot see a surface passing through itself; a mesh is ready for a volume
+    /// mesher when it is <see cref="Watertight"/> <strong>and</strong> this is empty -- Gmsh
+    /// refuses one that crosses. A copy.</remarks>
+    public IReadOnlyList<(uint A, uint B)> Crossings
+    {
+        get
+        {
+            var handle = Live;
+            var count = BlacksmithNative.cadaclysm_blacksmith_fem_mesh_crossing_count(handle);
+            var rows = new List<(uint, uint)>((int)count);
+            for (var i = 0u; i < count; i++)
+            {
+                if (!BlacksmithNative.cadaclysm_blacksmith_fem_mesh_crossing(handle, i, out var a, out var b))
+                    throw Blacksmith.Failure($"fem_mesh_crossing {i}");
+                rows.Add((a, b));
+            }
+            return rows;
+        }
+    }
+
     /// <summary>The library's two census readers have one shape, so the two lists cannot drift.
     /// </summary>
     private delegate bool CensusRow(FemMeshHandle mesh, uint index, out uint a, out uint b, out uint brepEdge);
@@ -2329,28 +2440,6 @@ public sealed class Solid : IDisposable
 {
     private readonly SolidHandle _handle;
 
-    /// <summary>The tolerance the library's tessellation cache was last filled at (null before
-    /// any of <see cref="Mesh"/>, <see cref="EdgePolylines"/> and <see cref="BoundsAt"/> ran),
-    /// and how many times it has been filled. The library replaces the cache whole whenever it
-    /// is asked for a tolerance other than the one it holds, so a view is tied to a
-    /// <em>filling</em>, not a tolerance: after 0.05, 0.5, 0.05 the first view's memory is
-    /// gone even though the cache is back at its tolerance. A view checks the generation it
-    /// was cut from, never the tolerance.</summary>
-    private double? _cacheTolerance;
-    private int _cacheGeneration;
-
-    /// <summary>Record that a call just tessellated at `tolerance`: a new filling if it differs
-    /// from the one the cache held. Returns the generation a view made now belongs to.</summary>
-    private int Filled(double tolerance)
-    {
-        if (_cacheTolerance != tolerance)
-        {
-            _cacheTolerance = tolerance;
-            _cacheGeneration++;
-        }
-        return _cacheGeneration;
-    }
-
     internal Solid(SolidHandle handle)
     {
         _handle = Blacksmith.Checked(handle, "solid");
@@ -2364,18 +2453,9 @@ public sealed class Solid : IDisposable
     public bool Closed => _handle.IsClosed;
 
     /// <summary>Give the solid back. Idempotent. Every <see cref="BlacksmithMesh"/> and
-    /// <see cref="BlacksmithPolylines"/> still held throws on its next read.</summary>
+    /// <see cref="BlacksmithPolylines"/> still held owns its own tessellation and reads on,
+    /// untouched by this.</summary>
     public void Dispose() => _handle.Dispose();
-
-    /// <summary>A view cut from filling `generation` may read only while that filling is the
-    /// one the solid holds; a disposed solid has none.</summary>
-    internal void CheckCache(int generation)
-    {
-        _ = Handle;
-        if (_cacheGeneration != generation)
-            throw new InvalidOperationException(
-                $"the view is stale: the solid's tessellation has been replaced since (now at tolerance {_cacheTolerance})");
-    }
 
     // -- building
 
@@ -2397,6 +2477,11 @@ public sealed class Solid : IDisposable
     /// <summary>A box `x` by `y` by `z` whose top face is narrowed to `topX` along x.</summary>
     public static Solid Wedge(double x, double y, double z, double topX) =>
         new(BlacksmithNative.cadaclysm_blacksmith_wedge(x, y, z, topX));
+
+    /// <summary>A right pyramid of `sides` sides (at least 3): its base the regular polygon of
+    /// circumradius `r` on z=0, its first corner on +x, its tip at (0, 0, `h`).</summary>
+    public static Solid Pyramid(int sides, double r, double h) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_pyramid((uint)Math.Max(0, sides), r, h));
 
     /// <summary>`profile` swept `height` along the frame's z, closed with two caps.</summary>
     public static Solid Extrude(Profile profile, double[] frame, double height) =>
@@ -2715,8 +2800,20 @@ public sealed class Solid : IDisposable
         return Blacksmith.Text(raw);
     }
 
-    /// <summary><see cref="BoundsAt"/> at tolerance 0.05.</summary>
-    public (double[] Min, double[] Max) Bounds => BoundsAt(0.05);
+    /// <summary>The solid's axis-aligned box, at the same cost whatever its size: its mesh at
+    /// a thousandth of its own extent, in `double`, so the box is inside the exact one and short
+    /// of it by at most that. Worked out once per solid, apart from the tessellation
+    /// <see cref="Mesh"/> caches -- asking it never invalidates a mesh's spans.
+    /// <see cref="BoundsAt"/> is the box of the mesh at a tolerance you name.</summary>
+    public (double[] Min, double[] Max) Bounds
+    {
+        get
+        {
+            double[] lo = new double[3], hi = new double[3];
+            if (!BlacksmithNative.cadaclysm_blacksmith_box(Handle, lo, hi)) throw Blacksmith.Failure("box");
+            return (lo, hi);
+        }
+    }
 
     /// <summary>The solid's axis-aligned bounds, over the positions of its cached
     /// tessellation at `tolerance` (the same cache <see cref="Mesh"/> fills and reuses, so a
@@ -2725,7 +2822,6 @@ public sealed class Solid : IDisposable
     {
         double[] lo = new double[3], hi = new double[3];
         if (!BlacksmithNative.cadaclysm_blacksmith_bounds(Handle, tolerance, lo, hi)) throw Blacksmith.Failure("bounds");
-        Filled(tolerance);
         return (lo, hi);
     }
 
@@ -2739,7 +2835,6 @@ public sealed class Solid : IDisposable
     {
         double[] lo = new double[3], hi = new double[3];
         if (!BlacksmithNative.cadaclysm_blacksmith_bounds64(Handle, tolerance, lo, hi)) throw Blacksmith.Failure("bounds64");
-        Filled(tolerance);
         return (lo, hi);
     }
 
@@ -2814,23 +2909,21 @@ public sealed class Solid : IDisposable
 
     // -- out
 
-    /// <summary>The triangles at `tolerance`, as views into the solid's cache. See the file
-    /// header for what invalidates them.</summary>
+    /// <summary>The triangles at `tolerance`, as views over a tessellation held of their own.
+    /// See the file header for the lifetime this gives them.</summary>
     public BlacksmithMesh Mesh(double tolerance = 0.05)
     {
-        var raw = BlacksmithNative.cadaclysm_blacksmith_mesh(Handle, tolerance);
-        if (raw.Positions == IntPtr.Zero) throw Blacksmith.Failure("mesh");
-        return new BlacksmithMesh(this, tolerance, Filled(tolerance), raw);
+        var held = Blacksmith.TessellationChecked(BlacksmithNative.cadaclysm_blacksmith_tessellation(Handle, tolerance), "mesh");
+        return new BlacksmithMesh(this, held, tolerance, BlacksmithNative.cadaclysm_blacksmith_tessellation_mesh(held));
     }
 
-    /// <summary><see cref="Mesh"/> in `double`, from the same cache: valid until the solid is
-    /// disposed or meshed again at a different tolerance -- through <see cref="Mesh"/> as much
-    /// as through this.</summary>
+    /// <summary><see cref="Mesh"/> in `double`, from the same held tessellation this solid's
+    /// cache would give at `tolerance` -- and, once held, untouched by anything done to the
+    /// solid afterwards, through <see cref="Mesh"/> as much as through this.</summary>
     public BlacksmithMesh64 Mesh64(double tolerance = 0.05)
     {
-        var raw = BlacksmithNative.cadaclysm_blacksmith_mesh64(Handle, tolerance);
-        if (raw.Positions == IntPtr.Zero) throw Blacksmith.Failure("mesh64");
-        return new BlacksmithMesh64(this, tolerance, Filled(tolerance), raw);
+        var held = Blacksmith.TessellationChecked(BlacksmithNative.cadaclysm_blacksmith_tessellation(Handle, tolerance), "mesh64");
+        return new BlacksmithMesh64(this, held, tolerance, BlacksmithNative.cadaclysm_blacksmith_tessellation_mesh64(held));
     }
 
     /// <summary>This solid meshed for a solver, as a <see cref="Cadaclysm.Blacksmith.FemMesh"/>:
@@ -2889,13 +2982,12 @@ public sealed class Solid : IDisposable
             IntPtr.Zero, IntPtr.Zero));
     }
 
-    /// <summary>The feature edges as polylines, views into the same cache as
-    /// <see cref="Mesh"/>.</summary>
+    /// <summary>The feature edges as polylines, views over a tessellation held the same way
+    /// as <see cref="Mesh"/>'s.</summary>
     public BlacksmithPolylines EdgePolylines(double tolerance = 0.05)
     {
-        var raw = BlacksmithNative.cadaclysm_blacksmith_edge_polylines(Handle, tolerance);
-        if (raw.Offsets == IntPtr.Zero) throw Blacksmith.Failure("edge_polylines");
-        return new BlacksmithPolylines(this, tolerance, Filled(tolerance), raw);
+        var held = Blacksmith.TessellationChecked(BlacksmithNative.cadaclysm_blacksmith_tessellation(Handle, tolerance), "edge_polylines");
+        return new BlacksmithPolylines(this, held, tolerance, BlacksmithNative.cadaclysm_blacksmith_tessellation_edge_polylines(held));
     }
 
     /// <summary>This solid as STEP text (AP203 unless <paramref name="schema"/> names another); see <see cref="Blacksmith.WriteStepText"/>.
@@ -3028,11 +3120,6 @@ public sealed class Solid : IDisposable
     {
         var raw = BlacksmithNative.cadaclysm_blacksmith_edge_polyline_colours(Handle, tolerance);
         if (raw.Rgb == IntPtr.Zero && Blacksmith.LastError().Length > 0) throw Blacksmith.Failure("edge_polyline_colours");
-        // This call tessellates like every other cache reader, even to report "no paint": it
-        // can replace the cache a view taken earlier is still borrowing, so it must bump the
-        // generation those views check, even though this method copies its own result out and
-        // keeps nothing borrowed itself.
-        Filled(tolerance);
         if (raw.Rgb == IntPtr.Zero) return Array.Empty<double[]?>();
         var values = new ReadOnlySpan<double>((void*)raw.Rgb, 3 * (int)raw.Count);
         var outColours = new double[]?[raw.Count];
@@ -3425,6 +3512,45 @@ public sealed class Assembly : IDisposable
         {
             BlacksmithNative.cadaclysm_blacksmith_string_free(raw);
         }
+    }
+
+    /// <summary>Declare a rigid link called <paramref name="name"/> over <paramref
+    /// name="placements"/>: names of placements of this assembly itself (not of assemblies
+    /// placed in it -- give those their own mechanism). A placed assembly in a link moves as
+    /// one piece. An empty name, a name taken by another link here, no placements, a placement
+    /// named twice, one this assembly does not have, or one already in another link throws
+    /// <see cref="BuildException"/>, and the assembly is left as it was. Written as an AP242
+    /// kinematic link; a mechanism anywhere in the tree makes AP242 the default schema of
+    /// <see cref="StepText"/>, and an explicit schema without the kinematic entities throws.
+    /// </summary>
+    public void Link(string name, params string[] placements)
+    {
+        var count = placements.Length;
+        var native = count == 0 ? null : new IntPtr[count];
+        try
+        {
+            if (native is not null)
+                for (var i = 0; i < count; i++) native[i] = Marshal.StringToCoTaskMemUTF8(placements[i]);
+            var ok = BlacksmithNative.cadaclysm_blacksmith_assembly_link(Handle, name, native, (nuint)count);
+            GC.KeepAlive(this);
+            if (!ok) throw Blacksmith.Failure("assembly_link");
+        }
+        finally
+        {
+            if (native is not null) foreach (var p in native) if (p != IntPtr.Zero) Marshal.FreeCoTaskMem(p);
+        }
+    }
+
+    /// <summary>Connect this assembly's links <paramref name="start"/> and <paramref
+    /// name="end"/>, kept in that order, as a joint called <paramref name="name"/>. An empty
+    /// name, a name taken by another joint here, a link this assembly does not have, a link
+    /// joined to itself, or a (start, end) pair already joined throws <see
+    /// cref="BuildException"/>; the reverse pair is a different joint.</summary>
+    public void Joint(string name, string start, string end)
+    {
+        var ok = BlacksmithNative.cadaclysm_blacksmith_assembly_joint(Handle, name, start, end);
+        GC.KeepAlive(this);
+        if (!ok) throw Blacksmith.Failure("assembly_joint");
     }
 
     /// <summary>This assembly, and everything placed under it, as one STEP file: this assembly

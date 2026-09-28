@@ -1,10 +1,15 @@
 // Scene::links() / joints() -- the mechanism facts, identical in every language: two
 // links "base" and "arm", each naming one node of its own name; one joint "hinge" from
-// "arm" (index 1) to "base" (index 0); the cube (no mechanism) has neither.
+// "arm" (index 1) to "base" (index 0); the cube (no mechanism) has neither. Also the
+// joint's pair (revolute, ranged, both contact frames at (0, 0, 100)) and the file's one
+// named state ("open": hinge set to 0.5).
 //
 //     cadaclysm_kinematics_test samples/cube.scad
+#include <array>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -53,6 +58,44 @@ static Result<void> run(const std::string& cube_path) {
     // Link equality holds across two lookups of the same index in the same scene.
     expect(start == mechanism.links()[1] && end == mechanism.links()[0] && start != end,
            "Link equality does not hold across two lookups");
+
+    // The pair: revolute about Z, ranged -1.5..1.5, both contact frames at (0, 0, 100).
+    std::optional<cadaclysm::Pair> pair = hinge.pair();
+    expect(pair.has_value(), "hinge has no pair");
+    if (pair) {
+        expect(pair->kind() == cadaclysm::PairKind::revolute, "hinge's pair is not revolute");
+        expect(!pair->type_name().has_value(), "a revolute pair has a type name");
+        expect(!pair->pitch().has_value(), "a revolute pair has a pitch");
+        for (const std::array<double, 16>& raw : {pair->raw_frame_start(), pair->raw_frame_end()}) {
+            expect(std::abs(raw[12] - 0.0) < 1e-9 && std::abs(raw[13] - 0.0) < 1e-9 && std::abs(raw[14] - 100.0) < 1e-9,
+                   "a pair frame's origin is not (0, 0, 100)");
+            expect(std::abs(raw[8] - 0.0) < 1e-9 && std::abs(raw[9] - 0.0) < 1e-9 && std::abs(raw[10] - 1.0) < 1e-9,
+                   "a pair frame's z axis is not (0, 0, 1)");
+        }
+        std::vector<cadaclysm::Freedom> freedoms = pair->freedoms();
+        expect(freedoms.size() == 1, "pair does not have exactly one freedom");
+        if (freedoms.size() == 1) {
+            expect(freedoms[0].motion == cadaclysm::Motion::rotation && freedoms[0].axis == cadaclysm::FreedomAxis::z,
+                   "freedom is not rotation about z");
+            expect(freedoms[0].lower.has_value() && std::abs(*freedoms[0].lower - -1.5) < 1e-9 &&
+                       freedoms[0].upper.has_value() && std::abs(*freedoms[0].upper - 1.5) < 1e-9,
+                   "freedom range is not -1.5..1.5");
+        }
+    }
+
+    // The state: one named "open", one row (hinge, [0.5]).
+    std::vector<cadaclysm::State> states = mechanism.states();
+    expect(states.size() == 1 && states[0].index == 0 && states[0].name == "open",
+           "mechanism does not carry exactly one state named open");
+    if (states.size() == 1) {
+        expect(states[0].values.size() == 1, "state open does not have exactly one row");
+        if (states[0].values.size() == 1) {
+            const cadaclysm::StateValue& row = states[0].values[0];
+            expect(row.joint.name() == "hinge" && row.joint.index() == 0, "state row joint is not hinge(0)");
+            expect(row.values.size() == 1 && std::abs(row.values[0] - 0.5) < 1e-9, "state row values are not [0.5]");
+        }
+    }
+    expect(cube.states().empty(), "the cube scene has states");
 
     return {};
 }

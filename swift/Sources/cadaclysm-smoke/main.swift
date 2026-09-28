@@ -296,14 +296,16 @@ print("face: \(sheetFaces) face, pushed out \(pushedFaces) faces")
 check(sheetFaces == 1 && pushedFaces == plateFaces && must("is_watertight") { try pushed.isWatertight() },
       "the outline's face did not push out to the plate")
 
-// A mesh view is tied to one filling of the solid's cache: meshing at another tolerance and
-// back again replaces that memory, and the first view must know it rather than read it.
+// A mesh view holds a tessellation of its own: meshing the solid again at another tolerance,
+// and back again, does not touch memory a view already handed out.
 let firstMesh = must("mesh") { try rounded.mesh(tolerance: 0.05) }
 check(!firstMesh.isStale && firstMesh.positions.count > 0, "a fresh mesh view is not readable")
+let firstMeshFirstPosition = firstMesh.positions[0]
 _ = must("mesh") { try rounded.mesh(tolerance: 0.5) }
 _ = must("mesh") { try rounded.mesh(tolerance: 0.05) }
-check(firstMesh.isStale, "a mesh view survived meshing at 0.05, 0.5, 0.05")
-print("mesh at 0.05: \(firstMesh.triangleCount) triangles; the first view is stale after 0.05, 0.5, 0.05")
+check(!firstMesh.isStale && firstMesh.positions[0] == firstMeshFirstPosition,
+      "a mesh view did not survive meshing at 0.05, 0.5, 0.05")
+print("mesh at 0.05: \(firstMesh.triangleCount) triangles; the first view still reads after 0.05, 0.5, 0.05")
 
 // f64 twins (Task 13): mesh64/bounds64 from the very same tessellation, unnarrowed.
 let mesh32k = must("mesh") { try rounded.mesh(tolerance: 0.05) }
@@ -764,15 +766,18 @@ func femKernel(_ rounded: Solid) {
     let longest = mesh.longestEdge
 
     // **A FEM mesh is not in the solid's tessellation cache**, so re-meshing the solid at
-    // another tolerance -- which stales every `Solid.mesh` view -- leaves it alone, and neither
-    // does closing the solid: the handle owns every array it lends. Catches reusing
-    // `CacheFilling` as this mesh's owner, which would refuse a read the library never did.
+    // another tolerance leaves it alone, and neither does closing the solid: the handle owns
+    // every array it lends. A `Solid.mesh` view now shares that much with it too, holding a
+    // `Tessellation` of its own -- pinned below alongside the FEM mesh. Catches reusing
+    // `Tessellation` as this mesh's owner, which would refuse a read the library never did.
     let held = mesh.nodes
     let firstNode = held[0]
     let tessellation = must("mesh") { try rounded.mesh(tolerance: 0.05) }
+    let firstTessellationPosition = tessellation.positions[0]
     _ = must("mesh") { try rounded.mesh(tolerance: 0.5) }
     _ = must("mesh") { try rounded.mesh(tolerance: 0.05) }
-    check(tessellation.isStale, "kernel fem: the tessellation view is the one that goes stale")
+    check(!tessellation.isStale && tessellation.positions[0] == firstTessellationPosition,
+          "kernel fem: a mesh view holds its own tessellation and is never staled by a re-mesh")
     check(held.isValid && held[0] == firstNode, "kernel fem: re-meshing the solid staled the FEM mesh")
     mesh.free()
     check(!held.isValid, "kernel fem: free() left the views readable")

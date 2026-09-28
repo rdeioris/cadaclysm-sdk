@@ -206,7 +206,7 @@ return function(t)
       end
       t.eq(p.select, p.geometry)
     end
-    t.eq(triangles, 542)
+    t.eq(triangles, 522)  -- 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound): 542 -> 522
     -- The second body sits 8 along x, the third 8 along y (column-major offset).
     t.eq(placements[2].raw_transform[13], 8)
     t.eq(placements[2].transform[1][4], 8)
@@ -475,11 +475,12 @@ return function(t)
     local bracket, pin = scene.nodes[2], scene.nodes[3]
     t.eq(bracket.is_meshed, false)
     t.eq(bracket.triangle_estimate, 18)
-    t.eq(pin.triangle_estimate, 480)
+    t.eq(pin.triangle_estimate, 468)  -- 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound): 480 -> 468
     t.eq(bracket.surface_edges.polyline_count, 12)
     t.eq(bracket.surface_edges.vertex_count, 24)
     t.eq(bracket.surface_isocurves.polyline_count, 0)
-    t.eq(pin.surface_isocurves.polyline_count, 3)
+    -- Three rings and three rulings (6 since 53759bef; the rulings were dropped at the trim boundary).
+    t.eq(pin.surface_isocurves.polyline_count, 6)
     local proxy = bracket:surface_proxy_mesh(4)
     t.eq(proxy.vertex_count, 150)
     t.eq(proxy.index_count, 576)
@@ -567,6 +568,26 @@ return function(t)
     t.eq(cracks[1][2], 2)
     mesh:free()
     scene:close()
+
+    -- Crossings: `samples/dented-box.stp` is a closed B-rep box whose top dips through
+    -- its own floor, 296 pairs measured 2026-09-26. `_open_edge_count` and
+    -- `_folded_edge_count` are both 0 for this watertight body, so a `crossings` wired to
+    -- either of those (rather than its own live `cadaclysm_fem_mesh_crossing_count`)
+    -- reads 0 here, not 296 -- once through this reader, and once through the kernel's
+    -- own open of the same file, which must agree with it.
+    local dented_scene = cadaclysm.open(t.fixture("samples/dented-box.stp"))
+    local dented_node
+    for _, n in ipairs(dented_scene.nodes) do
+      if n.can_mesh then dented_node = n; break end
+    end
+    local dented_mesh = dented_node:fem_mesh()
+    t.eq(dented_mesh.watertight, true)
+    t.eq(dented_mesh.from_mesh, false)
+    local crossings = dented_mesh.crossings
+    t.eq(#crossings, 296)
+    t.ok(crossings[1][1] < crossings[1][2], "the first pair is not a < b")
+    dented_mesh:free()
+    dented_scene:close()
   end)
 
   t.test("a node's FEM mesh: the mesh-only cube's arrays, census, quality and .msh text", function()
@@ -582,6 +603,7 @@ return function(t)
     t.eq(#mesh.vertices, 0)
     t.eq(#mesh.open_edges, 0)
     t.eq(#mesh.folded_edges, 0)
+    t.eq(#mesh.crossings, 0)
     t.near(mesh.min_angle, 45, 1e-9)
     t.near(mesh.longest_edge, 28.284271247461902, 1e-9)
     t.eq(mesh.worst_triangle, 0)
@@ -630,8 +652,9 @@ return function(t)
       function() return mesh.vertices end,
       function() return mesh.open_edges end,
       function() return mesh.folded_edges end,
+      function() return mesh.crossings end,
     }
-    t.eq(#calls, 6, "a call that takes the handle was added without being swept here")
+    t.eq(#calls, 7, "a call that takes the handle was added without being swept here")
     for _, call in ipairs(calls) do
       local err = t.raises(call, "fem mesh: freed")
       t.eq(getmetatable(err), cadaclysm.CadaclysmError)
@@ -707,11 +730,13 @@ return function(t)
     local mesh = scene.nodes[2]:fem_mesh(0.05)
     t.eq(mesh.from_mesh, false, "a STEP body is meshed off its brep")
     t.eq(mesh.face_count, 18)
-    t.eq(mesh.node_count, 2564)
-    t.eq(mesh.triangle_count, 5148)
+    -- 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound): 2564 -> 1484 nodes, 5148 -> 2988 triangles.
+    t.eq(mesh.node_count, 1484)
+    t.eq(mesh.triangle_count, 2988)
     t.eq(mesh.watertight, true)
     t.eq(#mesh.open_edges, 0)
     t.eq(#mesh.folded_edges, 0)
+    t.eq(#mesh.crossings, 0)
     local edges, vertices = mesh.edges, mesh.vertices
     t.eq(#edges, 48)
     t.eq(#vertices, 32)
@@ -867,6 +892,39 @@ return function(t)
     t.eq(joint.start.index, 1)
     t.eq(joint.end_.name, "base")
     t.eq(joint.end_.index, 0)
+
+    -- the pair: revolute about z, ranged -1.5..1.5, both contact frames at (0, 0, 100)
+    local pair = joint.pair
+    t.ok(pair ~= nil, "hinge has no pair")
+    t.eq(pair.kind, "revolute")
+    t.eq(pair.type_name, nil)
+    t.eq(pair.pitch, nil)
+    for _, raw in ipairs({ pair.raw_frame_start, pair.raw_frame_end }) do
+      t.near(raw[13], 0.0, 1e-9, "pair frame origin x")
+      t.near(raw[14], 0.0, 1e-9, "pair frame origin y")
+      t.near(raw[15], 100.0, 1e-9, "pair frame origin z")
+      t.near(raw[9], 0.0, 1e-9, "pair frame z axis x")
+      t.near(raw[10], 0.0, 1e-9, "pair frame z axis y")
+      t.near(raw[11], 1.0, 1e-9, "pair frame z axis z")
+    end
+    local freedoms = pair.freedoms
+    t.eq(#freedoms, 1)
+    t.eq(freedoms[1].motion, "rotation")
+    t.eq(freedoms[1].axis, "z")
+    t.near(freedoms[1].lower, -1.5, 1e-9)
+    t.near(freedoms[1].upper, 1.5, 1e-9)
+
+    -- the state: one named "open", one row (hinge, [0.5])
+    local states = scene.states
+    t.eq(#states, 1)
+    t.eq(states[1].index, 0)
+    t.eq(states[1].name, "open")
+    t.eq(#states[1].values, 1)
+    local row = states[1].values[1]
+    t.eq(row.joint.name, "hinge")
+    t.eq(row.joint.index, 0)
+    t.eq(#row.values, 1)
+    t.near(row.values[1], 0.5, 1e-9)
     scene:close()
   end)
 
@@ -874,6 +932,7 @@ return function(t)
     local scene = cadaclysm.open(t.fixture("samples/cube.scad"))
     t.eq(#scene.links, 0)
     t.eq(#scene.joints, 0)
+    t.eq(#scene.states, 0)
     scene:close()
   end)
 

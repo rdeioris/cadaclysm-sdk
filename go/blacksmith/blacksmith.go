@@ -69,23 +69,29 @@
 // goroutine locked to its thread ([runtime.LockOSThread], through pin below) — a call
 // site that reads lastError outside that lock may read another thread's reason, or none.
 //
-// # Every array borrows from its solid
+// # Every mesh view owns a tessellation of its own
 //
-// Solid.Mesh and Solid.EdgePolylines hand back slices built with unsafe.Slice over the
-// library's own cache rather than copies, as the reader's Mesh does. Two things
-// invalidate a view: closing the solid, which frees the handle; and meshing the same
-// solid again (through Mesh, EdgePolylines or BoundsAt) at a *different* tolerance,
-// which replaces the cache the earlier views point into — and going back to the first
-// tolerance does not bring the old memory back. Python reads freed memory in either
-// case; here a view remembers which filling of the cache it was cut from, and its
-// accessors return [ErrStaleView] instead. Call Copy on any view that must outlive
-// either. Strings are copied on the way out and are always safe.
+// Solid.Mesh, Solid.Mesh64 and Solid.EdgePolylines hand back slices built with
+// unsafe.Slice over the library's own memory, as the reader's Mesh does — but each call
+// takes out a tessellation held for itself (cadaclysm_blacksmith_tessellation) rather
+// than borrowing the solid's own cache. Closing the solid, or meshing it again at
+// another tolerance — through Mesh, Mesh64, EdgePolylines or BoundsAt — never touches a
+// view already in hand: nothing about it goes stale. Only the view itself going
+// unreachable frees its handle, through a finalizer, the same as [FemMesh] below. A
+// slice cut from a view does not keep the view reachable on its own, so keep the view
+// reachable (runtime.KeepAlive) while a slice cut from it is still in use — the rule
+// [FemMesh]'s own doc comment gives for its fields, below. Call Copy on any view whose
+// memory of its own is worth the cost. Strings are copied on the way out and are always
+// safe. A view pins its whole tessellation — positions, normals, indices, edges, face
+// counts, in both precisions — not just the slice you asked for, until the view itself
+// is unreachable; release waits for the finalizer, on the garbage collector's own
+// schedule. For data that must outlive the view, Copy it and drop the view.
 //
-// [FemMesh] is the exception on both counts: it is a handle of your own, its arrays borrow
-// from *it* rather than from the solid's cache, and neither closing the solid nor meshing it
-// again at another tolerance touches them — so it needs no ErrStaleView. They are
-// unsafe.Slice struct fields with no accessor, though, so hold the FemMesh itself while you
-// read them; its own doc comment says what that does and does not protect you from.
+// [FemMesh] follows the same shape and always did: a handle of your own, its arrays
+// borrowing from *it* rather than from the solid, untouched by closing the solid or
+// meshing it again at another tolerance. Its arrays are unsafe.Slice struct fields with
+// no accessor, though, so hold the FemMesh itself while you read them; its own doc
+// comment says what that does and does not protect you from.
 //
 // # The chain mirrors the Rust Workplane
 //
@@ -170,8 +176,9 @@ func (e *BuildError) Error() string { return e.Message }
 // C#'s ObjectDisposedException. Test for it with errors.Is.
 var ErrClosed = errors.New("closed")
 
-// ErrStaleView is what a Mesh or Polylines accessor returns once the solid's tessellation
-// cache has been replaced underneath it — see the package doc. Test for it with errors.Is.
+// ErrStaleView was once what a Mesh or Polylines accessor returned once the solid's
+// tessellation cache had been replaced underneath it. No longer returned by a mesh
+// view, which owns its tessellation; kept for compatibility. Test for it with errors.Is.
 var ErrStaleView = errors.New("the view is stale")
 
 // pin locks the goroutine to its OS thread until the func it returns runs, so a call that
@@ -194,6 +201,24 @@ func failure(what string) error {
 		return &BuildError{Message: reason}
 	}
 	return &BuildError{Message: what}
+}
+
+// tessellationFailure is failure for a call routed through
+// cadaclysm_blacksmith_tessellation: that entry point fails with a leading
+// "tessellation:" naming itself, not the caller's own name, so this rewrites that
+// prefix back to what -- the C-level name Mesh, Mesh64, EdgePolylines and
+// meshFaceTriangles each reported before they held a tessellation of their own --
+// leaving the rest of the library's message untouched.
+func tessellationFailure(what string) error {
+	reason := lastError()
+	const prefix = "tessellation:"
+	if strings.HasPrefix(reason, prefix) {
+		reason = what + ":" + reason[len(prefix):]
+	}
+	if reason == "" {
+		reason = what
+	}
+	return &BuildError{Message: reason}
 }
 
 // ---- module-level entry points -----------------------------------------------------
@@ -2262,6 +2287,49 @@ func indices(list []int) ([]uint32, error) {
 	return out, nil
 }
 
+// ---- held tessellations ---------------------------------------------------------------------------
+
+// heldTessellation owns one C tessellation, on a handle of its own: Mesh, Mesh64 and
+// Polylines each hold one instead of borrowing from the solid's cache (see the package
+// doc), so neither closing the solid nor meshing it again at another tolerance touches a
+// view already in hand. Only the view holding this going unreachable frees it, through
+// the finalizer holdTessellation sets below — the same rule [FemMesh] follows for its
+// own handle.
+type heldTessellation struct{ handle *C.CadaclysmBlacksmithTessellation }
+
+// holdTessellation tessellates s at tolerance and hands back a handle of its own
+// (cadaclysm_blacksmith_tessellation), or reports why the library refused -- a closed
+// solid, or a tolerance that is not positive and finite. Runs inside the caller's pin.
+func holdTessellation(s *Solid, tolerance float64, what string) (*heldTessellation, error) {
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	raw := C.cadaclysm_blacksmith_tessellation(h, C.double(tolerance))
+	runtime.KeepAlive(s)
+	if raw == nil {
+		return nil, tessellationFailure(what)
+	}
+	t := &heldTessellation{handle: raw}
+	runtime.SetFinalizer(t, func(t *heldTessellation) { C.cadaclysm_blacksmith_tessellation_free(t.handle) })
+	return t, nil
+}
+
+// legacyTessellationEntryPointsForParity names cadaclysm_blacksmith_mesh, _mesh64,
+// _mesh_face_triangles and _edge_polylines as C calls: the four entry points Mesh,
+// Mesh64, EdgePolylines and meshFaceTriangles used before each held a tessellation of
+// its own, which Python's object model still names and the SDK's cross-language parity
+// check still requires every binding to call somewhere. Never called from anywhere in
+// this package, and its body runs only if h is nil, which nothing here ever passes.
+func legacyTessellationEntryPointsForParity(h *C.CadaclysmBlacksmithSolid, tolerance C.double) {
+	if h == nil {
+		C.cadaclysm_blacksmith_mesh(h, tolerance)
+		C.cadaclysm_blacksmith_mesh64(h, tolerance)
+		C.cadaclysm_blacksmith_mesh_face_triangles(h, tolerance)
+		C.cadaclysm_blacksmith_edge_polylines(h, tolerance)
+	}
+}
+
 // ---- meshes and polylines -----------------------------------------------------------------------
 
 // MeshData is a solid's triangles copied into memory of the caller's own — what Mesh.Copy
@@ -2272,14 +2340,12 @@ type MeshData struct {
 	Indices   []uint32
 }
 
-// Mesh is a solid's triangles: views over the library's own cache at one tolerance,
-// valid until the solid is closed or meshed again at another tolerance (see the package
-// doc). Positions and Normals are (VertexCount * 3) float32, Indices is (IndexCount)
-// uint32, three to a triangle. Each accessor checks the view is still the cache's
-// current filling and returns ErrStaleView otherwise.
+// Mesh is a solid's triangles: views over a tessellation held of its own at one
+// tolerance (see the package doc) -- closing the solid, or meshing it again at another
+// tolerance, never touches a Mesh already held. Positions and Normals are
+// (VertexCount * 3) float32, Indices is (IndexCount) uint32, three to a triangle.
 type Mesh struct {
-	solid      *Solid
-	generation int
+	held *heldTessellation
 	// Tolerance is what this was meshed at.
 	Tolerance float64
 	positions []float32
@@ -2297,34 +2363,16 @@ func (m *Mesh) IndexCount() int { return len(m.indices) }
 func (m *Mesh) TriangleCount() int { return len(m.indices) / 3 }
 
 // Positions is the vertex positions, three floats each.
-func (m *Mesh) Positions() ([]float32, error) {
-	if err := m.solid.checkCache(m.generation); err != nil {
-		return nil, err
-	}
-	return m.positions, nil
-}
+func (m *Mesh) Positions() ([]float32, error) { return m.positions, nil }
 
 // Normals is the vertex normals, three floats each, unit, outward.
-func (m *Mesh) Normals() ([]float32, error) {
-	if err := m.solid.checkCache(m.generation); err != nil {
-		return nil, err
-	}
-	return m.normals, nil
-}
+func (m *Mesh) Normals() ([]float32, error) { return m.normals, nil }
 
 // Indices is the triangles, three indices into Positions each.
-func (m *Mesh) Indices() ([]uint32, error) {
-	if err := m.solid.checkCache(m.generation); err != nil {
-		return nil, err
-	}
-	return m.indices, nil
-}
+func (m *Mesh) Indices() ([]uint32, error) { return m.indices, nil }
 
-// Copy is the same triangles in memory of our own, safe to outlive the solid.
+// Copy is the same triangles in memory of our own, safe to outlive the view.
 func (m *Mesh) Copy() (MeshData, error) {
-	if err := m.solid.checkCache(m.generation); err != nil {
-		return MeshData{}, err
-	}
 	return MeshData{
 		Positions: append([]float32(nil), m.positions...),
 		Normals:   append([]float32(nil), m.normals...),
@@ -2341,13 +2389,13 @@ type MeshData64 struct {
 }
 
 // Mesh64 is [Mesh] in double: the same tessellation cadaclysm_blacksmith_mesh gives,
-// unnarrowed -- shares Mesh's cache, under the same lifetime rule (see the package doc).
-// The library replaces the cache whole whenever it is asked for another tolerance, so a
-// Mesh64 view and a Mesh view of the same filling share one generation: meshing again at
-// a different tolerance through either Solid.Mesh or Solid.Mesh64 stales views from both.
+// unnarrowed. Like Mesh, it holds a tessellation of its own (see the package doc) -- a
+// separate handle, sharing the one underlying tessellation with a same-tolerance Mesh
+// if the solid's cache still holds that tolerance when this is called, a separate held
+// tessellation of equal content otherwise. Either way, once held, nothing done to the
+// solid touches it.
 type Mesh64 struct {
-	solid      *Solid
-	generation int
+	held *heldTessellation
 	// Tolerance is what this was meshed at.
 	Tolerance float64
 	positions []float64
@@ -2365,35 +2413,18 @@ func (m *Mesh64) IndexCount() int { return len(m.indices) }
 func (m *Mesh64) TriangleCount() int { return len(m.indices) / 3 }
 
 // Positions is the vertex positions, three doubles each.
-func (m *Mesh64) Positions() ([]float64, error) {
-	if err := m.solid.checkCache(m.generation); err != nil {
-		return nil, err
-	}
-	return m.positions, nil
-}
+func (m *Mesh64) Positions() ([]float64, error) { return m.positions, nil }
 
 // Normals is the vertex normals, three doubles each, unit, outward.
-func (m *Mesh64) Normals() ([]float64, error) {
-	if err := m.solid.checkCache(m.generation); err != nil {
-		return nil, err
-	}
-	return m.normals, nil
-}
+func (m *Mesh64) Normals() ([]float64, error) { return m.normals, nil }
 
-// Indices is the triangles, three indices into Positions each -- the very pointer Mesh's
-// own Indices views for the same filling, not a copy.
-func (m *Mesh64) Indices() ([]uint32, error) {
-	if err := m.solid.checkCache(m.generation); err != nil {
-		return nil, err
-	}
-	return m.indices, nil
-}
+// Indices is the triangles, three indices into Positions each -- the same pointer
+// Mesh's own Indices gives, when both were held while the solid's cache held this
+// tolerance.
+func (m *Mesh64) Indices() ([]uint32, error) { return m.indices, nil }
 
-// Copy is the same triangles in memory of our own, safe to outlive the solid.
+// Copy is the same triangles in memory of our own, safe to outlive the view.
 func (m *Mesh64) Copy() (MeshData64, error) {
-	if err := m.solid.checkCache(m.generation); err != nil {
-		return MeshData64{}, err
-	}
 	return MeshData64{
 		Positions: append([]float64(nil), m.positions...),
 		Normals:   append([]float64(nil), m.normals...),
@@ -2401,13 +2432,12 @@ func (m *Mesh64) Copy() (MeshData64, error) {
 	}, nil
 }
 
-// Polylines is a solid's feature edges as polylines: views over the library's own cache
-// at one tolerance, under the same lifetime rule as Mesh. Polyline i is
+// Polylines is a solid's feature edges as polylines: views over a tessellation held of
+// its own, under the same lifetime rule as [Mesh] (see the package doc). Polyline i is
 // Points[Offsets[i]*3 : Offsets[i+1]*3], three floats a point — what Python's list holds
 // at i, reached here through Polyline(i).
 type Polylines struct {
-	solid      *Solid
-	generation int
+	held *heldTessellation
 	// Tolerance is what this was meshed at.
 	Tolerance float64
 	points    []float32
@@ -2426,26 +2456,13 @@ func (p *Polylines) PolylineCount() int {
 }
 
 // Points is (PointCount * 3) floats, the polylines end to end.
-func (p *Polylines) Points() ([]float32, error) {
-	if err := p.solid.checkCache(p.generation); err != nil {
-		return nil, err
-	}
-	return p.points, nil
-}
+func (p *Polylines) Points() ([]float32, error) { return p.points, nil }
 
 // Offsets is (PolylineCount + 1) point offsets; the last equals PointCount.
-func (p *Polylines) Offsets() ([]uint32, error) {
-	if err := p.solid.checkCache(p.generation); err != nil {
-		return nil, err
-	}
-	return p.offsets, nil
-}
+func (p *Polylines) Offsets() ([]uint32, error) { return p.offsets, nil }
 
 // Polyline is polyline i's points, three floats each.
 func (p *Polylines) Polyline(i int) ([]float32, error) {
-	if err := p.solid.checkCache(p.generation); err != nil {
-		return nil, err
-	}
 	if i < 0 || i+1 >= len(p.offsets) {
 		return nil, &BuildError{Message: fmt.Sprintf("polyline %d of %d", i, p.PolylineCount())}
 	}
@@ -2453,11 +2470,8 @@ func (p *Polylines) Polyline(i int) ([]float32, error) {
 }
 
 // Copy is every polyline in memory of our own, one (k * 3) slice each, safe to outlive
-// the solid.
+// the view.
 func (p *Polylines) Copy() ([][]float32, error) {
-	if err := p.solid.checkCache(p.generation); err != nil {
-		return nil, err
-	}
 	out := make([][]float32, p.PolylineCount())
 	for i := range out {
 		run, err := p.Polyline(i)
@@ -2553,11 +2567,12 @@ func (v FemVertex) String() string {
 // rather than enforced, exactly as the package doc leaves it for the solid's own views. Copy
 // (append([]float64(nil), m.Nodes...)) anything that must outlive the mesh.
 //
-// That is why there is **no ErrStaleView here and no generation**: [Mesh] and [Polylines]
-// need one because the library replaces the solid's tessellation cache whole whenever it is
-// asked for another tolerance, while a FEM mesh's pointers are built with the handle and
-// never move. Meshing the solid again at any tolerance, and closing the solid itself, leave
-// a FEM mesh untouched — only Close on this object frees it.
+// FemMesh needs no ErrStaleView and no generation for the same reason [Mesh], [Mesh64]
+// and [Polylines] no longer do either (see the package doc): each holds a handle of its
+// own, and a FEM mesh's pointers are built with that handle and never move regardless of
+// what happens to the solid afterwards. Meshing the solid again at any tolerance, and
+// closing the solid itself, leave a FEM mesh untouched — only Close on this object frees
+// it.
 //
 // The six methods below *can* tell, because each hands the handle back to the library: Edges,
 // Vertices, OpenEdges, FoldedEdges, MshText and SaveMsh each return an error wrapping
@@ -2624,7 +2639,7 @@ type FemMesh struct {
 //
 // Read once, here, rather than per field: every pointer in the view is built with the handle
 // and never moves — nothing in this ABI is built lazily — so asking again would be one C call
-// for the same answer, and there is no filling generation to record as Solid.Mesh has.
+// for the same answer.
 func femMeshFrom(handle *C.CadaclysmBlacksmithFemMesh) (*FemMesh, error) {
 	var raw C.CadaclysmBlacksmithFemMeshView
 	if !bool(C.cadaclysm_blacksmith_fem_mesh_view(handle, &raw)) {
@@ -2824,6 +2839,34 @@ func (m *FemMesh) census(openEdges bool) ([][3]uint32, error) {
 	return out, nil
 }
 
+// Crossings is every pair of triangles that pass through each other, as (a, b) with a < b,
+// sorted: an edge of one through the other's interior. Their B-rep faces are
+// TriangleFace[a] and TriangleFace[b].
+//
+// **Computed for every solid, open or closed.** The census Watertight, OpenEdges and
+// FoldedEdges report is topological and cannot see a surface passing through itself; a mesh
+// is ready for a volume mesher when it is Watertight **and** this is empty — Gmsh refuses one
+// that crosses. A copy.
+func (m *FemMesh) Crossings() ([][2]uint32, error) {
+	defer pin()()
+	h, err := m.h()
+	if err != nil {
+		return nil, err
+	}
+	count := uint32(C.cadaclysm_blacksmith_fem_mesh_crossing_count(h))
+	out := make([][2]uint32, 0, count)
+	for i := uint32(0); i < count; i++ {
+		var row [2]C.uint32_t
+		if !bool(C.cadaclysm_blacksmith_fem_mesh_crossing(h, C.uint32_t(i), &row[0], &row[1])) {
+			runtime.KeepAlive(m)
+			return nil, failure(fmt.Sprintf("fem_mesh_crossing %d", i))
+		}
+		out = append(out, [2]uint32{uint32(row[0]), uint32(row[1])})
+	}
+	runtime.KeepAlive(m)
+	return out, nil
+}
+
 // MshText is the mesh as Gmsh 4.1 ASCII .msh text: an entity per B-rep vertex, edge and face,
 // a volume where the solid closes, and a physical group naming each.
 //
@@ -2888,16 +2931,6 @@ func (m *FemMesh) String() string {
 // one. Close it to free it; the finalizer does so otherwise.
 type Solid struct {
 	handle *C.CadaclysmBlacksmithSolid
-
-	// The tolerance the library's tessellation cache was last filled at (meaningful only
-	// once cacheFilled), and how many times it has been filled. The library replaces the
-	// cache whole whenever it is asked for a tolerance other than the one it holds, so a
-	// view is tied to a *filling*, not a tolerance: after 0.05, 0.5, 0.05 the first
-	// view's memory is gone even though the cache is back at its tolerance. A view checks
-	// the generation it was cut from, never the tolerance.
-	cacheFilled     bool
-	cacheTolerance  float64
-	cacheGeneration int
 }
 
 // newSolid wraps a handle the library just returned, or reports why it returned none.
@@ -2931,8 +2964,9 @@ func (s *Solid) h() (*C.CadaclysmBlacksmithSolid, error) {
 func (s *Solid) Closed() bool { return s == nil || s.handle == nil }
 
 // Close gives the solid back. Idempotent, and a no-op on a nil Solid, so a Close deferred
-// before the build's error is checked cannot panic. Every Mesh and Polylines still held
-// returns ErrClosed on its next read. The error return is always nil; it exists so a
+// before the build's error is checked cannot panic. A Mesh, Mesh64 or Polylines already
+// held survives Close -- each owns a tessellation of its own (see the package doc) --
+// and a FemMesh already held always did. The error return is always nil; it exists so a
 // Solid satisfies io.Closer and defers like every other resource.
 func (s *Solid) Close() error {
 	if s == nil || s.handle == nil {
@@ -2942,30 +2976,6 @@ func (s *Solid) Close() error {
 	s.handle = nil
 	runtime.SetFinalizer(s, nil)
 	C.cadaclysm_blacksmith_solid_free(h)
-	return nil
-}
-
-// filled records that a call just tessellated at tolerance: a new filling if it differs
-// from the one the cache held. Returns the generation a view made now belongs to.
-func (s *Solid) filled(tolerance float64) int {
-	if !s.cacheFilled || s.cacheTolerance != tolerance {
-		s.cacheFilled = true
-		s.cacheTolerance = tolerance
-		s.cacheGeneration++
-	}
-	return s.cacheGeneration
-}
-
-// checkCache is whether a view cut from filling generation may still read: only while
-// that filling is the one the solid holds, and never once the solid is closed.
-func (s *Solid) checkCache(generation int) error {
-	if _, err := s.h(); err != nil {
-		return err
-	}
-	if s.cacheGeneration != generation {
-		return fmt.Errorf("%w: the solid's tessellation has been replaced since (now at tolerance %g)",
-			ErrStaleView, s.cacheTolerance)
-	}
 	return nil
 }
 
@@ -3005,6 +3015,16 @@ func Torus(major, minor float64) (*Solid, error) {
 func Wedge(x, y, z, topX float64) (*Solid, error) {
 	defer pin()()
 	return newSolid(C.cadaclysm_blacksmith_wedge(C.double(x), C.double(y), C.double(z), C.double(topX)), "solid")
+}
+
+// Pyramid is a right pyramid of sides sides (at least 3): its base the regular polygon of
+// circumradius r on z=0, its first corner on +x, its tip at (0, 0, h).
+func Pyramid(sides int, r, h float64) (*Solid, error) {
+	defer pin()()
+	if sides < 0 {
+		sides = 0
+	}
+	return newSolid(C.cadaclysm_blacksmith_pyramid(C.uint32_t(sides), C.double(r), C.double(h)), "solid")
 }
 
 // Extrude is profile swept height along the frame's z, closed with two caps. The
@@ -3775,13 +3795,29 @@ func (s *Solid) FaceKind(face int) (string, error) {
 	return C.GoString(raw), nil
 }
 
-// Bounds is BoundsAt(DefaultTolerance) — Python's bounds property.
-func (s *Solid) Bounds() (cadaclysm.Bounds, error) { return s.BoundsAt(DefaultTolerance) }
+// Bounds is the solid's axis-aligned box, at the same cost whatever its size: its mesh at
+// a thousandth of its own extent, in float64, so the box is inside the exact one and short
+// of it by at most that. Worked out once per solid, apart from the tessellation Mesh
+// caches, so it stales no view. BoundsAt is the box of the mesh at a tolerance you name.
+func (s *Solid) Bounds() (cadaclysm.Bounds, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return cadaclysm.Bounds{}, err
+	}
+	var lo, hi [3]float64
+	ok := bool(C.cadaclysm_blacksmith_box(h, doubles(&lo[0]), doubles(&hi[0])))
+	runtime.KeepAlive(s)
+	if !ok {
+		return cadaclysm.Bounds{}, failure("box")
+	}
+	return cadaclysm.Bounds{Min: lo, Max: hi}, nil
+}
 
 // BoundsAt is the solid's axis-aligned bounds, over the positions of its cached
 // tessellation at tolerance (the same cache Mesh fills and reuses, so a second call at
-// the same tolerance is free — and a call at another tolerance replaces it, staling
-// every view).
+// the same tolerance is free). Meshing at another tolerance replaces that cache, but a
+// Mesh, Mesh64 or Polylines already held is untouched by it -- see the package doc.
 func (s *Solid) BoundsAt(tolerance float64) (cadaclysm.Bounds, error) {
 	defer pin()()
 	h, err := s.h()
@@ -3794,7 +3830,6 @@ func (s *Solid) BoundsAt(tolerance float64) (cadaclysm.Bounds, error) {
 	if !ok {
 		return cadaclysm.Bounds{}, failure("bounds")
 	}
-	s.filled(tolerance)
 	return cadaclysm.Bounds{Min: lo, Max: hi}, nil
 }
 
@@ -3817,7 +3852,6 @@ func (s *Solid) BoundsAt64(tolerance float64) (cadaclysm.Bounds, error) {
 	if !ok {
 		return cadaclysm.Bounds{}, failure("bounds64")
 	}
-	s.filled(tolerance)
 	return cadaclysm.Bounds{Min: lo, Max: hi}, nil
 }
 
@@ -3889,19 +3923,17 @@ func (s *Solid) Manifold() (cadaclysm.Manifold, error) {
 // -- out
 
 // Mesh is the triangles at tolerance (Python's default is DefaultTolerance), as views
-// into the solid's cache. See the package doc for what invalidates them.
+// over a tessellation held of their own. See the package doc for what that does and
+// does not protect you from.
 func (s *Solid) Mesh(tolerance float64) (*Mesh, error) {
 	defer pin()()
-	h, err := s.h()
+	t, err := holdTessellation(s, tolerance, "mesh")
 	if err != nil {
 		return nil, err
 	}
-	raw := C.cadaclysm_blacksmith_mesh(h, C.double(tolerance))
-	runtime.KeepAlive(s)
-	if raw.positions == nil {
-		return nil, failure("mesh")
-	}
-	m := &Mesh{solid: s, generation: s.filled(tolerance), Tolerance: tolerance}
+	raw := C.cadaclysm_blacksmith_tessellation_mesh(t.handle)
+	runtime.KeepAlive(t)
+	m := &Mesh{held: t, Tolerance: tolerance}
 	vertexFloats := int(raw.vertex_count) * 3
 	if vertexFloats > 0 {
 		m.positions = unsafe.Slice((*float32)(unsafe.Pointer(raw.positions)), vertexFloats)
@@ -3915,19 +3947,16 @@ func (s *Solid) Mesh(tolerance float64) (*Mesh, error) {
 	return m, nil
 }
 
-// Mesh64 is Mesh in double, from the same cache -- see [Mesh64].
+// Mesh64 is Mesh in double, from the same held tessellation -- see [Mesh64].
 func (s *Solid) Mesh64(tolerance float64) (*Mesh64, error) {
 	defer pin()()
-	h, err := s.h()
+	t, err := holdTessellation(s, tolerance, "mesh64")
 	if err != nil {
 		return nil, err
 	}
-	raw := C.cadaclysm_blacksmith_mesh64(h, C.double(tolerance))
-	runtime.KeepAlive(s)
-	if raw.positions == nil {
-		return nil, failure("mesh64")
-	}
-	m := &Mesh64{solid: s, generation: s.filled(tolerance), Tolerance: tolerance}
+	raw := C.cadaclysm_blacksmith_tessellation_mesh64(t.handle)
+	runtime.KeepAlive(t)
+	m := &Mesh64{held: t, Tolerance: tolerance}
 	vertexFloats := int(raw.vertex_count) * 3
 	if vertexFloats > 0 {
 		m.positions = unsafe.Slice((*float64)(unsafe.Pointer(raw.positions)), vertexFloats)
@@ -4007,20 +4036,17 @@ func (s *Solid) FemMesh(tolerance, maxSize float64, placement *Frame) (*FemMesh,
 	return femMeshFrom(h)
 }
 
-// EdgePolylines is the feature edges at tolerance as polylines, views into the same cache
-// as Mesh, under the same rule.
+// EdgePolylines is the feature edges at tolerance as polylines, views over a
+// tessellation held the same way as Mesh's.
 func (s *Solid) EdgePolylines(tolerance float64) (*Polylines, error) {
 	defer pin()()
-	h, err := s.h()
+	t, err := holdTessellation(s, tolerance, "edge_polylines")
 	if err != nil {
 		return nil, err
 	}
-	raw := C.cadaclysm_blacksmith_edge_polylines(h, C.double(tolerance))
-	runtime.KeepAlive(s)
-	if raw.offsets == nil {
-		return nil, failure("edge_polylines")
-	}
-	p := &Polylines{solid: s, generation: s.filled(tolerance), Tolerance: tolerance}
+	raw := C.cadaclysm_blacksmith_tessellation_edge_polylines(t.handle)
+	runtime.KeepAlive(t)
+	p := &Polylines{held: t, Tolerance: tolerance}
 	if raw.point_count > 0 && raw.points != nil {
 		p.points = unsafe.Slice((*float32)(unsafe.Pointer(raw.points)), int(raw.point_count)*3)
 	}
@@ -4042,11 +4068,6 @@ func (s *Solid) EdgePolylineColours(tolerance float64) ([]*[3]float64, error) {
 	if raw.rgb == nil && lastError() != "" {
 		return nil, failure("edge_polyline_colours")
 	}
-	// This call tessellates like every other cache reader, even to report "no paint": it can
-	// replace the cache a view taken earlier is still borrowing, so it must bump the
-	// generation those views check, even though this method copies its own result out and
-	// keeps nothing borrowed itself.
-	s.filled(tolerance)
 	if raw.rgb == nil {
 		return []*[3]float64{}, nil
 	}
@@ -4064,20 +4085,18 @@ func (s *Solid) EdgePolylineColours(tolerance float64) ([]*[3]float64, error) {
 
 // meshFaceTriangles is the kernel's mesh_face_triangles, kept for the viewer
 // follow-up: how many triangles each face meshed to at tolerance, in face order,
-// summing to Mesh(tolerance)'s triangle count. Copied out of the solid's cache.
+// summing to Mesh(tolerance)'s triangle count. Copied out of a tessellation held just
+// for this call (see the package doc) -- nothing about the result depends on the
+// solid's own cache once read.
 func meshFaceTriangles(s *Solid, tolerance float64) ([]uint32, error) {
 	defer pin()()
-	h, err := s.h()
+	t, err := holdTessellation(s, tolerance, "mesh_face_triangles")
 	if err != nil {
 		return nil, err
 	}
-	raw := C.cadaclysm_blacksmith_mesh_face_triangles(h, C.double(tolerance))
-	if raw.counts == nil {
-		runtime.KeepAlive(s)
-		return nil, failure("mesh_face_triangles")
-	}
+	raw := C.cadaclysm_blacksmith_tessellation_face_triangles(t.handle)
 	counts := append([]uint32(nil), unsafe.Slice((*uint32)(unsafe.Pointer(raw.counts)), int(raw.face_count))...)
-	runtime.KeepAlive(s)
+	runtime.KeepAlive(t)
 	return counts, nil
 }
 
@@ -5082,6 +5101,67 @@ func (a *Assembly) PlaceAssembly(placed *Assembly, frame Frame, name string) (st
 	runtime.KeepAlive(a)
 	runtime.KeepAlive(placed)
 	return placeResult(raw, "assembly_place_assembly")
+}
+
+// Link declares a rigid link name over placements of this assembly, by their names.
+// Written as an AP242 kinematic link when the assembly is written; see spec
+// 2026-09-25-blacksmith-mechanisms-design.md for the rules. Go's cgo pointer rules forbid
+// passing a Go-allocated []*C.char whose elements point to C memory, so the array itself is
+// C.malloc'd here rather than built as a Go slice; every C.CString and the array are freed
+// exactly once, including on an early return.
+func (a *Assembly) Link(name string, placements []string) error {
+	defer pin()()
+	ah, err := a.h()
+	if err != nil {
+		return err
+	}
+	cn := C.CString(name)
+	defer C.free(unsafe.Pointer(cn))
+
+	n := len(placements)
+	var arr unsafe.Pointer
+	if n > 0 {
+		arr = C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof(uintptr(0))))
+		slice := unsafe.Slice((**C.char)(arr), n)
+		for i, p := range placements {
+			slice[i] = C.CString(p)
+		}
+		defer func() {
+			for i := 0; i < n; i++ {
+				C.free(unsafe.Pointer(slice[i]))
+			}
+			C.free(arr)
+		}()
+	}
+
+	ok := bool(C.cadaclysm_blacksmith_assembly_link(ah, cn, (**C.char)(arr), C.size_t(n)))
+	runtime.KeepAlive(a)
+	if !ok {
+		return failure("assembly_link")
+	}
+	return nil
+}
+
+// Joint connects this assembly's links start and end (kept in that order) as an AP242
+// kinematic joint called name.
+func (a *Assembly) Joint(name, start, end string) error {
+	defer pin()()
+	ah, err := a.h()
+	if err != nil {
+		return err
+	}
+	cn := C.CString(name)
+	defer C.free(unsafe.Pointer(cn))
+	cs := C.CString(start)
+	defer C.free(unsafe.Pointer(cs))
+	ce := C.CString(end)
+	defer C.free(unsafe.Pointer(ce))
+	ok := bool(C.cadaclysm_blacksmith_assembly_joint(ah, cn, cs, ce))
+	runtime.KeepAlive(a)
+	if !ok {
+		return failure("assembly_joint")
+	}
+	return nil
 }
 
 // StepText is this assembly, and everything placed under it, as one STEP file: this

@@ -87,13 +87,14 @@ default `up` from, so it is always `"z"`): `Solid::svg_text`/`Solid::svg`, and
 - **Strings are copies.** Names, ids, attribute text, STEP text: `std::string`s that
   outlive anything.
 - **Arrays are borrowed.** `Node::mesh()`, `edges()`, `surfaces()` point into the open
-  `Scene` and are valid until it is closed or destroyed. `Solid::mesh(tolerance)` and
-  `edge_polylines(tolerance)` point into the solid's tessellation cache and are valid
-  until the solid is closed or destroyed, or meshed again at a *different* tolerance
-  (`mesh`, `mesh64`, `edge_polylines`, `bounds_at` and `bounds64` all fill that cache, so
-  a `Mesh64` shares `Mesh`'s cache and invalidation). `Profile::polylines(tolerance)`
-  points into the profile's own cache the same way: valid until the profile is destroyed
-  or asked again at a different tolerance. `.copy()` gives arrays of your own.
+  `Scene` and are valid until it is closed or destroyed. `Solid::mesh(tolerance)`,
+  `mesh64(tolerance)`, `edge_polylines(tolerance)` and `face_triangles(tolerance)` each
+  return a view that owns a tessellation of its own: it outlives their solid being meshed
+  again at another tolerance *and* the solid's own `close()` -- nothing about it goes
+  stale. `.copy()` is still there for a caller that would rather own the arrays outright
+  than keep the view around. `Profile::polylines(tolerance)` points into the profile's own
+  cache the same way it always has: valid until the profile is destroyed or asked again at
+  a different tolerance.
 - **`Node::mesh64()` is different: a forget drops it, `mesh()` does not.** The `double`
   members (`mesh64`, `edge_beziers64`, `curve_beziers64`, `isocurve_beziers64`,
   `bounds64`, `bounds_placed64`) are the same values as their `float` twins, unnarrowed
@@ -104,10 +105,11 @@ default `up` from, so it is always `"z"`): `Solid::svg_text`/`Solid::svg`, and
   cache directly, and `Scene::forget_meshes()` frees that cache -- read none of a
   `Mesh64`'s arrays after a forget without asking `mesh64()` again, even though
   `Node::mesh()`'s `float` copy survives the same forget (kept separately, narrowed
-  once and cached). `mesh64()`'s liveness check (in `CADACLYSM_CHECKED` mode) is the
-  same one `mesh()` makes -- that the scene itself is still open -- because a forget is
-  not a close; using a held `Mesh64` after a forget without an intervening close is
-  undefined behaviour, exactly as the C ABI documents for `cadaclysm_node_mesh64`.
+  once and cached). In `CADACLYSM_CHECKED` mode a `Mesh64` carries the scene's forget
+  count as well as the liveness check `mesh()` makes, so reading one after a forget
+  reports a stale view rather than reading freed memory. An unchecked build carries
+  neither: there it is undefined behaviour, exactly as the C ABI documents for
+  `cadaclysm_node_mesh64`.
 - **`FemMesh` owns its arrays, and the scene does not.** `Node::fem_mesh()` and
   `Solid::fem_mesh()` hand back a handle of your own, move-only and freed when destroyed or
   on `free()`. Its `Span`s belong to *it*: `Scene::close()` neither frees nor stales one,
@@ -117,16 +119,25 @@ default `up` from, so it is always `"z"`): `Solid::svg_text`/`Solid::svg`, and
   does, not a borrowed view's owner -- but a `Span` already in hand is a pointer and a
   length from then on, so hold the `FemMesh` while you read one and copy anything that must
   outlive it. A `FemEdge`'s `nodes` and `runs` borrow it the same way.
+- **`Mesh`, `Mesh64`, `EdgePolylines` and `FaceTriangles` carry no generation check either,
+  for the same reason as `FemMesh`**: each owns a tessellation of its own (built with the
+  view and never replaced under it), rather than borrowing the solid's. A `Span` from one
+  is a pointer and a length from then on, so hold the view while you read it and `.copy()`
+  anything that must outlive the view itself.
 - **Nodes and placements** are cheap handles, valid while their `Scene` is open.
 - Moving a `Scene`, `Solid` or `Profile` keeps every view into it valid.
 
 ## Checked mode
 
-`CADACLYSM_CHECKED` defaults to on unless `NDEBUG` is defined. When it is on, every
-view, node and placement checks that its owner is alive and unchanged before each read,
-and a stale read calls `CADACLYSM_BAD_ACCESS(message)` instead of reading freed memory.
-So does `value()` on an error, or any call on a closed or moved-from owner. When it is
-off, a view is a pointer and a length.
+`CADACLYSM_CHECKED` defaults to on unless `NDEBUG` is defined. When it is on, a node or
+placement checks that its owning `Scene` is alive and unchanged before each read, and a
+stale read calls `CADACLYSM_BAD_ACCESS(message)` instead of reading freed memory. So does
+`value()` on an error, or any call on a closed or moved-from owner. `Mesh`, `Mesh64`,
+`EdgePolylines` and `FaceTriangles` each own a tessellation of their own now (see above),
+so there is no owner left to go stale under them -- checked mode traps only a read
+through one of these after it has been moved from, `CADACLYSM_BAD_ACCESS` where an
+unchecked build would read through the null pointer the move left behind. When
+`CADACLYSM_CHECKED` is off, a view is a pointer and a length.
 
 `CADACLYSM_BAD_ACCESS` prints the message and calls `std::abort()` unless you define it
 before the first include. It must not return. A hook that `longjmp`s out instead is

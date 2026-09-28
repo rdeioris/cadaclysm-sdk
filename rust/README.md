@@ -91,6 +91,32 @@ wrappers document that; here the compiler enforces it.
   or call `cancel` from another. A `Solid` is `Send` but not `Sync` -- the kernel
   caches its tessellation, and a solid is not for two threads at once.
 
+## Drawing
+
+`show` and `view` draw a `Solid`, `Profile`, `Scene` or `Node` with a viewer library --
+by default the terminal viewer the SDK ships (`cadaclysm_terminal`, copied beside your
+binary by the build), which draws with sixel, the kitty graphics protocol or half blocks:
+
+```rust
+use cadaclysm_sdk::blacksmith::Solid;
+use cadaclysm_sdk::viewer::ViewOptions;
+
+let mut part = Solid::cuboid(2.0, 1.0, 0.5)?;
+part.show(None)?;                              // one picture, left in the scrollback
+let camera = part.view(None)?;                 // orbit; q quits
+println!("{camera}");                          // az=-32 el=41 zoom=1.30
+part.show(&ViewOptions::from(camera))?;        // the same picture again
+part.show(&ViewOptions { hint: Some("blocks".into()), ..Default::default() })?;
+```
+
+`show` and `view` take `None` for the defaults, or `&options` (`Some(&options)` works
+too); so do `svg_text` and `svg`.
+
+Any library implementing `cadaclysm_viewer.h` can draw instead:
+`cadaclysm_sdk::viewer::use_library("path/to/viewer.dll")?`, or set `CADACLYSM_VIEWER` to
+it; `viewer::use_terminal()` switches back. `CADACLYSM_TERMINAL_LIBRARY` points at the
+terminal library when it is not beside the program.
+
 ## The license
 
 Development, testing and evaluation are free: without a license the libraries run

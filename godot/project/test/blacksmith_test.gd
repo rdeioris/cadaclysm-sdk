@@ -1162,6 +1162,7 @@ func test_fem_the_kernel_meshes_a_solid_and_survives_a_re_mesh():
 	eq(mesh.watertight, true)
 	eq(mesh.open_edges.size(), 0)
 	eq(mesh.folded_edges.size(), 0)
+	eq(mesh.crossings.size(), 0, "kernel fem: the rounded box does not cross itself")
 	var edges := mesh.edges
 	var vertices := mesh.vertices
 	ok(edges.size() > 0 and vertices.size() > 0, "kernel fem: a closed solid has no edges or no vertices")
@@ -1290,6 +1291,9 @@ func test_fem_an_open_sheet_is_the_not_asked_trio():
 	eq(mesh.watertight, false)
 	eq(mesh.open_edges.size(), 0, "kernel fem: an open sheet is not asked about, so its rim is not a crack")
 	eq(mesh.folded_edges.size(), 0)
+	# Unlike the two censuses above, `crossings` is computed for every solid, open or
+	# closed -- a flat sheet with no self-intersection still reads an empty list, not "not asked".
+	eq(mesh.crossings.size(), 0, "kernel fem: a flat sheet does not cross itself")
 	eq(mesh.face_count, 1)
 	var edges := mesh.edges
 	ok(edges.size() > 0, "kernel fem: the sheet has no edges")
@@ -1301,6 +1305,28 @@ func test_fem_an_open_sheet_is_the_not_asked_trio():
 			"kernel fem: the sheet's rim edge %d reads faces %s, not [0, %d]" % [i, edges[i]["faces"], FEM_NONE])
 	mesh.release()
 	sheet.close()
+
+# Crossings through the kernel's own open of a file: `samples/dented-box.stp` is a closed
+# B-rep box whose top dips through its own floor, 296 pairs measured 2026-09-26 -- the same
+# number reader_test.gd's census-wiring test reads through the reader over the same file,
+# which must agree with it.
+func test_fem_the_kernel_reports_the_same_crossings_opening_a_file_directly():
+	var path := fixture("samples/dented-box.stp")
+	if path == "":
+		return
+	var solid := CadaclysmSolid.open(path)
+	if not ok(solid != null, "kernel fem: " + Cadaclysm.last_error()):
+		return
+	var mesh: CadaclysmSolidFemMesh = solid.fem_mesh()
+	if not ok(mesh != null, "kernel fem: " + Cadaclysm.last_error()):
+		return
+	eq(mesh.watertight, true)
+	var crossings := mesh.crossings
+	eq(crossings.size(), 296)
+	if crossings.size() > 0:
+		ok(crossings[0][0] < crossings[0][1], "the first pair is not a < b")
+	mesh.release()
+	solid.close()
 
 func test_fem_a_cylinder_has_a_seam_edge_and_no_closed_one():
 	# A cylinder is the shape that tells `closed` from `seam`, and **measured, not assumed**:
@@ -1471,3 +1497,92 @@ func test_assembly_create_close_and_get_name():
 	top.close()
 	eq(top.name, "", "a closed assembly reads its name as \"\"")
 	refuses(func(): return top.place(CadaclysmSolid.cuboid(1, 1, 1), XY), "closed")
+
+# `CadaclysmAssembly.link`/`joint`, at parity with the Python reference's
+# `_mechanism()` and its two mechanism tests -- see the Rust suite's `mechanisms()`
+# for the same facts worked out, and this crate's own `blacksmith::tests` for the
+# same build in test form.
+func _mechanism_arm() -> Array:
+	# Spec 2026-09-25 section 6's fixture. The plate is left unpainted, so the AP242
+	# default fact 1 checks comes from the mechanism, not from paint.
+	var bolt := CadaclysmSolid.cylinder(1, 6).named("bolt")
+	var plate := CadaclysmSolid.cuboid(20, 10, 2).named("plate")
+	var bracket := CadaclysmAssembly.create("bracket")
+	bracket.place(plate, XY)
+	bracket.place(bolt, CadaclysmFrame.xy(Vector3(5, 5, 2)))
+	bracket.place(bolt, CadaclysmFrame.xy(Vector3(15, 5, 2)))
+	ok(bracket.link("fixed", ["plate"]), "bracket.link fixed")
+	ok(bracket.link("bolts", ["bolt", "bolt 2"]), "bracket.link bolts")
+	ok(bracket.joint("screw", "fixed", "bolts"), "bracket.joint screw")
+	var arm := CadaclysmAssembly.create("arm")
+	arm.place(plate, XY, "base")
+	arm.place(bracket, CadaclysmFrame.xy(Vector3(0, 0, 10)), "upper")
+	arm.place(bolt, CadaclysmFrame.xy(Vector3(5, 5, 2)), "pin")
+	ok(arm.link("ground", ["base"]), "arm.link ground")
+	ok(arm.link("upper arm", ["upper", "pin"]), "arm.link upper arm")
+	ok(arm.joint("shoulder", "ground", "upper arm"), "arm.joint shoulder")
+	return [bracket, arm]
+
+func test_a_mechanism_is_written_as_ap242_kinematic_topology():
+	var shared := _mechanism_arm()
+	var arm: CadaclysmAssembly = shared[1]
+	# Fact 1: the default schema (no explicit schema) carries the kinematic entities.
+	var text := arm.step_text()
+	ok(text.contains("AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF"), "arm.step_text() is not AP242")
+	eq(text.count("=KINEMATIC_LINK("), 4)
+	eq(text.count("=RIGID_LINK_REPRESENTATION("), 6)
+	eq(text.count("=CONTEXT_DEPENDENT_KINEMATIC_LINK_REPRESENTATION("), 6)
+	eq(text.count("=KINEMATIC_JOINT("), 2)
+	eq(text.count("=KINEMATIC_TOPOLOGY_STRUCTURE("), 2)
+	# Fact 2: an explicit schema without kinematic entities is refused.
+	refuses(func(): return arm.step_text("config_control_design"), "no kinematic entities")
+
+func test_every_bad_link_or_joint_is_refused_and_changes_nothing():
+	var shared := _mechanism_arm()
+	var arm: CadaclysmAssembly = shared[1]
+	var no_stamp := func(text: String) -> String:
+		var lines := []
+		for line in text.split("\n"):
+			if not line.begins_with("FILE_NAME("):
+				lines.append(line)
+		return "\n".join(lines)
+	# Fact 3: each of the eleven refusals raises with exactly its message, and
+	# afterwards the STEP text (with `FILE_NAME(` lines stripped) is unchanged.
+	var before: String = no_stamp.call(arm.step_text())
+	var refusals := [
+		[func(): return arm.link("", ["base"]), "link: a name cannot be empty"],
+		[func(): return arm.link("ground", ["base"]), "link: assembly 'arm' already has a link named 'ground'"],
+		[func(): return arm.link("free", []), "link: link 'free' names no placements"],
+		[func(): return arm.link("free", ["base", "base"]), "link: link 'free' names placement 'base' twice"],
+		[func(): return arm.link("free", ["bolt"]), "link: assembly 'arm' has no placement named 'bolt'"],
+		[func(): return arm.link("free", ["pin"]), "link: placement 'pin' of assembly 'arm' is already in link 'upper arm'"],
+		[func(): return arm.joint("", "ground", "upper arm"), "joint: a name cannot be empty"],
+		[func(): return arm.joint("shoulder", "upper arm", "ground"), "joint: assembly 'arm' already has a joint named 'shoulder'"],
+		[func(): return arm.joint("wrist", "ground", "hand"), "joint: assembly 'arm' has no link named 'hand'"],
+		[func(): return arm.joint("wrist", "ground", "ground"), "joint: joint 'wrist' joins link 'ground' to itself"],
+		[func(): return arm.joint("wrist", "ground", "upper arm"), "joint: assembly 'arm' already joins 'ground' to 'upper arm'"],
+	]
+	for pair in refusals:
+		var message: String = refuses(pair[0])
+		eq(message, pair[1], "refusal message")
+	eq(no_stamp.call(arm.step_text()), before, "arm.step_text() changed across the eleven refused calls")
+	# Fact 4: the reverse pair is a new joint.
+	ok(arm.joint("back", "upper arm", "ground"), "the reverse pair should be accepted: " + Cadaclysm.last_error())
+
+# Fact 5: read-back through the reader's links and joints, which come with the
+# reader's kinematics ABI, branch claude/kinematic-abi (merged into this checkout).
+func test_a_mechanism_reads_back_through_to_scene():
+	var shared := _mechanism_arm()
+	var arm: CadaclysmAssembly = shared[1]
+	var scene := arm.to_scene()
+	if not ok(scene != null, "to_scene: " + Cadaclysm.last_error()):
+		return
+	eq(scene.links.map(func(l): return l.name), ["fixed", "bolts", "ground", "upper arm"])
+	eq(scene.links.map(func(l): return l.nodes.size()), [1, 2, 1, 2])
+	eq(scene.joints.map(func(j): return [j.name, j.start.index, j.end.index]), [["screw", 0, 1], ["shoulder", 2, 3]])
+	var kinematics_diagnostics := 0
+	for d in scene.diagnostics:
+		if String(d).begins_with("kinematics:"):
+			kinematics_diagnostics += 1
+	eq(kinematics_diagnostics, 0, "no kinematics: diagnostic")
+	scene.close()

@@ -26,26 +26,31 @@
 // directory holding it if it is not where the loader looks by default (see `library()`).
 // `CADACLYSM_LIBRARY` is the reader's, as it is in Python.
 //
-// ## Every array borrows from its solid
+// ## Every mesh view owns its own tessellation
 //
-// `Solid.mesh` and `Solid.edgePolylines` hand back read-only `FloatBuffer`/`IntBuffer`
-// *views* over the library's own cache rather than copies, as the reader's `Cad.Mesh` does.
-// Two things invalidate a view: closing the solid, which frees the handle; and meshing the
-// same solid again (through `mesh`, `edgePolylines` or `boundsAt`) at a *different*
-// tolerance, which replaces the cache the earlier views point into -- and going back to the
-// first tolerance does not bring the old memory back. Python reads freed memory in either
-// case; here the view remembers which filling of the cache it was cut from and throws
-// `IllegalStateException` instead. Call `copy()` on any view that must outlive either.
-// Strings are copied on the way out and are always safe.
+// `Solid.mesh`, `Solid.mesh64` and `Solid.edgePolylines` hand back read-only
+// `FloatBuffer`/`DoubleBuffer`/`IntBuffer` views over the library's own memory, as the
+// reader's `Cad.Mesh` does -- but not into the solid's cache. Each call takes out a *held*
+// tessellation of its own (`cadaclysm_blacksmith_tessellation`) and the view keeps that
+// handle alive, so closing the solid or meshing it again at another tolerance -- through
+// `mesh`, `mesh64`, `edgePolylines` or `boundsAt` -- never touches a view already in hand:
+// nothing about it goes stale. Only the view itself going unreachable frees its handle, the
+// same as `FemMesh` below. A buffer read from it does not keep the view reachable on its own,
+// so keep the view reachable while a buffer cut from it is still in use, the same rule
+// `FemMesh` documents next. `copy()` gives memory of your own, safe to outlive the view.
+// Strings are copied on the way out and are always safe. A view pins its *whole*
+// tessellation -- positions, normals, indices, edges, face counts, in both precisions -- not
+// just the buffer you asked for, until the view itself is unreachable; release waits for the
+// `Cleaner`, which runs on the garbage collector's own schedule. For data that must outlive
+// the view, `copy()` it and drop the view.
 //
-// `Solid.femMesh` is the exception: a `FemMesh` is a handle of your own, and its buffers borrow
-// from *it* rather than from the solid or from the tessellation cache. Closing the solid neither
-// frees one nor stales one, and meshing the solid again does not either -- only `FemMesh.free()`
-// (or `close()`, or the `Cleaner`) does, which is why it carries no generation check. Every
-// accessor on it asks its handle first, so a buffer **asked for** after the free throws
-// `IllegalStateException`; a buffer **already in hand** is a window on an address with no owner
-// left to ask, and reads the freed block instead -- measured: 1.29e-311 where the mesh had 4.0,
-// no throw. Copy anything that must outlive the handle,
+// `Solid.femMesh` follows the same shape: a `FemMesh` is a handle of its own, and its buffers
+// borrow from *it* rather than from the solid. Closing the solid neither frees one nor stales
+// one, and meshing the solid again does not either -- only `FemMesh.free()` (or `close()`, or
+// the `Cleaner`) does. Every accessor on it asks its handle first, so a buffer **asked for**
+// after the free throws `IllegalStateException`; a buffer **already in hand** is a window on
+// an address with no owner left to ask, and reads the freed block instead -- measured:
+// 1.29e-311 where the mesh had 4.0, no throw. Copy anything that must outlive the handle,
 // and keep the `FemMesh` itself reachable while you read its buffers -- a buffer alone does not,
 // and the `Cleaner` frees what is unreachable.
 //
@@ -364,7 +369,7 @@ public final class Blacksmith {
             BUILD_DATE, VERSION, SOLID_FREE, PROFILE_FREE, PROFILE_RECT, PROFILE_CIRCLE,
             PROFILE_SLOT, PROFILE_POLYGON, PROFILE_REGULAR_POLYGON, PROFILE_STAR, PROFILE_SPLINE, PROFILE_WITH_HOLE, PROFILE_HITS, HITS_FREE, HIT_COUNT, HIT_AT, SOLID_PROFILE_HITS, HITS_PIECE_COUNT, HITS_PIECE, HITS_PIECE_PROFILE, PROFILE_COMMON, PROFILE_TEXT, PROFILE_LIST_COUNT, PROFILE_LIST_GET, PROFILE_LIST_FREE, TRANSLATE_PROFILE, PROFILE_ROUND, PROFILE_CHAIN, PROFILE_FROM_LOOPS, PROFILE_CLOSE_LOOP, PROFILE_PIECE_COUNT, PROFILE_PIECE, PROFILE_TRIM_COUNT, PROFILE_TRIM_CHAIN, PROFILE_POLYLINES, PATH_BEGIN,
             PATH_LINE_TO, PATH_ARC_TO, PATH_BEZIER_TO, PATH_CONIC_TO, PATH_PARABOLA_BY_VERTEX, PATH_PARABOLA_BY_FOCUS, PATH_PARABOLA, PATH_NURBS_TO, PATH_END, PATH_END_OPEN,
-            PATH_FREE, CUBOID, CYLINDER, CONE, SPHERE, TORUS, WEDGE, EXTRUDE, EXTRUDE_OPEN,
+            PATH_FREE, CUBOID, CYLINDER, CONE, SPHERE, TORUS, WEDGE, PYRAMID, EXTRUDE, EXTRUDE_OPEN,
             EXTRUDE_TAPERED, EXTRUDE_OPEN_TAPERED, EXTRUDE_BETWEEN, EXTRUDE_OPEN_BETWEEN,
             SLANT_OF_PLANE, FRAME_MIDPLANE, FRAME_THROUGH, LOFT, LOFT_OPEN, LOFT_THROUGH, LOFT_THROUGH_OPEN, REVOLVE, REVOLVE_OPEN, REVOLVE_IN_PLANE, REVOLVE_OPEN_IN_PLANE, SWEEP_PATH_BEGIN,
             SWEEP_PATH_LINE_TO, SWEEP_PATH_ARC, SWEEP_PATH_ALONG, SWEEP_PATH_FREE, SWEEP, SWEEP_OPEN,
@@ -375,10 +380,12 @@ public final class Blacksmith {
             EDGE_COUNT, EDGE_AT, EDGE_CURVE, INTERSECT, INTERSECTION_FREE, INTERSECTION_CHAIN_COUNT, INTERSECTION_CHAIN, INTERSECTION_CURVE, INTERSECTION_OVERLAP_COUNT, INTERSECTION_OVERLAP, MESH_AT, MESH_FACE_TRIANGLES,
             EDGE_POLYLINES, BOUNDS, LEAKED_EDGES, UNPAIRED_EDGES, MANIFOLD, STEP, SAT_TEXT, SAT, BREP_TEXT, BREP, STRING_FREE, FROM_BREP,
             BREP_LAYOUT_ID, SVG_OPTIONS_INIT, SVG_TEXT, SVG, DRAWING_SVG_TEXT, DRAWING_SVG,
-            MESH_AT64, BOUNDS64,
+            MESH_AT64, BOUNDS64, BOX,
+            TESSELLATION, TESSELLATION_FREE, TESSELLATION_MESH, TESSELLATION_MESH64, TESSELLATION_FACE_TRIANGLES, TESSELLATION_EDGE_POLYLINES,
             FEM_OPTIONS_INIT, SOLID_FEM_MESH, FEM_VIEW, FEM_EDGE_AT, FEM_VERTEX_AT,
-            FEM_OPEN_EDGE, FEM_FOLDED_EDGE, FEM_MSH_TEXT, FEM_SAVE_MSH, FEM_FREE,
-            NAMED, SOLID_NAME, ASSEMBLY_NEW, ASSEMBLY_FREE, ASSEMBLY_NAME, ASSEMBLY_PLACE_SOLID, ASSEMBLY_PLACE_ASSEMBLY, ASSEMBLY_STEP;
+            FEM_OPEN_EDGE, FEM_FOLDED_EDGE, FEM_CROSSING_COUNT, FEM_CROSSING, FEM_MSH_TEXT, FEM_SAVE_MSH, FEM_FREE,
+            NAMED, SOLID_NAME, ASSEMBLY_NEW, ASSEMBLY_FREE, ASSEMBLY_NAME, ASSEMBLY_PLACE_SOLID, ASSEMBLY_PLACE_ASSEMBLY, ASSEMBLY_STEP,
+            ASSEMBLY_LINK, ASSEMBLY_JOINT;
 
     static {
         SymbolLookup lib = library();
@@ -446,6 +453,7 @@ public final class Blacksmith {
         SPHERE = bind(linker, lib, "cadaclysm_blacksmith_sphere", FunctionDescriptor.of(A, D));
         TORUS = bind(linker, lib, "cadaclysm_blacksmith_torus", FunctionDescriptor.of(A, D, D));
         WEDGE = bind(linker, lib, "cadaclysm_blacksmith_wedge", FunctionDescriptor.of(A, D, D, D, D));
+        PYRAMID = bind(linker, lib, "cadaclysm_blacksmith_pyramid", FunctionDescriptor.of(A, I, D, D));
         EXTRUDE = bind(linker, lib, "cadaclysm_blacksmith_extrude", FunctionDescriptor.of(A, A, A, D));
         EXTRUDE_OPEN = bind(linker, lib, "cadaclysm_blacksmith_extrude_open", FunctionDescriptor.of(A, A, A, D));
         EXTRUDE_TAPERED = bind(linker, lib, "cadaclysm_blacksmith_extrude_tapered", FunctionDescriptor.of(A, A, A, D, D));
@@ -546,6 +554,18 @@ public final class Blacksmith {
         DRAWING_SVG = bind(linker, lib, "cadaclysm_blacksmith_drawing_svg", FunctionDescriptor.of(B, A, L, A, L, A, A));
         MESH_AT64 = bind(linker, lib, "cadaclysm_blacksmith_mesh64", FunctionDescriptor.of(MESH64, A, D));
         BOUNDS64 = bind(linker, lib, "cadaclysm_blacksmith_bounds64", FunctionDescriptor.of(B, A, D, A, A));
+        // A held tessellation: one solid meshed at one tolerance, kept alive on its own
+        // regardless of what happens to the solid afterwards -- meshed again at another
+        // tolerance, or closed. `Mesh`, `Mesh64` and `Polylines` each hold one of these instead
+        // of the solid itself; `_face_triangles` is bound for parity with Python even though no
+        // Java view reads it.
+        TESSELLATION = bind(linker, lib, "cadaclysm_blacksmith_tessellation", FunctionDescriptor.of(A, A, D));
+        TESSELLATION_FREE = bind(linker, lib, "cadaclysm_blacksmith_tessellation_free", FunctionDescriptor.ofVoid(A));
+        TESSELLATION_MESH = bind(linker, lib, "cadaclysm_blacksmith_tessellation_mesh", FunctionDescriptor.of(MESH, A));
+        TESSELLATION_MESH64 = bind(linker, lib, "cadaclysm_blacksmith_tessellation_mesh64", FunctionDescriptor.of(MESH64, A));
+        TESSELLATION_FACE_TRIANGLES = bind(linker, lib, "cadaclysm_blacksmith_tessellation_face_triangles", FunctionDescriptor.of(FACE_TRIANGLES, A));
+        TESSELLATION_EDGE_POLYLINES = bind(linker, lib, "cadaclysm_blacksmith_tessellation_edge_polylines", FunctionDescriptor.of(POLYLINES, A));
+        BOX = bind(linker, lib, "cadaclysm_blacksmith_box", FunctionDescriptor.of(B, A, A, A));
         // The FEM surface mesh. `cadaclysm_blacksmith_fem_mesh` takes a progress callback and a
         // user pointer, both passed null here as every other progress-taking entry point in this
         // file is (see the header's Ownership note): an upcall stub over the C callback is out of
@@ -559,6 +579,8 @@ public final class Blacksmith {
         FEM_VERTEX_AT = bind(linker, lib, "cadaclysm_blacksmith_fem_mesh_vertex", FunctionDescriptor.of(B, A, I, A));
         FEM_OPEN_EDGE = bind(linker, lib, "cadaclysm_blacksmith_fem_mesh_open_edge", FunctionDescriptor.of(B, A, I, A, A, A));
         FEM_FOLDED_EDGE = bind(linker, lib, "cadaclysm_blacksmith_fem_mesh_folded_edge", FunctionDescriptor.of(B, A, I, A, A, A));
+        FEM_CROSSING_COUNT = bind(linker, lib, "cadaclysm_blacksmith_fem_mesh_crossing_count", FunctionDescriptor.of(I, A));
+        FEM_CROSSING = bind(linker, lib, "cadaclysm_blacksmith_fem_mesh_crossing", FunctionDescriptor.of(B, A, I, A, A));
         FEM_MSH_TEXT = bind(linker, lib, "cadaclysm_blacksmith_fem_mesh_msh_text", FunctionDescriptor.of(A, A));
         FEM_SAVE_MSH = bind(linker, lib, "cadaclysm_blacksmith_fem_mesh_save_msh", FunctionDescriptor.of(B, A, A));
         FEM_FREE = bind(linker, lib, "cadaclysm_blacksmith_fem_mesh_free", FunctionDescriptor.ofVoid(A));
@@ -570,6 +592,8 @@ public final class Blacksmith {
         ASSEMBLY_PLACE_SOLID = bind(linker, lib, "cadaclysm_blacksmith_assembly_place_solid", FunctionDescriptor.of(A, A, A, A, A));
         ASSEMBLY_PLACE_ASSEMBLY = bind(linker, lib, "cadaclysm_blacksmith_assembly_place_assembly", FunctionDescriptor.of(A, A, A, A, A));
         ASSEMBLY_STEP = bind(linker, lib, "cadaclysm_blacksmith_assembly_step", FunctionDescriptor.of(A, A, A, I));
+        ASSEMBLY_LINK = bind(linker, lib, "cadaclysm_blacksmith_assembly_link", FunctionDescriptor.of(B, A, A, A, L));
+        ASSEMBLY_JOINT = bind(linker, lib, "cadaclysm_blacksmith_assembly_joint", FunctionDescriptor.of(B, A, A, A, A));
     }
 
     @SuppressWarnings("restricted") // downcallHandle: every entry point here is the published ABI.
@@ -637,6 +661,23 @@ public final class Blacksmith {
 
     private static MemorySegment checked(MemorySegment handle, String what) {
         if (handle.address() == 0) throw failure(what);
+        return handle;
+    }
+
+    /** {@link #failure} for a call routed through {@code cadaclysm_blacksmith_tessellation}:
+     *  that entry point fails with a leading "tessellation:" naming itself, not the caller,
+     *  so this rewrites that prefix back to {@code what} -- the C-level name the caller
+     *  reported before it held a tessellation of its own -- leaving the rest of the
+     *  library's message untouched. */
+    private static BuildException tessellationFailure(String what) {
+        String reason = lastError();
+        String prefix = "tessellation:";
+        if (reason.startsWith(prefix)) reason = what + ":" + reason.substring(prefix.length());
+        return new BuildException(reason.isEmpty() ? what : reason);
+    }
+
+    private static MemorySegment tessellationChecked(MemorySegment handle, String what) {
+        if (handle.address() == 0) throw tessellationFailure(what);
         return handle;
     }
 
@@ -2191,8 +2232,9 @@ public final class Blacksmith {
     }
 
     /**
-     * A solid's triangles -- views over the library's own cache at one tolerance, valid
-     * until the solid is closed or meshed again at another tolerance (see the file header).
+     * A solid's triangles -- views over a tessellation held of their own (see the file
+     * header): closing the solid, or meshing it again at another tolerance, never touches
+     * this once it is made.
      *
      * <p>{@link #positions()} and {@link #normals()} are {@code vertexCount * 3} floats,
      * {@link #indices()} is {@code indexCount}, three to a triangle. Every view is read-only
@@ -2202,23 +2244,31 @@ public final class Blacksmith {
     public static final class Mesh {
         private final Solid solid;
         private final double tolerance;
-        /** Which filling of the solid's cache this reads -- see {@link Solid#checkCache}. */
-        private final int generation;
+        private final Handle held;
         private final long positions, normals, indices;
         private final int vertexCount, indexCount;
 
-        private Mesh(Solid solid, double tolerance, int generation, MemorySegment raw) {
+        private Mesh(Solid solid, double tolerance, MemorySegment tessellation) {
             this.solid = solid;
             this.tolerance = tolerance;
-            this.generation = generation;
-            positions = raw.get(ValueLayout.ADDRESS, offset(MESH, "positions")).address();
-            normals = raw.get(ValueLayout.ADDRESS, offset(MESH, "normals")).address();
-            indices = raw.get(ValueLayout.ADDRESS, offset(MESH, "indices")).address();
-            vertexCount = raw.get(ValueLayout.JAVA_INT, offset(MESH, "vertex_count"));
-            indexCount = raw.get(ValueLayout.JAVA_INT, offset(MESH, "index_count"));
+            held = new Handle(TESSELLATION_FREE, "tessellation: freed", tessellationChecked(tessellation, "mesh"));
+            CLEANER.register(this, held);
+            try (Arena arena = Arena.ofConfined()) {
+                SegmentAllocator allocator = arena;
+                MemorySegment h = held.live();
+                MemorySegment raw = call(() -> (MemorySegment) TESSELLATION_MESH.invokeExact(allocator, h));
+                positions = raw.get(ValueLayout.ADDRESS, offset(MESH, "positions")).address();
+                normals = raw.get(ValueLayout.ADDRESS, offset(MESH, "normals")).address();
+                indices = raw.get(ValueLayout.ADDRESS, offset(MESH, "indices")).address();
+                vertexCount = raw.get(ValueLayout.JAVA_INT, offset(MESH, "vertex_count"));
+                indexCount = raw.get(ValueLayout.JAVA_INT, offset(MESH, "index_count"));
+            } finally {
+                keep(this);
+            }
         }
 
-        /** The solid this borrows from. */
+        /** The solid this was meshed from; the view's buffers do not depend on it -- they
+         *  stay valid after the solid is closed or meshed again (see the file header). */
         public Solid solid() {
             return solid;
         }
@@ -2241,21 +2291,30 @@ public final class Blacksmith {
         }
 
         public FloatBuffer positions() {
-            solid.checkCache(generation);
-            return floatView(positions, vertexCount * 3L);
+            try {
+                return floatView(positions, vertexCount * 3L);
+            } finally {
+                keep(this);
+            }
         }
 
         public FloatBuffer normals() {
-            solid.checkCache(generation);
-            return floatView(normals, vertexCount * 3L);
+            try {
+                return floatView(normals, vertexCount * 3L);
+            } finally {
+                keep(this);
+            }
         }
 
         public IntBuffer indices() {
-            solid.checkCache(generation);
-            return intView(indices, indexCount);
+            try {
+                return intView(indices, indexCount);
+            } finally {
+                keep(this);
+            }
         }
 
-        /** The same triangles in memory of our own, safe to outlive the solid. */
+        /** The same triangles in memory of our own, safe to outlive this view. */
         public MeshData copy() {
             return new MeshData(toArray(positions()), toArray(normals()), toArray(indices()));
         }
@@ -2266,10 +2325,9 @@ public final class Blacksmith {
     }
 
     /**
-     * {@code cadaclysm_blacksmith_mesh64}: the same tessellation as {@link Mesh}, from the
-     * same cache -- meshing at another tolerance (through {@link Solid#mesh}, {@link
-     * Solid#mesh64}, {@link Solid#edgePolylines}, {@link Solid#boundsAt} or {@link
-     * Solid#boundsAt64}) invalidates this the same way it invalidates {@link Mesh}.
+     * {@code cadaclysm_blacksmith_tessellation_mesh64}: the same tessellation as {@link Mesh}
+     * -- a view over its own held tessellation, unaffected by anything done to the solid
+     * afterwards, through {@link Solid#mesh} as much as through {@link Solid#mesh64}.
      *
      * <p>{@link #positions()} and {@link #normals()} are {@code vertexCount * 3} doubles,
      * {@link #indices()} is {@code indexCount}, the very pointer {@link Mesh} gives.
@@ -2277,23 +2335,31 @@ public final class Blacksmith {
     public static final class Mesh64 {
         private final Solid solid;
         private final double tolerance;
-        /** Which filling of the solid's cache this reads -- see {@link Solid#checkCache}. */
-        private final int generation;
+        private final Handle held;
         private final long positions, normals, indices;
         private final int vertexCount, indexCount;
 
-        private Mesh64(Solid solid, double tolerance, int generation, MemorySegment raw) {
+        private Mesh64(Solid solid, double tolerance, MemorySegment tessellation) {
             this.solid = solid;
             this.tolerance = tolerance;
-            this.generation = generation;
-            positions = raw.get(ValueLayout.ADDRESS, offset(MESH64, "positions")).address();
-            normals = raw.get(ValueLayout.ADDRESS, offset(MESH64, "normals")).address();
-            indices = raw.get(ValueLayout.ADDRESS, offset(MESH64, "indices")).address();
-            vertexCount = raw.get(ValueLayout.JAVA_INT, offset(MESH64, "vertex_count"));
-            indexCount = raw.get(ValueLayout.JAVA_INT, offset(MESH64, "index_count"));
+            held = new Handle(TESSELLATION_FREE, "tessellation: freed", tessellationChecked(tessellation, "mesh64"));
+            CLEANER.register(this, held);
+            try (Arena arena = Arena.ofConfined()) {
+                SegmentAllocator allocator = arena;
+                MemorySegment h = held.live();
+                MemorySegment raw = call(() -> (MemorySegment) TESSELLATION_MESH64.invokeExact(allocator, h));
+                positions = raw.get(ValueLayout.ADDRESS, offset(MESH64, "positions")).address();
+                normals = raw.get(ValueLayout.ADDRESS, offset(MESH64, "normals")).address();
+                indices = raw.get(ValueLayout.ADDRESS, offset(MESH64, "indices")).address();
+                vertexCount = raw.get(ValueLayout.JAVA_INT, offset(MESH64, "vertex_count"));
+                indexCount = raw.get(ValueLayout.JAVA_INT, offset(MESH64, "index_count"));
+            } finally {
+                keep(this);
+            }
         }
 
-        /** The solid this borrows from. */
+        /** The solid this was meshed from; the view's buffers do not depend on it -- they
+         *  stay valid after the solid is closed or meshed again (see the file header). */
         public Solid solid() {
             return solid;
         }
@@ -2316,48 +2382,67 @@ public final class Blacksmith {
         }
 
         public DoubleBuffer positions() {
-            solid.checkCache(generation);
-            return doubleView(positions, vertexCount * 3L);
+            try {
+                return doubleView(positions, vertexCount * 3L);
+            } finally {
+                keep(this);
+            }
         }
 
         public DoubleBuffer normals() {
-            solid.checkCache(generation);
-            return doubleView(normals, vertexCount * 3L);
+            try {
+                return doubleView(normals, vertexCount * 3L);
+            } finally {
+                keep(this);
+            }
         }
 
         public IntBuffer indices() {
-            solid.checkCache(generation);
-            return intView(indices, indexCount);
+            try {
+                return intView(indices, indexCount);
+            } finally {
+                keep(this);
+            }
         }
 
-        /** The same triangles in memory of our own, safe to outlive the solid. */
+        /** The same triangles in memory of our own, safe to outlive this view. */
         public MeshData64 copy() {
             return new MeshData64(toArray(positions()), toArray(normals()), toArray(indices()));
         }
     }
 
     /**
-     * A solid's feature edges as polylines -- views over the library's own cache at one
-     * tolerance, under the same lifetime rule as {@link Mesh}. Polyline {@code i} is {@code
-     * points[offsets[i] * 3 .. offsets[i + 1] * 3]}, three floats a point.
+     * A solid's feature edges as polylines -- a view over its own held tessellation, under
+     * the same lifetime rule as {@link Mesh} (see the file header). Polyline {@code i} is
+     * {@code points[offsets[i] * 3 .. offsets[i + 1] * 3]}, three floats a point.
      */
     public static final class Polylines {
         private final Solid solid;
         private final double tolerance;
-        private final int generation;
+        private final Handle held;
         private final long points, offsets;
         private final int pointCount, polylineCount;
 
-        private Polylines(Solid solid, double tolerance, int generation, MemorySegment raw) {
+        private Polylines(Solid solid, double tolerance, MemorySegment tessellation) {
             this.solid = solid;
             this.tolerance = tolerance;
-            this.generation = generation;
-            points = raw.get(ValueLayout.ADDRESS, offset(POLYLINES, "points")).address();
-            offsets = raw.get(ValueLayout.ADDRESS, offset(POLYLINES, "offsets")).address();
-            pointCount = raw.get(ValueLayout.JAVA_INT, offset(POLYLINES, "point_count"));
-            polylineCount = raw.get(ValueLayout.JAVA_INT, offset(POLYLINES, "polyline_count"));
+            held = new Handle(TESSELLATION_FREE, "tessellation: freed", tessellationChecked(tessellation, "edge_polylines"));
+            CLEANER.register(this, held);
+            try (Arena arena = Arena.ofConfined()) {
+                SegmentAllocator allocator = arena;
+                MemorySegment h = held.live();
+                MemorySegment raw = call(() -> (MemorySegment) TESSELLATION_EDGE_POLYLINES.invokeExact(allocator, h));
+                points = raw.get(ValueLayout.ADDRESS, offset(POLYLINES, "points")).address();
+                offsets = raw.get(ValueLayout.ADDRESS, offset(POLYLINES, "offsets")).address();
+                pointCount = raw.get(ValueLayout.JAVA_INT, offset(POLYLINES, "point_count"));
+                polylineCount = raw.get(ValueLayout.JAVA_INT, offset(POLYLINES, "polyline_count"));
+            } finally {
+                keep(this);
+            }
         }
 
+        /** The solid this was meshed from; the view's buffers do not depend on it -- they
+         *  stay valid after the solid is closed or meshed again (see the file header). */
         public Solid solid() {
             return solid;
         }
@@ -2376,14 +2461,20 @@ public final class Blacksmith {
 
         /** {@code pointCount * 3} floats, the polylines end to end. */
         public FloatBuffer points() {
-            solid.checkCache(generation);
-            return floatView(points, pointCount * 3L);
+            try {
+                return floatView(points, pointCount * 3L);
+            } finally {
+                keep(this);
+            }
         }
 
         /** {@code polylineCount + 1} point offsets; the last equals {@link #pointCount()}. */
         public IntBuffer offsets() {
-            solid.checkCache(generation);
-            return intView(offsets, polylineCount + 1L);
+            try {
+                return intView(offsets, polylineCount + 1L);
+            } finally {
+                keep(this);
+            }
         }
 
         /** Polyline {@code i}'s points, three floats each -- what Python's list holds at
@@ -2396,7 +2487,7 @@ public final class Blacksmith {
         }
 
         /** Every polyline in memory of our own, one {@code k * 3} array each, safe to
-         *  outlive the solid. */
+         *  outlive this view. */
         public float[][] copy() {
             float[][] out = new float[polylineCount][];
             for (int i = 0; i < out.length; i++) out[i] = toArray(polyline(i));
@@ -2492,9 +2583,10 @@ public final class Blacksmith {
      *
      * <p><b>The owner of these buffers is this object, not the solid.</b> {@link Solid#close()}
      * neither frees a FEM mesh nor stales one, and meshing the solid again at another tolerance
-     * does not either -- which is why this class has <em>no</em> generation check where
-     * {@link Mesh} and {@link Mesh64} have {@link Solid#checkCache}: a FEM view's pointers
-     * are built with the handle and never move.
+     * does not either -- the same shape {@link Mesh} and {@link Mesh64} now have with their
+     * own held tessellation, except a FEM mesh is freed explicitly, by {@link #free()} (or
+     * {@code close()}, or the {@link Cleaner}), where a mesh view exposes no free of its own
+     * and is freed only once it is unreachable.
      *
      * <p><b>What the guard does and does not do.</b> Every accessor below asks the handle first,
      * so a buffer <em>asked for</em> after {@link #free()} throws {@link IllegalStateException}.
@@ -2727,6 +2819,36 @@ public final class Blacksmith {
             return census(FEM_FOLDED_EDGE, foldedEdgeCount, "fem_mesh_folded_edge");
         }
 
+        /**
+         * Every pair of triangles that pass through each other, as {@code {a, b}} with
+         * {@code a < b}, sorted: an edge of one through the other's interior. Their B-rep
+         * faces are {@link #triangleFace()}{@code [a]} and {@code [b]}.
+         *
+         * <p><b>Computed for every body, open or closed.</b> The census {@link #watertight()},
+         * {@link #openEdges()} and {@link #foldedEdges()} report is topological and cannot see
+         * a surface passing through itself; a mesh is ready for a volume mesher when it is
+         * {@link #watertight()} <b>and</b> this is empty -- Gmsh refuses one that crosses. A
+         * copy.
+         */
+        public List<int[]> crossings() {
+            MemorySegment h = handle.live();
+            int count = call(() -> (int) FEM_CROSSING_COUNT.invokeExact(h));
+            List<int[]> out = new ArrayList<>(count);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment pair = arena.allocate(ValueLayout.JAVA_INT, 2);
+                MemorySegment a = pair.asSlice(0, Integer.BYTES);
+                MemorySegment b = pair.asSlice(Integer.BYTES, Integer.BYTES);
+                for (int i = 0; i < count; i++) {
+                    int at = i;
+                    if (!call(() -> (boolean) FEM_CROSSING.invokeExact(h, at, a, b))) throw failure("fem_mesh_crossing");
+                    out.add(pair.toArray(ValueLayout.JAVA_INT));
+                }
+            } finally {
+                keep(this);
+            }
+            return out;
+        }
+
         /** The library's two census readers have one shape, so the two lists cannot drift. */
         private List<int[]> census(MethodHandle row, int count, String what) {
             MemorySegment h = handle.live();
@@ -2862,43 +2984,9 @@ public final class Blacksmith {
         private final Handle handle;
         private final Cleaner.Cleanable cleanable;
 
-        /**
-         * The tolerance the library's tessellation cache was last filled at (NaN before any
-         * of {@link #mesh}, {@link #edgePolylines} and {@link #boundsAt} ran), and how many
-         * times it has been filled. The library replaces the cache whole whenever it is
-         * asked for a tolerance other than the one it holds, so a view is tied to a
-         * <em>filling</em>, not a tolerance: after 0.05, 0.5, 0.05 the first view's memory
-         * is gone even though the cache is back at its tolerance. A view checks the
-         * generation it was cut from, never the tolerance.
-         */
-        private double cacheTolerance = Double.NaN;
-        private int cacheGeneration;
-
         private Solid(MemorySegment raw) {
             handle = new Handle(SOLID_FREE, "solid: closed", checked(raw, "solid"));
             cleanable = CLEANER.register(this, handle);
-        }
-
-        /** Record that a call just tessellated at {@code tolerance}: a new filling if it
-         *  differs from the one the cache held. Returns the generation a view made now
-         *  belongs to. */
-        private int filled(double tolerance) {
-            if (Double.isNaN(cacheTolerance) || cacheTolerance != tolerance) {
-                cacheTolerance = tolerance;
-                cacheGeneration++;
-            }
-            return cacheGeneration;
-        }
-
-        /** A view cut from filling {@code generation} may read only while that filling is
-         *  the one the solid holds; a closed solid has none. */
-        void checkCache(int generation) {
-            handle();
-            if (cacheGeneration != generation) {
-                throw new IllegalStateException(
-                        "the view is stale: the solid's tessellation has been replaced since (now at tolerance "
-                                + cacheTolerance + ")");
-            }
         }
 
         MemorySegment handle() {
@@ -2947,6 +3035,13 @@ public final class Blacksmith {
          *  topX} along x. */
         public static Solid wedge(double x, double y, double z, double topX) {
             return new Solid(call(() -> (MemorySegment) WEDGE.invokeExact(x, y, z, topX)));
+        }
+
+        /** A right pyramid of {@code sides} sides (at least 3): its base the regular polygon of
+         *  circumradius {@code r} on z=0, its first corner on +x, its tip at (0, 0, {@code h}). */
+        public static Solid pyramid(int sides, double r, double h) {
+            int n = Math.max(0, sides);
+            return new Solid(call(() -> (MemorySegment) PYRAMID.invokeExact(n, r, h)));
         }
 
         /** One of the four `(profile, frame, double)` builders. */
@@ -3644,9 +3739,22 @@ public final class Blacksmith {
             }
         }
 
-        /** {@link #boundsAt} at tolerance 0.05. */
+        /** The solid's axis-aligned box, at the same cost whatever its size: its mesh at a
+         *  thousandth of its own extent, in {@code double}, so the box is inside the exact one
+         *  and short of it by at most that. Worked out once per solid, apart from the
+         *  tessellation {@link #mesh} caches -- asking it never invalidates a mesh's segments.
+         *  {@link #boundsAt} is the box of the mesh at a tolerance you name. */
         public Bounds bounds() {
-            return boundsAt(0.05);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment lo = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
+                MemorySegment hi = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
+                MemorySegment h = handle();
+                boolean ok = call(() -> (boolean) BOX.invokeExact(h, lo, hi));
+                if (!ok) throw failure("box");
+                return new Bounds(lo.toArray(ValueLayout.JAVA_DOUBLE), hi.toArray(ValueLayout.JAVA_DOUBLE));
+            } finally {
+                keep(this);
+            }
         }
 
         /** The solid's axis-aligned bounds, over the positions of its cached tessellation
@@ -3659,7 +3767,6 @@ public final class Blacksmith {
                 MemorySegment h = handle();
                 boolean ok = call(() -> (boolean) BOUNDS.invokeExact(h, tolerance, lo, hi));
                 if (!ok) throw failure("bounds");
-                filled(tolerance);
                 return new Bounds(lo.toArray(ValueLayout.JAVA_DOUBLE), hi.toArray(ValueLayout.JAVA_DOUBLE));
             } finally {
                 keep(this);
@@ -3681,7 +3788,6 @@ public final class Blacksmith {
                 MemorySegment h = handle();
                 boolean ok = call(() -> (boolean) BOUNDS64.invokeExact(h, tolerance, lo, hi));
                 if (!ok) throw failure("bounds64");
-                filled(tolerance);
                 return new Bounds(lo.toArray(ValueLayout.JAVA_DOUBLE), hi.toArray(ValueLayout.JAVA_DOUBLE));
             } finally {
                 keep(this);
@@ -3762,15 +3868,12 @@ public final class Blacksmith {
             return mesh(0.05);
         }
 
-        /** The triangles at {@code tolerance}, as views into the solid's cache. See the file
-         *  header for what invalidates them. */
+        /** The triangles at {@code tolerance}, as views over a tessellation held of their
+         *  own. See the file header for the lifetime this gives them. */
         public Mesh mesh(double tolerance) {
-            try (Arena arena = Arena.ofConfined()) {
-                SegmentAllocator allocator = arena;
+            try {
                 MemorySegment h = handle();
-                MemorySegment raw = call(() -> (MemorySegment) MESH_AT.invokeExact(allocator, h, tolerance));
-                if (raw.get(ValueLayout.ADDRESS, offset(MESH, "positions")).address() == 0) throw failure("mesh");
-                return new Mesh(this, tolerance, filled(tolerance), raw);
+                return new Mesh(this, tolerance, call(() -> (MemorySegment) TESSELLATION.invokeExact(h, tolerance)));
             } finally {
                 keep(this);
             }
@@ -3781,16 +3884,14 @@ public final class Blacksmith {
             return mesh64(0.05);
         }
 
-        /** {@link #mesh(double)} in {@code double}, from the same cache: valid until the
-         *  solid is closed or meshed again at a different tolerance -- through {@link
-         *  #mesh(double)} as much as through this. */
+        /** {@link #mesh(double)} in {@code double}, from the same held tessellation this
+         *  solid's cache would give at {@code tolerance} -- and, once held, untouched by
+         *  anything done to the solid afterwards, through {@link #mesh(double)} as much as
+         *  through this. */
         public Mesh64 mesh64(double tolerance) {
-            try (Arena arena = Arena.ofConfined()) {
-                SegmentAllocator allocator = arena;
+            try {
                 MemorySegment h = handle();
-                MemorySegment raw = call(() -> (MemorySegment) MESH_AT64.invokeExact(allocator, h, tolerance));
-                if (raw.get(ValueLayout.ADDRESS, offset(MESH64, "positions")).address() == 0) throw failure("mesh64");
-                return new Mesh64(this, tolerance, filled(tolerance), raw);
+                return new Mesh64(this, tolerance, call(() -> (MemorySegment) TESSELLATION.invokeExact(h, tolerance)));
             } finally {
                 keep(this);
             }
@@ -3879,14 +3980,12 @@ public final class Blacksmith {
             return edgePolylines(0.05);
         }
 
-        /** The feature edges as polylines, views into the same cache as {@link #mesh}. */
+        /** The feature edges as polylines, views over a tessellation held the same way as
+         *  {@link #mesh}'s. */
         public Polylines edgePolylines(double tolerance) {
-            try (Arena arena = Arena.ofConfined()) {
-                SegmentAllocator allocator = arena;
+            try {
                 MemorySegment h = handle();
-                MemorySegment raw = call(() -> (MemorySegment) EDGE_POLYLINES.invokeExact(allocator, h, tolerance));
-                if (raw.get(ValueLayout.ADDRESS, offset(POLYLINES, "offsets")).address() == 0) throw failure("edge_polylines");
-                return new Polylines(this, tolerance, filled(tolerance), raw);
+                return new Polylines(this, tolerance, call(() -> (MemorySegment) TESSELLATION.invokeExact(h, tolerance)));
             } finally {
                 keep(this);
             }
@@ -4149,11 +4248,6 @@ public final class Blacksmith {
                 MemorySegment rgb = raw.get(ValueLayout.ADDRESS, offset(COLOURS, "rgb"));
                 int count = raw.get(ValueLayout.JAVA_INT, offset(COLOURS, "count"));
                 if (rgb.address() == 0 && !lastError().isEmpty()) throw failure("edge_polyline_colours");
-                // This call tessellates like every other cache reader, even to report "no
-                // paint": it can replace the cache a view taken earlier is still borrowing, so
-                // it must bump the generation those views check, even though this method
-                // copies its own result out and keeps nothing borrowed itself.
-                filled(tolerance);
                 if (rgb.address() == 0) return new double[0][];
                 double[] values = rgb.reinterpret(3L * count * Double.BYTES).toArray(ValueLayout.JAVA_DOUBLE);
                 double[][] out = new double[count][];
@@ -4849,6 +4943,46 @@ public final class Blacksmith {
                 }
             } finally {
                 keep(this, placed);
+            }
+        }
+
+        /** Declare a rigid link {@code name} over placements of this assembly, by their names
+         *  (any number of them). Written as an AP242 kinematic link when the assembly is
+         *  written (see {@link #stepText(String, String)}). Refused (thrown) for an empty
+         *  name, a name already used by a link here, no placements, a repeated placement, an
+         *  unknown placement, or a placement already claimed by another link -- the assembly
+         *  is then unchanged. */
+        public void link(String name, String... placements) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment n = arena.allocateFrom(name);
+                int count = placements.length;
+                MemorySegment ps = count == 0 ? MemorySegment.NULL : arena.allocate(ValueLayout.ADDRESS, count);
+                for (int i = 0; i < count; i++) {
+                    ps.setAtIndex(ValueLayout.ADDRESS, i, arena.allocateFrom(placements[i]));
+                }
+                MemorySegment h = handle();
+                long size = count;
+                boolean ok = call(() -> (boolean) ASSEMBLY_LINK.invokeExact(h, n, ps, size));
+                if (!ok) throw failure("assembly_link");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Connect this assembly's links {@code start} and {@code end} (kept in that order), as
+         *  an AP242 kinematic joint. Refused (thrown) for an empty name, a name already used by
+         *  a joint here, an unknown link on either side, joining a link to itself, or a joint
+         *  already connecting the same two links -- the assembly is then unchanged. */
+        public void joint(String name, String start, String end) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment n = arena.allocateFrom(name);
+                MemorySegment s = arena.allocateFrom(start);
+                MemorySegment e = arena.allocateFrom(end);
+                MemorySegment h = handle();
+                boolean ok = call(() -> (boolean) ASSEMBLY_JOINT.invokeExact(h, n, s, e));
+                if (!ok) throw failure("assembly_joint");
+            } finally {
+                keep(this);
             }
         }
 

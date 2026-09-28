@@ -74,6 +74,33 @@ typedef enum CadaclysmMeshColors {
   CADACLYSM_COLORS_PER_FACE = 1,
 } CadaclysmMeshColors;
 
+typedef enum CadaclysmPairKind {
+  CADACLYSM_PAIR_REVOLUTE = 0,
+  CADACLYSM_PAIR_PRISMATIC = 1,
+  CADACLYSM_PAIR_CYLINDRICAL = 2,
+  CADACLYSM_PAIR_SPHERICAL = 3,
+  CADACLYSM_PAIR_SPHERICAL_WITH_PIN = 4,
+  CADACLYSM_PAIR_PLANAR = 5,
+  CADACLYSM_PAIR_UNIVERSAL = 6,
+  CADACLYSM_PAIR_HOMOKINETIC = 7,
+  CADACLYSM_PAIR_SCREW = 8,
+  CADACLYSM_PAIR_FULLY_CONSTRAINED = 9,
+  CADACLYSM_PAIR_UNCONSTRAINED = 10,
+  CADACLYSM_PAIR_LOW_ORDER = 11,
+  CADACLYSM_PAIR_OTHER = 12,
+} CadaclysmPairKind;
+
+typedef enum CadaclysmMotion {
+  CADACLYSM_MOTION_ROTATION = 0,
+  CADACLYSM_MOTION_TRANSLATION = 1,
+} CadaclysmMotion;
+
+typedef enum CadaclysmFreedomAxis {
+  CADACLYSM_FREEDOM_X = 0,
+  CADACLYSM_FREEDOM_Y = 1,
+  CADACLYSM_FREEDOM_Z = 2,
+} CadaclysmFreedomAxis;
+
 typedef struct CadaclysmBrep CadaclysmBrep;
 
 typedef struct CadaclysmFemMesh CadaclysmFemMesh;
@@ -203,6 +230,18 @@ typedef struct CadaclysmCollisionHull {
   uint32_t index_count;
 } CadaclysmCollisionHull;
 
+typedef struct CadaclysmFreedom {
+
+  uint32_t motion;
+
+  uint32_t axis;
+  bool has_lower;
+
+  double lower;
+  bool has_upper;
+  double upper;
+} CadaclysmFreedom;
+
 typedef struct CadaclysmPolylines {
   const float *positions;
   const uint32_t *counts;
@@ -272,7 +311,45 @@ typedef struct CadaclysmSurfaces {
 
   const uint32_t *shared;
   uint32_t shared_count;
+
+  const uint32_t *duplicate;
+  uint32_t duplicate_count;
 } CadaclysmSurfaces;
+
+typedef struct CadaclysmGpuSurfaces {
+  const struct CadaclysmFace *faces;
+  uint32_t face_count;
+  uint32_t surface_count;
+  const uint32_t *loops;
+  uint32_t loops_len;
+  const float *points;
+  uint32_t points_len;
+  const float *profiles;
+  uint32_t profiles_len;
+  const float *nurbs;
+  uint32_t nurbs_len;
+  const uint32_t *shared;
+  uint32_t shared_len;
+  const uint32_t *tiles;
+  uint32_t tiles_len;
+  const float *tile_domains;
+  uint32_t tile_domains_len;
+  const float *tile_samples;
+  uint32_t tile_samples_len;
+  const float *tile_boxes;
+  uint32_t tile_boxes_len;
+  const float *edges;
+  uint32_t edges_len;
+  double bounds[6];
+  double about[3];
+} CadaclysmGpuSurfaces;
+
+typedef struct CadaclysmPolylines64 {
+  const double *positions;
+  const uint32_t *counts;
+  uint32_t polyline_count;
+  uint32_t vertex_count;
+} CadaclysmPolylines64;
 
 typedef struct CadaclysmWindow {
   uint32_t kind;
@@ -432,6 +509,8 @@ const char *cadaclysm_node_id(const struct CadaclysmScene *scene, uint32_t node)
 
 bool cadaclysm_node_color(const struct CadaclysmScene *scene, uint32_t node, float *rgba);
 
+bool cadaclysm_node_own_color(const struct CadaclysmScene *scene, uint32_t node, float *rgba);
+
 void cadaclysm_node_transform(const struct CadaclysmScene *scene, uint32_t node, double *out);
 
 uint32_t cadaclysm_placement_count(const struct CadaclysmScene *scene);
@@ -460,6 +539,10 @@ bool cadaclysm_node_can_mesh(const struct CadaclysmScene *scene, uint32_t node);
 bool cadaclysm_node_visible(const struct CadaclysmScene *scene, uint32_t node);
 
 struct CadaclysmMesh cadaclysm_node_mesh(const struct CadaclysmScene *scene, uint32_t node);
+
+struct CadaclysmMesh cadaclysm_node_mesh_anchored(const struct CadaclysmScene *scene,
+                                                  uint32_t node,
+                                                  double *out_anchor);
 
 struct CadaclysmMesh64 cadaclysm_node_mesh64(const struct CadaclysmScene *scene, uint32_t node);
 
@@ -502,6 +585,11 @@ struct CadaclysmMesh cadaclysm_node_mesh_lod(const struct CadaclysmScene *scene,
                                              uint32_t node,
                                              uint32_t level);
 
+struct CadaclysmMesh cadaclysm_node_mesh_lod_anchored(const struct CadaclysmScene *scene,
+                                                      uint32_t node,
+                                                      uint32_t level,
+                                                      double *out_anchor);
+
 float cadaclysm_node_lod_error(const struct CadaclysmScene *scene, uint32_t node, uint32_t level);
 
 uint32_t cadaclysm_diagnostic_count(const struct CadaclysmScene *scene);
@@ -528,6 +616,37 @@ uint32_t cadaclysm_joint_start(const struct CadaclysmScene *scene, uint32_t join
 
 uint32_t cadaclysm_joint_end(const struct CadaclysmScene *scene, uint32_t joint);
 
+int32_t cadaclysm_joint_pair_kind(const struct CadaclysmScene *scene, uint32_t joint);
+
+const char *cadaclysm_joint_pair_type(const struct CadaclysmScene *scene, uint32_t joint);
+
+double cadaclysm_joint_pair_pitch(const struct CadaclysmScene *scene, uint32_t joint);
+
+bool cadaclysm_joint_pair_frames(const struct CadaclysmScene *scene,
+                                 uint32_t joint,
+                                 double *out_start,
+                                 double *out_end);
+
+uint32_t cadaclysm_joint_freedom_count(const struct CadaclysmScene *scene, uint32_t joint);
+
+bool cadaclysm_joint_freedom(const struct CadaclysmScene *scene,
+                             uint32_t joint,
+                             uint32_t index,
+                             struct CadaclysmFreedom *out);
+
+uint32_t cadaclysm_state_count(const struct CadaclysmScene *scene);
+
+const char *cadaclysm_state_name(const struct CadaclysmScene *scene, uint32_t state);
+
+uint32_t cadaclysm_state_value_count(const struct CadaclysmScene *scene, uint32_t state);
+
+uint32_t cadaclysm_state_value(const struct CadaclysmScene *scene,
+                               uint32_t state,
+                               uint32_t row,
+                               uint32_t *joint,
+                               double *values,
+                               uint32_t capacity);
+
 struct CadaclysmPolylines cadaclysm_node_edges(const struct CadaclysmScene *scene, uint32_t node);
 
 struct CadaclysmEdgeColors cadaclysm_node_edge_colors(const struct CadaclysmScene *scene,
@@ -553,6 +672,16 @@ struct CadaclysmBeziers64 cadaclysm_node_edge_beziers64(const struct CadaclysmSc
 
 struct CadaclysmSurfaces cadaclysm_node_surfaces(const struct CadaclysmScene *scene, uint32_t node);
 
+struct CadaclysmGpuSurfaces *cadaclysm_node_gpu_surfaces(const struct CadaclysmScene *scene,
+                                                         uint32_t node,
+                                                         double tolerance);
+
+void cadaclysm_gpu_surfaces_free(struct CadaclysmGpuSurfaces *surfaces);
+
+struct CadaclysmSurfaces cadaclysm_node_surfaces_anchored(const struct CadaclysmScene *scene,
+                                                          uint32_t node,
+                                                          double *out_anchor);
+
 bool cadaclysm_node_surface_pick(const struct CadaclysmScene *scene,
                                  uint32_t node,
                                  const double *from,
@@ -577,6 +706,24 @@ struct CadaclysmPolylines cadaclysm_node_curves(const struct CadaclysmScene *sce
 
 struct CadaclysmPolylines cadaclysm_node_isocurves(const struct CadaclysmScene *scene,
                                                    uint32_t node);
+
+struct CadaclysmPolylines64 cadaclysm_node_surface_edges64(const struct CadaclysmScene *scene,
+                                                           uint32_t node);
+
+struct CadaclysmBeziers64 cadaclysm_node_surface_edge_beziers64(const struct CadaclysmScene *scene,
+                                                                uint32_t node);
+
+struct CadaclysmPolylines64 cadaclysm_node_surface_isocurves64(const struct CadaclysmScene *scene,
+                                                               uint32_t node);
+
+struct CadaclysmPolylines64 cadaclysm_node_edges64(const struct CadaclysmScene *scene,
+                                                   uint32_t node);
+
+struct CadaclysmPolylines64 cadaclysm_node_curves64(const struct CadaclysmScene *scene,
+                                                    uint32_t node);
+
+struct CadaclysmPolylines64 cadaclysm_node_isocurves64(const struct CadaclysmScene *scene,
+                                                       uint32_t node);
 
 void cadaclysm_forget_meshes(struct CadaclysmScene *scene);
 
@@ -718,6 +865,13 @@ bool cadaclysm_fem_mesh_folded_edge(const struct CadaclysmFemMesh *m,
                                     uint32_t *a,
                                     uint32_t *b,
                                     uint32_t *brep_edge);
+
+uint32_t cadaclysm_fem_mesh_crossing_count(const struct CadaclysmFemMesh *m);
+
+bool cadaclysm_fem_mesh_crossing(const struct CadaclysmFemMesh *m,
+                                 uint32_t i,
+                                 uint32_t *a,
+                                 uint32_t *b);
 
 bool cadaclysm_fem_mesh_save_msh(const struct CadaclysmFemMesh *m, const char *path);
 

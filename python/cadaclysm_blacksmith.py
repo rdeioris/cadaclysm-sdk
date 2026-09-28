@@ -25,25 +25,36 @@ shared library if it is not where this looks by default (`target/release` or
 
 `numpy` is imported only when a mesh, polylines or a FEM mesh's arrays are asked for.
 
-## Every array borrows from its solid
+## A solid's arrays and a FEM mesh's are views; a profile's polylines are copies
 
-`Solid.mesh`, `Solid.face_triangles` and `Solid.edge_polylines` hand back **read-only numpy views into
-the library's own cache** rather than copies. Each view keeps its `Solid` alive
-through `.base`, so a view cannot outlive the solid by having merely dropped the
-last reference to it. Two things can still invalidate a view:
+`Solid.mesh`, `Solid.mesh64`, `Solid.face_triangles` and `Solid.edge_polylines` hand
+back **read-only numpy views**, each owned by a held tessellation of the solid at the
+tolerance asked -- not by the solid, and not by its own tessellation cache. Nothing
+invalidates them: not meshing the solid again at another tolerance -- `mesh`, but
+also `bounds_at`, `bounds64`, `face_triangles`, `edge_polylines` and
+`edge_polyline_colours` -- and not the solid's `close()`. The held tessellation stays
+alive exactly as long as some view of it does, through the array's `.base`. The
+solid's own cache still keeps one tolerance, but memory is bounded only by what you
+keep: a view pins its whole tessellation -- positions, normals, indices, edges, face
+counts, in both precisions -- until it and every array cut from it are freed or
+collected, so a view held from every tolerance you have ever meshed at holds every
+one of those tessellations too. For data that must outlive the view, `.copy()` it and
+drop the view. Under Pyodide (the website's notebook) the arrays are **read-only
+numpy copies** instead, and never invalidate: a JS typed array has no address this
+side to view. Strings are copied too.
 
-* `Solid.close()` (or leaving a `with` block), which frees the handle.
-* Meshing the same solid again at a *different* tolerance, which replaces the
-  cache the earlier views point into.
-
-Call `.copy()` on any array that must outlive either. Strings are copied on the
-way out and are always safe. Under Pyodide (the website's notebook) the arrays
-are copies and never invalidate.
+`Profile.polylines` hands back **read-only numpy copies** of the library's profile
+tessellation cache; a profile keeps every tolerance it has been asked at (unlike a
+solid), so nothing about it is ever replaced, but a view into it would dangle once
+the profile itself closes, and there is no held handle of the kind a solid's
+tessellation gets to keep it open, so they are copied out instead.
 
 `Solid.fem_mesh` is the one array product that is **not** the solid's: it hands
-back a `FemMesh`, a handle of its own whose arrays keep the `FemMesh` alive and
-are invalidated by its `free()` rather than by the solid's `close()` or by
-meshing again.
+back a `FemMesh`, a handle of its own whose arrays are **read-only numpy views
+into its memory** (a solver mesh is megabytes). Each view keeps the `FemMesh`
+alive through `.base`; only its explicit `free()` (or leaving a `with` block)
+invalidates them -- not the solid's `close()`, and not meshing again. Call
+`.copy()` on any FEM array that must outlive `free()`.
 
 ## The chain mirrors the Rust `Workplane`
 
@@ -85,6 +96,7 @@ is as correct, only slower.
 
 import ctypes
 import enum
+import math
 import numbers
 import operator
 import os
@@ -99,15 +111,15 @@ if TYPE_CHECKING:   # names the annotations use; imported when used, never at lo
     import numpy
 
 __all__ = [
-    "Assembly", "Axis", "BuildError", "Chain", "Curve", "Edge", "FemEdge", "FemMesh", "FemVertex", "Frame", "Hit", "Intersection", "Manifold", "Overlap", "Path", "Piece",
-    "Profile", "Selector", "Slant", "Solid", "SolidHits", "Spot", "SweepPath", "Workplane",
+    "Assembly", "Axis", "BuildError", "Chain", "Curve", "Edge", "FemEdge", "FemMesh", "FemVertex", "Frame", "Hit", "Intersection", "Job", "Manifold", "Operation", "Overlap", "Path", "Piece",
+    "Profile", "Program", "Report", "ReportItem", "Selector", "Slant", "Solid", "SolidHits", "Spot", "Stock", "SweepPath", "Tool", "Workplane",
     "brep_layout_id", "build_date", "default_schema", "library_path", "license", "license_info", "license_notice_count",
     "version",
     "svg", "write_brep", "write_brep_text", "write_sat", "write_sat_text", "write_step", "write_step_assembly", "write_step_assembly_text", "write_step_text", "__version__",
 ]
 
 # This file's own version (the workspace's); `version()` is the loaded library's.
-__version__ = "0.8.1"
+__version__ = "0.9.0"
 
 NONE = 0xFFFFFFFF
 UNITS = {"m": 0, "mm": 1, "in": 2}
@@ -337,6 +349,13 @@ _INTERSECTION = c_void_p
 _FEM = c_void_p
 _PROFILE_LIST = c_void_p
 _ASSEMBLY = c_void_p
+_TESSELLATION = c_void_p
+_TOOL = c_void_p
+_STOCK = c_void_p
+_JOB = c_void_p
+_PROGRAMS = c_void_p
+_REPORT = c_void_p
+_OPERATIONS = c_void_p
 
 _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_last_error", c_char_p, []),
@@ -398,6 +417,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_sphere", _SOLID, [c_double]),
     ("cadaclysm_blacksmith_torus", _SOLID, [c_double] * 2),
     ("cadaclysm_blacksmith_wedge", _SOLID, [c_double] * 4),
+    ("cadaclysm_blacksmith_pyramid", _SOLID, [c_uint32, c_double, c_double]),
     ("cadaclysm_blacksmith_extrude", _SOLID, [_PROFILE, _D, c_double]),
     ("cadaclysm_blacksmith_extrude_open", _SOLID, [_PROFILE, _D, c_double]),
     ("cadaclysm_blacksmith_extrude_tapered", _SOLID, [_PROFILE, _D, c_double, c_double]),
@@ -480,8 +500,15 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_mesh64", _Mesh64, [_SOLID, c_double]),
     ("cadaclysm_blacksmith_mesh_face_triangles", _FaceTriangles, [_SOLID, c_double]),
     ("cadaclysm_blacksmith_edge_polylines", _Polylines, [_SOLID, c_double]),
+    ("cadaclysm_blacksmith_tessellation", _TESSELLATION, [_SOLID, c_double]),
+    ("cadaclysm_blacksmith_tessellation_free", None, [_TESSELLATION]),
+    ("cadaclysm_blacksmith_tessellation_mesh", _Mesh, [_TESSELLATION]),
+    ("cadaclysm_blacksmith_tessellation_mesh64", _Mesh64, [_TESSELLATION]),
+    ("cadaclysm_blacksmith_tessellation_face_triangles", _FaceTriangles, [_TESSELLATION]),
+    ("cadaclysm_blacksmith_tessellation_edge_polylines", _Polylines, [_TESSELLATION]),
     ("cadaclysm_blacksmith_bounds", c_bool, [_SOLID, c_double, _D, _D]),
     ("cadaclysm_blacksmith_bounds64", c_bool, [_SOLID, c_double, _D, _D]),
+    ("cadaclysm_blacksmith_box", c_bool, [_SOLID, _D, _D]),
     ("cadaclysm_blacksmith_leaked_edges", c_uint32, [_SOLID, c_double]),
     ("cadaclysm_blacksmith_unpaired_edges", c_uint32, [_SOLID, c_double]),
     ("cadaclysm_blacksmith_manifold", c_bool, [_SOLID, _U]),
@@ -519,8 +546,60 @@ _ENTRY_POINTS = [
     ("cadaclysm_blacksmith_fem_mesh_vertex", c_bool, [_FEM, c_uint32, POINTER(_FemVertex)]),
     ("cadaclysm_blacksmith_fem_mesh_open_edge", c_bool, [_FEM, c_uint32, _U, _U, _U]),
     ("cadaclysm_blacksmith_fem_mesh_folded_edge", c_bool, [_FEM, c_uint32, _U, _U, _U]),
+    ("cadaclysm_blacksmith_fem_mesh_crossing_count", c_uint32, [_FEM]),
+    ("cadaclysm_blacksmith_fem_mesh_crossing", c_bool, [_FEM, c_uint32, _U, _U]),
     ("cadaclysm_blacksmith_fem_mesh_msh_text", c_void_p, [_FEM]),
     ("cadaclysm_blacksmith_fem_mesh_save_msh", c_bool, [_FEM, c_char_p]),
+    # machining: the kernel's lines-and-arcs verbs, then Tool, Stock, Job and the
+    # program list a job writes
+    ("cadaclysm_blacksmith_profile_to_arcs", _PROFILE, [_PROFILE, c_double]),
+    ("cadaclysm_blacksmith_profile_offset", _PROFILE_LIST, [_PROFILE, c_double, c_double]),
+    ("cadaclysm_blacksmith_solid_section", _PROFILE_LIST, [_SOLID, c_double, c_double]),
+    ("cadaclysm_blacksmith_tool_flat", _TOOL, [c_uint32, c_double, c_double, c_double, c_double, c_double]),
+    ("cadaclysm_blacksmith_tool_ball", _TOOL, [c_uint32, c_double, c_double, c_double, c_double, c_double]),
+    ("cadaclysm_blacksmith_tool_drill", _TOOL, [c_uint32, c_double, c_double, c_double, c_double]),
+    ("cadaclysm_blacksmith_tool_with_ramp_angle", _TOOL, [_TOOL, c_double]),
+    ("cadaclysm_blacksmith_tool_free", None, [_TOOL]),
+    ("cadaclysm_blacksmith_stock_box", _STOCK, [c_double, c_double, c_double, c_double, c_double, c_double]),
+    ("cadaclysm_blacksmith_stock_around", _STOCK, [_SOLID, c_double]),
+    ("cadaclysm_blacksmith_stock_free", None, [_STOCK]),
+    ("cadaclysm_blacksmith_job_new", _JOB, [_STOCK, c_double]),
+    ("cadaclysm_blacksmith_job_set_clearance", c_bool, [_JOB, c_double]),
+    ("cadaclysm_blacksmith_job_set_tolerance", c_bool, [_JOB, c_double]),
+    ("cadaclysm_blacksmith_job_set_spindle_dwell", c_bool, [_JOB, c_double]),
+    ("cadaclysm_blacksmith_job_set_resolution", c_bool, [_JOB, c_double]),
+    ("cadaclysm_blacksmith_job_set_name", c_bool, [_JOB, c_char_p]),
+    ("cadaclysm_blacksmith_job_face", c_bool, [_JOB, _TOOL, c_double, c_double, c_double]),
+    ("cadaclysm_blacksmith_job_contour", c_bool, [_JOB, _TOOL, _PROFILE, c_double, c_double, c_uint32, c_double, c_bool, c_bool]),
+    ("cadaclysm_blacksmith_job_pocket", c_bool, [_JOB, _TOOL, _PROFILE, c_double, c_double, c_double, c_double]),
+    ("cadaclysm_blacksmith_job_drill", c_bool, [_JOB, _TOOL, _D, c_size_t, c_double, c_double, c_double]),
+    ("cadaclysm_blacksmith_job_gcode", _PROGRAMS, [_JOB]),
+    ("cadaclysm_blacksmith_job_camotics", _PROGRAMS, [_JOB, c_char_p]),
+    ("cadaclysm_blacksmith_job_free", None, [_JOB]),
+    ("cadaclysm_blacksmith_programs_count", c_uint32, [_PROGRAMS]),
+    ("cadaclysm_blacksmith_programs_tool", c_uint32, [_PROGRAMS, c_uint32]),
+    ("cadaclysm_blacksmith_programs_name", c_char_p, [_PROGRAMS, c_uint32]),
+    ("cadaclysm_blacksmith_programs_text", c_char_p, [_PROGRAMS, c_uint32]),
+    ("cadaclysm_blacksmith_programs_free", None, [_PROGRAMS]),
+    # automatic CAM: recognise a part and append what makes it, then read back what
+    # was left uncut (the report) and every operation a job holds so far
+    ("cadaclysm_blacksmith_job_machine", _REPORT, [_JOB, _SOLID, _TOOL, POINTER(c_void_p), c_size_t, c_double, c_double, c_double, c_double]),
+    ("cadaclysm_blacksmith_report_count", c_uint32, [_REPORT]),
+    ("cadaclysm_blacksmith_report_kind", c_char_p, [_REPORT, c_uint32]),
+    ("cadaclysm_blacksmith_report_at", c_bool, [_REPORT, c_uint32, _D]),
+    ("cadaclysm_blacksmith_report_size", c_double, [_REPORT, c_uint32]),
+    ("cadaclysm_blacksmith_report_reason", c_char_p, [_REPORT, c_uint32]),
+    ("cadaclysm_blacksmith_report_region", _PROFILE_LIST, [_REPORT, c_uint32]),
+    ("cadaclysm_blacksmith_report_text", c_char_p, [_REPORT]),
+    ("cadaclysm_blacksmith_report_free", None, [_REPORT]),
+    ("cadaclysm_blacksmith_job_operations", _OPERATIONS, [_JOB]),
+    ("cadaclysm_blacksmith_operations_count", c_uint32, [_OPERATIONS]),
+    ("cadaclysm_blacksmith_operations_kind", c_char_p, [_OPERATIONS, c_uint32]),
+    ("cadaclysm_blacksmith_operations_tool", c_uint32, [_OPERATIONS, c_uint32]),
+    ("cadaclysm_blacksmith_operations_param_count", c_uint32, [_OPERATIONS, c_uint32]),
+    ("cadaclysm_blacksmith_operations_param_name", c_char_p, [_OPERATIONS, c_uint32, c_uint32]),
+    ("cadaclysm_blacksmith_operations_param_value", c_double, [_OPERATIONS, c_uint32, c_uint32]),
+    ("cadaclysm_blacksmith_operations_free", None, [_OPERATIONS]),
 ]
 
 # Under Pyodide (the website's notebook) there is no shared library to load: the
@@ -551,17 +630,22 @@ class _WasmLibrary:
     # for everything else
     _BOOLS = {"path_line_to", "path_arc_to", "path_bezier_to", "path_nurbs_to", "path_conic_to",
               "path_parabola_by_vertex", "path_parabola_by_focus", "sweep_path_line_to",
-              "sweep_path_arc", "slant_of_plane", "face_frame", "face_ref", "frame_midplane", "frame_through", "bounds", "bounds64", "edge", "colour", "profile_colour", "edge_colour", "manifold", "license_set", "assembly_link", "assembly_joint",
+              "sweep_path_arc", "slant_of_plane", "face_frame", "face_ref", "frame_midplane", "frame_through", "bounds", "bounds64", "box", "edge", "colour", "profile_colour", "edge_colour", "manifold", "license_set", "assembly_link", "assembly_joint",
               "hit", "edge_curve", "intersection_chain", "intersection_curve", "intersection_overlap", "hits_piece",
               "fem_mesh_view", "fem_mesh_edge", "fem_mesh_vertex", "fem_mesh_open_edge", "fem_mesh_folded_edge",
+              "fem_mesh_crossing",
               # its wasm export always throws ("the wasm writes no file"); `FemMesh.save_msh`
               # never reaches it under Pyodide, writing `msh_text()` through Pyodide's own
               # filesystem as `write_sat`/`write_brep`/`svg` do, so this is the shape a direct
               # `_lib()` call would still get right rather than a path the module takes
-              "fem_mesh_save_msh"}
+              "fem_mesh_save_msh",
+              # a job's settings and operations change it in place, true or a refusal
+              "job_set_clearance", "job_set_tolerance", "job_set_spindle_dwell", "job_set_resolution",
+              "job_set_name", "job_face", "job_contour", "job_pocket", "job_drill"}
     _FAILS = {"select_face": NONE, "leaked_edges": NONE, "unpaired_edges": NONE,
               "mesh": _Mesh(), "mesh64": _Mesh64(), "mesh_face_triangles": _FaceTriangles(), "edge_polylines": _Polylines(),
-              "profile_polylines": _Polylines(), "edge_polyline_colours": _Colours()}
+              "profile_polylines": _Polylines(), "edge_polyline_colours": _Colours(),
+              "programs_count": NONE, "programs_tool": NONE}
     # results that C writes into an out-array of doubles at this position, and the
     # wasm returns as a typed array (`bounds` fills two, `edge` a record: see `_back`)
     _OUT = {"slant_of_plane": 3, "face_frame": 2, "face_ref": 2, "frame_midplane": 2, "frame_through": 3}
@@ -570,20 +654,38 @@ class _WasmLibrary:
     # the out-arguments above
     _DROP = {"profile_polygon": (1,), "path_nurbs_to": (2, 5), "join": (4,), "cut": (4,), "common": (4,),
              "split_sheet": (4,), "trim": (5,), "drop_faces": (2,), "profile_round": (3,), "profile_spline": (1,), "profile_chain": (1,), "profile_from_loops": (1,), "profile_piece_count": (2,), "profile_piece": (2,), "profile_trim_count": (2,), "profile_trim_chain": (2,), "loft_through": (2,), "loft_through_open": (2,), "fillet": (2, 6), "chamfer": (2,), "shell": (3, 6), "thicken": (4,), "push_pull": (5,), "push_pull_faces": (2, 6), "split": (4,), "split_by_plane": (4,), "step": (1,), "step_assembly": (2, 5), "assembly_link": (3,), "sat_text": (1,), "brep_text": (1,), "profile_text": (4,),
-             "slant_of_plane": (3,), "face_frame": (2,), "face_ref": (2,), "bounds": (2, 3), "bounds64": (2, 3), "edge": (2,), "colour": (2,), "profile_colour": (1,), "edges_coloured": (2,), "edge_colour": (2,), "manifold": (1,), "hit": (2,), "edge_curve": (2,),
+             "slant_of_plane": (3,), "face_frame": (2,), "face_ref": (2,), "bounds": (2, 3), "bounds64": (2, 3), "box": (1, 2), "edge": (2,), "colour": (2,), "profile_colour": (1,), "edges_coloured": (2,), "edge_colour": (2,), "manifold": (1,), "hit": (2,), "edge_curve": (2,),
              "intersect": (4,), "intersection_chain": (2,), "intersection_curve": (2,), "intersection_overlap": (2,), "svg_text": (1,), "drawing_svg_text": (1, 3),
              "solid_profile_hits": (5,), "hits_piece": (2, 3, 4),
              # `fem_mesh`'s index counts the tuple `call` rewrites below, not the C call's:
              # the options struct becomes two scalars, so `user` has moved from 4 to 5.
              "fem_mesh": (5,), "fem_mesh_view": (1,), "fem_mesh_edge": (2,), "fem_mesh_vertex": (2,),
-             "fem_mesh_open_edge": (2, 3, 4), "fem_mesh_folded_edge": (2, 3, 4)}
+             "fem_mesh_open_edge": (2, 3, 4), "fem_mesh_folded_edge": (2, 3, 4), "fem_mesh_crossing": (2, 3),
+             # the point count: the wasm's `xy` is a Float64Array of x, y pairs
+             "job_drill": (3,),
+             # the drill count: the wasm's `drills` is an array of tool handles carrying
+             # its own length (job_machine has no wasm export yet -- plan B task 4 --
+             # so this is never exercised until then, only kept honest with job_drill's
+             # own precedent)
+             "job_machine": (4,)}
     # strings the C side returns as `const char*`, and the module decodes
     # `solid_name`'s wasm export returns an empty string for an unnamed solid
     # (see its own doc comment in crates/cadaclysm-wasm/src/blacksmith.rs), and
     # `str(result).encode()` below turns that into `b""` -- falsy exactly like
     # the `None` a null `const char*` decodes to on the native backend, so
     # every call site's `if raw` reads the same on both.
-    _TEXTS = {"version", "build_date", "face_kind", "license_info", "brep_layout_id", "assembly_name", "solid_name"}
+    _TEXTS = {"version", "build_date", "face_kind", "license_info", "brep_layout_id", "assembly_name", "solid_name",
+              "programs_name", "programs_text"}
+    # the automatic-CAM entry points (plan B): no wasm export exists for any of
+    # them yet (job_machine has no wasm export -- see `_DROP["job_machine"]`'s
+    # own comment -- and the rest exist only to read back what it returns), so
+    # `__getattr__` below refuses them by name instead of the generic missing-
+    # export message, which would otherwise send someone chasing a rebuild that
+    # cannot fix this.
+    _PENDING = {"job_machine", "report_count", "report_kind", "report_at", "report_size", "report_reason",
+                "report_region", "report_text", "report_free", "job_operations", "operations_count",
+                "operations_kind", "operations_tool", "operations_param_count", "operations_param_name",
+                "operations_param_value", "operations_free"}
 
     def __init__(self):
         import js
@@ -614,6 +716,8 @@ class _WasmLibrary:
         short = name[len(prefix):] if name.startswith(prefix) else name
         if name == short or name.startswith("_"):
             raise AttributeError(name)
+        if short in self._PENDING:
+            raise BuildError(f"{short} is not in the web build yet") from None
         try:
             function = getattr(self._js, name)
         except AttributeError:
@@ -825,6 +929,10 @@ class _WasmLibrary:
             for at, name in ((2, "a"), (3, "b"), (4, "brep_edge")):
                 args[at]._obj.value = int(getattr(result, name))
             return True
+        if short == "fem_mesh_crossing":   # a crossing, into two `c_uint32`s
+            args[2]._obj.value = int(result.a)
+            args[3]._obj.value = int(result.b)
+            return True
         if short in ("colour", "profile_colour", "edge_colour"):   # three doubles, or null where there is no colour: C's `false`
             if result is None:
                 return False
@@ -839,6 +947,10 @@ class _WasmLibrary:
         if short in ("bounds", "bounds64"):
             values = [float(v) for v in result]
             args[2][0:3], args[3][0:3] = values[0:3], values[3:6]
+            return True
+        if short == "box":
+            values = [float(v) for v in result]
+            args[1][0:3], args[2][0:3] = values[0:3], values[3:6]
             return True
         if short in self._OUT:
             out = args[self._OUT[short]]
@@ -913,6 +1025,32 @@ def _text(raw) -> str:
 def _fail(what: str):
     """Raise the library's own reason, or `what` if it left none."""
     raise BuildError(_text(_lib().cadaclysm_blacksmith_last_error()) or what)
+
+
+def _fail_tessellation(what: str):
+    """`_fail` for a call routed through `cadaclysm_blacksmith_tessellation`: that entry
+    point fails with a leading "tessellation:" naming itself, not the caller, so this
+    rewrites that prefix back to `what` -- the method name `mesh`/`mesh64`/
+    `mesh_face_triangles`/`edge_polylines` reported before each held a tessellation of its
+    own -- leaving the rest of the library's message untouched."""
+    reason = _text(_lib().cadaclysm_blacksmith_last_error())
+    prefix = "tessellation:"
+    if reason.startswith(prefix):
+        reason = what + ":" + reason[len(prefix):]
+    raise BuildError(reason or what)
+
+
+# A NUL truncates silently going through ctypes (a native call never sees what
+# follows it), so the kernel's own control-character refusal for a job name
+# never fires natively -- only under Pyodide, where the wasm kernel reads the
+# whole string. Catch it here instead, in the kernel's own words, so both paths
+# refuse alike.
+_NUL_NAME_ERROR = "job: a name must be non-empty and without brackets, slashes, quotes, control characters, or : * ? < > |"
+
+
+def _reject_nul(s: str) -> None:
+    if "\0" in s:
+        raise BuildError(_NUL_NAME_ERROR)
 
 
 def _packed(colour) -> int:
@@ -1001,6 +1139,21 @@ def _indices(value, call, param, edges=False):
     return out
 
 
+def _names(value, call, param):
+    """A list argument of names: `value` must be a list -- any iterable but a string -- and
+    each item a `str`. Refused here, named, before the kernel is asked: one name is
+    `[name]`, never read a character at a time
+    (docs/superpowers/specs/2026-09-25-list-arguments-refused-clearly-design.md)."""
+    if isinstance(value, (str, bytes)) or not hasattr(value, "__iter__"):
+        raise TypeError(f"{call}: {param} must be a list of names, not {value!r}")
+    out = []
+    for i, item in enumerate(value):
+        if not isinstance(item, str):
+            raise TypeError(f"{call}: {param}[{i}] is not a name: {item!r}")
+        out.append(item)
+    return out
+
+
 def _checked(handle, what: str):
     if not handle:
         _fail(what)
@@ -1018,6 +1171,117 @@ def _profile_list(handle, what: str) -> "list[Profile]":
         return [Profile(_checked(lib.cadaclysm_blacksmith_profile_list_get(handle, i), "profile_list_get")) for i in range(n)]
     finally:
         lib.cadaclysm_blacksmith_profile_list_free(handle)
+
+
+def _ok(done, what: str) -> None:
+    """A bool entry point's result: raise the library's reason where it is false."""
+    if not done:
+        _fail(what)
+
+
+def _programs(handle, what: str) -> "list[Program]":
+    """The files of a program list the library handed back (null: raise), copied
+    out as `Program`s -- the list's strings live only as long as it does -- and
+    the list freed."""
+    if not handle:
+        _fail(what)
+    lib = _lib()
+    try:
+        n = lib.cadaclysm_blacksmith_programs_count(handle)
+        if n == NONE:
+            _fail("programs_count")
+        out = []
+        for i in range(n):
+            tool = lib.cadaclysm_blacksmith_programs_tool(handle, i)
+            name = lib.cadaclysm_blacksmith_programs_name(handle, i)
+            text = lib.cadaclysm_blacksmith_programs_text(handle, i)
+            if tool == NONE or name is None or text is None:
+                _fail("programs")
+            out.append(Program(tool, name.decode("utf-8"), text.decode("utf-8")))
+        return out
+    finally:
+        lib.cadaclysm_blacksmith_programs_free(handle)
+
+
+def _report(handle, what: str) -> "Report":
+    """A report the library handed back (null: raise), read eagerly into `ReportItem`s
+    -- each item's region copied out through `_profile_list` -- and the report freed:
+    no handle from this call outlives it."""
+    if not handle:
+        _fail(what)
+    lib = _lib()
+    try:
+        n = lib.cadaclysm_blacksmith_report_count(handle)
+        if n == NONE:
+            _fail("report_count")
+        items = []
+        for i in range(n):
+            kind = lib.cadaclysm_blacksmith_report_kind(handle, i)
+            if kind is None:
+                _fail("report_kind")
+            out = (c_double * 3)()
+            if not lib.cadaclysm_blacksmith_report_at(handle, i, out):
+                _fail("report_at")
+            size = lib.cadaclysm_blacksmith_report_size(handle, i)
+            reason = lib.cadaclysm_blacksmith_report_reason(handle, i)
+            if reason is None:
+                _fail("report_reason")
+            region = _profile_list(lib.cadaclysm_blacksmith_report_region(handle, i), "report_region")
+            items.append(ReportItem(kind.decode("utf-8"), (out[0], out[1], out[2]), size, reason.decode("utf-8"), region))
+        text = lib.cadaclysm_blacksmith_report_text(handle)
+        if text is None:
+            _fail("report_text")
+        return Report(items, text.decode("utf-8"))
+    finally:
+        lib.cadaclysm_blacksmith_report_free(handle)
+
+
+def _operation_param(name: str, value: float):
+    """One `operations_param_value`, typed as the spec picks by its name: `side`
+    0/1/2 to "outside"/"inside"/"on", `climb`/`open` to bool, `points` to int, a
+    `NaN` `peck` to `None`; every other value stays a float."""
+    if name == "side":
+        return {0.0: "outside", 1.0: "inside", 2.0: "on"}.get(value, value)
+    if name in ("climb", "open"):
+        return bool(value)
+    if name == "points":
+        return int(value)
+    if name == "peck":
+        return None if math.isnan(value) else value
+    return value
+
+
+def _operations(handle, what: str) -> "list[Operation]":
+    """The operations of a list the library handed back (null: raise), read eagerly
+    into `Operation`s, and the list freed: no handle from this call outlives it."""
+    if not handle:
+        _fail(what)
+    lib = _lib()
+    try:
+        n = lib.cadaclysm_blacksmith_operations_count(handle)
+        if n == NONE:
+            _fail("operations_count")
+        out = []
+        for i in range(n):
+            kind = lib.cadaclysm_blacksmith_operations_kind(handle, i)
+            tool = lib.cadaclysm_blacksmith_operations_tool(handle, i)
+            if kind is None or tool == NONE:
+                _fail("operations")
+            param_count = lib.cadaclysm_blacksmith_operations_param_count(handle, i)
+            if param_count == NONE:
+                _fail("operations_param_count")
+            params = {}
+            for k in range(param_count):
+                name = lib.cadaclysm_blacksmith_operations_param_name(handle, i, k)
+                if name is None:
+                    _fail("operations_param_name")
+                name = name.decode("utf-8")
+                value = lib.cadaclysm_blacksmith_operations_param_value(handle, i, k)
+                params[name] = _operation_param(name, value)
+            out.append(Operation(kind.decode("utf-8"), tool, params))
+        return out
+    finally:
+        lib.cadaclysm_blacksmith_operations_free(handle)
 
 
 def _doubles(values, count: int, what: str):
@@ -1092,11 +1356,12 @@ class _Borrowed:
     """One block of borrowed memory, exposed through the array interface so the numpy
     view is read-only and holds its owner as its `.base`.
 
-    **The owner is whatever the memory belongs to.** A mesh, its per-face counts and
-    its edge polylines borrow from the solid's own cache, so the owner is the `Solid`
-    and closing it (or meshing again at another tolerance) is what invalidates them;
-    a `FemMesh`'s arrays borrow from that handle, so the owner is the `FemMesh` and
-    its `free()` is."""
+    **The owner is whatever the memory belongs to.** A `FemMesh`'s arrays borrow from
+    that handle, so the owner is the `FemMesh` and its `free()` is what invalidates
+    them; a solid's mesh arrays borrow from a held `_Tessellation`, so the owner is
+    that handle, freed only when the last view of it is. A profile's tessellation
+    cache is never lent this way -- `_copied` reads it through one of these with no
+    owner and copies it out at once."""
 
     __slots__ = ("_owner", "__array_interface__")
 
@@ -1115,8 +1380,8 @@ def _view(owner, pointer, shape, dtype):
     if _WASM:
         from pyodide.ffi import JsProxy
         # A JS typed array lives in the JS heap, which has no address this side, so it
-        # is copied out -- the view is read-only and has a `.base` as the borrowed one
-        # does, but never invalidates. A **ctypes** pointer under Pyodide is addressable
+        # is copied out -- read-only, with a `.base` as a borrowed view has, but it
+        # never invalidates. A **ctypes** pointer under Pyodide is addressable
         # exactly as on the desktop and falls through to the borrowed path:
         # `fem_mesh_view`'s own `_back` branch converts its typed arrays into ctypes
         # arrays kept on the out-struct, so the FEM arrays come through here the same
@@ -1135,6 +1400,21 @@ def _view(owner, pointer, shape, dtype):
     if not pointer or 0 in shape:
         return numpy.zeros(shape, dtype=dtype)
     return numpy.asarray(_Borrowed(owner, pointer, shape, numpy.dtype(dtype).str))
+
+
+def _copied(pointer, shape, dtype):
+    """`_view`, copied out: for a profile's tessellation cache -- a profile keeps every
+    tolerance it has been asked at, so nothing about it is ever replaced, but a view into
+    it would dangle once the profile itself closes (`Profile.close()` in the other
+    wrappers; here, once collected), and there is no held handle of the kind a solid's
+    tessellation gets to keep it open -- so `Profile.polylines` gets memory of its own --
+    and for a solid's mesh arrays under Pyodide, where a JS typed array has no address
+    this side to view. Read-only, as a borrowed view and the Pyodide copy are."""
+    array = _view(None, pointer, shape, dtype)
+    if isinstance(array.base, _Borrowed):
+        array = array.copy()
+        array.flags.writeable = False
+    return array
 
 
 def license(text_or_path) -> None:
@@ -1380,6 +1660,24 @@ class Profile:
     def with_hole(self, hole: "Profile") -> "Profile":
         return Profile(_lib().cadaclysm_blacksmith_profile_with_hole(self._handle, hole._handle))
 
+    def to_arcs(self, tolerance=0.01) -> "Profile":
+        """This profile with every free-form side (a Bezier, a conic, a NURBS) replaced
+        by lines and arcs within `tolerance` of it -- what a G-code writer can say.
+        Lines and arcs pass through as they are, every loop closes on itself exactly,
+        holes are converted the same way. Raises `BuildError` for a `tolerance` not
+        positive and finite, or a spline that does not evaluate."""
+        return Profile(_lib().cadaclysm_blacksmith_profile_to_arcs(self._handle, tolerance))
+
+    def offset(self, distance, tolerance=0.01) -> "list[Profile]":
+        """This profile grown by `distance` (shrunk where it is negative), as zero or
+        more profiles, all lines and arcs: outward corners rounded by `|distance|`,
+        holes moving against the boundary (a hole shrinks as the profile grows).
+        Free-form sides are fitted to `tolerance` first (`to_arcs`). A shrink that
+        eats the whole profile is an empty list. Raises `BuildError` for a `distance`
+        not finite, a `tolerance` not positive and finite, a loop with no sides, or
+        loops that cross or touch."""
+        return _profile_list(_lib().cadaclysm_blacksmith_profile_offset(self._handle, distance, tolerance), "profile_offset")
+
     def hits(self, other, tolerance=1e-6) -> "list[Hit]":
         """Where this profile's curves cross, touch or run along `other`'s, both read in
         one plane, as :class:`Hit` values ordered along this profile. Points closer than
@@ -1512,15 +1810,15 @@ class Profile:
         return [Profile(lib.cadaclysm_blacksmith_profile_trim_chain(self._handle, handles, len(cutters), int(piece), k, tolerance)) for k in range(n)]
 
     def polylines(self, tolerance=0.05) -> "list[numpy.ndarray]":
-        """The outline, then each hole, as float32 (k,3) read-only views at z = 0,
+        """The outline, then each hole, as float32 (k,3) read-only arrays at z = 0,
         within `tolerance` of the profile's arcs and splines -- what a viewer draws it
         with. A closed loop repeats its first point at the end; an open chain (a profile
-        ended open) stays open, the segments it has. Valid until the profile is freed or
-        asked again at another tolerance."""
+        ended open) stays open, the segments it has. Copies, valid for good (see the
+        module docs)."""
         p = _lib().cadaclysm_blacksmith_profile_polylines(self._handle, tolerance)
         if not p.offsets:
             _fail("profile_polylines")
-        points = _view(self, p.points, (p.point_count, 3), "f4")
+        points = _copied(p.points, (p.point_count, 3), "f4")
         offsets = [p.offsets[i] for i in range(p.polyline_count + 1)]
         return [points[a:b] for a, b in zip(offsets, offsets[1:])]
 
@@ -1847,6 +2145,12 @@ class Solid:
     @staticmethod
     def wedge(x, y, z, top_x) -> "Solid":
         return Solid(_lib().cadaclysm_blacksmith_wedge(x, y, z, top_x))
+
+    @staticmethod
+    def pyramid(sides, r, h) -> "Solid":
+        """A right pyramid of ``sides`` sides (at least 3): its base the regular polygon
+        of circumradius ``r`` on z=0, its first corner on +x, its tip at (0, 0, ``h``)."""
+        return Solid(_lib().cadaclysm_blacksmith_pyramid(max(0, int(sides)), r, h))
 
     @staticmethod
     def extrude(profile: Profile, frame, height) -> "Solid":
@@ -2233,6 +2537,16 @@ class Solid:
         finally:
             lib.cadaclysm_blacksmith_intersection_free(h)
 
+    def section(self, z, tolerance=0.05) -> "list[Profile]":
+        """This solid cut by the plane `Z = z`: its closed outlines there, in XY,
+        nested into profiles with holes (boundaries counter-clockwise, holes
+        clockwise), a line or a circle crossing kept exact and any other curve as
+        lines within `tolerance`. A plane that misses the solid is an empty list.
+        Raises `BuildError` for a `z` not finite, a `tolerance` not positive and
+        finite, a face lying in the plane (section a little above or below it), or
+        a crossing that does not close."""
+        return _profile_list(_lib().cadaclysm_blacksmith_solid_section(self._h(), z, tolerance), "solid_section")
+
     def hits(self, profile: "Profile", frame, tolerance=0.05, progress=None) -> "SolidHits":
         """Where `profile`, placed on `frame`, pierces this solid's faces, and the
         pieces its loops cut into, as a :class:`SolidHits`. Neither is changed.
@@ -2298,9 +2612,16 @@ class Solid:
 
     @property
     def bounds(self) -> "tuple[tuple[float, float, float], tuple[float, float, float]]":
-        """`bounds_at(0.05)` -- the bounds of the tessellation at tolerance
-        0.05. Use `bounds_at` for a different tolerance."""
-        return self.bounds_at(0.05)
+        """The solid's axis-aligned box, `((min_x, min_y, min_z), (max_x, max_y,
+        max_z))`, at the same cost whatever its size: its mesh at a thousandth of
+        its own extent, in float64, so the box is inside the exact one and short
+        of it by at most that. Worked out once per solid, apart from the
+        tessellation `mesh` caches -- asking it never invalidates a mesh's
+        arrays. `bounds_at` is the box of the mesh at a tolerance you name."""
+        lo, hi = (c_double * 3)(), (c_double * 3)()
+        if not _lib().cadaclysm_blacksmith_box(self._h(), lo, hi):
+            _fail("box")
+        return tuple(lo), tuple(hi)
 
     def bounds_at(self, tolerance) -> "tuple[tuple[float, float, float], tuple[float, float, float]]":
         """The solid's axis-aligned bounds, over the positions of its cached
@@ -2360,46 +2681,77 @@ class Solid:
 
     # -- out
     def mesh(self, tolerance=0.05) -> "tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]":
-        """`(positions, normals, indices)` as read-only numpy views (float32
-        (n,3), float32 (n,3), uint32 (m,)) into the solid's cache at
-        `tolerance`. See the module docs for what invalidates them."""
-        m = _lib().cadaclysm_blacksmith_mesh(self._h(), tolerance)
-        if not m.positions:
-            _fail("mesh")
+        """`(positions, normals, indices)` as read-only numpy arrays (float32
+        (n,3), float32 (n,3), uint32 (m,)): read-only numpy views owned by a held
+        tessellation of the solid at `tolerance`: nothing invalidates them -- not a
+        re-mesh at another tolerance, not the solid's `close()` (copies under
+        Pyodide) -- see the module docs."""
+        if _WASM:
+            m = _lib().cadaclysm_blacksmith_mesh(self._h(), tolerance)
+            if not m.positions:
+                _fail("mesh")
+            n = m.vertex_count
+            return (_copied(m.positions, (n, 3), "f4"),
+                    _copied(m.normals, (n, 3), "f4"),
+                    _copied(m.indices, (m.index_count,), "u4"))
+        held = _Tessellation(self, tolerance, "mesh")
+        m = _lib().cadaclysm_blacksmith_tessellation_mesh(held._handle_)
         n = m.vertex_count
-        return (_view(self, m.positions, (n, 3), "f4"),
-                _view(self, m.normals, (n, 3), "f4"),
-                _view(self, m.indices, (m.index_count,), "u4"))
+        return (_view(held, m.positions, (n, 3), "f4"), _view(held, m.normals, (n, 3), "f4"),
+                _view(held, m.indices, (m.index_count,), "u4"))
 
     def mesh64(self, tolerance=0.05) -> "tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]":
-        """`mesh` in float64: the same tessellation (the same indices), positions and normals
-        unnarrowed. The same cache and the same invalidation."""
-        m = _lib().cadaclysm_blacksmith_mesh64(self._h(), tolerance)
-        if not m.positions:
-            _fail("mesh64")
+        """`mesh` in float64: the same tessellation (the same indices), positions and
+        normals unnarrowed: read-only numpy views owned by a held tessellation of the
+        solid at `tolerance`: nothing invalidates them -- not a re-mesh at another
+        tolerance, not the solid's `close()` (copies under Pyodide)."""
+        if _WASM:
+            m = _lib().cadaclysm_blacksmith_mesh64(self._h(), tolerance)
+            if not m.positions:
+                _fail("mesh64")
+            n = m.vertex_count
+            return (_copied(m.positions, (n, 3), "f8"),
+                    _copied(m.normals, (n, 3), "f8"),
+                    _copied(m.indices, (m.index_count,), "u4"))
+        held = _Tessellation(self, tolerance, "mesh64")
+        m = _lib().cadaclysm_blacksmith_tessellation_mesh64(held._handle_)
         n = m.vertex_count
-        return (_view(self, m.positions, (n, 3), "f8"),
-                _view(self, m.normals, (n, 3), "f8"),
-                _view(self, m.indices, (m.index_count,), "u4"))
+        return (_view(held, m.positions, (n, 3), "f8"), _view(held, m.normals, (n, 3), "f8"),
+                _view(held, m.indices, (m.index_count,), "u4"))
 
     def face_triangles(self, tolerance=0.05) -> "numpy.ndarray":
         """How many triangles each face meshed to at `tolerance`, a read-only
-        uint32 view with one count per face in face order: the triangles of
+        uint32 array with one count per face in face order: the triangles of
         `mesh(tolerance)` run face by face, so face `f`'s are the `counts[f]`
         after the first `counts[:f].sum()`. The counts sum to the mesh's
-        triangle count; a face that meshed to nothing counts zero. Same cache
-        and lifetime as `mesh`."""
-        t = _lib().cadaclysm_blacksmith_mesh_face_triangles(self._h(), tolerance)
-        if not t.counts:
-            _fail("mesh_face_triangles")
-        return _view(self, t.counts, (t.face_count,), "u4")
+        triangle count; a face that meshed to nothing counts zero. Read-only numpy
+        views owned by a held tessellation of the solid at `tolerance`: nothing
+        invalidates them -- not a re-mesh at another tolerance, not the solid's
+        `close()` (copies under Pyodide)."""
+        if _WASM:
+            t = _lib().cadaclysm_blacksmith_mesh_face_triangles(self._h(), tolerance)
+            if not t.counts:
+                _fail("mesh_face_triangles")
+            return _copied(t.counts, (t.face_count,), "u4")
+        held = _Tessellation(self, tolerance, "mesh_face_triangles")
+        t = _lib().cadaclysm_blacksmith_tessellation_face_triangles(held._handle_)
+        return _view(held, t.counts, (t.face_count,), "u4")
 
     def edge_polylines(self, tolerance=0.05) -> "list[numpy.ndarray]":
-        """The feature edges as a list of float32 (k,3) read-only views."""
-        p = _lib().cadaclysm_blacksmith_edge_polylines(self._h(), tolerance)
-        if not p.offsets:
-            _fail("edge_polylines")
-        points = _view(self, p.points, (p.point_count, 3), "f4")
+        """The feature edges as a list of float32 (k,3) read-only arrays: read-only
+        numpy views owned by a held tessellation of the solid at `tolerance`: nothing
+        invalidates them -- not a re-mesh at another tolerance, not the solid's
+        `close()` (copies under Pyodide)."""
+        if _WASM:
+            p = _lib().cadaclysm_blacksmith_edge_polylines(self._h(), tolerance)
+            if not p.offsets:
+                _fail("edge_polylines")
+            points = _copied(p.points, (p.point_count, 3), "f4")
+            offsets = [p.offsets[i] for i in range(p.polyline_count + 1)]
+            return [points[a:b] for a, b in zip(offsets, offsets[1:])]
+        held = _Tessellation(self, tolerance, "edge_polylines")
+        p = _lib().cadaclysm_blacksmith_tessellation_edge_polylines(held._handle_)
+        points = _view(held, p.points, (p.point_count, 3), "f4")
         offsets = [p.offsets[i] for i in range(p.polyline_count + 1)]
         return [points[a:b] for a, b in zip(offsets, offsets[1:])]
 
@@ -2637,9 +2989,7 @@ class Solid:
     def edge_polyline_colours(self, tolerance=0.05) -> "list[tuple[float, float, float] | None]":
         """A colour per polyline of `edge_polylines(tolerance)`, as drawn: (r, g, b),
         or None for a polyline on no coloured edge; an empty list where the solid has
-        no edge paint at all. Copied out -- but it fills the solid's cache at
-        `tolerance` first, exactly as `edge_polylines` does, so a view taken at
-        another tolerance stops being valid."""
+        no edge paint at all. Copied out, as every solid array is."""
         c = _lib().cadaclysm_blacksmith_edge_polyline_colours(self._h(), tolerance)
         if not c.rgb:
             if _text(_lib().cadaclysm_blacksmith_last_error()):
@@ -2894,9 +3244,7 @@ class Assembly:
         """Declare a rigid link `name` over placements of this assembly, by their names
         (any iterable of str). Written as an AP242 kinematic link when the assembly is
         written; see spec 2026-09-25-blacksmith-mechanisms-design.md for the rules."""
-        if isinstance(placements, (str, bytes)):
-            raise TypeError("link: placements are a list of names, not one string")
-        names = [str(p) for p in placements]
+        names = _names(placements, "link", "placements")
         raw = (c_char_p * len(names))(*[n.encode("utf-8") for n in names])
         if not _lib().cadaclysm_blacksmith_assembly_link(self._h(), name.encode("utf-8"), raw, len(names)):
             _fail("assembly_link")
@@ -3301,6 +3649,26 @@ class FemVertex:
         return f"FemVertex(node={self.node}, point={self.point}, has_position={self.has_position})"
 
 
+class _Tessellation:
+    """One mesh of a solid, held: the owner of a mesh's numpy views. Its arrays belong to it,
+    not to the solid, so neither a re-mesh at another tolerance nor the solid's close frees
+    them; the handle goes when the last view does."""
+    __slots__ = ("_handle_", "__weakref__")
+
+    def __init__(self, solid, tolerance, what):
+        self._handle_ = _lib().cadaclysm_blacksmith_tessellation(solid._h(), tolerance)
+        if not self._handle_:
+            _fail_tessellation(what)
+
+    def __del__(self):
+        h, self._handle_ = getattr(self, "_handle_", None), None
+        if h and _library is not None:
+            try:
+                _library.cadaclysm_blacksmith_tessellation_free(h)
+            except Exception:
+                pass
+
+
 class FemMesh:
     """One solid meshed for a solver: nodes welded by bits, triangles wound outward,
     every node tagged with the lowest-dimension B-rep entity it lies on, and every
@@ -3309,11 +3677,11 @@ class FemMesh:
 
     A handle rather than a snapshot, as a `Solid` is, and its big arrays are
     **read-only numpy views into the library's own memory**, exactly as `Solid.mesh`'s
-    are and for the same reason: a solver mesh is megabytes, and copying it to hand it
-    over would cost that twice. Each array keeps *this object* alive through its
-    `.base` -- not the solid, which does not own it and whose `close()` does not free
-    it, and not the mesh cache, which meshing again at another tolerance replaces. What
-    still dangles is a view kept past an explicit `free()` or the end of a `with`
+    are: a solver mesh is megabytes, and copying it to hand it over would cost that
+    twice, and nothing but its own `free()` replaces this memory. Each array keeps
+    *this object* alive through its `.base` -- not the solid, which does not own it
+    and whose `close()` does not free it, and not the mesh cache, which meshing again
+    at another tolerance replaces. What still dangles is a view kept past an explicit `free()` or the end of a `with`
     block; call `.copy()` on anything that must outlive the handle. Under Pyodide the
     arrays are copies and never invalidate, as everywhere else in this module.
 
@@ -3476,6 +3844,26 @@ class FemMesh:
         return self._census(_lib().cadaclysm_blacksmith_fem_mesh_folded_edge,
                             self._live.folded_edge_count, "fem_mesh_folded_edge")
 
+    @property
+    def crossings(self) -> "list[tuple[int, int]]":
+        """Every pair of triangles that pass through each other, as `(a, b)` with `a < b`,
+        sorted: an edge of one through the other's interior. Their B-rep faces are
+        `triangle_face[a]` and `triangle_face[b]`.
+
+        **Computed for every solid, open or closed.** The census `watertight`,
+        `open_edges` and `folded_edges` report is topological and cannot see a surface
+        passing through itself; a mesh is ready for a volume mesher when it is
+        `watertight` **and** this is empty -- Gmsh refuses one that crosses. A copy."""
+        handle = self._h()
+        count = _lib().cadaclysm_blacksmith_fem_mesh_crossing_count(handle)
+        a, b = c_uint32(), c_uint32()
+        out = []
+        for i in range(count):
+            if not _lib().cadaclysm_blacksmith_fem_mesh_crossing(handle, i, ctypes.byref(a), ctypes.byref(b)):
+                _fail(f"fem_mesh_crossing {i}")
+            out.append((a.value, b.value))
+        return out
+
     def _census(self, call, count: int, what: str) -> "list[tuple[int, int, int]]":
         """One flattened census, row by row: the shape `open_edges` and `folded_edges`
         share, so the two cannot drift."""
@@ -3586,6 +3974,342 @@ class FemMesh:
         raw = self._raw
         return (f"FemMesh(nodes={raw.node_count}, triangles={raw.triangle_count}, "
                 f"watertight={bool(raw.watertight)})")
+
+
+# -- machining: 2.5D milling and drilling, written as Grbl 1.1 G-code
+
+
+class Tool:
+    """A cutter: Grbl tool `number` (1 to 255, the `T` word), `diameter` and
+    `flute_length` in mm, `feed` and `plunge` in mm/min, `rpm` its spindle speed,
+    ramping into its cuts at `ramp_angle` degrees. Immutable; a job keeps its own
+    copy."""
+
+    __slots__ = ("_handle",)
+
+    def __init__(self, handle):
+        self._handle = _checked(handle, "tool")
+
+    def __del__(self):
+        h, self._handle = getattr(self, "_handle", None), None
+        if h and _library is not None:
+            _library.cadaclysm_blacksmith_tool_free(h)
+
+    @staticmethod
+    def _ramped(handle, ramp_angle, what: str) -> "Tool":
+        tool = Tool(_checked(handle, what))
+        if ramp_angle == 3.0:   # the library's own default: no second handle
+            return tool
+        return Tool(_lib().cadaclysm_blacksmith_tool_with_ramp_angle(tool._handle, ramp_angle))
+
+    @staticmethod
+    def flat(number, diameter, flute_length, feed, plunge, rpm, ramp_angle=3.0) -> "Tool":
+        """A flat end mill. Raises `BuildError` for a `number` outside 1..255, a size,
+        feed or speed not positive and finite, or a `ramp_angle` outside (0, 90]."""
+        return Tool._ramped(_lib().cadaclysm_blacksmith_tool_flat(number, diameter, flute_length, feed, plunge, rpm),
+                            ramp_angle, "tool_flat")
+
+    @staticmethod
+    def ball(number, diameter, flute_length, feed, plunge, rpm, ramp_angle=3.0) -> "Tool":
+        """A ball end mill, as `flat` but its tip a half sphere of the diameter; in
+        2.5D it cuts where a flat does, `bottom` being the tip."""
+        return Tool._ramped(_lib().cadaclysm_blacksmith_tool_ball(number, diameter, flute_length, feed, plunge, rpm),
+                            ramp_angle, "tool_ball")
+
+    @staticmethod
+    def drill(number, diameter, flute_length, feed, rpm) -> "Tool":
+        """A drill, plunging at `feed`. A job takes it for `Job.drill` only."""
+        return Tool(_lib().cadaclysm_blacksmith_tool_drill(number, diameter, flute_length, feed, rpm))
+
+
+class Stock:
+    """The block of material a job cuts, an axis-aligned box. Immutable; a job
+    keeps its own copy."""
+
+    __slots__ = ("_handle",)
+
+    def __init__(self, handle):
+        self._handle = _checked(handle, "stock")
+
+    def __del__(self):
+        h, self._handle = getattr(self, "_handle", None), None
+        if h and _library is not None:
+            _library.cadaclysm_blacksmith_stock_free(h)
+
+    @staticmethod
+    def box(min, max) -> "Stock":  # noqa: A002 - the spec's own names
+        """The box from `min` (x, y, z) to `max`. Raises `BuildError` unless every
+        min is below its max and all six are finite."""
+        (x0, y0, z0), (x1, y1, z1) = min, max
+        return Stock(_lib().cadaclysm_blacksmith_stock_box(x0, y0, z0, x1, y1, z1))
+
+    @staticmethod
+    def around(solid: "Solid", margin=0.0) -> "Stock":
+        """`solid`'s bounds grown by `margin` in -X, +X, -Y, +Y and +Z; the bottom
+        stays at the solid's lowest Z. Raises `BuildError` for a `margin` negative
+        or not finite."""
+        return Stock(_lib().cadaclysm_blacksmith_stock_around(solid._h(), margin))
+
+
+class Program:
+    """One file a job wrote: a Grbl program (`tool` its `T` number, `name`
+    `<job name>-T<n>`, or `<job name>-<k>-T<n>` for a repeated tool) or, from
+    `Job.write_camotics`, a simulation copy or the CAMotics project (`tool` 0).
+    Read-only."""
+
+    __slots__ = ("tool", "name", "text")
+
+    def __init__(self, tool: int, name: str, text: str):
+        object.__setattr__(self, "tool", tool)
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "text", text)
+
+    def __setattr__(self, key, value):
+        raise AttributeError(f"Program.{key} is read-only")
+
+    def __delattr__(self, key):
+        raise AttributeError(f"Program.{key} is read-only")
+
+    def __repr__(self):
+        return f"Program(tool={self.tool}, name={self.name!r}, {len(self.text)} characters)"
+
+
+class Operation:
+    """One operation of a `Job`, read back by `Job.operations`: `kind` ("face",
+    "contour", "pocket" or "drill"), `tool` (its Grbl T number) and `params` -- a
+    dict, in the kind-specific order the operation stores. In `params`: `side`
+    reads as `"outside"`/`"inside"`/`"on"`; `climb` and `open` as `bool`; `points`
+    as `int`; a `NaN` `peck` as `None`; every other value stays a `float`.
+    Read-only."""
+
+    __slots__ = ("kind", "tool", "params")
+
+    def __init__(self, kind: str, tool: int, params: dict):
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "tool", tool)
+        object.__setattr__(self, "params", params)
+
+    def __setattr__(self, key, value):
+        raise AttributeError(f"Operation.{key} is read-only")
+
+    def __delattr__(self, key):
+        raise AttributeError(f"Operation.{key} is read-only")
+
+    def __repr__(self):
+        return f"Operation(kind={self.kind!r}, tool={self.tool}, params={self.params!r})"
+
+
+class ReportItem:
+    """One thing `Job.machine` left uncut: `kind` (`"corner"`, `"hole"`, `"slope"`,
+    `"undercut"` or `"too_deep"`), `at` (x, y, z), `size` (its meaning per `kind`),
+    `reason` (one sentence naming the tool involved), and `region` (its XY area, as
+    a list of `Profile`). Read-only."""
+
+    __slots__ = ("kind", "at", "size", "reason", "region")
+
+    def __init__(self, kind: str, at: "tuple[float, float, float]", size: float, reason: str, region: "list[Profile]"):
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "at", at)
+        object.__setattr__(self, "size", size)
+        object.__setattr__(self, "reason", reason)
+        object.__setattr__(self, "region", region)
+
+    def __setattr__(self, key, value):
+        raise AttributeError(f"ReportItem.{key} is read-only")
+
+    def __delattr__(self, key):
+        raise AttributeError(f"ReportItem.{key} is read-only")
+
+    def __repr__(self):
+        return f"ReportItem(kind={self.kind!r}, at={self.at!r}, size={self.size!r}, reason={self.reason!r}, region={len(self.region)} profile(s))"
+
+
+class Report:
+    """What `Job.machine` could not make: a read-only sequence of `ReportItem`, in
+    order, read eagerly when `machine` returns. `len`, iteration and indexing read
+    the items; `str(report)` is the kernel's own report text -- one line per item,
+    or `"nothing left uncut"`; `bool(report)` is `True` when it has items."""
+
+    __slots__ = ("_items", "_text")
+
+    def __init__(self, items: "list[ReportItem]", text: str):
+        object.__setattr__(self, "_items", items)
+        object.__setattr__(self, "_text", text)
+
+    def __setattr__(self, key, value):
+        raise AttributeError(f"Report.{key} is read-only")
+
+    def __delattr__(self, key):
+        raise AttributeError(f"Report.{key} is read-only")
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __getitem__(self, i):
+        return self._items[i]
+
+    def __bool__(self) -> bool:
+        return bool(self._items)
+
+    def __str__(self) -> str:
+        return self._text
+
+    def __repr__(self):
+        return f"Report({len(self._items)} item(s))"
+
+
+_SIDES = {"outside": 0, "inside": 1, "on": 2}
+
+
+class Job:
+    """A machining job on a `Stock`: operations kept in the order they are added,
+    written as one Grbl 1.1 program per run of operations sharing a tool.
+    Mutable -- each operation is added in place, and a refused one leaves the
+    job as it was. `safe_z` is the absolute Z of rapids between operations and at
+    a program's start and end, above the stock's top; an operation enters and
+    leaves its passes `clearance` above its top; `tolerance` fits free-form sides
+    and offsets; `name` names the programs (`<name>-T<n>`); every program waits
+    `spindle_dwell` seconds after starting the spindle; `resolution` is the
+    CAMotics project's voxel size in mm. Raises `BuildError` for a `safe_z` not
+    above the stock, or a setting the job refuses."""
+
+    __slots__ = ("_handle",)
+
+    def __init__(self, stock: Stock, safe_z, clearance=1.0, tolerance=0.01, name="job", spindle_dwell=2.0, resolution=0.1):
+        lib = _lib()
+        self._handle = _checked(lib.cadaclysm_blacksmith_job_new(stock._handle, safe_z), "job_new")
+        # the library starts at the same defaults, so only what differs is set
+        if clearance != 1.0:
+            self._set(lib.cadaclysm_blacksmith_job_set_clearance, clearance, "job_set_clearance")
+        if tolerance != 0.01:
+            self._set(lib.cadaclysm_blacksmith_job_set_tolerance, tolerance, "job_set_tolerance")
+        if spindle_dwell != 2.0:
+            self._set(lib.cadaclysm_blacksmith_job_set_spindle_dwell, spindle_dwell, "job_set_spindle_dwell")
+        if resolution != 0.1:
+            self._set(lib.cadaclysm_blacksmith_job_set_resolution, resolution, "job_set_resolution")
+        if name != "job":
+            name = str(name)
+            _reject_nul(name)
+            self._set(lib.cadaclysm_blacksmith_job_set_name, name.encode("utf-8"), "job_set_name")
+
+    def __del__(self):
+        h, self._handle = getattr(self, "_handle", None), None
+        if h and _library is not None:
+            _library.cadaclysm_blacksmith_job_free(h)
+
+    def _set(self, call, value, what: str) -> None:
+        _ok(call(self._handle, value), what)
+
+    def face(self, tool: Tool, z, stepover, stepdown) -> None:
+        """Face the stock's top down to `z`, in zigzag rows along X `stepover` apart
+        and passes at most `stepdown` deep. Raises `BuildError` for a drill, a `z`
+        above the stock's top, a stepover past the tool's diameter, ..."""
+        _ok(_lib().cadaclysm_blacksmith_job_face(self._handle, tool._handle, z, stepover, stepdown), "job_face")
+
+    def contour(self, tool: Tool, profile: Profile, top, bottom, side="outside", stepdown=1.0, climb=True, open=False) -> None:  # noqa: A002
+        """Cut along `profile` from `top` to `bottom` in passes at most `stepdown`
+        deep: `side` "outside" the profile, "inside" it, or "on" its line; `climb`
+        for climb milling, else conventional; `open` to cut the outline as an open
+        chain (only "on" its line, and with no holes). Raises `ValueError` for any
+        other `side`, `BuildError` for what the job refuses."""
+        code = _SIDES.get(side) if isinstance(side, str) else None
+        if code is None:
+            raise ValueError("side must be 'outside', 'inside' or 'on'")
+        _ok(_lib().cadaclysm_blacksmith_job_contour(self._handle, tool._handle, profile._handle, top, bottom, code,
+                                                    stepdown, bool(climb), bool(open)), "job_contour")
+
+    def pocket(self, tool: Tool, profile: Profile, top, bottom, stepover, stepdown) -> None:
+        """Clear `profile` -- its holes left standing as islands -- from `top` to
+        `bottom`, in rings `stepover` apart (at most the tool's radius) and passes at
+        most `stepdown` deep. Raises `BuildError` for what the job refuses; a pocket
+        too small for the tool is refused by `gcode()`, naming the operation."""
+        _ok(_lib().cadaclysm_blacksmith_job_pocket(self._handle, tool._handle, profile._handle, top, bottom,
+                                                   stepover, stepdown), "job_pocket")
+
+    def drill(self, tool: Tool, points, top, bottom, peck=None) -> None:
+        """Drill a hole at each (x, y) of `points` from `top` to `bottom`, pecking
+        `peck` deep at a time (retracting between pecks), or straight to depth for
+        `None`. Raises `ValueError` for a point that is not two numbers, `BuildError`
+        for what the job refuses (a tool that is not a drill, no points, ...)."""
+        pairs = [tuple(p) for p in points]
+        if any(len(p) != 2 for p in pairs):
+            raise ValueError("drill: every point must be (x, y)")
+        flat = [float(v) for p in pairs for v in p]
+        xy = (c_double * len(flat))(*flat)   # zero-length with none: the wasm takes an array, never None
+        _ok(_lib().cadaclysm_blacksmith_job_drill(self._handle, tool._handle, xy, len(pairs), top, bottom,
+                                                  float("nan") if peck is None else peck), "job_drill")
+
+    def machine(self, part: "Solid", end_mill: Tool, drills=(), stepover=None, stepdown=None, skin=0.3, peck=None) -> Report:
+        """Recognise `part` and append the operations that make it: faced, contoured
+        and pocketed with `end_mill`, its holes drilled with whichever of `drills`
+        fits each -- a tool per required diameter. `stepover` and `stepdown` default
+        to the kernel's own (`None`, not a number, asks for that); `skin` (at least 0,
+        default 0.3) is how far above the part's lowest point the outline stops, so
+        the part stays attached to the stock -- `0` cuts through; `peck` defaults to
+        none (a drill straight to depth). `drills` may be one `Tool` as well as a list
+        of them. Returns a `Report` of what could not be cut. Raises `TypeError` for a
+        `part` that is not a `Solid`, an `end_mill` or a drill that is not a `Tool`;
+        `BuildError` for what the kernel refuses (a drill as `end_mill`, ...); the job
+        changes only on success -- a refusal leaves it exactly as it was."""
+        if not isinstance(part, Solid):
+            raise TypeError(f"machine: part must be a Solid, not {type(part).__name__}")
+        if not isinstance(end_mill, Tool):
+            raise TypeError(f"machine: end_mill must be a Tool, not {type(end_mill).__name__}")
+        tools = [drills] if isinstance(drills, Tool) else list(drills)
+        for i, t in enumerate(tools):
+            if not isinstance(t, Tool):
+                raise TypeError(f"machine: drills[{i}] must be a Tool, not {type(t).__name__}")
+        handles = (c_void_p * len(tools))(*[t._handle for t in tools]) if tools else None
+        handle = _lib().cadaclysm_blacksmith_job_machine(
+            self._handle, part._h(), end_mill._handle, handles, len(tools),
+            float("nan") if stepover is None else stepover,
+            float("nan") if stepdown is None else stepdown,
+            skin,
+            float("nan") if peck is None else peck,
+        )
+        return _report(handle, "job_machine")
+
+    def operations(self) -> "list[Operation]":
+        """Every operation added to this job so far, in order -- whether added by
+        `face`/`contour`/`pocket`/`drill` or by `machine`."""
+        return _operations(_lib().cadaclysm_blacksmith_job_operations(self._handle), "job_operations")
+
+    def gcode(self) -> "list[Program]":
+        """The job as Grbl 1.1 programs, one per run of consecutive operations
+        sharing a tool (T1, T2, T1 gives three), each named `<name>-T<n>` (or
+        `<name>-<k>-T<n>` for run `k` of a repeated tool); a list of count 0 for a
+        job with no operations. Raises `BuildError` for an operation whose geometry
+        the tool cannot cut (named by its index and kind)."""
+        return _programs(_lib().cadaclysm_blacksmith_job_gcode(self._handle), "job_gcode")
+
+    def write_camotics(self, path) -> "list[str]":
+        """A CAMotics project at `path` and its files beside it, named after the
+        project's file stem (`out/part.camotics` writes `out/part-T1.nc`), not the
+        job's name: each program, a simulation copy of it (`.sim.nc`, which the
+        project lists), and the project last. Creates the directory. Returns the
+        paths written, the project last. Raises `BuildError` for a path with no file
+        stem, what `gcode()` refuses, or a file that cannot be written."""
+        path = _FsPath(path)
+        stem = path.stem
+        _reject_nul(stem)
+        files = _programs(_lib().cadaclysm_blacksmith_job_camotics(self._handle, stem.encode("utf-8")), "job_camotics")
+        # written here rather than by the library, so the notebook's own filesystem
+        # takes them under Pyodide as on the desktop
+        folder = path.parent
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            written = []
+            for i, f in enumerate(files):
+                at = path if i == len(files) - 1 else folder / f.name
+                with open(at, "w", encoding="utf-8", newline="") as out:   # byte for byte: no CRLF on Windows
+                    out.write(f.text)
+                written.append(str(at))
+        except OSError as e:
+            raise BuildError(f"job_camotics: {path}: {e.strerror or e}") from None
+        return written
 
 
 _XY = (0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1)

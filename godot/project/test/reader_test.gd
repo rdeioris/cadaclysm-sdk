@@ -104,7 +104,7 @@ func test_placements_transforms_and_meshes():
 		eq(t.origin, Vector3(raw[12], raw[13], raw[14]), "the origin is the fourth column")
 		eq(t.basis.x, Vector3(raw[0], raw[1], raw[2]), "column-major basis")
 		eq(p.select.index, p.geometry.index)
-	eq(triangles, 542)
+	eq(triangles, 522)  # 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound): 542 -> 522
 	# The second body sits 8 along x, the third 8 along y.
 	eq(placements[1].raw_transform[12], 8.0)
 	eq(placements[1].transform.origin.x, 8.0)
@@ -467,6 +467,48 @@ func test_mechanism_links_and_joints():
 	eq(hinge.end.name, "base")
 	eq(hinge.end.index, 0)
 
+	# The pair facts, in the native convention (Godot's own `open` reads Y up): revolute
+	# about Z, ranged -1.5..1.5, both contact frames at (0, 0, 100).
+	var native := CadaclysmScene.open_with(path, {"convention": "native"})
+	ok(native != null, Cadaclysm.last_error())
+	if native == null:
+		return
+	var native_hinge: CadaclysmJoint = native.joints[0]
+	var pair: CadaclysmPair = native_hinge.pair
+	ok(pair != null, "hinge has no pair")
+	if pair == null:
+		return
+	eq(pair.kind, "revolute")
+	eq(pair.type_name, "")
+	ok(is_nan(pair.pitch), "a revolute pair has a pitch")
+	for raw in [pair.raw_frame_start, pair.raw_frame_end]:
+		near(raw[12], 0.0, 1e-9, "a pair frame's origin x")
+		near(raw[13], 0.0, 1e-9, "a pair frame's origin y")
+		near(raw[14], 100.0, 1e-9, "a pair frame's origin z")
+		near(raw[8], 0.0, 1e-9, "a pair frame's z axis x")
+		near(raw[9], 0.0, 1e-9, "a pair frame's z axis y")
+		near(raw[10], 1.0, 1e-9, "a pair frame's z axis z")
+	var freedoms: Array = pair.freedoms
+	eq(freedoms.size(), 1)
+	var freedom: CadaclysmFreedom = freedoms[0]
+	eq(freedom.motion, "rotation")
+	eq(freedom.axis, "z")
+	near(freedom.lower, -1.5, 1e-9, "freedom lower")
+	near(freedom.upper, 1.5, 1e-9, "freedom upper")
+
+	# The state: one named "open", one row (hinge, [0.5]).
+	var states: Array = native.states
+	eq(states.size(), 1)
+	var state: CadaclysmState = states[0]
+	eq(state.index, 0)
+	eq(state.name, "open")
+	eq(state.values.size(), 1)
+	var row: CadaclysmStateValue = state.values[0]
+	eq(row.joint.name, "hinge")
+	eq(row.joint.index, 0)
+	eq(row.values.size(), 1)
+	near(row.values[0], 0.5, 1e-9, "state row value")
+
 func test_cube_has_no_links_or_joints():
 	var path := fixture("samples/cube.scad")
 	if path == "":
@@ -477,6 +519,7 @@ func test_cube_has_no_links_or_joints():
 		return
 	eq(scene.links.size(), 0)
 	eq(scene.joints.size(), 0)
+	eq(scene.states.size(), 0)
 
 # ---- the FEM surface mesh -------------------------------------------------------------
 #
@@ -496,6 +539,9 @@ const CUBE := "cube(20);"
 # The one body in this repository whose FEM censuses are both non-empty. Its own comment
 # header says why a `polyhedron` is the only route to one and what the figures are.
 const OPEN_SHEET := "samples/open-sheet.scad"
+# A closed B-rep box whose top dips through its own floor: the one body in this repository
+# where `crossings` is non-empty. 296 pairs measured 2026-09-26.
+const DENTED_BOX := "samples/dented-box.stp"
 # The ABI's "there is none" sentinel: 2^32 - 1. Every field that can hold it comes over
 # as an `int` (`vertices[i].node`) or in a `PackedInt64Array` (`faces`, `ends`, a census
 # row), never in a `PackedInt32Array`, where it would read as -1.
@@ -619,13 +665,20 @@ func cube_scene() -> CadaclysmScene:
 	return CadaclysmScene.open_bytes(CUBE.to_utf8_buffer(), "scad", {"convention": "native"})
 
 # A curved, closed B-rep body: the kernel builds it, writes STEP, and the reader reads it
-# back -- ten faces, the same body every other wrapper's FEM tests use, and the reader's
-# **B-rep path**, where the options are read. The one test here that uses the kernel; its
-# own `Solid.fem_mesh` is exercised in blacksmith_test.gd.
+# back -- ten faces, the same body Node's fem.test.js reads, and the reader's **B-rep
+# path**, where the options are read. The one test here that uses the kernel; its own
+# `Solid.fem_mesh` is exercised in blacksmith_test.gd.
+#
+# **Rounded to 4, not 2**, so that 0.01 and 0.05 mesh it differently. Since d2f866b6 (the
+# filler's interior at six rows with the 15-degree turn bound) the turn bound alone halves a
+# quarter round down to 8 segments, and on a radius of 2 that is already inside 0.01 (sag
+# 0.0096): the reader meshed it to 340 nodes at every tolerance from 0.01 to 0.2, so the
+# default-tolerance test below could not tell 0.01 from 0.05. At 4 the 8 segments sag 0.019,
+# so 0.01 needs 16 and 0.05 keeps 8: 500 nodes against 340.
 func rounded_scene() -> CadaclysmScene:
 	var box := CadaclysmSolid.cuboid(20, 20, 10)
 	var vertical := box.edges.filter(func(e): return e.is_line and absf(e.direction.z) > 0.99)
-	var rounded := box.fillet(vertical, 2)
+	var rounded := box.fillet(vertical, 4)
 	if rounded == null:
 		return null
 	return CadaclysmScene.open_bytes(rounded.step_text().to_utf8_buffer(), "stp", {"convention": "native", "name": "rounded.stp"})
@@ -678,6 +731,31 @@ func test_fem_a_census_reads_its_own_count_through_its_own_entry_point():
 	mesh.release()
 	scene.close()
 
+	# Crossings: `samples/dented-box.stp` is a closed B-rep box whose top dips through its
+	# own floor, 296 pairs measured 2026-09-26. `open_edge_count` and `folded_edge_count` are
+	# both 0 for this watertight body, so a `crossings` wired to either of those (rather than
+	# its own live `cadaclysm_fem_mesh_crossing_count`) reads 0 here, not 296.
+	var dented_path := fixture(DENTED_BOX)
+	if dented_path == "":
+		return
+	var dented_scene := CadaclysmScene.open_with(dented_path, {"convention": "native"})
+	if not ok(dented_scene != null, "fem census: " + Cadaclysm.last_error()):
+		return
+	var dented_body := brep_body(dented_scene)
+	if not ok(dented_body != null, "fem census: no placement of dented-box.stp has a brep"):
+		return
+	var dented_mesh: CadaclysmFemMesh = dented_body.fem_mesh()
+	if not ok(dented_mesh != null, "fem census: " + Cadaclysm.last_error()):
+		return
+	eq(dented_mesh.watertight, true)
+	eq(dented_mesh.from_mesh, false)
+	var crossings := dented_mesh.crossings
+	eq(crossings.size(), 296)
+	if crossings.size() > 0:
+		ok(crossings[0][0] < crossings[0][1], "the first pair is not a < b")
+	dented_mesh.release()
+	dented_scene.close()
+
 func test_fem_a_node_with_no_brep_meshes_from_its_own_triangles():
 	var scene := cube_scene()
 	var mesh: CadaclysmFemMesh = scene.node(0).fem_mesh()
@@ -695,6 +773,7 @@ func test_fem_a_node_with_no_brep_meshes_from_its_own_triangles():
 		eq(k, 2, "fem: a from_mesh body has a node off a face")
 	eq(mesh.open_edges.size(), 0)
 	eq(mesh.folded_edges.size(), 0)
+	eq(mesh.crossings.size(), 0, "fem: the cube does not cross itself")
 	eq(mesh.watertight, true, "fem: the cube's own mesh is not watertight")
 	eq(counts[0], 8)
 	eq(counts[1], 12)
@@ -862,11 +941,13 @@ func test_fem_a_brep_body_carries_topology_and_the_default_tolerance_is_the_libr
 	eq(mesh.watertight, true)
 	eq(mesh.open_edges.size(), 0)
 	eq(mesh.folded_edges.size(), 0)
+	eq(mesh.crossings.size(), 0, "fem brep: the rounded box does not cross itself")
 	# **The default tolerance is the library's own 0.01, not the 0.05 that `mesh` and its
 	# neighbours default to.** Pinned on this body because it is curved: `cube.scad`
 	# meshes to 8 nodes at either figure, which is how one wrapper's wrong default
 	# survived seventy-five other tests. Both assertions are needed -- the default must
-	# equal 0.01's node count and must *not* equal 0.05's.
+	# equal 0.01's node count and must *not* equal 0.05's. 500 nodes against 340 on the
+	# library of 2026-09-28; `rounded_scene` says why the radius is 4.
 	var defaulted: CadaclysmFemMesh = body.fem_mesh()
 	var hundredth: CadaclysmFemMesh = body.fem_mesh(0.01)
 	eq(defaulted.nodes.size(), hundredth.nodes.size(),

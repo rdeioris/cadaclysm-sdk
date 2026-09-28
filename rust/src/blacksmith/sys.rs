@@ -265,6 +265,17 @@ pub struct CadaclysmBlacksmithProfileList {
     _private: [u8; 0],
 }
 
+/// One meshed tessellation of a solid, held independently of it. Opaque: owned, made with
+/// `cadaclysm_blacksmith_tessellation`, freed with `cadaclysm_blacksmith_tessellation_free`.
+/// The accessors' pointers borrow from **this handle**, not the solid, and stay valid until
+/// it is freed -- whatever happens to the solid meanwhile: re-meshed at any tolerance,
+/// freed itself. The Rust SDK's own API stays borrow-checked (`&mut self`); this struct and
+/// its six entry points exist only so `sys.rs` matches the header for the parity gate.
+#[repr(C)]
+pub struct CadaclysmBlacksmithTessellation {
+    _private: [u8; 0],
+}
+
 /// One solid meshed for a solver. Opaque: owned, and freed with
 /// `cadaclysm_blacksmith_fem_mesh_free`. Every pointer any accessor writes is borrowed
 /// from it -- **except** the `.msh` text, which is the caller's and is released with
@@ -351,6 +362,7 @@ type Hits = CadaclysmBlacksmithHits;
 type Intersection = CadaclysmBlacksmithIntersection;
 type ProfileList = CadaclysmBlacksmithProfileList;
 type Fem = CadaclysmBlacksmithFemMesh;
+type Tessellation = CadaclysmBlacksmithTessellation;
 
 entry_points! {
     Api, ENTRY_POINTS;
@@ -464,6 +476,7 @@ entry_points! {
     fn cadaclysm_blacksmith_sphere(r: f64) -> *mut Solid;
     fn cadaclysm_blacksmith_torus(major: f64, minor: f64) -> *mut Solid;
     fn cadaclysm_blacksmith_wedge(x: f64, y: f64, z: f64, top_x: f64) -> *mut Solid;
+    fn cadaclysm_blacksmith_pyramid(sides: u32, r: f64, h: f64) -> *mut Solid;
     fn cadaclysm_blacksmith_extrude(profile: *const Profile, frame: *const f64, height: f64) -> *mut Solid;
     fn cadaclysm_blacksmith_extrude_open(profile: *const Profile, frame: *const f64, height: f64) -> *mut Solid;
     fn cadaclysm_blacksmith_extrude_tapered(profile: *const Profile, frame: *const f64, height: f64, taper: f64) -> *mut Solid;
@@ -595,8 +608,18 @@ entry_points! {
     fn cadaclysm_blacksmith_mesh_face_triangles(solid: *const Solid, tolerance: f64) -> CadaclysmBlacksmithFaceTriangles;
     fn cadaclysm_blacksmith_edge_polylines(solid: *const Solid, tolerance: f64) -> CadaclysmBlacksmithPolylines;
     fn cadaclysm_blacksmith_edge_polyline_colours(solid: *const Solid, tolerance: f64) -> CadaclysmBlacksmithColours;
+    // A held tessellation: declared to match the header for parity, unused by the SDK's
+    // own borrow-checked API (`crate::blacksmith`), which keeps `&mut self` views borrowed
+    // from the solid instead.
+    fn cadaclysm_blacksmith_tessellation(solid: *const Solid, tolerance: f64) -> *mut Tessellation;
+    fn cadaclysm_blacksmith_tessellation_free(tessellation: *mut Tessellation);
+    fn cadaclysm_blacksmith_tessellation_mesh(tessellation: *const Tessellation) -> CadaclysmBlacksmithMesh;
+    fn cadaclysm_blacksmith_tessellation_mesh64(tessellation: *const Tessellation) -> CadaclysmBlacksmithMesh64;
+    fn cadaclysm_blacksmith_tessellation_face_triangles(tessellation: *const Tessellation) -> CadaclysmBlacksmithFaceTriangles;
+    fn cadaclysm_blacksmith_tessellation_edge_polylines(tessellation: *const Tessellation) -> CadaclysmBlacksmithPolylines;
     fn cadaclysm_blacksmith_bounds(solid: *const Solid, tolerance: f64, min: *mut f64, max: *mut f64) -> bool;
     fn cadaclysm_blacksmith_bounds64(solid: *const Solid, tolerance: f64, min: *mut f64, max: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_box(solid: *const Solid, min: *mut f64, max: *mut f64) -> bool;
     fn cadaclysm_blacksmith_step(solids: *const *const Solid, count: usize, schema: *const c_char, unit: u32) -> *mut c_char;
     fn cadaclysm_blacksmith_sat_text(solids: *const *const Solid, count: usize, unit: u32) -> *mut c_char;
     fn cadaclysm_blacksmith_sat(solids: *const *const Solid, count: usize, path: *const c_char, unit: u32) -> bool;
@@ -618,6 +641,8 @@ entry_points! {
     fn cadaclysm_blacksmith_fem_mesh_vertex(m: *const Fem, i: u32, out: *mut CadaclysmBlacksmithFemVertex) -> bool;
     fn cadaclysm_blacksmith_fem_mesh_open_edge(m: *const Fem, i: u32, a: *mut u32, b: *mut u32, brep_edge: *mut u32) -> bool;
     fn cadaclysm_blacksmith_fem_mesh_folded_edge(m: *const Fem, i: u32, a: *mut u32, b: *mut u32, brep_edge: *mut u32) -> bool;
+    fn cadaclysm_blacksmith_fem_mesh_crossing_count(m: *const Fem) -> u32;
+    fn cadaclysm_blacksmith_fem_mesh_crossing(m: *const Fem, i: u32, a: *mut u32, b: *mut u32) -> bool;
     fn cadaclysm_blacksmith_fem_mesh_msh_text(m: *const Fem) -> *mut c_char;
     fn cadaclysm_blacksmith_fem_mesh_save_msh(m: *const Fem, path: *const c_char) -> bool;
     fn cadaclysm_blacksmith_fem_mesh_free(m: *mut Fem);
@@ -657,6 +682,13 @@ entry_points! {
         name: *const c_char
     ) -> *mut c_char;
     fn cadaclysm_blacksmith_assembly_step(assembly: *const Assembly, schema: *const c_char, unit: u32) -> *mut c_char;
+    fn cadaclysm_blacksmith_assembly_link(
+        assembly: *mut Assembly,
+        name: *const c_char,
+        placements: *const *const c_char,
+        placement_count: usize
+    ) -> bool;
+    fn cadaclysm_blacksmith_assembly_joint(assembly: *mut Assembly, name: *const c_char, start: *const c_char, end: *const c_char) -> bool;
 }
 
 // ---- loading --------------------------------------------------------------------

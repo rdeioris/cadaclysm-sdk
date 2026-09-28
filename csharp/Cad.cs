@@ -104,6 +104,46 @@ public enum ValueKind
     Reference = 6,
 }
 
+// ---- kinematics ----------------------------------------------------------------------------
+
+/// <summary>A <see cref="Pair"/>'s kind of relative motion -- the header's
+/// `CadaclysmPairKind`. Carried across the ABI as `int32_t`, not this enum's own type: -1
+/// (no pair) does not fit an unsigned `uint32_t` field, so <see cref="Joint.Pair"/> checks
+/// that sentinel itself rather than casting it into this enum.</summary>
+public enum PairKind
+{
+    Revolute = 0,
+    Prismatic = 1,
+    Cylindrical = 2,
+    Spherical = 3,
+    SphericalWithPin = 4,
+    Planar = 5,
+    Universal = 6,
+    Homokinetic = 7,
+    Screw = 8,
+    FullyConstrained = 9,
+    Unconstrained = 10,
+    LowOrder = 11,
+    Other = 12,
+}
+
+/// <summary>A <see cref="Freedom"/>'s kind of motion -- the header's `CadaclysmMotion`.
+/// </summary>
+public enum Motion
+{
+    Rotation = 0,
+    Translation = 1,
+}
+
+/// <summary>Which contact-frame axis a <see cref="Freedom"/> is about or along -- the
+/// header's `CadaclysmFreedomAxis`.</summary>
+public enum FreedomAxis
+{
+    X = 0,
+    Y = 1,
+    Z = 2,
+}
+
 // ---- SVG ---------------------------------------------------------------------------------
 
 /// <summary>One of the seven camera angles <see cref="SvgOptions.View"/> understands -- the
@@ -395,6 +435,21 @@ internal unsafe struct RawFemVertex
     [MarshalAs(UnmanagedType.I1)] public bool HasPosition;
 }
 
+/// <summary>`CadaclysmFreedom`. `Motion` and `Axis` are `uint32_t`, not the enum types, as
+/// the header's own note on `CadaclysmConvention` explains. C `bool` is one byte, so
+/// `HasLower`/`HasUpper` are attributed `I1` (as every bool in this file) rather than the four-byte default. Pinned by
+/// `tests/bindings.rs`.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawFreedom
+{
+    public uint Motion;
+    public uint Axis;
+    [MarshalAs(UnmanagedType.I1)] public bool HasLower;
+    public double Lower;
+    [MarshalAs(UnmanagedType.I1)] public bool HasUpper;
+    public double Upper;
+}
+
 [StructLayout(LayoutKind.Sequential)]
 internal struct RawPolylines
 {
@@ -488,6 +543,8 @@ internal struct RawSurfaces
     public uint NurbsCount;
     public IntPtr Shared;
     public uint SharedCount;
+    public IntPtr Duplicate;
+    public uint DuplicateCount;
 }
 
 /// <summary>`CadaclysmFace`. Read only through a raw pointer into `RawSurfaces.Faces` — never
@@ -823,6 +880,20 @@ internal static class Native
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_joint_name(SceneHandle scene, uint joint);
     [DllImport(Lib)] internal static extern uint cadaclysm_joint_start(SceneHandle scene, uint joint);
     [DllImport(Lib)] internal static extern uint cadaclysm_joint_end(SceneHandle scene, uint joint);
+    [DllImport(Lib)] internal static extern int cadaclysm_joint_pair_kind(SceneHandle scene, uint joint);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_joint_pair_type(SceneHandle scene, uint joint);
+    [DllImport(Lib)] internal static extern double cadaclysm_joint_pair_pitch(SceneHandle scene, uint joint);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_joint_pair_frames(SceneHandle scene, uint joint,
+        [Out] double[]? outStart, [Out] double[]? outEnd);
+    [DllImport(Lib)] internal static extern uint cadaclysm_joint_freedom_count(SceneHandle scene, uint joint);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_joint_freedom(SceneHandle scene, uint joint, uint index, out RawFreedom outValue);
+    [DllImport(Lib)] internal static extern uint cadaclysm_state_count(SceneHandle scene);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_state_name(SceneHandle scene, uint state);
+    [DllImport(Lib)] internal static extern uint cadaclysm_state_value_count(SceneHandle scene, uint state);
+    [DllImport(Lib)] internal static extern uint cadaclysm_state_value(SceneHandle scene, uint state, uint row,
+        out uint joint, [Out] double[]? values, uint capacity);
     [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_edges(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawEdgeColors cadaclysm_node_edge_colors(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_curves(SceneHandle scene, uint node);
@@ -871,6 +942,10 @@ internal static class Native
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_fem_mesh_folded_edge(FemMeshHandle mesh, uint index,
         out uint outA, out uint outB, out uint outBrepEdge);
+    [DllImport(Lib)] internal static extern uint cadaclysm_fem_mesh_crossing_count(FemMeshHandle mesh);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_fem_mesh_crossing(FemMeshHandle mesh, uint index,
+        out uint outA, out uint outB);
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_fem_mesh_msh_text(FemMeshHandle mesh);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_fem_mesh_save_msh(FemMeshHandle mesh,
@@ -1501,8 +1576,8 @@ public sealed class Link : IEquatable<Link>
     public override string ToString() => $"<Link {Index} {Name}>";
 }
 
-/// <summary>A connection between two links of the file's mechanism. Topology only: how it
-/// moves is not read yet. From <see cref="Scene.Joints"/>.</summary>
+/// <summary>A connection between two links of the file's mechanism, and, when the file names
+/// one, the kinematic pair saying how it moves. From <see cref="Scene.Joints"/>.</summary>
 public sealed class Joint : IEquatable<Joint>
 {
     public Scene Scene { get; }
@@ -1524,10 +1599,188 @@ public sealed class Joint : IEquatable<Joint>
     /// <summary>The link this joint ends at.</summary>
     public Link End => new(Scene, Native.cadaclysm_joint_end(Scene.Handle, Index));
 
+    /// <summary>How this joint moves: the kinematic pair naming it, or null when the file
+    /// gives it none.</summary>
+    public Pair? Pair
+    {
+        get
+        {
+            var kind = Native.cadaclysm_joint_pair_kind(Scene.Handle, Index);
+            return kind < 0 ? null : new Pair(Scene, Index, (PairKind)kind);
+        }
+    }
+
     public bool Equals(Joint? other) => other is not null && other.Index == Index && ReferenceEquals(other.Scene, Scene);
     public override bool Equals(object? obj) => Equals(obj as Joint);
     public override int GetHashCode() => HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(Scene), Index);
     public override string ToString() => $"<Joint {Index} {Name}>";
+}
+
+/// <summary>One degree of freedom of a <see cref="Pair"/>: which motion, about or along which
+/// contact-frame axis, and its optional range. From <see cref="Pair.Freedoms"/>.</summary>
+public sealed class Freedom
+{
+    public Motion Motion { get; }
+    public FreedomAxis Axis { get; }
+
+    /// <summary>The lower limit -- radians for a rotation, a length for a translation -- or
+    /// null for unbounded.</summary>
+    public double? Lower { get; }
+
+    /// <summary>The upper limit, or null for unbounded.</summary>
+    public double? Upper { get; }
+
+    internal Freedom(Motion motion, FreedomAxis axis, double? lower, double? upper)
+    {
+        Motion = motion;
+        Axis = axis;
+        Lower = lower;
+        Upper = upper;
+    }
+
+    public override string ToString() => $"<Freedom {Motion} {Axis} [{Lower}, {Upper}]>";
+}
+
+/// <summary>A kinematic pair: the kind of relative motion a joint allows between its two
+/// links. From <see cref="Joint.Pair"/>.</summary>
+public sealed class Pair
+{
+    private readonly Scene _scene;
+    private readonly uint _joint;
+
+    public PairKind Kind { get; }
+
+    internal Pair(Scene scene, uint joint, PairKind kind)
+    {
+        _scene = scene;
+        _joint = joint;
+        Kind = kind;
+    }
+
+    /// <summary>For <see cref="PairKind.Other"/>: the pair's entity type name
+    /// (`GEAR_PAIR`). Null otherwise.</summary>
+    public string? TypeName
+    {
+        get
+        {
+            var raw = Native.cadaclysm_joint_pair_type(_scene.Handle, _joint);
+            return raw == IntPtr.Zero ? null : Marshal.PtrToStringUTF8(raw);
+        }
+    }
+
+    /// <summary>For <see cref="PairKind.Screw"/>: its pitch, a length per revolution in the
+    /// scene's units. Null otherwise.</summary>
+    public double? Pitch
+    {
+        get
+        {
+            var value = Native.cadaclysm_joint_pair_pitch(_scene.Handle, _joint);
+            return double.IsNaN(value) ? null : value;
+        }
+    }
+
+    private (double[] Start, double[] End) RawFrames()
+    {
+        var start = new double[16];
+        var end = new double[16];
+        Native.cadaclysm_joint_pair_frames(_scene.Handle, _joint, start, end);
+        return (start, end);
+    }
+
+    /// <summary>`FrameStart` in the ABI's own column-major order, as 16 doubles -- the same
+    /// layout <see cref="Node.RawTransform"/> uses.</summary>
+    public double[] RawFrameStart => RawFrames().Start;
+
+    /// <summary>`FrameEnd` in the ABI's own column-major order, as 16 doubles.</summary>
+    public double[] RawFrameEnd => RawFrames().End;
+
+    /// <summary>The pair's contact frame fixed in its joint's <see cref="Joint.Start"/> link,
+    /// as a row-major 4x4 -- like <see cref="Node.Transform"/>.</summary>
+    public double[,] FrameStart => Matrices.ToRowMajor(RawFrameStart);
+
+    /// <summary>The pair's contact frame fixed in its joint's <see cref="Joint.End"/> link.
+    /// </summary>
+    public double[,] FrameEnd => Matrices.ToRowMajor(RawFrameEnd);
+
+    /// <summary>The pair's degrees of freedom, in the reader's per-kind order. Values on a
+    /// <see cref="State"/> compose in this order.</summary>
+    public IReadOnlyList<Freedom> Freedoms
+    {
+        get
+        {
+            var count = Native.cadaclysm_joint_freedom_count(_scene.Handle, _joint);
+            var found = new List<Freedom>((int)count);
+            for (uint i = 0; i < count; i++)
+            {
+                if (!Native.cadaclysm_joint_freedom(_scene.Handle, _joint, i, out var raw)) continue;
+                found.Add(new Freedom(
+                    (Motion)raw.Motion,
+                    (FreedomAxis)raw.Axis,
+                    raw.HasLower ? raw.Lower : null,
+                    raw.HasUpper ? raw.Upper : null));
+            }
+            return found;
+        }
+    }
+
+    public override string ToString() => $"<Pair {Kind}>";
+}
+
+/// <summary>One row of a <see cref="State"/>: a joint the state sets, and the values it sets
+/// on it, one per freedom of its pair, in the pair's freedom order. From
+/// <see cref="State.Values"/>.</summary>
+public sealed class StateValue
+{
+    public Joint Joint { get; }
+    public IReadOnlyList<double> Values { get; }
+
+    internal StateValue(Joint joint, IReadOnlyList<double> values)
+    {
+        Joint = joint;
+        Values = values;
+    }
+}
+
+/// <summary>A named pose of the mechanism: a `MECHANISM_STATE_REPRESENTATION`. From
+/// <see cref="Scene.States"/>.</summary>
+public sealed class State : IEquatable<State>
+{
+    private readonly Scene _scene;
+    public uint Index { get; }
+
+    internal State(Scene scene, uint index)
+    {
+        _scene = scene;
+        Index = index;
+    }
+
+    /// <summary>The state's name as the file gives it.</summary>
+    public string Name => Marshal.PtrToStringUTF8(Native.cadaclysm_state_name(_scene.Handle, Index)) ?? "";
+
+    /// <summary>One row per joint this state sets, in file order: the joint, then one value
+    /// per freedom of its pair, in the pair's freedom order.</summary>
+    public IReadOnlyList<StateValue> Values
+    {
+        get
+        {
+            var rowCount = Native.cadaclysm_state_value_count(_scene.Handle, Index);
+            var found = new List<StateValue>((int)rowCount);
+            for (uint row = 0; row < rowCount; row++)
+            {
+                var count = Native.cadaclysm_state_value(_scene.Handle, Index, row, out var joint, null, 0);
+                var values = new double[count];
+                Native.cadaclysm_state_value(_scene.Handle, Index, row, out joint, values, count);
+                if (joint == uint.MaxValue) continue;
+                found.Add(new StateValue(new Joint(_scene, joint), values));
+            }
+            return found;
+        }
+    }
+
+    public bool Equals(State? other) => other is not null && other.Index == Index && ReferenceEquals(other._scene, _scene);
+    public override bool Equals(object? obj) => Equals(obj as State);
+    public override int GetHashCode() => HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(_scene), Index);
+    public override string ToString() => $"<State {Index} {Name}>";
 }
 
 /// <summary>A body's exact B-rep -- the trimmed surfaces its mesh is cut from -- shared with
@@ -1963,6 +2216,31 @@ public sealed class FemMesh : IDisposable
     /// calls such a body sound. Empty under the same rule as <see cref="OpenEdges"/>.</remarks>
     public IReadOnlyList<(uint A, uint B, uint BrepEdge)> FoldedEdges =>
         Census(Native.cadaclysm_fem_mesh_folded_edge, Raw.FoldedEdgeCount, "folded edge");
+
+    /// <summary>Every pair of triangles that pass through each other, as `(A, B)` with `A &lt;
+    /// B`, sorted: an edge of one through the other's interior. Their B-rep faces are <see
+    /// cref="TriangleFace"/>`[A]` and `[B]`.</summary>
+    /// <remarks><strong>Computed for every body, open or closed.</strong> The census <see
+    /// cref="Watertight"/>, <see cref="OpenEdges"/> and <see cref="FoldedEdges"/> report is
+    /// topological and cannot see a surface passing through itself; a mesh is ready for a volume
+    /// mesher when it is <see cref="Watertight"/> <strong>and</strong> this is empty -- Gmsh
+    /// refuses one that crosses. A copy.</remarks>
+    public IReadOnlyList<(uint A, uint B)> Crossings
+    {
+        get
+        {
+            var handle = Live;
+            var count = Native.cadaclysm_fem_mesh_crossing_count(handle);
+            var rows = new List<(uint, uint)>((int)count);
+            for (var i = 0u; i < count; i++)
+            {
+                if (!Native.cadaclysm_fem_mesh_crossing(handle, i, out var a, out var b))
+                    throw new CadaclysmException(Cadaclysm.LastErrorOr($"fem mesh crossing {i}"));
+                rows.Add((a, b));
+            }
+            return rows;
+        }
+    }
 
     /// <summary>The library's census readers have one shape, so the two lists cannot drift.
     /// </summary>
@@ -2761,6 +3039,19 @@ public sealed class Scene : IDisposable
             var count = Native.cadaclysm_joint_count(Handle);
             var found = new List<Joint>((int)count);
             for (uint i = 0; i < count; i++) found.Add(new Joint(this, i));
+            return found;
+        }
+    }
+
+    /// <summary>The file's named mechanism poses, in file order; empty for a file that
+    /// records none.</summary>
+    public IReadOnlyList<State> States
+    {
+        get
+        {
+            var count = Native.cadaclysm_state_count(Handle);
+            var found = new List<State>((int)count);
+            for (uint i = 0; i < count; i++) found.Add(new State(this, i));
             return found;
         }
     }

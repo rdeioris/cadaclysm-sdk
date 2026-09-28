@@ -185,6 +185,8 @@ export class Solid {
   static sphere(r: number): Solid;
   static torus(major: number, minor: number): Solid;
   static wedge(x: number, y: number, z: number, topX: number): Solid;
+  /** A right pyramid of `sides` sides (at least 3): its base the regular polygon of circumradius `r` on z=0, its first corner on +x, its tip at (0, 0, `h`). */
+  static pyramid(sides: number, r: number, h: number): Solid;
   static extrude(profile: Profile, frame: FrameLike, height: number): Solid;
   static extrudeOpen(profile: Profile, frame: FrameLike, height: number): Solid;
   static extrudeTapered(profile: Profile, frame: FrameLike, height: number, taper: number): Solid;
@@ -257,6 +259,7 @@ export class Solid {
   splitSheetAsync(tool: Solid, tolerance?: number, progress?: Progress | null): Promise<Solid>;
   readonly faces: number;
   faceKind(face: number): string;
+  /** The solid's box at a thousandth of its own extent, in `double`: the same cost at any size. */
   readonly bounds: [number[], number[]];
   /** `bounds` in `double`: exact far from the origin. */
   readonly bounds64: [number[], number[]];
@@ -379,6 +382,19 @@ export class Assembly {
    * ...). Throws for a duplicate explicit name or a cycle. Returns the placement's name.
    */
   place(thing: Solid | Assembly, frame: FrameLike, name?: string | null): string;
+  /**
+   * Declare a rigid link called `name` over `placements` (names of placements of this
+   * assembly itself). Throws for an empty name, a name taken by another link here, no
+   * placements, a placement named twice, one this assembly does not have, or one already
+   * in another link. A bare string for `placements` throws a `TypeError` before any call.
+   */
+  link(name: string, placements: Iterable<string>): void;
+  /**
+   * Connect this assembly's links `start` and `end` (kept in that order) as a joint called
+   * `name`. Throws for an empty name, a name taken by another joint here, a link this
+   * assembly does not have, a link joined to itself, or a (start, end) pair already joined.
+   */
+  joint(name: string, start: string, end: string): void;
   stepText(schema?: string | null, unit?: Unit): string;
   step(path: string, schema?: string | null, unit?: Unit): void;
   /** This assembly as a reader `Scene`, through STEP text; see `Solid.toScene`. */
@@ -563,6 +579,8 @@ export class FemMesh {
   openEdges(): [number, number, number][];
   /** Every fold, as `openEdges` reports a crack. A solid can be folded without being open. */
   foldedEdges(): [number, number, number][];
+  /** Every pair of triangles that pass through each other, as `[a, b]` with `a < b`. Computed for every solid, open or closed. */
+  crossings(): [number, number][];
   readonly watertight: boolean;
   /** Always false here: a `Solid` always has a B-rep, so this library has no mesh-only body. */
   readonly fromMesh: boolean;

@@ -307,6 +307,22 @@ pub struct CadaclysmSurfaces {
     pub nurbs_count: u32,
     pub shared: *const u32,
     pub shared_count: u32,
+    pub duplicate: *const u32,
+    pub duplicate_count: u32,
+}
+
+/// `CadaclysmFreedom`: one of a pair's degrees of freedom -- which motion, about or
+/// along which contact-frame axis, and its optional range. The header's `bool` fields
+/// are one byte each, so Rust's `bool` (also one byte, `0`/`1`) matches it directly.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CadaclysmFreedom {
+    pub motion: u32,
+    pub axis: u32,
+    pub has_lower: bool,
+    pub lower: f64,
+    pub has_upper: bool,
+    pub upper: f64,
 }
 
 entry_points! {
@@ -443,6 +459,23 @@ entry_points! {
     fn cadaclysm_joint_name(scene: *const CadaclysmScene, joint: u32) -> *const c_char;
     fn cadaclysm_joint_start(scene: *const CadaclysmScene, joint: u32) -> u32;
     fn cadaclysm_joint_end(scene: *const CadaclysmScene, joint: u32) -> u32;
+    fn cadaclysm_joint_pair_kind(scene: *const CadaclysmScene, joint: u32) -> i32;
+    fn cadaclysm_joint_pair_type(scene: *const CadaclysmScene, joint: u32) -> *const c_char;
+    fn cadaclysm_joint_pair_pitch(scene: *const CadaclysmScene, joint: u32) -> f64;
+    fn cadaclysm_joint_pair_frames(scene: *const CadaclysmScene, joint: u32, out_start: *mut f64, out_end: *mut f64) -> bool;
+    fn cadaclysm_joint_freedom_count(scene: *const CadaclysmScene, joint: u32) -> u32;
+    fn cadaclysm_joint_freedom(scene: *const CadaclysmScene, joint: u32, index: u32, out: *mut CadaclysmFreedom) -> bool;
+    fn cadaclysm_state_count(scene: *const CadaclysmScene) -> u32;
+    fn cadaclysm_state_name(scene: *const CadaclysmScene, state: u32) -> *const c_char;
+    fn cadaclysm_state_value_count(scene: *const CadaclysmScene, state: u32) -> u32;
+    fn cadaclysm_state_value(
+        scene: *const CadaclysmScene,
+        state: u32,
+        row: u32,
+        joint: *mut u32,
+        values: *mut f64,
+        capacity: u32
+    ) -> u32;
     fn cadaclysm_fem_options_init(options: *mut CadaclysmFemOptions);
     fn cadaclysm_node_fem_mesh(
         scene: *const CadaclysmScene,
@@ -455,6 +488,8 @@ entry_points! {
     fn cadaclysm_fem_mesh_vertex(m: *const CadaclysmFemMesh, i: u32, out: *mut CadaclysmFemVertex) -> bool;
     fn cadaclysm_fem_mesh_open_edge(m: *const CadaclysmFemMesh, i: u32, a: *mut u32, b: *mut u32, brep_edge: *mut u32) -> bool;
     fn cadaclysm_fem_mesh_folded_edge(m: *const CadaclysmFemMesh, i: u32, a: *mut u32, b: *mut u32, brep_edge: *mut u32) -> bool;
+    fn cadaclysm_fem_mesh_crossing_count(m: *const CadaclysmFemMesh) -> u32;
+    fn cadaclysm_fem_mesh_crossing(m: *const CadaclysmFemMesh, i: u32, a: *mut u32, b: *mut u32) -> bool;
     fn cadaclysm_fem_mesh_msh_text(m: *const CadaclysmFemMesh) -> *const c_char;
     fn cadaclysm_fem_mesh_save_msh(m: *const CadaclysmFemMesh, path: *const c_char) -> bool;
     fn cadaclysm_fem_mesh_free(m: *mut CadaclysmFemMesh);

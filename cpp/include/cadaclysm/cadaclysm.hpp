@@ -143,6 +143,11 @@ inline std::string real_text(double value) {
 struct SceneState {
     CadaclysmScene* handle = nullptr;
     std::uint64_t generation = 0;
+    // How many times Scene::forget_meshes has run. Only Mesh64 stamps itself with
+    // this: it lends the document's own mesh, which a forget frees, where the float
+    // mesh and the line views are the library's own caches and outlive one. A Node is
+    // an index and outlives one too, so this is not the generation above.
+    std::uint64_t forgets = 0;
     std::string path;
     std::optional<std::string> schema_path;
     std::uint32_t convention = 0;
@@ -490,9 +495,10 @@ struct MeshData64 {
 // **A forget drops it.** Scene::forget_meshes frees the document's own mesh these
 // pointers borrow: read none of them after a forget; ask again and the mesh is built
 // again. Mesh's pointers survive a forget, its `float` copy being kept separately.
-// raw() checks the scene is still open, the same check Mesh makes, but a forget is not
-// a close and is not tracked: reading a Mesh64 after a forget (without an intervening
-// close) is undefined behaviour, exactly as the C ABI documents.
+// raw() checks the scene is still open, the same check Mesh makes, and a checked build
+// also counts the forgets: a Mesh64 read after one reports a stale view instead of
+// reading freed memory. An unchecked build does not, so it is undefined behaviour
+// there, exactly as the C ABI documents.
 class Mesh64 {
 public:
     Span<const double> positions() const { return doubles(raw().positions, 3); }
@@ -528,9 +534,25 @@ public:
 
 private:
     friend class Node;
-    Mesh64(detail::Ref<detail::SceneState> scene, const CadaclysmMesh64& data) : scene_(std::move(scene)), raw_(data) {}
+    Mesh64(detail::Ref<detail::SceneState> scene, const CadaclysmMesh64& data, std::uint64_t forgets)
+        : scene_(std::move(scene)), raw_(data) {
+#if CADACLYSM_CHECKED
+        forgets_ = forgets;
+#else
+        (void)forgets;
+#endif
+    }
     const CadaclysmMesh64& raw() const {
+#if CADACLYSM_CHECKED
+        const detail::SceneState& state = scene_.get("Mesh64");
+        if (state.forgets != forgets_) {
+            detail::bad_access("Mesh64",
+                               "stale view: the scene has forgotten its meshes since, freeing the document's own "
+                               "mesh this lends (ask the node again)");
+        }
+#else
         scene_.get("Mesh64");
+#endif
         return raw_;
     }
     Span<const double> doubles(const double* p, std::size_t per_vertex) const {
@@ -539,6 +561,10 @@ private:
 
     detail::Ref<detail::SceneState> scene_;
     CadaclysmMesh64 raw_;
+#if CADACLYSM_CHECKED
+    // The scene's forget count when this was made; see SceneState::forgets.
+    std::uint64_t forgets_ = 0;
+#endif
 };
 
 // A node's feature edges or free curves as runs of points, borrowed from the scene.
@@ -1052,6 +1078,23 @@ Result<std::vector<std::array<std::uint32_t, 3>>> census_rows(std::uint32_t coun
     return out;
 }
 
+// As census_rows(), but for crossings(): `row(i, &a, &b)` fills row i, two fields rather
+// than three -- the shape open_edges()/folded_edges() and crossings() do *not* share, a
+// crossing naming no B-rep edge. The shape crossings() shares on both sides of the ABI,
+// so the two cannot drift. Tested over a synthetic `row` in tests/fem_test.cpp:
+// `samples/dented-box.stp` exercises the real one, through the smoke.
+template <class Row, class Fail>
+Result<std::vector<std::array<std::uint32_t, 2>>> crossing_rows(std::uint32_t count, Row row, Fail fail) {
+    std::vector<std::array<std::uint32_t, 2>> out;
+    out.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        std::array<std::uint32_t, 2> at{};
+        if (!row(i, &at[0], &at[1])) return fail(i);
+        out.push_back(at);
+    }
+    return out;
+}
+
 }  // namespace detail
 
 // One body meshed for a solver: nodes welded by bits, triangles wound outward, every node
@@ -1185,6 +1228,24 @@ public:
                 return ::cadaclysm_fem_mesh_folded_edge(handle, i, a, b, edge);
             },
             [](std::uint32_t i) { return detail::reader_error(("fem mesh folded edge " + std::to_string(i)).c_str()); });
+    }
+
+    // Every pair of triangles that pass through each other, as {a, b} with a < b,
+    // sorted: an edge of one through the other's interior. Their B-rep faces are
+    // triangle_face()[a] and [b].
+    //
+    // **Computed for every body, open or closed.** The census watertight(), open_edges()
+    // and folded_edges() report is topological and cannot see a surface passing through
+    // itself; a mesh is ready for a volume mesher when it is watertight() **and** this is
+    // empty -- Gmsh refuses one that crosses. A copy.
+    Result<std::vector<std::array<std::uint32_t, 2>>> crossings() const {
+        const CadaclysmFemMesh* handle = live("FemMesh::crossings");
+        return detail::crossing_rows(
+            ::cadaclysm_fem_mesh_crossing_count(handle),
+            [handle](std::uint32_t i, std::uint32_t* a, std::uint32_t* b) {
+                return ::cadaclysm_fem_mesh_crossing(handle, i, a, b);
+            },
+            [](std::uint32_t i) { return detail::reader_error(("fem mesh crossing " + std::to_string(i)).c_str()); });
     }
 
     // The welded mesh closes -- and, for a B-rep body, so does the topology behind it.
@@ -1524,8 +1585,12 @@ public:
     Mesh mesh() const { return Mesh(scene_, ::cadaclysm_node_mesh(h(), index_)); }
 
     // mesh()'s own mesh, in `double`, lent rather than narrowed -- see Mesh64. All-null
-    // (empty()) for a node with nothing to mesh.
-    Mesh64 mesh64() const { return Mesh64(scene_, ::cadaclysm_node_mesh64(h(), index_)); }
+    // (empty()) for a node with nothing to mesh. Stamped with the scene's forget count,
+    // so reading it after a Scene::forget_meshes is caught rather than read.
+    Mesh64 mesh64() const {
+        detail::SceneState& state = scene_.get("Node");
+        return Mesh64(scene_, ::cadaclysm_node_mesh64(state.handle, index_), state.forgets);
+    }
 
     // Its triangles at a coarser level of detail: 0 is mesh() itself, 1 up to
     // lod_levels() each about a quarter of the triangles of the one before, and past
@@ -1917,8 +1982,132 @@ private:
     std::uint32_t index_ = 0;
 };
 
-// A connection between two links of the file's mechanism. Topology only: how it
-// moves is not read yet. From Scene::joints.
+// ---- pairs, freedoms and states ------------------------------------------------------
+
+struct State;
+namespace detail {
+State read_state(detail::Ref<detail::SceneState> scene, std::uint32_t index);
+}
+
+// Which kind of relative motion a Pair allows -- CadaclysmPairKind.
+enum class PairKind : std::int32_t {
+    revolute = 0,
+    prismatic = 1,
+    cylindrical = 2,
+    spherical = 3,
+    spherical_with_pin = 4,
+    planar = 5,
+    universal = 6,
+    homokinetic = 7,
+    screw = 8,
+    fully_constrained = 9,
+    unconstrained = 10,
+    low_order = 11,
+    other = 12,
+};
+
+// Which motion a Freedom is -- CadaclysmMotion.
+enum class Motion : std::uint32_t { rotation = 0, translation = 1 };
+
+// Which contact-frame axis a Freedom is about or along -- CadaclysmFreedomAxis.
+enum class FreedomAxis : std::uint32_t { x = 0, y = 1, z = 2 };
+
+// One degree of freedom of a Pair: which motion, about or along which contact-frame
+// axis, and its optional range. From Pair::freedoms.
+struct Freedom {
+    Motion motion = Motion::rotation;
+    FreedomAxis axis = FreedomAxis::x;
+    // Radians, or the scene's length unit; nothing when unbounded.
+    std::optional<double> lower;
+    std::optional<double> upper;
+};
+
+namespace detail {
+inline Freedom freedom_of(const CadaclysmFreedom& raw) {
+    Freedom out;
+    out.motion = static_cast<Motion>(raw.motion);
+    out.axis = static_cast<FreedomAxis>(raw.axis);
+    if (raw.has_lower) out.lower = raw.lower;
+    if (raw.has_upper) out.upper = raw.upper;
+    return out;
+}
+}  // namespace detail
+
+// A kinematic pair: the kind of relative motion a joint allows between its two links --
+// what Joint::pair returns.
+class Pair {
+public:
+    PairKind kind() const noexcept { return kind_; }
+
+    // The pair's entity type name ("GEAR_PAIR"), for PairKind::other; nothing otherwise.
+    std::optional<std::string> type_name() const {
+        const char* raw = ::cadaclysm_joint_pair_type(h(), joint_);
+        if (!raw) return std::nullopt;
+        return detail::text(raw);
+    }
+
+    // Its pitch -- length per revolution, in the scene's units -- for PairKind::screw;
+    // nothing otherwise.
+    std::optional<double> pitch() const {
+        double raw = ::cadaclysm_joint_pair_pitch(h(), joint_);
+        if (std::isnan(raw)) return std::nullopt;
+        return raw;
+    }
+
+    // The pair's contact frame fixed in its joint's start link, in world coordinates
+    // at the file's rest pose, as sixteen column-major doubles -- Node::raw_transform's
+    // layout.
+    std::array<double, 16> raw_frame_start() const { return raw_frames().first; }
+
+    // The pair's contact frame fixed in its joint's end link, as sixteen column-major
+    // doubles.
+    std::array<double, 16> raw_frame_end() const { return raw_frames().second; }
+
+    // raw_frame_start as rows, like Node::transform.
+    Matrix4 frame_start() const {
+        std::array<double, 16> raw = raw_frame_start();
+        return detail::rows_of(raw.data());
+    }
+
+    // raw_frame_end as rows, like Node::transform.
+    Matrix4 frame_end() const {
+        std::array<double, 16> raw = raw_frame_end();
+        return detail::rows_of(raw.data());
+    }
+
+    // Its degrees of freedom, in the reader's per-kind order. A State's values compose
+    // in this order.
+    std::vector<Freedom> freedoms() const {
+        std::uint32_t count = ::cadaclysm_joint_freedom_count(h(), joint_);
+        std::vector<Freedom> out;
+        out.reserve(count);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            CadaclysmFreedom raw{};
+            if (::cadaclysm_joint_freedom(h(), joint_, i, &raw)) out.push_back(detail::freedom_of(raw));
+        }
+        return out;
+    }
+
+private:
+    friend class Joint;
+    Pair(detail::Ref<detail::SceneState> scene, std::uint32_t joint, PairKind kind)
+        : scene_(std::move(scene)), joint_(joint), kind_(kind) {}
+    const CadaclysmScene* h() const { return scene_.get("Pair").handle; }
+
+    std::pair<std::array<double, 16>, std::array<double, 16>> raw_frames() const {
+        std::array<double, 16> start{};
+        std::array<double, 16> end{};
+        ::cadaclysm_joint_pair_frames(h(), joint_, start.data(), end.data());
+        return {start, end};
+    }
+
+    detail::Ref<detail::SceneState> scene_;
+    std::uint32_t joint_ = 0;
+    PairKind kind_ = PairKind::revolute;
+};
+
+// A connection between two links of the file's mechanism, and, when the file names
+// one, the kinematic pair saying how it moves. From Scene::joints.
 class Joint {
 public:
     std::uint32_t index() const noexcept { return index_; }
@@ -1933,6 +2122,14 @@ public:
     // The link this joint ends at, in the file's order.
     Link end() const { return Link(scene_, ::cadaclysm_joint_end(h(), index_)); }
 
+    // How this joint moves: the kinematic pair naming it, or nothing when the file
+    // gives it none.
+    std::optional<Pair> pair() const {
+        std::int32_t kind = ::cadaclysm_joint_pair_kind(h(), index_);
+        if (kind < 0) return std::nullopt;
+        return Pair(scene_, index_, static_cast<PairKind>(kind));
+    }
+
     bool operator==(const Joint& other) const noexcept {
         return index_ == other.index_ && scene_.identity() == other.scene_.identity();
     }
@@ -1940,12 +2137,49 @@ public:
 
 private:
     friend class Scene;
+    friend State detail::read_state(detail::Ref<detail::SceneState> scene, std::uint32_t index);
     Joint(detail::Ref<detail::SceneState> scene, std::uint32_t which) : scene_(std::move(scene)), index_(which) {}
     const CadaclysmScene* h() const { return scene_.get("Joint").handle; }
 
     detail::Ref<detail::SceneState> scene_;
     std::uint32_t index_ = 0;
 };
+
+// One row of a State: the joint it sets, and one value per freedom of its pair, in the
+// pair's freedom order.
+struct StateValue {
+    Joint joint;
+    std::vector<double> values;
+};
+
+// A named pose of the file's mechanism: a MECHANISM_STATE_REPRESENTATION. From
+// Scene::states.
+struct State {
+    std::uint32_t index = 0;
+    std::string name;
+    // One row per joint this state sets, in file order.
+    std::vector<StateValue> values;
+};
+
+namespace detail {
+inline State read_state(detail::Ref<detail::SceneState> scene, std::uint32_t index) {
+    const CadaclysmScene* handle = scene.get("State").handle;
+    State out;
+    out.index = index;
+    out.name = detail::text(::cadaclysm_state_name(handle, index));
+    std::uint32_t rows = ::cadaclysm_state_value_count(handle, index);
+    out.values.reserve(rows);
+    for (std::uint32_t row = 0; row < rows; ++row) {
+        std::uint32_t joint = NONE;
+        std::uint32_t n = ::cadaclysm_state_value(handle, index, row, &joint, nullptr, 0);
+        std::vector<double> values(n);
+        ::cadaclysm_state_value(handle, index, row, &joint, values.data(), n);
+        if (joint == NONE) continue;
+        out.values.push_back(StateValue{Joint(scene, joint), std::move(values)});
+    }
+    return out;
+}
+}  // namespace detail
 
 // ---- the scene ----------------------------------------------------------------------
 
@@ -2122,6 +2356,17 @@ public:
         return out;
     }
 
+    // The file's named mechanism states, e.g. STEP's MECHANISM_STATE_REPRESENTATION.
+    // Empty for a file that records none.
+    std::vector<State> states() const {
+        std::uint32_t count = ::cadaclysm_state_count(h());
+        std::vector<State> out;
+        out.reserve(count);
+        detail::Ref<detail::SceneState> r = ref();
+        for (std::uint32_t i = 0; i < count; ++i) out.push_back(detail::read_state(r, i));
+        return out;
+    }
+
     std::vector<Node> roots() const {
         const CadaclysmScene* scene = h();
         std::uint32_t count = ::cadaclysm_root_count(scene);
@@ -2157,9 +2402,17 @@ public:
     // Stop realize_all, for the life of the scene.
     void cancel() const { ::cadaclysm_cancel(h()); }
 
-    // Drop every mesh the scene has built; the next ask rebuilds. Every Mesh and
-    // Polylines handed out before this is over freed memory.
-    void forget_meshes() const { ::cadaclysm_forget_meshes(h()); }
+    // Drop every mesh the scene has built; the next ask rebuilds. What it frees is the
+    // document's own mesh: the Mesh64s handed out before it lend that and are over freed
+    // memory, so this counts the forget and a checked build reports one of them rather
+    // than reading it. Mesh, Polylines and the Béziers are the library's own caches,
+    // which a forget does not touch (the C ABI says so) and which stay good until the
+    // scene closes; a Node is an index and keeps working.
+    void forget_meshes() const {
+        detail::SceneState& scene = state("forget_meshes");
+        ::cadaclysm_forget_meshes(scene.handle);
+        ++scene.forgets;
+    }
 
     // Every placement of every shape as one file: "glb", "gltf" or "obj".
     Result<void> save(const std::string& path, const std::string& format = "glb") const {

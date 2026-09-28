@@ -263,6 +263,30 @@ static Result<void> fem_census_wiring(const std::string& sheet) {
                std::to_string(cracks[0][1]) + "), not (1,2)");
     std::printf("fem census: open-sheet.scad reads %zu cracks and %zu fold at (%u,%u)\n", cracks.size(), folds.size(),
                 folds[0][0], folds[0][1]);
+
+    // Crossings: `samples/dented-box.stp` is a closed B-rep box whose top dips through its
+    // own floor, 296 pairs measured 2026-09-26 -- once through this reader, and once
+    // through the kernel's own open of the same file, which must agree with it.
+    std::string dented = sheet.substr(0, sheet.size() - std::string("open-sheet.scad").size()) + "dented-box.stp";
+    CADACLYSM_TRY(dented_scene, cadaclysm::open(dented));
+    std::vector<cadaclysm::Node> dented_bodies = dented_scene.walk();
+    auto dented_body = std::find_if(dented_bodies.begin(), dented_bodies.end(),
+                                     [](const cadaclysm::Node& n) { return n.can_mesh(); });
+    EXPECT(dented_body != dented_bodies.end(), "fem crossings: dented-box.stp has no meshable node");
+    CADACLYSM_TRY(dented_mesh, dented_body->fem_mesh());
+    EXPECT(dented_mesh.watertight() && !dented_mesh.from_mesh(), "fem crossings: dented-box.stp is not a watertight brep");
+    CADACLYSM_TRY(dented_crossings, dented_mesh.crossings());
+    EXPECT(dented_crossings.size() == 296,
+           "fem crossings: dented-box.stp reads " + std::to_string(dented_crossings.size()) + " pairs, not 296");
+    EXPECT(dented_crossings[0][0] < dented_crossings[0][1], "fem crossings: the first pair is not a < b");
+
+    CADACLYSM_TRY(kernel_dented, bs::Solid::open(dented));
+    CADACLYSM_TRY(kernel_dented_mesh, kernel_dented.fem_mesh());
+    CADACLYSM_TRY(kernel_dented_crossings, kernel_dented_mesh.crossings());
+    EXPECT(kernel_dented_crossings.size() == 296,
+           "kernel fem crossings: dented-box.stp reads " + std::to_string(kernel_dented_crossings.size()) + " pairs, not 296");
+    std::printf("fem crossings: dented-box.stp reads %zu pairs through the reader and %zu through the kernel\n",
+                dented_crossings.size(), kernel_dented_crossings.size());
     return {};
 }
 
@@ -288,8 +312,9 @@ static Result<void> fem_reader(const cadaclysm::Scene& scene, bool is_cube) {
            "fem: a from_mesh body has edges, vertices or a node off face 0");
     CADACLYSM_TRY(open, mesh.open_edges());
     CADACLYSM_TRY(folded, mesh.folded_edges());
-    EXPECT(mesh.watertight() && open.empty() && folded.empty(),
-           "fem: the cube's own mesh is not watertight with both censuses empty");
+    CADACLYSM_TRY(crossings, mesh.crossings());
+    EXPECT(mesh.watertight() && open.empty() && folded.empty() && crossings.empty(),
+           "fem: the cube's own mesh is not watertight with both censuses empty and no crossings");
     EXPECT(mesh.min_angle() > 0.0 && mesh.min_angle() <= 60.0 && mesh.worst_triangle() < mesh.triangles().size() / 3 &&
                mesh.longest_edge() > 0.0,
            "fem: the quality figures read " + std::to_string(mesh.min_angle()) + " deg, triangle " +
@@ -499,8 +524,9 @@ static Result<void> fem_brep(const cadaclysm::Scene& back) {
     EXPECT(zeroed_without_one, "fem brep: a vertex with no position carries a point that is not zeroed");
     CADACLYSM_TRY(open, mesh.open_edges());
     CADACLYSM_TRY(folded, mesh.folded_edges());
-    EXPECT(mesh.watertight() && open.empty() && folded.empty(),
-           "fem brep: the closed filleted part is not watertight with both censuses empty");
+    CADACLYSM_TRY(crossings, mesh.crossings());
+    EXPECT(mesh.watertight() && open.empty() && folded.empty() && crossings.empty(),
+           "fem brep: the closed filleted part is not watertight with both censuses empty and no crossings");
     std::printf("fem brep: %zu nodes, %zu edges (edge 0 id=%u), %zu vertices, %u faces\n", mesh.nodes().size() / 3,
                 edges.size(), edges[0].id, vertices.size(), mesh.face_count());
 
@@ -541,8 +567,9 @@ static Result<void> fem_kernel(const bs::Solid& rounded, const bs::Solid& sheet)
     EXPECT(mesh.face_count() == 15, "kernel fem: the filleted part has " + std::to_string(mesh.face_count()) + " faces, not 15");
     CADACLYSM_TRY(open, mesh.open_edges());
     CADACLYSM_TRY(folded, mesh.folded_edges());
-    EXPECT(mesh.watertight() && open.empty() && folded.empty(),
-           "kernel fem: the filleted part is not watertight with both censuses empty");
+    CADACLYSM_TRY(crossings, mesh.crossings());
+    EXPECT(mesh.watertight() && open.empty() && folded.empty() && crossings.empty(),
+           "kernel fem: the filleted part is not watertight with both censuses empty and no crossings");
     CADACLYSM_TRY_VOID(fem_msh(mesh, "cadaclysm-smoke-cpp-kernel-fem.msh", "kernel fem"));
     std::size_t node_count = mesh.nodes().size() / 3;
     double longest = mesh.longest_edge();
@@ -571,9 +598,9 @@ static Result<void> fem_kernel(const bs::Solid& rounded, const bs::Solid& sheet)
            "kernel fem: fem_mesh() and fem_mesh(0.05) agree, so the default may be the neighbours' 0.05");
 
     // **A FEM mesh is not in the solid's tessellation cache**, so re-meshing the solid at
-    // another tolerance must not stale it: `Solid::fem_mesh` is the one array product here
-    // whose views carry no generation check. Catches that guard wired in by reflex from
-    // `Mesh`, where it belongs.
+    // another tolerance must not stale it: the FEM mesh and the tessellation are each
+    // their own handle -- neither is the solid's cache itself, so nothing here carries a
+    // generation guard to trip.
     CADACLYSM_TRY(coarse, rounded.mesh(0.5));
     std::uint32_t coarse_triangles = coarse.triangle_count();
     CADACLYSM_TRY(kept, rounded.fem_mesh(0.05));
@@ -581,8 +608,8 @@ static Result<void> fem_kernel(const bs::Solid& rounded, const bs::Solid& sheet)
     EXPECT(fine.triangle_count() != coarse_triangles,
            "kernel fem: the two tolerances meshed the same -- the re-mesh did not happen");
     EXPECT(!trips([&] { (void)kept.nodes(); }),
-           "kernel fem: a FEM mesh read after the solid was meshed again tripped -- a FEM mesh is its own handle, not a "
-           "product of the tessellation cache, so it must not carry Mesh's generation guard");
+           "kernel fem: a FEM mesh read after the solid was meshed again tripped -- the FEM mesh and the tessellation "
+           "are each their own handle");
     EXPECT(kept.nodes().size() / 3 == node_count, "kernel fem: a FEM mesh taken before a re-mesh reads a different node count after it");
     CADACLYSM_TRY(kept_edges, kept.edges());
     EXPECT(kept_edges.size() == edges.size(), "kernel fem: a FEM mesh's edges do not read after the solid was meshed again");
@@ -989,6 +1016,30 @@ static Result<void> reader(const std::string& path) {
         cadaclysm::Mesh held = walked_doomed.back().mesh();
         doomed.close();
         EXPECT(trips([&] { (void)held.positions(); }), "a mesh read after its scene closed did not trip");
+    }
+    // C++ only: forget_meshes() frees the document's own mesh, which Mesh64 lends, so a
+    // Mesh64 made before the forget is caught rather than read. The f32 mesh and the line
+    // views are the scene's own caches and survive it, as the C ABI says they do -- they
+    // must not be reported stale, nor must the nodes.
+    {
+        CADACLYSM_TRY(forgetful, cadaclysm::open(path));
+        std::vector<cadaclysm::Node> bodies = forgetful.walk();
+        auto body = std::find_if(bodies.begin(), bodies.end(), [](const cadaclysm::Node& n) { return n.can_mesh(); });
+        EXPECT(body != bodies.end(), "no meshable node");
+        cadaclysm::Mesh64 lent = body->mesh64();
+        cadaclysm::Mesh kept = body->mesh();
+        cadaclysm::Polylines outline = body->edges();
+        std::uint32_t lent_triangles = lent.triangle_count();
+        EXPECT(lent_triangles > 0, "the node lends no f64 mesh");
+        forgetful.forget_meshes();
+        EXPECT(trips([&] { (void)lent.positions(); }), "a Mesh64 read after forget_meshes did not trip");
+        EXPECT(trap::message.find("forgotten") != std::string::npos, "the trip does not say the meshes were forgotten");
+        EXPECT(!trips([&] { (void)kept.positions(); }), "forget_meshes reported the f32 mesh the scene keeps as stale");
+        EXPECT(!trips([&] { (void)outline.positions(); }), "forget_meshes reported an edge view as stale");
+        EXPECT(!trips([&] { (void)body->can_mesh(); }), "forget_meshes reported a node as stale");
+        cadaclysm::Mesh64 relent = body->mesh64();
+        EXPECT(!trips([&] { (void)relent.positions(); }) && relent.triangle_count() == lent_triangles,
+               "a Mesh64 asked for after forget_meshes does not read");
     }
 #endif
     return {};
@@ -1725,18 +1776,44 @@ static Result<std::pair<bs::Solid, std::uint32_t>> solids() {
     EXPECT(per_face.size() == faces && summed == fine && per_face.copy().size() == faces,
            "face_triangles is not one count per face summing to the mesh's triangles");
     std::printf("mesh: %u triangles at 0.5, %u at 0.05; %zu edge polylines\n", coarse, fine, polylines.size());
+
+    // A view owns a held tessellation: a re-mesh at another tolerance and the solid's close
+    // leave it -- and a span taken from it -- reading the same numbers.
+    {
+        CADACLYSM_TRY(first, rounded.mesh(0.5));
+        const auto positions = first.positions();  // a span, held across both
+        const std::vector<float> kept(positions.begin(), positions.end());
+        CADACLYSM_TRY(re_meshed_finer, rounded.mesh(0.05));
+        (void)re_meshed_finer;
+        CADACLYSM_TRY(re_meshed_finest, rounded.mesh(0.01));
+        (void)re_meshed_finest;
+        EXPECT(std::equal(kept.begin(), kept.end(), positions.begin()), "a span changed under a re-mesh at another tolerance");
+        EXPECT(!trips([&] { (void)first.positions(); }), "a held view tripped after a re-mesh");
+        CADACLYSM_TRY(held_box, bs::Solid::cuboid(1, 2, 3));
+        CADACLYSM_TRY(held_box_view, held_box.mesh(0.05));
+        const float held_box_kept = held_box_view.positions()[0];
+        held_box.close();
+        EXPECT(!trips([&] { (void)held_box_view.positions(); }) && held_box_view.positions()[0] == held_box_kept,
+               "a held view tripped after its solid closed");
+    }
+
+    // mesh(0) fails through cadaclysm_blacksmith_tessellation, which reports its own name
+    // ("tessellation: ..."); the wrapper rewrites that back to mesh's own name, as before
+    // the held tessellation existed.
+    auto zero_tolerance = rounded.mesh(0.0);
+    EXPECT(!zero_tolerance && zero_tolerance.error().message == "mesh: tolerance must be positive and finite",
+           "mesh(0): " + (zero_tolerance ? std::string("accepted") : zero_tolerance.error().message));
+
 #if CADACLYSM_CHECKED
-    // C++ only: the coarse view's memory was replaced by the fine mesh; reading it trips.
-    EXPECT(trips([&] { (void)coarse_view.positions(); }), "a view read after a re-mesh at a new tolerance did not trip");
-    EXPECT(trap::message.find("stale view") != std::string::npos, "the trip does not say the view is stale");
-    EXPECT(!trips([&] { (void)mesh.positions(); }), "a current view tripped");
-    // Moving a solid keeps its views; closing it does not.
-    CADACLYSM_TRY(box, bs::Solid::cuboid(1, 2, 3));
-    CADACLYSM_TRY(box_view, box.mesh(0.1));
-    bs::Solid moved = std::move(box);
-    EXPECT(!trips([&] { (void)box_view.positions(); }) && box_view.vertex_count() > 0, "a move invalidated the solid's views");
-    moved.close();
-    EXPECT(trips([&] { (void)box_view.positions(); }), "a view read after its solid closed did not trip");
+    // C++ only: a moved-from view traps too -- its held tessellation went with the move,
+    // so nothing is left to read.
+    {
+        CADACLYSM_TRY(moved_from, rounded.mesh(0.05));
+        bs::Mesh moved_into = std::move(moved_from);
+        EXPECT(trips([&] { (void)moved_from.positions(); }), "a moved-from mesh view read without tripping");
+        EXPECT(!trips([&] { (void)moved_into.positions(); }) && moved_into.vertex_count() > 0,
+               "the move did not carry the held tessellation over");
+    }
 #endif
 
     // Workplane latches: a step on an empty workplane, and everything after it skipped.

@@ -107,6 +107,7 @@ koffi.opaque('CadaclysmBlacksmithProfile');
 koffi.opaque('CadaclysmBlacksmithProfileList');
 koffi.opaque('CadaclysmBlacksmithSolid');
 koffi.opaque('CadaclysmBlacksmithSweepPath');
+koffi.opaque('CadaclysmBlacksmithTessellation');
 
 const CadaclysmBlacksmithMesh = koffi.struct('CadaclysmBlacksmithMesh', {
   positions: 'const float *',
@@ -318,9 +319,9 @@ function _wasmLibrary(w) {
   // handle, or a count the caller checks `last_error` on) for everything else
   const BOOLS = new Set(['path_line_to', 'path_arc_to', 'path_bezier_to', 'path_nurbs_to', 'path_conic_to', 'path_parabola_by_vertex',
     'path_parabola_by_focus', 'sweep_path_line_to', 'sweep_path_arc',
-    'slant_of_plane', 'face_frame', 'face_ref', 'frame_midplane', 'frame_through', 'bounds', 'bounds64', 'edge', 'colour', 'profile_colour', 'edge_colour', 'manifold', 'license_set', 'hit', 'edge_curve',
-    'intersection_chain', 'intersection_curve', 'intersection_overlap', 'hits_piece',
-    'fem_mesh_view', 'fem_mesh_edge', 'fem_mesh_vertex', 'fem_mesh_open_edge', 'fem_mesh_folded_edge',
+    'slant_of_plane', 'face_frame', 'face_ref', 'frame_midplane', 'frame_through', 'bounds', 'bounds64', 'box', 'edge', 'colour', 'profile_colour', 'edge_colour', 'manifold', 'license_set', 'hit', 'edge_curve',
+    'intersection_chain', 'intersection_curve', 'intersection_overlap', 'hits_piece', 'assembly_link', 'assembly_joint',
+    'fem_mesh_view', 'fem_mesh_edge', 'fem_mesh_vertex', 'fem_mesh_open_edge', 'fem_mesh_folded_edge', 'fem_mesh_crossing',
     // Its wasm export always throws ("the wasm writes no file"); `FemMesh.saveMsh`
     // never reaches it in the notebook, writing `mshText()` through the page's own
     // `fs` as `step`/`sat`/`svg` do, so this is the shape a direct `_lib()` call
@@ -341,13 +342,13 @@ function _wasmLibrary(w) {
     profile_round: [3], profile_spline: [1], profile_chain: [1], profile_from_loops: [1], profile_piece_count: [2], profile_piece: [2],
     profile_trim_count: [2], profile_trim_chain: [2], loft_through: [2], loft_through_open: [2], fillet: [2, 6], chamfer: [2], shell: [3, 6],
     thicken: [4], push_pull: [5], push_pull_faces: [2, 6], split: [4], split_by_plane: [4], step: [1], sat_text: [1], svg_text: [1], drawing_svg_text: [1, 3], profile_text: [4],
-    slant_of_plane: [3], face_frame: [2], face_ref: [2], bounds: [2, 3], bounds64: [2, 3], edge: [2], colour: [2], profile_colour: [1], edges_coloured: [2], edge_colour: [2], manifold: [1], hit: [2], edge_curve: [2],
+    slant_of_plane: [3], face_frame: [2], face_ref: [2], bounds: [2, 3], bounds64: [2, 3], box: [1, 2], edge: [2], colour: [2], profile_colour: [1], edges_coloured: [2], edge_colour: [2], manifold: [1], hit: [2], edge_curve: [2],
     intersect: [4], intersection_chain: [2], intersection_curve: [2], intersection_overlap: [2],
-    solid_profile_hits: [5], hits_piece: [2, 3, 4],
+    solid_profile_hits: [5], hits_piece: [2, 3, 4], assembly_link: [3],
     // `fem_mesh`'s index counts the tuple `call` rewrites below, not the C call's:
     // the options struct becomes two scalars, so `user` has moved from 4 to 5.
     fem_mesh: [5], fem_mesh_view: [1], fem_mesh_edge: [2], fem_mesh_vertex: [2],
-    fem_mesh_open_edge: [2, 3, 4], fem_mesh_folded_edge: [2, 3, 4] };
+    fem_mesh_open_edge: [2, 3, 4], fem_mesh_folded_edge: [2, 3, 4], fem_mesh_crossing: [2, 3] };
   let error = null;
   /** A `WebAssembly.RuntimeError`: the wasm trapped (a panic aborts, the tables stay borrowed), which no `last_error` can stand for. */
   const trapped = (e) => typeof WebAssembly !== 'undefined' && e instanceof WebAssembly.RuntimeError;
@@ -443,9 +444,16 @@ function _wasmLibrary(w) {
       args[2][0] = result.a; args[3][0] = result.b; args[4][0] = result.brep_edge;
       return true;
     }
+    if (short === 'fem_mesh_crossing') {
+      // A crossing row, into the two one-element `Uint32Array`s at args[2..3] --
+      // `fem_mesh_open_edge`/`fem_mesh_folded_edge`'s shape with no third field.
+      args[2][0] = result.a; args[3][0] = result.b;
+      return true;
+    }
     if (short === 'colour' || short === 'profile_colour' || short === 'edge_colour') { if (result == null) return false; args[short === 'profile_colour' ? 1 : 2].set(result); return true; }
     if (short === 'manifold') { args[1].set(result); return true; }
     if (short === 'bounds' || short === 'bounds64') { args[2].set(result.slice(0, 3)); args[3].set(result.slice(3, 6)); return true; }
+    if (short === 'box') { args[1].set(result.slice(0, 3)); args[2].set(result.slice(3, 6)); return true; }
     if (short in OUT) { args[OUT[short]].set(result); return true; }
     if (BOOLS.has(short)) return true;
     if (short === 'mesh' || short === 'mesh64') return { ...result, vertex_count: result.positions.length / 3, index_count: result.indices.length };
@@ -498,7 +506,11 @@ function _wasmLibrary(w) {
           // solids, profiles and words in that order.
           args = [args[0], args[1], args[2], args[3], svgWords(args[4])];
         }
-        const passed = args.filter((_, i) => !dropped.includes(i)).map(arg);
+        // `assembly_link`'s placements are names, not handles: cadaclysm_blacksmith_assembly_link
+        // in crates/cadaclysm-wasm/src/blacksmith.rs takes a `Vec<String>`, so `arg`'s generic
+        // array rule (a JS array is a handle list, turned into a `Uint32Array`) must not touch it.
+        const passed = args.filter((_, i) => !dropped.includes(i))
+          .map((a, i) => (short === 'assembly_link' && i === 2 ? Array.from(a, String) : arg(a)));
         let result;
         try { result = fn(...passed); } catch (e) {
           if (trapped(e)) throw e;   // not a refusal: the kernel is dead, and the page reboots it
@@ -547,8 +559,20 @@ function _lib() {
     mesh_face_triangles: f('CadaclysmBlacksmithFaceTriangles cadaclysm_blacksmith_mesh_face_triangles(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
     edge_polylines: f('CadaclysmBlacksmithPolylines cadaclysm_blacksmith_edge_polylines(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
     edge_polyline_colours: f('CadaclysmBlacksmithColours cadaclysm_blacksmith_edge_polyline_colours(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
+    // A held tessellation: the accessors below borrow from the handle, not the solid, and
+    // stay valid until `tessellation_free` whatever happens to the solid meanwhile. Node
+    // copies every array as `mesh`/`mesh64`/`mesh_face_triangles`/`edge_polylines` above
+    // already do, so it holds nothing itself -- these are declared for the parity gate
+    // and for a caller of `_lib()` who wants the handle directly.
+    tessellation: f('CadaclysmBlacksmithTessellation *cadaclysm_blacksmith_tessellation(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
+    tessellation_free: f('void cadaclysm_blacksmith_tessellation_free(CadaclysmBlacksmithTessellation *tessellation)'),
+    tessellation_mesh: f('CadaclysmBlacksmithMesh cadaclysm_blacksmith_tessellation_mesh(const CadaclysmBlacksmithTessellation *tessellation)'),
+    tessellation_mesh64: f('CadaclysmBlacksmithMesh64 cadaclysm_blacksmith_tessellation_mesh64(const CadaclysmBlacksmithTessellation *tessellation)'),
+    tessellation_face_triangles: f('CadaclysmBlacksmithFaceTriangles cadaclysm_blacksmith_tessellation_face_triangles(const CadaclysmBlacksmithTessellation *tessellation)'),
+    tessellation_edge_polylines: f('CadaclysmBlacksmithPolylines cadaclysm_blacksmith_tessellation_edge_polylines(const CadaclysmBlacksmithTessellation *tessellation)'),
     bounds: f('bool cadaclysm_blacksmith_bounds(const CadaclysmBlacksmithSolid *solid, double tolerance, _Out_ double *min, _Out_ double *max)'),
     bounds64: f('bool cadaclysm_blacksmith_bounds64(const CadaclysmBlacksmithSolid *solid, double tolerance, _Out_ double *min, _Out_ double *max)'),
+    box: f('bool cadaclysm_blacksmith_box(const CadaclysmBlacksmithSolid *solid, _Out_ double *min, _Out_ double *max)'),
     step: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_step(const CadaclysmBlacksmithSolid **solids, size_t count, const char *schema, uint32_t unit)'),
     sat_text: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_sat_text(const CadaclysmBlacksmithSolid **solids, size_t count, uint32_t unit)'),
     sat: f('bool cadaclysm_blacksmith_sat(const CadaclysmBlacksmithSolid **solids, size_t count, const char *path, uint32_t unit)'),
@@ -573,6 +597,8 @@ function _lib() {
     fem_mesh_vertex: f('bool cadaclysm_blacksmith_fem_mesh_vertex(const CadaclysmBlacksmithFemMesh *m, uint32_t i, _Out_ CadaclysmBlacksmithFemVertex *out)'),
     fem_mesh_open_edge: f('bool cadaclysm_blacksmith_fem_mesh_open_edge(const CadaclysmBlacksmithFemMesh *m, uint32_t i, _Out_ uint32_t *a, _Out_ uint32_t *b, _Out_ uint32_t *brep_edge)'),
     fem_mesh_folded_edge: f('bool cadaclysm_blacksmith_fem_mesh_folded_edge(const CadaclysmBlacksmithFemMesh *m, uint32_t i, _Out_ uint32_t *a, _Out_ uint32_t *b, _Out_ uint32_t *brep_edge)'),
+    fem_mesh_crossing_count: f('uint32_t cadaclysm_blacksmith_fem_mesh_crossing_count(const CadaclysmBlacksmithFemMesh *m)'),
+    fem_mesh_crossing: f('bool cadaclysm_blacksmith_fem_mesh_crossing(const CadaclysmBlacksmithFemMesh *m, uint32_t i, _Out_ uint32_t *a, _Out_ uint32_t *b)'),
     fem_mesh_msh_text: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_fem_mesh_msh_text(const CadaclysmBlacksmithFemMesh *m)'),
     fem_mesh_save_msh: f('bool cadaclysm_blacksmith_fem_mesh_save_msh(const CadaclysmBlacksmithFemMesh *m, const char *path)'),
     // `drawing_svg_text`/`drawing_svg`: `svg_text`/`svg` with a second handle list, the
@@ -645,6 +671,7 @@ function _lib() {
     sphere: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sphere(double r)'),
     torus: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_torus(double major, double minor)'),
     wedge: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_wedge(double x, double y, double z, double top_x)'),
+    pyramid: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_pyramid(uint32_t sides, double r, double h)'),
     extrude: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_extrude(const CadaclysmBlacksmithProfile *profile, const double *frame, double height)'),
     extrude_open: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_extrude_open(const CadaclysmBlacksmithProfile *profile, const double *frame, double height)'),
     extrude_tapered: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_extrude_tapered(const CadaclysmBlacksmithProfile *profile, const double *frame, double height, double taper)'),
@@ -720,6 +747,10 @@ function _lib() {
     assembly_place_solid: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_assembly_place_solid(CadaclysmBlacksmithAssembly *assembly, const CadaclysmBlacksmithSolid *solid, const double *frame, const char *name)'),
     assembly_place_assembly: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_assembly_place_assembly(CadaclysmBlacksmithAssembly *assembly, CadaclysmBlacksmithAssembly *placed, const double *frame, const char *name)'),
     assembly_step: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_assembly_step(const CadaclysmBlacksmithAssembly *assembly, const char *schema, uint32_t unit)'),
+    // koffi marshals a JS string array into `const char **` for the call's duration, as
+    // `CadaclysmOpenOptions.schemas` already does in cadaclysm.js.
+    assembly_link: f('bool cadaclysm_blacksmith_assembly_link(CadaclysmBlacksmithAssembly *assembly, const char *name, const char **placements, size_t count)'),
+    assembly_joint: f('bool cadaclysm_blacksmith_assembly_joint(CadaclysmBlacksmithAssembly *assembly, const char *name, const char *start, const char *end)'),
   };
   return library;
 }
@@ -776,6 +807,26 @@ function _indices(value, call, param, edges = false) {
     i++;
   }
   return Uint32Array.from(out);
+}
+// A list argument of names: `value` must be a list -- any iterable but a string -- and each
+// item a string. Refused here, named, before the kernel is asked: one name is `[name]`,
+// never split into characters
+// (docs/superpowers/specs/2026-09-25-list-arguments-refused-clearly-design.md).
+function _names(value, call, param) {
+  const described = (v) => (typeof v === 'string' ? JSON.stringify(v)
+    : (v != null && typeof v !== 'number' && typeof v !== 'boolean' && typeof v[Symbol.iterator] === 'function') ? 'a list'
+    : String(v));
+  if (value == null || typeof value === 'string' || typeof value[Symbol.iterator] !== 'function') {
+    throw new TypeError(`${call}: ${param} must be a list of names, not ${described(value)}`);
+  }
+  const out = [];
+  let i = 0;
+  for (const item of value) {
+    if (typeof item !== 'string') throw new TypeError(`${call}: ${param}[${i}] is not a name: ${described(item)}`);
+    out.push(item);
+    i++;
+  }
+  return out;
 }
 /** A face index for the C call, NONE for the whole solid; a negative one would wrap to NONE. */
 function _faceOrNone(solid, face, what) {
@@ -1323,6 +1374,8 @@ class Solid {
   static sphere(r) { return new Solid(_lib().sphere(r)); }
   static torus(major, minor) { return new Solid(_lib().torus(major, minor)); }
   static wedge(x, y, z, topX) { return new Solid(_lib().wedge(x, y, z, topX)); }
+  /** A right pyramid of `sides` sides (at least 3): its base the regular polygon of circumradius `r` on z=0, its first corner on +x, its tip at (0, 0, `h`). */
+  static pyramid(sides, r, h) { return new Solid(_lib().pyramid(Math.max(0, sides | 0), r, h)); }
   static extrude(profile, frame, height) { return new Solid(_lib().extrude(profile._handle, _frame(frame), height)); }
   static extrudeOpen(profile, frame, height) { return new Solid(_lib().extrude_open(profile._handle, _frame(frame), height)); }
   static extrudeTapered(profile, frame, height, taper) { return new Solid(_lib().extrude_tapered(profile._handle, _frame(frame), height, taper)); }
@@ -1526,7 +1579,17 @@ class Solid {
   }
   faceKind(face) { const raw = _lib().face_kind(this._handle, face); if (raw == null) _fail('face_kind'); return String(raw); }
   /** `boundsAt(0.05)`. */
-  get bounds() { return this.boundsAt(0.05); }
+  /**
+   * The solid's axis-aligned box, `[[minX, minY, minZ], [maxX, maxY, maxZ]]`, at the same cost
+   * whatever its size: its mesh at a thousandth of its own extent, in `double`, so the box is
+   * inside the exact one and short of it by at most that. Worked out once per solid, apart from
+   * the tessellation `mesh` caches. `boundsAt` is the box of the mesh at a tolerance you name.
+   */
+  get bounds() {
+    const lo = new Float64Array(3), hi = new Float64Array(3);
+    if (!_lib().box(this._handle, lo, hi)) _fail('box');
+    return [Array.from(lo), Array.from(hi)];
+  }
   /** `[[minX, minY, minZ], [maxX, maxY, maxZ]]` over the tessellation at `tolerance`. */
   boundsAt(tolerance) {
     const lo = new Float64Array(3), hi = new Float64Array(3);
@@ -2109,6 +2172,30 @@ class Assembly {
     return String(raw);
   }
   /**
+   * Declare a rigid link called `name` over `placements` (any iterable of names of
+   * placements of this assembly itself -- not of assemblies placed in it; give those their
+   * own mechanism). A placed assembly in a link moves as one piece. An empty name, a name
+   * taken by another link here, no placements, a placement named twice, one this assembly
+   * does not have, or one already in another link throws; the assembly is left as it was.
+   * Written as an AP242 kinematic link when this assembly is written; see spec
+   * 2026-09-25-blacksmith-mechanisms-design.md for the rules. `placements` a bare string,
+   * not a list, throws a `TypeError` before any call -- `link("x", "bolt")` would otherwise
+   * silently split into the placements `b`, `o`, `l`, `t`.
+   */
+  link(name, placements) {
+    const names = _names(placements, 'link', 'placements');
+    if (!_lib().assembly_link(this._live, name, names, names.length)) _fail('assembly_link');
+  }
+  /**
+   * Connect this assembly's links `start` and `end` (kept in that order) as a joint called
+   * `name`, written as an AP242 kinematic joint. An empty name, a name taken by another
+   * joint here, a link this assembly does not have, a link joined to itself, or a
+   * (start, end) pair already joined throws; the reverse pair is a different joint.
+   */
+  joint(name, start, end) {
+    if (!_lib().assembly_joint(this._live, name, start, end)) _fail('assembly_joint');
+  }
+  /**
    * This assembly, and everything placed under it, as one STEP file: this assembly the root
    * product, each sub-assembly and each distinct part (the same solid with the same paint and
    * name) written once, each placement an occurrence named as it was placed. `schema` and
@@ -2371,6 +2458,27 @@ class FemMesh {
   foldedEdges() {
     const l = _lib(), h = this._handle;
     return _censusRows((i, a, b, e) => l.fem_mesh_folded_edge(h, i, a, b, e), this._live.folded_edge_count, 'fem_mesh_folded_edge');
+  }
+  /**
+   * Every pair of triangles that pass through each other, as `[a, b]` with `a < b`,
+   * sorted: an edge of one through the other's interior. Their faces are
+   * `triangleFace()[a]` and `[b]`.
+   *
+   * **Computed for every solid, open or closed.** The census `watertight`,
+   * `openEdges()` and `foldedEdges()` report is topological and cannot see a surface
+   * passing through itself; a mesh is ready for a volume mesher when it is
+   * `watertight` **and** this is empty -- Gmsh refuses one that crosses. A copy.
+   */
+  crossings() {
+    const l = _lib(), h = this._handle;
+    const count = l.fem_mesh_crossing_count(h);
+    const a = new Uint32Array(1), b = new Uint32Array(1);
+    const out = [];
+    for (let i = 0; i < count; i++) {
+      if (!l.fem_mesh_crossing(h, i, a, b)) _fail(`fem_mesh_crossing ${i}`);
+      out.push([a[0], b[0]]);
+    }
+    return out;
   }
   // -- the summary
   /** The topology is closed and the welded mesh is too. **False for every solid whose topology is not closed**; read `openEdges()` for what an empty census beside a false here does and does not mean. */

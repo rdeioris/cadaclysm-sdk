@@ -251,7 +251,8 @@ local ENTRY_POINTS = {
   "cadaclysm_meshlet_children",
   "cadaclysm_fem_options_init", "cadaclysm_node_fem_mesh", "cadaclysm_fem_mesh_view",
   "cadaclysm_fem_mesh_edge", "cadaclysm_fem_mesh_vertex", "cadaclysm_fem_mesh_open_edge",
-  "cadaclysm_fem_mesh_folded_edge", "cadaclysm_fem_mesh_msh_text",
+  "cadaclysm_fem_mesh_folded_edge", "cadaclysm_fem_mesh_crossing_count", "cadaclysm_fem_mesh_crossing",
+  "cadaclysm_fem_mesh_msh_text",
   "cadaclysm_fem_mesh_save_msh", "cadaclysm_fem_mesh_free",
   "cadaclysm_svg_options_init", "cadaclysm_scene_svg_text", "cadaclysm_scene_svg",
   "cadaclysm_node_svg_text", "cadaclysm_node_svg",
@@ -1170,8 +1171,9 @@ end
 --- note at the top of this file documents for the scene's own views, and it is
 --- documented rather than enforced for the same reason.
 ---
---- `edges`, `vertices`, `open_edges` and `folded_edges` are computed when read, one C
---- call a row, and are copies: read them once into a local rather than inside a loop.
+--- `edges`, `vertices`, `open_edges`, `folded_edges` and `crossings` are computed when
+--- read, one C call a row, and are copies: read them once into a local rather than
+--- inside a loop.
 ---@class FemMesh
 ---@field nodes ffi.cdata*  const double *, 3 a node
 ---@field node_count integer
@@ -1305,6 +1307,30 @@ function FemMesh_get.folded_edges(self)
   local L = lib()
   return fem_census(self, function(h, i, a, b, e) return L.cadaclysm_fem_mesh_folded_edge(h, i, a, b, e) end,
     self._folded_edge_count, "fem mesh folded edge")
+end
+
+--- Every pair of triangles that pass through each other, as `{a, b}` with `a < b`,
+--- sorted: an edge of one through the other's interior. Their B-rep faces are
+--- `triangle_face[a]` and `[b]`.
+---
+--- **Computed for every body, open or closed.** The census `watertight`, `open_edges`
+--- and `folded_edges` report is topological and cannot see a surface passing through
+--- itself; a mesh is ready for a volume mesher when it is `watertight` **and** this is
+--- empty -- Gmsh refuses one that crosses. A copy.
+function FemMesh_get.crossings(self)
+  local L = lib()
+  local handle = fem_handle(self)
+  local count = L.cadaclysm_fem_mesh_crossing_count(handle)
+  local a, b = ffi.new("uint32_t[1]"), ffi.new("uint32_t[1]")
+  local out = {}
+  for i = 0, count - 1 do
+    if not L.cadaclysm_fem_mesh_crossing(handle, i, a, b) then
+      local reason = last_error()
+      fail(reason ~= "" and reason or ("fem mesh crossing " .. i), 3)
+    end
+    out[#out + 1] = { a[0], b[0] }
+  end
+  return out
 end
 
 --- The mesh as Gmsh 4.1 ASCII `.msh` text: an entity per B-rep vertex, edge and face,
@@ -1845,8 +1871,61 @@ end
 Link.__eq = function(a, b) return a.scene == b.scene and a.index == b.index end
 Link.__tostring = function(self) return ("<Link %d %s>"):format(self.index, self.name) end
 
---- A connection between two links of the file's mechanism. Topology only: how it
---- moves is not read yet. From `Scene.joints`.
+-- ---- pairs and freedoms -----------------------------------------------------------
+
+local PAIR_KIND_NAMES = {
+  "revolute", "prismatic", "cylindrical", "spherical", "spherical_with_pin",
+  "planar", "universal", "homokinetic", "screw", "fully_constrained",
+  "unconstrained", "low_order", "other",
+}
+local MOTION_NAMES = { "rotation", "translation" }
+local AXIS_NAMES = { "x", "y", "z" }
+
+--- One degree of freedom of a `Pair`: which motion, about or along which contact-frame
+--- axis, and its optional range. From `Pair.freedoms`.
+local Freedom_get = {}
+---@class Freedom
+---@field motion string  "rotation" or "translation"
+---@field axis string  "x", "y" or "z"
+---@field lower number|nil  radians, or the scene's length unit; nil for unbounded
+---@field upper number|nil
+local Freedom = class(Freedom_get)
+M.Freedom = Freedom
+
+local function freedom(motion, axis, lower, upper)
+  return setmetatable({ motion = motion, axis = axis, lower = lower, upper = upper }, Freedom)
+end
+Freedom.__tostring = function(self)
+  return ("<Freedom %s %s [%s, %s]>"):format(self.motion, self.axis, tostring(self.lower), tostring(self.upper))
+end
+
+--- A kinematic pair: the kind of relative motion a joint allows between its two links.
+--- From `Joint.pair`.
+local Pair_get = {}
+---@class Pair
+---@field kind string  one of the thirteen pair kinds
+---@field type_name string|nil  for "other": the pair's entity type name ("GEAR_PAIR")
+---@field pitch number|nil  for "screw": length per revolution, in the scene's units
+---@field frame_start number[][]  m[row][col], like Node.transform
+---@field frame_end number[][]
+---@field raw_frame_start number[]  the same 16 numbers, column-major, like Node.raw_transform
+---@field raw_frame_end number[]
+---@field freedoms Freedom[]
+local Pair = class(Pair_get)
+M.Pair = Pair
+
+local function pair(kind, type_name, pitch, frame_start, frame_end, raw_frame_start, raw_frame_end, freedoms)
+  return setmetatable({
+    kind = kind, type_name = type_name, pitch = pitch,
+    frame_start = frame_start, frame_end = frame_end,
+    raw_frame_start = raw_frame_start, raw_frame_end = raw_frame_end,
+    freedoms = freedoms,
+  }, Pair)
+end
+Pair.__tostring = function(self) return ("<Pair %s>"):format(self.kind) end
+
+--- A connection between two links of the file's mechanism, and, when the file names
+--- one, the kinematic pair saying how it moves. From `Scene.joints`.
 local Joint_get = {}
 ---@class Joint
 ---@field scene Scene
@@ -1864,8 +1943,82 @@ function Joint_get.start(self) return link(self.scene, lib().cadaclysm_joint_sta
 --- The link it ends at, in the file's order. `end_`, not `end`, which is a Lua keyword
 --- -- as with `Path:end_`.
 function Joint_get.end_(self) return link(self.scene, lib().cadaclysm_joint_end(h(self), self.index)) end
+--- How this joint moves: the kinematic pair naming it, or nil when the file names none.
+function Joint_get.pair(self)
+  local L, handle = lib(), h(self)
+  local kind_index = tonumber(L.cadaclysm_joint_pair_kind(handle, self.index))
+  if kind_index < 0 then return nil end
+  local type_name_raw = L.cadaclysm_joint_pair_type(handle, self.index)
+  local type_name = nil
+  if type_name_raw ~= nil then type_name = ffi.string(type_name_raw) end
+  local pitch = tonumber(L.cadaclysm_joint_pair_pitch(handle, self.index))
+  if pitch ~= pitch then pitch = nil end -- NaN means "no pitch"
+  local out_start, out_end = ffi.new("double[16]"), ffi.new("double[16]")
+  L.cadaclysm_joint_pair_frames(handle, self.index, out_start, out_end)
+  local raw_start, raw_end = sixteen(out_start), sixteen(out_end)
+  local freedoms = {}
+  for i = 0, L.cadaclysm_joint_freedom_count(handle, self.index) - 1 do
+    local raw = ffi.new("CadaclysmFreedom")
+    if L.cadaclysm_joint_freedom(handle, self.index, i, raw) then
+      local lower, upper = nil, nil
+      if raw.has_lower then lower = tonumber(raw.lower) end
+      if raw.has_upper then upper = tonumber(raw.upper) end
+      freedoms[#freedoms + 1] = freedom(
+        MOTION_NAMES[tonumber(raw.motion) + 1], AXIS_NAMES[tonumber(raw.axis) + 1], lower, upper)
+    end
+  end
+  return pair(PAIR_KIND_NAMES[kind_index + 1], type_name, pitch,
+              rows(raw_start), rows(raw_end), raw_start, raw_end, freedoms)
+end
 Joint.__eq = function(a, b) return a.scene == b.scene and a.index == b.index end
 Joint.__tostring = function(self) return ("<Joint %d %s>"):format(self.index, self.name) end
+
+-- ---- mechanism states ---------------------------------------------------------------
+
+--- One row of a `State`: the joint it sets, and the values it sets it to, one per
+--- freedom of the joint's pair, in the pair's freedom order.
+local StateValue_get = {}
+---@class StateValue
+---@field joint Joint
+---@field values number[]
+local StateValue = class(StateValue_get)
+M.StateValue = StateValue
+
+local function state_value(joint_obj, values)
+  return setmetatable({ joint = joint_obj, values = values }, StateValue)
+end
+StateValue.__tostring = function(self)
+  return ("<StateValue %s [%s]>"):format(self.joint.name, table.concat(self.values, ", "))
+end
+
+--- A named pose of the file's mechanism: a `MECHANISM_STATE_REPRESENTATION`. From
+--- `Scene.states`.
+local State_get = {}
+---@class State
+---@field index integer  its position in the scene's states
+---@field name string  as the file gives it
+---@field values StateValue[]  one row per joint this state sets, in file order
+local State = class(State_get)
+M.State = State
+
+local function read_state(scene, index)
+  local L, handle = lib(), scene:handle()
+  local name = text(L.cadaclysm_state_name(handle, index))
+  local values = {}
+  for row = 0, L.cadaclysm_state_value_count(handle, index) - 1 do
+    local joint_out = ffi.new("uint32_t[1]")
+    local count = L.cadaclysm_state_value(handle, index, row, joint_out, nil, 0)
+    local raw = ffi.new("double[?]", count)
+    L.cadaclysm_state_value(handle, index, row, joint_out, raw, count)
+    if joint_out[0] ~= M.NONE then
+      local row_values = {}
+      for i = 0, count - 1 do row_values[i + 1] = raw[i] end
+      values[#values + 1] = state_value(joint(scene, joint_out[0]), row_values)
+    end
+  end
+  return setmetatable({ index = index, name = name, values = values }, State)
+end
+State.__tostring = function(self) return ("<State %d %s>"):format(self.index, self.name) end
 
 -- ---- the scene ---------------------------------------------------------------------
 
@@ -1939,11 +2092,18 @@ function Scene_get.links(self)
   for i = 0, L.cadaclysm_link_count(handle) - 1 do out[#out + 1] = link(self, i) end
   return out
 end
---- The connections between those links, in the file's order. Topology only: how a
---- joint moves is not read yet.
+--- The connections between those links, in the file's order, each with its kinematic
+--- pair when the file names one.
 function Scene_get.joints(self)
   local L, handle, out = lib(), self:handle(), {}
   for i = 0, L.cadaclysm_joint_count(handle) - 1 do out[#out + 1] = joint(self, i) end
+  return out
+end
+--- The file's named mechanism states, e.g. STEP's `MECHANISM_STATE_REPRESENTATION`s.
+--- Empty for a file that records none.
+function Scene_get.states(self)
+  local L, handle, out = lib(), self:handle(), {}
+  for i = 0, L.cadaclysm_state_count(handle) - 1 do out[#out + 1] = read_state(self, i) end
   return out
 end
 --- What the reader built but the geometry stage could not finish: a face that would

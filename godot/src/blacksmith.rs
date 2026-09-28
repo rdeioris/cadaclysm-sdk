@@ -2212,6 +2212,14 @@ impl CadaclysmSolid {
         Self::made(bs::Solid::wedge(x, y, z, top_x))
     }
 
+    /// A right pyramid of `sides` sides (at least 3): its base the regular polygon of
+    /// circumradius `r` on z=0, its first corner on +x, its tip at (0, 0, `h`).
+    #[func]
+    fn pyramid(sides: i64, r: f64, h: f64) -> Option<Gd<CadaclysmSolid>> {
+        let sides = u32::try_from(sides).unwrap_or(0);
+        Self::made(bs::Solid::pyramid(sides, r, h))
+    }
+
     /// `profile`, drawn on `frame`, raised `height` along the frame's z.
     #[func]
     fn extrude(profile: Gd<CadaclysmProfile>, frame: Variant, height: f64) -> Option<Gd<CadaclysmSolid>> {
@@ -2799,10 +2807,12 @@ impl CadaclysmSolid {
         self.held().and_then(|s| ok(s.find_face(&r, hint, tolerance))).flatten().map_or(-1, i64::from)
     }
 
-    /// The axis-aligned box around its mesh at the default tolerance.
+    /// The solid's axis-aligned box, at the same cost whatever its size: its mesh at a
+    /// thousandth of its own extent, so the box is inside the exact one and short of it by at
+    /// most that. `bounds_at` is the box of the mesh at a tolerance you name.
     #[func]
     fn get_bounds(&self) -> Aabb {
-        self.bounds_at(bs::DEFAULT_TOLERANCE)
+        self.held().and_then(|s| ok(s.bounds())).map(|(lo, hi)| aabb(lo, hi)).unwrap_or_default()
     }
 
     /// The axis-aligned box around its mesh at `tolerance` (the same cache `mesh`
@@ -2812,7 +2822,8 @@ impl CadaclysmSolid {
         self.held().and_then(|s| ok(s.bounds_at(tolerance))).map(|(lo, hi)| aabb(lo, hi)).unwrap_or_default()
     }
 
-    /// The same box as six doubles: min x, y, z, then max x, y, z. Empty on failure.
+    /// `bounds_at(tolerance)`'s box as six doubles: min x, y, z, then max x, y, z. Empty on
+    /// failure.
     #[func]
     fn raw_bounds(&self, #[opt(default = 0.05)] tolerance: f64) -> PackedFloat64Array {
         let bounds = self.held().and_then(|s| ok(s.bounds_at(tolerance)));
@@ -3094,6 +3105,18 @@ impl CadaclysmAssembly {
         }
         fail(format!("place: expected a CadaclysmSolid or a CadaclysmAssembly, not {thing}"))
     }
+
+    /// Declare a rigid link called `name` over `placements`, through the SDK's own
+    /// `Assembly::link` -- see the `#[func]` doc comment for the rules it enforces.
+    fn linked(&self, name: &str, placements: &[&str]) -> Option<()> {
+        ok(self.held()?.link(name, placements))
+    }
+
+    /// Connect `start` and `end` as a joint called `name`, through the SDK's own
+    /// `Assembly::joint` -- see the `#[func]` doc comment for the rules it enforces.
+    fn jointed(&self, name: &str, start: &str, end: &str) -> Option<()> {
+        ok(self.held()?.joint(name, start, end))
+    }
 }
 
 #[godot_api]
@@ -3124,6 +3147,32 @@ impl CadaclysmAssembly {
         let name = name.to_string();
         let name = (!name.is_empty()).then_some(name.as_str());
         gs(self.placed(&thing, &f, name).unwrap_or_default())
+    }
+
+    /// Declare a rigid link called `name` over `placements`: names of placements of
+    /// this assembly itself (not of assemblies placed in it -- give those their own
+    /// mechanism). A placed assembly in a link moves as one piece. An empty name, a
+    /// name taken by another link here, no placements, a placement named twice, one
+    /// this assembly does not have, or one already in another link fails, and the
+    /// assembly is left as it was -- check `Cadaclysm.last_error()`. Written as an
+    /// AP242 kinematic link; a mechanism anywhere in the tree makes AP242 the default
+    /// schema of `step_text`, and an explicit schema without the kinematic entities
+    /// then fails. A reader `CadaclysmScene` reads it back as links and joints.
+    #[func]
+    fn link(&self, name: GString, placements: PackedStringArray) -> bool {
+        let placements: Vec<String> = placements.as_slice().iter().map(|s| s.to_string()).collect();
+        let refs: Vec<&str> = placements.iter().map(String::as_str).collect();
+        self.linked(&name.to_string(), &refs).is_some()
+    }
+
+    /// Connect this assembly's links `start` and `end`, kept in that order, as a joint
+    /// called `name`. An empty name, a name taken by another joint here, a link this
+    /// assembly does not have, a link joined to itself, or a (start, end) pair already
+    /// joined fails, and the assembly is left as it was -- check
+    /// `Cadaclysm.last_error()`; the reverse pair is a different joint.
+    #[func]
+    fn joint(&self, name: GString, start: GString, end: GString) -> bool {
+        self.jointed(&name.to_string(), &start.to_string(), &end.to_string()).is_some()
     }
 
     /// This assembly, and everything placed under it, as one STEP file: this assembly
@@ -3367,6 +3416,8 @@ pub struct CadaclysmSolidFemMesh {
     open_edges: PhantomVar<Array<PackedInt64Array>>,
     #[var(get = get_folded_edges, no_set)]
     folded_edges: PhantomVar<Array<PackedInt64Array>>,
+    #[var(get = get_crossings, no_set)]
+    crossings: PhantomVar<Array<PackedInt64Array>>,
     #[var(get = get_watertight, no_set)]
     watertight: PhantomVar<bool>,
     #[var(get = get_from_mesh, no_set)]
@@ -3395,6 +3446,7 @@ impl CadaclysmSolidFemMesh {
             vertices: PhantomVar::default(),
             open_edges: PhantomVar::default(),
             folded_edges: PhantomVar::default(),
+            crossings: PhantomVar::default(),
             watertight: PhantomVar::default(),
             from_mesh: PhantomVar::default(),
             min_angle: PhantomVar::default(),
@@ -3511,6 +3563,19 @@ impl CadaclysmSolidFemMesh {
     #[func]
     fn get_folded_edges(&self) -> Array<PackedInt64Array> {
         self.with(|m| ok(m.folded_edges()).map(|rows| reader::fem_census(&rows))).flatten().unwrap_or_default()
+    }
+
+    /// Every pair of triangles that pass through each other, as `[a, b]` with `a < b`,
+    /// sorted: an edge of one through the other's interior. Their faces are
+    /// `triangle_face[a]` and `[b]`.
+    ///
+    /// **Computed for every solid, open or closed.** The census `watertight`, `open_edges`
+    /// and `folded_edges` report is topological and cannot see a surface passing through
+    /// itself; a mesh is ready for a volume mesher when it is `watertight` **and** this is
+    /// empty -- Gmsh refuses one that crosses. A copy.
+    #[func]
+    fn get_crossings(&self) -> Array<PackedInt64Array> {
+        self.with(|m| ok(m.crossings()).map(|rows| reader::fem_crossings(&rows))).flatten().unwrap_or_default()
     }
 
     /// The welded mesh closes -- every directed mesh edge paired with its reverse and none

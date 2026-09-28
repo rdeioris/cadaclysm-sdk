@@ -50,8 +50,9 @@ lists every call.
   (`scene:query(filter)`, `solid:fillet(edges, 2)`). `Path.end` is `path:end_()`,
   `end` being a Lua keyword.
 - **Borrowed memory.** Mesh and polyline pointers point into the scene; views keep
-  their scene alive, and `scene:close()` invalidates them. A kernel view raises once
-  its solid is closed or meshed again at another tolerance.
+  their scene alive, and `scene:close()` invalidates them. A kernel mesh view owns a
+  held tessellation instead, so it stays valid across any re-mesh and the solid's own
+  close (`view.valid` always reports `true`).
 - **Indices** the library counts (nodes, faces, edges, mesh indices) count from zero;
   the Lua arrays the wrapper builds count from one.
 - **Errors** are `CadaclysmError` / `BuildError` values: `pcall` catches them,

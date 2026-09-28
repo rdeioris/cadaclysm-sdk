@@ -172,6 +172,23 @@ final class KernelFileTests: XCTestCase {
         XCTAssertGreaterThan(try Solid.fromNode(scene, moved, placed: false).faces, 0)
     }
 
+    /// Crossings through the kernel's own open of a file: `samples/dented-box.stp` is a closed
+    /// B-rep box whose top dips through its own floor, 296 pairs measured 2026-09-26 -- the same
+    /// number `ReaderTests.testFemCensusWiring` reads through the reader over the same file,
+    /// which must agree with it.
+    func testFemMeshCrossingsThroughTheKernelsOpenOfAFile() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../../../../../samples/dented-box.stp").standardizedFileURL
+        guard FileManager.default.fileExists(atPath: root.path) else { throw XCTSkip("samples/dented-box.stp is not to hand") }
+        let solid = try Solid.open(root.path)
+        let mesh = try solid.femMesh()
+        defer { mesh.free() }
+        XCTAssertTrue(mesh.watertight)
+        let crossings = try mesh.crossings
+        XCTAssertEqual(crossings.count, 296)
+        XCTAssertLessThan(crossings[0].0, crossings[0].1, "the first pair is not a < b")
+    }
+
     func testASolidGoesToTheReaderAsAScene() throws {
         let original = try plate()
         let scene = try original.toScene()

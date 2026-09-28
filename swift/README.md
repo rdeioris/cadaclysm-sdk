@@ -82,9 +82,10 @@ it.
 
 Strings are copied. Mesh and polyline arrays are `NativeArray` views -- random-access
 collections over the library's own memory, because a large assembly is tens of millions of
-triangles. A view read after its scene is closed traps rather than read freed memory, as
-does a kernel mesh view read after its solid was meshed again at another tolerance
-(`mesh.isStale` says so first). `copy()` gives memory of your own; so does `Array(view)`.
+triangles. A view read after its scene is closed traps rather than read freed memory. A
+kernel mesh view owns a held tessellation, so it stays valid across any re-mesh and the
+solid's own close (`mesh.isStale` always reports `false`). `copy()` gives memory of your
+own; so does `Array(view)`.
 
 Every call that can fail `throws` a `CadaclysmError` (the reader) or a `BuildError` (the
 kernel), carrying the library's own reason. A property read on a closed scene traps.

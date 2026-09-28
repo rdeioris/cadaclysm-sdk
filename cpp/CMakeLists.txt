@@ -96,6 +96,17 @@ if(CADACLYSM_LIBRARY_DIR)
             "$<TARGET_FILE_DIR:cadaclysm_assembly_test>")
   add_test(NAME assembly COMMAND cadaclysm_assembly_test ${CADACLYSM_LICENSE})
 
+  # Assembly::link/Assembly::joint, at parity with the Python reference's _mechanism()
+  # and its two mechanism tests -- see Node's blacksmith.test.js and Rust's mod tests for
+  # the same facts worked out. Needs a license, no sample file.
+  add_executable(cadaclysm_mechanism_test tests/mechanism_test.cpp)
+  target_link_libraries(cadaclysm_mechanism_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_mechanism_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_mechanism_test>")
+  add_test(NAME mechanism COMMAND cadaclysm_mechanism_test ${CADACLYSM_LICENSE})
+
   add_library(cadaclysm_header_reader OBJECT tests/include_reader.cpp)
   target_link_libraries(cadaclysm_header_reader PRIVATE cadaclysm::reader)
 

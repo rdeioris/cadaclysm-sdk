@@ -314,8 +314,9 @@ local function fem_kernel(bs)
   say(("kernel fem: the sheet's %d rim edges each bound one face"):format(#rim.edges))
   rim:free()
   sheet:close()
-  -- A FEM mesh is its own handle: re-meshing the solid at another tolerance stales
-  -- every view of its tessellation and leaves this untouched.
+  -- A FEM mesh is its own handle: re-meshing the solid at another tolerance re-meshes the
+  -- solid's own cache and leaves this untouched -- a tessellation view holds its own
+  -- tessellation now and would be untouched by it too.
   box:mesh(0.5)
   if mesh.node_count == 0 or #mesh.edges == 0 or #mesh:msh_text() == 0 then
     error("kernel fem: re-meshing the solid staled the FEM mesh")

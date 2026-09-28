@@ -38,7 +38,8 @@ if (Cadaclysm.Cadaclysm.MeshFormats().First(f => f.Name == "stl").Label != "STL 
 Console.WriteLine($"geometry diagnostics: {scene.GeometryDiagnostics.Count}");
 // Kinematics: a file with no mechanism carries no links or joints; mechanism.stp, beside
 // whatever sample this smoke was given, carries the fixed two-link one-joint mechanism.
-if (path.EndsWith("cube.scad") && (scene.Links.Count != 0 || scene.Joints.Count != 0)) return Fail("the cube scene has links or joints");
+if (path.EndsWith("cube.scad") && (scene.Links.Count != 0 || scene.Joints.Count != 0 || scene.States.Count != 0))
+    return Fail("the cube scene has links, joints or states");
 var mechanismPath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path))!, "mechanism.stp");
 using (var mechanism = Cadaclysm.Cadaclysm.Open(mechanismPath))
 {
@@ -54,6 +55,33 @@ using (var mechanism = Cadaclysm.Cadaclysm.Open(mechanismPath))
     if (joint.Start.Name != "arm" || joint.Start.Index != 1 || joint.End.Name != "base" || joint.End.Index != 0)
         return Fail($"joint hinge reads start={joint.Start.Name}#{joint.Start.Index} end={joint.End.Name}#{joint.End.Index}");
     Console.WriteLine($"kinematics: links {links.Count}, joints {joints.Count}, hinge {joint.Start.Name}->{joint.End.Name}");
+
+    // The pair: revolute about Z, ranged -1.5..1.5, both contact frames at (0, 0, 100).
+    var pair = joint.Pair;
+    if (pair is null || pair.Kind != PairKind.Revolute) return Fail("hinge has no pair, or it is not revolute");
+    if (pair.TypeName is not null || pair.Pitch is not null) return Fail("a revolute pair has a type name or a pitch");
+    bool Close(double a, double b) => Math.Abs(a - b) <= 1e-9;
+    foreach (var frame in new[] { pair.RawFrameStart, pair.RawFrameEnd })
+    {
+        if (!Close(frame[12], 0.0) || !Close(frame[13], 0.0) || !Close(frame[14], 100.0))
+            return Fail("a pair frame's origin is not (0, 0, 100)");
+        if (!Close(frame[8], 0.0) || !Close(frame[9], 0.0) || !Close(frame[10], 1.0))
+            return Fail("a pair frame's z axis is not (0, 0, 1)");
+    }
+    var freedoms = pair.Freedoms;
+    if (freedoms.Count != 1 || freedoms[0].Motion != Motion.Rotation || freedoms[0].Axis != FreedomAxis.Z)
+        return Fail("the hinge's freedom is not one rotation about z");
+    if (freedoms[0].Lower is not double lower || freedoms[0].Upper is not double upper || !Close(lower, -1.5) || !Close(upper, 1.5))
+        return Fail("the hinge's freedom range is not [-1.5, 1.5]");
+
+    // The state: one named "open", one row (hinge, [0.5]).
+    var states = mechanism.States;
+    if (states.Count != 1 || states[0].Index != 0 || states[0].Name != "open") return Fail("mechanism does not carry exactly one state named open");
+    var values = states[0].Values;
+    if (values.Count != 1 || values[0].Joint.Name != "hinge" || values[0].Joint.Index != 0
+        || values[0].Values.Count != 1 || !Close(values[0].Values[0], 0.5))
+        return Fail("state open does not set hinge to [0.5]");
+    Console.WriteLine($"pair: {pair.Kind}, freedoms {freedoms.Count}, states {states.Count}");
 }
 scene.ForgetMeshes();
 if (scene.Query("class == solid").Count == 0 || scene.Walk().Where(n => n.CanMesh).Sum(n => (long)(n.Mesh?.TriangleCount ?? 0)) != triangles) return Fail("forget_meshes did not rebuild");
@@ -556,21 +584,20 @@ using (fromSolid)
     if (fromSolid.Closed || fromSolid.Bounds.IsEmpty) return Fail("the scene did not survive its solid's dispose");
     Console.WriteLine($"to_scene: {fromSolid.Nodes.Count} node(s), path={fromSolid.Path}");
 }
-// A mesh view is tied to one filling of the solid's cache: meshing at another tolerance and
-// back again replaces that memory, and the first view must refuse to read it.
+// A mesh view owns a held tessellation: meshing the solid again at another tolerance, or
+// disposing the solid, leaves an already-taken view untouched.
 var firstMesh = rounded.Mesh(0.05);
-var triangles0 = firstMesh.TriangleCount;
+var kept = firstMesh.Positions.ToArray();
 rounded.Mesh(0.5);
-rounded.Mesh(0.05);
-try
-{
-    _ = firstMesh.Positions;
-    return Fail("a stale mesh view read freed memory after meshing at 0.05, 0.5, 0.05");
-}
-catch (InvalidOperationException)
-{
-}
-Console.WriteLine($"mesh at 0.05: {triangles0} triangles; the first view is stale after 0.05, 0.5, 0.05");
+rounded.Mesh(0.01);
+if (!firstMesh.Positions.SequenceEqual(kept)) return Fail("a held mesh view changed under a re-mesh at another tolerance");
+var meshBox = Solid.Cuboid(1, 2, 3);
+var boxMesh = meshBox.Mesh(0.05);
+var boxKept = boxMesh.Positions[0];
+meshBox.Dispose();
+if (boxMesh.Positions[0] != boxKept) return Fail("a held mesh view changed when its solid was disposed");
+GC.KeepAlive(firstMesh); GC.KeepAlive(boxMesh);
+Console.WriteLine("kernel: mesh views own their tessellation -- a re-mesh and a dispose leave them");
 // f64 twins on the kernel: mesh64 shares mesh's cache and bounds64 the same tessellation's
 // unnarrowed positions.
 var kMesh32 = rounded.Mesh(0.05);
@@ -676,8 +703,8 @@ using (var back = Cadaclysm.Cadaclysm.Open(brepPath))
         if (!femMesh.FromMesh || femMesh.FaceCount != 1 || femEdges.Count != 0 || femVertices.Count != 0)
             return Fail($"fem: the cube reads {femMesh}, not a mesh-only body of one face");
         foreach (var kind in femMesh.NodeKind) if (kind != 2) return Fail("fem: a mesh body's nodes all lie on face 0");
-        if (!femMesh.Watertight || femMesh.OpenEdges.Count != 0 || femMesh.FoldedEdges.Count != 0)
-            return Fail($"fem: the closed cube reads {femMesh.OpenEdges.Count} cracks and {femMesh.FoldedEdges.Count} folds");
+        if (!femMesh.Watertight || femMesh.OpenEdges.Count != 0 || femMesh.FoldedEdges.Count != 0 || femMesh.Crossings.Count != 0)
+            return Fail($"fem: the closed cube reads {femMesh.OpenEdges.Count} cracks, {femMesh.FoldedEdges.Count} folds and {femMesh.Crossings.Count} crossings");
     }
     var msh = femMesh.MshText();
     if (!msh.StartsWith("$MeshFormat") || !msh.Contains("$Nodes")) return Fail("fem: mshText is not Gmsh 4.1 ASCII");
@@ -728,6 +755,7 @@ using (var back = Cadaclysm.Cadaclysm.Open(brepPath))
                  () => { _ = staleReader.NodeEntity; }, () => { _ = staleReader.FaceCount; },
                  () => { _ = staleReader.Edges; }, () => { _ = staleReader.Vertices; },
                  () => { _ = staleReader.OpenEdges; }, () => { _ = staleReader.FoldedEdges; },
+                 () => { _ = staleReader.Crossings; },
                  () => { _ = staleReader.Watertight; }, () => { _ = staleReader.FromMesh; },
                  () => { _ = staleReader.MinAngle; }, () => { _ = staleReader.WorstTriangle; },
                  () => { _ = staleReader.LongestEdge; }, () => staleReader.MshText(),
@@ -738,7 +766,7 @@ using (var back = Cadaclysm.Cadaclysm.Open(brepPath))
         catch (CadaclysmException e) when (e.Message.Contains("freed")) { }
     }
     Console.WriteLine($"fem (reader): {femMesh}, minAngle {femMesh.MinAngle:F2}, longestEdge {femMesh.LongestEdge:F3};"
-                      + " a freed mesh refuses all seventeen reads");
+                      + " a freed mesh refuses all eighteen reads");
 }
 // # Which count feeds which entry point -- the census *wiring*, which nothing else here pins.
 // Every other FEM check proves a row is extracted correctly; none proves `OpenEdges` reads
@@ -766,6 +794,28 @@ if (path.EndsWith("cube.scad"))
     if (crack.A != 1 || crack.B != 2) return Fail($"fem census: the first crack reads ({crack.A},{crack.B}), not (1,2)");
     Console.WriteLine($"fem census: open-sheet.scad reads {census.OpenEdges.Count} cracks"
                       + $" and {census.FoldedEdges.Count} fold at ({fold.A},{fold.B})");
+
+    // Crossings: `samples/dented-box.stp` is a closed B-rep box whose top dips through its
+    // own floor, 296 pairs measured 2026-09-26 -- once through this reader, and once
+    // through the kernel's own open of the same file, which must agree with it.
+    var dentedPath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(path)!, "dented-box.stp");
+    using var dentedScene = Cadaclysm.Cadaclysm.Open(dentedPath);
+    var dentedNode = dentedScene.Walk().First(n => n.CanMesh);
+    using var dentedFem = dentedNode.FemMesh();
+    if (!dentedFem.Watertight || dentedFem.FromMesh)
+        return Fail($"fem crossings: dented-box.stp reads {dentedFem}, not a watertight brep");
+    var dentedCrossings = dentedFem.Crossings;
+    if (dentedCrossings.Count != 296) return Fail($"fem crossings: dented-box.stp reads {dentedCrossings.Count} pairs, not 296");
+    if (dentedCrossings[0].A >= dentedCrossings[0].B)
+        return Fail($"fem crossings: the first pair reads ({dentedCrossings[0].A},{dentedCrossings[0].B}), not a < b");
+
+    using var kernelDented = Solid.Open(dentedPath);
+    using var kernelDentedFem = kernelDented.FemMesh();
+    var kernelDentedCrossings = kernelDentedFem.Crossings;
+    if (kernelDentedCrossings.Count != 296)
+        return Fail($"kernel fem crossings: dented-box.stp reads {kernelDentedCrossings.Count} pairs, not 296");
+    Console.WriteLine($"fem crossings: dented-box.stp reads {dentedCrossings.Count} pairs through the reader"
+                      + $" and {kernelDentedCrossings.Count} through the kernel");
 }
 // A B-rep body, read back from the STEP this run wrote: the topology the mesh-only body has
 // none of -- edges with their own ids, vertices, and nodes on all three kinds of entity.
@@ -821,7 +871,8 @@ using (var back = Cadaclysm.Cadaclysm.Open(step))
     using var fem = rounded.FemMesh(tolerance: 0.5);
     if (fem.FromMesh || !fem.Watertight || fem.FaceCount != (uint)rounded.Faces || fem.Nodes.Length == 0)
         return Fail($"kernel fem: the filleted part reads {fem}");
-    if (fem.OpenEdges.Count != 0 || fem.FoldedEdges.Count != 0) return Fail($"kernel fem: a watertight solid reads {fem.OpenEdges.Count} cracks");
+    if (fem.OpenEdges.Count != 0 || fem.FoldedEdges.Count != 0 || fem.Crossings.Count != 0)
+        return Fail($"kernel fem: a watertight solid reads {fem.OpenEdges.Count} cracks and {fem.Crossings.Count} crossings");
     // `max_size` bounds the boundary segments and only targets the interior, so the figure a
     // solver caller checks is LongestEdge -- not the ceiling it asked for. Catches a wrapper
     // that dropped `maxSize` on the floor (the mesh would not refine at all).
@@ -872,7 +923,8 @@ using (var back = Cadaclysm.Cadaclysm.Open(step))
                  () => { _ = freed.Nodes; }, () => { _ = freed.Triangles; }, () => { _ = freed.TriangleFace; },
                  () => { _ = freed.NodeKind; }, () => { _ = freed.NodeEntity; }, () => { _ = freed.FaceCount; },
                  () => { _ = freed.Edges; }, () => { _ = freed.Vertices; }, () => { _ = freed.OpenEdges; },
-                 () => { _ = freed.FoldedEdges; }, () => { _ = freed.Watertight; }, () => { _ = freed.FromMesh; },
+                 () => { _ = freed.FoldedEdges; }, () => { _ = freed.Crossings; },
+                 () => { _ = freed.Watertight; }, () => { _ = freed.FromMesh; },
                  () => { _ = freed.MinAngle; }, () => { _ = freed.WorstTriangle; }, () => { _ = freed.LongestEdge; },
                  () => freed.MshText(), () => freed.SaveMsh(kernelMshPath),
              })
@@ -880,7 +932,7 @@ using (var back = Cadaclysm.Cadaclysm.Open(step))
         try { read(); return Fail("kernel fem: a freed mesh read anyway"); }
         catch (BuildException e) when (e.Message.Contains("freed")) { }
     }
-    Console.WriteLine("kernel fem: a freed mesh refuses all seventeen reads");
+    Console.WriteLine("kernel fem: a freed mesh refuses all eighteen reads");
 }
 
 // Assemblies: Assembly, Solid.Named and Solid.Name, at parity with the Python reference's
@@ -978,6 +1030,102 @@ using (var back = Cadaclysm.Cadaclysm.Open(step))
     using (var freshCube = Solid.Cuboid(1, 1, 1))
         if (freshCube.Name is not null) return Fail("assembly: a fresh cuboid's Name is not null");
     Console.WriteLine("assembly: Named/Name ride through one-source operations and drop through two-source ones");
+}
+
+// Mechanisms: Assembly.Link/Assembly.Joint, at parity with the Python reference's
+// _mechanism() and its tests (test_a_mechanism_is_written_as_ap242_kinematic_topology,
+// test_every_bad_link_or_joint_is_refused_and_changes_nothing).
+{
+    using var mechBolt = Solid.Cylinder(1, 6).Named("bolt");
+    using var mechPlate = Solid.Cuboid(20, 10, 2).Named("plate");   // uncoloured
+    using var mechBracket = new Assembly("bracket");
+    mechBracket.Place(mechPlate, Frame.Xy());
+    mechBracket.Place(mechBolt, Frame.Xy((5, 5, 2)));
+    mechBracket.Place(mechBolt, Frame.Xy((15, 5, 2)));
+    mechBracket.Link("fixed", "plate");
+    mechBracket.Link("bolts", "bolt", "bolt 2");
+    mechBracket.Joint("screw", "fixed", "bolts");
+
+    using var arm = new Assembly("arm");
+    arm.Place(mechPlate, Frame.Xy(), "base");
+    arm.Place(mechBracket, Frame.Xy((0, 0, 10)), "upper");
+    arm.Place(mechBolt, Frame.Xy((5, 5, 2)), "pin");
+    arm.Link("ground", "base");
+    arm.Link("upper arm", "upper", "pin");
+    arm.Joint("shoulder", "ground", "upper arm");
+
+    // Fact 1: the default schema (no explicit schema) carries the kinematic entities.
+    var armStepText = arm.StepText();
+    if (!armStepText.Contains("AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF"))
+        return Fail("mechanism: arm.StepText() does not name AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF");
+    var linkCount = CountOf(armStepText, "=KINEMATIC_LINK(");
+    var rigidCount = CountOf(armStepText, "=RIGID_LINK_REPRESENTATION(");
+    var cdklrCount = CountOf(armStepText, "=CONTEXT_DEPENDENT_KINEMATIC_LINK_REPRESENTATION(");
+    var jointCount = CountOf(armStepText, "=KINEMATIC_JOINT(");
+    var topoCount = CountOf(armStepText, "=KINEMATIC_TOPOLOGY_STRUCTURE(");
+    if (linkCount != 4 || rigidCount != 6 || cdklrCount != 6 || jointCount != 2 || topoCount != 2)
+        return Fail($"mechanism: arm.StepText() has {linkCount} links, {rigidCount} rigid reps, " +
+            $"{cdklrCount} context-dependent reps, {jointCount} joints, {topoCount} topologies, not 4/6/6/2/2");
+    Console.WriteLine($"mechanism: arm.StepText() writes {linkCount} links, {rigidCount} rigid reps, " +
+        $"{cdklrCount} context-dependent reps, {jointCount} joints, {topoCount} topologies");
+
+    // Fact 2: an explicit schema without kinematic entities is refused.
+    try { arm.StepText("config_control_design"); return Fail("mechanism: config_control_design wrote a mechanism"); }
+    catch (BuildException e) when (e.Message.Contains("no kinematic entities")) { }
+    Console.WriteLine("mechanism: an explicit schema without kinematic entities is refused");
+
+    // Fact 3: each of the eleven refusals raises with exactly its message, and afterwards
+    // the STEP text (with FILE_NAME( lines stripped) is unchanged.
+    static string NoStamp(string text) =>
+        string.Join("\n", text.Split('\n').Where(l => !l.StartsWith("FILE_NAME(")));
+    var before = NoStamp(arm.StepText());
+    var refusals = new (Action Call, string Message)[]
+    {
+        (() => arm.Link("", "base"), "link: a name cannot be empty"),
+        (() => arm.Link("ground", "base"), "link: assembly 'arm' already has a link named 'ground'"),
+        (() => arm.Link("free"), "link: link 'free' names no placements"),
+        (() => arm.Link("free", "base", "base"), "link: link 'free' names placement 'base' twice"),
+        (() => arm.Link("free", "bolt"), "link: assembly 'arm' has no placement named 'bolt'"),
+        (() => arm.Link("free", "pin"), "link: placement 'pin' of assembly 'arm' is already in link 'upper arm'"),
+        (() => arm.Joint("", "ground", "upper arm"), "joint: a name cannot be empty"),
+        (() => arm.Joint("shoulder", "upper arm", "ground"), "joint: assembly 'arm' already has a joint named 'shoulder'"),
+        (() => arm.Joint("wrist", "ground", "hand"), "joint: assembly 'arm' has no link named 'hand'"),
+        (() => arm.Joint("wrist", "ground", "ground"), "joint: joint 'wrist' joins link 'ground' to itself"),
+        (() => arm.Joint("wrist", "ground", "upper arm"), "joint: assembly 'arm' already joins 'ground' to 'upper arm'"),
+    };
+    foreach (var (call, message) in refusals)
+    {
+        try { call(); return Fail($"mechanism: \"{message}\" was accepted"); }
+        catch (BuildException e) when (e.Message == message) { }
+    }
+    if (NoStamp(arm.StepText()) != before) return Fail("mechanism: a refused link or joint changed the assembly");
+    Console.WriteLine("mechanism: all eleven bad links and joints are refused with their exact message, unchanged");
+
+    // Fact 5: read-back through the reader, before fact 4 adds "back" -- arm.ToScene()
+    // carries the same links and joints back in, by name and node count, with no
+    // kinematics diagnostic. (The Python reference checks this on a fresh _mechanism()
+    // build, i.e. before the reverse-pair joint exists; done here in place, ahead of
+    // fact 4, so it sees the same two joints.)
+    using (var mechScene = arm.ToScene())
+    {
+        var mechLinks = mechScene.Links;
+        if (!mechLinks.Select(l => l.Name).SequenceEqual(new[] { "fixed", "bolts", "ground", "upper arm" }))
+            return Fail("mechanism: read-back links are not [fixed, bolts, ground, upper arm]");
+        if (!mechLinks.Select(l => l.Nodes.Count).SequenceEqual(new[] { 1, 2, 1, 2 }))
+            return Fail("mechanism: read-back link node counts are not [1, 2, 1, 2]");
+        var mechJoints = mechScene.Joints;
+        if (mechJoints.Count != 2 ||
+            mechJoints[0].Name != "screw" || mechJoints[0].Start.Index != 0 || mechJoints[0].End.Index != 1 ||
+            mechJoints[1].Name != "shoulder" || mechJoints[1].Start.Index != 2 || mechJoints[1].End.Index != 3)
+            return Fail("mechanism: read-back joints are not (screw, 0, 1) and (shoulder, 2, 3)");
+        if (mechScene.Diagnostics.Any(d => d.StartsWith("kinematics:")))
+            return Fail("mechanism: read-back carries a kinematics: diagnostic");
+        Console.WriteLine("mechanism: read-back through arm.ToScene() matches links, joints and diagnostics");
+    }
+
+    // Fact 4: the reverse pair is a new joint.
+    arm.Joint("back", "upper arm", "ground");
+    Console.WriteLine("mechanism: the reverse pair (\"back\") is accepted as a new joint");
 }
 
 // SVG: the library's own camera, no viewer -- the reader (a scene, a node) and the kernel

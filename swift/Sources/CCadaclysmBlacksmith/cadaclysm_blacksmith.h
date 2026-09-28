@@ -96,6 +96,23 @@ typedef struct CadaclysmBlacksmithHits CadaclysmBlacksmithHits;
 typedef struct CadaclysmBlacksmithIntersection CadaclysmBlacksmithIntersection;
 
 /**
+ * A job: a stock, a safe height, its settings and the operations added so far.
+ *
+ * Mutable: every `job_set_*` call and every operation (`job_face`,
+ * `job_contour`, `job_pocket`, `job_drill`) changes the handle in place, and a
+ * refused call leaves it exactly as it was. Not shared with anything, and used
+ * from one thread at a time. Free with [`cadaclysm_blacksmith_job_free`].
+ */
+typedef struct CadaclysmBlacksmithJob CadaclysmBlacksmithJob;
+
+/**
+ * Every operation of a job, read back in order -- see
+ * [`cadaclysm_blacksmith_job_operations`]. Immutable; free with
+ * [`cadaclysm_blacksmith_operations_free`].
+ */
+typedef struct CadaclysmBlacksmithOperations CadaclysmBlacksmithOperations;
+
+/**
  * An outline under construction: a start point and the segments drawn so far.
  * A mutable object, like `CadaclysmBlacksmithSweepPath` and
  * `CadaclysmBlacksmithAssembly`; unlike them, [`cadaclysm_blacksmith_path_end`]
@@ -104,23 +121,48 @@ typedef struct CadaclysmBlacksmithIntersection CadaclysmBlacksmithIntersection;
 typedef struct CadaclysmBlacksmithPath CadaclysmBlacksmithPath;
 
 /**
- * A closed 2D outline, with holes: what a sweep reads. Immutable. The outline a
- * viewer asks for (`profile_polylines`) is cached on it, per tolerance, like a
- * solid's tessellation.
+ * A closed 2D outline, with holes: what a sweep reads. Immutable, and safe to
+ * use from any number of threads at once. The outline a viewer asks for
+ * (`profile_polylines`) is cached on it, once per tolerance asked, and kept
+ * until the profile is freed.
  */
 typedef struct CadaclysmBlacksmithProfile CadaclysmBlacksmithProfile;
 
 /**
- * Profiles a boolean or a line of text produced. Immutable; free with
+ * Profiles a boolean, an offset, a section or a line of text produced. Immutable; free with
  * [`cadaclysm_blacksmith_profile_list_free`].
  */
 typedef struct CadaclysmBlacksmithProfileList CadaclysmBlacksmithProfileList;
 
 /**
+ * Files a job wrote, in memory: each a tool number, a name and a text. Immutable;
+ * the strings [`cadaclysm_blacksmith_programs_name`] and
+ * [`cadaclysm_blacksmith_programs_text`] return are owned by the list and good
+ * until [`cadaclysm_blacksmith_programs_free`].
+ */
+typedef struct CadaclysmBlacksmithPrograms CadaclysmBlacksmithPrograms;
+
+/**
+ * What [`cadaclysm_blacksmith_job_machine`] left uncut, read back one item at a
+ * time. Immutable; free with [`cadaclysm_blacksmith_report_free`].
+ */
+typedef struct CadaclysmBlacksmithReport CadaclysmBlacksmithReport;
+
+/**
  * An exact B-rep solid (or open sheet), with its tessellation and edge table
- * cached on first ask. Immutable.
+ * cached on first ask. Immutable, and safe to read from any number of threads at
+ * once: the caches fill behind a lock, and threads asking at one tolerance share
+ * one tessellation. Meshing at another tolerance replaces it -- from any thread --
+ * and frees the arrays already lent out, so threads meshing one solid at several
+ * tolerances agree among themselves when that happens.
  */
 typedef struct CadaclysmBlacksmithSolid CadaclysmBlacksmithSolid;
+
+/**
+ * The block of material a job cuts. Immutable; free with
+ * [`cadaclysm_blacksmith_stock_free`].
+ */
+typedef struct CadaclysmBlacksmithStock CadaclysmBlacksmithStock;
 
 /**
  * A 3D path under construction: where it starts and its pieces in order. Read
@@ -130,6 +172,20 @@ typedef struct CadaclysmBlacksmithSolid CadaclysmBlacksmithSolid;
  * [`cadaclysm_blacksmith_sweep_path_free`].
  */
 typedef struct CadaclysmBlacksmithSweepPath CadaclysmBlacksmithSweepPath;
+
+/**
+ * One tessellation of a solid, held: opaque, owned, and freed with
+ * [`cadaclysm_blacksmith_tessellation_free`]. Its arrays belong to it, not to the solid --
+ * meshing the solid again at another tolerance, or freeing the solid, leaves them where they
+ * are. Immutable: any number of threads may read one at once.
+ */
+typedef struct CadaclysmBlacksmithTessellation CadaclysmBlacksmithTessellation;
+
+/**
+ * A cutter and its feeds: a flat or ball end mill, or a drill. Immutable; free
+ * with [`cadaclysm_blacksmith_tool_free`].
+ */
+typedef struct CadaclysmBlacksmithTool CadaclysmBlacksmithTool;
 
 /**
  * What a FEM mesh is meshed to.
@@ -187,6 +243,10 @@ typedef void (*CadaclysmBlacksmithProgress)(const char *phase, size_t done, size
  * Every pointer is **borrowed from the handle** and good until
  * [`cadaclysm_blacksmith_fem_mesh_free`]; none of them is a copy, and none of them is built by
  * the call that hands it over.
+ *
+ * The crossings -- triangles passing through each other -- are read through
+ * `cadaclysm_blacksmith_fem_mesh_crossing_count` and `cadaclysm_blacksmith_fem_mesh_crossing`,
+ * not a member here: callers allocate this struct, so it cannot grow.
  */
 typedef struct CadaclysmBlacksmithFemMeshView {
   /**
@@ -830,6 +890,495 @@ bool cadaclysm_blacksmith_assembly_joint(struct CadaclysmBlacksmithAssembly *ass
                                          const char *end);
 
 /**
+ * A flat end mill: Grbl tool `number` (at least 1), `diameter` and
+ * `flute_length` in mm, `feed` and `plunge` in mm/min, `rpm` its spindle speed.
+ * It ramps into its cuts at 3 degrees ([`cadaclysm_blacksmith_tool_with_ramp_angle`]
+ * changes that). Null (and `last_error`) for a number of 0 or above 255, or a
+ * size, feed or speed not positive and finite.
+ */
+struct CadaclysmBlacksmithTool *cadaclysm_blacksmith_tool_flat(uint32_t number,
+                                                               double diameter,
+                                                               double flute_length,
+                                                               double feed,
+                                                               double plunge,
+                                                               double rpm);
+
+/**
+ * A ball end mill: as [`cadaclysm_blacksmith_tool_flat`], its tip a half sphere
+ * of the diameter.
+ */
+struct CadaclysmBlacksmithTool *cadaclysm_blacksmith_tool_ball(uint32_t number,
+                                                               double diameter,
+                                                               double flute_length,
+                                                               double feed,
+                                                               double plunge,
+                                                               double rpm);
+
+/**
+ * A drill: as [`cadaclysm_blacksmith_tool_flat`], plunging at `feed`. A drill
+ * only drills -- a job refuses it for any other operation.
+ */
+struct CadaclysmBlacksmithTool *cadaclysm_blacksmith_tool_drill(uint32_t number,
+                                                                double diameter,
+                                                                double flute_length,
+                                                                double feed,
+                                                                double rpm);
+
+/**
+ * A new tool: `t`, ramping into its cuts at `degrees` from the horizontal. `t` is
+ * left as it was. Null (and `last_error`) for a null tool or an angle outside
+ * (0, 90].
+ *
+ * # Safety
+ * `t` a live tool.
+ */
+struct CadaclysmBlacksmithTool *cadaclysm_blacksmith_tool_with_ramp_angle(const struct CadaclysmBlacksmithTool *t,
+                                                                          double degrees);
+
+/**
+ * Release a tool. Null is a no-op. A job it was used in keeps its own copy.
+ *
+ * # Safety
+ * `t` must have come from this library and not have been freed already.
+ */
+void cadaclysm_blacksmith_tool_free(struct CadaclysmBlacksmithTool *t);
+
+/**
+ * The box of material from (`min_x`, `min_y`, `min_z`) to (`max_x`, `max_y`,
+ * `max_z`). Null (and `last_error`) unless every min is below its max and all six
+ * are finite.
+ */
+struct CadaclysmBlacksmithStock *cadaclysm_blacksmith_stock_box(double min_x,
+                                                                double min_y,
+                                                                double min_z,
+                                                                double max_x,
+                                                                double max_y,
+                                                                double max_z);
+
+/**
+ * `s`'s bounding box grown by `margin` sideways and on top (the bottom stays on
+ * the part's own). Null (and `last_error`) for a null solid or a margin that is
+ * negative or not finite.
+ *
+ * # Safety
+ * `s` a live solid.
+ */
+struct CadaclysmBlacksmithStock *cadaclysm_blacksmith_stock_around(const struct CadaclysmBlacksmithSolid *s,
+                                                                   double margin);
+
+/**
+ * Release a stock. Null is a no-op. A job made on it keeps its own copy.
+ *
+ * # Safety
+ * `s` must have come from this library and not have been freed already.
+ */
+void cadaclysm_blacksmith_stock_free(struct CadaclysmBlacksmithStock *s);
+
+/**
+ * An empty job on `stock`, rapids at `safe_z` (above the stock's top), named
+ * `"job"`, with a clearance of 1, a tolerance of 0.01, a spindle dwell of 2 s
+ * and a CAMotics resolution of 0.1 until a `job_set_*` call changes them. Null
+ * (and `last_error`) for a null stock or a `safe_z` not above its top.
+ *
+ * # Safety
+ * `stock` a live stock.
+ */
+struct CadaclysmBlacksmithJob *cadaclysm_blacksmith_job_new(const struct CadaclysmBlacksmithStock *stock,
+                                                            double safe_z);
+
+/**
+ * How far above an operation's top it enters and leaves its passes. In place;
+ * `false` (and `last_error`, the job unchanged) for a null job or a clearance
+ * not positive and finite.
+ *
+ * # Safety
+ * `j` a live job no other thread is using.
+ */
+bool cadaclysm_blacksmith_job_set_clearance(struct CadaclysmBlacksmithJob *j, double clearance);
+
+/**
+ * The tolerance free-form sides are fitted and offsets computed to. In place;
+ * `false` (and `last_error`, the job unchanged) for a null job or a tolerance
+ * not positive and finite.
+ *
+ * # Safety
+ * `j` a live job no other thread is using.
+ */
+bool cadaclysm_blacksmith_job_set_tolerance(struct CadaclysmBlacksmithJob *j, double tolerance);
+
+/**
+ * The seconds every program waits (`G4`) after starting the spindle; 0 writes no
+ * wait. In place; `false` (and `last_error`, the job unchanged) for a null job
+ * or a dwell negative or not finite.
+ *
+ * # Safety
+ * `j` a live job no other thread is using.
+ */
+bool cadaclysm_blacksmith_job_set_spindle_dwell(struct CadaclysmBlacksmithJob *j, double seconds);
+
+/**
+ * The name programs are called after (`<name>-T<n>`) and written into their
+ * header comment. In place; `false` (and `last_error`, the job unchanged) for a
+ * null job, a null or non-UTF-8 name, or a name the job refuses.
+ *
+ * # Safety
+ * `j` a live job no other thread is using; `name` NUL-terminated.
+ */
+bool cadaclysm_blacksmith_job_set_name(struct CadaclysmBlacksmithJob *j, const char *name);
+
+/**
+ * The voxel size, in mm, of the CAMotics project [`cadaclysm_blacksmith_job_camotics`]
+ * writes. In place; `false` (and `last_error`, the job unchanged) for a null job
+ * or a resolution not positive and finite.
+ *
+ * # Safety
+ * `j` a live job no other thread is using.
+ */
+bool cadaclysm_blacksmith_job_set_resolution(struct CadaclysmBlacksmithJob *j, double resolution);
+
+/**
+ * Face the stock's top down to `z`, in rows `stepover` apart and passes at most
+ * `stepdown` deep, with `t`. Added to the job in place; `false` (and
+ * `last_error`, the job unchanged) for a null job or tool, or what the job
+ * refuses (a drill, a `z` above the top, a stepover past the diameter, ...).
+ *
+ * # Safety
+ * `j` a live job no other thread is using; `t` a live tool.
+ */
+bool cadaclysm_blacksmith_job_face(struct CadaclysmBlacksmithJob *j,
+                                   const struct CadaclysmBlacksmithTool *t,
+                                   double z,
+                                   double stepover,
+                                   double stepdown);
+
+/**
+ * Cut along `p` from `top` to `bottom` in passes at most `stepdown` deep, with
+ * `t`: `side` 0 outside the profile, 1 inside it, 2 on its line; `climb` for
+ * climb milling, else conventional; `open` to cut the outline as an open chain
+ * (only on its line, and with no holes). Added in place; `false` (and
+ * `last_error`, the job unchanged) for a null job, tool or profile, a `side` past
+ * 2, or what the job refuses.
+ *
+ * # Safety
+ * `j` a live job no other thread is using; `t` a live tool; `p` a live profile.
+ */
+bool cadaclysm_blacksmith_job_contour(struct CadaclysmBlacksmithJob *j,
+                                      const struct CadaclysmBlacksmithTool *t,
+                                      const struct CadaclysmBlacksmithProfile *p,
+                                      double top,
+                                      double bottom,
+                                      uint32_t side,
+                                      double stepdown,
+                                      bool climb,
+                                      bool open);
+
+/**
+ * Clear `p` -- its holes left standing as islands -- from `top` to `bottom`, in
+ * rings `stepover` apart (at most the tool's radius) and passes at most
+ * `stepdown` deep, with `t`. Added in place; `false` (and `last_error`, the job
+ * unchanged) for a null job, tool or profile, or what the job refuses.
+ *
+ * # Safety
+ * `j` a live job no other thread is using; `t` a live tool; `p` a live profile.
+ */
+bool cadaclysm_blacksmith_job_pocket(struct CadaclysmBlacksmithJob *j,
+                                     const struct CadaclysmBlacksmithTool *t,
+                                     const struct CadaclysmBlacksmithProfile *p,
+                                     double top,
+                                     double bottom,
+                                     double stepover,
+                                     double stepdown);
+
+/**
+ * Drill `count` holes at `xy` (x0, y0, x1, y1, ... -- `2 * count` doubles) from
+ * `top` to `bottom` with `t`, pecking `peck` deep at a time, or straight to depth
+ * when `peck` is NaN. Added in place; `false` (and `last_error`, the job
+ * unchanged) for a null job or tool, a null `xy` with a `count` above 0, or what
+ * the job refuses.
+ *
+ * # Safety
+ * `j` a live job no other thread is using; `t` a live tool; `xy` readable for
+ * `2 * count` doubles, or null when `count` is 0.
+ */
+bool cadaclysm_blacksmith_job_drill(struct CadaclysmBlacksmithJob *j,
+                                    const struct CadaclysmBlacksmithTool *t,
+                                    const double *xy,
+                                    size_t count,
+                                    double top,
+                                    double bottom,
+                                    double peck);
+
+/**
+ * The job as Grbl 1.1 programs, one per run of consecutive operations sharing a
+ * tool, each named `<name>-T<n>` (or `<name>-<k>-T<n>` for run `k` of a tool that
+ * runs more than once). Null (and `last_error`) for a null job or a toolpath the
+ * writer refuses; a list of count 0 for a job with no operations.
+ *
+ * # Safety
+ * `j` a live job no other thread is changing.
+ */
+struct CadaclysmBlacksmithPrograms *cadaclysm_blacksmith_job_gcode(const struct CadaclysmBlacksmithJob *j);
+
+/**
+ * Every file of a CAMotics project named `stem`, in memory and in the order it
+ * would be written: each program (`<stem>-T<n>.nc`, or `<stem>-<k>-T<n>.nc` for
+ * run `k` of a repeated tool), its simulation copy, and the project
+ * (`<stem>.camotics`, tool 0) last. Each entry's name is the file's name, its
+ * text the file's content. Null (and `last_error`) for a null job, a null or
+ * non-UTF-8 stem, a stem that is not a plain file name, or what `job_gcode`
+ * refuses.
+ *
+ * # Safety
+ * `j` a live job no other thread is changing; `stem` NUL-terminated.
+ */
+struct CadaclysmBlacksmithPrograms *cadaclysm_blacksmith_job_camotics(const struct CadaclysmBlacksmithJob *j,
+                                                                      const char *stem);
+
+/**
+ * Release a job. Null is a no-op. Lists it wrote are independent and outlive it.
+ *
+ * # Safety
+ * `j` must have come from this library and not have been freed already.
+ */
+void cadaclysm_blacksmith_job_free(struct CadaclysmBlacksmithJob *j);
+
+/**
+ * How many files. `UINT32_MAX` (and `last_error`) for null.
+ *
+ * # Safety
+ * `l` a live list.
+ */
+uint32_t cadaclysm_blacksmith_programs_count(const struct CadaclysmBlacksmithPrograms *l);
+
+/**
+ * File `i`'s Grbl tool number; 0 for a CAMotics project file. `UINT32_MAX` (and
+ * `last_error`) for null or `i` out of range.
+ *
+ * # Safety
+ * `l` a live list.
+ */
+uint32_t cadaclysm_blacksmith_programs_tool(const struct CadaclysmBlacksmithPrograms *l,
+                                            uint32_t i);
+
+/**
+ * File `i`'s name: for [`cadaclysm_blacksmith_job_gcode`], the program's name
+ * without extension (`<name>-T<n>`, or `<name>-<k>-T<n>` for a repeated tool);
+ * for [`cadaclysm_blacksmith_job_camotics`], the file's name. Owned by the list
+ * and good until [`cadaclysm_blacksmith_programs_free`]; never freed by the
+ * caller. Null (and `last_error`) for null or `i` out of range.
+ *
+ * # Safety
+ * `l` a live list.
+ */
+const char *cadaclysm_blacksmith_programs_name(const struct CadaclysmBlacksmithPrograms *l,
+                                               uint32_t i);
+
+/**
+ * File `i`'s content: G-code, or a CAMotics project's JSON. Owned by the list and
+ * good until [`cadaclysm_blacksmith_programs_free`]; never freed by the caller.
+ * Null (and `last_error`) for null or `i` out of range.
+ *
+ * # Safety
+ * `l` a live list.
+ */
+const char *cadaclysm_blacksmith_programs_text(const struct CadaclysmBlacksmithPrograms *l,
+                                               uint32_t i);
+
+/**
+ * Release a list, and every string read out of it. Null is a no-op.
+ *
+ * # Safety
+ * `l` must have come from this library and not have been freed already.
+ */
+void cadaclysm_blacksmith_programs_free(struct CadaclysmBlacksmithPrograms *l);
+
+/**
+ * Recognise `part` and append the operations that make it to `j`: `NaN`
+ * `stepover`/`stepdown`/`peck` are the kernel's own defaults; `skin` is always
+ * given. `drills` is `drill_count` tool pointers, or null when `drill_count` is
+ * 0. `j` changes only on success -- a refusal leaves it exactly as it was. Null
+ * (and `last_error`) for a null job, part or end mill, a null drill pointer at
+ * index `i` (named `"job_machine: null drill <i>"`), or what the kernel
+ * refuses (a drill as the end mill, ...).
+ *
+ * # Safety
+ * `j` a live job no other thread is using; `part` a live solid; `end_mill` a
+ * live tool; `drills` readable for `drill_count` tool pointers (each null or a
+ * live tool), or null when `drill_count` is 0.
+ */
+struct CadaclysmBlacksmithReport *cadaclysm_blacksmith_job_machine(struct CadaclysmBlacksmithJob *j,
+                                                                   const struct CadaclysmBlacksmithSolid *part,
+                                                                   const struct CadaclysmBlacksmithTool *end_mill,
+                                                                   const struct CadaclysmBlacksmithTool *const *drills,
+                                                                   size_t drill_count,
+                                                                   double stepover,
+                                                                   double stepdown,
+                                                                   double skin,
+                                                                   double peck);
+
+/**
+ * How many items. `UINT32_MAX` (and `last_error`) for null.
+ *
+ * # Safety
+ * `r` a live report.
+ */
+uint32_t cadaclysm_blacksmith_report_count(const struct CadaclysmBlacksmithReport *r);
+
+/**
+ * Item `i`'s kind: `"corner"`, `"hole"`, `"slope"`, `"undercut"` or
+ * `"too_deep"`. Owned by the report and good until
+ * [`cadaclysm_blacksmith_report_free`]; never freed by the caller. Null (and
+ * `last_error`) for null or `i` out of range.
+ *
+ * # Safety
+ * `r` a live report.
+ */
+const char *cadaclysm_blacksmith_report_kind(const struct CadaclysmBlacksmithReport *r, uint32_t i);
+
+/**
+ * Item `i`'s location: x, y, z written to `out[0..3]`. `false` (and
+ * `last_error`) for null, `i` out of range, or a null `out`.
+ *
+ * # Safety
+ * `r` a live report; `out` three writable doubles.
+ */
+bool cadaclysm_blacksmith_report_at(const struct CadaclysmBlacksmithReport *r,
+                                    uint32_t i,
+                                    double *out);
+
+/**
+ * Item `i`'s size, per kind. `NaN` (and `last_error`) for null or `i` out of
+ * range -- unambiguous, since a size is never `NaN`.
+ *
+ * # Safety
+ * `r` a live report.
+ */
+double cadaclysm_blacksmith_report_size(const struct CadaclysmBlacksmithReport *r, uint32_t i);
+
+/**
+ * Item `i`'s reason, in one sentence naming the tool involved. Owned by the
+ * report and good until [`cadaclysm_blacksmith_report_free`]; never freed by
+ * the caller. Null (and `last_error`) for null or `i` out of range.
+ *
+ * # Safety
+ * `r` a live report.
+ */
+const char *cadaclysm_blacksmith_report_reason(const struct CadaclysmBlacksmithReport *r,
+                                               uint32_t i);
+
+/**
+ * Item `i`'s XY area, as a new profile list the caller frees with
+ * [`cadaclysm_blacksmith_profile_list_free`]. Null (and `last_error`) for null
+ * or `i` out of range.
+ *
+ * # Safety
+ * `r` a live report.
+ */
+struct CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_report_region(const struct CadaclysmBlacksmithReport *r,
+                                                                          uint32_t i);
+
+/**
+ * The report's own `Display`: one line per item, or `"nothing left uncut"`.
+ * Owned by the report and good until [`cadaclysm_blacksmith_report_free`];
+ * never freed by the caller. Null (and `last_error`) for null.
+ *
+ * # Safety
+ * `r` a live report.
+ */
+const char *cadaclysm_blacksmith_report_text(const struct CadaclysmBlacksmithReport *r);
+
+/**
+ * Release a report, and every string read out of it. Null is a no-op.
+ *
+ * # Safety
+ * `r` must have come from this library and not have been freed already.
+ */
+void cadaclysm_blacksmith_report_free(struct CadaclysmBlacksmithReport *r);
+
+/**
+ * Every operation added to `j` so far, in order. Null (and `last_error`) for a
+ * null job.
+ *
+ * # Safety
+ * `j` a live job no other thread is changing.
+ */
+struct CadaclysmBlacksmithOperations *cadaclysm_blacksmith_job_operations(const struct CadaclysmBlacksmithJob *j);
+
+/**
+ * How many operations. `UINT32_MAX` (and `last_error`) for null.
+ *
+ * # Safety
+ * `l` a live list.
+ */
+uint32_t cadaclysm_blacksmith_operations_count(const struct CadaclysmBlacksmithOperations *l);
+
+/**
+ * Operation `i`'s kind: `"face"`, `"contour"`, `"pocket"` or `"drill"`. Owned
+ * by the list and good until [`cadaclysm_blacksmith_operations_free`]; never
+ * freed by the caller. Null (and `last_error`) for null or `i` out of range.
+ *
+ * # Safety
+ * `l` a live list.
+ */
+const char *cadaclysm_blacksmith_operations_kind(const struct CadaclysmBlacksmithOperations *l,
+                                                 uint32_t i);
+
+/**
+ * Operation `i`'s tool number. `UINT32_MAX` (and `last_error`) for null or `i`
+ * out of range.
+ *
+ * # Safety
+ * `l` a live list.
+ */
+uint32_t cadaclysm_blacksmith_operations_tool(const struct CadaclysmBlacksmithOperations *l,
+                                              uint32_t i);
+
+/**
+ * How many params operation `i` has. `UINT32_MAX` (and `last_error`) for null
+ * or `i` out of range.
+ *
+ * # Safety
+ * `l` a live list.
+ */
+uint32_t cadaclysm_blacksmith_operations_param_count(const struct CadaclysmBlacksmithOperations *l,
+                                                     uint32_t i);
+
+/**
+ * Operation `i`'s param `k`'s name. Owned by the list and good until
+ * [`cadaclysm_blacksmith_operations_free`]; never freed by the caller. Null
+ * (and `last_error`) for null, `i` out of range, or `k` out of range -- a
+ * caller checks [`cadaclysm_blacksmith_operations_param_count`] first.
+ *
+ * # Safety
+ * `l` a live list.
+ */
+const char *cadaclysm_blacksmith_operations_param_name(const struct CadaclysmBlacksmithOperations *l,
+                                                       uint32_t i,
+                                                       uint32_t k);
+
+/**
+ * Operation `i`'s param `k`'s value. May legitimately be `NaN` (a drill's
+ * `peck` when there is none); on a bad index it is also `NaN`, with
+ * `last_error` set -- a caller checks
+ * [`cadaclysm_blacksmith_operations_param_count`] first, since `NaN` alone
+ * does not say which happened.
+ *
+ * # Safety
+ * `l` a live list.
+ */
+double cadaclysm_blacksmith_operations_param_value(const struct CadaclysmBlacksmithOperations *l,
+                                                   uint32_t i,
+                                                   uint32_t k);
+
+/**
+ * Release a list, and every string read out of it. Null is a no-op.
+ *
+ * # Safety
+ * `l` must have come from this library and not have been freed already.
+ */
+void cadaclysm_blacksmith_operations_free(struct CadaclysmBlacksmithOperations *l);
+
+/**
  * Fill `options` with `size` set and every default in place: a chordal tolerance and no size
  * ceiling, exactly as `FemOptions::default()` states them -- the numbers are not restated
  * here, so the two cannot drift.
@@ -990,6 +1539,32 @@ bool cadaclysm_blacksmith_fem_mesh_folded_edge(const struct CadaclysmBlacksmithF
                                                uint32_t *a,
                                                uint32_t *b,
                                                uint32_t *brep_edge);
+
+/**
+ * How many pairs of this mesh's triangles pass through each other: the rows
+ * [`cadaclysm_blacksmith_fem_mesh_crossing`] reads. 0 (and `last_error`) for a null handle.
+ *
+ * **In its own function because `CadaclysmBlacksmithFemMeshView` cannot grow**: callers
+ * allocate the view. A mesh is ready for a volume mesher when `watertight` is true **and**
+ * this is 0.
+ *
+ * # Safety
+ * `m` as [`cadaclysm_blacksmith_fem_mesh_view`].
+ */
+uint32_t cadaclysm_blacksmith_fem_mesh_crossing_count(const struct CadaclysmBlacksmithFemMesh *m);
+
+/**
+ * Crossing `i`: the triangles `a < b` that pass through each other. `false` (and `last_error`)
+ * for a null handle, a null out-pointer, or an `i` at or past
+ * [`cadaclysm_blacksmith_fem_mesh_crossing_count`]; nothing written then.
+ *
+ * # Safety
+ * `m` as [`cadaclysm_blacksmith_fem_mesh_view`]; `a` and `b` each null or a writable `uint32_t`.
+ */
+bool cadaclysm_blacksmith_fem_mesh_crossing(const struct CadaclysmBlacksmithFemMesh *m,
+                                            uint32_t i,
+                                            uint32_t *a,
+                                            uint32_t *b);
 
 /**
  * The mesh as Gmsh 4.1 ASCII `.msh` text: an entity per B-rep vertex, edge and face, a volume
@@ -1332,8 +1907,10 @@ const char *cadaclysm_blacksmith_build_date(void);
  * Tessellate at `tolerance` (chordal deviation, in the solid's own units) --
  * or hand back the tessellation already made at exactly this tolerance. The
  * pointers borrow from the solid and stay valid until it is freed or meshed
- * again at a *different* tolerance. Faces are meshed watertight, vertices
- * welded by position. All-null and `last_error` on failure.
+ * again at a *different* tolerance, by this thread or any other: callers on
+ * several threads at one tolerance share one mesh, meshed once. Faces are meshed watertight, vertices
+ * welded by position. All-null and `last_error` on failure. For arrays that must outlive a
+ * re-mesh or the solid, hold the tessellation: [`cadaclysm_blacksmith_tessellation`].
  *
  * # Safety
  * `solid` live.
@@ -1343,7 +1920,8 @@ struct CadaclysmBlacksmithMesh cadaclysm_blacksmith_mesh(const struct CadaclysmB
 
 /**
  * [`cadaclysm_blacksmith_mesh`] in `double`, from the same cache, under the same rule:
- * valid until the solid is freed or meshed again at a different tolerance.
+ * valid until the solid is freed or meshed again at a different tolerance. For arrays that
+ * must outlive a re-mesh or the solid, hold the tessellation: [`cadaclysm_blacksmith_tessellation`].
  *
  * # Safety
  * `solid` live.
@@ -1358,7 +1936,8 @@ struct CadaclysmBlacksmithMesh64 cadaclysm_blacksmith_mesh64(const struct Cadacl
  * and the faces in order, so face `f`'s triangles are the `counts[f]` that
  * follow the first `sum(counts[..f])`; a face that meshed to nothing counts
  * zero. What a viewer colours a face by. Same cache and lifetime rule as the
- * mesh. Null `counts` and `last_error` on failure.
+ * mesh. Null `counts` and `last_error` on failure. For arrays that must outlive a re-mesh or
+ * the solid, hold the tessellation: [`cadaclysm_blacksmith_tessellation`].
  *
  * # Safety
  * `solid` live.
@@ -1369,13 +1948,78 @@ struct CadaclysmBlacksmithFaceTriangles cadaclysm_blacksmith_mesh_face_triangles
 /**
  * The feature edges the mesher locked at `tolerance`, as polylines that lie on
  * the mesh [`cadaclysm_blacksmith_mesh`] gives at the same tolerance. Same
- * cache and lifetime rule as the mesh.
+ * cache and lifetime rule as the mesh. For arrays that must outlive a re-mesh or the solid,
+ * hold the tessellation: [`cadaclysm_blacksmith_tessellation`].
  *
  * # Safety
  * `solid` live.
  */
 struct CadaclysmBlacksmithPolylines cadaclysm_blacksmith_edge_polylines(const struct CadaclysmBlacksmithSolid *solid,
                                                                         double tolerance);
+
+/**
+ * The solid meshed at `tolerance`, held: the same mesh [`cadaclysm_blacksmith_mesh`] lends at
+ * that tolerance (the very same arrays while the solid's cache holds it), owned by the handle
+ * rather than lent by the solid. Where the solid's own arrays last until it is freed or meshed
+ * again at another tolerance, these last until [`cadaclysm_blacksmith_tessellation_free`],
+ * whatever happens to the solid. The solid still keeps one tessellation: a replaced one lives
+ * exactly as long as a handle holds it. Null, with
+ * [`cadaclysm_blacksmith_last_error`](crate::cadaclysm_blacksmith_last_error) saying why, for a
+ * null solid or a tolerance that is not positive and finite.
+ *
+ * # Safety
+ * `solid` null or live.
+ */
+struct CadaclysmBlacksmithTessellation *cadaclysm_blacksmith_tessellation(const struct CadaclysmBlacksmithSolid *solid,
+                                                                          double tolerance);
+
+/**
+ * Free a held tessellation, and with it every array lent from it. Null is a no-op.
+ *
+ * # Safety
+ * `tessellation` null, or from [`cadaclysm_blacksmith_tessellation`] and not freed already.
+ */
+void cadaclysm_blacksmith_tessellation_free(struct CadaclysmBlacksmithTessellation *tessellation);
+
+/**
+ * The held mesh's triangles, as [`cadaclysm_blacksmith_mesh`] gives them, borrowed from the
+ * handle and good until [`cadaclysm_blacksmith_tessellation_free`]. All-null and `last_error`
+ * for a null handle.
+ *
+ * # Safety
+ * `tessellation` null or live.
+ */
+struct CadaclysmBlacksmithMesh cadaclysm_blacksmith_tessellation_mesh(const struct CadaclysmBlacksmithTessellation *tessellation);
+
+/**
+ * The held mesh's triangles in `double`, as [`cadaclysm_blacksmith_mesh64`] gives them,
+ * borrowed from the handle and good until [`cadaclysm_blacksmith_tessellation_free`]. All-null
+ * and `last_error` for a null handle.
+ *
+ * # Safety
+ * `tessellation` null or live.
+ */
+struct CadaclysmBlacksmithMesh64 cadaclysm_blacksmith_tessellation_mesh64(const struct CadaclysmBlacksmithTessellation *tessellation);
+
+/**
+ * The held mesh's per-face triangle counts, as [`cadaclysm_blacksmith_mesh_face_triangles`]
+ * gives them, borrowed from the handle and good until
+ * [`cadaclysm_blacksmith_tessellation_free`]. Null `counts` and `last_error` for a null handle.
+ *
+ * # Safety
+ * `tessellation` null or live.
+ */
+struct CadaclysmBlacksmithFaceTriangles cadaclysm_blacksmith_tessellation_face_triangles(const struct CadaclysmBlacksmithTessellation *tessellation);
+
+/**
+ * The held mesh's feature-edge polylines, as [`cadaclysm_blacksmith_edge_polylines`] gives
+ * them, borrowed from the handle and good until [`cadaclysm_blacksmith_tessellation_free`].
+ * All-null and `last_error` for a null handle.
+ *
+ * # Safety
+ * `tessellation` null or live.
+ */
+struct CadaclysmBlacksmithPolylines cadaclysm_blacksmith_tessellation_edge_polylines(const struct CadaclysmBlacksmithTessellation *tessellation);
 
 /**
  * A colour per polyline of [`cadaclysm_blacksmith_edge_polylines`] at the same
@@ -1399,7 +2043,11 @@ struct CadaclysmBlacksmithColours cadaclysm_blacksmith_edge_polyline_colours(con
  * arcs and splines: a closed loop repeats its first point at the end; an open
  * chain (a profile ended open) is the segments it has. What a viewer draws a
  * profile with. The arrays belong to the profile and stay valid until it is
- * freed or this is called on it again with another tolerance.
+ * freed: each tolerance asked is flattened once and kept, so asking again at
+ * another tolerance -- on this thread or any other -- never moves or frees
+ * arrays already handed out. Safe to call on one profile from several threads
+ * at once; a profile asked at many distinct tolerances holds that many copies
+ * of its outline until it is freed.
  *
  * # Safety
  * `profile` live.
@@ -1434,6 +2082,23 @@ bool cadaclysm_blacksmith_bounds64(const struct CadaclysmBlacksmithSolid *solid,
                                    double tolerance,
                                    double *min,
                                    double *max);
+
+/**
+ * The solid's axis-aligned box, in `double`, at a cost that does not grow with the
+ * solid's size: its mesh at a tolerance of a thousandth of its own extent, so the box
+ * is inside the exact one and short of it by at most that. What a wrapper's `bounds`
+ * reads. [`cadaclysm_blacksmith_bounds`] meshes at a tolerance the caller names --
+ * an absolute one, which on a part tens of metres long in millimetres is millions of
+ * triangles. Worked out once per solid, and apart from the tessellation `mesh` and
+ * `bounds` share: asking it never invalidates their arrays. `false` on a null solid
+ * or null output.
+ *
+ * # Safety
+ * `solid` live; `min`, `max` three doubles each.
+ */
+bool cadaclysm_blacksmith_box(const struct CadaclysmBlacksmithSolid *solid,
+                              double *min,
+                              double *max);
 
 /**
  * `count` solids as one STEP part file, each its own `MANIFOLD_SOLID_BREP`,
@@ -2075,6 +2740,50 @@ struct CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_profile_common(const
                                                                            double tolerance);
 
 /**
+ * `p` with every free-form side (a Bezier, a conic, a NURBS) replaced by lines and
+ * arcs within `tolerance` of it both ways round -- what a G-code writer can say.
+ * Lines and arcs pass through as they are, every loop closes on itself exactly,
+ * holes are converted the same way. Null (and `last_error`) for a null profile, a
+ * `tolerance` not positive and finite, a spline that does not evaluate.
+ *
+ * # Safety
+ * `p` a live profile.
+ */
+struct CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_to_arcs(const struct CadaclysmBlacksmithProfile *p,
+                                                                        double tolerance);
+
+/**
+ * `p` grown by `distance` (shrunk where it is negative): zero or more profiles,
+ * all lines and arcs, outward corners rounded by `|distance|`, holes moving against
+ * the boundary. Free-form sides are fitted to `tolerance` first
+ * ([`cadaclysm_blacksmith_profile_to_arcs`]). A shrink that eats the whole profile
+ * is a list with a count of 0. Null (and `last_error`) for a null profile, a
+ * `distance` not finite, a `tolerance` not positive and finite, a loop with no
+ * sides, loops that cross or touch.
+ *
+ * # Safety
+ * `p` a live profile.
+ */
+struct CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_profile_offset(const struct CadaclysmBlacksmithProfile *p,
+                                                                           double distance,
+                                                                           double tolerance);
+
+/**
+ * `s` cut by the plane `Z = z`: its closed outlines there, in XY, nested into
+ * profiles with holes (boundaries counter-clockwise, holes clockwise), a line or a
+ * circle crossing kept exact. A plane that misses the solid is a list with a count
+ * of 0. Null (and `last_error`) for a null solid, a `z` not finite, a `tolerance`
+ * not positive and finite, a face lying in the plane (section a little above or
+ * below it), a crossing that does not close.
+ *
+ * # Safety
+ * `s` a live solid.
+ */
+struct CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_solid_section(const struct CadaclysmBlacksmithSolid *s,
+                                                                          double z,
+                                                                          double tolerance);
+
+/**
  * How many profiles. 0 (and `last_error`) for null.
  *
  * # Safety
@@ -2359,6 +3068,12 @@ struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_wedge(double x,
                                                             double y,
                                                             double z,
                                                             double top_x);
+
+/**
+ * A right pyramid of `sides` sides (at least 3): its base the regular polygon of
+ * circumradius `r` on z=0, its first corner on +x, its tip at (0, 0, `h`).
+ */
+struct CadaclysmBlacksmithSolid *cadaclysm_blacksmith_pyramid(uint32_t sides, double r, double h);
 
 /**
  * `profile` swept `height` along the frame's z, closed with two caps. The

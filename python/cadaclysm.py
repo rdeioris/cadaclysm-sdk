@@ -54,6 +54,7 @@ what invalidates them, not `Scene.close()`.
 import ctypes
 import decimal
 import enum
+import math
 import os
 import platform
 import re
@@ -74,6 +75,7 @@ __all__ = [
     "FemEdge",
     "FemMesh",
     "FemVertex",
+    "Freedom",
     "Joint",
     "Link",
     "Manifold",
@@ -82,9 +84,11 @@ __all__ = [
     "Meshlets",
     "NONE",
     "Node",
+    "Pair",
     "Placement",
     "Polylines",
     "Scene",
+    "State",
     "UV_WORLD",
     "ValueKind",
     "build_date",
@@ -360,6 +364,18 @@ class _EdgeColors(ctypes.Structure):
     ]
 
 
+class _Polylines64(ctypes.Structure):
+    #: `CadaclysmPolylines64`: `_Polylines` in float64, for `edges64` / `curves64` /
+    #: `isocurves64`. Entry points declared below for the parity gate; a later task
+    #: wires the Python wrapper methods themselves.
+    _fields_ = [
+        ("positions", POINTER(c_double)),
+        ("counts", POINTER(c_uint32)),
+        ("polyline_count", c_uint32),
+        ("vertex_count", c_uint32),
+    ]
+
+
 class _Beziers(ctypes.Structure):
     #: `CadaclysmBeziers`: four control points a curve (`count * 12` floats) and four
     #: weights a curve (`count * 4`). Pinned against the header by `tests/bindings.rs`.
@@ -449,6 +465,42 @@ class _Surfaces(ctypes.Structure):
         ("nurbs_count", c_uint32),
         ("shared", POINTER(c_uint32)),
         ("shared_count", c_uint32),
+        ("duplicate", POINTER(c_uint32)),
+        ("duplicate_count", c_uint32),
+    ]
+
+
+class _GpuSurfaces(ctypes.Structure):
+    #: `CadaclysmGpuSurfaces`: a part's exact faces packed for a GPU surface evaluator, and
+    #: its exact edges. Owned by the caller -- freed with `cadaclysm_gpu_surfaces_free`.
+    #: Entry points declared below for the parity gate; a later task wires the Python
+    #: wrapper methods themselves.
+    _fields_ = [
+        ("faces", POINTER(_Face)),
+        ("face_count", c_uint32),
+        ("surface_count", c_uint32),
+        ("loops", POINTER(c_uint32)),
+        ("loops_len", c_uint32),
+        ("points", POINTER(c_float)),
+        ("points_len", c_uint32),
+        ("profiles", POINTER(c_float)),
+        ("profiles_len", c_uint32),
+        ("nurbs", POINTER(c_float)),
+        ("nurbs_len", c_uint32),
+        ("shared", POINTER(c_uint32)),
+        ("shared_len", c_uint32),
+        ("tiles", POINTER(c_uint32)),
+        ("tiles_len", c_uint32),
+        ("tile_domains", POINTER(c_float)),
+        ("tile_domains_len", c_uint32),
+        ("tile_samples", POINTER(c_float)),
+        ("tile_samples_len", c_uint32),
+        ("tile_boxes", POINTER(c_float)),
+        ("tile_boxes_len", c_uint32),
+        ("edges", POINTER(c_float)),
+        ("edges_len", c_uint32),
+        ("bounds", c_double * 6),
+        ("about", c_double * 3),
     ]
 
 
@@ -522,6 +574,20 @@ class _FemVertex(ctypes.Structure):
     ]
 
 
+class _Freedom(ctypes.Structure):
+    #: `CadaclysmFreedom`. `motion` and `axis` are `uint32_t`, not the enum types,
+    #: as the header's own note on `CadaclysmConvention` explains. Pinned by
+    #: `tests/bindings.rs`.
+    _fields_ = [
+        ("motion", c_uint32),
+        ("axis", c_uint32),
+        ("has_lower", c_bool),
+        ("lower", c_double),
+        ("has_upper", c_bool),
+        ("upper", c_double),
+    ]
+
+
 # ---- loading the library --------------------------------------------------
 
 #: Every entry point in `include/cadaclysm.h`, as `(name, restype, argtypes)`.
@@ -582,6 +648,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_pick_save", c_char_p, [c_void_p, c_char_p]),
     ("cadaclysm_node_id", c_char_p, [c_void_p, c_uint32]),
     ("cadaclysm_node_color", c_bool, [c_void_p, c_uint32, POINTER(c_float)]),
+    ("cadaclysm_node_own_color", c_bool, [c_void_p, c_uint32, POINTER(c_float)]),
     ("cadaclysm_node_transform", None, [c_void_p, c_uint32, POINTER(c_double)]),
     ("cadaclysm_node_attribute_count", c_uint32, [c_void_p, c_uint32]),
     ("cadaclysm_node_attribute", _Attribute, [c_void_p, c_uint32, c_uint32]),
@@ -609,6 +676,8 @@ _ENTRY_POINTS = [
     ("cadaclysm_node_surface_proxy_mesh", _Mesh, [c_void_p, c_uint32, c_uint32]),
     ("cadaclysm_node_triangle_estimate", ctypes.c_int64, [c_void_p, c_uint32]),
     ("cadaclysm_node_surfaces", _Surfaces, [c_void_p, c_uint32]),
+    ("cadaclysm_node_gpu_surfaces", POINTER(_GpuSurfaces), [c_void_p, c_uint32, c_double]),
+    ("cadaclysm_gpu_surfaces_free", None, [POINTER(_GpuSurfaces)]),
     ("cadaclysm_node_brep", c_void_p, [c_void_p, c_uint32]),
     ("cadaclysm_brep_release", None, [c_void_p]),
     ("cadaclysm_brep_manifold", c_bool, [c_void_p, POINTER(c_uint32)]),
@@ -631,10 +700,25 @@ _ENTRY_POINTS = [
     ("cadaclysm_joint_name", c_char_p, [c_void_p, c_uint32]),
     ("cadaclysm_joint_start", c_uint32, [c_void_p, c_uint32]),
     ("cadaclysm_joint_end", c_uint32, [c_void_p, c_uint32]),
+    ("cadaclysm_joint_pair_kind", ctypes.c_int32, [c_void_p, c_uint32]),
+    ("cadaclysm_joint_pair_type", c_char_p, [c_void_p, c_uint32]),
+    ("cadaclysm_joint_pair_pitch", c_double, [c_void_p, c_uint32]),
+    ("cadaclysm_joint_pair_frames", c_bool,
+     [c_void_p, c_uint32, POINTER(c_double), POINTER(c_double)]),
+    ("cadaclysm_joint_freedom_count", c_uint32, [c_void_p, c_uint32]),
+    ("cadaclysm_joint_freedom", c_bool, [c_void_p, c_uint32, c_uint32, POINTER(_Freedom)]),
+    ("cadaclysm_state_count", c_uint32, [c_void_p]),
+    ("cadaclysm_state_name", c_char_p, [c_void_p, c_uint32]),
+    ("cadaclysm_state_value_count", c_uint32, [c_void_p, c_uint32]),
+    ("cadaclysm_state_value", c_uint32,
+     [c_void_p, c_uint32, c_uint32, POINTER(c_uint32), POINTER(c_double), c_uint32]),
     ("cadaclysm_node_edges", _Polylines, [c_void_p, c_uint32]),
     ("cadaclysm_node_edge_colors", _EdgeColors, [c_void_p, c_uint32]),
     ("cadaclysm_node_curves", _Polylines, [c_void_p, c_uint32]),
     ("cadaclysm_node_isocurves", _Polylines, [c_void_p, c_uint32]),
+    ("cadaclysm_node_edges64", _Polylines64, [c_void_p, c_uint32]),
+    ("cadaclysm_node_curves64", _Polylines64, [c_void_p, c_uint32]),
+    ("cadaclysm_node_isocurves64", _Polylines64, [c_void_p, c_uint32]),
     ("cadaclysm_node_edge_beziers", _Beziers, [c_void_p, c_uint32]),
     ("cadaclysm_node_curve_beziers", _Beziers, [c_void_p, c_uint32]),
     ("cadaclysm_node_isocurve_beziers", _Beziers, [c_void_p, c_uint32]),
@@ -676,6 +760,9 @@ _ENTRY_POINTS = [
      [c_void_p, c_uint32, POINTER(c_uint32), POINTER(c_uint32), POINTER(c_uint32)]),
     ("cadaclysm_fem_mesh_folded_edge", c_bool,
      [c_void_p, c_uint32, POINTER(c_uint32), POINTER(c_uint32), POINTER(c_uint32)]),
+    ("cadaclysm_fem_mesh_crossing_count", c_uint32, [c_void_p]),
+    ("cadaclysm_fem_mesh_crossing", c_bool,
+     [c_void_p, c_uint32, POINTER(c_uint32), POINTER(c_uint32)]),
     ("cadaclysm_fem_mesh_msh_text", c_char_p, [c_void_p]),
     ("cadaclysm_fem_mesh_save_msh", c_bool, [c_void_p, c_char_p]),
 ]
@@ -1474,9 +1561,129 @@ class Link:
         ]
 
 
+_PAIR_KIND_NAMES = (
+    "revolute",
+    "prismatic",
+    "cylindrical",
+    "spherical",
+    "spherical_with_pin",
+    "planar",
+    "universal",
+    "homokinetic",
+    "screw",
+    "fully_constrained",
+    "unconstrained",
+    "low_order",
+    "other",
+)
+
+
+class Freedom:
+    """One degree of freedom of a `Pair`: which motion, about or along which contact-
+    frame axis, and its optional range. From `Pair.freedoms`."""
+
+    __slots__ = ("motion", "axis", "lower", "upper")
+
+    _MOTIONS = ("rotation", "translation")
+    _AXES = ("x", "y", "z")
+
+    def __init__(self, motion: str, axis: str, lower, upper):
+        self.motion = motion
+        self.axis = axis
+        self.lower = lower
+        self.upper = upper
+
+    def __repr__(self):
+        return f"<Freedom {self.motion} {self.axis} [{self.lower}, {self.upper}]>"
+
+
+class Pair:
+    """A kinematic pair: the kind of relative motion a joint allows between its two
+    links. From `Joint.pair`."""
+
+    __slots__ = ("_scene", "_joint", "_kind")
+
+    def __init__(self, scene: "Scene", joint: int, kind: int):
+        self._scene = scene
+        self._joint = joint
+        self._kind = kind
+
+    def __repr__(self):
+        return f"<Pair {self.kind}>"
+
+    @property
+    def kind(self) -> str:
+        """One of the thirteen pair kinds: `"revolute"`, `"prismatic"`,
+        `"cylindrical"`, `"spherical"`, `"spherical_with_pin"`, `"planar"`,
+        `"universal"`, `"homokinetic"`, `"screw"`, `"fully_constrained"`,
+        `"unconstrained"`, `"low_order"`, `"other"`."""
+        return _PAIR_KIND_NAMES[self._kind]
+
+    @property
+    def type_name(self):
+        """For `"other"`: the pair's entity type name (`"GEAR_PAIR"`). None otherwise."""
+        raw = _lib().cadaclysm_joint_pair_type(self._scene._handle, self._joint)
+        return raw.decode("utf-8", "replace") if raw is not None else None
+
+    @property
+    def pitch(self):
+        """For `"screw"`: its pitch, a length per revolution in the scene's units.
+        None otherwise."""
+        value = _lib().cadaclysm_joint_pair_pitch(self._scene._handle, self._joint)
+        return None if math.isnan(value) else value
+
+    def _raw_frames(self):
+        start, end = (c_double * 16)(), (c_double * 16)()
+        _lib().cadaclysm_joint_pair_frames(self._scene._handle, self._joint, start, end)
+        return tuple(start), tuple(end)
+
+    @property
+    def raw_frame_start(self):
+        """`frame_start` in the ABI's own column-major order, as 16 floats -- the same
+        layout `Node.raw_transform` uses."""
+        return self._raw_frames()[0]
+
+    @property
+    def raw_frame_end(self):
+        """`frame_end` in the ABI's own column-major order, as 16 floats."""
+        return self._raw_frames()[1]
+
+    @property
+    def frame_start(self):
+        """The pair's contact frame fixed in its joint's `start` link, as a 4x4
+        float64 numpy array -- like `Node.transform`."""
+        numpy = _numpy()
+        return numpy.array(self.raw_frame_start, numpy.float64).reshape(4, 4).T
+
+    @property
+    def frame_end(self):
+        """The pair's contact frame fixed in its joint's `end` link, as a 4x4 float64
+        numpy array."""
+        numpy = _numpy()
+        return numpy.array(self.raw_frame_end, numpy.float64).reshape(4, 4).T
+
+    @property
+    def freedoms(self) -> "list[Freedom]":
+        """The pair's degrees of freedom, in the reader's per-kind order. Values on a
+        `State` compose in this order."""
+        library, handle = _lib(), self._scene._handle
+        out = []
+        for i in range(library.cadaclysm_joint_freedom_count(handle, self._joint)):
+            raw = _Freedom()
+            if not library.cadaclysm_joint_freedom(handle, self._joint, i, ctypes.byref(raw)):
+                continue
+            out.append(Freedom(
+                Freedom._MOTIONS[raw.motion],
+                Freedom._AXES[raw.axis],
+                raw.lower if raw.has_lower else None,
+                raw.upper if raw.has_upper else None,
+            ))
+        return out
+
+
 class Joint:
-    """A connection between two links of the file's mechanism. Topology only: how it
-    moves is not read yet. From `Scene.joints`."""
+    """A connection between two links of the file's mechanism, and, when the file
+    names one, the kinematic pair saying how it moves. From `Scene.joints`."""
 
     __slots__ = ("scene", "index")
 
@@ -1512,6 +1719,58 @@ class Joint:
     def end(self) -> Link:
         """The link this joint ends at."""
         return Link(self.scene, _lib().cadaclysm_joint_end(self.scene._handle, self.index))
+
+    @property
+    def pair(self):
+        """How this joint moves: the kinematic pair naming it, or None when the file
+        gives it none."""
+        kind = _lib().cadaclysm_joint_pair_kind(self.scene._handle, self.index)
+        return None if kind < 0 else Pair(self.scene, self.index, kind)
+
+
+class State:
+    """A named pose of the mechanism: a `MECHANISM_STATE_REPRESENTATION`. From
+    `Scene.states`."""
+
+    __slots__ = ("_scene", "index")
+
+    def __init__(self, scene: "Scene", index: int):
+        self._scene = scene
+        self.index = index
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, State)
+            and other.index == self.index
+            and other._scene is self._scene
+        )
+
+    def __hash__(self):
+        return hash((id(self._scene), self.index))
+
+    def __repr__(self):
+        return f"<State {self.index} {self.name}>"
+
+    @property
+    def name(self) -> str:
+        """The state's name as the file gives it."""
+        return _text(_lib().cadaclysm_state_name(self._scene._handle, self.index))
+
+    @property
+    def values(self) -> "list[tuple[Joint, list[float]]]":
+        """One row per joint this state sets, in file order: the joint, then one value
+        per freedom of its pair, in the pair's freedom order."""
+        library, handle = _lib(), self._scene._handle
+        out = []
+        for row in range(library.cadaclysm_state_value_count(handle, self.index)):
+            joint = c_uint32()
+            count = library.cadaclysm_state_value(handle, self.index, row, ctypes.byref(joint), None, 0)
+            values = (c_double * count)()
+            library.cadaclysm_state_value(handle, self.index, row, ctypes.byref(joint), values, count)
+            if joint.value == NONE:
+                continue
+            out.append((Joint(self._scene, joint.value), list(values)))
+        return out
 
 
 # ---- drawing ----------------------------------------------------------------
@@ -2077,6 +2336,26 @@ class FemMesh:
         `open_edges` calls such a body sound."""
         return self._census(_lib().cadaclysm_fem_mesh_folded_edge,
                             self._live.folded_edge_count, "folded edge")
+
+    @property
+    def crossings(self) -> "list[tuple[int, int]]":
+        """Every pair of triangles that pass through each other, as `(a, b)` with `a < b`,
+        sorted: an edge of one through the other's interior. Their B-rep faces are
+        `triangle_face[a]` and `triangle_face[b]`.
+
+        **Computed for every body, open or closed.** The census `watertight`,
+        `open_edges` and `folded_edges` report is topological and cannot see a surface
+        passing through itself; a mesh is ready for a volume mesher when it is
+        `watertight` **and** this is empty -- Gmsh refuses one that crosses. A copy."""
+        handle = self._handle
+        count = _lib().cadaclysm_fem_mesh_crossing_count(handle)
+        a, b = c_uint32(), c_uint32()
+        out = []
+        for i in range(count):
+            if not _lib().cadaclysm_fem_mesh_crossing(handle, i, ctypes.byref(a), ctypes.byref(b)):
+                raise CadaclysmError(_last_error() or f"fem mesh crossing {i}")
+            out.append((a.value, b.value))
+        return out
 
     def _census(self, call, count: int, what: str) -> "list[tuple[int, int, int]]":
         """One flattened census, row by row: the shape `open_edges` and
@@ -3014,6 +3293,12 @@ class Scene:
         """The connections between the links, in the file's order; empty for a file that
         records none."""
         return [Joint(self, i) for i in range(_lib().cadaclysm_joint_count(self._handle))]
+
+    @property
+    def states(self) -> "list[State]":
+        """The file's named mechanism poses, in file order; empty for a file that
+        records none."""
+        return [State(self, i) for i in range(_lib().cadaclysm_state_count(self._handle))]
 
     @property
     def geometry_diagnostics(self) -> "list[str]":

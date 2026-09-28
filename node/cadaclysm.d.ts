@@ -183,13 +183,53 @@ export class Link {
   nodes(): Node[];
 }
 
-/** A connection between two links of the file's mechanism. Topology only. */
+/** A connection between two links of the file's mechanism. */
 export class Joint {
   private constructor();
   scene: Scene; index: number;
   equals(other: unknown): boolean;
   readonly name: string;
   readonly start: Link; readonly end: Link;
+  /** How this joint moves: the kinematic pair naming it, or null when the file gives it none. */
+  readonly pair: Pair | null;
+}
+
+/** One of the thirteen `Pair.kind` names. */
+export type PairKind = 'revolute' | 'prismatic' | 'cylindrical' | 'spherical' | 'spherical_with_pin'
+  | 'planar' | 'universal' | 'homokinetic' | 'screw' | 'fully_constrained' | 'unconstrained' | 'low_order' | 'other';
+/** `Freedom.motion`. */
+export type Motion = 'rotation' | 'translation';
+/** `Freedom.axis`: the contact frames' axis the motion is about or along. */
+export type FreedomAxis = 'x' | 'y' | 'z';
+
+/** One degree of freedom of a `Pair`: which motion, about or along which contact-frame axis, and its optional range. */
+export class Freedom {
+  private constructor();
+  motion: Motion; axis: FreedomAxis;
+  lower: number | null; upper: number | null;
+}
+
+/** A kinematic pair: the kind of relative motion a joint allows between its two links. From `Joint.pair`. */
+export class Pair {
+  private constructor();
+  kind: PairKind;
+  typeName: string | null;
+  pitch: number | null;
+  frameStart: number[][]; frameEnd: number[][];
+  rawFrameStart: Float64Array; rawFrameEnd: Float64Array;
+  freedoms(): Freedom[];
+}
+
+/** One row of a `State`: the joint it sets, and the values it sets it to. */
+export class StateValue {
+  private constructor();
+  joint: Joint | null; values: number[];
+}
+
+/** A named pose of the file's mechanism, e.g. STEP's `MECHANISM_STATE_REPRESENTATION`. From `Scene.states()`. */
+export class State {
+  private constructor();
+  index: number; name: string; values: StateValue[];
 }
 
 export class Node {
@@ -262,7 +302,7 @@ export class Scene {
   walk(): IterableIterator<Node>;
   query(filter: string): number[];
   placements(): Placement[];
-  links(): Link[]; joints(): Joint[];
+  links(): Link[]; joints(): Joint[]; states(): State[];
   realizeAll(): number;
   realizeAllAsync(): Promise<number>;
   realizeMeshes(skipSurfaced?: boolean): number;
@@ -341,6 +381,8 @@ export class FemMesh {
   openEdges(): [number, number, number][];
   /** Every fold, as `openEdges` reports a crack. A body can be folded without being open. */
   foldedEdges(): [number, number, number][];
+  /** Every pair of triangles that pass through each other, as `[a, b]` with `a < b`. Computed for every body, open or closed. */
+  crossings(): [number, number][];
   readonly watertight: boolean;
   readonly fromMesh: boolean;
   readonly minAngle: number;

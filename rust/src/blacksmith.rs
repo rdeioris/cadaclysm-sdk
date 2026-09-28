@@ -35,7 +35,9 @@
 //!
 //! Every operation returns a new [`Solid`] and leaves its inputs as they were; dropping
 //! one frees it. A solid caches its tessellation, which is why [`Solid`] is `Send`
-//! but not `Sync`: the kernel says a handle is not for two threads at once, and here
+//! but not `Sync`. A kernel from 2026-09-26 on locks those caches and lets threads share
+//! a solid; older ones do not, and this crate loads whatever library it finds, so it
+//! keeps to the older rule -- a handle is not for two threads at once -- and here
 //! the compiler holds that.
 //!
 //! [`Solid::mesh`] and [`Solid::edge_polylines`] hand back slices into that cache,
@@ -56,6 +58,12 @@
 //! shared::<cadaclysm_sdk::blacksmith::Solid>(); // error: a solid is not for two threads at once
 //! ```
 //!
+//! The C ABI also has a held tessellation (`cadaclysm_blacksmith_tessellation`, its four
+//! accessors and a free) that other wrappers use to hand out mesh views outliving a re-mesh or the
+//! solid's own close. This crate does not need it: the compiler already holds
+//! [`Solid::mesh`]'s borrow, so [`sys`] only declares the six entry points, unused, to keep
+//! parity with the other wrappers' bindings.
+//!
 //! # Solids from files
 //!
 //! [`Solid::open`] reads a STEP, ACIS, Rhino, OCCT `.brep`, IGES or IFC file's body
@@ -72,8 +80,11 @@ use std::ffi::{c_char, CString};
 use std::fmt;
 use std::path::{Path as FsPath, PathBuf};
 use std::ptr::{self, NonNull};
+use std::sync::Mutex;
 
 use crate::{borrowed, groups, groups64, text, Error, Manifold, Mesh, Mesh64, Node, OpenOptions, Result, Scene, SvgOptions, SvgView, Up};
+use crate::viewer::draw::{self, split_by_colour, Drawing, LineBatch, MeshPart};
+use crate::viewer::{Camera, ViewOptions};
 
 pub mod sys;
 
@@ -125,6 +136,11 @@ fn profile_list(api: &'static Api, list: *mut sys::CadaclysmBlacksmithProfileLis
 
 fn c_text(what: &str, value: &str) -> Result<CString> {
     CString::new(value).map_err(|_| Error::new(format!("{what} contains a NUL byte")))
+}
+
+/// A kernel colour as the viewer's.
+fn rgb32(colour: Option<[f64; 3]>) -> Option<[f32; 3]> {
+    colour.map(|[r, g, b]| [r as f32, g as f32, b as f32])
 }
 
 // ---- the library ------------------------------------------------------------------
@@ -384,6 +400,14 @@ fn axis_raw(axis: &AxisLine) -> [f64; 6] {
 
 // ---- profiles ---------------------------------------------------------------------
 
+/// Serialises [`Profile::polylines`] process-wide. The kernel now keeps a profile's
+/// polylines behind a lock of its own, once per tolerance, and needs none of this;
+/// kernels before 2026-09-26 cached them in a `RefCell` holding one tolerance, which
+/// `Profile` being `Sync` would race (a panic, or a copy out of freed arrays). The SDK
+/// loads whatever library it finds at run time, so it keeps this lock until no kernel
+/// it may load is that old: one uncontended lock per call is cheap next to flattening.
+static PROFILE_POLYLINES: Mutex<()> = Mutex::new(());
+
 /// A closed outline with holes (or an open chain, from [`Path::end_open`]), in its own
 /// x/y. Immutable: every method returns a new one.
 pub struct Profile {
@@ -391,7 +415,10 @@ pub struct Profile {
     api: &'static Api,
 }
 
-// Immutable once built, and nothing in it is cached.
+// Immutable once built. The kernel caches on it the arrays `profile_polylines`
+// returns; a current kernel locks that cache itself, and for an older one (which
+// replaced the arrays at another tolerance, unlocked) `Profile::polylines` holds
+// `PROFILE_POLYLINES` across the call and the copy-out.
 unsafe impl Send for Profile {}
 unsafe impl Sync for Profile {}
 
@@ -642,6 +669,49 @@ impl Profile {
         Ok(None)
     }
 
+    /// The outline, then each hole, as polylines at z = 0 within `tolerance` of its arcs
+    /// and splines -- what a viewer draws it with. A closed loop repeats its first point
+    /// at the end; an open chain (a profile ended open) stays open. Copied out.
+    pub fn polylines(&self, tolerance: f64) -> Result<Vec<Vec<[f32; 3]>>> {
+        // Held until the arrays are copied out: under an older kernel, another thread
+        // asking this profile at another tolerance would replace them under us.
+        let _cache = PROFILE_POLYLINES.lock().unwrap_or_else(|p| p.into_inner());
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_profile_polylines)(self.raw(), tolerance) };
+        if raw.offsets.is_null() {
+            return Err(fail(self.api, "profile_polylines"));
+        }
+        // SAFETY: the arrays belong to the profile until it is freed or asked again; they
+        // are copied out before this call returns.
+        let (points, offsets) = unsafe {
+            (
+                groups::<3>(raw.points, raw.point_count as usize).unwrap_or(&[]),
+                borrowed(raw.offsets, raw.polyline_count as usize + 1),
+            )
+        };
+        Ok(offsets.windows(2).map(|w| points.get(w[0] as usize..w[1] as usize).unwrap_or(&[]).to_vec()).collect())
+    }
+
+    /// Draw the outline and holes with the viewer in use ([`crate::viewer::current`]),
+    /// from the top by default. `options.edges` is ignored: the lines are the picture.
+    pub fn show<'o>(&self, options: impl Into<Option<&'o ViewOptions>>) -> Result<()> {
+        let default = ViewOptions::default();
+        let options = options.into().unwrap_or(&default);
+        draw::show(&self.drawing(options)?, options)
+    }
+
+    /// Orbit the outline with the viewer in use; where the camera was left.
+    pub fn view<'o>(&self, options: impl Into<Option<&'o ViewOptions>>) -> Result<Camera> {
+        let default = ViewOptions::default();
+        let options = options.into().unwrap_or(&default);
+        draw::view(&self.drawing(options)?, options)
+    }
+
+    pub(crate) fn drawing(&self, options: &ViewOptions) -> Result<Drawing<'static>> {
+        let runs = self.polylines(options.tolerance.unwrap_or(DEFAULT_TOLERANCE))?;
+        let colours = vec![rgb32(self.colour()?); runs.len()];
+        Ok(Drawing { name: "Profile".into(), meshes: Vec::new(), lines: LineBatch::grouped(&runs, &colours)?, view: SvgView::Top, up: Up::Z })
+    }
+
     /// This profile with its corners rounded by `radius` where two straight segments
     /// meet. `corners: None` rounds every such corner, the holes' too; a list picks
     /// corners of the boundary alone (corner `k` is where segment `k` ends). `open`
@@ -661,16 +731,16 @@ impl Profile {
     /// `&SvgOptions` carries no way to tell an explicit `Iso` from a field the caller
     /// never touched, so the choice is made by whether an options value was passed at
     /// all, not by inspecting one.
-    pub fn svg_text(&self, options: Option<&SvgOptions>) -> Result<String> {
+    pub fn svg_text<'o>(&self, options: impl Into<Option<&'o SvgOptions>>) -> Result<String> {
         let top = SvgOptions { view: SvgView::Top, ..Default::default() };
-        svg_text_of(&[], &[self], options.unwrap_or(&top))
+        svg_text_of(&[], &[self], options.into().unwrap_or(&top))
     }
 
     /// This profile written to an SVG file at `path`, by the library itself -- see
     /// [`Profile::svg_text`] for the `Top` default.
-    pub fn svg(&self, path: impl AsRef<FsPath>, options: Option<&SvgOptions>) -> Result<()> {
+    pub fn svg<'o>(&self, path: impl AsRef<FsPath>, options: impl Into<Option<&'o SvgOptions>>) -> Result<()> {
         let top = SvgOptions { view: SvgView::Top, ..Default::default() };
-        svg_of(path, &[], &[self], options.unwrap_or(&top))
+        svg_of(path, &[], &[self], options.into().unwrap_or(&top))
     }
 }
 
@@ -1241,7 +1311,8 @@ pub struct Solid {
 }
 
 // A solid owns its brep reference and its caches outright, so it may move to another
-// thread. It is not `Sync`: its tessellation cache is a `RefCell` on the kernel's side.
+// thread. It is not `Sync`: kernels before 2026-09-26 cache its tessellation in an unlocked
+// `RefCell`, and this crate may load one of those (the module docs).
 unsafe impl Send for Solid {}
 
 impl Drop for Solid {
@@ -1328,6 +1399,13 @@ impl Solid {
     pub fn wedge(x: f64, y: f64, z: f64, top_x: f64) -> Result<Solid> {
         let api = api()?;
         Solid::wrap(api, unsafe { (api.cadaclysm_blacksmith_wedge)(x, y, z, top_x) }, "wedge")
+    }
+
+    /// A right pyramid of `sides` sides (at least 3): its base the regular polygon of
+    /// circumradius `r` on z=0, its first corner on +x, its tip at (0, 0, `h`).
+    pub fn pyramid(sides: u32, r: f64, h: f64) -> Result<Solid> {
+        let api = api()?;
+        Solid::wrap(api, unsafe { (api.cadaclysm_blacksmith_pyramid)(sides, r, h) }, "pyramid")
     }
 
     pub fn extrude(profile: &Profile, frame: &Frame, height: f64) -> Result<Solid> {
@@ -2019,9 +2097,16 @@ impl Solid {
         }
     }
 
-    /// `bounds_at(DEFAULT_TOLERANCE)`.
+    /// The solid's axis-aligned box `(min, max)`, at the same cost whatever its size: its
+    /// mesh at a thousandth of its own extent, in `f64`, so the box is inside the exact one
+    /// and short of it by at most that. Worked out once per solid, apart from the
+    /// tessellation `mesh` caches. `bounds_at` is the box of the mesh at a tolerance you name.
     pub fn bounds(&self) -> Result<([f64; 3], [f64; 3])> {
-        self.bounds_at(DEFAULT_TOLERANCE)
+        let (mut lo, mut hi) = ([0.0; 3], [0.0; 3]);
+        if !unsafe { (self.api.cadaclysm_blacksmith_box)(self.raw(), lo.as_mut_ptr(), hi.as_mut_ptr()) } {
+            return Err(fail(self.api, "box"));
+        }
+        Ok((lo, hi))
     }
 
     /// The axis-aligned bounds `(min, max)` over the positions of its tessellation at
@@ -2275,6 +2360,65 @@ impl Solid {
         Ok(values.chunks_exact(3).map(|c| (c[0] >= 0.0).then(|| [c[0], c[1], c[2]])).collect())
     }
 
+    /// How many triangles each face meshed to at `tolerance`, one count per face in face
+    /// order: [`Solid::mesh`]'s triangles at the same tolerance run face by face. What a
+    /// viewer colours a face by. Borrowed from the cache, as the mesh is.
+    pub fn face_triangles(&mut self, tolerance: f64) -> Result<&[u32]> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_mesh_face_triangles)(self.raw(), tolerance) };
+        if raw.counts.is_null() {
+            return Err(fail(self.api, "mesh_face_triangles"));
+        }
+        // SAFETY: as `mesh`.
+        Ok(unsafe { borrowed(raw.counts, raw.face_count as usize) })
+    }
+
+    /// Draw the solid with the viewer in use ([`crate::viewer::current`]) -- in a
+    /// terminal, the picture is left in the scrollback. Each face in its own colour
+    /// ([`Solid::face_colour`]). `None` for `options` draws with the defaults.
+    pub fn show<'o>(&mut self, options: impl Into<Option<&'o ViewOptions>>) -> Result<()> {
+        let default = ViewOptions::default();
+        let options = options.into().unwrap_or(&default);
+        let drawing = self.drawing(options)?;
+        draw::show(&drawing, options)
+    }
+
+    /// Orbit the solid with the viewer in use until it is closed; where the camera was left.
+    pub fn view<'o>(&mut self, options: impl Into<Option<&'o ViewOptions>>) -> Result<Camera> {
+        let default = ViewOptions::default();
+        let options = options.into().unwrap_or(&default);
+        let drawing = self.drawing(options)?;
+        draw::view(&drawing, options)
+    }
+
+    pub(crate) fn drawing(&mut self, options: &ViewOptions) -> Result<Drawing<'static>> {
+        let tolerance = options.tolerance.unwrap_or(DEFAULT_TOLERANCE);
+        let whole = self.colour()?;
+        let colours = (0..self.faces()?).map(|f| self.face_colour(f)).collect::<Result<Vec<_>>>()?;
+        let mesh = self.mesh(tolerance)?;
+        let (positions, normals, indices) = (mesh.positions.to_vec(), mesh.normals.map(<[_]>::to_vec), mesh.indices.to_vec());
+        let meshes = if colours.iter().all(|c| *c == whole) {
+            vec![MeshPart {
+                positions: positions.into(),
+                normals: normals.map(Into::into),
+                indices: indices.into(),
+                matrix: None,
+                rgb: rgb32(whole),
+            }]
+        } else {
+            let counts = self.face_triangles(tolerance)?.to_vec();
+            let colours: Vec<_> = colours.into_iter().map(rgb32).collect();
+            split_by_colour(&positions, normals.as_deref(), &indices, &counts, &colours)?
+        };
+        let lines = if options.edges {
+            let runs: Vec<Vec<[f32; 3]>> = self.edge_polylines(tolerance)?.into_iter().map(<[_]>::to_vec).collect();
+            let colours: Vec<_> = self.edge_polyline_colours(tolerance)?.into_iter().map(rgb32).collect();
+            LineBatch::grouped(&runs, &colours)?
+        } else {
+            Vec::new()
+        };
+        Ok(Drawing { name: "Solid".into(), meshes, lines, view: SvgView::Iso, up: Up::Z })
+    }
+
     /// This solid as STEP text: AP203 unless `schema` names another -- see
     /// [`write_step_text`].
     pub fn step_text(&self, schema: Option<&str>, unit: Unit) -> Result<String> {
@@ -2308,12 +2452,16 @@ impl Solid {
 
     /// This solid's wireframe as SVG text, from the camera `options` describes -- the
     /// library's own camera, not a viewer. See [`write_svg_text`].
-    pub fn svg_text(&self, options: &SvgOptions) -> Result<String> {
+    pub fn svg_text<'o>(&self, options: impl Into<Option<&'o SvgOptions>>) -> Result<String> {
+        let default = SvgOptions::default();
+        let options = options.into().unwrap_or(&default);
         write_svg_text(&[self], options)
     }
 
     /// This solid written to an SVG file at `path`, by the library itself.
-    pub fn svg(&self, path: impl AsRef<FsPath>, options: &SvgOptions) -> Result<()> {
+    pub fn svg<'o>(&self, path: impl AsRef<FsPath>, options: impl Into<Option<&'o SvgOptions>>) -> Result<()> {
+        let default = SvgOptions::default();
+        let options = options.into().unwrap_or(&default);
         write_svg(path, &[self], options)
     }
 
@@ -2422,6 +2570,39 @@ impl Assembly {
             )
         };
         place_result(self.api, raw, "assembly_place_assembly")
+    }
+
+    /// Declare a rigid link called `name` over `placements` -- names of placements of this
+    /// assembly itself, not of assemblies placed in it. An empty name, a name already taken
+    /// by a link here, no placements, a placement named twice, one this assembly does not
+    /// have, or one already in another link is refused and leaves the assembly as it was.
+    /// Written as an AP242 kinematic link; a mechanism anywhere in the tree makes AP242 the
+    /// default schema of [`step_text`](Self::step_text).
+    pub fn link(&self, name: &str, placements: &[&str]) -> Result<()> {
+        let name = c_text("name", name)?;
+        let owned: Vec<CString> = placements.iter().map(|p| c_text("placement", p)).collect::<Result<_>>()?;
+        let ptrs: Vec<*const c_char> = owned.iter().map(|s| s.as_ptr()).collect();
+        let ptr = if ptrs.is_empty() { ptr::null() } else { ptrs.as_ptr() };
+        if unsafe { (self.api.cadaclysm_blacksmith_assembly_link)(self.raw(), name.as_ptr(), ptr, ptrs.len()) } {
+            Ok(())
+        } else {
+            Err(fail(self.api, "assembly_link"))
+        }
+    }
+
+    /// Connect this assembly's links `start` and `end`, kept in that order, as a joint
+    /// called `name`. An empty name, a name taken by another joint here, a link this
+    /// assembly does not have, a link joined to itself, or a (start, end) pair already
+    /// joined is refused; the reverse pair is a different joint.
+    pub fn joint(&self, name: &str, start: &str, end: &str) -> Result<()> {
+        let name = c_text("name", name)?;
+        let start = c_text("start", start)?;
+        let end = c_text("end", end)?;
+        if unsafe { (self.api.cadaclysm_blacksmith_assembly_joint)(self.raw(), name.as_ptr(), start.as_ptr(), end.as_ptr()) } {
+            Ok(())
+        } else {
+            Err(fail(self.api, "assembly_joint"))
+        }
     }
 
     /// This assembly, and everything placed under it, as one STEP file: this assembly
@@ -2894,6 +3075,28 @@ impl FemMesh {
                     return Err(fail(self.api, what));
                 }
                 Ok((a, b, edge))
+            })
+            .collect()
+    }
+
+    /// Every pair of triangles that pass through each other, as `(a, b)` with `a < b`,
+    /// sorted: an edge of one through the other's interior. Their B-rep faces are
+    /// [`FemMesh::triangle_face`]`[a]` and `[b]`.
+    ///
+    /// **Computed for every solid, open or closed.** The census [`FemMesh::watertight`],
+    /// [`FemMesh::open_edges`] and [`FemMesh::folded_edges`] report is topological and
+    /// cannot see a surface passing through itself; a mesh is ready for a volume mesher
+    /// when it is [`FemMesh::watertight`] **and** this is empty -- Gmsh refuses one that
+    /// crosses. A copy.
+    pub fn crossings(&self) -> Result<Vec<(u32, u32)>> {
+        let count = unsafe { (self.api.cadaclysm_blacksmith_fem_mesh_crossing_count)(self.raw()) };
+        (0..count)
+            .map(|i| {
+                let (mut a, mut b) = (0u32, 0u32);
+                if !unsafe { (self.api.cadaclysm_blacksmith_fem_mesh_crossing)(self.raw(), i, &mut a, &mut b) } {
+                    return Err(fail(self.api, "fem_mesh_crossing"));
+                }
+                Ok((a, b))
             })
             .collect()
     }
@@ -3486,5 +3689,234 @@ mod tests {
         assert_eq!(bolt.name().as_deref(), Some("bolt"));
         let placed = bolt.place(&Frame::xy([1.0, 2.0, 3.0])).expect("place");
         assert_eq!(placed.name().as_deref(), Some("bolt"));
+    }
+
+    use crate::viewer::{draw::draw_with, fake, ViewOptions};
+
+    #[test]
+    fn a_rectangle_profile_draws_as_one_closed_line_from_the_top() {
+        let rect = match Profile::rect(2.0, 1.0) {
+            Ok(rect) => rect,
+            Err(err) => {
+                eprintln!("skipped: {err} (no kernel library)");
+                return;
+            }
+        };
+        let runs = rect.polylines(DEFAULT_TOLERANCE).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].len(), 5, "four corners and the first again");
+        assert_eq!(runs[0].first(), runs[0].last());
+        assert!(runs[0].iter().all(|p| p[2] == 0.0));
+        let d = rect.drawing(&ViewOptions::default()).unwrap();
+        assert!(d.meshes.is_empty());
+        assert_eq!((d.view, d.up, &d.lines[0].counts[..]), (SvgView::Top, Up::Z, &[5][..]));
+        // Lines are the whole picture: edges off does not set NO_EDGES.
+        fake::take();
+        draw_with(&fake::viewer(), &d, &ViewOptions { edges: false, ..ViewOptions::default() }, false).unwrap();
+        let log = fake::take();
+        assert!(log.iter().any(|l| l.starts_with("show az=-90 el=90") && l.contains("flags=0")), "{log:?}");
+    }
+
+    /// `Profile` is `Sync`, and the kernel caches a profile's polylines on it: threads
+    /// asking one profile at different tolerances must each get their own answer whole.
+    #[test]
+    fn one_profile_gives_polylines_to_many_threads_at_once() {
+        let (rect, circle) = match (Profile::rect(2.0, 1.0), Profile::circle(1.0)) {
+            (Ok(rect), Ok(circle)) => (rect, circle),
+            (Err(err), _) | (_, Err(err)) => {
+                eprintln!("skipped: {err} (no kernel library)");
+                return;
+            }
+        };
+        let tolerances = [0.1, 0.01];
+        let expected: Vec<[Vec<Vec<[f32; 3]>>; 2]> = [&rect, &circle]
+            .iter()
+            .map(|p| tolerances.map(|t| p.polylines(t).unwrap()))
+            .collect();
+        assert_ne!(expected[1][0][0].len(), expected[1][1][0].len(), "the circle's two tolerances differ");
+        let start = std::sync::Barrier::new(8);
+        std::thread::scope(|s| {
+            for thread in 0..8 {
+                let (profiles, expected, start) = ([&rect, &circle], &expected, &start);
+                s.spawn(move || {
+                    start.wait();
+                    for i in 0..2000 {
+                        let which = (thread + i) % 2;
+                        let runs = profiles[i % 2].polylines(tolerances[which]).expect("polylines");
+                        assert!(!runs.is_empty());
+                        for run in &runs {
+                            assert!(!run.is_empty() && run.first() == run.last(), "{run:?}");
+                            assert!(run.iter().all(|p| p[2] == 0.0), "{run:?}");
+                        }
+                        assert_eq!(runs, expected[i % 2][which]);
+                    }
+                });
+            }
+        });
+    }
+
+    /// `None`, `&options` and `Some(&options)` are one argument: a solid's `None` is the
+    /// defaults, a profile's `None` its own Top view rather than `SvgOptions::default()`.
+    #[test]
+    fn an_options_argument_takes_none_a_reference_or_some() {
+        let (cube, rect) = match (Solid::cuboid(1.0, 2.0, 3.0), Profile::rect(2.0, 1.0)) {
+            (Ok(cube), Ok(rect)) => (cube, rect),
+            (Err(err), _) | (_, Err(err)) => {
+                eprintln!("skipped: {err} (no kernel library)");
+                return;
+            }
+        };
+        let defaults = SvgOptions::default();
+        let solid = cube.svg_text(None).unwrap();
+        assert_eq!(solid, cube.svg_text(&defaults).unwrap());
+        assert_eq!(solid, cube.svg_text(Some(&defaults)).unwrap());
+        let top = rect.svg_text(None).unwrap();
+        assert_ne!(top, rect.svg_text(&defaults).unwrap(), "a profile's None is Top, not the Iso default");
+        let named_top = SvgOptions { view: SvgView::Top, ..SvgOptions::default() };
+        assert_eq!(top, rect.svg_text(&named_top).unwrap());
+    }
+
+    #[test]
+    fn a_plain_solid_draws_one_mesh_and_its_edges() {
+        let mut cube = match Solid::cuboid(1.0, 1.0, 1.0) {
+            Ok(cube) => cube,
+            Err(err) => {
+                eprintln!("skipped: {err} (no kernel library)");
+                return;
+            }
+        };
+        let triangles = cube.mesh(DEFAULT_TOLERANCE).unwrap().indices.len() / 3;
+        let counts = cube.face_triangles(DEFAULT_TOLERANCE).unwrap().to_vec();
+        assert_eq!(counts.len(), 6);
+        assert_eq!(counts.iter().sum::<u32>() as usize, triangles);
+        let d = cube.drawing(&ViewOptions::default()).unwrap();
+        assert_eq!(d.meshes.len(), 1);
+        assert_eq!(d.meshes[0].indices.len(), triangles * 3);
+        assert_eq!((d.meshes[0].rgb, d.view, d.up), (None, SvgView::Iso, Up::Z));
+        // As many polylines as `edge_polylines` gives, however it chains them.
+        let edges = cube.edge_polylines(DEFAULT_TOLERANCE).unwrap().len();
+        assert!(edges > 0);
+        assert_eq!(d.lines.iter().map(|b| b.counts.len()).sum::<usize>(), edges);
+        let bare = cube.drawing(&ViewOptions { edges: false, ..ViewOptions::default() }).unwrap();
+        assert!(bare.lines.is_empty());
+    }
+
+    #[test]
+    fn a_solid_with_a_face_painted_draws_one_mesh_per_colour() {
+        let cube = match Solid::cuboid(1.0, 1.0, 1.0) {
+            Ok(cube) => cube,
+            Err(err) => {
+                eprintln!("skipped: {err} (no kernel library)");
+                return;
+            }
+        };
+        let mut painted = cube.coloured([0.0, 0.0, 1.0], None).unwrap().coloured([1.0, 0.0, 0.0], Some(0)).unwrap();
+        let triangles = painted.mesh(DEFAULT_TOLERANCE).unwrap().indices.len() / 3;
+        let d = painted.drawing(&ViewOptions::default()).unwrap();
+        assert_eq!(d.meshes.len(), 2);
+        let rgbs: Vec<_> = d.meshes.iter().map(|m| m.rgb).collect();
+        assert!(rgbs.contains(&Some([1.0, 0.0, 0.0])) && rgbs.contains(&Some([0.0, 0.0, 1.0])), "{rgbs:?}");
+        assert_eq!(d.meshes.iter().map(|m| m.indices.len() / 3).sum::<usize>(), triangles);
+    }
+
+    fn count_of(text: &str, needle: &str) -> usize {
+        text.matches(needle).count()
+    }
+
+    /// `text` with every `FILE_NAME(` line dropped -- STEP's own timestamp line, which
+    /// changes call to call even when nothing else does.
+    fn no_stamp(text: &str) -> String {
+        text.lines().filter(|line| !line.starts_with("FILE_NAME(")).collect::<Vec<_>>().join("\n")
+    }
+
+    /// `Assembly::link`/`Assembly::joint`, at parity with the Python reference's
+    /// `_mechanism()` and its two mechanism tests in `test_cadaclysm_blacksmith.py` --
+    /// see Node's `test/blacksmith.test.js` for the same facts worked out. Skips quietly
+    /// without a kernel library, as the other library-backed test in this module does.
+    #[test]
+    fn mechanism_facts_hold_as_the_shared_spec_checks_them() {
+        let bolt = match Solid::cylinder(1.0, 6.0).and_then(|s| s.named("bolt")) {
+            Ok(bolt) => bolt,
+            Err(err) => {
+                eprintln!("skipped: {err} (no kernel library)");
+                return;
+            }
+        };
+        let plate = Solid::cuboid(20.0, 10.0, 2.0).and_then(|s| s.named("plate")).expect("plate");
+
+        let bracket = Assembly::new("bracket").expect("bracket");
+        bracket.place_solid(&plate, &Frame::xy([0.0; 3]), None).expect("place plate");
+        bracket.place_solid(&bolt, &Frame::xy([5.0, 5.0, 2.0]), None).expect("place bolt 1");
+        bracket.place_solid(&bolt, &Frame::xy([15.0, 5.0, 2.0]), None).expect("place bolt 2");
+        bracket.link("fixed", &["plate"]).expect("link fixed");
+        bracket.link("bolts", &["bolt", "bolt 2"]).expect("link bolts");
+        bracket.joint("screw", "fixed", "bolts").expect("joint screw");
+
+        let arm = Assembly::new("arm").expect("arm");
+        arm.place_solid(&plate, &Frame::xy([0.0; 3]), Some("base")).expect("place base");
+        arm.place_assembly(&bracket, &Frame::xy([0.0, 0.0, 10.0]), Some("upper")).expect("place upper");
+        arm.place_solid(&bolt, &Frame::xy([5.0, 5.0, 2.0]), Some("pin")).expect("place pin");
+        arm.link("ground", &["base"]).expect("link ground");
+        arm.link("upper arm", &["upper", "pin"]).expect("link upper arm");
+        arm.joint("shoulder", "ground", "upper arm").expect("joint shoulder");
+
+        // Fact 1: the default schema (no explicit schema) carries the kinematic entities.
+        let step = arm.step_text(None, Unit::Millimetre).expect("step_text");
+        assert!(step.contains("AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF"));
+        assert_eq!(count_of(&step, "=KINEMATIC_LINK("), 4);
+        assert_eq!(count_of(&step, "=RIGID_LINK_REPRESENTATION("), 6);
+        assert_eq!(count_of(&step, "=CONTEXT_DEPENDENT_KINEMATIC_LINK_REPRESENTATION("), 6);
+        assert_eq!(count_of(&step, "=KINEMATIC_JOINT("), 2);
+        assert_eq!(count_of(&step, "=KINEMATIC_TOPOLOGY_STRUCTURE("), 2);
+
+        // Fact 2: an explicit schema without kinematic entities is refused.
+        let refused = arm.step_text(Some("config_control_design"), Unit::Millimetre).unwrap_err();
+        assert!(refused.to_string().contains("no kinematic entities"), "{refused}");
+
+        // Fact 3: each of the eleven refusals raises with exactly its message, and
+        // afterwards the STEP text (with `FILE_NAME(` lines stripped) is unchanged.
+        let before = no_stamp(&arm.step_text(None, Unit::Millimetre).expect("step_text"));
+        let refusals: Vec<(Box<dyn Fn() -> Result<()> + '_>, &str)> = vec![
+            (Box::new(|| arm.link("", &["base"])), "link: a name cannot be empty"),
+            (Box::new(|| arm.link("ground", &["base"])), "link: assembly 'arm' already has a link named 'ground'"),
+            (Box::new(|| arm.link("free", &[])), "link: link 'free' names no placements"),
+            (Box::new(|| arm.link("free", &["base", "base"])), "link: link 'free' names placement 'base' twice"),
+            (Box::new(|| arm.link("free", &["bolt"])), "link: assembly 'arm' has no placement named 'bolt'"),
+            (
+                Box::new(|| arm.link("free", &["pin"])),
+                "link: placement 'pin' of assembly 'arm' is already in link 'upper arm'",
+            ),
+            (Box::new(|| arm.joint("", "ground", "upper arm")), "joint: a name cannot be empty"),
+            (
+                Box::new(|| arm.joint("shoulder", "upper arm", "ground")),
+                "joint: assembly 'arm' already has a joint named 'shoulder'",
+            ),
+            (Box::new(|| arm.joint("wrist", "ground", "hand")), "joint: assembly 'arm' has no link named 'hand'"),
+            (Box::new(|| arm.joint("wrist", "ground", "ground")), "joint: joint 'wrist' joins link 'ground' to itself"),
+            (
+                Box::new(|| arm.joint("wrist", "ground", "upper arm")),
+                "joint: assembly 'arm' already joins 'ground' to 'upper arm'",
+            ),
+        ];
+        for (call, message) in &refusals {
+            let err = call().unwrap_err();
+            assert_eq!(err.to_string(), *message);
+        }
+        assert_eq!(no_stamp(&arm.step_text(None, Unit::Millimetre).expect("step_text")), before);
+
+        // Fact 5: read-back through `to_scene`. Checked ahead of fact 4's reverse "back"
+        // joint, so the joint list below is exactly the two joints the fixture built.
+        let scene = arm.to_scene(None).expect("to_scene");
+        let link_names: Vec<String> = scene.links().iter().map(|l| l.name()).collect();
+        assert_eq!(link_names, ["fixed", "bolts", "ground", "upper arm"]);
+        let node_counts: Vec<usize> = scene.links().iter().map(|l| l.nodes().len()).collect();
+        assert_eq!(node_counts, [1, 2, 1, 2]);
+        let joint_facts: Vec<(String, u32, u32)> =
+            scene.joints().iter().map(|j| (j.name(), j.start().index(), j.end().index())).collect();
+        assert_eq!(joint_facts, [("screw".to_string(), 0, 1), ("shoulder".to_string(), 2, 3)]);
+        assert!(!scene.diagnostics().iter().any(|d| d.starts_with("kinematics:")));
+
+        // Fact 4: the reverse pair is a new joint.
+        arm.joint("back", "upper arm", "ground").expect("joint back");
     }
 }

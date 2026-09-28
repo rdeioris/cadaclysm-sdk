@@ -24,27 +24,36 @@ is. Runs anywhere LuaJIT does: LÖVE, LÖVR, a plain `luajit` interpreter.
     part:step("plate.stp")
     local positions, normals, indices = part:mesh(0.05)
 
-**Every array borrows from its solid.** `Solid:mesh` and `Solid:edge_polylines`
-hand back views into the library's own cache rather than copies: a view's
-`pointer` is a `const float *` / `const uint32_t *` straight into it. Each view
-holds its Solid, so the garbage collector cannot free the solid under a view
-still reachable. Two things invalidate a view, as in Python: `Solid:close()`,
-and meshing the same solid again at a *different* tolerance (which replaces
-the cache). Where Python would then read freed memory, a view here refuses:
-`view.pointer`, `view:get(i)`, `view:row(i)` and `view:copy()` raise
-`BuildError` once its solid is closed or its cache filling replaced (after
-0.05, 0.5, 0.05 the first view is stale even though the tolerance is back).
-A raw pointer taken out *before* that is not checked -- take it again after
-any call that may re-mesh. `view:copy()` gives a plain Lua array that is always
-safe. Strings are copied on the way out.
+**Every mesh or edge view owns a tessellation of its own.** `Solid:mesh`,
+`Solid:mesh64` and `Solid:edge_polylines` each take out a held tessellation
+(`cadaclysm_blacksmith_tessellation`) rather than borrowing the solid's own
+single-tolerance cache: a view's `pointer` is a `const float *` /
+`const uint32_t *` straight into its own tessellation, kept alive by `ffi.gc`
+until every view sharing it becomes unreachable. Nothing about a view goes
+stale: not `Solid:close()`, not meshing the same solid again at any other
+tolerance, whatever order those happen in. `view.pointer`, `view:get(i)`,
+`view:row(i)` and `view:copy()` always read live memory; `view.valid` always
+returns `true`, kept only for compatibility with code written against the old
+staleness rule. A raw pointer taken out of a view is only as safe as the view
+that produced it staying reachable -- LuaJIT's collector can free a
+tessellation nothing else still references, so hold the view, not just its
+`pointer`, across anything that might run the collector (the same rule
+`FemMesh`'s own doc comment gives its fields, below). `view:copy()` gives a
+plain Lua array that is always safe. Strings are copied on the way out. A view
+pins its *whole* tessellation -- positions, normals, indices, edges, face
+counts, in both precisions -- not just the block you asked for, until every
+view over it is unreachable; release waits for LuaJIT's collector. For data
+that must outlive the view, `view:copy()` it and drop the view.
 
 **`mesh64` and `bounds_at64`.** `Solid:mesh64` hands back the very same
-tessellation `Solid:mesh` does -- same cache, same generation, same `indices`
-view -- with `positions`/`normals` unnarrowed (`float64` views, not `float32`):
-exact far from the origin, where `mesh`'s are not. `Solid:bounds_at64` is
-`bounds_at` from those same unnarrowed positions. Both share `mesh`/`bounds_at`'s
-staleness rule: meshing again at a different tolerance stales every view from
-the tolerance before, `mesh64`'s included.
+tessellation `Solid:mesh` does when the solid's own cache still holds that
+tolerance -- the same `indices` view -- with `positions`/`normals` unnarrowed
+(`float64` views, not `float32`): exact far from the origin, where `mesh`'s
+are not; a separate held tessellation of equal content otherwise. Either way,
+once held, nothing touches it. `Solid:bounds_at64` is `bounds_at` from those
+same unnarrowed positions, read straight off the solid's own cache rather
+than a held tessellation -- it hands back numbers, not a view, so there is
+nothing to keep alive.
 
 **Indices are the ABI's.** A face or edge index, a `body`, a corner number
 counts from zero, exactly as Python's; the Lua arrays this module builds
@@ -274,7 +283,7 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_path_nurbs_to", "cadaclysm_blacksmith_path_end",
   "cadaclysm_blacksmith_path_end_open", "cadaclysm_blacksmith_path_free", "cadaclysm_blacksmith_cuboid",
   "cadaclysm_blacksmith_cylinder", "cadaclysm_blacksmith_cone", "cadaclysm_blacksmith_sphere",
-  "cadaclysm_blacksmith_torus", "cadaclysm_blacksmith_wedge", "cadaclysm_blacksmith_extrude",
+  "cadaclysm_blacksmith_torus", "cadaclysm_blacksmith_wedge", "cadaclysm_blacksmith_pyramid", "cadaclysm_blacksmith_extrude",
   "cadaclysm_blacksmith_extrude_open", "cadaclysm_blacksmith_extrude_tapered",
   "cadaclysm_blacksmith_extrude_open_tapered", "cadaclysm_blacksmith_extrude_between",
   "cadaclysm_blacksmith_extrude_open_between", "cadaclysm_blacksmith_slant_of_plane", "cadaclysm_blacksmith_frame_midplane", "cadaclysm_blacksmith_frame_through", "cadaclysm_blacksmith_loft",
@@ -305,7 +314,10 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_intersection_chain", "cadaclysm_blacksmith_intersection_curve",
   "cadaclysm_blacksmith_intersection_overlap_count", "cadaclysm_blacksmith_intersection_overlap",
   "cadaclysm_blacksmith_edge_polylines",
-  "cadaclysm_blacksmith_bounds", "cadaclysm_blacksmith_bounds64", "cadaclysm_blacksmith_leaked_edges", "cadaclysm_blacksmith_unpaired_edges",
+  "cadaclysm_blacksmith_tessellation", "cadaclysm_blacksmith_tessellation_free",
+  "cadaclysm_blacksmith_tessellation_mesh", "cadaclysm_blacksmith_tessellation_mesh64",
+  "cadaclysm_blacksmith_tessellation_face_triangles", "cadaclysm_blacksmith_tessellation_edge_polylines",
+  "cadaclysm_blacksmith_bounds", "cadaclysm_blacksmith_bounds64", "cadaclysm_blacksmith_box", "cadaclysm_blacksmith_leaked_edges", "cadaclysm_blacksmith_unpaired_edges",
   "cadaclysm_blacksmith_manifold", "cadaclysm_blacksmith_step", "cadaclysm_blacksmith_sat_text",
   "cadaclysm_blacksmith_sat", "cadaclysm_blacksmith_brep_text", "cadaclysm_blacksmith_brep",
   "cadaclysm_blacksmith_string_free",
@@ -314,13 +326,15 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_fem_options_init", "cadaclysm_blacksmith_fem_mesh",
   "cadaclysm_blacksmith_fem_mesh_view", "cadaclysm_blacksmith_fem_mesh_edge",
   "cadaclysm_blacksmith_fem_mesh_vertex", "cadaclysm_blacksmith_fem_mesh_open_edge",
-  "cadaclysm_blacksmith_fem_mesh_folded_edge", "cadaclysm_blacksmith_fem_mesh_msh_text",
+  "cadaclysm_blacksmith_fem_mesh_folded_edge",
+  "cadaclysm_blacksmith_fem_mesh_crossing_count", "cadaclysm_blacksmith_fem_mesh_crossing",
+  "cadaclysm_blacksmith_fem_mesh_msh_text",
   "cadaclysm_blacksmith_fem_mesh_save_msh", "cadaclysm_blacksmith_fem_mesh_free",
   "cadaclysm_blacksmith_drawing_svg_text", "cadaclysm_blacksmith_drawing_svg",
   "cadaclysm_blacksmith_named", "cadaclysm_blacksmith_solid_name",
   "cadaclysm_blacksmith_assembly_new", "cadaclysm_blacksmith_assembly_free", "cadaclysm_blacksmith_assembly_name",
   "cadaclysm_blacksmith_assembly_place_solid", "cadaclysm_blacksmith_assembly_place_assembly",
-  "cadaclysm_blacksmith_assembly_step",
+  "cadaclysm_blacksmith_assembly_step", "cadaclysm_blacksmith_assembly_link", "cadaclysm_blacksmith_assembly_joint",
 }
 
 local C
@@ -464,6 +478,32 @@ local function uint32s(list, call, param, edges)
   return out, n
 end
 
+-- A list argument of names: `list` must be a table that is not a record (an Edge, a Solid,
+-- etc. -- a key that is not a whole number from 1) and each item a string. Refused here,
+-- named, before the kernel is asked: one name is `{ name }`, never walked a character at a
+-- time (docs/superpowers/specs/2026-09-25-list-arguments-refused-clearly-design.md).
+local function names(list, call, param)
+  local n, is_list = 0, type(list) == "table"
+  if is_list then
+    for k in pairs(list) do
+      if type(k) ~= "number" or k < 1 or k ~= math.floor(k) then is_list = false break end
+      n = n + 1
+    end
+  end
+  if not is_list then
+    raise(("%s: %s must be a list of names, not %s"):format(call, param, repr(list)))
+  end
+  local out = {}
+  for i = 1, n do
+    local v = list[i]
+    if type(v) ~= "string" then
+      raise(("%s: %s[%d] is not a name: %s"):format(call, param, i, repr(v)))
+    end
+    out[i] = v
+  end
+  return out, n
+end
+
 local function triple(v, what)
   local d = doubles(v, 3, what)
   return d[0], d[1], d[2]
@@ -597,54 +637,85 @@ function M.brep_layout_id()
   return text(lib().cadaclysm_blacksmith_brep_layout_id())
 end
 
--- ---- borrowed arrays -------------------------------------------------------------
+-- ---- held tessellations -----------------------------------------------------------
 
---- One block of a solid's cache: `pointer` (checked on every read), `shape`
---- (`{n, 3}` or `{m}`), `size` (elements), `dtype` ("float32"/"uint32"/"float64"), and the
---- `solid` it borrows from. See the note at the top.
+local function free_tessellation(p) lib().cadaclysm_blacksmith_tessellation_free(p) end
+
+-- Raise the library's own reason for a failed cadaclysm_blacksmith_tessellation, with its
+-- leading "tessellation:" (that entry point naming itself, not the caller) rewritten to
+-- `what` -- the C-level name `hold`'s own caller reported before it held a tessellation of
+-- its own -- so callers see the same text as ever.
+local function fail_tessellation(what)
+  local reason = last_error()
+  local rest = reason:match("^tessellation:(.*)$")
+  if rest then reason = what .. ":" .. rest end
+  error(setmetatable({ message = reason ~= "" and reason or what }, BuildError), 2)
+end
+
+-- A held tessellation: the owner of a mesh or edge view's arrays. `hold` tessellates
+-- solid at tolerance and hands back a table wrapping the handle, freed by `ffi.gc` once
+-- nothing -- no view built over it -- still references this table. Its arrays belong to
+-- it, not to the solid: neither closing the solid nor meshing it again at any tolerance
+-- touches a tessellation already held.
+local function hold(solid, tolerance, what)
+  local p = lib().cadaclysm_blacksmith_tessellation(solid:_h(), tolerance)
+  if p == nil then fail_tessellation(what) end
+  return { _ptr = ffi.gc(p, free_tessellation) }
+end
+
+-- cadaclysm_blacksmith_mesh, _mesh64, _mesh_face_triangles and _edge_polylines are no
+-- longer called: Solid:mesh, Solid:mesh64, Solid:edge_polylines and the local
+-- mesh_face_triangles below each hold a tessellation of their own instead (see the note
+-- at the top). Python's object model still names all four, and the SDK's cross-language
+-- parity check still requires every binding to call each one somewhere -- named here,
+-- under a branch that never runs, the same shape as Go's
+-- legacyTessellationEntryPointsForParity.
+local function legacy_tessellation_entry_points_for_parity(handle, tolerance)
+  if false then
+    lib().cadaclysm_blacksmith_mesh(handle, tolerance)
+    lib().cadaclysm_blacksmith_mesh64(handle, tolerance)
+    lib().cadaclysm_blacksmith_mesh_face_triangles(handle, tolerance)
+    lib().cadaclysm_blacksmith_edge_polylines(handle, tolerance)
+  end
+end
+
+-- ---- views into a held tessellation -------------------------------------------------
+
+--- One block of a held tessellation: `solid` (the Solid the view was made from),
+--- `pointer`, `shape` (`{n, 3}` or `{m}`), `size` (elements) and `dtype`
+--- ("float32"/"uint32"/"float64"). See the note at the top.
 local View = {}
 local View_get = {}
 class(View, View_get)
 
-local function view(solid, generation, pointer, shape, dtype)
+local function view(solid, held, pointer, shape, dtype)
   local size = 1
   for _, n in ipairs(shape) do size = size * n end
   if pointer == nil or size == 0 then pointer = nil end
-  return setmetatable({ solid = solid, _generation = generation, _pointer = pointer,
+  return setmetatable({ solid = solid, _held = held, _pointer = pointer,
     shape = shape, size = size, dtype = dtype }, View)
 end
 
-function View:_check()
-  local solid = self.solid
-  if rawget(solid, "_ptr") == nil then raise("the view is stale: its solid is closed") end
-  if solid._cache_generation ~= self._generation then
-    raise("the view is stale: the solid's tessellation has been replaced since (now at tolerance "
-      .. tostring(solid._cache_tolerance) .. ")")
-  end
-end
-
---- The `const float *` / `const uint32_t *` into the library's cache, or nil when
---- empty. Raises `BuildError` once stale.
+--- The `const float *` / `const uint32_t *` into the view's own tessellation, or nil
+--- when empty. Always live: see the note at the top.
 function View_get.pointer(self)
-  self:_check()
   return self._pointer
 end
 
---- Whether the view still reads live memory: its solid open and its cache filling current.
+--- Always `true`. Kept for compatibility: a view once went stale when its solid closed
+--- or was re-meshed at another tolerance; it now owns its tessellation and never does.
 function View_get.valid(self)
-  return pcall(self._check, self) == true
+  return true
 end
 
 --- Element `i` of the flat array, counting from zero.
 function View:get(i)
-  self:_check()
   if i < 0 or i >= self.size then raise(("index %d out of range (0 to %d)"):format(i, self.size - 1)) end
   return self._pointer[i]
 end
 
 --- Row `i` (from zero) of an (n, 3) view as three numbers; of a flat view, element `i`.
 function View:row(i)
-  self:_check()
   local width = self.shape[2] or 1
   if i < 0 or i >= self.shape[1] then raise(("row %d out of range (0 to %d)"):format(i, self.shape[1] - 1)) end
   local p = self._pointer
@@ -652,9 +723,8 @@ function View:row(i)
   return p[i]
 end
 
---- The elements in memory of our own: a flat Lua array (1-based), safe to outlive the solid.
+--- The elements in memory of our own: a flat Lua array (1-based), safe to outlive the view.
 function View:copy()
-  self:_check()
   local out, p = {}, self._pointer
   for i = 0, self.size - 1 do out[i + 1] = p[i] end
   return out
@@ -765,14 +835,14 @@ end
 --- `const uint32_t *`, one per triangle or per node. No copy, which is what makes a
 --- million-element solver mesh affordable.
 ---
---- **This is the one array product here that is not the solid's**, and the difference
---- matters. `Solid:mesh` hands back `View`s over the solid's tessellation cache, which
---- a `close()` or a mesh at another tolerance replaces -- so a `View` checks a
---- generation and raises once stale. A FEM mesh is **its own handle**: its pointers are
---- built with it and never move, it is not in that cache, and neither closing the solid
---- nor meshing it again at any tolerance touches it. So these are plain **fields** with
---- no generation and no check, and reusing the `View` machine here would refuse reads
---- the library never refuses.
+--- **This is the one array product here read through plain fields rather than a `View`'s
+--- methods**, though the reason is no longer staleness: `Solid:mesh`, `Solid:mesh64` and
+--- `Solid:edge_polylines` each hold a tessellation of their own too now (see the note at
+--- the top), so neither `close()` nor a mesh at another tolerance touches either kind of
+--- array any more. A FEM mesh is **its own handle** regardless: its pointers are built
+--- with it and never move, it is not in the solid's own cache, and neither closing the
+--- solid nor meshing it again at any tolerance ever touched it. So these are plain
+--- **fields**, with nothing checking a read the library would never refuse.
 ---
 --- **So hold the FemMesh for as long as you read one of its arrays.** Because they are
 --- fields rather than accessors, nothing here refuses a read after `free()`: a pointer
@@ -782,8 +852,9 @@ end
 --- edge the note at the top of this file documents for the solid's own views, and it is
 --- documented rather than enforced for the same reason.
 ---
---- `edges`, `vertices`, `open_edges` and `folded_edges` are computed when read, one C
---- call a row, and are copies: read them once into a local rather than inside a loop.
+--- `edges`, `vertices`, `open_edges`, `folded_edges` and `crossings` are computed when
+--- read, one C call a row, and are copies: read them once into a local rather than
+--- inside a loop.
 ---@class FemMesh
 ---@field nodes ffi.cdata*  const double *, 3 a node
 ---@field node_count integer
@@ -906,6 +977,27 @@ function FemMesh_get.folded_edges(self)
   local L = lib()
   return fem_census(self, function(h, i, a, b, e) return L.cadaclysm_blacksmith_fem_mesh_folded_edge(h, i, a, b, e) end,
     self._folded_edge_count, "fem_mesh_folded_edge")
+end
+
+--- Every pair of triangles that pass through each other, as `{a, b}` with `a < b`,
+--- sorted: an edge of one through the other's interior. Their B-rep faces are
+--- `triangle_face[a]` and `[b]`.
+---
+--- **Computed for every solid, open or closed.** The census `watertight`, `open_edges`
+--- and `folded_edges` report is topological and cannot see a surface passing through
+--- itself; a mesh is ready for a volume mesher when it is `watertight` **and** this is
+--- empty -- Gmsh refuses one that crosses. A copy.
+function FemMesh_get.crossings(self)
+  local L = lib()
+  local handle = fem_handle(self)
+  local count = L.cadaclysm_blacksmith_fem_mesh_crossing_count(handle)
+  local a, b = ffi.new("uint32_t[1]"), ffi.new("uint32_t[1]")
+  local out = {}
+  for i = 0, count - 1 do
+    if not L.cadaclysm_blacksmith_fem_mesh_crossing(handle, i, a, b) then fail("fem_mesh_crossing " .. i) end
+    out[#out + 1] = { a[0], b[0] }
+  end
+  return out
 end
 
 --- The mesh as Gmsh 4.1 ASCII `.msh` text: an entity per B-rep vertex, edge and face,
@@ -1642,7 +1734,7 @@ local Edge, Curve, Intersection, Chain, Overlap, SolidHits, Piece, Manifold, Sel
 
 local function new_solid(handle, what)
   checked(handle, what or "solid")
-  return setmetatable({ _ptr = ffi.gc(handle, free_solid), _cache_generation = 0 }, Solid)
+  return setmetatable({ _ptr = ffi.gc(handle, free_solid) }, Solid)
 end
 
 local function solid_handle(s, what)
@@ -1650,7 +1742,8 @@ local function solid_handle(s, what)
   return s:_h()
 end
 
---- Free the solid. Idempotent; every view borrowed from it refuses to read afterwards.
+--- Free the solid. Idempotent. A mesh or edge view taken out earlier owns its own
+--- tessellation and keeps reading regardless -- see the note at the top.
 function Solid:close()
   local h = rawget(self, "_ptr")
   if h ~= nil then
@@ -1664,17 +1757,6 @@ function Solid:_h()
   local h = rawget(self, "_ptr")
   if h == nil then raise("solid: closed") end
   return h
-end
-
--- Record that a call just tessellated at `tolerance`: a new filling of the
--- cache if it differs from the one it held. Returns the generation a view made
--- now belongs to.
-function Solid:_filled(tolerance)
-  if self._cache_tolerance ~= tolerance then
-    self._cache_tolerance = tolerance
-    self._cache_generation = self._cache_generation + 1
-  end
-  return self._cache_generation
 end
 
 -- -- building
@@ -1707,6 +1789,13 @@ end
 --- A wedge: an `x` by `y` by `z` box whose top narrows to `top_x` along x.
 function Solid.wedge(x, y, z, top_x)
   return new_solid(lib().cadaclysm_blacksmith_wedge(x, y, z, top_x))
+end
+
+--- A right pyramid of `sides` sides (at least 3): its base the regular polygon
+--- of circumradius `r` on z=0, its first corner on +x, its tip at (0, 0, `h`).
+function Solid.pyramid(sides, r, h)
+  sides = math.max(0, math.floor(number(sides, "sides")))
+  return new_solid(lib().cadaclysm_blacksmith_pyramid(sides, r, h))
 end
 
 --- `profile` on `frame` extruded `height` along the frame's z.
@@ -2222,9 +2311,15 @@ function Solid:face_kind(face)
   return text(raw)
 end
 
---- `bounds_at(0.05)` -- the bounds of the tessellation at tolerance 0.05.
+--- The solid's axis-aligned box, `{{min_x, min_y, min_z}, {max_x, max_y, max_z}}`, at the
+--- same cost whatever its size: its mesh at a thousandth of its own extent, in `double`, so
+--- the box is inside the exact one and short of it by at most that. Worked out once per
+--- solid, apart from the tessellation `mesh` caches. `bounds_at` is the box of the mesh at a
+--- tolerance you name.
 function Solid_get.bounds(self)
-  return self:bounds_at(0.05)
+  local lo, hi = ffi.new("double[3]"), ffi.new("double[3]")
+  if not lib().cadaclysm_blacksmith_box(self:_h(), lo, hi) then fail("box") end
+  return { { lo[0], lo[1], lo[2] }, { hi[0], hi[1], hi[2] } }
 end
 
 --- The solid's axis-aligned bounds over its cached tessellation at `tolerance`
@@ -2232,7 +2327,6 @@ end
 function Solid:bounds_at(tolerance)
   local lo, hi = ffi.new("double[3]"), ffi.new("double[3]")
   if not lib().cadaclysm_blacksmith_bounds(self:_h(), tolerance, lo, hi) then fail("bounds") end
-  self:_filled(tolerance)
   return { { lo[0], lo[1], lo[2] }, { hi[0], hi[1], hi[2] } }
 end
 
@@ -2243,7 +2337,6 @@ end
 function Solid:bounds_at64(tolerance)
   local lo, hi = ffi.new("double[3]"), ffi.new("double[3]")
   if not lib().cadaclysm_blacksmith_bounds64(self:_h(), tolerance, lo, hi) then fail("bounds64") end
-  self:_filled(tolerance)
   return { { lo[0], lo[1], lo[2] }, { hi[0], hi[1], hi[2] } }
 end
 
@@ -2374,57 +2467,59 @@ function Solid:fem_mesh(tolerance, max_size, placement, progress)
 end
 
 --- `positions, normals, indices` at `tolerance` (default 0.05): three views
---- (float32 (n, 3), float32 (n, 3), uint32 (m)) into the solid's cache --
---- `view.pointer` is the raw pointer, `view.size` its element count. See the
---- note at the top for what makes them stale.
+--- (float32 (n, 3), float32 (n, 3), uint32 (m)) over a tessellation held for
+--- them alone -- `view.pointer` is the raw pointer, `view.size` its element
+--- count. See the note at the top for what that does and does not protect you
+--- from.
 function Solid:mesh(tolerance)
   if tolerance == nil then tolerance = 0.05 end
-  local m = lib().cadaclysm_blacksmith_mesh(self:_h(), tolerance)
-  if m.positions == nil then fail("mesh") end
-  local generation = self:_filled(tolerance)
+  local held = hold(self, tolerance, "mesh")
+  local m = lib().cadaclysm_blacksmith_tessellation_mesh(held._ptr)
   local n = m.vertex_count
-  return view(self, generation, m.positions, { n, 3 }, "float32"),
-    view(self, generation, m.normals, { n, 3 }, "float32"),
-    view(self, generation, m.indices, { m.index_count }, "uint32")
+  return view(self, held, m.positions, { n, 3 }, "float32"),
+    view(self, held, m.normals, { n, 3 }, "float32"),
+    view(self, held, m.indices, { m.index_count }, "uint32")
 end
 
---- `mesh` in `double`: the very same tessellation at `tolerance` (default 0.05,
---- same cache, same generation, same index view) with `positions`/`normals`
---- unnarrowed -- three views (float64 (n, 3), float64 (n, 3), uint32 (m)). Exact
---- far from the origin, where `mesh`'s `float` positions are not.
+--- `mesh` in `double`: the very same tessellation at `tolerance` (default 0.05)
+--- `mesh` gives when the solid's own cache still holds it -- same index view --
+--- with `positions`/`normals` unnarrowed -- three views (float64 (n, 3),
+--- float64 (n, 3), uint32 (m)). Exact far from the origin, where `mesh`'s
+--- `float` positions are not.
 function Solid:mesh64(tolerance)
   if tolerance == nil then tolerance = 0.05 end
-  local m = lib().cadaclysm_blacksmith_mesh64(self:_h(), tolerance)
-  if m.positions == nil then fail("mesh64") end
-  local generation = self:_filled(tolerance)
+  local held = hold(self, tolerance, "mesh64")
+  local m = lib().cadaclysm_blacksmith_tessellation_mesh64(held._ptr)
   local n = m.vertex_count
-  return view(self, generation, m.positions, { n, 3 }, "float64"),
-    view(self, generation, m.normals, { n, 3 }, "float64"),
-    view(self, generation, m.indices, { m.index_count }, "uint32")
+  return view(self, held, m.positions, { n, 3 }, "float64"),
+    view(self, held, m.normals, { n, 3 }, "float64"),
+    view(self, held, m.indices, { m.index_count }, "uint32")
 end
 
 --- The feature edges at `tolerance` (default 0.05) as a Lua array of float32
---- (k, 3) views, one per polyline, borrowed as `mesh`'s are.
+--- (k, 3) views, one per polyline, over a tessellation held for them alone, as
+--- `mesh`'s is.
 function Solid:edge_polylines(tolerance)
   if tolerance == nil then tolerance = 0.05 end
-  local p = lib().cadaclysm_blacksmith_edge_polylines(self:_h(), tolerance)
-  if p.offsets == nil then fail("edge_polylines") end
-  local generation = self:_filled(tolerance)
+  local held = hold(self, tolerance, "edge_polylines")
+  local p = lib().cadaclysm_blacksmith_tessellation_edge_polylines(held._ptr)
   local out = {}
   for i = 0, p.polyline_count - 1 do
     local a, b = p.offsets[i], p.offsets[i + 1]
     local pointer = p.points ~= nil and (p.points + 3 * a) or nil
-    out[i + 1] = view(self, generation, pointer, { b - a, 3 }, "float32")
+    out[i + 1] = view(self, held, pointer, { b - a, 3 }, "float32")
   end
   return out
 end
 
 -- The kernel's mesh_face_triangles, kept for the viewer follow-up (as Go keeps it): how
 -- many triangles each face meshed to at `tolerance`, in face order, summing to `mesh`'s
--- triangle count at the same tolerance -- copied out into a Lua array of numbers.
+-- triangle count at the same tolerance -- copied out into a Lua array of numbers, out of
+-- a tessellation held just for this call (see the note at the top): nothing about the
+-- result depends on the solid's own cache once read.
 local function mesh_face_triangles(solid, tolerance)
-  local t = lib().cadaclysm_blacksmith_mesh_face_triangles(solid:_h(), tolerance)
-  if t.counts == nil then fail("mesh_face_triangles") end
+  local held = hold(solid, tolerance, "mesh_face_triangles")
+  local t = lib().cadaclysm_blacksmith_tessellation_face_triangles(held._ptr)
   local out = {}
   for i = 0, t.face_count - 1 do out[i + 1] = t.counts[i] end
   return out
@@ -2612,11 +2707,10 @@ function Solid:edge_polyline_colours(tolerance)
   if tolerance == nil then tolerance = 0.05 end
   local c = lib().cadaclysm_blacksmith_edge_polyline_colours(self:_h(), tolerance)
   if c.rgb == nil and last_error() ~= "" then fail("edge_polyline_colours") end
-  -- This call tessellates like every other cache reader, even to report "no paint": it can
-  -- replace the cache a view taken earlier is still borrowing, so it must bump the
-  -- generation those views check, even though this method copies its own result out and
-  -- keeps nothing borrowed itself.
-  self:_filled(tolerance)
+  -- This call tessellates the solid's own cache like `bounds_at` does, even to report "no
+  -- paint" -- it may re-mesh the solid at `tolerance` -- but a mesh or edge view taken
+  -- earlier owns its own tessellation and is untouched by that either way, and this method
+  -- copies its own result out and keeps nothing borrowed itself.
   if c.rgb == nil then return {} end
   local out = {}
   for i = 0, c.count - 1 do
@@ -3658,6 +3752,37 @@ function Assembly:place(thing, frame, name)
   local result = ffi.string(raw)
   lib().cadaclysm_blacksmith_string_free(raw)
   return result
+end
+
+--- Connect `placements` (a Lua array of placement names -- not one string, which would
+--- otherwise be read a character at a time) into a link called `name` in this assembly,
+--- written as an AP242 kinematic link. An empty name, a name already taken by another
+--- link here, an empty `placements`, a placement named twice, a placement this assembly
+--- does not have, or a placement already claimed by another link here all raise
+--- `BuildError`, and the assembly is left unchanged.
+function Assembly:link(name, placements)
+  if type(name) ~= "string" then raise("assembly: link's name must be a string, got " .. repr(name)) end
+  local list, n = names(placements, "link", "placements")
+  -- The array is sized at least 1 so a zero-length link still reaches C as a valid
+  -- pointer with count 0, rather than NULL, and gets the kernel's own refusal.
+  local arr = ffi.new("const char*[?]", math.max(n, 1))
+  for i = 1, n do
+    arr[i - 1] = list[i]   -- `list` stays referenced for the whole call below, so these Lua
+                            -- strings the array now points into cannot be collected.
+  end
+  if not lib().cadaclysm_blacksmith_assembly_link(self:_h(), name, arr, n) then fail("assembly_link") end
+end
+
+--- Connect this assembly's links `start` and `end` (kept in that order) as a joint
+--- called `name`, written as an AP242 kinematic joint. An empty name, a name already
+--- taken by another joint here, a link this assembly does not have, a link joined to
+--- itself, or a (start, end) pair already joined all raise `BuildError`; the reverse
+--- pair is a different joint.
+function Assembly:joint(name, start, end_)
+  if type(name) ~= "string" then raise("assembly: joint's name must be a string, got " .. repr(name)) end
+  if type(start) ~= "string" then raise("assembly: joint's start must be a string, got " .. repr(start)) end
+  if type(end_) ~= "string" then raise("assembly: joint's end must be a string, got " .. repr(end_)) end
+  if not lib().cadaclysm_blacksmith_assembly_joint(self:_h(), name, start, end_) then fail("assembly_joint") end
 end
 
 --- This assembly, and everything placed under it, as one STEP file: this

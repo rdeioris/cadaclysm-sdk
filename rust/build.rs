@@ -117,17 +117,29 @@ fn leg() -> Result<(&'static str, &'static str), String> {
     }
 }
 
-fn file_names() -> [String; 2] {
-    let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    ["cadaclysm_capi", "cadaclysm_blacksmith"].map(|stem| match os.as_str() {
+/// The platform's file name for the library whose stem is `stem`.
+fn file_name(stem: &str) -> String {
+    match env::var("CARGO_CFG_TARGET_OS").unwrap_or_default().as_str() {
         "windows" => format!("{stem}.dll"),
         "macos" => format!("lib{stem}.dylib"),
         _ => format!("lib{stem}.so"),
-    })
+    }
+}
+
+/// The two libraries the crate cannot work without: an unpacked archive lacking one is
+/// not used.
+fn file_names() -> [String; 2] {
+    ["cadaclysm_capi", "cadaclysm_blacksmith"].map(file_name)
 }
 
 fn has_both(lib: &Path) -> bool {
     file_names().iter().all(|name| lib.join(name).is_file())
+}
+
+/// Everything copied beside the binaries: the two, and the terminal viewer that `show()`
+/// and `view()` draw with by default.
+fn shipped() -> [String; 3] {
+    ["cadaclysm_capi", "cadaclysm_blacksmith", "cadaclysm_terminal"].map(file_name)
 }
 
 /// `curl` or `tar`: on Windows the system's own, by path, since a Git or MSYS shell puts
@@ -166,7 +178,11 @@ fn download(url: &str, to: &Path) -> Result<(), String> {
 fn beside_the_binaries(lib: &Path) {
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     let Some(profile_dir) = out.ancestors().nth(3) else { return };
-    for name in file_names() {
+    for name in shipped() {
+        if !lib.join(&name).is_file() {
+            println!("cargo:warning=cadaclysm-sdk: {name} is not in the release archive; show() and view() will look for it elsewhere (CADACLYSM_TERMINAL_LIBRARY)");
+            continue;
+        }
         let (from, to) = (lib.join(&name), profile_dir.join(&name));
         let same = fs::metadata(&to).ok().zip(fs::metadata(&from).ok()).is_some_and(|(a, b)| a.len() == b.len());
         if !same {

@@ -209,6 +209,47 @@ typedef enum CadaclysmMeshColors {
 } CadaclysmMeshColors;
 
 /**
+ * A [`cadaclysm::PairKind`] value, for [`cadaclysm_joint_pair_kind`]. Struct fields and
+ * returns carry this as a `uint32_t` rather than the enum itself -- the module doc's
+ * note on [`CadaclysmConvention`] gives the reason -- so this exists to be documented
+ * and named from C, not to appear in any signature.
+ */
+typedef enum CadaclysmPairKind {
+  CADACLYSM_PAIR_REVOLUTE = 0,
+  CADACLYSM_PAIR_PRISMATIC = 1,
+  CADACLYSM_PAIR_CYLINDRICAL = 2,
+  CADACLYSM_PAIR_SPHERICAL = 3,
+  CADACLYSM_PAIR_SPHERICAL_WITH_PIN = 4,
+  CADACLYSM_PAIR_PLANAR = 5,
+  CADACLYSM_PAIR_UNIVERSAL = 6,
+  CADACLYSM_PAIR_HOMOKINETIC = 7,
+  CADACLYSM_PAIR_SCREW = 8,
+  CADACLYSM_PAIR_FULLY_CONSTRAINED = 9,
+  CADACLYSM_PAIR_UNCONSTRAINED = 10,
+  CADACLYSM_PAIR_LOW_ORDER = 11,
+  CADACLYSM_PAIR_OTHER = 12,
+} CadaclysmPairKind;
+
+/**
+ * A [`cadaclysm::Motion`] value, for [`CadaclysmFreedom::motion`]. Carried as a
+ * `uint32_t`, as [`CadaclysmPairKind`] is.
+ */
+typedef enum CadaclysmMotion {
+  CADACLYSM_MOTION_ROTATION = 0,
+  CADACLYSM_MOTION_TRANSLATION = 1,
+} CadaclysmMotion;
+
+/**
+ * A [`cadaclysm::FreedomAxis`] value, for [`CadaclysmFreedom::axis`]. Carried as a
+ * `uint32_t`, as [`CadaclysmPairKind`] is.
+ */
+typedef enum CadaclysmFreedomAxis {
+  CADACLYSM_FREEDOM_X = 0,
+  CADACLYSM_FREEDOM_Y = 1,
+  CADACLYSM_FREEDOM_Z = 2,
+} CadaclysmFreedomAxis;
+
+/**
  * An imported body's exact B-rep -- the trimmed surfaces its mesh is cut from --
  * opaque, and shared with the scene rather than copied. Made by
  * [`cadaclysm_node_brep`], given back with [`cadaclysm_brep_release`]. It is
@@ -423,7 +464,11 @@ typedef struct CadaclysmAttribute {
  * `positions` and `normals` each hold `vertex_count * 3` floats, `uvs` holds
  * `vertex_count * 2`, `colors` holds `vertex_count * 4`, and `indices` holds
  * `index_count` of them, three to a triangle. A part with no geometry gives
- * all-null and all-zero.
+ * all-null and all-zero. `normals`, `uvs` and `colors` are each handed over only
+ * when they hold exactly that many floats for `positions`' own vertex count;
+ * empty or mismatched both read as "not there" (null), so a caller reading
+ * `vertex_count` entries from a non-null pointer never reads past what is
+ * actually there — the same rule [`CadaclysmMesh64`] uses for its own fields.
  *
  * `uvs` is present for either of two reasons, and **they do not mean the same
  * thing**:
@@ -464,7 +509,8 @@ typedef struct CadaclysmMesh {
    * asked for, a STEP reader read the body, and that body's faces carry more
    * than one colour between them. A body painted a single colour reports it
    * through [`cadaclysm_node_color`] and spends nothing here, and a body
-   * painted none reports nothing either way.
+   * painted none reports nothing either way. Also null on a mismatch: handed
+   * over only when it holds exactly `vertex_count * 4` floats.
    *
    * Borrowed from the document exactly as `positions` is, and valid for as
    * long.
@@ -483,7 +529,10 @@ typedef struct CadaclysmMesh {
  * which `float` cannot hold far from the origin.
  *
  * Colours stay `float` (RGBA in 0..1 needs no more). Null where [`CadaclysmMesh`]'s field
- * would be.
+ * would be: `normals`, `uvs` and `colors` are handed over only when each is the same
+ * length as `positions` (empty or mismatched both read as "not there"), so a caller
+ * reading `vertex_count` entries from a non-null pointer never reads past what is
+ * actually there.
  *
  * **A forget drops it.** The pointers borrow the document's mesh, which
  * [`cadaclysm_forget_meshes`] frees: read none of them after a forget; ask again, and the
@@ -565,6 +614,29 @@ typedef struct CadaclysmCollisionHull {
   uint32_t vertex_count;
   uint32_t index_count;
 } CadaclysmCollisionHull;
+
+/**
+ * One of a pair's degrees of freedom: which motion, about or along which contact-frame
+ * axis, and its optional range.
+ */
+typedef struct CadaclysmFreedom {
+  /**
+   * One of [`CadaclysmMotion`]'s values.
+   */
+  uint32_t motion;
+  /**
+   * One of [`CadaclysmFreedomAxis`]'s values.
+   */
+  uint32_t axis;
+  bool has_lower;
+  /**
+   * Radians for a rotation, a length for a translation, in the scene's convention.
+   * Meaningless when `has_lower` is false.
+   */
+  double lower;
+  bool has_upper;
+  double upper;
+} CadaclysmFreedom;
 
 /**
  * A set of polylines. Both pointers borrow from the scene.
@@ -762,7 +834,77 @@ typedef struct CadaclysmSurfaces {
    */
   const uint32_t *shared;
   uint32_t shared_count;
+  /**
+   * One bit a point, laid out as `shared`: whether the trim segment that starts at
+   * that point is the *second* copy of a shared edge -- an earlier face of this body
+   * (a lower index in `faces`) runs along the same edge and its copy is the one to
+   * draw.
+   *
+   * **A shared edge is one line, and each face that meets there carries a copy of it
+   * in its trim.** A renderer that outlines every face from its trim draws the edge
+   * twice, the two copies evaluated through two surfaces a rounding apart, and which
+   * one wins the depth test is the GPU's call: the same revolved body picked one face
+   * along its seam on one vendor and the other face on another. Skipping the segments
+   * marked here draws each edge once, from the lowest-indexed face that names it -- a
+   * choice made from the topology, so it holds from every view and on every GPU.
+   *
+   * Always a subset of `shared`. `null` with `duplicate_count` zero where no segment
+   * is a second copy, and wherever `shared` is `null`.
+   */
+  const uint32_t *duplicate;
+  uint32_t duplicate_count;
 } CadaclysmSurfaces;
+
+/**
+ * A part's exact faces packed for a GPU surface evaluator, and its exact edges -- see
+ * [`cadaclysm_node_gpu_surfaces`]. Every array's length is in its own scalars (`u32` or
+ * `float`): `faces` is `face_count` records ([`CadaclysmFace`]); `loops` two words a loop;
+ * `points` two floats a point; `profiles` four a sample; `tiles` two words a face (the
+ * tile grid `nu, nv`); `tile_domains` four floats a tile; `tile_samples` the density
+ * samples, three floats a point; `tile_boxes` six floats a tile; `edges` sixteen floats a
+ * rational cubic (four xyz points, four weights). Positions are about `about`; `bounds`
+ * (min xyz, max xyz) alone is in the part's own coordinates. `surface_count` is the faces
+ * packed, one colour slot each.
+ */
+typedef struct CadaclysmGpuSurfaces {
+  const struct CadaclysmFace *faces;
+  uint32_t face_count;
+  uint32_t surface_count;
+  const uint32_t *loops;
+  uint32_t loops_len;
+  const float *points;
+  uint32_t points_len;
+  const float *profiles;
+  uint32_t profiles_len;
+  const float *nurbs;
+  uint32_t nurbs_len;
+  const uint32_t *shared;
+  uint32_t shared_len;
+  const uint32_t *tiles;
+  uint32_t tiles_len;
+  const float *tile_domains;
+  uint32_t tile_domains_len;
+  const float *tile_samples;
+  uint32_t tile_samples_len;
+  const float *tile_boxes;
+  uint32_t tile_boxes_len;
+  const float *edges;
+  uint32_t edges_len;
+  double bounds[6];
+  double about[3];
+} CadaclysmGpuSurfaces;
+
+/**
+ * [`CadaclysmPolylines`] in `double`: the same polylines, unnarrowed, for geometry far from
+ * the origin. `positions` holds `vertex_count * 3` doubles; `counts` says where each run
+ * stops. A part with none gives all-null and all-zero.
+ */
+typedef struct CadaclysmPolylines64 {
+  const double *positions;
+  const uint32_t *counts;
+  uint32_t polyline_count;
+  uint32_t vertex_count;
+} CadaclysmPolylines64;
 
 /**
  * The host window a dialog should belong to. `kind` is one of the
@@ -896,6 +1038,10 @@ typedef struct CadaclysmFemOptions {
  * Every pointer is **borrowed from the handle** and good until
  * [`cadaclysm_fem_mesh_free`]; none of them is a copy, and none of them is built by the call
  * that hands it over.
+ *
+ * The crossings -- triangles passing through each other -- are read through
+ * `cadaclysm_fem_mesh_crossing_count` and `cadaclysm_fem_mesh_crossing`, not a member here:
+ * callers allocate this struct, so it cannot grow.
  */
 typedef struct CadaclysmFemMeshView {
   /**
@@ -1445,6 +1591,19 @@ const char *cadaclysm_node_id(const struct CadaclysmScene *scene, uint32_t node)
 bool cadaclysm_node_color(const struct CadaclysmScene *scene, uint32_t node, float *rgba);
 
 /**
+ * This node's **own** colour, and nothing inherited: true only where the node itself
+ * carries one. [`cadaclysm_node_color`] answers "own, else the shape's" -- the colour to
+ * draw -- and so cannot say which of the two it was. A renderer that treats a part with
+ * no colour of its own differently (a mesh's per-vertex alpha is honoured only there)
+ * asks this.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`], and `rgba` must be null or
+ * point to four writable floats.
+ */
+bool cadaclysm_node_own_color(const struct CadaclysmScene *scene, uint32_t node, float *rgba);
+
+/**
  * Where this part's geometry sits, as a 4x4 column-major matrix.
  *
  * A mesh is in its part's own frame; this carries it to world. Doubles, while
@@ -1670,6 +1829,38 @@ bool cadaclysm_node_visible(const struct CadaclysmScene *scene, uint32_t node);
  * after [`cadaclysm_close`].
  */
 struct CadaclysmMesh cadaclysm_node_mesh(const struct CadaclysmScene *scene, uint32_t node);
+
+/**
+ * [`cadaclysm_node_mesh`], with its positions taken about a point near the part rather
+ * than about the file's origin, and that point written to `out_anchor` as three doubles.
+ *
+ * **A position far from the origin does not survive `float`.** The float's step is 0.06
+ * at a million and a quarter of a unit at a survey grid's 2.6 million, so a building on
+ * its site in metres, handed over in file coordinates, arrives with every vertex snapped
+ * to that grid. Taken about a point near the part the same triangles round at the part's
+ * own size instead: each position is the mesh's less the anchor, subtracted in `double`
+ * before it is rounded. Normals, texture coordinates, colours and indices are not
+ * positions and are exactly [`cadaclysm_node_mesh`]'s; the coarser index lists over
+ * these same vertices come from [`cadaclysm_node_mesh_lod_anchored`].
+ *
+ * The anchor is the centre of the mesh's own box, in the same frame as the triangles
+ * (the instanced part's, where the part instances another), so a caller puts it back as
+ * a translation composed in `double` -- the part's point is `anchor + p` -- and what
+ * reaches the GPU stays small. Two occurrences of one shape hand back the same pointers
+ * and the same anchor.
+ *
+ * Empty, and writing three zeros, exactly where [`cadaclysm_node_mesh`] is empty.
+ * `out_anchor` may be null. Built and kept on its own the first time it is asked for, so
+ * a caller wanting only this form never pays for the other.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out_anchor` must be null or
+ * point to space for three doubles. The pointers in the result are good until
+ * [`cadaclysm_close`], as with [`cadaclysm_node_mesh`].
+ */
+struct CadaclysmMesh cadaclysm_node_mesh_anchored(const struct CadaclysmScene *scene,
+                                                  uint32_t node,
+                                                  double *out_anchor);
 
 /**
  * This part's triangles in `double`: [`cadaclysm_node_mesh`]'s own mesh, lent rather
@@ -1921,6 +2112,29 @@ struct CadaclysmMesh cadaclysm_node_mesh_lod(const struct CadaclysmScene *scene,
                                              uint32_t level);
 
 /**
+ * [`cadaclysm_node_mesh_lod`] over the vertices of [`cadaclysm_node_mesh_anchored`]: the
+ * same index lists, addressing positions taken about a point near the part, and that
+ * point written to `out_anchor` as three doubles. Level 0 is
+ * [`cadaclysm_node_mesh_anchored`] itself.
+ *
+ * **For a caller that draws the anchored vertices and switches level by index range.**
+ * Asking the plain [`cadaclysm_node_mesh_lod`] for the index lists would narrow the
+ * file-frame positions as well, only to hand back a pointer to them the caller never
+ * reads -- a second copy of every vertex, held until the scene closes.
+ *
+ * Empty, and writing three zeros, wherever [`cadaclysm_node_mesh_lod`] is empty.
+ * `out_anchor` may be null.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out_anchor` must be null or
+ * point to space for three doubles.
+ */
+struct CadaclysmMesh cadaclysm_node_mesh_lod_anchored(const struct CadaclysmScene *scene,
+                                                      uint32_t node,
+                                                      uint32_t level,
+                                                      double *out_anchor);
+
+/**
  * How far a level moved the surface, in the scene's own units — 0 at level 0,
  * and 0 for a level that does not exist.
  *
@@ -2069,6 +2283,109 @@ uint32_t cadaclysm_joint_start(const struct CadaclysmScene *scene, uint32_t join
 uint32_t cadaclysm_joint_end(const struct CadaclysmScene *scene, uint32_t joint);
 
 /**
+ * The joint's pair kind (a [`CadaclysmPairKind`] value), or -1 when the joint has no
+ * pair or the index is out of range.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+int32_t cadaclysm_joint_pair_kind(const struct CadaclysmScene *scene, uint32_t joint);
+
+/**
+ * For [`CadaclysmPairKind::CADACLYSM_PAIR_OTHER`]: the pair's entity type name
+ * (`"GEAR_PAIR"`); null otherwise. Borrowed, lives as long as the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+const char *cadaclysm_joint_pair_type(const struct CadaclysmScene *scene, uint32_t joint);
+
+/**
+ * For [`CadaclysmPairKind::CADACLYSM_PAIR_SCREW`]: its pitch (length per revolution,
+ * in the scene's units); NaN otherwise.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+double cadaclysm_joint_pair_pitch(const struct CadaclysmScene *scene, uint32_t joint);
+
+/**
+ * The pair's two contact frames as sixteen column-major doubles each
+ * ([`cadaclysm_node_transform`]'s layout). False, writing nothing, when the joint has
+ * no pair. Either out pointer may be null.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out_start` and
+ * `out_end`, where not null, must have room for sixteen doubles each.
+ */
+bool cadaclysm_joint_pair_frames(const struct CadaclysmScene *scene,
+                                 uint32_t joint,
+                                 double *out_start,
+                                 double *out_end);
+
+/**
+ * How many degrees of freedom the joint's pair has. 0 for a joint with no pair.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_joint_freedom_count(const struct CadaclysmScene *scene, uint32_t joint);
+
+/**
+ * One of a pair's freedoms, in the reader's per-kind order. False when `out` is null
+ * or the index is out of range.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out`, where not null,
+ * must point to a writable [`CadaclysmFreedom`].
+ */
+bool cadaclysm_joint_freedom(const struct CadaclysmScene *scene,
+                             uint32_t joint,
+                             uint32_t index,
+                             struct CadaclysmFreedom *out);
+
+/**
+ * How many named mechanism states the file records. 0 for a file with no mechanism.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_state_count(const struct CadaclysmScene *scene);
+
+/**
+ * A state's name as the file gives it, or null past the end. Borrowed, lives as long
+ * as the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+const char *cadaclysm_state_name(const struct CadaclysmScene *scene, uint32_t state);
+
+/**
+ * How many rows (joints set) the state has.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_state_value_count(const struct CadaclysmScene *scene, uint32_t state);
+
+/**
+ * Row `row` of state `state`: writes its joint index to `*joint`
+ * ([`CADACLYSM_NONE`] out of range), writes up to `capacity` values to `values`, and
+ * returns how many values the row has. Pass capacity 0 to ask the count.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `joint`, where not null,
+ * must be writable; `values`, where not null, must have room for `capacity` doubles.
+ */
+uint32_t cadaclysm_state_value(const struct CadaclysmScene *scene,
+                               uint32_t state,
+                               uint32_t row,
+                               uint32_t *joint,
+                               double *values,
+                               uint32_t capacity);
+
+/**
  * This part's feature edges, as polylines to draw an overlay from.
  *
  * Flattened by the document at the part's own scale — capi does not choose a
@@ -2114,9 +2431,10 @@ struct CadaclysmEdgeColors cadaclysm_node_edge_colors(const struct CadaclysmScen
  * In the surfaces' own frame, like [`cadaclysm_node_surfaces`] -- see
  * [`cadaclysm_surface_matrix`].
  *
- * Empty for a part with no surfaces. A shared edge appears twice, once from each face that
- * meets there: a face's boundary is what a trim loop is, and matching curves between faces
- * is the topology this product exists to do without.
+ * Empty for a part with no surfaces. A shared edge appears once, from the first face that
+ * names it -- the same face whose copy [`CadaclysmSurfaces::duplicate`] leaves unmarked --
+ * where the builder tied the loops to edges; a loop it could not is drawn whole, so an edge
+ * on two such faces still appears twice.
  *
  * # Safety
  * `scene` must be null or a handle from [`cadaclysm_open`].
@@ -2223,6 +2541,66 @@ struct CadaclysmBeziers64 cadaclysm_node_edge_beziers64(const struct CadaclysmSc
  * `scene` must be null or a handle from [`cadaclysm_open`].
  */
 struct CadaclysmSurfaces cadaclysm_node_surfaces(const struct CadaclysmScene *scene, uint32_t node);
+
+/**
+ * This part's exact faces packed for a GPU surface evaluator, and its exact edges: the
+ * records a viewer uploads to draw the part from its surfaces rather than its triangles,
+ * positions about the faces' own centre. `tolerance` (model units, positive) sets the
+ * trims and the edges -- a viewer takes it from the part's size.
+ *
+ * **Owned by the caller**, unlike the borrowed arrays elsewhere here: free it with
+ * [`cadaclysm_gpu_surfaces_free`]. It is built on every call, because the answer depends
+ * on the tolerance. Where the part instances another, these are the instanced part's
+ * faces, the same indirection [`cadaclysm_node_mesh`] follows.
+ *
+ * NULL, with the reason at [`cadaclysm_last_error`], for a null scene, a node out of
+ * range, a tolerance that is not a positive finite number, or a part with no exact faces
+ * (every mesh-only format, and a B-rep this path cannot express).
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+struct CadaclysmGpuSurfaces *cadaclysm_node_gpu_surfaces(const struct CadaclysmScene *scene,
+                                                         uint32_t node,
+                                                         double tolerance);
+
+/**
+ * Frees what [`cadaclysm_node_gpu_surfaces`] handed out. NULL is allowed.
+ *
+ * # Safety
+ * `surfaces` must be null or a result of [`cadaclysm_node_gpu_surfaces`] not yet freed.
+ */
+void cadaclysm_gpu_surfaces_free(struct CadaclysmGpuSurfaces *surfaces);
+
+/**
+ * [`cadaclysm_node_surfaces`], packed about a point near the part rather than about the
+ * file's origin, and that point written to `out_anchor` as three doubles.
+ *
+ * **A position far from the origin does not survive `float`.** The float's step is 0.06
+ * at a million and a quarter of a unit at a survey grid's 2.6 million, so a building on
+ * its site in metres, handed over in file coordinates, arrives with every frame origin
+ * and control point snapped to that grid: a lopsided dome, crumpled column caps, a
+ * leaning tower. Taken about a point near the part the same data rounds at the part's own
+ * size instead. Every position -- a frame's origin, a revolution's axis point, a sum's
+ * base, a swept profile's samples, a NURBS net -- is the file's position less the anchor,
+ * subtracted in `double` before it is rounded; directions, radii, angles and the trims'
+ * `(u, v)` are not positions and are as [`cadaclysm_node_surfaces`] gives them.
+ *
+ * The anchor is the centre of the part's surface bounds, in the same frame as the faces
+ * (the file's -- see [`cadaclysm_surface_matrix`]), so a caller puts it back as a
+ * translation composed in `double`: the file's point is `anchor + p`, and what reaches
+ * the GPU stays small. A caller that draws a far part this way loses nothing it had.
+ *
+ * Empty, and writing three zeros, exactly where [`cadaclysm_node_surfaces`] is empty.
+ * `out_anchor` may be null.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out_anchor` must be null or
+ * point to space for three doubles.
+ */
+struct CadaclysmSurfaces cadaclysm_node_surfaces_anchored(const struct CadaclysmScene *scene,
+                                                          uint32_t node,
+                                                          double *out_anchor);
 
 /**
  * Where a segment first meets one part's surfaces, written to `out_point` as three
@@ -2342,6 +2720,72 @@ struct CadaclysmPolylines cadaclysm_node_curves(const struct CadaclysmScene *sce
  */
 struct CadaclysmPolylines cadaclysm_node_isocurves(const struct CadaclysmScene *scene,
                                                    uint32_t node);
+
+/**
+ * [`cadaclysm_node_surface_edges`] in `double`: the outline drawn from the trims, without
+ * its per-edge colours (see [`cadaclysm_node_surface_edge_colors`], which are the same
+ * runs in the same order). Borrowed from the scene.
+ *
+ * **For a caller drawing a far part's outline.** A site on its survey grid, handed over in
+ * `float`, has its outline snapped to a quarter unit there: the edges wander off faces the
+ * surface path draws exactly. In `double` a caller takes them about a point near the part
+ * first, as it does the faces (see [`cadaclysm_node_surfaces_anchored`]).
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+struct CadaclysmPolylines64 cadaclysm_node_surface_edges64(const struct CadaclysmScene *scene,
+                                                           uint32_t node);
+
+/**
+ * [`cadaclysm_node_surface_edge_beziers`] in `double`: the same exact edges, unnarrowed --
+ * see [`CadaclysmBeziers64`], and [`cadaclysm_node_surface_edges64`] for why. Empty where
+ * [`cadaclysm_node_surface_edge_beziers`] is. Borrowed from the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+struct CadaclysmBeziers64 cadaclysm_node_surface_edge_beziers64(const struct CadaclysmScene *scene,
+                                                                uint32_t node);
+
+/**
+ * [`cadaclysm_node_surface_isocurves`] in `double` -- see [`cadaclysm_node_surface_edges64`]
+ * for why. Borrowed from the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+struct CadaclysmPolylines64 cadaclysm_node_surface_isocurves64(const struct CadaclysmScene *scene,
+                                                               uint32_t node);
+
+/**
+ * [`cadaclysm_node_edges`] in `double`. The document's feature edges exactly as it
+ * flattens them for drawing (`get_edges_as_polylines`), without their per-edge colours --
+ * see [`cadaclysm_node_edge_colors`] for those. Borrowed from the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+struct CadaclysmPolylines64 cadaclysm_node_edges64(const struct CadaclysmScene *scene,
+                                                   uint32_t node);
+
+/**
+ * [`cadaclysm_node_curves`] in `double`. Borrowed from the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+struct CadaclysmPolylines64 cadaclysm_node_curves64(const struct CadaclysmScene *scene,
+                                                    uint32_t node);
+
+/**
+ * [`cadaclysm_node_isocurves`] in `double`. Borrowed from the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+struct CadaclysmPolylines64 cadaclysm_node_isocurves64(const struct CadaclysmScene *scene,
+                                                       uint32_t node);
 
 /**
  * Drop every mesh built so far, keeping the document and its node tree.
@@ -3134,6 +3578,39 @@ bool cadaclysm_fem_mesh_folded_edge(const struct CadaclysmFemMesh *m,
                                     uint32_t *a,
                                     uint32_t *b,
                                     uint32_t *brep_edge);
+
+/**
+ * How many pairs of this mesh's triangles pass through each other: the rows
+ * [`cadaclysm_fem_mesh_crossing`] reads. 0, with [`cadaclysm_last_error`](crate::cadaclysm_last_error),
+ * for a null handle.
+ *
+ * **In its own function because `CadaclysmFemMeshView` cannot grow**: callers allocate the
+ * view, and a new member would have this library write past the end of every v0.7 caller's.
+ *
+ * A mesh is ready for a volume mesher when `CadaclysmFemMeshView::watertight` is true **and**
+ * this is 0: the census the view reports is topological, and cannot see a surface passing
+ * through itself.
+ *
+ * # Safety
+ * `m` as [`cadaclysm_fem_mesh_view`].
+ */
+uint32_t cadaclysm_fem_mesh_crossing_count(const struct CadaclysmFemMesh *m);
+
+/**
+ * Crossing `i`: the triangles `a < b` that pass through each other -- an edge of one through
+ * the other's interior. Their B-rep faces are `triangle_face[a]` and `triangle_face[b]`.
+ *
+ * `false`, with [`cadaclysm_last_error`](crate::cadaclysm_last_error), for a null handle, a
+ * null out-pointer, or an `i` at or past [`cadaclysm_fem_mesh_crossing_count`]; nothing is
+ * written then.
+ *
+ * # Safety
+ * `m` as [`cadaclysm_fem_mesh_view`]; `a` and `b` each null or a writable `uint32_t`.
+ */
+bool cadaclysm_fem_mesh_crossing(const struct CadaclysmFemMesh *m,
+                                 uint32_t i,
+                                 uint32_t *a,
+                                 uint32_t *b);
 
 /**
  * Write the mesh to `path` as a Gmsh 4.1 ASCII `.msh`: an entity per B-rep vertex, edge and
