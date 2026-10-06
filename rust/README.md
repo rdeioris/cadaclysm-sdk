@@ -93,29 +93,77 @@ wrappers document that; here the compiler enforces it.
 
 ## Drawing
 
-`show` and `view` draw a `Solid`, `Profile`, `Scene` or `Node` with a viewer library --
-by default the terminal viewer the SDK ships (`cadaclysm_terminal`, copied beside your
-binary by the build), which draws with sixel, the kitty graphics protocol or half blocks:
+`show` and `view` draw a `Solid`, `Profile`, `Scene` or `Node` -- by default with the
+terminal library the SDK ships (`cadaclysm_terminal`, copied beside your binary by the
+build), which draws with sixel, the kitty graphics protocol or half blocks. Solids,
+scenes and nodes are drawn by handle, exact, read in place:
 
 ```rust
 use cadaclysm_sdk::blacksmith::Solid;
-use cadaclysm_sdk::viewer::ViewOptions;
+use cadaclysm_sdk::view::{self, ViewOptions};
 
-let mut part = Solid::cuboid(2.0, 1.0, 0.5)?;
-part.show(None)?;                              // one picture, left in the scrollback
+let part = Solid::cuboid(2.0, 1.0, 0.5)?;
+part.show(None)?;                              // terminal: one picture, left in the scrollback
 let camera = part.view(None)?;                 // orbit; q quits
-println!("{camera}");                          // az=-32 el=41 zoom=1.30
+println!("{camera}");                          // az=-32 el=41
 part.show(&ViewOptions::from(camera))?;        // the same picture again
 part.show(&ViewOptions { hint: Some("blocks".into()), ..Default::default() })?;
+
+view::use_wgpu()?;                             // cadaclysm_view: windows of its own
+part.show(None)?;                              // a window; returns when it is closed
 ```
 
 `show` and `view` take `None` for the defaults, or `&options` (`Some(&options)` works
 too); so do `svg_text` and `svg`.
 
-Any library implementing `cadaclysm_viewer.h` can draw instead:
-`cadaclysm_sdk::viewer::use_library("path/to/viewer.dll")?`, or set `CADACLYSM_VIEWER` to
-it; `viewer::use_terminal()` switches back. `CADACLYSM_TERMINAL_LIBRARY` points at the
-terminal library when it is not beside the program.
+### `View`
+
+A `View` is one window of the library's own, a host's window, or an offscreen picture,
+and what it shows comes back as `Item`s:
+
+```rust
+use cadaclysm_sdk::view::{self, Standard, View, ViewOptions};
+
+view::use_wgpu()?;
+let cube = Solid::cuboid(1.0, 1.0, 1.0)?;      // shown by handle: must outlive the view
+let view = View::offscreen(900, 600)?;         // or View::new(&ViewOptions { .. })
+let curve = [[0.0, 0.0, 0.0, 1.0], [1.0, 2.0, 0.0, 1.0], [3.0, -1.0, 0.0, 1.0], [4.0, 1.0, 0.0, 1.0]];
+view.show_curves(&[curve], Some([0.9, 0.3, 0.1]))?;
+let item = view.show_solid(&cube, 0.05, None)?;
+item.colour([0.2, 0.5, 0.9])?;
+view.standard(Standard::Iso)?;
+view.frame()?;
+view.save("view.png")?;                        // or view.image()? for the pixels; view.run()? for a window
+```
+
+- **Showing.** `show_solid(&solid, tolerance, rgb)`, `show_scene(&scene)`,
+  `show_node(node)` by handle; `show_mesh`, `show_lines`, `show_curves` (rational cubic
+  Béziers, `[[x, y, z, w]; 4]` each), `show_image` by value -- these need no reader or
+  kernel loaded. A solid, scene or node shown by handle is borrowed by the view: dropping
+  it first does not compile.
+- **`Item`.** `remove`, `colour`, `placement`, `face_colours`, `xray`, `frame`,
+  `node_visible`, `node_colour`, `node_highlight`, `frame_node`, `node_transforms` (pose a
+  shown scene, one matrix per node), `id`.
+- **The camera.** `orbit`, `pan`, `zoom`, `look`, `dolly`, `standard`, `frame`,
+  `orthographic`, `viewports`.
+- **The rest.** `pick(x, y, viewport)`, `draw`, `needs_draw`, `run` (blocks; the camera and
+  the last pick), `pump(timeout_ms)` (for a loop of your own), `image`, `save` (PNG),
+  `input(&Event)`, `resize`, `layer`, `set_surfaces`, `background`, `lod(Some(Lod { .. }))`
+  (levels of detail) and `wake_ms` (when a resting frame is owed). Dropping the view
+  destroys it.
+- **A host's window.** `unsafe { View::in_window(window, &options) }` with a `RawWindow`
+  (a kind, a handle and a display); with the `raw-window-handle` feature,
+  `RawWindow::of(&winit_window, width, height)`. The host forwards input (`input`), calls
+  `resize` on its resize and `draw` when `needs_draw`.
+- **Offscreen** needs no display, only a GPU adapter (SSH, CI); the terminal refuses it.
+
+### Which library
+
+`view::use_terminal()` (the default), `view::use_wgpu()`, or
+`view::use_library("path/to/library")?` for any library implementing `cadaclysm_view.h`;
+or set `CADACLYSM_VIEW` to `terminal`, `wgpu` or a path. `CADACLYSM_TERMINAL_LIBRARY` and
+`CADACLYSM_VIEW_LIBRARY` point at the two libraries when they are not beside the program.
+`cargo run --example view` shows the API in a window; `-- offscreen` writes `view.png`.
 
 ## The license
 

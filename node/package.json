@@ -7,11 +7,12 @@
   "types": "cadaclysm.d.ts",
   "exports": {
     ".": { "types": "./cadaclysm.d.ts", "default": "./cadaclysm.js" },
-    "./blacksmith": { "types": "./cadaclysm_blacksmith.d.ts", "default": "./cadaclysm_blacksmith.js" }
+    "./blacksmith": { "types": "./cadaclysm_blacksmith.d.ts", "default": "./cadaclysm_blacksmith.js" },
+    "./view": { "types": "./cadaclysm_view.d.ts", "default": "./cadaclysm_view.js" }
   },
-  "files": ["cadaclysm.js", "cadaclysm_blacksmith.js", "worker.js", "cadaclysm.d.ts", "cadaclysm_blacksmith.d.ts", "README.md", "smoke.js"],
+  "files": ["cadaclysm.js", "cadaclysm_blacksmith.js", "cadaclysm_view.js", "worker.js", "cadaclysm.d.ts", "cadaclysm_blacksmith.d.ts", "cadaclysm_view.d.ts", "README.md", "smoke.js"],
   "engines": { "node": ">=18" },
-  "scripts": { "test": "node --test test/" },
+  "scripts": { "test": "node --test" },
   "dependencies": { "koffi": "^2.16.0" },
   "devDependencies": { "typescript": "^5.4.0", "@types/node": "^18.19.0" }
 }

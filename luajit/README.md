@@ -12,6 +12,7 @@ The same object model as the Python module, name for name.
 | `cadaclysm_cdef.lua`, `cadaclysm_blacksmith_cdef.lua` | The C headers as `ffi.cdef` text, **generated** by `gen_cdef.py` (in the repository); do not edit |
 | `cadaclysm_love.lua` | LÖVE helper: meshes into `love.graphics` meshes, a lit 3D pass, 2D line work in one draw call |
 | `cadaclysm_lovr.lua` | LÖVR helper: meshes and edges into LÖVR meshes, a lit shader, a camera, a table-top placement |
+| `cadaclysm_view.lua`, `cadaclysm_view_cdef.lua` | Drawing: the terminal, a GPU window (`use_wgpu()`), a host's window, offscreen |
 | `smoke/` | The smoke test every wrapper has: `luajit smoke/main.lua samples/cube.scad` |
 | `test/` | The test suite: `luajit test/main.lua`, `lovec test` or `lovr test` |
 | `examples/` | `love-part`, `love-drawing`, `love-forge`, `lovr-part`, and two fuller viewers |
@@ -42,6 +43,25 @@ executable, and in a `lib/` or `target/release` of any parent; `load(path)` name
 outright. The website's [LÖVE and LÖVR page](https://cadaclysm.blitter.studio/engines/love.html)
 walks through it with pictures, and the [LuaJIT reference](https://cadaclysm.blitter.studio/docs/luajit.html)
 lists every call.
+
+## Drawing
+
+```lua
+local view = require("cadaclysm_view")
+view.use_wgpu()                    -- the GPU window; the terminal is the default
+part:show()                        -- blocks until the window is closed
+local camera = scene:view({ view = "top" })
+local v = view.View.offscreen(800, 600)
+v:show_solid(part); v:standard("iso"); v:frame(); v:save("part.png"); v:close()
+```
+
+Solids and scenes are drawn by handle. The library is found through
+`CADACLYSM_TERMINAL_LIBRARY` / `CADACLYSM_VIEW_LIBRARY` as the reader's is;
+`CADACLYSM_VIEW` (`terminal`, `wgpu` or a path) picks one without code. In LÖVE or LÖVR,
+`View.in_window{ kind = ..., window = ..., width = ..., height = ... }` draws into the
+engine's own window from its native handle, beside `cadaclysm_love.lua` and
+`cadaclysm_lovr.lua`; the host forwards input with `v:input{...}`, calls `v:resize` and
+`v:draw`, and `view.pump(0)` from its own loop keeps a window of the library's own live.
 
 ## Notes
 

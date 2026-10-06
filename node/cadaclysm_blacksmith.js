@@ -99,15 +99,23 @@ function defaultSchema() {
 // line: `tests/bindings.rs` compares these blocks with the header.
 
 koffi.opaque('CadaclysmBlacksmithAssembly');
+koffi.opaque('CadaclysmBlacksmithCollider');
+koffi.opaque('CadaclysmBlacksmithCollisions');
 koffi.opaque('CadaclysmBlacksmithFemMesh');
 koffi.opaque('CadaclysmBlacksmithHits');
 koffi.opaque('CadaclysmBlacksmithIntersection');
+koffi.opaque('CadaclysmBlacksmithJob');
+koffi.opaque('CadaclysmBlacksmithOperations');
 koffi.opaque('CadaclysmBlacksmithPath');
 koffi.opaque('CadaclysmBlacksmithProfile');
 koffi.opaque('CadaclysmBlacksmithProfileList');
+koffi.opaque('CadaclysmBlacksmithPrograms');
+koffi.opaque('CadaclysmBlacksmithReport');
 koffi.opaque('CadaclysmBlacksmithSolid');
+koffi.opaque('CadaclysmBlacksmithStock');
 koffi.opaque('CadaclysmBlacksmithSweepPath');
 koffi.opaque('CadaclysmBlacksmithTessellation');
+koffi.opaque('CadaclysmBlacksmithTool');
 
 const CadaclysmBlacksmithMesh = koffi.struct('CadaclysmBlacksmithMesh', {
   positions: 'const float *',
@@ -137,6 +145,27 @@ const CadaclysmBlacksmithColours = koffi.struct('CadaclysmBlacksmithColours', {
   rgb: 'const double *',
   count: 'uint32_t',
 });
+// What a body measures, per unit density, each figure beside a bound on its own error. The four
+// flags are int32 and come first, so every double after them is already eight-aligned and C adds no
+// padding -- which is what lets koffi read it field for field. Pinned against the header by
+// `cadaclysm-capi/tests/bindings.rs`.
+const CadaclysmBlacksmithMassProperties = koffi.struct('CadaclysmBlacksmithMassProperties', {
+  closed: 'int32_t',
+  inverted: 'int32_t',
+  accuracy_met: 'int32_t',
+  from_mesh: 'int32_t',
+  area: 'double',
+  area_error: 'double',
+  volume: 'double',
+  volume_error: 'double',
+  centroid: koffi.array('double', 3),
+  centroid_error: 'double',
+  inertia: koffi.array('double', 9),
+  inertia_error: 'double',
+  principal_moments: koffi.array('double', 3),
+  principal_axes: koffi.array('double', 9),
+});
+
 const CadaclysmBlacksmithFaceTriangles = koffi.struct('CadaclysmBlacksmithFaceTriangles', {
   counts: 'const uint32_t *',
   face_count: 'uint32_t',
@@ -204,6 +233,36 @@ const CadaclysmBlacksmithOverlap = koffi.struct('CadaclysmBlacksmithOverlap', {
   loop_offsets: 'const uint32_t *',
   point_count: 'uint32_t',
   loop_count: 'uint32_t',
+});
+// An axis-aligned box: bit-compatible with six contiguous doubles (lo, then hi), which
+// is how a Box crosses *into* a call (koffi has no cheaper way to pass a struct by value
+// than its own fields); this struct is only ever an out-param, filled by the library.
+const CadaclysmBlacksmithBox = koffi.struct('CadaclysmBlacksmithBox', {
+  lo: koffi.array('double', 3),
+  hi: koffi.array('double', 3),
+});
+const CadaclysmBlacksmithColliderStats = koffi.struct('CadaclysmBlacksmithColliderStats', {
+  considered: 'uint32_t',
+  world_boxes: 'uint32_t',
+  oriented_boxes: 'uint32_t',
+  skipped_share: 'uint32_t',
+  cached: 'uint32_t',
+  closed_form: 'uint32_t',
+  meshed: 'uint32_t',
+  refused: 'uint32_t',
+  confirmed: 'uint32_t',
+});
+const CadaclysmBlacksmithCollisionHit = koffi.struct('CadaclysmBlacksmithCollisionHit', {
+  a: 'uint32_t',
+  b: 'uint32_t',
+  overlap: 'bool',
+  depth: 'double',
+  positions: 'const double *',
+  normals: 'const double *',
+  indices: 'const uint32_t *',
+  vertex_count: 'uint32_t',
+  index_count: 'uint32_t',
+  text: 'const char *',
 });
 // The FEM surface mesh, the kernel's twins of the reader's four. `size` is how
 // `CadaclysmBlacksmithFemOptions` grows: the library's own
@@ -319,14 +378,29 @@ function _wasmLibrary(w) {
   // handle, or a count the caller checks `last_error` on) for everything else
   const BOOLS = new Set(['path_line_to', 'path_arc_to', 'path_bezier_to', 'path_nurbs_to', 'path_conic_to', 'path_parabola_by_vertex',
     'path_parabola_by_focus', 'sweep_path_line_to', 'sweep_path_arc',
-    'slant_of_plane', 'face_frame', 'face_ref', 'frame_midplane', 'frame_through', 'bounds', 'bounds64', 'box', 'edge', 'colour', 'profile_colour', 'edge_colour', 'manifold', 'license_set', 'hit', 'edge_curve',
+    'slant_of_plane', 'face_frame', 'face_ref', 'frame_midplane', 'frame_through', 'bounds', 'bounds64', 'box', 'edge', 'colour', 'profile_colour', 'edge_colour', 'parse_colour', 'manifold', 'license_set', 'hit', 'edge_curve',
+    'mass_properties',
     'intersection_chain', 'intersection_curve', 'intersection_overlap', 'hits_piece', 'assembly_link', 'assembly_joint',
+    'assembly_pair', 'assembly_state', 'assembly_sequence', 'assembly_base',
     'fem_mesh_view', 'fem_mesh_edge', 'fem_mesh_vertex', 'fem_mesh_open_edge', 'fem_mesh_folded_edge', 'fem_mesh_crossing',
+    // collider: `solid_bounds_box`/`box_moved` write a Box out-param, `boxes_apart` a bool,
+    // `collider_stats`/`collisions_hit` a record -- the C return is a plain success flag
+    // either way, so a failure is `false` here too. `box_overlaps` is deliberately absent:
+    // its C return **is** the answer, not a success flag.
+    'solid_bounds_box', 'box_moved', 'boxes_apart', 'collider_stats', 'collisions_hit',
     // Its wasm export always throws ("the wasm writes no file"); `FemMesh.saveMsh`
     // never reaches it in the notebook, writing `mshText()` through the page's own
     // `fs` as `step`/`sat`/`svg` do, so this is the shape a direct `_lib()` call
     // would still get right rather than a path this module takes.
-    'fem_mesh_save_msh']);
+    'fem_mesh_save_msh',
+    // job_machine's CAM report: item `i`'s location, x/y/z, written to a `double *`
+    // out-param natively, returned as a plain array by the wasm export (see OUT below).
+    'report_at',
+    // Job's setters: plain bool verbs, as `job_set_clearance` and its siblings return
+    // natively.
+    'job_set_clearance', 'job_set_tolerance', 'job_set_spindle_dwell', 'job_set_resolution', 'job_set_name',
+    // The four manual verbs: plain bool wasm exports too, as job_set_* above.
+    'job_face', 'job_contour', 'job_pocket', 'job_drill']);
   const FAILS = { select_face: NONE, leaked_edges: NONE, unpaired_edges: NONE, mesh: { positions: null }, mesh64: { positions: null }, mesh_face_triangles: { counts: null },
     edge_polylines: { offsets: null }, profile_polylines: { offsets: null }, edge_polyline_colours: { rgb: null, count: 0 },
     step: null, sat_text: null, svg_text: null, drawing_svg_text: null, face_kind: null, brep_layout_id: null,
@@ -334,21 +408,41 @@ function _wasmLibrary(w) {
     assembly_place_assembly: null, assembly_step: null };
   // results that C writes into an out-array of doubles at this position, and the
   // wasm returns as an array (`bounds` fills two, `edge` and `hit` a record: see `back`)
-  const OUT = { slant_of_plane: 3, face_frame: 2, face_ref: 2, frame_midplane: 2, frame_through: 3 };
+  const OUT = { slant_of_plane: 3, face_frame: 2, face_ref: 2, frame_midplane: 2, frame_through: 3, report_at: 2 };
   // argument positions the C call has and the wasm call does not: an array's
   // count (a typed array knows its length), the progress `user` pointer, and
   // the out-arguments above
   const DROP = { profile_polygon: [1], path_nurbs_to: [2, 5], join: [4], cut: [4], common: [4], split_sheet: [4], trim: [5], drop_faces: [2],
+    // job_machine: the drills array's own count (a typed array knows its length), as
+    // every other array argument's count is dropped above.
+    job_machine: [4],
+    // job_drill: the xy array's own count, the same way.
+    job_drill: [3],
     profile_round: [3], profile_spline: [1], profile_chain: [1], profile_from_loops: [1], profile_piece_count: [2], profile_piece: [2],
     profile_trim_count: [2], profile_trim_chain: [2], loft_through: [2], loft_through_open: [2], fillet: [2, 6], chamfer: [2], shell: [3, 6],
     thicken: [4], push_pull: [5], push_pull_faces: [2, 6], split: [4], split_by_plane: [4], step: [1], sat_text: [1], svg_text: [1], drawing_svg_text: [1, 3], profile_text: [4],
-    slant_of_plane: [3], face_frame: [2], face_ref: [2], bounds: [2, 3], bounds64: [2, 3], box: [1, 2], edge: [2], colour: [2], profile_colour: [1], edges_coloured: [2], edge_colour: [2], manifold: [1], hit: [2], edge_curve: [2],
+    slant_of_plane: [3], face_frame: [2], face_ref: [2], bounds: [2, 3], bounds64: [2, 3], box: [1, 2], edge: [2], colour: [2], profile_colour: [1], edges_coloured: [2], edge_colour: [2], parse_colour: [1], manifold: [1], hit: [2], edge_curve: [2],
     intersect: [4], intersection_chain: [2], intersection_curve: [2], intersection_overlap: [2],
     solid_profile_hits: [5], hits_piece: [2, 3, 4], assembly_link: [3],
+    // `assembly_state`'s row_count (args[5]) drops: joints/counts/values are arrays, each
+    // carrying its own length, as `assembly_link`'s placement count does above.
+    assembly_state: [5],
+    // `assembly_sequence`'s count (args[5]) drops the same way: states/ts/interpolations are arrays.
+    assembly_sequence: [5],
     // `fem_mesh`'s index counts the tuple `call` rewrites below, not the C call's:
     // the options struct becomes two scalars, so `user` has moved from 4 to 5.
     fem_mesh: [5], fem_mesh_view: [1], fem_mesh_edge: [2], fem_mesh_vertex: [2],
-    fem_mesh_open_edge: [2, 3, 4], fem_mesh_folded_edge: [2, 3, 4], fem_mesh_crossing: [2, 3] };
+    fem_mesh_open_edge: [2, 3, 4], fem_mesh_folded_edge: [2, 3, 4], fem_mesh_crossing: [2, 3],
+    // collider: `solid_bounds_box`/`box_moved` drop their Box out-param; `boxes_apart` its
+    // bool out-param; `collider_new` its `solids` count and `allowed` count (a typed array
+    // knows its own length); `collider_check` its `frame_count`; `collider_stats`/
+    // `collisions_hit` their out-record.
+    solid_bounds_box: [2], box_moved: [2], boxes_apart: [4],
+    collider_new: [1, 5], collider_check: [2], collider_stats: [1], collisions_hit: [2],
+    // `mass_properties` drops its CadaclysmBlacksmithMassProperties out-param: the export
+    // returns the figures as a flat array of doubles instead. It was already in BOOLS and
+    // missing here, so `.mass()` over the wasm handed back an unfilled struct.
+    mass_properties: [2] };
   let error = null;
   /** A `WebAssembly.RuntimeError`: the wasm trapped (a panic aborts, the tables stay borrowed), which no `last_error` can stand for. */
   const trapped = (e) => typeof WebAssembly !== 'undefined' && e instanceof WebAssembly.RuntimeError;
@@ -410,6 +504,43 @@ function _wasmLibrary(w) {
       raw.loop_offsets = result.loop_offsets; raw.loop_count = result.loop_offsets.length;
       return true;
     }
+    if (short === 'solid_bounds_box' || short === 'box_moved') {
+      // `result` is six numbers (lo, then hi), into the `Box` out-struct at args[2].
+      const raw = args[2];
+      raw.lo = result.slice(0, 3); raw.hi = result.slice(3, 6);
+      return true;
+    }
+    if (short === 'boxes_apart') {
+      args[4][0] = Boolean(result);
+      return true;
+    }
+    if (short === 'mass_properties') {
+      // 34 numbers in `CadaclysmBlacksmithMassProperties`' own field order, into the out
+      // object at args[2] -- see the export's doc comment in crates/cadaclysm-wasm/src/
+      // blacksmith.rs for why they cross flat. `_mass` reads these names.
+      const v = Array.from(result);
+      if (v.length !== 34) throw new Error(`mass_properties: the wasm returned ${v.length} figures, not 34`);
+      const raw = args[2];
+      [raw.closed, raw.inverted, raw.accuracy_met, raw.from_mesh] = v.slice(0, 4);
+      [raw.area, raw.area_error, raw.volume, raw.volume_error] = v.slice(4, 8);
+      raw.centroid = v.slice(8, 11); raw.centroid_error = v[11];
+      raw.inertia = v.slice(12, 21); raw.inertia_error = v[21];
+      raw.principal_moments = v.slice(22, 25); raw.principal_axes = v.slice(25, 34);
+      return true;
+    }
+    if (short === 'collider_stats') {
+      const raw = args[1];
+      for (const name of ['considered', 'world_boxes', 'oriented_boxes', 'skipped_share', 'cached', 'closed_form', 'meshed', 'refused', 'confirmed']) raw[name] = result[name];
+      return true;
+    }
+    if (short === 'collisions_hit') {
+      const raw = args[2];
+      raw.a = result.a; raw.b = result.b; raw.overlap = Boolean(result.overlap); raw.depth = result.depth;
+      raw.positions = result.positions; raw.normals = result.normals; raw.indices = result.indices;
+      raw.vertex_count = result.positions.length / 3; raw.index_count = result.indices.length;
+      raw.text = result.text;
+      return true;
+    }
     if (short === 'fem_mesh_view') {
       // The arrays and the summary, into the out-struct at args[1]. The typed arrays
       // are handed on as they are: `_doublesAt`/`_uint32s` read a typed array the
@@ -451,6 +582,7 @@ function _wasmLibrary(w) {
       return true;
     }
     if (short === 'colour' || short === 'profile_colour' || short === 'edge_colour') { if (result == null) return false; args[short === 'profile_colour' ? 1 : 2].set(result); return true; }
+    if (short === 'parse_colour') { if (result == null) return false; args[1].set(result); return true; }
     if (short === 'manifold') { args[1].set(result); return true; }
     if (short === 'bounds' || short === 'bounds64') { args[2].set(result.slice(0, 3)); args[3].set(result.slice(3, 6)); return true; }
     if (short === 'box') { args[1].set(result.slice(0, 3)); args[2].set(result.slice(3, 6)); return true; }
@@ -506,11 +638,32 @@ function _wasmLibrary(w) {
           // solids, profiles and words in that order.
           args = [args[0], args[1], args[2], args[3], svgWords(args[4])];
         }
-        // `assembly_link`'s placements are names, not handles: cadaclysm_blacksmith_assembly_link
-        // in crates/cadaclysm-wasm/src/blacksmith.rs takes a `Vec<String>`, so `arg`'s generic
-        // array rule (a JS array is a handle list, turned into a `Uint32Array`) must not touch it.
+        if (short === 'assembly_pair') {
+          // cadaclysm_blacksmith_assembly_pair(assembly, joint, kind, frame, end_frame, lower,
+          // upper, pitch) in crates/cadaclysm-wasm/src/blacksmith.rs: lower/upper (args[5],
+          // args[6]) fold has_lower/has_upper (args[7], args[8]) into themselves as `NaN`
+          // standing for "this side unbounded", the wasm export's own convention; freedom_count
+          // (args[9]) drops, since a typed array carries its own length.
+          const [assembly, joint, kind, frame, endFrame, lower, upper, hasLower, hasUpper, count, pitch] = args;
+          let loNan = null, upNan = null;
+          if (lower != null) {
+            loNan = new Float64Array(count);
+            upNan = new Float64Array(count);
+            for (let i = 0; i < count; i++) {
+              loNan[i] = hasLower[i] ? lower[i] : NaN;
+              upNan[i] = hasUpper[i] ? upper[i] : NaN;
+            }
+          }
+          args = [assembly, joint, kind, frame, endFrame, loNan, upNan, pitch];
+        }
+        // `assembly_sequence`'s states (2 after the name) and interpolations (4) are names too.
+        // `assembly_link`'s placements, and `assembly_state`'s joints, are names, not handles:
+        // cadaclysm_blacksmith_assembly_link/_state in crates/cadaclysm-wasm/src/blacksmith.rs
+        // take a `Vec<String>`, so `arg`'s generic array rule (a JS array is a handle list,
+        // turned into a `Uint32Array`) must not touch them.
         const passed = args.filter((_, i) => !dropped.includes(i))
-          .map((a, i) => (short === 'assembly_link' && i === 2 ? Array.from(a, String) : arg(a)));
+          .map((a, i) => (((short === 'assembly_link' || short === 'assembly_state') && i === 2)
+            || (short === 'assembly_sequence' && (i === 2 || i === 4)) ? Array.from(a, String) : arg(a)));
         let result;
         try { result = fn(...passed); } catch (e) {
           if (trapped(e)) throw e;   // not a refusal: the kernel is dead, and the page reboots it
@@ -626,6 +779,9 @@ function _lib() {
     hits_piece: f('bool cadaclysm_blacksmith_hits_piece(const CadaclysmBlacksmithHits *hits, uint32_t i, _Out_ bool *inside, _Out_ CadaclysmBlacksmithSpot *start, _Out_ CadaclysmBlacksmithSpot *end)'),
     hits_piece_profile: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_hits_piece_profile(const CadaclysmBlacksmithHits *hits, uint32_t i)'),
     profile_common: f('CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_profile_common(const CadaclysmBlacksmithProfile *a, const CadaclysmBlacksmithProfile *b, double tolerance)'),
+    profile_to_arcs: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_to_arcs(const CadaclysmBlacksmithProfile *p, double tolerance)'),
+    profile_offset: f('CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_profile_offset(const CadaclysmBlacksmithProfile *p, double distance, double tolerance)'),
+    solid_section: f('CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_solid_section(const CadaclysmBlacksmithSolid *s, double z, double tolerance)'),
     profile_text: f('CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_profile_text(const char *text, double size, const char *font, const uint8_t *font_bytes, size_t font_len, const char *halign, const char *valign, double spacing, const char *direction)'),
     profile_list_count: f('uint32_t cadaclysm_blacksmith_profile_list_count(const CadaclysmBlacksmithProfileList *list)'),
     profile_list_get: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_list_get(const CadaclysmBlacksmithProfileList *list, uint32_t i)'),
@@ -645,6 +801,7 @@ function _lib() {
     face_count: f('uint32_t cadaclysm_blacksmith_face_count(const CadaclysmBlacksmithSolid *solid)'),
     select_face: f('uint32_t cadaclysm_blacksmith_select_face(const CadaclysmBlacksmithSolid *solid, uint32_t kind, const double *v, uint32_t index)'),
     face_frame: f('bool cadaclysm_blacksmith_face_frame(const CadaclysmBlacksmithSolid *solid, uint32_t face, _Out_ double *out)'),
+    mass_properties: f('bool cadaclysm_blacksmith_mass_properties(const CadaclysmBlacksmithSolid *solid, double accuracy, _Out_ CadaclysmBlacksmithMassProperties *out)'),
     face_ref: f('bool cadaclysm_blacksmith_face_ref(const CadaclysmBlacksmithSolid *solid, uint32_t face, _Out_ double *out)'),
     find_face: f('int32_t cadaclysm_blacksmith_find_face(const CadaclysmBlacksmithSolid *solid, const double *face_ref, int32_t hint, double tolerance)'),
     face_kind: f('const char *cadaclysm_blacksmith_face_kind(const CadaclysmBlacksmithSolid *solid, uint32_t face)'),
@@ -662,6 +819,22 @@ function _lib() {
     intersection_curve: f('bool cadaclysm_blacksmith_intersection_curve(const CadaclysmBlacksmithIntersection *intersection, uint32_t i, _Out_ CadaclysmBlacksmithCurve *out)'),
     intersection_overlap_count: f('uint32_t cadaclysm_blacksmith_intersection_overlap_count(const CadaclysmBlacksmithIntersection *intersection)'),
     intersection_overlap: f('bool cadaclysm_blacksmith_intersection_overlap(const CadaclysmBlacksmithIntersection *intersection, uint32_t i, _Out_ CadaclysmBlacksmithOverlap *out)'),
+    // The collider. `a`/`b`/`box_` cross *in* as six contiguous doubles (lo then hi) -- as a
+    // frame crosses in as twelve -- bit-compatible with `CadaclysmBlacksmithBox`; only an
+    // out-param is the real struct.
+    solid_bounds_box: f('bool cadaclysm_blacksmith_solid_bounds_box(const CadaclysmBlacksmithSolid *solid, double tolerance, _Out_ CadaclysmBlacksmithBox *out)'),
+    box_moved: f('bool cadaclysm_blacksmith_box_moved(const double *box_, const double *frame, _Out_ CadaclysmBlacksmithBox *out)'),
+    box_overlaps: f('bool cadaclysm_blacksmith_box_overlaps(const double *a, const double *b)'),
+    boxes_apart: f('bool cadaclysm_blacksmith_boxes_apart(const double *a, const double *frame_a, const double *b, const double *frame_b, _Out_ bool *apart)'),
+    collider_new: f('CadaclysmBlacksmithCollider *cadaclysm_blacksmith_collider_new(const CadaclysmBlacksmithSolid **solids, uint32_t count, double tolerance, const uint32_t *groups, const uint32_t *allowed, uint32_t allowed_count)'),
+    collider_free: f('void cadaclysm_blacksmith_collider_free(CadaclysmBlacksmithCollider *collider)'),
+    collider_group_count: f('uint32_t cadaclysm_blacksmith_collider_group_count(const CadaclysmBlacksmithCollider *collider)'),
+    collider_stats: f('bool cadaclysm_blacksmith_collider_stats(const CadaclysmBlacksmithCollider *collider, _Out_ CadaclysmBlacksmithColliderStats *out)'),
+    collider_check: f('CadaclysmBlacksmithCollisions *cadaclysm_blacksmith_collider_check(CadaclysmBlacksmithCollider *collider, const double *frames, uint32_t frame_count, uint32_t share_k, uint32_t share_n)'),
+    collisions_free: f('void cadaclysm_blacksmith_collisions_free(CadaclysmBlacksmithCollisions *collisions)'),
+    collisions_count: f('uint32_t cadaclysm_blacksmith_collisions_count(const CadaclysmBlacksmithCollisions *collisions)'),
+    collisions_hit: f('bool cadaclysm_blacksmith_collisions_hit(const CadaclysmBlacksmithCollisions *collisions, uint32_t i, _Out_ CadaclysmBlacksmithCollisionHit *out)'),
+    collisions_solid: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_collisions_solid(const CadaclysmBlacksmithCollisions *collisions, uint32_t i)'),
     leaked_edges: f('uint32_t cadaclysm_blacksmith_leaked_edges(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
     unpaired_edges: f('uint32_t cadaclysm_blacksmith_unpaired_edges(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
     manifold: f('bool cadaclysm_blacksmith_manifold(const CadaclysmBlacksmithSolid *solid, _Out_ uint32_t *out)'),
@@ -695,6 +868,7 @@ function _lib() {
     translate_profile: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_translate_profile(const CadaclysmBlacksmithProfile *profile, double dx, double dy)'),
     profile_coloured: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_coloured(const CadaclysmBlacksmithProfile *profile, double r, double g, double b)'),
     profile_colour: f('bool cadaclysm_blacksmith_profile_colour(const CadaclysmBlacksmithProfile *profile, _Out_ double *out)'),
+    parse_colour: f('bool cadaclysm_blacksmith_parse_colour(const char *text, _Out_ double *out)'),
     profile_round: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_round(const CadaclysmBlacksmithProfile *profile, double radius, const uint32_t *corners, size_t count, bool open)'),
     profile_close_loop: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_close_loop(const CadaclysmBlacksmithProfile *profile)'),
     profile_polylines: f('CadaclysmBlacksmithPolylines cadaclysm_blacksmith_profile_polylines(const CadaclysmBlacksmithProfile *profile, double tolerance)'),
@@ -739,6 +913,53 @@ function _lib() {
     sweep: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sweep(const CadaclysmBlacksmithProfile *profile, const double *frame, const CadaclysmBlacksmithSweepPath *path)'),
     sweep_open: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_sweep_open(const CadaclysmBlacksmithProfile *profile, const double *frame, const CadaclysmBlacksmithSweepPath *path)'),
     pipe: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_pipe(const CadaclysmBlacksmithSweepPath *path, double radius, double thickness)'),
+    // -- CAM: tools, stock and a job -- `Job.machine` recognises a part and appends
+    // what makes it; `report()` and `operations()` read the result back.
+    tool_flat: f('CadaclysmBlacksmithTool *cadaclysm_blacksmith_tool_flat(uint32_t number, double diameter, double flute_length, double feed, double plunge, double rpm)'),
+    tool_ball: f('CadaclysmBlacksmithTool *cadaclysm_blacksmith_tool_ball(uint32_t number, double diameter, double flute_length, double feed, double plunge, double rpm)'),
+    tool_drill: f('CadaclysmBlacksmithTool *cadaclysm_blacksmith_tool_drill(uint32_t number, double diameter, double flute_length, double feed, double rpm)'),
+    tool_with_ramp_angle: f('CadaclysmBlacksmithTool *cadaclysm_blacksmith_tool_with_ramp_angle(const CadaclysmBlacksmithTool *t, double degrees)'),
+    tool_free: f('void cadaclysm_blacksmith_tool_free(CadaclysmBlacksmithTool *t)'),
+    stock_box: f('CadaclysmBlacksmithStock *cadaclysm_blacksmith_stock_box(double min_x, double min_y, double min_z, double max_x, double max_y, double max_z)'),
+    stock_around: f('CadaclysmBlacksmithStock *cadaclysm_blacksmith_stock_around(const CadaclysmBlacksmithSolid *s, double margin)'),
+    stock_free: f('void cadaclysm_blacksmith_stock_free(CadaclysmBlacksmithStock *s)'),
+    job_new: f('CadaclysmBlacksmithJob *cadaclysm_blacksmith_job_new(const CadaclysmBlacksmithStock *stock, double safe_z)'),
+    job_set_clearance: f('bool cadaclysm_blacksmith_job_set_clearance(CadaclysmBlacksmithJob *j, double clearance)'),
+    job_set_tolerance: f('bool cadaclysm_blacksmith_job_set_tolerance(CadaclysmBlacksmithJob *j, double tolerance)'),
+    job_set_spindle_dwell: f('bool cadaclysm_blacksmith_job_set_spindle_dwell(CadaclysmBlacksmithJob *j, double seconds)'),
+    job_set_resolution: f('bool cadaclysm_blacksmith_job_set_resolution(CadaclysmBlacksmithJob *j, double resolution)'),
+    job_set_name: f('bool cadaclysm_blacksmith_job_set_name(CadaclysmBlacksmithJob *j, const char *name)'),
+    // The four manual verbs, and write_camotics's own file list -- header order, beside
+    // job_machine's own binding below (docs/superpowers/plans/2026-09-30-cam-in-the-other-wrappers.md, task 7b).
+    job_face: f('bool cadaclysm_blacksmith_job_face(CadaclysmBlacksmithJob *j, const CadaclysmBlacksmithTool *t, double z, double stepover, double stepdown)'),
+    job_contour: f('bool cadaclysm_blacksmith_job_contour(CadaclysmBlacksmithJob *j, const CadaclysmBlacksmithTool *t, const CadaclysmBlacksmithProfile *p, double top, double bottom, uint32_t side, double stepdown, bool climb, bool open)'),
+    job_pocket: f('bool cadaclysm_blacksmith_job_pocket(CadaclysmBlacksmithJob *j, const CadaclysmBlacksmithTool *t, const CadaclysmBlacksmithProfile *p, double top, double bottom, double stepover, double stepdown)'),
+    job_drill: f('bool cadaclysm_blacksmith_job_drill(CadaclysmBlacksmithJob *j, const CadaclysmBlacksmithTool *t, const double *xy, size_t count, double top, double bottom, double peck)'),
+    job_machine: f('CadaclysmBlacksmithReport *cadaclysm_blacksmith_job_machine(CadaclysmBlacksmithJob *j, const CadaclysmBlacksmithSolid *part, const CadaclysmBlacksmithTool *end_mill, const CadaclysmBlacksmithTool *const *drills, size_t drill_count, double stepover, double stepdown, double skin, double peck)'),
+    job_operations: f('CadaclysmBlacksmithOperations *cadaclysm_blacksmith_job_operations(const CadaclysmBlacksmithJob *j)'),
+    job_gcode: f('CadaclysmBlacksmithPrograms *cadaclysm_blacksmith_job_gcode(const CadaclysmBlacksmithJob *j)'),
+    job_camotics: f('CadaclysmBlacksmithPrograms *cadaclysm_blacksmith_job_camotics(const CadaclysmBlacksmithJob *j, const char *stem)'),
+    job_free: f('void cadaclysm_blacksmith_job_free(CadaclysmBlacksmithJob *j)'),
+    report_count: f('uint32_t cadaclysm_blacksmith_report_count(const CadaclysmBlacksmithReport *r)'),
+    report_kind: f('const char *cadaclysm_blacksmith_report_kind(const CadaclysmBlacksmithReport *r, uint32_t i)'),
+    report_at: f('bool cadaclysm_blacksmith_report_at(const CadaclysmBlacksmithReport *r, uint32_t i, _Out_ double *out)'),
+    report_size: f('double cadaclysm_blacksmith_report_size(const CadaclysmBlacksmithReport *r, uint32_t i)'),
+    report_reason: f('const char *cadaclysm_blacksmith_report_reason(const CadaclysmBlacksmithReport *r, uint32_t i)'),
+    report_region: f('CadaclysmBlacksmithProfileList *cadaclysm_blacksmith_report_region(const CadaclysmBlacksmithReport *r, uint32_t i)'),
+    report_text: f('const char *cadaclysm_blacksmith_report_text(const CadaclysmBlacksmithReport *r)'),
+    report_free: f('void cadaclysm_blacksmith_report_free(CadaclysmBlacksmithReport *r)'),
+    operations_count: f('uint32_t cadaclysm_blacksmith_operations_count(const CadaclysmBlacksmithOperations *l)'),
+    operations_kind: f('const char *cadaclysm_blacksmith_operations_kind(const CadaclysmBlacksmithOperations *l, uint32_t i)'),
+    operations_tool: f('uint32_t cadaclysm_blacksmith_operations_tool(const CadaclysmBlacksmithOperations *l, uint32_t i)'),
+    operations_param_count: f('uint32_t cadaclysm_blacksmith_operations_param_count(const CadaclysmBlacksmithOperations *l, uint32_t i)'),
+    operations_param_name: f('const char *cadaclysm_blacksmith_operations_param_name(const CadaclysmBlacksmithOperations *l, uint32_t i, uint32_t k)'),
+    operations_param_value: f('double cadaclysm_blacksmith_operations_param_value(const CadaclysmBlacksmithOperations *l, uint32_t i, uint32_t k)'),
+    operations_free: f('void cadaclysm_blacksmith_operations_free(CadaclysmBlacksmithOperations *l)'),
+    programs_count: f('uint32_t cadaclysm_blacksmith_programs_count(const CadaclysmBlacksmithPrograms *l)'),
+    programs_tool: f('uint32_t cadaclysm_blacksmith_programs_tool(const CadaclysmBlacksmithPrograms *l, uint32_t i)'),
+    programs_name: f('const char *cadaclysm_blacksmith_programs_name(const CadaclysmBlacksmithPrograms *l, uint32_t i)'),
+    programs_text: f('const char *cadaclysm_blacksmith_programs_text(const CadaclysmBlacksmithPrograms *l, uint32_t i)'),
+    programs_free: f('void cadaclysm_blacksmith_programs_free(CadaclysmBlacksmithPrograms *l)'),
     // -- assemblies: `assembly_name` borrows, like `solid_name`; the three that follow return
     // owned text (the placement's or the file's), freed the same way `step`/`sat_text` are.
     assembly_new: f('CadaclysmBlacksmithAssembly *cadaclysm_blacksmith_assembly_new(const char *name)'),
@@ -751,6 +972,16 @@ function _lib() {
     // `CadaclysmOpenOptions.schemas` already does in cadaclysm.js.
     assembly_link: f('bool cadaclysm_blacksmith_assembly_link(CadaclysmBlacksmithAssembly *assembly, const char *name, const char **placements, size_t count)'),
     assembly_joint: f('bool cadaclysm_blacksmith_assembly_joint(CadaclysmBlacksmithAssembly *assembly, const char *name, const char *start, const char *end)'),
+    // `frame`/`end_frame`, `lower`/`upper` and `has_lower`/`has_upper` stay alive for the call's
+    // duration as the caller's typed arrays; either all four of lower/upper/has_lower/has_upper
+    // are null (freedom_count 0) or all four are non-null with freedom_count entries each.
+    assembly_pair: f('bool cadaclysm_blacksmith_assembly_pair(CadaclysmBlacksmithAssembly *assembly, const char *joint, const char *kind, const double *frame, const double *end_frame, const double *lower, const double *upper, const bool *has_lower, const bool *has_upper, size_t freedom_count, double pitch)'),
+    // koffi marshals the joints string array into `const char **`, as `assembly_link` does.
+    // koffi marshals the states and interpolations string arrays into `const char *const *`, as `assembly_state`'s joints.
+    assembly_sequence: f('bool cadaclysm_blacksmith_assembly_sequence(CadaclysmBlacksmithAssembly *assembly, const char *name, const char *const *states, const double *ts, const char *const *interpolations, size_t count, bool seconds)'),
+    assembly_state: f('bool cadaclysm_blacksmith_assembly_state(CadaclysmBlacksmithAssembly *assembly, const char *name, const char **joints, const uint32_t *counts, const double *values, size_t row_count)'),
+    assembly_base: f('bool cadaclysm_blacksmith_assembly_base(CadaclysmBlacksmithAssembly *assembly, const char *link)'),
+    pair_freedom_count: f('uint32_t cadaclysm_blacksmith_pair_freedom_count(const char *kind)'),
   };
   return library;
 }
@@ -761,7 +992,6 @@ function _text(raw) { return raw == null ? '' : String(raw); }
 function _lastError() { return _text(_lib().last_error()); }
 /** Throw the library's own reason, or `what` if it left none. */
 function _fail(what) { throw new BuildError(_lastError() || what); }
-/** [r, g, b] from '#rgb', '#rrggbb' or three numbers; the range is the library's to check. */
 /** The eight counts `cadaclysm_blacksmith_manifold` writes, as a record. */
 function _manifold(row) {
   return {
@@ -771,18 +1001,59 @@ function _manifold(row) {
   };
 }
 
+/**
+ * What a solid measures, per unit density, each figure beside a bound on its own error, as a
+ * record with a `weight(density)` on it.
+ *
+ * Per unit density is the primitive: a body's weight is `density * volume` and its inertia scales
+ * the same way, so `weight` is the only figure that takes one. Nothing here multiplies by a density
+ * on your behalf -- an assembly of two materials would have to undo it.
+ *
+ * `volume`, `centroid`, `inertia` and `principalMoments` mean something only where `closed`. Where
+ * `accuracyMet` is false the refinement stopped before the accuracy asked for: the figures are
+ * honest, they are simply less certain, and the errors say by how much.
+ */
+function _mass(raw) {
+  const rows = (flat) => [
+    [flat[0], flat[1], flat[2]], [flat[3], flat[4], flat[5]], [flat[6], flat[7], flat[8]],
+  ];
+  return {
+    closed: raw.closed !== 0,
+    inverted: raw.inverted !== 0,
+    accuracyMet: raw.accuracy_met !== 0,
+    fromMesh: raw.from_mesh !== 0,
+    area: raw.area,
+    areaError: raw.area_error,
+    volume: raw.volume,
+    volumeError: raw.volume_error,
+    centroid: Array.from(raw.centroid),
+    centroidError: raw.centroid_error,
+    inertia: rows(raw.inertia),
+    inertiaError: raw.inertia_error,
+    principalMoments: Array.from(raw.principal_moments),
+    principalAxes: rows(raw.principal_axes),
+    /** `density * volume`, in whatever units the model and the density agree on. */
+    weight(density) { return density * this.volume; },
+  };
+}
+
+/** [r, g, b] in 0..1 from colour text -- '#rgb', '#rrggbb' or a CSS colour name -- read by the
+ *  library's own parser; null if it refused the text. */
+function _colourText(text) {
+  const out = new Float64Array(3);
+  return _lib().parse_colour(String(text), out) ? Array.from(out) : null;
+}
+
+/** [r, g, b] from '#rgb', '#rrggbb', a CSS colour name or three numbers; the range is the library's to check. */
 function _rgb(colour) {
   if (typeof colour === 'string') {
-    let h = colour.trim().replace(/^#/, '');
-    if (/^([0-9a-f]{3}|[0-9a-f]{6})$/i.test(h)) {
-      if (h.length === 3) h = [...h].map((c) => c + c).join('');
-      return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
-    }
+    const rgb = _colourText(colour);
+    if (rgb) return rgb;
   } else if (colour != null && typeof colour[Symbol.iterator] === 'function') {
     const v = [...colour].map(Number);
     if (v.length === 3) return v;
   }
-  throw new BuildError(`coloured: a colour is "#rgb", "#rrggbb" or (r, g, b) in 0..1, not ${JSON.stringify(colour)}`);
+  throw new BuildError(`coloured: a colour is "#rgb", "#rrggbb", a CSS colour name or (r, g, b) in 0..1, not ${JSON.stringify(colour)}`);
 }
 // A list argument as indices: `value` must be a list -- any iterable but a string -- and
 // each item an index (a whole number, 0 to 4294967295) or, where `edges`, an `Edge`.
@@ -827,6 +1098,47 @@ function _names(value, call, param) {
     i++;
   }
   return out;
+}
+// A pair's ranges argument: `null` (no ranges), or any iterable but a string -- each item
+// `null` (both sides unbounded) or a `[lower, upper]` pair with either side `null`. Refused
+// here, named, before the kernel is asked, as `_names` refuses a bare string for a list of
+// names.
+function _ranges(value, call) {
+  const described = (v) => (typeof v === 'string' ? JSON.stringify(v)
+    : (v != null && typeof v !== 'number' && typeof v !== 'boolean' && typeof v[Symbol.iterator] === 'function') ? 'a list'
+    : String(v));
+  if (value == null || typeof value === 'string' || typeof value[Symbol.iterator] !== 'function') {
+    throw new TypeError(`${call}: ranges must be a list of [lower, upper] pairs, not ${described(value)}`);
+  }
+  const rows = Array.from(value);
+  // Each entry is `null` (both sides unbounded) or a [lower, upper] pair -- never a bare
+  // number or other non-iterable, which Python's own `r[0]`/`r[1]` indexing would refuse
+  // (a Python non-sequence range entry raises `TypeError: '<type>' object is not
+  // subscriptable`); refused here, named, rather than silently read as "both unbounded".
+  rows.forEach((r, i) => {
+    if (r != null && (typeof r === 'string' || typeof r[Symbol.iterator] !== 'function')) {
+      throw new TypeError(`${call}: ranges[${i}] is not a [lower, upper] pair: ${described(r)}`);
+    }
+  });
+  return rows;
+}
+// A state's rows argument: a `Map`, or any iterable but a string, of `[joint, values]` pairs.
+// Refused here, named, before the kernel is asked, as `_names` refuses a bare string for a
+// list of names.
+function _stateRows(value, call) {
+  const described = (v) => (typeof v === 'string' ? JSON.stringify(v)
+    : (v != null && typeof v !== 'number' && typeof v !== 'boolean' && typeof v[Symbol.iterator] === 'function') ? 'a list'
+    : String(v));
+  if (value == null || typeof value === 'string' || (!(value instanceof Map) && typeof value[Symbol.iterator] !== 'function')) {
+    throw new TypeError(`${call}: rows must be a Map or a list of [joint, values] pairs, not ${described(value)}`);
+  }
+  const rows = value instanceof Map ? Array.from(value) : Array.from(value);
+  return rows.map((row, i) => {
+    if (row == null || typeof row[Symbol.iterator] !== 'function') throw new TypeError(`${call}: rows[${i}] is not a [joint, values] pair: ${described(row)}`);
+    const [joint, values] = row;
+    if (typeof joint !== 'string') throw new TypeError(`${call}: rows[${i}][0] is not a name: ${described(joint)}`);
+    return [joint, Array.from(values, Number)];
+  });
 }
 /** A face index for the C call, NONE for the whole solid; a negative one would wrap to NONE. */
 function _faceOrNone(solid, face, what) {
@@ -885,32 +1197,34 @@ const SVG_TRANSPARENT = 0xFFFFFFFF;
 /**
  * The seven camera angles `SvgOptions.view` understands, degrees
  * `[azimuth, elevation]` -- the same table the reader's own `SvgView` gives
- * (`cadaclysm_viewer.VIEWS` in Python).
+ * (`cadaclysm_view.VIEWS` in Python).
  */
 const SvgView = Object.freeze({
   front: Object.freeze([-90, 0]), back: Object.freeze([90, 0]), left: Object.freeze([180, 0]), right: Object.freeze([0, 0]),
   top: Object.freeze([-90, 90]), bottom: Object.freeze([-90, -90]), iso: Object.freeze([-50, 28]),
 });
 
-/** A colour as the ABI's packed `0xRRGGBB`: `'#rgb'`, `'#rrggbb'` or an `[r, g, b]` triple (0..255). */
+/** A colour as the ABI's packed `0xRRGGBB`: `'#rgb'`, `'#rrggbb'`, a CSS colour name or an `[r, g, b]` triple (0..255). */
 function _packedColour(colour, what) {
   if (typeof colour === 'string') {
-    let h = colour.trim().replace(/^#/, '');
-    if (h.length === 3) h = [...h].map((c) => c + c).join('');
-    if (/^[0-9a-f]{6}$/i.test(h)) return parseInt(h, 16);
-    throw new BuildError(`${what}: '${colour}' is not '#rgb' or '#rrggbb'`);
-  }
-  if (colour != null && typeof colour[Symbol.iterator] === 'function') {
+    const rgb = _colourText(colour);
+    if (rgb) return (Math.round(rgb[0] * 255) << 16) | (Math.round(rgb[1] * 255) << 8) | Math.round(rgb[2] * 255);
+  } else if (colour != null && typeof colour[Symbol.iterator] === 'function') {
     const [r, g, b] = Array.from(colour, Number);
     if ([r, g, b].every(Number.isFinite)) return ((r & 0xff) << 16) | ((g & 0xff) << 8) | (b & 0xff);
   }
-  throw new BuildError(`${what}: a colour is '#rgb', '#rrggbb' or [r, g, b] in 0..255, not ${JSON.stringify(colour)}`);
+  throw new BuildError(`${what}: a colour is '#rgb', '#rrggbb', a CSS colour name or [r, g, b] in 0..255, not ${JSON.stringify(colour)}`);
 }
 
 /**
  * `SvgOptions`'s own defaults, the same `cadaclysm_blacksmith_svg_options_init`
  * fills: the viewer's `iso`, orthographic, a 1000-square page, a black
- * one-unit stroke on nothing (transparent), edges alone. Every field is
+ * one-unit stroke on nothing (transparent), and edges with each solid's
+ * outline beside them. `silhouettes` is on by default because a line set
+ * alone cannot draw every body: a sphere's and a torus's only curves are
+ * their seams, which are not edges of the body and are never drawn, so those
+ * two came back as a blank page. Pass `silhouettes: false` for the lines
+ * alone. Every field is
  * optional on `Solid.svgText`/`Solid.svg`/`Solid.svgAsync`, `writeSvgText` and
  * `writeSvg`; a field left out keeps its default here, not `undefined`. `up`
  * defaults to `'z'` when left out -- a solid carries no convention of its own.
@@ -919,7 +1233,7 @@ function svgOptionsDefaults() {
   return {
     view: 'iso', azimuth: null, elevation: null, up: null, fov: 0, width: 1000, height: 1000,
     margin: 0.05, tolerance: 0.1, stroke: '#000000', strokeWidth: 1, background: null,
-    edges: true, curves: false, isocurves: false, polylines: false,
+    edges: true, curves: false, isocurves: false, polylines: false, silhouettes: true,
   };
 }
 
@@ -952,7 +1266,10 @@ function _svgOptions(options) {
   raw.stroke_width = o.strokeWidth;
   raw.stroke = _packedColour(o.stroke, 'svg: stroke');
   raw.background = o.background == null ? SVG_TRANSPARENT : _packedColour(o.background, 'svg: background');
-  raw.flags = (o.edges ? 1 : 0) | (o.curves ? 2 : 0) | (o.isocurves ? 4 : 0) | (o.polylines ? 8 : 0);
+  // `silhouettes` (16) is a line set in its own right: on its own it draws an
+  // outline-only page, and only naming nothing at all is refused.
+  raw.flags = (o.edges ? 1 : 0) | (o.curves ? 2 : 0) | (o.isocurves ? 4 : 0) | (o.polylines ? 8 : 0)
+    | (o.silhouettes ? 16 : 0);
   return raw;
 }
 
@@ -1093,6 +1410,38 @@ class Profile {
   }
   withHole(hole) { return new Profile(_lib().profile_with_hole(this._handle, hole._handle)); }
   /**
+   * This profile with every free-form side (a Bezier, a conic, a NURBS) replaced by lines and
+   * arcs within `tolerance` of it -- what a G-code writer can say. Lines and arcs pass through as
+   * they are, every loop closes on itself exactly, holes are converted the same way. Throws
+   * `BuildError` for a `tolerance` not positive and finite, or a spline that does not evaluate.
+   */
+  /**
+   * The outline, then each hole, as `Float32Array`s of x, y, z at z = 0, within `tolerance` of the
+   * profile's arcs and splines -- what a viewer draws it with. A closed loop repeats its first point
+   * at the end; an open chain (a profile ended open) stays open, the segments it has. Copies.
+   */
+  polylines(tolerance = 0.05) {
+    const p = _lib().profile_polylines(this._handle, tolerance);
+    if (p.offsets == null) _fail('profile_polylines');
+    const points = _floats(p.points, p.point_count * 3) ?? new Float32Array(0);
+    const offsets = _uint32s(p.offsets, p.polyline_count + 1);
+    const out = [];
+    for (let i = 0; i < p.polyline_count; i++) out.push(points.slice(offsets[i] * 3, offsets[i + 1] * 3));
+    return out;
+  }
+  toArcs(tolerance = 0.01) { return new Profile(_lib().profile_to_arcs(this._handle, tolerance)); }
+  /**
+   * This profile grown by `distance` (shrunk where it is negative), as zero or more profiles, all
+   * lines and arcs: outward corners rounded by `|distance|`, holes moving against the boundary (a
+   * hole shrinks as the profile grows). Free-form sides are fitted to `tolerance` first
+   * (`toArcs`). A shrink that eats the whole profile is an empty array. Throws `BuildError` for a
+   * `distance` not finite, a `tolerance` not positive and finite, a loop with no sides, or loops
+   * that cross or touch.
+   */
+  offset(distance, tolerance = 0.01) {
+    return _profileList(_lib().profile_offset(this._handle, distance, tolerance), 'profile_offset');
+  }
+  /**
    * Where this profile's curves cross, touch or run along `other`'s, both read in one plane, as
    * `Hit` values ordered along this profile. Points closer than `tolerance` merge; two curves
    * within `tolerance` of each other for longer than it are one run when they part only where one
@@ -1146,7 +1495,7 @@ class Profile {
       String(halign), String(valign), spacing, String(direction)), 'profile_text');
   }
   translate(dx, dy) { return new Profile(_lib().translate_profile(this._handle, dx, dy)); }
-  /** This outline coloured -- `colour` is '#rgb', '#rrggbb' or [r, g, b] in 0..1: how it is drawn.
+  /** This outline coloured -- `colour` is '#rgb', '#rrggbb', a CSS colour name or [r, g, b] in 0..1: how it is drawn.
    *  The verbs that make a profile from one carry it; a solid made from it takes nothing. */
   coloured(colour) {
     const [r, g, b] = _rgb(colour);
@@ -1367,6 +1716,10 @@ class Solid {
     _lib().solid_free(h);
   }
   [Symbol.for('nodejs.dispose')]() { this.close(); }
+  /** Draw it with the view library in use: on the wgpu library, in the one shared window (returns at once); elsewhere, a still. Options as `ShowOptions`. */
+  show(options = {}) { return require('./cadaclysm_view')._present(this, options, 'show'); }
+  /** Orbit it until the window is closed; the camera it was left at, and the last pick. */
+  view(options = {}) { return require('./cadaclysm_view')._present(this, options, 'view'); }
   // -- building
   static cuboid(x, y, z) { return new Solid(_lib().cuboid(x, y, z)); }
   static cylinder(r, h) { return new Solid(_lib().cylinder(r, h)); }
@@ -1449,6 +1802,17 @@ class Solid {
   static _keep(keep) { if (keep !== 'outside' && keep !== 'inside') throw new BuildError(`trim: keep must be 'outside' or 'inside', not '${keep}'`); }
   // -- moving
   place(frame) { return new Solid(_lib().place(this._handle, _frame(frame))); }
+  /**
+   * This solid cut by the plane `Z = z`: its closed outlines there, in XY, nested into profiles
+   * with holes (boundaries counter-clockwise, holes clockwise), a line or a circle crossing kept
+   * exact and any other curve as lines within `tolerance`. A plane that misses the solid is an
+   * empty array. Throws `BuildError` for a `z` not finite, a `tolerance` not positive and finite,
+   * a face lying in the plane (section a little above or below it), or a crossing that does not
+   * close.
+   */
+  section(z, tolerance = 0.05) {
+    return _profileList(_lib().solid_section(this._handle, z, tolerance), 'solid_section');
+  }
   translate(dx, dy, dz) { return new Solid(_lib().translate(this._handle, dx, dy, dz)); }
   /** This solid scaled by `factor` about the origin: every length times `factor`, exactly. */
   scaled(factor) { return new Solid(_lib().scaled(this._handle, factor)); }
@@ -1640,6 +2004,24 @@ class Solid {
     if (!_lib().manifold(this._handle, out)) _fail('manifold');
     return _manifold(out);
   }
+  /**
+   * What this solid measures, per unit density, each figure beside a bound on its own error.
+   * `accuracy` is relative and 0 asks for the library's default. The volume-side figures mean
+   * something only where `closed`; where `accuracyMet` is false the refinement stopped early and
+   * the figures are honest but less certain, which the errors say.
+   */
+  mass(accuracy = 0) {
+    const out = {};
+    if (!_lib().mass_properties(this._handle, accuracy, out)) _fail('mass_properties');
+    return _mass(out);
+  }
+  /** This solid's box at `tolerance`: its boolean mesh, padded by twice that -- the
+   *  broad phase's own bound (`Collider` builds one per part at construction). */
+  boundsBox(tolerance = 0.05) {
+    const out = {};
+    if (!_lib().solid_bounds_box(this._handle, tolerance, out)) _fail('solid_bounds_box');
+    return _boxOf(out);
+  }
   // -- out
   /** `{ positions, normals, indices }` as fresh typed arrays at `tolerance`. */
   mesh(tolerance = 0.05) {
@@ -1822,7 +2204,7 @@ class Solid {
    */
   get name() { const raw = _lib().solid_name(this._handle); return raw ? String(raw) : null; }
   // -- colour
-  /** This solid coloured -- `colour` is '#rgb', '#rrggbb' or [r, g, b] in 0..1 -- or with `face`
+  /** This solid coloured -- `colour` is '#rgb', '#rrggbb', a CSS colour name or [r, g, b] in 0..1 -- or with `face`
    *  just that face, whose colour then wins over the solid's. What is made from a coloured solid
    *  inherits: a move keeps every colour; a boolean, fillet, chamfer or shell gives each face the
    *  colour of the face it lies on (a cut's bore the tool's), and a new face the solid's. */
@@ -2124,6 +2506,349 @@ class Solid {
   }
 }
 
+// ---- CAM: tools, stock and a job ---------------------------------------------------
+// The automatic layer (`Job.machine`) only, matching `cadaclysm_blacksmith.py`'s object
+// model name for name -- `machine`, `report()`'s items and `operations()`. `Job`'s manual
+// verbs (`face`/`contour`/`pocket`/`drill`) and `writeCamotics` stay off this wrapper for
+// now (docs/superpowers/plans/2026-09-28-cam-abi-python.md's plan 4 is where the other
+// nine wrappers gain the whole surface); nothing here stops that plan adding them later.
+
+const _toolFinalizer = typeof FinalizationRegistry === 'function'
+  ? new FinalizationRegistry((h) => { try { _lib().tool_free(h); } catch (_) { /* exiting */ } }) : null;
+
+/** A cutter: Grbl tool `number` (1 to 255, the `T` word), `diameter` and `fluteLength` in
+ * mm, `feed` and `plunge` in mm/min, `rpm` its spindle speed, ramping into its cuts at
+ * `rampAngle` degrees. Immutable; a job keeps its own copy. */
+class Tool {
+  constructor(handle) {
+    this._handle = _checked(handle, 'tool');
+    if (_toolFinalizer) _toolFinalizer.register(this, handle);
+  }
+  static _ramped(handle, rampAngle, what) {
+    const tool = new Tool(_checked(handle, what));
+    if (rampAngle === 3.0) return tool;   // the library's own default: no second handle
+    return new Tool(_lib().tool_with_ramp_angle(tool._handle, rampAngle));
+  }
+  /** A flat end mill. Throws for a `number` outside 1..255, a size, feed or speed not
+   * positive and finite, or a `rampAngle` outside (0, 90]. */
+  static flat(number, diameter, fluteLength, feed, plunge, rpm, rampAngle = 3.0) {
+    return Tool._ramped(_lib().tool_flat(number, diameter, fluteLength, feed, plunge, rpm), rampAngle, 'tool_flat');
+  }
+  /** A ball end mill, as `flat` but its tip a half sphere of the diameter; in 2.5D it
+   * cuts where a flat does, `bottom` being the tip. */
+  static ball(number, diameter, fluteLength, feed, plunge, rpm, rampAngle = 3.0) {
+    return Tool._ramped(_lib().tool_ball(number, diameter, fluteLength, feed, plunge, rpm), rampAngle, 'tool_ball');
+  }
+  /** A drill, plunging at `feed`. A job takes it for automatic holes, or its own `drill` (not
+   * yet wrapped here) only. */
+  static drill(number, diameter, fluteLength, feed, rpm) {
+    return new Tool(_lib().tool_drill(number, diameter, fluteLength, feed, rpm));
+  }
+}
+
+const _stockFinalizer = typeof FinalizationRegistry === 'function'
+  ? new FinalizationRegistry((h) => { try { _lib().stock_free(h); } catch (_) { /* exiting */ } }) : null;
+
+/** The block of material a job cuts, an axis-aligned box. Immutable; a job keeps its own
+ * copy. */
+class Stock {
+  constructor(handle) {
+    this._handle = _checked(handle, 'stock');
+    if (_stockFinalizer) _stockFinalizer.register(this, handle);
+  }
+  /** The box from `min` (x, y, z) to `max`. Throws unless every min is below its max and
+   * all six are finite. */
+  static box(min, max) {
+    const [x0, y0, z0] = min, [x1, y1, z1] = max;
+    return new Stock(_lib().stock_box(x0, y0, z0, x1, y1, z1));
+  }
+  /** `solid`'s bounds grown by `margin` in -X, +X, -Y, +Y and +Z; the bottom stays at the
+   * solid's lowest Z. Throws for a `margin` negative or not finite. */
+  static around(solid, margin = 0) { return new Stock(_lib().stock_around(solid._handle, margin)); }
+}
+
+/** One file a job wrote: a Grbl program -- `tool` its `T` number, `name` `<job name>-T<n>`
+ * (or `<job name>-<k>-T<n>` for a repeated tool), `text` its G-code. Read-only. */
+class Program {
+  constructor(tool, name, text) { this.tool = tool; this.name = name; this.text = text; Object.freeze(this); }
+}
+
+function _programs(handle, what) {
+  const l = _lib();
+  _checked(handle, what);
+  try {
+    const n = l.programs_count(handle);
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(new Program(l.programs_tool(handle, i), l.programs_name(handle, i), l.programs_text(handle, i)));
+    return out;
+  } finally {
+    l.programs_free(handle);
+  }
+}
+
+/** One operation of a `Job`, read back by `job.operations()`: `kind` ("face", "contour",
+ * "pocket" or "drill"), `tool` (its Grbl T number) and `params` -- a plain object, in the
+ * kind-specific order the operation stores. In `params`: `side` reads as
+ * `"outside"`/`"inside"`/`"on"`; `climb` and `open` as `bool`; `points` as an integer; a
+ * `NaN` `peck` as `null`; every other value stays a number. Read-only. */
+class Operation {
+  constructor(kind, tool, params) { this.kind = kind; this.tool = tool; this.params = params; Object.freeze(this); }
+}
+
+/** A value's name for a "must be a Foo, not <this>" message: its constructor's name for
+ * an object, `null`/`undefined` spelled out, `typeof` otherwise. */
+function _typeName(v) {
+  if (v === null || v === undefined) return String(v);
+  return typeof v === 'object' ? (v.constructor?.name ?? 'object') : typeof v;
+}
+
+/** One `operations_param_value`, typed as the spec picks by its name (mirrors Python's
+ * `_operation_param`). */
+function _operationParam(name, value) {
+  if (name === 'side') return { 0: 'outside', 1: 'inside', 2: 'on' }[value] ?? value;
+  if (name === 'climb' || name === 'open') return Boolean(value);
+  if (name === 'points') return Math.trunc(value);
+  if (name === 'peck') return Number.isNaN(value) ? null : value;
+  return value;
+}
+
+function _operations(handle, what) {
+  const l = _lib();
+  _checked(handle, what);
+  try {
+    const n = l.operations_count(handle);
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const kind = l.operations_kind(handle, i);
+      const tool = l.operations_tool(handle, i);
+      const paramCount = l.operations_param_count(handle, i);
+      const params = {};
+      for (let k = 0; k < paramCount; k++) {
+        const name = l.operations_param_name(handle, i, k);
+        params[name] = _operationParam(name, l.operations_param_value(handle, i, k));
+      }
+      out.push(new Operation(kind, tool, params));
+    }
+    return out;
+  } finally {
+    l.operations_free(handle);
+  }
+}
+
+/** One thing `job.machine()` left uncut: `kind` (`"corner"`, `"hole"`, `"slope"`,
+ * `"undercut"` or `"too_deep"`), `at` (`[x, y, z]`), `size` (its meaning per `kind`),
+ * `reason` (one sentence naming the tool involved), and `region` (its XY area, as a list
+ * of `Profile`). Read-only. */
+class ReportItem {
+  constructor(kind, at, size, reason, region) {
+    this.kind = kind; this.at = at; this.size = size; this.reason = reason; this.region = region;
+    Object.freeze(this);
+  }
+}
+
+/**
+ * What `job.machine()` could not make, read eagerly when it returns: a plain array of
+ * `ReportItem`, in order -- `length`, iteration and indexing read the items, as any array
+ * does -- with a non-enumerable `text` (the kernel's own report text, one line per item or
+ * "nothing left uncut") and a matching `toString()`, so `` `${report}` `` and
+ * `String(report)` print it. There is no `Report` class of its own: Python's `Report`
+ * wraps a list for `len`/`iter`/`str`, which a plain array already gives for free here.
+ */
+function _report(handle, what) {
+  const l = _lib();
+  _checked(handle, what);
+  try {
+    const n = l.report_count(handle);
+    const items = [];
+    for (let i = 0; i < n; i++) {
+      const kind = l.report_kind(handle, i);
+      const at = new Float64Array(3);
+      if (!l.report_at(handle, i, at)) _fail('report_at');
+      const size = l.report_size(handle, i);
+      const reason = l.report_reason(handle, i);
+      const region = _profileList(l.report_region(handle, i), 'report_region');
+      items.push(new ReportItem(kind, Array.from(at), size, reason, region));
+    }
+    const text = l.report_text(handle);
+    Object.defineProperty(items, 'text', { value: text, enumerable: false });
+    items.toString = () => text;
+    return items;
+  } finally {
+    l.report_free(handle);
+  }
+}
+
+const _jobFinalizer = typeof FinalizationRegistry === 'function'
+  ? new FinalizationRegistry((h) => { try { _lib().job_free(h); } catch (_) { /* exiting */ } }) : null;
+
+// `contour`'s `side`, as cadaclysm_blacksmith.py's `_SIDES` maps it for the C call.
+const _JOB_SIDES = { outside: 0, inside: 1, on: 2 };
+// A NUL truncates silently going through the native call, so a name or a CAMotics stem with
+// one in it is refused here, in the kernel's own words for a name with a control character in
+// it, as the Python SDK does.
+const _NUL_NAME_ERROR = 'job: a name must be non-empty and without brackets, slashes, quotes, control characters, or : * ? < > |';
+const _rejectNul = (s) => { if (String(s).includes('\0')) throw new BuildError(_NUL_NAME_ERROR); };
+
+/**
+ * A machining job on a `Stock`: operations kept in the order they are added, written as
+ * one Grbl 1.1 program per run of operations sharing a tool. Mutable -- each operation is
+ * added in place, and a refused one leaves the job as it was. `safeZ` is the absolute Z of
+ * rapids between operations and at a program's start and end, above the stock's top;
+ * `clearance` is how far an operation enters and leaves its passes above its top;
+ * `tolerance` fits free-form sides and offsets; `name` names the programs (`<name>-T<n>`);
+ * every program waits `spindleDwell` seconds after starting the spindle; `resolution` is
+ * the CAMotics project's voxel size in mm. Throws for a `safeZ` not above the stock, or a
+ * setting the job refuses. `close()` frees this handle.
+ */
+class Job {
+  // Positional, with defaults, name for name and in the same order as
+  // cadaclysm_blacksmith.py's `Job.__init__(self, stock, safe_z, clearance=1.0,
+  // tolerance=0.01, name="job", spindle_dwell=2.0, resolution=0.1)` -- this file's own
+  // convention for a call with several optional settings (`Solid.join`, `Solid.cut`), not
+  // an options object.
+  constructor(stock, safeZ, clearance = 1.0, tolerance = 0.01, name = 'job', spindleDwell = 2.0, resolution = 0.1) {
+    _rejectNul(name);
+    const l = _lib();
+    this._handle = _checked(l.job_new(stock._handle, safeZ), 'job_new');
+    if (_jobFinalizer) _jobFinalizer.register(this, this._handle, this);
+    // the library starts at the same defaults, so only what differs is set
+    if (clearance !== 1.0 && !l.job_set_clearance(this._handle, clearance)) _fail('job_set_clearance');
+    if (tolerance !== 0.01 && !l.job_set_tolerance(this._handle, tolerance)) _fail('job_set_tolerance');
+    if (spindleDwell !== 2.0 && !l.job_set_spindle_dwell(this._handle, spindleDwell)) _fail('job_set_spindle_dwell');
+    if (resolution !== 0.1 && !l.job_set_resolution(this._handle, resolution)) _fail('job_set_resolution');
+    if (name !== 'job' && !l.job_set_name(this._handle, String(name))) _fail('job_set_name');
+  }
+  get _live() {
+    if (!this._handle) throw new BuildError('job: closed');
+    return this._handle;
+  }
+  get closed() { return this._handle === null; }
+  close() {
+    if (this._handle === null) return;
+    const h = this._handle; this._handle = null;
+    if (_jobFinalizer) _jobFinalizer.unregister(this);
+    _lib().job_free(h);
+  }
+  [Symbol.for('nodejs.dispose')]() { this.close(); }
+  /**
+   * Face the stock's top down to `z`, in zigzag rows along X `stepover` apart and passes at
+   * most `stepdown` deep, with `tool`. Added to the job in place. Throws for a drill, a `z`
+   * above the stock's top, a stepover past the tool's diameter, ...
+   */
+  face(tool, z, stepover, stepdown) {
+    if (!_lib().job_face(this._live, tool._handle, z, stepover, stepdown)) _fail('job_face');
+  }
+  /**
+   * Cut along `profile` from `top` to `bottom` in passes at most `stepdown` deep, with
+   * `tool`: `side` "outside" the profile, "inside" it, or "on" its line; `climb` for climb
+   * milling, else conventional; `open` to cut the outline as an open chain (only "on" its
+   * line, and with no holes). Throws `BuildError` for any other `side`, or what the job
+   * otherwise refuses.
+   */
+  contour(tool, profile, top, bottom, side = 'outside', stepdown = 1.0, climb = true, open = false) {
+    const code = typeof side === 'string' ? _JOB_SIDES[side] : undefined;
+    if (code === undefined) throw new BuildError("side must be 'outside', 'inside' or 'on'");
+    if (!_lib().job_contour(this._live, tool._handle, profile._handle, top, bottom, code, stepdown, Boolean(climb), Boolean(open))) {
+      _fail('job_contour');
+    }
+  }
+  /**
+   * Clear `profile` -- its holes left standing as islands -- from `top` to `bottom`, in
+   * rings `stepover` apart (at most the tool's radius) and passes at most `stepdown` deep,
+   * with `tool`. Throws for what the job refuses; a pocket too small for the tool is refused
+   * by `gcode()`, naming the operation.
+   */
+  pocket(tool, profile, top, bottom, stepover, stepdown) {
+    if (!_lib().job_pocket(this._live, tool._handle, profile._handle, top, bottom, stepover, stepdown)) _fail('job_pocket');
+  }
+  /**
+   * Drill a hole at each (x, y) of `points` from `top` to `bottom` with `tool`, pecking
+   * `peck` deep at a time (retracting between pecks), or straight to depth for `null`.
+   * Throws `BuildError` for a point that is not two numbers, or what the job otherwise
+   * refuses (a tool that is not a drill, no points, ...).
+   */
+  drill(tool, points, top, bottom, peck = null) {
+    const pairs = Array.from(points, (p) => Array.from(p, Number));
+    if (pairs.some((p) => p.length !== 2)) throw new BuildError('drill: every point must be (x, y)');
+    const xy = Float64Array.from(pairs.flat());
+    if (!_lib().job_drill(this._live, tool._handle, xy, pairs.length, top, bottom, peck == null ? NaN : peck)) _fail('job_drill');
+  }
+  /**
+   * Recognise `part` and append the operations that make it: faced, contoured and
+   * pocketed with `endMill`, its holes drilled with whichever of `drills` fits each -- a
+   * tool per required diameter. `stepover` and `stepdown` default to the kernel's own
+   * (`null`, the default, asks for that); `skin` (at least 0, default 0.3) is how far
+   * above the part's lowest point the outline stops, so the part stays attached to the
+   * stock -- `0` cuts through; `peck` defaults to none (a drill straight to depth).
+   * `drills` may be one `Tool` as well as an array of them. Returns the machining's
+   * `Report` (see `_report`) of what could not be cut. Throws for a `part` that is not a
+   * solid handle, an `endMill` or a drill that is not a `Tool`, or what the kernel refuses
+   * (a drill as `endMill`, ...); the job changes only on success -- a refusal leaves it
+   * exactly as it was.
+   */
+  machine(part, endMill, drills = [], stepover = null, stepdown = null, skin = 0.3, peck = null) {
+    // Checked here, before the C call: a wrong type would otherwise hit `part._handle` or
+    // `t._handle` on a value with no such property and raise a confusing TypeError of its
+    // own -- `undefined` reaching the library as a handle, rather than this one naming the
+    // argument (mirrors Python's `Job.machine`, which raises the same way for the same
+    // reason).
+    if (!(part instanceof Solid)) throw new TypeError(`machine: part must be a Solid, not ${_typeName(part)}`);
+    if (!(endMill instanceof Tool)) throw new TypeError(`machine: endMill must be a Tool, not ${_typeName(endMill)}`);
+    const tools = drills instanceof Tool ? [drills] : Array.from(drills);
+    // A plain array of handles, not a Uint32Array: native handles are koffi pointer
+    // objects (only the wasm backend's handles are small integers), and the wasm shim's
+    // own `arg()` turns a plain array into a `Uint32Array` for that backend already.
+    const handles = tools.map((t, i) => {
+      if (!(t instanceof Tool)) throw new TypeError(`machine: drills[${i}] must be a Tool, not ${_typeName(t)}`);
+      return t._handle;
+    });
+    const handle = _lib().job_machine(
+      this._live, part._handle, endMill._handle, handles, handles.length,
+      stepover == null ? NaN : stepover,
+      stepdown == null ? NaN : stepdown,
+      skin,
+      peck == null ? NaN : peck,
+    );
+    return _report(handle, 'job_machine');
+  }
+  /** Every operation added to this job so far, in order -- whether added by
+   * `face`/`contour`/`pocket`/`drill` or by `machine`. */
+  operations() { return _operations(_lib().job_operations(this._live), 'job_operations'); }
+  /** The job as Grbl 1.1 programs, one per run of consecutive operations sharing a tool
+   * (T1, T2, T1 gives three), each named `<name>-T<n>` (or `<name>-<k>-T<n>` for run `k`
+   * of a repeated tool); an array of length 0 for a job with no operations. Throws for an
+   * operation whose geometry the tool cannot cut (named by its index and kind). */
+  gcode() { return _programs(_lib().job_gcode(this._live), 'job_gcode'); }
+  /**
+   * A CAMotics project at `filePath` and its files beside it, named after the project's
+   * file stem (`out/part.camotics` writes `out/part-T1.nc`), not the job's name: each
+   * program, a simulation copy of it (`.sim.nc`, which the project lists), and the project
+   * last. Creates the directory. Returns the paths written, the project last, written here
+   * (not by the library) with `fs`, exactly as the programs' own text reads. Throws for a
+   * path with no file stem, what `gcode()` refuses, or a file that cannot be written.
+   */
+  writeCamotics(filePath) {
+    filePath = String(filePath);
+    const stem = path.basename(filePath, path.extname(filePath));
+    _rejectNul(stem);
+    const files = _programs(_lib().job_camotics(this._live, stem), 'job_camotics');
+    const folder = path.dirname(filePath);
+    try {
+      fs.mkdirSync(folder, { recursive: true });
+      const written = [];
+      files.forEach((program, i) => {
+        const at = i === files.length - 1 ? filePath : path.join(folder, program.name);
+        fs.writeFileSync(at, program.text, 'utf8');
+        written.push(at);
+      });
+      return written;
+    } catch (e) {
+      if (e instanceof BuildError) throw e;
+      throw new BuildError(`job_camotics: ${filePath}: ${e.message}`);
+    }
+  }
+}
+
 const _assemblyFinalizer = typeof FinalizationRegistry === 'function'
   ? new FinalizationRegistry((h) => { try { _lib().assembly_free(h); } catch (_) { /* exiting */ } }) : null;
 
@@ -2196,6 +2921,82 @@ class Assembly {
     if (!_lib().assembly_joint(this._live, name, start, end)) _fail('assembly_joint');
   }
   /**
+   * Give joint `joint` its pair: `kind` (a name of the kind table -- `revolute`, `prismatic`,
+   * `cylindrical`, `screw`, `spherical`, `spherical_with_pin`, `planar`, `universal`,
+   * `homokinetic`, `fully_constrained` or `unconstrained`), the contact `frame` at rest, an
+   * optional `endFrame` (the frame the pair reaches at its rest values; `frame` itself when
+   * omitted), `ranges` (an array, one entry per freedom of `kind`, each `null` or a `[lower,
+   * upper]` pair with either side `null`; omitted entirely for a kind that allows none), and
+   * `pitch` (required and non-zero for `screw`, refused for any other kind). Throws the
+   * kernel's own text when a rule refuses it; the assembly is then unchanged.
+   */
+  pair(joint, kind, frame, { endFrame = null, ranges = null, pitch = null } = {}) {
+    const f = _frame(frame);
+    const ef = endFrame == null ? null : _frame(endFrame);
+    let lower = null, upper = null, hasLower = null, hasUpper = null, freedomCount = 0;
+    if (ranges != null) {
+      const rows = _ranges(ranges, 'pair');
+      freedomCount = rows.length;
+      // `ranges` being given -- even `[]` -- must reach the C ABI as non-null pointers
+      // with count 0, never as "no ranges" (all four null, which only an omitted `ranges`
+      // means); koffi passes a zero-length typed array's buffer as a null pointer, so a
+      // trailing dummy element is padded on to keep it non-null. `freedomCount` below
+      // stays the real (possibly 0) count, so the C ABI never reads the padding.
+      const bufLen = freedomCount || 1;
+      lower = new Float64Array(bufLen);
+      upper = new Float64Array(bufLen);
+      hasLower = new Uint8Array(bufLen);
+      hasUpper = new Uint8Array(bufLen);
+      rows.forEach((r, i) => {
+        const lo = r == null ? null : r[0];
+        const hi = r == null ? null : r[1];
+        if (lo != null) { lower[i] = Number(lo); hasLower[i] = 1; }
+        if (hi != null) { upper[i] = Number(hi); hasUpper[i] = 1; }
+      });
+    }
+    const pitchArg = pitch == null ? NaN : Number(pitch);
+    if (!_lib().assembly_pair(this._live, joint, kind, f, ef, lower, upper, hasLower, hasUpper, freedomCount, pitchArg)) _fail('assembly_pair');
+  }
+  /**
+   * Add a named state to this assembly: `rows` is a `Map` or an iterable of `[joint, values]`
+   * pairs, each joint's values in its pair's freedom order. Throws the kernel's own text when
+   * a rule refuses it; the assembly is then unchanged. `rows` a bare string, or an item not a
+   * `[joint, values]` pair, throws a `TypeError` before any call.
+   */
+  state(name, rows) {
+    const entries = _stateRows(rows, 'state');
+    const joints = entries.map(([joint]) => joint);
+    const counts = Uint32Array.from(entries, ([, values]) => values.length);
+    const flat = Float64Array.from(entries.flatMap(([, values]) => values));
+    if (!_lib().assembly_state(this._live, name, joints, counts, flat, entries.length)) _fail('assembly_state');
+  }
+  /**
+   * Add a named motion sequence over this assembly's states: `segments` are `[state name,
+   * parameter, interpolation]` rows, the interpolation one of `'undefined'`, `'discontinuous'`,
+   * `'synchronous'` or `'linear'`, and `seconds` writes the parameter's unit as the second.
+   * Closed or open is the last segment's interpolation: closed unless it is `'discontinuous'`.
+   * Throws the kernel's own text when a rule refuses it; the assembly is then unchanged.
+   */
+  sequence(name, segments, seconds = false) {
+    const rows = Array.from(segments, (row, i) => {
+      if (row == null || typeof row[Symbol.iterator] !== 'function') throw new TypeError(`sequence: segments[${i}] is not a [state, t, interpolation] row`);
+      const [state, t, interpolation] = row;
+      return [String(state), Number(t), String(interpolation)];
+    });
+    const states = rows.map(([state]) => state);
+    const ts = Float64Array.from(rows, ([, t]) => t);
+    const interpolations = rows.map(([, , interpolation]) => interpolation);
+    if (!_lib().assembly_sequence(this._live, name, states, ts, interpolations, rows.length, Boolean(seconds))) _fail('assembly_sequence');
+  }
+  /**
+   * Declare this assembly's base link. Throws the kernel's own text when a rule refuses it
+   * (an empty name, one this assembly does not have, or one already declared); the assembly
+   * is then unchanged.
+   */
+  base(link) {
+    if (!_lib().assembly_base(this._live, link)) _fail('assembly_base');
+  }
+  /**
    * This assembly, and everything placed under it, as one STEP file: this assembly the root
    * product, each sub-assembly and each distinct part (the same solid with the same paint and
    * name) written once, each placement an occurrence named as it was placed. `schema` and
@@ -2237,6 +3038,9 @@ function _fromBrep(node, what) {
 }
 /** How the loaded library lays a brep out in memory; `Solid.fromNode` works only where it equals the reader's `Brep.layoutId()`. */
 function brepLayoutId() { return _text(_lib().brep_layout_id()); }
+/** The pair kind `kind`'s freedom count (`spherical` 3, `revolute` 1, `fully_constrained` 0,
+ *  and 0 for a name not in the kind table). */
+function pairFreedomCount(kind) { return Number(_lib().pair_freedom_count(String(kind))); }
 
 // ---- the FEM surface mesh -------------------------------------------------------
 
@@ -2690,6 +3494,167 @@ class Overlap {
   constructor(faces, loops) { this.faces = faces; this.loops = loops; }
 }
 
+/** `box` as six contiguous doubles (lo then hi): bit-compatible with
+ *  `CadaclysmBlacksmithBox`, which is how a `Box` crosses *into* a call -- as a frame
+ *  does, twelve doubles rather than a `Frame` object. */
+function _boxWords(box) { return Float64Array.of(...box.lo, ...box.hi); }
+function _boxOf(raw) { return new Box(Array.from(raw.lo), Array.from(raw.hi)); }
+
+/**
+ * An axis-aligned box: `lo` and `hi`, three-tuples. The broad phase's own shape
+ * (`Solid.boundsBox`, `Collider`'s own boxes): cheap to move and to test against
+ * another, before anything is meshed.
+ */
+class Box {
+  constructor(lo, hi) {
+    this.lo = Array.from(_doubles(lo, 3, 'Box'));
+    this.hi = Array.from(_doubles(hi, 3, 'Box'));
+  }
+  /** This box moved by `frame` (rigid), boxed again on the world axes -- not this
+   *  box's corners individually moved, which would not in general be a box at all:
+   *  the *bounding* box of the moved corners. */
+  moved(frame) {
+    const out = {};
+    if (!_lib().box_moved(_boxWords(this), _frame(frame), out)) _fail('box_moved');
+    return _boxOf(out);
+  }
+  /** Whether this box and `other` share a point (touching counts). */
+  overlaps(other) { return Boolean(_lib().box_overlaps(_boxWords(this), _boxWords(other))); }
+}
+
+/**
+ * True only if box `a` at `frameA` and box `b` at `frameB` cannot touch -- a separating
+ * axis among the boxes' face normals and edge-direction crosses; touching is not apart.
+ * Sharper than moving each box and asking `overlaps`, which boxes the *result* on the
+ * world axes again and so can call two oriented boxes overlapping when they are not.
+ */
+function boxesApart(a, frameA, b, frameB) {
+  const apart = [false];
+  if (!_lib().boxes_apart(_boxWords(a), _frame(frameA), _boxWords(b), _frame(frameB), apart)) _fail('boxes_apart');
+  return Boolean(apart[0]);
+}
+
+const _collisionsFinalizer = typeof FinalizationRegistry === 'function'
+  ? new FinalizationRegistry((h) => { try { _lib().collisions_free(h); } catch (_) { /* exiting */ } }) : null;
+
+/**
+ * Keeps one `collider.check` answer alive for as long as any `CollisionHit` of it is
+ * reachable: each hit holds one of these, and once the last one is unreachable the
+ * registry frees the handle -- the same idiom `Intersection` copies out to plain data
+ * with, except a `CollisionHit` needs the handle itself back for `solid()`.
+ */
+class _CollisionsHandle {
+  constructor(handle) {
+    this._pointer = handle;
+    if (_collisionsFinalizer) _collisionsFinalizer.register(this, handle, this);
+  }
+}
+
+/**
+ * One pair `Collider.check` found overlapping (`kind === 'overlap'`), or could not
+ * decide (`kind === 'refused'`, `text` says why): `depth` the thinnest side of the
+ * overlap's world box (0 for a refused pair), `positions`/`normals` world xyz triples
+ * (three per triangle, unwelded) and `indices` into them -- all empty for a refused pair.
+ *
+ * `solid()` rebuilds the exact overlap now, from the frames `check` found it at; this
+ * keeps the collisions handle behind every hit of one `check` call alive until the last
+ * of them is unreachable.
+ */
+class CollisionHit {
+  constructor(a, b, kind, depth, text, positions, normals, indices, keeper, index) {
+    this.a = a; this.b = b; this.kind = kind; this.depth = depth; this.text = text;
+    this.positions = positions; this.normals = normals; this.indices = indices;
+    this._keeper = keeper; this._index = index;
+  }
+  /** The exact overlap of this pair at the frames it was found at, as a new solid.
+   *  Throws for a refused pair, or a collisions handle already closed some other way. */
+  solid() {
+    const h = this._keeper._pointer;
+    if (!h) throw new BuildError('collision hit: the collisions handle is closed');
+    return new Solid(_checked(_lib().collisions_solid(h, this._index), 'collisions_solid'));
+  }
+}
+
+function _collisionHitOf(raw, keeper, index) {
+  const n = raw.vertex_count, m = raw.index_count;
+  return new CollisionHit(raw.a, raw.b, raw.overlap ? 'overlap' : 'refused', raw.depth, _text(raw.text),
+    _doublesAt(raw.positions, n * 3) ?? new Float64Array(0),
+    _doublesAt(raw.normals, n * 3) ?? new Float64Array(0),
+    _uint32s(raw.indices, m) ?? new Uint32Array(0),
+    keeper, index);
+}
+
+/**
+ * Parts meshed once, asked pose after pose which of them interfere. `close()` frees this
+ * handle; so does leaving a `using` block or the garbage collector.
+ */
+class Collider {
+  /**
+   * `solids` at rest, meshed at `tolerance`; `groups` one group index per solid (null:
+   * each solid its own group -- `check` then takes one frame per solid), `allowed` pairs
+   * of part indices never tested (designed contacts, flattened: `[a0, b0, a1, b1, ...]`).
+   */
+  constructor(solids, tolerance = 0.05, groups = null, allowed = []) {
+    const handles = Array.from(solids, (s) => s._handle);
+    if (groups != null && groups.length !== handles.length) {
+      throw new BuildError(`Collider: groups must have one entry per solid (${handles.length} solids, ${groups.length} groups)`);
+    }
+    const groupsArr = groups == null ? null : Uint32Array.from(groups, Number);
+    const allowedArr = Uint32Array.from(allowed, Number);
+    const h = _lib().collider_new(handles, handles.length, tolerance, groupsArr, allowedArr, allowedArr.length / 2);
+    this._pointer = _checked(h, 'collider_new');
+  }
+  get _handle() {
+    if (!this._pointer) throw new BuildError('collider: closed');
+    return this._pointer;
+  }
+  get closed() { return this._pointer === null; }
+  close() {
+    if (this._pointer === null) return;
+    const h = this._pointer; this._pointer = null;
+    _lib().collider_free(h);
+  }
+  [Symbol.for('nodejs.dispose')]() { this.close(); }
+  /** How many groups this collider has -- the highest group index past the constructor, plus one. */
+  get groupCount() { return _lib().collider_group_count(this._handle); }
+  /** Counts of the last `check` call (all zero before the first one): `considered`,
+   *  `worldBoxes`, `orientedBoxes`, `skippedShare`, `cached`, `closedForm`, `meshed`,
+   *  `refused`, `confirmed` -- see the C ABI's own doc on `CadaclysmBlacksmithColliderStats`
+   *  for what each counts. */
+  get stats() {
+    const out = {};
+    if (!_lib().collider_stats(this._handle, out)) _fail('collider_stats');
+    return {
+      considered: out.considered, worldBoxes: out.world_boxes, orientedBoxes: out.oriented_boxes,
+      skippedShare: out.skipped_share, cached: out.cached, closedForm: out.closed_form,
+      meshed: out.meshed, refused: out.refused, confirmed: out.confirmed,
+    };
+  }
+  /**
+   * The pairs that interfere, or could not be decided, with each group placed at its
+   * matching frame in `frames` (one per group, in group order). `share`: `null`, every
+   * pair past the box filters is decided now; `[k, n]`, only those whose index is `k`
+   * modulo `n` (the shares of one pose are disjoint and cover it). `[k, 0]` is the same as
+   * `null`: the C ABI reads `n` 0 as every pair.
+   */
+  check(frames, share = null) {
+    const flat = Float64Array.from(Array.from(frames).flatMap((f) => Array.from(_frame(f))));
+    const [shareK, shareN] = share ?? [0, 0];
+    const l = _lib();
+    const h = _checked(l.collider_check(this._handle, flat, flat.length / 12, shareK, shareN), 'collider_check');
+    const count = l.collisions_count(h);
+    if (count === 0) { l.collisions_free(h); return []; }
+    const keeper = new _CollisionsHandle(h);
+    const hits = [];
+    for (let i = 0; i < count; i++) {
+      const raw = {};
+      if (!l.collisions_hit(h, i, raw)) _fail('collisions_hit');
+      hits.push(_collisionHitOf(raw, keeper, i));
+    }
+    return hits;
+  }
+}
+
 /**
  * One place two curves meet, copied out. A point (`run` false): `start` equals `end`, and
  * `touch` is true where the curves are tangent rather than crossing. A run (`run` true): they
@@ -2956,10 +3921,12 @@ function writeSvg(filePath, things, options = {}) {
 
 module.exports = {
   BuildError, NONE, UNITS, Axis, SvgView,
-  libraryPath, defaultSchema, version, buildDate, license, licenseInfo, licenseNoticeCount, brepLayoutId,
+  libraryPath, defaultSchema, version, buildDate, license, licenseInfo, licenseNoticeCount, brepLayoutId, pairFreedomCount,
   svgOptionsDefaults,
   Frame, Profile, Path, SweepPath, Slant, Solid, Assembly, Selector, Edge, Curve, Intersection, Chain, Overlap, Hit, Spot, SolidHits, Piece, Workplane, writeStep, writeStepText, writeSat, writeSatText, writeBrep, writeBrepText, writeSvg, writeSvgText,
   FemMesh, FemEdge, FemVertex,
+  Box, boxesApart, Collider, CollisionHit,
+  Tool, Stock, Job, Program, Operation, ReportItem,
   _lib, _lastError, _frame, _axis, _progress, _searchedPaths, _notFoundMessage, _floats, _uint32s, _doublesAt, _svgOptions,
   _femEdgeOf, _femVertexOf, _censusRows, _femOptions,
 };

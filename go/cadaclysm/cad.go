@@ -90,11 +90,14 @@ package cadaclysm
 #cgo windows LDFLAGS: -L${SRCDIR}/../../lib -L${SRCDIR}/../../../../../target/release -l:cadaclysm_capi.dll
 #cgo !windows LDFLAGS: -L${SRCDIR}/../../lib -L${SRCDIR}/../../../../../target/release -lcadaclysm_capi
 #include <stdlib.h>
-#include "cadaclysm.h"
+// <...>, not "...": on Windows cgo compiles its probes from %TEMP%, and a quoted
+// include would read any stray cadaclysm.h there before the -I directories.
+#include <cadaclysm.h>
 */
 import "C"
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -530,14 +533,15 @@ func openNative(path, schema string, opts C.CadaclysmOpenOptions) (*C.CadaclysmS
 	return p, nil
 }
 
-// Open opens a CAD file, or a .zip holding one.
+// Open opens a CAD file, or a .zip, .stpZ or .gz holding one.
 //
 // Raises no panic and never returns a nil Scene with a nil error: failure always comes
 // back as an error carrying what the library said. An unrecognised WithConvention is one
 // of the failures Convention validation itself catches before this is ever reached; a
 // convention this package cannot build is refused by the library instead, at open.
 //
-// A .zip opens its first readable member; Scene.SourceName says which.
+// A .zip (or .stpZ, STEP's zip) opens its first readable member; Scene.SourceName says
+// which. A .gz is read as the format named before it: part.step.gz as .step.
 func Open(path string, opts ...Option) (*Scene, error) {
 	cfg := openConfig{convention: Native}
 	for _, opt := range opts {
@@ -747,9 +751,64 @@ func (m *Mesh) Copy() MeshData {
 // Mesh.
 //
 // A forget drops it: the pointers borrow the document's own mesh, which
-// Scene.ForgetMeshes frees -- read none of them after a forget; ask again, and the mesh
-// is built again. (Mesh's float32 copy survives a forget, its own memory being kept.)
+// Scene.ForgetMeshes frees, so -- unlike Mesh's fields -- the arrays are methods that
+// check the scene first: one asked for after a forget returns an error wrapping
+// [ErrStaleView] instead of a slice over freed memory, and after Scene.Close the closed
+// scene's error. A slice taken out before the forget is not caught; ask the node again,
+// and the mesh is built again. (Mesh's float32 copy survives a forget, its own memory
+// being kept.)
 type Mesh64 struct {
+	scene     *Scene
+	forgets   uint64 // the scene's forget count when this was made; see Scene.forgets
+	positions []float64
+	normals   []float64
+	uvs       []float64
+	colours   []float32
+	indices   []uint32
+}
+
+// ErrStaleView is what a [Mesh64] accessor returns, wrapped with what happened, once the
+// scene has forgotten its meshes since the Mesh64 was made. Test for it with errors.Is.
+var ErrStaleView = errors.New("stale view")
+
+// live is the check every Mesh64 accessor makes: the scene still open, and no forget since.
+func (m *Mesh64) live() error {
+	if err := m.scene.closedError(); err != nil {
+		return err
+	}
+	if m.scene.forgets != m.forgets {
+		return fmt.Errorf("mesh64: %w: the scene has forgotten its meshes since, freeing the document's own mesh this lends (ask the node again)", ErrStaleView)
+	}
+	return nil
+}
+
+// TriangleCount is the index count / 3; counted when made, so it never fails.
+func (m *Mesh64) TriangleCount() int { return len(m.indices) / 3 }
+
+// VertexCount is the vertex count; counted when made, so it never fails.
+func (m *Mesh64) VertexCount() int { return len(m.positions) / 3 }
+
+// IndexCount is the index count, three a triangle; counted when made, so it never fails.
+func (m *Mesh64) IndexCount() int { return len(m.indices) }
+
+// Positions is (vertex count * 3) float64.
+func (m *Mesh64) Positions() ([]float64, error) { return m.positions, m.live() }
+
+// Normals is (vertex count * 3) float64, or nil.
+func (m *Mesh64) Normals() ([]float64, error) { return m.normals, m.live() }
+
+// Uvs is (vertex count * 2) float64, or nil.
+func (m *Mesh64) Uvs() ([]float64, error) { return m.uvs, m.live() }
+
+// Colours is (vertex count * 4) float32 RGBA, or nil.
+func (m *Mesh64) Colours() ([]float32, error) { return m.colours, m.live() }
+
+// Indices is (index count) uint32, three to a triangle.
+func (m *Mesh64) Indices() ([]uint32, error) { return m.indices, m.live() }
+
+// MeshData64 is a node's triangles in double, copied into memory of the caller's own --
+// what Mesh64.Copy returns.
+type MeshData64 struct {
 	Positions []float64
 	Normals   []float64
 	Uvs       []float64
@@ -757,26 +816,39 @@ type Mesh64 struct {
 	Indices   []uint32
 }
 
-// TriangleCount is len(Indices) / 3.
-func (m *Mesh64) TriangleCount() int { return len(m.Indices) / 3 }
+// Copy is the same triangles in memory of our own, safe past a forget or the scene's close.
+func (m *Mesh64) Copy() (MeshData64, error) {
+	if err := m.live(); err != nil {
+		return MeshData64{}, err
+	}
+	return MeshData64{
+		Positions: append([]float64(nil), m.positions...),
+		Normals:   append([]float64(nil), m.normals...),
+		Uvs:       append([]float64(nil), m.uvs...),
+		Colours:   append([]float32(nil), m.colours...),
+		Indices:   append([]uint32(nil), m.indices...),
+	}, nil
+}
 
-func meshFrom64(raw C.CadaclysmMesh64) *Mesh64 {
+func meshFrom64(scene *Scene, raw C.CadaclysmMesh64) *Mesh64 {
 	if raw.index_count == 0 || raw.positions == nil {
 		return nil
 	}
 	vertexFloats := int(raw.vertex_count) * 3
 	m := &Mesh64{
-		Positions: unsafe.Slice((*float64)(unsafe.Pointer(raw.positions)), vertexFloats),
-		Indices:   unsafe.Slice((*uint32)(unsafe.Pointer(raw.indices)), int(raw.index_count)),
+		scene:     scene,
+		forgets:   scene.forgets,
+		positions: unsafe.Slice((*float64)(unsafe.Pointer(raw.positions)), vertexFloats),
+		indices:   unsafe.Slice((*uint32)(unsafe.Pointer(raw.indices)), int(raw.index_count)),
 	}
 	if raw.normals != nil {
-		m.Normals = unsafe.Slice((*float64)(unsafe.Pointer(raw.normals)), vertexFloats)
+		m.normals = unsafe.Slice((*float64)(unsafe.Pointer(raw.normals)), vertexFloats)
 	}
 	if raw.uvs != nil {
-		m.Uvs = unsafe.Slice((*float64)(unsafe.Pointer(raw.uvs)), int(raw.vertex_count)*2)
+		m.uvs = unsafe.Slice((*float64)(unsafe.Pointer(raw.uvs)), int(raw.vertex_count)*2)
 	}
 	if raw.colors != nil {
-		m.Colours = unsafe.Slice((*float32)(unsafe.Pointer(raw.colors)), int(raw.vertex_count)*4)
+		m.colours = unsafe.Slice((*float32)(unsafe.Pointer(raw.colors)), int(raw.vertex_count)*4)
 	}
 	return m
 }
@@ -785,8 +857,10 @@ func meshFrom64(raw C.CadaclysmMesh64) *Mesh64 {
 // view over the scene's own memory, valid until Scene.Close.
 //
 // Positions is (vertex count * 3) float32 with the runs end to end; Counts is
-// (polyline count) uint32 saying where each run stops. Both lengths are read straight
-// off the slices, so there is nothing further to carry beside them.
+// (polyline count) uint32 saying how many points each run has — not where it ends, so
+// twelve two-point edges read 2, 2, 2, … and a caller walks the runs by adding them up.
+// Both lengths are read straight off the slices, so there is nothing further to carry
+// beside them.
 type Polylines struct {
 	Positions []float32
 	Counts    []uint32
@@ -1291,6 +1365,253 @@ func (s *Scene) States() []State {
 	return out
 }
 
+// PoseOutOfRange is one entry of a Pose's OutOfRange: a joint's given value that fell
+// outside its freedom's range, used as given and reported here.
+type PoseOutOfRange struct {
+	Joint   *Joint
+	Freedom uint32
+	Value   float64
+}
+
+// Pose is a posed mechanism -- Scene.Pose or Scene.PoseState's answer. The document
+// itself is unchanged.
+//
+// Copied eagerly out of the C handle when it is made (copyPose, Scene's private
+// copy-then-free helper), so a Pose holds no C pointer and outlives the call that made
+// it -- closing the scene does not invalidate it.
+type Pose struct {
+	// Ground is the link held fixed.
+	Ground *Link
+	// Unsolved is the joints that close a loop and were not honoured, in file order.
+	Unsolved []*Joint
+	// OutOfRange is one entry per given value outside its freedom's range.
+	OutOfRange []PoseOutOfRange
+
+	transforms [][16]float64
+}
+
+// Transform is node's posed transform, in row-major order -- the same layout
+// Node.Transform returns.
+func (p *Pose) Transform(node *Node) [16]float64 {
+	return rowMajor(p.RawTransform(node))
+}
+
+// RawTransform is the same matrix in the ABI's own column-major order, as sixteen
+// doubles, exactly as Node.RawTransform lays them out.
+func (p *Pose) RawTransform(node *Node) [16]float64 {
+	return p.transforms[node.index]
+}
+
+// Base is the link the file declares as the mechanism's base, or nil when it declares
+// none (the default ground is then the link on the most joints; see Pose).
+func (s *Scene) Base() *Link {
+	index := uint32(C.cadaclysm_kinematics_base(s.h()))
+	if index == noneIndex {
+		return nil
+	}
+	return &Link{scene: s, index: index}
+}
+
+// Pose is the mechanism posed by values: rows of a joint and the values it sets, one
+// per freedom of its pair, in the pair's freedom order -- exactly State.Values's row
+// type, so Pose(state.Values, nil) poses like PoseState(state, nil) -- with ground (a
+// link, or nil for the default ground) held fixed. Values outside a freedom's range are
+// used as given and reported in the answer's OutOfRange.
+//
+// Returns a *CadaclysmError on a bad row (a joint given twice, one with the wrong number
+// of values, ...) or a file with no mechanism, carrying cadaclysm_last_error's text
+// unchanged.
+func (s *Scene) Pose(values []StateValue, ground *Link) (*Pose, error) {
+	if err := s.closedError(); err != nil {
+		return nil, err
+	}
+	defer pin()()
+	n := len(values)
+	joints := make([]C.uint32_t, n)
+	counts := make([]C.uint32_t, n)
+	var flat []C.double
+	for i, row := range values {
+		joints[i] = C.uint32_t(row.Joint.index)
+		counts[i] = C.uint32_t(len(row.Values))
+		for _, v := range row.Values {
+			flat = append(flat, C.double(v))
+		}
+	}
+	var jointsPtr, countsPtr *C.uint32_t
+	var valuesPtr *C.double
+	if n > 0 {
+		jointsPtr = &joints[0]
+		countsPtr = &counts[0]
+	}
+	if len(flat) > 0 {
+		valuesPtr = &flat[0]
+	}
+	groundIndex := noneIndex
+	if ground != nil {
+		groundIndex = ground.index
+	}
+	ptr := C.cadaclysm_pose(s.h(), jointsPtr, countsPtr, valuesPtr, C.uint32_t(n), C.uint32_t(groundIndex))
+	if ptr == nil {
+		return nil, &CadaclysmError{Message: lastErrorOr("pose")}
+	}
+	return s.copyPose(ptr), nil
+}
+
+// PoseState is the mechanism posed by state's values, with ground held fixed as Pose
+// does. Returns a *CadaclysmError as Pose does.
+func (s *Scene) PoseState(state State, ground *Link) (*Pose, error) {
+	if err := s.closedError(); err != nil {
+		return nil, err
+	}
+	defer pin()()
+	groundIndex := noneIndex
+	if ground != nil {
+		groundIndex = ground.index
+	}
+	ptr := C.cadaclysm_pose_state(s.h(), C.uint32_t(state.Index), C.uint32_t(groundIndex))
+	if ptr == nil {
+		return nil, &CadaclysmError{Message: lastErrorOr("pose_state")}
+	}
+	return s.copyPose(ptr), nil
+}
+
+// Segment is one step of a Sequence: the State it reaches, its parameter T, and how the
+// motion leaves it for the next -- Interpolation is the lower-case word "undefined",
+// "discontinuous", "synchronous" or "linear". From Sequence.Segments.
+type Segment struct {
+	State         State
+	T             float64
+	Interpolation string
+}
+
+// Sequence is a motion the file records: an INTERPOLATED_CONFIGURATION_SEQUENCE, its states
+// at increasing parameter values. From Scene.Sequences.
+type Sequence struct {
+	Index uint32
+	// Name is the sequence's representation's name, "name #2" and on for further sequences
+	// in one representation.
+	Name string
+	// Closed is whether the motion returns to its first segment (its last segment is not
+	// discontinuous).
+	Closed bool
+	// SecondsPerUnit is seconds per unit of the parameter where the file states a time unit,
+	// or nil where it states none (the parameter is then read as seconds).
+	SecondsPerUnit *float64
+	// Segments are the segments, in file order (at least two).
+	Segments []Segment
+	scene    *Scene
+}
+
+// Start is the first segment's parameter.
+func (q Sequence) Start() float64 { return q.Segments[0].T }
+
+// End is the last segment's parameter (the closing span of a closed sequence not included).
+func (q Sequence) End() float64 { return q.Segments[len(q.Segments)-1].T }
+
+// interpolationWords maps cadaclysm_sequence_segment's interpolation code (0 undefined,
+// 1 discontinuous, 2 synchronous, 3 linear) to its word.
+var interpolationWords = [...]string{"undefined", "discontinuous", "synchronous", "linear"}
+
+// Sequences is the file's motion sequences, in file order; empty for a file that records
+// none.
+func (s *Scene) Sequences() []Sequence {
+	h := s.h()
+	states := s.States()
+	n := uint32(C.cadaclysm_sequence_count(h))
+	out := make([]Sequence, n)
+	for i := uint32(0); i < n; i++ {
+		q := Sequence{
+			Index:  i,
+			Name:   C.GoString(C.cadaclysm_sequence_name(h, C.uint32_t(i))),
+			Closed: bool(C.cadaclysm_sequence_closed(h, C.uint32_t(i))),
+			scene:  s,
+		}
+		if secs := float64(C.cadaclysm_sequence_seconds_per_unit(h, C.uint32_t(i))); secs != 0 {
+			q.SecondsPerUnit = &secs
+		}
+		count := uint32(C.cadaclysm_sequence_segment_count(h, C.uint32_t(i)))
+		q.Segments = make([]Segment, count)
+		for k := uint32(0); k < count; k++ {
+			var state, interpolation C.uint32_t
+			var t C.double
+			C.cadaclysm_sequence_segment(h, C.uint32_t(i), C.uint32_t(k), &state, &t, &interpolation)
+			word := "undefined"
+			if int(interpolation) < len(interpolationWords) {
+				word = interpolationWords[interpolation]
+			}
+			q.Segments[k] = Segment{State: states[state], T: float64(t), Interpolation: word}
+		}
+		out[i] = q
+	}
+	return out
+}
+
+// Pose is the mechanism posed by this sequence at parameter t, in the file's own
+// parameter: a segment is a keyframe of its state, a discontinuous segment holds until the
+// next and every other kind moves linearly, an open sequence holds its ends and a closed
+// one wraps. ground is held fixed as Scene.Pose does. Returns a *CadaclysmError as
+// Scene.Pose does, for a t that is not finite among others.
+func (q Sequence) Pose(t float64, ground *Link) (*Pose, error) {
+	s := q.scene
+	if err := s.closedError(); err != nil {
+		return nil, err
+	}
+	defer pin()()
+	groundIndex := noneIndex
+	if ground != nil {
+		groundIndex = ground.index
+	}
+	ptr := C.cadaclysm_pose_sequence(s.h(), C.uint32_t(q.Index), C.double(t), C.uint32_t(groundIndex))
+	if ptr == nil {
+		return nil, &CadaclysmError{Message: lastErrorOr("pose_sequence")}
+	}
+	return s.copyPose(ptr), nil
+}
+
+// copyPose reads everything out of a *C.CadaclysmPose into a Pose, then frees it
+// (ruling 2 of the posing plan: wrappers copy eagerly, never holding the C pointer). The
+// free runs in a defer, so a panic partway through copying still frees the handle.
+func (s *Scene) copyPose(ptr *C.CadaclysmPose) *Pose {
+	defer C.cadaclysm_pose_free(ptr)
+	groundIndex := uint32(C.cadaclysm_pose_ground(ptr))
+	nodeCount := uint32(C.cadaclysm_pose_node_count(ptr))
+	transforms := make([][16]float64, nodeCount)
+	for i := uint32(0); i < nodeCount; i++ {
+		var raw [16]C.double
+		C.cadaclysm_pose_node_transform(ptr, C.uint32_t(i), (*C.double)(unsafe.Pointer(&raw[0])))
+		for k := range raw {
+			transforms[i][k] = float64(raw[k])
+		}
+	}
+	unsolvedCount := uint32(C.cadaclysm_pose_unsolved_count(ptr))
+	unsolved := make([]*Joint, 0, unsolvedCount)
+	for i := uint32(0); i < unsolvedCount; i++ {
+		joint := uint32(C.cadaclysm_pose_unsolved(ptr, C.uint32_t(i)))
+		if joint != noneIndex {
+			unsolved = append(unsolved, &Joint{scene: s, index: joint})
+		}
+	}
+	outOfRangeCount := uint32(C.cadaclysm_pose_out_of_range_count(ptr))
+	outOfRange := make([]PoseOutOfRange, 0, outOfRangeCount)
+	for i := uint32(0); i < outOfRangeCount; i++ {
+		var joint, freedom C.uint32_t
+		var value C.double
+		if bool(C.cadaclysm_pose_out_of_range(ptr, C.uint32_t(i), &joint, &freedom, &value)) {
+			outOfRange = append(outOfRange, PoseOutOfRange{
+				Joint:   &Joint{scene: s, index: uint32(joint)},
+				Freedom: uint32(freedom),
+				Value:   float64(value),
+			})
+		}
+	}
+	return &Pose{
+		Ground:     &Link{scene: s, index: groundIndex},
+		Unsolved:   unsolved,
+		OutOfRange: outOfRange,
+		transforms: transforms,
+	}
+}
+
 // ---- breps -------------------------------------------------------------------------------
 
 // Brep is a body's exact B-rep -- the trimmed surfaces its mesh is cut from -- shared with
@@ -1357,6 +1678,51 @@ func ManifoldOf(row [8]uint32) Manifold {
 		BoundaryEdges: int(row[3]), NonManifoldEdges: int(row[4]), NonManifoldVertices: int(row[5]),
 		IsManifold: row[6] == 1, IsClosed: row[7] == 1,
 	}
+}
+
+// Sewed is this brep with its free edges sewn, and what was sewn, as a new [Brep] and a
+// [SewReport]; this one is left as it was. Two free edges become one shared edge where both
+// their ends coincide within vertex -- by default the rounding [Brep.Manifold] merges
+// vertices at -- and their curves lie within tolerance of each other, by default vertex too,
+// so only edges that are one curve written twice are joined. A larger tolerance also joins
+// two curves between the same two vertices that part by up to it; vertex is what decides
+// which edges are candidates at all, and raising it is what could close a slot. Nothing
+// moves. A nil tolerance or vertex takes the default. The new brep is the caller's to Close.
+func (b *Brep) Sewed(tolerance, vertex *float64) (*Brep, SewReport, error) {
+	defer pin()()
+	if b == nil || b.ptr == nil {
+		return nil, SewReport{}, &CadaclysmError{Message: "brep: released"}
+	}
+	tol, vert := math.NaN(), math.NaN()
+	if tolerance != nil {
+		tol = *tolerance
+	}
+	if vertex != nil {
+		vert = *vertex
+	}
+	var counts [4]uint32
+	var gaps [3]float64
+	p := C.cadaclysm_brep_sew(b.ptr, C.double(tol), C.double(vert),
+		(*C.uint32_t)(unsafe.Pointer(&counts[0])), (*C.double)(unsafe.Pointer(&gaps[0])))
+	runtime.KeepAlive(b)
+	if p == nil {
+		return nil, SewReport{}, &CadaclysmError{Message: lastErrorOr("sew")}
+	}
+	sewn := &Brep{ptr: p}
+	runtime.SetFinalizer(sewn, (*Brep).Close)
+	return sewn, SewReport{
+		Pairs: counts[0], FreeBefore: counts[1], FreeAfter: counts[2], Refused: counts[3],
+		WorstGap: gaps[0], Tolerance: gaps[1], Vertex: gaps[2],
+	}, nil
+}
+
+// SewReport is what [Brep.Sewed] did, as plain data: the edges it joined (Pairs), the free
+// edges before and after, how many groups of free edges between the same two vertices it
+// left free (Refused: too far apart for the tolerance, or more than two), the widest gap it
+// sewed, and the two tolerances it used.
+type SewReport struct {
+	Pairs, FreeBefore, FreeAfter, Refused uint32
+	WorstGap, Tolerance, Vertex           float64
 }
 
 // Close gives this reference back. Idempotent, and a no-op on a nil Brep. The error
@@ -2240,7 +2606,7 @@ func (n *Node) Mesh64() (*Mesh64, error) {
 	if err := n.scene.closedError(); err != nil {
 		return nil, err
 	}
-	return meshFrom64(C.cadaclysm_node_mesh64(n.scene.h(), C.uint32_t(n.index))), nil
+	return meshFrom64(n.scene, C.cadaclysm_node_mesh64(n.scene.h(), C.uint32_t(n.index))), nil
 }
 
 // FemMesh is this node's body meshed for a solver, as a [FemMesh]: nodes welded by bits,
@@ -2650,6 +3016,10 @@ type Scene struct {
 	path       string
 	schemaPath string
 	convention Convention
+	// How many times ForgetMeshes has run. Only Mesh64 stamps itself with this: it lends
+	// the document's own mesh, which a forget frees, where the float mesh and the line
+	// views are the library's own caches and outlive one.
+	forgets uint64
 }
 
 // Close gives the scene back. Idempotent. Every Mesh and Polylines still held is reading
@@ -2924,9 +3294,15 @@ func (s *Scene) RealizeTotal() uint32 { return uint32(C.cadaclysm_realize_total(
 // every later RealizeAll on this scene returns 0 at once.
 func (s *Scene) Cancel() { C.cadaclysm_cancel(s.h()) }
 
-// ForgetMeshes drops every mesh the scene has built; the next ask rebuilds. Every Mesh
-// and Polylines handed out before this is over freed memory.
-func (s *Scene) ForgetMeshes() { C.cadaclysm_forget_meshes(s.h()) }
+// ForgetMeshes drops every mesh the scene has built; the next ask rebuilds. What it frees
+// is the document's own mesh: the [Mesh64]s handed out before it lend that, so this counts
+// the forget and their accessors return [ErrStaleView] afterwards rather than freed memory.
+// Mesh, Polylines and the Béziers are the library's own caches, which a forget does not
+// touch and which stay good until the scene closes.
+func (s *Scene) ForgetMeshes() {
+	C.cadaclysm_forget_meshes(s.h())
+	s.forgets++
+}
 
 // Save writes the whole scene to path: "glb" (binary glTF), "gltf" (text glTF) or "obj"
 // (Wavefront). Every placement of every shape, named and placed as the tree is, with a
@@ -2966,7 +3342,7 @@ func (s *Scene) SurfaceMatrix() [16]float64 {
 // ---- svg ----------------------------------------------------------------------------
 
 // SvgView is one of the seven camera angles SvgOptions.View understands — the same
-// table cadaclysm_viewer.VIEWS gives Python's show() and svg() both.
+// table cadaclysm_view.VIEWS gives Python's show() and svg() both.
 type SvgView int
 
 // The seven named cameras SvgView holds — front, back, left, right, top, bottom and the
@@ -3019,12 +3395,12 @@ type SvgOptions struct {
 	Margin float64
 	// Tolerance is how far a written curve may stray, in page units. Default 0.1.
 	Tolerance float64
-	// Stroke is the pen colour, "#rrggbb". Default black.
+	// Stroke is the pen colour: "#rgb", "#rrggbb" or a CSS colour name. Default black.
 	Stroke string
 	// StrokeWidth is the pen's width, page units. Default 1.
 	StrokeWidth float64
-	// Background is "#rrggbb", or nil (the default) for no <rect> behind the drawing —
-	// the page left to whatever the viewer composites it onto.
+	// Background is "#rgb", "#rrggbb", a CSS colour name, or nil (the default) for no
+	// <rect> behind the drawing — the page left to whatever the viewer composites it onto.
 	Background *string
 	// Edges draws each shape's feature edges — the exact curves the flattened
 	// polylines are drawn from. Default true.
@@ -3038,10 +3414,18 @@ type SvgOptions struct {
 	// Polylines writes every line as straight segments within Tolerance, instead of
 	// being fitted back to cubic Béziers. Default false.
 	Polylines bool
+	// Silhouettes also draws where each body's surfaces turn away from the eye — the
+	// outline a sphere has no edge for. One group per placement, after that placement's
+	// lines. Default true: a sphere's and a torus's only curves are the seams where their
+	// one face meets itself, which are not edges of the body and are never drawn, so
+	// without this those two draw a blank page. A line set in its own right — set it with
+	// Edges false for the outline alone, or clear it for the lines alone.
+	Silhouettes bool
 }
 
 // NewSvgOptions is the defaults cadaclysm_svg_options_init fills: the viewer's iso,
-// orthographic, a 1000-square page, black edges one unit wide on nothing.
+// orthographic, a 1000-square page, black edges one unit wide on nothing, and each
+// body's outline beside them.
 func NewSvgOptions() SvgOptions {
 	return SvgOptions{
 		View:        SvgIso,
@@ -3052,27 +3436,33 @@ func NewSvgOptions() SvgOptions {
 		Stroke:      "#000000",
 		StrokeWidth: 1,
 		Edges:       true,
+		Silhouettes: true,
 	}
 }
 
-// parseSvgColour is a colour as the ABI's packed 0xRRGGBB: "#rrggbb", the leading '#'
-// optional.
+// parseSvgColour is a colour as the ABI's packed 0xRRGGBB, from "#rgb", "#rrggbb" or a
+// CSS colour name, read by the library's own parser (cadaclysm_parse_colour) and packed
+// with round(c*255) — as every SVG colour is packed. Stroke/Background are strings only
+// here, so the refusal names no numeric triple at all.
 func parseSvgColour(colour string) (uint32, error) {
-	hex := strings.TrimPrefix(colour, "#")
-	if len(hex) != 6 {
-		return 0, &CadaclysmError{Message: fmt.Sprintf("colour %s: expected '#rrggbb'", colour)}
+	text := C.CString(colour)
+	defer C.free(unsafe.Pointer(text))
+	var out [3]C.double
+	defer pin()()
+	if !bool(C.cadaclysm_parse_colour(text, &out[0])) {
+		return 0, &CadaclysmError{Message: fmt.Sprintf(`colour: a colour is "#rgb", "#rrggbb" or a CSS colour name, not %q`, colour)}
 	}
-	v, err := strconv.ParseUint(hex, 16, 32)
-	if err != nil {
-		return 0, &CadaclysmError{Message: fmt.Sprintf("colour %s: expected '#rrggbb'", colour)}
-	}
-	return uint32(v), nil
+	r := uint32(math.Round(float64(out[0]) * 255))
+	g := uint32(math.Round(float64(out[1]) * 255))
+	b := uint32(math.Round(float64(out[2]) * 255))
+	return (r << 16) | (g << 8) | b, nil
 }
 
 // buildSvgOptions packs opts (nil for NewSvgOptions()'s defaults) into a
 // C.CadaclysmSvgOptions: View fills Azimuth/Elevation unless they are set directly, Up
-// defaults to defaultUp, colours are "#rrggbb". Shared by Scene.SvgText/Scene.Svg and
-// Node.SvgText/Node.Svg, as Python's _svg_options is shared by Scene.svg and Node.svg.
+// defaults to defaultUp, colours are "#rgb", "#rrggbb" or a CSS colour name. Shared by
+// Scene.SvgText/Scene.Svg and Node.SvgText/Node.Svg, as Python's _svg_options is shared
+// by Scene.svg and Node.svg.
 func buildSvgOptions(opts *SvgOptions, defaultUp string) (C.CadaclysmSvgOptions, error) {
 	o := NewSvgOptions()
 	if opts != nil {
@@ -3134,6 +3524,9 @@ func buildSvgOptions(opts *SvgOptions, defaultUp string) (C.CadaclysmSvgOptions,
 	}
 	if o.Polylines {
 		flags |= uint32(C.CADACLYSM_SVG_POLYLINES)
+	}
+	if o.Silhouettes {
+		flags |= uint32(C.CADACLYSM_SVG_SILHOUETTES)
 	}
 	raw.flags = C.uint32_t(flags)
 	return raw, nil

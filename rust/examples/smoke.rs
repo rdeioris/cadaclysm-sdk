@@ -9,10 +9,10 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use cadaclysm_sdk::blacksmith::{
-    self, Assembly, Axis, Curve, Frame, Intersection, Keep, Path as Outline, Profile, Selector, Solid, SolidHits, SweepPath, Unit, Workplane,
-    DEFAULT_TOLERANCE, FILLET_TOLERANCE,
+    self, Assembly, Axis, Collider, Curve, Frame, Intersection, Keep, PairOptions, Path as Outline, Profile, Selector, Solid, SolidHits,
+    SweepPath, Unit, Workplane, DEFAULT_TOLERANCE, FILLET_TOLERANCE,
 };
-use cadaclysm_sdk::{Convention, Link, Node, OpenOptions, Scene, SvgOptions};
+use cadaclysm_sdk::{Convention, Link, Node, OpenOptions, Scene, StateValue, SvgOptions};
 
 fn main() -> ExitCode {
     match run() {
@@ -391,6 +391,36 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
         shared.overlaps[0].loops.len()
     );
 
+    // The collider: two cuboids overlapping by 2 along x, plus one far away -> one hit
+    // (0, 1), depth 2, solid() non-null.
+    let part_a = Solid::cuboid(4.0, 4.0, 4.0).map_err(e)?;
+    let part_b = Solid::cuboid(4.0, 4.0, 4.0).map_err(e)?.translate(2.0, 0.0, 0.0).map_err(e)?;
+    let part_c = Solid::cuboid(4.0, 4.0, 4.0).map_err(e)?.translate(100.0, 0.0, 0.0).map_err(e)?;
+    let box_a = part_a.bounds_box(DEFAULT_TOLERANCE).map_err(e)?;
+    let box_b = part_b.bounds_box(DEFAULT_TOLERANCE).map_err(e)?;
+    check(box_a.overlaps(&box_b).map_err(e)?, "collider: the two overlapping cuboids' bounds boxes do not overlap")?;
+    let collider = Collider::new(&[&part_a, &part_b, &part_c], DEFAULT_TOLERANCE, None, &[]).map_err(e)?;
+    check(collider.group_count() == 3, "collider: the group count is not one per part")?;
+    let xy0 = Frame::xy([0.0, 0.0, 0.0]);
+    let hits = collider.check(&[xy0, xy0, xy0], None).map_err(e)?;
+    check(hits.len() == 1, &format!("collider: found other than one hit: {hits:?}"))?;
+    let hit = &hits[0];
+    check(hit.a == 0 && hit.b == 1, &format!("collider: the hit does not name parts 0 and 1: {hit:?}"))?;
+    check(
+        hit.overlap && hit.kind == "overlap" && hit.text.is_empty(),
+        &format!("collider: the hit is not a clean overlap: {hit:?}"),
+    )?;
+    check((hit.depth - 2.0).abs() < 1e-9, &format!("collider: the hit's depth is not exactly 2: {hit:?}"))?;
+    let overlap_solid = hit.solid().map_err(e)?;
+    check(overlap_solid.faces().map_err(e)? > 0, "collider: the hit's rebuilt solid has no faces")?;
+    let stats = collider.stats().map_err(e)?;
+    check(stats.considered == 3, &format!("collider: the stats do not consider all three pairs: {stats:?}"))?;
+    match Collider::new(&[&part_a, &part_b, &part_c], DEFAULT_TOLERANCE, Some(&[0, 1]), &[]) {
+        Err(err) if err.to_string().contains("groups must have one entry per solid") => {}
+        other => return Err(format!("collider: a short groups list was accepted or refused in other words: {other:?}")),
+    }
+    println!("collider: {} hit(s), depth {}, stats {stats:?}", hits.len(), hit.depth);
+
     // Solid x profile hits: a line through a cuboid pierces two faces and is cut into three
     // pieces, outside/inside/outside, the middle one spanning the box and sweeping; a loop no
     // hit cuts is one piece; an open sheet has no pieces; a zero tolerance refused verbatim.
@@ -621,7 +651,13 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
         .map(|p| p.geometry())
         .find(|node| node.brep().is_some())
         .ok_or("no placement of the read-back STEP has a brep")?;
-    let read = body.brep().ok_or("the brep went away")?.manifold().map_err(e)?;
+    let read_brep = body.brep().ok_or("the brep went away")?;
+    let read = read_brep.manifold().map_err(e)?;
+    let (_sewn, sew) = read_brep.sewed(None, None).map_err(e)?;
+    check(
+        sew.free_before == read.boundary_edges && read_brep.manifold().map_err(e)?.boundary_edges == read.boundary_edges,
+        &format!("sewed reports {} free edges before, the brep has {}", sew.free_before, read.boundary_edges),
+    )?;
     check(read.is_closed && read.faces == 15, &format!("the read body is not the closed manifold written: {read:?}"))?;
     let imported = Solid::from_node(&body, true).map_err(|err| format!("from_node: {err}"))?;
     drop(back);
@@ -849,9 +885,77 @@ fn mechanism_checks(sample_path: &str) -> Result<(), String> {
     check(row.values.len() == 1 && (row.values[0] - 0.5).abs() < 1e-9, &format!("mechanism: state row values are {:?}, not [0.5]", row.values))?;
     println!("mechanism: pair {:?}, freedoms {}, states {}", pair.kind(), freedoms.len(), states.len());
 
+    // The pose facts (posing plan 2, wrapper brief facts 1-6). base/arm nodes: the one
+    // node each link names (checked above).
+    let base_link = &links[0];
+    let arm_link = &links[1];
+    let base_node = base_link.nodes()[0];
+    let arm_node = arm_link.nodes()[0];
+    let apply = |raw: &[f64; 16], p: [f64; 3]| -> [f64; 3] {
+        [
+            raw[0] * p[0] + raw[4] * p[1] + raw[8] * p[2] + raw[12],
+            raw[1] * p[0] + raw[5] * p[1] + raw[9] * p[2] + raw[13],
+            raw[2] * p[0] + raw[6] * p[1] + raw[10] * p[2] + raw[14],
+        ]
+    };
+    let close3 = |a: [f64; 3], b: [f64; 3], tol: f64| (0..3).all(|i| (a[i] - b[i]).abs() < tol);
+
+    // Fact 1: no declared base.
+    check(mechanism.base().is_none(), "mechanism: base is not None")?;
+
+    // Fact 2: pose_state(open) grounds base, solves cleanly, and turns the arm by -0.5.
+    let state = &mechanism.states()[0];
+    let pose = mechanism.pose_state(state, None).map_err(e)?;
+    check(pose.ground == *base_link, "pose_state: ground is not the base link")?;
+    check(pose.unsolved.is_empty() && pose.out_of_range.is_empty(), "pose_state: unsolved or out_of_range is not empty")?;
+    let q = 0.5f64;
+    let arm_raw = pose.raw_transform(arm_node);
+    check(
+        close3(apply(&arm_raw, [10.0, 0.0, 0.0]), [10.0 * q.cos(), -10.0 * q.sin(), 100.0], 1e-9),
+        "pose_state: apply(transform(arm_node), (10,0,0)) is wrong",
+    )?;
+    check(close3(apply(&arm_raw, [0.0, 0.0, 0.0]), [0.0, 0.0, 100.0], 1e-9), "pose_state: apply(transform(arm_node), (0,0,0)) is wrong")?;
+    check(pose.raw_transform(base_node) == base_node.raw_transform(), "pose_state: base_node's transform is not its rest transform")?;
+
+    // Fact 3: a value past its range is used and reported.
+    let past_range = mechanism.pose(&[StateValue { joint: *hinge, values: vec![2.0] }], None).map_err(e)?;
+    check(
+        past_range.out_of_range == vec![(*hinge, 0, 2.0)],
+        &format!("pose: out_of_range is {:?}, not [(hinge, 0, 2.0)]", past_range.out_of_range),
+    )?;
+    let past_raw = past_range.raw_transform(arm_node);
+    check(
+        close3(apply(&past_raw, [10.0, 0.0, 0.0]), [10.0 * 2.0f64.cos(), -10.0 * 2.0f64.sin(), 100.0], 1e-9),
+        "pose: apply(transform(arm_node), (10,0,0)) at q=2.0 is wrong",
+    )?;
+
+    // Fact 4: the ground can be named.
+    let arm_grounded = mechanism.pose(&[StateValue { joint: *hinge, values: vec![0.5] }], Some(*arm_link)).map_err(e)?;
+    check(arm_grounded.ground == *arm_link, "pose: ground is not the arm link when named")?;
+    check(arm_grounded.raw_transform(arm_node) == arm_node.raw_transform(), "pose: arm_node's transform is not its rest transform when grounded on arm")?;
+
+    // Fact 5: state.values poses like pose_state, and pose([]) is the rest pose.
+    let via_values = mechanism.pose(&state.values, None).map_err(e)?;
+    let via_state = mechanism.pose_state(state, None).map_err(e)?;
+    check(via_values.raw_transform(arm_node) == via_state.raw_transform(arm_node), "pose(state.values) does not match pose_state(state)")?;
+    let rest = mechanism.pose(&[], None).map_err(e)?;
+    for node in mechanism.nodes() {
+        check(rest.raw_transform(node) == node.raw_transform(), &format!("pose([]): node {} is not at its rest transform", node.name()))?;
+    }
+
+    // Fact 6: a bad row fails with the core's own message; a file with no mechanism too.
+    let bad = mechanism.pose(&[StateValue { joint: *hinge, values: vec![1.0, 2.0] }], None);
+    let bad_message = bad.err().map(|err| err.to_string()).unwrap_or_default();
+    check(bad_message.contains("takes 1 value(s)"), &format!("pose: bad row message is {bad_message:?}, missing \"takes 1 value(s)\""))?;
+
     // A file with no mechanism has no joints, links or states.
     let cube = cadaclysm_sdk::open(sample_path).map_err(e)?;
     check(cube.links().is_empty() && cube.joints().is_empty() && cube.states().is_empty(), "mechanism: cube has links, joints or states")?;
+    let no_mechanism = cube.pose(&[], None);
+    let no_mechanism_message = no_mechanism.err().map(|err| err.to_string()).unwrap_or_default();
+    check(no_mechanism_message.contains("no mechanism"), &format!("pose on a mechanism-less file is {no_mechanism_message:?}, missing \"no mechanism\""))?;
+
+    println!("mechanism: pose facts 1-6 checked");
     Ok(())
 }
 
@@ -1084,8 +1188,211 @@ fn mechanisms() -> Result<(), String> {
         "arm.to_scene() has a kinematics: diagnostic",
     )?;
 
-    // Fact 4: the reverse pair is a new joint.
+    // Pairs: Assembly.pair/Assembly.state/Assembly.base and the free pair_freedom_count,
+    // at parity with the Python reference's _paired() fixture and its tests (spec
+    // 2026-09-29-blacksmith-pairs-2). Built on bracket/arm before "back" is added below: a
+    // joint with no pair refuses step_text(), so facts 1-6 and 9's diagnostics half need
+    // arm without it.
+    bracket
+        .pair("screw", "prismatic", &at([1.0, 2.0, 3.0]), &PairOptions { end_frame: Some(at([4.0, 2.0, 3.0])), ..Default::default() })
+        .map_err(e)?;
+    arm.pair(
+        "shoulder",
+        "revolute",
+        &at([0.0, 0.0, 10.0]),
+        &PairOptions { ranges: Some(vec![(Some(-1.5), Some(1.5))]), ..Default::default() },
+    )
+    .map_err(e)?;
+    arm.state("reach", &[("shoulder", &[0.5])]).map_err(e)?;
+    arm.base("ground").map_err(e)?;
+
+    // Fact 1: the pair/state entity counts in the default schema.
+    let paired_text = arm.step_text(None, Unit::Millimetre).map_err(e)?;
+    let pcount = |needle: &str| paired_text.matches(needle).count();
+    check(
+        pcount("=MECHANISM_REPRESENTATION(") == 2
+            && pcount("=PAIR_REPRESENTATION_RELATIONSHIP(") == 2
+            && pcount("REVOLUTE_PAIR_WITH_RANGE") == 1
+            && pcount("PRISMATIC_PAIR") == 1
+            && pcount("=KINEMATIC_PROPERTY_MECHANISM_REPRESENTATION(") == 1
+            && pcount("=MECHANISM_STATE_REPRESENTATION(") == 1,
+        "pairs: arm.step_text()'s pair/state entity counts are not 2/2/1/1/1/1",
+    )?;
+
+    // Facts 2-6 and 9: read back through to_scene.
+    let paired_scene = arm.to_scene(None).map_err(e)?;
+    let close3 = |a: [f64; 3], b: [f64; 3]| (0..3).all(|i| (a[i] - b[i]).abs() < 1e-9);
+    let origin = |f: [[f64; 4]; 4]| [f[0][3], f[1][3], f[2][3]];
+    let z_axis = |f: [[f64; 4]; 4]| [f[0][2], f[1][2], f[2][2]];
+
+    let shoulder = paired_scene.joints().into_iter().find(|j| j.name() == "shoulder").ok_or("pairs: no shoulder joint")?;
+    let s_pair = shoulder.pair().ok_or("pairs: shoulder has no pair")?;
+    check(s_pair.kind() == cadaclysm_sdk::PairKind::Revolute, "pairs: shoulder's pair is not revolute")?;
+    check(
+        close3(origin(s_pair.frame_start()), [0.0, 0.0, 10.0])
+            && close3(origin(s_pair.frame_end()), [0.0, 0.0, 10.0])
+            && close3(z_axis(s_pair.frame_start()), [0.0, 0.0, 1.0])
+            && close3(z_axis(s_pair.frame_end()), [0.0, 0.0, 1.0]),
+        "pairs: shoulder's pair frames are not at (0, 0, 10) with z (0, 0, 1)",
+    )?;
+    let s_freedoms = s_pair.freedoms();
+    check(
+        s_freedoms.len() == 1
+            && s_freedoms[0].motion == cadaclysm_sdk::Motion::Rotation
+            && s_freedoms[0].axis == cadaclysm_sdk::FreedomAxis::Z
+            && (s_freedoms[0].lower.unwrap_or(f64::NAN) - -1.5).abs() < 1e-9
+            && (s_freedoms[0].upper.unwrap_or(f64::NAN) - 1.5).abs() < 1e-9,
+        "pairs: shoulder's pair is not one rotation-about-z freedom ranged [-1.5, 1.5]",
+    )?;
+    println!("pairs: shoulder's pair is revolute, one rotation-about-z freedom ranged [-1.5, 1.5]");
+
+    let screw = paired_scene.joints().into_iter().find(|j| j.name() == "screw").ok_or("pairs: no screw joint")?;
+    let sc_pair = screw.pair().ok_or("pairs: screw has no pair")?;
+    check(sc_pair.kind() == cadaclysm_sdk::PairKind::Prismatic, "pairs: screw's pair is not prismatic")?;
+    check(sc_pair.freedoms().iter().all(|f| f.lower.is_none() && f.upper.is_none()), "pairs: screw's pair has a ranged freedom")?;
+    check(
+        close3(origin(sc_pair.frame_start()), [1.0, 2.0, 13.0]) && close3(origin(sc_pair.frame_end()), [4.0, 2.0, 13.0]),
+        "pairs: screw's pair frames are not (1,2,13) to (4,2,13)",
+    )?;
+    println!("pairs: screw's pair is prismatic with no ranges, frames (1,2,13) to (4,2,13)");
+
+    let paired_base = paired_scene.base().ok_or("pairs: the scene has no base")?;
+    check(paired_base.name() == "ground", "pairs: the scene's base is not 'ground'")?;
+    let paired_states = paired_scene.states();
+    check(
+        paired_states.len() == 1 && paired_states[0].name == "reach",
+        "pairs: the scene does not carry exactly one state named 'reach'",
+    )?;
+    let reach = &paired_states[0];
+    check(
+        reach.values.len() == 1 && reach.values[0].joint.name() == "shoulder" && (reach.values[0].values[0] - 0.5).abs() < 1e-9,
+        "pairs: state 'reach' is not exactly one row (shoulder, [0.5])",
+    )?;
+    println!("pairs: the scene's base is 'ground', with one state 'reach' of (shoulder, [0.5])");
+
+    let reach_pose = paired_scene.pose_state(reach, None).map_err(e)?;
+    let upper_arm = paired_scene.links().into_iter().find(|l| l.name() == "upper arm").ok_or("pairs: no 'upper arm' link")?;
+    let pin_node = upper_arm
+        .nodes()
+        .into_iter()
+        .find(|n| close3(origin(n.transform()), [5.0, 5.0, 2.0]))
+        .ok_or("pairs: 'upper arm' has no node at (5,5,2)")?;
+    let want = [5.0 * 0.5f64.cos() - 5.0 * 0.5f64.sin(), 5.0 * 0.5f64.sin() + 5.0 * 0.5f64.cos(), 2.0];
+    check(
+        close3(origin(reach_pose.transform(pin_node)), want),
+        "pairs: pose_state(reach) did not carry the pin node to the expected point",
+    )?;
+    println!("pairs: pose_state(reach) carries the pin node to the expected point");
+
+    let pose3 = paired_scene.pose(&[StateValue { joint: screw, values: vec![3.0] }], None).map_err(e)?;
+    let pose5 = paired_scene.pose(&[StateValue { joint: screw, values: vec![5.0] }], None).map_err(e)?;
+    let bolts = paired_scene.links().into_iter().find(|l| l.name() == "bolts").ok_or("pairs: no 'bolts' link")?;
+    for node in bolts.nodes() {
+        let rest = origin(node.transform());
+        let at3 = origin(pose3.transform(node));
+        let at5 = origin(pose5.transform(node));
+        check(close3(at3, rest), "pairs: pose([(screw, [3.0])]) moved a 'bolts' node off rest")?;
+        check(
+            close3(at5, [rest[0] + 2.0, rest[1], rest[2]]),
+            "pairs: pose([(screw, [5.0])]) did not move a 'bolts' node by (2, 0, 0)",
+        )?;
+    }
+    println!("pairs: pose at rest leaves 'bolts' alone; pose([(screw, [5.0])]) moves every 'bolts' node by (2, 0, 0)");
+
+    check(
+        !paired_scene.diagnostics().iter().any(|d| d.starts_with("kinematics:")),
+        "pairs: arm.to_scene() has a kinematics: diagnostic",
+    )?;
+
+    // Fact 4: the reverse pair is a new joint -- and, from here, the unpaired joint
+    // facts 7 and 8 below are built on.
     arm.joint("back", "upper arm", "ground").map_err(e)?;
+
+    // Fact 7: every bad pair/state/base call is refused with its exact message and
+    // changes nothing. 'back' stays unpaired throughout: step_text() always fails with
+    // fact 8's refusal, so that message staying byte-identical before and after is proof
+    // none of these calls mutated 'back', or anything else step_text() would notice.
+    let unpaired_message = || arm.step_text(None, Unit::Millimetre).err().map(|err| err.to_string()).unwrap_or_default();
+    let before_pairs = unpaired_message();
+    let xy0 = at([0.0; 3]);
+    let turned_frame_2d = Frame::at([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], Some([0.0, 1.0, 0.0])).map_err(|err| format!("pairs: {err}"))?;
+    let pair_refusals: Vec<(Box<dyn Fn() -> Result<(), cadaclysm_sdk::Error>>, &str)> = vec![
+        (Box::new(|| arm.pair("shoulder", "revolute", &at([0.0, 0.0, 10.0]), &PairOptions::default())), "pair: joint 'shoulder' already has a pair"),
+        (
+            Box::new(|| arm.pair("back", "orbital", &xy0, &PairOptions::default())),
+            "pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, spherical, \
+             spherical_with_pin, planar, universal, homokinetic, fully_constrained, unconstrained)",
+        ),
+        (Box::new(|| arm.pair("back", "screw", &xy0, &PairOptions::default())), "pair: a screw needs a non-zero pitch"),
+        (
+            Box::new(|| {
+                arm.pair(
+                    "back",
+                    "revolute",
+                    &xy0,
+                    &PairOptions { ranges: Some(vec![(Some(-1.0), Some(1.0)), (Some(-1.0), Some(1.0))]), ..Default::default() },
+                )
+            }),
+            "pair: 'revolute' has 1 freedoms, but 2 ranges were given",
+        ),
+        (
+            Box::new(|| arm.pair("back", "revolute", &xy0, &PairOptions { ranges: Some(vec![(Some(1.0), Some(-1.0))]), ..Default::default() })),
+            "pair: range 0 of joint 'back' has lower >= upper",
+        ),
+        (
+            Box::new(|| arm.pair("back", "prismatic", &turned_frame_2d, &PairOptions { end_frame: Some(xy0), ..Default::default() })),
+            "pair: joint 'back' is prismatic, but its end frame is turned 90\u{b0} about -z, which prismatic (does not turn) cannot make",
+        ),
+        (Box::new(|| arm.state("overreach", &[("shoulder", &[5.0])])), "state: value 0 of joint 'shoulder' is outside its range"),
+        (Box::new(|| arm.base("upper arm")), "base: assembly 'arm' already has base 'ground'"),
+    ];
+    for (call, message) in &pair_refusals {
+        let got = call().err().map(|err| err.to_string()).unwrap_or_default();
+        check(got == *message, &format!("pairs: refusal message was {got:?}, not {message:?}"))?;
+    }
+    check(unpaired_message() == before_pairs, "pairs: 'back' or something else changed across the eight refused calls")?;
+    println!("pairs: eight bad pair/state/base calls refused with their exact message, nothing changed");
+
+    // Fact 8: a joint without a pair is refused only when step_text() is written.
+    let back_message = unpaired_message();
+    check(
+        back_message == "assembly_step: assembly 'arm': joint 'back' has no pair; a mechanism with pairs needs one on every joint (AP242)",
+        &format!("pairs: joint 'back' without a pair was refused as {back_message:?}"),
+    )?;
+
+    // Fact 9: no diagnostic names kinematics (checked above); pair_freedom_count gives
+    // spherical 3, revolute 1, fully_constrained 0, an unknown name 0.
+    check(
+        blacksmith::pair_freedom_count("spherical") == 3
+            && blacksmith::pair_freedom_count("revolute") == 1
+            && blacksmith::pair_freedom_count("fully_constrained") == 0
+            && blacksmith::pair_freedom_count("not_a_kind") == 0,
+        "pairs: pair_freedom_count does not give 3/1/0/0 for spherical/revolute/fully_constrained/unknown",
+    )?;
+    println!("pairs: pair_freedom_count gives spherical 3, revolute 1, fully_constrained 0, an unknown name 0");
+
+    // Controller ruling, fact 10: a one-sided range survives the round trip. An
+    // implementation that always sent has_lower/has_upper as true would pass every other
+    // fact but fail this one.
+    let hinge_plate = Solid::cuboid(20.0, 10.0, 2.0).map_err(e)?;
+    let hinge_bolt = Solid::cylinder(1.0, 6.0).map_err(e)?;
+    let hinge = Assembly::new("hinge").map_err(e)?;
+    hinge.place_solid(&hinge_plate, &Frame::xy([0.0; 3]), Some("base")).map_err(e)?;
+    hinge.place_solid(&hinge_bolt, &at([0.0, 0.0, 2.0]), Some("arm")).map_err(e)?;
+    hinge.link("base", &["base"]).map_err(e)?;
+    hinge.link("arm", &["arm"]).map_err(e)?;
+    hinge.joint("j", "base", "arm").map_err(e)?;
+    hinge
+        .pair("j", "revolute", &Frame::xy([0.0; 3]), &PairOptions { ranges: Some(vec![(None, Some(1.0))]), ..Default::default() })
+        .map_err(e)?;
+    let hinge_scene = hinge.to_scene(None).map_err(e)?;
+    let j = hinge_scene.joints().into_iter().find(|j| j.name() == "j").ok_or("pairs: no joint 'j'")?;
+    let j_freedoms = j.pair().ok_or("pairs: joint 'j' has no pair")?.freedoms();
+    check(
+        j_freedoms.len() == 1 && j_freedoms[0].lower.is_none() && (j_freedoms[0].upper.unwrap_or(f64::NAN) - 1.0).abs() < 1e-9,
+        "pairs: a one-sided range did not survive the round trip",
+    )?;
+    println!("pairs: a one-sided range (None, 1.0) survives the round trip as (None, 1.0)");
 
     println!("mechanisms: 5 facts checked (kinematic STEP counts, eleven exact refusals, unchanged file, reverse joint, Scene read-back)");
     Ok(())

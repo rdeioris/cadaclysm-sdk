@@ -444,6 +444,26 @@ final class OwnedBuffer<Element>: NativeMemoryOwner {
     var nativeMemoryInvalidReason: String? { nil }
 }
 
+/// What a `Mesh64`'s arrays name as their owner: the scene, and the scene's forget count when
+/// the mesh was lent. `Scene.forgetMeshes()` frees the document's own mesh those arrays view, so
+/// a forget since then invalidates them as a close does, and a read traps rather than reading
+/// freed memory.
+final class LentMesh: NativeMemoryOwner {
+    let scene: Scene
+    let forgets: Int
+
+    init(_ scene: Scene) {
+        self.scene = scene
+        forgets = scene.forgets
+    }
+
+    var nativeMemoryInvalidReason: String? {
+        if let closed = scene.nativeMemoryInvalidReason { return closed }
+        return scene.forgets == forgets ? nil
+            : "stale view: the scene has forgotten its meshes since, freeing the document's own mesh this lends (ask the node again)"
+    }
+}
+
 /// A read-only array over memory the library owns, kept alive by holding its owner.
 ///
 /// Element access checks the owner first and traps once it has given the memory back (the
@@ -686,6 +706,32 @@ public struct Manifold: Hashable, Sendable, CustomStringConvertible {
         "Manifold(faces: \(faces), edges: \(edges), vertices: \(vertices), boundaryEdges: \(boundaryEdges), "
             + "nonManifoldEdges: \(nonManifoldEdges), nonManifoldVertices: \(nonManifoldVertices), "
             + "isManifold: \(isManifold), isClosed: \(isClosed))"
+    }
+}
+
+/// What `Brep.sewed` did, as plain data: the edges it joined (`pairs`), the free edges before and
+/// after, how many groups of free edges between the same two vertices it left free (`refused`:
+/// too far apart for the tolerance, or more than two), the widest gap it sewed, and the two
+/// tolerances it used.
+public struct SewReport: Hashable, Sendable {
+    public let pairs: UInt32
+    public let freeBefore: UInt32
+    public let freeAfter: UInt32
+    public let refused: UInt32
+    public let worstGap: Double
+    public let tolerance: Double
+    public let vertex: Double
+
+    /// The four counts and three gaps `cadaclysm_brep_sew` writes, in order.
+    public init(counts: [UInt32], gaps: [Double]) {
+        precondition(counts.count >= 4 && gaps.count >= 3, "SewReport: needs four counts and three gaps")
+        pairs = counts[0]
+        freeBefore = counts[1]
+        freeAfter = counts[2]
+        refused = counts[3]
+        worstGap = gaps[0]
+        tolerance = gaps[1]
+        vertex = gaps[2]
     }
 }
 
@@ -1257,6 +1303,12 @@ public struct Pair {
 public struct StateValue {
     public let joint: Joint?
     public let values: [Double]
+
+    /// A row naming `joint` and its values, for `Scene.pose`'s `values` argument.
+    public init(joint: Joint?, values: [Double]) {
+        self.joint = joint
+        self.values = values
+    }
 }
 
 /// A named pose of the file's mechanism: a `MECHANISM_STATE_REPRESENTATION`. From
@@ -1283,6 +1335,150 @@ private func readState(_ scene: Scene, _ index: UInt32) -> State {
         rows.append(StateValue(joint: joint, values: values))
     }
     return State(index: Int(index), name: name, values: rows)
+}
+
+/// One stop of a `MotionSequence`: the state it reaches, at which parameter, and how the motion
+/// leaves it.
+public struct Segment {
+    public let state: State
+    public let t: Double
+    /// `"undefined"`, `"discontinuous"`, `"synchronous"` or `"linear"`.
+    public let interpolation: String
+}
+
+/// The lower-case word for a `CadaclysmInterpolation` code.
+private func interpolationWord(_ code: UInt32) -> String {
+    switch code {
+    case 1: return "discontinuous"
+    case 2: return "synchronous"
+    case 3: return "linear"
+    default: return "undefined"
+    }
+}
+
+/// A named motion over the file's states: an `INTERPOLATED_CONFIGURATION_SEQUENCE`. From
+/// `Scene.sequences`.
+public struct MotionSequence {
+    public let index: Int
+    public let name: String
+    /// Whether it returns to its first segment (its last segment is not discontinuous).
+    public let closed: Bool
+    /// Seconds per unit of the parameter, or nil where the file states no time unit (read
+    /// the parameter as seconds).
+    public let secondsPerUnit: Double?
+    /// At least two, in parameter order.
+    public let segments: [Segment]
+    private let scene: Scene
+
+    fileprivate init(scene: Scene, index: Int, name: String, closed: Bool, secondsPerUnit: Double?, segments: [Segment]) {
+        self.scene = scene
+        self.index = index
+        self.name = name
+        self.closed = closed
+        self.secondsPerUnit = secondsPerUnit
+        self.segments = segments
+    }
+
+    /// The parameter of the first segment.
+    public var start: Double { segments.first?.t ?? 0 }
+
+    /// The parameter of the last segment.
+    public var end: Double { segments.last?.t ?? 0 }
+
+    /// The mechanism posed at parameter `t` (the file's own parameter; see `secondsPerUnit`),
+    /// with `ground` held fixed as `Scene.pose` does. Throws `CadaclysmError` for a `t` that
+    /// is not finite, carrying `cadaclysm_last_error`'s text unchanged.
+    public func pose(_ t: Double, ground: Link? = nil) throws -> Pose {
+        let handle = try scene.liveOrThrow()
+        let groundIndex = ground.map { UInt32($0.index) } ?? noneIndex
+        guard let ptr = cadaclysm_pose_sequence(handle, UInt32(index), t, groundIndex) else {
+            throw CadaclysmError(lastErrorOr("pose"))
+        }
+        return copyPose(scene, ptr)
+    }
+}
+
+private func readSequence(_ scene: Scene, _ index: UInt32) -> MotionSequence {
+    let handle = scene.live("Sequence")
+    let name = borrowed(cadaclysm_sequence_name(handle, index))
+    let closed = cadaclysm_sequence_closed(handle, index)
+    let perUnit = cadaclysm_sequence_seconds_per_unit(handle, index)
+    var segments: [Segment] = []
+    for i in 0..<cadaclysm_sequence_segment_count(handle, index) {
+        var state: UInt32 = 0
+        var t = 0.0
+        var interpolation: UInt32 = 0
+        if cadaclysm_sequence_segment(handle, index, i, &state, &t, &interpolation) {
+            segments.append(Segment(state: readState(scene, state), t: t, interpolation: interpolationWord(interpolation)))
+        }
+    }
+    return MotionSequence(scene: scene, index: Int(index), name: name, closed: closed,
+                    secondsPerUnit: perUnit > 0 ? perUnit : nil, segments: segments)
+}
+
+/// A posed mechanism: `Scene.pose` or `Scene.poseState`'s answer. The document itself is
+/// unchanged.
+///
+/// Copied eagerly out of the C handle at construction time (`copyPose`), so a `Pose` holds
+/// no C pointer and outlives the call that made it -- closing the scene does not
+/// invalidate it.
+public struct Pose {
+    /// The link held fixed.
+    public let ground: Link
+    /// Joints that close a loop and were not honoured, in file order.
+    public let unsolved: [Joint]
+    /// `(joint, freedom index, value)` for every given value outside its freedom's range.
+    public let outOfRange: [(joint: Joint, freedom: Int, value: Double)]
+    private let transforms: [[Double]]
+
+    fileprivate init(ground: Link, unsolved: [Joint],
+                     outOfRange: [(joint: Joint, freedom: Int, value: Double)], transforms: [[Double]]) {
+        self.ground = ground
+        self.unsolved = unsolved
+        self.outOfRange = outOfRange
+        self.transforms = transforms
+    }
+
+    /// `node`'s posed transform, as four rows of four doubles -- the same type
+    /// `Node.transform` returns.
+    public func transform(_ node: Node) -> [[Double]] { rowMajor(rawTransform(node)) }
+
+    /// The same matrix in the ABI's own column-major order, as sixteen doubles, exactly as
+    /// `Node.rawTransform` lays them out.
+    public func rawTransform(_ node: Node) -> [Double] { transforms[node.index] }
+}
+
+/// Reads everything out of a `CadaclysmPose*` into a `Pose`, then frees it (ruling 2 of the
+/// posing plan: wrappers copy eagerly, never holding the C pointer). `defer` runs the free
+/// even if copying throws partway through.
+private func copyPose(_ scene: Scene, _ posePtr: OpaquePointer) -> Pose {
+    defer { cadaclysm_pose_free(posePtr) }
+    let ground = Link(scene, Int(cadaclysm_pose_ground(posePtr)))
+    let nodeCount = cadaclysm_pose_node_count(posePtr)
+    var transforms: [[Double]] = []
+    transforms.reserveCapacity(Int(nodeCount))
+    for node in 0..<nodeCount {
+        var raw = [Double](repeating: 0, count: 16)
+        cadaclysm_pose_node_transform(posePtr, node, &raw)
+        transforms.append(raw)
+    }
+    var unsolved: [Joint] = []
+    let unsolvedCount = cadaclysm_pose_unsolved_count(posePtr)
+    for i in 0..<unsolvedCount {
+        let joint = cadaclysm_pose_unsolved(posePtr, i)
+        if joint != noneIndex { unsolved.append(Joint(scene, Int(joint))) }
+    }
+    var outOfRange: [(joint: Joint, freedom: Int, value: Double)] = []
+    let outOfRangeCount = cadaclysm_pose_out_of_range_count(posePtr)
+    for i in 0..<outOfRangeCount {
+        var joint: UInt32 = 0
+        var freedom: UInt32 = 0
+        var value: Double = 0
+        if cadaclysm_pose_out_of_range(posePtr, i, &joint, &freedom, &value) {
+            outOfRange.append((Joint(scene, Int(joint)), Int(freedom), value))
+        }
+    }
+    return Pose(ground: ground, unsolved: unsolved, outOfRange: outOfRange, transforms: transforms)
 }
 
 // ---- breps ------------------------------------------------------------------------------------
@@ -1329,6 +1525,24 @@ public final class Brep {
             }
             return Manifold(row)
         }
+    }
+
+    /// This brep with its free edges sewn, and what was sewn, as a new `Brep` and a `SewReport`;
+    /// this one is left as it was. Two free edges become one shared edge where both their ends
+    /// coincide within `vertex` -- by default the rounding `manifold` merges vertices at -- and
+    /// their curves lie within `tolerance` of each other, by default `vertex` too, so only edges
+    /// that are one curve written twice are joined. A larger `tolerance` also joins two curves
+    /// between the same two vertices that part by up to it; `vertex` is what decides which edges
+    /// are candidates at all, and raising it is what could close a slot. Nothing moves. Throws
+    /// once released, or with the library's reason.
+    public func sewed(tolerance: Double? = nil, vertex: Double? = nil) throws -> (Brep, SewReport) {
+        guard let handle = handle else { throw CadaclysmError("brep: released") }
+        var counts = [UInt32](repeating: 0, count: 4)
+        var gaps = [Double](repeating: 0, count: 3)
+        guard let sewn = cadaclysm_brep_sew(handle, tolerance ?? .nan, vertex ?? .nan, &counts, &gaps) else {
+            throw CadaclysmError(lastErrorOr("sew"))
+        }
+        return (Brep(handle: sewn), SewReport(counts: counts, gaps: gaps))
     }
 
     /// Give the reference back now. Idempotent; `deinit` does it otherwise.
@@ -1997,11 +2211,12 @@ public struct Node: Hashable, CustomStringConvertible {
 
     private func mesh64(_ got: CadaclysmMesh64) -> Mesh64 {
         let n = Int(got.vertex_count)
-        return Mesh64(positions: NativeArray(owner: scene, base: got.positions, count: n * 3),
-                     normals: got.normals.map { NativeArray(owner: scene, base: $0, count: n * 3) },
-                     uvs: got.uvs.map { NativeArray(owner: scene, base: $0, count: n * 2) },
-                     colors: got.colors.map { NativeArray(owner: scene, base: $0, count: n * 4) },
-                     indices: NativeArray(owner: scene, base: got.indices, count: Int(got.index_count)),
+        let lent = LentMesh(scene)
+        return Mesh64(positions: NativeArray(owner: lent, base: got.positions, count: n * 3),
+                     normals: got.normals.map { NativeArray(owner: lent, base: $0, count: n * 3) },
+                     uvs: got.uvs.map { NativeArray(owner: lent, base: $0, count: n * 2) },
+                     colors: got.colors.map { NativeArray(owner: lent, base: $0, count: n * 4) },
+                     indices: NativeArray(owner: lent, base: got.indices, count: Int(got.index_count)),
                      vertexCount: n, indexCount: Int(got.index_count))
     }
 
@@ -2013,10 +2228,10 @@ public struct Node: Hashable, CustomStringConvertible {
     ///
     /// **A forget drops it, unlike `mesh`.** `Scene.forgetMeshes()` frees the document's mesh
     /// these arrays view; `mesh`'s arrays survive a forget, being a separate copy the library
-    /// keeps. A `Mesh64`'s `NativeArray`s check only whether the *scene* is closed, not whether the
-    /// mesh cache has since been forgotten, so nothing here traps on a stale read after
-    /// `forgetMeshes()`: ask for `mesh64` again rather than reuse one held from before the
-    /// forget.
+    /// keeps. A `Mesh64`'s `NativeArray`s carry the scene's forget count as well as the check
+    /// that the scene is open, so a read after `forgetMeshes()` traps (and `isValid` turns
+    /// false) rather than reading freed memory: ask for `mesh64` again rather than reuse one
+    /// held from before the forget.
     public var mesh64: Mesh64 { mesh64(cadaclysm_node_mesh64(live(), raw)) }
 
     /// How far `meshLod(level)` moved the surface, in the scene's units -- what to pick a
@@ -2339,7 +2554,7 @@ public enum Up: Sendable, Equatable {
 }
 
 /// One of the seven camera angles `SvgOptions.view` understands -- the same table
-/// `cadaclysm_viewer.VIEWS` gives Python's `show()` and `svg()` both. Degrees (azimuth,
+/// `cadaclysm_view.VIEWS` gives Python's `show()` and `svg()` both. Degrees (azimuth,
 /// elevation): see `angles`.
 public enum SvgView: Sendable {
     /// (-90, 0) -- looking from -Y.
@@ -2379,6 +2594,19 @@ private let svgEdgesFlag: UInt32 = 1
 private let svgCurvesFlag: UInt32 = 2
 private let svgIsocurvesFlag: UInt32 = 4
 private let svgPolylinesFlag: UInt32 = 8
+private let svgSilhouettesFlag: UInt32 = 16
+
+/// A colour as the ABI's packed `0xRRGGBB`, from `"#rgb"`, `"#rrggbb"` or a CSS colour name --
+/// for `SvgOptions.stroke`/`SvgOptions.background`, which take the packed number. Read by the
+/// library's own parser, so every wrapper takes the same forms. Takes no numeric triple of its
+/// own, so its refusal lists only the text forms.
+public func packed(_ colour: String) throws -> UInt32 {
+    var out = [Double](repeating: 0, count: 3)
+    guard cadaclysm_parse_colour(colour, &out) else {
+        throw CadaclysmError("colour: a colour is \"#rgb\", \"#rrggbb\" or a CSS colour name, not '\(colour)'")
+    }
+    return (UInt32((out[0] * 255).rounded()) << 16) | (UInt32((out[1] * 255).rounded()) << 8) | UInt32((out[2] * 255).rounded())
+}
 
 /// How an SVG drawing is made -- the camera in the viewer's words, the page, the pen and which
 /// line sets. Mirrors `CadaclysmSvgOptions`; `SvgOptions()` is the defaults
@@ -2410,12 +2638,14 @@ public struct SvgOptions: Sendable {
     public var margin: Double
     /// How far a written curve may stray, in page units. Default 0.1.
     public var tolerance: Double
-    /// The pen colour, `0xRRGGBB`. Default black.
+    /// The pen colour, `0xRRGGBB` -- `packed(_:)` reads a `"#rgb"`, `"#rrggbb"` or CSS colour
+    /// name string, e.g. `stroke: try packed("navy")`. Default black.
     public var stroke: UInt32
     /// The pen's width, page units. Default 1.
     public var strokeWidth: Double
     /// `0xRRGGBB`, or `nil` (the default) for no `<rect>` behind the drawing -- the page left to
-    /// whatever the viewer composites it onto.
+    /// whatever the viewer composites it onto. `packed(_:)` reads a `"#rgb"`, `"#rrggbb"` or CSS
+    /// colour name string, e.g. `background: try packed("navy")`.
     public var background: UInt32?
     /// Each shape's feature edges -- the exact curves the flattened polylines are drawn from.
     /// Default `true`.
@@ -2429,14 +2659,24 @@ public struct SvgOptions: Sendable {
     /// Write every line as straight segments within `tolerance`, instead of being fitted back
     /// to cubic Béziers. Default `false`.
     public var polylines: Bool
+    /// Also draw where each body's surfaces turn away from the eye -- the outline a sphere has
+    /// no edge for. One group per body, after that body's lines. Default `true`.
+    ///
+    /// On by default because a line set alone cannot draw every body: a sphere's and a torus's
+    /// only curves are the seams where their one face meets itself, which are not edges of the
+    /// body and are never drawn, so without it those two draw a blank page. A line set in its
+    /// own right -- set it with `edges: false` for the outline alone, or clear it for the lines
+    /// alone. Only naming nothing at all is refused.
+    public var silhouettes: Bool
 
     /// The defaults `cadaclysm_svg_options_init` fills: the viewer's iso, orthographic, a
-    /// 1000-square page, black edges one unit wide on nothing.
+    /// 1000-square page, black edges one unit wide on nothing, and each body's outline beside
+    /// them.
     public init(view: SvgView = .iso, azimuth: Double? = nil, elevation: Double? = nil, up: Up? = nil,
                 fov: Double = 0, width: Double = 1000, height: Double = 1000, margin: Double = 0.05,
                 tolerance: Double = 0.1, stroke: UInt32 = 0x00_0000, strokeWidth: Double = 1,
                 background: UInt32? = nil, edges: Bool = true, curves: Bool = false,
-                isocurves: Bool = false, polylines: Bool = false) {
+                isocurves: Bool = false, polylines: Bool = false, silhouettes: Bool = true) {
         self.view = view
         self.azimuth = azimuth
         self.elevation = elevation
@@ -2453,6 +2693,7 @@ public struct SvgOptions: Sendable {
         self.curves = curves
         self.isocurves = isocurves
         self.polylines = polylines
+        self.silhouettes = silhouettes
     }
 }
 
@@ -2477,6 +2718,7 @@ func buildSvgOptions(_ options: SvgOptions, defaultUp: Up) -> CadaclysmSvgOption
     raw.background = options.background ?? svgTransparent
     raw.flags = (options.edges ? svgEdgesFlag : 0) | (options.curves ? svgCurvesFlag : 0)
         | (options.isocurves ? svgIsocurvesFlag : 0) | (options.polylines ? svgPolylinesFlag : 0)
+        | (options.silhouettes ? svgSilhouettesFlag : 0)
     return raw
 }
 
@@ -2601,6 +2843,65 @@ public final class Scene: NativeMemoryOwner, CustomStringConvertible {
         return (0..<cadaclysm_state_count(handle)).map { readState(self, $0) }
     }
 
+    /// The file's motion sequences -- `INTERPOLATED_CONFIGURATION_SEQUENCE`, each a named walk
+    /// through its states. Empty for a file that records none.
+    public var sequences: [MotionSequence] {
+        let handle = live()
+        return (0..<cadaclysm_sequence_count(handle)).map { readSequence(self, $0) }
+    }
+
+    /// The link the file declares as the mechanism's base, or nil when it declares none
+    /// (the default ground is then the link on the most joints; see `pose`).
+    public var base: Link? {
+        let index = cadaclysm_kinematics_base(live())
+        return index == noneIndex ? nil : Link(self, Int(index))
+    }
+
+    /// The mechanism posed by `values`: one `(joint, values)` row per joint to set --
+    /// exactly `State.values`' row type, so `pose(state.values)` poses like
+    /// `poseState(state)` -- with `ground` (a `Link`, or nil for the default ground) held
+    /// fixed. Values outside a freedom's range are used as given and reported in the
+    /// answer's `outOfRange`.
+    ///
+    /// Throws `CadaclysmError` on a bad row (a joint given twice, one with the wrong
+    /// number of values, ...) or a file with no mechanism, carrying
+    /// `cadaclysm_last_error`'s text unchanged.
+    public func pose(_ values: [StateValue] = [], ground: Link? = nil) throws -> Pose {
+        let handle = try liveOrThrow()
+        var rows: [(UInt32, [Double])] = []
+        rows.reserveCapacity(values.count)
+        for row in values {
+            guard let joint = row.joint else {
+                throw CadaclysmError("pose: a row names no joint")
+            }
+            rows.append((UInt32(joint.index), row.values))
+        }
+        let joints = rows.map { $0.0 }
+        let counts = rows.map { UInt32($0.1.count) }
+        let flat = rows.flatMap { $0.1 }
+        let groundIndex = ground.map { UInt32($0.index) } ?? noneIndex
+        let ptr: OpaquePointer? = joints.withUnsafeBufferPointer { j in
+            counts.withUnsafeBufferPointer { c in
+                flat.withUnsafeBufferPointer { v in
+                    cadaclysm_pose(handle, j.baseAddress, c.baseAddress, v.baseAddress, UInt32(rows.count), groundIndex)
+                }
+            }
+        }
+        guard let ptr = ptr else { throw CadaclysmError(lastErrorOr("pose")) }
+        return copyPose(self, ptr)
+    }
+
+    /// The mechanism posed by `state`'s values, with `ground` held fixed as `pose` does.
+    /// Throws `CadaclysmError` as `pose` does.
+    public func poseState(_ state: State, ground: Link? = nil) throws -> Pose {
+        let handle = try liveOrThrow()
+        let groundIndex = ground.map { UInt32($0.index) } ?? noneIndex
+        guard let ptr = cadaclysm_pose_state(handle, UInt32(state.index), groundIndex) else {
+            throw CadaclysmError(lastErrorOr("pose"))
+        }
+        return copyPose(self, ptr)
+    }
+
     /// The archive member this was read from, or nil for a plain file.
     public var sourceName: String? {
         guard let raw = cadaclysm_source_name(live()) else { return nil }
@@ -2666,9 +2967,20 @@ public final class Scene: NativeMemoryOwner, CustomStringConvertible {
     /// return at once, and meshes are still built one node at a time on request.
     public func cancel() { cadaclysm_cancel(live()) }
 
-    /// Drop every mesh the scene has built; the next ask rebuilds. Every `Mesh` and
-    /// `Polylines` handed out before this is over freed memory.
-    public func forgetMeshes() { cadaclysm_forget_meshes(live()) }
+    /// Drop every mesh the scene has built; the next ask rebuilds. What it frees is the
+    /// document's own mesh: the `Mesh64`s handed out before it view that, so this counts the
+    /// forget and their arrays trap afterwards rather than read freed memory. `Mesh`,
+    /// `Polylines` and the Béziers are the library's own caches, which a forget does not touch
+    /// and which stay good until the scene closes.
+    public func forgetMeshes() {
+        cadaclysm_forget_meshes(live())
+        forgets += 1
+    }
+
+    /// How many times `forgetMeshes()` has run. Only `Mesh64` stamps itself with this (through
+    /// `LentMesh`): it lends the document's own mesh, which a forget frees, where the float mesh
+    /// and the line views are the library's own caches and outlive one.
+    private(set) var forgets = 0
 
     /// Write the whole scene: `glb` (binary glTF), `gltf` (text glTF, one file) or `obj` (every
     /// placement baked to its own named object, a `.mtl` beside it when anything has a colour).

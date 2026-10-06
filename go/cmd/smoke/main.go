@@ -166,7 +166,162 @@ func main() {
 		fail("mechanism does not carry exactly one state 'open' setting hinge to [0.5]")
 	}
 	fmt.Printf("pair: %v, freedoms %d, states %d\n", pair.Kind, len(freedoms), len(states))
+
+	// Posing: Scene.Base/Pose/PoseState and Pose, at parity with the Python reference's
+	// six pose facts (mechanism.stp declares no base; base=links[0], arm=links[1]).
+	baseLink, armLink := links[0], links[1]
+	armNode := armLink.Nodes()[0]
+	baseNode := baseLink.Nodes()[0]
+	apply := func(m [16]float64, x, y, z float64) (float64, float64, float64) {
+		return m[0]*x + m[4]*y + m[8]*z + m[12],
+			m[1]*x + m[5]*y + m[9]*z + m[13],
+			m[2]*x + m[6]*y + m[10]*z + m[14]
+	}
+	close3 := func(a, b float64) bool { return math.Abs(a-b) <= 1e-9 }
+	if mechanism.Base() != nil {
+		fail("mechanism.stp declares a base but declares none")
+	}
+	posedState, perr := mechanism.PoseState(states[0], nil)
+	if perr != nil {
+		fail(perr.Error())
+	}
+	if posedState.Ground.Index() != baseLink.Index() {
+		fail("pose_state's ground is not the base link")
+	}
+	if len(posedState.Unsolved) != 0 || len(posedState.OutOfRange) != 0 {
+		fail("pose_state reports unsolved or out-of-range joints")
+	}
+	const q = 0.5 // the arm is the joint's start, reached from its end: it turns by -q
+	tipX, tipY, tipZ := apply(posedState.RawTransform(armNode), 10, 0, 0)
+	if !close3(tipX, 10*math.Cos(q)) || !close3(tipY, -10*math.Sin(q)) || !close3(tipZ, 100) {
+		fail("pose_state does not turn the arm by -0.5")
+	}
+	originX, originY, originZ := apply(posedState.RawTransform(armNode), 0, 0, 0)
+	if !close3(originX, 0) || !close3(originY, 0) || !close3(originZ, 100) {
+		fail("pose_state's arm origin is not (0, 0, 100)")
+	}
+	if posedState.RawTransform(baseNode) != baseNode.RawTransform() {
+		fail("pose_state moves the ground link's own node")
+	}
+
+	pastRange, perr2 := mechanism.Pose([]cadaclysm.StateValue{{Joint: joint, Values: []float64{2.0}}}, nil)
+	if perr2 != nil {
+		fail(perr2.Error())
+	}
+	if len(pastRange.OutOfRange) != 1 || pastRange.OutOfRange[0].Joint.Index() != joint.Index() ||
+		pastRange.OutOfRange[0].Freedom != 0 || !close3(pastRange.OutOfRange[0].Value, 2.0) {
+		fail("pose does not report the out-of-range value")
+	}
+	pastTipX, pastTipY, pastTipZ := apply(pastRange.RawTransform(armNode), 10, 0, 0)
+	if !close3(pastTipX, 10*math.Cos(2.0)) || !close3(pastTipY, -10*math.Sin(2.0)) || !close3(pastTipZ, 100) {
+		fail("pose does not use the out-of-range value")
+	}
+
+	groundedOnArm, perr3 := mechanism.Pose([]cadaclysm.StateValue{{Joint: joint, Values: []float64{0.5}}}, armLink)
+	if perr3 != nil {
+		fail(perr3.Error())
+	}
+	if groundedOnArm.Ground.Index() != armLink.Index() {
+		fail("pose does not hold the named ground")
+	}
+	if groundedOnArm.RawTransform(armNode) != armNode.RawTransform() {
+		fail("pose does not leave the named ground at its rest transform")
+	}
+
+	fromStateValues, perr4 := mechanism.Pose(states[0].Values, nil)
+	if perr4 != nil {
+		fail(perr4.Error())
+	}
+	if fromStateValues.RawTransform(armNode) != posedState.RawTransform(armNode) {
+		fail("pose(state.Values) does not match pose_state(state)")
+	}
+	rest, perr5 := mechanism.Pose(nil, nil)
+	if perr5 != nil {
+		fail(perr5.Error())
+	}
+	for _, node := range mechanism.Walk() {
+		if rest.RawTransform(node) != node.RawTransform() {
+			fail("pose([]) does not leave every node at its rest transform")
+		}
+	}
+
+	if _, err := mechanism.Pose([]cadaclysm.StateValue{{Joint: joint, Values: []float64{1.0, 2.0}}}, nil); err == nil ||
+		!strings.Contains(err.Error(), "takes 1 value(s)") {
+		fail("a joint given the wrong number of values was not refused right")
+	}
+	fmt.Printf("pose: base=%v, ground=%s, out-of-range %d\n", mechanism.Base(), posedState.Ground.Name(), len(pastRange.OutOfRange))
 	mechanism.Close()
+
+	// Motion sequences: samples/mechanism-sequence.stp's two sequences, at parity with the
+	// Python reference (plan 2026-10-05-motion-sequences-2).
+	sequenceScene, sqerr := cadaclysm.Open(filepath.Join(filepath.Dir(absPath), "mechanism-sequence.stp"))
+	if sqerr != nil {
+		fail(sqerr.Error())
+	}
+	sequences := sequenceScene.Sequences()
+	if len(sequences) != 2 || sequences[0].Name != "swing" || sequences[1].Name != "snap" {
+		fail("sequences: the file does not carry swing then snap")
+	}
+	swing, snap := sequences[0], sequences[1]
+	if !swing.Closed || swing.SecondsPerUnit == nil || *swing.SecondsPerUnit != 1.0 {
+		fail("sequences: swing is not closed at 1 second per unit")
+	}
+	if snap.Closed || snap.SecondsPerUnit != nil {
+		fail("sequences: snap is not open with no unit")
+	}
+	type seg struct {
+		State, Interpolation string
+		T                    float64
+	}
+	segsOf := func(s cadaclysm.Sequence) []seg {
+		out := []seg{}
+		for _, g := range s.Segments {
+			out = append(out, seg{g.State.Name, g.Interpolation, g.T})
+		}
+		return out
+	}
+	if got, want := segsOf(swing), []seg{{"shut", "linear", 0}, {"open", "synchronous", 1}, {"wide", "linear", 2}}; !slices.Equal(got, want) {
+		fail(fmt.Sprintf("sequences: swing's segments are %v", got))
+	}
+	if got, want := segsOf(snap), []seg{{"shut", "discontinuous", 0}, {"wide", "discontinuous", 0.5}}; !slices.Equal(got, want) {
+		fail(fmt.Sprintf("sequences: snap's segments are %v", got))
+	}
+	if swing.Start() != 0 || swing.End() != 2 {
+		fail("sequences: swing does not run 0 to 2")
+	}
+	for _, g := range swing.Segments {
+		at, aterr := swing.Pose(g.T, nil)
+		if aterr != nil {
+			fail(aterr.Error())
+		}
+		want, werr := sequenceScene.PoseState(g.State, nil)
+		if werr != nil {
+			fail(werr.Error())
+		}
+		for _, node := range sequenceScene.Walk() {
+			if at.RawTransform(node) != want.RawTransform(node) {
+				fail(fmt.Sprintf("sequences: swing at %v does not match state %s", g.T, g.State.Name))
+			}
+		}
+	}
+	if _, nanerr := swing.Pose(math.NaN(), nil); nanerr == nil || !strings.Contains(nanerr.Error(), "the sequence parameter must be a finite number") {
+		fail("sequences: pose(NaN) was not refused right")
+	}
+	sequenceScene.Close()
+	fmt.Println("sequences: swing and snap read as the file records them, and swing poses at each keyframe")
+
+	// pose([]) on the cube sample (no mechanism) fails with a message naming that, as the
+	// Python reference's test_a_bad_pose_raises checks on the same file.
+	cubePath := filepath.Join(filepath.Dir(absPath), "cube.scad")
+	cubeScene, cerr := cadaclysm.Open(cubePath)
+	if cerr != nil {
+		fail(cerr.Error())
+	}
+	if _, err := cubeScene.Pose(nil, nil); err == nil || !strings.Contains(err.Error(), "no mechanism") {
+		fail("pose([]) on a file without a mechanism was not refused right")
+	}
+	cubeScene.Close()
+
 	scene.ForgetMeshes()
 	rebuiltTriangles := 0
 	for _, n := range scene.Walk() {
@@ -214,14 +369,22 @@ func main() {
 	if m64err != nil {
 		fail(m64err.Error())
 	}
-	if mesh64 == nil || mesh64.TriangleCount() != full.TriangleCount() || len(mesh64.Positions) != len(full.Positions) ||
-		len(mesh64.Indices) != len(full.Indices) {
+	if mesh64 == nil {
+		fail("mesh64 is nil for a meshable node")
+	}
+	positions64, p64err := mesh64.Positions()
+	indices64, i64err := mesh64.Indices()
+	if p64err != nil || i64err != nil {
+		fail("mesh64's arrays refused before any forget")
+	}
+	if mesh64.TriangleCount() != full.TriangleCount() || len(positions64) != len(full.Positions) ||
+		len(indices64) != len(full.Indices) {
 		fail("mesh64's vertex/index counts do not equal mesh's")
 	}
 	if len(full.Positions) >= 3 &&
-		(float32(mesh64.Positions[0]) != full.Positions[0] ||
-			float32(mesh64.Positions[1]) != full.Positions[1] ||
-			float32(mesh64.Positions[2]) != full.Positions[2]) {
+		(float32(positions64[0]) != full.Positions[0] ||
+			float32(positions64[1]) != full.Positions[1] ||
+			float32(positions64[2]) != full.Positions[2]) {
 		fail("mesh64's first position narrowed to float does not equal mesh's first position")
 	}
 	edgeBeziers32, edgeBeziers64 := first.EdgeBeziers(), first.EdgeBeziers64()
@@ -245,6 +408,40 @@ func main() {
 	}
 	fmt.Printf("reader f64 twins: mesh64 %d triangles, edgeBeziers64 %d, bounds64 max (%g,%g,%g)\n",
 		mesh64.TriangleCount(), edgeBeziers64.Count(), sceneBounds64.Max[0], sceneBounds64.Max[1], sceneBounds64.Max[2])
+	// ForgetMeshes frees the document's own mesh, which Mesh64 lends, so a Mesh64 made before
+	// the forget answers ErrStaleView rather than a slice over freed memory. The float mesh
+	// and the edge views are the scene's own caches and survive it, as the C ABI says they
+	// do -- they must not be reported stale, nor must the node.
+	{
+		lent, _ := first.Mesh64()
+		keptMesh, _ := first.Mesh()
+		keptEdges := first.Edges()
+		lentTriangles := lent.TriangleCount()
+		early, err := lent.Copy()
+		if err != nil {
+			fail("a Mesh64 copy refused before any forget: " + err.Error())
+		}
+		scene.ForgetMeshes()
+		if _, err := lent.Positions(); !errors.Is(err, cadaclysm.ErrStaleView) || !strings.Contains(err.Error(), "forgotten") {
+			fail(fmt.Sprintf("a Mesh64 read after ForgetMeshes did not answer ErrStaleView: %v", err))
+		}
+		if _, err := lent.Copy(); !errors.Is(err, cadaclysm.ErrStaleView) {
+			fail(fmt.Sprintf("a Mesh64 copied after ForgetMeshes did not answer ErrStaleView: %v", err))
+		}
+		if len(keptMesh.Positions) == 0 || len(keptEdges.Positions) == 0 || !first.CanMesh() {
+			fail("ForgetMeshes staled the float mesh, an edge view or the node")
+		}
+		relent, _ := first.Mesh64()
+		again, err := relent.Positions()
+		if err != nil || relent.TriangleCount() != lentTriangles || len(again) != len(early.Positions) {
+			fail("a Mesh64 asked for after ForgetMeshes does not read")
+		}
+		for i := range again {
+			if again[i] != early.Positions[i] {
+				fail("a Mesh64 asked for after ForgetMeshes reads other positions")
+			}
+		}
+	}
 	fit, ok := first.Collision(0)
 	if !ok || fit.Error != 0 || fit.HullVertexCount != 8 || fit.ShapeName() == "" {
 		fail("the collision fit is off")
@@ -486,6 +683,24 @@ func main() {
 	if _, serr := scene.SvgText(&badFov); serr == nil {
 		fail("scene svg: fov=200 was accepted")
 	}
+
+	// CSS colour names in SvgOptions: a stroke of "red" packs to #ff0000, the same as the
+	// hex form; a bogus name is refused.
+	namedStroke := cadaclysm.NewSvgOptions()
+	namedStroke.Stroke = "red"
+	namedStrokeText, serr := scene.SvgText(&namedStroke)
+	if serr != nil {
+		fail(serr.Error())
+	}
+	if !strings.Contains(namedStrokeText, "#ff0000") {
+		fail("scene svg: Stroke = \"red\" did not draw as #ff0000")
+	}
+	bogusStroke := cadaclysm.NewSvgOptions()
+	bogusStroke.Stroke = "notacolour"
+	if _, serr := scene.SvgText(&bogusStroke); serr == nil || !strings.Contains(serr.Error(), "a CSS colour name") {
+		fail("scene svg: Stroke = \"notacolour\" was accepted")
+	}
+	fmt.Println("cadaclysm svg: Stroke by CSS colour name, bogus name refused")
 	fmt.Println("svg: scene and node text, file written, fov=200 refused")
 
 	kernel(license)
@@ -521,8 +736,10 @@ func kernel(license string) {
 	}
 	defer outline.Close()
 	hits()
+	machining()
 	edgeCurves()
 	intersections()
+	collider()
 	solidHits()
 	plate, err := blacksmith.XY().Extrude(outline, 6).Solid()
 	if err != nil {
@@ -698,6 +915,64 @@ func kernel(license string) {
 		fail("an empty edge list coloured edge 0")
 	}
 
+	// CSS colour names: RGB and the ...Text methods read "red" the same as (1, 0, 0), and
+	// refuse a name the library's parser does not know.
+	redRGB, err := blacksmith.RGB("red")
+	if err != nil {
+		fail(err.Error())
+	}
+	if redRGB != [3]float64{1, 0, 0} {
+		fail(fmt.Sprintf("blacksmith.RGB(\"red\") is %v, not (1, 0, 0)", redRGB))
+	}
+	if _, err := blacksmith.RGB("notacolour"); err == nil || !strings.Contains(err.Error(), "a CSS colour name") {
+		fail("blacksmith.RGB(\"notacolour\") was accepted")
+	}
+	redBox, err := plate.ColouredText("red")
+	if err != nil {
+		fail(err.Error())
+	}
+	defer redBox.Close()
+	redBoxColour, ok, err := redBox.Colour()
+	if err != nil || !ok || redBoxColour != [3]float64{1, 0, 0} {
+		fail(fmt.Sprintf("Solid.ColouredText(\"red\") did not read back as (1, 0, 0): %v, %v, %v", redBoxColour, ok, err))
+	}
+	if _, err := plate.ColouredText("notacolour"); err == nil || !strings.Contains(err.Error(), "a CSS colour name") {
+		fail("Solid.ColouredText(\"notacolour\") was accepted")
+	}
+	redFace, err := plate.ColouredFaceText(0, "lime")
+	if err != nil {
+		fail(err.Error())
+	}
+	defer redFace.Close()
+	if c, ok, err := redFace.FaceColour(0); err != nil || !ok || c != [3]float64{0, 1, 0} {
+		fail(fmt.Sprintf("Solid.ColouredFaceText(0, \"lime\") did not read back as (0, 1, 0): %v, %v, %v", c, ok, err))
+	}
+	redEdges, err := plate.EdgesColouredText("blue")
+	if err != nil {
+		fail(err.Error())
+	}
+	defer redEdges.Close()
+	if c, ok, err := redEdges.EdgeColour(0); err != nil || !ok || c != [3]float64{0, 0, 1} {
+		fail(fmt.Sprintf("Solid.EdgesColouredText(\"blue\") did not read back as (0, 0, 1): %v, %v, %v", c, ok, err))
+	}
+	redEdgesPicked, err := plate.EdgesColouredPickedText([]int{0}, "yellow")
+	if err != nil {
+		fail(err.Error())
+	}
+	defer redEdgesPicked.Close()
+	if c, ok, err := redEdgesPicked.EdgeColour(0); err != nil || !ok || c != [3]float64{1, 1, 0} {
+		fail(fmt.Sprintf("Solid.EdgesColouredPickedText([0], \"yellow\") did not read back as (1, 1, 0): %v, %v, %v", c, ok, err))
+	}
+	redProfile, err := rectProfile.ColouredText("red")
+	if err != nil {
+		fail(err.Error())
+	}
+	defer redProfile.Close()
+	if c, ok, err := redProfile.Colour(); err != nil || !ok || c != [3]float64{1, 0, 0} {
+		fail(fmt.Sprintf("Profile.ColouredText(\"red\") did not read back as (1, 0, 0): %v, %v, %v", c, ok, err))
+	}
+	fmt.Println("blacksmith colour: RGB and every ...Text method read CSS colour names, bogus names refused")
+
 	// A face: the outline as a sheet, which pushed out is the plate again.
 	sheet, err := blacksmith.Face(outline, blacksmith.Frame{0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1})
 	if err != nil {
@@ -850,6 +1125,17 @@ func kernel(license string) {
 	for _, p := range back.Placements() {
 		if brep, _ := p.Geometry().Brep(); brep != nil {
 			read, err := brep.Manifold()
+			if err == nil {
+				sewn, report, serr := brep.Sewed(nil, nil)
+				if serr != nil {
+					fail(serr.Error())
+				}
+				again, _ := brep.Manifold()
+				if int(report.FreeBefore) != read.BoundaryEdges || again.BoundaryEdges != read.BoundaryEdges {
+					fail(fmt.Sprintf("sewed reports %d free edges before, the brep has %d", report.FreeBefore, read.BoundaryEdges))
+				}
+				sewn.Close()
+			}
 			brep.Close()
 			if err != nil {
 				fail(err.Error())
@@ -1445,11 +1731,359 @@ func mechanism() {
 	mechScene.Close()
 	fmt.Println("mechanism: read-back through arm.ToScene() matches links, joints and diagnostics")
 
-	// Fact 4: the reverse pair is a new joint.
+	// Pairs: Assembly.Pair/Assembly.State/Assembly.Base and the free PairFreedomCount, at
+	// parity with the Python reference's _paired() fixture and its tests (spec
+	// 2026-09-29). Built on bracket/arm before "back" is added below: a joint with no pair
+	// refuses StepText(), so facts 1-6 and 9's diagnostics half need arm without it.
+	near := func(a, b float64) bool { return math.Abs(a-b) <= 1e-9 }
+
+	screwEndFrame := blacksmith.FrameXY([3]float64{4, 2, 3})
+	if err := bracket.Pair("screw", "prismatic", blacksmith.FrameXY([3]float64{1, 2, 3}),
+		blacksmith.PairOptions{EndFrame: &screwEndFrame}); err != nil {
+		fail(err.Error())
+	}
+	shoulderLower, shoulderUpper := -1.5, 1.5
+	if err := arm.Pair("shoulder", "revolute", blacksmith.FrameXY([3]float64{0, 0, 10}),
+		blacksmith.PairOptions{Ranges: []blacksmith.Range{{Lower: &shoulderLower, Upper: &shoulderUpper}}}); err != nil {
+		fail(err.Error())
+	}
+	if err := arm.State("reach", []blacksmith.StateRow{{Joint: "shoulder", Values: []float64{0.5}}}); err != nil {
+		fail(err.Error())
+	}
+	if err := arm.Base("ground"); err != nil {
+		fail(err.Error())
+	}
+
+	// Fact 1: the pair/state entity counts in the default schema.
+	pairedStepText, err := arm.StepText("", "mm")
+	if err != nil {
+		fail(err.Error())
+	}
+	mechReprCount2 := strings.Count(pairedStepText, "=MECHANISM_REPRESENTATION(")
+	pairRelCount := strings.Count(pairedStepText, "=PAIR_REPRESENTATION_RELATIONSHIP(")
+	revoluteRangeCount := strings.Count(pairedStepText, "REVOLUTE_PAIR_WITH_RANGE")
+	prismaticCount := strings.Count(pairedStepText, "PRISMATIC_PAIR")
+	kinPropCount := strings.Count(pairedStepText, "=KINEMATIC_PROPERTY_MECHANISM_REPRESENTATION(")
+	mechStateCount := strings.Count(pairedStepText, "=MECHANISM_STATE_REPRESENTATION(")
+	if mechReprCount2 != 2 || pairRelCount != 2 || revoluteRangeCount != 1 || prismaticCount != 1 ||
+		kinPropCount != 1 || mechStateCount != 1 {
+		fail(fmt.Sprintf("pairs: arm.StepText() has %d mechanism reps, %d pair rels, %d revolute-with-range, "+
+			"%d prismatic, %d kinematic property reps, %d mechanism states, not 2/2/1/1/1/1",
+			mechReprCount2, pairRelCount, revoluteRangeCount, prismaticCount, kinPropCount, mechStateCount))
+	}
+	fmt.Printf("pairs: arm.StepText() writes %d mechanism reps, %d pair rels, %d revolute-with-range, "+
+		"%d prismatic, %d kinematic property reps, %d mechanism states\n",
+		mechReprCount2, pairRelCount, revoluteRangeCount, prismaticCount, kinPropCount, mechStateCount)
+
+	// Facts 2-6 and 9 (diagnostics half): read back through the reader.
+	pairedScene, err := arm.ToScene("")
+	if err != nil {
+		fail(err.Error())
+	}
+	var shoulderJoint, screwJoint *cadaclysm.Joint
+	for _, j := range pairedScene.Joints() {
+		switch j.Name() {
+		case "shoulder":
+			shoulderJoint = j
+		case "screw":
+			screwJoint = j
+		}
+	}
+	if shoulderJoint == nil || screwJoint == nil {
+		fail("pairs: read-back is missing the shoulder or screw joint")
+	}
+	shoulderPair := shoulderJoint.Pair()
+	if shoulderPair == nil {
+		fail("pairs: shoulder has no pair")
+	}
+	if shoulderPair.Kind != cadaclysm.PairRevolute {
+		fail("pairs: shoulder's pair is not revolute")
+	}
+	for _, frame := range [][16]float64{shoulderPair.FrameStart(), shoulderPair.FrameEnd()} {
+		if !near(frame[3], 0) || !near(frame[7], 0) || !near(frame[11], 10) ||
+			!near(frame[2], 0) || !near(frame[6], 0) || !near(frame[10], 1) {
+			fail("pairs: shoulder's pair frames are not at (0,0,10) with z (0,0,1)")
+		}
+	}
+	shoulderFreedoms := shoulderPair.Freedoms()
+	if len(shoulderFreedoms) != 1 || shoulderFreedoms[0].Motion != cadaclysm.MotionRotation ||
+		shoulderFreedoms[0].Axis != cadaclysm.FreedomZ ||
+		!shoulderFreedoms[0].HasLower || !near(shoulderFreedoms[0].Lower, -1.5) ||
+		!shoulderFreedoms[0].HasUpper || !near(shoulderFreedoms[0].Upper, 1.5) {
+		fail("pairs: shoulder's pair is not one rotation-about-z freedom ranged [-1.5, 1.5]")
+	}
+	fmt.Println("pairs: shoulder's pair is revolute, one rotation-about-z freedom ranged [-1.5, 1.5]")
+
+	screwPair := screwJoint.Pair()
+	if screwPair == nil {
+		fail("pairs: screw has no pair")
+	}
+	if screwPair.Kind != cadaclysm.PairPrismatic {
+		fail("pairs: screw's pair is not prismatic")
+	}
+	for _, f := range screwPair.Freedoms() {
+		if f.HasLower || f.HasUpper {
+			fail("pairs: screw's pair has a ranged freedom")
+		}
+	}
+	screwStart, screwEnd := screwPair.FrameStart(), screwPair.FrameEnd()
+	if !near(screwStart[3], 1) || !near(screwStart[7], 2) || !near(screwStart[11], 13) ||
+		!near(screwEnd[3], 4) || !near(screwEnd[7], 2) || !near(screwEnd[11], 13) {
+		fail("pairs: screw's pair frames are not (1,2,13) to (4,2,13)")
+	}
+	fmt.Println("pairs: screw's pair is prismatic with no ranges, frames (1,2,13) to (4,2,13)")
+
+	pairedBaseLink := pairedScene.Base()
+	if pairedBaseLink == nil || pairedBaseLink.Name() != "ground" {
+		fail("pairs: the scene's base is not 'ground'")
+	}
+	pairedStates := pairedScene.States()
+	if len(pairedStates) != 1 || pairedStates[0].Name != "reach" {
+		fail("pairs: the scene does not carry exactly one state named 'reach'")
+	}
+	reachRow := pairedStates[0].Values
+	if len(reachRow) != 1 || reachRow[0].Joint.Name() != "shoulder" ||
+		len(reachRow[0].Values) != 1 || !near(reachRow[0].Values[0], 0.5) {
+		fail("pairs: state 'reach' is not exactly one row (shoulder, [0.5])")
+	}
+	fmt.Println("pairs: the scene's base is 'ground', with one state 'reach' of (shoulder, [0.5])")
+
+	// Fact 5: pose_state(reach) carries the pin node to (5cos0.5-5sin0.5, 5sin0.5+5cos0.5, 2).
+	reachPose, err := pairedScene.PoseState(pairedStates[0], nil)
+	if err != nil {
+		fail(err.Error())
+	}
+	var upperArmLink *cadaclysm.Link
+	for _, l := range pairedScene.Links() {
+		if l.Name() == "upper arm" {
+			upperArmLink = l
+		}
+	}
+	if upperArmLink == nil {
+		fail("pairs: read-back is missing the 'upper arm' link")
+	}
+	var pinNode *cadaclysm.Node
+	for _, nd := range upperArmLink.Nodes() {
+		t := nd.Transform()
+		if near(t[3], 5) && near(t[7], 5) && near(t[11], 2) {
+			pinNode = nd
+		}
+	}
+	if pinNode == nil {
+		fail("pairs: 'upper arm' has no node at (5,5,2)")
+	}
+	posedPin := reachPose.Transform(pinNode)
+	wantX := 5*math.Cos(0.5) - 5*math.Sin(0.5)
+	wantY := 5*math.Sin(0.5) + 5*math.Cos(0.5)
+	if !near(posedPin[3], wantX) || !near(posedPin[7], wantY) || !near(posedPin[11], 2) {
+		fail("pairs: pose_state(reach) did not carry the pin node to the expected point")
+	}
+	fmt.Println("pairs: pose_state(reach) carries the pin node to the expected point")
+
+	// Fact 6: pose([(screw, [3.0])]) leaves every 'bolts' node at rest; [5.0] moves by (2,0,0).
+	pose3, err := pairedScene.Pose([]cadaclysm.StateValue{{Joint: screwJoint, Values: []float64{3.0}}}, nil)
+	if err != nil {
+		fail(err.Error())
+	}
+	pose5, err := pairedScene.Pose([]cadaclysm.StateValue{{Joint: screwJoint, Values: []float64{5.0}}}, nil)
+	if err != nil {
+		fail(err.Error())
+	}
+	var boltsLink *cadaclysm.Link
+	for _, l := range pairedScene.Links() {
+		if l.Name() == "bolts" {
+			boltsLink = l
+		}
+	}
+	if boltsLink == nil {
+		fail("pairs: read-back is missing the 'bolts' link")
+	}
+	for _, node := range boltsLink.Nodes() {
+		rest := node.Transform()
+		at3 := pose3.Transform(node)
+		at5 := pose5.Transform(node)
+		if !near(at3[3], rest[3]) || !near(at3[7], rest[7]) || !near(at3[11], rest[11]) {
+			fail("pairs: pose([(screw, [3.0])]) moved a 'bolts' node off rest")
+		}
+		if !near(at5[3], rest[3]+2.0) || !near(at5[7], rest[7]) || !near(at5[11], rest[11]) {
+			fail("pairs: pose([(screw, [5.0])]) did not move a 'bolts' node by (2,0,0)")
+		}
+	}
+	fmt.Println("pairs: pose([(screw, [3.0])]) rests, pose([(screw, [5.0])]) moves 'bolts' by (2,0,0)")
+
+	// Fact 9 (diagnostics half): no diagnostic names kinematics.
+	for _, d := range pairedScene.Diagnostics() {
+		if strings.HasPrefix(d, "kinematics:") {
+			fail("pairs: the paired scene carries a kinematics: diagnostic")
+		}
+	}
+	pairedScene.Close()
+
+	// Motion sequences, written: a state rest and a swing over rest and reach, read back.
+	if err := arm.State("rest", []blacksmith.StateRow{{Joint: "shoulder", Values: []float64{0.0}}}); err != nil {
+		fail(err.Error())
+	}
+	if err := arm.Sequence("swing", []blacksmith.SequenceSegment{{State: "rest", T: 0, Interpolation: "linear"}, {State: "reach", T: 1, Interpolation: "linear"}}, true); err != nil {
+		fail(err.Error())
+	}
+	swingScene, err := arm.ToScene("")
+	if err != nil {
+		fail(err.Error())
+	}
+	written := swingScene.Sequences()
+	if len(written) != 1 || written[0].Name != "swing" || !written[0].Closed || written[0].SecondsPerUnit == nil || *written[0].SecondsPerUnit != 1.0 {
+		fail("sequences: the written swing did not read back closed at 1 second per unit")
+	}
+	if len(written[0].Segments) != 2 || written[0].Segments[0].State.Name != "rest" || written[0].Segments[0].T != 0 || written[0].Segments[0].Interpolation != "linear" ||
+		written[0].Segments[1].State.Name != "reach" || written[0].Segments[1].T != 1 || written[0].Segments[1].Interpolation != "linear" {
+		fail("sequences: the written swing's segments are not rest@0 then reach@1, linear")
+	}
+	swingScene.Close()
+	if err := arm.Sequence("bad", []blacksmith.SequenceSegment{{State: "rest", T: 0, Interpolation: "linear"}, {State: "nowhere", T: 1, Interpolation: "linear"}}, false); err == nil ||
+		err.Error() != "sequence: assembly 'arm' has no state named 'nowhere'" {
+		fail(fmt.Sprintf("sequences: a sequence over an unknown state was not refused exactly: %v", err))
+	}
+	fmt.Println("sequences: Assembly.Sequence round-trips and refuses an unknown state exactly")
+
+	// Fact 4 (mechanism's own): the reverse pair is a new joint.
 	if err := arm.Joint("back", "upper arm", "ground"); err != nil {
 		fail(err.Error())
 	}
 	fmt.Println("mechanism: the reverse pair (\"back\") is accepted as a new joint")
+
+	// Fact 7: the eight bad pair/state/base calls are refused with exactly their message,
+	// and fact 8's unpaired-joint refusal ("back" has no pair) stays byte-identical before
+	// and after -- proof none of them mutated "back", or anything else StepText() would
+	// notice, even though a wholly valid StepText() snapshot is unavailable while "back" has
+	// no pair.
+	pairedUnpairedMessage := func() string {
+		if _, serr := arm.StepText("", "mm"); serr == nil {
+			fail("pairs: arm.StepText() with an unpaired joint 'back' was accepted")
+			return ""
+		} else {
+			return serr.Error()
+		}
+	}
+	pairedBefore := pairedUnpairedMessage()
+	negOne, posOne := -1.0, 1.0
+	oneVal, negOneVal := 1.0, -1.0
+	turnedFrame, ferr := blacksmith.FrameAtX([3]float64{0, 0, 0}, [3]float64{0, 0, 1}, [3]float64{0, 1, 0})
+	if ferr != nil {
+		fail(ferr.Error())
+	}
+	backEndFrame := blacksmith.FrameXY([3]float64{})
+	pairRefusals := []struct {
+		Call    func() error
+		Message string
+	}{
+		{func() error {
+			return arm.Pair("shoulder", "revolute", blacksmith.FrameXY([3]float64{0, 0, 10}), blacksmith.PairOptions{})
+		}, "pair: joint 'shoulder' already has a pair"},
+		{func() error { return arm.Pair("back", "orbital", blacksmith.FrameXY([3]float64{}), blacksmith.PairOptions{}) },
+			"pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, spherical, " +
+				"spherical_with_pin, planar, universal, homokinetic, fully_constrained, unconstrained)"},
+		{func() error { return arm.Pair("back", "screw", blacksmith.FrameXY([3]float64{}), blacksmith.PairOptions{}) },
+			"pair: a screw needs a non-zero pitch"},
+		{func() error {
+			return arm.Pair("back", "revolute", blacksmith.FrameXY([3]float64{}),
+				blacksmith.PairOptions{Ranges: []blacksmith.Range{{Lower: &negOne, Upper: &posOne}, {Lower: &negOne, Upper: &posOne}}})
+		}, "pair: 'revolute' has 1 freedoms, but 2 ranges were given"},
+		{func() error {
+			return arm.Pair("back", "revolute", blacksmith.FrameXY([3]float64{}),
+				blacksmith.PairOptions{Ranges: []blacksmith.Range{{Lower: &oneVal, Upper: &negOneVal}}})
+		}, "pair: range 0 of joint 'back' has lower >= upper"},
+		{func() error {
+			return arm.Pair("back", "prismatic", turnedFrame, blacksmith.PairOptions{EndFrame: &backEndFrame})
+		}, "pair: joint 'back' is prismatic, but its end frame is turned 90° about -z, " +
+			"which prismatic (does not turn) cannot make"},
+		{func() error {
+			return arm.State("overreach", []blacksmith.StateRow{{Joint: "shoulder", Values: []float64{5.0}}})
+		}, "state: value 0 of joint 'shoulder' is outside its range"},
+		{func() error { return arm.Base("upper arm") }, "base: assembly 'arm' already has base 'ground'"},
+	}
+	for _, r := range pairRefusals {
+		rerr := r.Call()
+		if rerr == nil {
+			fail(fmt.Sprintf("pairs: %q was accepted", r.Message))
+		}
+		if rerr.Error() != r.Message {
+			fail(fmt.Sprintf("pairs: got %q, not %q", rerr.Error(), r.Message))
+		}
+	}
+	fmt.Println("pairs: all eight bad pair/state/base calls are refused with their exact message")
+
+	// Fact 8: after "back" alone (added above), StepText() is refused with exactly this
+	// message -- Fact 7 already computed it as the before/after snapshot; checked here
+	// against the brief's exact text.
+	const noPairMessage = "assembly_step: assembly 'arm': joint 'back' has no pair; a mechanism with pairs needs one on every joint (AP242)"
+	if pairedBefore != noPairMessage {
+		fail(fmt.Sprintf("pairs: StepText()'s unpaired-joint refusal is %q, not the expected text", pairedBefore))
+	}
+	pairedAfter := pairedUnpairedMessage()
+	if pairedAfter != pairedBefore {
+		fail("pairs: a refused pair/state/base call changed the unpaired-joint refusal")
+	}
+	fmt.Println("pairs: joint 'back' with no pair refuses StepText() with exactly its message, unchanged by any refusal above")
+
+	// Fact 9 (freedom-count half): PairFreedomCount.
+	if blacksmith.PairFreedomCount("spherical") != 3 || blacksmith.PairFreedomCount("revolute") != 1 ||
+		blacksmith.PairFreedomCount("fully_constrained") != 0 || blacksmith.PairFreedomCount("not_a_kind") != 0 {
+		fail("pairs: PairFreedomCount does not give 3/1/0/0 for spherical/revolute/fully_constrained/unknown")
+	}
+	fmt.Println("pairs: PairFreedomCount gives 3/1/0/0 for spherical/revolute/fully_constrained/an unknown name")
+
+	// Fact 10 (controller ruling, added after review): a one-sided range survives the
+	// round trip. Without has_lower/has_upper actually carried (an implementation that
+	// always sends true for both would pass every other fact), joint "j"'s freedom would
+	// come back with a lower limit it was never given.
+	hinge, err := blacksmith.NewAssembly("hinge")
+	if err != nil {
+		fail(err.Error())
+	}
+	if _, err := hinge.PlaceSolid(mechPlate, blacksmith.FrameXY([3]float64{}), "base"); err != nil {
+		fail(err.Error())
+	}
+	if _, err := hinge.PlaceSolid(mechBolt, blacksmith.FrameXY([3]float64{0, 0, 2}), "arm"); err != nil {
+		fail(err.Error())
+	}
+	if err := hinge.Link("base", []string{"base"}); err != nil {
+		fail(err.Error())
+	}
+	if err := hinge.Link("arm", []string{"arm"}); err != nil {
+		fail(err.Error())
+	}
+	if err := hinge.Joint("j", "base", "arm"); err != nil {
+		fail(err.Error())
+	}
+	hingeUpper := 1.0
+	if err := hinge.Pair("j", "revolute", blacksmith.FrameXY([3]float64{}),
+		blacksmith.PairOptions{Ranges: []blacksmith.Range{{Upper: &hingeUpper}}}); err != nil {
+		fail(err.Error())
+	}
+	hingeScene, err := hinge.ToScene("")
+	if err != nil {
+		fail(err.Error())
+	}
+	var hingeJoint *cadaclysm.Joint
+	for _, j := range hingeScene.Joints() {
+		if j.Name() == "j" {
+			hingeJoint = j
+		}
+	}
+	if hingeJoint == nil {
+		fail("pairs: hinge joint 'j' not found")
+	}
+	hingePair := hingeJoint.Pair()
+	if hingePair == nil {
+		fail("pairs: hinge joint 'j' has no pair")
+	}
+	hingeFreedoms := hingePair.Freedoms()
+	if len(hingeFreedoms) != 1 || hingeFreedoms[0].HasLower || !hingeFreedoms[0].HasUpper || !near(hingeFreedoms[0].Upper, 1.0) {
+		fail("pairs: hinge joint 'j' is not one freedom with no lower limit and upper exactly 1.0")
+	}
+	fmt.Println("pairs: a one-sided range (no lower, upper 1.0) survives the round trip")
+	hingeScene.Close()
+	hinge.Close()
 }
 
 func fail(why string) {
@@ -2142,6 +2776,579 @@ func hits() {
 	fmt.Printf("common: one lens, %d faces extruded\n", lensFaces)
 }
 
+// footprint is a profile's [x0, x1, y0, y1], read off the bounds of it extruded 1, at a
+// fine tolerance.
+func footprint(p *blacksmith.Profile) [4]float64 {
+	solid, err := blacksmith.XY().Extrude(p, 1).Solid()
+	if err != nil {
+		fail(err.Error())
+	}
+	defer solid.Close()
+	b, err := solid.BoundsAt(0.001)
+	if err != nil {
+		fail(err.Error())
+	}
+	return [4]float64{b.Min[0], b.Max[0], b.Min[1], b.Max[1]}
+}
+
+// near4 is whether every one of a's four numbers is within tolerance of b's.
+func near4(a, b [4]float64, tolerance float64) bool {
+	for i := range a {
+		if math.Abs(a[i]-b[i]) > tolerance {
+			return false
+		}
+	}
+	return true
+}
+
+// pocketedBlock is a 40x30x10 block on z=0 with a 20x10 pocket 8 deep: four corners a 6 mm
+// end mill misses.
+func pocketedBlock() *blacksmith.Solid {
+	block0, err := blacksmith.Cuboid(40, 30, 10)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer block0.Close()
+	block, err := block0.Translate(0, 0, 5)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer block.Close()
+	pocket0, err := blacksmith.Cuboid(20, 10, 8)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer pocket0.Close()
+	pocket, err := pocket0.Translate(0, 0, 6)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer pocket.Close()
+	out, err := block.Cut(pocket, blacksmith.DefaultTolerance)
+	if err != nil {
+		fail(err.Error())
+	}
+	return out
+}
+
+// machining: the Python SDK's to_arcs, offset and section, then Tool, Stock and Job -- the
+// fixtures of test_cadaclysm_blacksmith.py's "machining" block and Node's pocketedBlock on.
+func machining() {
+	rect2010, err := blacksmith.Rect(20, 10)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer rect2010.Close()
+	grown, err := rect2010.Offset(2, 0.01)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(grown) != 1 || !near4(footprint(grown[0]), [4]float64{-12, 12, -7, 7}, 1e-3) {
+		fail(fmt.Sprintf("offset: grown by 2 is %d profile(s)", len(grown)))
+	}
+	grown[0].Close()
+	shrunk, err := rect2010.Offset(-2, 0.01)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(shrunk) != 1 || !near4(footprint(shrunk[0]), [4]float64{-8, 8, -3, 3}, 1e-3) {
+		fail("offset: shrunk by 2 is not one profile over [-8, 8, -3, 3]")
+	}
+	shrunk[0].Close()
+	eaten, err := rect2010.Offset(-6, 0.01)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(eaten) != 0 {
+		fail("offset: a shrink past half the width left something")
+	}
+	if _, err := rect2010.Offset(math.NaN(), 0.01); err == nil || err.Error() != "profile_offset: distance must be finite" {
+		fail(fmt.Sprintf("offset: a NaN distance was accepted or refused in other words: %v", err))
+	}
+	fmt.Println("offset: grown to [-12, 12, -7, 7], shrunk to [-8, 8, -3, 3], eaten at -6, NaN refused")
+
+	spline, err := blacksmith.Spline([][2]float64{{0, 0}, {10, 0}, {10, 10}, {0, 10}}, 3, nil, true)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer spline.Close()
+	fitted, err := spline.ToArcs(0.01)
+	if err != nil {
+		fail(err.Error())
+	}
+	if !near4(footprint(fitted), footprint(spline), 0.011) {
+		fail("to_arcs: the fit's footprint is not within 0.011 of the spline's")
+	}
+	fitted.Close()
+	if _, err := spline.ToArcs(0); err == nil || err.Error() != "profile_to_arcs: tolerance must be positive and finite" {
+		fail(fmt.Sprintf("to_arcs: a zero tolerance was accepted or refused in other words: %v", err))
+	}
+	fmt.Println("to_arcs: the fit bounds the spline within 0.011, zero tolerance refused")
+
+	box2010, err := blacksmith.Cuboid(20, 10, 5)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer box2010.Close()
+	middle, err := box2010.Section(0, 0.05)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(middle) != 1 || !near4(footprint(middle[0]), [4]float64{-10, 10, -5, 5}, 1e-3) {
+		fail("section: the box's middle is not one profile over [-10, 10, -5, 5]")
+	}
+	middle[0].Close()
+	miss, err := box2010.Section(50, 0.05)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(miss) != 0 {
+		fail("section: a plane missing the box cut something")
+	}
+	if _, err := box2010.Section(2.5, 0.05); err == nil ||
+		err.Error() != "solid_section: a face lies in the plane -- section a little above or below it" {
+		fail(fmt.Sprintf("section: a plane on the top face was accepted or refused in other words: %v", err))
+	}
+	fmt.Println("section: the box's middle, a miss above it, a face in the plane refused")
+
+	// The pocketed block: a 6 mm end mill is too big for the pocket's four square corners.
+	block := pocketedBlock()
+	defer block.Close()
+	endMill, err := blacksmith.ToolFlat(1, 6, 20, 800, 200, 12000, 3.0)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer endMill.Close()
+	blockStock, err := blacksmith.StockAround(block, 2)
+	if err != nil {
+		fail(err.Error())
+	}
+	job, err := blacksmith.NewJob(blockStock, 30, blacksmith.JobDefaultClearance, blacksmith.JobDefaultTolerance,
+		blacksmith.JobDefaultName, blacksmith.JobDefaultSpindleDwell, blacksmith.JobDefaultResolution)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer job.Close()
+	report, err := job.Machine(block, endMill, nil, nil, nil, 0.3, nil)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(report.Items) != 4 {
+		fail(fmt.Sprintf("machine: the pocketed block reports %d item(s), not 4:\n%s", len(report.Items), report.Text))
+	}
+	if report.String() != report.Text || len(strings.Split(report.Text, "\n")) != 4 {
+		fail(fmt.Sprintf("machine: the report's text is not four lines:\n%s", report.Text))
+	}
+	for _, item := range report.Items {
+		if item.Kind != "corner" || !(item.Size > 0) || len(item.Region) == 0 || item.Reason == "" {
+			fail(fmt.Sprintf("machine: %v is not a corner with a location, a size and a region", item))
+		}
+		for _, r := range item.Region {
+			r.Close()
+		}
+	}
+	ops, err := job.Operations()
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(ops) == 0 {
+		fail("machine: the pocketed block's operations are missing")
+	}
+	for _, o := range ops {
+		if o.Kind == "" || o.Tool != 1 || len(o.Params) == 0 {
+			fail(fmt.Sprintf("machine: %v is missing a kind, a tool or params", o))
+		}
+	}
+	fmt.Printf("machine: the pocketed block leaves four corners, %d operations (%v)\n", len(ops), report.Items[0])
+
+	// A drill as the end mill is refused, and leaves the job as it was.
+	drill5, err := blacksmith.ToolDrill(2, 5, 30, 150, 3000)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer drill5.Close()
+	freshStock, err := blacksmith.StockAround(block, 2)
+	if err != nil {
+		fail(err.Error())
+	}
+	fresh, err := blacksmith.NewJob(freshStock, 30, blacksmith.JobDefaultClearance, blacksmith.JobDefaultTolerance,
+		blacksmith.JobDefaultName, blacksmith.JobDefaultSpindleDwell, blacksmith.JobDefaultResolution)
+	if err != nil {
+		fail(err.Error())
+	}
+	if _, err := fresh.Machine(block, drill5, nil, nil, nil, 0.3, nil); err == nil ||
+		!strings.Contains(err.Error(), "end mill must not be a drill") {
+		fail(fmt.Sprintf("machine: a drill as the end mill was accepted or refused in other words: %v", err))
+	}
+	freshOps, err := fresh.Operations()
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(freshOps) != 0 {
+		fail("machine: a refused call changed the job")
+	}
+
+	// A closed job refuses every later call.
+	fresh.Close()
+	fresh.Close() // idempotent
+	if !fresh.Closed() {
+		fail("job: closed but Closed() is false")
+	}
+	if _, err := fresh.Machine(block, endMill, nil, nil, nil, 0.3, nil); err == nil || !errors.Is(err, blacksmith.ErrClosed) {
+		fail(fmt.Sprintf("job: machine() after Close() was accepted or the wrong error: %v", err))
+	}
+	if _, err := fresh.Operations(); err == nil || !errors.Is(err, blacksmith.ErrClosed) {
+		fail(fmt.Sprintf("job: operations() after Close() was accepted or the wrong error: %v", err))
+	}
+	if _, err := fresh.Gcode(); err == nil || !errors.Is(err, blacksmith.ErrClosed) {
+		fail(fmt.Sprintf("job: gcode() after Close() was accepted or the wrong error: %v", err))
+	}
+	fmt.Println("machine: a drill as the end mill refused, the job unchanged; a closed job refuses")
+
+	// The plate of spec 2026-09-28: machined cleanly by one end mill and one drill.
+	plateOutline0, err := blacksmith.Rect(80, 50)
+	if err != nil {
+		fail(err.Error())
+	}
+	plateOutline, err := plateOutline0.Round(6, nil, false)
+	plateOutline0.Close()
+	if err != nil {
+		fail(err.Error())
+	}
+	defer plateOutline.Close()
+	platePart, err := blacksmith.XY().Extrude(plateOutline, 12).Solid()
+	if err != nil {
+		fail(err.Error())
+	}
+	pocketOutline0, err := blacksmith.Rect(40, 24)
+	if err != nil {
+		fail(err.Error())
+	}
+	pocketOutline1, err := pocketOutline0.Round(4, nil, false)
+	pocketOutline0.Close()
+	if err != nil {
+		fail(err.Error())
+	}
+	pocketHole, err := blacksmith.Circle(5)
+	if err != nil {
+		fail(err.Error())
+	}
+	pocketOutline, err := pocketOutline1.WithHole(pocketHole)
+	pocketOutline1.Close()
+	pocketHole.Close()
+	if err != nil {
+		fail(err.Error())
+	}
+	pocketSolid, err := blacksmith.Extrude(pocketOutline, blacksmith.FrameXY([3]float64{0, 0, 7}), 5)
+	pocketOutline.Close()
+	if err != nil {
+		fail(err.Error())
+	}
+	was := platePart
+	platePart, err = was.Cut(pocketSolid, blacksmith.DefaultTolerance)
+	was.Close()
+	pocketSolid.Close()
+	if err != nil {
+		fail(err.Error())
+	}
+	for _, xy := range [][2]float64{{-32, -17}, {-32, 17}, {32, -17}, {32, 17}} {
+		bore0, err := blacksmith.Cylinder(3, 12)
+		if err != nil {
+			fail(err.Error())
+		}
+		bore, err := bore0.Translate(xy[0], xy[1], 0)
+		bore0.Close()
+		if err != nil {
+			fail(err.Error())
+		}
+		was := platePart
+		platePart, err = was.Cut(bore, blacksmith.DefaultTolerance)
+		was.Close()
+		bore.Close()
+		if err != nil {
+			fail(err.Error())
+		}
+	}
+	defer platePart.Close()
+
+	plateDrill, err := blacksmith.ToolDrill(2, 6, 30, 150, 3000)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer plateDrill.Close()
+	plateStock, err := blacksmith.StockAround(platePart, 3)
+	if err != nil {
+		fail(err.Error())
+	}
+	plateJob, err := blacksmith.NewJob(plateStock, 25, 1.0, 0.01, "plate", blacksmith.JobDefaultSpindleDwell,
+		blacksmith.JobDefaultResolution)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer plateJob.Close()
+	plateReport, err := plateJob.Machine(platePart, endMill, []*blacksmith.Tool{plateDrill}, nil, nil, 0.3, nil)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(plateReport.Items) != 0 || plateReport.Text != "nothing left uncut" {
+		fail(fmt.Sprintf("plate: the report is not empty:\n%s", plateReport.Text))
+	}
+	plateOps, err := plateJob.Operations()
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(plateOps) == 0 || plateOps[0].Kind != "face" {
+		fail(fmt.Sprintf("plate: the operations do not start with face: %v", plateOps))
+	}
+	hasPocket := false
+	for _, o := range plateOps {
+		if o.Kind == "pocket" {
+			hasPocket = true
+		}
+	}
+	last := plateOps[len(plateOps)-1]
+	if !hasPocket || last.Kind != "drill" {
+		fail(fmt.Sprintf("plate: the operations are wrong: %v", plateOps))
+	}
+	if points := last.Params["points"]; points == nil || *points != 4 {
+		fail(fmt.Sprintf("plate: the drill's params are %v", last))
+	}
+	if peck, ok := last.Params["peck"]; !ok || peck != nil {
+		fail(fmt.Sprintf("plate: the drill's params are %v", last))
+	}
+	platePrograms, err := plateJob.Gcode()
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(platePrograms) != 2 {
+		fail(fmt.Sprintf("plate: gcode() gives %v", platePrograms))
+	}
+	for _, p := range platePrograms {
+		if p.Tool < 1 || p.Name == "" || p.Text == "" {
+			fail(fmt.Sprintf("plate: gcode() gives %v", platePrograms))
+		}
+	}
+	folder := filepath.Join(os.TempDir(), fmt.Sprintf("cadaclysm-smoke-cam-go-%d", os.Getpid()))
+	defer os.RemoveAll(folder)
+	written, err := plateJob.WriteCamotics(filepath.Join(folder, "plate.camotics"))
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(written) == 0 || !strings.HasSuffix(written[len(written)-1], "plate.camotics") {
+		fail(fmt.Sprintf("plate: write_camotics wrote %v", written))
+	}
+	for _, w := range written {
+		if _, statErr := os.Stat(w); statErr != nil {
+			fail(fmt.Sprintf("plate: write_camotics wrote %s (missing): %v", w, statErr))
+		}
+	}
+	// a stem that is all extension stays whole, as Python's Path.stem keeps it
+	dotFolder := filepath.Join(os.TempDir(), fmt.Sprintf("cadaclysm-smoke-dot-go-%d", os.Getpid()))
+	defer os.RemoveAll(dotFolder)
+	dotWritten, err := plateJob.WriteCamotics(filepath.Join(dotFolder, ".camotics"))
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(dotWritten) < 2 || !strings.HasPrefix(filepath.Base(dotWritten[0]), ".camotics-T1") {
+		fail(fmt.Sprintf("write_camotics: the stem of \".camotics\" is not kept: %v", dotWritten))
+	}
+	fmt.Printf("plate: nothing left uncut, %d operations, %d programs, %d CAMotics files\n",
+		len(plateOps), len(platePrograms), len(written))
+
+	// The four verbs by hand -- the spec's own example -- and the refusals in the kernel's words.
+	specOutline0, err := blacksmith.Rect(60, 40)
+	if err != nil {
+		fail(err.Error())
+	}
+	specOutline, err := specOutline0.Round(5, nil, false)
+	specOutline0.Close()
+	if err != nil {
+		fail(err.Error())
+	}
+	defer specOutline.Close()
+	specPart, err := blacksmith.XY().Extrude(specOutline, 20).Solid()
+	if err != nil {
+		fail(err.Error())
+	}
+	defer specPart.Close()
+	end, err := blacksmith.ToolFlat(1, 6, 20, 800, 200, 12000, 3.0)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer end.Close()
+	specDrill, err := blacksmith.ToolDrill(2, 5, 30, 150, 3000)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer specDrill.Close()
+	specStock, err := blacksmith.StockAround(specPart, 2)
+	if err != nil {
+		fail(err.Error())
+	}
+	specJob, err := blacksmith.NewJob(specStock, 30, blacksmith.JobDefaultClearance, blacksmith.JobDefaultTolerance,
+		blacksmith.JobDefaultName, blacksmith.JobDefaultSpindleDwell, blacksmith.JobDefaultResolution)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer specJob.Close()
+	if err := specJob.Face(end, 20, 3, 1); err != nil {
+		fail(err.Error())
+	}
+	if err := specJob.Contour(end, specOutline, 20, 0, "outside", 2, true, false); err != nil {
+		fail(err.Error())
+	}
+	levels, err := specPart.Section(15, 0.05)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(levels) == 0 {
+		fail("job: section(15) is empty")
+	}
+	if err := specJob.Pocket(end, levels[0], 20, 10, 2.4, 2); err != nil {
+		fail(err.Error())
+	}
+	for _, l := range levels {
+		l.Close()
+	}
+	peck3 := 3.0
+	if err := specJob.Drill(specDrill, [][2]float64{{10, 10}, {40, 10}}, 20, -1, &peck3); err != nil {
+		fail(err.Error())
+	}
+	specPrograms, err := specJob.Gcode()
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(specPrograms) != 2 || specPrograms[0].Tool != 1 || specPrograms[0].Name != "job-T1" ||
+		specPrograms[1].Tool != 2 || specPrograms[1].Name != "job-T2" ||
+		!strings.HasPrefix(specPrograms[0].Text, "(cadaclysm: job-T1, T1 flat D6)\n") ||
+		!strings.HasPrefix(specPrograms[1].Text, "(cadaclysm: job-T2, T2 drill D5)\n") {
+		fail(fmt.Sprintf("job: the spec example's programs are %v", specPrograms))
+	}
+	specOps, err := specJob.Operations()
+	if err != nil {
+		fail(err.Error())
+	}
+	kinds := make([]string, len(specOps))
+	for i, o := range specOps {
+		kinds[i] = o.Kind
+	}
+	if strings.Join(kinds, ",") != "face,contour,pocket,drill" {
+		fail(fmt.Sprintf("job: the operations are %v", kinds))
+	}
+	dOp := specOps[3]
+	if p := dOp.Params["peck"]; p == nil || *p != 3 {
+		fail(fmt.Sprintf("job: the drill's params are %v", dOp))
+	}
+	if p := dOp.Params["points"]; p == nil || *p != 2 {
+		fail(fmt.Sprintf("job: the drill's params are %v", dOp))
+	}
+
+	stockE, err := blacksmith.StockBox([3]float64{-15, -10, 0}, [3]float64{15, 10, 10})
+	if err != nil {
+		fail(err.Error())
+	}
+	defer stockE.Close()
+	squareProfile, err := blacksmith.Rect(20, 10)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer squareProfile.Close()
+
+	prefixRefusals := []struct {
+		text string
+		call func() error
+	}{
+		{"tool: number must be at least 1", func() error {
+			_, err := blacksmith.ToolFlat(0, 6, 20, 800, 200, 12000, 3.0)
+			return err
+		}},
+		{"tool: ramp angle must be in (0, 90] degrees", func() error {
+			_, err := blacksmith.ToolBall(1, 6, 20, 800, 200, 12000, 91)
+			return err
+		}},
+		{"stock: min must be below max on every axis, all finite", func() error {
+			_, err := blacksmith.StockBox([3]float64{0, 0, 0}, [3]float64{0, 10, 10})
+			return err
+		}},
+		{"job: safe z must be above the stock's top", func() error {
+			_, err := blacksmith.NewJob(stockE, 5, blacksmith.JobDefaultClearance, blacksmith.JobDefaultTolerance,
+				blacksmith.JobDefaultName, blacksmith.JobDefaultSpindleDwell, blacksmith.JobDefaultResolution)
+			return err
+		}},
+		{"job: clearance must be positive and finite", func() error {
+			_, err := blacksmith.NewJob(stockE, 30, 0, blacksmith.JobDefaultTolerance,
+				blacksmith.JobDefaultName, blacksmith.JobDefaultSpindleDwell, blacksmith.JobDefaultResolution)
+			return err
+		}},
+		{"job: a name must be non-empty and without brackets", func() error {
+			_, err := blacksmith.NewJob(stockE, 30, blacksmith.JobDefaultClearance, blacksmith.JobDefaultTolerance,
+				"a/b", blacksmith.JobDefaultSpindleDwell, blacksmith.JobDefaultResolution)
+			return err
+		}},
+		{"job: a name must be non-empty and without brackets", func() error {
+			_, err := blacksmith.NewJob(stockE, 30, blacksmith.JobDefaultClearance, blacksmith.JobDefaultTolerance,
+				"a\x00b", blacksmith.JobDefaultSpindleDwell, blacksmith.JobDefaultResolution)
+			return err
+		}},
+	}
+	for _, r := range prefixRefusals {
+		if err := r.call(); err == nil || !strings.HasPrefix(err.Error(), r.text) {
+			fail(fmt.Sprintf("cam: %q was accepted or refused in other words: %v", r.text, err))
+		}
+	}
+
+	emptyJob, err := blacksmith.NewJob(stockE, 30, blacksmith.JobDefaultClearance, blacksmith.JobDefaultTolerance,
+		blacksmith.JobDefaultName, blacksmith.JobDefaultSpindleDwell, blacksmith.JobDefaultResolution)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer emptyJob.Close()
+	exactRefusals := []struct {
+		text string
+		call func() error
+	}{
+		{"contour: a drill only drills", func() error {
+			return emptyJob.Contour(specDrill, squareProfile, 10, 5, "outside", 1.0, true, false)
+		}},
+		{"drill: drilling needs a drill", func() error {
+			return emptyJob.Drill(end, [][2]float64{{0, 0}}, 10, 5, nil)
+		}},
+		{"drill: there are no points", func() error {
+			return emptyJob.Drill(specDrill, nil, 10, 5, nil)
+		}},
+		{"pocket: stepover must be at most the tool's radius for a pocket", func() error {
+			return emptyJob.Pocket(end, squareProfile, 10, 5, 4, 1)
+		}},
+		{"face: z must be finite and not above the stock's top", func() error {
+			return emptyJob.Face(end, 11, 3, 1)
+		}},
+	}
+	for _, r := range exactRefusals {
+		if err := r.call(); err == nil || err.Error() != r.text {
+			fail(fmt.Sprintf("cam: %q was accepted or refused in other words: %v", r.text, err))
+		}
+	}
+	if err := emptyJob.Contour(end, squareProfile, 10, 5, "left", 1.0, true, false); err == nil ||
+		err.Error() != "side must be 'outside', 'inside' or 'on'" {
+		fail(fmt.Sprintf("contour: side \"left\" was accepted or the wrong error: %v", err))
+	} else if _, isBuild := err.(*blacksmith.BuildError); !isBuild {
+		fail(fmt.Sprintf("contour: the bad-side refusal is a %T, not a *BuildError", err))
+	}
+	// a NUL in a CAMotics stem is refused in the kernel's words, before the library
+	if _, err := emptyJob.WriteCamotics(filepath.Join(os.TempDir(), "cadaclysm-nul", "a\x00b.camotics")); err == nil ||
+		err.Error() != "job: a name must be non-empty and without brackets, slashes, quotes, control characters, or : * ? < > |" {
+		fail(fmt.Sprintf("write_camotics: a NUL stem was accepted or refused in other words: %v", err))
+	}
+	emptyGcode, err := emptyJob.Gcode()
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(emptyGcode) != 0 {
+		fail("cam: a refused operation changed the job")
+	}
+	fmt.Println("job: face, contour, pocket and drill by hand give two programs; every refusal in the kernel's words")
+}
+
 // edgeCurves: a cylinder's rims are circles of its radius about a cap centre in a unit
 // frame, a whole turn each; a cuboid's edges are lines whose origin + x is the far end;
 // an extruded closed spline keeps a nurbs edge with knots = poles + degree + 1.
@@ -2347,6 +3554,101 @@ func intersections() {
 		}
 	}
 	fmt.Printf("intersect: %v (%d ellipses); %v\n", found, ellipses, shared.Overlaps[0])
+}
+
+// collider: two cuboids overlapping by 2 along x, plus one far away -> one hit (0, 1),
+// depth 2, Solid() non-null.
+func collider() {
+	xy0 := blacksmith.Frame{0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1}
+	partA, err := blacksmith.Cuboid(4, 4, 4)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer partA.Close()
+	cubB, err := blacksmith.Cuboid(4, 4, 4)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer cubB.Close()
+	partB, err := cubB.Translate(2, 0, 0)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer partB.Close()
+	cubC, err := blacksmith.Cuboid(4, 4, 4)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer cubC.Close()
+	partC, err := cubC.Translate(100, 0, 0)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer partC.Close()
+	boxA, err := partA.BoundsBox()
+	if err != nil {
+		fail(err.Error())
+	}
+	boxB, err := partB.BoundsBox()
+	if err != nil {
+		fail(err.Error())
+	}
+	if !boxA.Overlaps(boxB) {
+		fail("collider: the two overlapping cuboids' bounds boxes do not overlap")
+	}
+	col, err := blacksmith.NewCollider([]*blacksmith.Solid{partA, partB, partC}, blacksmith.DefaultTolerance, nil, nil)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer col.Close()
+	groupCount, err := col.GroupCount()
+	if err != nil {
+		fail(err.Error())
+	}
+	if groupCount != 3 {
+		fail(fmt.Sprintf("collider: the group count is not one per part: %d", groupCount))
+	}
+	hits, err := col.Check([]blacksmith.Frame{xy0, xy0, xy0}, 0, 0)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(hits) != 1 {
+		fail(fmt.Sprintf("collider: found other than one hit: %v", hits))
+	}
+	hit := hits[0]
+	if hit.A != 0 || hit.B != 1 {
+		fail(fmt.Sprintf("collider: the hit does not name parts 0 and 1: %v", hit))
+	}
+	if !hit.Overlap || hit.Kind != "overlap" || hit.Text != "" {
+		fail(fmt.Sprintf("collider: the hit is not a clean overlap: %v", hit))
+	}
+	if math.Abs(hit.Depth-2.0) > 1e-9 {
+		fail(fmt.Sprintf("collider: the hit's depth is not exactly 2: %v", hit))
+	}
+	overlapSolid, err := hit.Solid()
+	if err != nil {
+		fail(err.Error())
+	}
+	defer overlapSolid.Close()
+	faces, err := overlapSolid.Faces()
+	if err != nil {
+		fail(err.Error())
+	}
+	if faces == 0 {
+		fail("collider: the hit's rebuilt solid has no faces")
+	}
+	stats, err := col.Stats()
+	if err != nil {
+		fail(err.Error())
+	}
+	if stats.Considered != 3 {
+		fail(fmt.Sprintf("collider: the stats do not consider all three pairs: %v", stats))
+	}
+	if _, err := blacksmith.NewCollider([]*blacksmith.Solid{partA, partB, partC}, blacksmith.DefaultTolerance, []uint32{0, 1}, nil); err == nil ||
+		!strings.Contains(err.Error(), "groups must have one entry per solid") {
+		fail(fmt.Sprintf("collider: a short groups list was accepted or refused in other words: %v", err))
+	}
+	fmt.Printf("collider: %d hit(s), depth %g, %v\n", len(hits), hit.Depth, stats)
 }
 
 // solidHits: a line through a cuboid pierces two faces and is cut into three pieces,

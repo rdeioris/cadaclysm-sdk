@@ -29,6 +29,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <tuple>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -341,6 +342,19 @@ inline Result<std::uint32_t> parse_convention(std::string_view text) {
         start = end + 1;
     }
     return packed;
+}
+
+// A colour as the ABI's packed 0xRRGGBB, from "#rgb", "#rrggbb" or a CSS colour name --
+// for SvgOptions::stroke / background, which take the packed number. Read by the
+// library's own parser, so every wrapper takes the same forms. Takes no numeric triple
+// of its own, so its refusal lists only the text forms.
+inline Result<std::uint32_t> packed(std::string_view colour) {
+    std::string text(colour);
+    Vec3 out{};
+    if (!::cadaclysm_parse_colour(text.c_str(), out.data()))
+        return Error{"colour: a colour is \"#rgb\", \"#rrggbb\" or a CSS colour name, not '" + text + "'"};
+    auto byte = [](double v) { return static_cast<std::uint32_t>(std::lround(v * 255.0)); };
+    return (byte(out[0]) << 16) | (byte(out[1]) << 8) | byte(out[2]);
 }
 
 // ---- values -----------------------------------------------------------------------
@@ -824,6 +838,20 @@ inline Manifold manifold_of(const std::uint32_t (&row)[8]) {
 }
 }  // namespace detail
 
+// What Brep::sewed did, as plain data: the edges it joined (pairs), the free
+// edges before and after, how many groups of free edges between the same two
+// vertices it left free (refused: too far apart for the tolerance, or more than
+// two), the widest gap it sewed, and the two tolerances it used.
+struct SewReport {
+    std::uint32_t pairs = 0;
+    std::uint32_t free_before = 0;
+    std::uint32_t free_after = 0;
+    std::uint32_t refused = 0;
+    double worst_gap = 0.0;
+    double tolerance = 0.0;
+    double vertex = 0.0;
+};
+
 // A node's exact B-rep, shared with the scene (not copied), for
 // blacksmith::Solid::from_node. Holds a reference of its own, so it outlives the
 // scene; released when destroyed or on release().
@@ -842,6 +870,33 @@ public:
         std::uint32_t row[8] = {};
         if (!::cadaclysm_brep_manifold(ptr_.get(), row)) return detail::reader_error("manifold");
         return detail::manifold_of(row);
+    }
+
+    // This brep with its free edges sewn, and what was sewn, as a new Brep and a
+    // SewReport; this one is left as it was. Two free edges become one shared edge
+    // where both their ends coincide within `vertex` -- by default the rounding
+    // manifold() merges vertices at -- and their curves lie within `tolerance` of
+    // each other, by default `vertex` too, so only edges that are one curve written
+    // twice are joined. A larger `tolerance` also joins two curves between the same
+    // two vertices that part by up to it; `vertex` is what decides which edges are
+    // candidates at all, and raising it is what could close a slot. Nothing moves.
+    Result<std::pair<Brep, SewReport>> sewed(std::optional<double> tolerance = std::nullopt,
+                                            std::optional<double> vertex = std::nullopt) const {
+        if (!ptr_) return Error{"brep: released", Origin::reader};
+        std::uint32_t counts[4] = {};
+        double gaps[3] = {};
+        const CadaclysmBrep* sewn = ::cadaclysm_brep_sew(
+            ptr_.get(), tolerance.value_or(std::nan("")), vertex.value_or(std::nan("")), counts, gaps);
+        if (sewn == nullptr) return detail::reader_error("sew");
+        SewReport report;
+        report.pairs = counts[0];
+        report.free_before = counts[1];
+        report.free_after = counts[2];
+        report.refused = counts[3];
+        report.worst_gap = gaps[0];
+        report.tolerance = gaps[1];
+        report.vertex = gaps[2];
+        return std::pair<Brep, SewReport>(Brep(sewn), report);
     }
 
     void release() noexcept { ptr_.reset(); }
@@ -1361,7 +1416,7 @@ Matrix4 rows_of(const Number* column_major) {
 // ---- svg ----------------------------------------------------------------------------
 
 // One of the seven camera angles SvgOptions::view understands -- the same table
-// cadaclysm_viewer.VIEWS gives Python's show() and svg() both.
+// cadaclysm_view.VIEWS gives Python's show() and svg() both.
 enum class SvgView { front, back, left, right, top, bottom, iso };
 
 namespace detail {
@@ -1409,12 +1464,14 @@ struct SvgOptions {
     double margin = 0.05;
     // How far a written curve may stray, in page units. Default 0.1.
     double tolerance = 0.1;
-    // 0xRRGGBB. Default black.
+    // 0xRRGGBB -- packed(std::string_view) reads a "#rgb", "#rrggbb" or CSS colour name
+    // string, e.g. `stroke = *packed("navy")`. Default black.
     std::uint32_t stroke = 0x000000;
     // The pen's width, page units. Default 1.
     double stroke_width = 1.0;
     // 0xRRGGBB, or nullopt (the default) for no <rect> behind the drawing -- the page
-    // left to whatever the viewer composites it onto.
+    // left to whatever the viewer composites it onto. packed(std::string_view) reads a
+    // "#rgb", "#rrggbb" or CSS colour name string, e.g. `background = *packed("navy")`.
     std::optional<std::uint32_t> background;
     // Each shape's feature edges -- the exact curves the flattened polylines are drawn
     // from. Default true.
@@ -1428,6 +1485,13 @@ struct SvgOptions {
     // Write every line as straight segments within tolerance, instead of being fitted
     // back to cubic Beziers. Default false.
     bool polylines = false;
+    // Also draw where each body's surfaces turn away from the eye -- the outline a
+    // sphere has no edge for. One group per placement, after that placement's lines.
+    // Default true: a sphere's and a torus's only curves are the seams where their one
+    // face meets itself, which are not edges of the body and are never drawn, so
+    // without this those two draw a blank page. A line set in its own right -- set it
+    // with edges false for the outline alone, or clear it for the lines alone.
+    bool silhouettes = true;
 };
 
 namespace detail {
@@ -1453,7 +1517,8 @@ inline CadaclysmSvgOptions build_svg_options(const SvgOptions& options, const st
     raw.stroke = options.stroke;
     raw.background = options.background.value_or(CADACLYSM_SVG_TRANSPARENT);
     raw.flags = (options.edges ? CADACLYSM_SVG_EDGES : 0u) | (options.curves ? CADACLYSM_SVG_CURVES : 0u) |
-                (options.isocurves ? CADACLYSM_SVG_ISOCURVES : 0u) | (options.polylines ? CADACLYSM_SVG_POLYLINES : 0u);
+                (options.isocurves ? CADACLYSM_SVG_ISOCURVES : 0u) | (options.polylines ? CADACLYSM_SVG_POLYLINES : 0u) |
+                (options.silhouettes ? CADACLYSM_SVG_SILHOUETTES : 0u);
     return raw;
 }
 
@@ -2181,6 +2246,87 @@ inline State read_state(detail::Ref<detail::SceneState> scene, std::uint32_t ind
 }
 }  // namespace detail
 
+// One stop of a Sequence: the state it reaches, at which parameter, and how the motion
+// leaves it.
+struct Segment {
+    State state;
+    double t = 0;
+    // "undefined", "discontinuous", "synchronous" or "linear".
+    std::string interpolation;
+};
+
+struct Pose;
+
+// A named motion over the file's states: an INTERPOLATED_CONFIGURATION_SEQUENCE. From
+// Scene::sequences.
+struct Sequence {
+    std::uint32_t index = 0;
+    std::string name;
+    // Whether it returns to its first segment (its last segment is not discontinuous).
+    bool closed = false;
+    // Seconds per unit of the parameter, or nothing where the file states no time unit (read
+    // the parameter as seconds).
+    std::optional<double> seconds_per_unit;
+    // At least two, in parameter order.
+    std::vector<Segment> segments;
+
+    // The parameter of the first segment.
+    double start() const { return segments.empty() ? 0.0 : segments.front().t; }
+    // The parameter of the last segment.
+    double end() const { return segments.empty() ? 0.0 : segments.back().t; }
+
+    // The mechanism posed at parameter `t` (the file's own parameter; see seconds_per_unit),
+    // with `ground` held fixed as Scene::pose does. An Error for a `t` that is not finite,
+    // carrying cadaclysm_last_error()'s text unchanged. Defined after Scene.
+    Result<Pose> pose(double t, std::optional<Link> ground = std::nullopt) const;
+
+private:
+    friend class Scene;
+    detail::Ref<detail::SceneState> scene_;
+};
+
+namespace detail {
+inline const char* interpolation_word(std::uint32_t code) {
+    switch (code) {
+        case 1: return "discontinuous";
+        case 2: return "synchronous";
+        case 3: return "linear";
+        default: return "undefined";
+    }
+}
+}  // namespace detail
+
+// A posed mechanism: Scene::pose or Scene::pose_state's answer. The document itself is
+// unchanged.
+//
+// Copied eagerly out of the C handle at construction time (Scene::copy_pose_), so a Pose
+// holds no C pointer and outlives the call that made it -- closing the scene does not
+// invalidate it.
+struct Pose {
+    // The link held fixed.
+    Link ground;
+    // Joints that close a loop and were not honoured, in file order.
+    std::vector<Joint> unsolved;
+    // (joint, freedom index, value) for every given value outside its freedom's range.
+    std::vector<std::tuple<Joint, std::uint32_t, double>> out_of_range;
+    // One entry per scene node, in Node::raw_transform's layout.
+    std::vector<std::array<double, 16>> transforms;
+
+    // node's posed transform, as rows -- the same type Node::transform returns.
+    Matrix4 transform(const Node& node) const {
+        std::array<double, 16> raw = raw_transform(node);
+        return detail::rows_of(raw.data());
+    }
+
+    // The same matrix in the ABI's own column-major order, as sixteen doubles, exactly as
+    // Node::raw_transform lays them out. The identity for a node this pose has no entry for.
+    std::array<double, 16> raw_transform(const Node& node) const {
+        std::uint32_t index = node.index();
+        if (index < transforms.size()) return transforms[index];
+        return std::array<double, 16>{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    }
+};
+
 // ---- the scene ----------------------------------------------------------------------
 
 // An open document. Move-only; closes when destroyed or on close(). Everything it
@@ -2367,6 +2513,81 @@ public:
         return out;
     }
 
+    // The file's motion sequences -- INTERPOLATED_CONFIGURATION_SEQUENCE, each a named walk
+    // through its states. Empty for a file that records none.
+    std::vector<Sequence> sequences() const {
+        const CadaclysmScene* handle = h();
+        std::uint32_t count = ::cadaclysm_sequence_count(handle);
+        std::vector<Sequence> out;
+        out.reserve(count);
+        detail::Ref<detail::SceneState> r = ref();
+        for (std::uint32_t i = 0; i < count; ++i) {
+            Sequence sequence;
+            sequence.index = i;
+            sequence.name = detail::text(::cadaclysm_sequence_name(handle, i));
+            sequence.closed = ::cadaclysm_sequence_closed(handle, i);
+            double per_unit = ::cadaclysm_sequence_seconds_per_unit(handle, i);
+            if (per_unit > 0) sequence.seconds_per_unit = per_unit;
+            std::uint32_t segments = ::cadaclysm_sequence_segment_count(handle, i);
+            for (std::uint32_t k = 0; k < segments; ++k) {
+                std::uint32_t state = 0;
+                double t = 0;
+                std::uint32_t interpolation = 0;
+                if (::cadaclysm_sequence_segment(handle, i, k, &state, &t, &interpolation)) {
+                    sequence.segments.push_back(
+                        Segment{detail::read_state(r, state), t, detail::interpolation_word(interpolation)});
+                }
+            }
+            sequence.scene_ = r;
+            out.push_back(std::move(sequence));
+        }
+        return out;
+    }
+
+    // The link the file declares as the mechanism's base, or nothing when it declares
+    // none (the default ground is then the link on the most joints; see pose()).
+    std::optional<Link> base() const {
+        std::uint32_t index = ::cadaclysm_kinematics_base(h());
+        if (index == NONE) return std::nullopt;
+        return Link(ref(), index);
+    }
+
+    // The mechanism posed by `values`: one (joint, values) row per joint to set -- exactly
+    // StateValue's own row type, so pose(state.values) poses like pose_state(state) --
+    // with `ground` (a Link, or nothing for the default ground) held fixed. Values outside
+    // a freedom's range are used as given and reported in the answer's out_of_range.
+    //
+    // An Error on a bad row (a joint given twice, one with the wrong number of values,
+    // ...) or a file with no mechanism, carrying cadaclysm_last_error()'s text unchanged.
+    Result<Pose> pose(const std::vector<StateValue>& values = {}, std::optional<Link> ground = std::nullopt) const {
+        std::vector<std::uint32_t> joints;
+        std::vector<std::uint32_t> counts;
+        std::vector<double> flat;
+        joints.reserve(values.size());
+        counts.reserve(values.size());
+        for (const StateValue& row : values) {
+            joints.push_back(row.joint.index());
+            counts.push_back(static_cast<std::uint32_t>(row.values.size()));
+            flat.insert(flat.end(), row.values.begin(), row.values.end());
+        }
+        std::uint32_t ground_index = ground ? ground->index() : NONE;
+        CadaclysmPose* ptr = ::cadaclysm_pose(h(), joints.empty() ? nullptr : joints.data(),
+                                              counts.empty() ? nullptr : counts.data(),
+                                              flat.empty() ? nullptr : flat.data(),
+                                              static_cast<std::uint32_t>(values.size()), ground_index);
+        if (!ptr) return detail::reader_error("pose");
+        return copy_pose_(ref(), ptr);
+    }
+
+    // The mechanism posed by `state`'s values, with `ground` held fixed as pose() does. An
+    // Error as pose() does.
+    Result<Pose> pose_state(const State& state, std::optional<Link> ground = std::nullopt) const {
+        std::uint32_t ground_index = ground ? ground->index() : NONE;
+        CadaclysmPose* ptr = ::cadaclysm_pose_state(h(), state.index, ground_index);
+        if (!ptr) return detail::reader_error("pose");
+        return copy_pose_(ref(), ptr);
+    }
+
     std::vector<Node> roots() const {
         const CadaclysmScene* scene = h();
         std::uint32_t count = ::cadaclysm_root_count(scene);
@@ -2445,6 +2666,51 @@ private:
 
     explicit Scene(std::shared_ptr<detail::SceneState> owned) : state_(std::move(owned)) {}
 
+    // Reads everything out of a CadaclysmPose* into a Pose, then frees it (ruling 2 of the
+    // posing plan: wrappers copy eagerly, never holding the C pointer). The guard's
+    // destructor frees the handle even if copying throws (e.g. std::bad_alloc), even
+    // though nothing else in this header does.
+    static Pose copy_pose_(const detail::Ref<detail::SceneState>& scene_ref, CadaclysmPose* pose_ptr) {
+        struct Guard {
+            CadaclysmPose* ptr;
+            ~Guard() { ::cadaclysm_pose_free(ptr); }
+        } guard{pose_ptr};
+
+        // Pose is an aggregate with no default constructor (Link has none), so every
+        // field is built here and handed to Pose{...} at the end rather than assigned
+        // into a default-constructed Pose.
+        Link ground(scene_ref, ::cadaclysm_pose_ground(pose_ptr));
+
+        std::vector<std::array<double, 16>> transforms;
+        std::uint32_t node_count = ::cadaclysm_pose_node_count(pose_ptr);
+        transforms.reserve(node_count);
+        for (std::uint32_t node = 0; node < node_count; ++node) {
+            std::array<double, 16> raw{};
+            ::cadaclysm_pose_node_transform(pose_ptr, node, raw.data());
+            transforms.push_back(raw);
+        }
+
+        std::vector<Joint> unsolved;
+        std::uint32_t unsolved_count = ::cadaclysm_pose_unsolved_count(pose_ptr);
+        for (std::uint32_t i = 0; i < unsolved_count; ++i) {
+            std::uint32_t joint = ::cadaclysm_pose_unsolved(pose_ptr, i);
+            if (joint != NONE) unsolved.push_back(Joint(scene_ref, joint));
+        }
+
+        std::vector<std::tuple<Joint, std::uint32_t, double>> out_of_range;
+        std::uint32_t out_of_range_count = ::cadaclysm_pose_out_of_range_count(pose_ptr);
+        for (std::uint32_t i = 0; i < out_of_range_count; ++i) {
+            std::uint32_t joint = 0;
+            std::uint32_t freedom = 0;
+            double value = 0;
+            if (::cadaclysm_pose_out_of_range(pose_ptr, i, &joint, &freedom, &value)) {
+                out_of_range.emplace_back(Joint(scene_ref, joint), freedom, value);
+            }
+        }
+
+        return Pose{std::move(ground), std::move(unsolved), std::move(out_of_range), std::move(transforms)};
+    }
+
     detail::SceneState& state(const char* what) const {
         if (!state_) detail::bad_access(what, "the scene is empty (moved from)");
         if (!state_->live()) detail::bad_access(what, "the scene is closed");
@@ -2457,7 +2723,15 @@ private:
     }
 
     std::shared_ptr<detail::SceneState> state_;
+    friend struct Sequence;
 };
+
+inline Result<Pose> Sequence::pose(double t, std::optional<Link> ground) const {
+    std::uint32_t ground_index = ground ? ground->index() : NONE;
+    CadaclysmPose* ptr = ::cadaclysm_pose_sequence(scene_.get("Sequence").handle, index, t, ground_index);
+    if (!ptr) return detail::reader_error("pose");
+    return Scene::copy_pose_(scene_, ptr);
+}
 
 // ---- schemas --------------------------------------------------------------------------
 

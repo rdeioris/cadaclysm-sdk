@@ -37,6 +37,13 @@ pub struct CadaclysmBrep {
     _private: [u8; 0],
 }
 
+/// A posed mechanism -- `Scene::pose` or `Scene::pose_state`'s answer. Opaque; owns its
+/// transforms and does not borrow the scene. Freed with `cadaclysm_pose_free`.
+#[repr(C)]
+pub struct CadaclysmPose {
+    _private: [u8; 0],
+}
+
 /// A mesh split into meshlets. Opaque.
 #[repr(C)]
 pub struct CadaclysmMeshlets {
@@ -405,6 +412,7 @@ entry_points! {
     fn cadaclysm_node_brep(scene: *const CadaclysmScene, node: u32) -> *const CadaclysmBrep;
     fn cadaclysm_brep_release(brep: *const CadaclysmBrep);
     fn cadaclysm_brep_manifold(brep: *const CadaclysmBrep, out: *mut u32) -> bool;
+    fn cadaclysm_brep_sew(brep: *const CadaclysmBrep, tolerance: f64, vertex: f64, out: *mut u32, gaps: *mut f64) -> *const CadaclysmBrep;
     fn cadaclysm_brep_layout_id() -> *const c_char;
     fn cadaclysm_surface_matrix(scene: *const CadaclysmScene, out: *mut f32);
     fn cadaclysm_node_bounds(scene: *const CadaclysmScene, node: u32) -> CadaclysmBounds;
@@ -447,6 +455,7 @@ entry_points! {
     fn cadaclysm_meshlet_children(handle: *const CadaclysmMeshlets, index: u32, out: *mut u32);
     fn cadaclysm_forget_meshes(scene: *mut CadaclysmScene);
     fn cadaclysm_svg_options_init(options: *mut CadaclysmSvgOptions);
+    fn cadaclysm_parse_colour(text: *const c_char, out: *mut f64) -> bool;
     fn cadaclysm_scene_svg_text(scene: *const CadaclysmScene, options: *const CadaclysmSvgOptions) -> *const c_char;
     fn cadaclysm_scene_svg(scene: *const CadaclysmScene, path: *const c_char, options: *const CadaclysmSvgOptions) -> bool;
     fn cadaclysm_node_svg_text(scene: *const CadaclysmScene, node: u32, options: *const CadaclysmSvgOptions) -> *const c_char;
@@ -476,6 +485,19 @@ entry_points! {
         values: *mut f64,
         capacity: u32
     ) -> u32;
+    fn cadaclysm_sequence_count(scene: *const CadaclysmScene) -> u32;
+    fn cadaclysm_sequence_name(scene: *const CadaclysmScene, sequence: u32) -> *const c_char;
+    fn cadaclysm_sequence_closed(scene: *const CadaclysmScene, sequence: u32) -> bool;
+    fn cadaclysm_sequence_seconds_per_unit(scene: *const CadaclysmScene, sequence: u32) -> f64;
+    fn cadaclysm_sequence_segment_count(scene: *const CadaclysmScene, sequence: u32) -> u32;
+    fn cadaclysm_sequence_segment(
+        scene: *const CadaclysmScene,
+        sequence: u32,
+        segment: u32,
+        state: *mut u32,
+        t: *mut f64,
+        interpolation: *mut u32
+    ) -> bool;
     fn cadaclysm_fem_options_init(options: *mut CadaclysmFemOptions);
     fn cadaclysm_node_fem_mesh(
         scene: *const CadaclysmScene,
@@ -493,6 +515,31 @@ entry_points! {
     fn cadaclysm_fem_mesh_msh_text(m: *const CadaclysmFemMesh) -> *const c_char;
     fn cadaclysm_fem_mesh_save_msh(m: *const CadaclysmFemMesh, path: *const c_char) -> bool;
     fn cadaclysm_fem_mesh_free(m: *mut CadaclysmFemMesh);
+    fn cadaclysm_pose(
+        scene: *const CadaclysmScene,
+        joints: *const u32,
+        counts: *const u32,
+        values: *const f64,
+        row_count: u32,
+        ground: u32
+    ) -> *mut CadaclysmPose;
+    fn cadaclysm_pose_state(scene: *const CadaclysmScene, state: u32, ground: u32) -> *mut CadaclysmPose;
+    fn cadaclysm_pose_sequence(scene: *const CadaclysmScene, sequence: u32, t: f64, ground: u32) -> *mut CadaclysmPose;
+    fn cadaclysm_pose_free(pose: *mut CadaclysmPose);
+    fn cadaclysm_pose_ground(pose: *const CadaclysmPose) -> u32;
+    fn cadaclysm_pose_node_count(pose: *const CadaclysmPose) -> u32;
+    fn cadaclysm_pose_node_transform(pose: *const CadaclysmPose, node: u32, out: *mut f64);
+    fn cadaclysm_pose_unsolved_count(pose: *const CadaclysmPose) -> u32;
+    fn cadaclysm_pose_unsolved(pose: *const CadaclysmPose, index: u32) -> u32;
+    fn cadaclysm_pose_out_of_range_count(pose: *const CadaclysmPose) -> u32;
+    fn cadaclysm_pose_out_of_range(
+        pose: *const CadaclysmPose,
+        index: u32,
+        joint: *mut u32,
+        freedom: *mut u32,
+        value: *mut f64
+    ) -> bool;
+    fn cadaclysm_kinematics_base(scene: *const CadaclysmScene) -> u32;
 }
 
 // ---- loading --------------------------------------------------------------------

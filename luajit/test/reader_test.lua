@@ -98,6 +98,29 @@ return function(t)
     scene:close()
   end)
 
+  t.test("a mesh64 read after forget_meshes is caught, not read; mesh, edges and the node survive it", function()
+    local scene = cadaclysm.open(t.fixture("samples/cube.scad"))
+    local node = scene.nodes[1]
+    local lent, kept, outline = node.mesh64, node.mesh, node.edges
+    local triangles = lent.triangle_count
+    local early = lent:copy()
+    t.ok(lent.positions ~= nil and triangles > 0)
+    scene:forget_meshes()
+    t.raises(function() return lent.positions end, "forgotten")
+    t.raises(function() return lent.indices end, "forgotten")
+    t.raises(function() return lent:position(0) end, "forgotten")
+    t.raises(function() return lent:copy() end, "forgotten")
+    t.eq(lent.triangle_count, triangles)
+    t.ok(not lent.is_empty)
+    t.eq(kept.positions[0], kept.positions[0])
+    t.ok(outline.positions ~= nil and node.can_mesh)
+    local again = node.mesh64
+    t.eq(again.triangle_count, triangles)
+    for i = 0, again.vertex_count * 3 - 1 do t.eq(again.positions[i], early.positions[i]) end
+    scene:close()
+    t.raises(function() return again.positions end, "closed")
+  end)
+
   t.test("mesh64/bounds64 keep a coordinate far from the origin that mesh()/bounds cannot", function()
     local scad = t.tmp("far64.scad")
     local f = assert(io.open(scad, "w"))
@@ -206,7 +229,7 @@ return function(t)
       end
       t.eq(p.select, p.geometry)
     end
-    t.eq(triangles, 522)  -- 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound): 542 -> 522
+    t.eq(triangles, 274)  -- 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound): 542 -> 522; 2026-10-04, one row along a ruling (the display's filler lays one row along a cylinder's or cone's straight axis, not six): 522 -> 274
     -- The second body sits 8 along x, the third 8 along y (column-major offset).
     t.eq(placements[2].raw_transform[13], 8)
     t.eq(placements[2].transform[1][4], 8)
@@ -284,6 +307,10 @@ return function(t)
     t.eq(man.is_manifold, true)
     t.eq(man.is_closed, true)
     t.eq(man.boundary_edges, 0)
+    local sewn, report = brep:sewed()
+    t.eq(report.free_before, man.boundary_edges)
+    t.eq(brep.manifold.boundary_edges, man.boundary_edges)
+    sewn:release()
     scene:close()
     -- The brep outlives the scene; releasing is idempotent and then refused.
     t.eq(brep.manifold.faces, man.faces)
@@ -369,6 +396,8 @@ return function(t)
     t.ok(z_up ~= y_up, "z-up and y-up read the same")
     local painted = scene:svg_text({ background = "#ff0000" })
     t.ok(painted:find('fill="#ff0000"', 1, true), painted:sub(1, 300))
+    local named = scene:svg_text({ stroke = "Red" })
+    t.ok(named:find('stroke="#ff0000"', 1, true), named:sub(1, 300))
 
     t.raises(function() scene:svg_text({ fov = 200 }) end, "fov")
     t.raises(function() scene.roots[1]:svg_text({ fov = 200 }) end, "fov")
@@ -475,7 +504,7 @@ return function(t)
     local bracket, pin = scene.nodes[2], scene.nodes[3]
     t.eq(bracket.is_meshed, false)
     t.eq(bracket.triangle_estimate, 18)
-    t.eq(pin.triangle_estimate, 468)  -- 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound): 480 -> 468
+    t.eq(pin.triangle_estimate, 318)  -- 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound): 480 -> 468; 2026-10-04, one row along a ruling (the display's filler lays one row along a cylinder's or cone's straight axis, not six): 468 -> 318
     t.eq(bracket.surface_edges.polyline_count, 12)
     t.eq(bracket.surface_edges.vertex_count, 24)
     t.eq(bracket.surface_isocurves.polyline_count, 0)
@@ -935,6 +964,131 @@ return function(t)
     t.eq(#scene.states, 0)
     scene:close()
   end)
+
+  -- m is Pose:raw_transform's return: 16 numbers, column-major, 1-indexed Lua array.
+  local function apply(m, p)
+    return m[1] * p[1] + m[5] * p[2] + m[9] * p[3] + m[13],
+           m[2] * p[1] + m[6] * p[2] + m[10] * p[3] + m[14],
+           m[3] * p[1] + m[7] * p[2] + m[11] * p[3] + m[15]
+  end
+
+  local function mechanism_parts(scene)
+    local links = scene.links
+    local base_link, arm_link = links[1], links[2]
+    t.eq(base_link.name, "base")
+    t.eq(arm_link.name, "arm")
+    local hinge = scene.joints[1]
+    local state = scene.states[1]
+    return base_link, arm_link, hinge, state, arm_link.nodes[1], base_link.nodes[1]
+  end
+
+  t.test("a mechanism poses its state", function()
+    local scene = cadaclysm.open(t.fixture("samples/mechanism.stp"))
+    local base_link, arm_link, hinge, state, arm_node, base_node = mechanism_parts(scene)
+    t.eq(scene.base, nil)
+    local pose = scene:pose_state(state)
+    t.eq(pose.ground.index, base_link.index)
+    t.eq(#pose.unsolved, 0)
+    t.eq(#pose.out_of_range, 0)
+    local q = 0.5 -- the arm is the joint's start, reached from its end: it turns by -q
+    local x, y, z = apply(pose:raw_transform(arm_node), { 10, 0, 0 })
+    t.near(x, 10 * math.cos(q), 1e-9, "arm point x")
+    t.near(y, -10 * math.sin(q), 1e-9, "arm point y")
+    t.near(z, 100, 1e-9, "arm point z")
+    x, y, z = apply(pose:raw_transform(arm_node), { 0, 0, 0 })
+    t.near(x, 0, 1e-9, "arm origin x")
+    t.near(y, 0, 1e-9, "arm origin y")
+    t.near(z, 100, 1e-9, "arm origin z")
+    local base_raw = pose:raw_transform(base_node)
+    local base_rest = base_node.raw_transform
+    for i = 1, 16 do t.near(base_raw[i], base_rest[i], 0, "base transform[" .. i .. "]") end
+    scene:close()
+  end)
+
+  t.test("a value past its range is used and reported", function()
+    local scene = cadaclysm.open(t.fixture("samples/mechanism.stp"))
+    local base_link, arm_link, hinge, state, arm_node, base_node = mechanism_parts(scene)
+    local pose = scene:pose({ { joint = hinge, values = { 2.0 } } })
+    t.eq(#pose.out_of_range, 1)
+    local entry = pose.out_of_range[1]
+    t.eq(entry.joint.index, hinge.index)
+    t.eq(entry.freedom, 0)
+    t.near(entry.value, 2.0, 0)
+    local x, y, z = apply(pose:raw_transform(arm_node), { 10, 0, 0 })
+    t.near(x, 10 * math.cos(2.0), 1e-9, "arm point x")
+    t.near(y, -10 * math.sin(2.0), 1e-9, "arm point y")
+    t.near(z, 100, 1e-9, "arm point z")
+    scene:close()
+  end)
+
+  t.test("the ground can be named", function()
+    local scene = cadaclysm.open(t.fixture("samples/mechanism.stp"))
+    local base_link, arm_link, hinge, state, arm_node, base_node = mechanism_parts(scene)
+    local pose = scene:pose({ { joint = hinge, values = { 0.5 } } }, arm_link)
+    t.eq(pose.ground.index, arm_link.index)
+    local raw, rest = pose:raw_transform(arm_node), arm_node.raw_transform
+    for i = 1, 16 do t.near(raw[i], rest[i], 0, "arm transform[" .. i .. "]") end
+    scene:close()
+  end)
+
+  t.test("a file's motion sequences read, and a sequence poses like its states", function()
+    local scene = cadaclysm.open(t.fixture("samples/mechanism-sequence.stp"))
+    local sequences = scene.sequences
+    t.eq(#sequences, 2)
+    local swing, snap = sequences[1], sequences[2]
+    t.eq(swing.name, "swing")
+    t.eq(swing.closed, true)
+    t.eq(swing.seconds_per_unit, 1)
+    t.eq(snap.name, "snap")
+    t.eq(snap.closed, false)
+    t.eq(snap.seconds_per_unit, nil)
+    local function summary(seq)
+      local out = {}
+      for i, seg in ipairs(seq.segments) do out[i] = ("%s@%g %s"):format(seg.state.name, seg.t, seg.interpolation) end
+      return table.concat(out, ",")
+    end
+    t.eq(summary(swing), "shut@0 linear,open@1 synchronous,wide@2 linear")
+    t.eq(summary(snap), "shut@0 discontinuous,wide@0.5 discontinuous")
+    t.eq(swing.start, 0)
+    t.eq(swing.end_, 2)
+    t.eq(snap.end_, 0.5)
+    for _, seg in ipairs(swing.segments) do
+      local by_sequence = swing:pose(seg.t)
+      local by_state = scene:pose_state(seg.state)
+      for _, node in ipairs(scene.nodes) do
+        local a, b = by_sequence:raw_transform(node), by_state:raw_transform(node)
+        for i = 1, 16 do t.near(a[i], b[i], 1e-9, seg.state.name .. " transform[" .. i .. "]") end
+      end
+    end
+    local e = t.raises(function() swing:pose(0 / 0) end)
+    t.eq(e.message, "the sequence parameter must be a finite number")
+    scene:close()
+  end)
+
+  t.test("state values pose like the state", function()
+    local scene = cadaclysm.open(t.fixture("samples/mechanism.stp"))
+    local base_link, arm_link, hinge, state, arm_node, base_node = mechanism_parts(scene)
+    local by_values = scene:pose(state.values):raw_transform(arm_node)
+    local by_state = scene:pose_state(state):raw_transform(arm_node)
+    for i = 1, 16 do t.near(by_values[i], by_state[i], 1e-12, "transform[" .. i .. "]") end
+    local rest = scene:pose({})
+    for _, n in ipairs(scene.nodes) do
+      local raw, node_rest = rest:raw_transform(n), n.raw_transform
+      for i = 1, 16 do t.near(raw[i], node_rest[i], 0, "node " .. n.index .. " transform[" .. i .. "]") end
+    end
+    scene:close()
+  end)
+
+  t.test("a bad pose raises", function()
+    local scene = cadaclysm.open(t.fixture("samples/mechanism.stp"))
+    local base_link, arm_link, hinge, state, arm_node, base_node = mechanism_parts(scene)
+    t.raises(function() scene:pose({ { joint = hinge, values = { 1.0, 2.0 } } }) end, "takes 1 value%(s%)")
+    local cube = cadaclysm.open(t.fixture("samples/cube.scad"))
+    t.raises(function() cube:pose({}) end, "no mechanism")
+    cube:close()
+    scene:close()
+  end)
+
 
   local function is_teal(c)
     return c ~= false and math.abs(c[1] - 0.1) < 1e-6 and math.abs(c[2] - 0.6) < 1e-6 and math.abs(c[3] - 0.55) < 1e-6

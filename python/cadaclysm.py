@@ -79,6 +79,7 @@ __all__ = [
     "Joint",
     "Link",
     "Manifold",
+    "SewReport",
     "Mesh",
     "Meshlet",
     "Meshlets",
@@ -87,7 +88,10 @@ __all__ = [
     "Pair",
     "Placement",
     "Polylines",
+    "Pose",
     "Scene",
+    "Segment",
+    "Sequence",
     "State",
     "UV_WORLD",
     "ValueKind",
@@ -141,7 +145,7 @@ class Convention(enum.IntEnum):
 
     @classmethod
     def parse(cls, text: str) -> int:
-        """A packed `uint32` from a name a user typed, as `viewer.py` takes it.
+        """A packed `uint32` from a name a user typed, as a command line takes it.
 
         `"unreal"`, or `"unreal+file-units"` to keep the file's own units under
         the preset's axes. Raises `ValueError` naming what was accepted, since
@@ -599,6 +603,7 @@ class _Freedom(ctypes.Structure):
 _ENTRY_POINTS = [
     ("cadaclysm_last_error", c_char_p, []),
     ("cadaclysm_version", c_char_p, []),
+    ("cadaclysm_parse_colour", c_bool, [c_char_p, POINTER(c_double)]),
     ("cadaclysm_license_set", ctypes.c_bool, [c_char_p]),
     ("cadaclysm_license_info", c_char_p, []),
     ("cadaclysm_license_notice_count", c_uint64, []),
@@ -681,6 +686,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_node_brep", c_void_p, [c_void_p, c_uint32]),
     ("cadaclysm_brep_release", None, [c_void_p]),
     ("cadaclysm_brep_manifold", c_bool, [c_void_p, POINTER(c_uint32)]),
+    ("cadaclysm_brep_sew", c_void_p, [c_void_p, c_double, c_double, POINTER(c_uint32), POINTER(c_double)]),
     ("cadaclysm_brep_layout_id", c_char_p, []),
     ("cadaclysm_surface_matrix", None, [c_void_p, POINTER(c_float)]),
     ("cadaclysm_node_bounds", _Bounds, [c_void_p, c_uint32]),
@@ -712,6 +718,27 @@ _ENTRY_POINTS = [
     ("cadaclysm_state_value_count", c_uint32, [c_void_p, c_uint32]),
     ("cadaclysm_state_value", c_uint32,
      [c_void_p, c_uint32, c_uint32, POINTER(c_uint32), POINTER(c_double), c_uint32]),
+    ("cadaclysm_sequence_count", c_uint32, [c_void_p]),
+    ("cadaclysm_sequence_name", c_char_p, [c_void_p, c_uint32]),
+    ("cadaclysm_sequence_closed", c_bool, [c_void_p, c_uint32]),
+    ("cadaclysm_sequence_seconds_per_unit", c_double, [c_void_p, c_uint32]),
+    ("cadaclysm_sequence_segment_count", c_uint32, [c_void_p, c_uint32]),
+    ("cadaclysm_sequence_segment", c_bool,
+     [c_void_p, c_uint32, c_uint32, POINTER(c_uint32), POINTER(c_double), POINTER(c_uint32)]),
+    ("cadaclysm_pose", c_void_p,
+     [c_void_p, POINTER(c_uint32), POINTER(c_uint32), POINTER(c_double), c_uint32, c_uint32]),
+    ("cadaclysm_pose_state", c_void_p, [c_void_p, c_uint32, c_uint32]),
+    ("cadaclysm_pose_sequence", c_void_p, [c_void_p, c_uint32, c_double, c_uint32]),
+    ("cadaclysm_pose_free", None, [c_void_p]),
+    ("cadaclysm_pose_ground", c_uint32, [c_void_p]),
+    ("cadaclysm_pose_node_count", c_uint32, [c_void_p]),
+    ("cadaclysm_pose_node_transform", None, [c_void_p, c_uint32, POINTER(c_double)]),
+    ("cadaclysm_pose_unsolved_count", c_uint32, [c_void_p]),
+    ("cadaclysm_pose_unsolved", c_uint32, [c_void_p, c_uint32]),
+    ("cadaclysm_pose_out_of_range_count", c_uint32, [c_void_p]),
+    ("cadaclysm_pose_out_of_range", c_bool,
+     [c_void_p, c_uint32, POINTER(c_uint32), POINTER(c_uint32), POINTER(c_double)]),
+    ("cadaclysm_kinematics_base", c_uint32, [c_void_p]),
     ("cadaclysm_node_edges", _Polylines, [c_void_p, c_uint32]),
     ("cadaclysm_node_edge_colors", _EdgeColors, [c_void_p, c_uint32]),
     ("cadaclysm_node_curves", _Polylines, [c_void_p, c_uint32]),
@@ -868,28 +895,50 @@ def _text(raw) -> str:
     return raw.decode("utf-8", "replace") if raw else ""
 
 
+def _transform_matrix(raw):
+    """16 ABI doubles (column-major, as `Node.raw_transform` lays them out) as a 4x4
+    float64 numpy array, transposed into numpy's row-major convention: `M[:3, :3]` is the
+    rotation and scale block and `M[:3, 3]` is the offset. Shared by every `raw_transform`
+    that has a `transform` beside it (`Node`, `Placement`, `Pose`), so the two never drift
+    apart."""
+    numpy = _numpy()
+    return numpy.array(raw, numpy.float64).reshape(4, 4).T
+
+
 def _last_error() -> str:
     return _text(_lib().cadaclysm_last_error())
 
 
+def _colour_text(text: str):
+    """(r, g, b) in 0..1 from colour text -- "#rgb", "#rrggbb" or a CSS colour name --
+    read by the library's own parser, so every wrapper takes the same forms; None if
+    the library refused it."""
+    out = (c_double * 3)()
+    if _lib().cadaclysm_parse_colour(text.encode("utf-8"), out):
+        return tuple(out)
+    return None
+
+
 def _packed(colour) -> int:
-    """A colour as the ABI's packed `0xRRGGBB`: `'#rrggbb'` or an `(r, g, b)` triple."""
+    """A colour as the ABI's packed `0xRRGGBB`: "#rgb", "#rrggbb", a CSS colour name or
+    an `(r, g, b)` triple in 0..255."""
     if isinstance(colour, str):
-        h = colour.lstrip("#")
-        if len(h) != 6:
-            raise ValueError(f"colour {colour!r}: '#rrggbb' or (r, g, b)")
-        return int(h, 16)
-    r, g, b = colour
+        rgb = _colour_text(colour)
+        if rgb is None:
+            raise ValueError(f'colour {colour!r}: a colour is "#rgb", "#rrggbb", a CSS colour name or (r, g, b) in 0..255')
+        r, g, b = (round(c * 255) for c in rgb)
+    else:
+        r, g, b = colour
     return (int(r) << 16) | (int(g) << 8) | int(b)
 
 
 def _svg_options(default_up, *, view="iso", az=None, el=None, up=None, fov=0.0, size=(1000, 1000), margin=0.05,
                  tolerance=0.1, stroke="#000000", width=1.0, background=None, edges=True, curves=False,
-                 isocurves=False, polylines=False) -> _SvgOptions:
+                 isocurves=False, polylines=False, silhouettes=True) -> _SvgOptions:
     """`Scene.svg`/`Node.svg`'s keywords, packed into `CadaclysmSvgOptions`: `view`
-    through the viewer's own table (`cadaclysm_viewer.VIEWS`, the one `show` reads
+    through the view's own table (`cadaclysm_view.VIEWS`, the one `show` reads
     too), `az`/`el` over it, `up` from the scene's convention unless given, colours
-    as `'#rrggbb'` or an `(r, g, b)` triple."""
+    as `"#rgb"`, `"#rrggbb"`, a CSS colour name or an (r, g, b) triple in 0..255."""
     VIEWS = _viewer().VIEWS   # the one table both show() and svg() read, found the way show() finds it
 
     if view not in VIEWS:
@@ -905,7 +954,14 @@ def _svg_options(default_up, *, view="iso", az=None, el=None, up=None, fov=0.0, 
     o.margin, o.tolerance, o.stroke_width = float(margin), float(tolerance), float(width)
     o.stroke = _packed(stroke)
     o.background = NONE if background is None else _packed(background)
-    o.flags = (1 if edges else 0) | (2 if curves else 0) | (4 if isocurves else 0) | (8 if polylines else 0)
+    # `silhouettes` (16) is a line set in its own right: alone it draws an
+    # outline-only page. ON by default, matching `cadaclysm_svg_options_init`,
+    # because `edges=` alone cannot draw every body -- a sphere's and a torus's
+    # only curves are the seams where their one face meets itself, which are not
+    # edges of the body and are never drawn, so those two came back as a blank
+    # page. `silhouettes=False` gives the old lines-only drawing.
+    o.flags = ((1 if edges else 0) | (2 if curves else 0) | (4 if isocurves else 0)
+               | (8 if polylines else 0) | (16 if silhouettes else 0))
     return o
 
 
@@ -1254,12 +1310,59 @@ class Mesh:
         return f"Mesh(vertices={self.vertex_count}, triangles={self.triangle_count})"
 
 
+def _lent_array(name):
+    slot = Mesh.__dict__[name]
+
+    def read(self):
+        self._check()
+        return slot.__get__(self, Mesh)
+
+    return property(read, doc=f"`Mesh.{name}`, refused once the scene has forgotten its meshes.")
+
+
+class _LentMesh(Mesh):
+    """`Node.mesh64`'s `Mesh`: views over the document's own mesh, which
+    `Scene.forget_meshes()` frees, so every array read checks the scene's forget
+    count against the one this was made under (and that the scene is still open)
+    and raises a stale view rather than reading freed memory. `copy()` reads
+    through the same check, and what it returns is a plain `Mesh` of our own."""
+
+    __slots__ = ("_scene", "_forgets")
+
+    positions = _lent_array("positions")
+    normals = _lent_array("normals")
+    uvs = _lent_array("uvs")
+    colors = _lent_array("colors")
+    indices = _lent_array("indices")
+
+    def __init__(self, scene, forgets, mesh):
+        for name in ("positions", "normals", "uvs", "colors", "indices",
+                     "vertex_count", "index_count"):
+            Mesh.__dict__[name].__set__(self, getattr(mesh, name))
+        self._scene = scene
+        self._forgets = forgets
+
+    def _check(self):
+        self._scene._handle  # a closed scene raises, as every call does
+        if self._scene._forgets != self._forgets:
+            raise CadaclysmError(
+                "mesh64: stale view: the scene has forgotten its meshes since, freeing "
+                "the document's own mesh this lends (ask the node again)")
+
+
 class Polylines:
     """A node's feature edges or free curves, already flattened to points.
 
     `positions` is `(vertex_count, 3)` float32 with the runs end to end, and
-    `counts` is `(polyline_count,)` uint32 saying where each run stops. Both
-    are read-only views into the scene.
+    `counts` is `(polyline_count,)` uint32 saying **how many points each run
+    has** -- not where it ends, so twelve two-point edges read `2, 2, 2, ...`:
+
+        start = 0
+        for length in counts:
+            run = positions[start:start + length]
+            start += length
+
+    Both are read-only views into the scene.
     """
 
     __slots__ = ("positions", "counts", "polyline_count", "vertex_count")
@@ -1508,8 +1611,7 @@ class Placement:
         convention for the reason `Node.transform` gives, and `raw_transform`
         keeps the ABI's own order.
         """
-        numpy = _numpy()
-        return numpy.array(self.raw_transform, numpy.float64).reshape(4, 4).T
+        return _transform_matrix(self.raw_transform)
 
     @property
     def raw_transform(self):
@@ -1773,61 +1875,218 @@ class State:
         return out
 
 
+_INTERPOLATIONS = ("undefined", "discontinuous", "synchronous", "linear")
+
+
+class Segment:
+    """One step of a `Sequence`: the `State` it reaches, its parameter `t`, and how the
+    motion leaves it for the next -- `interpolation`, one of `"undefined"`,
+    `"discontinuous"`, `"synchronous"`, `"linear"`."""
+
+    __slots__ = ("state", "t", "interpolation")
+
+    def __init__(self, state: "State", t: float, interpolation: str):
+        self.state = state
+        self.t = t
+        self.interpolation = interpolation
+
+    def __repr__(self):
+        return f"<Segment {self.state.name} t={self.t} {self.interpolation}>"
+
+
+class Sequence:
+    """A motion the file records: an `INTERPOLATED_CONFIGURATION_SEQUENCE`, its states
+    at increasing parameter values. From `Scene.sequences`.
+
+    `pose(t)` poses it at parameter `t`, in the file's own parameter: a segment is a
+    keyframe of its state, a `"discontinuous"` segment holds until the next and every
+    other kind moves linearly, an open sequence holds its ends and a `closed` one wraps
+    (its closing span, last back to first, is the mean of its spans; each joint loops on
+    its own keys, so one that only some segments name still comes back round smoothly).
+    To play it on a clock:
+    with a duration, stretch `start`..`end` (plus the closing span when closed) to
+    it; with none, read the parameter as seconds -- times `seconds_per_unit` where the
+    file states a time unit."""
+
+    __slots__ = ("_scene", "index")
+
+    def __init__(self, scene: "Scene", index: int):
+        self._scene = scene
+        self.index = index
+
+    def __eq__(self, other):
+        return isinstance(other, Sequence) and other.index == self.index and other._scene is self._scene
+
+    def __hash__(self):
+        return hash((id(self._scene), self.index))
+
+    def __repr__(self):
+        return f"<Sequence {self.index} {self.name}>"
+
+    @property
+    def name(self) -> str:
+        """The sequence's name: its representation's (`name #2` and on for further
+        sequences in one representation)."""
+        return _text(_lib().cadaclysm_sequence_name(self._scene._handle, self.index))
+
+    @property
+    def closed(self) -> bool:
+        """Whether the motion returns to its first segment (its last is not
+        discontinuous)."""
+        return bool(_lib().cadaclysm_sequence_closed(self._scene._handle, self.index))
+
+    @property
+    def seconds_per_unit(self) -> "float | None":
+        """Seconds per unit of the parameter where the file states a time unit; None
+        where it states none (the parameter is then read as seconds)."""
+        value = _lib().cadaclysm_sequence_seconds_per_unit(self._scene._handle, self.index)
+        return None if value == 0.0 else value
+
+    @property
+    def segments(self) -> "list[Segment]":
+        """The segments, in file order (at least two)."""
+        library, handle = _lib(), self._scene._handle
+        out = []
+        for i in range(library.cadaclysm_sequence_segment_count(handle, self.index)):
+            state, t, interpolation = c_uint32(), c_double(), c_uint32()
+            library.cadaclysm_sequence_segment(
+                handle, self.index, i, ctypes.byref(state), ctypes.byref(t), ctypes.byref(interpolation)
+            )
+            out.append(Segment(State(self._scene, state.value), t.value, _INTERPOLATIONS[interpolation.value]))
+        return out
+
+    @property
+    def start(self) -> float:
+        """The first segment's parameter."""
+        return self.segments[0].t
+
+    @property
+    def end(self) -> float:
+        """The last segment's parameter (the closing span not included)."""
+        return self.segments[-1].t
+
+    def pose(self, t: float, ground: "Link | None" = None) -> "Pose":
+        """The mechanism posed by this sequence at parameter `t`, with `ground` held
+        fixed as `Scene.pose` does. Raises `CadaclysmError` for a `t` that is not
+        finite."""
+        ground_index = NONE if ground is None else ground.index
+        ptr = _lib().cadaclysm_pose_sequence(self._scene._handle, self.index, float(t), ground_index)
+        if not ptr:
+            raise CadaclysmError(_last_error())
+        return _copy_pose(self._scene, ptr)
+
+
+class Pose:
+    """A posed mechanism: `Scene.pose`, `Scene.pose_state` or `Sequence.pose`'s answer. The document itself
+    is unchanged.
+
+    Copied eagerly out of the C handle at construction time (`_copy_pose`), so a `Pose`
+    holds no C pointer and outlives the call that made it -- closing the scene does not
+    invalidate it.
+    """
+
+    __slots__ = ("_scene", "ground", "unsolved", "out_of_range", "_transforms")
+
+    def __init__(self, scene: "Scene", ground: Link, unsolved: "list[Joint]",
+                 out_of_range: "list[tuple[Joint, int, float]]", transforms: "list[tuple]"):
+        self._scene = scene
+        #: The link held fixed.
+        self.ground = ground
+        #: Joints that close a loop and were not honoured, in file order.
+        self.unsolved = unsolved
+        #: `(joint, freedom index, value)` for every given value outside its freedom's range.
+        self.out_of_range = out_of_range
+        self._transforms = transforms
+
+    def __repr__(self):
+        return f"<Pose ground={self.ground!r}>"
+
+    def transform(self, node: "Node"):
+        """`node`'s posed transform, as a 4x4 float64 numpy array -- the same type
+        `Node.transform` returns."""
+        return _transform_matrix(self.raw_transform(node))
+
+    def raw_transform(self, node: "Node") -> tuple:
+        """The same matrix in the ABI's own column-major order, as 16 floats, exactly as
+        `Node.raw_transform` lays them out."""
+        return self._transforms[node.index]
+
+    def show(self, **options) -> None:
+        """Draw this pose's scene with the viewer in use, as `Scene.show` does -- the scene by
+        handle -- with every node's posed transform handed to the view
+        (`cadaclysm_view_set_node_transforms`), which moves each node's geometry by
+        `raw_transform(n) · n's rest⁻¹`. A node the pose left exactly where it rests takes no
+        move -- so an unposed `Pose` (`scene.pose([])`) draws exactly what `Scene.show` does,
+        not merely close to it. Same keywords as `Scene.show`."""
+        self._scene._draw("show", options, "Pose", transforms=self._transforms)
+
+    def view(self, **options):
+        """`Pose.show`'s orbiting twin; returns what `Scene.view` returns."""
+        return self._scene._draw("view", options, "Pose", transforms=self._transforms)
+
+
+def _copy_pose(scene: "Scene", pose_ptr) -> Pose:
+    """Reads everything out of a `CadaclysmPose *` into a `Pose`, then frees it (ruling 2 of
+    the posing plan: wrappers copy eagerly, never holding the C pointer). Runs in a
+    `try`/`finally` so an exception midway through copying still frees the handle."""
+    library = _lib()
+    try:
+        ground = Link(scene, library.cadaclysm_pose_ground(pose_ptr))
+        transforms = []
+        for node in range(library.cadaclysm_pose_node_count(pose_ptr)):
+            raw = (c_double * 16)()
+            library.cadaclysm_pose_node_transform(pose_ptr, node, raw)
+            transforms.append(tuple(raw))
+        unsolved = []
+        for i in range(library.cadaclysm_pose_unsolved_count(pose_ptr)):
+            joint = library.cadaclysm_pose_unsolved(pose_ptr, i)
+            if joint != NONE:
+                unsolved.append(Joint(scene, joint))
+        out_of_range = []
+        for i in range(library.cadaclysm_pose_out_of_range_count(pose_ptr)):
+            joint, freedom, value = c_uint32(), c_uint32(), c_double()
+            if library.cadaclysm_pose_out_of_range(
+                pose_ptr, i, ctypes.byref(joint), ctypes.byref(freedom), ctypes.byref(value)
+            ):
+                out_of_range.append((Joint(scene, joint.value), freedom.value, value.value))
+        return Pose(scene, ground, unsolved, out_of_range, transforms)
+    finally:
+        library.cadaclysm_pose_free(pose_ptr)
+
+
 # ---- drawing ----------------------------------------------------------------
 
 
+def _release_shown(obj) -> None:
+    """Tell the view loader to drop every item showing `obj`, if it was ever imported --
+    unlike `_viewer()`, this never imports it itself (`obj` may never have been drawn).
+    `Scene.close()` calls this before freeing its handle: `cadaclysm_view.h` requires a
+    scene (unlike a solid, copied at show time) to stay open until its item is removed or
+    the view destroyed, so a view must drop it first."""
+    viewer = sys.modules.get("cadaclysm.view") or sys.modules.get("cadaclysm_view")
+    if viewer is not None:
+        viewer._release(obj)
+
+
 def _viewer():
-    """The viewer loader: `cadaclysm.viewer` in the wheel, `cadaclysm_viewer` beside this
+    """The view loader: `cadaclysm.view` in the wheel, `cadaclysm_view` beside this
     module in a checkout. Imported only when something is drawn."""
     try:
-        from cadaclysm import viewer
-        return viewer
+        from cadaclysm import view
+        return view
     except ImportError:
         pass
     try:
-        import cadaclysm_viewer
-        return cadaclysm_viewer
+        import cadaclysm_view
+        return cadaclysm_view
     except ImportError:
         here = Path(__file__).resolve().parent
         sys.path.insert(0, str(here))
-        import cadaclysm_viewer
-        return cadaclysm_viewer
+        import cadaclysm_view
+        return cadaclysm_view
 
 
 _Y_UP = {int(Convention.UNITY), int(Convention.Y_UP)}
-
-
-def _drawn_placements(placements, edges):
-    """(meshes, polylines) for the loader, one entry per drawing -- see `Placement`.
-
-    Each placement draws its geometry's mesh (or, for a node drawn as a curve, its
-    curves) through the placement's own transform, in the colour of what a click on it
-    selects -- else the shape's -- and only while that selected node is visible. With
-    `edges`, a meshed placement brings its B-rep edges too, through the same matrix.
-    """
-    meshes, lines = [], []
-    for place in placements:
-        select = place.select
-        if not select.visible_now:
-            continue
-        node = place.geometry
-        if not node.can_mesh:
-            continue
-        colour = select.colour or node.colour
-        rgb = None if colour is None else colour[:3]
-        matrix = place.raw_transform
-        mesh = node.mesh
-        if mesh:
-            meshes.append((mesh.positions, mesh.normals, mesh.indices, matrix, rgb))
-            if edges:
-                outline = node.edges
-                if outline:
-                    lines.append((outline.positions, outline.counts, matrix, None))
-        else:
-            curves = node.curves
-            if curves:
-                lines.append((curves.positions, curves.counts, matrix, rgb))
-    return meshes, lines
 
 
 # ---- nodes ----------------------------------------------------------------
@@ -1890,6 +2149,26 @@ class Brep:
             raise CadaclysmError(_text(_lib().cadaclysm_last_error()) or "manifold")
         return Manifold(tuple(out))
 
+    def sewed(self, tolerance: "float | None" = None, vertex: "float | None" = None) -> "tuple[Brep, SewReport]":
+        """This brep with its free edges sewn, and what was sewn, as a new `Brep` and a
+        `SewReport`; this one is left as it was. Two free edges become one shared edge
+        where both their ends coincide within `vertex` -- by default the rounding
+        `manifold` merges vertices at -- and their curves lie within `tolerance` of
+        each other, by default `vertex` too, so only edges that are one curve written
+        twice are joined. A larger `tolerance` also joins two curves between the same
+        two vertices that part by up to it; `vertex` is what decides which edges are
+        candidates at all, and raising it is what could close a slot. A value outside the legal range takes the
+        default (`vertex` not finite or not positive, `tolerance` negative), and the
+        report's `vertex` and `tolerance` show what was used. Nothing moves."""
+        out = (c_uint32 * 4)()
+        gaps = (c_double * 3)()
+        nan = float("nan")
+        pointer = _lib().cadaclysm_brep_sew(self.pointer, nan if tolerance is None else float(tolerance),
+                                            nan if vertex is None else float(vertex), out, gaps)
+        if not pointer:
+            raise CadaclysmError(_text(_lib().cadaclysm_last_error()) or "sew")
+        return Brep(pointer), SewReport(tuple(out), tuple(gaps))
+
     def release(self) -> None:
         pointer, self._pointer = getattr(self, "_pointer", None), None
         if pointer and _library is not None:
@@ -1917,6 +2196,24 @@ class Manifold:
                 f"boundary_edges={self.boundary_edges}, non_manifold_edges={self.non_manifold_edges}, "
                 f"non_manifold_vertices={self.non_manifold_vertices}, is_manifold={self.is_manifold}, "
                 f"is_closed={self.is_closed})")
+
+
+class SewReport:
+    """What `Brep.sewed` did, as plain data: the edges it joined (`pairs`), the free
+    edges before and after, how many groups of free edges between the same two
+    vertices it left free (`refused`: too far apart for the tolerance, or more than
+    two), the widest gap it sewed, and the two tolerances it used."""
+
+    __slots__ = ("pairs", "free_before", "free_after", "refused", "worst_gap", "tolerance", "vertex")
+
+    def __init__(self, counts, gaps):
+        self.pairs, self.free_before, self.free_after, self.refused = (int(v) for v in counts)
+        self.worst_gap, self.tolerance, self.vertex = (float(v) for v in gaps)
+
+    def __repr__(self):
+        return (f"SewReport(pairs={self.pairs}, free_before={self.free_before}, free_after={self.free_after}, "
+                f"refused={self.refused}, worst_gap={self.worst_gap:g}, tolerance={self.tolerance:g}, "
+                f"vertex={self.vertex:g})")
 
 
 class Meshlet:
@@ -2690,8 +2987,7 @@ class Node:
         coordinates baked into f32 world positions loses millimetres, where an
         f32 mesh about its own origin under an f64 transform does not.
         """
-        numpy = _numpy()
-        return numpy.array(self.raw_transform, numpy.float64).reshape(4, 4).T
+        return _transform_matrix(self.raw_transform)
 
     @property
     def raw_transform(self):
@@ -2731,8 +3027,13 @@ class Node:
     def mesh64(self) -> Mesh:
         """`mesh` in float64: the document's own mesh, lent (the float32 one is this
         narrowed) -- the same indices, for a caller using the mesh as geometry. **A
-        `Scene.forget_meshes()` invalidates these views**; ask again after one."""
-        return self._mesh_of(_lib().cadaclysm_node_mesh64(self.scene._handle, self.index), "float64")
+        `Scene.forget_meshes()` invalidates these views**; ask again after one. The
+        `Mesh` is stamped with the scene's forget count, so reading one of its arrays
+        after a forget raises `CadaclysmError` ("stale view") rather than reading freed
+        memory -- an array already taken out of it before the forget is not caught."""
+        forgets = self.scene._forgets
+        lent = self._mesh_of(_lib().cadaclysm_node_mesh64(self.scene._handle, self.index), "float64")
+        return _LentMesh(self.scene, forgets, lent)
 
     def _mesh_of(self, raw, real="float32") -> Mesh:
         n = raw.vertex_count
@@ -3085,15 +3386,15 @@ class Node:
             stack.extend(reversed(node.children))
 
     def show(self, **options) -> None:
-        """Draw what this node and everything under it places -- the placements whose
-        selected node is this one or in its subtree -- with the viewer in use. Keywords
-        as `Scene.show`."""
-        self.scene._draw("show", self._placements(), options, "Node")
+        """Draw this node: its scene with the siblings along the path from its root hidden
+        (the ancestors' own geometry stays), framed on the node. Keywords as `Scene.show`."""
+        self.scene._draw("show", options, "Node", node=self)
 
     def view(self, **options):
-        """Orbit what this node and everything under it places; returns (azimuth,
-        elevation, zoom)."""
-        return self.scene._draw("view", self._placements(), options, "Node")
+        """Draw this node: its scene with the siblings along the path from its root hidden
+        (the ancestors' own geometry stays), framed on the node. Orbit it; returns the camera
+        (eye, target, up, orthographic) and the last pick."""
+        return self.scene._draw("view", options, "Node", node=self)
 
     def svg(self, path=None, **words) -> "str | None":
         """This node's own wireframe as SVG, in its own frame -- `Scene.svg`'s
@@ -3115,11 +3416,6 @@ class Node:
             raise CadaclysmError(_last_error() or "svg")
         return p.decode("utf-8")
 
-    def _placements(self) -> "list[Placement]":
-        mine = {node.index for node in self.walk()}
-        return [p for p in self.scene.placements if p.select.index in mine]
-
-
 # ---- the scene ------------------------------------------------------------
 
 
@@ -3129,10 +3425,14 @@ class Scene:
     Everything it hands back borrows from it — see the module docstring.
     """
 
-    __slots__ = ("_pointer", "path", "schema_path", "convention", "__weakref__")
+    __slots__ = ("_pointer", "path", "schema_path", "convention", "_forgets", "__weakref__")
 
     def __init__(self, pointer: int, path: Path, schema_path, convention=0):
         self._pointer = pointer
+        # How many times `forget_meshes` has run. Only `Node.mesh64` stamps itself with
+        # this: it lends the document's own mesh, which a forget frees, where the float
+        # mesh and the line views are the library's own caches and outlive one.
+        self._forgets = 0
         #: The file this was read from.
         self.path = path
         #: The `.exp` actually used, or None. Worth reporting when `open` was
@@ -3184,9 +3484,12 @@ class Scene:
         """Give the scene back. Idempotent.
 
         Every borrowed array — every `Mesh` and `Polylines` view still in
-        Python's hands — is reading freed memory afterwards.
+        Python's hands — is reading freed memory afterwards. Any view showing
+        this scene (directly, or a node of it) has its item removed first: the
+        scene must stay open until then.
         """
         if self._pointer is not None:
+            _release_shown(self)
             pointer, self._pointer = self._pointer, None
             _lib().cadaclysm_close(pointer)
 
@@ -3299,6 +3602,52 @@ class Scene:
         """The file's named mechanism poses, in file order; empty for a file that
         records none."""
         return [State(self, i) for i in range(_lib().cadaclysm_state_count(self._handle))]
+
+    @property
+    def sequences(self) -> "list[Sequence]":
+        """The file's motion sequences, in file order; empty for a file that records
+        none."""
+        return [Sequence(self, i) for i in range(_lib().cadaclysm_sequence_count(self._handle))]
+
+    @property
+    def base(self) -> "Link | None":
+        """The link the file declares as the mechanism's base, or None when it declares
+        none (the default ground is then the link on the most joints; see `pose`)."""
+        index = _lib().cadaclysm_kinematics_base(self._handle)
+        return None if index == NONE else Link(self, index)
+
+    def pose(self, values=(), ground: "Link | None" = None) -> "Pose":
+        """The mechanism posed by `values`: an iterable of `(Joint, sequence of numbers)`
+        rows -- exactly `State.values`' row type, so `pose(state.values)` poses like
+        `pose_state(state)` -- with `ground` (a `Link`, or None for the default ground)
+        held fixed. Values outside a freedom's range are used as given and reported in
+        the answer's `out_of_range`.
+
+        Raises `CadaclysmError` on a bad row (a joint given twice, one with the wrong
+        number of values, ...) or a file with no mechanism, carrying
+        `cadaclysm_last_error`'s text unchanged.
+        """
+        rows = [(joint.index, list(row_values)) for joint, row_values in values]
+        library = _lib()
+        n = len(rows)
+        joints = (c_uint32 * n)(*(joint for joint, _ in rows))
+        counts = (c_uint32 * n)(*(len(row_values) for _, row_values in rows))
+        flat = [v for _, row_values in rows for v in row_values]
+        flat_values = (c_double * len(flat))(*flat)
+        ground_index = NONE if ground is None else ground.index
+        ptr = library.cadaclysm_pose(self._handle, joints, counts, flat_values, n, ground_index)
+        if not ptr:
+            raise CadaclysmError(_last_error())
+        return _copy_pose(self, ptr)
+
+    def pose_state(self, state: "State", ground: "Link | None" = None) -> "Pose":
+        """The mechanism posed by `state`'s values, with `ground` held fixed as `pose`
+        does. Raises `CadaclysmError` as `pose` does."""
+        ground_index = NONE if ground is None else ground.index
+        ptr = _lib().cadaclysm_pose_state(self._handle, state.index, ground_index)
+        if not ptr:
+            raise CadaclysmError(_last_error())
+        return _copy_pose(self, ptr)
 
     @property
     def geometry_diagnostics(self) -> "list[str]":
@@ -3454,9 +3803,14 @@ class Scene:
 
     def forget_meshes(self) -> None:
         """Drop every mesh the scene has built; the next ask rebuilds. For a
-        viewer that has uploaded them and wants the memory back. Every `Mesh`
-        and `Polylines` view handed out before this is over freed memory."""
+        viewer that has uploaded them and wants the memory back. What it frees
+        is the document's own mesh, which `Node.mesh64` lends: this counts the
+        forget, so reading one of those from before it raises a stale view
+        rather than reading freed memory. `Node.mesh`, `Polylines` and the
+        Béziers are the library's own caches, which a forget does not touch
+        and which stay good until the scene closes."""
         _lib().cadaclysm_forget_meshes(self._handle)
+        self._forgets += 1
 
     # -- writing --
 
@@ -3483,14 +3837,16 @@ class Scene:
     def show(self, **options) -> None:
         """Draw every visible placement with the viewer in use. Keywords: view= (front
         back left right top bottom iso), az=, el=, zoom=, up= (default from the convention
-        the scene was opened with), edges= (the B-rep edges over the shapes; free curves
-        are drawn either way), width=, height=, hint=. No tolerance=: a document is drawn
-        at the tolerance it was read with."""
-        self._draw("show", self.placements, options, "Scene")
+        the scene was opened with), edges= (the B-rep edges over the shapes; on the
+        terminal library, edges=False also hides free curves -- the two share one layer
+        there), width=, height=, hint=. No tolerance=: a document is drawn at the
+        tolerance it was read with."""
+        self._draw("show", options, "Scene")
 
     def view(self, **options):
-        """Orbit the model with the viewer in use; returns (azimuth, elevation, zoom)."""
-        return self._draw("view", self.placements, options, "Scene")
+        """Orbit the model with the view library in use; returns the camera (eye,
+        target, up, orthographic) and the last pick."""
+        return self._draw("view", options, "Scene")
 
     def svg(self, path=None, **words) -> "str | None":
         """Every visible placement's wireframe as SVG, from the camera the keywords
@@ -3501,7 +3857,12 @@ class Scene:
         the content's extent left each side), tolerance= (how far a written curve
         may stray, in page units), stroke=, width= (the stroke's, in page units),
         background= (`None` for transparent), edges=, curves=, isocurves=,
-        polylines= (which line sets are drawn; edges alone by default).
+        polylines= (which line sets are drawn; edges by default), silhouettes=
+        (also draw where each body's surfaces turn away from the eye -- the
+        outline a sphere has no edge for; on by default, since a sphere and a
+        torus have no edges but their seams and would otherwise draw a blank
+        page. A line set in its own right, so `silhouettes=True` with
+        `edges=False` draws the outline alone).
 
         With `path`, writes the file and returns `None`; without, returns the SVG
         text. Raises `CadaclysmError` on a refused option (naming the field) or a
@@ -3524,21 +3885,13 @@ class Scene:
         other's notion of "default"."""
         return "y" if (self.convention & 0xFF) in _Y_UP else "z"
 
-    def _draw(self, mode, placements, options, owner):
+    def _draw(self, mode, options, owner, node=None, transforms=None):
         if "tolerance" in options:
             raise TypeError(f"{owner}.{mode} takes no tolerance: a document is drawn at the "
                             "tolerance it was read with")
-        viewer = _viewer()
-        opts = viewer.options("iso", default_up=self._default_up(), **options)
-        edges = options.get("edges", True)
-        meshes, lines = _drawn_placements(placements, edges)
-        # Lines are drawn only while the edges flag is clear, so free curves keep it clear;
-        # only a picture with no lines at all may be asked for no (screen-space) edges.
-        opts["flags"] = viewer.NO_EDGES if not edges and not lines else 0
-        last = viewer.draw(mode, self.path.name, meshes, lines, opts)
-        if mode == "view":
-            viewer.announce(owner.lower(), last)
-        return last
+        extra = {} if transforms is None else {"transforms": transforms}
+        return _viewer().present(mode, self if node is None else node, name=self.path.name, default_view="iso",
+                                 keywords=dict(options, default_up=self._default_up()), owner=owner.lower(), **extra)
 
 
 # ---- opening --------------------------------------------------------------
@@ -3617,7 +3970,9 @@ def open(path, schema=None, convention=Convention.NATIVE,  # noqa: A001 - the ve
     no longer has to be opened twice, or opened again, to be looked at the other
     way.
 
-    A `.zip` opens its first readable member; `Scene.source_name` says which.
+    A `.zip` (or `.stpZ`, STEP's zip) opens its first readable member;
+    `Scene.source_name` says which. A `.gz` is read as the format named before
+    it: `part.step.gz` as `.step`.
 
     Raises `CadaclysmError` on failure, carrying what the library said. An
     unrecognised `convention` is one of the failures it raises on, so a typo

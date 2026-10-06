@@ -396,6 +396,62 @@ final class KernelTests: XCTestCase {
         XCTAssertEqual(o.description, "Overlap(faces=(\(o.faceA), \(o.faceB)), loops=\(o.loops.count))")
     }
 
+    func testTheColliderFindsOverlappingPartsAndRebuildsTheOverlap() throws {
+        // Two cuboids overlapping by 2 along x, plus one far away -> one hit (0, 1), depth 2.
+        let xy0 = try Frame.xy()
+        let a = try Solid.cuboid(4, 4, 4)
+        let b = try Solid.cuboid(4, 4, 4).translate(2, 0, 0)
+        let c = try Solid.cuboid(4, 4, 4).translate(100, 0, 0)
+        XCTAssertTrue(try a.boundsBox.overlaps(try b.boundsBox), "the two overlapping cuboids' bounds boxes do not overlap")
+        let collider = try Collider([a, b, c])
+        XCTAssertEqual(try collider.groupCount, 3)
+        let stats0 = try collider.stats
+        XCTAssertEqual(stats0.considered, 0, "no check yet")
+        let hits = try collider.check([xy0, xy0, xy0])
+        XCTAssertEqual(hits.count, 1)
+        let hit = try XCTUnwrap(hits.first)
+        XCTAssertEqual(hit.a, 0)
+        XCTAssertEqual(hit.b, 1)
+        XCTAssertTrue(hit.overlap && hit.kind == "overlap" && hit.text.isEmpty)
+        XCTAssertEqual(hit.depth, 2.0, accuracy: 1e-9)
+        let overlap = try hit.solid()
+        XCTAssertGreaterThan(try overlap.faces, 0)
+        let stats1 = try collider.stats
+        XCTAssertEqual(stats1.considered, 3, "considered is every candidate pair among the three parts, box filtering aside")
+        XCTAssertGreaterThanOrEqual(stats1.confirmed + stats1.closedForm + stats1.meshed, 1)
+        let movedFar = try Frame(values: [100, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])
+        let far = try collider.check([xy0, movedFar, movedFar])
+        XCTAssertTrue(far.isEmpty)
+        collider.close()
+        XCTAssertTrue(refusal { _ = try collider.check([xy0, xy0, xy0]) }?.hasPrefix("collider: closed") ?? false)
+    }
+
+    func testTheColliderRefusesAShortGroupsList() throws {
+        let a = try Solid.cuboid(2, 2, 2)
+        let b = try Solid.cuboid(2, 2, 2).translate(1, 0, 0)
+        XCTAssertTrue(refusal { _ = try Collider([a, b], groups: [0]) }?
+            .contains("groups must have one entry per solid (2 solids, 1 groups)") ?? false)
+    }
+
+    func testACollisionHitsSolidSurvivesTheColliderClosing() throws {
+        // solid() keeps the collisions handle (not the collider) alive: closing the collider
+        // itself must not take the hit's own rebuild with it.
+        let xy0 = try Frame.xy()
+        let a = try Solid.cuboid(2, 2, 2)
+        let b = try Solid.cuboid(2, 2, 2).translate(1, 0, 0)
+        let collider = try Collider([a, b])
+        let hits = try collider.check([xy0, xy0])
+        collider.close()
+        XCTAssertEqual(hits.count, 1)
+        let overlap = try hits[0].solid()
+        XCTAssertGreaterThan(try overlap.faces, 0)
+    }
+
+    func testTheColliderRefusesAPartThatIsNotAClosedSolid() throws {
+        let sheet = try Solid.cuboid(2, 2, 2).faceSheet(0)
+        XCTAssertTrue(refusal { _ = try Collider([sheet]) }?.contains("collider_new: part 0 is not a closed solid") ?? false)
+    }
+
     func testProfilesAndPaths() throws {
         XCTAssertTrue(refusal { _ = try Profile.rect(0, 1) }?.hasPrefix("profile_rect: width and height must be positive") ?? false)
         let xy = try Frame.xy()
@@ -739,10 +795,23 @@ final class KernelTests: XCTestCase {
         XCTAssertEqual(refusal { _ = try block.coloured("#fff", face: 6) }, "coloured: face 6 is not one of the solid's 6")
         XCTAssertEqual(refusal { _ = try block.coloured("#fff", face: -1) }, "coloured: face -1 is not one of the solid's 6")
         XCTAssertEqual(refusal { _ = try block.faceColour(6) }, "colour: face 6 is not one of the solid's 6")
-        XCTAssertEqual(refusal { _ = try block.coloured("red") },
-                       "coloured: a colour is \"#rgb\", \"#rrggbb\" or (r, g, b) in 0..1, not 'red'")
         // Fullwidth digits are hex digits to Character but not to Int(radix:): refused, not a trap.
         XCTAssertNotNil(refusal { _ = try block.coloured("#ＦＦＦ") })
+    }
+
+    func testColouredTakesCssNames() throws {
+        let box = try Solid.cuboid(1, 1, 1)
+        XCTAssertEqual(try box.coloured("red").colour, SIMD3<Double>(1, 0, 0))
+        XCTAssertEqual(try box.coloured("#0f0").colour, SIMD3<Double>(0, 1, 0))
+        XCTAssertThrowsError(try box.coloured("notacolour")) { e in
+            XCTAssertTrue("\(e)".contains("a CSS colour name"))
+        }
+        XCTAssertEqual(try packed("navy"), 0x000080)
+        XCTAssertThrowsError(try packed("bogus")) { e in
+            let text = "\(e)"
+            XCTAssertTrue(text.contains("not 'bogus'"))
+            XCTAssertFalse(text.contains("0..1"))
+        }
     }
 
     func testProfileAndEdgeColours() throws {
@@ -859,7 +928,9 @@ final class KernelTests: XCTestCase {
         XCTAssertTrue(try String(contentsOfFile: path, encoding: .utf8).hasPrefix("<svg"))
 
         let both = try Blacksmith.writeSvgText([plate, try Solid.cuboid(1, 1, 1)])
-        XCTAssertEqual(both.components(separatedBy: "<g ").count - 1, 2)
+        // Two bodies' line groups, plus the plate's silhouette group: silhouettes are on by
+        // default since fc978acfc, and a cuboid has no silhouette curves to draw.
+        XCTAssertEqual(both.components(separatedBy: "<g ").count - 1, 3)
 
         // No convention over the kernel: `up` left nil falls back to Z, not a scene's, so a
         // Y-up ask still reads differently from the default.
@@ -1403,6 +1474,222 @@ final class KernelTests: XCTestCase {
 
         // Fact 4: the reverse pair is a new joint.
         try arm.joint("back", "upper arm", "ground")
+    }
+
+    /// `Assembly.pair`/`state`/`base` and `Assembly.pairFreedomCount`, at parity with the
+    /// Python reference's `_paired()` and its tests in `test_cadaclysm_blacksmith.py`
+    /// (spec 2026-09-28). See Node's `test/blacksmith.test.js` and Rust's `mod tests` for
+    /// the same facts worked out.
+    func testPairedMechanismFactsHoldAsTheSharedSpecChecksThem() throws {
+        let bolt = try Solid.cylinder(1, 6).named("bolt")
+        let plate = try Solid.cuboid(20, 10, 2).named("plate")
+
+        let bracket = try Assembly("bracket")
+        _ = try bracket.place(plate, try Frame.xy())
+        _ = try bracket.place(bolt, try Frame.xy([5, 5, 2]))
+        _ = try bracket.place(bolt, try Frame.xy([15, 5, 2]))
+        try bracket.link("fixed", ["plate"])
+        try bracket.link("bolts", ["bolt", "bolt 2"])
+        try bracket.joint("screw", "fixed", "bolts")
+
+        let arm = try Assembly("arm")
+        _ = try arm.place(plate, try Frame.xy(), name: "base")
+        _ = try arm.place(bracket, try Frame.xy([0, 0, 10]), name: "upper")
+        _ = try arm.place(bolt, try Frame.xy([5, 5, 2]), name: "pin")
+        try arm.link("ground", ["base"])
+        try arm.link("upper arm", ["upper", "pin"])
+        try arm.joint("shoulder", "ground", "upper arm")
+
+        try bracket.pair("screw", "prismatic", try Frame.xy([1, 2, 3]), endFrame: try Frame.xy([4, 2, 3]))
+        try arm.pair("shoulder", "revolute", try Frame.xy([0, 0, 10]), ranges: [(-1.5, 1.5)])
+        try arm.state("reach", [("shoulder", [0.5])])
+        try arm.base("ground")
+
+        // Fact 1: the written STEP text carries the pairs and the state.
+        let step = try arm.stepText()
+        XCTAssertEqual(countOf(step, "=MECHANISM_REPRESENTATION("), 2)
+        XCTAssertEqual(countOf(step, "=PAIR_REPRESENTATION_RELATIONSHIP("), 2)
+        XCTAssertEqual(countOf(step, "REVOLUTE_PAIR_WITH_RANGE"), 1)
+        XCTAssertEqual(countOf(step, "PRISMATIC_PAIR"), 1)
+        XCTAssertEqual(countOf(step, "=KINEMATIC_PROPERTY_MECHANISM_REPRESENTATION("), 1)
+        XCTAssertEqual(countOf(step, "=MECHANISM_STATE_REPRESENTATION("), 1)
+
+        // Facts 2-6, 9: read back through `toScene`.
+        let scene = try arm.toScene()
+        let shoulder = try XCTUnwrap(scene.joints.first { $0.name == "shoulder" })
+        let shoulderPair = try XCTUnwrap(shoulder.pair)
+        XCTAssertEqual(shoulderPair.kind, .revolute)
+        for frame in [shoulderPair.frameStart, shoulderPair.frameEnd] {
+            XCTAssertEqual(frame[0][3], 0.0, accuracy: 1e-9)
+            XCTAssertEqual(frame[1][3], 0.0, accuracy: 1e-9)
+            XCTAssertEqual(frame[2][3], 10.0, accuracy: 1e-9)
+            XCTAssertEqual(frame[0][2], 0.0, accuracy: 1e-9)
+            XCTAssertEqual(frame[1][2], 0.0, accuracy: 1e-9)
+            XCTAssertEqual(frame[2][2], 1.0, accuracy: 1e-9)
+        }
+        let shoulderFreedoms = shoulderPair.freedoms()
+        XCTAssertEqual(shoulderFreedoms.count, 1)
+        XCTAssertEqual(shoulderFreedoms[0].motion, .rotation)
+        XCTAssertEqual(shoulderFreedoms[0].axis, .z)
+        XCTAssertEqual(shoulderFreedoms[0].lower ?? .nan, -1.5, accuracy: 1e-9)
+        XCTAssertEqual(shoulderFreedoms[0].upper ?? .nan, 1.5, accuracy: 1e-9)
+
+        let screw = try XCTUnwrap(scene.joints.first { $0.name == "screw" })
+        let screwPair = try XCTUnwrap(screw.pair)
+        XCTAssertEqual(screwPair.kind, .prismatic)
+        XCTAssertTrue(screwPair.freedoms().allSatisfy { $0.lower == nil && $0.upper == nil })
+        XCTAssertEqual(screwPair.frameStart[0][3], 1.0, accuracy: 1e-9)
+        XCTAssertEqual(screwPair.frameStart[1][3], 2.0, accuracy: 1e-9)
+        XCTAssertEqual(screwPair.frameStart[2][3], 13.0, accuracy: 1e-9)
+        XCTAssertEqual(screwPair.frameEnd[0][3], 4.0, accuracy: 1e-9)
+        XCTAssertEqual(screwPair.frameEnd[1][3], 2.0, accuracy: 1e-9)
+        XCTAssertEqual(screwPair.frameEnd[2][3], 13.0, accuracy: 1e-9)
+
+        XCTAssertEqual(scene.base?.name, "ground")
+        XCTAssertEqual(scene.states.map { $0.name }, ["reach"])
+        let reach = scene.states[0]
+        XCTAssertEqual(reach.values.count, 1)
+        XCTAssertEqual(reach.values[0].joint?.name, "shoulder")
+        XCTAssertEqual(reach.values[0].values.count, 1)
+        XCTAssertEqual(reach.values[0].values[0], 0.5, accuracy: 1e-9)
+
+        // Fact 5: `poseState(reach)` carries the pin node at (5, 5, 2) to
+        // (5cos0.5 - 5sin0.5, 5sin0.5 + 5cos0.5, 2).
+        let pose = try scene.poseState(reach)
+        let upperArm = try XCTUnwrap(scene.links.first { $0.name == "upper arm" })
+        let pinNode = try XCTUnwrap(upperArm.nodes.first {
+            let t = $0.transform
+            return abs(t[0][3] - 5.0) < 1e-9 && abs(t[1][3] - 5.0) < 1e-9 && abs(t[2][3] - 2.0) < 1e-9
+        })
+        let posed = pose.transform(pinNode)
+        XCTAssertEqual(posed[0][3], 5 * cos(0.5) - 5 * sin(0.5), accuracy: 1e-9)
+        XCTAssertEqual(posed[1][3], 5 * sin(0.5) + 5 * cos(0.5), accuracy: 1e-9)
+        XCTAssertEqual(posed[2][3], 2.0, accuracy: 1e-9)
+
+        // Fact 6: `pose([(screw, [3.0])])` leaves every 'bolts' node at rest; `[5.0]` moves
+        // each by (2, 0, 0).
+        let pose3 = try scene.pose([StateValue(joint: screw, values: [3.0])])
+        let pose5 = try scene.pose([StateValue(joint: screw, values: [5.0])])
+        let bolts = try XCTUnwrap(scene.links.first { $0.name == "bolts" })
+        for node in bolts.nodes {
+            let rest = node.transform
+            let at3 = pose3.transform(node)
+            let at5 = pose5.transform(node)
+            for row in 0..<3 {
+                XCTAssertEqual(at3[row][3], rest[row][3], accuracy: 1e-9)
+            }
+            XCTAssertEqual(at5[0][3], rest[0][3] + 2.0, accuracy: 1e-9)
+            XCTAssertEqual(at5[1][3], rest[1][3], accuracy: 1e-9)
+            XCTAssertEqual(at5[2][3], rest[2][3], accuracy: 1e-9)
+        }
+
+        // Fact 9: no diagnostic names kinematics.
+        XCTAssertFalse(scene.diagnostics.contains { $0.hasPrefix("kinematics:") })
+        scene.close()
+
+        // Fact 7: the eight refusals, each with exactly its message, and the unpaired
+        // 'back' trick -- step_text()'s refusal text is identical before and after.
+        try arm.joint("back", "upper arm", "ground")
+        func unpairedMessage() -> String? { refusal { _ = try arm.stepText() } }
+        let before = unpairedMessage()
+        let refusals: [(() throws -> Void, String)] = [
+            ({ try arm.pair("shoulder", "revolute", try Frame.xy([0, 0, 10])) },
+             "pair: joint 'shoulder' already has a pair"),
+            ({ try arm.pair("back", "orbital", try Frame.xy()) },
+             "pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, spherical, "
+             + "spherical_with_pin, planar, universal, homokinetic, fully_constrained, unconstrained)"),
+            ({ try arm.pair("back", "screw", try Frame.xy()) }, "pair: a screw needs a non-zero pitch"),
+            ({ try arm.pair("back", "revolute", try Frame.xy(), ranges: [(-1, 1), (-1, 1)]) },
+             "pair: 'revolute' has 1 freedoms, but 2 ranges were given"),
+            ({ try arm.pair("back", "revolute", try Frame.xy(), ranges: []) },
+             "pair: 'revolute' has 1 freedoms, but 0 ranges were given"),
+            ({ try arm.pair("back", "revolute", try Frame.xy(), ranges: [(1, -1)]) },
+             "pair: range 0 of joint 'back' has lower >= upper"),
+            ({ try arm.pair("back", "prismatic", try Frame.at(SIMD3(0, 0, 0), SIMD3(0, 0, 1), x: SIMD3(0, 1, 0)),
+                            endFrame: try Frame.xy()) },
+             "pair: joint 'back' is prismatic, but its end frame is turned 90\u{00B0} about -z, "
+             + "which prismatic (does not turn) cannot make"),
+            ({ try arm.state("overreach", [("shoulder", [5.0])]) },
+             "state: value 0 of joint 'shoulder' is outside its range"),
+            ({ try arm.base("upper arm") }, "base: assembly 'arm' already has base 'ground'"),
+        ]
+        for (call, message) in refusals {
+            XCTAssertEqual(refusal(call), message)
+        }
+        XCTAssertEqual(unpairedMessage(), before)
+
+        // Fact 8: a joint with no pair is refused at write time.
+        XCTAssertEqual(
+            refusal { _ = try arm.stepText() },
+            "assembly_step: assembly 'arm': joint 'back' has no pair; "
+            + "a mechanism with pairs needs one on every joint (AP242)"
+        )
+
+        // Fact 9: `pairFreedomCount`.
+        XCTAssertEqual(Assembly.pairFreedomCount("spherical"), 3)
+        XCTAssertEqual(Assembly.pairFreedomCount("revolute"), 1)
+        XCTAssertEqual(Assembly.pairFreedomCount("fully_constrained"), 0)
+        XCTAssertEqual(Assembly.pairFreedomCount("not_a_kind"), 0)
+    }
+
+    /// `Assembly.sequence`, read back through `toScene`: the paired arm, a state `rest`, and a
+    /// two-segment `swing`; one refusal checked exactly.
+    func testASequenceSurvivesTheRoundTrip() throws {
+        let bolt = try Solid.cylinder(1, 6).named("bolt")
+        let plate = try Solid.cuboid(20, 10, 2).named("plate")
+        let arm = try Assembly("arm")
+        _ = try arm.place(plate, try Frame.xy(), name: "base")
+        _ = try arm.place(bolt, try Frame.xy([5, 5, 2]), name: "pin")
+        try arm.link("ground", ["base"])
+        try arm.link("upper arm", ["pin"])
+        try arm.joint("shoulder", "ground", "upper arm")
+        try arm.pair("shoulder", "revolute", try Frame.xy([0, 0, 10]), ranges: [(-1.5, 1.5)])
+        try arm.state("reach", [("shoulder", [0.5])])
+        try arm.state("rest", [("shoulder", [0.0])])
+        try arm.base("ground")
+        try arm.sequence("swing", [("rest", 0.0, "linear"), ("reach", 1.0, "linear")], seconds: true)
+
+        let scene = try arm.toScene()
+        defer { scene.close() }
+        let sequences = scene.sequences
+        XCTAssertEqual(sequences.count, 1)
+        XCTAssertEqual(sequences[0].name, "swing")
+        XCTAssertTrue(sequences[0].closed)
+        XCTAssertEqual(sequences[0].secondsPerUnit, 1.0)
+        XCTAssertEqual(sequences[0].segments.map { $0.state.name }, ["rest", "reach"])
+        XCTAssertEqual(sequences[0].segments.map { $0.t }, [0.0, 1.0])
+        XCTAssertEqual(sequences[0].segments.map { $0.interpolation }, ["linear", "linear"])
+
+        let before = noStamp(try arm.stepText())
+        XCTAssertEqual(
+            refusal { try arm.sequence("bad", [("rest", 0.0, "linear"), ("nowhere", 1.0, "linear")]) },
+            "sequence: assembly 'arm' has no state named 'nowhere'"
+        )
+        XCTAssertEqual(noStamp(try arm.stepText()), before)
+    }
+
+    /// Controller ruling: fact 10 -- a one-sided range survives the round trip. Without
+    /// this, an implementation sending `has_lower`/`has_upper` as always-true would pass
+    /// every other fact.
+    func testPairOneSidedRangeSurvivesTheRoundTrip() throws {
+        let plate = try Solid.cuboid(20, 10, 2).named("plate")
+        let bolt = try Solid.cylinder(1, 6).named("bolt")
+
+        let hinge = try Assembly("hinge")
+        _ = try hinge.place(plate, try Frame.xy(), name: "base")
+        _ = try hinge.place(bolt, try Frame.xy([0, 0, 2]), name: "arm")
+        try hinge.link("base", ["base"])
+        try hinge.link("arm", ["arm"])
+        try hinge.joint("j", "base", "arm")
+        try hinge.pair("j", "revolute", try Frame.xy(), ranges: [(nil, 1.0)])
+
+        let scene = try hinge.toScene()
+        let j = try XCTUnwrap(scene.joints.first { $0.name == "j" })
+        let freedoms = try XCTUnwrap(j.pair).freedoms()
+        XCTAssertEqual(freedoms.count, 1)
+        XCTAssertNil(freedoms[0].lower)
+        XCTAssertEqual(freedoms[0].upper, 1.0)
+        scene.close()
     }
 }
 

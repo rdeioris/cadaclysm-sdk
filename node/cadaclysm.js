@@ -126,6 +126,7 @@ koffi.opaque('CadaclysmScene');
 koffi.opaque('CadaclysmBrep');
 koffi.opaque('CadaclysmMeshlets');
 koffi.opaque('CadaclysmFemMesh');
+koffi.opaque('CadaclysmPose');
 const CadaclysmWindow = koffi.struct('CadaclysmWindow', {
   kind: 'uint32_t',
   handle: 'void *',
@@ -369,6 +370,7 @@ function _lib() {
     brep_release: f('void cadaclysm_brep_release(const CadaclysmBrep *brep)'),
     brep_layout_id: f('const char *cadaclysm_brep_layout_id(void)'),
     brep_manifold: f('bool cadaclysm_brep_manifold(const CadaclysmBrep *brep, _Out_ uint32_t *out)'),
+    brep_sew: f('CadaclysmBrep *cadaclysm_brep_sew(const CadaclysmBrep *brep, double tolerance, double vertex, _Out_ uint32_t *out, _Out_ double *gaps)'),
     node_count: f('uint32_t cadaclysm_node_count(const CadaclysmScene *scene)'),
     root_count: f('uint32_t cadaclysm_root_count(const CadaclysmScene *scene)'),
     root: f('uint32_t cadaclysm_root(const CadaclysmScene *scene, uint32_t index)'),
@@ -458,6 +460,7 @@ function _lib() {
     source_name: f('const char *cadaclysm_source_name(const CadaclysmScene *scene)'),
     pick_file: f('const char *cadaclysm_pick_file(const CadaclysmWindow *parent)'),
     pick_save: f('const char *cadaclysm_pick_save(const CadaclysmWindow *parent, const char *suggested_name)'),
+    parse_colour: f('bool cadaclysm_parse_colour(const char *text, _Out_ double *out)'),
     license_set: f('bool cadaclysm_license_set(const char *text_or_path)'),
     license_info: f('const char *cadaclysm_license_info(void)'),
     license_notice_count: f('uint64_t cadaclysm_license_notice_count(void)'),
@@ -495,6 +498,28 @@ function _lib() {
     state_name: f('const char *cadaclysm_state_name(const CadaclysmScene *scene, uint32_t state)'),
     state_value_count: f('uint32_t cadaclysm_state_value_count(const CadaclysmScene *scene, uint32_t state)'),
     state_value: f('uint32_t cadaclysm_state_value(const CadaclysmScene *scene, uint32_t state, uint32_t row, _Out_ uint32_t *joint, _Out_ double *values, uint32_t capacity)'),
+    // Mechanism posing (posing plan 2): a scene posed by explicit values or by a
+    // named state, copied eagerly into a wrapper Pose and freed -- see _copyPose.
+    kinematics_base: f('uint32_t cadaclysm_kinematics_base(const CadaclysmScene *scene)'),
+    pose: f('CadaclysmPose *cadaclysm_pose(const CadaclysmScene *scene, const uint32_t *joints, const uint32_t *counts, const double *values, uint32_t row_count, uint32_t ground)'),
+    pose_state: f('CadaclysmPose *cadaclysm_pose_state(const CadaclysmScene *scene, uint32_t state, uint32_t ground)'),
+    // Motion sequences: the file's INTERPOLATED_CONFIGURATION_SEQUENCEs, and a scene posed at a
+    // parameter of one (copied eagerly into a wrapper Pose like `pose_state`).
+    sequence_count: f('uint32_t cadaclysm_sequence_count(const CadaclysmScene *scene)'),
+    sequence_name: f('const char *cadaclysm_sequence_name(const CadaclysmScene *scene, uint32_t sequence)'),
+    sequence_closed: f('bool cadaclysm_sequence_closed(const CadaclysmScene *scene, uint32_t sequence)'),
+    sequence_seconds_per_unit: f('double cadaclysm_sequence_seconds_per_unit(const CadaclysmScene *scene, uint32_t sequence)'),
+    sequence_segment_count: f('uint32_t cadaclysm_sequence_segment_count(const CadaclysmScene *scene, uint32_t sequence)'),
+    sequence_segment: f('bool cadaclysm_sequence_segment(const CadaclysmScene *scene, uint32_t sequence, uint32_t segment, _Out_ uint32_t *state, _Out_ double *t, _Out_ uint32_t *interpolation)'),
+    pose_sequence: f('CadaclysmPose *cadaclysm_pose_sequence(const CadaclysmScene *scene, uint32_t sequence, double t, uint32_t ground)'),
+    pose_free: f('void cadaclysm_pose_free(CadaclysmPose *pose)'),
+    pose_ground: f('uint32_t cadaclysm_pose_ground(const CadaclysmPose *pose)'),
+    pose_node_count: f('uint32_t cadaclysm_pose_node_count(const CadaclysmPose *pose)'),
+    pose_node_transform: f('void cadaclysm_pose_node_transform(const CadaclysmPose *pose, uint32_t node, _Out_ double *out)'),
+    pose_unsolved_count: f('uint32_t cadaclysm_pose_unsolved_count(const CadaclysmPose *pose)'),
+    pose_unsolved: f('uint32_t cadaclysm_pose_unsolved(const CadaclysmPose *pose, uint32_t index)'),
+    pose_out_of_range_count: f('uint32_t cadaclysm_pose_out_of_range_count(const CadaclysmPose *pose)'),
+    pose_out_of_range: f('bool cadaclysm_pose_out_of_range(const CadaclysmPose *pose, uint32_t index, _Out_ uint32_t *joint, _Out_ uint32_t *freedom, _Out_ double *value)'),
     // The FEM surface mesh: a handle of the caller's own, and its accessors.
     // `cadaclysm_fem_mesh_msh_text` returns a `const char *` **borrowed** from the
     // handle -- a slot replaced by the next ask and gone when the mesh is freed --
@@ -864,7 +889,7 @@ const SVG_TRANSPARENT = 0xFFFFFFFF;
 
 /**
  * The seven camera angles `SvgOptions.view` understands, degrees
- * `[azimuth, elevation]` -- the same table `cadaclysm_viewer.VIEWS` gives
+ * `[azimuth, elevation]` -- the same table `cadaclysm_view.VIEWS` gives
  * Python's `show()` and `svg()` both.
  */
 const SvgView = Object.freeze({
@@ -872,25 +897,34 @@ const SvgView = Object.freeze({
   top: Object.freeze([-90, 90]), bottom: Object.freeze([-90, -90]), iso: Object.freeze([-50, 28]),
 });
 
-/** A colour as the ABI's packed `0xRRGGBB`: `'#rgb'`, `'#rrggbb'` or an `[r, g, b]` triple (0..255). */
+/** [r, g, b] in 0..1 from colour text -- '#rgb', '#rrggbb' or a CSS colour name -- read by the
+ *  library's own parser; null if it refused the text. */
+function _colourText(text) {
+  const out = new Float64Array(3);
+  return _lib().parse_colour(String(text), out) ? Array.from(out) : null;
+}
+
+/** A colour as the ABI's packed `0xRRGGBB`: `'#rgb'`, `'#rrggbb'`, a CSS colour name or an `[r, g, b]` triple (0..255). */
 function _packedColour(colour, what) {
   if (typeof colour === 'string') {
-    let h = colour.trim().replace(/^#/, '');
-    if (h.length === 3) h = [...h].map((c) => c + c).join('');
-    if (/^[0-9a-f]{6}$/i.test(h)) return parseInt(h, 16);
-    throw new CadaclysmError(`${what}: '${colour}' is not '#rgb' or '#rrggbb'`);
-  }
-  if (colour != null && typeof colour[Symbol.iterator] === 'function') {
+    const rgb = _colourText(colour);
+    if (rgb) return (Math.round(rgb[0] * 255) << 16) | (Math.round(rgb[1] * 255) << 8) | Math.round(rgb[2] * 255);
+  } else if (colour != null && typeof colour[Symbol.iterator] === 'function') {
     const [r, g, b] = Array.from(colour, Number);
     if ([r, g, b].every(Number.isFinite)) return ((r & 0xff) << 16) | ((g & 0xff) << 8) | (b & 0xff);
   }
-  throw new CadaclysmError(`${what}: a colour is '#rgb', '#rrggbb' or [r, g, b] in 0..255, not ${JSON.stringify(colour)}`);
+  throw new CadaclysmError(`${what}: a colour is '#rgb', '#rrggbb', a CSS colour name or [r, g, b] in 0..255, not ${JSON.stringify(colour)}`);
 }
 
 /**
  * `SvgOptions`'s own defaults, the same `cadaclysm_svg_options_init` fills:
  * the viewer's `iso`, orthographic, a 1000-square page, a black one-unit
- * stroke on nothing (transparent), edges alone. Every field is optional on
+ * stroke on nothing (transparent), and edges with each body's outline beside
+ * them. `silhouettes` is on by default because a line set alone cannot draw
+ * every body: a sphere's and a torus's only curves are the seams where their
+ * one face meets itself, which are not edges of the body and are never
+ * drawn, so those two came back as a blank page. Pass `silhouettes: false`
+ * for the lines alone. Every field is optional on
  * `Scene.svgText`/`Scene.svg`/`Node.svgText`/`Node.svg` (and their `*Async`
  * twins); a field left out keeps its default here, not `undefined`.
  */
@@ -898,7 +932,7 @@ function svgOptionsDefaults() {
   return {
     view: 'iso', azimuth: null, elevation: null, up: null, fov: 0, width: 1000, height: 1000,
     margin: 0.05, tolerance: 0.1, stroke: '#000000', strokeWidth: 1, background: null,
-    edges: true, curves: false, isocurves: false, polylines: false,
+    edges: true, curves: false, isocurves: false, polylines: false, silhouettes: true,
   };
 }
 
@@ -926,7 +960,10 @@ function _svgOptions(options, defaultUp) {
   raw.stroke_width = o.strokeWidth;
   raw.stroke = _packedColour(o.stroke, 'svg: stroke');
   raw.background = o.background == null ? SVG_TRANSPARENT : _packedColour(o.background, 'svg: background');
-  raw.flags = (o.edges ? 1 : 0) | (o.curves ? 2 : 0) | (o.isocurves ? 4 : 0) | (o.polylines ? 8 : 0);
+  // `silhouettes` (16) is a line set in its own right: on its own it draws an
+  // outline-only page, and only naming nothing at all is refused.
+  raw.flags = (o.edges ? 1 : 0) | (o.curves ? 2 : 0) | (o.isocurves ? 4 : 0) | (o.polylines ? 8 : 0)
+    | (o.silhouettes ? 16 : 0);
   return raw;
 }
 
@@ -973,6 +1010,35 @@ class Brep {
       faces: out[0], edges: out[1], vertices: out[2],
       boundaryEdges: out[3], nonManifoldEdges: out[4], nonManifoldVertices: out[5],
       isManifold: out[6] === 1, isClosed: out[7] === 1,
+    };
+  }
+  /**
+   * This brep with its free edges sewn, and what was sewn: `{ brep, report }`,
+   * the brep a new one (release it) and this one left as it was. Two free
+   * edges become one shared edge where both their ends coincide within
+   * `vertex` -- by default the rounding `manifold` merges vertices at -- and
+   * their curves lie within `tolerance` of each other, by default `vertex`
+   * too, so only edges that are one curve written twice are joined. A larger
+   * `tolerance` also joins two curves between the same two vertices that part
+   * by up to it; `vertex` is what decides which edges are candidates at all,
+   * and raising it is what could close a slot. Nothing moves. `report` is
+   * `{ pairs, freeBefore, freeAfter, refused, worstGap, tolerance, vertex }`:
+   * the edges joined, the free edges before and after, how many groups of free
+   * edges between the same two vertices were left free (too far apart for the
+   * tolerance, or more than two), the widest gap sewed, and the two
+   * tolerances used. Omitted or `undefined` takes the default.
+   */
+  sewed({ tolerance, vertex } = {}) {
+    const counts = new Uint32Array(4);
+    const gaps = new Float64Array(3);
+    const p = _lib().brep_sew(this.pointer, tolerance ?? NaN, vertex ?? NaN, counts, gaps);
+    if (p === null) throw new CadaclysmError(_lastError() || 'sew');
+    return {
+      brep: new Brep(p),
+      report: {
+        pairs: counts[0], freeBefore: counts[1], freeAfter: counts[2], refused: counts[3],
+        worstGap: gaps[0], tolerance: gaps[1], vertex: gaps[2],
+      },
     };
   }
   release() {
@@ -1137,6 +1203,125 @@ function _readState(scene, index) {
   return new State(index, name, rows);
 }
 
+// A `cadaclysm::Interpolation`'s code (cadaclysm_sequence_segment) as the lower-case word.
+const _INTERPOLATIONS = ['undefined', 'discontinuous', 'synchronous', 'linear'];
+
+/** One step of a `Sequence`: the `State` it reaches, its parameter, and how the motion leaves it. */
+class Segment {
+  constructor(state, t, interpolation) { this.state = state; this.t = t; this.interpolation = interpolation; }
+}
+
+/**
+ * A motion the file records: an `INTERPOLATED_CONFIGURATION_SEQUENCE`, its states at
+ * increasing parameter values. From `Scene.sequences()`.
+ *
+ * `pose(t)` poses it at parameter `t`, in the file's own parameter: a segment is a keyframe
+ * of its state, a `'discontinuous'` segment holds until the next and every other kind moves
+ * linearly, an open sequence holds its ends and a `closed` one wraps. `secondsPerUnit` is
+ * null where the file states no time unit (the parameter is then read as seconds).
+ */
+class Sequence {
+  constructor(scene, index) { this._scene = scene; this.index = index; }
+  /** The sequence's name: its representation's (`name #2` and on for further sequences in one representation). */
+  get name() { return _text(_lib().sequence_name(this._scene._handle, this.index)); }
+  /** Whether the motion returns to its first segment (its last is not discontinuous). */
+  get closed() { return Boolean(_lib().sequence_closed(this._scene._handle, this.index)); }
+  /** Seconds per unit of the parameter where the file states a time unit; null where it states none. */
+  get secondsPerUnit() {
+    const value = _lib().sequence_seconds_per_unit(this._scene._handle, this.index);
+    return value === 0 ? null : value;
+  }
+  /** The segments, in file order (at least two). */
+  get segments() {
+    const l = _lib(); const h = this._scene._handle; const out = [];
+    for (let i = 0, n = l.sequence_segment_count(h, this.index); i < n; i++) {
+      const state = new Uint32Array(1); const t = new Float64Array(1); const interpolation = new Uint32Array(1);
+      l.sequence_segment(h, this.index, i, state, t, interpolation);
+      out.push(new Segment(_readState(this._scene, state[0]), t[0], _INTERPOLATIONS[interpolation[0]] ?? 'undefined'));
+    }
+    return out;
+  }
+  /** The first segment's parameter. */
+  get start() { return this.segments[0].t; }
+  /** The last segment's parameter (the closing span not included). */
+  get end() { const segments = this.segments; return segments[segments.length - 1].t; }
+  /** The mechanism posed at parameter `t`, with `ground` held fixed as `Scene.pose` does.
+   *  Throws `CadaclysmError` for a `t` that is not finite. */
+  pose(t, ground = null) {
+    const groundIndex = ground === null ? NONE : ground.index;
+    const ptr = _lib().pose_sequence(this._scene._handle, this.index, Number(t), groundIndex);
+    if (!ptr) throw new CadaclysmError(_lastError());
+    return _copyPose(this._scene, ptr);
+  }
+}
+
+/**
+ * A posed mechanism: `Scene.pose()` or `Scene.poseState()`'s answer. The document
+ * itself is unchanged.
+ *
+ * Copied eagerly out of the C handle at construction time (`_copyPose`), so a `Pose`
+ * holds no C pointer and outlives the call that made it -- closing the scene does not
+ * invalidate it.
+ */
+class Pose {
+  constructor(scene, ground, unsolved, outOfRange, transforms) {
+    this._scene = scene;
+    /** The link held fixed. */
+    this.ground = ground;
+    /** Joints that close a loop and were not honoured, in file order. */
+    this.unsolved = unsolved;
+    /** `[joint, freedom index, value]` for every given value outside its freedom's range. */
+    this.outOfRange = outOfRange;
+    this._transforms = transforms;
+  }
+  /** `node`'s posed transform, as four rows -- the same type `Node.transform` returns. */
+  transform(node) { return _rows(this.rawTransform(node)); }
+  /** The same matrix in the ABI's own column-major order, as 16 doubles, exactly as
+   *  `Node.rawTransform` lays them out. */
+  rawTransform(node) { return this._transforms[node.index]; }
+  /**
+   * Draw this pose's scene as `Scene.show` does -- the scene by handle -- with every node's
+   * posed transform handed to the view (`cadaclysm_view_set_node_transforms`). An unposed
+   * pose (`scene.pose([])`) draws exactly what `Scene.show` does.
+   */
+  show(options = {}) { return require('./cadaclysm_view')._present(this._scene, { ...options, up: options.up ?? this._scene._defaultUp() }, 'show', this._transforms); }
+  /** `Pose.show`'s orbiting twin; returns what `Scene.view` returns. */
+  view(options = {}) { return require('./cadaclysm_view')._present(this._scene, { ...options, up: options.up ?? this._scene._defaultUp() }, 'view', this._transforms); }
+}
+
+/**
+ * Reads everything out of a `CadaclysmPose *` into a `Pose`, then frees it (ruling 2 of
+ * the posing plan: wrappers copy eagerly, never holding the C pointer). Runs in a
+ * `try`/`finally` so an exception midway through copying still frees the handle.
+ */
+function _copyPose(scene, posePtr) {
+  const l = _lib();
+  try {
+    const ground = new Link(scene, l.pose_ground(posePtr));
+    const transforms = [];
+    for (let node = 0, n = l.pose_node_count(posePtr); node < n; node++) {
+      const raw = new Float64Array(16);
+      l.pose_node_transform(posePtr, node, raw);
+      transforms.push(raw);
+    }
+    const unsolved = [];
+    for (let i = 0, n = l.pose_unsolved_count(posePtr); i < n; i++) {
+      const joint = l.pose_unsolved(posePtr, i);
+      if (joint !== NONE) unsolved.push(new Joint(scene, joint));
+    }
+    const outOfRange = [];
+    for (let i = 0, n = l.pose_out_of_range_count(posePtr); i < n; i++) {
+      const joint = new Uint32Array(1); const freedom = new Uint32Array(1); const value = new Float64Array(1);
+      if (l.pose_out_of_range(posePtr, i, joint, freedom, value)) {
+        outOfRange.push([new Joint(scene, joint[0]), freedom[0], value[0]]);
+      }
+    }
+    return new Pose(scene, ground, unsolved, outOfRange, transforms);
+  } finally {
+    l.pose_free(posePtr);
+  }
+}
+
 // ---- nodes ------------------------------------------------------------------
 
 /**
@@ -1147,6 +1332,10 @@ function _readState(scene, index) {
 class Node {
   constructor(scene, index) { this.scene = scene; this.index = index; }
   equals(other) { return other instanceof Node && other.index === this.index && other.scene === this.scene; }
+  /** Draw it with the view library in use: on the wgpu library, in the one shared window (returns at once); elsewhere, a still. Options as `ShowOptions`. */
+  show(options = {}) { return require('./cadaclysm_view')._present(this, { ...options, up: options.up ?? this.scene._defaultUp() }, 'show'); }
+  /** Orbit it until the window is closed; the camera it was left at, and the last pick. */
+  view(options = {}) { return require('./cadaclysm_view')._present(this, { ...options, up: options.up ?? this.scene._defaultUp() }, 'view'); }
   get name() { return _text(_lib().node_name(this.scene._handle, this.index)); }
   get id() { return _text(_lib().node_id(this.scene._handle, this.index)); }
   get kind() { return _text(_lib().node_kind(this.scene._handle, this.index)); }
@@ -1415,12 +1604,20 @@ class Scene {
   close() {
     if (this._pointer === null) return;
     if (this._busy) throw new CadaclysmError(`busy: ${this._busy} in progress`);
+    // Items of a view that show this scene go first: the view reads it in place until they do.
+    // Looked up, never resolved: a cadaclysm.js copied without its view module has nothing to release.
+    const viewModule = require.cache[path.join(__dirname, 'cadaclysm_view.js')];
+    if (viewModule) viewModule.exports._release(this);
     const pointer = this._pointer;
     this._pointer = null;
     if (_finalizer) _finalizer.unregister(this);
     _lib().close(pointer);
   }
   [Symbol.for('nodejs.dispose')]() { this.close(); }
+  /** Draw it with the view library in use: on the wgpu library, in the one shared window (returns at once); elsewhere, a still. Options as `ShowOptions`. */
+  show(options = {}) { return require('./cadaclysm_view')._present(this, { ...options, up: options.up ?? this._defaultUp() }, 'show'); }
+  /** Orbit it until the window is closed; the camera it was left at, and the last pick. */
+  view(options = {}) { return require('./cadaclysm_view')._present(this, { ...options, up: options.up ?? this._defaultUp() }, 'view'); }
   // -- the file --
   get version() { return version(); }
   get schema() { return _text(_lib().schema(this._handle)); }
@@ -1480,6 +1677,53 @@ class Scene {
     const out = [];
     for (let i = 0, n = _lib().state_count(this._handle); i < n; i++) out.push(_readState(this, i));
     return out;
+  }
+  /** The file's motion sequences, in file order. Empty for a file that records none. */
+  sequences() {
+    const out = [];
+    for (let i = 0, n = _lib().sequence_count(this._handle); i < n; i++) out.push(new Sequence(this, i));
+    return out;
+  }
+  /** The link the file declares as the mechanism's base, or null when it declares
+   *  none (the default ground is then the link on the most joints; see `pose`). */
+  get base() {
+    const index = _lib().kinematics_base(this._handle);
+    return index === NONE ? null : new Link(this, index);
+  }
+  /**
+   * The mechanism posed by `values`: an iterable of `[Joint, sequence of numbers]`
+   * rows -- exactly `StateValue`'s shape, so `pose(state.values)` poses like
+   * `poseState(state)` -- with `ground` (a `Link`, or null for the default ground)
+   * held fixed. Values outside a freedom's range are used as given and reported in
+   * the answer's `outOfRange`.
+   *
+   * Throws `CadaclysmError` on a bad row (a joint given twice, one with the wrong
+   * number of values, ...) or a file with no mechanism, carrying
+   * `cadaclysm_last_error`'s text unchanged.
+   */
+  pose(values = [], ground = null) {
+    const rows = Array.from(values, (row) => (row instanceof StateValue ? [row.joint, row.values] : row));
+    const n = rows.length;
+    const joints = new Uint32Array(n);
+    const counts = new Uint32Array(n);
+    const flat = [];
+    rows.forEach(([joint, rowValues], i) => {
+      joints[i] = joint.index;
+      counts[i] = rowValues.length;
+      for (const v of rowValues) flat.push(v);
+    });
+    const groundIndex = ground === null ? NONE : ground.index;
+    const ptr = _lib().pose(this._handle, joints, counts, new Float64Array(flat), n, groundIndex);
+    if (!ptr) throw new CadaclysmError(_lastError());
+    return _copyPose(this, ptr);
+  }
+  /** The mechanism posed by `state`'s values, with `ground` held fixed as `pose` does.
+   *  Throws `CadaclysmError` as `pose` does. */
+  poseState(state, ground = null) {
+    const groundIndex = ground === null ? NONE : ground.index;
+    const ptr = _lib().pose_state(this._handle, state.index, groundIndex);
+    if (!ptr) throw new CadaclysmError(_lastError());
+    return _copyPose(this, ptr);
   }
   // -- nodes --
   get nodeCount() { return _lib().node_count(this._handle); }
@@ -2138,7 +2382,7 @@ module.exports = {
   libraryPath, version, buildDate, license, licenseInfo, licenseNoticeCount, meshFormats, formats, lodLevels,
   svgOptionsDefaults,
   _lib, _text, _lastError, _floats, _uint32s, _doubles, _searchedPaths, _notFoundMessage,
-  Bounds, Bounds64, Attribute, Brep, Placement, Node, Link, Joint, Pair, Freedom, State, StateValue, Scene, open, openMemory, _openRaw, openAsync, openMemoryAsync, declaredSchema, resolveSchema, _options, _rows, _attribute,
+  Bounds, Bounds64, Attribute, Brep, Placement, Node, Link, Joint, Pair, Freedom, State, StateValue, Segment, Sequence, Pose, Scene, open, openMemory, _openRaw, openAsync, openMemoryAsync, declaredSchema, resolveSchema, _options, _rows, _attribute,
   Mesh, Mesh64, Polylines, Beziers, Beziers64, Face, Surfaces, Collision, CollisionHull, Meshlets, pickFile, pickSave,
   FemMesh, FemEdge, FemVertex,
   _meshOf, _mesh64Of, _polylinesOf, _beziersOf, _beziers64Of, _surfacesOf, _svgOptions,

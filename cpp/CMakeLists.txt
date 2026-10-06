@@ -107,6 +107,27 @@ if(CADACLYSM_LIBRARY_DIR)
             "$<TARGET_FILE_DIR:cadaclysm_mechanism_test>")
   add_test(NAME mechanism COMMAND cadaclysm_mechanism_test ${CADACLYSM_LICENSE})
 
+  # Assembly::pair/state/base and pair_freedom_count, at parity with the Python
+  # reference's _paired() and its tests -- see Node's blacksmith.test.js and Rust's mod
+  # tests for the same facts worked out. Needs a license, no sample file.
+  add_executable(cadaclysm_pair_test tests/pair_test.cpp)
+  target_link_libraries(cadaclysm_pair_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_pair_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_pair_test>")
+  add_test(NAME pair COMMAND cadaclysm_pair_test ${CADACLYSM_LICENSE})
+  # to_arcs, offset, section, Tool, Stock and Job over the pocketed block and the plate
+  # fixtures, plus face/contour/pocket/drill driven by hand and a closed job's refusal.
+  # Needs a license, as assembly does; no sample file.
+  add_executable(cadaclysm_blacksmith_cam_test tests/blacksmith_cam_test.cpp)
+  target_link_libraries(cadaclysm_blacksmith_cam_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_blacksmith_cam_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_blacksmith_cam_test>")
+  add_test(NAME blacksmith_cam COMMAND cadaclysm_blacksmith_cam_test ${CADACLYSM_LICENSE})
+
   add_library(cadaclysm_header_reader OBJECT tests/include_reader.cpp)
   target_link_libraries(cadaclysm_header_reader PRIVATE cadaclysm::reader)
 

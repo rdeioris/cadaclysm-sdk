@@ -1,6 +1,8 @@
 //! The kernel: `CadaclysmBlacksmith` (the library's own functions), `CadaclysmFrame`, `CadaclysmProfile`,
 //! `CadaclysmPath`, `CadaclysmSweepPath`, `CadaclysmSolid`, `CadaclysmAssembly`, `CadaclysmEdge`, `CadaclysmHit`,
-//! `CadaclysmSpot`, `CadaclysmWorkplane` and `CadaclysmSolidFemMesh`.
+//! `CadaclysmSpot`, `CadaclysmWorkplane`, `CadaclysmSolidFemMesh` and the CAM surface --
+//! `CadaclysmTool`, `CadaclysmStock`, `CadaclysmJob`, `CadaclysmProgram`, `CadaclysmOperation`,
+//! `CadaclysmReport` and `CadaclysmReportItem`.
 //!
 //! The kernel works in doubles, in the model's own units (millimetres, as a rule), so
 //! every point it takes is a `Variant`: a `Vector2`/`Vector3` (or the `i` kinds), or an
@@ -122,6 +124,96 @@ fn number_list(v: &Variant, what: &str) -> Option<Vec<f64>> {
     }
 }
 
+/// One entry of `CadaclysmAssembly.pair`'s `ranges`: `[lower, upper]`, each side `null`
+/// for unbounded (`PairOptions`'s own per-side `None`) or a number for a bound.
+fn range_item(v: &Variant, what: &str) -> Option<(Option<f64>, Option<f64>)> {
+    let Ok(pair) = v.try_to::<AnyArray>() else {
+        return fail(format!("{what}: expected [lower, upper], not {v}"));
+    };
+    if pair.len() != 2 {
+        return fail(format!("{what}: expected [lower, upper], got {} items", pair.len()));
+    }
+    let side = |side: Variant, which: &str| -> Option<Option<f64>> {
+        if side.is_nil() {
+            Some(None)
+        } else {
+            match number(&side) {
+                Some(n) => Some(Some(n)),
+                None => fail(format!("{what}: {which} must be a number or null, not {side}")),
+            }
+        }
+    };
+    let lower = side(pair.at(0), "lower")?;
+    let upper = side(pair.at(1), "upper")?;
+    Some((lower, upper))
+}
+
+/// `CadaclysmAssembly.pair`'s `ranges`: an array of `[lower, upper]` pairs. Empty reads
+/// as `PairOptions::ranges` `None` ("no ranges given") -- this is Godot's own idiom, not
+/// the C ABI's: the C ABI distinguishes "no ranges" (all four pointers null) from "zero
+/// ranges given" (non-null pointers, count 0), and a `kind` with freedoms refuses the
+/// latter. Godot has no null-vs-empty-array distinction worth a separate `Variant` here
+/// (unlike `end_frame`), so an empty GDScript array always means "no ranges" by this
+/// wrapper's own choice (controller ruling), not a pass-through of the kernel's distinction.
+fn ranges_arg(v: &AnyArray, what: &str) -> Option<Option<Vec<(Option<f64>, Option<f64>)>>> {
+    if v.len() == 0 {
+        return Some(None);
+    }
+    let mut out = Vec::with_capacity(v.len());
+    for (i, item) in v.iter_shared().enumerate() {
+        out.push(range_item(&item, &format!("{what}[{i}]"))?);
+    }
+    Some(Some(out))
+}
+
+/// One row of `CadaclysmAssembly.state`'s `rows`: `[joint, values]`, `joint` a `String`
+/// and `values` a `PackedFloat64Array` (or any array of numbers).
+fn state_row(v: &Variant, what: &str) -> Option<(String, Vec<f64>)> {
+    let Ok(row) = v.try_to::<AnyArray>() else {
+        return fail(format!("{what}: expected [joint, values], not {v}"));
+    };
+    if row.len() != 2 {
+        return fail(format!("{what}: expected [joint, values], got {} items", row.len()));
+    }
+    let joint = row.at(0).to_string();
+    let values = number_list(&row.at(1), &format!("{what}.values"))?;
+    Some((joint, values))
+}
+
+/// `CadaclysmAssembly.state`'s `rows`: an array of `[joint, values]` rows, in the
+/// caller's order -- Godot's spelling of the SDK's `&[(&str, &[f64])]`.
+fn state_rows_arg(v: &AnyArray, what: &str) -> Option<Vec<(String, Vec<f64>)>> {
+    let mut out = Vec::with_capacity(v.len());
+    for (i, item) in v.iter_shared().enumerate() {
+        out.push(state_row(&item, &format!("{what}[{i}]"))?);
+    }
+    Some(out)
+}
+
+/// `[[state, t, interpolation], ...]` as `Assembly::sequence` takes it.
+fn sequence_rows_arg(v: &AnyArray, what: &str) -> Option<Vec<(String, f64, String)>> {
+    let mut out = Vec::with_capacity(v.len());
+    for (i, item) in v.iter_shared().enumerate() {
+        let what = format!("{what}[{i}]");
+        let Ok(row) = item.try_to::<AnyArray>() else { return fail(format!("{what}: expected [state, t, interpolation]")) };
+        if row.len() != 3 {
+            return fail(format!("{what}: expected [state, t, interpolation]"));
+        }
+        let Ok(state) = row.at(0).try_to::<GString>() else { return fail(format!("{what}: state must be a String")) };
+        let Ok(t) = row.at(1).try_to::<f64>() else { return fail(format!("{what}: t must be a number")) };
+        let Ok(word) = row.at(2).try_to::<GString>() else { return fail(format!("{what}: interpolation must be a String")) };
+        out.push((state.to_string(), t, word.to_string()));
+    }
+    Some(out)
+}
+
+/// A Grbl tool number from GDScript's `int`: a negative one clamped to 0, as every other
+/// wrapper does, so the library refuses it in its own words ("tool: number must be at least
+/// 1") rather than this one in a message of its own.
+fn tool_number(number: i64) -> u32 {
+    u32::try_from(number).unwrap_or(if number < 0 { 0 } else { u32::MAX })
+}
+
 /// A count or an index from GDScript's `int`, refused where negative.
 fn index(i: i64, what: &str) -> Option<u32> {
     match u32::try_from(i) {
@@ -187,14 +279,31 @@ fn frame(v: &Variant, what: &str) -> Option<bs::Frame> {
 }
 
 /// A `Transform3D` as a frame: its basis must be square, right-handed and unscaled
-/// (a frame's axes are unit, so a scale would be dropped without a word).
+/// (a frame's axes are unit, so a scale would be dropped without a word) -- each to
+/// 1e-5, a float's own slack. Within that the basis is squared up in doubles
+/// (Gram-Schmidt: x normalised, y made square to x and normalised, z = x × y), so a
+/// float32 transform gives an exactly rigid frame.
 fn frame_of_transform(t: Transform3D) -> Result<bs::Frame, String> {
+    const SLACK: f64 = 1e-5;
     let d = |v: Vector3| [f64::from(v.x), f64::from(v.y), f64::from(v.z)];
-    let axes = [t.basis.col_a(), t.basis.col_b(), t.basis.col_c()];
-    if axes.iter().any(|a| (f64::from(a.length()) - 1.0).abs() > 1e-5) {
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let cross = |a: [f64; 3], b: [f64; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    let scaled = |a: [f64; 3], s: f64| [a[0] * s, a[1] * s, a[2] * s];
+    let [x, y, z] = [t.basis.col_a(), t.basis.col_b(), t.basis.col_c()].map(d);
+    if [x, y, z].iter().any(|&a| (dot(a, a).sqrt() - 1.0).abs() > SLACK) {
         return Err("frame: the transform scales, which a frame cannot follow".to_string());
     }
-    bs::Frame::new(d(t.origin), d(axes[0]), d(axes[1]), d(axes[2])).map_err(|e| e.to_string())
+    if dot(x, y).abs().max(dot(y, z).abs()).max(dot(z, x).abs()) > SLACK {
+        return Err("frame: the transform shears, which a frame cannot follow".to_string());
+    }
+    if dot(cross(x, y), z) <= 0.0 {
+        // Mirrored: the frame's own refusal says so.
+        return bs::Frame::new(d(t.origin), x, y, z).map_err(|e| e.to_string());
+    }
+    let x = scaled(x, 1.0 / dot(x, x).sqrt());
+    let y0 = [y[0] - x[0] * dot(x, y), y[1] - x[1] * dot(x, y), y[2] - x[2] * dot(x, y)];
+    let y = scaled(y0, 1.0 / dot(y0, y0).sqrt());
+    bs::Frame::new(d(t.origin), x, y, cross(x, y)).map_err(|e| e.to_string())
 }
 
 /// A slant: a number (a flat plane at that height), or `{at, grad}` with `grad` two
@@ -269,7 +378,7 @@ fn schema_arg(text: &GString) -> Option<String> {
     }
 }
 
-/// A colour: a `Color`, `"#rgb"`/`"#rrggbb"`, or three numbers in 0..1.
+/// A colour: a `Color`, `"#rgb"`/`"#rrggbb"`/a CSS colour name, or three numbers in 0..1.
 fn colour_arg(v: &Variant) -> Option<[f64; 3]> {
     match v.get_type() {
         VariantType::COLOR => {
@@ -470,8 +579,17 @@ impl CadaclysmBlacksmith {
         bs::FILLET_TOLERANCE
     }
 
-    /// `"#rgb"` or `"#rrggbb"` (the `#` optional) as a `Color`; black, with the error
-    /// recorded, for anything else.
+    /// How many freedoms a pair kind has, so a caller can size
+    /// `CadaclysmAssembly.pair`'s `ranges`: one entry per freedom of `kind`. 0 for an
+    /// unknown name, for `"fully_constrained"` (which has none), and if the kernel
+    /// library cannot be loaded.
+    #[func]
+    fn pair_freedom_count(kind: GString) -> i64 {
+        bs::pair_freedom_count(&kind.to_string()).into()
+    }
+
+    /// `"#rgb"`, `"#rrggbb"` (the `#` optional) or a CSS colour name as a `Color`; black,
+    /// with the error recorded, for anything else.
     #[func]
     fn rgb(hex: GString) -> Color {
         let rgb = ok(bs::rgb(&hex.to_string()));
@@ -939,7 +1057,7 @@ impl CadaclysmProfile {
         Self::made(self.profile.translate(dx, dy))
     }
 
-    /// This outline coloured `colour` (a `Color`, `"#rrggbb"`, or three numbers in 0..1): how
+    /// This outline coloured `colour` (a `Color`, `"#rrggbb"`, a CSS colour name, or three numbers in 0..1): how
     /// it is drawn. The verbs that make a profile from one carry it; a solid made from it
     /// takes nothing.
     #[func]
@@ -1020,6 +1138,27 @@ impl CadaclysmProfile {
     ) -> Option<Gd<CadaclysmProfile>> {
         let picked = if corners.is_empty() { None } else { Some(packed_indices(&corners, "round: corner")?) };
         Self::made(self.profile.round(radius, picked.as_deref(), open))
+    }
+
+    /// This profile with every free-form side (a Bezier, a conic, a NURBS) replaced by
+    /// lines and arcs within `tolerance` of it -- what a G-code writer can say. Lines and
+    /// arcs pass through as they are, every loop closes on itself exactly, holes are
+    /// converted the same way. Fails for a `tolerance` not positive and finite, or a
+    /// spline that does not evaluate.
+    #[func]
+    fn to_arcs(&self, #[opt(default = 0.01)] tolerance: f64) -> Option<Gd<CadaclysmProfile>> {
+        Self::made(self.profile.to_arcs(tolerance))
+    }
+
+    /// This profile grown by `distance` (shrunk where it is negative), as zero or more
+    /// profiles, all lines and arcs: outward corners rounded by `|distance|`, holes moving
+    /// against the boundary (a hole shrinks as the profile grows). Free-form sides are
+    /// fitted to `tolerance` first (`to_arcs`). A shrink that eats the whole profile is an
+    /// empty array. Fails for a `distance` not finite, a `tolerance` not positive and
+    /// finite, a loop with no sides, or loops that cross or touch.
+    #[func]
+    fn offset(&self, distance: f64, #[opt(default = 0.01)] tolerance: f64) -> Array<Gd<CadaclysmProfile>> {
+        ok(self.profile.offset(distance, tolerance)).unwrap_or_default().into_iter().map(Self::wrap).collect()
     }
 
     /// This profile's own loops as SVG text, from directly above by default -- a
@@ -1852,6 +1991,423 @@ impl CadaclysmOverlap {
     }
 }
 
+// ---- CadaclysmBox, CadaclysmColliderStats, CadaclysmCollisionHit, CadaclysmCollider ------
+
+/// An axis-aligned box: `lo` and `hi`, three numbers each (`Vector3`). The broad phase's
+/// own shape (`CadaclysmSolid.bounds_box`, `CadaclysmCollider`'s own boxes): cheap to move
+/// and to test against another, before anything is meshed.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmBox {
+    aabb: bs::Aabb,
+    #[var(get = get_lo, no_set)]
+    lo: PhantomVar<Vector3>,
+    #[var(get = get_hi, no_set)]
+    hi: PhantomVar<Vector3>,
+}
+
+impl CadaclysmBox {
+    pub(crate) fn wrap(aabb: bs::Aabb) -> Gd<CadaclysmBox> {
+        Gd::from_object(CadaclysmBox { aabb, lo: PhantomVar::default(), hi: PhantomVar::default() })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmBox {
+    fn to_string(&self) -> GString {
+        gs(format!("Box(lo={:?}, hi={:?})", self.aabb.lo, self.aabb.hi))
+    }
+}
+
+#[godot_api]
+impl CadaclysmBox {
+    /// A box from its low and high corners.
+    #[func]
+    fn create(lo: Vector3, hi: Vector3) -> Gd<CadaclysmBox> {
+        CadaclysmBox::wrap(bs::Aabb::new([f64::from(lo.x), f64::from(lo.y), f64::from(lo.z)],
+            [f64::from(hi.x), f64::from(hi.y), f64::from(hi.z)]))
+    }
+
+    #[func]
+    fn get_lo(&self) -> Vector3 {
+        vector3(self.aabb.lo)
+    }
+
+    #[func]
+    fn get_hi(&self) -> Vector3 {
+        vector3(self.aabb.hi)
+    }
+
+    /// This box moved by `frame` (a `CadaclysmFrame`, a `Transform3D`, twelve numbers or
+    /// four triples), boxed again on the world axes -- not this box's corners
+    /// individually moved, which would not in general be a box at all: the *bounding*
+    /// box of the moved corners.
+    #[func]
+    fn moved(&self, frame_arg: Variant) -> Option<Gd<CadaclysmBox>> {
+        let f = frame(&frame_arg, "Box.moved: frame")?;
+        ok(self.aabb.moved(&f)).map(CadaclysmBox::wrap)
+    }
+
+    /// Whether this box and `other` share a point (touching counts).
+    #[func]
+    fn overlaps(&self, other: Gd<CadaclysmBox>) -> bool {
+        ok(self.aabb.overlaps(&other.bind().aabb)).unwrap_or(false)
+    }
+
+    /// True only if box `a` at `frame_a` and box `b` at `frame_b` cannot touch -- a
+    /// separating axis among the boxes' face normals and edge-direction crosses;
+    /// touching is not apart. Sharper than moving each box and asking `overlaps`, which
+    /// boxes the *result* on the world axes again and so can call two oriented boxes
+    /// overlapping when they are not (two unit boxes, the second turned 45 degrees
+    /// about z and moved 2.3 along x: their world boxes overlap, but the boxes
+    /// themselves do not touch).
+    #[func]
+    fn boxes_apart(a: Gd<CadaclysmBox>, frame_a: Variant, b: Gd<CadaclysmBox>, frame_b: Variant) -> bool {
+        let Some(fa) = frame(&frame_a, "boxes_apart: frame_a") else { return false };
+        let Some(fb) = frame(&frame_b, "boxes_apart: frame_b") else { return false };
+        ok(bs::boxes_apart(&a.bind().aabb, &fa, &b.bind().aabb, &fb)).unwrap_or(false)
+    }
+}
+
+/// Counts of one `CadaclysmCollider.check` call: the candidate pairs `considered`, how
+/// many of them the world boxes and the oriented boxes cleared, how many the share left
+/// to another call, how the rest were answered (`cached`, `closed_form`, `meshed`), and
+/// how many were `refused`. `confirmed` is the subset of `meshed` that were thin
+/// mesh-path overlaps sent to `CadaclysmSolid.common` itself for a final answer.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmColliderStats {
+    stats: bs::ColliderStats,
+    #[var(get = get_considered, no_set)]
+    considered: PhantomVar<i64>,
+    #[var(get = get_world_boxes, no_set)]
+    world_boxes: PhantomVar<i64>,
+    #[var(get = get_oriented_boxes, no_set)]
+    oriented_boxes: PhantomVar<i64>,
+    #[var(get = get_skipped_share, no_set)]
+    skipped_share: PhantomVar<i64>,
+    #[var(get = get_cached, no_set)]
+    cached: PhantomVar<i64>,
+    #[var(get = get_closed_form, no_set)]
+    closed_form: PhantomVar<i64>,
+    #[var(get = get_meshed, no_set)]
+    meshed: PhantomVar<i64>,
+    #[var(get = get_refused, no_set)]
+    refused: PhantomVar<i64>,
+    #[var(get = get_confirmed, no_set)]
+    confirmed: PhantomVar<i64>,
+}
+
+impl CadaclysmColliderStats {
+    fn wrap(stats: bs::ColliderStats) -> Gd<CadaclysmColliderStats> {
+        Gd::from_object(CadaclysmColliderStats {
+            stats,
+            considered: PhantomVar::default(),
+            world_boxes: PhantomVar::default(),
+            oriented_boxes: PhantomVar::default(),
+            skipped_share: PhantomVar::default(),
+            cached: PhantomVar::default(),
+            closed_form: PhantomVar::default(),
+            meshed: PhantomVar::default(),
+            refused: PhantomVar::default(),
+            confirmed: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmColliderStats {
+    fn to_string(&self) -> GString {
+        let s = &self.stats;
+        gs(format!(
+            "ColliderStats(considered={}, world_boxes={}, oriented_boxes={}, skipped_share={}, cached={}, \
+             closed_form={}, meshed={}, refused={}, confirmed={})",
+            s.considered, s.world_boxes, s.oriented_boxes, s.skipped_share, s.cached, s.closed_form, s.meshed,
+            s.refused, s.confirmed
+        ))
+    }
+}
+
+#[godot_api]
+impl CadaclysmColliderStats {
+    #[func]
+    fn get_considered(&self) -> i64 {
+        self.stats.considered.into()
+    }
+    #[func]
+    fn get_world_boxes(&self) -> i64 {
+        self.stats.world_boxes.into()
+    }
+    #[func]
+    fn get_oriented_boxes(&self) -> i64 {
+        self.stats.oriented_boxes.into()
+    }
+    #[func]
+    fn get_skipped_share(&self) -> i64 {
+        self.stats.skipped_share.into()
+    }
+    #[func]
+    fn get_cached(&self) -> i64 {
+        self.stats.cached.into()
+    }
+    #[func]
+    fn get_closed_form(&self) -> i64 {
+        self.stats.closed_form.into()
+    }
+    #[func]
+    fn get_meshed(&self) -> i64 {
+        self.stats.meshed.into()
+    }
+    #[func]
+    fn get_refused(&self) -> i64 {
+        self.stats.refused.into()
+    }
+    #[func]
+    fn get_confirmed(&self) -> i64 {
+        self.stats.confirmed.into()
+    }
+}
+
+/// One pair `CadaclysmCollider.check` found overlapping (`overlap` true), or could not
+/// decide (`overlap` false; `text` says why, empty for an overlap). `positions`/
+/// `normals` are world xyz triples, three per triangle (unwelded); `indices` indexes
+/// them -- all empty for a refused pair. `depth` is the thinnest side of the overlap's
+/// world box, 0 for a refused pair.
+///
+/// `solid()` rebuilds the exact overlap now, from the frames `CadaclysmCollider.check`
+/// found it at; this keeps the collisions handle behind every hit of one `check` call
+/// alive until the last of them is released, freeing it only then. Named
+/// `CadaclysmCollisionHit` rather than the plainer `CadaclysmHit`, which this module
+/// already uses for a curve-crossing result (`CadaclysmSolid.hits`).
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmCollisionHit {
+    hit: bs::CollisionHit,
+    #[var(get = get_a, no_set)]
+    a: PhantomVar<i64>,
+    #[var(get = get_b, no_set)]
+    b: PhantomVar<i64>,
+    #[var(get = get_overlap, no_set)]
+    overlap: PhantomVar<bool>,
+    #[var(get = get_kind, no_set)]
+    kind: PhantomVar<GString>,
+    #[var(get = get_depth, no_set)]
+    depth: PhantomVar<f64>,
+    #[var(get = get_text, no_set)]
+    text: PhantomVar<GString>,
+    #[var(get = get_positions, no_set)]
+    positions: PhantomVar<PackedVector3Array>,
+    #[var(get = get_normals, no_set)]
+    normals: PhantomVar<PackedVector3Array>,
+    #[var(get = get_indices, no_set)]
+    indices: PhantomVar<PackedInt32Array>,
+}
+
+impl CadaclysmCollisionHit {
+    fn wrap(hit: bs::CollisionHit) -> Gd<CadaclysmCollisionHit> {
+        Gd::from_object(CadaclysmCollisionHit {
+            hit,
+            a: PhantomVar::default(),
+            b: PhantomVar::default(),
+            overlap: PhantomVar::default(),
+            kind: PhantomVar::default(),
+            depth: PhantomVar::default(),
+            text: PhantomVar::default(),
+            positions: PhantomVar::default(),
+            normals: PhantomVar::default(),
+            indices: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmCollisionHit {
+    fn to_string(&self) -> GString {
+        gs(format!("CollisionHit(a={}, b={}, overlap={}, depth={})", self.hit.a, self.hit.b, self.hit.overlap, self.hit.depth))
+    }
+}
+
+#[godot_api]
+impl CadaclysmCollisionHit {
+    #[func]
+    fn get_a(&self) -> i64 {
+        self.hit.a.into()
+    }
+    #[func]
+    fn get_b(&self) -> i64 {
+        self.hit.b.into()
+    }
+    #[func]
+    fn get_overlap(&self) -> bool {
+        self.hit.overlap
+    }
+    #[func]
+    fn get_kind(&self) -> GString {
+        gs(&self.hit.kind)
+    }
+    #[func]
+    fn get_depth(&self) -> f64 {
+        self.hit.depth
+    }
+    #[func]
+    fn get_text(&self) -> GString {
+        gs(&self.hit.text)
+    }
+    #[func]
+    fn get_positions(&self) -> PackedVector3Array {
+        self.hit.positions.iter().map(|&p| vector3(p)).collect()
+    }
+    #[func]
+    fn get_normals(&self) -> PackedVector3Array {
+        self.hit.normals.iter().map(|&p| vector3(p)).collect()
+    }
+    #[func]
+    fn get_indices(&self) -> PackedInt32Array {
+        self.hit.indices.iter().map(|&i| i as i32).collect()
+    }
+
+    /// The exact overlap of this pair at the frames `CadaclysmCollider.check` found it
+    /// at, as a new solid. `null` for a refused pair (`overlap` false) or a collisions
+    /// handle already closed some other way.
+    #[func]
+    fn solid(&self) -> Option<Gd<CadaclysmSolid>> {
+        ok(self.hit.solid()).map(CadaclysmSolid::wrap)
+    }
+}
+
+/// Parts meshed once, asked pose after pose which of them interfere: `solids` at rest,
+/// meshed at `tolerance`; `groups` one group index per solid (empty: each solid its own
+/// group -- `check` then takes one frame per solid), `allowed` pairs of part indices
+/// never tested (designed contacts, by part index, flat: `[a0, b0, a1, b1, ...]`).
+/// `close()` frees this handle; so does the garbage collector.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmCollider {
+    collider: Option<bs::Collider>,
+    #[var(get = get_group_count, no_set)]
+    group_count: PhantomVar<i64>,
+    #[var(get = get_closed, no_set)]
+    closed: PhantomVar<bool>,
+}
+
+impl CadaclysmCollider {
+    fn wrap(collider: bs::Collider) -> Gd<CadaclysmCollider> {
+        Gd::from_object(CadaclysmCollider { collider: Some(collider), group_count: PhantomVar::default(), closed: PhantomVar::default() })
+    }
+
+    fn held(&self) -> Option<&bs::Collider> {
+        match &self.collider {
+            Some(collider) => Some(collider),
+            None => fail("the collider is closed"),
+        }
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmCollider {
+    fn to_string(&self) -> GString {
+        gs("Collider")
+    }
+}
+
+#[godot_api]
+impl CadaclysmCollider {
+    /// `solids` at rest, meshed at `tolerance`; `groups` one group index per solid
+    /// (empty: each solid its own group), `allowed` part-index pairs never tested,
+    /// flat: `[a0, b0, a1, b1, ...]`. `null` (reason in `Cadaclysm.last_error()`) for
+    /// a negative group or part index, an odd-length `allowed`, or the kernel's refusal.
+    #[func]
+    fn create(
+        solids: Array<Gd<CadaclysmSolid>>,
+        #[opt(default = 0.05)] tolerance: f64,
+        #[opt(default = &PackedInt32Array::new())] groups: PackedInt32Array,
+        #[opt(default = &PackedInt32Array::new())] allowed: PackedInt32Array,
+    ) -> Option<Gd<CadaclysmCollider>> {
+        let owners: Vec<Gd<CadaclysmSolid>> = solids.iter_shared().collect();
+        let guards: Vec<GdRef<CadaclysmSolid>> = owners.iter().map(Gd::bind).collect();
+        let mut refs: Vec<&bs::Solid> = Vec::with_capacity(guards.len());
+        for g in &guards {
+            refs.push(g.held()?);
+        }
+        let Ok(groups_vec) = groups.as_slice().iter().map(|&g| u32::try_from(g)).collect::<Result<Vec<u32>, _>>() else {
+            return fail("create: a group index is negative");
+        };
+        if allowed.len() % 2 != 0 {
+            return fail(format!("create: allowed is {} numbers, not pairs", allowed.len()));
+        }
+        let Ok(allowed_vec) = allowed
+            .as_slice()
+            .chunks_exact(2)
+            .map(|c| Ok::<_, std::num::TryFromIntError>((u32::try_from(c[0])?, u32::try_from(c[1])?)))
+            .collect::<Result<Vec<(u32, u32)>, _>>()
+        else {
+            return fail("create: an allowed part index is negative");
+        };
+        ok(bs::Collider::new(&refs, tolerance, (!groups_vec.is_empty()).then_some(&groups_vec[..]), &allowed_vec))
+            .map(CadaclysmCollider::wrap)
+    }
+
+    /// Free the collider now. Idempotent; a `CadaclysmCollisionHit`'s own `solid()`
+    /// still works afterwards -- it keeps the collisions handle, not this one.
+    #[func]
+    fn close(&mut self) {
+        self.collider = None;
+    }
+
+    #[func]
+    fn get_closed(&self) -> bool {
+        self.collider.is_none()
+    }
+
+    /// How many groups this collider has -- the highest group index past `create`,
+    /// plus one.
+    #[func]
+    fn get_group_count(&self) -> i64 {
+        self.held().map_or(0, |c| i64::from(c.group_count()))
+    }
+
+    /// Counts of the last `check` call (all zero before the first one).
+    #[func]
+    fn stats(&self) -> Option<Gd<CadaclysmColliderStats>> {
+        self.held().and_then(|c| ok(c.stats())).map(CadaclysmColliderStats::wrap)
+    }
+
+    /// The pairs that interfere, or could not be decided, with each group placed at its
+    /// matching frame in `frames` (an array of frames -- `CadaclysmFrame`, `Transform3D`,
+    /// twelve numbers or four triples -- one per group, in group order). `share_n` 0:
+    /// every pair past the box filters is decided now; otherwise only those whose index
+    /// is `share_k` modulo `share_n` (the shares of one pose are disjoint and cover it --
+    /// split one `check` across `share_n` workers).
+    ///
+    /// Returns an `Array` of `CadaclysmCollisionHit` -- empty only when every pair is
+    /// proved clear -- or `null` when the check is refused, with the reason in
+    /// `Cadaclysm.last_error()`: a closed collider, a frame that is not a frame (or
+    /// scales, shears or mirrors), a frame count other than `group_count`, or a share
+    /// out of range (`share_n` negative, or `share_k` not in `0 <= share_k < share_n`).
+    /// Test for `null` before reading the hits: a refusal is never "clear".
+    #[func]
+    fn check(&self, frames: VarArray, #[opt(default = 0)] share_k: i64, #[opt(default = 0)] share_n: i64) -> Variant {
+        let Some(collider) = self.held() else { return Variant::nil() };
+        let mut fs = Vec::with_capacity(frames.len());
+        for (i, item) in frames.iter_shared().enumerate() {
+            let Some(f) = frame(&item, &format!("check: frame {i}")) else { return Variant::nil() };
+            fs.push(f);
+        }
+        let share = match (u32::try_from(share_k), u32::try_from(share_n)) {
+            (_, Ok(0)) => None,
+            (Ok(k), Ok(n)) if k < n => Some((k, n)),
+            _ => {
+                fail::<()>(format!("check: share ({share_k}, {share_n}) is not 0 <= k < n"));
+                return Variant::nil();
+            }
+        };
+        match ok(collider.check(&fs, share)) {
+            Some(hits) => hits.into_iter().map(CadaclysmCollisionHit::wrap).collect::<Array<Gd<CadaclysmCollisionHit>>>().to_variant(),
+            None => Variant::nil(),
+        }
+    }
+}
+
 // ---- CadaclysmSpot and CadaclysmHit ------------------------------------------------------
 
 /// Where a `CadaclysmHit` lands on one side: a profile's `loop_index` (0 the boundary or
@@ -2667,7 +3223,7 @@ impl CadaclysmSolid {
 
     // -- colour
 
-    /// This solid coloured `colour` (a `Color`, `"#rrggbb"`, or three numbers in 0..1),
+    /// This solid coloured `colour` (a `Color`, `"#rrggbb"`, a CSS colour name, or three numbers in 0..1),
     /// or with `face` just that face, whose colour then wins over the solid's. What is
     /// made from a coloured solid inherits its colours.
     #[func]
@@ -2830,6 +3386,13 @@ impl CadaclysmSolid {
         bounds.map(|(lo, hi)| PackedFloat64Array::from(&[lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]][..])).unwrap_or_default()
     }
 
+    /// This solid's box at `tolerance`: its boolean mesh, padded by twice that -- the
+    /// broad phase's own shape, cheaper to move and test than the solid itself.
+    #[func]
+    fn bounds_box(&self, #[opt(default = 0.05)] tolerance: f64) -> Option<Gd<CadaclysmBox>> {
+        self.held().and_then(|s| ok(s.bounds_box(tolerance))).map(CadaclysmBox::wrap)
+    }
+
     /// How many edges of the mesh at `tolerance` are bound by anything other than
     /// exactly two triangles -- zero for a closed solid; -1 on failure.
     #[func]
@@ -2856,6 +3419,40 @@ impl CadaclysmSolid {
     #[func]
     fn get_manifold(&self) -> VarDictionary {
         self.held().and_then(|s| ok(s.manifold())).map(reader::manifold).unwrap_or_default()
+    }
+
+    /// What it measures, per unit density, each figure beside a bound on its own error, as a
+    /// Dictionary: `closed`, `inverted`, `accuracy_met` and `from_mesh` (bools), `area`,
+    /// `area_error`, `volume`, `volume_error`, `centroid_error` and `inertia_error` (floats),
+    /// `centroid` and `principal_moments` (three floats each) and `inertia` and `principal_axes`
+    /// (nine each, row-major). `accuracy` is relative; 0 asks for the library's default.
+    ///
+    /// A body's weight is `density * volume` and its inertia scales the same way -- nothing here
+    /// assumes a density. The volume-side figures mean something only where `closed`.
+    #[func]
+    fn mass(&self, #[opt(default = 0.0)] accuracy: f64) -> VarDictionary {
+        let Some(m) = self.held().and_then(|s| ok(s.mass(accuracy))) else {
+            return VarDictionary::default();
+        };
+        let flat = |rows: [[f64; 3]; 3]| {
+            PackedFloat64Array::from(rows.concat().as_slice())
+        };
+        dict(&[
+            ("closed", m.closed.to_variant()),
+            ("inverted", m.inverted.to_variant()),
+            ("accuracy_met", m.accuracy_met.to_variant()),
+            ("from_mesh", m.from_mesh.to_variant()),
+            ("area", m.area.to_variant()),
+            ("area_error", m.area_error.to_variant()),
+            ("volume", m.volume.to_variant()),
+            ("volume_error", m.volume_error.to_variant()),
+            ("centroid", PackedFloat64Array::from(m.centroid.as_slice()).to_variant()),
+            ("centroid_error", m.centroid_error.to_variant()),
+            ("inertia", flat(m.inertia).to_variant()),
+            ("inertia_error", m.inertia_error.to_variant()),
+            ("principal_moments", PackedFloat64Array::from(m.principal_moments.as_slice()).to_variant()),
+            ("principal_axes", flat(m.principal_axes).to_variant()),
+        ])
     }
 
     /// Its edges, whose indices `fillet` and `chamfer` take.
@@ -3049,6 +3646,19 @@ impl CadaclysmSolid {
         let schema = schema_arg(&schema);
         ok(self.held()?.to_scene(schema.as_deref())).map(CadaclysmScene::wrap)
     }
+
+    // -- machining
+
+    /// This solid cut by the plane `Z = z`: its closed outlines there, in XY, nested into
+    /// profiles with holes (boundaries counter-clockwise, holes clockwise), a line or a
+    /// circle crossing kept exact and any other curve as lines within `tolerance`. A plane
+    /// that misses the solid is an empty array. Fails for a `z` not finite, a `tolerance`
+    /// not positive and finite, a face lying in the plane (section a little above or below
+    /// it), or a crossing that does not close.
+    #[func]
+    fn section(&self, z: f64, #[opt(default = 0.05)] tolerance: f64) -> Array<Gd<CadaclysmProfile>> {
+        self.held().and_then(|s| ok(s.section(z, tolerance))).unwrap_or_default().into_iter().map(CadaclysmProfile::wrap).collect()
+    }
 }
 
 // ---- CadaclysmAssembly --------------------------------------------------------------------
@@ -3117,6 +3727,30 @@ impl CadaclysmAssembly {
     fn jointed(&self, name: &str, start: &str, end: &str) -> Option<()> {
         ok(self.held()?.joint(name, start, end))
     }
+
+    /// Gives `joint` its pair, through the SDK's own `Assembly::pair` -- see the
+    /// `#[func]` doc comment for the rules it enforces.
+    fn paired(&self, joint: &str, kind: &str, frame: &bs::Frame, options: &bs::PairOptions) -> Option<()> {
+        ok(self.held()?.pair(joint, kind, frame, options))
+    }
+
+    /// Adds a named state, through the SDK's own `Assembly::state` -- see the `#[func]`
+    /// doc comment for the rules it enforces.
+    fn stated(&self, name: &str, rows: &[(&str, &[f64])]) -> Option<()> {
+        ok(self.held()?.state(name, rows))
+    }
+
+    /// Adds a named motion sequence, through the SDK's own `Assembly::sequence` -- see
+    /// the `#[func]` doc comment for the rules it enforces.
+    fn sequenced(&self, name: &str, segments: &[(&str, f64, &str)], seconds: bool) -> Option<()> {
+        ok(self.held()?.sequence(name, segments, seconds))
+    }
+
+    /// Declares this assembly's base link, through the SDK's own `Assembly::base` --
+    /// see the `#[func]` doc comment for the rules it enforces.
+    fn based(&self, link: &str) -> Option<()> {
+        ok(self.held()?.base(link))
+    }
 }
 
 #[godot_api]
@@ -3173,6 +3807,71 @@ impl CadaclysmAssembly {
     #[func]
     fn joint(&self, name: GString, start: GString, end: GString) -> bool {
         self.jointed(&name.to_string(), &start.to_string(), &end.to_string()).is_some()
+    }
+
+    /// Gives `joint` its pair: `kind` (one of `"revolute"`, `"prismatic"`,
+    /// `"cylindrical"`, `"screw"`, `"spherical"`, `"spherical_with_pin"`, `"planar"`,
+    /// `"universal"`, `"homokinetic"`, `"fully_constrained"` or `"unconstrained"`),
+    /// the contact frame at rest (a `CadaclysmFrame`, a `Transform3D` or twelve
+    /// numbers, as `place`'s `frame` takes it), `end_frame` (the same shapes, or
+    /// `null` for the pair's own rest frame unmoved), `ranges` (an array of
+    /// `[lower, upper]`, each side `null` for unbounded, one entry per freedom of
+    /// `kind` -- see `pair_freedom_count`; `[]` for none, read the same as giving none
+    /// at all) and `pitch` (a length per revolution, required and non-zero for
+    /// `"screw"`, refused for any other kind; `NAN` for none). An unknown or
+    /// already-paired joint, an unknown kind, a bad pitch, ranges of the wrong length,
+    /// a non-finite or inverted range, or an end frame this kind's motion cannot reach
+    /// fails, and the assembly is left as it was -- check `Cadaclysm.last_error()`.
+    #[func]
+    fn pair(&self, joint: GString, kind: GString, frame: Variant, end_frame: Variant, ranges: AnyArray, pitch: f64) -> bool {
+        let Some(f) = self::frame(&frame, "pair: frame") else { return false };
+        let end_frame = if end_frame.is_nil() {
+            None
+        } else {
+            let Some(e) = self::frame(&end_frame, "pair: end_frame") else { return false };
+            Some(e)
+        };
+        let Some(ranges) = ranges_arg(&ranges, "pair: ranges") else { return false };
+        let pitch = (!pitch.is_nan()).then_some(pitch);
+        let options = bs::PairOptions { end_frame, ranges, pitch };
+        self.paired(&joint.to_string(), &kind.to_string(), &f, &options).is_some()
+    }
+
+    /// Adds a named state: `rows` (an array of `[joint, values]`, `values` a
+    /// `PackedFloat64Array` of one number per freedom of that joint's pair, in the
+    /// pair's freedom order) sets each named joint, in that order. An empty or
+    /// duplicate name, no rows, an unknown joint, a joint set twice, a joint with no
+    /// pair or none of its pair's freedoms, a row of the wrong length, or a non-finite
+    /// or out-of-range value fails, and the assembly is left as it was -- check
+    /// `Cadaclysm.last_error()`.
+    #[func]
+    fn state(&self, name: GString, rows: AnyArray) -> bool {
+        let Some(rows) = state_rows_arg(&rows, "state: rows") else { return false };
+        let refs: Vec<(&str, &[f64])> = rows.iter().map(|(joint, values)| (joint.as_str(), values.as_slice())).collect();
+        self.stated(&name.to_string(), &refs).is_some()
+    }
+
+    /// Adds a named motion sequence: `segments` (an array of `[state, t, interpolation]`,
+    /// `state` the name of one of this assembly's states, `t` a number and
+    /// `interpolation` one of `"undefined"`, `"discontinuous"`, `"synchronous"` or
+    /// `"linear"`) in order; `seconds` says the parameter is in seconds. The sequence is
+    /// closed unless its last segment is `"discontinuous"`. An empty or duplicate name,
+    /// fewer than two segments, an unknown state, a non-finite or decreasing parameter or
+    /// an unknown word fails, and the assembly is left as it was -- check
+    /// `Cadaclysm.last_error()`.
+    #[func]
+    fn sequence(&self, name: GString, segments: AnyArray, #[opt(default = false)] seconds: bool) -> bool {
+        let Some(rows) = sequence_rows_arg(&segments, "sequence: segments") else { return false };
+        let refs: Vec<(&str, f64, &str)> = rows.iter().map(|(s, t, w)| (s.as_str(), *t, w.as_str())).collect();
+        self.sequenced(&name.to_string(), &refs, seconds).is_some()
+    }
+
+    /// Declares this assembly's base link. `link` naming no link of this assembly, or
+    /// a base already declared, fails, naming the link already there -- check
+    /// `Cadaclysm.last_error()`.
+    #[func]
+    fn base(&self, link: GString) -> bool {
+        self.based(&link.to_string()).is_some()
     }
 
     /// This assembly, and everything placed under it, as one STEP file: this assembly
@@ -3662,5 +4361,624 @@ impl CadaclysmSolidFemMesh {
             // By value, as the SDK's `free` takes it: dropping the handle is the free.
             mesh.free();
         }
+    }
+}
+
+// ---- CadaclysmTool ------------------------------------------------------------------------
+
+/// A cutter: Grbl tool `number` (1 to 255, the `T` word), `diameter` and `flute_length` in
+/// mm, `feed` and `plunge` in mm/min, `rpm` its spindle speed, ramping into its cuts at
+/// `ramp_angle` degrees. Immutable; a `CadaclysmJob` keeps its own copy, so dropping a tool a
+/// job has used changes nothing there. Freed when the last reference goes.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmTool {
+    tool: bs::Tool,
+}
+
+impl CadaclysmTool {
+    fn wrap(tool: bs::Tool) -> Gd<CadaclysmTool> {
+        Gd::from_object(CadaclysmTool { tool })
+    }
+
+    fn made(result: sdk::Result<bs::Tool>) -> Option<Gd<CadaclysmTool>> {
+        ok(result).map(Self::wrap)
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmTool {
+    fn to_string(&self) -> GString {
+        gs(format!("{:?}", self.tool))
+    }
+}
+
+#[godot_api]
+impl CadaclysmTool {
+    /// A flat end mill: Grbl tool `number` (at least 1), `diameter` and `flute_length` in
+    /// mm, `feed` and `plunge` in mm/min, `rpm` its spindle speed. It ramps into its cuts
+    /// at `ramp_angle` degrees. Fails for a `number` of 0 or above 255, a size, feed or
+    /// speed not positive and finite, or a `ramp_angle` outside (0, 90].
+    #[func]
+    fn flat(
+        number: i64,
+        diameter: f64,
+        flute_length: f64,
+        feed: f64,
+        plunge: f64,
+        rpm: f64,
+        #[opt(default = 3.0)] ramp_angle: f64,
+    ) -> Option<Gd<CadaclysmTool>> {
+        Self::made(bs::Tool::flat(tool_number(number), diameter, flute_length, feed, plunge, rpm, ramp_angle))
+    }
+
+    /// A ball end mill, as `flat`, its tip a half sphere of the diameter; in 2.5D it cuts
+    /// where a flat does, `bottom` being the tip.
+    #[func]
+    fn ball(
+        number: i64,
+        diameter: f64,
+        flute_length: f64,
+        feed: f64,
+        plunge: f64,
+        rpm: f64,
+        #[opt(default = 3.0)] ramp_angle: f64,
+    ) -> Option<Gd<CadaclysmTool>> {
+        Self::made(bs::Tool::ball(tool_number(number), diameter, flute_length, feed, plunge, rpm, ramp_angle))
+    }
+
+    /// A drill: as `flat`, plunging at `feed`. A `CadaclysmJob` takes it for `drill` (and
+    /// `machine`'s drills) only.
+    #[func]
+    fn drill(number: i64, diameter: f64, flute_length: f64, feed: f64, rpm: f64) -> Option<Gd<CadaclysmTool>> {
+        Self::made(bs::Tool::drill(tool_number(number), diameter, flute_length, feed, rpm))
+    }
+
+    /// A new tool: this one, ramping into its cuts at `degrees` from the horizontal
+    /// instead. Fails for an angle outside (0, 90].
+    #[func]
+    fn with_ramp_angle(&self, degrees: f64) -> Option<Gd<CadaclysmTool>> {
+        Self::made(self.tool.with_ramp_angle(degrees))
+    }
+}
+
+// ---- CadaclysmStock -----------------------------------------------------------------------
+
+/// The block of material a job cuts, an axis-aligned box. Immutable; a `CadaclysmJob` keeps
+/// its own copy. Freed when the last reference goes.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmStock {
+    stock: bs::Stock,
+}
+
+impl CadaclysmStock {
+    fn wrap(stock: bs::Stock) -> Gd<CadaclysmStock> {
+        Gd::from_object(CadaclysmStock { stock })
+    }
+
+    fn made(result: sdk::Result<bs::Stock>) -> Option<Gd<CadaclysmStock>> {
+        ok(result).map(Self::wrap)
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmStock {
+    fn to_string(&self) -> GString {
+        gs(format!("{:?}", self.stock))
+    }
+}
+
+#[godot_api]
+impl CadaclysmStock {
+    /// The box from `min` (x, y, z) to `max`. Fails unless every min is below its max and
+    /// all six are finite. Python's `Stock.box` -- `box` is a Rust keyword, so this
+    /// method (and the SDK's own it calls) is `box_`, as the Rust wrapper's own is.
+    #[func]
+    fn box_(min: Variant, max: Variant) -> Option<Gd<CadaclysmStock>> {
+        let (min, max) = (v3(&min, "box_: min")?, v3(&max, "box_: max")?);
+        Self::made(bs::Stock::box_(min, max))
+    }
+
+    /// `solid`'s bounds grown by `margin` in -X, +X, -Y, +Y and +Z; the bottom stays at the
+    /// solid's lowest Z. Fails for a `margin` negative or not finite.
+    #[func]
+    fn around(solid: Gd<CadaclysmSolid>, #[opt(default = 0.0)] margin: f64) -> Option<Gd<CadaclysmStock>> {
+        Self::made(bs::Stock::around(solid.bind().held()?, margin))
+    }
+}
+
+// ---- CadaclysmProgram ----------------------------------------------------------------------
+
+/// One file a `CadaclysmJob` wrote: a Grbl program (`tool` its `T` number, `name`
+/// `<job name>-T<n>`, or `<job name>-<k>-T<n>` for a repeated tool) from `CadaclysmJob.gcode`,
+/// or one of `CadaclysmJob.write_camotics`'s files (`tool` 0 for the simulation copies and
+/// the project). Copied out; read-only.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmProgram {
+    own_tool: u32,
+    own_name: String,
+    own_text: String,
+    #[var(get = get_tool, no_set)]
+    tool: PhantomVar<i64>,
+    #[var(get = get_name, no_set)]
+    name: PhantomVar<GString>,
+    #[var(get = get_text, no_set)]
+    text: PhantomVar<GString>,
+}
+
+impl CadaclysmProgram {
+    fn wrap(program: bs::Program) -> Gd<CadaclysmProgram> {
+        Gd::from_object(CadaclysmProgram {
+            own_tool: program.tool,
+            own_name: program.name,
+            own_text: program.text,
+            tool: PhantomVar::default(),
+            name: PhantomVar::default(),
+            text: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmProgram {
+    fn to_string(&self) -> GString {
+        gs(format!("Program(tool={}, name={:?})", self.own_tool, self.own_name))
+    }
+}
+
+#[godot_api]
+impl CadaclysmProgram {
+    #[func]
+    fn get_tool(&self) -> i64 {
+        self.own_tool as i64
+    }
+
+    #[func]
+    fn get_name(&self) -> GString {
+        gs(&self.own_name)
+    }
+
+    #[func]
+    fn get_text(&self) -> GString {
+        gs(&self.own_text)
+    }
+}
+
+// ---- CadaclysmOperation --------------------------------------------------------------------
+
+/// One operation of a `CadaclysmJob`, read back by `CadaclysmJob.operations`: `kind`
+/// (`"face"`, `"contour"`, `"pocket"` or `"drill"`), `tool` (its Grbl `T` number) and
+/// `params`, a Dictionary (sorted by key, for a stable order) of the operation's own
+/// arguments in the library's own numbers -- `side` 0 outside, 1 inside or 2 on its line;
+/// `climb` and `open` 1 or 0; `points` a count; a `peck` of none reads as `null`. Copied
+/// out; read-only.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmOperation {
+    own_kind: String,
+    own_tool: u32,
+    own_params: Vec<(String, Option<f64>)>,
+    #[var(get = get_kind, no_set)]
+    kind: PhantomVar<GString>,
+    #[var(get = get_tool, no_set)]
+    tool: PhantomVar<i64>,
+    #[var(get = get_params, no_set)]
+    params: PhantomVar<VarDictionary>,
+}
+
+impl CadaclysmOperation {
+    fn wrap(operation: bs::Operation) -> Gd<CadaclysmOperation> {
+        Gd::from_object(CadaclysmOperation {
+            own_kind: operation.kind,
+            own_tool: operation.tool,
+            own_params: operation.params.into_iter().collect(),
+            kind: PhantomVar::default(),
+            tool: PhantomVar::default(),
+            params: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmOperation {
+    fn to_string(&self) -> GString {
+        gs(format!("Operation(kind={:?}, tool={})", self.own_kind, self.own_tool))
+    }
+}
+
+#[godot_api]
+impl CadaclysmOperation {
+    #[func]
+    fn get_kind(&self) -> GString {
+        gs(&self.own_kind)
+    }
+
+    #[func]
+    fn get_tool(&self) -> i64 {
+        self.own_tool as i64
+    }
+
+    #[func]
+    fn get_params(&self) -> VarDictionary {
+        let mut d = VarDictionary::new();
+        for (key, value) in &self.own_params {
+            let v = match value {
+                Some(x) => x.to_variant(),
+                None => Variant::nil(),
+            };
+            d.set(key.as_str(), &v);
+        }
+        d
+    }
+}
+
+// ---- CadaclysmReportItem, CadaclysmReport ------------------------------------------------
+
+/// One thing `CadaclysmJob.machine` left uncut, one of `CadaclysmReport`'s items: `kind`
+/// (`"corner"`, material the end mill doesn't reach; `"hole"`, a round hole no drill
+/// matches or a matched drill can't make; `"slope"`, a face that is neither horizontal nor
+/// vertical, cut as steps; `"undercut"`, material under an overhang; or `"too_deep"`, a
+/// level below the end mill's flute length, cut only that far), `at` (the item's XYZ
+/// location -- a centroid for an area, the axis point at the top for a hole), `size` (an
+/// area in mm^2 for `corner`/`undercut`, a diameter in mm for `hole`, and a height in mm --
+/// its Z range -- for `slope` and `too_deep`), `reason` (one sentence naming the cause and
+/// the tool involved) and `region` (the XY area the item covers). Copied out; read-only.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmReportItem {
+    own_kind: String,
+    own_at: [f64; 3],
+    own_size: f64,
+    own_reason: String,
+    own_region: Vec<Gd<CadaclysmProfile>>,
+    #[var(get = get_kind, no_set)]
+    kind: PhantomVar<GString>,
+    #[var(get = get_at, no_set)]
+    at: PhantomVar<Vector3>,
+    #[var(get = get_size, no_set)]
+    size: PhantomVar<f64>,
+    #[var(get = get_reason, no_set)]
+    reason: PhantomVar<GString>,
+    #[var(get = get_region, no_set)]
+    region: PhantomVar<Array<Gd<CadaclysmProfile>>>,
+}
+
+impl CadaclysmReportItem {
+    fn wrap(item: bs::ReportItem) -> Gd<CadaclysmReportItem> {
+        Gd::from_object(CadaclysmReportItem {
+            own_kind: item.kind,
+            own_at: item.at,
+            own_size: item.size,
+            own_reason: item.reason,
+            own_region: item.region.into_iter().map(CadaclysmProfile::wrap).collect(),
+            kind: PhantomVar::default(),
+            at: PhantomVar::default(),
+            size: PhantomVar::default(),
+            reason: PhantomVar::default(),
+            region: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmReportItem {
+    fn to_string(&self) -> GString {
+        gs(format!("ReportItem(kind={:?}, size={})", self.own_kind, self.own_size))
+    }
+}
+
+#[godot_api]
+impl CadaclysmReportItem {
+    #[func]
+    fn get_kind(&self) -> GString {
+        gs(&self.own_kind)
+    }
+
+    #[func]
+    fn get_at(&self) -> Vector3 {
+        vector3(self.own_at)
+    }
+
+    #[func]
+    fn get_size(&self) -> f64 {
+        self.own_size
+    }
+
+    #[func]
+    fn get_reason(&self) -> GString {
+        gs(&self.own_reason)
+    }
+
+    #[func]
+    fn get_region(&self) -> Array<Gd<CadaclysmProfile>> {
+        self.own_region.iter().cloned().collect()
+    }
+}
+
+/// What `CadaclysmJob.machine` could not make: `items`, in order, read once when `machine`
+/// returns, and `text` -- the kernel's own: one line per item, or `"nothing left uncut"`.
+/// `to_string()` is that same text. Copied out; read-only.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmReport {
+    own_items: Vec<Gd<CadaclysmReportItem>>,
+    own_text: String,
+    #[var(get = get_items, no_set)]
+    items: PhantomVar<Array<Gd<CadaclysmReportItem>>>,
+    #[var(get = get_text, no_set)]
+    text: PhantomVar<GString>,
+    #[var(get = get_is_empty, no_set)]
+    is_empty: PhantomVar<bool>,
+}
+
+impl CadaclysmReport {
+    fn wrap(report: bs::Report) -> Gd<CadaclysmReport> {
+        let text = report.text().to_string();
+        let items = report.into_items().into_iter().map(CadaclysmReportItem::wrap).collect();
+        Gd::from_object(CadaclysmReport {
+            own_items: items,
+            own_text: text,
+            items: PhantomVar::default(),
+            text: PhantomVar::default(),
+            is_empty: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmReport {
+    fn to_string(&self) -> GString {
+        gs(&self.own_text)
+    }
+}
+
+#[godot_api]
+impl CadaclysmReport {
+    #[func]
+    fn get_items(&self) -> Array<Gd<CadaclysmReportItem>> {
+        self.own_items.iter().cloned().collect()
+    }
+
+    #[func]
+    fn get_text(&self) -> GString {
+        gs(&self.own_text)
+    }
+
+    /// Whether nothing was left uncut (no items) -- `true` for `"nothing left uncut"`.
+    #[func]
+    fn get_is_empty(&self) -> bool {
+        self.own_items.is_empty()
+    }
+}
+
+// ---- CadaclysmJob --------------------------------------------------------------------------
+
+/// A mutable machining job on a `CadaclysmStock`: operations kept in the order they are
+/// added, written as one Grbl 1.1 program per run of operations sharing a tool. Each
+/// operation is added in place, and a refused one leaves the job as it was. `new` is
+/// GDScript's own reserved name, so the constructor is `create`, as `CadaclysmFrame`'s and
+/// `CadaclysmAssembly`'s are. Godot's objects are not deterministically dropped, so, as
+/// `CadaclysmSolid` and `CadaclysmAssembly` do, this one takes an explicit `close()`; every
+/// call after fails with "job: closed".
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmJob {
+    job: Option<bs::Job>,
+    #[var(get = get_closed, no_set)]
+    closed: PhantomVar<bool>,
+}
+
+impl CadaclysmJob {
+    fn held(&self) -> Option<&bs::Job> {
+        match &self.job {
+            Some(job) => Some(job),
+            None => fail("job: closed"),
+        }
+    }
+
+    fn held_mut(&mut self) -> Option<&mut bs::Job> {
+        match &mut self.job {
+            Some(job) => Some(job),
+            None => fail("job: closed"),
+        }
+    }
+
+    /// `machine`/`machine_with_drills`'s shared body, once `drills` is resolved to
+    /// borrowed tool handles.
+    fn machined(
+        &mut self,
+        part: &Gd<CadaclysmSolid>,
+        end_mill: &Gd<CadaclysmTool>,
+        drills: &[Option<&bs::Tool>],
+        stepover: f64,
+        stepdown: f64,
+        skin: f64,
+        peck: f64,
+    ) -> Option<Gd<CadaclysmReport>> {
+        let part = part.bind();
+        let end_mill = end_mill.bind();
+        let stepover = (!stepover.is_nan()).then_some(stepover);
+        let stepdown = (!stepdown.is_nan()).then_some(stepdown);
+        let peck = (!peck.is_nan()).then_some(peck);
+        let part_ref = part.held()?;
+        let job = self.held_mut()?;
+        let report = ok(job.machine(part_ref, &end_mill.tool, drills, stepover, stepdown, skin, peck))?;
+        Some(CadaclysmReport::wrap(report))
+    }
+}
+
+#[godot_api]
+impl IRefCounted for CadaclysmJob {
+    fn to_string(&self) -> GString {
+        match &self.job {
+            Some(job) => gs(format!("{job:?}")),
+            None => gs("Job(closed)"),
+        }
+    }
+}
+
+#[godot_api]
+impl CadaclysmJob {
+    /// An empty job on `stock`, rapids at `safe_z` (above the stock's top). `clearance` is
+    /// how far above an operation's top it enters and leaves its passes; `tolerance` fits
+    /// free-form sides and offsets; `name` names the programs (`<name>-T<n>`);
+    /// `spindle_dwell` is how long every program waits after starting the spindle;
+    /// `resolution` is the CAMotics project's voxel size in mm. Fails for a `safe_z` not
+    /// above the stock's top, or a setting the job refuses.
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn create(
+        stock: Gd<CadaclysmStock>,
+        safe_z: f64,
+        #[opt(default = 1.0)] clearance: f64,
+        #[opt(default = 0.01)] tolerance: f64,
+        #[opt(default = "job")] name: GString,
+        #[opt(default = 2.0)] spindle_dwell: f64,
+        #[opt(default = 0.1)] resolution: f64,
+    ) -> Option<Gd<CadaclysmJob>> {
+        let job = ok(bs::Job::new(&stock.bind().stock, safe_z, clearance, tolerance, &name.to_string(), spindle_dwell, resolution))?;
+        Some(Gd::from_object(CadaclysmJob { job: Some(job), closed: PhantomVar::default() }))
+    }
+
+    /// Free it now rather than when the last reference goes; later calls fail with
+    /// "job: closed".
+    #[func]
+    fn close(&mut self) {
+        self.job = None;
+    }
+
+    #[func]
+    fn get_closed(&self) -> bool {
+        self.job.is_none()
+    }
+
+    /// Face the stock's top down to `z`, in zigzag rows along X `stepover` apart and
+    /// passes at most `stepdown` deep, with `tool`. Fails for a drill, a `z` above the
+    /// stock's top, a stepover past the tool's diameter, or what the job otherwise
+    /// refuses.
+    #[func]
+    fn face(&mut self, tool: Gd<CadaclysmTool>, z: f64, stepover: f64, stepdown: f64) -> bool {
+        let Some(job) = self.held_mut() else { return false };
+        ok(job.face(&tool.bind().tool, z, stepover, stepdown)).is_some()
+    }
+
+    /// Cut along `profile` from `top` to `bottom` in passes at most `stepdown` deep, with
+    /// `tool`: `side` "outside" the profile, "inside" it, or "on" its line; `climb` for
+    /// climb milling, else conventional; `open` to cut the outline as an open chain (only
+    /// "on" its line, and with no holes). Fails for any other `side`, or what the job
+    /// otherwise refuses -- unchanged either way.
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn contour(
+        &mut self,
+        tool: Gd<CadaclysmTool>,
+        profile: Gd<CadaclysmProfile>,
+        top: f64,
+        bottom: f64,
+        #[opt(default = "outside")] side: GString,
+        #[opt(default = 1.0)] stepdown: f64,
+        #[opt(default = true)] climb: bool,
+        #[opt(default = false)] open: bool,
+    ) -> bool {
+        let Some(job) = self.held_mut() else { return false };
+        ok(job.contour(&tool.bind().tool, &profile.bind().profile, top, bottom, &side.to_string(), stepdown, climb, open)).is_some()
+    }
+
+    /// Clear `profile` -- its holes left standing as islands -- from `top` to `bottom`, in
+    /// rings `stepover` apart (at most the tool's radius) and passes at most `stepdown`
+    /// deep, with `tool`. Fails for what the job refuses; a pocket too small for the tool
+    /// is refused by `gcode`, naming the operation.
+    #[func]
+    fn pocket(&mut self, tool: Gd<CadaclysmTool>, profile: Gd<CadaclysmProfile>, top: f64, bottom: f64, stepover: f64, stepdown: f64) -> bool {
+        let Some(job) = self.held_mut() else { return false };
+        ok(job.pocket(&tool.bind().tool, &profile.bind().profile, top, bottom, stepover, stepdown)).is_some()
+    }
+
+    /// A hole at each (x, y) of `points`, from `top` to `bottom` with `tool`, pecking
+    /// `peck` deep at a time (retracting between pecks), or straight to depth for `NAN`
+    /// (Godot has no null default for a number; `NAN` is the sentinel, as the C ABI's
+    /// own is). Fails for what the job refuses (a tool that is not a drill, no points,
+    /// ...).
+    #[func]
+    fn drill(&mut self, tool: Gd<CadaclysmTool>, points: Variant, top: f64, bottom: f64, #[opt(default = f64::NAN)] peck: f64) -> bool {
+        let Some(pts) = points2(&points, "drill: points") else { return false };
+        let Some(job) = self.held_mut() else { return false };
+        let peck = (!peck.is_nan()).then_some(peck);
+        ok(job.drill(&tool.bind().tool, &pts, top, bottom, peck)).is_some()
+    }
+
+    /// Recognise `part` and append the operations that make it: faced, contoured and
+    /// pocketed with `end_mill`, no holes drilled (see `machine_with_drills` for that).
+    /// `stepover` and `stepdown` of `NAN` are the kernel's own defaults; `skin` (at least
+    /// 0) is how far above the part's lowest point the outline stops, so the part stays
+    /// attached to the stock -- 0 cuts through; `peck` of `NAN` is none (a drill straight
+    /// to depth, not that this call ever drills). Returns a `CadaclysmReport` of what
+    /// could not be cut. Fails for what the kernel refuses (a drill as `end_mill`, ...);
+    /// the job changes only on success -- a refusal leaves it exactly as it was.
+    #[func]
+    fn machine(
+        &mut self,
+        part: Gd<CadaclysmSolid>,
+        end_mill: Gd<CadaclysmTool>,
+        #[opt(default = f64::NAN)] stepover: f64,
+        #[opt(default = f64::NAN)] stepdown: f64,
+        #[opt(default = 0.3)] skin: f64,
+        #[opt(default = f64::NAN)] peck: f64,
+    ) -> Option<Gd<CadaclysmReport>> {
+        self.machined(&part, &end_mill, &[], stepover, stepdown, skin, peck)
+    }
+
+    /// `machine`, with `drills` (`CadaclysmTool`s) tried against each round hole found --
+    /// a tool per required diameter -- since Godot has no null default for an array to
+    /// give `machine` an optional one of its own (as `CadaclysmScene.open`/`open_with`
+    /// are two calls for the same reason).
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn machine_with_drills(
+        &mut self,
+        part: Gd<CadaclysmSolid>,
+        end_mill: Gd<CadaclysmTool>,
+        drills: AnyArray,
+        #[opt(default = f64::NAN)] stepover: f64,
+        #[opt(default = f64::NAN)] stepdown: f64,
+        #[opt(default = 0.3)] skin: f64,
+        #[opt(default = f64::NAN)] peck: f64,
+    ) -> Option<Gd<CadaclysmReport>> {
+        let drill_list = object_list::<CadaclysmTool>(&drills, "machine_with_drills: drills")?;
+        let guards: Vec<GdRef<CadaclysmTool>> = drill_list.iter().map(|t| t.bind()).collect();
+        let refs: Vec<Option<&bs::Tool>> = guards.iter().map(|g| Some(&g.tool)).collect();
+        self.machined(&part, &end_mill, &refs, stepover, stepdown, skin, peck)
+    }
+
+    /// Every operation added to this job so far, in order -- whether added by `face`,
+    /// `contour`, `pocket`, `drill` or `machine`.
+    #[func]
+    fn operations(&self) -> Array<Gd<CadaclysmOperation>> {
+        self.held().and_then(|j| ok(j.operations())).unwrap_or_default().into_iter().map(CadaclysmOperation::wrap).collect()
+    }
+
+    /// The job as Grbl 1.1 programs, one per run of consecutive operations sharing a tool
+    /// (T1, T2, T1 gives three), each named `<name>-T<n>` (or `<name>-<k>-T<n>` for run
+    /// `k` of a tool that runs more than once); an empty array for a job with no
+    /// operations. Fails for an operation whose geometry the tool cannot cut (named by
+    /// its index and kind).
+    #[func]
+    fn gcode(&self) -> Array<Gd<CadaclysmProgram>> {
+        self.held().and_then(|j| ok(j.gcode())).unwrap_or_default().into_iter().map(CadaclysmProgram::wrap).collect()
+    }
+
+    /// A CAMotics project at `path` and its files beside it, named after the project's
+    /// file stem (`out/part.camotics` writes `out/part-T1.nc`), not the job's name: each
+    /// program, a simulation copy of it (`.sim.nc`, which the project lists), and the
+    /// project last. Creates the directory. Returns the paths written, the project last.
+    /// Fails for a path with no file stem, what `gcode` refuses, or a file that cannot be
+    /// written.
+    #[func]
+    fn write_camotics(&self, path: GString) -> PackedStringArray {
+        let Some(job) = self.held() else { return PackedStringArray::new() };
+        let written = ok(job.write_camotics(os_path(&path))).unwrap_or_default();
+        written.into_iter().map(|p| gs(p.display().to_string())).collect()
     }
 }

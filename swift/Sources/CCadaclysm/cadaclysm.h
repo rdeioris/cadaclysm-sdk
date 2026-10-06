@@ -99,6 +99,38 @@
 #define CADACLYSM_SVG_POLYLINES 8
 
 /**
+ * Also draw each body's silhouettes -- the curves where its surfaces turn
+ * away from the eye, which no edge of the body lies on, so a sphere gains an
+ * outline it otherwise has none of.
+ *
+ * A line set in its own right: combine it with `EDGES`, `CURVES` or
+ * `ISOCURVES` to draw an outline over them, or set it alone for an
+ * outline-only drawing. Only naming *nothing* is refused. The silhouettes are
+ * solved against the
+ * same eye the drawing uses, at the page tolerance converted to the model's
+ * units, and land in their own group after that placement's lines.
+ *
+ * It does change the camera of a *single node's* drawing under perspective,
+ * which is the price of that shared eye. Without the flag the node path hands
+ * the writer a view and lets it grow its own camera from the lines' Bézier
+ * control points; with the flag the camera is pinned from the same box the
+ * query measures, which is built from edge samples. Control points of an arc
+ * lie outside it by up to about 16%, so `{fov: 45, EDGES}` and
+ * `{fov: 45, EDGES|SILHOUETTES}` draw the same edges at slightly different
+ * eye distances, and so with slightly different foreshortening. Orthographic
+ * drawings are unaffected (the box plays no part in a parallel eye), and the
+ * whole-scene path does not move its camera either way.
+ *
+ * On a scene, each placement's eye is carried into that placement's own frame
+ * by the inverse of its transform, and that is exact for **any** invertible
+ * placement -- a non-uniform scale, a shear and a mirror included. The one
+ * case with no answer is a *singular* placement, one whose transform flattens
+ * space: it has no frame to carry an eye into, so it contributes no silhouette
+ * group while the rest of the drawing is unaffected.
+ */
+#define CADACLYSM_SVG_SILHOUETTES 16
+
+/**
  * One of the six directions an axis can land on, for
  * [`CadaclysmConventionSpec`]. Spelled the way the header spells its other
  * constants, for the same reason [`CadaclysmConvention`] is.
@@ -250,6 +282,17 @@ typedef enum CadaclysmFreedomAxis {
 } CadaclysmFreedomAxis;
 
 /**
+ * A [`cadaclysm::Interpolation`] value, for [`cadaclysm_sequence_segment`]'s
+ * `interpolation`. Carried as a `uint32_t`, as [`CadaclysmMotion`] is.
+ */
+typedef enum CadaclysmInterpolation {
+  CADACLYSM_INTERPOLATION_UNDEFINED = 0,
+  CADACLYSM_INTERPOLATION_DISCONTINUOUS = 1,
+  CADACLYSM_INTERPOLATION_SYNCHRONOUS = 2,
+  CADACLYSM_INTERPOLATION_LINEAR = 3,
+} CadaclysmInterpolation;
+
+/**
  * An imported body's exact B-rep -- the trimmed surfaces its mesh is cut from --
  * opaque, and shared with the scene rather than copied. Made by
  * [`cadaclysm_node_brep`], given back with [`cadaclysm_brep_release`]. It is
@@ -270,6 +313,14 @@ typedef struct CadaclysmFemMesh CadaclysmFemMesh;
  * A mesh split into meshlets, and the coarser levels above them.
  */
 typedef struct CadaclysmMeshlets CadaclysmMeshlets;
+
+/**
+ * A posed mechanism, made by [`cadaclysm_pose`], [`cadaclysm_pose_state`] or
+ * [`cadaclysm_pose_sequence`] and freed by
+ * [`cadaclysm_pose_free`]. Opaque to C. Owns a copy of the core's pose, so it outlives
+ * neither more nor less than the caller wants: closing the scene does not invalidate it.
+ */
+typedef struct CadaclysmPose CadaclysmPose;
 
 /**
  * A file, read. Opaque to C; `cadaclysm_close` frees it.
@@ -642,7 +693,9 @@ typedef struct CadaclysmFreedom {
  * A set of polylines. Both pointers borrow from the scene.
  *
  * `positions` holds `vertex_count * 3` floats, run together end to end;
- * `counts` holds `polyline_count` vertex counts saying where each run stops.
+ * `counts` holds `polyline_count` vertex counts -- **how many points each run
+ * has**, not where it ends, so a body of twelve two-point edges reads
+ * `2, 2, 2, ...` and a caller walks the runs by adding them up.
  * A part with none gives all-null and all-zero.
  */
 typedef struct CadaclysmPolylines {
@@ -737,6 +790,12 @@ typedef struct CadaclysmFace {
    * A revolution whose `u` is the profile and `v` the spin, rather than the other way.
    */
   uint32_t transposed;
+  /**
+   * Flags. Bit 0 (`1`): the face meets itself along a **crease**, not a seam -- it names
+   * an edge twice (a closed face's wrap line) and is not smooth across it, like a closed
+   * wall whose profile kinks where it starts. A renderer that leaves out the trim spans
+   * along a closed face's seam should draw them on such a face. Every other bit is zero.
+   */
   uint32_t reserved;
   float origin[4];
   float ax[4];
@@ -896,8 +955,8 @@ typedef struct CadaclysmGpuSurfaces {
 
 /**
  * [`CadaclysmPolylines`] in `double`: the same polylines, unnarrowed, for geometry far from
- * the origin. `positions` holds `vertex_count * 3` doubles; `counts` says where each run
- * stops. A part with none gives all-null and all-zero.
+ * the origin. `positions` holds `vertex_count * 3` doubles; `counts` says how many points
+ * each run has, as in [`CadaclysmPolylines`]. A part with none gives all-null and all-zero.
  */
 typedef struct CadaclysmPolylines64 {
   const double *positions;
@@ -984,10 +1043,17 @@ typedef struct CadaclysmSvgOptions {
    */
   uint32_t background;
   /**
-   * `CADACLYSM_SVG_EDGES` (the default) | `CURVES` | `ISOCURVES` |
-   * `POLYLINES`. The three line-set bits combine freely -- any one, any
-   * two or all three, exactly the sets named and no other; at least one
-   * must be set.
+   * `CADACLYSM_SVG_EDGES` | `CURVES` | `ISOCURVES` | `POLYLINES` |
+   * `SILHOUETTES`, with `EDGES | SILHOUETTES` the default. The three
+   * line-set bits combine freely -- any one, any two or all three, exactly
+   * the sets named and no other. `SILHOUETTES` is a line set in its own
+   * right (so it may be set alone, for an outline-only drawing); only
+   * naming nothing at all is refused.
+   *
+   * It is on by default because a line set alone cannot draw every body: a
+   * sphere's and a torus's only curves are their seams, which are not edges
+   * and are never drawn, so `EDGES` alone gave those two a blank page.
+   * Clear the bit for lines and nothing else.
    */
   uint32_t flags;
 } CadaclysmSvgOptions;
@@ -1280,7 +1346,18 @@ const char *cadaclysm_last_error(void);
 const char *cadaclysm_version(void);
 
 /**
- * Open a CAD file, or a `.zip` holding one.
+ * A colour's text as r, g, b in 0..1, into `out[0..3]`: `"#rgb"`, `"#rrggbb"`
+ * (the `#` optional) or one of the 148 CSS colour names, any case. The one
+ * parser every wrapper hands colour text to, so the forms are the same in each.
+ * False, with [`cadaclysm_last_error`] saying why, for anything else.
+ *
+ * # Safety
+ * `text` a NUL-terminated string; `out` room for three doubles.
+ */
+bool cadaclysm_parse_colour(const char *text, double *out);
+
+/**
+ * Open a CAD file, or a `.zip`, `.stpZ` or `.gz` holding one.
  *
  * `path` names the model. `schema` names the EXPRESS schema (`.exp`) it
  * conforms to, which only STEP and IFC need — they name one and cannot be
@@ -1291,7 +1368,13 @@ const char *cadaclysm_version(void);
  * `options->pick` names, with the rest of the archive standing in for the
  * file's own directory — an `include <lib/box.scad>` inside the archive
  * finds the archive's own `lib/box.scad`. [`cadaclysm_source_name`] says
- * which member was chosen.
+ * which member was chosen. A `.stpZ` (STEP-Z: the STEP file, zipped) is a
+ * zip.
+ *
+ * **A `.gz` is read as the format named before it**: `part.step.gz` is
+ * decompressed in memory and read as `.step`, with the `.gz`'s own directory
+ * as its home; `bundle.zip.gz` opens as a zip. A bare `model.gz` is refused,
+ * since it does not say what it holds.
  *
  * **An OpenSCAD program's `include <…>` and `use <…>` are resolved beside
  * it**: the reader is handed the file's own directory, so a library next to
@@ -1316,11 +1399,11 @@ const char *cadaclysm_version(void);
 struct CadaclysmScene *cadaclysm_open(const char *path, const struct CadaclysmOpenOptions *options);
 
 /**
- * Open a CAD file already in memory, or a `.zip` holding one.
+ * Open a CAD file already in memory, or a `.zip`, `.stpZ` or `.gz` holding one.
  *
  * `format` names the kind as an extension would — `"step"`, `"ifc"`, `"igs"`,
- * `"brep"`, `"3dm"`, `"scad"`, `"sat"`, `"zip"` — since there is no file name
- * to take it from. A leading dot is allowed and ignored.
+ * `"brep"`, `"3dm"`, `"scad"`, `"sat"`, `"zip"`, `"stpz"`, `"step.gz"` — since
+ * there is no file name to take it from. A leading dot is allowed and ignored.
  *
  * Those are examples rather than the whole list, which depends on the readers
  * this build was compiled with: [`cadaclysm_format_extensions`] is what it
@@ -1331,7 +1414,12 @@ struct CadaclysmScene *cadaclysm_open(const char *path, const struct CadaclysmOp
  * **`"zip"` opens its shallowest readable member**, or the one
  * `options->pick` names, with the rest of the archive standing in for the
  * missing directory a plain buffer would have none of.
- * [`cadaclysm_source_name`] says which member was chosen.
+ * [`cadaclysm_source_name`] says which member was chosen. `"stpz"` (STEP-Z,
+ * the STEP file zipped) is a zip.
+ *
+ * **A gzip stream is named by what it holds, then `.gz`** — `"step.gz"` —
+ * and is decompressed in memory and read as that; `"zip.gz"` opens a
+ * gzipped zip. A bare `"gz"` is refused, since it does not say what it holds.
  *
  * `options` is as [`cadaclysm_open`] takes it, null included.
  *
@@ -2386,6 +2474,199 @@ uint32_t cadaclysm_state_value(const struct CadaclysmScene *scene,
                                uint32_t capacity);
 
 /**
+ * How many motion sequences (`INTERPOLATED_CONFIGURATION_SEQUENCE`) the file records.
+ * 0 for a file with none.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_sequence_count(const struct CadaclysmScene *scene);
+
+/**
+ * A sequence's name -- its representation's, `name #2` and on for a representation's
+ * further sequences -- or null past the end. Borrowed, lives as long as the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+const char *cadaclysm_sequence_name(const struct CadaclysmScene *scene, uint32_t sequence);
+
+/**
+ * Whether the sequence returns to its first segment (its last segment is not
+ * discontinuous). False past the end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+bool cadaclysm_sequence_closed(const struct CadaclysmScene *scene, uint32_t sequence);
+
+/**
+ * Seconds per unit of the sequence's parameter where the file states a time unit;
+ * 0 where it states none (read the parameter as seconds) and past the end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+double cadaclysm_sequence_seconds_per_unit(const struct CadaclysmScene *scene, uint32_t sequence);
+
+/**
+ * How many segments the sequence has (at least two). 0 past the end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_sequence_segment_count(const struct CadaclysmScene *scene, uint32_t sequence);
+
+/**
+ * Segment `segment` of sequence `sequence`: its state's index into the scene's states,
+ * its parameter, and how the motion leaves it (a [`CadaclysmInterpolation`]). Each out
+ * pointer may be null. False, with nothing written, past the end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; each out pointer, where not
+ * null, must be writable.
+ */
+bool cadaclysm_sequence_segment(const struct CadaclysmScene *scene,
+                                uint32_t sequence,
+                                uint32_t segment,
+                                uint32_t *state,
+                                double *t,
+                                uint32_t *interpolation);
+
+/**
+ * The mechanism posed by `row_count` rows: row `i` sets joint `joints[i]` to `counts[i]`
+ * values, taken consecutively from `values` (so `values` holds the sum of `counts`).
+ * `ground`: a link index, or [`CADACLYSM_NONE`] for the default ground. NULL on error, with
+ * the reason on [`cadaclysm_last_error`]: a null scene, a null `joints`/`counts` with
+ * `row_count` > 0, a null `values` with a non-zero sum of counts, or any `PoseError` (its
+ * `Display` text). Free with [`cadaclysm_pose_free`].
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]. When `row_count > 0`, `joints`
+ * and `counts` must each be readable for `row_count` elements. When the counts sum above
+ * zero, `values` must be readable for that many elements.
+ */
+struct CadaclysmPose *cadaclysm_pose(const struct CadaclysmScene *scene,
+                                     const uint32_t *joints,
+                                     const uint32_t *counts,
+                                     const double *values,
+                                     uint32_t row_count,
+                                     uint32_t ground);
+
+/**
+ * The mechanism posed by the scene's state `state`. NULL on error, as [`cadaclysm_pose`].
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+struct CadaclysmPose *cadaclysm_pose_state(const struct CadaclysmScene *scene,
+                                           uint32_t state,
+                                           uint32_t ground);
+
+/**
+ * The mechanism posed by sequence `sequence` at parameter `t` (the file's own
+ * parameter; see [`cadaclysm_sequence_seconds_per_unit`] for seconds). NULL on error --
+ * no such sequence, a `t` that is not finite -- as [`cadaclysm_pose`].
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+struct CadaclysmPose *cadaclysm_pose_sequence(const struct CadaclysmScene *scene,
+                                              uint32_t sequence,
+                                              double t,
+                                              uint32_t ground);
+
+/**
+ * Frees a pose made by [`cadaclysm_pose`], [`cadaclysm_pose_state`] or
+ * [`cadaclysm_pose_sequence`]. Null is fine.
+ *
+ * # Safety
+ * `pose`, if not null, must be a handle from [`cadaclysm_pose`], [`cadaclysm_pose_state`]
+ * or [`cadaclysm_pose_sequence`] not already freed.
+ */
+void cadaclysm_pose_free(struct CadaclysmPose *pose);
+
+/**
+ * The link held fixed; [`CADACLYSM_NONE`] for a null pose.
+ *
+ * # Safety
+ * `pose` must be null or a handle from [`cadaclysm_pose`], [`cadaclysm_pose_state`] or
+ * [`cadaclysm_pose_sequence`].
+ */
+uint32_t cadaclysm_pose_ground(const struct CadaclysmPose *pose);
+
+/**
+ * How many node transforms the pose holds (the scene's node count); 0 for a null pose.
+ *
+ * # Safety
+ * `pose` must be null or a handle from [`cadaclysm_pose`], [`cadaclysm_pose_state`] or
+ * [`cadaclysm_pose_sequence`].
+ */
+uint32_t cadaclysm_pose_node_count(const struct CadaclysmPose *pose);
+
+/**
+ * 16 column-major doubles, [`cadaclysm_node_transform`]'s layout; the identity for a null
+ * pose or a bad index; nothing written when `out` is NULL.
+ *
+ * # Safety
+ * `pose` must be null or a handle from [`cadaclysm_pose`], [`cadaclysm_pose_state`] or
+ * [`cadaclysm_pose_sequence`]; `out`,
+ * where not null, must be writable for 16 doubles.
+ */
+void cadaclysm_pose_node_transform(const struct CadaclysmPose *pose, uint32_t node, double *out);
+
+/**
+ * How many joints close a loop and were not honoured; 0 for a null pose.
+ *
+ * # Safety
+ * `pose` must be null or a handle from [`cadaclysm_pose`], [`cadaclysm_pose_state`] or
+ * [`cadaclysm_pose_sequence`].
+ */
+uint32_t cadaclysm_pose_unsolved_count(const struct CadaclysmPose *pose);
+
+/**
+ * The `index`-th loop-closing joint not honoured; [`CADACLYSM_NONE`] out of range.
+ *
+ * # Safety
+ * `pose` must be null or a handle from [`cadaclysm_pose`], [`cadaclysm_pose_state`] or
+ * [`cadaclysm_pose_sequence`].
+ */
+uint32_t cadaclysm_pose_unsolved(const struct CadaclysmPose *pose, uint32_t index);
+
+/**
+ * How many given values fell outside their freedom's range; 0 for a null pose.
+ *
+ * # Safety
+ * `pose` must be null or a handle from [`cadaclysm_pose`], [`cadaclysm_pose_state`] or
+ * [`cadaclysm_pose_sequence`].
+ */
+uint32_t cadaclysm_pose_out_of_range_count(const struct CadaclysmPose *pose);
+
+/**
+ * The `index`-th value used outside its freedom's range. False, writing nothing, out of
+ * range. Each out pointer may be NULL.
+ *
+ * # Safety
+ * `pose` must be null or a handle from [`cadaclysm_pose`], [`cadaclysm_pose_state`] or
+ * [`cadaclysm_pose_sequence`];
+ * `joint`, `freedom` and `value`, where not null, must each be writable.
+ */
+bool cadaclysm_pose_out_of_range(const struct CadaclysmPose *pose,
+                                 uint32_t index,
+                                 uint32_t *joint,
+                                 uint32_t *freedom,
+                                 double *value);
+
+/**
+ * The link the file declares as the mechanism's base; [`CADACLYSM_NONE`] when it declares
+ * none or the scene is null.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_kinematics_base(const struct CadaclysmScene *scene);
+
+/**
  * This part's feature edges, as polylines to draw an overlay from.
  *
  * Flattened by the document at the part's own scale — capi does not choose a
@@ -3167,7 +3448,7 @@ const struct CadaclysmBrep *cadaclysm_node_brep(const struct CadaclysmScene *sce
  * release frees the brep. Null is a no-op.
  *
  * # Safety
- * `brep` must be null or from [`cadaclysm_node_brep`], and released once.
+ * `brep` must be null or from [`cadaclysm_node_brep`] or [`cadaclysm_brep_sew`], and released once.
  */
 void cadaclysm_brep_release(const struct CadaclysmBrep *brep);
 
@@ -3195,8 +3476,36 @@ void cadaclysm_brep_release(const struct CadaclysmBrep *brep);
 bool cadaclysm_brep_manifold(const struct CadaclysmBrep *brep, uint32_t *out);
 
 /**
+ * The brep with its free edges sewn: every pair of free edges whose two ends coincide
+ * within `vertex` and whose curves lie within `tolerance` of each other becomes one
+ * shared edge (`TrimmedBrep::sewed`). A new brep, released with
+ * [`cadaclysm_brep_release`]; `brep` itself is untouched. Nothing moves: only which
+ * faces share an edge, and how loose an edge is said to be, change.
+ *
+ * `NaN` for either tolerance takes its default: `vertex` the rounding
+ * [`cadaclysm_brep_manifold`] merges vertices at, `tolerance` equal to `vertex`, so
+ * only edges that are one curve to a rounding are sewn. A value outside the legal
+ * range takes the default too (`vertex` not finite or not positive, `tolerance`
+ * negative; `+inf` tolerance is legal), and the figures in `gaps` show what was used. Four counts into `out` --
+ * edges joined, free edges before, free edges after, groups refused (two or more free
+ * edges between the same two vertices left free: too far apart, or more than two) --
+ * and three figures into `gaps`: the widest gap sewn, then the tolerance and vertex
+ * used. Either may be NULL. NULL (and [`cadaclysm_last_error`](crate::cadaclysm_last_error))
+ * for a NULL `brep`.
+ *
+ * # Safety
+ * `brep` null or from [`cadaclysm_node_brep`] or this function and not yet released;
+ * `out` null or four `uint32_t`; `gaps` null or three `double`.
+ */
+const struct CadaclysmBrep *cadaclysm_brep_sew(const struct CadaclysmBrep *brep,
+                                               double tolerance,
+                                               double vertex,
+                                               uint32_t *out,
+                                               double *gaps);
+
+/**
  * The defaults: the viewer's `iso`, orthographic, a 1000-square page, black
- * edges one unit wide on nothing.
+ * edges one unit wide on nothing, and each body's outline beside them.
  *
  * # Safety
  * `options` must be null or writable.
@@ -3272,6 +3581,52 @@ bool cadaclysm_node_svg(const struct CadaclysmScene *scene,
                         uint32_t node,
                         const char *path,
                         const struct CadaclysmSvgOptions *options);
+
+/**
+ * This part's silhouette curves as Bézier segments -- the curves where its
+ * surfaces turn away from the eye, which no edge of the body lies on.
+ *
+ * The eye is the options' own view words (`up`, `azimuth`, `elevation`,
+ * `fov`), so the same options that draw a picture ask about the same eye.
+ * `tolerance` and `width` are read together, as a page tolerance turned into
+ * a world one (`width` is how the page fraction `tolerance / width` is
+ * read off, so it is read, not ignored, despite naming a page dimension).
+ * `size` is checked (as every struct here is) but names no camera word.
+ * `height`, `margin`, `stroke*`, `background` and `flags` are unread --
+ * `flags` in particular: a silhouette query asks for an eye and a
+ * tolerance, never a line set, so `flags = 0` (no line set at all, which a
+ * drawing refuses) is accepted here same as any other value of it.
+ *
+ * The arrays borrow from the scene and are **valid until the next silhouette
+ * call on this scene**, like `cadaclysm_node_svg_text`'s string and unlike the
+ * edge accessors, which can cache per node because they take no eye -- one
+ * slot serves every node, so a different node's call replaces this one's too.
+ * A refused call leaves the slot, and any pointer a caller already holds from
+ * it, untouched. Two threads calling this on one scene free each other's
+ * arrays: callers sharing a scene across threads serialise their silhouette
+ * calls (and the reads of what they return) themselves, the same contract
+ * `cadaclysm_scene_svg_text` documents for `svg_text`.
+ *
+ * A body with no silhouette (no exact B-rep, or curved faces that this eye
+ * never turns away from -- a cube under any eye, a sphere seen from neither
+ * outside nor in) gives all-null and count 0, which is not an error and never
+ * touches `last_error`.
+ *
+ * A body this call cannot *measure* is a different answer: one with neither
+ * sampled space edges nor a declared bounding box gives no box to derive the
+ * eye's distance and the world tolerance from, and is **refused** with
+ * `last_error` set, rather than answered for. Check `last_error` to tell that
+ * apart from the empty answer above, which leaves it alone. A whole-scene
+ * drawing can still draw such a body's silhouette, because it frames the
+ * scene rather than the body.
+ *
+ * # Safety
+ * `scene` null or from `cadaclysm_open`; `options` null or a struct filled by
+ * [`cadaclysm_svg_options_init`].
+ */
+struct CadaclysmBeziers64 cadaclysm_node_silhouette_beziers(const struct CadaclysmScene *scene,
+                                                            uint32_t node,
+                                                            const struct CadaclysmSvgOptions *options);
 
 /**
  * Split a mesh into meshlets, optionally with the coarser levels above them.

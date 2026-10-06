@@ -82,6 +82,107 @@ using (var mechanism = Cadaclysm.Cadaclysm.Open(mechanismPath))
         || values[0].Values.Count != 1 || !Close(values[0].Values[0], 0.5))
         return Fail("state open does not set hinge to [0.5]");
     Console.WriteLine($"pair: {pair.Kind}, freedoms {freedoms.Count}, states {states.Count}");
+
+    // Posing: Scene.Base/Pose/PoseState and Pose, at parity with the Python reference's six
+    // pose facts (mechanism.stp declares no base; base=links[0], arm=links[1]).
+    var baseLink = links[0];
+    var armLink = links[1];
+    var armNode = armLink.Nodes[0];
+    var baseNode = baseLink.Nodes[0];
+    (double X, double Y, double Z) Apply(double[,] m, double x, double y, double z) => (
+        m[0, 0] * x + m[0, 1] * y + m[0, 2] * z + m[0, 3],
+        m[1, 0] * x + m[1, 1] * y + m[1, 2] * z + m[1, 3],
+        m[2, 0] * x + m[2, 1] * y + m[2, 2] * z + m[2, 3]);
+    if (mechanism.Base is not null) return Fail("mechanism.stp declares a base but declares none");
+    var posedState = mechanism.PoseState(states[0]);
+    if (posedState.Ground.Index != baseLink.Index) return Fail("pose_state's ground is not the base link");
+    if (posedState.Unsolved.Count != 0 || posedState.OutOfRange.Count != 0) return Fail("pose_state reports unsolved or out-of-range joints");
+    const double q = 0.5; // the arm is the joint's start, reached from its end: it turns by -q
+    var armTip = Apply(posedState.Transform(armNode), 10, 0, 0);
+    if (!Close(armTip.X, 10 * Math.Cos(q)) || !Close(armTip.Y, -10 * Math.Sin(q)) || !Close(armTip.Z, 100))
+        return Fail("pose_state does not turn the arm by -0.5");
+    var armOrigin = Apply(posedState.Transform(armNode), 0, 0, 0);
+    if (!Close(armOrigin.X, 0) || !Close(armOrigin.Y, 0) || !Close(armOrigin.Z, 100))
+        return Fail("pose_state's arm origin is not (0, 0, 100)");
+    if (!posedState.RawTransform(baseNode).SequenceEqual(baseNode.RawTransform))
+        return Fail("pose_state moves the ground link's own node");
+
+    var pastRange = mechanism.Pose(new[] { (joint, (IReadOnlyList<double>)new double[] { 2.0 }) });
+    if (pastRange.OutOfRange.Count != 1 || pastRange.OutOfRange[0].Joint.Index != joint.Index
+        || pastRange.OutOfRange[0].Freedom != 0 || !Close(pastRange.OutOfRange[0].Value, 2.0))
+        return Fail("pose does not report the out-of-range value");
+    var pastRangeTip = Apply(pastRange.Transform(armNode), 10, 0, 0);
+    if (!Close(pastRangeTip.X, 10 * Math.Cos(2.0)) || !Close(pastRangeTip.Y, -10 * Math.Sin(2.0)) || !Close(pastRangeTip.Z, 100))
+        return Fail("pose does not use the out-of-range value");
+
+    var groundedOnArm = mechanism.Pose(new[] { (joint, (IReadOnlyList<double>)new double[] { 0.5 }) }, armLink);
+    if (groundedOnArm.Ground.Index != armLink.Index) return Fail("pose does not hold the named ground");
+    if (!groundedOnArm.RawTransform(armNode).SequenceEqual(armNode.RawTransform))
+        return Fail("pose does not leave the named ground at its rest transform");
+
+    var fromStateValues = mechanism.Pose(values);
+    if (!fromStateValues.RawTransform(armNode).SequenceEqual(posedState.RawTransform(armNode)))
+        return Fail("pose(state.Values) does not match pose_state(state)");
+    var rest = mechanism.Pose(Array.Empty<(Joint, IReadOnlyList<double>)>());
+    foreach (var node in mechanism.Nodes)
+        if (!rest.RawTransform(node).SequenceEqual(node.RawTransform))
+            return Fail("pose([]) does not leave every node at its rest transform");
+
+    try
+    {
+        mechanism.Pose(new[] { (joint, (IReadOnlyList<double>)new double[] { 1.0, 2.0 }) });
+        return Fail("a joint given the wrong number of values was accepted");
+    }
+    catch (CadaclysmException e) when (e.Message.Contains("takes 1 value(s)")) { }
+    Console.WriteLine($"pose: base={mechanism.Base}, ground={posedState.Ground.Name}, out-of-range {pastRange.OutOfRange.Count}");
+}
+// Motion sequences: samples/mechanism-sequence.stp's two sequences, at parity with the
+// Python reference (plan 2026-10-05-motion-sequences-2).
+var sequencePath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path))!, "mechanism-sequence.stp");
+using (var sequenceScene = Cadaclysm.Cadaclysm.Open(sequencePath))
+{
+    var sequences = sequenceScene.Sequences;
+    if (sequences.Count != 2 || sequences[0].Name != "swing" || sequences[1].Name != "snap")
+        return Fail("sequences: the file does not carry swing then snap");
+    var swing = sequences[0];
+    var snap = sequences[1];
+    if (!swing.Closed || swing.SecondsPerUnit != 1.0) return Fail("sequences: swing is not closed at 1 second per unit");
+    if (snap.Closed || snap.SecondsPerUnit is not null) return Fail("sequences: snap is not open with no unit");
+    var wantSwing = new (string State, double T, string Interpolation)[] { ("shut", 0, "linear"), ("open", 1, "synchronous"), ("wide", 2, "linear") };
+    var gotSwing = swing.Segments.Select(g => (g.State.Name, g.T, g.Interpolation)).ToArray();
+    if (!gotSwing.SequenceEqual(wantSwing)) return Fail("sequences: swing's segments are " + string.Join(", ", gotSwing));
+    var wantSnap = new (string State, double T, string Interpolation)[] { ("shut", 0, "discontinuous"), ("wide", 0.5, "discontinuous") };
+    var gotSnap = snap.Segments.Select(g => (g.State.Name, g.T, g.Interpolation)).ToArray();
+    if (!gotSnap.SequenceEqual(wantSnap)) return Fail("sequences: snap's segments are " + string.Join(", ", gotSnap));
+    if (swing.Start != 0 || swing.End != 2) return Fail("sequences: swing does not run 0 to 2");
+    foreach (var seg in swing.Segments)
+    {
+        var at = swing.Pose(seg.T);
+        var want = sequenceScene.PoseState(seg.State);
+        foreach (var node in sequenceScene.Nodes)
+            if (!at.RawTransform(node).SequenceEqual(want.RawTransform(node)))
+                return Fail($"sequences: swing at {seg.T} does not match state {seg.State.Name}");
+    }
+    try
+    {
+        swing.Pose(double.NaN);
+        return Fail("sequences: pose(NaN) was accepted");
+    }
+    catch (CadaclysmException e) when (e.Message.Contains("the sequence parameter must be a finite number")) { }
+    Console.WriteLine("sequences: swing and snap read as the file records them, and swing poses at each keyframe");
+}
+
+// pose([]) on the cube sample (no mechanism) fails with a message naming that, as the
+// Python reference's test_a_bad_pose_raises checks on the same file.
+var cubePath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path))!, "cube.scad");
+using (var cubeScene = Cadaclysm.Cadaclysm.Open(cubePath))
+{
+    try
+    {
+        cubeScene.Pose(Array.Empty<(Joint, IReadOnlyList<double>)>());
+        return Fail("pose([]) on a file without a mechanism was accepted");
+    }
+    catch (CadaclysmException e) when (e.Message.Contains("no mechanism")) { }
 }
 scene.ForgetMeshes();
 if (scene.Query("class == solid").Count == 0 || scene.Walk().Where(n => n.CanMesh).Sum(n => (long)(n.Mesh?.TriangleCount ?? 0)) != triangles) return Fail("forget_meshes did not rebuild");
@@ -116,6 +217,27 @@ var sceneBounds64 = scene.Bounds64;
 if ((float)sceneBounds64.Max[0] != bounds.Max[0] || (float)sceneBounds64.Max[1] != bounds.Max[1] || (float)sceneBounds64.Max[2] != bounds.Max[2])
     return Fail("scene bounds64's max does not equal bounds's max widened");
 Console.WriteLine($"reader f64 twins: mesh64 {mesh64.TriangleCount} triangles, edgeBeziers64 {edgeBeziers64.Count}, bounds64 max ({sceneBounds64.Max[0]},{sceneBounds64.Max[1]},{sceneBounds64.Max[2]})");
+// ForgetMeshes frees the document's own mesh, which Mesh64 lends, so a Mesh64 made before
+// the forget throws a stale view rather than being read. The float mesh and the edge views
+// are the scene's own caches and survive it, as the C ABI says they do -- they must not be
+// reported stale, nor must the node.
+{
+    var lent = first.Mesh64!;
+    var keptMesh = first.Mesh!;
+    var keptEdges = first.Edges;
+    var lentTriangles = lent.TriangleCount;
+    var early = lent.Copy();
+    scene.ForgetMeshes();
+    try { _ = lent.Positions; return Fail("a Mesh64 read after ForgetMeshes did not throw"); }
+    catch (CadaclysmException e) when (e.Message.Contains("forgotten")) { }
+    try { _ = lent.Copy(); return Fail("a Mesh64 copied after ForgetMeshes did not throw"); }
+    catch (CadaclysmException e) when (e.Message.Contains("forgotten")) { }
+    if (keptMesh.Positions.Length != keptMesh.VertexCount * 3 || keptEdges.Positions.IsEmpty || !first.CanMesh)
+        return Fail("ForgetMeshes staled the float mesh, an edge view or the node");
+    var relent = first.Mesh64!;
+    if (relent.TriangleCount != lentTriangles || !relent.Positions.SequenceEqual(early.Positions))
+        return Fail("a Mesh64 asked for after ForgetMeshes does not read");
+}
 var fit = first.Collision();
 if (fit is null || fit.Error != 0 || fit.Frame.Length != 16 || fit.HullVertexCount != 8) return Fail("the collision fit is off");
 if (first.CollisionHull().VertexCount != 8 || first.CollisionHull().Indices.Length != 36) return Fail("the collision hull is off");
@@ -257,6 +379,199 @@ using var outline = rect.WithHole(hole);
     catch (BuildException e) when (e.Message.Contains("profile_common: tolerance must be positive and finite")) { }
     Console.WriteLine($"common: one lens, {lensSolid.Faces} faces extruded");
 }
+// Machining: the Python SDK's to_arcs, offset and section, then Tool, Stock and Job -- the
+// fixtures of test_cadaclysm_blacksmith.py's "machining" block and Node's pocketedBlock on.
+// A profile is measured by extruding it 1 and reading the solid's bounds.
+{
+    using var rect2010 = Profile.Rect(20, 10);
+    var grown = rect2010.Offset(2);
+    if (grown.Count != 1 || !Near(Footprint(grown[0]), new[] { -12.0, 12, -7, 7 }, 1e-3))
+        return Fail($"offset: grown by 2 is {grown.Count} profile(s)"
+            + (grown.Count == 1 ? $", footprint {string.Join(", ", Footprint(grown[0]))}" : ""));
+    var shrunk = rect2010.Offset(-2);
+    if (shrunk.Count != 1 || !Near(Footprint(shrunk[0]), new[] { -8.0, 8, -3, 3 }, 1e-3))
+        return Fail($"offset: shrunk by 2 is {shrunk.Count} profile(s)"
+            + (shrunk.Count == 1 ? $", footprint {string.Join(", ", Footprint(shrunk[0]))}, not [-8, 8, -3, 3]" : ", not one profile over [-8, 8, -3, 3]"));
+    if (rect2010.Offset(-6).Count != 0) return Fail("offset: a shrink past half the width left something");
+    try { rect2010.Offset(double.NaN); return Fail("offset: a NaN distance was accepted"); }
+    catch (BuildException e) when (e.Message == "profile_offset: distance must be finite") { }
+    Console.WriteLine("offset: grown to [-12, 12, -7, 7], shrunk to [-8, 8, -3, 3], eaten at -6, NaN refused");
+
+    using var spline = Profile.Spline(new[] { (0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0) }, closed: true);
+    using var fitted = spline.ToArcs(0.01);
+    if (!Near(Footprint(fitted), Footprint(spline), 0.011))
+        return Fail($"to_arcs: the fit's footprint {string.Join(", ", Footprint(fitted))} is not within 0.011 of the spline's");
+    try { spline.ToArcs(0); return Fail("to_arcs: a zero tolerance was accepted"); }
+    catch (BuildException e) when (e.Message == "profile_to_arcs: tolerance must be positive and finite") { }
+    Console.WriteLine("to_arcs: the fit bounds the spline within 0.011, zero tolerance refused");
+
+    using var box2010 = Solid.Cuboid(20, 10, 5);
+    var middle = box2010.Section(0);
+    if (middle.Count != 1 || !Near(Footprint(middle[0]), new[] { -10.0, 10, -5, 5 }, 1e-3))
+        return Fail($"section: the box's middle is {middle.Count} profile(s)"
+            + (middle.Count == 1 ? $", footprint {string.Join(", ", Footprint(middle[0]))}, not [-10, 10, -5, 5]" : ", not one profile over [-10, 10, -5, 5]"));
+    if (box2010.Section(50).Count != 0) return Fail("section: a plane missing the box cut something");
+    try { box2010.Section(2.5); return Fail("section: a plane on the top face was accepted"); }
+    catch (BuildException e) when (e.Message == "solid_section: a face lies in the plane -- section a little above or below it") { }
+    Console.WriteLine("section: the box's middle, a miss above it, a face in the plane refused");
+}
+{
+    // The pocketed block: a 6 mm end mill is too big for the pocket's four square corners.
+    using var block = PocketedBlock();
+    using var endMill = Tool.Flat(1, 6, 20, 800, 200, 12000);
+    using var job = new Job(Stock.Around(block, 2), 30);
+    var report = job.Machine(block, endMill);
+    if (report.Count != 4) return Fail($"machine: the pocketed block reports {report.Count} item(s), not 4:\n{report}");
+    if (report.ToString() != report.Text || report.Text.Split('\n').Length != 4)
+        return Fail($"machine: the report's text is not four lines:\n{report.Text}");
+    foreach (var item in report)
+        if (item.Kind != "corner" || !(item.Size > 0) || item.Region.Count == 0 || item.Reason.Length == 0
+            || !double.IsFinite(item.At.X) || !double.IsFinite(item.At.Y) || !double.IsFinite(item.At.Z))
+            return Fail($"machine: {item} is not a corner with a location, a size and a region");
+    var ops = job.Operations();
+    if (ops.Count == 0 || ops.Any(o => o.Kind.Length == 0 || o.Tool != 1 || o.Params.Count == 0))
+        return Fail("machine: the pocketed block's operations are missing a kind, a tool or params");
+    Console.WriteLine($"machine: the pocketed block leaves four corners, {ops.Count} operations ({report[0]})");
+
+    // A drill as the end mill is refused, and leaves the job as it was.
+    using var drill5 = Tool.Drill(2, 5, 30, 150, 3000);
+    using var fresh = new Job(Stock.Around(block, 2), 30);
+    try { fresh.Machine(block, drill5); return Fail("machine: a drill as the end mill was accepted"); }
+    catch (BuildException e) when (e.Message.Contains("end mill must not be a drill")) { }
+    if (fresh.Operations().Count != 0) return Fail("machine: a refused call changed the job");
+
+    // A disposed job refuses every later call.
+    fresh.Dispose();
+    fresh.Dispose();   // idempotent
+    if (!fresh.Closed) return Fail("job: disposed but not closed");
+    foreach (var (what, call) in new (string, Action)[]
+             {
+                 ("machine", () => fresh.Machine(block, endMill)),
+                 ("operations", () => fresh.Operations()),
+                 ("gcode", () => fresh.Gcode()),
+             })
+    {
+        try { call(); return Fail($"job: {what}() after Dispose() was accepted"); }
+        catch (ObjectDisposedException e) when (e.Message.Contains("job: closed")) { }
+    }
+    Console.WriteLine("machine: a drill as the end mill refused, the job unchanged; a disposed job refuses");
+}
+{
+    // The plate of spec 2026-09-28: machined cleanly by one end mill and one drill.
+    using var plateOutline = Profile.Rect(80, 50).Round(6);
+    var platePart = Solid.Extrude(plateOutline, Frame.Xy(), 12);
+    using (var pocketOutline = Profile.Rect(40, 24).Round(4).WithHole(Profile.Circle(5)))
+    using (var pocket = Solid.Extrude(pocketOutline, Frame.Xy((0, 0, 7)), 5))
+    using (var was = platePart)
+        platePart = was.Cut(pocket);
+    foreach (var x in new[] { -32.0, 32.0 })
+        foreach (var y in new[] { -17.0, 17.0 })
+            using (var was = platePart)
+            using (var bore = Solid.Cylinder(3, 12).Translate(x, y, 0))
+                platePart = was.Cut(bore);
+    using var plateSolid = platePart;
+    using var endMill = Tool.Flat(1, 6, 20, 800, 200, 12000);
+    using var drill = Tool.Drill(2, 6, 30, 150, 3000);
+    using var job = new Job(Stock.Around(plateSolid, 3), 25, 1.0, 0.01, "plate");
+    var report = job.Machine(plateSolid, endMill, new[] { drill });
+    if (report.Count != 0 || report.ToString() != "nothing left uncut") return Fail($"plate: the report is not empty:\n{report}");
+    var ops = job.Operations();
+    if (ops[0].Kind != "face" || !ops.Any(o => o.Kind == "pocket") || ops[^1].Kind != "drill")
+        return Fail($"plate: the operations run {string.Join(", ", ops.Select(o => o.Kind))}");
+    if (ops[^1].Params["points"] != 4 || !ops[^1].Params.ContainsKey("peck") || ops[^1].Params["peck"] is not null)
+        return Fail($"plate: the drill's params are {ops[^1]}");
+    var programs = job.Gcode();
+    if (programs.Count != 2 || programs.Any(p => p.Tool < 1 || p.Name.Length == 0 || p.Text.Length == 0))
+        return Fail($"plate: gcode() gives {string.Join(", ", programs)}");
+    var folder = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"cadaclysm-smoke-cam-{Environment.ProcessId}");
+    try
+    {
+        var written = job.WriteCamotics(System.IO.Path.Combine(folder, "plate.camotics"));
+        if (written.Count == 0 || !written.All(File.Exists) || !written[^1].EndsWith("plate.camotics"))
+            return Fail($"plate: write_camotics wrote {string.Join(", ", written)}");
+        Console.WriteLine($"plate: nothing left uncut, {ops.Count} operations, {programs.Count} programs, {written.Count} CAMotics files");
+    }
+    finally
+    {
+        if (Directory.Exists(folder)) Directory.Delete(folder, true);
+    }
+}
+{
+    // The four verbs by hand -- the spec's own example -- and the refusals in the kernel's words.
+    using var specOutline = Profile.Rect(60, 40).Round(5);
+    using var specPart = Solid.Extrude(specOutline, Frame.Xy(), 20);
+    using var end = Tool.Flat(1, 6, 20, 800, 200, 12000);
+    using var drill = Tool.Drill(2, 5, 30, 150, 3000);
+    using var job = new Job(Stock.Around(specPart, 2), 30);
+    job.Face(end, 20, 3, 1);
+    job.Contour(end, specOutline, 20, 0, "outside", 2);
+    using (var level = specPart.Section(15)[0])
+        job.Pocket(end, level, 20, 10, 2.4, 2);
+    job.Drill(drill, new[] { (10.0, 10.0), (40.0, 10.0) }, 20, -1, peck: 3);
+    var programs = job.Gcode();
+    if (!programs.Select(p => (p.Tool, p.Name)).SequenceEqual(new[] { (1, "job-T1"), (2, "job-T2") })
+        || !programs[0].Text.StartsWith("(cadaclysm: job-T1, T1 flat D6)\n")
+        || !programs[1].Text.StartsWith("(cadaclysm: job-T2, T2 drill D5)\n"))
+        return Fail($"job: the spec example's programs are {string.Join(", ", programs)}");
+    var kinds = job.Operations().Select(o => o.Kind).ToArray();
+    if (!kinds.SequenceEqual(new[] { "face", "contour", "pocket", "drill" })) return Fail($"job: the operations are {string.Join(", ", kinds)}");
+    var drilled = job.Operations()[3].Params;
+    if (drilled["peck"] != 3 || drilled["points"] != 2) return Fail($"job: the drill's params are {job.Operations()[3]}");
+
+    using var stock = Stock.Box((-15, -10, 0), (15, 10, 10));
+    using var square = Profile.Rect(20, 10);
+    foreach (var (make, text) in new (Action, string)[]
+             {
+                 (() => Tool.Flat(0, 6, 20, 800, 200, 12000), "tool: number must be at least 1"),
+                 (() => Tool.Ball(1, 6, 20, 800, 200, 12000, rampAngle: 91), "tool: ramp angle must be in (0, 90] degrees"),
+                 (() => Stock.Box((0, 0, 0), (0, 10, 10)), "stock: min must be below max on every axis, all finite"),
+                 (() => new Job(stock, 5), "job: safe z must be above the stock's top"),
+                 (() => new Job(stock, 30, clearance: 0), "job: clearance must be positive and finite"),
+                 (() => new Job(stock, 30, name: "a/b"), "job: a name must be non-empty and without brackets"),
+                 (() => new Job(stock, 30, name: "a\0b"), "job: a name must be non-empty and without brackets"),
+             })
+    {
+        try { make(); return Fail($"cam: \"{text}\" was accepted"); }
+        catch (BuildException e) when (e.Message.StartsWith(text)) { }
+    }
+    using var empty = new Job(stock, 30);
+    foreach (var (add, text) in new (Action, string)[]
+             {
+                 (() => empty.Contour(drill, square, 10, 5), "contour: a drill only drills"),
+                 (() => empty.Drill(end, new[] { (0.0, 0.0) }, 10, 5), "drill: drilling needs a drill"),
+                 (() => empty.Drill(drill, Array.Empty<(double, double)>(), 10, 5), "drill: there are no points"),
+                 (() => empty.Pocket(end, square, 10, 5, 4, 1), "pocket: stepover must be at most the tool's radius for a pocket"),
+                 (() => empty.Face(end, 11, 3, 1), "face: z must be finite and not above the stock's top"),
+             })
+    {
+        try { add(); return Fail($"cam: \"{text}\" was accepted"); }
+        catch (BuildException e) when (e.Message == text) { }
+    }
+    try { empty.Contour(end, square, 10, 5, side: "left"); return Fail("contour: side \"left\" was accepted"); }
+    catch (ArgumentException e) when (e.Message == "side must be 'outside', 'inside' or 'on'") { }
+    if (empty.Gcode().Count != 0) return Fail("cam: a refused operation changed the job");
+    // a NUL in a CAMotics stem is refused in the kernel's words, before the library; a stem that
+    // is all extension (".camotics") stays whole, as Python's Path.stem keeps it
+    const string nulName = "job: a name must be non-empty and without brackets, slashes, quotes, control characters, or : * ? < > |";
+    try { empty.WriteCamotics(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cadaclysm-nul", "a\0b.camotics")); return Fail("write_camotics: a NUL stem was accepted"); }
+    catch (BuildException e) when (e.Message == nulName) { }
+    {
+        using var dotJob = new Job(stock, 30);
+        dotJob.Face(end, 8, 3, 1);
+        var dotFolder = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"cadaclysm-smoke-dot-{Environment.ProcessId}");
+        try
+        {
+            var written = dotJob.WriteCamotics(System.IO.Path.Combine(dotFolder, ".camotics"));
+            if (written.Count < 2 || !System.IO.Path.GetFileName(written[0]).StartsWith(".camotics-T1"))
+                return Fail($"write_camotics: the stem of \".camotics\" is not kept: {string.Join(", ", written)}");
+        }
+        finally
+        {
+            if (Directory.Exists(dotFolder)) Directory.Delete(dotFolder, true);
+        }
+    }
+    Console.WriteLine("job: face, contour, pocket and drill by hand give two programs; every refusal in the kernel's words");
+}
 // Edge curves: a cylinder's rims are circles of its radius about a cap centre in a unit
 // frame, a whole turn each; a cuboid's edges are lines whose origin + x is the far end;
 // an extruded closed spline keeps a nurbs edge with knots = poles + degree + 1.
@@ -342,6 +657,32 @@ using var outline = rect.WithHole(hole);
         if (ring.Length < 3 || ring.Any(p => OnA(p) > 50 * tol || p[2] < 2 - 50 * tol || p[2] > 4 + 50 * tol))
             return Fail($"intersect: an overlap ring leaves the shared band: {shared.Overlaps[0]}");
     Console.WriteLine($"intersect: {found} ({ellipses} ellipses); {shared.Overlaps[0]}");
+}
+// The collider: two cuboids overlapping by 2 along x, plus one far away -> one hit (0, 1),
+// depth 2, Solid() non-null.
+{
+    var xy0 = new double[] { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    using var partA = Solid.Cuboid(4, 4, 4);
+    using var partB = Solid.Cuboid(4, 4, 4).Translate(2, 0, 0);
+    using var partC = Solid.Cuboid(4, 4, 4).Translate(100, 0, 0);
+    var boxA = partA.BoundsBox();
+    var boxB = partB.BoundsBox();
+    if (!boxA.Overlaps(boxB)) return Fail("collider: the two overlapping cuboids' bounds boxes do not overlap");
+    using var collider = new Collider(new[] { partA, partB, partC });
+    if (collider.GroupCount != 3) return Fail("collider: the group count is not one per part");
+    var hits = collider.Check(new[] { xy0, xy0, xy0 });
+    if (hits.Count != 1) return Fail($"collider: found other than one hit: {string.Join(", ", hits)}");
+    var hit = hits[0];
+    if (hit.A != 0 || hit.B != 1) return Fail($"collider: the hit does not name parts 0 and 1: {hit}");
+    if (!hit.Overlap || hit.Kind != "overlap" || hit.Text != "") return Fail($"collider: the hit is not a clean overlap: {hit}");
+    if (Math.Abs(hit.Depth - 2.0) > 1e-9) return Fail($"collider: the hit's depth is not exactly 2: {hit}");
+    using var overlapSolid = hit.Solid();
+    if (overlapSolid.Faces == 0) return Fail("collider: the hit's rebuilt solid has no faces");
+    var stats = collider.Stats;
+    if (stats.Considered != 3) return Fail($"collider: the stats do not consider all three pairs: {stats}");
+    try { new Collider(new[] { partA, partB, partC }, groups: new uint[] { 0, 1 }); return Fail("collider: a short groups list was accepted"); }
+    catch (BuildException e) when (e.Message.Contains("groups must have one entry per solid")) { }
+    Console.WriteLine($"collider: {hits.Count} hit(s), depth {hit.Depth}, {stats}");
 }
 // Solid x profile hits: a line through a cuboid pierces two faces and is cut into three
 // pieces, outside/inside/outside, the middle one spanning the box and sweeping; a loop no hit
@@ -536,6 +877,25 @@ if (!(blueEdge.EdgeColour(0) ?? []).SequenceEqual([0.2, 0.4, 1.0]) || !(blueEdge
 using var untouched = blueEdge.EdgesColoured(0.1, 0.1, 0.1, Array.Empty<int>());
 if (!(untouched.EdgeColour(0) ?? []).SequenceEqual([0.2, 0.4, 1.0]) || !(untouched.EdgeColour(1) ?? []).SequenceEqual([0.8, 0.6, 0.4]))
     return Fail("an empty edge list should colour nothing");
+// CSS colour names and hex forms reach Coloured/EdgesColoured the same way the numeric
+// triples do, and a name the parser doesn't know is refused with the wrapper's own text.
+using var redBox = Solid.Cuboid(1, 1, 1).Coloured("red");
+if (!(redBox.Colour ?? []).SequenceEqual([1.0, 0.0, 0.0])) return Fail("Coloured(\"red\") did not come back (1, 0, 0)");
+if (Solid.Cuboid(1, 1, 1).Coloured("#0f0").Colour![1] != 1.0) return Fail("Coloured(\"#0f0\") did not come back green");
+try { Solid.Cuboid(1, 1, 1).Coloured("notacolour"); return Fail("coloured: \"notacolour\" was accepted"); }
+catch (BuildException e) when (e.Message.Contains("a CSS colour name")) { }
+using var redEdgeBox = Solid.Cuboid(1, 1, 1).EdgesColoured("red");
+if (!(redEdgeBox.EdgeColour(0) ?? []).SequenceEqual([1.0, 0.0, 0.0])) return Fail("EdgesColoured(\"red\") did not come back (1, 0, 0)");
+using var blueEdgeByRef = redEdgeBox.EdgesColoured(new[] { redEdgeBox.Edges[0] }, "blue");
+if (!(blueEdgeByRef.EdgeColour(0) ?? []).SequenceEqual([0.0, 0.0, 1.0])) return Fail("EdgesColoured(edges, \"blue\") did not come back (0, 0, 1)");
+using var goldRectByName = Profile.Rect(10, 4).Coloured("#cc9966");
+if (!(goldRectByName.Colour ?? []).SequenceEqual(Blacksmith.Rgb("#cc9966", "coloured"))) return Fail("Profile.Coloured(string) did not carry through");
+if (Blacksmith.Packed("navy") != 0x000080u) return Fail("Blacksmith.Packed(\"navy\") is not 0x000080");
+// Packed takes no numeric triple of its own, so its refusal names only the text forms --
+// unlike Coloured/EdgesColoured's "notacolour" case above, it must not mention "0..1".
+try { Blacksmith.Packed("bogus"); return Fail("Blacksmith.Packed(\"bogus\") was accepted"); }
+catch (BuildException e) when (e.Message.Contains("not 'bogus'") && !e.Message.Contains("0..1")) { }
+Console.WriteLine("colour: CSS names and hex strings match the numeric overloads, an unknown name is refused");
 // A face: the outline as a sheet, which pushed out is the plate again.
 using var sheet = Solid.Face(outline, [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]);
 using var pushed = sheet.ExtrudeFaces(6);
@@ -632,6 +992,10 @@ using (var back = Cadaclysm.Cadaclysm.Open(step))
     {
         var read = brep.Manifold;
         if (!read.IsClosed || read.Faces != rounded.Faces) return Fail($"the read body is not the closed manifold written: {read}");
+        var (sewn, sew) = brep.Sewed();
+        using (sewn)
+            if (sew.FreeBefore != read.BoundaryEdges || brep.Manifold.BoundaryEdges != read.BoundaryEdges)
+                return Fail($"sewed reports {sew.FreeBefore} free edges before, the brep has {read.BoundaryEdges}");
     }
     using var imported = Solid.FromNode(back, node);
     back.Dispose();
@@ -1123,9 +1487,202 @@ using (var back = Cadaclysm.Cadaclysm.Open(step))
         Console.WriteLine("mechanism: read-back through arm.ToScene() matches links, joints and diagnostics");
     }
 
+    // Pairs: Assembly.Pair/Assembly.State/Assembly.Base and the free PairFreedomCount, at
+    // parity with the Python reference's _paired() fixture and its tests (spec 2026-09-29).
+    // Built on bracket/arm before "back" is added below: a joint with no pair refuses
+    // StepText(), so facts 1-6 and 9's diagnostics check need arm without it.
+    static bool NearValue(double a, double b) => Math.Abs(a - b) <= 1e-9;
+
+    mechBracket.Pair("screw", "prismatic", Frame.Xy((1, 2, 3)), endFrame: Frame.Xy((4, 2, 3)));
+    arm.Pair("shoulder", "revolute", Frame.Xy((0, 0, 10)), ranges: new (double? Lower, double? Upper)[] { (-1.5, 1.5) });
+    arm.State("reach", new (string Joint, IReadOnlyList<double> Values)[] { ("shoulder", new double[] { 0.5 }) });
+    arm.Base("ground");
+
+    // Fact 1: the pair/state entity counts in the default schema.
+    var pairedStepText = arm.StepText();
+    var mechReprCount = CountOf(pairedStepText, "=MECHANISM_REPRESENTATION(");
+    var pairRelCount = CountOf(pairedStepText, "=PAIR_REPRESENTATION_RELATIONSHIP(");
+    var revoluteRangeCount = CountOf(pairedStepText, "REVOLUTE_PAIR_WITH_RANGE");
+    var prismaticCount = CountOf(pairedStepText, "PRISMATIC_PAIR");
+    var kinPropCount = CountOf(pairedStepText, "=KINEMATIC_PROPERTY_MECHANISM_REPRESENTATION(");
+    var mechStateCount = CountOf(pairedStepText, "=MECHANISM_STATE_REPRESENTATION(");
+    if (mechReprCount != 2 || pairRelCount != 2 || revoluteRangeCount != 1 || prismaticCount != 1
+        || kinPropCount != 1 || mechStateCount != 1)
+        return Fail($"pairs: arm.StepText() has {mechReprCount} mechanism reps, {pairRelCount} pair rels, " +
+            $"{revoluteRangeCount} revolute-with-range, {prismaticCount} prismatic, {kinPropCount} kinematic " +
+            $"property reps, {mechStateCount} mechanism states, not 2/2/1/1/1/1");
+    Console.WriteLine($"pairs: arm.StepText() writes {mechReprCount} mechanism reps, {pairRelCount} pair rels, " +
+        $"{revoluteRangeCount} revolute-with-range, {prismaticCount} prismatic, {kinPropCount} kinematic " +
+        $"property reps, {mechStateCount} mechanism states");
+
+    // Facts 2-6 and 9 (diagnostics half): read back through the reader.
+    using (var pairedScene = arm.ToScene())
+    {
+        var shoulder = pairedScene.Joints.Single(j => j.Name == "shoulder");
+        var shoulderPair = shoulder.Pair ?? throw new Exception("pairs: shoulder has no pair");
+        if (shoulderPair.Kind != PairKind.Revolute) return Fail("pairs: shoulder's pair is not revolute");
+        foreach (var frame in new[] { shoulderPair.FrameStart, shoulderPair.FrameEnd })
+            if (!NearValue(frame[0, 3], 0.0) || !NearValue(frame[1, 3], 0.0) || !NearValue(frame[2, 3], 10.0)
+                || !NearValue(frame[0, 2], 0.0) || !NearValue(frame[1, 2], 0.0) || !NearValue(frame[2, 2], 1.0))
+                return Fail("pairs: shoulder's pair frames are not at (0,0,10) with z (0,0,1)");
+        var shoulderFreedoms = shoulderPair.Freedoms;
+        if (shoulderFreedoms.Count != 1 || shoulderFreedoms[0].Motion != Motion.Rotation
+            || shoulderFreedoms[0].Axis != FreedomAxis.Z
+            || shoulderFreedoms[0].Lower is not { } shoulderLower || !NearValue(shoulderLower, -1.5)
+            || shoulderFreedoms[0].Upper is not { } shoulderUpper || !NearValue(shoulderUpper, 1.5))
+            return Fail("pairs: shoulder's pair is not one rotation-about-z freedom ranged [-1.5, 1.5]");
+        Console.WriteLine("pairs: shoulder's pair is revolute, one rotation-about-z freedom ranged [-1.5, 1.5]");
+
+        var screw = pairedScene.Joints.Single(j => j.Name == "screw");
+        var screwPair = screw.Pair ?? throw new Exception("pairs: screw has no pair");
+        if (screwPair.Kind != PairKind.Prismatic) return Fail("pairs: screw's pair is not prismatic");
+        if (screwPair.Freedoms.Any(f => f.Lower is not null || f.Upper is not null))
+            return Fail("pairs: screw's pair has a ranged freedom");
+        if (!NearValue(screwPair.FrameStart[0, 3], 1.0) || !NearValue(screwPair.FrameStart[1, 3], 2.0) || !NearValue(screwPair.FrameStart[2, 3], 13.0)
+            || !NearValue(screwPair.FrameEnd[0, 3], 4.0) || !NearValue(screwPair.FrameEnd[1, 3], 2.0) || !NearValue(screwPair.FrameEnd[2, 3], 13.0))
+            return Fail("pairs: screw's pair frames are not (1,2,13) to (4,2,13)");
+        Console.WriteLine("pairs: screw's pair is prismatic with no ranges, frames (1,2,13) to (4,2,13)");
+
+        if (pairedScene.Base is not { } pairedBaseLink || pairedBaseLink.Name != "ground")
+            return Fail("pairs: the scene's base is not 'ground'");
+        var pairedStates = pairedScene.States;
+        if (pairedStates.Count != 1 || pairedStates[0].Name != "reach")
+            return Fail("pairs: the scene does not carry exactly one state named 'reach'");
+        var reachValues = pairedStates[0].Values;
+        if (reachValues.Count != 1 || reachValues[0].Joint.Name != "shoulder"
+            || reachValues[0].Values.Count != 1 || !NearValue(reachValues[0].Values[0], 0.5))
+            return Fail("pairs: state 'reach' is not exactly one row (shoulder, [0.5])");
+        Console.WriteLine("pairs: the scene's base is 'ground', with one state 'reach' of (shoulder, [0.5])");
+
+        // Fact 5: pose_state(reach) carries the pin node to (5cos0.5-5sin0.5, 5sin0.5+5cos0.5, 2).
+        var reachPose = pairedScene.PoseState(pairedStates[0]);
+        var upperArmLink = pairedScene.Links.Single(l => l.Name == "upper arm");
+        var pinNode = upperArmLink.Nodes.Single(n => NearValue(n.Transform[0, 3], 5.0) && NearValue(n.Transform[1, 3], 5.0) && NearValue(n.Transform[2, 3], 2.0));
+        var posedPin = reachPose.Transform(pinNode);
+        var wantX = 5 * Math.Cos(0.5) - 5 * Math.Sin(0.5);
+        var wantY = 5 * Math.Sin(0.5) + 5 * Math.Cos(0.5);
+        if (!NearValue(posedPin[0, 3], wantX) || !NearValue(posedPin[1, 3], wantY) || !NearValue(posedPin[2, 3], 2.0))
+            return Fail("pairs: pose_state(reach) did not carry the pin node to the expected point");
+        Console.WriteLine("pairs: pose_state(reach) carries the pin node to the expected point");
+
+        // Fact 6: pose([(screw, [3.0])]) leaves every 'bolts' node at rest; [5.0] moves by (2,0,0).
+        var pose3 = pairedScene.Pose(new[] { (screw, (IReadOnlyList<double>)new double[] { 3.0 }) });
+        var pose5 = pairedScene.Pose(new[] { (screw, (IReadOnlyList<double>)new double[] { 5.0 }) });
+        var bolts = pairedScene.Links.Single(l => l.Name == "bolts");
+        foreach (var node in bolts.Nodes)
+        {
+            var rest = node.Transform;
+            var at3 = pose3.Transform(node);
+            var at5 = pose5.Transform(node);
+            if (!NearValue(at3[0, 3], rest[0, 3]) || !NearValue(at3[1, 3], rest[1, 3]) || !NearValue(at3[2, 3], rest[2, 3]))
+                return Fail("pairs: pose([(screw, [3.0])]) moved a 'bolts' node off rest");
+            if (!NearValue(at5[0, 3], rest[0, 3] + 2.0) || !NearValue(at5[1, 3], rest[1, 3]) || !NearValue(at5[2, 3], rest[2, 3]))
+                return Fail("pairs: pose([(screw, [5.0])]) did not move a 'bolts' node by (2,0,0)");
+        }
+        Console.WriteLine("pairs: pose([(screw, [3.0])]) rests, pose([(screw, [5.0])]) moves 'bolts' by (2,0,0)");
+
+        // Fact 9 (diagnostics half): no diagnostic names kinematics.
+        if (pairedScene.Diagnostics.Any(d => d.StartsWith("kinematics:")))
+            return Fail("pairs: the paired scene carries a kinematics: diagnostic");
+    }
+
+    // Motion sequences, written: a state rest and a swing over rest and reach, read back.
+    arm.State("rest", new (string Joint, IReadOnlyList<double> Values)[] { ("shoulder", new double[] { 0.0 }) });
+    arm.Sequence("swing", new (string State, double T, string Interpolation)[] { ("rest", 0.0, "linear"), ("reach", 1.0, "linear") }, seconds: true);
+    using (var swingScene = arm.ToScene())
+    {
+        var written = swingScene.Sequences;
+        if (written.Count != 1 || written[0].Name != "swing" || !written[0].Closed || written[0].SecondsPerUnit != 1.0)
+            return Fail("sequences: the written swing did not read back closed at 1 second per unit");
+        var writtenSegments = written[0].Segments.Select(g => (g.State.Name, g.T, g.Interpolation)).ToArray();
+        if (!writtenSegments.SequenceEqual(new (string, double, string)[] { ("rest", 0, "linear"), ("reach", 1, "linear") }))
+            return Fail("sequences: the written swing's segments are " + string.Join(", ", writtenSegments));
+    }
+    try
+    {
+        arm.Sequence("bad", new (string State, double T, string Interpolation)[] { ("rest", 0.0, "linear"), ("nowhere", 1.0, "linear") });
+        return Fail("sequences: a sequence over an unknown state was accepted");
+    }
+    catch (BuildException e) when (e.Message == "sequence: assembly 'arm' has no state named 'nowhere'") { }
+    Console.WriteLine("sequences: Assembly.Sequence round-trips and refuses an unknown state exactly");
+
     // Fact 4: the reverse pair is a new joint.
     arm.Joint("back", "upper arm", "ground");
     Console.WriteLine("mechanism: the reverse pair (\"back\") is accepted as a new joint");
+
+    // Fact 7: the eight bad pair/state/base calls are refused with exactly their message,
+    // and Fact 8's unpaired-joint refusal ("back" has no pair) stays byte-identical before
+    // and after -- proof none of them mutated "back", or anything else StepText() would
+    // notice, even though a wholly valid StepText() snapshot is unavailable while "back" has
+    // no pair.
+    string PairedUnpairedMessage()
+    {
+        try { arm.StepText(); throw new Exception("pairs: arm.StepText() with an unpaired joint 'back' was accepted"); }
+        catch (BuildException e) { return e.Message; }
+    }
+    var pairedBefore = PairedUnpairedMessage();
+    var pairRefusals = new (Action Call, string Message)[]
+    {
+        (() => arm.Pair("shoulder", "revolute", Frame.Xy((0, 0, 10))), "pair: joint 'shoulder' already has a pair"),
+        (() => arm.Pair("back", "orbital", Frame.Xy()),
+            "pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, spherical, " +
+            "spherical_with_pin, planar, universal, homokinetic, fully_constrained, unconstrained)"),
+        (() => arm.Pair("back", "screw", Frame.Xy()), "pair: a screw needs a non-zero pitch"),
+        (() => arm.Pair("back", "revolute", Frame.Xy(), ranges: new (double? Lower, double? Upper)[] { (-1, 1), (-1, 1) }),
+            "pair: 'revolute' has 1 freedoms, but 2 ranges were given"),
+        (() => arm.Pair("back", "revolute", Frame.Xy(), ranges: new (double? Lower, double? Upper)[] { (1, -1) }),
+            "pair: range 0 of joint 'back' has lower >= upper"),
+        (() => arm.Pair("back", "prismatic", Frame.At((0, 0, 0), (0, 0, 1), (0, 1, 0)), endFrame: Frame.Xy()),
+            "pair: joint 'back' is prismatic, but its end frame is turned 90° about -z, " +
+            "which prismatic (does not turn) cannot make"),
+        (() => arm.State("overreach", new (string Joint, IReadOnlyList<double> Values)[] { ("shoulder", new double[] { 5.0 }) }),
+            "state: value 0 of joint 'shoulder' is outside its range"),
+        (() => arm.Base("upper arm"), "base: assembly 'arm' already has base 'ground'"),
+    };
+    foreach (var (call, message) in pairRefusals)
+    {
+        try { call(); return Fail($"pairs: \"{message}\" was accepted"); }
+        catch (BuildException e) when (e.Message == message) { }
+    }
+    Console.WriteLine("pairs: all eight bad pair/state/base calls are refused with their exact message");
+
+    // Fact 8: after "back" alone (added above), StepText() is refused with exactly this
+    // message -- Fact 7 already computed it as the before/after snapshot; checked here
+    // against the brief's exact text.
+    const string NoPairMessage =
+        "assembly_step: assembly 'arm': joint 'back' has no pair; a mechanism with pairs needs one on every joint (AP242)";
+    if (pairedBefore != NoPairMessage)
+        return Fail($"pairs: StepText()'s unpaired-joint refusal is \"{pairedBefore}\", not the expected text");
+    var pairedAfter = PairedUnpairedMessage();
+    if (pairedAfter != pairedBefore) return Fail("pairs: a refused pair/state/base call changed the unpaired-joint refusal");
+    Console.WriteLine("pairs: joint 'back' with no pair refuses StepText() with exactly its message, unchanged by any refusal above");
+
+    // Fact 9 (freedom-count half): PairFreedomCount.
+    if (Blacksmith.PairFreedomCount("spherical") != 3 || Blacksmith.PairFreedomCount("revolute") != 1
+        || Blacksmith.PairFreedomCount("fully_constrained") != 0 || Blacksmith.PairFreedomCount("not_a_kind") != 0)
+        return Fail("pairs: Blacksmith.PairFreedomCount does not give 3/1/0/0 for spherical/revolute/fully_constrained/unknown");
+    Console.WriteLine("pairs: Blacksmith.PairFreedomCount gives 3/1/0/0 for spherical/revolute/fully_constrained/an unknown name");
+
+    // Fact 10 (controller ruling, added after review): a one-sided range survives the
+    // round trip. Without has_lower/has_upper actually carried (an implementation that
+    // always sends true for both would pass every other fact), joint "j"'s freedom would
+    // come back with a lower limit it was never given.
+    using (var hinge = new Assembly("hinge"))
+    {
+        hinge.Place(mechPlate, Frame.Xy(), "base");
+        hinge.Place(mechBolt, Frame.Xy((0, 0, 2)), "arm");
+        hinge.Link("base", "base");
+        hinge.Link("arm", "arm");
+        hinge.Joint("j", "base", "arm");
+        hinge.Pair("j", "revolute", Frame.Xy(), ranges: new (double? Lower, double? Upper)[] { (null, 1.0) });
+        using var hingeScene = hinge.ToScene();
+        var hingeJoint = hingeScene.Joints.Single(j => j.Name == "j");
+        var hingeFreedoms = (hingeJoint.Pair ?? throw new Exception("pairs: hinge joint 'j' has no pair")).Freedoms;
+        if (hingeFreedoms.Count != 1 || hingeFreedoms[0].Lower is not null
+            || hingeFreedoms[0].Upper is not { } hingeUpper || !NearValue(hingeUpper, 1.0))
+            return Fail("pairs: hinge joint 'j' is not one freedom with no lower limit and upper exactly 1.0");
+        Console.WriteLine("pairs: a one-sided range (no lower, upper 1.0) survives the round trip");
+    }
 }
 
 // SVG: the library's own camera, no viewer -- the reader (a scene, a node) and the kernel
@@ -1139,7 +1696,10 @@ var nodeSvgText = first.SvgText();
 if (!nodeSvgText.StartsWith("<svg") || !nodeSvgText.Contains("<path")) return Fail("node SVG text did not look like an SVG wireframe");
 try { scene.SvgText(new Cadaclysm.SvgOptions { Fov = 200 }); return Fail("scene svg: fov=200 was accepted"); }
 catch (CadaclysmException) { }
-Console.WriteLine("svg: scene and node text, file written, fov=200 refused");
+var namedSvgText = scene.SvgText(new Cadaclysm.SvgOptions { Stroke = "Red" });
+if (!namedSvgText.Contains("stroke=\"#ff0000\"")) return Fail("scene svg: Stroke = \"Red\" did not come back #ff0000");
+if (Cadaclysm.Cadaclysm.Packed("navy") != 0x000080u) return Fail("Cadaclysm.Packed(\"navy\") is not 0x000080");
+Console.WriteLine("svg: scene and node text, file written, fov=200 refused, a CSS colour name stroke");
 
 var solidSvgText = rounded.SvgText();
 if (!solidSvgText.StartsWith("<svg") || !solidSvgText.Contains("<path")) return Fail("solid SVG text did not look like an SVG wireframe");
@@ -1148,7 +1708,10 @@ rounded.Svg(solidSvgPath);
 if (new FileInfo(solidSvgPath).Length == 0) return Fail("Solid.Svg wrote an empty file");
 try { rounded.SvgText(new Cadaclysm.Blacksmith.SvgOptions { Fov = 200 }); return Fail("blacksmith svg: fov=200 was accepted"); }
 catch (BuildException) { }
-Console.WriteLine("blacksmith svg: solid text, file written, fov=200 refused");
+var paintedSvgText = rounded.SvgText(new Cadaclysm.Blacksmith.SvgOptions { Stroke = "red", Background = Blacksmith.Packed("navy") });
+if (!paintedSvgText.ToLowerInvariant().Contains("#ff0000")) return Fail("blacksmith svg: Stroke = \"red\" did not come back #ff0000");
+if (!paintedSvgText.Contains("#000080")) return Fail("blacksmith svg: Background = Packed(\"navy\") did not come back #000080");
+Console.WriteLine("blacksmith svg: solid text, file written, fov=200 refused, a CSS colour name stroke and Packed background");
 
 // A profile draws its own plane, top by default -- unlike a solid, a sketch has no camera-
 // facing convention of its own, so its plane (z = 0) is already the page. The default is
@@ -1177,3 +1740,20 @@ return 0;
 static int Fail(string why) { Console.Error.WriteLine(why); return 1; }
 static double Norm(double[] v) => Math.Sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
 static int CountOf(string haystack, string needle) => (haystack.Length - haystack.Replace(needle, "").Length) / needle.Length;
+// A profile's [x0, x1, y0, y1], read off the bounds of it extruded 1, at a fine tolerance.
+static double[] Footprint(Profile profile)
+{
+    using var solid = Workplane.Xy().Extrude(profile, 1).Solid();
+    var (lo, hi) = solid.BoundsAt(0.001);
+    return new[] { lo[0], hi[0], lo[1], hi[1] };
+}
+static bool Near(double[] a, double[] b, double tolerance) => a.Zip(b).All(p => Math.Abs(p.First - p.Second) <= tolerance);
+// A 40x30x10 block on z = 0 with a 20x10 pocket 8 deep: four corners a 6 mm end mill misses.
+static Solid PocketedBlock()
+{
+    using var block0 = Solid.Cuboid(40, 30, 10);
+    using var block = block0.Translate(0, 0, 5);
+    using var pocket0 = Solid.Cuboid(20, 10, 8);
+    using var pocket = pocket0.Translate(0, 0, 6);
+    return block.Cut(pocket);
+}

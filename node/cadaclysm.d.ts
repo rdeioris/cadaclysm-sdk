@@ -1,4 +1,5 @@
 /// <reference types="node" />
+import type { ShowOptions, Camera } from './cadaclysm_view';
 /** The cadaclysm C ABI for Node.js. See cadaclysm.js for the semantics. */
 
 // `Symbol.dispose` (explicit resource management) is TS >= 5.2 and needs the
@@ -40,7 +41,7 @@ export interface SvgOptions {
   margin?: number;
   /** How far a written curve may stray, in page units. Default 0.1. */
   tolerance?: number;
-  /** `'#rgb'`, `'#rrggbb'` or `[r, g, b]` in 0..255. Default '#000000'. */
+  /** `'#rgb'`, `'#rrggbb'`, a CSS colour name or `[r, g, b]` in 0..255. Default '#000000'. */
   stroke?: string | ArrayLike<number>;
   /** The pen's width, page units. Default 1. */
   strokeWidth?: number;
@@ -54,9 +55,17 @@ export interface SvgOptions {
   isocurves?: boolean;
   /** Straight segments within `tolerance` instead of fitted Béziers. Default false. */
   polylines?: boolean;
+  /**
+   * Also draw where each body's surfaces turn away from the eye -- the outline a
+   * sphere has no edge for. Default true: a sphere's and a torus's only curves are
+   * the seams where their one face meets itself, which are not edges of the body
+   * and are never drawn, so without it those two draw a blank page. A line set in
+   * its own right, so `silhouettes` with `edges: false` draws the outline alone.
+   */
+  silhouettes?: boolean;
 }
 /** `SvgOptions`'s own defaults, as `cadaclysm_svg_options_init` fills them. */
-export function svgOptionsDefaults(): Required<Pick<SvgOptions, 'view' | 'fov' | 'width' | 'height' | 'margin' | 'tolerance' | 'stroke' | 'strokeWidth' | 'edges' | 'curves' | 'isocurves' | 'polylines'>>
+export function svgOptionsDefaults(): Required<Pick<SvgOptions, 'view' | 'fov' | 'width' | 'height' | 'margin' | 'tolerance' | 'stroke' | 'strokeWidth' | 'edges' | 'curves' | 'isocurves' | 'polylines' | 'silhouettes'>>
   & Pick<SvgOptions, 'azimuth' | 'elevation' | 'up' | 'background'>;
 
 export function libraryPath(): string;
@@ -157,7 +166,15 @@ export class Brep {
   readonly released: boolean;
   static layoutId(): string;
   readonly manifold: Manifold;
+  /** This brep with its free edges sewn, and what was sewn; this one is left as it was. Release the new brep. */
+  sewed(options?: { tolerance?: number; vertex?: number }): { brep: Brep; report: SewReport };
   release(): void;
+}
+
+/** What `Brep.sewed` did: the edges joined, the free edges before and after, the groups left free, the widest gap sewed, and the two tolerances used. */
+export interface SewReport {
+  pairs: number; freeBefore: number; freeAfter: number; refused: number;
+  worstGap: number; tolerance: number; vertex: number;
 }
 
 /** Whether a brep's faces make a manifold, read off its topology (`Brep.manifold`). */
@@ -232,10 +249,49 @@ export class State {
   index: number; name: string; values: StateValue[];
 }
 
+/** One step of a `Sequence`: the `State` it reaches, its parameter, and how the motion leaves it. */
+export class Segment {
+  private constructor();
+  state: State; t: number; interpolation: Interpolation;
+}
+
+/** How a `Segment`'s motion leaves it for the next. */
+export type Interpolation = 'undefined' | 'discontinuous' | 'synchronous' | 'linear';
+
+/** A motion the file records: an `INTERPOLATED_CONFIGURATION_SEQUENCE`. From `Scene.sequences()`. */
+export class Sequence {
+  private constructor();
+  index: number; name: string; closed: boolean;
+  /** Seconds per unit of the parameter, or null where the file states no time unit. */
+  secondsPerUnit: number | null;
+  segments: Segment[];
+  start: number; end: number;
+  /** The mechanism posed at parameter `t`, with `ground` held fixed. Throws for a `t` that is not finite. */
+  pose(t: number, ground?: Link | null): Pose;
+}
+
+/** A posed mechanism: `Scene.pose()` or `Scene.poseState()`'s answer. Copied eagerly out of the C handle; holds no C pointer. */
+export class Pose {
+  private constructor();
+  readonly ground: Link;
+  readonly unsolved: Joint[];
+  readonly outOfRange: [Joint, number, number][];
+  transform(node: Node): number[][];
+  rawTransform(node: Node): Float64Array;
+  /** Draw with the view library in use: the shared window (returns) or a still. */
+  show(options?: ShowOptions): void;
+  /** Orbit until the window is closed; the camera it was left at and the last pick. */
+  view(options?: ShowOptions): Camera;
+}
+
 export class Node {
   private constructor();
   scene: Scene; index: number;
   equals(other: unknown): boolean;
+  /** Draw with the view library in use: the shared window (returns) or a still. */
+  show(options?: ShowOptions): void;
+  /** Orbit until the window is closed; the camera it was left at and the last pick. */
+  view(options?: ShowOptions): Camera;
   readonly name: string; readonly id: string; readonly kind: string; readonly label: string;
   readonly depth: number; readonly generator: string;
   readonly visible: boolean; readonly visibleNow: boolean; readonly locked: boolean; readonly canMesh: boolean;
@@ -292,6 +348,10 @@ export class Scene {
   path: string; schemaPath: string | null; convention: number;
   readonly closed: boolean;
   close(): void;
+  /** Draw with the view library in use: the shared window (returns) or a still. */
+  show(options?: ShowOptions): void;
+  /** Orbit until the window is closed; the camera it was left at and the last pick. */
+  view(options?: ShowOptions): Camera;
   [Symbol.dispose](): void;
   readonly version: string; readonly schema: string; readonly schemaRead: string; readonly substituted: boolean;
   readonly sourceName: string | null;
@@ -303,6 +363,13 @@ export class Scene {
   query(filter: string): number[];
   placements(): Placement[];
   links(): Link[]; joints(): Joint[]; states(): State[];
+  /** The file's motion sequences, in file order. */
+  sequences(): Sequence[];
+  /** The link the file declares as the mechanism's base, or null when it declares none. */
+  readonly base: Link | null;
+  /** The mechanism posed by `values` ([Joint, sequence of numbers] rows, or `StateValue`s), with `ground` held fixed. */
+  pose(values?: Iterable<StateValue | [Joint, ArrayLike<number>]>, ground?: Link | null): Pose;
+  poseState(state: State, ground?: Link | null): Pose;
   realizeAll(): number;
   realizeAllAsync(): Promise<number>;
   realizeMeshes(skipSurfaced?: boolean): number;

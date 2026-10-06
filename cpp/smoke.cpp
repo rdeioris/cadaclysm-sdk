@@ -1094,7 +1094,24 @@ static Result<void> kernel_values() {
 
     CADACLYSM_TRY(blue, bs::rgb("#36f"));
     EXPECT(blue == (bs::Vec3{0x33 / 255.0, 0x66 / 255.0, 1.0}), "rgb(#36f) is not #3366ff");
-    EXPECT(!bs::rgb("teal"), "rgb accepted a colour name");
+    EXPECT(bs::rgb("teal") && (*bs::rgb("teal"))[1] == 128.0 / 255.0, "rgb(teal)");
+    EXPECT(!bs::rgb("notacolour"), "rgb accepted notacolour");
+    EXPECT(bs::packed("navy") && *bs::packed("navy") == 0x000080u, "packed(navy)");
+    auto bogus_packed = bs::packed("bogus");
+    EXPECT(!bogus_packed && bogus_packed.error().message.find("not 'bogus'") != std::string::npos &&
+               bogus_packed.error().message.find("0..1") == std::string::npos,
+           "packed(bogus): " + (bogus_packed ? std::string("accepted") : bogus_packed.error().message));
+    {
+        CADACLYSM_TRY(colour_box, bs::Solid::cuboid(1, 1, 1));
+        auto red = colour_box.coloured("red");
+        EXPECT(red && red->colour() && (**red->colour())[0] == 1.0, "coloured(\"red\")");
+        bs::SvgOptions red_stroke;
+        red_stroke.stroke = *bs::packed("red");
+        CADACLYSM_TRY(red_stroke_text, colour_box.svg_text(red_stroke));
+        std::string red_stroke_lower = red_stroke_text;
+        std::transform(red_stroke_lower.begin(), red_stroke_lower.end(), red_stroke_lower.begin(), ::tolower);
+        EXPECT(red_stroke_lower.find("#ff0000") != std::string::npos, "SvgOptions.stroke = *packed(\"red\") did not draw as #ff0000");
+    }
 
     bs::SweepPath bend = bs::SweepPath::at({0, 0, 0});
     bend.line_to({0, 0, 10}).arc({5, 0, 10}, {0, 1, 0}, 1.5707963267948966);
@@ -1530,6 +1547,38 @@ static Result<void> outlines() {
         EXPECT(rings_ok, "an overlap ring leaves the shared band");
     }
 
+    // The collider: two cuboids overlapping by 2 along x, plus one far away -> one hit
+    // (0, 1), depth 2, solid() non-null.
+    {
+        CADACLYSM_TRY(part_a, bs::Solid::cuboid(4, 4, 4));
+        CADACLYSM_TRY(cub_b, bs::Solid::cuboid(4, 4, 4));
+        CADACLYSM_TRY(part_b, cub_b.translate(2, 0, 0));
+        CADACLYSM_TRY(cub_c, bs::Solid::cuboid(4, 4, 4));
+        CADACLYSM_TRY(part_c, cub_c.translate(100, 0, 0));
+        CADACLYSM_TRY(box_a, part_a.bounds_box());
+        CADACLYSM_TRY(box_b, part_b.bounds_box());
+        EXPECT(box_a.overlaps(box_b), "the two overlapping cuboids' bounds boxes do not overlap");
+        std::vector<std::reference_wrapper<const bs::Solid>> parts{part_a, part_b, part_c};
+        CADACLYSM_TRY(collider, bs::Collider::make(parts));
+        EXPECT(collider.group_count() == 3, "the collider's group count is not one per part");
+        CADACLYSM_TRY(xy0, bs::Frame::xy());
+        std::vector<std::reference_wrapper<const bs::Frame>> frames{xy0, xy0, xy0};
+        CADACLYSM_TRY(hits, collider.check(frames));
+        EXPECT(hits.size() == 1, "the collider found other than one hit for two overlapping cuboids and one far away");
+        const bs::CollisionHit& hit = hits[0];
+        EXPECT(hit.a == 0 && hit.b == 1, "the collision hit does not name parts 0 and 1");
+        EXPECT(hit.overlap && hit.kind == "overlap" && hit.text.empty(), "the collision hit is not a clean overlap");
+        EXPECT(std::fabs(hit.depth - 2.0) < 1e-9, "the collision depth is not exactly 2: " + std::to_string(hit.depth));
+        CADACLYSM_TRY(overlap_solid, hit.solid());
+        EXPECT(overlap_solid.faces() > 0, "the collision hit's rebuilt solid has no faces");
+        CADACLYSM_TRY(collider_stats, collider.stats());
+        EXPECT(collider_stats.considered == 3, "the collider's stats do not consider all three pairs");
+        auto short_groups = bs::Collider::make(parts, bs::DEFAULT_TOLERANCE, std::vector<std::uint32_t>{0, 1});
+        EXPECT(!short_groups && short_groups.error().message.find("groups must have one entry per solid") != std::string::npos,
+               "a short groups list was accepted or refused in other words: " +
+                   (short_groups ? std::string("accepted") : short_groups.error().message));
+    }
+
     // Solid x profile hits: a line through a cuboid pierces two faces and is cut into three
     // pieces, outside/inside/outside, the middle one spanning the box and sweeping; a loop no
     // hit cuts is one piece; an open sheet has no pieces; a zero tolerance refused verbatim.
@@ -1939,6 +1988,13 @@ static Result<void> round_trip(bs::Solid rounded, std::uint32_t faces) {
     EXPECT(body.has_value(), "no placement of the read-back STEP has a brep");
     CADACLYSM_TRY(read, body->brep()->manifold());
     EXPECT(read.is_closed && read.faces == 15, "the read body is not the closed manifold written");
+    {
+        std::optional<cadaclysm::Brep> read_brep = body->brep();
+        CADACLYSM_TRY(sewn, read_brep->sewed());
+        CADACLYSM_TRY(after_sew, read_brep->manifold());
+        EXPECT(sewn.second.free_before == read.boundary_edges && after_sew.boundary_edges == read.boundary_edges,
+               "sewed disagrees with manifold about the free edges");
+    }
     CADACLYSM_TRY_VOID(fem_brep(back));
     auto imported_made = bs::Solid::from_node(*body);
     if (!imported_made) return Error{"from_node: " + imported_made.error().message};

@@ -1,6 +1,7 @@
 /// <reference types="node" />
 /** The cadaclysm_blacksmith C ABI for Node.js. See cadaclysm_blacksmith.js for the semantics. */
 import type { Node, Scene } from './cadaclysm';
+import type { ShowOptions, Camera } from './cadaclysm_view';
 
 export class BuildError extends Error {}
 export const NONE: number;
@@ -32,7 +33,7 @@ export interface SvgOptions {
   margin?: number;
   /** How far a written curve may stray, in page units. Default 0.1. */
   tolerance?: number;
-  /** `'#rgb'`, `'#rrggbb'` or `[r, g, b]` in 0..255. Default '#000000'. */
+  /** `'#rgb'`, `'#rrggbb'`, a CSS colour name or `[r, g, b]` in 0..255. Default '#000000'. */
   stroke?: string | ArrayLike<number>;
   /** The pen's width, page units. Default 1. */
   strokeWidth?: number;
@@ -46,6 +47,14 @@ export interface SvgOptions {
   isocurves?: boolean;
   /** Straight segments within `tolerance` instead of fitted Béziers. Default false. */
   polylines?: boolean;
+  /**
+   * Also draw where each solid's surfaces turn away from the eye -- the
+   * outline a sphere has no edge for. Default true: a sphere's and a torus's
+   * only curves are their seams, which are not edges of the body and are
+   * never drawn, so without it those two draw a blank page. A line set in its
+   * own right, so `silhouettes` with `edges: false` draws the outline alone.
+   */
+  silhouettes?: boolean;
 }
 /** `SvgOptions`'s own defaults, as `cadaclysm_blacksmith_svg_options_init` fills them. */
 export function svgOptionsDefaults(): SvgOptions;
@@ -92,11 +101,17 @@ export class Profile {
   /** This curve with piece `piece` of `pieces` taken away: what is left, as open profiles. */
   trim(cutters: Iterable<Profile>, piece: number, tolerance?: number): Profile[];
   withHole(hole: Profile): Profile;
+  /** The outline, then each hole, as x, y, z runs at z = 0 within `tolerance` (0.05 by default). */
+  polylines(tolerance?: number): Float32Array[];
+  /** Every free-form side as lines and arcs within `tolerance` (0.01 by default). */
+  toArcs(tolerance?: number): Profile;
+  /** Grown by `distance` (shrunk where negative), as zero or more line-and-arc profiles. */
+  offset(distance: number, tolerance?: number): Profile[];
   hits(other: Profile, tolerance?: number): Hit[];
   common(other: Profile, tolerance?: number): Profile[];
   static text(text: string, size?: number, font?: string, halign?: 'left' | 'center' | 'right', valign?: 'baseline' | 'bottom' | 'center' | 'top', spacing?: number, direction?: 'ltr' | 'rtl', fontBytes?: Uint8Array | ArrayBuffer | null): Profile[];
   translate(dx: number, dy: number): Profile;
-  /** This outline coloured -- '#rgb', '#rrggbb' or [r, g, b] in 0..1: how it is drawn.
+  /** This outline coloured -- '#rgb', '#rrggbb', a CSS colour name or [r, g, b] in 0..1: how it is drawn.
    *  The verbs that make a profile from one carry it; a solid made from it takes nothing. */
   coloured(colour: string | Iterable<number>): Profile;
   readonly colour: [number, number, number] | null;
@@ -170,6 +185,46 @@ export interface Manifold {
   boundaryEdges: number; nonManifoldEdges: number; nonManifoldVertices: number;
   isManifold: boolean; isClosed: boolean;
 }
+/**
+ * What a solid measures, per unit density, each figure beside a bound on its own error.
+ *
+ * Per unit density is the primitive: a body's weight is `density * volume` and its inertia scales
+ * the same way, so `weight` is the only figure that takes one. `volume`, `centroid`, `inertia` and
+ * `principalMoments` mean something only where `closed`; where `accuracyMet` is false the
+ * refinement stopped early and the figures are honest but less certain, which the errors say.
+ */
+export interface Mass {
+  /** Closed, so the volume-side figures mean something. */
+  closed: boolean;
+  /** Every face pointed inward; the figures are given as if they had not. */
+  inverted: boolean;
+  /** Every error came under the accuracy asked for. */
+  accuracyMet: boolean;
+  /** Measured on a mesh rather than exact surfaces, so the errors are the rounding floor. */
+  fromMesh: boolean;
+  /** The surface area. */
+  area: number;
+  /** A bound on `area`'s own error. */
+  areaError: number;
+  /** The volume enclosed, where `closed`. */
+  volume: number;
+  /** A bound on `volume`'s own error. */
+  volumeError: number;
+  /** The volume's centroid, where `closed`. */
+  centroid: number[];
+  /** A bound on the distance from `centroid` to the true centroid. */
+  centroidError: number;
+  /** Three rows of three about the centroid, products of inertia negated. */
+  inertia: number[][];
+  /** A bound on every entry of `inertia`. */
+  inertiaError: number;
+  /** Ascending. */
+  principalMoments: number[];
+  /** Unit, orthogonal, right-handed; row `i` belongs to moment `i`. */
+  principalAxes: number[][];
+  /** `density * volume`, in whatever units the model and the density agree on. */
+  weight(density: number): number;
+}
 export interface SolidMesh { positions: Float32Array; normals: Float32Array; indices: Uint32Array; vertexCount: number; indexCount: number }
 /** `SolidMesh` in `double`: the same tessellation's own unnarrowed positions/normals. */
 export interface SolidMesh64 { positions: Float64Array; normals: Float64Array; indices: Uint32Array; vertexCount: number; indexCount: number }
@@ -179,6 +234,10 @@ export class Solid {
   readonly closed: boolean;
   close(): void;
   [Symbol.dispose](): void;
+  /** Draw with the view library in use: the shared window (returns) or a still. */
+  show(options?: ShowOptions): void;
+  /** Orbit until the window is closed; the camera it was left at and the last pick. */
+  view(options?: ShowOptions): Camera;
   static cuboid(x: number, y: number, z: number): Solid;
   static cylinder(r: number, h: number): Solid;
   static cone(r: number, h: number): Solid;
@@ -212,6 +271,8 @@ export class Solid {
   trim(tool: Solid, keep?: 'outside' | 'inside', tolerance?: number, progress?: Progress | null): Solid;
   trimAsync(tool: Solid, keep?: 'outside' | 'inside', tolerance?: number, progress?: Progress | null): Promise<Solid>;
   place(frame: FrameLike): Solid;
+  /** The closed outlines where the plane `Z = z` cuts this solid, as profiles with holes. */
+  section(z: number, tolerance?: number): Profile[];
   translate(dx: number, dy: number, dz: number): Solid;
   /** This solid scaled by `factor` about the origin: every length times `factor`, exactly. */
   scaled(factor: number): Solid;
@@ -270,6 +331,14 @@ export class Solid {
   unpairedEdges(tolerance?: number): number;
   isWatertight(tolerance?: number): boolean;
   readonly manifold: Manifold;
+  /**
+   * What this solid measures, per unit density, each figure beside a bound on its own error.
+   * `accuracy` is relative and 0 asks for the library's default.
+   */
+  mass(accuracy?: number): Mass;
+  /** This solid's box at `tolerance`: its boolean mesh, padded by twice that -- the
+   *  broad phase's own bound (`Collider` builds one per part at construction). */
+  boundsBox(tolerance?: number): Box;
   mesh(tolerance?: number): SolidMesh;
   /** `mesh` in `double`, from the same tessellation cache -- unnarrowed positions/normals. */
   mesh64(tolerance?: number): SolidMesh64;
@@ -363,6 +432,16 @@ export class Solid {
   static openAll(path: string): Solid[];
 }
 export function brepLayoutId(): string;
+/** The pair kind `kind`'s freedom count (`spherical` 3, `revolute` 1, `fully_constrained` 0, and 0 for an unknown name). */
+export function pairFreedomCount(kind: string): number;
+
+/** One freedom's range for `Assembly.pair`'s `ranges`: `null` (unbounded) or a `[lower, upper]` pair with either side `null`. */
+export type PairRange = [number | null, number | null] | null;
+export interface PairOptions {
+  endFrame?: FrameLike | null;
+  ranges?: Iterable<PairRange> | null;
+  pitch?: number | null;
+}
 
 /**
  * A mutable tree of placements: a name, and zero or more solids or other assemblies placed in
@@ -395,6 +474,28 @@ export class Assembly {
    * assembly does not have, a link joined to itself, or a (start, end) pair already joined.
    */
   joint(name: string, start: string, end: string): void;
+  /**
+   * Give joint `joint` its pair: `kind` (`revolute`, `prismatic`, `cylindrical`, `screw`,
+   * `spherical`, `spherical_with_pin`, `planar`, `universal`, `homokinetic`,
+   * `fully_constrained` or `unconstrained`), the contact `frame` at rest, and `options`.
+   * Throws the kernel's own text when a rule refuses it; the assembly is then unchanged.
+   */
+  pair(joint: string, kind: string, frame: FrameLike, options?: PairOptions): void;
+  /**
+   * Add a named state to this assembly: `rows` is a `Map` or an iterable of `[joint, values]`
+   * pairs, each joint's values in its pair's freedom order. Throws the kernel's own text when
+   * a rule refuses it; the assembly is then unchanged.
+   */
+  state(name: string, rows: Map<string, Iterable<number>> | Iterable<[string, Iterable<number>]>): void;
+  /**
+   * Add a named motion sequence over this assembly's states: `segments` are `[state, t,
+   * interpolation]` rows, the interpolation `'undefined'`, `'discontinuous'`, `'synchronous'` or
+   * `'linear'`; `seconds` writes the parameter's unit as the second. Closed unless the last
+   * segment is `'discontinuous'`. Throws the kernel's own text when a rule refuses it.
+   */
+  sequence(name: string, segments: Iterable<[string, number, 'undefined' | 'discontinuous' | 'synchronous' | 'linear']>, seconds?: boolean): void;
+  /** Declare this assembly's base link. Throws the kernel's own text when a rule refuses it. */
+  base(link: string): void;
   stepText(schema?: string | null, unit?: Unit): string;
   step(path: string, schema?: string | null, unit?: Unit): void;
   /** This assembly as a reader `Scene`, through STEP text; see `Solid.toScene`. */
@@ -478,6 +579,80 @@ export class Overlap {
   faces: [number, number];
   loops: number[][][];
 }
+/** An axis-aligned box: `lo` and `hi`, three-tuples. The broad phase's own shape
+ *  (`Solid.boundsBox`, `Collider`'s own boxes). */
+export class Box {
+  lo: [number, number, number];
+  hi: [number, number, number];
+  constructor(lo: ArrayLike<number>, hi: ArrayLike<number>);
+  /** This box moved by `frame` (rigid), boxed again on the world axes. */
+  moved(frame: FrameLike): Box;
+  /** Whether this box and `other` share a point (touching counts). */
+  overlaps(other: Box): boolean;
+}
+/**
+ * True only if box `a` at `frameA` and box `b` at `frameB` cannot touch -- a separating axis
+ * among the boxes' face normals and edge-direction crosses; touching is not apart. Sharper than
+ * moving each box and asking `overlaps`, which boxes the *result* on the world axes again.
+ */
+export function boxesApart(a: Box, frameA: FrameLike, b: Box, frameB: FrameLike): boolean;
+/** Counts of one `Collider.check` call -- see `CadaclysmBlacksmithColliderStats`'s own doc. */
+export interface ColliderStats {
+  considered: number;
+  worldBoxes: number;
+  orientedBoxes: number;
+  skippedShare: number;
+  cached: number;
+  closedForm: number;
+  meshed: number;
+  refused: number;
+  confirmed: number;
+}
+/**
+ * One pair `Collider.check` found overlapping (`kind === 'overlap'`), or could not decide
+ * (`kind === 'refused'`, `text` says why): `depth` the thinnest side of the overlap's world box (0
+ * for a refused pair), `positions`/`normals` world xyz triples (three per triangle, unwelded) and
+ * `indices` into them -- all empty for a refused pair.
+ */
+export class CollisionHit {
+  private constructor();
+  a: number;
+  b: number;
+  kind: 'overlap' | 'refused';
+  depth: number;
+  text: string;
+  positions: Float64Array;
+  normals: Float64Array;
+  indices: Uint32Array;
+  /** The exact overlap of this pair at the frames it was found at, as a new solid. Throws for a
+   *  refused pair, or a collisions handle already closed some other way. */
+  solid(): Solid;
+}
+/**
+ * Parts meshed once, asked pose after pose which of them interfere. `close()` frees this handle;
+ * so does leaving a `using` block or the garbage collector.
+ */
+export class Collider {
+  /**
+   * `solids` at rest, meshed at `tolerance`; `groups` one group index per solid (omitted: each
+   * solid its own group -- `check` then takes one frame per solid), `allowed` pairs of part
+   * indices never tested (designed contacts, flattened: `[a0, b0, a1, b1, ...]`).
+   */
+  constructor(solids: Solid[], tolerance?: number, groups?: ArrayLike<number> | null, allowed?: ArrayLike<number>);
+  close(): void;
+  readonly closed: boolean;
+  [Symbol.dispose](): void;
+  /** How many groups this collider has -- the highest group index past the constructor, plus one. */
+  readonly groupCount: number;
+  readonly stats: ColliderStats;
+  /**
+   * The pairs that interfere, or could not be decided, with each group placed at its matching
+   * frame in `frames` (one per group, in group order). `share`: omitted, every pair past the box
+   * filters is decided now; `[k, n]`, only those whose index is `k` modulo `n`. `[k, 0]` is the
+   * same as omitted: the C ABI reads `n` 0 as every pair.
+   */
+  check(frames: FrameLike[], share?: [number, number] | null): CollisionHit[];
+}
 export class Edge {
   private constructor();
   index: number; kind: string; faces: number[]; segments: [number[], number[]][];
@@ -513,6 +688,126 @@ export class Workplane {
   workplane(): this;
   solid(): Solid;
 }
+
+// ---- CAM: tools, stock and a job -------------------------------------------------------
+
+/** A cutter: Grbl tool `number` (1 to 255, the `T` word), `diameter` and `fluteLength` in
+ * mm, `feed` and `plunge` in mm/min, `rpm` its spindle speed, ramping into its cuts at
+ * `rampAngle` degrees. Immutable; a job keeps its own copy. */
+export class Tool {
+  private constructor();
+  /** A flat end mill. Throws for a `number` outside 1..255, a size, feed or speed not
+   * positive and finite, or a `rampAngle` outside (0, 90]. */
+  static flat(number: number, diameter: number, fluteLength: number, feed: number, plunge: number, rpm: number, rampAngle?: number): Tool;
+  /** A ball end mill, as `flat` but its tip a half sphere of the diameter; in 2.5D it cuts
+   * where a flat does, `bottom` being the tip. */
+  static ball(number: number, diameter: number, fluteLength: number, feed: number, plunge: number, rpm: number, rampAngle?: number): Tool;
+  /** A drill, plunging at `feed`. A job takes it for `Job.drill` or `Job.machine`'s own
+   * holes. */
+  static drill(number: number, diameter: number, fluteLength: number, feed: number, rpm: number): Tool;
+}
+
+/** The block of material a job cuts, an axis-aligned box. Immutable; a job keeps its own
+ * copy. */
+export class Stock {
+  private constructor();
+  /** The box from `min` (x, y, z) to `max`. Throws unless every min is below its max and
+   * all six are finite. */
+  static box(min: Point3, max: Point3): Stock;
+  /** `solid`'s bounds grown by `margin` in -X, +X, -Y, +Y and +Z; the bottom stays at the
+   * solid's lowest Z. Throws for a `margin` negative or not finite. */
+  static around(solid: Solid, margin?: number): Stock;
+}
+
+/** One file a job wrote: a Grbl program (`tool` its `T` number, `name` `<job name>-T<n>`,
+ * or `<job name>-<k>-T<n>` for a repeated tool) or, from `Job.writeCamotics`, a simulation
+ * copy or the CAMotics project (`tool` 0). Read-only. */
+export class Program {
+  private constructor();
+  readonly tool: number; readonly name: string; readonly text: string;
+}
+
+/** One operation of a `Job`, read back by `Job.operations()`: `kind` ("face", "contour",
+ * "pocket" or "drill"), `tool` (its Grbl T number) and `params` -- a plain object, in the
+ * kind-specific order the operation stores. In `params`: `side` reads as
+ * `"outside"`/`"inside"`/`"on"`; `climb` and `open` as `boolean`; `points` as an integer; a
+ * `NaN` `peck` as `null`; every other value stays a number. Read-only. */
+export class Operation {
+  private constructor();
+  readonly kind: string; readonly tool: number;
+  readonly params: Record<string, number | string | boolean | null>;
+}
+
+/** One thing `Job.machine()` left uncut: `kind` (`"corner"`, `"hole"`, `"slope"`,
+ * `"undercut"` or `"too_deep"`), `at` (`[x, y, z]`), `size` (its meaning per `kind`),
+ * `reason` (one sentence naming the tool involved), and `region` (its XY area, as a list
+ * of `Profile`). Read-only. */
+export class ReportItem {
+  private constructor();
+  readonly kind: string; readonly at: number[]; readonly size: number; readonly reason: string;
+  readonly region: Profile[];
+}
+/** What `Job.machine()` could not make, read eagerly when it returns: a plain array of
+ * `ReportItem`, in order, with a non-enumerable `text` (the kernel's own report text, one
+ * line per item or "nothing left uncut") and a matching `toString()`. */
+export interface Report extends ReadonlyArray<ReportItem> {
+  readonly text: string;
+}
+
+/**
+ * A machining job on a `Stock`: operations kept in the order they are added, written as
+ * one Grbl 1.1 program per run of operations sharing a tool. Mutable -- each operation is
+ * added in place, and a refused one leaves the job as it was. `safeZ` is the absolute Z of
+ * rapids between operations and at a program's start and end, above the stock's top;
+ * `clearance` is how far an operation enters and leaves its passes above its top;
+ * `tolerance` fits free-form sides and offsets; `name` names the programs (`<name>-T<n>`);
+ * every program waits `spindleDwell` seconds after starting the spindle; `resolution` is
+ * the CAMotics project's voxel size in mm. Throws for a `safeZ` not above the stock, or a
+ * setting the job refuses. `close()` frees this handle.
+ */
+export class Job {
+  constructor(stock: Stock, safeZ: number, clearance?: number, tolerance?: number, name?: string, spindleDwell?: number, resolution?: number);
+  readonly closed: boolean;
+  close(): void;
+  [Symbol.dispose](): void;
+  /** Face the stock's top down to `z`, in zigzag rows along X `stepover` apart and passes
+   * at most `stepdown` deep, with `tool`. Added to the job in place. */
+  face(tool: Tool, z: number, stepover: number, stepdown: number): void;
+  /** Cut along `profile` from `top` to `bottom` in passes at most `stepdown` deep, with
+   * `tool`: `side` "outside" the profile, "inside" it, or "on" its line; `climb` for climb
+   * milling, else conventional; `open` to cut the outline as an open chain. Throws for any
+   * other `side`. */
+  contour(tool: Tool, profile: Profile, top: number, bottom: number, side?: 'outside' | 'inside' | 'on', stepdown?: number, climb?: boolean, open?: boolean): void;
+  /** Clear `profile` -- its holes left standing as islands -- from `top` to `bottom`, in
+   * rings `stepover` apart (at most the tool's radius) and passes at most `stepdown` deep,
+   * with `tool`. */
+  pocket(tool: Tool, profile: Profile, top: number, bottom: number, stepover: number, stepdown: number): void;
+  /** Drill a hole at each (x, y) of `points` from `top` to `bottom` with `tool`, pecking
+   * `peck` deep at a time (retracting between pecks), or straight to depth for `null`. */
+  drill(tool: Tool, points: Iterable<Point2>, top: number, bottom: number, peck?: number | null): void;
+  /**
+   * Recognise `part` and append the operations that make it: faced, contoured and
+   * pocketed with `endMill`, its holes drilled with whichever of `drills` fits each -- a
+   * tool per required diameter. `drills` may be one `Tool` as well as an array of them.
+   * Returns the machining's `Report` of what could not be cut.
+   */
+  machine(part: Solid, endMill: Tool, drills?: Tool | Iterable<Tool>, stepover?: number | null, stepdown?: number | null, skin?: number, peck?: number | null): Report;
+  /** Every operation added to this job so far, in order -- whether added by
+   * `face`/`contour`/`pocket`/`drill` or by `machine`. */
+  operations(): Operation[];
+  /** The job as Grbl 1.1 programs, one per run of consecutive operations sharing a tool
+   * (T1, T2, T1 gives three), each named `<name>-T<n>` (or `<name>-<k>-T<n>` for run `k`
+   * of a repeated tool); an array of length 0 for a job with no operations. */
+  gcode(): Program[];
+  /**
+   * A CAMotics project at `filePath` and its files beside it, named after the project's
+   * file stem (`out/part.camotics` writes `out/part-T1.nc`), not the job's name: each
+   * program, a simulation copy of it (`.sim.nc`, which the project lists), and the project
+   * last. Creates the directory. Returns the paths written, the project last.
+   */
+  writeCamotics(filePath: string): string[];
+}
+
 /**
  * `schema`: null/undefined (the kernel's built-in AP203); the path of a schema file
  * (no newline in it, naming an existing file), read and sent as EXPRESS text; the bare

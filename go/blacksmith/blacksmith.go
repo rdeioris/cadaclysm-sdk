@@ -55,11 +55,13 @@
 //
 // # Ownership
 //
-// [Profile], [Path], [SweepPath] and [Solid] own a C handle: Close them, or let the
-// finalizer free them as Python's __del__ does. Close is idempotent, and a call on a closed
-// object returns [ErrClosed] wrapped with what it was. [Workplane], [Selector], [Slant],
-// [Edge] and [Axis] are plain values. Join, Cut, Common and SplitSheet return a new
-// solid and leave both operands open; WithHole, FromSolid and the sweeps borrow.
+// [Profile], [Path], [SweepPath], [Solid], [Tool], [Stock] and [Job] own a C handle:
+// Close them, or let the finalizer free them as Python's __del__ does. Close is
+// idempotent, and a call on a closed object returns [ErrClosed] wrapped with what it was
+// ("job: closed" for a [Job]). [Workplane], [Selector], [Slant], [Edge] and [Axis] are
+// plain values, and [Program], [Operation], [Report] and [ReportItem] are copied out.
+// Join, Cut, Common and SplitSheet return a new solid and leave both operands open;
+// WithHole, FromSolid and the sweeps borrow.
 //
 // # The library's error slot is thread-local
 //
@@ -127,7 +129,9 @@ package blacksmith
 #cgo windows LDFLAGS: -L${SRCDIR}/../../lib -L${SRCDIR}/../../../../../target/release -l:cadaclysm_blacksmith.dll
 #cgo !windows LDFLAGS: -L${SRCDIR}/../../lib -L${SRCDIR}/../../../../../target/release -lcadaclysm_blacksmith
 #include <stdlib.h>
-#include "cadaclysm_blacksmith.h"
+// <...>, not "...": on Windows cgo compiles its probes from %TEMP%, and a quoted
+// include would read any stray cadaclysm_blacksmith.h there before the -I directories.
+#include <cadaclysm_blacksmith.h>
 */
 import "C"
 
@@ -139,7 +143,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"unsafe"
 
@@ -219,6 +222,22 @@ func tessellationFailure(what string) error {
 		reason = what
 	}
 	return &BuildError{Message: reason}
+}
+
+// RGB is colour text -- "#rgb", "#rrggbb" or a CSS colour name -- as r, g, b in 0..1, read
+// by the library's own parser, so every wrapper takes the same forms. Serves the paint
+// methods (Coloured, EdgesColoured and their ...Text forms), so its refusal keeps the
+// paint wording, (r, g, b) in 0..1 included, even though RGB itself takes no numeric
+// triple -- a caller who typed one meant a paint method.
+func RGB(colour string) ([3]float64, error) {
+	text := C.CString(colour)
+	defer C.free(unsafe.Pointer(text))
+	var out [3]C.double
+	defer pin()()
+	if !bool(C.cadaclysm_blacksmith_parse_colour(text, &out[0])) {
+		return [3]float64{}, &BuildError{Message: fmt.Sprintf(`coloured: a colour is "#rgb", "#rrggbb", a CSS colour name or (r, g, b) in 0..1, not %q`, colour)}
+	}
+	return [3]float64{float64(out[0]), float64(out[1]), float64(out[2])}, nil
 }
 
 // ---- module-level entry points -----------------------------------------------------
@@ -592,11 +611,12 @@ type SvgOptions struct {
 	Margin float64
 	// Tolerance is how far a written curve may stray, in page units. Default 0.1.
 	Tolerance float64
-	// Stroke is the pen colour, "#rrggbb". Default black.
+	// Stroke is the pen colour: "#rgb", "#rrggbb" or a CSS colour name. Default black.
 	Stroke string
 	// StrokeWidth is the pen's width, page units. Default 1.
 	StrokeWidth float64
-	// Background is "#rrggbb", or nil (the default) for no <rect> behind the drawing.
+	// Background is "#rgb", "#rrggbb", a CSS colour name, or nil (the default) for no
+	// <rect> behind the drawing.
 	Background *string
 	// Edges draws each shape's feature edges. Default true.
 	Edges bool
@@ -609,10 +629,18 @@ type SvgOptions struct {
 	// Polylines writes every line as straight segments within Tolerance, instead of
 	// being fitted back to cubic Béziers. Default false.
 	Polylines bool
+	// Silhouettes also draws where each solid's surfaces turn away from the eye — the
+	// outline a sphere has no edge for. One group per solid, after that solid's lines.
+	// Default true: a sphere's and a torus's only curves are the seams where their one
+	// face meets itself, which are not edges of the body and are never drawn, so without
+	// this those two draw a blank page. A line set in its own right — set it with Edges
+	// false for the outline alone, or clear it for the lines alone.
+	Silhouettes bool
 }
 
 // NewSvgOptions is the defaults cadaclysm_blacksmith_svg_options_init fills: the
-// viewer's iso, orthographic, a 1000-square page, black edges one unit wide on nothing.
+// viewer's iso, orthographic, a 1000-square page, black edges one unit wide on
+// nothing, and each solid's outline beside them.
 func NewSvgOptions() SvgOptions {
 	return SvgOptions{
 		View:        SvgIso,
@@ -623,27 +651,30 @@ func NewSvgOptions() SvgOptions {
 		Stroke:      "#000000",
 		StrokeWidth: 1,
 		Edges:       true,
+		Silhouettes: true,
 	}
 }
 
-// parseSvgColour is a colour as the ABI's packed 0xRRGGBB: "#rrggbb", the leading '#'
-// optional.
+// parseSvgColour is a colour as the ABI's packed 0xRRGGBB, from "#rgb", "#rrggbb" or a
+// CSS colour name, through RGB — packing 0..1 back to 0..255 with round(c*255), as every
+// SVG colour is packed. Stroke/Background are strings only here, so the refusal names no
+// numeric triple at all.
 func parseSvgColour(colour string) (uint32, error) {
-	hex := strings.TrimPrefix(colour, "#")
-	if len(hex) != 6 {
-		return 0, &BuildError{Message: fmt.Sprintf("colour %s: expected '#rrggbb'", colour)}
-	}
-	v, err := strconv.ParseUint(hex, 16, 32)
+	c, err := RGB(colour)
 	if err != nil {
-		return 0, &BuildError{Message: fmt.Sprintf("colour %s: expected '#rrggbb'", colour)}
+		return 0, &BuildError{Message: fmt.Sprintf(`colour: a colour is "#rgb", "#rrggbb" or a CSS colour name, not %q`, colour)}
 	}
-	return uint32(v), nil
+	r := uint32(math.Round(c[0] * 255))
+	g := uint32(math.Round(c[1] * 255))
+	b := uint32(math.Round(c[2] * 255))
+	return (r << 16) | (g << 8) | b, nil
 }
 
 // buildSvgOptions packs opts (nil for NewSvgOptions()'s defaults) into a
 // C.CadaclysmBlacksmithSvgOptions: View fills Azimuth/Elevation unless they are set
 // directly, Up defaults to "z" (a solid carries no convention of its own), colours are
-// "#rrggbb" — as the reader package's own buildSvgOptions, but with no scene to default
+// "#rgb", "#rrggbb" or a CSS colour name — as the reader package's own buildSvgOptions,
+// but with no scene to default
 // Up from.
 func buildSvgOptions(opts *SvgOptions) (C.CadaclysmBlacksmithSvgOptions, error) {
 	o := NewSvgOptions()
@@ -706,6 +737,9 @@ func buildSvgOptions(opts *SvgOptions) (C.CadaclysmBlacksmithSvgOptions, error) 
 	}
 	if o.Polylines {
 		flags |= uint32(C.CADACLYSM_BLACKSMITH_SVG_POLYLINES)
+	}
+	if o.Silhouettes {
+		flags |= uint32(C.CADACLYSM_BLACKSMITH_SVG_SILHOUETTES)
 	}
 	raw.flags = C.uint32_t(flags)
 	return raw, nil
@@ -1031,6 +1065,91 @@ func (f Frame) String() string {
 // stay alive across the call, which a value copied into a local by the caller does.
 func doubles(v *float64) *C.double { return (*C.double)(unsafe.Pointer(v)) }
 
+// ---- boxes --------------------------------------------------------------------------
+
+// Box is an axis-aligned box: Lo and Hi, three numbers each. The broad phase's own shape
+// (Solid.BoundsBox, Collider's own boxes): cheap to move and to test against another,
+// before anything is meshed.
+type Box struct {
+	Lo [3]float64
+	Hi [3]float64
+}
+
+func boxWords(b Box) C.CadaclysmBlacksmithBox {
+	var raw C.CadaclysmBlacksmithBox
+	for i := 0; i < 3; i++ {
+		raw.lo[i] = C.double(b.Lo[i])
+		raw.hi[i] = C.double(b.Hi[i])
+	}
+	return raw
+}
+
+func boxOf(raw *C.CadaclysmBlacksmithBox) Box {
+	var b Box
+	for i := 0; i < 3; i++ {
+		b.Lo[i] = float64(raw.lo[i])
+		b.Hi[i] = float64(raw.hi[i])
+	}
+	return b
+}
+
+// Moved is this box moved by frame (rigid), boxed again on the world axes -- not this
+// box's corners individually moved, which would not in general be a box at all: the
+// *bounding* box of the moved corners.
+func (b Box) Moved(frame Frame) (Box, error) {
+	defer pin()()
+	raw := boxWords(b)
+	f := frame
+	var out C.CadaclysmBlacksmithBox
+	ok := bool(C.cadaclysm_blacksmith_box_moved(&raw, doubles(&f[0]), &out))
+	if !ok {
+		return Box{}, failure("box_moved")
+	}
+	return boxOf(&out), nil
+}
+
+// Overlaps is whether this box and other share a point (touching counts).
+func (b Box) Overlaps(other Box) bool {
+	defer pin()()
+	a := boxWords(b)
+	o := boxWords(other)
+	return bool(C.cadaclysm_blacksmith_box_overlaps(&a, &o))
+}
+
+func (b Box) String() string {
+	return fmt.Sprintf("Box(lo=%v, hi=%v)", b.Lo, b.Hi)
+}
+
+// BoxesApart is true only if box a at frameA and box b at frameB cannot touch -- a
+// separating axis among the boxes' face normals and edge-direction crosses; touching is
+// not apart. Sharper than moving each box and asking Box.Overlaps, which boxes the
+// *result* on the world axes again and so can call two oriented boxes overlapping when
+// they are not (two unit boxes, the second turned 45 degrees about z and moved 2.3 along
+// x: their world boxes overlap, but the boxes themselves do not touch).
+func BoxesApart(a Box, frameA Frame, b Box, frameB Frame) (bool, error) {
+	defer pin()()
+	ra := boxWords(a)
+	rb := boxWords(b)
+	fa, fb := frameA, frameB
+	var apart C.bool
+	ok := bool(C.cadaclysm_blacksmith_boxes_apart(&ra, doubles(&fa[0]), &rb, doubles(&fb[0]), &apart))
+	if !ok {
+		return false, failure("boxes_apart")
+	}
+	return bool(apart), nil
+}
+
+// uint32sOf copies n uint32s at at out as a slice.
+func uint32sOf(at *C.uint32_t, n int) []uint32 {
+	if at == nil || n == 0 {
+		return nil
+	}
+	raw := unsafe.Slice((*uint32)(unsafe.Pointer(at)), n)
+	out := make([]uint32, n)
+	copy(out, raw)
+	return out
+}
+
 // ---- profiles -------------------------------------------------------------------------
 
 // Profile is a closed outline with holes, in its own x/y. Immutable; every method returns
@@ -1249,6 +1368,38 @@ func (p *Profile) Common(other *Profile, tolerance float64) ([]*Profile, error) 
 	return profileList(C.cadaclysm_blacksmith_profile_common(a, b, C.double(tolerance)), "profile_common")
 }
 
+// ToArcs is this profile with every free-form side (a Bezier, a conic, a NURBS) replaced
+// by lines and arcs within tolerance of it — what a G-code writer can say. Lines and arcs
+// pass through as they are, every loop closes on itself exactly, holes are converted the
+// same way. Fails for a tolerance not positive and finite, or a spline that does not
+// evaluate. Python's tolerance defaults to 0.01.
+func (p *Profile) ToArcs(tolerance float64) (*Profile, error) {
+	defer pin()()
+	h, err := p.h()
+	if err != nil {
+		return nil, err
+	}
+	out, err := newProfile(C.cadaclysm_blacksmith_profile_to_arcs(h, C.double(tolerance)), "profile_to_arcs")
+	runtime.KeepAlive(p)
+	return out, err
+}
+
+// Offset is this profile grown by distance (shrunk where it is negative), as zero or more
+// profiles, all lines and arcs: outward corners rounded by |distance|, holes moving
+// against the boundary (a hole shrinks as the profile grows). Free-form sides are fitted
+// to tolerance first (ToArcs). A shrink that eats the whole profile is an empty slice.
+// Fails for a distance not finite, a tolerance not positive and finite, a loop with no
+// sides, or loops that cross or touch. Python's tolerance defaults to 0.01.
+func (p *Profile) Offset(distance, tolerance float64) ([]*Profile, error) {
+	defer pin()()
+	h, err := p.h()
+	if err != nil {
+		return nil, err
+	}
+	defer runtime.KeepAlive(p)
+	return profileList(C.cadaclysm_blacksmith_profile_offset(h, C.double(distance), C.double(tolerance)), "profile_offset")
+}
+
 // Text is text set in a font, one profile per closed shape — a letter with its counters
 // as holes (o one, 8 two; i is two profiles) — on the sketch plane, the baseline along x
 // from the origin, each outline counter-clockwise and its holes clockwise, a curved side
@@ -1326,6 +1477,15 @@ func (p *Profile) Coloured(r, g, b float64) (*Profile, error) {
 	out, err := newProfile(C.cadaclysm_blacksmith_profile_coloured(h, C.double(r), C.double(g), C.double(b)), "profile_coloured")
 	runtime.KeepAlive(p)
 	return out, err
+}
+
+// ColouredText is Coloured from "#rgb", "#rrggbb" or a CSS colour name.
+func (p *Profile) ColouredText(colour string) (*Profile, error) {
+	c, err := RGB(colour)
+	if err != nil {
+		return nil, err
+	}
+	return p.Coloured(c[0], c[1], c[2])
 }
 
 // Colour is the outline's colour, (r, g, b) in 0..1, and false where it has none.
@@ -3537,6 +3697,22 @@ func (s *Solid) common(other *Solid, tolerance float64) (*Solid, error) {
 	return out, err
 }
 
+// Section is this solid cut by the plane Z = z: its closed outlines there, in XY, nested
+// into profiles with holes (boundaries counter-clockwise, holes clockwise), a line or a
+// circle crossing kept exact and any other curve as lines within tolerance. A plane that
+// misses the solid is an empty slice. Fails for a z not finite, a tolerance not positive
+// and finite, a face lying in the plane (section a little above or below it), or a
+// crossing that does not close. Python's tolerance defaults to 0.05.
+func (s *Solid) Section(z, tolerance float64) ([]*Profile, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	defer runtime.KeepAlive(s)
+	return profileList(C.cadaclysm_blacksmith_solid_section(h, C.double(z), C.double(tolerance)), "solid_section")
+}
+
 // SplitSheet is this solid (a sheet or a solid) cut along tool's boundary, nothing
 // removed: every face comes back in its pieces outside tool and its pieces inside, each
 // piece a face, in this solid's own face order with each face's outside pieces before its
@@ -3647,6 +3823,249 @@ func (s *Solid) Intersect(other *Solid, tolerance float64) (*Intersection, error
 		out.Overlaps = append(out.Overlaps, Overlap{FaceA: int(raw.face_a), FaceB: int(raw.face_b), Loops: loops})
 	}
 	return out, nil
+}
+
+// ---- collider -------------------------------------------------------------------------
+
+// ColliderStats is counts of one Collider.Check call: the candidate pairs Considered, how
+// many of them the world boxes and the oriented boxes cleared, how many the share left to
+// another call, how the rest were answered (Cached, ClosedForm, Meshed), and how many were
+// Refused. Confirmed is the subset of Meshed that were thin mesh-path overlaps sent to
+// Solid.Common itself for a final answer.
+type ColliderStats struct {
+	Considered    int
+	WorldBoxes    int
+	OrientedBoxes int
+	SkippedShare  int
+	Cached        int
+	ClosedForm    int
+	Meshed        int
+	Refused       int
+	Confirmed     int
+}
+
+func (s ColliderStats) String() string {
+	return fmt.Sprintf(
+		"ColliderStats(considered=%d, worldBoxes=%d, orientedBoxes=%d, skippedShare=%d, cached=%d, closedForm=%d, meshed=%d, refused=%d, confirmed=%d)",
+		s.Considered, s.WorldBoxes, s.OrientedBoxes, s.SkippedShare, s.Cached, s.ClosedForm, s.Meshed, s.Refused, s.Confirmed)
+}
+
+// collisions is one Collider.Check answer, kept alive by every CollisionHit of it: as long
+// as one is reachable, the garbage collector keeps this reachable too, and its finalizer
+// frees the handle only once nothing does -- a CollisionHit needs it back for Solid().
+type collisions struct {
+	handle *C.CadaclysmBlacksmithCollisions
+}
+
+func newCollisions(handle *C.CadaclysmBlacksmithCollisions) *collisions {
+	c := &collisions{handle: handle}
+	runtime.SetFinalizer(c, (*collisions).finalize)
+	return c
+}
+
+func (c *collisions) finalize() {
+	if c.handle != nil {
+		C.cadaclysm_blacksmith_collisions_free(c.handle)
+		c.handle = nil
+	}
+}
+
+// CollisionHit is one pair Collider.Check found overlapping (Overlap true), or could not
+// decide (Overlap false; Text says why, empty for an overlap). Positions/Normals are world
+// xyz triples, three per triangle (unwelded); Indices indexes them -- all empty for a
+// refused pair. Depth is the thinnest side of the overlap's world box, 0 for a refused
+// pair.
+//
+// Solid rebuilds the exact overlap now, from the frames Collider.Check found it at; this
+// keeps the collisions handle behind every hit of one Check call alive until the last of
+// them is unreachable, freeing it only then. Named CollisionHit rather than the plainer
+// Hit, which this package already uses for a curve-crossing result (Solid.Hits).
+type CollisionHit struct {
+	A, B    int
+	Overlap bool
+	// Kind is "overlap" or "refused" -- the same answer as Overlap.
+	Kind      string
+	Depth     float64
+	Text      string
+	Positions [][3]float64
+	Normals   [][3]float64
+	Indices   []uint32
+
+	collisions *collisions
+	index      uint32
+}
+
+func (h *CollisionHit) String() string {
+	return fmt.Sprintf("CollisionHit(a=%d, b=%d, overlap=%v, depth=%g)", h.A, h.B, h.Overlap, h.Depth)
+}
+
+// Solid is the exact overlap of this pair at the frames Collider.Check found it at, as a
+// new solid. Fails for a refused pair (Overlap false) or a collisions handle already freed
+// (which cannot happen while this CollisionHit itself is reachable).
+func (h *CollisionHit) Solid() (*Solid, error) {
+	defer pin()()
+	if h == nil || h.collisions == nil {
+		return nil, fmt.Errorf("collision hit: %w", ErrClosed)
+	}
+	raw := C.cadaclysm_blacksmith_collisions_solid(h.collisions.handle, C.uint32_t(h.index))
+	runtime.KeepAlive(h.collisions)
+	return newSolid(raw, "collisions_solid")
+}
+
+// Collider is parts meshed once, asked pose after pose which of them interfere. Close frees
+// this handle; the finalizer does so otherwise.
+type Collider struct {
+	handle *C.CadaclysmBlacksmithCollider
+}
+
+// NewCollider is solids at rest, meshed at tolerance; groups one group index per solid
+// (nil: each solid its own group -- Check then takes one frame per solid), allowed pairs of
+// part indices never tested (designed contacts, by part index, flat: (a0, b0, a1, b1,
+// ...)).
+func NewCollider(solids []*Solid, tolerance float64, groups []uint32, allowed []uint32) (*Collider, error) {
+	defer pin()()
+	if groups != nil && len(groups) != len(solids) {
+		return nil, &BuildError{Message: fmt.Sprintf(
+			"Collider: groups must have one entry per solid (%d solids, %d groups)", len(solids), len(groups))}
+	}
+	handles := make([]*C.CadaclysmBlacksmithSolid, len(solids))
+	for i, s := range solids {
+		h, err := s.h()
+		if err != nil {
+			return nil, err
+		}
+		handles[i] = h
+	}
+	var firstSolid **C.CadaclysmBlacksmithSolid
+	if len(handles) > 0 {
+		firstSolid = &handles[0]
+	}
+	var groupsPtr *C.uint32_t
+	if len(groups) > 0 {
+		groupsPtr = (*C.uint32_t)(unsafe.Pointer(&groups[0]))
+	}
+	var allowedPtr *C.uint32_t
+	if len(allowed) > 0 {
+		allowedPtr = (*C.uint32_t)(unsafe.Pointer(&allowed[0]))
+	}
+	raw := C.cadaclysm_blacksmith_collider_new(firstSolid, C.uint32_t(len(handles)), C.double(tolerance), groupsPtr, allowedPtr,
+		C.uint32_t(len(allowed)/2))
+	for _, s := range solids {
+		runtime.KeepAlive(s)
+	}
+	if raw == nil {
+		return nil, failure("collider_new")
+	}
+	c := &Collider{handle: raw}
+	runtime.SetFinalizer(c, (*Collider).finalize)
+	return c, nil
+}
+
+func (c *Collider) finalize() {
+	if c.handle != nil {
+		C.cadaclysm_blacksmith_collider_free(c.handle)
+		c.handle = nil
+	}
+}
+
+// Close gives the collider back. Idempotent.
+func (c *Collider) Close() {
+	c.finalize()
+	runtime.SetFinalizer(c, nil)
+}
+
+// Closed is whether Close has already run. A nil Collider counts as closed.
+func (c *Collider) Closed() bool { return c == nil || c.handle == nil }
+
+func (c *Collider) h() (*C.CadaclysmBlacksmithCollider, error) {
+	if c == nil || c.handle == nil {
+		return nil, fmt.Errorf("collider: %w", ErrClosed)
+	}
+	return c.handle, nil
+}
+
+// GroupCount is how many groups this collider has -- the highest group index past
+// NewCollider, plus one.
+func (c *Collider) GroupCount() (int, error) {
+	h, err := c.h()
+	if err != nil {
+		return 0, err
+	}
+	n := int(C.cadaclysm_blacksmith_collider_group_count(h))
+	runtime.KeepAlive(c)
+	return n, nil
+}
+
+// Stats is counts of the last Check call (all zero before the first one).
+func (c *Collider) Stats() (ColliderStats, error) {
+	h, err := c.h()
+	if err != nil {
+		return ColliderStats{}, err
+	}
+	var raw C.CadaclysmBlacksmithColliderStats
+	ok := bool(C.cadaclysm_blacksmith_collider_stats(h, &raw))
+	runtime.KeepAlive(c)
+	if !ok {
+		return ColliderStats{}, failure("collider_stats")
+	}
+	return ColliderStats{
+		Considered: int(raw.considered), WorldBoxes: int(raw.world_boxes), OrientedBoxes: int(raw.oriented_boxes),
+		SkippedShare: int(raw.skipped_share), Cached: int(raw.cached), ClosedForm: int(raw.closed_form),
+		Meshed: int(raw.meshed), Refused: int(raw.refused), Confirmed: int(raw.confirmed),
+	}, nil
+}
+
+// Check is the pairs that interfere, or could not be decided, with each group placed at its
+// matching frame in frames (one per group, in group order). shareK/shareN both 0: every
+// pair past the box filters is decided now; otherwise, only those whose index is shareK
+// modulo shareN (the shares of one pose are disjoint and cover it -- split one Check across
+// shareN workers).
+func (c *Collider) Check(frames []Frame, shareK, shareN uint32) ([]*CollisionHit, error) {
+	defer pin()()
+	h, err := c.h()
+	if err != nil {
+		return nil, err
+	}
+	flat := make([]float64, len(frames)*12)
+	for i, f := range frames {
+		copy(flat[i*12:], f[:])
+	}
+	var framesPtr *C.double
+	if len(flat) > 0 {
+		framesPtr = doubles(&flat[0])
+	}
+	raw := C.cadaclysm_blacksmith_collider_check(h, framesPtr, C.uint32_t(len(frames)), C.uint32_t(shareK), C.uint32_t(shareN))
+	runtime.KeepAlive(c)
+	if raw == nil {
+		return nil, failure("collider_check")
+	}
+	count := int(C.cadaclysm_blacksmith_collisions_count(raw))
+	if count == 0 {
+		C.cadaclysm_blacksmith_collisions_free(raw)
+		return nil, nil
+	}
+	col := newCollisions(raw)
+	hits := make([]*CollisionHit, 0, count)
+	for i := 0; i < count; i++ {
+		var rawHit C.CadaclysmBlacksmithCollisionHit
+		if !bool(C.cadaclysm_blacksmith_collisions_hit(col.handle, C.uint32_t(i), &rawHit)) {
+			return nil, failure("collisions_hit")
+		}
+		kind := "refused"
+		if bool(rawHit.overlap) {
+			kind = "overlap"
+		}
+		hits = append(hits, &CollisionHit{
+			A: int(rawHit.a), B: int(rawHit.b), Overlap: bool(rawHit.overlap), Kind: kind, Depth: float64(rawHit.depth),
+			Text:       C.GoString(rawHit.text),
+			Positions:  pointsOf(rawHit.positions, int(rawHit.vertex_count)),
+			Normals:    pointsOf(rawHit.normals, int(rawHit.vertex_count)),
+			Indices:    uint32sOf(rawHit.indices, int(rawHit.index_count)),
+			collisions: col,
+			index:      uint32(i),
+		})
+	}
+	return hits, nil
 }
 
 // SolidHits is what Solid.Hits found, copied out: Hits (ordered along the profile; AStart/AEnd
@@ -3855,10 +4274,31 @@ func (s *Solid) BoundsAt64(tolerance float64) (cadaclysm.Bounds, error) {
 	return cadaclysm.Bounds{Min: lo, Max: hi}, nil
 }
 
+// BoundsBox is BoundsBoxAt(DefaultTolerance).
+func (s *Solid) BoundsBox() (Box, error) { return s.BoundsBoxAt(DefaultTolerance) }
+
+// BoundsBoxAt is this solid's box at tolerance: its boolean mesh, padded by twice that --
+// the broad phase's own shape, cheaper to move and test than the solid itself.
+func (s *Solid) BoundsBoxAt(tolerance float64) (Box, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return Box{}, err
+	}
+	var raw C.CadaclysmBlacksmithBox
+	ok := bool(C.cadaclysm_blacksmith_solid_bounds_box(h, C.double(tolerance), &raw))
+	runtime.KeepAlive(s)
+	if !ok {
+		return Box{}, failure("bounds_box")
+	}
+	return boxOf(&raw), nil
+}
+
 // LeakedEdges is how many edges of the mesh at tolerance (Python's default is
 // DefaultTolerance) are bound by anything other than exactly two triangles — zero for a
-// closed solid. A seam two solids share along a line (four triangles, two pairs) does
-// *not* count here; a genuine hole or a fold does.
+// closed solid, counted on the triangles the mesh calls hand out. A hole, a fold, and a
+// seam two solids share along a line (four triangles) all count here; UnpairedEdges is
+// the check that lets the seam pass.
 func (s *Solid) LeakedEdges(tolerance float64) (int, error) {
 	defer pin()()
 	h, err := s.h()
@@ -4244,6 +4684,78 @@ func (s *Solid) FaceFrame(face int) (Frame, error) {
 	return out, nil
 }
 
+// -- measuring
+
+// Mass is what a solid measures, per unit density, each figure beside a bound on its own
+// error. Volume, Centroid, Inertia and PrincipalMoments mean something only where Closed:
+// on a sheet they are zero and Area is still measured. A body's mass is density * Volume
+// and its inertia scales the same way — nothing here assumes a density of its own.
+//
+// Inertia is row-major about the centroid with the products of inertia negated,
+// PrincipalMoments ascend, and PrincipalAxes is row-major, unit and right-handed, the axis
+// in row i belonging to moment i. Where AccuracyMet is false the refinement stopped before
+// the accuracy asked for: the figures are honest, the errors say how certain.
+type Mass struct {
+	Closed           bool
+	Inverted         bool
+	AccuracyMet      bool
+	FromMesh         bool
+	Area             float64
+	AreaError        float64
+	Volume           float64
+	VolumeError      float64
+	Centroid         [3]float64
+	CentroidError    float64
+	Inertia          [9]float64
+	InertiaError     float64
+	PrincipalMoments [3]float64
+	PrincipalAxes    [9]float64
+}
+
+// Weight is density * Volume, in whatever units the model and the density agree on. Per unit
+// density is what everything else here is, because an assembly of two materials would have to
+// undo a density applied on its behalf.
+func (m Mass) Weight(density float64) float64 {
+	return density * m.Volume
+}
+
+// Mass measures the solid. accuracy is relative; 0 asks for the library's default, a part
+// in ten million. It works on a solid read from a file as much as one built here.
+func (s *Solid) Mass(accuracy float64) (Mass, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return Mass{}, err
+	}
+	var raw C.struct_CadaclysmBlacksmithMassProperties
+	ok := bool(C.cadaclysm_blacksmith_mass_properties(h, C.double(accuracy), &raw))
+	runtime.KeepAlive(s)
+	if !ok {
+		return Mass{}, failure("mass")
+	}
+	m := Mass{
+		Closed:        raw.closed != 0,
+		Inverted:      raw.inverted != 0,
+		AccuracyMet:   raw.accuracy_met != 0,
+		FromMesh:      raw.from_mesh != 0,
+		Area:          float64(raw.area),
+		AreaError:     float64(raw.area_error),
+		Volume:        float64(raw.volume),
+		VolumeError:   float64(raw.volume_error),
+		CentroidError: float64(raw.centroid_error),
+		InertiaError:  float64(raw.inertia_error),
+	}
+	for i := 0; i < 3; i++ {
+		m.Centroid[i] = float64(raw.centroid[i])
+		m.PrincipalMoments[i] = float64(raw.principal_moments[i])
+	}
+	for i := 0; i < 9; i++ {
+		m.Inertia[i] = float64(raw.inertia[i])
+		m.PrincipalAxes[i] = float64(raw.principal_axes[i])
+	}
+	return m, nil
+}
+
 // -- naming
 
 // Named is this solid, named name — Python's named. The name rides through an operation
@@ -4300,6 +4812,15 @@ func (s *Solid) Coloured(r, g, b float64) (*Solid, error) {
 	return s.coloured(C.CADACLYSM_BLACKSMITH_NONE, r, g, b)
 }
 
+// ColouredText is Coloured from "#rgb", "#rrggbb" or a CSS colour name.
+func (s *Solid) ColouredText(colour string) (*Solid, error) {
+	c, err := RGB(colour)
+	if err != nil {
+		return nil, err
+	}
+	return s.Coloured(c[0], c[1], c[2])
+}
+
 // ColouredFace is this solid with face coloured (r, g, b), a colour that wins over the
 // solid's — Python's coloured(colour, face=face).
 func (s *Solid) ColouredFace(face int, r, g, b float64) (*Solid, error) {
@@ -4308,6 +4829,15 @@ func (s *Solid) ColouredFace(face int, r, g, b float64) (*Solid, error) {
 		return nil, err
 	}
 	return s.coloured(i, r, g, b)
+}
+
+// ColouredFaceText is ColouredFace from "#rgb", "#rrggbb" or a CSS colour name.
+func (s *Solid) ColouredFaceText(face int, colour string) (*Solid, error) {
+	c, err := RGB(colour)
+	if err != nil {
+		return nil, err
+	}
+	return s.ColouredFace(face, c[0], c[1], c[2])
 }
 
 func (s *Solid) coloured(face C.uint32_t, r, g, b float64) (*Solid, error) {
@@ -4360,6 +4890,15 @@ func (s *Solid) EdgesColoured(r, g, b float64) (*Solid, error) {
 	return s.edgesColoured(nil, 0, r, g, b)
 }
 
+// EdgesColouredText is EdgesColoured from "#rgb", "#rrggbb" or a CSS colour name.
+func (s *Solid) EdgesColouredText(colour string) (*Solid, error) {
+	c, err := RGB(colour)
+	if err != nil {
+		return nil, err
+	}
+	return s.EdgesColoured(c[0], c[1], c[2])
+}
+
 // EdgesColouredPicked is this solid with edges (by index, as Fillet takes them) coloured,
 // a colour that wins over the all-edges one; an empty list colours none — Python's
 // edges_coloured(colour, edges).
@@ -4377,6 +4916,15 @@ func (s *Solid) EdgesColouredPicked(edges []int, r, g, b float64) (*Solid, error
 	out, err := s.edgesColoured(first, len(which), r, g, b)
 	runtime.KeepAlive(which)
 	return out, err
+}
+
+// EdgesColouredPickedText is EdgesColouredPicked from "#rgb", "#rrggbb" or a CSS colour name.
+func (s *Solid) EdgesColouredPickedText(edges []int, colour string) (*Solid, error) {
+	c, err := RGB(colour)
+	if err != nil {
+		return nil, err
+	}
+	return s.EdgesColouredPicked(edges, c[0], c[1], c[2])
 }
 
 func (s *Solid) edgesColoured(first *C.uint32_t, count int, r, g, b float64) (*Solid, error) {
@@ -5164,6 +5712,270 @@ func (a *Assembly) Joint(name, start, end string) error {
 	return nil
 }
 
+// Range is one freedom's bounds for Pair's Ranges — either side nil for unbounded.
+type Range struct {
+	Lower, Upper *float64
+}
+
+// PairOptions is Pair's optional arguments, Go's spelling of Python's keyword arguments:
+// EndFrame nil is "frame itself" (all-zero rest values); Ranges nil is "none" (a kind
+// that allows none, or no ranges at all); Pitch nil is NaN (required and non-zero for
+// "screw", refused for any other kind).
+type PairOptions struct {
+	EndFrame *Frame
+	Ranges   []Range
+	Pitch    *float64
+}
+
+// Pair gives joint joint its pair: kind (a name of the kind table — "revolute",
+// "prismatic", "cylindrical", "screw", "spherical", "spherical_with_pin", "planar",
+// "universal", "homokinetic", "fully_constrained" or "unconstrained"), the contact frame
+// at rest, and opts — see [PairOptions]. [PairFreedomCount] sizes opts.Ranges: one entry
+// per freedom of kind. An unknown or already-paired joint, an unknown kind, a bad pitch,
+// ranges given where none are allowed or of the wrong length, a non-finite or inverted
+// range, or an end frame this kind's motion cannot reach returns the kernel's own
+// *BuildError, and the assembly is left as it was.
+//
+// Ranges' four parallel arrays (lower, upper, has_lower, has_upper) are C.malloc'd and
+// freed in a defer, as Link's placement array is — Go's cgo pointer rules forbid handing
+// C a Go-allocated array it might read after this call returns, and nothing shorter-lived
+// than the call itself is safe to free early.
+func (a *Assembly) Pair(joint, kind string, frame Frame, opts PairOptions) error {
+	defer pin()()
+	ah, err := a.h()
+	if err != nil {
+		return err
+	}
+	cj := C.CString(joint)
+	defer C.free(unsafe.Pointer(cj))
+	ck := C.CString(kind)
+	defer C.free(unsafe.Pointer(ck))
+
+	var endFrame *C.double
+	if opts.EndFrame != nil {
+		ef := *opts.EndFrame
+		endFrame = doubles(&ef[0])
+	}
+
+	// len() is 0 for both a nil Ranges and an empty, non-nil []Range -- Go has no
+	// nil-vs-empty-slice distinction worth separate handling here, so both mean "no
+	// ranges" and send all four pointers null (controller ruling; this is this wrapper's
+	// own idiom, not a pass-through of the C ABI's null-vs-zero-count distinction).
+	n := len(opts.Ranges)
+	var lower, upper *C.double
+	var hasLower, hasUpper *C.bool
+	if n > 0 {
+		lowerArr := C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof(C.double(0))))
+		defer C.free(lowerArr)
+		upperArr := C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof(C.double(0))))
+		defer C.free(upperArr)
+		hasLowerArr := C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof(C.bool(false))))
+		defer C.free(hasLowerArr)
+		hasUpperArr := C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof(C.bool(false))))
+		defer C.free(hasUpperArr)
+		lowerSlice := unsafe.Slice((*C.double)(lowerArr), n)
+		upperSlice := unsafe.Slice((*C.double)(upperArr), n)
+		hasLowerSlice := unsafe.Slice((*C.bool)(hasLowerArr), n)
+		hasUpperSlice := unsafe.Slice((*C.bool)(hasUpperArr), n)
+		for i, r := range opts.Ranges {
+			if r.Lower != nil {
+				lowerSlice[i] = C.double(*r.Lower)
+				hasLowerSlice[i] = C.bool(true)
+			} else {
+				lowerSlice[i] = 0
+				hasLowerSlice[i] = C.bool(false)
+			}
+			if r.Upper != nil {
+				upperSlice[i] = C.double(*r.Upper)
+				hasUpperSlice[i] = C.bool(true)
+			} else {
+				upperSlice[i] = 0
+				hasUpperSlice[i] = C.bool(false)
+			}
+		}
+		lower = (*C.double)(lowerArr)
+		upper = (*C.double)(upperArr)
+		hasLower = (*C.bool)(hasLowerArr)
+		hasUpper = (*C.bool)(hasUpperArr)
+	}
+
+	pitch := math.NaN()
+	if opts.Pitch != nil {
+		pitch = *opts.Pitch
+	}
+
+	ok := bool(C.cadaclysm_blacksmith_assembly_pair(ah, cj, ck, doubles(&frame[0]), endFrame,
+		lower, upper, hasLower, hasUpper, C.size_t(n), C.double(pitch)))
+	runtime.KeepAlive(a)
+	if !ok {
+		return failure("assembly_pair")
+	}
+	return nil
+}
+
+// StateRow is one row of Assembly.State: joint set to values, in that joint's pair's
+// freedom order.
+type StateRow struct {
+	Joint  string
+	Values []float64
+}
+
+// State adds a named state name to this assembly: rows sets each named joint to its
+// values, in that joint's pair's freedom order. An empty or duplicate name, no rows, an
+// unknown joint, a joint set twice, a joint with no pair or none of its pair's freedoms,
+// a row of the wrong length, or a non-finite or out-of-range value returns the kernel's
+// own *BuildError, and the assembly is left as it was.
+//
+// rows' joint names, row lengths and flattened values are three C.malloc'd arrays, freed
+// in a defer along with every C.CString, exactly as Link builds its placement array.
+func (a *Assembly) State(name string, rows []StateRow) error {
+	defer pin()()
+	ah, err := a.h()
+	if err != nil {
+		return err
+	}
+	cn := C.CString(name)
+	defer C.free(unsafe.Pointer(cn))
+
+	n := len(rows)
+	var joints unsafe.Pointer
+	var jointSlice []*C.char
+	var countsArr unsafe.Pointer
+	var valuesArr unsafe.Pointer
+	if n > 0 {
+		joints = C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof(uintptr(0))))
+		jointSlice = unsafe.Slice((**C.char)(joints), n)
+		countsArr = C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof(C.uint32_t(0))))
+		countsSlice := unsafe.Slice((*C.uint32_t)(countsArr), n)
+		total := 0
+		for _, r := range rows {
+			total += len(r.Values)
+		}
+		var valuesSlice []C.double
+		if total > 0 {
+			valuesArr = C.malloc(C.size_t(total) * C.size_t(unsafe.Sizeof(C.double(0))))
+			valuesSlice = unsafe.Slice((*C.double)(valuesArr), total)
+		}
+		offset := 0
+		for i, r := range rows {
+			jointSlice[i] = C.CString(r.Joint)
+			countsSlice[i] = C.uint32_t(len(r.Values))
+			for _, v := range r.Values {
+				valuesSlice[offset] = C.double(v)
+				offset++
+			}
+		}
+		defer func() {
+			for i := 0; i < n; i++ {
+				C.free(unsafe.Pointer(jointSlice[i]))
+			}
+			C.free(joints)
+			C.free(countsArr)
+			if valuesArr != nil {
+				C.free(valuesArr)
+			}
+		}()
+	}
+
+	ok := bool(C.cadaclysm_blacksmith_assembly_state(ah, cn,
+		(**C.char)(joints), (*C.uint32_t)(countsArr), (*C.double)(valuesArr), C.size_t(n)))
+	runtime.KeepAlive(a)
+	if !ok {
+		return failure("assembly_state")
+	}
+	return nil
+}
+
+// SequenceSegment is one segment of Assembly.Sequence: the named state it reaches, its
+// parameter T, and how the motion leaves it for the next, one of the words "undefined",
+// "discontinuous", "synchronous" or "linear".
+type SequenceSegment struct {
+	State         string
+	T             float64
+	Interpolation string
+}
+
+// Sequence adds a named motion sequence over this assembly's states: segments in
+// increasing T, each reaching a named state. The sequence is closed unless its last
+// segment is "discontinuous". seconds says T is in seconds (the file then states a time
+// unit). An empty or duplicate name, fewer than two segments, an unknown state, a T that
+// is not finite or decreases, or an unknown interpolation word returns the kernel's own
+// *BuildError, and the assembly is left as it was.
+//
+// The state names and interpolation words are C.CString arrays and the parameters a
+// C.malloc'd one, all freed in a defer, as State frees its rows.
+func (a *Assembly) Sequence(name string, segments []SequenceSegment, seconds bool) error {
+	defer pin()()
+	ah, err := a.h()
+	if err != nil {
+		return err
+	}
+	cn := C.CString(name)
+	defer C.free(unsafe.Pointer(cn))
+
+	n := len(segments)
+	var statesArr, interpArr, tsArr unsafe.Pointer
+	if n > 0 {
+		statesArr = C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof(uintptr(0))))
+		interpArr = C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof(uintptr(0))))
+		tsArr = C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof(C.double(0))))
+		stateSlice := unsafe.Slice((**C.char)(statesArr), n)
+		interpSlice := unsafe.Slice((**C.char)(interpArr), n)
+		tsSlice := unsafe.Slice((*C.double)(tsArr), n)
+		for i, g := range segments {
+			stateSlice[i] = C.CString(g.State)
+			interpSlice[i] = C.CString(g.Interpolation)
+			tsSlice[i] = C.double(g.T)
+		}
+		defer func() {
+			for i := 0; i < n; i++ {
+				C.free(unsafe.Pointer(stateSlice[i]))
+				C.free(unsafe.Pointer(interpSlice[i]))
+			}
+			C.free(statesArr)
+			C.free(interpArr)
+			C.free(tsArr)
+		}()
+	}
+
+	ok := bool(C.cadaclysm_blacksmith_assembly_sequence(ah, cn,
+		(**C.char)(statesArr), (*C.double)(tsArr), (**C.char)(interpArr), C.size_t(n), C.bool(seconds)))
+	runtime.KeepAlive(a)
+	if !ok {
+		return failure("assembly_sequence")
+	}
+	return nil
+}
+
+// Base declares this assembly's base link. link naming no link of this assembly, or a
+// base already declared, returns the kernel's own *BuildError naming the link already
+// there, and the assembly is left as it was.
+func (a *Assembly) Base(link string) error {
+	defer pin()()
+	ah, err := a.h()
+	if err != nil {
+		return err
+	}
+	cl := C.CString(link)
+	defer C.free(unsafe.Pointer(cl))
+	ok := bool(C.cadaclysm_blacksmith_assembly_base(ah, cl))
+	runtime.KeepAlive(a)
+	if !ok {
+		return failure("assembly_base")
+	}
+	return nil
+}
+
+// PairFreedomCount is how many freedoms a pair kind has, so a caller can size
+// [PairOptions]'s Ranges. 0 for an unknown name, and for "fully_constrained", which has
+// none.
+func PairFreedomCount(kind string) int {
+	defer pin()()
+	ck := C.CString(kind)
+	defer C.free(unsafe.Pointer(ck))
+	return int(C.cadaclysm_blacksmith_pair_freedom_count(ck))
+}
+
 // StepText is this assembly, and everything placed under it, as one STEP file: this
 // assembly the root product, each sub-assembly and each distinct part (the same solid
 // with the same paint and name) written once, each placement an occurrence named as it
@@ -5404,4 +6216,680 @@ func (w *Workplane) Solid() (*Solid, error) {
 		return nil, &BuildError{Message: "solid: nothing was built (BuildError::Empty)"}
 	}
 	return w.solid, nil
+}
+
+// ---- machining --------------------------------------------------------------------------
+
+// jobNulName is what the kernel says of a name with a control character in it -- a NUL,
+// which the UTF-8 marshalling would otherwise cut the name short at, is refused here with
+// it, before the string ever reaches the library.
+const jobNulName = "job: a name must be non-empty and without brackets, slashes, quotes, control characters, or : * ? < > |"
+
+// JobDefaultClearance, JobDefaultTolerance, JobDefaultName, JobDefaultSpindleDwell and
+// JobDefaultResolution are the library's own defaults for [NewJob]'s settings -- Go has no
+// defaults, so a caller passing every one of these gets the library's own job.
+const (
+	JobDefaultClearance    = 1.0
+	JobDefaultTolerance    = 0.01
+	JobDefaultName         = "job"
+	JobDefaultSpindleDwell = 2.0
+	JobDefaultResolution   = 0.1
+)
+
+var jobSides = map[string]uint32{"outside": 0, "inside": 1, "on": 2}
+
+// toolNumber is a Grbl tool number clamped as RegularPolygon's sides is: a negative number
+// reads as 0, so the library reports its own "number must be at least 1".
+func toolNumber(n int) C.uint32_t {
+	if n < 0 {
+		n = 0
+	}
+	return C.uint32_t(n)
+}
+
+// orNaN is v, or NaN for a nil pointer -- the library's own "none" for stepover, stepdown
+// and peck.
+func orNaN(v *float64) C.double {
+	if v == nil {
+		return C.double(math.NaN())
+	}
+	return C.double(*v)
+}
+
+// Tool is a cutter: Grbl tool number (1 to 255, the T word), diameter and fluteLength in
+// mm, feed and plunge in mm/min, rpm its spindle speed, ramping into its cuts at rampAngle
+// degrees. Immutable; a job keeps its own copy, so closing a tool a job has used changes
+// nothing there. Owns a handle: Close it, or let the finalizer.
+type Tool struct{ handle *C.CadaclysmBlacksmithTool }
+
+func newTool(handle *C.CadaclysmBlacksmithTool, what string) (*Tool, error) {
+	if handle == nil {
+		return nil, failure(what)
+	}
+	t := &Tool{handle: handle}
+	runtime.SetFinalizer(t, (*Tool).finalize)
+	return t, nil
+}
+
+func (t *Tool) finalize() {
+	if t.handle != nil {
+		C.cadaclysm_blacksmith_tool_free(t.handle)
+		t.handle = nil
+	}
+}
+
+// h is the live handle, or ErrClosed after Close. A nil t (the zero value of Job.Machine's
+// drills slice, meaning "no tool here") is not an error: the caller checks for it before
+// asking for h.
+func (t *Tool) h() (*C.CadaclysmBlacksmithTool, error) {
+	if t == nil || t.handle == nil {
+		return nil, fmt.Errorf("tool: %w", ErrClosed)
+	}
+	return t.handle, nil
+}
+
+// Closed is whether Close has already run. A nil Tool counts as closed.
+func (t *Tool) Closed() bool { return t == nil || t.handle == nil }
+
+// Close gives the tool back. Idempotent, and a no-op on a nil Tool. The error return is
+// always nil; it exists so a Tool satisfies io.Closer.
+func (t *Tool) Close() error {
+	if t == nil || t.handle == nil {
+		return nil
+	}
+	h := t.handle
+	t.handle = nil
+	runtime.SetFinalizer(t, nil)
+	C.cadaclysm_blacksmith_tool_free(h)
+	return nil
+}
+
+// ramped is made, turned to rampAngle when that is not the library's own 3 degrees -- the
+// unramped handle closed at once, not left to the collector.
+func ramped(made *C.CadaclysmBlacksmithTool, rampAngle float64, what string) (*Tool, error) {
+	t, err := newTool(made, what)
+	if err != nil {
+		return nil, err
+	}
+	if rampAngle == 3.0 { // the library's own default: no second handle
+		return t, nil
+	}
+	h, err := t.h()
+	if err != nil {
+		return nil, err
+	}
+	out, err := newTool(C.cadaclysm_blacksmith_tool_with_ramp_angle(h, C.double(rampAngle)), "tool_with_ramp_angle")
+	t.Close()
+	return out, err
+}
+
+// ToolFlat is a flat end mill. Fails for a number outside 1..255, a size, feed or speed
+// not positive and finite, or a rampAngle outside (0, 90]. Python's rampAngle defaults to
+// 3.0.
+func ToolFlat(number int, diameter, fluteLength, feed, plunge, rpm, rampAngle float64) (*Tool, error) {
+	defer pin()()
+	made := C.cadaclysm_blacksmith_tool_flat(toolNumber(number), C.double(diameter), C.double(fluteLength), C.double(feed),
+		C.double(plunge), C.double(rpm))
+	return ramped(made, rampAngle, "tool_flat")
+}
+
+// ToolBall is a ball end mill, as ToolFlat but its tip a half sphere of the diameter; in
+// 2.5D it cuts where a flat does, bottom being the tip.
+func ToolBall(number int, diameter, fluteLength, feed, plunge, rpm, rampAngle float64) (*Tool, error) {
+	defer pin()()
+	made := C.cadaclysm_blacksmith_tool_ball(toolNumber(number), C.double(diameter), C.double(fluteLength), C.double(feed),
+		C.double(plunge), C.double(rpm))
+	return ramped(made, rampAngle, "tool_ball")
+}
+
+// ToolDrill is a drill, plunging at feed. A job takes it for Job.Drill (and Job.Machine's
+// holes) only.
+func ToolDrill(number int, diameter, fluteLength, feed, rpm float64) (*Tool, error) {
+	defer pin()()
+	return newTool(C.cadaclysm_blacksmith_tool_drill(toolNumber(number), C.double(diameter), C.double(fluteLength), C.double(feed),
+		C.double(rpm)), "tool_drill")
+}
+
+// Stock is the block of material a job cuts, an axis-aligned box. Immutable; a job keeps
+// its own copy. Owns a handle: Close it, or let the finalizer.
+type Stock struct{ handle *C.CadaclysmBlacksmithStock }
+
+func newStock(handle *C.CadaclysmBlacksmithStock, what string) (*Stock, error) {
+	if handle == nil {
+		return nil, failure(what)
+	}
+	s := &Stock{handle: handle}
+	runtime.SetFinalizer(s, (*Stock).finalize)
+	return s, nil
+}
+
+func (s *Stock) finalize() {
+	if s.handle != nil {
+		C.cadaclysm_blacksmith_stock_free(s.handle)
+		s.handle = nil
+	}
+}
+
+// h is the live handle, or ErrClosed after Close.
+func (s *Stock) h() (*C.CadaclysmBlacksmithStock, error) {
+	if s == nil || s.handle == nil {
+		return nil, fmt.Errorf("stock: %w", ErrClosed)
+	}
+	return s.handle, nil
+}
+
+// Closed is whether Close has already run. A nil Stock counts as closed.
+func (s *Stock) Closed() bool { return s == nil || s.handle == nil }
+
+// Close gives the stock back. Idempotent, and a no-op on a nil Stock. The error return is
+// always nil; it exists so a Stock satisfies io.Closer.
+func (s *Stock) Close() error {
+	if s == nil || s.handle == nil {
+		return nil
+	}
+	h := s.handle
+	s.handle = nil
+	runtime.SetFinalizer(s, nil)
+	C.cadaclysm_blacksmith_stock_free(h)
+	return nil
+}
+
+// StockBox is the box from min (x, y, z) to max. Fails unless every min is below its max
+// and all six are finite.
+func StockBox(min, max [3]float64) (*Stock, error) {
+	defer pin()()
+	return newStock(C.cadaclysm_blacksmith_stock_box(C.double(min[0]), C.double(min[1]), C.double(min[2]),
+		C.double(max[0]), C.double(max[1]), C.double(max[2])), "stock_box")
+}
+
+// StockAround is solid's bounds grown by margin in -X, +X, -Y, +Y and +Z; the bottom stays
+// at the solid's lowest Z. Fails for a margin negative or not finite. Python's margin
+// defaults to 0.0.
+func StockAround(solid *Solid, margin float64) (*Stock, error) {
+	defer pin()()
+	h, err := solid.h()
+	if err != nil {
+		return nil, err
+	}
+	out, err := newStock(C.cadaclysm_blacksmith_stock_around(h, C.double(margin)), "stock_around")
+	runtime.KeepAlive(solid)
+	return out, err
+}
+
+// Program is one file a job wrote: a Grbl program (Tool its T number, Name
+// "<job name>-T<n>", or "<job name>-<k>-T<n>" for a repeated tool) from Job.Gcode, or one
+// of Job.WriteCamotics's files (Tool 0 for the simulation copies and the project). Copied
+// out; read-only.
+type Program struct {
+	Tool int
+	Name string
+	Text string
+}
+
+// String is Python's repr.
+func (p Program) String() string {
+	return fmt.Sprintf("Program(tool=%d, name=%s, %d characters)", p.Tool, p.Name, len(p.Text))
+}
+
+// Operation is one operation of a Job, read back by Job.Operations: Kind ("face",
+// "contour", "pocket" or "drill"), Tool (its Grbl T number) and Params, in the
+// kind-specific order the operation stores them. Every param is the library's own number:
+// side 0 outside, 1 inside, 2 on its line; climb and open 1 or 0; points a count; a peck
+// of none is a nil *float64. Copied out; read-only.
+type Operation struct {
+	Kind   string
+	Tool   int
+	Params map[string]*float64
+}
+
+// String is Python's repr.
+func (o Operation) String() string {
+	parts := make([]string, 0, len(o.Params))
+	for k, v := range o.Params {
+		if v == nil {
+			parts = append(parts, k+": <nil>")
+		} else {
+			parts = append(parts, fmt.Sprintf("%s: %v", k, *v))
+		}
+	}
+	sort.Strings(parts)
+	return fmt.Sprintf("Operation(kind=%s, tool=%d, params={%s})", o.Kind, o.Tool, strings.Join(parts, ", "))
+}
+
+// ReportItem is one thing Job.Machine left uncut: Kind ("corner", "hole", "slope",
+// "undercut" or "too_deep"), At (x, y, z), Size (its meaning per Kind), Reason (one
+// sentence naming the tool involved), and Region (its XY area, as profiles of their own,
+// owned: Close each, or let the finalizer). Copied out; read-only.
+type ReportItem struct {
+	Kind   string
+	At     [3]float64
+	Size   float64
+	Reason string
+	Region []*Profile
+}
+
+// String is Python's repr.
+func (r ReportItem) String() string {
+	return fmt.Sprintf("ReportItem(kind=%s, at=%v, size=%v, reason=%s, region=%d profile(s))",
+		r.Kind, r.At, r.Size, r.Reason, len(r.Region))
+}
+
+// Report is what Job.Machine could not make: Items, a slice of ReportItem in order, read
+// once when Machine returns, and Text -- the kernel's own report, one line per item, or
+// "nothing left uncut". Copied out; read-only.
+type Report struct {
+	Items []ReportItem
+	Text  string
+}
+
+// String is Text.
+func (r Report) String() string { return r.Text }
+
+// Job is a machining job on a Stock: operations kept in the order they are added, written
+// as one Grbl 1.1 program per run of operations sharing a tool. Mutable -- each operation
+// is added in place, and a refused one leaves the job as it was. safeZ is the absolute Z
+// of rapids between operations and at a program's start and end, above the stock's top;
+// clearance is how far above an operation's top it enters and leaves its passes; tolerance
+// fits free-form sides and offsets; name names the programs ("<name>-T<n>"); spindleDwell
+// is how long every program waits after starting the spindle; resolution is the CAMotics
+// project's voxel size in mm. Owns a handle: Close it, after which every call returns
+// ErrClosed wrapped as "job: closed" -- what Python's Job.__del__ frees.
+type Job struct{ handle *C.CadaclysmBlacksmithJob }
+
+// NewJob is an empty job on stock, rapids at safeZ (above the stock's top). Go has no
+// defaults, so every setting is spelled out: [JobDefaultClearance], [JobDefaultTolerance],
+// [JobDefaultName], [JobDefaultSpindleDwell] and [JobDefaultResolution] are the library's
+// own. Fails for a safeZ not above the stock's top, a name with a NUL in it, or a setting
+// the job refuses.
+func NewJob(stock *Stock, safeZ, clearance, tolerance float64, name string, spindleDwell, resolution float64) (*Job, error) {
+	defer pin()()
+	if strings.ContainsRune(name, 0) {
+		return nil, &BuildError{Message: jobNulName}
+	}
+	sh, err := stock.h()
+	if err != nil {
+		return nil, err
+	}
+	raw := C.cadaclysm_blacksmith_job_new(sh, C.double(safeZ))
+	runtime.KeepAlive(stock)
+	if raw == nil {
+		return nil, failure("job_new")
+	}
+	j := &Job{handle: raw}
+	runtime.SetFinalizer(j, (*Job).finalize)
+	if !bool(C.cadaclysm_blacksmith_job_set_clearance(raw, C.double(clearance))) {
+		err := failure("job_set_clearance")
+		j.Close()
+		return nil, err
+	}
+	if !bool(C.cadaclysm_blacksmith_job_set_tolerance(raw, C.double(tolerance))) {
+		err := failure("job_set_tolerance")
+		j.Close()
+		return nil, err
+	}
+	if !bool(C.cadaclysm_blacksmith_job_set_spindle_dwell(raw, C.double(spindleDwell))) {
+		err := failure("job_set_spindle_dwell")
+		j.Close()
+		return nil, err
+	}
+	if !bool(C.cadaclysm_blacksmith_job_set_resolution(raw, C.double(resolution))) {
+		err := failure("job_set_resolution")
+		j.Close()
+		return nil, err
+	}
+	cn := C.CString(name)
+	defer C.free(unsafe.Pointer(cn))
+	if !bool(C.cadaclysm_blacksmith_job_set_name(raw, cn)) {
+		err := failure("job_set_name")
+		j.Close()
+		return nil, err
+	}
+	return j, nil
+}
+
+func (j *Job) finalize() {
+	if j.handle != nil {
+		C.cadaclysm_blacksmith_job_free(j.handle)
+		j.handle = nil
+	}
+}
+
+// h is the live handle, or ErrClosed ("job: closed") after Close.
+func (j *Job) h() (*C.CadaclysmBlacksmithJob, error) {
+	if j == nil || j.handle == nil {
+		return nil, fmt.Errorf("job: %w", ErrClosed)
+	}
+	return j.handle, nil
+}
+
+// Closed is whether Close has already run. A nil Job counts as closed.
+func (j *Job) Closed() bool { return j == nil || j.handle == nil }
+
+// Close gives the job back. Idempotent, and a no-op on a nil Job; the lists it wrote are
+// copies and outlive it. The error return is always nil; it exists so a Job satisfies
+// io.Closer.
+func (j *Job) Close() error {
+	if j == nil || j.handle == nil {
+		return nil
+	}
+	h := j.handle
+	j.handle = nil
+	runtime.SetFinalizer(j, nil)
+	C.cadaclysm_blacksmith_job_free(h)
+	return nil
+}
+
+// Face is the stock's top down to z, in zigzag rows along X stepover apart and passes at
+// most stepdown deep, with tool. Fails for a drill, a z above the stock's top, a stepover
+// past the tool's diameter, ...
+func (j *Job) Face(tool *Tool, z, stepover, stepdown float64) error {
+	defer pin()()
+	jh, err := j.h()
+	if err != nil {
+		return err
+	}
+	th, err := tool.h()
+	if err != nil {
+		return err
+	}
+	ok := bool(C.cadaclysm_blacksmith_job_face(jh, th, C.double(z), C.double(stepover), C.double(stepdown)))
+	runtime.KeepAlive(j)
+	runtime.KeepAlive(tool)
+	if !ok {
+		return failure("job_face")
+	}
+	return nil
+}
+
+// Contour is a cut along profile from top to bottom in passes at most stepdown deep, with
+// tool: side "outside" the profile, "inside" it, or "on" its line; climb for climb
+// milling, else conventional; open to cut the outline as an open chain (only "on" its
+// line, and with no holes). Returns a *BuildError for any other side, without asking the
+// library, and for what the job refuses.
+func (j *Job) Contour(tool *Tool, profile *Profile, top, bottom float64, side string, stepdown float64, climb, open bool) error {
+	code, ok := jobSides[side]
+	if !ok {
+		return &BuildError{Message: "side must be 'outside', 'inside' or 'on'"}
+	}
+	defer pin()()
+	jh, err := j.h()
+	if err != nil {
+		return err
+	}
+	th, err := tool.h()
+	if err != nil {
+		return err
+	}
+	ph, err := profile.h()
+	if err != nil {
+		return err
+	}
+	done := bool(C.cadaclysm_blacksmith_job_contour(jh, th, ph, C.double(top), C.double(bottom), C.uint32_t(code),
+		C.double(stepdown), C.bool(climb), C.bool(open)))
+	runtime.KeepAlive(j)
+	runtime.KeepAlive(tool)
+	runtime.KeepAlive(profile)
+	if !done {
+		return failure("job_contour")
+	}
+	return nil
+}
+
+// Pocket is profile -- its holes left standing as islands -- cleared from top to bottom,
+// in rings stepover apart (at most the tool's radius) and passes at most stepdown deep,
+// with tool. Fails for what the job refuses; a pocket too small for the tool is refused by
+// Gcode, naming the operation.
+func (j *Job) Pocket(tool *Tool, profile *Profile, top, bottom, stepover, stepdown float64) error {
+	defer pin()()
+	jh, err := j.h()
+	if err != nil {
+		return err
+	}
+	th, err := tool.h()
+	if err != nil {
+		return err
+	}
+	ph, err := profile.h()
+	if err != nil {
+		return err
+	}
+	done := bool(C.cadaclysm_blacksmith_job_pocket(jh, th, ph, C.double(top), C.double(bottom), C.double(stepover),
+		C.double(stepdown)))
+	runtime.KeepAlive(j)
+	runtime.KeepAlive(tool)
+	runtime.KeepAlive(profile)
+	if !done {
+		return failure("job_pocket")
+	}
+	return nil
+}
+
+// Drill is a hole at each (x, y) of points, from top to bottom with tool, pecking peck
+// deep at a time (retracting between pecks), or straight to depth for a nil peck. Fails
+// for what the job refuses (a tool that is not a drill, no points, ...).
+func (j *Job) Drill(tool *Tool, points [][2]float64, top, bottom float64, peck *float64) error {
+	defer pin()()
+	jh, err := j.h()
+	if err != nil {
+		return err
+	}
+	th, err := tool.h()
+	if err != nil {
+		return err
+	}
+	flat := make([]float64, 0, len(points)*2)
+	for _, p := range points {
+		flat = append(flat, p[0], p[1])
+	}
+	var xy *C.double
+	if len(flat) > 0 {
+		xy = doubles(&flat[0])
+	}
+	done := bool(C.cadaclysm_blacksmith_job_drill(jh, th, xy, C.size_t(len(points)), C.double(top), C.double(bottom),
+		orNaN(peck)))
+	runtime.KeepAlive(j)
+	runtime.KeepAlive(tool)
+	if !done {
+		return failure("job_drill")
+	}
+	return nil
+}
+
+// Machine recognises part and appends the operations that make it: faced, contoured and
+// pocketed with endMill, its holes drilled with whichever of drills fits each -- a tool
+// per required diameter. A nil element of drills is the library's own "null drill <i>".
+// stepover and stepdown are the kernel's own defaults for a nil pointer; skin (at least 0)
+// is how far above the part's lowest point the outline stops, so the part stays attached
+// to the stock -- 0 cuts through; a nil peck is none (a drill straight to depth). Returns
+// a *Report of what could not be cut. Fails for what the kernel refuses (a drill as
+// endMill, a null drill, ...); the job changes only on success -- a refusal leaves it
+// exactly as it was.
+func (j *Job) Machine(part *Solid, endMill *Tool, drills []*Tool, stepover, stepdown *float64, skin float64,
+	peck *float64) (*Report, error) {
+	defer pin()()
+	jh, err := j.h()
+	if err != nil {
+		return nil, err
+	}
+	ph, err := part.h()
+	if err != nil {
+		return nil, err
+	}
+	eh, err := endMill.h()
+	if err != nil {
+		return nil, err
+	}
+	handles := make([]*C.CadaclysmBlacksmithTool, len(drills))
+	for i, t := range drills {
+		if t == nil {
+			handles[i] = nil
+			continue
+		}
+		h, err := t.h()
+		if err != nil {
+			return nil, err
+		}
+		handles[i] = h
+	}
+	var firstDrill **C.CadaclysmBlacksmithTool
+	if len(handles) > 0 {
+		firstDrill = &handles[0]
+	}
+	raw := C.cadaclysm_blacksmith_job_machine(jh, ph, eh, firstDrill, C.size_t(len(handles)), orNaN(stepover),
+		orNaN(stepdown), C.double(skin), orNaN(peck))
+	runtime.KeepAlive(j)
+	runtime.KeepAlive(part)
+	runtime.KeepAlive(endMill)
+	for _, t := range drills {
+		runtime.KeepAlive(t)
+	}
+	if raw == nil {
+		return nil, failure("job_machine")
+	}
+	defer C.cadaclysm_blacksmith_report_free(raw)
+	n := uint32(C.cadaclysm_blacksmith_report_count(raw))
+	items := make([]ReportItem, 0, n)
+	for i := uint32(0); i < n; i++ {
+		var at [3]float64
+		if !bool(C.cadaclysm_blacksmith_report_at(raw, C.uint32_t(i), doubles(&at[0]))) {
+			return nil, failure("report_at")
+		}
+		region, err := profileList(C.cadaclysm_blacksmith_report_region(raw, C.uint32_t(i)), "report_region")
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, ReportItem{
+			Kind:   C.GoString(C.cadaclysm_blacksmith_report_kind(raw, C.uint32_t(i))),
+			At:     at,
+			Size:   float64(C.cadaclysm_blacksmith_report_size(raw, C.uint32_t(i))),
+			Reason: C.GoString(C.cadaclysm_blacksmith_report_reason(raw, C.uint32_t(i))),
+			Region: region,
+		})
+	}
+	return &Report{Items: items, Text: C.GoString(C.cadaclysm_blacksmith_report_text(raw))}, nil
+}
+
+// Operations is every operation added to this job so far, in order -- whether added by
+// Face/Contour/Pocket/Drill or by Machine.
+func (j *Job) Operations() ([]Operation, error) {
+	defer pin()()
+	jh, err := j.h()
+	if err != nil {
+		return nil, err
+	}
+	raw := C.cadaclysm_blacksmith_job_operations(jh)
+	runtime.KeepAlive(j)
+	if raw == nil {
+		return nil, failure("job_operations")
+	}
+	defer C.cadaclysm_blacksmith_operations_free(raw)
+	n := uint32(C.cadaclysm_blacksmith_operations_count(raw))
+	out := make([]Operation, 0, n)
+	for i := uint32(0); i < n; i++ {
+		paramCount := uint32(C.cadaclysm_blacksmith_operations_param_count(raw, C.uint32_t(i)))
+		params := make(map[string]*float64, paramCount)
+		for k := uint32(0); k < paramCount; k++ {
+			name := C.GoString(C.cadaclysm_blacksmith_operations_param_name(raw, C.uint32_t(i), C.uint32_t(k)))
+			value := float64(C.cadaclysm_blacksmith_operations_param_value(raw, C.uint32_t(i), C.uint32_t(k)))
+			if math.IsNaN(value) {
+				params[name] = nil
+			} else {
+				v := value
+				params[name] = &v
+			}
+		}
+		out = append(out, Operation{
+			Kind:   C.GoString(C.cadaclysm_blacksmith_operations_kind(raw, C.uint32_t(i))),
+			Tool:   int(C.cadaclysm_blacksmith_operations_tool(raw, C.uint32_t(i))),
+			Params: params,
+		})
+	}
+	return out, nil
+}
+
+// programs is the files of a list the library handed back (nil: the last error), each
+// copied out, the list freed.
+func programs(handle *C.CadaclysmBlacksmithPrograms, what string) ([]Program, error) {
+	if handle == nil {
+		return nil, failure(what)
+	}
+	defer C.cadaclysm_blacksmith_programs_free(handle)
+	n := uint32(C.cadaclysm_blacksmith_programs_count(handle))
+	out := make([]Program, 0, n)
+	for i := uint32(0); i < n; i++ {
+		out = append(out, Program{
+			Tool: int(C.cadaclysm_blacksmith_programs_tool(handle, C.uint32_t(i))),
+			Name: C.GoString(C.cadaclysm_blacksmith_programs_name(handle, C.uint32_t(i))),
+			Text: C.GoString(C.cadaclysm_blacksmith_programs_text(handle, C.uint32_t(i))),
+		})
+	}
+	return out, nil
+}
+
+// Gcode is the job as Grbl 1.1 programs, one per run of consecutive operations sharing a
+// tool (T1, T2, T1 gives three), each named "<name>-T<n>" (or "<name>-<k>-T<n>" for run k
+// of a repeated tool); an empty slice for a job with no operations. Fails for an operation
+// whose geometry the tool cannot cut (named by its index and kind).
+func (j *Job) Gcode() ([]Program, error) {
+	defer pin()()
+	jh, err := j.h()
+	if err != nil {
+		return nil, err
+	}
+	out, err := programs(C.cadaclysm_blacksmith_job_gcode(jh), "job_gcode")
+	runtime.KeepAlive(j)
+	return out, err
+}
+
+// camoticsFiles is job_camotics(stem), copied out.
+func (j *Job) camoticsFiles(stem string) ([]Program, error) {
+	defer pin()()
+	jh, err := j.h()
+	if err != nil {
+		return nil, err
+	}
+	cs := C.CString(stem)
+	defer C.free(unsafe.Pointer(cs))
+	raw := C.cadaclysm_blacksmith_job_camotics(jh, cs)
+	runtime.KeepAlive(j)
+	return programs(raw, "job_camotics")
+}
+
+// WriteCamotics is a CAMotics project at path and its files beside it, named after the
+// project's file stem (out/part.camotics writes out/part-T1.nc), not the job's name: each
+// program, a simulation copy of it (.sim.nc, which the project lists), and the project
+// last. Creates the directory. Returns the paths written, the project last, written here
+// (not by the library) byte for byte, as plain UTF-8 with no byte-order mark. Fails for a
+// path with no file stem, what Gcode refuses, or a file that cannot be written.
+func (j *Job) WriteCamotics(path string) ([]string, error) {
+	base := filepath.Base(path)
+	stem := strings.TrimSuffix(base, filepath.Ext(base))
+	if stem == "" { // Python's Path(".camotics").stem is ".camotics": a name that is all extension stays whole
+		stem = base
+	}
+	if strings.ContainsRune(stem, 0) {
+		return nil, &BuildError{Message: jobNulName}
+	}
+	files, err := j.camoticsFiles(stem)
+	if err != nil {
+		return nil, err
+	}
+	folder := filepath.Dir(path)
+	if folder != "" {
+		if err := os.MkdirAll(folder, 0o755); err != nil {
+			return nil, &BuildError{Message: fmt.Sprintf("job_camotics: %s: %v", path, err)}
+		}
+	}
+	written := make([]string, 0, len(files))
+	for i, f := range files {
+		at := path
+		if i != len(files)-1 {
+			at = filepath.Join(folder, f.Name)
+		}
+		if err := os.WriteFile(at, []byte(f.Text), 0o644); err != nil {
+			return nil, &BuildError{Message: fmt.Sprintf("job_camotics: %s: %v", path, err)}
+		}
+		written = append(written, at)
+	}
+	return written, nil
 }

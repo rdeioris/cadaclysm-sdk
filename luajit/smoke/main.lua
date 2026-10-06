@@ -613,6 +613,36 @@ local function main()
     end
   end
   say(("intersect: %s (%d ellipses); %s"):format(tostring(found), ellipses, tostring(shared.overlaps[1])))
+  -- The collider: two cuboids overlapping by 2 along x, plus one far away -> one hit
+  -- (0, 1), depth 2, solid() non-null.
+  local xy0 = { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 }
+  local part_a = bs.Solid.cuboid(4, 4, 4)
+  local part_b = bs.Solid.cuboid(4, 4, 4):translate(2, 0, 0)
+  local part_c = bs.Solid.cuboid(4, 4, 4):translate(100, 0, 0)
+  if not part_a.bounds_box:overlaps(part_b.bounds_box) then
+    error("collider: the two overlapping cuboids' bounds boxes do not overlap")
+  end
+  local collider = bs.Collider({ part_a, part_b, part_c })
+  if collider.group_count ~= 3 then error("collider: the group count is not one per part: " .. tostring(collider.group_count)) end
+  local hits = collider:check({ xy0, xy0, xy0 })
+  if #hits ~= 1 then error("collider: found other than one hit: " .. #hits) end
+  local hit = hits[1]
+  if hit.a ~= 0 or hit.b ~= 1 then error("collider: the hit does not name parts 0 and 1: " .. tostring(hit)) end
+  if not hit.overlap or hit.kind ~= "overlap" or hit.text ~= "" then
+    error("collider: the hit is not a clean overlap: " .. tostring(hit))
+  end
+  if math.abs(hit.depth - 2.0) > 1e-9 then error("collider: the hit's depth is not exactly 2: " .. tostring(hit)) end
+  local overlap_solid = hit:solid()
+  if overlap_solid.faces == 0 then error("collider: the hit's rebuilt solid has no faces") end
+  local collider_stats = collider.stats
+  if collider_stats.considered ~= 3 then
+    error("collider: the stats do not consider all three pairs: " .. tostring(collider_stats))
+  end
+  local ok_groups, err_groups = pcall(function() return bs.Collider({ part_a, part_b, part_c }, 0.05, { 0, 1 }) end)
+  if ok_groups or not tostring(err_groups):find("groups must have one entry per solid", 1, true) then
+    error("collider: a short groups list was accepted or refused in other words: " .. tostring(err_groups))
+  end
+  say(("collider: %d hit(s), depth %g, %s"):format(#hits, hit.depth, tostring(collider_stats)))
   -- Solid x profile hits: a line through a cuboid pierces two faces and is cut into three
   -- pieces, outside/inside/outside, the middle one spanning the box.
   local xy = { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 }

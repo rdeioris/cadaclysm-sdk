@@ -266,8 +266,10 @@ final class ReaderTests: XCTestCase {
         let body = scene.nodes[2]
         XCTAssertEqual(body.mesh.vertexCount, 619)
         XCTAssertEqual(body.mesh.triangleCount, 1014)
-        XCTAssertEqual(body.edges.polylineCount, 15)
-        XCTAssertEqual(body.edges.segmentIndices().count, 218)
+        // 15 -> 14 polylines, 218 -> 216 segment indices on 2026-10-01: the body's one seam is
+        // no longer drawn (`TrimmedBrep::seam_edges`); the manifold below still counts 15 edges.
+        XCTAssertEqual(body.edges.polylineCount, 14)
+        XCTAssertEqual(body.edges.segmentIndices().count, 216)
         let surfaces = body.surfaces
         XCTAssertEqual(surfaces.count, 7)
         XCTAssertEqual(surfaces[0].kind, 7)
@@ -282,6 +284,10 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(manifold.vertices, 10)
         XCTAssertTrue(manifold.isManifold)
         XCTAssertTrue(manifold.isClosed)
+        let (sewn, report) = try brep.sewed()
+        defer { sewn.release() }
+        XCTAssertEqual(Int(report.freeBefore), manifold.boundaryEdges)
+        XCTAssertEqual(try brep.manifold, manifold)
     }
 
     func testStepPolylinesAndSurfaces() throws {
@@ -305,12 +311,15 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(plate.depth, 1)
         XCTAssertEqual(plate.colour, SIMD4(1, 0, 0, 1))
         // 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound): 2652 -> 2100 vertices, 4092 -> 2988 triangles.
-        XCTAssertEqual(plate.mesh.vertexCount, 2100)
-        XCTAssertEqual(plate.mesh.triangleCount, 2988)
+        // 2026-09-28, 619a1b2d (each shared edge's polyline thinned for display, BOUNDARY_THINNING 0.25): 2100 -> 1716 vertices, 2988 -> 2604 triangles.
+        // 2026-10-04, ff5f68b7b (one row along a ruling: a plane's display lays no lattice rows; b33429ed2 missed this row): 1716 -> 996 vertices, 2604 -> 1164 triangles.
+        XCTAssertEqual(plate.mesh.vertexCount, 996)
+        XCTAssertEqual(plate.mesh.triangleCount, 1164)
         let edges = plate.edges
         XCTAssertEqual(edges.polylineCount, 48)
-        XCTAssertEqual(edges.vertexCount, 648)
-        XCTAssertEqual(edges.segmentIndices().count, 1200)
+        // 2026-09-28, 619a1b2d (the same thinning): 648 -> 456 vertices, 1200 -> 816 segment indices.
+        XCTAssertEqual(edges.vertexCount, 456)
+        XCTAssertEqual(edges.segmentIndices().count, 816)
         XCTAssertEqual(Int(edges.counts.reduce(0, +)), edges.vertexCount)
         XCTAssertEqual(plate.isocurves.polylineCount, 102)
         XCTAssertEqual(plate.isocurves.vertexCount, 384)
@@ -392,6 +401,10 @@ final class ReaderTests: XCTestCase {
         XCTAssertNotEqual(zUp, yUp)
         let painted = try scene.svgText(SvgOptions(background: 0xFF0000))
         XCTAssertTrue(painted.contains("fill=\"#ff0000\""), painted.prefix(300).description)
+
+        // `packed(_:)` reads a CSS colour name into the same packed 0xRRGGBB the stroke takes.
+        let redStroke = try scene.svgText(SvgOptions(stroke: try packed("red")))
+        XCTAssertTrue(redStroke.contains("#ff0000"), redStroke.prefix(300).description)
 
         // Refusals surface as the library's own words, thrown as a CadaclysmError.
         XCTAssertThrowsError(try scene.svgText(SvgOptions(fov: 200))) { error in
@@ -651,6 +664,30 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(node.mesh.triangleCount, 12)
     }
 
+    func testAMesh64HeldAcrossAForgetIsInvalidNotRead() throws {
+        // forgetMeshes frees the document's own mesh, which mesh64 lends, so a Mesh64 from before
+        // the forget must report its arrays invalid (a read would trap) rather than read freed
+        // memory; the float mesh, the edge views and the node are the library's own and survive.
+        let scene = try Cadaclysm.open(try sample(cube))
+        defer { scene.close() }
+        let node = scene.nodes[0]
+        let lent = node.mesh64, kept = node.mesh, outline = node.edges
+        let early = lent.copy()
+        XCTAssertTrue(lent.positions.isValid && lent.indices.isValid)
+        scene.forgetMeshes()
+        XCTAssertFalse(lent.positions.isValid, "a Mesh64 held across a forget still reads")
+        XCTAssertFalse(lent.indices.isValid)
+        XCTAssertEqual(lent.normals?.isValid, false)
+        XCTAssertTrue(lent.positions.owner.nativeMemoryInvalidReason?.contains("forgotten") == true)
+        XCTAssertTrue(kept.positions.isValid && outline.positions.isValid && node.canMesh,
+                      "the forget staled the float mesh, an edge view or the node")
+        XCTAssertTrue(early.positions.isValid, "a copy is our own and survives the forget")
+        let again = node.mesh64
+        XCTAssertTrue(again.positions.isValid)
+        XCTAssertEqual(again.triangleCount, early.triangleCount)
+        XCTAssertEqual(Array(again.positions), Array(early.positions))
+    }
+
     func testMesh64AndBounds64KeepACoordinateFarFromTheOrigin() throws {
         // A cube at small coordinates cannot tell mesh64 from mesh widened -- both narrow
         // losslessly there. This catches mesh64 handing back mesh's float positions widened
@@ -675,7 +712,7 @@ final class ReaderTests: XCTestCase {
         let bracket = scene.nodes[1], pin = scene.nodes[2]
         XCTAssertFalse(bracket.isMeshed)
         XCTAssertEqual(bracket.triangleEstimate, 18)
-        XCTAssertEqual(pin.triangleEstimate, 468)  // 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound): 480 -> 468
+        XCTAssertEqual(pin.triangleEstimate, 318)  // 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound): 480 -> 468; 2026-10-04, one row along a ruling (the display's filler lays one row along a cylinder's or cone's straight axis, not six): 468 -> 318
         XCTAssertEqual(bracket.surfaceEdges.polylineCount, 12)
         XCTAssertEqual(bracket.surfaceEdges.vertexCount, 24)
         XCTAssertTrue(bracket.surfaceIsocurves.isEmpty)
@@ -750,6 +787,139 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(row.joint?.index, 0)
         XCTAssertEqual(row.values.count, 1)
         XCTAssertEqual(row.values.first ?? .nan, 0.5, accuracy: 1e-9)
+    }
+
+    /// The pose facts, identical in every language (posing plan 2's wrapper brief):
+    /// mechanism.stp declares no base; `poseState(open)` holds the base link fixed and
+    /// turns the arm by -0.5 about Z (hinge is the arm's joint, reached from its end); a
+    /// value past the pair's range is used and reported; `pose` can hold a different link
+    /// fixed; `pose(state.values)` poses like `poseState(state)`, and `pose([])` is the
+    /// rest pose; a bad row, or a file with no mechanism, throws.
+    func testAMechanismPosesItsState() throws {
+        func apply(_ m: [Double], _ p: (Double, Double, Double)) -> (Double, Double, Double) {
+            (m[0] * p.0 + m[4] * p.1 + m[8] * p.2 + m[12],
+             m[1] * p.0 + m[5] * p.1 + m[9] * p.2 + m[13],
+             m[2] * p.0 + m[6] * p.1 + m[10] * p.2 + m[14])
+        }
+
+        let scene = try Cadaclysm.open(try sample(mechanism))
+        defer { scene.close() }
+        let links = scene.links
+        let base = links[0]
+        let arm = links[1]
+        let hinge = scene.joints[0]
+        let state = scene.states[0]
+        let armNode = arm.nodes[0]
+        let baseNode = base.nodes[0]
+
+        XCTAssertNil(scene.base)
+
+        let posed = try scene.poseState(state)
+        XCTAssertEqual(posed.ground.index, base.index)
+        XCTAssertTrue(posed.unsolved.isEmpty)
+        XCTAssertTrue(posed.outOfRange.isEmpty)
+        let q = 0.5  // the arm is the joint's start, reached from its end: it turns by -q
+        let p1 = apply(posed.rawTransform(armNode), (10, 0, 0))
+        XCTAssertEqual(p1.0, 10 * cos(q), accuracy: 1e-9)
+        XCTAssertEqual(p1.1, -10 * sin(q), accuracy: 1e-9)
+        XCTAssertEqual(p1.2, 100, accuracy: 1e-9)
+        let p2 = apply(posed.rawTransform(armNode), (0, 0, 0))
+        XCTAssertEqual(p2.0, 0, accuracy: 1e-9)
+        XCTAssertEqual(p2.1, 0, accuracy: 1e-9)
+        XCTAssertEqual(p2.2, 100, accuracy: 1e-9)
+        XCTAssertEqual(posed.rawTransform(baseNode), baseNode.rawTransform)
+
+        // A value past the range is used and reported.
+        let overRange = try scene.pose([StateValue(joint: hinge, values: [2.0])])
+        XCTAssertEqual(overRange.outOfRange.count, 1)
+        let row = overRange.outOfRange[0]
+        XCTAssertEqual(row.joint.index, hinge.index)
+        XCTAssertEqual(row.freedom, 0)
+        XCTAssertEqual(row.value, 2.0, accuracy: 1e-9)
+        let p3 = apply(overRange.rawTransform(armNode), (10, 0, 0))
+        XCTAssertEqual(p3.0, 10 * cos(2.0), accuracy: 1e-9)
+        XCTAssertEqual(p3.1, -10 * sin(2.0), accuracy: 1e-9)
+        XCTAssertEqual(p3.2, 100, accuracy: 1e-9)
+
+        // The ground can be named.
+        let grounded = try scene.pose([StateValue(joint: hinge, values: [0.5])], ground: arm)
+        XCTAssertEqual(grounded.ground.index, arm.index)
+        XCTAssertEqual(grounded.rawTransform(armNode), armNode.rawTransform)
+
+        // State values pose like the state, and an empty pose is the rest pose.
+        let fromValues = try scene.pose(state.values)
+        XCTAssertEqual(fromValues.rawTransform(armNode), posed.rawTransform(armNode))
+        let rest = try scene.pose([])
+        for node in scene.nodes {
+            XCTAssertEqual(rest.rawTransform(node), node.rawTransform)
+        }
+
+        // A bad row, or a file with no mechanism, throws.
+        XCTAssertThrowsError(try scene.pose([StateValue(joint: hinge, values: [1.0, 2.0])])) { error in
+            guard let error = error as? CadaclysmError else { return XCTFail("\(error)") }
+            XCTAssertTrue(error.message.contains("takes 1 value(s)"), error.message)
+        }
+        let cubeScene = try Cadaclysm.open(try sample(cube))
+        defer { cubeScene.close() }
+        XCTAssertThrowsError(try cubeScene.pose([])) { error in
+            guard let error = error as? CadaclysmError else { return XCTFail("\(error)") }
+            XCTAssertTrue(error.message.contains("no mechanism"), error.message)
+        }
+    }
+
+    /// The sequence facts, identical in every language: mechanism-sequence.stp holds states
+    /// `open`, `shut`, `wide` and two sequences. `swing` is closed, one second a unit, and
+    /// runs shut@0 linear, open@1 synchronous, wide@2 linear; `snap` is open, has no unit,
+    /// and runs shut@0, wide@0.5, both discontinuous. `pose` at each of `swing`'s parameters
+    /// poses its state, and a parameter that is not a number throws.
+    func testASequencePosesItsSegments() throws {
+        // The standard library's Sequence protocol stays usable beside this module.
+        func countAll<S: Sequence>(_ s: S) -> Int { s.reduce(0) { n, _ in n + 1 } }
+        XCTAssertEqual(countAll([1, 2, 3]), 3)
+        let scene = try Cadaclysm.open(try sample("samples/mechanism-sequence.stp"))
+        defer { scene.close() }
+        XCTAssertEqual(scene.states.map { $0.name }, ["open", "shut", "wide"])
+        let sequences = scene.sequences
+        XCTAssertEqual(sequences.map { $0.name }, ["swing", "snap"])
+
+        let swing = sequences[0]
+        XCTAssertEqual(swing.index, 0)
+        XCTAssertTrue(swing.closed)
+        XCTAssertEqual(swing.secondsPerUnit, 1.0)
+        XCTAssertEqual(swing.segments.map { $0.state.name }, ["shut", "open", "wide"])
+        XCTAssertEqual(swing.segments.map { $0.t }, [0.0, 1.0, 2.0])
+        XCTAssertEqual(swing.segments.map { $0.interpolation }, ["linear", "synchronous", "linear"])
+        XCTAssertEqual(swing.start, 0.0)
+        XCTAssertEqual(swing.end, 2.0)
+
+        let snap = sequences[1]
+        XCTAssertEqual(snap.index, 1)
+        XCTAssertEqual(snap.name, "snap")
+        XCTAssertFalse(snap.closed)
+        XCTAssertNil(snap.secondsPerUnit)
+        XCTAssertEqual(snap.segments.map { $0.state.name }, ["shut", "wide"])
+        XCTAssertEqual(snap.segments.map { $0.t }, [0.0, 0.5])
+        XCTAssertEqual(snap.segments.map { $0.interpolation }, ["discontinuous", "discontinuous"])
+
+        for segment in swing.segments {
+            let posed = try swing.pose(segment.t)
+            let expected = try scene.poseState(segment.state)
+            for node in scene.nodes {
+                let got = posed.rawTransform(node)
+                let want = expected.rawTransform(node)
+                for k in 0..<16 { XCTAssertEqual(got[k], want[k], accuracy: 1e-9) }
+            }
+        }
+        _ = try swing.pose(0.5, ground: scene.links[1])
+
+        XCTAssertThrowsError(try swing.pose(Double.nan)) { error in
+            guard let error = error as? CadaclysmError else { return XCTFail("\(error)") }
+            XCTAssertTrue(error.message.contains("the sequence parameter must be a finite number"), error.message)
+        }
+
+        let cube = try Cadaclysm.open(try sample(cube))
+        defer { cube.close() }
+        XCTAssertTrue(cube.sequences.isEmpty)
     }
 
     func testCubeHasNoLinksOrJoints() throws {

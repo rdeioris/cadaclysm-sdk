@@ -54,15 +54,12 @@ use std::ptr::NonNull;
 mod loader;
 pub mod blacksmith;
 pub mod sys;
-pub mod viewer;
+pub mod view;
 
 use sys::Api;
 
-use std::borrow::Cow;
-use std::collections::HashSet;
-
-use viewer::draw::{self, Drawing, LineBatch, MeshPart};
-use viewer::{Camera, ViewOptions};
+use view::objects::{present, Shown};
+use view::{Camera, ViewOptions};
 
 /// What the ABI returns for "no such node": a parent that is a root, an
 /// `instance_of` that is not an instance. `CADACLYSM_NONE`, `u32::MAX`.
@@ -145,6 +142,31 @@ pub(crate) fn c_path(path: &Path) -> Result<CString> {
         .to_str()
         .ok_or_else(|| Error::new(format!("{}: the library takes UTF-8 paths only", path.display())))?;
     c_string("path", text)
+}
+
+/// The library's own colour parse, shared by [`packed`] (this crate's own paint API,
+/// [`blacksmith::coloured`]/[`blacksmith::edges_coloured`], calls the kernel library's
+/// own copy instead): `Some((r, g, b))` in 0..1, or `None` for text the library refuses.
+fn parse_colour(colour: &str) -> Result<Option<[f64; 3]>> {
+    let api = api()?;
+    let colour_text = c_string("colour", colour)?;
+    let mut out = [0.0f64; 3];
+    if unsafe { (api.cadaclysm_parse_colour)(colour_text.as_ptr(), out.as_mut_ptr()) } {
+        Ok(Some(out))
+    } else {
+        Ok(None)
+    }
+}
+
+/// A colour packed `0xRRGGBB` from colour text -- `"#rgb"`, `"#rrggbb"` or a CSS colour
+/// name, matched ASCII case-insensitively -- read by the library's own parser. For
+/// [`SvgOptions::stroke`]/[`SvgOptions::background`], which stay numeric: e.g.
+/// `packed("navy")?` for a colour name or hex.
+pub fn packed(colour: &str) -> Result<u32> {
+    let [r, g, b] = parse_colour(colour)?.ok_or_else(|| {
+        Error::new(format!("colour: a colour is \"#rgb\", \"#rrggbb\" or a CSS colour name, not '{colour}'"))
+    })?;
+    Ok(((r * 255.0).round() as u32) << 16 | ((g * 255.0).round() as u32) << 8 | (b * 255.0).round() as u32)
 }
 
 /// A slice over the library's memory, empty where the pointer is null.
@@ -950,6 +972,46 @@ impl Brep {
         Ok(Manifold::from_row(out))
     }
 
+    /// This brep with its free edges sewn, and what was sewn, as a new `Brep` and a
+    /// [`SewReport`]; this one is left as it was. Two free edges become one shared edge
+    /// where both their ends coincide within `vertex` -- by default the rounding
+    /// [`Brep::manifold`] merges vertices at -- and their curves lie within `tolerance` of
+    /// each other, by default `vertex` too, so only edges that are one curve written
+    /// twice are joined. A larger `tolerance` also joins two curves between the same
+    /// two vertices that part by up to it; `vertex` is what decides which edges are
+    /// candidates at all, and raising it is what could close a slot. Nothing moves.
+    pub fn sewed(&self, tolerance: Option<f64>, vertex: Option<f64>) -> Result<(Brep, SewReport)> {
+        let mut counts = [0u32; 4];
+        let mut gaps = [0f64; 3];
+        let pointer = unsafe {
+            (self.api.cadaclysm_brep_sew)(
+                self.pointer(),
+                tolerance.unwrap_or(f64::NAN),
+                vertex.unwrap_or(f64::NAN),
+                counts.as_mut_ptr(),
+                gaps.as_mut_ptr(),
+            )
+        };
+        match NonNull::new(pointer.cast_mut()) {
+            Some(pointer) => Ok((
+                Brep { pointer, api: self.api },
+                SewReport {
+                    pairs: counts[0],
+                    free_before: counts[1],
+                    free_after: counts[2],
+                    refused: counts[3],
+                    worst_gap: gaps[0],
+                    tolerance: gaps[1],
+                    vertex: gaps[2],
+                },
+            )),
+            None => {
+                let reason = last_error(self.api);
+                Err(Error::new(if reason.is_empty() { "sew".to_string() } else { reason }))
+            }
+        }
+    }
+
     /// Give the reference back now rather than at the end of scope.
     pub fn release(self) {}
 }
@@ -1581,7 +1643,6 @@ impl fmt::Debug for FemMesh {
     }
 }
 
-/// Whether a brep's faces make a manifold, as plain data ([`Brep::manifold`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Manifold {
     pub faces: u32,
@@ -1612,6 +1673,21 @@ impl Manifold {
             is_closed: row[7] != 0,
         }
     }
+}
+
+/// What [`Brep::sewed`] did, as plain data: the edges it joined (`pairs`), the free
+/// edges before and after, how many groups of free edges between the same two
+/// vertices it left free (`refused`: too far apart for the tolerance, or more than
+/// two), the widest gap it sewed, and the two tolerances it used.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SewReport {
+    pub pairs: u32,
+    pub free_before: u32,
+    pub free_after: u32,
+    pub refused: u32,
+    pub worst_gap: f64,
+    pub tolerance: f64,
+    pub vertex: f64,
 }
 
 // ---- placements -------------------------------------------------------------------
@@ -1989,6 +2065,204 @@ pub struct State<'s> {
     pub name: String,
     /// One row per joint this state sets, in file order.
     pub values: Vec<StateValue<'s>>,
+}
+
+/// How a motion sequence leaves a segment for the next: the schema's
+/// `interpolation_type` (`cadaclysm_sequence_segment`'s `interpolation`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Interpolation {
+    Undefined,
+    Discontinuous,
+    Synchronous,
+    Linear,
+}
+
+impl Interpolation {
+    fn from_raw(raw: u32) -> Interpolation {
+        match raw {
+            1 => Interpolation::Discontinuous,
+            2 => Interpolation::Synchronous,
+            3 => Interpolation::Linear,
+            _ => Interpolation::Undefined,
+        }
+    }
+
+    /// `"undefined"`, `"discontinuous"`, `"synchronous"` or `"linear"`.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Interpolation::Undefined => "undefined",
+            Interpolation::Discontinuous => "discontinuous",
+            Interpolation::Synchronous => "synchronous",
+            Interpolation::Linear => "linear",
+        }
+    }
+}
+
+/// One step of a [`Sequence`]: the [`State`] it reaches, its parameter, and how the motion
+/// leaves it.
+#[derive(Clone, Debug)]
+pub struct Segment<'s> {
+    pub state: State<'s>,
+    pub t: f64,
+    pub interpolation: Interpolation,
+}
+
+/// A motion the file records: an `INTERPOLATED_CONFIGURATION_SEQUENCE`. From
+/// [`Scene::sequences`]. [`Sequence::pose`] poses it at a parameter; see
+/// `cadaclysm.h`'s `cadaclysm_pose_sequence` and the spec's seconds rule for playing it on
+/// a clock.
+#[derive(Clone)]
+pub struct Sequence<'s> {
+    scene: &'s Scene,
+    pub index: u32,
+    pub name: String,
+    /// Whether the motion returns to its first segment.
+    pub closed: bool,
+    /// Seconds per parameter unit where the file states a time unit; `None` where it
+    /// states none (read the parameter as seconds).
+    pub seconds_per_unit: Option<f64>,
+    pub segments: Vec<Segment<'s>>,
+}
+
+impl std::fmt::Debug for Sequence<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sequence")
+            .field("index", &self.index)
+            .field("name", &self.name)
+            .field("closed", &self.closed)
+            .field("seconds_per_unit", &self.seconds_per_unit)
+            .field("segments", &self.segments)
+            .finish()
+    }
+}
+
+impl<'s> Sequence<'s> {
+    /// The first segment's parameter.
+    pub fn start(&self) -> f64 {
+        self.segments.first().map_or(0.0, |s| s.t)
+    }
+
+    /// The last segment's parameter (the closing span not included).
+    pub fn end(&self) -> f64 {
+        self.segments.last().map_or(0.0, |s| s.t)
+    }
+
+    /// The mechanism posed by this sequence at parameter `t`, with `ground` held fixed as
+    /// [`Scene::pose`] does. A closed sequence wraps, each joint looping on its own keys
+    /// (the closing span, last back to first, is the mean of the sequence's spans). Fails
+    /// for a `t` that is not finite.
+    pub fn pose(&self, t: f64, ground: Option<Link<'_>>) -> Result<Pose<'s>> {
+        let ground_index = ground.map_or(NONE, |link| link.index);
+        let api = self.scene.api;
+        let ptr = unsafe { (api.cadaclysm_pose_sequence)(self.scene.raw(), self.index, t, ground_index) };
+        if ptr.is_null() {
+            return Err(Error::new(last_error(api)));
+        }
+        Ok(copy_pose(self.scene, ptr))
+    }
+}
+
+/// A posed mechanism: [`Scene::pose`], [`Scene::pose_state`] or [`Sequence::pose`]'s answer. The document
+/// itself is unchanged.
+///
+/// Copied eagerly out of the C handle at construction time (see [`copy_pose`]), so a
+/// `Pose` holds no C pointer and outlives the call that made it -- closing the scene
+/// does not invalidate it. It still borrows the scene, like [`State`], so its [`Link`]s
+/// and [`Joint`]s can be compared against ones read from it directly.
+#[derive(Clone, Debug)]
+pub struct Pose<'s> {
+    /// The link held fixed.
+    pub ground: Link<'s>,
+    /// Joints that close a loop and were not honoured, in file order.
+    pub unsolved: Vec<Joint<'s>>,
+    /// `(joint, freedom index, value)` for every given value outside its freedom's range.
+    pub out_of_range: Vec<(Joint<'s>, u32, f64)>,
+    transforms: Vec<[f64; 16]>,
+}
+
+impl<'s> Pose<'s> {
+    /// `node`'s posed transform, as rows -- the same shape [`Node::transform`] returns.
+    pub fn transform(&self, node: Node<'s>) -> [[f64; 4]; 4] {
+        rows(&self.raw_transform(node))
+    }
+
+    /// The same matrix in the ABI's own column-major order, exactly as
+    /// [`Node::raw_transform`] lays it out.
+    pub fn raw_transform(&self, node: Node<'s>) -> [f64; 16] {
+        self.transforms[node.index as usize]
+    }
+
+    /// Draw this pose's scene with the view library in use, as [`Scene::show`] does -- the
+    /// scene by handle -- with every node's posed transform handed to the view
+    /// (`cadaclysm_view_set_node_transforms`), which moves each node's geometry by
+    /// `raw_transform(n) · n's rest⁻¹`. A node the pose left exactly where it rests takes no
+    /// move, so an unposed `Pose` (`scene.pose(&[], None)`) draws exactly what `Scene::show`
+    /// does. The library refuses a moved node whose rest transform is singular; that reason
+    /// comes back as the `Err`. Same options as `Scene::show`.
+    pub fn show<'o>(&self, options: impl Into<Option<&'o ViewOptions>>) -> Result<()> {
+        let default = ViewOptions::default();
+        let options = options.into().unwrap_or(&default);
+        Scene::check_tolerance(options)?;
+        let scene = self.ground.scene();
+        scene.shown_with(view::current()?, Shown::Pose(scene, &self.transforms), options, false).map(|_| ())
+    }
+
+    /// [`Pose::show`]'s orbiting twin; the same camera [`Scene::view`] returns.
+    pub fn view<'o>(&self, options: impl Into<Option<&'o ViewOptions>>) -> Result<Camera> {
+        let default = ViewOptions::default();
+        let options = options.into().unwrap_or(&default);
+        Scene::check_tolerance(options)?;
+        let scene = self.ground.scene();
+        scene.shown_with(view::current()?, Shown::Pose(scene, &self.transforms), options, true)?
+            .ok_or_else(|| Error::new("view: the view library gave back no camera"))
+    }
+}
+
+/// Frees a `CadaclysmPose *` even if copying it panics partway through (ruling 2 of the
+/// posing plan: wrappers copy eagerly, never holding the C pointer). The Rust analogue
+/// of Python's `try`/`finally` around `_copy_pose`.
+struct PoseGuard<'a> {
+    api: &'a Api,
+    ptr: *mut sys::CadaclysmPose,
+}
+
+impl Drop for PoseGuard<'_> {
+    fn drop(&mut self) {
+        unsafe { (self.api.cadaclysm_pose_free)(self.ptr) }
+    }
+}
+
+/// Reads everything out of a `CadaclysmPose *` into a [`Pose`], then frees it. Shared by
+/// [`Scene::pose`] and [`Scene::pose_state`]; `ptr` must not be null.
+fn copy_pose(scene: &Scene, ptr: *mut sys::CadaclysmPose) -> Pose<'_> {
+    let api = scene.api;
+    let guard = PoseGuard { api, ptr };
+    let ground = Link { scene, index: unsafe { (api.cadaclysm_pose_ground)(guard.ptr) } };
+    let node_count = unsafe { (api.cadaclysm_pose_node_count)(guard.ptr) };
+    let transforms = (0..node_count)
+        .map(|node| {
+            let mut out = [0.0; 16];
+            unsafe { (api.cadaclysm_pose_node_transform)(guard.ptr, node, out.as_mut_ptr()) };
+            out
+        })
+        .collect();
+    let unsolved_count = unsafe { (api.cadaclysm_pose_unsolved_count)(guard.ptr) };
+    let unsolved = (0..unsolved_count)
+        .filter_map(|i| {
+            let joint = unsafe { (api.cadaclysm_pose_unsolved)(guard.ptr, i) };
+            (joint != NONE).then_some(Joint { scene, index: joint })
+        })
+        .collect();
+    let out_of_range_count = unsafe { (api.cadaclysm_pose_out_of_range_count)(guard.ptr) };
+    let out_of_range = (0..out_of_range_count)
+        .filter_map(|i| {
+            let (mut joint, mut freedom, mut value) = (NONE, 0u32, 0.0f64);
+            let ok = unsafe { (api.cadaclysm_pose_out_of_range)(guard.ptr, i, &mut joint, &mut freedom, &mut value) };
+            ok.then(|| (Joint { scene, index: joint }, freedom, value))
+        })
+        .collect();
+    // `guard` drops here, freeing the C pose now that everything is copied.
+    Pose { ground, unsolved, out_of_range, transforms }
 }
 
 // ---- nodes ------------------------------------------------------------------------
@@ -2468,26 +2742,21 @@ impl<'s> Node<'s> {
         Walk { stack: vec![*self] }
     }
 
-    /// Draw what this node and everything under it places -- the placements whose
-    /// selected node is this one or under it -- with the viewer in use. Options as
-    /// [`Scene::show`].
+    /// Draw this node with the view library in use: its scene by handle, everything outside
+    /// this node hidden, fitted to it. Options as [`Scene::show`].
     pub fn show<'o>(&self, options: impl Into<Option<&'o ViewOptions>>) -> Result<()> {
         let default = ViewOptions::default();
         let options = options.into().unwrap_or(&default);
-        draw::show(&self.scene.drawing(self.placements_under(), options)?, options)
+        Scene::check_tolerance(options)?;
+        self.scene.shown_with(view::current()?, Shown::Node(*self), options, false).map(|_| ())
     }
 
-    /// Orbit what this node and everything under it places; where the camera was left.
+    /// Orbit this node until the window is closed; where the camera was left.
     pub fn view<'o>(&self, options: impl Into<Option<&'o ViewOptions>>) -> Result<Camera> {
         let default = ViewOptions::default();
         let options = options.into().unwrap_or(&default);
-        draw::view(&self.scene.drawing(self.placements_under(), options)?, options)
-    }
-
-    /// The scene's placements whose selected node is this one or under it.
-    fn placements_under(&self) -> Vec<Placement<'s>> {
-        let under: HashSet<u32> = self.walk().map(|n| n.index).collect();
-        self.scene.placements().into_iter().filter(|p| under.contains(&p.select().index)).collect()
+        Scene::check_tolerance(options)?;
+        self.scene.shown_with(view::current()?, Shown::Node(*self), options, true)?.ok_or_else(|| Error::new("view: the view library gave back no camera"))
     }
 
     // -- the surface path: for a renderer drawing exact surfaces, never triangles --
@@ -2627,7 +2896,7 @@ pub enum Up {
 }
 
 /// One of the seven camera angles [`SvgOptions::view`] understands -- the same table
-/// `cadaclysm_viewer.VIEWS` gives Python's `show()` and `svg()` both. Degrees
+/// `cadaclysm_view.VIEWS` gives Python's `show()` and `svg()` both. Degrees
 /// (azimuth, elevation): [`SvgView::angles`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum SvgView {
@@ -2695,12 +2964,14 @@ pub struct SvgOptions {
     pub margin: f64,
     /// How far a written curve may stray, in page units. Default 0.1.
     pub tolerance: f64,
-    /// The pen colour, `0xRRGGBB`. Default black.
+    /// The pen colour, `0xRRGGBB` -- [`packed`]`("navy")?` for a colour name or hex.
+    /// Default black.
     pub stroke: u32,
     /// The pen's width, page units. Default 1.
     pub stroke_width: f64,
-    /// `0xRRGGBB`, or `None` (the default) for no `<rect>` behind the drawing -- the
-    /// page left to whatever the viewer composites it onto.
+    /// `0xRRGGBB` -- [`packed`]`("navy")?` for a colour name or hex -- or `None` (the
+    /// default) for no `<rect>` behind the drawing -- the page left to whatever the
+    /// viewer composites it onto.
     pub background: Option<u32>,
     /// Each shape's feature edges -- the exact curves the flattened polylines are drawn
     /// from. Default `true`.
@@ -2714,11 +2985,23 @@ pub struct SvgOptions {
     /// Write every line as straight segments within `tolerance`, instead of being
     /// fitted back to cubic Béziers. Default `false`.
     pub polylines: bool,
+    /// Also draw each body's silhouettes -- where its surfaces turn away from the eye,
+    /// which no edge lies on, so a sphere gains an outline it otherwise has none of.
+    /// One group per body, after that body's lines. Default `true`.
+    ///
+    /// On by default because a line set alone cannot draw every body: a sphere is one
+    /// face closed on itself and a torus one closed on itself twice, so each body's only
+    /// curves are the seams where that face meets itself -- not edges of the body, and
+    /// never drawn -- and without this those two draw a blank page. A line set in its own
+    /// right: set it with `edges` false for an outline-only drawing, or clear it for the
+    /// lines alone. Only naming nothing at all is refused.
+    pub silhouettes: bool,
 }
 
 impl Default for SvgOptions {
     /// The defaults `cadaclysm_svg_options_init` fills: the viewer's iso, orthographic,
-    /// a 1000-square page, black edges one unit wide on nothing.
+    /// a 1000-square page, black edges one unit wide on nothing, and each body's
+    /// outline beside them.
     fn default() -> SvgOptions {
         SvgOptions {
             view: SvgView::Iso,
@@ -2737,6 +3020,7 @@ impl Default for SvgOptions {
             curves: false,
             isocurves: false,
             polylines: false,
+            silhouettes: true,
         }
     }
 }
@@ -2770,7 +3054,8 @@ fn build_svg_options(api: &Api, options: &SvgOptions, default_up: Up) -> sys::Ca
     raw.flags = u32::from(options.edges)
         | (u32::from(options.curves) << 1)
         | (u32::from(options.isocurves) << 2)
-        | (u32::from(options.polylines) << 3);
+        | (u32::from(options.polylines) << 3)
+        | (u32::from(options.silhouettes) << 4);
     raw
 }
 
@@ -2946,6 +3231,80 @@ impl Scene {
             .collect()
     }
 
+    /// The file's motion sequences -- see [`Sequence`]. Empty where the file records none.
+    pub fn sequences(&self) -> Vec<Sequence<'_>> {
+        let api = self.api;
+        let states = self.states();
+        let count = unsafe { (api.cadaclysm_sequence_count)(self.raw()) };
+        (0..count)
+            .map(|index| {
+                let name = unsafe { text((api.cadaclysm_sequence_name)(self.raw(), index)) };
+                let closed = unsafe { (api.cadaclysm_sequence_closed)(self.raw(), index) };
+                let seconds = unsafe { (api.cadaclysm_sequence_seconds_per_unit)(self.raw(), index) };
+                let n = unsafe { (api.cadaclysm_sequence_segment_count)(self.raw(), index) };
+                let segments = (0..n)
+                    .filter_map(|i| {
+                        let (mut state, mut t, mut interpolation) = (0u32, 0f64, 0u32);
+                        let ok = unsafe { (api.cadaclysm_sequence_segment)(self.raw(), index, i, &mut state, &mut t, &mut interpolation) };
+                        let state = states.get(state as usize)?.clone();
+                        ok.then(|| Segment { state, t, interpolation: Interpolation::from_raw(interpolation) })
+                    })
+                    .collect();
+                Sequence { scene: self, index, name, closed, seconds_per_unit: (seconds != 0.0).then_some(seconds), segments }
+            })
+            .collect()
+    }
+
+    /// The link the file declares as the mechanism's base, or `None` when it declares
+    /// none (the default ground is then the link on the most joints; see [`Scene::pose`]).
+    pub fn base(&self) -> Option<Link<'_>> {
+        let index = unsafe { (self.api.cadaclysm_kinematics_base)(self.raw()) };
+        (index != NONE).then_some(Link { scene: self, index })
+    }
+
+    /// The mechanism posed by `values`: one row per joint to set, naming the joint and
+    /// giving one value per freedom of its pair -- exactly [`State::values`]' row type,
+    /// so `pose(&state.values, ground)` poses like `pose_state(state, ground)` -- with
+    /// `ground` (a [`Link`], or `None` for the default ground) held fixed. Values
+    /// outside a freedom's range are used as given and reported in the answer's
+    /// `out_of_range`.
+    ///
+    /// Fails on a bad row (a joint given twice, one with the wrong number of values,
+    /// ...) or a file with no mechanism, carrying the library's own message unchanged.
+    pub fn pose(&self, values: &[StateValue<'_>], ground: Option<Link<'_>>) -> Result<Pose<'_>> {
+        let joints: Vec<u32> = values.iter().map(|row| row.joint.index).collect();
+        let counts: Vec<u32> = values.iter().map(|row| row.values.len() as u32).collect();
+        let flat: Vec<f64> = values.iter().flat_map(|row| row.values.iter().copied()).collect();
+        let ground_index = ground.map_or(NONE, |link| link.index);
+        let api = self.api;
+        let ptr = unsafe {
+            (api.cadaclysm_pose)(
+                self.raw(),
+                joints.as_ptr(),
+                counts.as_ptr(),
+                flat.as_ptr(),
+                values.len() as u32,
+                ground_index
+            )
+        };
+        if ptr.is_null() {
+            return Err(Error::new(last_error(api)));
+        }
+        Ok(copy_pose(self, ptr))
+    }
+
+    /// The mechanism posed by `state`'s values, with `ground` held fixed as
+    /// [`Scene::pose`] does. Fails as [`Scene::pose`] does.
+    pub fn pose_state(&self, state: &State<'_>, ground: Option<Link<'_>>) -> Result<Pose<'_>> {
+        let ground_index = ground.map_or(NONE, |link| link.index);
+        let api = self.api;
+        let ptr = unsafe { (api.cadaclysm_pose_state)(self.raw(), state.index, ground_index) };
+        if ptr.is_null() {
+            return Err(Error::new(last_error(api)));
+        }
+        Ok(copy_pose(self, ptr))
+    }
+
     /// The archive member this was read from, or `None` for a plain file: `open` on a
     /// `.zip` chooses one member, and this is the only way to learn which.
     pub fn source_name(&self) -> Option<String> {
@@ -3085,65 +3444,42 @@ impl Scene {
         }
     }
 
-    /// Draw every visible placement with the viewer in use ([`viewer::current`]).
-    /// `options.up` defaults to this scene's convention; `options.edges` draws the B-rep
-    /// edges over the shapes (free curves are drawn either way); `options.tolerance` must
-    /// be `None` -- a document is drawn at the tolerance it was read with. `None` for
-    /// `options` draws with the defaults; `&options` or `Some(&options)` with those.
+    /// Draw the document with the view library in use ([`view::current`]), by handle --
+    /// every visible placement where the file puts it. On the terminal, one still in the
+    /// scrollback; on the wgpu library ([`view::use_wgpu`]), a window that this call waits
+    /// on until it is closed. `options.up` defaults to this scene's convention;
+    /// `options.edges` switches the edges layer; `options.tolerance` must be `None` -- a
+    /// document is drawn at the tolerance it was read with.
     pub fn show<'o>(&self, options: impl Into<Option<&'o ViewOptions>>) -> Result<()> {
         let default = ViewOptions::default();
         let options = options.into().unwrap_or(&default);
-        draw::show(&self.drawing(self.placements(), options)?, options)
+        Scene::check_tolerance(options)?;
+        self.shown_with(view::current()?, Shown::Scene(self), options, false).map(|_| ())
     }
 
-    /// Orbit the model with the viewer in use; where the camera was left.
+    /// Orbit the model until the window is closed; where the camera was left.
     pub fn view<'o>(&self, options: impl Into<Option<&'o ViewOptions>>) -> Result<Camera> {
         let default = ViewOptions::default();
         let options = options.into().unwrap_or(&default);
-        draw::view(&self.drawing(self.placements(), options)?, options)
+        Scene::check_tolerance(options)?;
+        self.shown_with(view::current()?, Shown::Scene(self), options, true)?.ok_or_else(|| Error::new("view: the view library gave back no camera"))
     }
 
-    /// `placements` as the viewer's meshes and lines -- Python's `_drawn_placements`.
-    fn drawing<'a>(&'a self, placements: Vec<Placement<'a>>, options: &ViewOptions) -> Result<Drawing<'a>> {
+    /// `options.tolerance` must be `None` for any `show`/`view` on a document already read at
+    /// its own tolerance (`Scene`/`Node`/`Pose`) -- checked before [`view::current`] loads a
+    /// library, so a missing library never masks this refusal.
+    fn check_tolerance(options: &ViewOptions) -> Result<()> {
         if options.tolerance.is_some() {
             return Err(Error::new("a document is drawn at the tolerance it was read with: leave ViewOptions::tolerance None"));
         }
-        let (mut meshes, mut lines) = (Vec::new(), Vec::new());
-        for place in placements {
-            let select = place.select();
-            if !select.visible_now() {
-                continue;
-            }
-            let node = place.geometry();
-            if !node.can_mesh() {
-                continue;
-            }
-            let rgb = select.colour().or_else(|| node.colour()).map(|c| [c[0], c[1], c[2]]);
-            let matrix = Some(place.raw_transform());
-            let mesh = node.mesh();
-            if !mesh.indices.is_empty() {
-                meshes.push(MeshPart {
-                    positions: Cow::Borrowed(mesh.positions),
-                    normals: mesh.normals.map(Cow::Borrowed),
-                    indices: Cow::Borrowed(mesh.indices),
-                    matrix,
-                    rgb,
-                });
-                if options.edges {
-                    let edges = node.edges();
-                    if !edges.is_empty() {
-                        lines.push(LineBatch { points: Cow::Borrowed(edges.positions), counts: Cow::Borrowed(edges.counts), matrix, rgb: None });
-                    }
-                }
-            } else {
-                let curves = node.curves();
-                if !curves.is_empty() {
-                    lines.push(LineBatch { points: Cow::Borrowed(curves.positions), counts: Cow::Borrowed(curves.counts), matrix, rgb });
-                }
-            }
-        }
+        Ok(())
+    }
+
+    /// `shown` (this scene, or one of its nodes) with `library`, titled by the file's name.
+    fn shown_with(&self, library: &'static view::Library, shown: Shown<'_>, options: &ViewOptions, orbit: bool) -> Result<Option<Camera>> {
+        Scene::check_tolerance(options)?;
         let name = self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        Ok(Drawing { name, meshes, lines, view: SvgView::Iso, up: self.default_up() })
+        present(library, shown, options, &name, SvgView::Iso, self.default_up(), orbit)
     }
 
     /// Every visible placement's wireframe as SVG text, from the camera `options`
@@ -3290,8 +3626,9 @@ impl OpenOptions {
         }
     }
 
-    /// Open a CAD file. A `.zip` opens its first readable member; [`Scene::source_name`]
-    /// says which. An unrecognised convention is an error, never read as `Native`.
+    /// Open a CAD file. A `.zip` (or `.stpZ`, STEP's zip) opens its first readable member;
+    /// [`Scene::source_name`] says which. A `.gz` is read as the format named before it:
+    /// `part.step.gz` as `.step`. An unrecognised convention is an error, never read as `Native`.
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Scene> {
         let path = path.as_ref();
         if !path.exists() {
@@ -3426,6 +3763,21 @@ pub fn resolve_schema(model: impl AsRef<Path>, schema: impl AsRef<Path>) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Needs the real library (`CADACLYSM_LIBRARY`); skips quietly without one, like this
+    /// module's other library-needing tests. The skip check is `version()`, not `packed`
+    /// itself: a `packed` that always errs must not be able to hide behind that skip.
+    #[test]
+    fn packed_reads_css_names_through_the_library() {
+        if let Err(err) = version() {
+            eprintln!("skipped: {err} (no library to read colour names with)");
+            return;
+        }
+        assert_eq!(packed("navy").unwrap(), 0x00_00_80);
+        let err = packed("bogus").unwrap_err().to_string();
+        assert!(err.contains("not 'bogus'"), "{err}");
+        assert!(!err.contains("0..1"), "{err}");
+    }
 
     #[test]
     fn conventions_parse_as_python_parses_them() {
@@ -3608,7 +3960,9 @@ mod tests {
         assert!((scene_b64.min[1] + 2_600_000.987_654_321).abs() < 1e-6, "the scene's bounds64 lost the far corner");
     }
 
-    use crate::viewer::{draw::draw_with, fake, ViewOptions};
+    use std::collections::HashSet;
+
+    use crate::view::{fake, objects::Shown, ViewOptions};
 
     /// Two cubes, the second three units along x -- two placements, each a mesh.
     /// `tag` gives each test its own scratch path: `cargo test` runs tests on parallel
@@ -3629,53 +3983,281 @@ mod tests {
     }
 
     #[test]
-    fn a_scene_draws_each_visible_placement_where_it_sits() {
-        let Some(scene) = two_cubes("placements") else { return };
-        let d = scene.drawing(scene.placements(), &ViewOptions::default()).unwrap();
-        assert_eq!(d.meshes.len(), 2);
-        assert!(d.meshes.iter().all(|m| m.matrix.is_some()));
-        // Where each cube lands in the world -- through its matrix (column-major), whether the
-        // reader put the translation there or in the positions.
-        let far_x = |m: &MeshPart<'_>| {
-            let t = m.matrix.unwrap();
-            m.positions.iter().map(|p| t[0] * p[0] as f64 + t[4] * p[1] as f64 + t[8] * p[2] as f64 + t[12]).fold(f64::MIN, f64::max)
-        };
-        let mut far: Vec<f64> = d.meshes.iter().map(far_x).collect();
-        far.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        assert!((far[0] - 1.0).abs() < 1e-6 && (far[1] - 4.0).abs() < 1e-6, "the cubes end at x = 1 and 4: {far:?}");
-        assert_eq!((d.view, d.up), (SvgView::Iso, scene.default_up()));
-        assert_eq!(d.name, "cadaclysm-rust-viewer-two-cubes-placements.scad");
-    }
-
-    #[test]
-    fn edges_off_draws_no_edges_and_sets_no_edges() {
-        let Some(scene) = two_cubes("edges-off") else { return };
-        let off = ViewOptions { edges: false, ..ViewOptions::default() };
-        let d = scene.drawing(scene.placements(), &off).unwrap();
-        assert!(d.lines.is_empty());
-        fake::take();
-        draw_with(&fake::viewer(), &d, &off, false).unwrap();
-        assert!(fake::take().iter().any(|l| l.contains("flags=1")));
-        let with = scene.drawing(scene.placements(), &ViewOptions::default()).unwrap();
-        assert_eq!(with.lines.len(), with.meshes.len(), "each meshed placement brings its edges");
-    }
-
-    #[test]
     fn a_scene_refuses_a_tolerance() {
         let Some(scene) = two_cubes("tolerance") else { return };
         let err = scene.show(&ViewOptions { tolerance: Some(0.1), ..ViewOptions::default() }).unwrap_err();
         assert!(err.message().contains("tolerance"), "{}", err.message());
     }
 
+    /// The tolerance refusal must reach the caller even with no view library to be found at
+    /// all -- `show`/`view` check `options.tolerance` before `view::current()` loads
+    /// anything, so a missing library never masks it behind "no view library". Run in a
+    /// child process (as `view::tests::draws_in_a_child`'s caller does) so this process's
+    /// own cached `view::current()` library (other tests may have loaded one already, under
+    /// `view::CURRENT_LOCK`) and other tests running in parallel cannot interfere with the
+    /// child's `CADACLYSM_TERMINAL_LIBRARY`.
     #[test]
-    fn a_node_draws_only_what_its_subtree_places() {
-        let Some(scene) = two_cubes("node") else { return };
-        assert_eq!(scene.placements().len(), 2);
-        // Every root together places both cubes; some node below places exactly one.
-        let from_roots: usize = scene.roots().iter().map(|r| r.placements_under().len()).sum();
-        assert_eq!(from_roots, 2);
-        let one = scene.walk().find(|n| n.placements_under().len() == 1).expect("a node placing one cube");
-        let d = scene.drawing(one.placements_under(), &ViewOptions::default()).unwrap();
-        assert_eq!(d.meshes.len(), 1, "{} draws only its own cube", one.name());
+    fn a_scene_checks_tolerance_before_loading_a_view_library() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["tests::tolerance_checked_before_view_library_in_a_child", "--exact", "--ignored", "--nocapture", "--test-threads=1"])
+            .env("CADACLYSM_TERMINAL_LIBRARY", "/does/not/exist/cadaclysm_terminal_missing")
+            .env_remove("CADACLYSM_VIEW")
+            .output()
+            .expect("the test binary runs again");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "the child failed: {stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+        if stdout.contains("MESSAGE: SKIP") {
+            eprintln!("skipped: {stdout} (no library to open the cubes with, in the child)");
+            return;
+        }
+        // `--nocapture` interleaves this print with cargo's own "test ... " progress line (no
+        // leading newline before the test finishes), so the marker can land mid-line: search
+        // the whole capture for it rather than matching a line's prefix.
+        let message = stdout
+            .split("MESSAGE: ")
+            .nth(1)
+            .map(|rest| rest.lines().next().unwrap_or(rest))
+            .unwrap_or_else(|| panic!("no MESSAGE marker: {stdout:?}"));
+        assert!(message.contains("tolerance"), "{message}");
+        assert!(!message.contains("no view library"), "the missing library masked the tolerance refusal: {message}");
+    }
+
+    #[test]
+    #[ignore = "run by a_scene_checks_tolerance_before_loading_a_view_library, in a child process"]
+    fn tolerance_checked_before_view_library_in_a_child() {
+        if std::env::var_os("CADACLYSM_TERMINAL_LIBRARY").is_none() {
+            return;
+        }
+        let Some(scene) = two_cubes("tolerance-child") else {
+            println!("MESSAGE: SKIP");
+            return;
+        };
+        let err = scene.show(&ViewOptions { tolerance: Some(0.1), ..ViewOptions::default() }).unwrap_err();
+        println!("MESSAGE: {}", err.message());
+    }
+
+    #[test]
+    fn a_scene_is_shown_by_its_handle() {
+        let Some(scene) = two_cubes("handle") else { return };
+        let view = crate::view::View::open(fake::leaked(), crate::view::target_own(), &ViewOptions::default(), "part", Up::Z).unwrap();
+        fake::take();
+        assert_eq!(view.show_scene(&scene).unwrap().id(), 21);
+        assert_eq!(fake::take(), ["show scene"]);
+    }
+
+    #[test]
+    fn a_node_hides_what_is_outside_it_by_handle() {
+        // `two_cubes`' OpenSCAD scene has two top-level cubes, both roots with no
+        // children (OpenSCAD's own reader never nests), so this needs real assembly
+        // depth: `mechanism-solid.stp`'s `arm` (bracket, plate, bolt), the bracket
+        // itself holding a plate and two bolts -- a node whose parent is not a root.
+        let Some(scene) = open_mechanism_solid() else { return };
+        let Some(one) = scene.walk().find(|n| n.parent().is_some() && n.children().is_empty()) else {
+            eprintln!("skipped: the mechanism's scene has no leaf below a root");
+            return;
+        };
+        // What must be hidden: every node outside `one`'s subtree and ancestors whose parent
+        // is an ancestor (or which is a root) -- hiding it hides the rest.
+        let mut ancestors = HashSet::new();
+        let mut at = one.parent();
+        while let Some(node) = at {
+            ancestors.insert(node.index());
+            at = node.parent();
+        }
+        let mut expected: Vec<String> = scene
+            .walk()
+            .filter(|n| n.index() != one.index() && !ancestors.contains(&n.index()))
+            .filter(|n| n.parent().map_or(true, |p| ancestors.contains(&p.index())))
+            .map(|n| format!("node_visible 21 {} false", n.index()))
+            .collect();
+        assert!(!expected.is_empty(), "the mechanism: siblings outside the node are hidden");
+        let view = crate::view::View::open(fake::leaked(), crate::view::target_own(), &ViewOptions::default(), "part", Up::Z).unwrap();
+        fake::take();
+        view.show_node(one).unwrap();
+        let mut log = fake::take();
+        assert_eq!(log.remove(0), "show scene");
+        log.sort();
+        expected.sort();
+        assert_eq!(log, expected);
+    }
+
+    #[test]
+    fn a_scene_shows_itself_by_handle_titled_by_its_file() {
+        let Some(scene) = two_cubes("show") else { return };
+        fake::take();
+        scene.shown_with(fake::leaked(), Shown::Scene(&scene), &ViewOptions { edges: false, ..ViewOptions::default() }, false).unwrap();
+        let log = fake::take();
+        assert!(log[0].starts_with("create cadaclysm-rust-viewer-two-cubes-show.scad "), "{log:?}");
+        assert_eq!(log[1], "show scene");
+        assert!(log.iter().any(|l| l == "layer 1 false"), "{log:?}");
+        assert!(log.iter().any(|l| l == "frame 0"), "{log:?}");
+    }
+
+    #[test]
+    fn a_node_shows_its_scene_fitted_to_itself() {
+        let Some(scene) = open_mechanism_solid() else { return };
+        let one = scene
+            .walk()
+            .find(|n| n.parent().is_some())
+            .expect("the mechanism's scene has a node below a root");
+        fake::take();
+        scene.shown_with(fake::leaked(), Shown::Node(one), &ViewOptions::default(), false).unwrap();
+        let log = fake::take();
+        // F14: aim always frames everything first (Python's `_aim` calls `frame(0)`
+        // unconditionally), then fits the node on top of it with its own `frame_node`.
+        let frame_at = log.iter().position(|l| l == "frame 0").expect(&format!("{log:?}"));
+        let frame_node_at = log
+            .iter()
+            .position(|l| *l == format!("frame_node 21 {}", one.index()))
+            .expect(&format!("{log:?}"));
+        assert!(frame_at < frame_node_at, "frame everything, then fit the node: {log:?}");
+    }
+
+    /// Review round 1, F-aim: `aim`'s `item.frame_node` refusal must reach `present`'s
+    /// caller as its own `Err` (Python's `Item.frame_node` raises through `_ok`), not be
+    /// swallowed the way `standard`/`orbit`/`frame`/`zoom` are. `mechanism-solid.stp` (not
+    /// `two_cubes`) is used here since it is guaranteed to have a node below a root.
+    #[test]
+    fn a_refused_frame_node_is_the_error_and_the_view_is_destroyed() {
+        let Some(scene) = open_mechanism_solid() else { return };
+        let Some(one) = scene.walk().find(|n| n.parent().is_some() && n.children().is_empty()) else {
+            eprintln!("skipped: the mechanism's scene has no leaf below a root");
+            return;
+        };
+        fake::take();
+        fake::fail_at("frame_node");
+        let err = scene.shown_with(fake::leaked(), Shown::Node(one), &ViewOptions::default(), false).unwrap_err();
+        fake::fail_at("");
+        assert_eq!(err.message(), "fake 1.0: fake failure");
+        assert_eq!(fake::take().last().map(String::as_str), Some("destroy"));
+    }
+
+    // ---- Pose::show / Pose::view (mechanism playback) ------------------------------
+
+    /// `samples/mechanism.stp`, beside this repository's root -- the same file
+    /// `mechanism_checks` in `examples/smoke.rs` poses. Carries kinematics but no mesh
+    /// geometry at all (its two parts' shape representations hold only an axis
+    /// placement, no solid): `Scene::placements` is empty for it, so it proves nothing
+    /// by itself about what gets drawn -- see `open_mechanism_solid`. Skips quietly
+    /// without a library, like `two_cubes`.
+    fn open_mechanism() -> Option<Scene> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../../samples/mechanism.stp");
+        match open(path) {
+            Ok(scene) => Some(scene),
+            Err(err) => {
+                eprintln!("skipped: {err} (no library to open the mechanism with)");
+                None
+            }
+        }
+    }
+
+    /// The same shape of mechanism as `open_mechanism`, but with real geometry:
+    /// `samples/mechanism-solid.stp`, generated by `samples/mechanism-solid.py` (that
+    /// script's own docstring says how, and that the file is pinned -- edit the script
+    /// and regenerate by hand to change it). A plate and two bolts (links `fixed`/
+    /// `bolts`, joined by a prismatic `screw`) nested inside an `arm` assembly beside a
+    /// base plate and a third bolt (links `ground`/`upper arm`, joined by a revolute
+    /// `shoulder`), two states `reach` and `rest` and the sequence `lift`. Skips quietly without a library.
+    fn open_mechanism_solid() -> Option<Scene> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../../samples/mechanism-solid.stp");
+        match open(path) {
+            Ok(scene) => Some(scene),
+            Err(err) => {
+                eprintln!("skipped: {err} (no library to open the mechanism with)");
+                None
+            }
+        }
+    }
+
+    fn sequenced() -> Option<Scene> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../../samples/mechanism-sequence.stp");
+        match open(path) {
+            Ok(scene) => Some(scene),
+            Err(err) => {
+                eprintln!("skipped: {err} (no library to open the sequenced mechanism with)");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn a_file_reads_its_motion_sequences() {
+        let Some(scene) = sequenced() else { return };
+        let sequences = scene.sequences();
+        assert_eq!(sequences.len(), 2);
+        let swing = &sequences[0];
+        assert_eq!((swing.name.as_str(), swing.closed, swing.seconds_per_unit), ("swing", true, Some(1.0)));
+        let got: Vec<(&str, f64, Interpolation)> = swing.segments.iter().map(|s| (s.state.name.as_str(), s.t, s.interpolation)).collect();
+        assert_eq!(got, [("shut", 0.0, Interpolation::Linear), ("open", 1.0, Interpolation::Synchronous), ("wide", 2.0, Interpolation::Linear)]);
+        assert_eq!((swing.start(), swing.end()), (0.0, 2.0));
+        assert_eq!(sequences[1].seconds_per_unit, None);
+        assert_eq!(Interpolation::Discontinuous.name(), "discontinuous");
+    }
+
+    #[test]
+    fn a_sequence_poses_like_its_state_at_a_segment() {
+        let Some(scene) = sequenced() else { return };
+        let swing = &scene.sequences()[0];
+        for segment in &swing.segments {
+            let by_sequence = swing.pose(segment.t, None).unwrap();
+            let by_state = scene.pose_state(&segment.state, None).unwrap();
+            for node in scene.walk() {
+                assert_eq!(by_sequence.raw_transform(node), by_state.raw_transform(node));
+            }
+        }
+        assert_eq!(swing.pose(f64::NAN, None).unwrap_err().to_string(), "the sequence parameter must be a finite number");
+    }
+
+    /// `Pose::raw_transform` against the real solved pose -- no geometry needed for this
+    /// one, so `mechanism.stp` (kinematics only) is enough.
+    #[test]
+    fn a_pose_moves_the_arm_and_leaves_the_base_at_exactly_its_rest() {
+        let Some(mechanism) = open_mechanism() else { return };
+        let links = mechanism.links();
+        let (base_node, arm_node) = (links[0].nodes()[0], links[1].nodes()[0]);
+        let state = &mechanism.states()[0];
+        let pose = mechanism.pose_state(state, None).unwrap();
+
+        // The base is the pose's ground: bit-identical to its rest transform. The arm moved.
+        assert_eq!(pose.raw_transform(base_node), base_node.raw_transform(), "the ground link stays exactly at rest");
+        assert_ne!(pose.raw_transform(arm_node), arm_node.raw_transform(), "the arm should actually have moved");
+    }
+
+    #[test]
+    fn a_pose_is_its_scene_by_handle_with_every_nodes_transform_set() {
+        let Some(mechanism) = open_mechanism_solid() else { return };
+        let pose = mechanism.pose_state(&mechanism.states()[0], None).unwrap();
+        assert_eq!(pose.transforms.len(), mechanism.len(), "one transform per node, in index order");
+        fake::take();
+        mechanism.shown_with(fake::leaked(), Shown::Pose(&mechanism, &pose.transforms), &ViewOptions::default(), false).unwrap();
+        let log = fake::take();
+        assert_eq!(log[1], "show scene");
+        assert_eq!(log[2], format!("node_transforms 21 {}", mechanism.len()), "set on the scene's item before drawing");
+        assert_eq!(log.last().map(String::as_str), Some("destroy"));
+    }
+
+    /// The singular-rest refusal is the library's now (`cadaclysm-view`'s
+    /// `set_node_transforms`, Ruling 18): the wrapper hands back its reason, naming the
+    /// library, and still destroys the view.
+    #[test]
+    fn a_pose_the_library_refuses_is_its_error_and_the_view_is_destroyed() {
+        let Some(mechanism) = open_mechanism_solid() else { return };
+        let pose = mechanism.pose(&[], None).unwrap();
+        fake::take();
+        fake::failure(b"set_node_transforms: node 3 has a singular rest transform\0");
+        fake::fail_at("node_transforms");
+        let err = mechanism.shown_with(fake::leaked(), Shown::Pose(&mechanism, &pose.transforms), &ViewOptions::default(), false).unwrap_err();
+        fake::fail_at("");
+        fake::failure(b"fake failure\0");
+        assert_eq!(err.message(), "fake 1.0: set_node_transforms: node 3 has a singular rest transform");
+        assert_eq!(fake::take().last().map(String::as_str), Some("destroy"));
+    }
+
+    #[test]
+    fn pose_view_returns_runs_camera_and_pick() {
+        let Some(mechanism) = open_mechanism_solid() else { return };
+        let pose = mechanism.pose(&[], None).unwrap();
+        let camera = mechanism.shown_with(fake::leaked(), Shown::Pose(&mechanism, &pose.transforms), &ViewOptions::default(), true).unwrap().expect("a camera");
+        assert_eq!(camera.pick, Some(crate::view::Pick { item: 3, node: 4, face: 5 }));
     }
 }

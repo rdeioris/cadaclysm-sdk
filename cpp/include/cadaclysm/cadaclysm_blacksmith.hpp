@@ -13,6 +13,7 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <map>
 
 namespace cadaclysm {
 inline namespace CADACLYSM_ABI {
@@ -32,6 +33,39 @@ using Vec3 = cadaclysm::Vec3;
 // A point and a direction.
 using AxisLine = std::array<Vec3, 2>;
 using Manifold = cadaclysm::Manifold;
+
+/// What a solid measures, per unit density, each figure beside a bound on its own error.
+///
+/// Per unit density is the primitive: a body's weight is `density * volume` and its inertia scales
+/// the same way, so `m.weight(7850)` is a steel part in kilograms where the model is in metres.
+/// Nothing here multiplies by a density on your behalf -- an assembly of two materials would have
+/// to undo it.
+///
+/// `volume`, `centroid`, `inertia` and `principal_moments` mean something only where `closed`.
+/// Where `accuracy_met` is false the refinement stopped before the accuracy asked for: the figures
+/// are honest, they are simply less certain, and the errors say by how much.
+struct Mass {
+    bool closed = false;
+    bool inverted = false;
+    bool accuracy_met = false;
+    bool from_mesh = false;
+    double area = 0.0;
+    double area_error = 0.0;
+    double volume = 0.0;
+    double volume_error = 0.0;
+    Vec3 centroid = {};
+    double centroid_error = 0.0;
+    /// Three rows of three, about the centroid, products of inertia negated.
+    std::array<Vec3, 3> inertia = {};
+    double inertia_error = 0.0;
+    /// Ascending.
+    Vec3 principal_moments = {};
+    /// Unit, orthogonal, right-handed; row `i` belongs to moment `i`.
+    std::array<Vec3, 3> principal_axes = {};
+
+    /// `density * volume`, in whatever units the model and the density agree on.
+    double weight(double density) const { return density * volume; }
+};
 using MeshData = cadaclysm::MeshData;
 using MeshData64 = cadaclysm::MeshData64;
 // Called with a phase name and progress through it; for the long operations.
@@ -94,12 +128,14 @@ struct SvgOptions {
     double margin = 0.05;
     // How far a written curve may stray, in page units. Default 0.1.
     double tolerance = 0.1;
-    // 0xRRGGBB. Default black.
+    // 0xRRGGBB -- packed(std::string_view) reads a "#rgb", "#rrggbb" or CSS colour name
+    // string, e.g. `stroke = *packed("navy")`. Default black.
     std::uint32_t stroke = 0x000000;
     // The pen's width, page units. Default 1.
     double stroke_width = 1.0;
     // 0xRRGGBB, or nullopt (the default) for no <rect> behind the drawing -- the page
-    // left to whatever the viewer composites it onto.
+    // left to whatever the viewer composites it onto. packed(std::string_view) reads a
+    // "#rgb", "#rrggbb" or CSS colour name string, e.g. `background = *packed("navy")`.
     std::optional<std::uint32_t> background;
     // Each solid's feature edges. Default true.
     bool edges = true;
@@ -110,6 +146,13 @@ struct SvgOptions {
     // Write every line as straight segments within tolerance, instead of being fitted
     // back to cubic Beziers. Default false.
     bool polylines = false;
+    // Also draw where each solid's surfaces turn away from the eye -- the outline a
+    // sphere has no edge for. One group per solid, after that solid's lines. Default
+    // true: a sphere's and a torus's only curves are the seams where their one face
+    // meets itself, which are not edges of the body and are never drawn, so without
+    // this those two draw a blank page. A line set in its own right -- set it with
+    // edges false for the outline alone, or clear it for the lines alone.
+    bool silhouettes = true;
 };
 
 class Profile;
@@ -119,6 +162,11 @@ class Frame;
 class Solid;
 class Assembly;
 class Workplane;
+class CollisionHit;
+class Collider;
+class Tool;
+class Stock;
+class Job;
 using Profiles = std::vector<std::reference_wrapper<const Profile>>;
 using Solids = std::vector<std::reference_wrapper<const Solid>>;
 // A profile on its frame: one section of Solid::loft_through, borrowed for the call.
@@ -150,6 +198,13 @@ inline Error tessellation_error(const char* name) {
 
 inline Error refuse(std::string message) { return Error{std::move(message), Origin::kernel}; }
 
+// Colour text -- "#rgb", "#rrggbb" or a CSS colour name -- as r, g, b in 0..1, through the
+// library's own parser. Shared by rgb() and packed() so neither duplicates the parsing.
+inline bool try_parse_colour(std::string_view colour, Vec3& out) {
+    std::string text(colour);
+    return ::cadaclysm_blacksmith_parse_colour(text.c_str(), out.data());
+}
+
 // `options` packed into a CadaclysmBlacksmithSvgOptions: `view` fills
 // azimuth/elevation unless they are set directly, `up` falls back to "z" -- a solid
 // carries no convention of its own. cadaclysm_blacksmith_svg_options_init fills the
@@ -173,7 +228,8 @@ inline CadaclysmBlacksmithSvgOptions build_svg_options(const SvgOptions& options
     raw.background = options.background.value_or(CADACLYSM_BLACKSMITH_SVG_TRANSPARENT);
     raw.flags = (options.edges ? CADACLYSM_BLACKSMITH_SVG_EDGES : 0u) | (options.curves ? CADACLYSM_BLACKSMITH_SVG_CURVES : 0u) |
                 (options.isocurves ? CADACLYSM_BLACKSMITH_SVG_ISOCURVES : 0u) |
-                (options.polylines ? CADACLYSM_BLACKSMITH_SVG_POLYLINES : 0u);
+                (options.polylines ? CADACLYSM_BLACKSMITH_SVG_POLYLINES : 0u) |
+                (options.silhouettes ? CADACLYSM_BLACKSMITH_SVG_SILHOUETTES : 0u);
     return raw;
 }
 
@@ -251,22 +307,24 @@ inline Result<std::string> default_schema() {
         "or pass a schema name, a .exp path or EXPRESS text)");
 }
 
-// "#rgb" or "#rrggbb" (the # optional) as three numbers in 0..1.
-inline Result<Vec3> rgb(std::string_view hex) {
-    std::string h(hex);
-    const char* space = " \t\r\n\f\v";
-    std::size_t first = h.find_first_not_of(space);
-    h = first == std::string::npos ? std::string() : h.substr(first, h.find_last_not_of(space) - first + 1);
-    if (!h.empty() && h[0] == '#') h.erase(0, 1);
-    bool digits = !h.empty();
-    for (char c : h) digits = digits && std::isxdigit(static_cast<unsigned char>(c));
-    if (digits && (h.size() == 3 || h.size() == 6)) {
-        if (h.size() == 3) h = std::string{h[0], h[0], h[1], h[1], h[2], h[2]};
-        Vec3 out{};
-        for (int i = 0; i < 3; ++i) out[i] = std::strtol(h.substr(2 * i, 2).c_str(), nullptr, 16) / 255.0;
-        return out;
-    }
-    return detail::refuse("coloured: a colour is \"#rgb\", \"#rrggbb\" or (r, g, b) in 0..1, not '" + std::string(hex) + "'");
+// Colour text -- "#rgb", "#rrggbb" or a CSS colour name -- as r, g, b in 0..1, read by the
+// library's own parser, so every wrapper takes the same forms.
+inline Result<Vec3> rgb(std::string_view colour) {
+    Vec3 out{};
+    if (detail::try_parse_colour(colour, out)) return out;
+    return detail::refuse("coloured: a colour is \"#rgb\", \"#rrggbb\", a CSS colour name or (r, g, b) in 0..1, not '" +
+                           std::string(colour) + "'");
+}
+
+// A colour as the ABI's packed 0xRRGGBB, from "#rgb", "#rrggbb" or a CSS colour name --
+// for SvgOptions::stroke / background, which take the packed number. Takes no numeric
+// triple of its own, so its refusal lists only the text forms.
+inline Result<std::uint32_t> packed(std::string_view colour) {
+    Vec3 out{};
+    if (!detail::try_parse_colour(colour, out))
+        return detail::refuse("colour: a colour is \"#rgb\", \"#rrggbb\" or a CSS colour name, not '" + std::string(colour) + "'");
+    auto byte = [](double v) { return static_cast<std::uint32_t>(std::lround(v * 255.0)); };
+    return (byte(out[0]) << 16) | (byte(out[1]) << 8) | byte(out[2]);
 }
 
 // ---- frames and planes --------------------------------------------------------------
@@ -378,6 +436,81 @@ private:
     }
     std::array<double, 12> v_;
 };
+
+// An axis-aligned box: `lo` and `hi`, three numbers each. The broad phase's own shape
+// (Solid::bounds_box, Collider's own boxes): cheap to move and to test against another,
+// before anything is meshed.
+struct Box {
+    Vec3 lo{};
+    Vec3 hi{};
+
+    Box() = default;
+    Box(const Vec3& lo_, const Vec3& hi_) : lo(lo_), hi(hi_) {}
+
+    // This box moved by `frame` (rigid), boxed again on the world axes -- not this
+    // box's corners individually moved, which would not in general be a box at all:
+    // the *bounding* box of the moved corners.
+    Result<Box> moved(const Frame& frame) const {
+        CadaclysmBlacksmithBox raw = words();
+        CadaclysmBlacksmithBox out{};
+        if (!::cadaclysm_blacksmith_box_moved(&raw, frame.raw().data(), &out)) return detail::kernel_error("box_moved");
+        return Box({out.lo[0], out.lo[1], out.lo[2]}, {out.hi[0], out.hi[1], out.hi[2]});
+    }
+
+    // Whether this box and `other` share a point (touching counts).
+    bool overlaps(const Box& other) const {
+        CadaclysmBlacksmithBox a = words();
+        CadaclysmBlacksmithBox b = other.words();
+        return ::cadaclysm_blacksmith_box_overlaps(&a, &b);
+    }
+
+    // This box as the six contiguous doubles the C ABI reads.
+    CadaclysmBlacksmithBox words() const {
+        CadaclysmBlacksmithBox raw{};
+        raw.lo[0] = lo[0];
+        raw.lo[1] = lo[1];
+        raw.lo[2] = lo[2];
+        raw.hi[0] = hi[0];
+        raw.hi[1] = hi[1];
+        raw.hi[2] = hi[2];
+        return raw;
+    }
+
+    bool operator==(const Box& other) const noexcept { return lo == other.lo && hi == other.hi; }
+    bool operator!=(const Box& other) const noexcept { return !(*this == other); }
+};
+
+namespace detail {
+inline CadaclysmBlacksmithBox box_words(const Box& box) {
+    CadaclysmBlacksmithBox raw{};
+    raw.lo[0] = box.lo[0];
+    raw.lo[1] = box.lo[1];
+    raw.lo[2] = box.lo[2];
+    raw.hi[0] = box.hi[0];
+    raw.hi[1] = box.hi[1];
+    raw.hi[2] = box.hi[2];
+    return raw;
+}
+inline Box box_of(const CadaclysmBlacksmithBox& raw) {
+    return Box({raw.lo[0], raw.lo[1], raw.lo[2]}, {raw.hi[0], raw.hi[1], raw.hi[2]});
+}
+}  // namespace detail
+
+// True only if box `a` at `frame_a` and box `b` at `frame_b` cannot touch -- a
+// separating axis among the boxes' face normals and edge-direction crosses; touching
+// is not apart. Sharper than moving each box and asking Box::overlaps, which boxes the
+// *result* on the world axes again and so can call two oriented boxes overlapping when
+// they are not (two unit boxes, the second turned 45 degrees about z and moved 2.3
+// along x: their world boxes overlap, but the boxes themselves do not touch).
+inline Result<bool> boxes_apart(const Box& a, const Frame& frame_a, const Box& b, const Frame& frame_b) {
+    CadaclysmBlacksmithBox ra = detail::box_words(a);
+    CadaclysmBlacksmithBox rb = detail::box_words(b);
+    bool apart = false;
+    if (!::cadaclysm_blacksmith_boxes_apart(&ra, frame_a.raw().data(), &rb, frame_b.raw().data(), &apart)) {
+        return detail::kernel_error("boxes_apart");
+    }
+    return apart;
+}
 
 // A plane a sweep starts or ends on, read as a height over the sketch plane:
 // at + grad . p. A bare number converts to a flat one, as in Python.
@@ -807,6 +940,11 @@ public:
     Result<Profile> coloured(const Vec3& rgb_value) const {
         return wrap(::cadaclysm_blacksmith_profile_coloured(ptr(), rgb_value[0], rgb_value[1], rgb_value[2]));
     }
+    // coloured(const Vec3&) from "#rgb", "#rrggbb" or a CSS colour name.
+    Result<Profile> coloured(std::string_view colour) const {
+        CADACLYSM_TRY(rgb_value, rgb(colour));
+        return coloured(rgb_value);
+    }
     // The outline's colour, or nullopt.
     Result<std::optional<Vec3>> colour() const {
         Vec3 out{};
@@ -859,6 +997,25 @@ public:
         return list(::cadaclysm_blacksmith_profile_common(ptr(), other.ptr(), tolerance), "profile_common");
     }
 
+    // This profile with every free-form side (a Bezier, a conic, a NURBS) replaced by
+    // lines and arcs within `tolerance` of it -- what a G-code writer can say. Lines and
+    // arcs pass through as they are, every loop closes on itself exactly, holes are
+    // converted the same way. Fails for a `tolerance` not positive and finite, or a
+    // spline that does not evaluate.
+    Result<Profile> to_arcs(double tolerance = 0.01) const {
+        return wrap(::cadaclysm_blacksmith_profile_to_arcs(ptr(), tolerance), "profile_to_arcs");
+    }
+
+    // This profile grown by `distance` (shrunk where it is negative), as zero or more
+    // profiles, all lines and arcs: outward corners rounded by `|distance|`, holes
+    // moving against the boundary (a hole shrinks as the profile grows). Free-form sides
+    // are fitted to `tolerance` first (to_arcs). A shrink that eats the whole profile is
+    // an empty vector. Fails for a `distance` not finite, a `tolerance` not positive and
+    // finite, a loop with no sides, or loops that cross or touch.
+    Result<std::vector<Profile>> offset(double distance, double tolerance = 0.01) const {
+        return list(::cadaclysm_blacksmith_profile_offset(ptr(), distance, tolerance), "profile_offset");
+    }
+
     // `text` set in a font, one profile per closed shape -- a letter with its counters as
     // holes (`o` one, `8` two; `i` is two profiles) -- on the sketch plane, the baseline along
     // x from the origin, each outline counter-clockwise and its holes clockwise, a curved side
@@ -888,10 +1045,12 @@ public:
                     "profile_text");
     }
 
-private:
     // The profiles of a list the library handed back (null: the last error). Each profile
     // is a handle of its own; the list goes on every path once read, a failed read's too
-    // (the profiles read so far are destroyed with `out`).
+    // (the profiles read so far are destroyed with `out`). Public rather than private
+    // (the rest of this class's helpers are): Solid::section and the machining section's
+    // report reader share it, over a list the library hands back the same way
+    // profile_common's does.
     static Result<std::vector<Profile>> list(CadaclysmBlacksmithProfileList* list, const char* what) {
         if (!list) return detail::kernel_error(what);
         std::uint32_t n = ::cadaclysm_blacksmith_profile_list_count(list);
@@ -938,6 +1097,7 @@ private:
     friend class Path;
     friend class SweepPath;
     friend class Solid;
+    friend class Job;
 
     explicit Profile(CadaclysmBlacksmithProfile* raw) : state_(std::make_shared<detail::ProfileState>(raw)) {}
 
@@ -2002,6 +2162,15 @@ public:
                                                          detail::progress_fn(progress), detail::progress_user(progress))),
                       merge);
     }
+    // This solid cut by the plane Z = `z`: its closed outlines there, in XY, nested into
+    // profiles with holes (boundaries counter-clockwise, holes clockwise), a line or a
+    // circle crossing kept exact and any other curve as lines within `tolerance`. A plane
+    // that misses the solid is an empty vector. Fails for a `z` not finite, a `tolerance`
+    // not positive and finite, a face lying in the plane (section a little above or below
+    // it), or a crossing that does not close.
+    Result<std::vector<Profile>> section(double z, double tolerance = 0.05) const {
+        return Profile::list(::cadaclysm_blacksmith_solid_section(raw_handle("section"), z, tolerance), "solid_section");
+    }
     // Cut along the closed `tool`'s boundary, keeping one side.
     Result<Solid> trim(const Solid& tool, Keep keep = Keep::outside, double tolerance = DEFAULT_TOLERANCE,
                        const Progress& progress = {}) const {
@@ -2158,6 +2327,15 @@ public:
         }
         return std::make_pair(lo, hi);
     }
+    // This solid's box at `tolerance`: its boolean mesh, padded by twice that -- the
+    // broad phase's own shape, cheaper to move and test than the solid itself.
+    Result<Box> bounds_box(double tolerance = DEFAULT_TOLERANCE) const {
+        CadaclysmBlacksmithBox out{};
+        if (!::cadaclysm_blacksmith_solid_bounds_box(raw_handle("bounds_box"), tolerance, &out)) {
+            return detail::kernel_error("bounds_box");
+        }
+        return detail::box_of(out);
+    }
     // Edges of a mesh at `tolerance` not bound by exactly two triangles; 0 when closed.
     Result<std::uint32_t> leaked_edges(double tolerance = DEFAULT_TOLERANCE) const {
         std::uint32_t n = ::cadaclysm_blacksmith_leaked_edges(raw_handle("leaked_edges"), tolerance);
@@ -2177,6 +2355,32 @@ public:
         std::uint32_t row[8] = {};
         if (!::cadaclysm_blacksmith_manifold(raw_handle("manifold"), row)) return detail::kernel_error("manifold");
         return cadaclysm::detail::manifold_of(row);
+    }
+    Result<Mass> mass(double accuracy = 0.0) const {
+        CadaclysmBlacksmithMassProperties out = {};
+        if (!::cadaclysm_blacksmith_mass_properties(raw_handle("mass"), accuracy, &out)) {
+            return detail::kernel_error("mass");
+        }
+        Mass m;
+        m.closed = out.closed != 0;
+        m.inverted = out.inverted != 0;
+        m.accuracy_met = out.accuracy_met != 0;
+        m.from_mesh = out.from_mesh != 0;
+        m.area = out.area;
+        m.area_error = out.area_error;
+        m.volume = out.volume;
+        m.volume_error = out.volume_error;
+        m.centroid = {out.centroid[0], out.centroid[1], out.centroid[2]};
+        m.centroid_error = out.centroid_error;
+        for (std::size_t r = 0; r < 3; ++r) {
+            m.inertia[r] = {out.inertia[r * 3], out.inertia[r * 3 + 1], out.inertia[r * 3 + 2]};
+            m.principal_axes[r] = {out.principal_axes[r * 3], out.principal_axes[r * 3 + 1],
+                                   out.principal_axes[r * 3 + 2]};
+        }
+        m.inertia_error = out.inertia_error;
+        m.principal_moments = {out.principal_moments[0], out.principal_moments[1],
+                               out.principal_moments[2]};
+        return m;
     }
 
     // -- out
@@ -2397,6 +2601,11 @@ public:
         CADACLYSM_TRY(which, face_or_none(f, "coloured"));
         return wrap(::cadaclysm_blacksmith_coloured(raw_handle("coloured"), which, rgb_value[0], rgb_value[1], rgb_value[2]));
     }
+    // coloured(const Vec3&, ...) from "#rgb", "#rrggbb" or a CSS colour name.
+    Result<Solid> coloured(std::string_view colour, std::optional<std::uint32_t> f = std::nullopt) const {
+        CADACLYSM_TRY(rgb_value, rgb(colour));
+        return coloured(rgb_value, f);
+    }
     Result<std::optional<Vec3>> colour() const { return colour_of(NONE); }
     Result<std::optional<Vec3>> face_colour(std::uint32_t f) const {
         CADACLYSM_TRY(which, face_or_none(f, "colour"));
@@ -2411,6 +2620,11 @@ public:
         static const std::uint32_t none = 0;
         const std::uint32_t* list = edge_indices->empty() ? &none : edge_indices->data();
         return wrap(::cadaclysm_blacksmith_edges_coloured(raw_handle("edges_coloured"), list, edge_indices->size(), rgb_value[0], rgb_value[1], rgb_value[2]));
+    }
+    // edges_coloured(const Vec3&, ...) from "#rgb", "#rrggbb" or a CSS colour name.
+    Result<Solid> edges_coloured(std::string_view colour, std::optional<std::vector<std::uint32_t>> edge_indices = std::nullopt) const {
+        CADACLYSM_TRY(rgb_value, rgb(colour));
+        return edges_coloured(rgb_value, std::move(edge_indices));
     }
     // Edge `e`'s colour as drawn -- its own, else the solid's edge colour -- or nullopt.
     Result<std::optional<Vec3>> edge_colour(std::uint32_t e) const {
@@ -2518,6 +2732,9 @@ public:
 private:
     friend class Workplane;
     friend class Assembly;
+    friend class CollisionHit;
+    friend class Stock;
+    friend class Job;
     friend Result<std::string> write_step_text(const Solids&, const std::optional<std::string>&, Unit);
     friend Result<std::string> write_sat_text(const Solids&, Unit);
     friend Result<void> write_sat(const std::string&, const Solids&, Unit);
@@ -2597,6 +2814,684 @@ private:
     }
 
     std::shared_ptr<detail::SolidState> state_;
+};
+
+// ---- machining ----------------------------------------------------------------------
+
+// A cutter: Grbl tool `number` (1 to 255, the `T` word), `diameter` and `flute_length`
+// in mm, `feed` and `plunge` in mm/min, `rpm` its spindle speed, ramping into its cuts
+// at `ramp_angle` degrees. Immutable; a Job keeps its own copy of one it is given, so
+// destroying a Tool a job has used changes nothing there. Move-only, freed by its own
+// unique_ptr, as Path.
+class Tool {
+public:
+    Tool(Tool&&) noexcept = default;
+    Tool& operator=(Tool&&) noexcept = default;
+    Tool(const Tool&) = delete;
+    Tool& operator=(const Tool&) = delete;
+
+    // A flat end mill: Grbl tool `number` (at least 1), `diameter` and `flute_length` in
+    // mm, `feed` and `plunge` in mm/min, `rpm` its spindle speed. It ramps into its cuts
+    // at `ramp_angle` degrees (the library's own default is 3). Fails for a `number` of
+    // 0 or above 255, a size, feed or speed not positive and finite, or a `ramp_angle`
+    // outside (0, 90].
+    static Result<Tool> flat(std::uint32_t number, double diameter, double flute_length, double feed, double plunge,
+                             double rpm, double ramp_angle = 3.0) {
+        return ramped(::cadaclysm_blacksmith_tool_flat(number, diameter, flute_length, feed, plunge, rpm), ramp_angle,
+                     "tool_flat");
+    }
+    // A ball end mill, as flat, its tip a half sphere of the diameter; in 2.5D it cuts
+    // where a flat does, `bottom` being the tip.
+    static Result<Tool> ball(std::uint32_t number, double diameter, double flute_length, double feed, double plunge,
+                             double rpm, double ramp_angle = 3.0) {
+        return ramped(::cadaclysm_blacksmith_tool_ball(number, diameter, flute_length, feed, plunge, rpm), ramp_angle,
+                     "tool_ball");
+    }
+    // A drill: as flat, plunging at `feed`. A job takes it for Job::drill (and
+    // Job::machine's drills) only.
+    static Result<Tool> drill(std::uint32_t number, double diameter, double flute_length, double feed, double rpm) {
+        return wrap(::cadaclysm_blacksmith_tool_drill(number, diameter, flute_length, feed, rpm), "tool_drill");
+    }
+    // A new tool: this one, ramping into its cuts at `degrees` from the horizontal
+    // instead. Fails for an angle outside (0, 90].
+    Result<Tool> with_ramp_angle(double degrees) const {
+        return wrap(::cadaclysm_blacksmith_tool_with_ramp_angle(raw_handle("tool_with_ramp_angle"), degrees),
+                    "tool_with_ramp_angle");
+    }
+
+    // The C handle, for code that calls the C ABI directly. Owned by this Tool.
+    const CadaclysmBlacksmithTool* handle() const noexcept { return ptr_.get(); }
+
+private:
+    friend class Job;
+
+    struct Free {
+        void operator()(CadaclysmBlacksmithTool* p) const noexcept { ::cadaclysm_blacksmith_tool_free(p); }
+    };
+
+    explicit Tool(CadaclysmBlacksmithTool* raw) : ptr_(raw) {}
+
+    static Result<Tool> wrap(CadaclysmBlacksmithTool* raw, const char* what) {
+        if (!raw) return detail::kernel_error(what);
+        return Tool(raw);
+    }
+    // `made` wrapped, then turned to `ramp_angle` when it is not the library's own
+    // default -- the unramped handle freed at once rather than kept around.
+    static Result<Tool> ramped(CadaclysmBlacksmithTool* made, double ramp_angle, const char* what) {
+        CADACLYSM_TRY(tool, wrap(made, what));
+        if (ramp_angle == 3.0) return tool;
+        return tool.with_ramp_angle(ramp_angle);
+    }
+
+    const CadaclysmBlacksmithTool* raw_handle(const char* what) const {
+        if (!ptr_) cadaclysm::detail::bad_access(what, "the tool is empty (moved from)");
+        return ptr_.get();
+    }
+
+    std::unique_ptr<CadaclysmBlacksmithTool, Free> ptr_;
+};
+
+// The block of material a Job cuts, an axis-aligned box. Immutable; a Job keeps its own
+// copy. Move-only, freed by its own unique_ptr, as Tool.
+class Stock {
+public:
+    Stock(Stock&&) noexcept = default;
+    Stock& operator=(Stock&&) noexcept = default;
+    Stock(const Stock&) = delete;
+    Stock& operator=(const Stock&) = delete;
+
+    // The box from (`min_x`, `min_y`, `min_z`) to (`max_x`, `max_y`, `max_z`). Fails
+    // unless every min is below its max and all six are finite.
+    static Result<Stock> box(const Vec3& min, const Vec3& max) {
+        return wrap(::cadaclysm_blacksmith_stock_box(min[0], min[1], min[2], max[0], max[1], max[2]), "stock_box");
+    }
+    // `solid`'s bounds grown by `margin` in -X, +X, -Y, +Y and +Z; the bottom stays at
+    // the solid's lowest Z. Fails for a `margin` negative or not finite.
+    static Result<Stock> around(const Solid& solid, double margin = 0.0) {
+        return wrap(::cadaclysm_blacksmith_stock_around(solid.raw_handle("stock_around"), margin), "stock_around");
+    }
+
+    // The C handle, for code that calls the C ABI directly. Owned by this Stock.
+    const CadaclysmBlacksmithStock* handle() const noexcept { return ptr_.get(); }
+
+private:
+    friend class Job;
+
+    struct Free {
+        void operator()(CadaclysmBlacksmithStock* p) const noexcept { ::cadaclysm_blacksmith_stock_free(p); }
+    };
+
+    explicit Stock(CadaclysmBlacksmithStock* raw) : ptr_(raw) {}
+
+    static Result<Stock> wrap(CadaclysmBlacksmithStock* raw, const char* what) {
+        if (!raw) return detail::kernel_error(what);
+        return Stock(raw);
+    }
+
+    const CadaclysmBlacksmithStock* raw_handle(const char* what) const {
+        if (!ptr_) cadaclysm::detail::bad_access(what, "the stock is empty (moved from)");
+        return ptr_.get();
+    }
+
+    std::unique_ptr<CadaclysmBlacksmithStock, Free> ptr_;
+};
+
+// One file a Job wrote: a Grbl program (`tool` its `T` number, `name` `<job name>-T<n>`,
+// or `<job name>-<k>-T<n>` for a repeated tool) from Job::gcode, or one of
+// Job::write_camotics's files (`tool` 0 for the simulation copies and the project).
+// Copied out; immutable.
+struct Program {
+    std::uint32_t tool = 0;
+    std::string name;
+    std::string text;
+};
+
+// One operation of a Job, read back by Job::operations: `kind` (`"face"`, `"contour"`,
+// `"pocket"` or `"drill"`), `tool` (its Grbl `T` number) and `params`, the operation's
+// own arguments in the library's own numbers -- `side` 0 outside, 1 inside or 2 on its
+// line; `climb` and `open` 1 or 0; `points` a count; a `peck` of none reads back as
+// nullopt. Copied out; immutable.
+struct Operation {
+    std::string kind;
+    std::uint32_t tool = 0;
+    std::map<std::string, std::optional<double>> params;
+};
+
+// One thing Job::machine left uncut, one of Report's items. Copied out; immutable.
+struct ReportItem {
+    // "corner" (material the end mill doesn't reach), "hole" (a round hole no drill
+    // matches or a matched drill can't make), "slope" (a face that is neither
+    // horizontal nor vertical, cut as steps), "undercut" (material under an overhang)
+    // or "too_deep" (a level below the end mill's flute length, cut only that far).
+    std::string kind;
+    // The item's XYZ location -- a centroid for an area, the axis point at the top for
+    // a hole.
+    Vec3 at{};
+    // An area in mm^2 for corner/undercut, a diameter in mm for hole, and a height in
+    // mm (its Z range) for slope and too_deep.
+    double size = 0.0;
+    // One sentence naming the cause and the tool involved.
+    std::string reason;
+    // The XY area the item covers.
+    std::vector<Profile> region;
+};
+
+// What Job::machine could not make: `items`, in order, read once when machine returns,
+// and the kernel's own `text` -- one line per item, or "nothing left uncut". Copied
+// out; immutable.
+struct Report {
+    std::vector<ReportItem> items;
+    std::string text;
+
+    bool empty() const noexcept { return items.empty(); }
+};
+
+namespace detail {
+
+// `side`'s library code, or the refusal for any other side -- checked here so a bad spelling never
+// reaches the library.
+inline Result<std::uint32_t> job_side(const std::string& side) {
+    if (side == "outside") return std::uint32_t(0);
+    if (side == "inside") return std::uint32_t(1);
+    if (side == "on") return std::uint32_t(2);
+    return detail::refuse("side must be 'outside', 'inside' or 'on'");
+}
+
+// What the kernel says of a job name with a control character in it -- a NUL, which a C
+// string would cut the name short at, is refused with it before the library is asked, as
+// the Python SDK does for a `Job` name and a `write_camotics` stem.
+inline constexpr const char* job_nul_name_error =
+    "job: a name must be non-empty and without brackets, slashes, quotes, control characters, or : * ? < > |";
+
+// The files of one job_gcode/job_camotics call, copied out, the list freed.
+inline Result<std::vector<Program>> programs_of(CadaclysmBlacksmithPrograms* raw, const char* what) {
+    if (!raw) return detail::kernel_error(what);
+    std::uint32_t n = ::cadaclysm_blacksmith_programs_count(raw);
+    std::vector<Program> out;
+    out.reserve(n);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        Program p;
+        p.tool = ::cadaclysm_blacksmith_programs_tool(raw, i);
+        p.name = detail::text(::cadaclysm_blacksmith_programs_name(raw, i));
+        p.text = detail::text(::cadaclysm_blacksmith_programs_text(raw, i));
+        out.push_back(std::move(p));
+    }
+    ::cadaclysm_blacksmith_programs_free(raw);
+    return out;
+}
+
+// A job_machine report, read field by field, the report freed.
+inline Result<Report> report_of(CadaclysmBlacksmithReport* raw) {
+    if (!raw) return detail::kernel_error("job_machine");
+    std::uint32_t n = ::cadaclysm_blacksmith_report_count(raw);
+    std::vector<ReportItem> items;
+    items.reserve(n);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        double at[3] = {0, 0, 0};
+        if (!::cadaclysm_blacksmith_report_at(raw, i, at)) {
+            ::cadaclysm_blacksmith_report_free(raw);
+            return detail::kernel_error("report_at");
+        }
+        Result<std::vector<Profile>> region = Profile::list(::cadaclysm_blacksmith_report_region(raw, i), "report_region");
+        if (!region) {
+            ::cadaclysm_blacksmith_report_free(raw);
+            return region.error();
+        }
+        ReportItem item;
+        item.kind = detail::text(::cadaclysm_blacksmith_report_kind(raw, i));
+        item.at = Vec3{at[0], at[1], at[2]};
+        item.size = ::cadaclysm_blacksmith_report_size(raw, i);
+        item.reason = detail::text(::cadaclysm_blacksmith_report_reason(raw, i));
+        item.region = std::move(region).value();
+        items.push_back(std::move(item));
+    }
+    Report out;
+    out.items = std::move(items);
+    out.text = detail::text(::cadaclysm_blacksmith_report_text(raw));
+    ::cadaclysm_blacksmith_report_free(raw);
+    return out;
+}
+
+// Every operation of one job_operations call, read field by field, the list freed.
+inline std::vector<Operation> operations_of(CadaclysmBlacksmithOperations* raw) {
+    std::uint32_t n = ::cadaclysm_blacksmith_operations_count(raw);
+    std::vector<Operation> out;
+    out.reserve(n);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        Operation op;
+        op.kind = detail::text(::cadaclysm_blacksmith_operations_kind(raw, i));
+        op.tool = ::cadaclysm_blacksmith_operations_tool(raw, i);
+        std::uint32_t param_count = ::cadaclysm_blacksmith_operations_param_count(raw, i);
+        for (std::uint32_t k = 0; k < param_count; ++k) {
+            std::string name = detail::text(::cadaclysm_blacksmith_operations_param_name(raw, i, k));
+            double value = ::cadaclysm_blacksmith_operations_param_value(raw, i, k);
+            op.params[name] = std::isnan(value) ? std::optional<double>() : std::optional<double>(value);
+        }
+        out.push_back(std::move(op));
+    }
+    ::cadaclysm_blacksmith_operations_free(raw);
+    return out;
+}
+
+}  // namespace detail
+
+// A machining job on a Stock: operations kept in the order they are added, written as
+// one Grbl 1.1 program per run of operations sharing a tool. Mutable -- each operation
+// is added in place, and a refused one leaves the job as it was. `safe_z` is the
+// absolute Z of rapids between operations and at a program's start and end, above the
+// stock's top; `clearance` is how far above an operation's top it enters and leaves its
+// passes; `tolerance` fits free-form sides and offsets; `name` names the programs
+// (`<name>-T<n>`); `spindle_dwell` is how long every program waits after starting the
+// spindle; `resolution` is the CAMotics project's voxel size in mm. Move-only, backed
+// by a unique_ptr with a Free, as Assembly; close() frees it now, and every call after
+// is refused rather than aborting -- a job's own operations already return a Result the
+// same way a refused C call does, so a closed job answers through that same channel.
+class Job {
+public:
+    Job(Job&&) noexcept = default;
+    Job& operator=(Job&&) noexcept = default;
+    Job(const Job&) = delete;
+    Job& operator=(const Job&) = delete;
+
+    // An empty job on `stock`, rapids at `safe_z` (above the stock's top), with the
+    // library's own defaults (`clearance` 1, `tolerance` 0.01, `name` "job",
+    // `spindle_dwell` 2 s, `resolution` 0.1 mm) until overridden here. Fails for a
+    // `safe_z` not above the stock's top, or a setting the job refuses.
+    static Result<Job> make(const Stock& stock, double safe_z, double clearance = 1.0, double tolerance = 0.01,
+                            const std::string& name = "job", double spindle_dwell = 2.0, double resolution = 0.1) {
+        if (name.find('\0') != std::string::npos) return detail::refuse(detail::job_nul_name_error);
+        CadaclysmBlacksmithJob* raw = ::cadaclysm_blacksmith_job_new(stock.raw_handle("job_new"), safe_z);
+        if (!raw) return detail::kernel_error("job_new");
+        Job job(raw);
+        if (!::cadaclysm_blacksmith_job_set_clearance(raw, clearance)) return detail::kernel_error("job_set_clearance");
+        if (!::cadaclysm_blacksmith_job_set_tolerance(raw, tolerance)) return detail::kernel_error("job_set_tolerance");
+        if (!::cadaclysm_blacksmith_job_set_spindle_dwell(raw, spindle_dwell)) {
+            return detail::kernel_error("job_set_spindle_dwell");
+        }
+        if (!::cadaclysm_blacksmith_job_set_resolution(raw, resolution)) return detail::kernel_error("job_set_resolution");
+        if (!::cadaclysm_blacksmith_job_set_name(raw, name.c_str())) return detail::kernel_error("job_set_name");
+        return job;
+    }
+
+    // Free the job now. Idempotent; every call on the job is refused after. Lists it
+    // wrote (operations(), gcode(), write_camotics, a Report) are independent copies
+    // and outlive it.
+    void close() noexcept { ptr_.reset(); }
+    bool closed() const noexcept { return !ptr_; }
+
+    // Face the stock's top down to `z`, in zigzag rows along X `stepover` apart and
+    // passes at most `stepdown` deep, with `tool`. Fails for a drill, a `z` above the
+    // stock's top, a stepover past the tool's diameter, or what the job otherwise
+    // refuses.
+    Result<void> face(const Tool& tool, double z, double stepover, double stepdown) {
+        CADACLYSM_TRY(handle, live());
+        if (!::cadaclysm_blacksmith_job_face(handle, tool.raw_handle("job_face"), z, stepover, stepdown)) {
+            return detail::kernel_error("job_face");
+        }
+        return {};
+    }
+    // Cut along `profile` from `top` to `bottom` in passes at most `stepdown` deep,
+    // with `tool`: `side` "outside" the profile, "inside" it, or "on" its line; `climb`
+    // for climb milling, else conventional; `open` to cut the outline as an open chain
+    // (only "on" its line, and with no holes). Fails for any other `side`, or what the
+    // job otherwise refuses.
+    Result<void> contour(const Tool& tool, const Profile& profile, double top, double bottom,
+                         const std::string& side = "outside", double stepdown = 1.0, bool climb = true,
+                         bool open = false) {
+        CADACLYSM_TRY(handle, live());
+        CADACLYSM_TRY(code, detail::job_side(side));
+        if (!::cadaclysm_blacksmith_job_contour(handle, tool.raw_handle("job_contour"), profile.ptr(), top, bottom,
+                                                code, stepdown, climb, open)) {
+            return detail::kernel_error("job_contour");
+        }
+        return {};
+    }
+    // Clear `profile` -- its holes left standing as islands -- from `top` to `bottom`,
+    // in rings `stepover` apart (at most the tool's radius) and passes at most
+    // `stepdown` deep, with `tool`. Fails for what the job refuses; a pocket too small
+    // for the tool is refused by gcode(), naming the operation.
+    Result<void> pocket(const Tool& tool, const Profile& profile, double top, double bottom, double stepover,
+                        double stepdown) {
+        CADACLYSM_TRY(handle, live());
+        if (!::cadaclysm_blacksmith_job_pocket(handle, tool.raw_handle("job_pocket"), profile.ptr(), top, bottom,
+                                               stepover, stepdown)) {
+            return detail::kernel_error("job_pocket");
+        }
+        return {};
+    }
+    // A hole at each (x, y) of `points`, from `top` to `bottom` with `tool`, pecking
+    // `peck` deep at a time (retracting between pecks), or straight to depth for
+    // nullopt. Fails for what the job refuses (a tool that is not a drill, no points,
+    // ...).
+    Result<void> drill(const Tool& tool, const std::vector<Vec2>& points, double top, double bottom,
+                       std::optional<double> peck = std::nullopt) {
+        CADACLYSM_TRY(handle, live());
+        std::vector<double> flat;
+        flat.reserve(points.size() * 2);
+        for (const Vec2& p : points) {
+            flat.push_back(p[0]);
+            flat.push_back(p[1]);
+        }
+        if (!::cadaclysm_blacksmith_job_drill(handle, tool.raw_handle("job_drill"),
+                                              flat.empty() ? nullptr : flat.data(), points.size(), top, bottom,
+                                              peck.value_or(std::numeric_limits<double>::quiet_NaN()))) {
+            return detail::kernel_error("job_drill");
+        }
+        return {};
+    }
+    // Recognise `part` and append the operations that make it: faced, contoured and
+    // pocketed with `end_mill`, its holes drilled with whichever of `drills` fits each
+    // -- a tool per required diameter. `stepover` and `stepdown` of nullopt are the
+    // kernel's own defaults; `skin` (at least 0) is how far above the part's lowest
+    // point the outline stops, so the part stays attached to the stock -- 0 cuts
+    // through; `peck` of nullopt is none (a drill straight to depth). Returns a Report
+    // of what could not be cut. Fails for what the kernel refuses (a drill as
+    // `end_mill`, ...); the job changes only on success -- a refusal leaves it exactly
+    // as it was.
+    Result<Report> machine(const Solid& part, const Tool& end_mill, const std::vector<const Tool*>& drills = {},
+                           std::optional<double> stepover = std::nullopt, std::optional<double> stepdown = std::nullopt,
+                           double skin = 0.3, std::optional<double> peck = std::nullopt) {
+        CADACLYSM_TRY(handle, live());
+        std::vector<const CadaclysmBlacksmithTool*> handles;
+        handles.reserve(drills.size());
+        for (const Tool* d : drills) handles.push_back(d ? d->raw_handle("job_machine") : nullptr);
+        double nan = std::numeric_limits<double>::quiet_NaN();
+        CadaclysmBlacksmithReport* raw = ::cadaclysm_blacksmith_job_machine(
+            handle, part.raw_handle("job_machine"), end_mill.raw_handle("job_machine"),
+            handles.empty() ? nullptr : handles.data(), handles.size(), stepover.value_or(nan), stepdown.value_or(nan),
+            skin, peck.value_or(nan));
+        return detail::report_of(raw);
+    }
+
+    // Every operation added to this job so far, in order -- whether added by face,
+    // contour, pocket, drill or machine.
+    Result<std::vector<Operation>> operations() const {
+        CADACLYSM_TRY(handle, live());
+        CadaclysmBlacksmithOperations* raw = ::cadaclysm_blacksmith_job_operations(handle);
+        if (!raw) return detail::kernel_error("job_operations");
+        return detail::operations_of(raw);
+    }
+    // The job as Grbl 1.1 programs, one per run of consecutive operations sharing a
+    // tool (T1, T2, T1 gives three), each named `<name>-T<n>` (or `<name>-<k>-T<n>` for
+    // run `k` of a tool that runs more than once); an empty vector for a job with no
+    // operations. Fails for an operation whose geometry the tool cannot cut (named by
+    // its index and kind).
+    Result<std::vector<Program>> gcode() const {
+        CADACLYSM_TRY(handle, live());
+        return detail::programs_of(::cadaclysm_blacksmith_job_gcode(handle), "job_gcode");
+    }
+    // A CAMotics project at `path` and its files beside it, named after the project's
+    // file stem (`out/part.camotics` writes `out/part-T1.nc`), not the job's name: each
+    // program, a simulation copy of it (`.sim.nc`, which the project lists), and the
+    // project last. Creates the directory. Returns the paths written, the project
+    // last, written here (not by the library) byte for byte, as plain UTF-8 with no
+    // byte-order mark. Fails for a path with no file stem, what gcode() refuses, or a
+    // file that cannot be written.
+    Result<std::vector<std::string>> write_camotics(const std::string& path) const {
+        CADACLYSM_TRY(handle, live());
+        // the stem is read off the text first: a path with a NUL in it may not survive being a
+        // std::filesystem::path, and Python refuses the stem, in the kernel's words
+        {
+            std::string tail = path.substr(path.find_last_of("/\\") == std::string::npos ? 0 : path.find_last_of("/\\") + 1);
+            std::size_t dot = tail.find_last_of('.');
+            if (tail.substr(0, dot == std::string::npos || dot == 0 ? tail.size() : dot).find('\0') != std::string::npos) {
+                return detail::refuse(detail::job_nul_name_error);
+            }
+        }
+        std::filesystem::path path_fs = cadaclysm::detail::fs_path(path);
+        std::string stem = cadaclysm::detail::utf8(path_fs.stem());
+        if (stem.empty()) return detail::refuse("job_camotics: " + path + " has no file stem");
+        CADACLYSM_TRY(files, detail::programs_of(::cadaclysm_blacksmith_job_camotics(handle, stem.c_str()), "job_camotics"));
+        std::filesystem::path dir_fs = path_fs.parent_path();
+        if (!dir_fs.empty()) {
+            std::error_code ec;
+            std::filesystem::create_directories(dir_fs, ec);
+            if (ec) return detail::refuse("job_camotics: " + path + ": " + ec.message());
+        }
+        std::vector<std::string> written;
+        written.reserve(files.size());
+        for (std::size_t i = 0; i < files.size(); ++i) {
+            std::filesystem::path at = (i + 1 == files.size()) ? path_fs : dir_fs / std::filesystem::path(files[i].name);
+            std::ofstream out(at, std::ios::binary);
+            if (!out) return detail::refuse("job_camotics: " + path + ": cannot write " + cadaclysm::detail::utf8(at));
+            out.write(files[i].text.data(), static_cast<std::streamsize>(files[i].text.size()));
+            if (!out) return detail::refuse("job_camotics: " + path + ": cannot write " + cadaclysm::detail::utf8(at));
+            written.push_back(cadaclysm::detail::utf8(at));
+        }
+        return written;
+    }
+
+    // The C handle, for code that calls the C ABI directly. Owned by this Job.
+    const CadaclysmBlacksmithJob* handle() const noexcept { return ptr_.get(); }
+
+private:
+    struct Free {
+        void operator()(CadaclysmBlacksmithJob* p) const noexcept { ::cadaclysm_blacksmith_job_free(p); }
+    };
+
+    explicit Job(CadaclysmBlacksmithJob* raw) : ptr_(raw) {}
+
+    // The handle for a live job, or "job: closed" for one that has been closed (or
+    // moved from) already -- as Path's "already ended" and SweepPath's "closed" name
+    // their own refusal, not the library's.
+    Result<CadaclysmBlacksmithJob*> live() const {
+        if (!ptr_) return detail::refuse("job: closed");
+        return ptr_.get();
+    }
+
+    std::unique_ptr<CadaclysmBlacksmithJob, Free> ptr_;
+};
+
+// ---- collider -------------------------------------------------------------------------
+
+namespace detail {
+
+// Keeps one Collider::check answer alive for as long as any CollisionHit of it is: each
+// hit holds one of these (shared), and the last one let go frees the handle -- the same
+// idiom Solid's own state uses, except a CollisionHit needs the handle itself back for
+// solid().
+struct CollisionsState {
+    CadaclysmBlacksmithCollisions* handle = nullptr;
+    CollisionsState() = default;
+    CollisionsState(const CollisionsState&) = delete;
+    CollisionsState& operator=(const CollisionsState&) = delete;
+    ~CollisionsState() {
+        if (handle) ::cadaclysm_blacksmith_collisions_free(handle);
+    }
+};
+
+}  // namespace detail
+
+// Counts of one Collider::check call: the candidate pairs `considered`, how many of
+// them the world boxes and the oriented boxes cleared, how many the share left to
+// another call, how the rest were answered (`cached`, `closed_form`, `meshed`), and how
+// many were `refused`. `confirmed` is the subset of `meshed` that were thin mesh-path
+// overlaps sent to Solid::common itself for a final answer.
+struct ColliderStats {
+    std::uint32_t considered = 0;
+    std::uint32_t world_boxes = 0;
+    std::uint32_t oriented_boxes = 0;
+    std::uint32_t skipped_share = 0;
+    std::uint32_t cached = 0;
+    std::uint32_t closed_form = 0;
+    std::uint32_t meshed = 0;
+    std::uint32_t refused = 0;
+    std::uint32_t confirmed = 0;
+};
+
+// One pair Collider::check found overlapping (`kind == "overlap"`), or could not decide
+// (`kind == "refused"`, `text` says why, empty for an overlap). `overlap` is the same
+// answer as a bool. `positions`/`normals` are world xyz triples, three per triangle
+// (unwelded); `indices` indexes them -- all empty for a refused pair. `depth` is the
+// thinnest side of the overlap's world box, 0 for a refused pair.
+//
+// `solid()` rebuilds the exact overlap now, from the frames `check` found it at; this
+// keeps the collisions handle behind every hit of one `check` call alive until the last
+// of them is destroyed, freeing it only then.
+class CollisionHit {
+public:
+    std::uint32_t a = 0;
+    std::uint32_t b = 0;
+    bool overlap = false;
+    std::string kind;
+    double depth = 0.0;
+    std::string text;
+    std::vector<Vec3> positions;
+    std::vector<Vec3> normals;
+    std::vector<std::uint32_t> indices;
+
+    CollisionHit() = default;
+
+    // The exact overlap of this pair at the frames Collider::check found it at, as a
+    // new solid. Refused for a refused pair (`overlap` false) or a collisions handle
+    // already closed some other way.
+    Result<Solid> solid() const {
+        if (!keeper_ || !keeper_->handle) return detail::refuse("CollisionHit.solid: the collisions handle is closed");
+        return Solid::wrap(::cadaclysm_blacksmith_collisions_solid(keeper_->handle, index_), "collisions_solid");
+    }
+
+private:
+    friend class Collider;
+
+    // Copied out of the C struct: the pointers are read here and nowhere kept.
+    static CollisionHit from_raw(const CadaclysmBlacksmithCollisionHit& raw, std::shared_ptr<detail::CollisionsState> keeper,
+                                 std::uint32_t index) {
+        CollisionHit hit;
+        hit.a = raw.a;
+        hit.b = raw.b;
+        hit.overlap = raw.overlap;
+        hit.kind = raw.overlap ? "overlap" : "refused";
+        hit.depth = raw.depth;
+        hit.text = detail::text(raw.text);
+        hit.positions = detail::points_at(raw.positions, raw.vertex_count);
+        hit.normals = detail::points_at(raw.normals, raw.vertex_count);
+        if (raw.indices) hit.indices.assign(raw.indices, raw.indices + raw.index_count);
+        hit.keeper_ = std::move(keeper);
+        hit.index_ = index;
+        return hit;
+    }
+
+    std::shared_ptr<detail::CollisionsState> keeper_;
+    std::uint32_t index_ = 0;
+};
+
+// Parts meshed once, asked pose after pose which of them interfere: `solids` at rest,
+// meshed at `tolerance`; `groups` one group index per solid (nullopt: each solid its
+// own group -- check() then takes one frame per solid), `allowed` pairs of part indices
+// never tested (designed contacts, by part index). Move-only; the destructor frees the
+// handle, as close() does early.
+class Collider {
+public:
+    // Hand-written, not `= default`: a raw handle's default move copies the pointer
+    // without clearing the source, which frees it twice (once from the moved-from
+    // temporary, once from here) the moment either goes out of scope.
+    Collider(Collider&& other) noexcept : handle_(other.handle_) { other.handle_ = nullptr; }
+    Collider& operator=(Collider&& other) noexcept {
+        if (this != &other) {
+            close();
+            handle_ = other.handle_;
+            other.handle_ = nullptr;
+        }
+        return *this;
+    }
+    Collider(const Collider&) = delete;
+    Collider& operator=(const Collider&) = delete;
+
+    ~Collider() { close(); }
+
+    void close() noexcept {
+        if (handle_) {
+            ::cadaclysm_blacksmith_collider_free(handle_);
+            handle_ = nullptr;
+        }
+    }
+    bool closed() const noexcept { return handle_ == nullptr; }
+
+    static Result<Collider> make(const std::vector<std::reference_wrapper<const Solid>>& solids,
+                                 double tolerance = DEFAULT_TOLERANCE,
+                                 const std::optional<std::vector<std::uint32_t>>& groups = std::nullopt,
+                                 const std::vector<std::pair<std::uint32_t, std::uint32_t>>& allowed = {}) {
+        if (groups && groups->size() != solids.size()) {
+            return detail::refuse("Collider: groups must have one entry per solid (" + std::to_string(solids.size()) +
+                                  " solids, " + std::to_string(groups->size()) + " groups)");
+        }
+        std::vector<const CadaclysmBlacksmithSolid*> handles;
+        handles.reserve(solids.size());
+        for (const Solid& s : solids) handles.push_back(s.handle());
+        std::vector<std::uint32_t> allowed_flat;
+        allowed_flat.reserve(allowed.size() * 2);
+        for (const auto& pair : allowed) {
+            allowed_flat.push_back(pair.first);
+            allowed_flat.push_back(pair.second);
+        }
+        CadaclysmBlacksmithCollider* h = ::cadaclysm_blacksmith_collider_new(
+            handles.data(), static_cast<std::uint32_t>(handles.size()), tolerance,
+            groups ? groups->data() : nullptr, allowed_flat.empty() ? nullptr : allowed_flat.data(),
+            static_cast<std::uint32_t>(allowed.size()));
+        if (!h) return detail::kernel_error("collider_new");
+        return Collider(h);
+    }
+
+    // How many groups this collider has -- the highest group index past the
+    // constructor, plus one.
+    std::uint32_t group_count() const { return ::cadaclysm_blacksmith_collider_group_count(raw_handle("group_count")); }
+
+    // Counts of the last check() call (all zero before the first one).
+    Result<ColliderStats> stats() const {
+        CadaclysmBlacksmithColliderStats out{};
+        if (!::cadaclysm_blacksmith_collider_stats(raw_handle("stats"), &out)) return detail::kernel_error("collider_stats");
+        return ColliderStats{out.considered, out.world_boxes,  out.oriented_boxes, out.skipped_share, out.cached,
+                             out.closed_form, out.meshed,      out.refused,        out.confirmed};
+    }
+
+    // The pairs that interfere, or could not be decided, with each group placed at its
+    // matching frame in `frames` (one per group, in group order). `share`: nullopt,
+    // every pair past the box filters is decided now; `(k, n)`, only those whose index
+    // is `k` modulo `n` (the shares of one pose are disjoint and cover it -- split one
+    // check() across `n` workers).
+    Result<std::vector<CollisionHit>> check(const std::vector<std::reference_wrapper<const Frame>>& frames,
+                                            const std::optional<std::pair<std::uint32_t, std::uint32_t>>& share =
+                                                std::nullopt) const {
+        std::vector<double> flat;
+        flat.reserve(frames.size() * 12);
+        for (const Frame& f : frames) {
+            const std::array<double, 12>& v = f.raw();
+            flat.insert(flat.end(), v.begin(), v.end());
+        }
+        std::uint32_t share_k = share ? share->first : 0;
+        std::uint32_t share_n = share ? share->second : 0;
+        CadaclysmBlacksmithCollisions* h = ::cadaclysm_blacksmith_collider_check(
+            raw_handle("check"), flat.data(), static_cast<std::uint32_t>(frames.size()), share_k, share_n);
+        if (!h) return detail::kernel_error("collider_check");
+        std::uint32_t count = ::cadaclysm_blacksmith_collisions_count(h);
+        if (count == 0) {
+            ::cadaclysm_blacksmith_collisions_free(h);
+            return std::vector<CollisionHit>{};
+        }
+        auto keeper = std::make_shared<detail::CollisionsState>();
+        keeper->handle = h;
+        std::vector<CollisionHit> hits;
+        hits.reserve(count);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            CadaclysmBlacksmithCollisionHit raw{};
+            if (!::cadaclysm_blacksmith_collisions_hit(h, i, &raw)) return detail::kernel_error("collisions_hit");
+            hits.push_back(CollisionHit::from_raw(raw, keeper, i));
+        }
+        return hits;
+    }
+
+    // The C handle, for code that calls the C ABI directly. Owned by this Collider.
+    const CadaclysmBlacksmithCollider* handle() const noexcept { return handle_; }
+
+private:
+    explicit Collider(CadaclysmBlacksmithCollider* h) : handle_(h) {}
+
+    CadaclysmBlacksmithCollider* raw_handle(const char* what) const {
+        if (!handle_) cadaclysm::detail::bad_access(what, "the collider is closed");
+        return handle_;
+    }
+
+    CadaclysmBlacksmithCollider* handle_ = nullptr;
 };
 
 // One STEP text, each solid its own body.
@@ -2899,6 +3794,36 @@ inline Result<cadaclysm::Scene> Solid::to_scene(const std::optional<std::string>
 
 // ---- assemblies -------------------------------------------------------------------------
 
+// One freedom's range for Assembly::pair: either side nullopt for unbounded.
+struct Range {
+    std::optional<double> lower;
+    std::optional<double> upper;
+};
+
+// Assembly::pair's optional arguments: the frame the pair reaches at its rest values
+// (frame itself, i.e. all-zero rest values, when nullopt), one Range per freedom of the
+// pair's kind (nullopt entirely for a kind that allows none), and a pitch (required and
+// non-zero for screw, refused for any other kind).
+struct PairOptions {
+    std::optional<Frame> end_frame;
+    std::optional<std::vector<Range>> ranges;
+    std::optional<double> pitch;
+};
+
+// One row of Assembly::state: a joint name and its values, in its pair's freedom order.
+struct StateRow {
+    std::string joint;
+    std::vector<double> values;
+};
+
+// One segment of Assembly::sequence: the state it reaches, at which parameter, and how the
+// motion leaves it -- "undefined", "discontinuous", "synchronous" or "linear".
+struct SequenceSegment {
+    std::string state;
+    double t = 0;
+    std::string interpolation;
+};
+
 // A mutable tree of placements: a name, and zero or more solids or other assemblies
 // placed in it at a frame. place_solid/place_assembly return the placement's name so a
 // caller can keep it. Unlike Solid, placing shares rather than copies -- placing one
@@ -2997,6 +3922,111 @@ public:
         return {};
     }
 
+    // Give joint `joint_name` its pair: `kind` (a name of the kind table -- "revolute",
+    // "prismatic", "cylindrical", "screw", "spherical", "spherical_with_pin", "planar",
+    // "universal", "homokinetic", "fully_constrained" or "unconstrained"), the contact
+    // frame at rest, and `options` (end_frame, ranges, pitch -- see PairOptions). Refused,
+    // with the kernel's own message and the assembly left unchanged, when a rule refuses
+    // it.
+    Result<void> pair(std::string_view joint_name, std::string_view kind, const Frame& frame,
+                      const PairOptions& options = {}) const {
+        std::string owned_joint(joint_name), owned_kind(kind);
+        const double* end_frame_ptr = options.end_frame ? options.end_frame->raw().data() : nullptr;
+
+        std::size_t freedom_count = options.ranges ? options.ranges->size() : 0;
+        // `ranges` being present -- even an empty vector -- means ranges were GIVEN, and
+        // the C ABI must see that as all four pointers non-null with count `freedom_count`
+        // (possibly 0), never as "no ranges" (all four null, which only an absent
+        // `options.ranges` means). So every buffer below is sized max(freedom_count, 1)
+        // whenever `options.ranges` is present, even when it is empty.
+        std::vector<double> lower, upper;
+        // has_lower/has_upper are a plain bool array on the C ABI side; std::vector<bool>
+        // is bit-packed and has no contiguous bool* to hand it, so these are an owning
+        // bool[] instead.
+        std::unique_ptr<bool[]> has_lower, has_upper;
+        if (options.ranges) {
+            lower.resize(freedom_count ? freedom_count : 1);
+            upper.resize(freedom_count ? freedom_count : 1);
+            has_lower = std::make_unique<bool[]>(freedom_count ? freedom_count : 1);
+            has_upper = std::make_unique<bool[]>(freedom_count ? freedom_count : 1);
+            for (std::size_t i = 0; i < freedom_count; ++i) {
+                const Range& r = (*options.ranges)[i];
+                lower[i] = r.lower.value_or(0.0);
+                upper[i] = r.upper.value_or(0.0);
+                has_lower[i] = r.lower.has_value();
+                has_upper[i] = r.upper.has_value();
+            }
+        }
+        double pitch = options.pitch.value_or(std::numeric_limits<double>::quiet_NaN());
+        bool ok = ::cadaclysm_blacksmith_assembly_pair(
+            raw_handle("assembly_pair"), owned_joint.c_str(), owned_kind.c_str(), frame.raw().data(), end_frame_ptr,
+            options.ranges ? lower.data() : nullptr, options.ranges ? upper.data() : nullptr,
+            options.ranges ? has_lower.get() : nullptr, options.ranges ? has_upper.get() : nullptr,
+            freedom_count, pitch);
+        if (!ok) return detail::kernel_error("assembly_pair");
+        return {};
+    }
+
+    // Add a named state to this assembly: `rows` gives each joint's values, in its pair's
+    // freedom order, in the caller's order. Refused, with the kernel's own message and the
+    // assembly left unchanged, when a rule refuses it.
+    Result<void> state(std::string_view name, const std::vector<StateRow>& rows) const {
+        std::string owned_name(name);
+        std::vector<std::string> joint_names;
+        joint_names.reserve(rows.size());
+        for (const StateRow& row : rows) joint_names.push_back(row.joint);
+        std::vector<const char*> joint_pointers;
+        joint_pointers.reserve(rows.size());
+        for (const std::string& j : joint_names) joint_pointers.push_back(j.c_str());
+        std::vector<std::uint32_t> counts;
+        counts.reserve(rows.size());
+        std::vector<double> flat;
+        for (const StateRow& row : rows) {
+            counts.push_back(static_cast<std::uint32_t>(row.values.size()));
+            flat.insert(flat.end(), row.values.begin(), row.values.end());
+        }
+        bool ok = ::cadaclysm_blacksmith_assembly_state(
+            raw_handle("assembly_state"), owned_name.c_str(), joint_pointers.empty() ? nullptr : joint_pointers.data(),
+            counts.empty() ? nullptr : counts.data(), flat.empty() ? nullptr : flat.data(), rows.size());
+        if (!ok) return detail::kernel_error("assembly_state");
+        return {};
+    }
+
+    // Add a named motion sequence over this assembly's states. It is closed unless the last
+    // segment is "discontinuous"; `seconds` writes the parameter's unit as the second.
+    // Refused, with the kernel's own message and the assembly left unchanged, when a rule
+    // refuses it.
+    Result<void> sequence(std::string_view name, const std::vector<SequenceSegment>& segments,
+                          bool seconds = false) const {
+        std::string owned_name(name);
+        std::vector<const char*> states;
+        std::vector<double> ts;
+        std::vector<const char*> words;
+        states.reserve(segments.size());
+        ts.reserve(segments.size());
+        words.reserve(segments.size());
+        for (const SequenceSegment& segment : segments) {
+            states.push_back(segment.state.c_str());
+            ts.push_back(segment.t);
+            words.push_back(segment.interpolation.c_str());
+        }
+        bool ok = ::cadaclysm_blacksmith_assembly_sequence(
+            raw_handle("assembly_sequence"), owned_name.c_str(), states.empty() ? nullptr : states.data(),
+            ts.empty() ? nullptr : ts.data(), words.empty() ? nullptr : words.data(), segments.size(), seconds);
+        if (!ok) return detail::kernel_error("assembly_sequence");
+        return {};
+    }
+
+    // Declare this assembly's base link. Refused, with the kernel's own message and the
+    // assembly left unchanged, when a rule refuses it.
+    Result<void> base(std::string_view link) const {
+        std::string owned_link(link);
+        if (!::cadaclysm_blacksmith_assembly_base(raw_handle("assembly_base"), owned_link.c_str())) {
+            return detail::kernel_error("assembly_base");
+        }
+        return {};
+    }
+
     // This assembly, and everything placed under it, as one STEP file: this assembly the
     // root product, each sub-assembly and each distinct part written once, each
     // placement an occurrence named as it was placed. `schema` and `unit` as
@@ -3064,6 +4094,14 @@ private:
 
     std::unique_ptr<CadaclysmBlacksmithAssembly, Free> ptr_;
 };
+
+// How many freedoms a pair kind has, so a caller can size Assembly::pair's ranges --
+// see cadaclysm_blacksmith_pair_freedom_count. 0 for an unknown name, and for
+// fully_constrained, which has none.
+inline std::uint32_t pair_freedom_count(std::string_view kind) {
+    std::string owned(kind);
+    return ::cadaclysm_blacksmith_pair_freedom_count(owned.c_str());
+}
 
 // ---- the chain --------------------------------------------------------------------------
 

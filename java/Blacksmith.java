@@ -68,10 +68,11 @@
 //
 // ## Ownership
 //
-// `Profile`, `Path`, `SweepPath` and `Solid` own a C handle: close them (a
-// try-with-resources), or let the `Cleaner` free them when the garbage collector finds them
-// unreachable, as Python's `__del__` does. `Workplane`, `Selector`, `Slant`, `Edge` and
-// `Axis` are plain values. `close()` is idempotent; a call on a closed object throws
+// `Profile`, `Path`, `SweepPath`, `Solid`, `Tool`, `Stock` and `Job` own a C handle: close
+// them (a try-with-resources), or let the `Cleaner` free them when the garbage collector
+// finds them unreachable, as Python's `__del__` does. `Workplane`, `Selector`, `Slant`,
+// `Edge` and `Axis` are plain values, and `Program`, `Operation`, `Report` and `ReportItem`
+// are copied out. `close()` is idempotent; a call on a closed object throws
 // `IllegalStateException`. The progress callbacks Python's `join`/`cut`/`common`/
 // `split_sheet`/`fillet`/`shell` accept are not offered: an upcall stub over the C callback
 // is out of this binding's scope, and every call runs silent.
@@ -97,9 +98,12 @@ import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -261,6 +265,42 @@ public final class Blacksmith {
             ValueLayout.JAVA_INT.withName("point_count"),
             ValueLayout.JAVA_INT.withName("loop_count"));
 
+    /** {@code CadaclysmBlacksmithBox}: {@code lo} and {@code hi}, three doubles each. Named
+     *  {@code BOX_LAYOUT}, not {@code BOX}: {@code BOX} is already the {@link MethodHandle} for
+     *  {@code cadaclysm_blacksmith_box} (Solid.bounds's own call), on this same class. */
+    private static final MemoryLayout BOX_LAYOUT = MemoryLayout.structLayout(
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("lo"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("hi"));
+
+    /** {@code CadaclysmBlacksmithColliderStats}: nine counts of one {@code collider_check}
+     *  call. */
+    private static final MemoryLayout COLLIDER_STATS = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("considered"),
+            ValueLayout.JAVA_INT.withName("world_boxes"),
+            ValueLayout.JAVA_INT.withName("oriented_boxes"),
+            ValueLayout.JAVA_INT.withName("skipped_share"),
+            ValueLayout.JAVA_INT.withName("cached"),
+            ValueLayout.JAVA_INT.withName("closed_form"),
+            ValueLayout.JAVA_INT.withName("meshed"),
+            ValueLayout.JAVA_INT.withName("refused"),
+            ValueLayout.JAVA_INT.withName("confirmed"));
+
+    /** {@code CadaclysmBlacksmithCollisionHit}: a pair the collider found overlapping, or
+     *  could not decide; seven bytes of padding after {@code overlap}, which lands {@code
+     *  depth} on an eight-byte boundary. */
+    private static final MemoryLayout COLLISION_HIT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("a"),
+            ValueLayout.JAVA_INT.withName("b"),
+            ValueLayout.JAVA_BOOLEAN.withName("overlap"),
+            MemoryLayout.paddingLayout(7),
+            ValueLayout.JAVA_DOUBLE.withName("depth"),
+            ValueLayout.ADDRESS.withName("positions"),
+            ValueLayout.ADDRESS.withName("normals"),
+            ValueLayout.ADDRESS.withName("indices"),
+            ValueLayout.JAVA_INT.withName("vertex_count"),
+            ValueLayout.JAVA_INT.withName("index_count"),
+            ValueLayout.ADDRESS.withName("text"));
+
     /**
      * {@code CadaclysmBlacksmithSvgOptions}. {@code cadaclysm_blacksmith_svg_options_init}
      * fills the whole struct, so this must be at least as long as the header's and may never
@@ -375,17 +415,29 @@ public final class Blacksmith {
             SWEEP_PATH_LINE_TO, SWEEP_PATH_ARC, SWEEP_PATH_ALONG, SWEEP_PATH_FREE, SWEEP, SWEEP_OPEN,
             EXTRUDE_FACES, FACE, FACE_SHEET, DROP_FACES, PLACE, TRANSLATE, SCALED, ROTATE, MIRROR, JOIN, CUT,
             COMMON, SPLIT_SHEET, TRIM, FILLET, CHAMFER,
-            SHELL, THICKEN, PUSH_PULL, PUSH_PULL_FACES, MERGE_FLUSH, REFILLET, UNFILLET, RECHAMFER, UNCHAMFER, COIL, PIPE, SPLIT, SPLIT_BY_PLANE, LUMP_COUNT, LUMP, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_REF, FIND_FACE, FACE_KIND, COLOURED, COLOUR,
+            SHELL, THICKEN, PUSH_PULL, PUSH_PULL_FACES, MERGE_FLUSH, REFILLET, UNFILLET, RECHAMFER, UNCHAMFER, COIL, PIPE, SPLIT, SPLIT_BY_PLANE, LUMP_COUNT, LUMP, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_REF, FIND_FACE, FACE_KIND, MASS_PROPERTIES, COLOURED, COLOUR,
             PROFILE_COLOURED, PROFILE_COLOUR, EDGES_COLOURED, EDGE_COLOUR, EDGE_POLYLINE_COLOURS,
             EDGE_COUNT, EDGE_AT, EDGE_CURVE, INTERSECT, INTERSECTION_FREE, INTERSECTION_CHAIN_COUNT, INTERSECTION_CHAIN, INTERSECTION_CURVE, INTERSECTION_OVERLAP_COUNT, INTERSECTION_OVERLAP, MESH_AT, MESH_FACE_TRIANGLES,
             EDGE_POLYLINES, BOUNDS, LEAKED_EDGES, UNPAIRED_EDGES, MANIFOLD, STEP, SAT_TEXT, SAT, BREP_TEXT, BREP, STRING_FREE, FROM_BREP,
             BREP_LAYOUT_ID, SVG_OPTIONS_INIT, SVG_TEXT, SVG, DRAWING_SVG_TEXT, DRAWING_SVG,
-            MESH_AT64, BOUNDS64, BOX,
+            MESH_AT64, BOUNDS64, BOX_AT,
             TESSELLATION, TESSELLATION_FREE, TESSELLATION_MESH, TESSELLATION_MESH64, TESSELLATION_FACE_TRIANGLES, TESSELLATION_EDGE_POLYLINES,
             FEM_OPTIONS_INIT, SOLID_FEM_MESH, FEM_VIEW, FEM_EDGE_AT, FEM_VERTEX_AT,
             FEM_OPEN_EDGE, FEM_FOLDED_EDGE, FEM_CROSSING_COUNT, FEM_CROSSING, FEM_MSH_TEXT, FEM_SAVE_MSH, FEM_FREE,
             NAMED, SOLID_NAME, ASSEMBLY_NEW, ASSEMBLY_FREE, ASSEMBLY_NAME, ASSEMBLY_PLACE_SOLID, ASSEMBLY_PLACE_ASSEMBLY, ASSEMBLY_STEP,
-            ASSEMBLY_LINK, ASSEMBLY_JOINT;
+            ASSEMBLY_LINK, ASSEMBLY_JOINT, ASSEMBLY_PAIR, ASSEMBLY_STATE, ASSEMBLY_SEQUENCE, ASSEMBLY_BASE, PAIR_FREEDOM_COUNT,
+            SOLID_BOUNDS_BOX, BOX_MOVED, BOX_OVERLAPS, BOXES_APART, COLLIDER_NEW, COLLIDER_FREE, COLLIDER_GROUP_COUNT,
+            COLLIDER_STATS_CALL, COLLIDER_CHECK, COLLISIONS_FREE, COLLISIONS_COUNT, COLLISIONS_HIT, COLLISIONS_SOLID,
+            PROFILE_TO_ARCS, PROFILE_OFFSET, SOLID_SECTION,
+            TOOL_FLAT, TOOL_BALL, TOOL_DRILL, TOOL_WITH_RAMP_ANGLE, TOOL_FREE,
+            STOCK_BOX, STOCK_AROUND, STOCK_FREE,
+            JOB_NEW, JOB_SET_CLEARANCE, JOB_SET_TOLERANCE, JOB_SET_SPINDLE_DWELL, JOB_SET_NAME, JOB_SET_RESOLUTION,
+            JOB_FACE, JOB_CONTOUR, JOB_POCKET, JOB_DRILL, JOB_GCODE, JOB_CAMOTICS, JOB_FREE,
+            PROGRAMS_COUNT, PROGRAMS_TOOL, PROGRAMS_NAME, PROGRAMS_TEXT, PROGRAMS_FREE,
+            JOB_MACHINE, REPORT_COUNT, REPORT_KIND, REPORT_AT, REPORT_SIZE, REPORT_REASON, REPORT_REGION, REPORT_TEXT, REPORT_FREE,
+            JOB_OPERATIONS, OPERATIONS_COUNT, OPERATIONS_KIND, OPERATIONS_TOOL, OPERATIONS_PARAM_COUNT,
+            OPERATIONS_PARAM_NAME, OPERATIONS_PARAM_VALUE, OPERATIONS_FREE,
+            PARSE_COLOUR;
 
     static {
         SymbolLookup lib = library();
@@ -416,6 +468,8 @@ public final class Blacksmith {
         HITS_FREE = bind(linker, lib, "cadaclysm_blacksmith_hits_free", FunctionDescriptor.ofVoid(A));
         HIT_COUNT = bind(linker, lib, "cadaclysm_blacksmith_hit_count", FunctionDescriptor.of(I, A));
         PROFILE_COMMON = bind(linker, lib, "cadaclysm_blacksmith_profile_common", FunctionDescriptor.of(A, A, A, D));
+        PROFILE_TO_ARCS = bind(linker, lib, "cadaclysm_blacksmith_profile_to_arcs", FunctionDescriptor.of(A, A, D));
+        PROFILE_OFFSET = bind(linker, lib, "cadaclysm_blacksmith_profile_offset", FunctionDescriptor.of(A, A, D, D));
         PROFILE_TEXT = bind(linker, lib, "cadaclysm_blacksmith_profile_text", FunctionDescriptor.of(A, A, D, A, A, L, A, A, D, A));
         PROFILE_LIST_COUNT = bind(linker, lib, "cadaclysm_blacksmith_profile_list_count", FunctionDescriptor.of(I, A));
         PROFILE_LIST_GET = bind(linker, lib, "cadaclysm_blacksmith_profile_list_get", FunctionDescriptor.of(A, A, I));
@@ -514,6 +568,7 @@ public final class Blacksmith {
         FACE_COUNT = bind(linker, lib, "cadaclysm_blacksmith_face_count", FunctionDescriptor.of(I, A));
         SELECT_FACE = bind(linker, lib, "cadaclysm_blacksmith_select_face", FunctionDescriptor.of(I, A, I, A, I));
         FACE_FRAME = bind(linker, lib, "cadaclysm_blacksmith_face_frame", FunctionDescriptor.of(B, A, I, A));
+        MASS_PROPERTIES = bind(linker, lib, "cadaclysm_blacksmith_mass_properties", FunctionDescriptor.of(B, A, D, A));
         FACE_REF = bind(linker, lib, "cadaclysm_blacksmith_face_ref", FunctionDescriptor.of(B, A, I, A));
         FIND_FACE = bind(linker, lib, "cadaclysm_blacksmith_find_face", FunctionDescriptor.of(I, A, A, I, D));
         FACE_KIND = bind(linker, lib, "cadaclysm_blacksmith_face_kind", FunctionDescriptor.of(A, A, I));
@@ -547,6 +602,7 @@ public final class Blacksmith {
         STRING_FREE = bind(linker, lib, "cadaclysm_blacksmith_string_free", FunctionDescriptor.ofVoid(A));
         FROM_BREP = bind(linker, lib, "cadaclysm_blacksmith_from_brep", FunctionDescriptor.of(A, A, A));
         BREP_LAYOUT_ID = bind(linker, lib, "cadaclysm_blacksmith_brep_layout_id", FunctionDescriptor.of(A));
+        PARSE_COLOUR = bind(linker, lib, "cadaclysm_blacksmith_parse_colour", FunctionDescriptor.of(B, A, A));
         SVG_OPTIONS_INIT = bind(linker, lib, "cadaclysm_blacksmith_svg_options_init", FunctionDescriptor.ofVoid(A));
         SVG_TEXT = bind(linker, lib, "cadaclysm_blacksmith_svg_text", FunctionDescriptor.of(A, A, L, A));
         SVG = bind(linker, lib, "cadaclysm_blacksmith_svg", FunctionDescriptor.of(B, A, L, A, A));
@@ -565,7 +621,7 @@ public final class Blacksmith {
         TESSELLATION_MESH64 = bind(linker, lib, "cadaclysm_blacksmith_tessellation_mesh64", FunctionDescriptor.of(MESH64, A));
         TESSELLATION_FACE_TRIANGLES = bind(linker, lib, "cadaclysm_blacksmith_tessellation_face_triangles", FunctionDescriptor.of(FACE_TRIANGLES, A));
         TESSELLATION_EDGE_POLYLINES = bind(linker, lib, "cadaclysm_blacksmith_tessellation_edge_polylines", FunctionDescriptor.of(POLYLINES, A));
-        BOX = bind(linker, lib, "cadaclysm_blacksmith_box", FunctionDescriptor.of(B, A, A, A));
+        BOX_AT = bind(linker, lib, "cadaclysm_blacksmith_box", FunctionDescriptor.of(B, A, A, A));
         // The FEM surface mesh. `cadaclysm_blacksmith_fem_mesh` takes a progress callback and a
         // user pointer, both passed null here as every other progress-taking entry point in this
         // file is (see the header's Ownership note): an upcall stub over the C callback is out of
@@ -594,6 +650,83 @@ public final class Blacksmith {
         ASSEMBLY_STEP = bind(linker, lib, "cadaclysm_blacksmith_assembly_step", FunctionDescriptor.of(A, A, A, I));
         ASSEMBLY_LINK = bind(linker, lib, "cadaclysm_blacksmith_assembly_link", FunctionDescriptor.of(B, A, A, A, L));
         ASSEMBLY_JOINT = bind(linker, lib, "cadaclysm_blacksmith_assembly_joint", FunctionDescriptor.of(B, A, A, A, A));
+        // The pair plan's four entry points (spec 2026-09-28/29): assembly_pair takes the
+        // joint and kind names, the rest frame, an optional end frame, the four parallel
+        // range arrays (all null with freedom_count 0 for none), the freedom count and the
+        // pitch (NaN unless given); assembly_state takes the state name, the row joints,
+        // their per-row value counts and the flattened values; assembly_base takes the base
+        // link's name; pair_freedom_count takes just a kind name and returns its freedom
+        // count (uint32_t -> JAVA_INT, as every other uint32_t return in this file does).
+        ASSEMBLY_PAIR = bind(linker, lib, "cadaclysm_blacksmith_assembly_pair", FunctionDescriptor.of(B, A, A, A, A, A, A, A, A, A, L, D));
+        ASSEMBLY_STATE = bind(linker, lib, "cadaclysm_blacksmith_assembly_state", FunctionDescriptor.of(B, A, A, A, A, A, L));
+        // assembly_sequence takes the sequence name, parallel arrays of state names, parameters
+        // and interpolation words, their count and whether the parameter is in seconds.
+        ASSEMBLY_SEQUENCE = bind(linker, lib, "cadaclysm_blacksmith_assembly_sequence", FunctionDescriptor.of(B, A, A, A, A, A, L, B));
+        ASSEMBLY_BASE = bind(linker, lib, "cadaclysm_blacksmith_assembly_base", FunctionDescriptor.of(B, A, A));
+        PAIR_FREEDOM_COUNT = bind(linker, lib, "cadaclysm_blacksmith_pair_freedom_count", FunctionDescriptor.of(I, A));
+        SOLID_BOUNDS_BOX = bind(linker, lib, "cadaclysm_blacksmith_solid_bounds_box", FunctionDescriptor.of(B, A, D, A));
+        BOX_MOVED = bind(linker, lib, "cadaclysm_blacksmith_box_moved", FunctionDescriptor.of(B, A, A, A));
+        BOX_OVERLAPS = bind(linker, lib, "cadaclysm_blacksmith_box_overlaps", FunctionDescriptor.of(B, A, A));
+        BOXES_APART = bind(linker, lib, "cadaclysm_blacksmith_boxes_apart", FunctionDescriptor.of(B, A, A, A, A, A));
+        COLLIDER_NEW = bind(linker, lib, "cadaclysm_blacksmith_collider_new", FunctionDescriptor.of(A, A, I, D, A, A, I));
+        COLLIDER_FREE = bind(linker, lib, "cadaclysm_blacksmith_collider_free", FunctionDescriptor.ofVoid(A));
+        COLLIDER_GROUP_COUNT = bind(linker, lib, "cadaclysm_blacksmith_collider_group_count", FunctionDescriptor.of(I, A));
+        COLLIDER_STATS_CALL = bind(linker, lib, "cadaclysm_blacksmith_collider_stats", FunctionDescriptor.of(B, A, A));
+        COLLIDER_CHECK = bind(linker, lib, "cadaclysm_blacksmith_collider_check", FunctionDescriptor.of(A, A, A, I, I, I));
+        COLLISIONS_FREE = bind(linker, lib, "cadaclysm_blacksmith_collisions_free", FunctionDescriptor.ofVoid(A));
+        COLLISIONS_COUNT = bind(linker, lib, "cadaclysm_blacksmith_collisions_count", FunctionDescriptor.of(I, A));
+        COLLISIONS_HIT = bind(linker, lib, "cadaclysm_blacksmith_collisions_hit", FunctionDescriptor.of(B, A, I, A));
+        COLLISIONS_SOLID = bind(linker, lib, "cadaclysm_blacksmith_collisions_solid", FunctionDescriptor.of(A, A, I));
+        // Machining. Tools, stocks and jobs are handles of their own; `job_gcode`/`job_camotics`,
+        // `job_machine` and `job_operations` hand back lists whose strings are **borrowed** from
+        // the list (good until its free), so each is read through `string()` -- a copy -- before
+        // the list's handle is freed. `job_machine`'s drills are raw addresses, as `brep`'s solids
+        // are: nothing here ref-counts an array of handles, so the owners are kept reachable with
+        // `keep()` for the length of the call.
+        SOLID_SECTION = bind(linker, lib, "cadaclysm_blacksmith_solid_section", FunctionDescriptor.of(A, A, D, D));
+        TOOL_FLAT = bind(linker, lib, "cadaclysm_blacksmith_tool_flat", FunctionDescriptor.of(A, I, D, D, D, D, D));
+        TOOL_BALL = bind(linker, lib, "cadaclysm_blacksmith_tool_ball", FunctionDescriptor.of(A, I, D, D, D, D, D));
+        TOOL_DRILL = bind(linker, lib, "cadaclysm_blacksmith_tool_drill", FunctionDescriptor.of(A, I, D, D, D, D));
+        TOOL_WITH_RAMP_ANGLE = bind(linker, lib, "cadaclysm_blacksmith_tool_with_ramp_angle", FunctionDescriptor.of(A, A, D));
+        TOOL_FREE = bind(linker, lib, "cadaclysm_blacksmith_tool_free", FunctionDescriptor.ofVoid(A));
+        STOCK_BOX = bind(linker, lib, "cadaclysm_blacksmith_stock_box", FunctionDescriptor.of(A, D, D, D, D, D, D));
+        STOCK_AROUND = bind(linker, lib, "cadaclysm_blacksmith_stock_around", FunctionDescriptor.of(A, A, D));
+        STOCK_FREE = bind(linker, lib, "cadaclysm_blacksmith_stock_free", FunctionDescriptor.ofVoid(A));
+        JOB_NEW = bind(linker, lib, "cadaclysm_blacksmith_job_new", FunctionDescriptor.of(A, A, D));
+        JOB_SET_CLEARANCE = bind(linker, lib, "cadaclysm_blacksmith_job_set_clearance", FunctionDescriptor.of(B, A, D));
+        JOB_SET_TOLERANCE = bind(linker, lib, "cadaclysm_blacksmith_job_set_tolerance", FunctionDescriptor.of(B, A, D));
+        JOB_SET_SPINDLE_DWELL = bind(linker, lib, "cadaclysm_blacksmith_job_set_spindle_dwell", FunctionDescriptor.of(B, A, D));
+        JOB_SET_NAME = bind(linker, lib, "cadaclysm_blacksmith_job_set_name", FunctionDescriptor.of(B, A, A));
+        JOB_SET_RESOLUTION = bind(linker, lib, "cadaclysm_blacksmith_job_set_resolution", FunctionDescriptor.of(B, A, D));
+        JOB_FACE = bind(linker, lib, "cadaclysm_blacksmith_job_face", FunctionDescriptor.of(B, A, A, D, D, D));
+        JOB_CONTOUR = bind(linker, lib, "cadaclysm_blacksmith_job_contour", FunctionDescriptor.of(B, A, A, A, D, D, I, D, B, B));
+        JOB_POCKET = bind(linker, lib, "cadaclysm_blacksmith_job_pocket", FunctionDescriptor.of(B, A, A, A, D, D, D, D));
+        JOB_DRILL = bind(linker, lib, "cadaclysm_blacksmith_job_drill", FunctionDescriptor.of(B, A, A, A, L, D, D, D));
+        JOB_GCODE = bind(linker, lib, "cadaclysm_blacksmith_job_gcode", FunctionDescriptor.of(A, A));
+        JOB_CAMOTICS = bind(linker, lib, "cadaclysm_blacksmith_job_camotics", FunctionDescriptor.of(A, A, A));
+        JOB_FREE = bind(linker, lib, "cadaclysm_blacksmith_job_free", FunctionDescriptor.ofVoid(A));
+        PROGRAMS_COUNT = bind(linker, lib, "cadaclysm_blacksmith_programs_count", FunctionDescriptor.of(I, A));
+        PROGRAMS_TOOL = bind(linker, lib, "cadaclysm_blacksmith_programs_tool", FunctionDescriptor.of(I, A, I));
+        PROGRAMS_NAME = bind(linker, lib, "cadaclysm_blacksmith_programs_name", FunctionDescriptor.of(A, A, I));
+        PROGRAMS_TEXT = bind(linker, lib, "cadaclysm_blacksmith_programs_text", FunctionDescriptor.of(A, A, I));
+        PROGRAMS_FREE = bind(linker, lib, "cadaclysm_blacksmith_programs_free", FunctionDescriptor.ofVoid(A));
+        JOB_MACHINE = bind(linker, lib, "cadaclysm_blacksmith_job_machine", FunctionDescriptor.of(A, A, A, A, A, L, D, D, D, D));
+        REPORT_COUNT = bind(linker, lib, "cadaclysm_blacksmith_report_count", FunctionDescriptor.of(I, A));
+        REPORT_KIND = bind(linker, lib, "cadaclysm_blacksmith_report_kind", FunctionDescriptor.of(A, A, I));
+        REPORT_AT = bind(linker, lib, "cadaclysm_blacksmith_report_at", FunctionDescriptor.of(B, A, I, A));
+        REPORT_SIZE = bind(linker, lib, "cadaclysm_blacksmith_report_size", FunctionDescriptor.of(D, A, I));
+        REPORT_REASON = bind(linker, lib, "cadaclysm_blacksmith_report_reason", FunctionDescriptor.of(A, A, I));
+        REPORT_REGION = bind(linker, lib, "cadaclysm_blacksmith_report_region", FunctionDescriptor.of(A, A, I));
+        REPORT_TEXT = bind(linker, lib, "cadaclysm_blacksmith_report_text", FunctionDescriptor.of(A, A));
+        REPORT_FREE = bind(linker, lib, "cadaclysm_blacksmith_report_free", FunctionDescriptor.ofVoid(A));
+        JOB_OPERATIONS = bind(linker, lib, "cadaclysm_blacksmith_job_operations", FunctionDescriptor.of(A, A));
+        OPERATIONS_COUNT = bind(linker, lib, "cadaclysm_blacksmith_operations_count", FunctionDescriptor.of(I, A));
+        OPERATIONS_KIND = bind(linker, lib, "cadaclysm_blacksmith_operations_kind", FunctionDescriptor.of(A, A, I));
+        OPERATIONS_TOOL = bind(linker, lib, "cadaclysm_blacksmith_operations_tool", FunctionDescriptor.of(I, A, I));
+        OPERATIONS_PARAM_COUNT = bind(linker, lib, "cadaclysm_blacksmith_operations_param_count", FunctionDescriptor.of(I, A, I));
+        OPERATIONS_PARAM_NAME = bind(linker, lib, "cadaclysm_blacksmith_operations_param_name", FunctionDescriptor.of(A, A, I, I));
+        OPERATIONS_PARAM_VALUE = bind(linker, lib, "cadaclysm_blacksmith_operations_param_value", FunctionDescriptor.of(D, A, I, I));
+        OPERATIONS_FREE = bind(linker, lib, "cadaclysm_blacksmith_operations_free", FunctionDescriptor.ofVoid(A));
     }
 
     @SuppressWarnings("restricted") // downcallHandle: every entry point here is the published ABI.
@@ -651,6 +784,15 @@ public final class Blacksmith {
      *  Cad.Brep.layoutId()} -- the two from the same release. */
     public static String brepLayoutId() {
         return string(call(() -> (MemorySegment) BREP_LAYOUT_ID.invokeExact()));
+    }
+
+    /** How many freedoms a pair kind has, so a caller can size {@link PairOptions#ranges()}.
+     *  0 for an unknown name, and for "fully_constrained", which has none. */
+    public static int pairFreedomCount(String kind) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment k = arena.allocateFrom(kind);
+            return call(() -> (int) PAIR_FREEDOM_COUNT.invokeExact(k));
+        }
     }
 
     /** The library's own reason, or {@code what} if it left none. */
@@ -996,16 +1138,27 @@ public final class Blacksmith {
      * <p>Passed to {@link #writeSvgText}, {@link #writeSvg} and {@link Solid#svgText}/{@link
      * Solid#svg}. A refused option (an out-of-range {@link #fov()}, say) throws {@link
      * BuildException} naming the field, worded by the library itself.
+     *
+     * <p>{@code stroke} is the pen colour: {@code "#rgb"}, {@code "#rrggbb"} or a CSS colour
+     * name. {@code background} stays the packed {@code 0xRRGGBB} number, or null for no {@code
+     * <rect>} behind the drawing -- {@link #packed(String)} reads a {@code "#rgb"}, {@code
+     * "#rrggbb"} or CSS colour name string, e.g. {@code background = Blacksmith.packed("navy")}.
      */
     public record SvgOptions(SvgView view, Double azimuth, Double elevation, String up, double fov,
                               double width, double height, double margin, double tolerance,
                               String stroke, double strokeWidth, Integer background,
-                              boolean edges, boolean curves, boolean isocurves, boolean polylines) {
+                              boolean edges, boolean curves, boolean isocurves, boolean polylines,
+                              boolean silhouettes) {
         /**
          * {@code view = ISO}, {@code azimuth}/{@code elevation}/{@code up}/{@code background}
          * null (fall through to {@link #view()}, "z", and transparent), {@code fov = 0}
          * (orthographic), a 1000-square page, {@code margin = 0.05}, {@code tolerance = 0.1}, a
-         * black one-unit stroke, edges alone.
+         * black one-unit stroke, and edges with each solid's outline beside them.
+         *
+         * <p>{@code silhouettes} is on because a line set alone cannot draw every body: a
+         * sphere's and a torus's only curves are the seams where their one face meets itself,
+         * which are not edges of the body and are never drawn, so without it those two draw a
+         * blank page.
          */
         public static SvgOptions defaults() {
             return defaults(SvgView.ISO);
@@ -1013,23 +1166,45 @@ public final class Blacksmith {
 
         /** {@link #defaults()}, but with {@code view} in place of {@link SvgView#ISO} --
          *  {@link Profile#svgText} and {@link Profile#svg} use this to default to {@link
-         *  SvgView#TOP} without repeating the other eleven fields. */
+         *  SvgView#TOP} without repeating the other twelve fields. */
         private static SvgOptions defaults(SvgView view) {
             return new SvgOptions(view, null, null, null, 0.0, 1000.0, 1000.0, 0.05, 0.1,
-                    "#000000", 1.0, null, true, false, false, false);
+                    "#000000", 1.0, null, true, false, false, false, true);
         }
     }
 
-    /** A colour as the ABI's packed {@code 0xRRGGBB}: {@code "#rrggbb"}, the leading {@code #}
-     *  optional. */
-    private static int parseColour(String colour) {
-        String hex = colour.startsWith("#") ? colour.substring(1) : colour;
-        if (hex.length() != 6) throw new BuildException("colour " + colour + ": expected '#rrggbb'");
-        try {
-            return (int) Long.parseLong(hex, 16);
-        } catch (NumberFormatException e) {
-            throw new BuildException("colour " + colour + ": expected '#rrggbb'");
+    /** (r, g, b) in 0..1 from colour text -- {@code "#rgb"}, {@code "#rrggbb"} or a CSS colour
+     *  name -- read by the library's own parser, so every wrapper takes the same forms. */
+    private static double[] tryParseRgb(String colour) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
+            boolean ok = call(() -> (boolean) PARSE_COLOUR.invokeExact(arena.allocateFrom(colour), out));
+            return ok ? out.toArray(ValueLayout.JAVA_DOUBLE) : null;
         }
+    }
+
+    /** (r, g, b) in 0..1 from colour text, for a paint entry point that also takes a numeric
+     *  triple -- {@code what} is that verb, so the refusal lists every form paint accepts,
+     *  {@code (r, g, b) in 0..1} included. */
+    private static double[] rgb(String colour, String what) {
+        double[] c = tryParseRgb(colour);
+        if (c != null) return c;
+        throw new BuildException(what + ": a colour is \"#rgb\", \"#rrggbb\", a CSS colour name or (r, g, b) in 0..1, not '" + colour + "'");
+    }
+
+    /** A colour as the ABI's packed {@code 0xRRGGBB}, from {@code "#rgb"}, {@code "#rrggbb"} or a
+     *  CSS colour name -- for {@link SvgOptions#background()}, which takes the packed number.
+     *  Takes no numeric triple of its own, so its refusal lists only the text forms. */
+    public static int packed(String colour) {
+        double[] c = tryParseRgb(colour);
+        if (c == null) throw new BuildException("colour: a colour is \"#rgb\", \"#rrggbb\" or a CSS colour name, not '" + colour + "'");
+        return ((int) Math.round(c[0] * 255) << 16) | ((int) Math.round(c[1] * 255) << 8) | (int) Math.round(c[2] * 255);
+    }
+
+    /** A colour as the ABI's packed {@code 0xRRGGBB} -- how {@link SvgOptions#stroke()} reaches
+     *  the raw struct. */
+    private static int parseColour(String colour) {
+        return packed(colour);
     }
 
     /**
@@ -1059,7 +1234,8 @@ public final class Blacksmith {
         out.set(ValueLayout.JAVA_INT, offset(SVG_OPTIONS, "stroke"), parseColour(o.stroke()));
         out.set(ValueLayout.JAVA_INT, offset(SVG_OPTIONS, "background"),
                 o.background() == null ? 0xFFFFFFFF : o.background()); // CADACLYSM_BLACKSMITH_SVG_TRANSPARENT
-        int flags = (o.edges() ? 1 : 0) | (o.curves() ? 2 : 0) | (o.isocurves() ? 4 : 0) | (o.polylines() ? 8 : 0);
+        int flags = (o.edges() ? 1 : 0) | (o.curves() ? 2 : 0) | (o.isocurves() ? 4 : 0) | (o.polylines() ? 8 : 0)
+                | (o.silhouettes() ? 16 : 0);
         out.set(ValueLayout.JAVA_INT, offset(SVG_OPTIONS, "flags"), flags);
         return out;
     }
@@ -1596,6 +1772,46 @@ public final class Blacksmith {
             }
         }
 
+        /** {@link #toArcs(double)} at a tolerance of 0.01. */
+        public Profile toArcs() {
+            return toArcs(0.01);
+        }
+
+        /** This profile with every free-form side (a Bezier, a conic, a NURBS) replaced by
+         *  lines and arcs within {@code tolerance} of it -- what a G-code writer can say. Lines
+         *  and arcs pass through as they are, every loop closes on itself exactly, holes are
+         *  converted the same way. Throws {@link BuildException} for a {@code tolerance} not
+         *  positive and finite, or a spline that does not evaluate. */
+        public Profile toArcs(double tolerance) {
+            try {
+                MemorySegment h = handle();
+                return new Profile(call(() -> (MemorySegment) PROFILE_TO_ARCS.invokeExact(h, tolerance)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #offset(double, double)} at a tolerance of 0.01. */
+        public List<Profile> offset(double distance) {
+            return offset(distance, 0.01);
+        }
+
+        /** This profile grown by {@code distance} (shrunk where it is negative), as zero or
+         *  more profiles, all lines and arcs: outward corners rounded by {@code |distance|},
+         *  holes moving against the boundary (a hole shrinks as the profile grows). Free-form
+         *  sides are fitted to {@code tolerance} first ({@link #toArcs}). A shrink that eats the
+         *  whole profile is an empty list. Throws {@link BuildException} for a {@code distance}
+         *  not finite, a {@code tolerance} not positive and finite, a loop with no sides, or
+         *  loops that cross or touch. */
+        public List<Profile> offset(double distance, double tolerance) {
+            try {
+                MemorySegment h = handle();
+                return profileList(call(() -> (MemorySegment) PROFILE_OFFSET.invokeExact(h, distance, tolerance)), "profile_offset");
+            } finally {
+                keep(this);
+            }
+        }
+
         /** {@link #text(String, double, String, String, String, double, String, byte[])} in the
          *  bundled face, left-aligned on the baseline, left to right, at the font's spacing. */
         public static List<Profile> text(String text, double size) {
@@ -1669,6 +1885,13 @@ public final class Blacksmith {
             } finally {
                 keep(this);
             }
+        }
+
+        /** {@link #coloured(double, double, double)} from {@code "#rgb"}, {@code "#rrggbb"} or a
+         *  CSS colour name. */
+        public Profile coloured(String colour) {
+            double[] c = Blacksmith.rgb(colour, "coloured");
+            return coloured(c[0], c[1], c[2]);
         }
 
         /** This outline coloured ({@code r}, {@code g}, {@code b}), each in 0..1: how it is drawn.
@@ -2177,6 +2400,7 @@ public final class Blacksmith {
      * @param at   the height at the sketch plane's origin
      * @param grad the slope along the sketch plane's x and y, two numbers
      */
+
     public record Slant(double at, double[] grad) {
         public Slant {
             grad = point2(grad, "grad").clone();
@@ -2221,6 +2445,46 @@ public final class Blacksmith {
         @Override
         public String toString() {
             return "Slant(" + at + ", (" + grad[0] + ", " + grad[1] + "))";
+        }
+    }
+
+    /** What a solid measures, per unit density, each figure beside a bound on its own error.
+     *
+     * <p>{@code volume}, {@code centroid}, {@code inertia} and {@code principalMoments} mean
+     * something only where {@code closed}: on a sheet they are zero and {@code area} is still
+     * measured. A body's mass is {@code density * volume} and its inertia scales the same way --
+     * nothing here assumes a density. {@code inertia} is row-major about the centroid with the
+     * products of inertia negated, {@code principalMoments} ascend, and {@code principalAxes} is
+     * row-major, unit and right-handed, the axis in row {@code i} belonging to moment {@code i}.
+     * Where {@code accuracyMet} is false the refinement stopped before the accuracy asked for: the
+     * figures are honest, and the errors say how certain. */
+    public record Mass(boolean closed, boolean inverted, boolean accuracyMet, boolean fromMesh,
+                       double area, double areaError, double volume, double volumeError,
+                       double[] centroid, double centroidError, double[] inertia, double inertiaError,
+                       double[] principalMoments, double[] principalAxes) {
+        static Mass of(MemorySegment s) {
+            double[] centroid = new double[3], inertia = new double[9];
+            double[] moments = new double[3], axes = new double[9];
+            for (int i = 0; i < 3; i++) {
+                centroid[i] = s.get(ValueLayout.JAVA_DOUBLE, 48 + 8L * i);
+                moments[i] = s.get(ValueLayout.JAVA_DOUBLE, 160 + 8L * i);
+            }
+            for (int i = 0; i < 9; i++) {
+                inertia[i] = s.get(ValueLayout.JAVA_DOUBLE, 80 + 8L * i);
+                axes[i] = s.get(ValueLayout.JAVA_DOUBLE, 184 + 8L * i);
+            }
+            return new Mass(s.get(ValueLayout.JAVA_INT, 0) != 0, s.get(ValueLayout.JAVA_INT, 4) != 0,
+                            s.get(ValueLayout.JAVA_INT, 8) != 0, s.get(ValueLayout.JAVA_INT, 12) != 0,
+                            s.get(ValueLayout.JAVA_DOUBLE, 16), s.get(ValueLayout.JAVA_DOUBLE, 24),
+                            s.get(ValueLayout.JAVA_DOUBLE, 32), s.get(ValueLayout.JAVA_DOUBLE, 40),
+                            centroid, s.get(ValueLayout.JAVA_DOUBLE, 72),
+                            inertia, s.get(ValueLayout.JAVA_DOUBLE, 152),
+                            moments, axes);
+        }
+
+        /** {@code density * volume}, in whatever units the model and the density agree on. */
+        public double mass(double density) {
+            return density * volume;
         }
     }
 
@@ -3004,6 +3268,24 @@ public final class Blacksmith {
             cleanable.clean();
         }
 
+        /** Draw with the view library in use: blocks until the window is closed; on the terminal, prints a still. */
+        public void show() {
+            View.present(this, new View.ShowOptions(), false);
+        }
+
+        public void show(View.ShowOptions options) {
+            View.present(this, options, false);
+        }
+
+        /** Orbit until the window is closed; the camera it was left at and the last pick. */
+        public View.Camera view() {
+            return View.present(this, new View.ShowOptions(), true);
+        }
+
+        public View.Camera view(View.ShowOptions options) {
+            return View.present(this, options, true);
+        }
+
         // -- building
 
         /** A box {@code x} by {@code y} by {@code z}, centred on the origin. */
@@ -3623,6 +3905,26 @@ public final class Blacksmith {
             }
         }
 
+        /** {@link #section(double, double)} at a tolerance of 0.05. */
+        public List<Profile> section(double z) {
+            return section(z, 0.05);
+        }
+
+        /** This solid cut by the plane {@code Z = z}: its closed outlines there, in XY, nested
+         *  into profiles with holes (boundaries counter-clockwise, holes clockwise), a line or a
+         *  circle crossing kept exact and any other curve as lines within {@code tolerance}. A
+         *  plane that misses the solid is an empty list. Throws {@link BuildException} for a
+         *  {@code z} not finite, a {@code tolerance} not positive and finite, a face lying in the
+         *  plane (section a little above or below it), or a crossing that does not close. */
+        public List<Profile> section(double z, double tolerance) {
+            try {
+                MemorySegment h = handle();
+                return Profile.profileList(call(() -> (MemorySegment) SOLID_SECTION.invokeExact(h, z, tolerance)), "solid_section");
+            } finally {
+                keep(this);
+            }
+        }
+
         /** {@link #hits(Profile, double[], double)} at 0.05. */
         public SolidHits hits(Profile profile, double[] frame) {
             return hits(profile, frame, 0.05);
@@ -3749,7 +4051,7 @@ public final class Blacksmith {
                 MemorySegment lo = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
                 MemorySegment hi = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
                 MemorySegment h = handle();
-                boolean ok = call(() -> (boolean) BOX.invokeExact(h, lo, hi));
+                boolean ok = call(() -> (boolean) BOX_AT.invokeExact(h, lo, hi));
                 if (!ok) throw failure("box");
                 return new Bounds(lo.toArray(ValueLayout.JAVA_DOUBLE), hi.toArray(ValueLayout.JAVA_DOUBLE));
             } finally {
@@ -3794,15 +4096,35 @@ public final class Blacksmith {
             }
         }
 
+        /** {@link #boundsBox(double)} at 0.05. */
+        public Box boundsBox() {
+            return boundsBox(0.05);
+        }
+
+        /** This solid's box at {@code tolerance}: its boolean mesh, padded by twice that --
+         *  the broad phase's own shape, cheaper to move and test than the solid itself. */
+        public Box boundsBox(double tolerance) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment raw = arena.allocate(BOX_LAYOUT);
+                MemorySegment h = handle();
+                boolean ok = call(() -> (boolean) SOLID_BOUNDS_BOX.invokeExact(h, tolerance, raw));
+                if (!ok) throw failure("bounds_box");
+                return Box.of(raw);
+            } finally {
+                keep(this);
+            }
+        }
+
         /** {@link #leakedEdges(double)} at 0.05. */
         public int leakedEdges() {
             return leakedEdges(0.05);
         }
 
         /** How many edges of the mesh at {@code tolerance} are bound by anything other than
-         *  exactly two triangles -- zero for a closed solid. A seam two solids share along a
-         *  line (four triangles, two pairs) does <em>not</em> count here; a genuine hole or
-         *  a fold does. */
+         *  exactly two triangles -- zero for a closed solid, counted on the triangles the
+         *  mesh calls hand out. A hole, a fold, and a seam two solids share along a line
+         *  (four triangles) all count here; {@code unpairedEdges} is the check that lets
+         *  the seam pass. */
         public int leakedEdges(double tolerance) {
             try {
                 MemorySegment h = handle();
@@ -4081,6 +4403,28 @@ public final class Blacksmith {
             }
         }
 
+        /** What the solid measures, per unit density: area, volume, centroid and inertia, each
+         * beside a bound on its own error. {@code accuracy} is relative; 0 asks for the library's
+         * default, a part in ten million.
+         *
+         * <p>The volume, the centroid and the inertia mean something only where {@code closed} --
+         * on a sheet they are zero and the area is still measured. A body's mass is
+         * {@code density * volume} and its inertia scales the same way: nothing here assumes a
+         * density of its own. Works on a solid read from a file as much as one built here. */
+        public Mass mass(double accuracy) {
+            try (Arena arena = Arena.ofConfined()) {
+                // Four ints then the doubles: 16 + 32 + 24 + 8 + 72 + 8 + 24 + 72 = 256 bytes, and
+                // the ints come first so every double that follows is already eight-aligned.
+                MemorySegment out = arena.allocate(256, 8);
+                MemorySegment h = handle();
+                boolean ok = call(() -> (boolean) MASS_PROPERTIES.invokeExact(h, accuracy, out));
+                if (!ok) throw failure("mass");
+                return Mass.of(out);
+            } finally {
+                keep(this);
+            }
+        }
+
         /** Twelve doubles: origin, x, y, z of the workplane on {@code face}. */
         public double[] faceFrame(int face) {
             int i = index(face);
@@ -4153,6 +4497,20 @@ public final class Blacksmith {
             return colouredAt(index(face), r, g, b);
         }
 
+        /** {@link #coloured(double, double, double)} from {@code "#rgb"}, {@code "#rrggbb"} or a
+         *  CSS colour name. */
+        public Solid coloured(String colour) {
+            double[] c = Blacksmith.rgb(colour, "coloured");
+            return coloured(c[0], c[1], c[2]);
+        }
+
+        /** {@link #coloured(int, double, double, double)} from {@code "#rgb"}, {@code "#rrggbb"}
+         *  or a CSS colour name. */
+        public Solid coloured(String colour, int face) {
+            double[] c = Blacksmith.rgb(colour, "coloured");
+            return coloured(face, c[0], c[1], c[2]);
+        }
+
         private Solid colouredAt(int face, double r, double g, double b) {
             try {
                 MemorySegment h = handle();
@@ -4205,6 +4563,27 @@ public final class Blacksmith {
         /** {@link #edgesColoured(int[], double, double, double)} by {@link Edge}. */
         public Solid edgesColoured(Collection<Edge> edges, double r, double g, double b) {
             return edgesColoured(indicesOf(edges), r, g, b);
+        }
+
+        /** {@link #edgesColoured(double, double, double)} from {@code "#rgb"}, {@code "#rrggbb"}
+         *  or a CSS colour name. */
+        public Solid edgesColoured(String colour) {
+            double[] c = Blacksmith.rgb(colour, "coloured");
+            return edgesColoured(c[0], c[1], c[2]);
+        }
+
+        /** {@link #edgesColoured(int[], double, double, double)} from {@code "#rgb"}, {@code
+         *  "#rrggbb"} or a CSS colour name. */
+        public Solid edgesColoured(int[] edges, String colour) {
+            double[] c = Blacksmith.rgb(colour, "coloured");
+            return edgesColoured(edges, c[0], c[1], c[2]);
+        }
+
+        /** {@link #edgesColoured(Collection, double, double, double)} from {@code "#rgb"},
+         *  {@code "#rrggbb"} or a CSS colour name. */
+        public Solid edgesColoured(Collection<Edge> edges, String colour) {
+            double[] c = Blacksmith.rgb(colour, "coloured");
+            return edgesColoured(edges, c[0], c[1], c[2]);
         }
 
         private Solid edgesColouredAt(MemorySegment list, long count, double r, double g, double b) {
@@ -4836,6 +5215,27 @@ public final class Blacksmith {
 
     // ---- assemblies -------------------------------------------------------------------------
 
+    /** {@link Assembly#pair}'s optional arguments: {@code endFrame} the frame the pair
+     *  reaches at its rest values (null meaning {@code frame} itself, i.e. all-zero rest
+     *  values), {@code ranges} one entry per freedom of the pair's kind -- see {@link
+     *  Blacksmith#pairFreedomCount} -- (null entirely for a kind that allows none), and
+     *  {@code pitch} (required and non-zero for "screw", refused for any other kind; null
+     *  unless given). */
+    public record PairOptions(Frame endFrame, List<Range> ranges, Double pitch) {}
+
+    /** One freedom's range, for {@link PairOptions#ranges()}: either side null for
+     *  unbounded on that side. */
+    public record Range(Double lower, Double upper) {}
+
+    /** One row of {@link Assembly#state}: a joint name and the values it sets, in that
+     *  joint's pair's freedom order. */
+    public record StateRow(String joint, double[] values) {}
+
+    /** One keyframe of {@link Assembly#sequence}: the named state, its parameter {@code t}, and
+     *  the interpolation word ({@code "undefined"}, {@code "discontinuous"},
+     *  {@code "synchronous"} or {@code "linear"}). */
+    public record SequenceSegment(String state, double t, String interpolation) {}
+
     /** A mutable tree of placements: a name, and zero or more solids or other assemblies placed
      *  in it at a frame. Unlike {@link Solid}, placing shares rather than copies -- placing one
      *  assembly under another does not snapshot it, so a later placement on the shared one shows
@@ -4981,6 +5381,132 @@ public final class Blacksmith {
                 MemorySegment h = handle();
                 boolean ok = call(() -> (boolean) ASSEMBLY_JOINT.invokeExact(h, n, s, e));
                 if (!ok) throw failure("assembly_joint");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #pair(String, String, Frame, PairOptions)} with no options. */
+        public void pair(String joint, String kind, Frame frame) {
+            pair(joint, kind, frame, null);
+        }
+
+        /** Give joint {@code joint} its pair: {@code kind} (a name of the kind table --
+         *  "revolute", "prismatic", "cylindrical", "screw", "spherical",
+         *  "spherical_with_pin", "planar", "universal", "homokinetic", "fully_constrained"
+         *  or "unconstrained"), the contact frame at rest, and {@code options} (null for
+         *  every default -- see {@link PairOptions}). Throws {@link BuildException} with
+         *  the kernel's own text when a rule refuses it; the assembly is then unchanged. */
+        public void pair(String joint, String kind, Frame frame, PairOptions options) {
+            Frame endFrame = options == null ? null : options.endFrame();
+            List<Range> ranges = options == null ? null : options.ranges();
+            Double pitch = options == null ? null : options.pitch();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment j = arena.allocateFrom(joint);
+                MemorySegment k = arena.allocateFrom(kind);
+                MemorySegment fs = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, frame.toArray());
+                MemorySegment ef = endFrame == null ? MemorySegment.NULL
+                        : arena.allocateFrom(ValueLayout.JAVA_DOUBLE, endFrame.toArray());
+                MemorySegment lowerSeg = MemorySegment.NULL, upperSeg = MemorySegment.NULL;
+                MemorySegment hasLowerSeg = MemorySegment.NULL, hasUpperSeg = MemorySegment.NULL;
+                int freedomCount = 0;
+                if (ranges != null) {
+                    freedomCount = ranges.size();
+                    lowerSeg = arena.allocate(ValueLayout.JAVA_DOUBLE, freedomCount);
+                    upperSeg = arena.allocate(ValueLayout.JAVA_DOUBLE, freedomCount);
+                    hasLowerSeg = arena.allocate(ValueLayout.JAVA_BOOLEAN, freedomCount);
+                    hasUpperSeg = arena.allocate(ValueLayout.JAVA_BOOLEAN, freedomCount);
+                    for (int i = 0; i < freedomCount; i++) {
+                        Range r = ranges.get(i);
+                        Double lo = r == null ? null : r.lower();
+                        Double hi = r == null ? null : r.upper();
+                        lowerSeg.setAtIndex(ValueLayout.JAVA_DOUBLE, i, lo == null ? 0.0 : lo);
+                        upperSeg.setAtIndex(ValueLayout.JAVA_DOUBLE, i, hi == null ? 0.0 : hi);
+                        hasLowerSeg.setAtIndex(ValueLayout.JAVA_BOOLEAN, i, lo != null);
+                        hasUpperSeg.setAtIndex(ValueLayout.JAVA_BOOLEAN, i, hi != null);
+                    }
+                }
+                double pitchArg = pitch == null ? Double.NaN : pitch;
+                MemorySegment h = handle();
+                MemorySegment lowerF = lowerSeg, upperF = upperSeg, hasLowerF = hasLowerSeg, hasUpperF = hasUpperSeg;
+                long fc = freedomCount;
+                boolean ok = call(() -> (boolean) ASSEMBLY_PAIR.invokeExact(
+                        h, j, k, fs, ef, lowerF, upperF, hasLowerF, hasUpperF, fc, pitchArg));
+                if (!ok) throw failure("assembly_pair");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Add a named state {@code name} to this assembly: {@code rows} sets each named
+         *  joint to its values, in that joint's pair's freedom order. Throws {@link
+         *  BuildException} with the kernel's own text when a rule refuses it; the assembly
+         *  is then unchanged. */
+        public void state(String name, List<StateRow> rows) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment n = arena.allocateFrom(name);
+                int count = rows.size();
+                MemorySegment joints = count == 0 ? MemorySegment.NULL : arena.allocate(ValueLayout.ADDRESS, count);
+                MemorySegment counts = count == 0 ? MemorySegment.NULL : arena.allocate(ValueLayout.JAVA_INT, count);
+                int flatCount = 0;
+                for (StateRow row : rows) flatCount += row.values().length;
+                MemorySegment values = flatCount == 0 ? MemorySegment.NULL : arena.allocate(ValueLayout.JAVA_DOUBLE, flatCount);
+                int p = 0;
+                for (int i = 0; i < count; i++) {
+                    StateRow row = rows.get(i);
+                    joints.setAtIndex(ValueLayout.ADDRESS, i, arena.allocateFrom(row.joint()));
+                    counts.setAtIndex(ValueLayout.JAVA_INT, i, row.values().length);
+                    for (double v : row.values()) values.setAtIndex(ValueLayout.JAVA_DOUBLE, p++, v);
+                }
+                MemorySegment h = handle();
+                long rowCount = count;
+                boolean ok = call(() -> (boolean) ASSEMBLY_STATE.invokeExact(h, n, joints, counts, values, rowCount));
+                if (!ok) throw failure("assembly_state");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Add a motion sequence {@code name} over this assembly's named states: one {@link
+         *  SequenceSegment} per keyframe, {@code seconds} saying the parameter is in seconds.
+         *  The sequence is closed unless its last segment is {@code "discontinuous"}. Throws
+         *  {@link BuildException} with the kernel's own text when a rule refuses it; the
+         *  assembly is then unchanged. */
+        public void sequence(String name, List<SequenceSegment> segments) {
+            sequence(name, segments, false);
+        }
+
+        /** As {@link #sequence(String, List)}, {@code seconds} saying the parameter is in seconds. */
+        public void sequence(String name, List<SequenceSegment> segments, boolean seconds) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment n = arena.allocateFrom(name);
+                int count = segments.size();
+                MemorySegment states = count == 0 ? MemorySegment.NULL : arena.allocate(ValueLayout.ADDRESS, count);
+                MemorySegment ts = count == 0 ? MemorySegment.NULL : arena.allocate(ValueLayout.JAVA_DOUBLE, count);
+                MemorySegment words = count == 0 ? MemorySegment.NULL : arena.allocate(ValueLayout.ADDRESS, count);
+                for (int i = 0; i < count; i++) {
+                    SequenceSegment segment = segments.get(i);
+                    states.setAtIndex(ValueLayout.ADDRESS, i, arena.allocateFrom(segment.state()));
+                    ts.setAtIndex(ValueLayout.JAVA_DOUBLE, i, segment.t());
+                    words.setAtIndex(ValueLayout.ADDRESS, i, arena.allocateFrom(segment.interpolation()));
+                }
+                MemorySegment h = handle();
+                long length = count;
+                boolean ok = call(() -> (boolean) ASSEMBLY_SEQUENCE.invokeExact(h, n, states, ts, words, length, seconds));
+                if (!ok) throw failure("assembly_sequence");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Declare this assembly's base link. Throws {@link BuildException} with the
+         *  kernel's own text when a rule refuses it; the assembly is then unchanged. */
+        public void base(String link) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment l = arena.allocateFrom(link);
+                MemorySegment h = handle();
+                boolean ok = call(() -> (boolean) ASSEMBLY_BASE.invokeExact(h, l));
+                if (!ok) throw failure("assembly_base");
             } finally {
                 keep(this);
             }
@@ -5252,6 +5778,345 @@ public final class Blacksmith {
         @Override
         public String toString() {
             return "Overlap(faces=(" + faceA + ", " + faceB + "), loops=" + loops.length + ")";
+        }
+    }
+
+    // ---- collider -----------------------------------------------------------------------
+
+    /**
+     * An axis-aligned box: {@code lo} and {@code hi}, three numbers each. The broad phase's
+     * own shape ({@link Solid#boundsBox}, {@link Collider}'s own boxes): cheap to move and to
+     * test against another, before anything is meshed.
+     *
+     * @param lo three numbers
+     * @param hi three numbers
+     */
+    public record Box(double[] lo, double[] hi) {
+        public Box {
+            lo = doubles(lo, 3, "lo");
+            hi = doubles(hi, 3, "hi");
+        }
+
+        static Box of(MemorySegment raw) {
+            long loOff = offset(BOX_LAYOUT, "lo"), hiOff = offset(BOX_LAYOUT, "hi");
+            double[] lo = new double[3], hi = new double[3];
+            for (int i = 0; i < 3; i++) {
+                lo[i] = raw.get(ValueLayout.JAVA_DOUBLE, loOff + 8L * i);
+                hi[i] = raw.get(ValueLayout.JAVA_DOUBLE, hiOff + 8L * i);
+            }
+            return new Box(lo, hi);
+        }
+
+        private MemorySegment words(Arena arena) {
+            MemorySegment raw = arena.allocate(BOX_LAYOUT);
+            long loOff = offset(BOX_LAYOUT, "lo"), hiOff = offset(BOX_LAYOUT, "hi");
+            for (int i = 0; i < 3; i++) {
+                raw.set(ValueLayout.JAVA_DOUBLE, loOff + 8L * i, lo[i]);
+                raw.set(ValueLayout.JAVA_DOUBLE, hiOff + 8L * i, hi[i]);
+            }
+            return raw;
+        }
+
+        /** This box moved by {@code frame} (rigid), boxed again on the world axes -- not this
+         *  box's corners individually moved, which would not in general be a box at all: the
+         *  <em>bounding</em> box of the moved corners. */
+        public Box moved(double[] frame) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment raw = words(arena);
+                MemorySegment out = arena.allocate(BOX_LAYOUT);
+                MemorySegment frameSeg = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, frame(frame));
+                boolean ok = call(() -> (boolean) BOX_MOVED.invokeExact(raw, frameSeg, out));
+                if (!ok) throw failure("box_moved");
+                return Box.of(out);
+            }
+        }
+
+        /** Whether this box and {@code other} share a point (touching counts). */
+        public boolean overlaps(Box other) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment a = words(arena);
+                MemorySegment b = other.words(arena);
+                return call(() -> (boolean) BOX_OVERLAPS.invokeExact(a, b));
+            }
+        }
+
+        @Override
+        public String toString() {
+            return "Box(lo=" + Arrays.toString(lo) + ", hi=" + Arrays.toString(hi) + ")";
+        }
+    }
+
+    /**
+     * True only if box {@code a} at {@code frameA} and box {@code b} at {@code frameB} cannot
+     * touch -- a separating axis among the boxes' face normals and edge-direction crosses;
+     * touching is not apart. Sharper than moving each box and asking {@link Box#overlaps},
+     * which boxes the <em>result</em> on the world axes again and so can call two oriented
+     * boxes overlapping when they are not (two unit boxes, the second turned 45 degrees about
+     * z and moved 2.3 along x: their world boxes overlap, but the boxes themselves do not
+     * touch).
+     */
+    public static boolean boxesApart(Box a, double[] frameA, Box b, double[] frameB) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment ra = a.words(arena);
+            MemorySegment rb = b.words(arena);
+            MemorySegment frameASeg = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, frame(frameA));
+            MemorySegment frameBSeg = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, frame(frameB));
+            MemorySegment apart = arena.allocate(ValueLayout.JAVA_BOOLEAN);
+            boolean ok = call(() -> (boolean) BOXES_APART.invokeExact(ra, frameASeg, rb, frameBSeg, apart));
+            if (!ok) throw failure("boxes_apart");
+            return apart.get(ValueLayout.JAVA_BOOLEAN, 0);
+        }
+    }
+
+    /**
+     * Counts of one {@link Collider#check} call: the candidate pairs {@code considered}, how
+     * many of them the world boxes and the oriented boxes cleared, how many the share left to
+     * another call, how the rest were answered ({@code cached}, {@code closedForm}, {@code
+     * meshed}), and how many were {@code refused}. {@code confirmed} is the subset of {@code
+     * meshed} that were thin mesh-path overlaps sent to {@link Solid#common} itself for a
+     * final answer.
+     */
+    public record ColliderStats(int considered, int worldBoxes, int orientedBoxes, int skippedShare, int cached,
+                                int closedForm, int meshed, int refused, int confirmed) {
+        static ColliderStats of(MemorySegment raw) {
+            return new ColliderStats(
+                    raw.get(ValueLayout.JAVA_INT, offset(COLLIDER_STATS, "considered")),
+                    raw.get(ValueLayout.JAVA_INT, offset(COLLIDER_STATS, "world_boxes")),
+                    raw.get(ValueLayout.JAVA_INT, offset(COLLIDER_STATS, "oriented_boxes")),
+                    raw.get(ValueLayout.JAVA_INT, offset(COLLIDER_STATS, "skipped_share")),
+                    raw.get(ValueLayout.JAVA_INT, offset(COLLIDER_STATS, "cached")),
+                    raw.get(ValueLayout.JAVA_INT, offset(COLLIDER_STATS, "closed_form")),
+                    raw.get(ValueLayout.JAVA_INT, offset(COLLIDER_STATS, "meshed")),
+                    raw.get(ValueLayout.JAVA_INT, offset(COLLIDER_STATS, "refused")),
+                    raw.get(ValueLayout.JAVA_INT, offset(COLLIDER_STATS, "confirmed")));
+        }
+    }
+
+    /** Keeps one {@link Collider#check} answer alive for as long as any {@link CollisionHit}
+     *  of it is: each hit holds a reference to this, which the garbage collector keeps
+     *  reachable until the last one lets go, freeing it only then -- a {@link CollisionHit}
+     *  needs the handle itself back for {@link CollisionHit#solid}. */
+    private static final class Collisions {
+        private final Handle handle;
+
+        Collisions(MemorySegment raw) {
+            handle = new Handle(COLLISIONS_FREE, "collisions: closed", checked(raw, "collider_check"));
+            // No manual close (unlike Solid/Collider): a Collisions lives only as long as
+            // something -- a CollisionHit -- references it, so its Cleanable is never
+            // used to free it early, only registered so the Cleaner still runs when it
+            // is not.
+            CLEANER.register(this, handle);
+        }
+
+        MemorySegment handle() {
+            return handle.live();
+        }
+    }
+
+    /**
+     * One pair {@link Collider#check} found overlapping ({@code overlap} true), or could not
+     * decide ({@code overlap} false; {@code text} says why, empty for an overlap). {@code
+     * positions}/{@code normals} are world xyz triples, three per triangle (unwelded); {@code
+     * indices} indexes them -- all empty for a refused pair. {@code depth} is the thinnest
+     * side of the overlap's world box, 0 for a refused pair.
+     *
+     * <p>{@link #solid} rebuilds the exact overlap now, from the frames {@link Collider#check}
+     * found it at; this keeps the collisions handle behind every hit of one {@code check} call
+     * alive until the last of them is collected, freeing it only then. Named {@code
+     * CollisionHit} rather than the plainer {@code Hit}, which this module already uses for a
+     * curve-crossing result ({@link Solid#hits}).
+     */
+    public static final class CollisionHit {
+        public final int a;
+        public final int b;
+        public final boolean overlap;
+        /** {@code "overlap"} or {@code "refused"} -- the same answer as {@link #overlap}. */
+        public final String kind;
+        public final double depth;
+        public final String text;
+        public final double[][] positions;
+        public final double[][] normals;
+        public final int[] indices;
+
+        // Accessors alongside the public fields above, named the same: every other plain-data
+        // type in this module is a record, read as `x()`, and these let a caller (and the docs
+        // generator, which only recognises method-shaped members) read `CollisionHit` the same
+        // way, without breaking the field access this class already had.
+        public int a() { return a; }
+        public int b() { return b; }
+        public boolean overlap() { return overlap; }
+        public String kind() { return kind; }
+        public double depth() { return depth; }
+        public String text() { return text; }
+        public double[][] positions() { return positions; }
+        public double[][] normals() { return normals; }
+        public int[] indices() { return indices; }
+
+        private final Collisions collisions;
+        private final int index;
+
+        private CollisionHit(int a, int b, boolean overlap, String kind, double depth, String text, double[][] positions,
+                             double[][] normals, int[] indices, Collisions collisions, int index) {
+            this.a = a;
+            this.b = b;
+            this.overlap = overlap;
+            this.kind = kind;
+            this.depth = depth;
+            this.text = text;
+            this.positions = positions;
+            this.normals = normals;
+            this.indices = indices;
+            this.collisions = collisions;
+            this.index = index;
+        }
+
+        static CollisionHit of(MemorySegment raw, Collisions collisions, int index) {
+            int a = raw.get(ValueLayout.JAVA_INT, offset(COLLISION_HIT, "a"));
+            int b = raw.get(ValueLayout.JAVA_INT, offset(COLLISION_HIT, "b"));
+            boolean overlap = raw.get(ValueLayout.JAVA_BOOLEAN, offset(COLLISION_HIT, "overlap"));
+            double depth = raw.get(ValueLayout.JAVA_DOUBLE, offset(COLLISION_HIT, "depth"));
+            int vertexCount = raw.get(ValueLayout.JAVA_INT, offset(COLLISION_HIT, "vertex_count"));
+            int indexCount = raw.get(ValueLayout.JAVA_INT, offset(COLLISION_HIT, "index_count"));
+            double[][] positions = Solid.pointsOf(
+                    Solid.doublesOf(raw.get(ValueLayout.ADDRESS, offset(COLLISION_HIT, "positions")), 3 * vertexCount));
+            double[][] normals = Solid.pointsOf(
+                    Solid.doublesOf(raw.get(ValueLayout.ADDRESS, offset(COLLISION_HIT, "normals")), 3 * vertexCount));
+            int[] indices = Solid.intsOf(raw.get(ValueLayout.ADDRESS, offset(COLLISION_HIT, "indices")), indexCount);
+            String text = string(raw.get(ValueLayout.ADDRESS, offset(COLLISION_HIT, "text")));
+            return new CollisionHit(a, b, overlap, overlap ? "overlap" : "refused", depth, text, positions, normals, indices, collisions,
+                    index);
+        }
+
+        /** The exact overlap of this pair at the frames {@link Collider#check} found it at, as
+         *  a new solid. Throws {@link BuildException} for a refused pair ({@code overlap}
+         *  false) or a collisions handle already closed some other way. */
+        public Solid solid() {
+            MemorySegment h = collisions.handle();
+            MemorySegment raw = call(() -> (MemorySegment) COLLISIONS_SOLID.invokeExact(h, index));
+            try {
+                return new Solid(checked(raw, "collisions_solid"));
+            } finally {
+                keep(collisions);
+            }
+        }
+
+        @Override
+        public String toString() {
+            return "CollisionHit(a=" + a + ", b=" + b + ", overlap=" + overlap + ", depth=" + depth + ")";
+        }
+    }
+
+    /**
+     * Parts meshed once, asked pose after pose which of them interfere: {@code solids} at
+     * rest, meshed at {@code tolerance}; {@code groups} one group index per solid (null: each
+     * solid its own group -- {@link #check} then takes one frame per solid), {@code allowed}
+     * pairs of part indices never tested (designed contacts, by part index, flat: {@code (a0,
+     * b0, a1, b1, ...)}). {@link #close} frees this handle; so does the garbage collector.
+     */
+    public static final class Collider implements AutoCloseable {
+        private final Handle handle;
+        private final Cleaner.Cleanable cleanable;
+
+        public Collider(Solid[] solids, double tolerance, int[] groups, int[] allowed) {
+            if (groups != null && groups.length != solids.length) {
+                throw new BuildException(
+                        "Collider: groups must have one entry per solid (" + solids.length + " solids, " + groups.length + " groups)");
+            }
+            MemorySegment raw;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment handles = arena.allocate(ValueLayout.ADDRESS, Math.max(solids.length, 1));
+                for (int i = 0; i < solids.length; i++) handles.setAtIndex(ValueLayout.ADDRESS, i, solids[i].handle());
+                MemorySegment groupsSeg = groups == null ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_INT, groups);
+                int allowedCount = allowed == null ? 0 : allowed.length / 2;
+                MemorySegment allowedSeg =
+                        allowed == null || allowed.length == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_INT, allowed);
+                int count = solids.length;
+                raw = call(() -> (MemorySegment) COLLIDER_NEW.invokeExact(handles, count, tolerance, groupsSeg, allowedSeg, allowedCount));
+            } finally {
+                keep((Object[]) solids);
+            }
+            handle = new Handle(COLLIDER_FREE, "collider: closed", checked(raw, "collider_new"));
+            cleanable = CLEANER.register(this, handle);
+        }
+
+        /** {@link #Collider(Solid[], double, int[], int[])} at tolerance 0.05, each solid its
+         *  own group, and no allowed pairs. */
+        public Collider(Solid[] solids) {
+            this(solids, 0.05, null, null);
+        }
+
+        MemorySegment handle() {
+            return handle.live();
+        }
+
+        public boolean closed() {
+            return handle.closed();
+        }
+
+        /** Give the collider back. Idempotent. */
+        @Override
+        public void close() {
+            cleanable.clean();
+        }
+
+        /** How many groups this collider has -- the highest group index past the
+         *  constructor, plus one. */
+        public int groupCount() {
+            MemorySegment h = handle();
+            return call(() -> (int) COLLIDER_GROUP_COUNT.invokeExact(h));
+        }
+
+        /** Counts of the last {@link #check} call (all zero before the first one). */
+        public ColliderStats stats() {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment raw = arena.allocate(COLLIDER_STATS);
+                MemorySegment h = handle();
+                boolean ok = call(() -> (boolean) COLLIDER_STATS_CALL.invokeExact(h, raw));
+                if (!ok) throw failure("collider_stats");
+                return ColliderStats.of(raw);
+            }
+        }
+
+        /** {@link #check(double[][], Integer, Integer)} with every pair past the box filters
+         *  decided now. */
+        public List<CollisionHit> check(double[][] frames) {
+            return check(frames, null, null);
+        }
+
+        /** The pairs that interfere, or could not be decided, with each group placed at its
+         *  matching frame in {@code frames} (one twelve-number frame per group, in group
+         *  order). {@code shareK}/{@code shareN}: both null, every pair past the box filters
+         *  is decided now; both given, only those whose index is {@code shareK} modulo {@code
+         *  shareN} (the shares of one pose are disjoint and cover it -- split one {@link
+         *  #check} across {@code shareN} workers). */
+        public List<CollisionHit> check(double[][] frames, Integer shareK, Integer shareN) {
+            double[] flat = new double[frames.length * 12];
+            for (int i = 0; i < frames.length; i++) System.arraycopy(frame(frames[i]), 0, flat, i * 12, 12);
+            int sk = shareK == null ? 0 : shareK;
+            int sn = shareN == null ? 0 : shareN;
+            int frameCount = frames.length;
+            MemorySegment raw;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment h = handle();
+                MemorySegment framesSeg = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, flat);
+                raw = call(() -> (MemorySegment) COLLIDER_CHECK.invokeExact(h, framesSeg, frameCount, sk, sn));
+            } finally {
+                keep(this);
+            }
+            Collisions collisions = new Collisions(checked(raw, "collider_check"));
+            MemorySegment ch = collisions.handle();
+            int count = call(() -> (int) COLLISIONS_COUNT.invokeExact(ch));
+            List<CollisionHit> hits = new ArrayList<>(count);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment rawHit = arena.allocate(COLLISION_HIT);
+                for (int i = 0; i < count; i++) {
+                    int at = i;
+                    boolean ok = call(() -> (boolean) COLLISIONS_HIT.invokeExact(ch, at, rawHit));
+                    if (!ok) throw failure("collisions_hit");
+                    hits.add(CollisionHit.of(rawHit, collisions, i));
+                }
+            }
+            return hits;
         }
     }
 
@@ -5611,6 +6476,601 @@ public final class Blacksmith {
         public Solid solid() {
             if (solid == null) throw new BuildException("solid: nothing was built (BuildError::Empty)");
             return solid;
+        }
+    }
+
+    // ---- machining -------------------------------------------------------------------------
+
+    /**
+     * A cutter: Grbl tool {@code number} (1 to 255, the {@code T} word), {@code diameter} and
+     * {@code fluteLength} in mm, {@code feed} and {@code plunge} in mm/min, {@code rpm} its
+     * spindle speed, ramping into its cuts at {@code rampAngle} degrees. Immutable; a job keeps
+     * its own copy, so closing a tool a job has used changes nothing there. Owns a handle:
+     * close it, or let the {@link Cleaner}.
+     */
+    public static final class Tool implements AutoCloseable {
+        private final Handle handle;
+        private final Cleaner.Cleanable cleanable;
+
+        private Tool(MemorySegment raw, String what) {
+            handle = new Handle(TOOL_FREE, "tool: closed", checked(raw, what));
+            cleanable = CLEANER.register(this, handle);
+        }
+
+        MemorySegment handle() {
+            return handle.live();
+        }
+
+        public boolean closed() {
+            return handle.closed();
+        }
+
+        /** Give the tool back. Idempotent. */
+        @Override
+        public void close() {
+            cleanable.clean();
+        }
+
+        /** A tool just made, turned to {@code rampAngle} when that is not the library's own 3
+         *  degrees -- the unramped handle closed at once, not left to the {@link Cleaner}. */
+        private static Tool ramped(MemorySegment made, double rampAngle, String what) {
+            Tool tool = new Tool(made, what);
+            if (rampAngle == 3.0) return tool;
+            try {
+                MemorySegment h = tool.handle();
+                return new Tool(call(() -> (MemorySegment) TOOL_WITH_RAMP_ANGLE.invokeExact(h, rampAngle)), "tool_with_ramp_angle");
+            } finally {
+                keep(tool);
+                tool.close();
+            }
+        }
+
+        /** {@link #flat(int, double, double, double, double, double, double)} at a ramp angle
+         *  of 3 degrees. */
+        public static Tool flat(int number, double diameter, double fluteLength, double feed, double plunge, double rpm) {
+            return flat(number, diameter, fluteLength, feed, plunge, rpm, 3.0);
+        }
+
+        /** A flat end mill. Throws {@link BuildException} for a {@code number} outside 1..255,
+         *  a size, feed or speed not positive and finite, or a {@code rampAngle} outside
+         *  (0, 90]. */
+        public static Tool flat(int number, double diameter, double fluteLength, double feed, double plunge, double rpm,
+                                double rampAngle) {
+            int n = Math.max(0, number);
+            return ramped(call(() -> (MemorySegment) TOOL_FLAT.invokeExact(n, diameter, fluteLength, feed, plunge, rpm)),
+                          rampAngle, "tool_flat");
+        }
+
+        /** {@link #ball(int, double, double, double, double, double, double)} at a ramp angle
+         *  of 3 degrees. */
+        public static Tool ball(int number, double diameter, double fluteLength, double feed, double plunge, double rpm) {
+            return ball(number, diameter, fluteLength, feed, plunge, rpm, 3.0);
+        }
+
+        /** A ball end mill, as {@link #flat} but its tip a half sphere of the diameter; in 2.5D
+         *  it cuts where a flat does, {@code bottom} being the tip. */
+        public static Tool ball(int number, double diameter, double fluteLength, double feed, double plunge, double rpm,
+                                double rampAngle) {
+            int n = Math.max(0, number);
+            return ramped(call(() -> (MemorySegment) TOOL_BALL.invokeExact(n, diameter, fluteLength, feed, plunge, rpm)),
+                          rampAngle, "tool_ball");
+        }
+
+        /** A drill, plunging at {@code feed}. A job takes it for {@link Job#drill} (and
+         *  {@link Job#machine}'s holes) only. */
+        public static Tool drill(int number, double diameter, double fluteLength, double feed, double rpm) {
+            int n = Math.max(0, number);
+            return new Tool(call(() -> (MemorySegment) TOOL_DRILL.invokeExact(n, diameter, fluteLength, feed, rpm)), "tool_drill");
+        }
+    }
+
+    /**
+     * The block of material a job cuts, an axis-aligned box. Immutable; a job keeps its own
+     * copy. Owns a handle: close it, or let the {@link Cleaner}.
+     */
+    public static final class Stock implements AutoCloseable {
+        private final Handle handle;
+        private final Cleaner.Cleanable cleanable;
+
+        private Stock(MemorySegment raw, String what) {
+            handle = new Handle(STOCK_FREE, "stock: closed", checked(raw, what));
+            cleanable = CLEANER.register(this, handle);
+        }
+
+        MemorySegment handle() {
+            return handle.live();
+        }
+
+        public boolean closed() {
+            return handle.closed();
+        }
+
+        /** Give the stock back. Idempotent. */
+        @Override
+        public void close() {
+            cleanable.clean();
+        }
+
+        /** The box from {@code min} to {@code max} (three numbers each). Throws {@link
+         *  BuildException} unless every min is below its max and all six are finite. */
+        public static Stock box(double[] min, double[] max) {
+            double[] lo = point3(min, "min");
+            double[] hi = point3(max, "max");
+            return new Stock(call(() -> (MemorySegment) STOCK_BOX.invokeExact(lo[0], lo[1], lo[2], hi[0], hi[1], hi[2])), "stock_box");
+        }
+
+        /** {@link #around(Solid, double)} at a margin of 0. */
+        public static Stock around(Solid solid) {
+            return around(solid, 0.0);
+        }
+
+        /** {@code solid}'s bounds grown by {@code margin} in -X, +X, -Y, +Y and +Z; the bottom
+         *  stays at the solid's lowest Z. Throws {@link BuildException} for a {@code margin}
+         *  negative or not finite. */
+        public static Stock around(Solid solid, double margin) {
+            try {
+                MemorySegment s = solid.handle();
+                return new Stock(call(() -> (MemorySegment) STOCK_AROUND.invokeExact(s, margin)), "stock_around");
+            } finally {
+                keep(solid);
+            }
+        }
+    }
+
+    /** One file a job wrote: a Grbl program ({@code tool} its {@code T} number, {@code name}
+     *  {@code <job name>-T<n>}, or {@code <job name>-<k>-T<n>} for a repeated tool) from {@link
+     *  Job#gcode}. Read-only. */
+    public record Program(int tool, String name, String text) {
+        @Override
+        public String toString() {
+            return "Program(tool=" + tool + ", name=" + name + ", " + text.length() + " characters)";
+        }
+    }
+
+    /** One operation of a {@link Job}, read back by {@link Job#operations}: {@code kind}
+     *  ("face", "contour", "pocket" or "drill"), {@code tool} (its Grbl T number) and {@code
+     *  params}, in the kind-specific order the operation stores them. Every param is the
+     *  library's own number: {@code side} 0 outside, 1 inside, 2 on its line; {@code climb} and
+     *  {@code open} 1 or 0; {@code points} a count; a {@code peck} of none is null. Read-only:
+     *  {@code params} is an unmodifiable map, in the same order (a copy, so it does not follow
+     *  the map it was made from). */
+    public record Operation(String kind, int tool, Map<String, Double> params) {
+        public Operation {
+            // not Map.copyOf: that refuses the null a none peck reads as, and drops the order
+            params = Collections.unmodifiableMap(new LinkedHashMap<>(params));
+        }
+
+        @Override
+        public String toString() {
+            return "Operation(kind=" + kind + ", tool=" + tool + ", params=" + params + ")";
+        }
+    }
+
+    /** One thing {@link Job#machine} left uncut: {@code kind} ("corner", "hole", "slope",
+     *  "undercut" or "too_deep"), {@code at} (x, y, z), {@code size} (its meaning per {@code
+     *  kind}), {@code reason} (one sentence naming the tool involved), and {@code region} (its
+     *  XY area, as profiles of their own). Read-only: {@code at} is copied in and out, so
+     *  changing an array you were handed leaves the item as it was, and {@code region} is an
+     *  unmodifiable list (its profiles are yours to close). */
+    public record ReportItem(String kind, double[] at, double size, String reason, List<Profile> region) {
+        public ReportItem {
+            at = at.clone();
+            region = List.copyOf(region);
+        }
+
+        /** The item's XYZ location, as a copy. */
+        @Override
+        public double[] at() {
+            return at.clone();
+        }
+
+        @Override
+        public String toString() {
+            return "ReportItem(kind=" + kind + ", at=(" + at[0] + ", " + at[1] + ", " + at[2] + "), size=" + size
+                    + ", reason=" + reason + ", region=" + region.size() + " profile(s))";
+        }
+    }
+
+    /** What {@link Job#machine} could not make: a read-only list of {@link ReportItem}, in
+     *  order, read once when {@code machine} returns. {@link #text} (and {@code toString()}) is
+     *  the kernel's own report -- one line per item, or "nothing left uncut". */
+    public static final class Report extends AbstractList<ReportItem> {
+        private final List<ReportItem> items;
+        private final String text;
+
+        Report(List<ReportItem> items, String text) {
+            this.items = items;
+            this.text = text;
+        }
+
+        /** The kernel's own report: one line per item, or "nothing left uncut". */
+        public String text() {
+            return text;
+        }
+
+        @Override
+        public ReportItem get(int index) {
+            return items.get(index);
+        }
+
+        @Override
+        public int size() {
+            return items.size();
+        }
+
+        @Override
+        public String toString() {
+            return text;
+        }
+    }
+
+    /**
+     * A machining job on a {@link Stock}: operations kept in the order they are added, written
+     * as one Grbl 1.1 program per run of operations sharing a tool. Mutable -- each operation
+     * is added in place, and a refused one leaves the job as it was. {@code safeZ} is the
+     * absolute Z of rapids between operations and at a program's start and end, above the
+     * stock's top; an operation enters and leaves its passes {@code clearance} above its top;
+     * {@code tolerance} fits free-form sides and offsets; {@code name} names the programs
+     * ({@code <name>-T<n>}); every program waits {@code spindleDwell} seconds after starting
+     * the spindle; {@code resolution} is the CAMotics project's voxel size in mm. The
+     * constructor throws {@link BuildException} for a {@code safeZ} not above the stock, or a
+     * setting the job refuses. Owns a handle: close it, after which every call throws {@link
+     * IllegalStateException} -- what Python's {@code Job.__del__} frees.
+     */
+    public static final class Job implements AutoCloseable {
+        /** What the kernel says of a name with a control character in it -- a NUL, which the
+         *  UTF-8 marshalling would otherwise cut the name short at, is refused here with it. */
+        private static final String NUL_NAME_ERROR =
+                "job: a name must be non-empty and without brackets, slashes, quotes, control characters, or : * ? < > |";
+
+        private static final Map<String, Integer> SIDES = Map.of("outside", 0, "inside", 1, "on", 2);
+
+        private final Handle handle;
+        private final Cleaner.Cleanable cleanable;
+
+        /** {@link #Job(Stock, double, double, double, String, double, double)} at the
+         *  library's own defaults. */
+        public Job(Stock stock, double safeZ) {
+            this(stock, safeZ, 1.0, 0.01, "job", 2.0, 0.1);
+        }
+
+        /** {@link #Job(Stock, double, double, double, String, double, double)} at the
+         *  library's own spindle dwell and resolution. */
+        public Job(Stock stock, double safeZ, double clearance, double tolerance, String name) {
+            this(stock, safeZ, clearance, tolerance, name, 2.0, 0.1);
+        }
+
+        public Job(Stock stock, double safeZ, double clearance, double tolerance, String name, double spindleDwell,
+                   double resolution) {
+            if (name.indexOf('\0') >= 0) throw new BuildException(NUL_NAME_ERROR);
+            MemorySegment s = stock.handle();
+            MemorySegment raw = checked(call(() -> (MemorySegment) JOB_NEW.invokeExact(s, safeZ)), "job_new");
+            keep(stock);
+            handle = new Handle(JOB_FREE, "job: closed", raw);
+            cleanable = CLEANER.register(this, handle);
+            try {
+                // the library starts at the same defaults, so only what differs is set
+                if (clearance != 1.0) ok(setClearance(clearance), "job_set_clearance");
+                if (tolerance != 0.01) ok(setTolerance(tolerance), "job_set_tolerance");
+                if (spindleDwell != 2.0) ok(setSpindleDwell(spindleDwell), "job_set_spindle_dwell");
+                if (resolution != 0.1) ok(setResolution(resolution), "job_set_resolution");
+                if (!name.equals("job")) ok(setName(name), "job_set_name");
+            } catch (RuntimeException e) {
+                close();   // refused after job_new: the handle is closed on the way out
+                throw e;
+            }
+        }
+
+        private boolean setClearance(double clearance) {
+            MemorySegment j = handle();
+            return call(() -> (boolean) JOB_SET_CLEARANCE.invokeExact(j, clearance));
+        }
+
+        private boolean setTolerance(double tolerance) {
+            MemorySegment j = handle();
+            return call(() -> (boolean) JOB_SET_TOLERANCE.invokeExact(j, tolerance));
+        }
+
+        private boolean setSpindleDwell(double seconds) {
+            MemorySegment j = handle();
+            return call(() -> (boolean) JOB_SET_SPINDLE_DWELL.invokeExact(j, seconds));
+        }
+
+        private boolean setResolution(double resolution) {
+            MemorySegment j = handle();
+            return call(() -> (boolean) JOB_SET_RESOLUTION.invokeExact(j, resolution));
+        }
+
+        private boolean setName(String name) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment n = arena.allocateFrom(name);
+                MemorySegment j = handle();
+                return call(() -> (boolean) JOB_SET_NAME.invokeExact(j, n));
+            }
+        }
+
+        MemorySegment handle() {
+            return handle.live();
+        }
+
+        /** Whether the job has been closed. */
+        public boolean closed() {
+            return handle.closed();
+        }
+
+        /** Give the job back. Idempotent; the lists it wrote are copies and outlive it. */
+        @Override
+        public void close() {
+            cleanable.clean();
+        }
+
+        private static void ok(boolean done, String what) {
+            if (!done) throw failure(what);
+        }
+
+        /** Face the stock's top down to {@code z}, in zigzag rows {@code stepover} apart and
+         *  passes at most {@code stepdown} deep. Throws {@link BuildException} for a drill, a
+         *  {@code z} above the stock's top, a stepover past the tool's diameter, ... */
+        public void face(Tool tool, double z, double stepover, double stepdown) {
+            try {
+                MemorySegment j = handle();
+                MemorySegment t = tool.handle();
+                ok(call(() -> (boolean) JOB_FACE.invokeExact(j, t, z, stepover, stepdown)), "job_face");
+            } finally {
+                keep(this, tool);
+            }
+        }
+
+        /** {@link #contour(Tool, Profile, double, double, String, double, boolean, boolean)}
+         *  outside the profile, climb milling, closed, one pass. */
+        public void contour(Tool tool, Profile profile, double top, double bottom) {
+            contour(tool, profile, top, bottom, "outside", 1.0, true, false);
+        }
+
+        /** Cut along {@code profile} from {@code top} to {@code bottom} in passes at most
+         *  {@code stepdown} deep: {@code side} "outside" the profile, "inside" it, or "on" its
+         *  line; {@code climb} for climb milling, else conventional; {@code open} to cut the
+         *  outline as an open chain (only "on" its line, and with no holes). Throws {@link
+         *  IllegalArgumentException} for any other {@code side}, {@link BuildException} for
+         *  what the job refuses. */
+        public void contour(Tool tool, Profile profile, double top, double bottom, String side, double stepdown,
+                            boolean climb, boolean open) {
+            Integer code = SIDES.get(side);
+            if (code == null) throw new IllegalArgumentException("side must be 'outside', 'inside' or 'on'");
+            try {
+                MemorySegment j = handle();
+                MemorySegment t = tool.handle();
+                MemorySegment p = profile.handle();
+                int c = code;
+                ok(call(() -> (boolean) JOB_CONTOUR.invokeExact(j, t, p, top, bottom, c, stepdown, climb, open)), "job_contour");
+            } finally {
+                keep(this, tool, profile);
+            }
+        }
+
+        /** Clear {@code profile} -- its holes left standing as islands -- from {@code top} to
+         *  {@code bottom}, in rings {@code stepover} apart (at most the tool's radius) and
+         *  passes at most {@code stepdown} deep. Throws {@link BuildException} for what the job
+         *  refuses; a pocket too small for the tool is refused by {@link #gcode}, naming the
+         *  operation. */
+        public void pocket(Tool tool, Profile profile, double top, double bottom, double stepover, double stepdown) {
+            try {
+                MemorySegment j = handle();
+                MemorySegment t = tool.handle();
+                MemorySegment p = profile.handle();
+                ok(call(() -> (boolean) JOB_POCKET.invokeExact(j, t, p, top, bottom, stepover, stepdown)), "job_pocket");
+            } finally {
+                keep(this, tool, profile);
+            }
+        }
+
+        /** {@link #drill(Tool, double[][], double, double, Double)} straight to depth. */
+        public void drill(Tool tool, double[][] points, double top, double bottom) {
+            drill(tool, points, top, bottom, null);
+        }
+
+        /** Drill a hole at each (x, y) of {@code points} from {@code top} to {@code bottom},
+         *  pecking {@code peck} deep at a time (retracting between pecks), or straight to depth
+         *  for null. Throws {@link BuildException} for what the job refuses (a tool that is not
+         *  a drill, no points, ...). */
+        public void drill(Tool tool, double[][] points, double top, double bottom, Double peck) {
+            double[] flat = flatten2(points, "point");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment xy = arena.allocate(ValueLayout.JAVA_DOUBLE, Math.max(flat.length, 1));
+                MemorySegment.copy(flat, 0, xy, ValueLayout.JAVA_DOUBLE, 0, flat.length);
+                MemorySegment j = handle();
+                MemorySegment t = tool.handle();
+                long count = flat.length / 2;
+                double pk = peck == null ? Double.NaN : peck;
+                ok(call(() -> (boolean) JOB_DRILL.invokeExact(j, t, xy, count, top, bottom, pk)), "job_drill");
+            } finally {
+                keep(this, tool);
+            }
+        }
+
+        /** {@link #machine(Solid, Tool, Tool[], Double, Double, double, Double)} with no
+         *  drills, the kernel's own stepover/stepdown, a 0.3 skin and no peck. */
+        public Report machine(Solid part, Tool endMill) {
+            return machine(part, endMill, null, null, null, 0.3, null);
+        }
+
+        /** {@link #machine(Solid, Tool, Tool[], Double, Double, double, Double)} with {@code
+         *  drills}, the kernel's own stepover/stepdown, a 0.3 skin and no peck. */
+        public Report machine(Solid part, Tool endMill, Tool[] drills) {
+            return machine(part, endMill, drills, null, null, 0.3, null);
+        }
+
+        /** Recognise {@code part} and append the operations that make it: faced, contoured and
+         *  pocketed with {@code endMill}, its holes drilled with whichever of {@code drills}
+         *  fits each -- a tool per required diameter. {@code stepover} and {@code stepdown}
+         *  default to the kernel's own (null asks for that); {@code skin} (at least 0, default
+         *  0.3) is how far above the part's lowest point the outline stops, so the part stays
+         *  attached to the stock -- 0 cuts through; {@code peck} defaults to none (a drill
+         *  straight to depth). Returns a {@link Report} of what could not be cut. Throws {@link
+         *  BuildException} for what the kernel refuses (a drill as {@code endMill}, a null
+         *  drill, ...); the job changes only on success -- a refusal leaves it exactly as it
+         *  was. */
+        public Report machine(Solid part, Tool endMill, Tool[] drills, Double stepover, Double stepdown, double skin,
+                              Double peck) {
+            // Raw addresses, as `brep`'s solids are: the owners kept reachable until the call
+            // has returned. A null drill goes over as a null pointer, for the library's own
+            // "null drill <i>".
+            Tool[] owners = drills == null ? new Tool[0] : drills;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment handles = arena.allocate(ValueLayout.ADDRESS, Math.max(owners.length, 1));
+                for (int i = 0; i < owners.length; i++) {
+                    handles.setAtIndex(ValueLayout.ADDRESS, i, owners[i] == null ? MemorySegment.NULL : owners[i].handle());
+                }
+                MemorySegment j = handle();
+                MemorySegment p = part.handle();
+                MemorySegment e = endMill.handle();
+                long count = owners.length;
+                double so = stepover == null ? Double.NaN : stepover;
+                double sd = stepdown == null ? Double.NaN : stepdown;
+                double pk = peck == null ? Double.NaN : peck;
+                MemorySegment made = call(() -> (MemorySegment) JOB_MACHINE.invokeExact(j, p, e, handles, count, so, sd, skin, pk));
+                keep((Object[]) owners);
+                keep(this, part, endMill);
+                MemorySegment report = checked(made, "job_machine");
+                try {
+                    int n = call(() -> (int) REPORT_COUNT.invokeExact(report));
+                    List<ReportItem> items = new ArrayList<>(n);
+                    MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
+                    for (int i = 0; i < n; i++) {
+                        int at = i;
+                        boolean ok = call(() -> (boolean) REPORT_AT.invokeExact(report, at, out));
+                        if (!ok) throw failure("report_at");
+                        items.add(new ReportItem(
+                                string(call(() -> (MemorySegment) REPORT_KIND.invokeExact(report, at))),
+                                out.toArray(ValueLayout.JAVA_DOUBLE),
+                                call(() -> (double) REPORT_SIZE.invokeExact(report, at)),
+                                string(call(() -> (MemorySegment) REPORT_REASON.invokeExact(report, at))),
+                                Profile.profileList(call(() -> (MemorySegment) REPORT_REGION.invokeExact(report, at)), "report_region")));
+                    }
+                    String text = string(call(() -> (MemorySegment) REPORT_TEXT.invokeExact(report)));
+                    return new Report(items, text);
+                } finally {
+                    call(() -> {
+                        REPORT_FREE.invokeExact(report);
+                        return null;
+                    });
+                }
+            }
+        }
+
+        /** Every operation added to this job so far, in order -- whether added by {@link
+         *  #face}/{@link #contour}/{@link #pocket}/{@link #drill} or by {@link #machine}. */
+        public List<Operation> operations() {
+            try {
+                MemorySegment j = handle();
+                MemorySegment list = checked(call(() -> (MemorySegment) JOB_OPERATIONS.invokeExact(j)), "job_operations");
+                try {
+                    int n = call(() -> (int) OPERATIONS_COUNT.invokeExact(list));
+                    List<Operation> found = new ArrayList<>(n);
+                    for (int i = 0; i < n; i++) {
+                        int at = i;
+                        int paramCount = call(() -> (int) OPERATIONS_PARAM_COUNT.invokeExact(list, at));
+                        Map<String, Double> params = new LinkedHashMap<>();
+                        for (int k = 0; k < paramCount; k++) {
+                            int kk = k;
+                            String name = string(call(() -> (MemorySegment) OPERATIONS_PARAM_NAME.invokeExact(list, at, kk)));
+                            double value = call(() -> (double) OPERATIONS_PARAM_VALUE.invokeExact(list, at, kk));
+                            params.put(name, Double.isNaN(value) ? null : value);
+                        }
+                        found.add(new Operation(
+                                string(call(() -> (MemorySegment) OPERATIONS_KIND.invokeExact(list, at))),
+                                call(() -> (int) OPERATIONS_TOOL.invokeExact(list, at)),
+                                params));
+                    }
+                    return found;
+                } finally {
+                    call(() -> {
+                        OPERATIONS_FREE.invokeExact(list);
+                        return null;
+                    });
+                }
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The job as Grbl 1.1 programs, one per run of consecutive operations sharing a tool
+         *  (T1, T2, T1 gives three), each named {@code <name>-T<n>} (or {@code
+         *  <name>-<k>-T<n>} for run {@code k} of a repeated tool); an empty list for a job with
+         *  no operations. Throws {@link BuildException} for an operation whose geometry the
+         *  tool cannot cut (named by its index and kind). */
+        public List<Program> gcode() {
+            try {
+                MemorySegment j = handle();
+                return programs(call(() -> (MemorySegment) JOB_GCODE.invokeExact(j)), "job_gcode");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** A CAMotics project at {@code path} and its files beside it, named after the
+         *  project's file stem ({@code out/part.camotics} writes {@code out/part-T1.nc}), not
+         *  the job's name: each program, a simulation copy of it ({@code .sim.nc}, which the
+         *  project lists), and the project last. Creates the directory. Returns the paths
+         *  written, the project last. Throws {@link BuildException} for a path with no file
+         *  stem, what {@link #gcode} refuses, or a file that cannot be written. */
+        public List<String> writeCamotics(String path) {
+            // the stem is read off the text first: a path with a NUL in it is no java.nio Path, and
+            // Python's refusal of the stem is this one, in the kernel's words
+            String tail = path.substring(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1);
+            int tailDot = tail.lastIndexOf('.');
+            if ((tailDot > 0 ? tail.substring(0, tailDot) : tail).indexOf('\0') >= 0) throw new BuildException(NUL_NAME_ERROR);
+            java.nio.file.Path target = java.nio.file.Path.of(path);
+            java.nio.file.Path fileName = target.getFileName();
+            if (fileName == null) throw new BuildException("job_camotics: " + path + " has no file stem");
+            String stem = fileName.toString();
+            int dot = stem.lastIndexOf('.');
+            if (dot > 0) stem = stem.substring(0, dot);
+            List<Program> files;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment s = arena.allocateFrom(stem);
+                MemorySegment j = handle();
+                files = programs(call(() -> (MemorySegment) JOB_CAMOTICS.invokeExact(j, s)), "job_camotics");
+            } finally {
+                keep(this);
+            }
+            // written here rather than by the library, as Python writes them: byte for byte,
+            // UTF-8 with no byte-order mark
+            java.nio.file.Path folder = target.getParent();
+            List<String> written = new ArrayList<>(files.size());
+            try {
+                if (folder != null) Files.createDirectories(folder);
+                for (int i = 0; i < files.size(); i++) {
+                    java.nio.file.Path at = i == files.size() - 1 ? target
+                            : (folder != null ? folder.resolve(files.get(i).name()) : java.nio.file.Path.of(files.get(i).name()));
+                    Files.writeString(at, files.get(i).text(), StandardCharsets.UTF_8);
+                    written.add(at.toString());
+                }
+            } catch (IOException e) {
+                throw new BuildException("job_camotics: " + path + ": " + e.getMessage());
+            }
+            return written;
+        }
+
+        private static List<Program> programs(MemorySegment raw, String what) {
+            MemorySegment list = checked(raw, what);
+            try {
+                int n = call(() -> (int) PROGRAMS_COUNT.invokeExact(list));
+                List<Program> found = new ArrayList<>(n);
+                for (int i = 0; i < n; i++) {
+                    int at = i;
+                    found.add(new Program(
+                            call(() -> (int) PROGRAMS_TOOL.invokeExact(list, at)),
+                            string(call(() -> (MemorySegment) PROGRAMS_NAME.invokeExact(list, at))),
+                            string(call(() -> (MemorySegment) PROGRAMS_TEXT.invokeExact(list, at)))));
+                }
+                return found;
+            } finally {
+                call(() -> {
+                    PROGRAMS_FREE.invokeExact(list);
+                    return null;
+                });
+            }
         }
     }
 }

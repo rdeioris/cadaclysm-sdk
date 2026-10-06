@@ -127,18 +127,15 @@ func indices32(_ indices: [Int], _ what: String) throws -> [UInt32] {
     try indices.map { try index32($0, what) }
 }
 
-/// A colour as (r, g, b) in 0..1 from `"#rgb"` or `"#rrggbb"` (the `#` optional). Shared by
+/// Colour text -- "#rgb", "#rrggbb" or a CSS colour name -- as r, g, b in 0..1, read by the
+/// library's own parser, so every wrapper takes the same forms. Shared by
 /// `Profile.coloured(String)` and `Solid.coloured(String)`.
 func rgb(_ colour: String) throws -> SIMD3<Double> {
-    var hex = Substring(colour.trimmingCharacters(in: .whitespacesAndNewlines))
-    if hex.hasPrefix("#") { hex = hex.dropFirst() }
-    if hex.count == 3 || hex.count == 6, hex.allSatisfy({ $0.isASCII && $0.isHexDigit }) {
-        let six = hex.count == 3 ? String(hex.flatMap { [$0, $0] }) : String(hex)
-        let digits = Array(six)
-        let values = stride(from: 0, to: 6, by: 2).map { Double(Int(String(digits[$0...$0 + 1]), radix: 16)!) / 255 }
-        return SIMD3(values[0], values[1], values[2])
+    var out = [Double](repeating: 0, count: 3)
+    guard cadaclysm_blacksmith_parse_colour(colour, &out) else {
+        throw BuildError("coloured: a colour is \"#rgb\", \"#rrggbb\", a CSS colour name or (r, g, b) in 0..1, not '\(colour)'")
     }
-    throw BuildError("coloured: a colour is \"#rgb\", \"#rrggbb\" or (r, g, b) in 0..1, not '\(colour)'")
+    return SIMD3(out[0], out[1], out[2])
 }
 
 /// Twelve numbers, as every call taking a frame reads them.
@@ -323,6 +320,7 @@ func buildSvgOptions(_ options: SvgOptions) -> CadaclysmBlacksmithSvgOptions {
     raw.background = options.background ?? svgTransparent
     raw.flags = (options.edges ? UInt32(1) : 0) | (options.curves ? UInt32(2) : 0)
         | (options.isocurves ? UInt32(4) : 0) | (options.polylines ? UInt32(8) : 0)
+        | (options.silhouettes ? UInt32(16) : 0)
     return raw
 }
 
@@ -692,7 +690,7 @@ public final class Profile {
         try Profile(cadaclysm_blacksmith_profile_coloured(handle, colour.x, colour.y, colour.z))
     }
 
-    /// `coloured` with `"#rgb"` or `"#rrggbb"`.
+    /// `coloured` with `"#rgb"`, `"#rrggbb"` or a CSS colour name.
     public func coloured(_ colour: String) throws -> Profile { try coloured(try rgb(colour)) }
 
     /// The outline's colour, (r, g, b) in 0..1, or nil.
@@ -736,6 +734,25 @@ public final class Profile {
         try Profile.list(cadaclysm_blacksmith_profile_common(handle, other.handle, tolerance), "profile_common")
     }
 
+    /// This profile with every free-form side (a Bezier, a conic, a NURBS) replaced by lines
+    /// and arcs within `tolerance` of it -- what a G-code writer can say. Lines and arcs pass
+    /// through as they are, every loop closes on itself exactly, holes are converted the same
+    /// way. Throws for a `tolerance` not positive and finite, or a spline that does not
+    /// evaluate.
+    public func toArcs(_ tolerance: Double = 0.01) throws -> Profile {
+        try Profile(cadaclysm_blacksmith_profile_to_arcs(handle, tolerance), "profile_to_arcs")
+    }
+
+    /// This profile grown by `distance` (shrunk where it is negative), as zero or more
+    /// profiles, all lines and arcs: outward corners rounded by `|distance|`, holes moving
+    /// against the boundary (a hole shrinks as the profile grows). Free-form sides are fitted
+    /// to `tolerance` first (`toArcs`). A shrink that eats the whole profile is an empty
+    /// array. Throws for a `distance` not finite, a `tolerance` not positive and finite, a
+    /// loop with no sides, or loops that cross or touch.
+    public func offset(_ distance: Double, tolerance: Double = 0.01) throws -> [Profile] {
+        try Profile.list(cadaclysm_blacksmith_profile_offset(handle, distance, tolerance), "profile_offset")
+    }
+
     /// `text` set in a font, one profile per closed shape -- a letter with its counters as
     /// holes (`o` one, `8` two; `i` is two profiles) -- on the sketch plane, the baseline
     /// along x from the origin, each outline counter-clockwise and its holes clockwise, a
@@ -763,8 +780,9 @@ public final class Profile {
     }
 
     /// The profiles of a list the library handed back (nil: throw), each a handle of its
-    /// own, the list freed.
-    private static func list(_ raw: OpaquePointer?, _ what: String) throws -> [Profile] {
+    /// own, the list freed. `fileprivate`, not `private`: `Job`'s report reader (this file's
+    /// machining section) reads a `ReportItem`'s region the same way.
+    fileprivate static func list(_ raw: OpaquePointer?, _ what: String) throws -> [Profile] {
         guard let list = raw else {
             throw failure(what)
         }
@@ -1725,6 +1743,16 @@ public final class Solid {
         try combine(other, merge: merge) { cadaclysm_blacksmith_common($0, $1, tolerance, nil, nil) }
     }
 
+    /// This solid cut by the plane `Z = z`: its closed outlines there, in XY, nested into
+    /// profiles with holes (boundaries counter-clockwise, holes clockwise), a line or a
+    /// circle crossing kept exact and any other curve as lines within `tolerance`. A plane
+    /// that misses the solid is an empty array. Throws for a `z` not finite, a `tolerance`
+    /// not positive and finite, a face lying in the plane (section a little above or below
+    /// it), or a crossing that does not close.
+    public func section(_ z: Double, tolerance: Double = 0.05) throws -> [Profile] {
+        try Profile.list(cadaclysm_blacksmith_solid_section(try h(), z, tolerance), "solid_section")
+    }
+
     /// This solid (a sheet or a solid) cut along the closed `tool`'s boundary and the pieces
     /// on one side thrown away: `keep` `"outside"` keeps what lies outside the tool -- a hole
     /// punched through the sheet -- and `"inside"` what lies within it. `splitSheet` then
@@ -1901,6 +1929,19 @@ public final class Solid {
         return (SIMD3(lo[0], lo[1], lo[2]), SIMD3(hi[0], hi[1], hi[2]))
     }
 
+    /// `boundsBoxAt(0.05)`.
+    public var boundsBox: Box {
+        get throws { try boundsBoxAt(0.05) }
+    }
+
+    /// This solid's box at `tolerance`: its boolean mesh, padded by twice that -- the broad
+    /// phase's own shape, cheaper to move and test than the solid itself.
+    public func boundsBoxAt(_ tolerance: Double) throws -> Box {
+        var raw = CadaclysmBlacksmithBox()
+        if !cadaclysm_blacksmith_solid_bounds_box(try h(), tolerance, &raw) { throw failure("bounds_box") }
+        return Box(raw)
+    }
+
     /// How many edges of the mesh at `tolerance` are bound by anything other than exactly two
     /// triangles -- zero for a closed solid. A seam two solids share along a line does *not*
     /// count; a genuine hole or a fold does.
@@ -1934,6 +1975,19 @@ public final class Solid {
             if !cadaclysm_blacksmith_manifold(try h(), &row) { throw failure("manifold") }
             return Manifold(row)
         }
+    }
+
+    /// What this solid measures, per unit density, each figure beside a bound on its own error.
+    ///
+    /// `accuracy` is relative and 0 asks for the library's default. The volume-side figures mean
+    /// something only where `Mass.closed`; where `accuracyMet` is false the refinement stopped early
+    /// and the figures are honest but less certain, which the errors say.
+    public func mass(_ accuracy: Double = 0.0) throws -> Mass {
+        var raw = CadaclysmBlacksmithMassProperties()
+        if !cadaclysm_blacksmith_mass_properties(try h(), accuracy, &raw) {
+            throw failure("mass_properties")
+        }
+        return Mass(raw)
     }
 
     // MARK: Output
@@ -2118,6 +2172,21 @@ public final class Solid {
         return Int(i)
     }
 
+    /// What the solid measures, per unit density: its area, its volume, where its mass sits and how
+    /// it resists being spun about that point, each beside a bound on its own error. `accuracy` is
+    /// relative; 0 asks for the default, a part in ten million.
+    ///
+    /// The volume, the centroid and the inertia mean something only where `closed` is 1 -- on a sheet
+    /// they are zero and the area is still measured. Mass is `density * volume` and the inertia scales
+    /// the same way: nothing here assumes a density of its own.
+    public func mass(_ accuracy: Double = 0) throws -> CadaclysmBlacksmithMassProperties {
+        var out = CadaclysmBlacksmithMassProperties()
+        if !cadaclysm_blacksmith_mass_properties(try h(), accuracy, &out) {
+            throw failure("mass")
+        }
+        return out
+    }
+
     /// Twelve numbers: origin, x, y, z of the workplane on `face` -- its centre, world X laid
     /// onto it (world Y on a face facing close to X) and its outward normal, as `Frame.at`
     /// lays them. `Frame.of` reads them as a `Frame`.
@@ -2167,7 +2236,7 @@ public final class Solid {
         return try Solid(cadaclysm_blacksmith_coloured(try h(), which, colour.x, colour.y, colour.z))
     }
 
-    /// `coloured` with `"#rgb"` or `"#rrggbb"` (the `#` optional).
+    /// `coloured` with `"#rgb"`, `"#rrggbb"` (the `#` optional) or a CSS colour name.
     public func coloured(_ colour: String, face: Int? = nil) throws -> Solid {
         try coloured(try rgb(colour), face: face)
     }
@@ -2217,8 +2286,13 @@ public final class Solid {
         try edgesColoured(colour, edges: edges.map { $0.index })
     }
 
-    /// `edgesColoured` with `"#rgb"` or `"#rrggbb"`.
+    /// `edgesColoured` with `"#rgb"`, `"#rrggbb"` or a CSS colour name.
     public func edgesColoured(_ colour: String, edges: [Int]? = nil) throws -> Solid {
+        try edgesColoured(try rgb(colour), edges: edges)
+    }
+
+    /// `edgesColoured` with `"#rgb"`, `"#rrggbb"` or a CSS colour name, by `Edge`.
+    public func edgesColoured(_ colour: String, edges: [Edge]) throws -> Solid {
         try edgesColoured(try rgb(colour), edges: edges)
     }
 
@@ -2650,6 +2724,114 @@ public final class Assembly {
         guard cadaclysm_blacksmith_assembly_joint(handle, name, start, end) else { throw failure("assembly_joint") }
     }
 
+    /// Give joint `name` its pair: `kind` (a name of the kind table -- `revolute`,
+    /// `prismatic`, `cylindrical`, `screw`, `spherical`, `spherical_with_pin`, `planar`,
+    /// `universal`, `homokinetic`, `fully_constrained` or `unconstrained`), the contact
+    /// frame at rest, an optional `endFrame` (the frame the pair reaches at its rest
+    /// values; `frame` itself, i.e. all-zero rest values, when omitted), `ranges` (one
+    /// entry per freedom of `kind`, each side `nil` for unbounded; omitted entirely for a
+    /// kind that allows none), and `pitch` (required and non-zero for `screw`, refused for
+    /// any other kind). Throws the kernel's own text when a rule refuses it; the assembly
+    /// is then unchanged.
+    public func pair(
+        _ joint: String, _ kind: String, _ frame: Frame,
+        endFrame: Frame? = nil, ranges: [(Double?, Double?)]? = nil, pitch: Double? = nil
+    ) throws {
+        let handle = try h()
+        let frameVals = try frameValues(frame.values)
+        let endFrameVals = try endFrame.map { try frameValues($0.values) }
+        // `ranges` being non-nil -- even `[]` -- means ranges were GIVEN, and the C ABI
+        // must see non-null pointers with count 0, never "no ranges" (all four null, which
+        // only a nil `ranges` means). `withOptionalArray` passes `baseAddress`, which is
+        // nil for an *empty* array's buffer regardless of nil-ness, so a trailing dummy
+        // element is padded on whenever ranges is non-nil to keep the pointer non-null;
+        // `count` below stays the real (possibly 0) freedom count, so the C ABI never
+        // reads the padding.
+        let lower = ranges.map { $0.map { $0.0 ?? 0.0 } + [0.0] }
+        let upper = ranges.map { $0.map { $0.1 ?? 0.0 } + [0.0] }
+        let hasLower = ranges.map { $0.map { $0.0 != nil } + [false] }
+        let hasUpper = ranges.map { $0.map { $0.1 != nil } + [false] }
+        let count = ranges?.count ?? 0
+        let pitchVal = pitch ?? Double.nan
+
+        let ok = withOptionalArray(endFrameVals) { endPtr in
+            withOptionalArray(lower) { lowerPtr in
+                withOptionalArray(upper) { upperPtr in
+                    withOptionalArray(hasLower) { hasLowerPtr in
+                        withOptionalArray(hasUpper) { hasUpperPtr in
+                            cadaclysm_blacksmith_assembly_pair(
+                                handle, joint, kind, frameVals, endPtr,
+                                lowerPtr, upperPtr, hasLowerPtr, hasUpperPtr, count, pitchVal
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        guard ok else { throw failure("assembly_pair") }
+    }
+
+    /// Add a named state to this assembly: `rows` gives each joint's values, in its
+    /// pair's freedom order, in the caller's order. Throws the kernel's own text when a
+    /// rule refuses it; the assembly is then unchanged.
+    public func state(_ name: String, _ rows: [(String, [Double])]) throws {
+        let handle = try h()
+        let joints = rows.map { $0.0 }
+        let counts = rows.map { UInt32($0.1.count) }
+        let flat = rows.flatMap { $0.1 }
+        try withCStrings(joints) { pointers in
+            let ok = pointers.withUnsafeBufferPointer { jointsBuf in
+                withOptionalArray(counts) { countsPtr in
+                    withOptionalArray(flat) { flatPtr in
+                        cadaclysm_blacksmith_assembly_state(
+                            handle, name, jointsBuf.baseAddress, countsPtr, flatPtr, rows.count
+                        )
+                    }
+                }
+            }
+            guard ok else { throw failure("assembly_state") }
+        }
+    }
+
+    /// Add a named motion sequence over this assembly's states: each segment is
+    /// `(state name, parameter, interpolation)`, the interpolation one of `"undefined"`,
+    /// `"discontinuous"`, `"synchronous"` or `"linear"`. `seconds` writes the parameter's
+    /// unit as the second. It is closed unless the last segment is `"discontinuous"`. Throws
+    /// the kernel's own text when a rule refuses it; the assembly is then unchanged.
+    public func sequence(_ name: String, _ segments: [(String, Double, String)], seconds: Bool = false) throws {
+        let handle = try h()
+        let states = segments.map { $0.0 }
+        let ts = segments.map { $0.1 }
+        let words = segments.map { $0.2 }
+        try withCStrings(states) { statePointers in
+            try withCStrings(words) { wordPointers in
+                let ok = statePointers.withUnsafeBufferPointer { statesBuf in
+                    wordPointers.withUnsafeBufferPointer { wordsBuf in
+                        withOptionalArray(ts) { tsPtr in
+                            cadaclysm_blacksmith_assembly_sequence(
+                                handle, name, statesBuf.baseAddress, tsPtr, wordsBuf.baseAddress,
+                                segments.count, seconds
+                            )
+                        }
+                    }
+                }
+                guard ok else { throw failure("assembly_sequence") }
+            }
+        }
+    }
+
+    /// Declare this assembly's base link. Throws the kernel's own text when a rule
+    /// refuses it; the assembly is then unchanged.
+    public func base(_ link: String) throws {
+        guard cadaclysm_blacksmith_assembly_base(try h(), link) else { throw failure("assembly_base") }
+    }
+
+    /// How many freedoms a pair kind has -- see `cadaclysm_blacksmith_pair_freedom_count`.
+    /// 0 for an unknown name, and for `fully_constrained`, which has none.
+    public static func pairFreedomCount(_ kind: String) -> Int {
+        Int(cadaclysm_blacksmith_pair_freedom_count(kind))
+    }
+
     /// This assembly, and everything placed under it, as one STEP file: this assembly
     /// the root product, each sub-assembly and each distinct part written once, each
     /// placement an occurrence named as it was placed. `schema` and `unit` as
@@ -2707,6 +2889,13 @@ private func withCStrings<R>(_ strings: [String], _ body: ([UnsafePointer<CChar>
     let pointers: [UnsafeMutablePointer<CChar>?] = strings.map { strdup($0) }
     defer { pointers.forEach { free($0) } }
     return try body(pointers.map { UnsafePointer($0) })
+}
+
+/// Runs `body` with `values` as a C array pointer, or nil when `values` is nil -- for the
+/// optional `double`/`bool` arrays `Assembly.pair` and `Assembly.state` pass on.
+private func withOptionalArray<T, R>(_ values: [T]?, _ body: (UnsafePointer<T>?) -> R) -> R {
+    guard let values else { return body(nil) }
+    return values.withUnsafeBufferPointer { body($0.baseAddress) }
 }
 
 /// The three world axes `Selector.max` and `Selector.min` take.
@@ -2847,6 +3036,74 @@ public struct Edge: CustomStringConvertible {
 /// do, and the vertices whose faces make more than one fan (two solids touching at a
 /// corner); `isManifold` where there are none of the last two, and `isClosed` where there is
 /// no boundary edge either -- it encloses a solid.
+/// What a solid measures, per unit density, each figure beside a bound on its own error.
+///
+/// Per unit density is the primitive: a body's weight is `density * volume` and its inertia scales
+/// the same way, so `weight(_:)` is the only figure that takes one. Nothing here multiplies by a
+/// density on your behalf -- an assembly of two materials would have to undo it.
+///
+/// `volume`, `centroid`, `inertia` and `principalMoments` mean something only where `closed`. Where
+/// `accuracyMet` is false the refinement stopped before the accuracy asked for: the figures are
+/// honest, they are simply less certain, and the errors say by how much.
+public struct Mass: Equatable, CustomStringConvertible {
+    /// Closed, so the volume-side figures mean something.
+    public let closed: Bool
+    /// Every face pointed inward; the figures are given as if they had not.
+    public let inverted: Bool
+    /// Every error came under the accuracy asked for.
+    public let accuracyMet: Bool
+    /// Measured on a mesh rather than exact surfaces, so the errors are the rounding floor.
+    public let fromMesh: Bool
+    /// The surface area.
+    public let area: Double
+    /// A bound on `area`'s own error.
+    public let areaError: Double
+    /// The volume enclosed, where `closed`.
+    public let volume: Double
+    /// A bound on `volume`'s own error.
+    public let volumeError: Double
+    /// The volume's centroid, where `closed`.
+    public let centroid: SIMD3<Double>
+    /// A bound on the distance from `centroid` to the true centroid.
+    public let centroidError: Double
+    /// Three rows of three about the centroid, products of inertia negated.
+    public let inertia: [SIMD3<Double>]
+    /// A bound on every entry of `inertia`.
+    public let inertiaError: Double
+    /// Ascending.
+    public let principalMoments: SIMD3<Double>
+    /// Unit, orthogonal, right-handed; row `i` belongs to moment `i`.
+    public let principalAxes: [SIMD3<Double>]
+
+    init(_ raw: CadaclysmBlacksmithMassProperties) {
+        closed = raw.closed != 0
+        inverted = raw.inverted != 0
+        accuracyMet = raw.accuracy_met != 0
+        fromMesh = raw.from_mesh != 0
+        area = raw.area
+        areaError = raw.area_error
+        volume = raw.volume
+        volumeError = raw.volume_error
+        centroid = SIMD3(raw.centroid.0, raw.centroid.1, raw.centroid.2)
+        centroidError = raw.centroid_error
+        let i = raw.inertia
+        inertia = [SIMD3(i.0, i.1, i.2), SIMD3(i.3, i.4, i.5), SIMD3(i.6, i.7, i.8)]
+        inertiaError = raw.inertia_error
+        principalMoments = SIMD3(raw.principal_moments.0, raw.principal_moments.1, raw.principal_moments.2)
+        let a = raw.principal_axes
+        principalAxes = [SIMD3(a.0, a.1, a.2), SIMD3(a.3, a.4, a.5), SIMD3(a.6, a.7, a.8)]
+    }
+
+    /// `density * volume`, in whatever units the model and the density agree on.
+    public func weight(_ density: Double) -> Double { density * volume }
+
+    public var description: String {
+        closed
+            ? "Mass(area: \(area), volume: \(volume), centroid: \(centroid))"
+            : "Mass(open, area: \(area))"
+    }
+}
+
 public struct Manifold: Equatable, CustomStringConvertible {
     /// How many faces.
     public let faces: Int
@@ -3009,6 +3266,256 @@ public struct Overlap: Equatable, CustomStringConvertible {
     public var description: String { "Overlap(faces=(\(faceA), \(faceB)), loops=\(loops.count))" }
 }
 
+// MARK: - Collider
+
+/// An axis-aligned box: `lo` and `hi`, three numbers each. The broad phase's own shape
+/// (`Solid.boundsBox`, `Collider`'s own boxes): cheap to move and to test against another,
+/// before anything is meshed.
+public struct Box: Equatable, CustomStringConvertible {
+    public let lo: SIMD3<Double>
+    public let hi: SIMD3<Double>
+
+    public init(_ lo: SIMD3<Double>, _ hi: SIMD3<Double>) {
+        self.lo = lo
+        self.hi = hi
+    }
+
+    init(_ raw: CadaclysmBlacksmithBox) {
+        lo = SIMD3(raw.lo.0, raw.lo.1, raw.lo.2)
+        hi = SIMD3(raw.hi.0, raw.hi.1, raw.hi.2)
+    }
+
+    var words: CadaclysmBlacksmithBox {
+        var raw = CadaclysmBlacksmithBox()
+        raw.lo = (lo.x, lo.y, lo.z)
+        raw.hi = (hi.x, hi.y, hi.z)
+        return raw
+    }
+
+    /// This box moved by `frame` (rigid), boxed again on the world axes -- not this box's
+    /// corners individually moved, which would not in general be a box at all: the
+    /// *bounding* box of the moved corners.
+    public func moved(_ frame: Frame) throws -> Box {
+        var raw = words
+        var out = CadaclysmBlacksmithBox()
+        if !cadaclysm_blacksmith_box_moved(&raw, frame.values, &out) { throw failure("box_moved") }
+        return Box(out)
+    }
+
+    /// Whether this box and `other` share a point (touching counts).
+    public func overlaps(_ other: Box) -> Bool {
+        var a = words
+        var b = other.words
+        return cadaclysm_blacksmith_box_overlaps(&a, &b)
+    }
+
+    public var description: String { "Box(lo=\(lo), hi=\(hi))" }
+}
+
+/// True only if box `a` at `frameA` and box `b` at `frameB` cannot touch -- a separating
+/// axis among the boxes' face normals and edge-direction crosses; touching is not apart.
+/// Sharper than moving each box and asking `Box.overlaps`, which boxes the *result* on the
+/// world axes again and so can call two oriented boxes overlapping when they are not (two
+/// unit boxes, the second turned 45 degrees about z and moved 2.3 along x: their world
+/// boxes overlap, but the boxes themselves do not touch).
+public func boxesApart(_ a: Box, _ frameA: Frame, _ b: Box, _ frameB: Frame) throws -> Bool {
+    var ra = a.words
+    var rb = b.words
+    var apart = false
+    if !cadaclysm_blacksmith_boxes_apart(&ra, frameA.values, &rb, frameB.values, &apart) {
+        throw failure("boxes_apart")
+    }
+    return apart
+}
+
+/// Counts of one `Collider.check` call: the candidate pairs `considered`, how many of them
+/// the world boxes and the oriented boxes cleared, how many the share left to another call,
+/// how the rest were answered (`cached`, `closedForm`, `meshed`), and how many were
+/// `refused`. `confirmed` is the subset of `meshed` that were thin mesh-path overlaps sent
+/// to `Solid.common` itself for a final answer.
+public struct ColliderStats: Equatable, CustomStringConvertible {
+    public let considered: Int
+    public let worldBoxes: Int
+    public let orientedBoxes: Int
+    public let skippedShare: Int
+    public let cached: Int
+    public let closedForm: Int
+    public let meshed: Int
+    public let refused: Int
+    public let confirmed: Int
+
+    init(_ raw: CadaclysmBlacksmithColliderStats) {
+        considered = Int(raw.considered)
+        worldBoxes = Int(raw.world_boxes)
+        orientedBoxes = Int(raw.oriented_boxes)
+        skippedShare = Int(raw.skipped_share)
+        cached = Int(raw.cached)
+        closedForm = Int(raw.closed_form)
+        meshed = Int(raw.meshed)
+        refused = Int(raw.refused)
+        confirmed = Int(raw.confirmed)
+    }
+
+    public var description: String {
+        "ColliderStats(considered=\(considered), worldBoxes=\(worldBoxes), orientedBoxes=\(orientedBoxes), "
+            + "skippedShare=\(skippedShare), cached=\(cached), closedForm=\(closedForm), meshed=\(meshed), "
+            + "refused=\(refused), confirmed=\(confirmed))"
+    }
+}
+
+/// Keeps one `Collider.check` answer alive for as long as any `CollisionHit` of it is: each
+/// hit holds a reference to this, and ARC frees it only once the last one lets go -- a
+/// `CollisionHit` needs the handle itself back for `solid()`.
+final class Collisions {
+    let handle: OpaquePointer
+
+    init(_ handle: OpaquePointer) {
+        self.handle = handle
+    }
+
+    deinit { cadaclysm_blacksmith_collisions_free(handle) }
+}
+
+/// One pair `Collider.check` found overlapping (`overlap` true), or could not decide
+/// (`overlap` false; `text` says why, empty for an overlap). `positions`/`normals` are world
+/// xyz triples, three per triangle (unwelded); `indices` indexes them -- all empty for a
+/// refused pair. `depth` is the thinnest side of the overlap's world box, 0 for a refused
+/// pair.
+///
+/// `solid()` rebuilds the exact overlap now, from the frames `Collider.check` found it at;
+/// this keeps the collisions handle behind every hit of one `check` call alive until the
+/// last of them is released, freeing it only then. Named `CollisionHit` rather than the
+/// plainer `Hit`, which this module already uses for a curve-crossing result
+/// (`Solid.hits`).
+public final class CollisionHit: CustomStringConvertible {
+    public let a: Int
+    public let b: Int
+    public let overlap: Bool
+    /// `"overlap"` or `"refused"` -- the same answer as `overlap`.
+    public let kind: String
+    public let depth: Double
+    public let text: String
+    public let positions: [SIMD3<Double>]
+    public let normals: [SIMD3<Double>]
+    public let indices: [UInt32]
+
+    private let collisions: Collisions
+    private let index: UInt32
+
+    init(_ raw: CadaclysmBlacksmithCollisionHit, _ collisions: Collisions, _ index: UInt32) {
+        a = Int(raw.a)
+        b = Int(raw.b)
+        overlap = raw.overlap
+        kind = raw.overlap ? "overlap" : "refused"
+        depth = raw.depth
+        text = Blacksmith.text(raw.text)
+        positions = pointsAt(raw.positions, raw.vertex_count)
+        normals = pointsAt(raw.normals, raw.vertex_count)
+        if let at = raw.indices, raw.index_count > 0 {
+            indices = Array(UnsafeBufferPointer(start: at, count: Int(raw.index_count)))
+        } else {
+            indices = []
+        }
+        self.collisions = collisions
+        self.index = index
+    }
+
+    /// The exact overlap of this pair at the frames `Collider.check` found it at, as a new
+    /// solid. Throws for a refused pair (`overlap` false) or a collisions handle already
+    /// closed some other way.
+    public func solid() throws -> Solid {
+        try withExtendedLifetime(collisions) {
+            try Solid(cadaclysm_blacksmith_collisions_solid(collisions.handle, index), "collisions_solid")
+        }
+    }
+
+    public var description: String { "CollisionHit(a=\(a), b=\(b), overlap=\(overlap), depth=\(depth))" }
+}
+
+/// Parts meshed once, asked pose after pose which of them interfere: `solids` at rest,
+/// meshed at `tolerance`; `groups` one group index per solid (nil: each solid its own group
+/// -- `check` then takes one frame per solid), `allowed` pairs of part indices never tested
+/// (designed contacts, by part index, flat: `(a0, b0, a1, b1, ...)`). `close()` frees this
+/// handle; so does `deinit`.
+public final class Collider {
+    private var handle: OpaquePointer?
+
+    public init(_ solids: [Solid], tolerance: Double = 0.05, groups: [UInt32]? = nil, allowed: [UInt32] = []) throws {
+        if let groups, groups.count != solids.count {
+            throw BuildError(
+                "Collider: groups must have one entry per solid (\(solids.count) solids, \(groups.count) groups)")
+        }
+        let handles: [OpaquePointer?] = try solids.map { try $0.h() }
+        let allowedCount = UInt32(allowed.count / 2)
+        let raw: OpaquePointer? = withExtendedLifetime(solids) {
+            if let groups {
+                return cadaclysm_blacksmith_collider_new(handles, UInt32(handles.count), tolerance, groups, allowed, allowedCount)
+            }
+            return cadaclysm_blacksmith_collider_new(handles, UInt32(handles.count), tolerance, nil, allowed, allowedCount)
+        }
+        handle = try checked(raw, "collider_new")
+    }
+
+    deinit { close() }
+
+    /// Free the collider now. Idempotent.
+    public func close() {
+        if let handle { cadaclysm_blacksmith_collider_free(handle) }
+        handle = nil
+    }
+
+    /// Whether `close()` has run.
+    public var isClosed: Bool { handle == nil }
+
+    func h() throws -> OpaquePointer {
+        guard let handle else { throw BuildError("collider: closed") }
+        return handle
+    }
+
+    /// How many groups this collider has -- the highest group index past `init`, plus one.
+    public var groupCount: Int {
+        get throws { Int(cadaclysm_blacksmith_collider_group_count(try h())) }
+    }
+
+    /// Counts of the last `check` call (all zero before the first one).
+    public var stats: ColliderStats {
+        get throws {
+            var raw = CadaclysmBlacksmithColliderStats()
+            if !cadaclysm_blacksmith_collider_stats(try h(), &raw) { throw failure("collider_stats") }
+            return ColliderStats(raw)
+        }
+    }
+
+    /// The pairs that interfere, or could not be decided, with each group placed at its
+    /// matching frame in `frames` (one per group, in group order). `share`: `nil`, every
+    /// pair past the box filters is decided now; `(k, n)`, only those whose index is `k`
+    /// modulo `n` (the shares of one pose are disjoint and cover it -- split one `check`
+    /// across `n` workers).
+    public func check(_ frames: [Frame], share: (k: UInt32, n: UInt32)? = nil) throws -> [CollisionHit] {
+        var flat: [Double] = []
+        flat.reserveCapacity(frames.count * 12)
+        for f in frames { flat.append(contentsOf: f.values) }
+        let (shareK, shareN) = share ?? (0, 0)
+        guard let found = cadaclysm_blacksmith_collider_check(try h(), flat, UInt32(frames.count), shareK, shareN) else {
+            throw failure("collider_check")
+        }
+        let count = cadaclysm_blacksmith_collisions_count(found)
+        if count == 0 {
+            cadaclysm_blacksmith_collisions_free(found)
+            return []
+        }
+        let collisions = Collisions(found)
+        var hits: [CollisionHit] = []
+        hits.reserveCapacity(Int(count))
+        for i in 0..<count {
+            var raw = CadaclysmBlacksmithCollisionHit()
+            if !cadaclysm_blacksmith_collisions_hit(found, i, &raw) { throw failure("collisions_hit") }
+            hits.append(CollisionHit(raw, collisions, i))
+        }
+        return hits
+    }
+}
+
 /// One place two curves meet, copied out (`Profile.hits`). A point (`run` false): `start`
 /// equals `end`, and `touch` is true where the curves are tangent rather than crossing. A run
 /// (`run` true): they coincide from `start` to `end`. `aStart`/`aEnd` are where on the first
@@ -3046,6 +3553,399 @@ public struct Hit: Equatable, CustomStringConvertible {
     public var description: String {
         "Hit(run=\(run), touch=\(touch), start=(\(start.x), \(start.y), \(start.z)), "
             + "end=(\(end.x), \(end.y), \(end.z)))"
+    }
+}
+
+// MARK: - Machining
+
+/// A cutter: Grbl tool `number` (1 to 255, the `T` word), `diameter` and `fluteLength` in
+/// mm, `feed` and `plunge` in mm/min, `rpm` its spindle speed, ramping into its cuts at
+/// `rampAngle` degrees. Immutable; a job keeps its own copy, so freeing a tool a job has
+/// used changes nothing there. `deinit` frees it; there is no `close()` of its own.
+public final class Tool {
+    let handle: OpaquePointer
+
+    init(_ raw: OpaquePointer?, _ what: String = "tool") throws {
+        handle = try checked(raw, what)
+    }
+
+    deinit { cadaclysm_blacksmith_tool_free(handle) }
+
+    /// `made` wrapped, then turned to `rampAngle` when it is not the library's own default --
+    /// the unramped handle freed at once rather than kept around.
+    private static func ramped(_ made: OpaquePointer?, rampAngle: Double, _ what: String) throws -> Tool {
+        let tool = try Tool(made, what)
+        guard rampAngle != 3.0 else { return tool }
+        return try tool.withRampAngle(rampAngle)
+    }
+
+    /// A flat end mill: Grbl tool `number` (at least 1), `diameter` and `fluteLength` in mm,
+    /// `feed` and `plunge` in mm/min, `rpm` its spindle speed. It ramps into its cuts at
+    /// `rampAngle` degrees (the library's own default is 3). Throws for a `number` of 0 or
+    /// above 255, a size, feed or speed not positive and finite, or a `rampAngle` outside
+    /// (0, 90].
+    public static func flat(_ number: Int, diameter: Double, fluteLength: Double, feed: Double, plunge: Double,
+                            rpm: Double, rampAngle: Double = 3.0) throws -> Tool {
+        let made = cadaclysm_blacksmith_tool_flat(UInt32(clamping: number), diameter, fluteLength, feed, plunge, rpm)
+        return try ramped(made, rampAngle: rampAngle, "tool_flat")
+    }
+
+    /// A ball end mill, as `flat`, its tip a half sphere of the diameter; in 2.5D it cuts
+    /// where a flat does, `bottom` being the tip.
+    public static func ball(_ number: Int, diameter: Double, fluteLength: Double, feed: Double, plunge: Double,
+                            rpm: Double, rampAngle: Double = 3.0) throws -> Tool {
+        let made = cadaclysm_blacksmith_tool_ball(UInt32(clamping: number), diameter, fluteLength, feed, plunge, rpm)
+        return try ramped(made, rampAngle: rampAngle, "tool_ball")
+    }
+
+    /// A drill: as `flat`, plunging at `feed`. A job takes it for `Job.drill` (and
+    /// `Job.machine`'s drills) only.
+    public static func drill(_ number: Int, diameter: Double, fluteLength: Double, feed: Double, rpm: Double) throws -> Tool {
+        try Tool(cadaclysm_blacksmith_tool_drill(UInt32(clamping: number), diameter, fluteLength, feed, rpm), "tool_drill")
+    }
+
+    /// A new tool: this one, ramping into its cuts at `degrees` from the horizontal instead.
+    /// Throws for an angle outside (0, 90].
+    public func withRampAngle(_ degrees: Double) throws -> Tool {
+        try Tool(cadaclysm_blacksmith_tool_with_ramp_angle(handle, degrees), "tool_with_ramp_angle")
+    }
+}
+
+/// The block of material a job cuts, an axis-aligned box. Immutable; a job keeps its own
+/// copy. `deinit` frees it; there is no `close()` of its own.
+public final class Stock {
+    let handle: OpaquePointer
+
+    init(_ raw: OpaquePointer?, _ what: String = "stock") throws {
+        handle = try checked(raw, what)
+    }
+
+    deinit { cadaclysm_blacksmith_stock_free(handle) }
+
+    /// The box from `min` (x, y, z) to `max`. Throws unless every min is below its max and
+    /// all six are finite.
+    public static func box(min: SIMD3<Double>, max: SIMD3<Double>) throws -> Stock {
+        try Stock(cadaclysm_blacksmith_stock_box(min.x, min.y, min.z, max.x, max.y, max.z), "stock_box")
+    }
+
+    /// `solid`'s bounds grown by `margin` in -X, +X, -Y, +Y and +Z; the bottom stays at the
+    /// solid's lowest Z. Throws for a `margin` negative or not finite.
+    public static func around(_ solid: Solid, margin: Double = 0.0) throws -> Stock {
+        try Stock(cadaclysm_blacksmith_stock_around(try solid.h(), margin), "stock_around")
+    }
+}
+
+/// One file a job wrote: a Grbl program (`tool` its `T` number, `name` `<job name>-T<n>`, or
+/// `<job name>-<k>-T<n>` for a repeated tool) from `Job.gcode`, or one of
+/// `Job.writeCamotics`'s files (`tool` 0 for the simulation copies and the project). Copied
+/// out; immutable.
+public struct Program: Equatable, CustomStringConvertible {
+    public let tool: Int
+    public let name: String
+    public let text: String
+
+    public var description: String { "Program(tool=\(tool), name=\(name), \(text.count) characters)" }
+}
+
+/// One operation of a `Job`, read back by `Job.operations`: `kind` (`"face"`, `"contour"`,
+/// `"pocket"` or `"drill"`), `tool` (its Grbl `T` number) and `params`, the operation's own
+/// arguments in the library's own numbers -- `side` 0 outside, 1 inside or 2 on its line;
+/// `climb` and `open` 1 or 0; `points` a count; a `peck` of none reads back as `nil`. Copied
+/// out; immutable.
+public struct Operation: Equatable, CustomStringConvertible {
+    public let kind: String
+    public let tool: Int
+    public let params: [String: Double?]
+
+    public var description: String {
+        let parts = params.map { k, v in v.map { "\(k): \($0)" } ?? "\(k): nil" }.sorted()
+        return "Operation(kind=\(kind), tool=\(tool), params={\(parts.joined(separator: ", "))})"
+    }
+}
+
+/// One thing `Job.machine` left uncut, one of `Report`'s items. Copied out; immutable.
+public struct ReportItem: CustomStringConvertible {
+    /// `"corner"` (material the end mill doesn't reach), `"hole"` (a round hole no drill
+    /// matches or a matched drill can't make), `"slope"` (a face that is neither horizontal
+    /// nor vertical, cut as steps), `"undercut"` (material under an overhang) or
+    /// `"too_deep"` (a level below the end mill's flute length, cut only that far).
+    public let kind: String
+    /// The item's XYZ location -- a centroid for an area, the axis point at the top for a
+    /// hole.
+    public let at: SIMD3<Double>
+    /// An area in mm^2 for `corner`/`undercut`, a diameter in mm for `hole`, and a height in
+    /// mm (its Z range) for `slope` and `too_deep`.
+    public let size: Double
+    /// One sentence naming the cause and the tool involved.
+    public let reason: String
+    /// The XY area the item covers.
+    public let region: [Profile]
+
+    public var description: String {
+        "ReportItem(kind=\(kind), at=(\(at.x), \(at.y), \(at.z)), size=\(size), reason=\(reason), "
+            + "region=\(region.count) profile(s))"
+    }
+}
+
+/// What `Job.machine` could not make: `items`, in order, read once when `machine` returns,
+/// and the kernel's own `text` -- one line per item, or `"nothing left uncut"`. Copied out;
+/// immutable.
+public struct Report: CustomStringConvertible {
+    public let items: [ReportItem]
+    public let text: String
+
+    /// Whether nothing was left uncut (no items).
+    public var isEmpty: Bool { items.isEmpty }
+
+    public var description: String { text }
+}
+
+/// `side`'s library code, or the refusal for any other side -- checked here so a bad spelling never
+/// reaches the library.
+private func jobSide(_ side: String) throws -> UInt32 {
+    switch side {
+    case "outside": return 0
+    case "inside": return 1
+    case "on": return 2
+    default: throw BuildError("side must be 'outside', 'inside' or 'on'")
+    }
+}
+
+/// What the kernel says of a job name with a control character in it -- a NUL, which a C
+/// string would cut the name short at, is refused with it before the library is asked, as
+/// the Python SDK does for a `Job` name and a `writeCamotics` stem.
+private let jobNulName = "job: a name must be non-empty and without brackets, slashes, quotes, control characters, or : * ? < > |"
+
+/// The files of one `job_gcode`/`job_camotics` call, copied out, the list freed.
+private func programs(_ raw: OpaquePointer?, _ what: String) throws -> [Program] {
+    guard let raw else { throw failure(what) }
+    defer { cadaclysm_blacksmith_programs_free(raw) }
+    let n = cadaclysm_blacksmith_programs_count(raw)
+    return (0..<n).map { i in
+        Program(tool: Int(cadaclysm_blacksmith_programs_tool(raw, i)),
+                name: text(cadaclysm_blacksmith_programs_name(raw, i)),
+                text: text(cadaclysm_blacksmith_programs_text(raw, i)))
+    }
+}
+
+/// A `job_machine` report, read field by field, the report freed.
+private func readReport(_ raw: OpaquePointer?) throws -> Report {
+    guard let raw else { throw failure("job_machine") }
+    defer { cadaclysm_blacksmith_report_free(raw) }
+    let n = cadaclysm_blacksmith_report_count(raw)
+    var items: [ReportItem] = []
+    items.reserveCapacity(Int(n))
+    for i in 0..<n {
+        var at = [Double](repeating: 0, count: 3)
+        guard cadaclysm_blacksmith_report_at(raw, i, &at) else { throw failure("report_at") }
+        let region = try Profile.list(cadaclysm_blacksmith_report_region(raw, i), "report_region")
+        items.append(ReportItem(kind: text(cadaclysm_blacksmith_report_kind(raw, i)),
+                                 at: SIMD3(at[0], at[1], at[2]),
+                                 size: cadaclysm_blacksmith_report_size(raw, i),
+                                 reason: text(cadaclysm_blacksmith_report_reason(raw, i)),
+                                 region: region))
+    }
+    return Report(items: items, text: text(cadaclysm_blacksmith_report_text(raw)))
+}
+
+/// Every operation of one `job_operations` call, read field by field, the list freed.
+private func readOperations(_ raw: OpaquePointer) -> [Operation] {
+    defer { cadaclysm_blacksmith_operations_free(raw) }
+    let n = cadaclysm_blacksmith_operations_count(raw)
+    return (0..<n).map { i -> Operation in
+        let paramCount = cadaclysm_blacksmith_operations_param_count(raw, i)
+        var params: [String: Double?] = [:]
+        for k in 0..<paramCount {
+            let name = text(cadaclysm_blacksmith_operations_param_name(raw, i, k))
+            let value = cadaclysm_blacksmith_operations_param_value(raw, i, k)
+            params.updateValue(value.isNaN ? nil : value, forKey: name)
+        }
+        return Operation(kind: text(cadaclysm_blacksmith_operations_kind(raw, i)),
+                          tool: Int(cadaclysm_blacksmith_operations_tool(raw, i)),
+                          params: params)
+    }
+}
+
+/// A machining job on a `Stock`: operations kept in the order they are added, written as one
+/// Grbl 1.1 program per run of operations sharing a tool. Mutable -- each operation is added
+/// in place, and a refused one leaves the job as it was. `safeZ` is the absolute Z of rapids
+/// between operations and at a program's start and end, above the stock's top; `clearance`
+/// is how far above an operation's top it enters and leaves its passes; `tolerance` fits
+/// free-form sides and offsets; `name` names the programs (`<name>-T<n>`); `spindleDwell` is
+/// how long every program waits after starting the spindle; `resolution` is the CAMotics
+/// project's voxel size in mm. `close()` frees it now; `deinit` does otherwise, as `Solid`'s.
+public final class Job {
+    private var handle: OpaquePointer?
+
+    /// An empty job on `stock`, rapids at `safeZ` (above the stock's top), with the
+    /// library's own defaults (`clearance` 1, `tolerance` 0.01, `name` "job",
+    /// `spindleDwell` 2 s, `resolution` 0.1 mm) until overridden here. Throws for a `safeZ`
+    /// not above the stock's top, or a setting the job refuses.
+    public init(_ stock: Stock, safeZ: Double, clearance: Double = 1.0, tolerance: Double = 0.01,
+               name: String = "job", spindleDwell: Double = 2.0, resolution: Double = 0.1) throws {
+        guard !name.utf8.contains(0) else { throw BuildError(jobNulName) }
+        let raw = cadaclysm_blacksmith_job_new(stock.handle, safeZ)
+        handle = try checked(raw, "job_new")
+        guard cadaclysm_blacksmith_job_set_clearance(handle, clearance) else {
+            let error = failure("job_set_clearance"); close(); throw error
+        }
+        guard cadaclysm_blacksmith_job_set_tolerance(handle, tolerance) else {
+            let error = failure("job_set_tolerance"); close(); throw error
+        }
+        guard cadaclysm_blacksmith_job_set_spindle_dwell(handle, spindleDwell) else {
+            let error = failure("job_set_spindle_dwell"); close(); throw error
+        }
+        guard cadaclysm_blacksmith_job_set_resolution(handle, resolution) else {
+            let error = failure("job_set_resolution"); close(); throw error
+        }
+        guard cadaclysm_blacksmith_job_set_name(handle, name) else {
+            let error = failure("job_set_name"); close(); throw error
+        }
+    }
+
+    deinit { close() }
+
+    /// Free the job now. Idempotent; every call on the job throws after. Lists it wrote
+    /// (`operations()`, `gcode()`, `writeCamotics`, a `Report`) are independent copies and
+    /// outlive it.
+    public func close() {
+        if let handle { cadaclysm_blacksmith_job_free(handle) }
+        handle = nil
+    }
+
+    /// Whether `close()` has run.
+    public var isClosed: Bool { handle == nil }
+
+    private func h() throws -> OpaquePointer {
+        guard let handle else { throw BuildError("job: closed") }
+        return handle
+    }
+
+    /// Face the stock's top down to `z`, in zigzag rows along X `stepover` apart and passes
+    /// at most `stepdown` deep, with `tool`. Throws for a drill, a `z` above the stock's
+    /// top, a stepover past the tool's diameter, or what the job otherwise refuses.
+    public func face(_ tool: Tool, z: Double, stepover: Double, stepdown: Double) throws {
+        guard cadaclysm_blacksmith_job_face(try h(), tool.handle, z, stepover, stepdown) else {
+            throw failure("job_face")
+        }
+    }
+
+    /// Cut along `profile` from `top` to `bottom` in passes at most `stepdown` deep, with
+    /// `tool`: `side` "outside" the profile, "inside" it, or "on" its line; `climb` for
+    /// climb milling, else conventional; `open` to cut the outline as an open chain (only
+    /// "on" its line, and with no holes). Throws for any other `side`, or what the job
+    /// otherwise refuses.
+    public func contour(_ tool: Tool, profile: Profile, top: Double, bottom: Double, side: String = "outside",
+                        stepdown: Double = 1.0, climb: Bool = true, open: Bool = false) throws {
+        let code = try jobSide(side)
+        guard cadaclysm_blacksmith_job_contour(try h(), tool.handle, profile.handle, top, bottom, code, stepdown,
+                                               climb, open) else {
+            throw failure("job_contour")
+        }
+    }
+
+    /// Clear `profile` -- its holes left standing as islands -- from `top` to `bottom`, in
+    /// rings `stepover` apart (at most the tool's radius) and passes at most `stepdown`
+    /// deep, with `tool`. Throws for what the job refuses; a pocket too small for the tool
+    /// is refused by `gcode()`, naming the operation.
+    public func pocket(_ tool: Tool, profile: Profile, top: Double, bottom: Double, stepover: Double,
+                       stepdown: Double) throws {
+        guard cadaclysm_blacksmith_job_pocket(try h(), tool.handle, profile.handle, top, bottom, stepover,
+                                              stepdown) else {
+            throw failure("job_pocket")
+        }
+    }
+
+    /// A hole at each (x, y) of `points`, from `top` to `bottom` with `tool`, pecking `peck`
+    /// deep at a time (retracting between pecks), or straight to depth for `nil`. Throws for
+    /// what the job refuses (a tool that is not a drill, no points, ...).
+    public func drill(_ tool: Tool, points: [SIMD2<Double>], top: Double, bottom: Double, peck: Double? = nil) throws {
+        let flat = points.flatMap { [$0.x, $0.y] }
+        guard cadaclysm_blacksmith_job_drill(try h(), tool.handle, flat, points.count, top, bottom,
+                                             peck ?? .nan) else {
+            throw failure("job_drill")
+        }
+    }
+
+    /// Recognise `part` and append the operations that make it: faced, contoured and
+    /// pocketed with `endMill`, its holes drilled with whichever of `drills` fits each -- a
+    /// tool per required diameter. A `nil` element of `drills` is the library's own "null
+    /// drill <i>". `stepover` and `stepdown` of `nil` are the kernel's own defaults; `skin`
+    /// (at least 0) is how far above the part's lowest point the outline stops, so the part
+    /// stays attached to the stock -- 0 cuts through; `peck` of `nil` is none (a drill
+    /// straight to depth). Returns a `Report` of what could not be cut. Throws for what the
+    /// kernel refuses (a drill as `endMill`, a null drill, ...); the job changes only on
+    /// success -- a refusal leaves it exactly as it was.
+    public func machine(_ part: Solid, endMill: Tool, drills: [Tool?] = [], stepover: Double? = nil,
+                        stepdown: Double? = nil, skin: Double = 0.3, peck: Double? = nil) throws -> Report {
+        let jh = try h()
+        let ph = try part.h()
+        let handles: [OpaquePointer?] = drills.map { $0?.handle }
+        let raw = withExtendedLifetime(drills) {
+            cadaclysm_blacksmith_job_machine(jh, ph, endMill.handle, handles, handles.count, stepover ?? .nan,
+                                             stepdown ?? .nan, skin, peck ?? .nan)
+        }
+        return try readReport(raw)
+    }
+
+    /// Every operation added to this job so far, in order -- whether added by `face`,
+    /// `contour`, `pocket`, `drill` or `machine`.
+    public func operations() throws -> [Operation] {
+        guard let raw = cadaclysm_blacksmith_job_operations(try h()) else { throw failure("job_operations") }
+        return readOperations(raw)
+    }
+
+    /// The job as Grbl 1.1 programs, one per run of consecutive operations sharing a tool
+    /// (T1, T2, T1 gives three), each named `<name>-T<n>` (or `<name>-<k>-T<n>` for run `k`
+    /// of a tool that runs more than once); an empty array for a job with no operations.
+    /// Throws for an operation whose geometry the tool cannot cut (named by its index and
+    /// kind).
+    public func gcode() throws -> [Program] {
+        try programs(cadaclysm_blacksmith_job_gcode(try h()), "job_gcode")
+    }
+
+    /// `job_camotics(stem)`, copied out.
+    private func camoticsFiles(_ stem: String) throws -> [Program] {
+        try programs(cadaclysm_blacksmith_job_camotics(try h(), stem), "job_camotics")
+    }
+
+    /// A CAMotics project at `path` and its files beside it, named after the project's file
+    /// stem (`out/part.camotics` writes `out/part-T1.nc`), not the job's name: each program,
+    /// a simulation copy of it (`.sim.nc`, which the project lists), and the project last.
+    /// Creates the directory. Returns the paths written, the project last, written here (not
+    /// by the library) byte for byte, as plain UTF-8 with no byte-order mark. Throws for a
+    /// path with no file stem, what `gcode()` refuses, or a file that cannot be written.
+    public func writeCamotics(_ path: String) throws -> [String] {
+        // the stem is read off the text first: Foundation would take a NUL into the URL, and
+        // Python refuses the stem, in the kernel's words
+        let tail = path.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? ""
+        var tailStem = tail
+        if let dot = tail.lastIndex(of: "."), dot != tail.startIndex { tailStem = String(tail[..<dot]) }
+        if tailStem.utf8.contains(0) { throw BuildError(jobNulName) }
+        let pathURL = URL(fileURLWithPath: path)
+        let stem = pathURL.deletingPathExtension().lastPathComponent
+        guard !stem.isEmpty else { throw BuildError("job_camotics: \(path) has no file stem") }
+        let files = try camoticsFiles(stem)
+        let dirURL = pathURL.deletingLastPathComponent()
+        if !dirURL.path.isEmpty {
+            do {
+                try FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
+            } catch {
+                throw BuildError("job_camotics: \(path): \(error.localizedDescription)")
+            }
+        }
+        var written: [String] = []
+        written.reserveCapacity(files.count)
+        for (i, file) in files.enumerated() {
+            let at = (i == files.count - 1) ? pathURL : dirURL.appendingPathComponent(file.name)
+            do {
+                try file.text.write(to: at, atomically: false, encoding: .utf8)
+            } catch {
+                throw BuildError("job_camotics: \(path): \(error.localizedDescription)")
+            }
+            written.append(at.path)
+        }
+        return written
     }
 }
 

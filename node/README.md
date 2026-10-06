@@ -199,10 +199,41 @@ unless they are given directly; `up` ('y' or 'z') falls back to the scene's
 own convention (a solid -- `Solid.svgText`/`Solid.svg`/`writeSvgText`/
 `writeSvg` in `cadaclysm/blacksmith`, drawing several at once -- always 'z',
 carrying no convention of its own). `stroke` and `background` take `'#rgb'`,
-`'#rrggbb'` or an `[r, g, b]` triple (0..255); `background` left out is no
+`'#rrggbb'`, a CSS colour name or an `[r, g, b]` triple (0..255); `background` left out is no
 `<rect>` at all, the page left transparent. A refused option (`fov` outside
 `0..179`, say) throws with the field named. `svgAsync()` is the worker-thread
 twin of `svgText`, on `Scene`, `Node` and the kernel's `Solid` alike.
+
+## Drawing
+
+`require('cadaclysm/view')` draws through `cadaclysm_view.h`: the terminal by default, a GPU
+window of its own with `useWgpu()`, a host's window with `View.inWindow`, or offscreen with
+`View.offscreen` (no display: SSH, CI). Solids and scenes are drawn by handle, exactly.
+
+```js
+const view = require('cadaclysm/view');
+view.useWgpu();
+part.show();                       // the shared window shows the part; returns at once
+scene.show({ view: 'top' });       // replaces what the shared window shows
+const camera = part.view();        // a window of its own, until it is closed
+
+const v = view.View.offscreen(800, 600);
+const item = v.showSolid(part, 0.05, [0.9, 0.3, 0.1]);
+v.standard('iso'); v.frame();
+v.save('part.png');
+item.remove(); v.close();
+```
+
+While a window is open, a 16 ms timer keeps it live and keeps the process running; the process
+ends when the last window is closed. `view.pump()` serves a loop of your own. The library is
+found through `CADACLYSM_TERMINAL_LIBRARY` / `CADACLYSM_VIEW_LIBRARY`, then beside this
+package, in a `lib/` above it and in a `target/release` or `target/debug` above it;
+`CADACLYSM_VIEW` (`terminal`, `wgpu` or a path) picks one without code. An `Item` holds the
+object it shows; do not `close()` a solid while an item still shows it (`scene.close()`
+removes the items that show the scene first). Choosing a library that prints (the terminal, or
+one of your own) makes `process.stdout` and `process.stderr` block, so a still never overtakes
+what was printed before it; output already queued in a full pipe at that moment can still trail
+the first still, since Node has no way to drain it.
 
 ## Off the event loop
 
@@ -230,8 +261,8 @@ reply arrives -- the C call is still reading those handles until then.
 
 ## TypeScript
 
-Typings ship beside the modules: `import * as cad from 'cadaclysm'` and
-`import * as bs from 'cadaclysm/blacksmith'`.
+Typings ship beside the modules: `import * as cad from 'cadaclysm'`,
+`import * as bs from 'cadaclysm/blacksmith'` and `import * as view from 'cadaclysm/view'`.
 
 ## Tests and the smoke program
 

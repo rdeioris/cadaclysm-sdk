@@ -87,7 +87,7 @@ if not pcall(ffi.typeof, "struct CadaclysmBlacksmithMesh") then
 end
 
 --- This file's own version (the workspace's); `version()` is the loaded library's.
-M.__version__ = "0.4.4"
+M.__version__ = "0.10.0"
 
 --- What the ABI returns for "no such face" and uses for "the whole solid".
 M.NONE = 0xFFFFFFFF
@@ -97,6 +97,10 @@ M.UNITS = { m = 0, mm = 1, ["in"] = 2 }
 
 local NONE = M.NONE
 local UNITS = M.UNITS
+
+-- `Assembly:pair`'s `pitch` when the caller gives none: the C ABI reads a NaN pitch as
+-- "not given", the same way Python's wrapper passes `float("nan")`.
+local NAN = 0 / 0
 
 -- ---- errors -------------------------------------------------------------------
 
@@ -304,6 +308,7 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_unchamfer", "cadaclysm_blacksmith_split", "cadaclysm_blacksmith_split_by_plane",
   "cadaclysm_blacksmith_lump_count", "cadaclysm_blacksmith_lump", "cadaclysm_blacksmith_face_count",
   "cadaclysm_blacksmith_select_face", "cadaclysm_blacksmith_face_frame", "cadaclysm_blacksmith_face_ref",
+  "cadaclysm_blacksmith_mass_properties",
   "cadaclysm_blacksmith_find_face", "cadaclysm_blacksmith_coloured",
   "cadaclysm_blacksmith_profile_coloured", "cadaclysm_blacksmith_profile_colour",
   "cadaclysm_blacksmith_colour",
@@ -335,6 +340,32 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_assembly_new", "cadaclysm_blacksmith_assembly_free", "cadaclysm_blacksmith_assembly_name",
   "cadaclysm_blacksmith_assembly_place_solid", "cadaclysm_blacksmith_assembly_place_assembly",
   "cadaclysm_blacksmith_assembly_step", "cadaclysm_blacksmith_assembly_link", "cadaclysm_blacksmith_assembly_joint",
+  "cadaclysm_blacksmith_assembly_pair", "cadaclysm_blacksmith_assembly_state", "cadaclysm_blacksmith_assembly_sequence",
+  "cadaclysm_blacksmith_assembly_base",
+  "cadaclysm_blacksmith_pair_freedom_count",
+  "cadaclysm_blacksmith_solid_bounds_box", "cadaclysm_blacksmith_box_moved", "cadaclysm_blacksmith_box_overlaps",
+  "cadaclysm_blacksmith_boxes_apart", "cadaclysm_blacksmith_collider_new", "cadaclysm_blacksmith_collider_free",
+  "cadaclysm_blacksmith_collider_group_count", "cadaclysm_blacksmith_collider_stats", "cadaclysm_blacksmith_collider_check",
+  "cadaclysm_blacksmith_collisions_free", "cadaclysm_blacksmith_collisions_count", "cadaclysm_blacksmith_collisions_hit",
+  "cadaclysm_blacksmith_collisions_solid",
+  "cadaclysm_blacksmith_profile_to_arcs", "cadaclysm_blacksmith_profile_offset", "cadaclysm_blacksmith_solid_section",
+  "cadaclysm_blacksmith_tool_flat", "cadaclysm_blacksmith_tool_ball", "cadaclysm_blacksmith_tool_drill",
+  "cadaclysm_blacksmith_tool_with_ramp_angle", "cadaclysm_blacksmith_tool_free",
+  "cadaclysm_blacksmith_stock_box", "cadaclysm_blacksmith_stock_around", "cadaclysm_blacksmith_stock_free",
+  "cadaclysm_blacksmith_job_new", "cadaclysm_blacksmith_job_set_clearance", "cadaclysm_blacksmith_job_set_tolerance",
+  "cadaclysm_blacksmith_job_set_spindle_dwell", "cadaclysm_blacksmith_job_set_resolution", "cadaclysm_blacksmith_job_set_name",
+  "cadaclysm_blacksmith_job_face", "cadaclysm_blacksmith_job_contour", "cadaclysm_blacksmith_job_pocket",
+  "cadaclysm_blacksmith_job_drill", "cadaclysm_blacksmith_job_gcode", "cadaclysm_blacksmith_job_camotics",
+  "cadaclysm_blacksmith_job_free",
+  "cadaclysm_blacksmith_programs_count", "cadaclysm_blacksmith_programs_tool", "cadaclysm_blacksmith_programs_name",
+  "cadaclysm_blacksmith_programs_text", "cadaclysm_blacksmith_programs_free",
+  "cadaclysm_blacksmith_job_machine", "cadaclysm_blacksmith_report_count", "cadaclysm_blacksmith_report_kind",
+  "cadaclysm_blacksmith_report_at", "cadaclysm_blacksmith_report_size", "cadaclysm_blacksmith_report_reason",
+  "cadaclysm_blacksmith_report_region", "cadaclysm_blacksmith_report_text", "cadaclysm_blacksmith_report_free",
+  "cadaclysm_blacksmith_job_operations", "cadaclysm_blacksmith_operations_count", "cadaclysm_blacksmith_operations_kind",
+  "cadaclysm_blacksmith_operations_tool", "cadaclysm_blacksmith_operations_param_count",
+  "cadaclysm_blacksmith_operations_param_name", "cadaclysm_blacksmith_operations_param_value",
+  "cadaclysm_blacksmith_operations_free",
 }
 
 local C
@@ -504,6 +535,22 @@ local function names(list, call, param)
   return out, n
 end
 
+-- How many items `value` holds as a list (a table that is not a record -- an Edge, a
+-- Solid, {foo = "bar"} -- a key that is not a whole number from 1), or nil when it is
+-- not one at all (including a bare string, which `type` already marks as not a table,
+-- so it is refused rather than walked a character at a time). Shared by `pair`'s
+-- `ranges` and `state`'s `rows`, which both need this same list-or-refused check
+-- ahead of any kernel call.
+local function list_count(value)
+  if type(value) ~= "table" then return nil end
+  local n = 0
+  for k in pairs(value) do
+    if type(k) ~= "number" or k < 1 or k ~= math.floor(k) then return nil end
+    n = n + 1
+  end
+  return n
+end
+
 local function triple(v, what)
   local d = doubles(v, 3, what)
   return d[0], d[1], d[2]
@@ -514,20 +561,25 @@ local function pair(v, what)
   return d[0], d[1]
 end
 
--- (r, g, b) from "#rgb", "#rrggbb" or three numbers; the range is the library's to check.
+-- r, g, b in 0..1 from colour text -- "#rgb", "#rrggbb" or a CSS colour name -- read by the
+-- library's own parser; nil if it refused the text.
+local function colour_text(text)
+  local out = ffi.new("double[3]")
+  if lib().cadaclysm_blacksmith_parse_colour(text, out) then return out[0], out[1], out[2] end
+  return nil
+end
+
+-- (r, g, b) from "#rgb", "#rrggbb", a CSS colour name or three numbers; the range is the
+-- library's to check.
 local function rgb(colour)
   if type(colour) == "string" then
-    local h = colour:match("^%s*(.-)%s*$")
-    if h:sub(1, 1) == "#" then h = h:sub(2) end
-    if (#h == 3 or #h == 6) and not h:find("[^0-9a-fA-F]") then
-      if #h == 3 then h = h:gsub(".", "%0%0") end
-      return tonumber(h:sub(1, 2), 16) / 255, tonumber(h:sub(3, 4), 16) / 255, tonumber(h:sub(5, 6), 16) / 255
-    end
+    local r, g, b = colour_text(colour)
+    if r then return r, g, b end
   elseif type(colour) == "table" and #colour == 3 then
     local r, g, b = tonumber(colour[1]), tonumber(colour[2]), tonumber(colour[3])
     if r and g and b then return r, g, b end
   end
-  raise('coloured: a colour is "#rgb", "#rrggbb" or (r, g, b) in 0..1, not ' .. repr(colour))
+  raise('coloured: a colour is "#rgb", "#rrggbb", a CSS colour name or (r, g, b) in 0..1, not ' .. repr(colour))
 end
 
 -- The reader module, cadaclysm.lua, with a message saying where it lives.
@@ -635,6 +687,13 @@ end
 --- (`cadaclysm.Brep.layout_id()`) -- the two from the same release.
 function M.brep_layout_id()
   return text(lib().cadaclysm_blacksmith_brep_layout_id())
+end
+
+--- How many freedoms a pair kind has, so a caller can size `Assembly:pair`'s `ranges`.
+--- 0 for an unknown name, and for `"fully_constrained"`, which has none.
+function M.pair_freedom_count(kind)
+  if type(kind) ~= "string" then raise("pair_freedom_count: kind must be a string, got " .. repr(kind)) end
+  return tonumber(lib().cadaclysm_blacksmith_pair_freedom_count(kind))
 end
 
 -- ---- held tessellations -----------------------------------------------------------
@@ -1283,8 +1342,8 @@ function Profile:translate(dx, dy)
   return new_profile(lib().cadaclysm_blacksmith_translate_profile(self._handle, dx, dy))
 end
 
---- This outline coloured -- `colour` is "#rgb", "#rrggbb" or {r, g, b} in 0..1: how
---- it is drawn. The verbs that make a profile from one carry it; a solid made from it
+--- This outline coloured -- `colour` is "#rgb", "#rrggbb", a CSS colour name or {r, g, b}
+--- in 0..1: how it is drawn. The verbs that make a profile from one carry it; a solid made from it
 --- takes nothing.
 function Profile:coloured(colour)
   local r, g, b = rgb(colour)
@@ -1335,6 +1394,27 @@ end
 function Profile:common(other, tolerance)
   if tolerance == nil then tolerance = 1e-6 end
   return profile_list(lib().cadaclysm_blacksmith_profile_common(self._handle, profile_handle(other, "common"), tolerance), "profile_common")
+end
+
+--- This profile with every free-form side (a Bezier, a conic, a NURBS) replaced by lines
+--- and arcs within `tolerance` of it -- what a G-code writer can say. Lines and arcs pass
+--- through as they are, every loop closes on itself exactly, holes are converted the same
+--- way. `tolerance` defaults to 0.01. Raises `BuildError` for a tolerance not positive and
+--- finite, or a spline that does not evaluate.
+function Profile:to_arcs(tolerance)
+  if tolerance == nil then tolerance = 0.01 end
+  return new_profile(lib().cadaclysm_blacksmith_profile_to_arcs(self._handle, tolerance), "profile_to_arcs")
+end
+
+--- This profile grown by `distance` (shrunk where it is negative), as zero or more
+--- profiles, all lines and arcs: outward corners rounded by |distance|, holes moving
+--- against the boundary (a hole shrinks as the profile grows). Free-form sides are fitted
+--- to `tolerance` first (`to_arcs`). A shrink that eats the whole profile is an empty
+--- table. `tolerance` defaults to 0.01. Raises `BuildError` for a distance not finite, a
+--- tolerance not positive and finite, a loop with no sides, or loops that cross or touch.
+function Profile:offset(distance, tolerance)
+  if tolerance == nil then tolerance = 0.01 end
+  return profile_list(lib().cadaclysm_blacksmith_profile_offset(self._handle, distance, tolerance), "profile_offset")
 end
 
 --- `text` set in a font, one profile per closed shape -- a letter with its
@@ -1670,12 +1750,16 @@ local SVG_VIEWS = {
 --- same value.
 local SVG_TRANSPARENT = 0xffffffff
 
---- A colour as the ABI's packed `0xRRGGBB`: `"#rrggbb"` or a `{r, g, b}` table.
-local function svg_colour(colour)
+--- A colour as the ABI's packed `0xRRGGBB`: `"#rrggbb"`, a CSS colour name or a `{r, g,
+--- b}` table (0..255). `what` names the field in the error, e.g. "svg: stroke".
+local function svg_colour(colour, what)
   if type(colour) == "string" then
-    local hex = colour:gsub("^#", "")
-    if #hex ~= 6 then raise(("colour '%s': '#rrggbb' or {r, g, b}"):format(colour)) end
-    return tonumber(hex, 16)
+    local r, g, b = colour_text(colour)
+    if r then
+      return math.floor(r * 255 + 0.5) * 65536 + math.floor(g * 255 + 0.5) * 256 + math.floor(b * 255 + 0.5)
+    end
+    raise(("%s: a colour is \"#rgb\", \"#rrggbb\", a CSS colour name or {r, g, b} in 0..255, not %s")
+      :format(what, repr(colour)))
   end
   return bit.bor(bit.lshift(math.floor(colour[1]), 16), bit.lshift(math.floor(colour[2]), 8), math.floor(colour[3]))
 end
@@ -1701,12 +1785,20 @@ local function svg_options(words)
   o.width, o.height = size[1], size[2]
   o.margin = words.margin or 0.05
   o.tolerance = words.tolerance or 0.1
-  o.stroke = words.stroke ~= nil and svg_colour(words.stroke) or 0x000000
+  o.stroke = words.stroke ~= nil and svg_colour(words.stroke, "svg: stroke") or 0x000000
   o.stroke_width = words.width or 1.0
-  o.background = words.background ~= nil and svg_colour(words.background) or SVG_TRANSPARENT
+  o.background = words.background ~= nil and svg_colour(words.background, "svg: background") or SVG_TRANSPARENT
   local edges = words.edges
   if edges == nil then edges = true end
-  o.flags = bit.bor(edges and 1 or 0, words.curves and 2 or 0, words.isocurves and 4 or 0, words.polylines and 8 or 0)
+  -- `silhouettes` (16) is ON by default, as the library is: a sphere's and a torus's
+  -- only curves are the seams where their one face meets itself, which are not edges
+  -- of the body and are never drawn, so without the outline those two draw a blank
+  -- page. A line set in its own right -- `silhouettes` with `edges = false` draws the
+  -- outline alone, and `silhouettes = false` draws the lines alone.
+  local silhouettes = words.silhouettes
+  if silhouettes == nil then silhouettes = true end
+  o.flags = bit.bor(edges and 1 or 0, words.curves and 2 or 0, words.isocurves and 4 or 0, words.polylines and 8 or 0,
+                    silhouettes and 16 or 0)
   return o
 end
 
@@ -1730,7 +1822,8 @@ local Solid_get = {}
 class(Solid, Solid_get)
 M.Solid = Solid
 
-local Edge, Curve, Intersection, Chain, Overlap, SolidHits, Piece, Manifold, Selector
+local Edge, Curve, Intersection, Chain, Overlap, SolidHits, Piece, Manifold, Mass, Selector
+local Box, ColliderStats, CollisionHit, Collider, box_of, box_words
 
 local function new_solid(handle, what)
   checked(handle, what or "solid")
@@ -1758,6 +1851,13 @@ function Solid:_h()
   if h == nil then raise("solid: closed") end
   return h
 end
+
+--- Draw it with the view library in use, by handle: blocks until the window is closed on the
+--- GPU library; on the terminal, prints a still. Options: view, azimuth, elevation, zoom, up,
+--- edges, width, height, title, rgb, tolerance (see cadaclysm_view.lua).
+function Solid:show(options) return require(prefix .. "cadaclysm_view")._present(self, options, false) end
+--- Orbit it until the window is closed; the camera it was left at and the last pick.
+function Solid:view(options) return require(prefix .. "cadaclysm_view")._present(self, options, true) end
 
 -- -- building
 
@@ -2161,6 +2261,17 @@ function Solid:common(other, tolerance, progress, merge)
   return merged(new_solid(h), merge)
 end
 
+--- This solid cut by the plane Z = `z`: its closed outlines there, in XY, nested into
+--- profiles with holes (boundaries counter-clockwise, holes clockwise), a line or a circle
+--- crossing kept exact and any other curve as lines within `tolerance`. A plane that misses
+--- the solid is an empty table. `tolerance` defaults to 0.05. Raises `BuildError` for a `z`
+--- not finite, a tolerance not positive and finite, a face lying in the plane (section a
+--- little above or below it), or a crossing that does not close.
+function Solid:section(z, tolerance)
+  if tolerance == nil then tolerance = 0.05 end
+  return profile_list(lib().cadaclysm_blacksmith_solid_section(self:_h(), z, tolerance), "solid_section")
+end
+
 --- `self` (a sheet or a solid) cut along the closed `tool`'s boundary and the
 --- pieces on one side thrown away: `keep` "outside" (default) keeps what lies
 --- outside the tool -- a hole punched through -- and "inside" what lies within
@@ -2338,6 +2449,19 @@ function Solid:bounds_at64(tolerance)
   local lo, hi = ffi.new("double[3]"), ffi.new("double[3]")
   if not lib().cadaclysm_blacksmith_bounds64(self:_h(), tolerance, lo, hi) then fail("bounds64") end
   return { { lo[0], lo[1], lo[2] }, { hi[0], hi[1], hi[2] } }
+end
+
+--- `bounds_box_at(0.05)`.
+function Solid_get.bounds_box(self)
+  return self:bounds_box_at(0.05)
+end
+
+--- This solid's box at `tolerance`: its boolean mesh, padded by twice that -- the
+--- broad phase's own shape, cheaper to move and test than the solid itself.
+function Solid:bounds_box_at(tolerance)
+  local raw = ffi.new("CadaclysmBlacksmithBox")
+  if not lib().cadaclysm_blacksmith_solid_bounds_box(self:_h(), tolerance, raw) then fail("bounds_box") end
+  return box_of(raw)
 end
 
 --- How many edges of the mesh at `tolerance` (default 0.05) are bound by
@@ -2605,6 +2729,43 @@ function Solid:face_frame(face)
   return t
 end
 
+--- What the solid measures, per unit density: `area`, `volume`, `centroid`,
+--- `inertia` and the principal moments and axes, each beside a bound on its own
+--- error, and the flags `closed`, `inverted`, `accuracy_met` and `from_mesh`.
+--- `accuracy` is relative; nil or 0 asks for the default, a part in ten million.
+---
+--- `volume`, `centroid`, `inertia` and `principal_moments` mean something only
+--- where `closed` -- on a sheet they are zero and `area` is still measured. A
+--- body's mass is `density * volume` and the inertia scales the same way:
+--- nothing here assumes a density. Tables are 1-based, `inertia` row-major.
+function Solid:mass(accuracy)
+  local out = ffi.new("CadaclysmBlacksmithMassProperties[1]")
+  if not lib().cadaclysm_blacksmith_mass_properties(self:_h(), accuracy or 0, out) then fail("mass") end
+  local m = out[0]
+  local function triple(a) return { a[0], a[1], a[2] } end
+  local function nine(a)
+    local t = {}
+    for i = 0, 8 do t[i + 1] = a[i] end
+    return t
+  end
+  return Mass.new({
+    closed = m.closed ~= 0,
+    inverted = m.inverted ~= 0,
+    accuracy_met = m.accuracy_met ~= 0,
+    from_mesh = m.from_mesh ~= 0,
+    area = m.area,
+    area_error = m.area_error,
+    volume = m.volume,
+    volume_error = m.volume_error,
+    centroid = triple(m.centroid),
+    centroid_error = m.centroid_error,
+    inertia = nine(m.inertia),
+    inertia_error = m.inertia_error,
+    principal_moments = triple(m.principal_moments),
+    principal_axes = nine(m.principal_axes),
+  })
+end
+
 --- Face `face` by what it is, eight numbers: the surface's kind (plane 0,
 --- cylinder 1, cone 2, sphere 3, torus 4, NURBS 5, revolution 6, extrusion 7,
 --- sum 8), a point on the surface at the face's middle (x y z), the outward
@@ -2658,8 +2819,8 @@ function Solid:_colour(face)
   return nil
 end
 
---- This solid coloured -- `colour` is "#rgb", "#rrggbb" or {r, g, b} in 0..1 --
---- or with `face` (an index, as `select_face` returns) just that face, whose
+--- This solid coloured -- `colour` is "#rgb", "#rrggbb", a CSS colour name or {r, g, b}
+--- in 0..1 -- or with `face` (an index, as `select_face` returns) just that face, whose
 --- colour then wins over the solid's. What is made from a coloured solid inherits.
 function Solid:coloured(colour, face)
   local r, g, b = rgb(colour)
@@ -3121,6 +3282,54 @@ Manifold.__tostring = function(self)
     tostring(self.is_closed))
 end
 
+--- What a solid measures, per unit density, each figure beside a bound on its own
+--- error: what `Solid:mass` returns.
+---
+--- Per unit density is the primitive: a body's weight is `density * volume` and
+--- its inertia scales the same way, so `weight` is the only figure that takes
+--- one. `volume`, `centroid`, `inertia` and `principal_moments` mean something
+--- only where `closed`; where `accuracy_met` is false the refinement stopped
+--- early and the figures are honest but less certain, which the errors say.
+--- Tables are 1-based, `inertia` and `principal_axes` row-major.
+---@class Mass
+---@field closed boolean           the volume-side figures mean something
+---@field inverted boolean         every face pointed inward; given as if not
+---@field accuracy_met boolean     every error came under the accuracy asked for
+---@field from_mesh boolean        measured on a mesh, so the errors are the rounding floor
+---@field area number
+---@field area_error number        a bound on `area`'s own error
+---@field volume number            where `closed`
+---@field volume_error number      a bound on `volume`'s own error
+---@field centroid number[]        the volume's, where `closed`
+---@field centroid_error number    a bound on the distance to the true centroid
+---@field inertia number[]         nine, about the centroid, products negated
+---@field inertia_error number     a bound on every entry
+---@field principal_moments number[]  three, ascending
+---@field principal_axes number[]  nine, unit, right-handed, row `i` for moment `i`
+Mass = {}
+class(Mass)
+callable(Mass)
+M.Mass = Mass
+
+function Mass.new(fields)
+  return setmetatable(fields, Mass)
+end
+
+--- `density * volume`, in whatever units the model and the density agree on.
+---@param density number
+---@return number
+function Mass:weight(density)
+  return density * self.volume
+end
+
+Mass.__tostring = function(self)
+  if not self.closed then
+    return ("Mass(open, area=%.6g+-%.3g)"):format(self.area, self.area_error)
+  end
+  return ("Mass(area=%.6g+-%.3g, volume=%.6g+-%.3g)"):format(
+    self.area, self.area_error, self.volume, self.volume_error)
+end
+
 --- Where a hit lands on one side: a profile's `loop_index` (0 the boundary or
 --- the open chain, then the holes in the order they were added), `segment`, and
 --- `t` from 0 to 1 along it, with `face` NONE -- or a solid's `face` at (`u`,
@@ -3249,6 +3458,256 @@ end
 
 Overlap.__tostring = function(self)
   return ("Overlap(faces=(%d, %d), loops=%d)"):format(self.faces[1], self.faces[2], #self.loops)
+end
+
+-- ---- collider ---------------------------------------------------------------------
+
+--- An axis-aligned box: `lo` and `hi`, three numbers each. The broad phase's own shape
+--- (`Solid.bounds_box`, `Collider`'s own boxes): cheap to move and to test against
+--- another, before anything is meshed.
+---@class Box
+---@field lo number[]  {x, y, z}
+---@field hi number[]  {x, y, z}
+Box = {}
+class(Box)
+callable(Box)
+M.Box = Box
+
+function Box.new(lo, hi)
+  return setmetatable({
+    lo = { number(lo[1], "lo"), number(lo[2], "lo"), number(lo[3], "lo") },
+    hi = { number(hi[1], "hi"), number(hi[2], "hi"), number(hi[3], "hi") },
+  }, Box)
+end
+
+box_of = function(raw)
+  return Box.new({ tonumber(raw.lo[0]), tonumber(raw.lo[1]), tonumber(raw.lo[2]) },
+    { tonumber(raw.hi[0]), tonumber(raw.hi[1]), tonumber(raw.hi[2]) })
+end
+
+box_words = function(box)
+  local raw = ffi.new("CadaclysmBlacksmithBox")
+  raw.lo[0], raw.lo[1], raw.lo[2] = box.lo[1], box.lo[2], box.lo[3]
+  raw.hi[0], raw.hi[1], raw.hi[2] = box.hi[1], box.hi[2], box.hi[3]
+  return raw
+end
+
+--- This box moved by `frame` (rigid), boxed again on the world axes -- not this box's
+--- corners individually moved, which would not in general be a box at all: the
+--- *bounding* box of the moved corners.
+function Box:moved(frame)
+  local raw, f, out = box_words(self), frame_arg(frame), ffi.new("CadaclysmBlacksmithBox")
+  if not lib().cadaclysm_blacksmith_box_moved(raw, f, out) then fail("box_moved") end
+  return box_of(out)
+end
+
+--- Whether this box and `other` share a point (touching counts).
+function Box:overlaps(other)
+  return lib().cadaclysm_blacksmith_box_overlaps(box_words(self), box_words(other))
+end
+
+Box.__tostring = function(self)
+  return ("Box(lo=(%g, %g, %g), hi=(%g, %g, %g))"):format(self.lo[1], self.lo[2], self.lo[3], self.hi[1], self.hi[2], self.hi[3])
+end
+
+--- True only if box `a` at `frame_a` and box `b` at `frame_b` cannot touch -- a
+--- separating axis among the boxes' face normals and edge-direction crosses; touching
+--- is not apart. Sharper than moving each box and asking `Box:overlaps`, which boxes the
+--- *result* on the world axes again and so can call two oriented boxes overlapping when
+--- they are not (two unit boxes, the second turned 45 degrees about z and moved 2.3
+--- along x: their world boxes overlap, but the boxes themselves do not touch).
+function M.boxes_apart(a, frame_a, b, frame_b)
+  local ra, rb = box_words(a), box_words(b)
+  local fa, fb = frame_arg(frame_a), frame_arg(frame_b)
+  local apart = ffi.new("bool[1]")
+  if not lib().cadaclysm_blacksmith_boxes_apart(ra, fa, rb, fb, apart) then fail("boxes_apart") end
+  return apart[0]
+end
+
+--- Counts of one `Collider:check` call: the candidate pairs `considered`, how many of
+--- them the world boxes and the oriented boxes cleared, how many the share left to
+--- another call, how the rest were answered (`cached`, `closed_form`, `meshed`), and how
+--- many were `refused`. `confirmed` is the subset of `meshed` that were thin mesh-path
+--- overlaps sent to `Solid:common` itself for a final answer.
+---@class ColliderStats
+---@field considered integer
+---@field world_boxes integer
+---@field oriented_boxes integer
+---@field skipped_share integer
+---@field cached integer
+---@field closed_form integer
+---@field meshed integer
+---@field refused integer
+---@field confirmed integer
+ColliderStats = {}
+class(ColliderStats)
+M.ColliderStats = ColliderStats
+
+local function collider_stats_of(raw)
+  return setmetatable({
+    considered = tonumber(raw.considered), world_boxes = tonumber(raw.world_boxes),
+    oriented_boxes = tonumber(raw.oriented_boxes), skipped_share = tonumber(raw.skipped_share),
+    cached = tonumber(raw.cached), closed_form = tonumber(raw.closed_form),
+    meshed = tonumber(raw.meshed), refused = tonumber(raw.refused), confirmed = tonumber(raw.confirmed),
+  }, ColliderStats)
+end
+
+ColliderStats.__tostring = function(self)
+  return ("ColliderStats(considered=%d, world_boxes=%d, oriented_boxes=%d, skipped_share=%d, cached=%d, "
+    .. "closed_form=%d, meshed=%d, refused=%d, confirmed=%d)"):format(self.considered, self.world_boxes,
+    self.oriented_boxes, self.skipped_share, self.cached, self.closed_form, self.meshed, self.refused, self.confirmed)
+end
+
+--- One pair `Collider:check` found overlapping (`overlap` true), or could not decide
+--- (`overlap` false; `text` says why, empty for an overlap). `positions`/`normals` are
+--- {x, y, z} triples, three per triangle (unwelded); `indices` indexes them (from zero)
+--- -- all empty for a refused pair. `depth` is the thinnest side of the overlap's world
+--- box, 0 for a refused pair.
+---
+--- `solid()` rebuilds the exact overlap now, from the frames `Collider:check` found it
+--- at; this keeps the collisions handle behind every hit of one `check` call alive
+--- until the last of them is collected, freeing it only then (the handle is shared
+--- `ffi.gc`'d cdata: LuaJIT frees it only once nothing references it). Named
+--- `CollisionHit` rather than the plainer `Hit`, which this module already uses for a
+--- curve-crossing result (`Solid:hits`).
+---@class CollisionHit
+---@field a integer
+---@field b integer
+---@field overlap boolean
+---@field kind string
+---@field depth number
+---@field text string
+---@field positions number[]
+---@field normals number[]
+---@field indices integer[]
+CollisionHit = {}
+class(CollisionHit)
+M.CollisionHit = CollisionHit
+
+function CollisionHit.of(raw, collisions, index)
+  local indices = {}
+  if raw.indices ~= nil then
+    for k = 0, tonumber(raw.index_count) - 1 do indices[k + 1] = tonumber(raw.indices[k]) end
+  end
+  return setmetatable({
+    a = tonumber(raw.a), b = tonumber(raw.b), overlap = raw.overlap,
+    kind = raw.overlap and "overlap" or "refused",
+    depth = tonumber(raw.depth),
+    text = text(raw.text),
+    positions = points_at(raw.positions, tonumber(raw.vertex_count)),
+    normals = points_at(raw.normals, tonumber(raw.vertex_count)),
+    indices = indices,
+    _collisions = collisions, _index = index,
+  }, CollisionHit)
+end
+
+--- The exact overlap of this pair at the frames `Collider:check` found it at, as a new
+--- solid. Raises for a refused pair (`overlap` false) or a collisions handle already
+--- closed some other way.
+function CollisionHit:solid()
+  local h = lib().cadaclysm_blacksmith_collisions_solid(self._collisions, self._index)
+  return new_solid(h, "collisions_solid")
+end
+
+CollisionHit.__tostring = function(self)
+  return ("CollisionHit(a=%d, b=%d, overlap=%s, depth=%g)"):format(self.a, self.b, tostring(self.overlap), self.depth)
+end
+
+--- Parts meshed once, asked pose after pose which of them interfere: `solids` at rest,
+--- meshed at `tolerance` (0.05), `groups` one group index per solid (nil: each solid its
+--- own group -- `check` then takes one frame per solid), `allowed` pairs of part indices
+--- never tested (designed contacts, by part index, flat: {a0, b0, a1, b1, ...}).
+--- `close()` frees this handle; so does the garbage collector.
+---@class Collider
+Collider = {}
+local Collider_get = {}
+class(Collider, Collider_get)
+callable(Collider)
+M.Collider = Collider
+
+local function free_collider(h)
+  lib().cadaclysm_blacksmith_collider_free(h)
+end
+
+function Collider.new(solids, tolerance, groups, allowed)
+  if tolerance == nil then tolerance = 0.05 end
+  local count = #solids
+  if groups ~= nil and #groups ~= count then
+    raise(("Collider: groups must have one entry per solid (%d solids, %d groups)"):format(count, #groups))
+  end
+  local parts = ffi.new("const struct CadaclysmBlacksmithSolid *[?]", math.max(count, 1))
+  for i, s in ipairs(solids) do parts[i - 1] = solid_handle(s, "collider") end
+  local groups_arr = nil
+  if groups ~= nil then
+    groups_arr = ffi.new("uint32_t[?]", #groups)
+    for i, g in ipairs(groups) do groups_arr[i - 1] = g end
+  end
+  local allowed_flat = allowed or {}
+  local allowed_arr = ffi.new("uint32_t[?]", math.max(#allowed_flat, 1))
+  for i, v in ipairs(allowed_flat) do allowed_arr[i - 1] = v end
+  local h = lib().cadaclysm_blacksmith_collider_new(parts, count, tolerance, groups_arr, allowed_arr, #allowed_flat / 2)
+  checked(h, "collider_new")
+  return setmetatable({ _ptr = ffi.gc(h, free_collider) }, Collider)
+end
+
+--- Free the collider. Idempotent; a `CollisionHit`'s own `solid()` still works
+--- afterwards -- it keeps the collisions handle, not this one.
+function Collider:close()
+  local h = rawget(self, "_ptr")
+  if h ~= nil then
+    self._ptr = nil
+    ffi.gc(h, nil)
+    lib().cadaclysm_blacksmith_collider_free(h)
+  end
+end
+
+function Collider:_h()
+  local h = rawget(self, "_ptr")
+  if h == nil then raise("collider: closed") end
+  return h
+end
+
+--- How many groups this collider has -- the highest group index past `new`, plus one.
+function Collider_get.group_count(self)
+  return tonumber(lib().cadaclysm_blacksmith_collider_group_count(self:_h()))
+end
+
+--- Counts of the last `check` call (all zero before the first one).
+function Collider_get.stats(self)
+  local raw = ffi.new("CadaclysmBlacksmithColliderStats")
+  if not lib().cadaclysm_blacksmith_collider_stats(self:_h(), raw) then fail("collider_stats") end
+  return collider_stats_of(raw)
+end
+
+--- The pairs that interfere, or could not be decided, with each group placed at its
+--- matching frame in `frames` (one per group, in group order). `share`: nil, every pair
+--- past the box filters is decided now; {k, n}, only those whose index is `k` modulo `n`
+--- (the shares of one pose are disjoint and cover it -- split one `check` across `n`
+--- workers).
+function Collider:check(frames, share)
+  local h = self:_h()
+  local n = #frames
+  local flat = ffi.new("double[?]", math.max(n * 12, 1))
+  for i, f in ipairs(frames) do
+    local fv = frame_arg(f)
+    for k = 0, 11 do flat[(i - 1) * 12 + k] = fv[k] end
+  end
+  local share_k, share_n = 0, 0
+  if share ~= nil then share_k, share_n = share[1], share[2] end
+  local found = lib().cadaclysm_blacksmith_collider_check(h, flat, n, share_k, share_n)
+  if found == nil then fail("collider_check") end
+  local count = tonumber(lib().cadaclysm_blacksmith_collisions_count(found))
+  if count == 0 then
+    lib().cadaclysm_blacksmith_collisions_free(found)
+    return {}
+  end
+  local kept = ffi.gc(found, function(hh) lib().cadaclysm_blacksmith_collisions_free(hh) end)
+  local hits, raw = {}, ffi.new("CadaclysmBlacksmithCollisionHit")
+  for i = 0, count - 1 do
+    if not lib().cadaclysm_blacksmith_collisions_hit(kept, i, raw) then fail("collisions_hit") end
+    hits[#hits + 1] = CollisionHit.of(raw, kept, i)
+  end
+  return hits
 end
 
 ---@class Hit
@@ -3785,6 +4244,156 @@ function Assembly:joint(name, start, end_)
   if not lib().cadaclysm_blacksmith_assembly_joint(self:_h(), name, start, end_) then fail("assembly_joint") end
 end
 
+--- Give joint `joint` its pair: `kind` (a name of the kind table -- "revolute",
+--- "prismatic", "cylindrical", "screw", "spherical", "spherical_with_pin", "planar",
+--- "universal", "homokinetic", "fully_constrained" or "unconstrained"), the contact
+--- frame at rest (twelve numbers, four triples or a `Frame`), and an optional `opts`
+--- table: `end_frame` (the frame the pair reaches at its rest values; `frame` itself
+--- when left nil), `ranges` (an array `{{lower, upper}, ...}`, one entry per freedom of
+--- `kind`, kept in that order; either side `nil` for unbounded; left nil entirely for a
+--- kind that allows none), and `pitch` (required and non-zero for "screw", refused for
+--- any other kind). Raises `BuildError` with the kernel's own text when a rule refuses
+--- it; the assembly is then unchanged.
+function Assembly:pair(joint_name, kind, frame, opts)
+  if type(joint_name) ~= "string" then raise("assembly: pair's joint must be a string, got " .. repr(joint_name)) end
+  if type(kind) ~= "string" then raise("assembly: pair's kind must be a string, got " .. repr(kind)) end
+  if opts ~= nil and type(opts) ~= "table" then raise("assembly: pair's opts must be a table, got " .. repr(opts)) end
+  opts = opts or {}
+  local f = frame_arg(frame)
+  local ef = nil
+  if opts.end_frame ~= nil then ef = frame_arg(opts.end_frame) end
+
+  local ranges = opts.ranges
+  local lower, upper, has_lower, has_upper, freedom_count = nil, nil, nil, nil, 0
+  if ranges ~= nil then
+    freedom_count = list_count(ranges)
+    if freedom_count == nil then
+      raise("pair: ranges must be a list of {lower, upper} pairs, not " .. repr(ranges))
+    end
+    local size = math.max(freedom_count, 1)
+    lower, upper = ffi.new("double[?]", size), ffi.new("double[?]", size)
+    has_lower, has_upper = ffi.new("bool[?]", size), ffi.new("bool[?]", size)
+    for i = 1, freedom_count do
+      local r = ranges[i]
+      if type(r) ~= "table" then
+        raise(("pair: ranges[%d] must be a table {lower, upper}, not %s"):format(i, repr(r)))
+      end
+      local lo, hi = r[1], r[2]
+      if lo == nil then
+        lower[i - 1], has_lower[i - 1] = 0.0, false
+      else
+        lower[i - 1], has_lower[i - 1] = number(lo, ("pair: ranges[%d][1]"):format(i)), true
+      end
+      if hi == nil then
+        upper[i - 1], has_upper[i - 1] = 0.0, false
+      else
+        upper[i - 1], has_upper[i - 1] = number(hi, ("pair: ranges[%d][2]"):format(i)), true
+      end
+    end
+  end
+
+  local pitch_arg = NAN
+  if opts.pitch ~= nil then pitch_arg = number(opts.pitch, "pair: pitch") end
+
+  if not lib().cadaclysm_blacksmith_assembly_pair(
+    self:_h(), joint_name, kind, f, ef, lower, upper, has_lower, has_upper, freedom_count, pitch_arg
+  ) then
+    fail("assembly_pair")
+  end
+end
+
+--- Add a named state to this assembly: `rows` is an array `{{joint, {values}}, ...}`,
+--- kept in that order, each setting one joint to its values in that joint's pair's
+--- freedom order. Raises `BuildError` with the kernel's own text when a rule refuses
+--- it; the assembly is then unchanged.
+function Assembly:state(name, rows)
+  if type(name) ~= "string" then raise("assembly: state's name must be a string, got " .. repr(name)) end
+  local row_count = list_count(rows)
+  if row_count == nil then
+    raise("state: rows must be a list of {joint, values} rows, not " .. repr(rows))
+  end
+  -- `joint_names` stays referenced for the whole call below, so the Lua strings
+  -- `joint_ptrs` now points into cannot be collected.
+  local joint_names = {}
+  local joint_ptrs = ffi.new("const char*[?]", math.max(row_count, 1))
+  local counts = ffi.new("uint32_t[?]", math.max(row_count, 1))
+  local flat = {}
+  for i = 1, row_count do
+    local row = rows[i]
+    if type(row) ~= "table" then
+      raise(("state: rows[%d] must be a table {joint, values}, not %s"):format(i, repr(row)))
+    end
+    local joint_name, values = row[1], row[2]
+    if type(joint_name) ~= "string" then
+      raise(("state: rows[%d][1] is not a joint name: %s"):format(i, repr(joint_name)))
+    end
+    local value_count = list_count(values)
+    if value_count == nil then
+      raise(("state: rows[%d][2] must be a list of numbers, not %s"):format(i, repr(values)))
+    end
+    joint_names[i] = joint_name
+    joint_ptrs[i - 1] = joint_name
+    counts[i - 1] = value_count
+    for j = 1, value_count do
+      flat[#flat + 1] = number(values[j], ("state: rows[%d][2][%d]"):format(i, j))
+    end
+  end
+  local values_arr = ffi.new("double[?]", math.max(#flat, 1))
+  for i = 1, #flat do values_arr[i - 1] = flat[i] end
+  if not lib().cadaclysm_blacksmith_assembly_state(self:_h(), name, joint_ptrs, counts, values_arr, row_count) then
+    fail("assembly_state")
+  end
+end
+
+--- Add a named motion sequence to this assembly: `segments` is an array
+--- `{{state, t, interpolation}, ...}`, the state's name, its parameter (non-decreasing)
+--- and one of "undefined", "discontinuous", "synchronous", "linear". The sequence is
+--- closed unless the last segment is "discontinuous". `seconds` (default false) says
+--- the parameter is in seconds, written as a time unit. Raises `BuildError` with the
+--- kernel's own text when a rule refuses it; the assembly is then unchanged.
+function Assembly:sequence(name, segments, seconds)
+  if type(name) ~= "string" then raise("assembly: sequence's name must be a string, got " .. repr(name)) end
+  local count = list_count(segments)
+  if count == nil then
+    raise("sequence: segments must be a list of {state, t, interpolation}, not " .. repr(segments))
+  end
+  local states_ptr = ffi.new("const char*[?]", math.max(count, 1))
+  local interp_ptr = ffi.new("const char*[?]", math.max(count, 1))
+  local ts = ffi.new("double[?]", math.max(count, 1))
+  -- The Lua strings stay referenced for the whole call below.
+  local keep = {}
+  for i = 1, count do
+    local seg = segments[i]
+    if type(seg) ~= "table" then
+      raise(("sequence: segments[%d] must be a table {state, t, interpolation}, not %s"):format(i, repr(seg)))
+    end
+    local state, t, word = seg[1], seg[2], seg[3]
+    if type(state) ~= "string" then
+      raise(("sequence: segments[%d][1] is not a state name: %s"):format(i, repr(state)))
+    end
+    if type(word) ~= "string" then
+      raise(("sequence: segments[%d][3] is not an interpolation word: %s"):format(i, repr(word)))
+    end
+    keep[#keep + 1] = state
+    keep[#keep + 1] = word
+    states_ptr[i - 1] = state
+    interp_ptr[i - 1] = word
+    ts[i - 1] = number(t, ("sequence: segments[%d][2]"):format(i))
+  end
+  if not lib().cadaclysm_blacksmith_assembly_sequence(
+    self:_h(), name, states_ptr, ts, interp_ptr, count, seconds and true or false
+  ) then
+    fail("assembly_sequence")
+  end
+end
+
+--- Declare this assembly's base link. Raises `BuildError` with the kernel's own text
+--- when a rule refuses it; the assembly is then unchanged.
+function Assembly:base(link_name)
+  if type(link_name) ~= "string" then raise("assembly: base's link must be a string, got " .. repr(link_name)) end
+  if not lib().cadaclysm_blacksmith_assembly_base(self:_h(), link_name) then fail("assembly_base") end
+end
+
 --- This assembly, and everything placed under it, as one STEP file: this
 --- assembly the root product, each sub-assembly and each distinct part (the
 --- same solid with the same paint and name) written once, each placement an
@@ -3897,5 +4506,495 @@ function M.write_svg(path, things, words)
   end
   if not ok then fail("svg") end
 end
+
+-- ---- machining -----------------------------------------------------------------------
+
+local function free_tool(p) lib().cadaclysm_blacksmith_tool_free(p) end
+local function free_stock(p) lib().cadaclysm_blacksmith_stock_free(p) end
+local function free_job(p) lib().cadaclysm_blacksmith_job_free(p) end
+
+local function or_nan(v)
+  if v == nil then return 0 / 0 end
+  return v
+end
+
+--- A cutter: Grbl tool `number` (1 to 255, the T word), `diameter` and `flute_length` in
+--- mm, `feed` and `plunge` in mm/min, `rpm` its spindle speed, ramping into its cuts at
+--- `ramp_angle` degrees. Immutable; a `Job` keeps its own copy, so a tool going out of
+--- scope after it is used changes nothing there.
+---@class Tool
+local Tool = {}
+class(Tool)
+M.Tool = Tool
+
+local function new_tool(handle, what)
+  checked(handle, what or "tool")
+  return setmetatable({ _handle = ffi.gc(handle, free_tool) }, Tool)
+end
+
+local function tool_handle(t, what)
+  if type(t) ~= "table" or getmetatable(t) ~= Tool then raise((what or "tool") .. ": expected a Tool, got " .. repr(t)) end
+  return t._handle
+end
+
+local function tool_number(n)
+  n = math.floor(number(n, "number"))
+  if n < 0 then n = 0 end
+  return n
+end
+
+-- `made` at the library's own default ramp angle (3 degrees), turned to `ramp_angle` when
+-- that differs -- the unramped handle freed at once, not left to the collector.
+local function ramped(made, ramp_angle, what)
+  local t = new_tool(made, what)
+  if ramp_angle == 3.0 then return t end
+  -- checked before the free, so a refusal still reads its own last_error
+  local turned = new_tool(lib().cadaclysm_blacksmith_tool_with_ramp_angle(t._handle, ramp_angle), "tool_with_ramp_angle")
+  free_tool(ffi.gc(t._handle, nil))
+  t._handle = nil
+  return turned
+end
+
+--- A flat end mill. `ramp_angle` defaults to 3.0. Raises `BuildError` for a `number`
+--- outside 1..255, a size, feed or speed not positive and finite, or a `ramp_angle`
+--- outside (0, 90].
+function Tool.flat(number_, diameter, flute_length, feed, plunge, rpm, ramp_angle)
+  if ramp_angle == nil then ramp_angle = 3.0 end
+  local made = lib().cadaclysm_blacksmith_tool_flat(tool_number(number_), diameter, flute_length, feed, plunge, rpm)
+  return ramped(made, ramp_angle, "tool_flat")
+end
+
+--- A ball end mill, as `Tool.flat` but its tip a half sphere of the diameter; in 2.5D it
+--- cuts where a flat does, bottom being the tip.
+function Tool.ball(number_, diameter, flute_length, feed, plunge, rpm, ramp_angle)
+  if ramp_angle == nil then ramp_angle = 3.0 end
+  local made = lib().cadaclysm_blacksmith_tool_ball(tool_number(number_), diameter, flute_length, feed, plunge, rpm)
+  return ramped(made, ramp_angle, "tool_ball")
+end
+
+--- A drill, plunging at `feed`. A job takes it for `Job:drill` (and `Job:machine`'s
+--- `drills`) only.
+function Tool.drill(number_, diameter, flute_length, feed, rpm)
+  return new_tool(lib().cadaclysm_blacksmith_tool_drill(tool_number(number_), diameter, flute_length, feed, rpm), "tool_drill")
+end
+
+--- The block of material a job cuts, an axis-aligned box. Immutable; a `Job` keeps its
+--- own copy.
+---@class Stock
+local Stock = {}
+class(Stock)
+M.Stock = Stock
+
+local function new_stock(handle, what)
+  checked(handle, what or "stock")
+  return setmetatable({ _handle = ffi.gc(handle, free_stock) }, Stock)
+end
+
+local function stock_handle(s, what)
+  if type(s) ~= "table" or getmetatable(s) ~= Stock then raise((what or "stock") .. ": expected a Stock, got " .. repr(s)) end
+  return s._handle
+end
+
+--- The box from `min` (x, y, z) to `max`. Raises `BuildError` unless every min is below
+--- its max and all six are finite.
+function Stock.box(min, max)
+  local x0, y0, z0 = triple(min, "min")
+  local x1, y1, z1 = triple(max, "max")
+  return new_stock(lib().cadaclysm_blacksmith_stock_box(x0, y0, z0, x1, y1, z1), "stock_box")
+end
+
+--- `solid`'s bounds grown by `margin` in -X, +X, -Y, +Y and +Z; the bottom stays at the
+--- solid's lowest Z. `margin` defaults to 0.0. Raises `BuildError` for a margin negative or
+--- not finite.
+function Stock.around(solid, margin)
+  if margin == nil then margin = 0.0 end
+  return new_stock(lib().cadaclysm_blacksmith_stock_around(solid_handle(solid, "stock_around"), margin), "stock_around")
+end
+
+--- One file a `Job` wrote: a Grbl program (`tool` its T number, `name` "<job
+--- name>-T<n>", or "<job name>-<k>-T<n>" for a repeated tool) from `Job:gcode`, or one
+--- of `Job:write_camotics`'s files (`tool` 0 for the simulation copies and the project).
+--- Copied out; read-only.
+---@class Program
+---@field tool integer
+---@field name string
+---@field text string
+local Program = {}
+class(Program)
+M.Program = Program
+
+Program.__tostring = function(self)
+  return ("Program(tool=%d, name=%s, %d characters)"):format(self.tool, self.name, #self.text)
+end
+
+--- One operation of a `Job`, read back by `Job:operations`: `kind` ("face", "contour",
+--- "pocket" or "drill"), `tool` (its Grbl T number) and `params`, an unordered table of
+--- the operation's own arguments, typed by name as the Python SDK does: `side` is "outside",
+--- "inside" or "on" (a value that is none of 0, 1, 2 stays a number); `climb` and `open` are
+--- booleans; `points` is an integer count; a none `peck` is absent (reads `nil`); every
+--- other value is a number. Copied out; read-only.
+---@class Operation
+---@field kind string
+---@field tool integer
+---@field params table<string, number|string|boolean>
+local Operation = {}
+class(Operation)
+M.Operation = Operation
+
+Operation.__tostring = function(self)
+  local parts = {}
+  for k, v in pairs(self.params) do parts[#parts + 1] = k .. ": " .. tostring(v) end
+  table.sort(parts)
+  return ("Operation(kind=%s, tool=%d, params={%s})"):format(self.kind, self.tool, table.concat(parts, ", "))
+end
+
+--- One thing `Job:machine` left uncut: `kind` ("corner", "hole", "slope", "undercut" or
+--- "too_deep"), `at` ({x, y, z}), `size` (its meaning per `kind`), `reason` (one sentence
+--- naming the tool involved), and `region` (its XY area, as a table of `Profile`).
+--- Copied out; read-only.
+---@class ReportItem
+---@field kind string
+---@field at number[]
+---@field size number
+---@field reason string
+---@field region Profile[]
+local ReportItem = {}
+class(ReportItem)
+M.ReportItem = ReportItem
+
+ReportItem.__tostring = function(self)
+  return ("ReportItem(kind=%s, at=(%g, %g, %g), size=%g, reason=%s, region=%d profile(s))"):format(
+    self.kind, self.at[1], self.at[2], self.at[3], self.size, self.reason, #self.region)
+end
+
+--- What `Job:machine` could not make: a read-only sequence of `ReportItem`, in order,
+--- read eagerly when `machine` returns (`#report`, `ipairs(report)`, `report[i]`); `.text`
+--- is the kernel's own report -- one line per item, or "nothing left uncut" -- and is
+--- also `tostring(report)`.
+---@class Report
+---@field text string
+local Report = {}
+class(Report)
+M.Report = Report
+
+Report.__tostring = function(self) return self.text end
+
+local function report_item_of(raw, i)
+  local at = ffi.new("double[3]")
+  if not lib().cadaclysm_blacksmith_report_at(raw, i, at) then fail("report_at") end
+  local region = profile_list(lib().cadaclysm_blacksmith_report_region(raw, i), "report_region")
+  return setmetatable({
+    kind = text(lib().cadaclysm_blacksmith_report_kind(raw, i)),
+    at = { tonumber(at[0]), tonumber(at[1]), tonumber(at[2]) },
+    size = tonumber(lib().cadaclysm_blacksmith_report_size(raw, i)),
+    reason = text(lib().cadaclysm_blacksmith_report_reason(raw, i)),
+    region = region,
+  }, ReportItem)
+end
+
+local function report_of(raw)
+  local n = lib().cadaclysm_blacksmith_report_count(raw)
+  local items = {}
+  for i = 0, n - 1 do items[#items + 1] = report_item_of(raw, i) end
+  items.text = text(lib().cadaclysm_blacksmith_report_text(raw))
+  return setmetatable(items, Report)
+end
+
+local PARAM_SIDES = { [0] = "outside", [1] = "inside", [2] = "on" }
+
+-- One `operations_param_value`, typed as the spec picks by its name: `side` 0/1/2 to
+-- "outside"/"inside"/"on" (any other value stays a number), `climb`/`open` to a boolean
+-- (non-zero true), `points` to an integer; every other value stays a number.
+local function operation_param(name, value)
+  if name == "side" then return PARAM_SIDES[value] or value end
+  if name == "climb" or name == "open" then return value ~= 0 end
+  if name == "points" then return value < 0 and math.ceil(value) or math.floor(value) end
+  return value
+end
+
+local function operation_of(raw, i)
+  local kind = text(lib().cadaclysm_blacksmith_operations_kind(raw, i))
+  local op_tool = tonumber(lib().cadaclysm_blacksmith_operations_tool(raw, i))
+  local pc = lib().cadaclysm_blacksmith_operations_param_count(raw, i)
+  local params = {}
+  for k = 0, pc - 1 do
+    local name = text(lib().cadaclysm_blacksmith_operations_param_name(raw, i, k))
+    local value = lib().cadaclysm_blacksmith_operations_param_value(raw, i, k)
+    if value == value then params[name] = operation_param(name, tonumber(value)) end -- a NaN (peck: none) stays absent, read back as nil
+  end
+  return setmetatable({ kind = kind, tool = op_tool, params = params }, Operation)
+end
+
+-- The programs of a list the library handed back (nil: raise), each copied out, the
+-- list freed.
+local function programs_of(raw, what)
+  if raw == nil then fail(what) end
+  local ok, result = pcall(function()
+    local n = lib().cadaclysm_blacksmith_programs_count(raw)
+    local out = {}
+    for i = 0, n - 1 do
+      out[#out + 1] = setmetatable({
+        tool = tonumber(lib().cadaclysm_blacksmith_programs_tool(raw, i)),
+        name = text(lib().cadaclysm_blacksmith_programs_name(raw, i)),
+        text = text(lib().cadaclysm_blacksmith_programs_text(raw, i)),
+      }, Program)
+    end
+    return out
+  end)
+  lib().cadaclysm_blacksmith_programs_free(raw)
+  if not ok then error(result, 0) end
+  return result
+end
+
+local JOB_SIDES = { outside = 0, inside = 1, on = 2 }
+
+-- `path`'s directory (nil for none) and file stem (its name without its last extension).
+local function split_path(path)
+  path = tostring(path):gsub("\\", "/")
+  local dir, base = path:match("^(.*)/([^/]*)$")
+  if not dir then dir, base = nil, path end
+  local stem = base:match("^(.*)%.[^.]+$") or base
+  if stem == "" then stem = base end
+  return dir, stem
+end
+
+local mkdir_windows = package.config:sub(1, 1) == "\\"
+
+-- One `mkdir` of a single path, via the C runtime -- no shell, so a name with a quote or a
+-- space needs no escaping. `nil` if the runtime doesn't offer it (falls back to a shell).
+local mkdir_one
+do
+  local ok = pcall(function()
+    if mkdir_windows then
+      ffi.cdef[[int _mkdir(const char *path);]]
+      mkdir_one = function(path) return ffi.C._mkdir(path) end
+    else
+      ffi.cdef[[int mkdir(const char *path, unsigned int mode);]]
+      mkdir_one = function(path) return ffi.C.mkdir(path, 0x1FF) end
+    end
+  end)
+  if not ok then mkdir_one = nil end
+end
+
+-- Creates dir and every missing ancestor, one path component at a time. Best-effort: an
+-- existing directory, or one a component can't make, is left for the caller's own write to
+-- fail against.
+local function mkdir_p(dir)
+  if not dir or dir == "" then return end
+  local norm = tostring(dir):gsub("\\", "/")
+  local prefix = norm:match("^(/)") or ""
+  local acc = prefix
+  for part in norm:gmatch("[^/]+") do
+    if acc == "" or acc:sub(-1) == "/" then
+      acc = acc .. part
+    else
+      acc = acc .. "/" .. part
+    end
+    if not acc:match("^%a:$") then -- a bare Windows drive letter always exists
+      local native = mkdir_windows and acc:gsub("/", "\\") or acc
+      if mkdir_one then
+        mkdir_one(native)
+      elseif mkdir_windows then
+        if not native:find('"') then os.execute(('mkdir "%s" 2>nul'):format(native)) end
+      else
+        os.execute(("mkdir -p '%s'"):format(native:gsub("'", "'\\''")))
+      end
+    end
+  end
+end
+
+--- A machining job on a `Stock`: operations kept in the order they are added, written as
+--- one Grbl 1.1 program per run of operations sharing a tool. Mutable -- each operation is
+--- added in place, and a refused one leaves the job as it was. `safe_z` is the absolute Z
+--- of rapids between operations and at a program's start and end, above the stock's top;
+--- `clearance` (default 1.0) is how far above an operation's top it enters and leaves its
+--- passes; `tolerance` (default 0.01) fits free-form sides and offsets; `name` (default
+--- "job") names the programs ("<name>-T<n>"); `spindle_dwell` (default 2.0) is how long
+--- every program waits after starting the spindle; `resolution` (default 0.1) is the
+--- CAMotics project's voxel size in mm. Raises `BuildError` for a `safe_z` not above the
+--- stock's top, a `name` with a control character in it, or a setting the job refuses.
+--- `Job.new(stock, safe_z, ...)` or `Job(stock, safe_z, ...)`.
+---@class Job
+local Job = {}
+class(Job)
+callable(Job)
+M.Job = Job
+
+-- A NUL truncates silently going through the native call, so a name or a CAMotics stem with
+-- one in it is refused here, in the kernel's own words for a name with a control character
+-- in it, as the Python SDK does.
+local NUL_NAME_ERROR = "job: a name must be non-empty and without brackets, slashes, quotes, control characters, or : * ? < > |"
+
+local function reject_nul(s)
+  if tostring(s):find("\0", 1, true) then raise(NUL_NAME_ERROR) end
+end
+
+function Job.new(stock, safe_z, clearance, tolerance, name, spindle_dwell, resolution)
+  if clearance == nil then clearance = 1.0 end
+  if tolerance == nil then tolerance = 0.01 end
+  if name == nil then name = "job" end
+  if spindle_dwell == nil then spindle_dwell = 2.0 end
+  if resolution == nil then resolution = 0.1 end
+  reject_nul(name)
+  local sh = stock_handle(stock, "job_new")
+  local raw = checked(lib().cadaclysm_blacksmith_job_new(sh, safe_z), "job_new")
+  local h = ffi.gc(raw, free_job)
+  if clearance ~= 1.0 and not lib().cadaclysm_blacksmith_job_set_clearance(h, clearance) then fail("job_set_clearance") end
+  if tolerance ~= 0.01 and not lib().cadaclysm_blacksmith_job_set_tolerance(h, tolerance) then fail("job_set_tolerance") end
+  if spindle_dwell ~= 2.0 and not lib().cadaclysm_blacksmith_job_set_spindle_dwell(h, spindle_dwell) then
+    fail("job_set_spindle_dwell")
+  end
+  if resolution ~= 0.1 and not lib().cadaclysm_blacksmith_job_set_resolution(h, resolution) then fail("job_set_resolution") end
+  if name ~= "job" and not lib().cadaclysm_blacksmith_job_set_name(h, tostring(name)) then fail("job_set_name") end
+  return setmetatable({ _ptr = h }, Job)
+end
+
+function Job:_h()
+  local h = rawget(self, "_ptr")
+  if h == nil then raise("job: closed") end
+  return h
+end
+
+--- Free the job. Idempotent. The lists it wrote (`operations`, `gcode`, `machine`'s
+--- `Report`) are copies and outlive it.
+function Job:close()
+  local h = rawget(self, "_ptr")
+  if h ~= nil then
+    self._ptr = nil
+    ffi.gc(h, nil)
+    lib().cadaclysm_blacksmith_job_free(h)
+  end
+end
+
+--- Face the stock's top down to `z`, in zigzag rows along X `stepover` apart and passes
+--- at most `stepdown` deep, with `tool`. Raises `BuildError` for a drill, a `z` above the
+--- stock's top, a stepover past the tool's diameter, ...
+function Job:face(tool, z, stepover, stepdown)
+  local h = self:_h()
+  if not lib().cadaclysm_blacksmith_job_face(h, tool_handle(tool, "face"), z, stepover, stepdown) then
+    fail("job_face")
+  end
+end
+
+--- Cut along `profile` from `top` to `bottom` in passes at most `stepdown` deep, with
+--- `tool`: `side` "outside" the profile (default), "inside" it, or "on" its line; `climb`
+--- (default true) for climb milling, else conventional; `open` (default false) to cut the
+--- outline as an open chain (only "on" its line, and with no holes). Raises `BuildError`
+--- for any other `side`, without asking the library, and for what the job refuses.
+function Job:contour(tool, profile, top, bottom, side, stepdown, climb, open)
+  if side == nil then side = "outside" end
+  if stepdown == nil then stepdown = 1.0 end
+  if climb == nil then climb = true end
+  if open == nil then open = false end
+  local code = JOB_SIDES[side]
+  if code == nil then raise("side must be 'outside', 'inside' or 'on'") end
+  local h = self:_h()
+  local th, ph = tool_handle(tool, "contour"), profile_handle(profile, "contour")
+  if not lib().cadaclysm_blacksmith_job_contour(h, th, ph, top, bottom, code, stepdown, climb and true or false,
+      open and true or false) then
+    fail("job_contour")
+  end
+end
+
+--- Clear `profile` -- its holes left standing as islands -- from `top` to `bottom`, in
+--- rings `stepover` apart (at most the tool's radius) and passes at most `stepdown` deep,
+--- with `tool`. Raises `BuildError` for what the job refuses; a pocket too small for the
+--- tool is refused by `gcode`, naming the operation.
+function Job:pocket(tool, profile, top, bottom, stepover, stepdown)
+  local h = self:_h()
+  local th, ph = tool_handle(tool, "pocket"), profile_handle(profile, "pocket")
+  if not lib().cadaclysm_blacksmith_job_pocket(h, th, ph, top, bottom, stepover, stepdown) then fail("job_pocket") end
+end
+
+--- Drill a hole at each (x, y) of `points` from `top` to `bottom`, with `tool`, pecking
+--- `peck` deep at a time (retracting between pecks), or straight to depth for `nil`
+--- (default). Raises `BuildError` for what the job refuses (a tool that is not a drill, no
+--- points, ...).
+function Job:drill(tool, points, top, bottom, peck)
+  local h = self:_h()
+  local th = tool_handle(tool, "drill")
+  local xy, n = pairs_arg(points, "drill")
+  if not lib().cadaclysm_blacksmith_job_drill(h, th, xy, n, top, bottom, or_nan(peck)) then fail("job_drill") end
+end
+
+--- Recognise `part` and append the operations that make it: faced, contoured and pocketed
+--- with `end_mill`, its holes drilled with whichever of `drills` fits each -- a tool per
+--- required diameter; `drills` may be one `Tool` or a table of them (default none).
+--- `stepover` and `stepdown` default to the kernel's own (nil asks for that); `skin` (at
+--- least 0, default 0.3) is how far above the part's lowest point the outline stops, so
+--- the part stays attached to the stock -- 0 cuts through; `peck` defaults to none (a
+--- drill straight to depth). Returns a `Report` of what could not be cut. Raises
+--- `BuildError` for what the kernel refuses (a drill as `end_mill`, ...); the job changes
+--- only on success -- a refusal leaves it exactly as it was.
+function Job:machine(part, end_mill, drills, stepover, stepdown, skin, peck)
+  if drills == nil then drills = {} end
+  if skin == nil then skin = 0.3 end
+  local list = drills
+  if type(drills) == "table" and getmetatable(drills) == Tool then list = { drills } end
+  local h = self:_h()
+  local ph = solid_handle(part, "machine")
+  local eh = tool_handle(end_mill, "machine")
+  local n = #list
+  local handles = ffi.new("const struct CadaclysmBlacksmithTool *[?]", math.max(n, 1))
+  for i = 1, n do handles[i - 1] = tool_handle(list[i], "machine") end
+  local raw = lib().cadaclysm_blacksmith_job_machine(h, ph, eh, handles, n, or_nan(stepover), or_nan(stepdown), skin,
+    or_nan(peck))
+  if raw == nil then fail("job_machine") end
+  local ok, result = pcall(report_of, raw)
+  lib().cadaclysm_blacksmith_report_free(raw)
+  if not ok then error(result, 0) end
+  return result
+end
+
+--- Every operation added to this job so far, in order -- whether added by
+--- `face`/`contour`/`pocket`/`drill` or by `machine`.
+function Job:operations()
+  local h = self:_h()
+  local raw = lib().cadaclysm_blacksmith_job_operations(h)
+  if raw == nil then fail("job_operations") end
+  local ok, result = pcall(function()
+    local n = lib().cadaclysm_blacksmith_operations_count(raw)
+    local out = {}
+    for i = 0, n - 1 do out[#out + 1] = operation_of(raw, i) end
+    return out
+  end)
+  lib().cadaclysm_blacksmith_operations_free(raw)
+  if not ok then error(result, 0) end
+  return result
+end
+
+--- The job as Grbl 1.1 programs, one per run of consecutive operations sharing a tool (T1,
+--- T2, T1 gives three), each named "<name>-T<n>" (or "<name>-<k>-T<n>" for run `k` of a
+--- repeated tool); an empty table for a job with no operations. Raises `BuildError` for an
+--- operation whose geometry the tool cannot cut (named by its index and kind).
+function Job:gcode()
+  return programs_of(lib().cadaclysm_blacksmith_job_gcode(self:_h()), "job_gcode")
+end
+
+--- A CAMotics project at `path` and its files beside it, named after the project's file
+--- stem ("out/part.camotics" writes "out/part-T1.nc"), not the job's name: each program, a
+--- simulation copy of it (".sim.nc", which the project lists), and the project last.
+--- Creates the directory. Returns the paths written, the project last, written here (not
+--- by the library) byte for byte. Raises `BuildError` for a path with no file stem, what
+--- `gcode` refuses, or a file that cannot be written.
+function Job:write_camotics(path)
+  local h = self:_h()
+  local dir, stem = split_path(path)
+  reject_nul(stem)
+  local files = programs_of(lib().cadaclysm_blacksmith_job_camotics(h, stem), "job_camotics")
+  mkdir_p(dir)
+  local written = {}
+  for i, f in ipairs(files) do
+    local at = tostring(path)
+    if i ~= #files then at = (dir and (dir .. "/") or "") .. f.name end
+    local out, err = io.open(at, "wb")
+    if not out then raise(("job_camotics: %s: %s"):format(tostring(path), tostring(err))) end
+    out:write(f.text)
+    out:close()
+    written[#written + 1] = at
+  end
+  return written
+end
+
 
 return M

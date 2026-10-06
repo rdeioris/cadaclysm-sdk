@@ -67,6 +67,31 @@ pub struct CadaclysmBlacksmithMesh64 {
     pub index_count: u32,
 }
 
+/// A body's mass properties, per unit density, each figure beside a bound on its own error.
+///
+/// `closed`, `inverted`, `accuracy_met` and `from_mesh` are 1 or 0. The volume, the centroid and the
+/// inertia mean something only where `closed` is 1, and are zero otherwise; the area is measured
+/// either way. `inertia` is row-major about the centroid with the products of inertia negated,
+/// `principal_moments` ascend, and `principal_axes` is row-major, unit and right-handed.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CadaclysmBlacksmithMassProperties {
+    pub closed: i32,
+    pub inverted: i32,
+    pub accuracy_met: i32,
+    pub from_mesh: i32,
+    pub area: f64,
+    pub area_error: f64,
+    pub volume: f64,
+    pub volume_error: f64,
+    pub centroid: [f64; 3],
+    pub centroid_error: f64,
+    pub inertia: [f64; 9],
+    pub inertia_error: f64,
+    pub principal_moments: [f64; 3],
+    pub principal_axes: [f64; 9],
+}
+
 #[repr(C)]
 pub struct CadaclysmBlacksmithPolylines {
     pub points: *const f32,
@@ -230,6 +255,86 @@ pub struct CadaclysmBlacksmithIntersection {
     _private: [u8; 0],
 }
 
+/// Parts meshed once, asked pose after pose which of them interfere. Opaque; freed
+/// with `cadaclysm_blacksmith_collider_free`.
+#[repr(C)]
+pub struct CadaclysmBlacksmithCollider {
+    _private: [u8; 0],
+}
+
+/// One `cadaclysm_blacksmith_collider_check` call's answer, read one pair at a time
+/// (`cadaclysm_blacksmith_collisions_hit`) or rebuilt exactly
+/// (`cadaclysm_blacksmith_collisions_solid`). Opaque; freed with
+/// `cadaclysm_blacksmith_collisions_free`.
+#[repr(C)]
+pub struct CadaclysmBlacksmithCollisions {
+    _private: [u8; 0],
+}
+
+/// An axis-aligned box: `lo` and `hi`, three doubles each.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CadaclysmBlacksmithBox {
+    pub lo: [f64; 3],
+    pub hi: [f64; 3],
+}
+
+/// Counts of one `cadaclysm_blacksmith_collider_check` call: the candidate pairs
+/// `considered`, how many the world boxes and the oriented boxes cleared, how many
+/// the share left to another call, how the rest were answered (`cached`,
+/// `closed_form`, `meshed`), and how many were `refused`. `confirmed` is the subset
+/// of `meshed` that were thin mesh-path overlaps sent to `common` for a final answer.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CadaclysmBlacksmithColliderStats {
+    pub considered: u32,
+    pub world_boxes: u32,
+    pub oriented_boxes: u32,
+    pub skipped_share: u32,
+    pub cached: u32,
+    pub closed_form: u32,
+    pub meshed: u32,
+    pub refused: u32,
+    pub confirmed: u32,
+}
+
+/// A pair that interferes (`overlap` true), or could not be decided (`overlap`
+/// false; `text` says why, empty for an overlap). `positions` and `normals` are
+/// `vertex_count` world xyz triples, three per triangle (unwelded); `indices` is
+/// `index_count` entries; all empty (null, counts 0) for a refused pair. `depth` is
+/// the thinnest side of the overlap's world box, 0 for a refused pair.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CadaclysmBlacksmithCollisionHit {
+    pub a: u32,
+    pub b: u32,
+    pub overlap: bool,
+    pub depth: f64,
+    pub positions: *const f64,
+    pub normals: *const f64,
+    pub indices: *const u32,
+    pub vertex_count: u32,
+    pub index_count: u32,
+    pub text: *const c_char,
+}
+
+impl Default for CadaclysmBlacksmithCollisionHit {
+    fn default() -> Self {
+        CadaclysmBlacksmithCollisionHit {
+            a: 0,
+            b: 0,
+            overlap: false,
+            depth: 0.0,
+            positions: std::ptr::null(),
+            normals: std::ptr::null(),
+            indices: std::ptr::null(),
+            vertex_count: 0,
+            index_count: 0,
+            text: std::ptr::null(),
+        }
+    }
+}
+
 /// `CadaclysmBlacksmithSvgOptions`. `size` is the struct's growth room, as
 /// `CadaclysmOpenOptions` on the reader library -- this crate fills it by calling
 /// `cadaclysm_blacksmith_svg_options_init` first, then overrides the fields
@@ -262,6 +367,47 @@ pub struct CadaclysmBlacksmithHits {
 /// `cadaclysm_blacksmith_profile_list_get`, freed with `cadaclysm_blacksmith_profile_list_free`.
 #[repr(C)]
 pub struct CadaclysmBlacksmithProfileList {
+    _private: [u8; 0],
+}
+
+/// A cutter. Opaque; freed with `cadaclysm_blacksmith_tool_free`.
+#[repr(C)]
+pub struct CadaclysmBlacksmithTool {
+    _private: [u8; 0],
+}
+
+/// A block of material a job cuts. Opaque; freed with `cadaclysm_blacksmith_stock_free`.
+#[repr(C)]
+pub struct CadaclysmBlacksmithStock {
+    _private: [u8; 0],
+}
+
+/// A machining job on a stock. Opaque; freed with `cadaclysm_blacksmith_job_free`.
+#[repr(C)]
+pub struct CadaclysmBlacksmithJob {
+    _private: [u8; 0],
+}
+
+/// The files of one `cadaclysm_blacksmith_job_gcode`/`cadaclysm_blacksmith_job_camotics` call.
+/// Opaque; read with the `cadaclysm_blacksmith_programs_*` accessors, freed with
+/// `cadaclysm_blacksmith_programs_free`.
+#[repr(C)]
+pub struct CadaclysmBlacksmithPrograms {
+    _private: [u8; 0],
+}
+
+/// What one `cadaclysm_blacksmith_job_machine` call left uncut. Opaque; read with the
+/// `cadaclysm_blacksmith_report_*` accessors, freed with `cadaclysm_blacksmith_report_free`.
+#[repr(C)]
+pub struct CadaclysmBlacksmithReport {
+    _private: [u8; 0],
+}
+
+/// Every operation added to a job, from `cadaclysm_blacksmith_job_operations`. Opaque; read
+/// with the `cadaclysm_blacksmith_operations_*` accessors, freed with
+/// `cadaclysm_blacksmith_operations_free`.
+#[repr(C)]
+pub struct CadaclysmBlacksmithOperations {
     _private: [u8; 0],
 }
 
@@ -361,7 +507,16 @@ type Progress = CadaclysmBlacksmithProgress;
 type Hits = CadaclysmBlacksmithHits;
 type Intersection = CadaclysmBlacksmithIntersection;
 type ProfileList = CadaclysmBlacksmithProfileList;
+type Tool = CadaclysmBlacksmithTool;
+type Stock = CadaclysmBlacksmithStock;
+type Job = CadaclysmBlacksmithJob;
+type Programs = CadaclysmBlacksmithPrograms;
+type Report = CadaclysmBlacksmithReport;
+type Operations = CadaclysmBlacksmithOperations;
 type Fem = CadaclysmBlacksmithFemMesh;
+type Collider = CadaclysmBlacksmithCollider;
+type Collisions = CadaclysmBlacksmithCollisions;
+type BoxShape = CadaclysmBlacksmithBox;
 type Tessellation = CadaclysmBlacksmithTessellation;
 
 entry_points! {
@@ -433,6 +588,8 @@ entry_points! {
     fn cadaclysm_blacksmith_profile_list_get(list: *const ProfileList, i: u32) -> *mut Profile;
     fn cadaclysm_blacksmith_profile_list_free(list: *mut ProfileList);
     fn cadaclysm_blacksmith_translate_profile(profile: *const Profile, dx: f64, dy: f64) -> *mut Profile;
+    fn cadaclysm_blacksmith_profile_to_arcs(profile: *const Profile, tolerance: f64) -> *mut Profile;
+    fn cadaclysm_blacksmith_profile_offset(profile: *const Profile, distance: f64, tolerance: f64) -> *mut ProfileList;
 
     fn cadaclysm_blacksmith_path_begin(x: f64, y: f64) -> *mut Path2;
     fn cadaclysm_blacksmith_path_line_to(p: *mut Path2, x: f64, y: f64) -> bool;
@@ -511,6 +668,7 @@ entry_points! {
     fn cadaclysm_blacksmith_coloured(solid: *const Solid, face: u32, r: f64, g: f64, b: f64) -> *mut Solid;
     fn cadaclysm_blacksmith_edges_coloured(solid: *const Solid, edges: *const u32, count: usize, r: f64, g: f64, b: f64) -> *mut Solid;
 
+    fn cadaclysm_blacksmith_solid_section(solid: *const Solid, z: f64, tolerance: f64) -> *mut ProfileList;
     fn cadaclysm_blacksmith_join(a: *const Solid, b: *const Solid, tolerance: f64, progress: Progress, user: *mut c_void) -> *mut Solid;
     fn cadaclysm_blacksmith_cut(a: *const Solid, b: *const Solid, tolerance: f64, progress: Progress, user: *mut c_void) -> *mut Solid;
     fn cadaclysm_blacksmith_common(a: *const Solid, b: *const Solid, tolerance: f64, progress: Progress, user: *mut c_void) -> *mut Solid;
@@ -589,6 +747,7 @@ entry_points! {
     fn cadaclysm_blacksmith_find_face(solid: *const Solid, face_ref: *const f64, hint: i32, tolerance: f64) -> i32;
     fn cadaclysm_blacksmith_colour(solid: *const Solid, face: u32, out: *mut f64) -> bool;
     fn cadaclysm_blacksmith_edge_colour(solid: *const Solid, edge: u32, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_parse_colour(text: *const c_char, out: *mut f64) -> bool;
     fn cadaclysm_blacksmith_face_kind(solid: *const Solid, face: u32) -> *const c_char;
     fn cadaclysm_blacksmith_edge_count(solid: *const Solid) -> u32;
     fn cadaclysm_blacksmith_edge(solid: *const Solid, i: u32, out: *mut CadaclysmBlacksmithEdge) -> bool;
@@ -603,6 +762,8 @@ entry_points! {
     fn cadaclysm_blacksmith_leaked_edges(solid: *const Solid, tolerance: f64) -> u32;
     fn cadaclysm_blacksmith_unpaired_edges(solid: *const Solid, tolerance: f64) -> u32;
     fn cadaclysm_blacksmith_manifold(solid: *const Solid, out: *mut u32) -> bool;
+    fn cadaclysm_blacksmith_mass_properties(solid: *const Solid, accuracy: f64,
+                                           out: *mut CadaclysmBlacksmithMassProperties) -> bool;
     fn cadaclysm_blacksmith_mesh(solid: *const Solid, tolerance: f64) -> CadaclysmBlacksmithMesh;
     fn cadaclysm_blacksmith_mesh64(solid: *const Solid, tolerance: f64) -> CadaclysmBlacksmithMesh64;
     fn cadaclysm_blacksmith_mesh_face_triangles(solid: *const Solid, tolerance: f64) -> CadaclysmBlacksmithFaceTriangles;
@@ -689,6 +850,136 @@ entry_points! {
         placement_count: usize
     ) -> bool;
     fn cadaclysm_blacksmith_assembly_joint(assembly: *mut Assembly, name: *const c_char, start: *const c_char, end: *const c_char) -> bool;
+    // Blacksmith pairs (docs/superpowers/plans/2026-09-28-blacksmith-pairs-1.md, 2026-09-29's
+    // plan 2 task 5): a joint's pair, a named mechanism state, and an assembly's base link.
+    fn cadaclysm_blacksmith_assembly_pair(
+        assembly: *mut Assembly,
+        joint: *const c_char,
+        kind: *const c_char,
+        frame: *const f64,
+        end_frame: *const f64,
+        lower: *const f64,
+        upper: *const f64,
+        has_lower: *const bool,
+        has_upper: *const bool,
+        freedom_count: usize,
+        pitch: f64
+    ) -> bool;
+    fn cadaclysm_blacksmith_assembly_state(
+        assembly: *mut Assembly,
+        name: *const c_char,
+        joints: *const *const c_char,
+        counts: *const u32,
+        values: *const f64,
+        row_count: usize
+    ) -> bool;
+    fn cadaclysm_blacksmith_assembly_sequence(
+        assembly: *mut Assembly,
+        name: *const c_char,
+        states: *const *const c_char,
+        ts: *const f64,
+        interpolations: *const *const c_char,
+        count: usize,
+        seconds: bool
+    ) -> bool;
+    fn cadaclysm_blacksmith_assembly_base(assembly: *mut Assembly, link: *const c_char) -> bool;
+    fn cadaclysm_blacksmith_pair_freedom_count(kind: *const c_char) -> u32;
+
+    fn cadaclysm_blacksmith_solid_bounds_box(solid: *const Solid, tolerance: f64, out: *mut BoxShape) -> bool;
+    fn cadaclysm_blacksmith_box_moved(box_: *const BoxShape, frame: *const f64, out: *mut BoxShape) -> bool;
+    fn cadaclysm_blacksmith_box_overlaps(a: *const BoxShape, b: *const BoxShape) -> bool;
+    fn cadaclysm_blacksmith_boxes_apart(a: *const BoxShape, frame_a: *const f64, b: *const BoxShape, frame_b: *const f64, apart: *mut bool) -> bool;
+    fn cadaclysm_blacksmith_collider_new(
+        solids: *const *const Solid,
+        count: u32,
+        tolerance: f64,
+        groups: *const u32,
+        allowed: *const u32,
+        allowed_count: u32
+    ) -> *mut Collider;
+    fn cadaclysm_blacksmith_collider_free(collider: *mut Collider);
+    fn cadaclysm_blacksmith_collider_group_count(collider: *const Collider) -> u32;
+    fn cadaclysm_blacksmith_collider_stats(collider: *const Collider, out: *mut CadaclysmBlacksmithColliderStats) -> bool;
+    fn cadaclysm_blacksmith_collider_check(
+        collider: *mut Collider,
+        frames: *const f64,
+        frame_count: u32,
+        share_k: u32,
+        share_n: u32
+    ) -> *mut Collisions;
+    fn cadaclysm_blacksmith_collisions_free(collisions: *mut Collisions);
+    fn cadaclysm_blacksmith_collisions_count(collisions: *const Collisions) -> u32;
+    fn cadaclysm_blacksmith_collisions_hit(collisions: *const Collisions, i: u32, out: *mut CadaclysmBlacksmithCollisionHit) -> bool;
+    fn cadaclysm_blacksmith_collisions_solid(collisions: *const Collisions, i: u32) -> *mut Solid;
+
+    fn cadaclysm_blacksmith_tool_flat(number: u32, diameter: f64, flute_length: f64, feed: f64, plunge: f64, rpm: f64) -> *mut Tool;
+    fn cadaclysm_blacksmith_tool_ball(number: u32, diameter: f64, flute_length: f64, feed: f64, plunge: f64, rpm: f64) -> *mut Tool;
+    fn cadaclysm_blacksmith_tool_drill(number: u32, diameter: f64, flute_length: f64, feed: f64, rpm: f64) -> *mut Tool;
+    fn cadaclysm_blacksmith_tool_with_ramp_angle(t: *const Tool, degrees: f64) -> *mut Tool;
+    fn cadaclysm_blacksmith_tool_free(t: *mut Tool);
+
+    fn cadaclysm_blacksmith_stock_box(min_x: f64, min_y: f64, min_z: f64, max_x: f64, max_y: f64, max_z: f64) -> *mut Stock;
+    fn cadaclysm_blacksmith_stock_around(solid: *const Solid, margin: f64) -> *mut Stock;
+    fn cadaclysm_blacksmith_stock_free(s: *mut Stock);
+
+    fn cadaclysm_blacksmith_job_new(stock: *const Stock, safe_z: f64) -> *mut Job;
+    fn cadaclysm_blacksmith_job_set_clearance(j: *mut Job, clearance: f64) -> bool;
+    fn cadaclysm_blacksmith_job_set_tolerance(j: *mut Job, tolerance: f64) -> bool;
+    fn cadaclysm_blacksmith_job_set_spindle_dwell(j: *mut Job, seconds: f64) -> bool;
+    fn cadaclysm_blacksmith_job_set_name(j: *mut Job, name: *const c_char) -> bool;
+    fn cadaclysm_blacksmith_job_set_resolution(j: *mut Job, resolution: f64) -> bool;
+    fn cadaclysm_blacksmith_job_face(j: *mut Job, t: *const Tool, z: f64, stepover: f64, stepdown: f64) -> bool;
+    fn cadaclysm_blacksmith_job_contour(
+        j: *mut Job,
+        t: *const Tool,
+        p: *const Profile,
+        top: f64,
+        bottom: f64,
+        side: u32,
+        stepdown: f64,
+        climb: bool,
+        open: bool
+    ) -> bool;
+    fn cadaclysm_blacksmith_job_pocket(j: *mut Job, t: *const Tool, p: *const Profile, top: f64, bottom: f64, stepover: f64, stepdown: f64) -> bool;
+    fn cadaclysm_blacksmith_job_drill(j: *mut Job, t: *const Tool, xy: *const f64, count: usize, top: f64, bottom: f64, peck: f64) -> bool;
+    fn cadaclysm_blacksmith_job_gcode(j: *const Job) -> *mut Programs;
+    fn cadaclysm_blacksmith_job_camotics(j: *const Job, stem: *const c_char) -> *mut Programs;
+    fn cadaclysm_blacksmith_job_free(j: *mut Job);
+
+    fn cadaclysm_blacksmith_programs_count(l: *const Programs) -> u32;
+    fn cadaclysm_blacksmith_programs_tool(l: *const Programs, i: u32) -> u32;
+    fn cadaclysm_blacksmith_programs_name(l: *const Programs, i: u32) -> *const c_char;
+    fn cadaclysm_blacksmith_programs_text(l: *const Programs, i: u32) -> *const c_char;
+    fn cadaclysm_blacksmith_programs_free(l: *mut Programs);
+
+    fn cadaclysm_blacksmith_job_machine(
+        j: *mut Job,
+        part: *const Solid,
+        end_mill: *const Tool,
+        drills: *const *const Tool,
+        drill_count: usize,
+        stepover: f64,
+        stepdown: f64,
+        skin: f64,
+        peck: f64
+    ) -> *mut Report;
+    fn cadaclysm_blacksmith_report_count(r: *const Report) -> u32;
+    fn cadaclysm_blacksmith_report_kind(r: *const Report, i: u32) -> *const c_char;
+    fn cadaclysm_blacksmith_report_at(r: *const Report, i: u32, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_report_size(r: *const Report, i: u32) -> f64;
+    fn cadaclysm_blacksmith_report_reason(r: *const Report, i: u32) -> *const c_char;
+    fn cadaclysm_blacksmith_report_region(r: *const Report, i: u32) -> *mut ProfileList;
+    fn cadaclysm_blacksmith_report_text(r: *const Report) -> *const c_char;
+    fn cadaclysm_blacksmith_report_free(r: *mut Report);
+
+    fn cadaclysm_blacksmith_job_operations(j: *const Job) -> *mut Operations;
+    fn cadaclysm_blacksmith_operations_count(l: *const Operations) -> u32;
+    fn cadaclysm_blacksmith_operations_kind(l: *const Operations, i: u32) -> *const c_char;
+    fn cadaclysm_blacksmith_operations_tool(l: *const Operations, i: u32) -> u32;
+    fn cadaclysm_blacksmith_operations_param_count(l: *const Operations, i: u32) -> u32;
+    fn cadaclysm_blacksmith_operations_param_name(l: *const Operations, i: u32, k: u32) -> *const c_char;
+    fn cadaclysm_blacksmith_operations_param_value(l: *const Operations, i: u32, k: u32) -> f64;
+    fn cadaclysm_blacksmith_operations_free(l: *mut Operations);
 }
 
 // ---- loading --------------------------------------------------------------------

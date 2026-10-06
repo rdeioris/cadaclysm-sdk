@@ -393,7 +393,7 @@ public final class Cad {
             NODE_MESH, NODE_SURFACES, SURFACE_MATRIX, NODE_BOUNDS, NODE_INSTANCE_OF,
             NODE_SELECT_AS, NODE_GENERATOR, DIAGNOSTIC_COUNT, DIAGNOSTIC, NODE_EDGES,
             NODE_CURVES, NODE_ISOCURVES, REALIZE_ALL, REALIZED, REALIZE_TOTAL, CANCEL,
-            NODE_BREP, BREP_RELEASE, BREP_LAYOUT_ID, BREP_MANIFOLD, MESH_FORMAT_LABEL,
+            NODE_BREP, BREP_RELEASE, BREP_LAYOUT_ID, BREP_MANIFOLD, BREP_SEW, MESH_FORMAT_LABEL,
             FORMAT_COUNT, FORMAT_NAME, FORMAT_EXTENSIONS, PICK_SAVE, GEOMETRY_DIAGNOSTIC_COUNT,
             GEOMETRY_DIAGNOSTIC, FORGET_MESHES, LOD_LEVELS, NODE_MESH_LOD, NODE_LOD_ERROR,
             NODE_EDGE_BEZIERS, NODE_CURVE_BEZIERS, NODE_ISOCURVE_BEZIERS,
@@ -410,9 +410,12 @@ public final class Cad {
             JOINT_COUNT, JOINT_NAME, JOINT_START, JOINT_END,
             JOINT_PAIR_KIND, JOINT_PAIR_TYPE, JOINT_PAIR_PITCH, JOINT_PAIR_FRAMES,
             JOINT_FREEDOM_COUNT, JOINT_FREEDOM, STATE_COUNT, STATE_NAME, STATE_VALUE_COUNT, STATE_VALUE,
+            SEQUENCE_COUNT, SEQUENCE_NAME, SEQUENCE_CLOSED, SEQUENCE_SECONDS_PER_UNIT, SEQUENCE_SEGMENT_COUNT, SEQUENCE_SEGMENT, POSE_SEQUENCE,
+            POSE, POSE_STATE, POSE_FREE, POSE_GROUND, POSE_NODE_COUNT, POSE_NODE_TRANSFORM,
+            POSE_UNSOLVED_COUNT, POSE_UNSOLVED, POSE_OUT_OF_RANGE_COUNT, POSE_OUT_OF_RANGE, KINEMATICS_BASE,
             FEM_OPTIONS_INIT, NODE_FEM_MESH, FEM_VIEW, FEM_EDGE_AT, FEM_VERTEX_AT,
             FEM_OPEN_EDGE, FEM_FOLDED_EDGE, FEM_CROSSING_COUNT, FEM_CROSSING, FEM_MSH_TEXT, FEM_SAVE_MSH, FEM_FREE,
-            NODE_EDGE_COLORS, NODE_SURFACE_EDGE_COLORS;
+            NODE_EDGE_COLORS, NODE_SURFACE_EDGE_COLORS, PARSE_COLOUR;
 
     static {
         SymbolLookup lib = Loader.resolve(Loader.CAPI_LIBRARY);
@@ -487,6 +490,7 @@ public final class Cad {
         BREP_RELEASE = bind(linker, lib, "cadaclysm_brep_release", FunctionDescriptor.ofVoid(A));
         BREP_LAYOUT_ID = bind(linker, lib, "cadaclysm_brep_layout_id", FunctionDescriptor.of(A));
         BREP_MANIFOLD = bind(linker, lib, "cadaclysm_brep_manifold", FunctionDescriptor.of(B, A, A));
+        BREP_SEW = bind(linker, lib, "cadaclysm_brep_sew", FunctionDescriptor.of(A, A, D, D, A, A));
         MESH_FORMAT_LABEL = bind(linker, lib, "cadaclysm_mesh_format_label", FunctionDescriptor.of(A, I));
         FORMAT_COUNT = bind(linker, lib, "cadaclysm_format_count", FunctionDescriptor.of(I));
         FORMAT_NAME = bind(linker, lib, "cadaclysm_format_name", FunctionDescriptor.of(A, I));
@@ -541,6 +545,7 @@ public final class Cad {
         FEM_MSH_TEXT = bind(linker, lib, "cadaclysm_fem_mesh_msh_text", FunctionDescriptor.of(A, A));
         FEM_SAVE_MSH = bind(linker, lib, "cadaclysm_fem_mesh_save_msh", FunctionDescriptor.of(B, A, A));
         FEM_FREE = bind(linker, lib, "cadaclysm_fem_mesh_free", FunctionDescriptor.ofVoid(A));
+        PARSE_COLOUR = bind(linker, lib, "cadaclysm_parse_colour", FunctionDescriptor.of(B, A, A));
         SVG_OPTIONS_INIT = bind(linker, lib, "cadaclysm_svg_options_init", FunctionDescriptor.ofVoid(A));
         SCENE_SVG_TEXT = bind(linker, lib, "cadaclysm_scene_svg_text", FunctionDescriptor.of(A, A, A));
         SCENE_SVG = bind(linker, lib, "cadaclysm_scene_svg", FunctionDescriptor.of(B, A, A, A));
@@ -571,6 +576,30 @@ public final class Cad {
         STATE_NAME = bind(linker, lib, "cadaclysm_state_name", FunctionDescriptor.of(A, A, I));
         STATE_VALUE_COUNT = bind(linker, lib, "cadaclysm_state_value_count", FunctionDescriptor.of(I, A, I));
         STATE_VALUE = bind(linker, lib, "cadaclysm_state_value", FunctionDescriptor.of(I, A, I, I, A, A, I));
+        // Motion sequences (plan 2026-10-05-motion-sequences-2): a sequence's name, closedness,
+        // seconds per unit (0 for none), and its segments (state index, parameter, interpolation
+        // code); pose_sequence poses the mechanism at a parameter.
+        SEQUENCE_COUNT = bind(linker, lib, "cadaclysm_sequence_count", FunctionDescriptor.of(I, A));
+        SEQUENCE_NAME = bind(linker, lib, "cadaclysm_sequence_name", FunctionDescriptor.of(A, A, I));
+        SEQUENCE_CLOSED = bind(linker, lib, "cadaclysm_sequence_closed", FunctionDescriptor.of(B, A, I));
+        SEQUENCE_SECONDS_PER_UNIT = bind(linker, lib, "cadaclysm_sequence_seconds_per_unit", FunctionDescriptor.of(D, A, I));
+        SEQUENCE_SEGMENT_COUNT = bind(linker, lib, "cadaclysm_sequence_segment_count", FunctionDescriptor.of(I, A, I));
+        SEQUENCE_SEGMENT = bind(linker, lib, "cadaclysm_sequence_segment", FunctionDescriptor.of(B, A, I, I, A, A, A));
+        POSE_SEQUENCE = bind(linker, lib, "cadaclysm_pose_sequence", FunctionDescriptor.of(A, A, I, D, I));
+        // Posing (docs/superpowers/plans/2026-09-28-mechanism-posing-2.md): the mechanism posed by
+        // explicit values or a named state, copied eagerly into a Pose and freed (POSE_FREE) before
+        // the C handle escapes anywhere -- see Scene.copyPose.
+        POSE = bind(linker, lib, "cadaclysm_pose", FunctionDescriptor.of(A, A, A, A, A, I, I));
+        POSE_STATE = bind(linker, lib, "cadaclysm_pose_state", FunctionDescriptor.of(A, A, I, I));
+        POSE_FREE = bind(linker, lib, "cadaclysm_pose_free", FunctionDescriptor.ofVoid(A));
+        POSE_GROUND = bind(linker, lib, "cadaclysm_pose_ground", FunctionDescriptor.of(I, A));
+        POSE_NODE_COUNT = bind(linker, lib, "cadaclysm_pose_node_count", FunctionDescriptor.of(I, A));
+        POSE_NODE_TRANSFORM = bind(linker, lib, "cadaclysm_pose_node_transform", FunctionDescriptor.ofVoid(A, I, A));
+        POSE_UNSOLVED_COUNT = bind(linker, lib, "cadaclysm_pose_unsolved_count", FunctionDescriptor.of(I, A));
+        POSE_UNSOLVED = bind(linker, lib, "cadaclysm_pose_unsolved", FunctionDescriptor.of(I, A, I));
+        POSE_OUT_OF_RANGE_COUNT = bind(linker, lib, "cadaclysm_pose_out_of_range_count", FunctionDescriptor.of(I, A));
+        POSE_OUT_OF_RANGE = bind(linker, lib, "cadaclysm_pose_out_of_range", FunctionDescriptor.of(B, A, I, A, A, A));
+        KINEMATICS_BASE = bind(linker, lib, "cadaclysm_kinematics_base", FunctionDescriptor.of(I, A));
     }
 
     @SuppressWarnings("restricted") // downcallHandle: every entry point here is the published ABI.
@@ -915,7 +944,7 @@ public final class Cad {
     }
 
     /**
-     * Open a CAD file, or a {@code .zip} holding one.
+     * Open a CAD file, or a {@code .zip}, {@code .stpZ} or {@code .gz} holding one.
      *
      * <p>{@code options.schema()} names an EXPRESS schema ({@code .exp}) beyond the ones built
      * into the library -- every schema the project ships is compiled in, so a STEP or IFC file
@@ -923,8 +952,9 @@ public final class Cad {
      * speaks. {@code options.convention()} is the space to read the file into; the library
      * does the converting, so every array a caller reads out is already in it.
      *
-     * <p>A {@code .zip} opens its first readable member; {@link Scene#sourceName()} says
-     * which. Throws {@link CadaclysmException} on failure, carrying what the library said.
+     * <p>A {@code .zip} (or {@code .stpZ}, STEP's zip) opens its first readable member;
+     * {@link Scene#sourceName()} says which. A {@code .gz} is read as the format named before
+     * it: {@code part.step.gz} as {@code .step}. Throws {@link CadaclysmException} on failure, carrying what the library said.
      */
     public static Scene open(String path, OpenOptions options) {
         if (!Files.exists(Path.of(path))) {
@@ -1128,7 +1158,7 @@ public final class Cad {
 
     /**
      * One of the seven camera angles {@link SvgOptions#view()} understands -- the same table
-     * {@code cadaclysm_viewer.VIEWS} gives Python's {@code show()} and {@code svg()} both. Each
+     * {@code cadaclysm_view.VIEWS} gives Python's {@code show()} and {@code svg()} both. Each
      * constant carries its own (azimuth, elevation) in degrees, which is the "View helper"
      * every language's SVG binding offers.
      */
@@ -1169,33 +1199,55 @@ public final class Cad {
      * {@link Node#svgText(SvgOptions)} and {@link Node#svg(String, SvgOptions)}. A refused
      * option (an out-of-range {@link #fov()}, say) throws {@link CadaclysmException} naming the
      * field, worded by the library itself.
+     *
+     * <p>{@code stroke} is the pen colour: {@code "#rgb"}, {@code "#rrggbb"} or a CSS colour
+     * name. {@code background} stays the packed {@code 0xRRGGBB} number, or null for no {@code
+     * <rect>} behind the drawing -- {@link #packed(String)} reads a {@code "#rgb"}, {@code
+     * "#rrggbb"} or CSS colour name string, e.g. {@code background = Cad.packed("navy")}.
      */
     public record SvgOptions(SvgView view, Double azimuth, Double elevation, String up, double fov,
                               double width, double height, double margin, double tolerance,
                               String stroke, double strokeWidth, Integer background,
-                              boolean edges, boolean curves, boolean isocurves, boolean polylines) {
+                              boolean edges, boolean curves, boolean isocurves, boolean polylines,
+                              boolean silhouettes) {
         /**
          * {@code view = ISO}, {@code azimuth}/{@code elevation}/{@code up}/{@code background}
          * null (fall through to {@link #view()}, the scene's convention, and transparent),
          * {@code fov = 0} (orthographic), a 1000-square page, {@code margin = 0.05}, {@code
-         * tolerance = 0.1}, a black one-unit stroke, edges alone.
+         * tolerance = 0.1}, a black one-unit stroke, and edges with each body's outline
+         * beside them.
+         *
+         * <p>{@code silhouettes} is on because a line set alone cannot draw every body: a
+         * sphere's and a torus's only curves are the seams where their one face meets itself,
+         * which are not edges of the body and are never drawn, so without it those two draw a
+         * blank page.
          */
         public static SvgOptions defaults() {
             return new SvgOptions(SvgView.ISO, null, null, null, 0.0, 1000.0, 1000.0, 0.05, 0.1,
-                    "#000000", 1.0, null, true, false, false, false);
+                    "#000000", 1.0, null, true, false, false, false, true);
         }
     }
 
-    /** A colour as the ABI's packed {@code 0xRRGGBB}: {@code "#rrggbb"}, the leading {@code #}
-     *  optional. */
+    /** A colour as the ABI's packed {@code 0xRRGGBB}, from {@code "#rgb"}, {@code "#rrggbb"} or a
+     *  CSS colour name -- read by the library's own parser, so every wrapper takes the same
+     *  forms. */
     private static int parseColour(String colour) {
-        String hex = colour.startsWith("#") ? colour.substring(1) : colour;
-        if (hex.length() != 6) throw new CadaclysmException("colour " + colour + ": expected '#rrggbb'");
-        try {
-            return (int) Long.parseLong(hex, 16);
-        } catch (NumberFormatException e) {
-            throw new CadaclysmException("colour " + colour + ": expected '#rrggbb'");
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
+            if ((boolean) PARSE_COLOUR.invokeExact(arena.allocateFrom(colour), out)) {
+                double[] c = out.toArray(ValueLayout.JAVA_DOUBLE);
+                return ((int) Math.round(c[0] * 255) << 16) | ((int) Math.round(c[1] * 255) << 8) | (int) Math.round(c[2] * 255);
+            }
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
         }
+        throw new CadaclysmException("colour: a colour is \"#rgb\", \"#rrggbb\" or a CSS colour name, not '" + colour + "'");
+    }
+
+    /** A colour as the ABI's packed {@code 0xRRGGBB}, from {@code "#rgb"}, {@code "#rrggbb"} or a
+     *  CSS colour name -- for {@link SvgOptions#background()}, which takes the packed number. */
+    public static int packed(String colour) {
+        return parseColour(colour);
     }
 
     /**
@@ -1224,7 +1276,8 @@ public final class Cad {
         out.set(ValueLayout.JAVA_INT, offset(SVG_OPTIONS, "stroke"), parseColour(o.stroke()));
         out.set(ValueLayout.JAVA_INT, offset(SVG_OPTIONS, "background"),
                 o.background() == null ? 0xFFFFFFFF : o.background()); // CADACLYSM_SVG_TRANSPARENT
-        int flags = (o.edges() ? 1 : 0) | (o.curves() ? 2 : 0) | (o.isocurves() ? 4 : 0) | (o.polylines() ? 8 : 0);
+        int flags = (o.edges() ? 1 : 0) | (o.curves() ? 2 : 0) | (o.isocurves() ? 4 : 0) | (o.polylines() ? 8 : 0)
+                | (o.silhouettes() ? 16 : 0);
         out.set(ValueLayout.JAVA_INT, offset(SVG_OPTIONS, "flags"), flags);
         return out;
     }
@@ -1538,6 +1591,8 @@ public final class Cad {
         private final Scene scene;
         private final long positions, normals, uvs, colours, indices;
         private final int vertexCount, indexCount;
+        // The scene's forget count when this was made; see Scene.forgets.
+        private final long forgets;
 
         private Mesh64(Scene scene, long positions, long normals, long uvs, long colours, long indices,
                        int vertexCount, int indexCount) {
@@ -1549,6 +1604,7 @@ public final class Cad {
             this.indices = indices;
             this.vertexCount = vertexCount;
             this.indexCount = indexCount;
+            this.forgets = scene.forgets;
         }
 
         /** The scene this borrows from. */
@@ -1569,9 +1625,14 @@ public final class Cad {
         }
 
         /** As {@link Mesh}'s: a closed scene throws rather than hand out a view over freed
-         *  memory. */
+         *  memory -- and so does a scene that has forgotten its meshes since this was made,
+         *  the forget having freed the mesh this lends. */
         private void open() {
             scene.handle();
+            if (scene.forgets != forgets) {
+                throw new CadaclysmException("mesh64: stale view: the scene has forgotten its meshes since, "
+                        + "freeing the document's own mesh this lends (ask the node again)");
+            }
         }
 
         public DoubleBuffer positions() {
@@ -1652,7 +1713,8 @@ public final class Cad {
             return floatView(positions, vertexCount * 3L);
         }
 
-        /** {@code polylineCount} vertex counts saying where each run stops. */
+        /** {@code polylineCount} vertex counts: how many points each run has, not where it
+         * ends, so twelve two-point edges read {@code 2, 2, 2, ...}. */
         public IntBuffer counts() {
             scene.handle();
             return intView(counts, polylineCount);
@@ -2064,6 +2126,19 @@ public final class Cad {
         }
     }
 
+    /** What {@link Brep#sewed} did, as plain data: the edges it joined ({@code pairs}), the
+     *  free edges before and after, how many groups of free edges between the same two
+     *  vertices it left free ({@code refused}: too far apart for the tolerance, or more than
+     *  two), the widest gap it sewed, and the two tolerances it used. */
+    public record SewReport(int pairs, int freeBefore, int freeAfter, int refused, double worstGap,
+                            double tolerance, double vertex) {
+    }
+
+    /** A sewn brep and its {@link SewReport}, from {@link Brep#sewed}. The brep is the
+     *  caller's to close. */
+    public record Sewn(Brep brep, SewReport report) {
+    }
+
     /**
      * A body's exact B-rep -- the trimmed surfaces its mesh is cut from -- shared with the
      * scene rather than copied: a reference of this object's own, given back by {@link
@@ -2121,6 +2196,36 @@ public final class Cad {
                 }
                 if (!ok) throw new CadaclysmException(lastErrorOr("manifold"));
                 return Manifold.of(out.toArray(ValueLayout.JAVA_INT));
+            } finally {
+                java.lang.ref.Reference.reachabilityFence(this);
+            }
+        }
+
+        /** This brep with its free edges sewn, and what was sewn, as a new {@link Brep} and a
+         *  {@link SewReport}; this one is left as it was. Two free edges become one shared
+         *  edge where both their ends coincide within {@code vertex} -- by default the
+         *  rounding {@link #manifold()} merges vertices at -- and their curves lie within
+         *  {@code tolerance} of each other, by default {@code vertex} too, so only edges that
+         *  are one curve written twice are joined. A larger {@code tolerance} also joins two
+         *  curves between the same two vertices that part by up to it; {@code vertex} is what
+         *  decides which edges are candidates at all, and raising it is what could close a
+         *  slot. Nothing moves. Pass null for either to take its default. */
+        public Sewn sewed(Double tolerance, Double vertex) {
+            MemorySegment p = pointer();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment counts = arena.allocate(ValueLayout.JAVA_INT, 4);
+                MemorySegment gaps = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
+                MemorySegment raw;
+                try {
+                    raw = (MemorySegment) BREP_SEW.invokeExact(p, tolerance == null ? Double.NaN : tolerance,
+                            vertex == null ? Double.NaN : vertex, counts, gaps);
+                } catch (Throwable t) {
+                    throw new RuntimeException(t);
+                }
+                if (raw.address() == 0) throw new CadaclysmException(lastErrorOr("sew"));
+                int[] c = counts.toArray(ValueLayout.JAVA_INT);
+                double[] g = gaps.toArray(ValueLayout.JAVA_DOUBLE);
+                return new Sewn(new Brep(raw), new SewReport(c[0], c[1], c[2], c[3], g[0], g[1], g[2]));
             } finally {
                 java.lang.ref.Reference.reachabilityFence(this);
             }
@@ -2296,6 +2401,15 @@ public final class Cad {
     private static double invokeDoubleAt(MethodHandle function, MemorySegment handle, int index) {
         try {
             return (double) function.invokeExact(handle, index);
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
+
+    /** Frees a {@code CadaclysmPose *}; null is fine, as the ABI documents. */
+    private static void invokePoseFree(MemorySegment pose) {
+        try {
+            POSE_FREE.invokeExact(pose);
         } catch (Throwable t) {
             throw new RuntimeException(t);
         }
@@ -3131,6 +3245,87 @@ public final class Cad {
         return new State(index, name, List.copyOf(values));
     }
 
+    // ---- Sequences ------------------------------------------------------------------------
+
+    /** One keyframe of a {@link Sequence}: the {@link State} it holds at parameter {@code t}, and
+     *  how the sequence runs on from it: {@code "undefined"}, {@code "discontinuous"},
+     *  {@code "synchronous"} or {@code "linear"}. */
+    public record Segment(State state, double t, String interpolation) {}
+
+    /** A motion sequence the file records, e.g. STEP's {@code INTERPOLATED_CONFIGURATION_SEQUENCE}:
+     *  keyframes over states. {@code secondsPerUnit} is null when the file names no time unit.
+     *  From {@link Scene#sequences()}. */
+    public record Sequence(int index, String name, boolean closed, Double secondsPerUnit,
+                           List<Segment> segments, Scene scene) {
+        /** The first segment's parameter. */
+        public double start() {
+            return segments.get(0).t();
+        }
+
+        /** The last segment's parameter. */
+        public double end() {
+            return segments.get(segments.size() - 1).t();
+        }
+
+        /** {@link #pose(double, Link)} with the default ground. */
+        public Pose pose(double t) {
+            return pose(t, null);
+        }
+
+        /** The mechanism posed at sequence parameter {@code t}, with {@code ground} held fixed as
+         *  {@link Scene#pose(List, Link)} does. Throws {@link CadaclysmException} for a {@code t}
+         *  that is not finite. */
+        public Pose pose(double t, Link ground) {
+            int groundIndex = ground == null ? NONE : ground.index();
+            try {
+                MemorySegment ptr = (MemorySegment) POSE_SEQUENCE.invokeExact(scene.handle(), index, t, groundIndex);
+                if (ptr.address() == 0) throw new CadaclysmException(lastErrorOr("pose_sequence"));
+                return scene.copyPose(ptr);
+            } catch (CadaclysmException e) {
+                throw e;
+            } catch (Throwable th) {
+                throw new RuntimeException(th);
+            }
+        }
+    }
+
+    private static final String[] INTERPOLATIONS = {"undefined", "discontinuous", "synchronous", "linear"};
+
+    private static Sequence readSequence(Scene scene, int index, List<State> states) {
+        String name = string(invokeStringAt(SEQUENCE_NAME, scene.handle(), index));
+        boolean closed;
+        double seconds;
+        int segmentCount;
+        try {
+            closed = (boolean) SEQUENCE_CLOSED.invokeExact(scene.handle(), index);
+            seconds = (double) SEQUENCE_SECONDS_PER_UNIT.invokeExact(scene.handle(), index);
+            segmentCount = (int) SEQUENCE_SEGMENT_COUNT.invokeExact(scene.handle(), index);
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+        List<Segment> segments = new ArrayList<>(segmentCount);
+        for (int i = 0; i < segmentCount; i++) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment stateOut = arena.allocate(ValueLayout.JAVA_INT);
+                MemorySegment tOut = arena.allocate(ValueLayout.JAVA_DOUBLE);
+                MemorySegment interpolationOut = arena.allocate(ValueLayout.JAVA_INT);
+                boolean ok = (boolean) SEQUENCE_SEGMENT.invokeExact(scene.handle(), index, i, stateOut, tOut, interpolationOut);
+                if (!ok) throw new CadaclysmException(lastErrorOr("sequence_segment"));
+                int code = interpolationOut.get(ValueLayout.JAVA_INT, 0);
+                segments.add(new Segment(states.get(stateOut.get(ValueLayout.JAVA_INT, 0)),
+                        tOut.get(ValueLayout.JAVA_DOUBLE, 0),
+                        code >= 0 && code < INTERPOLATIONS.length ? INTERPOLATIONS[code] : "undefined"));
+            } catch (CadaclysmException e) {
+                throw e;
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+        return new Sequence(index, name, closed,
+                seconds == 0.0 ? null : seconds,
+                List.copyOf(segments), scene);
+    }
+
     private static StateValue readStateValue(Scene scene, int state, int row) {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment jointOut = arena.allocate(ValueLayout.JAVA_INT);
@@ -3144,6 +3339,89 @@ public final class Cad {
             return new StateValue(joint, values);
         } catch (Throwable t) {
             throw new RuntimeException(t);
+        }
+    }
+
+    // ---- Pose -----------------------------------------------------------------------------
+
+    /** One value given for a joint's freedom that fell outside its range: reported in
+     *  {@link Pose#outOfRange()}, used as given rather than clamped. */
+    public record OutOfRange(Joint joint, int freedom, double value) {}
+
+    /**
+     * A posed mechanism: {@link Scene#pose} or {@link Scene#poseState}'s answer. The document
+     * itself is unchanged.
+     *
+     * <p>Copied eagerly out of the C handle when it is made ({@link Scene}'s private
+     * {@code copyPose} helper), so a {@link Pose} holds no C pointer and outlives the call
+     * that made it -- closing the scene does not invalidate its transforms. {@link #show} and
+     * {@link #view} need the scene open, since they draw it by handle.
+     */
+    public static final class Pose {
+        private final Scene scene;
+        private final Link ground;
+        private final List<Joint> unsolved;
+        private final List<OutOfRange> outOfRange;
+        private final double[][] transforms;
+
+        private Pose(Scene scene, Link ground, List<Joint> unsolved, List<OutOfRange> outOfRange, double[][] transforms) {
+            this.scene = scene;
+            this.ground = ground;
+            this.unsolved = unsolved;
+            this.outOfRange = outOfRange;
+            this.transforms = transforms;
+        }
+
+        /** The link held fixed. */
+        public Link ground() {
+            return ground;
+        }
+
+        /** Joints that close a loop and were not honoured, in file order. */
+        public List<Joint> unsolved() {
+            return unsolved;
+        }
+
+        /** One entry per given value outside its freedom's range. */
+        public List<OutOfRange> outOfRange() {
+            return outOfRange;
+        }
+
+        /** {@code node}'s posed transform, as a row-major 4x4 double matrix -- the same type
+         *  {@link Node#transform()} returns. */
+        public double[][] transform(Node node) {
+            return toRowMajor(rawTransform(node));
+        }
+
+        /** The same matrix in the ABI's own column-major order, as 16 doubles, exactly as
+         *  {@link Node#rawTransform()} lays them out. */
+        public double[] rawTransform(Node node) {
+            return transforms[node.index()].clone();
+        }
+
+        /** Draw this pose's scene as Scene.show does -- by handle -- with every node's posed
+         *  transform handed to the view (cadaclysm_view_set_node_transforms). An unposed pose
+         *  draws exactly what Scene.show does. */
+        public void show() {
+            View.present(scene, new View.ShowOptions(), false, transforms);
+        }
+
+        public void show(View.ShowOptions options) {
+            View.present(scene, options, false, transforms);
+        }
+
+        /** Pose.show's orbiting twin; returns what Scene.view returns. */
+        public View.Camera view() {
+            return View.present(scene, new View.ShowOptions(), true, transforms);
+        }
+
+        public View.Camera view(View.ShowOptions options) {
+            return View.present(scene, options, true, transforms);
+        }
+
+        @Override
+        public String toString() {
+            return "<Pose ground=" + ground + ">";
         }
     }
 
@@ -3172,6 +3450,24 @@ public final class Cad {
 
         public int index() {
             return index;
+        }
+
+        /** Draw with the view library in use: blocks until the window is closed; on the terminal, prints a still. */
+        public void show() {
+            View.present(this, new View.ShowOptions(), false);
+        }
+
+        public void show(View.ShowOptions options) {
+            View.present(this, options, false);
+        }
+
+        /** Orbit until the window is closed; the camera it was left at and the last pick. */
+        public View.Camera view() {
+            return View.present(this, new View.ShowOptions(), true);
+        }
+
+        public View.Camera view(View.ShowOptions options) {
+            return View.present(this, options, true);
         }
 
         public String name() {
@@ -3960,6 +4256,10 @@ public final class Cad {
      */
     public static final class Scene implements AutoCloseable {
         private MemorySegment handle;
+        // How many times forgetMeshes has run. Only Mesh64 stamps itself with this: it lends
+        // the document's own mesh, which a forget frees, where the float mesh and the line
+        // views are the library's own caches and outlive one.
+        private long forgets;
         private final String label;
         private final String path;
         private final String schemaPath;
@@ -3998,7 +4298,7 @@ public final class Cad {
         /** The raw handle, refusing to hand over a closed one -- every call goes through here
          *  rather than touching the field directly, so a use-after-close throws at the call
          *  site instead of passing a dangling pointer into the library. */
-        private MemorySegment handle() {
+        MemorySegment handle() {
             if (handle == null) throw new CadaclysmException(label + ": the scene is closed");
             return handle;
         }
@@ -4008,6 +4308,9 @@ public final class Cad {
         @Override
         public void close() {
             if (handle == null) return;
+            // What a view shows of this scene is removed first; a view of another thread that
+            // still shows it makes this throw, and the scene stays open.
+            View.release(this);
             MemorySegment h = handle;
             handle = null;
             try {
@@ -4015,6 +4318,24 @@ public final class Cad {
             } catch (Throwable t) {
                 throw new RuntimeException(t);
             }
+        }
+
+        /** Draw with the view library in use: blocks until the window is closed; on the terminal, prints a still. */
+        public void show() {
+            View.present(this, new View.ShowOptions(), false);
+        }
+
+        public void show(View.ShowOptions options) {
+            View.present(this, options, false);
+        }
+
+        /** Orbit until the window is closed; the camera it was left at and the last pick. */
+        public View.Camera view() {
+            return View.present(this, new View.ShowOptions(), true);
+        }
+
+        public View.Camera view(View.ShowOptions options) {
+            return View.present(this, options, true);
         }
 
         /** The version of the library that read it. */
@@ -4123,6 +4444,135 @@ public final class Cad {
             List<State> found = new ArrayList<>(count);
             for (int i = 0; i < count; i++) found.add(readState(this, i));
             return found;
+        }
+
+        /** The motion sequences the file records, e.g. STEP's
+         *  {@code INTERPOLATED_CONFIGURATION_SEQUENCE}. Empty for a file that records none. */
+        public List<Sequence> sequences() {
+            int count = invokeIntOf(SEQUENCE_COUNT, handle());
+            List<State> states = states();
+            List<Sequence> found = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) found.add(readSequence(this, i, states));
+            return found;
+        }
+
+        /** The link the file declares as the mechanism's base, or null when it declares
+         *  none (the default ground is then the link on the most joints; see {@link #pose}). */
+        public Link base() {
+            int index = invokeIntOf(KINEMATICS_BASE, handle());
+            return index == NONE ? null : new Link(this, index);
+        }
+
+        /** {@link #pose(List, Link)} with the default ground. */
+        public Pose pose(List<StateValue> values) {
+            return pose(values, null);
+        }
+
+        /**
+         * The mechanism posed by {@code values}: rows of a joint and the values it sets, one
+         * per freedom of its pair, in the pair's freedom order -- exactly {@link
+         * State#values()}'s row type, so {@code pose(state.values())} poses like {@code
+         * poseState(state)} -- with {@code ground} (a {@link Link}, or null for the default
+         * ground) held fixed. Values outside a freedom's range are used as given and reported
+         * in the answer's {@link Pose#outOfRange()}.
+         *
+         * <p>Throws {@link CadaclysmException} on a bad row (a joint given twice, one with the
+         * wrong number of values, ...) or a file with no mechanism, carrying {@code
+         * cadaclysm_last_error}'s text unchanged.
+         */
+        public Pose pose(List<StateValue> values, Link ground) {
+            int rowCount = values.size();
+            int[] jointsArr = new int[rowCount];
+            int[] countsArr = new int[rowCount];
+            int flatCount = 0;
+            for (int i = 0; i < rowCount; i++) {
+                StateValue row = values.get(i);
+                jointsArr[i] = row.joint().index();
+                countsArr[i] = row.values().length;
+                flatCount += countsArr[i];
+            }
+            double[] flat = new double[flatCount];
+            int p = 0;
+            for (StateValue row : values) for (double v : row.values()) flat[p++] = v;
+            int groundIndex = ground == null ? NONE : ground.index();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment jointsSeg = rowCount == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_INT, jointsArr);
+                MemorySegment countsSeg = rowCount == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_INT, countsArr);
+                MemorySegment valuesSeg = flatCount == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_DOUBLE, flat);
+                MemorySegment ptr = (MemorySegment) POSE.invokeExact(handle(), jointsSeg, countsSeg, valuesSeg, rowCount, groundIndex);
+                if (ptr.address() == 0) throw new CadaclysmException(lastErrorOr("pose"));
+                return copyPose(ptr);
+            } catch (CadaclysmException e) {
+                throw e;
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
+        /** {@link #poseState(State, Link)} with the default ground. */
+        public Pose poseState(State state) {
+            return poseState(state, null);
+        }
+
+        /** The mechanism posed by {@code state}'s values, with {@code ground} held fixed as
+         *  {@link #pose(List, Link)} does. Throws as {@link #pose(List, Link)} does. */
+        public Pose poseState(State state, Link ground) {
+            int groundIndex = ground == null ? NONE : ground.index();
+            try {
+                MemorySegment ptr = (MemorySegment) POSE_STATE.invokeExact(handle(), state.index(), groundIndex);
+                if (ptr.address() == 0) throw new CadaclysmException(lastErrorOr("pose_state"));
+                return copyPose(ptr);
+            } catch (CadaclysmException e) {
+                throw e;
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+
+        /** Reads everything out of a {@code CadaclysmPose *} into a {@link Pose}, then frees
+         *  it (ruling 2 of the posing plan: wrappers copy eagerly, never holding the C
+         *  pointer). Runs in a {@code finally} so an exception midway through copying still
+         *  frees the handle. */
+        private Pose copyPose(MemorySegment ptr) {
+            try {
+                Link ground = new Link(this, invokeIntOf(POSE_GROUND, ptr));
+                int nodeCount = invokeIntOf(POSE_NODE_COUNT, ptr);
+                double[][] transforms = new double[nodeCount][];
+                for (int node = 0; node < nodeCount; node++) {
+                    try (Arena arena = Arena.ofConfined()) {
+                        MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 16);
+                        POSE_NODE_TRANSFORM.invokeExact(ptr, node, out);
+                        transforms[node] = out.toArray(ValueLayout.JAVA_DOUBLE);
+                    } catch (Throwable t) {
+                        throw new RuntimeException(t);
+                    }
+                }
+                int unsolvedCount = invokeIntOf(POSE_UNSOLVED_COUNT, ptr);
+                List<Joint> unsolved = new ArrayList<>(unsolvedCount);
+                for (int i = 0; i < unsolvedCount; i++) {
+                    int joint = invokeIntAt(POSE_UNSOLVED, ptr, i);
+                    if (joint != NONE) unsolved.add(new Joint(this, joint));
+                }
+                int outOfRangeCount = invokeIntOf(POSE_OUT_OF_RANGE_COUNT, ptr);
+                List<OutOfRange> outOfRange = new ArrayList<>(outOfRangeCount);
+                for (int i = 0; i < outOfRangeCount; i++) {
+                    try (Arena arena = Arena.ofConfined()) {
+                        MemorySegment jointOut = arena.allocate(ValueLayout.JAVA_INT);
+                        MemorySegment freedomOut = arena.allocate(ValueLayout.JAVA_INT);
+                        MemorySegment valueOut = arena.allocate(ValueLayout.JAVA_DOUBLE);
+                        boolean ok = (boolean) POSE_OUT_OF_RANGE.invokeExact(ptr, i, jointOut, freedomOut, valueOut);
+                        if (ok) {
+                            outOfRange.add(new OutOfRange(new Joint(this, jointOut.get(ValueLayout.JAVA_INT, 0)),
+                                    freedomOut.get(ValueLayout.JAVA_INT, 0), valueOut.get(ValueLayout.JAVA_DOUBLE, 0)));
+                        }
+                    } catch (Throwable t) {
+                        throw new RuntimeException(t);
+                    }
+                }
+                return new Pose(this, ground, List.copyOf(unsolved), List.copyOf(outOfRange), transforms);
+            } finally {
+                invokePoseFree(ptr);
+            }
         }
 
         /** What the reader built but the geometry stage could not finish -- a face that would
@@ -4247,14 +4697,19 @@ public final class Cad {
             }
         }
 
-        /** Drop every mesh the scene has built; the next ask rebuilds. Every {@link Mesh} and
-         *  {@link Polylines} handed out before this is over freed memory. */
+        /** Drop every mesh the scene has built; the next ask rebuilds. What it frees is the
+         *  document's own mesh: the {@link Mesh64}s handed out before it lend that, so this
+         *  counts the forget and one of them read afterwards throws a stale view rather than
+         *  reading freed memory. {@link Mesh}, {@link Polylines} and the Béziers are the
+         *  library's own caches, which a forget does not touch and which stay good until the
+         *  scene closes. */
         public void forgetMeshes() {
             try {
                 FORGET_MESHES.invokeExact(handle());
             } catch (Throwable t) {
                 throw new RuntimeException(t);
             }
+            forgets++;
         }
 
         /** {@link #save(String, String)} as {@code "glb"}. */
@@ -4283,7 +4738,7 @@ public final class Cad {
          * Convention#UNITY} and {@link Convention#Y_UP} give "y", every other convention "z".
          * What {@link SvgOptions#up()} defaults to when left null.
          */
-        private String defaultUp() {
+        String defaultUp() {
             return convention == Convention.UNITY || convention == Convention.Y_UP ? "y" : "z";
         }
 

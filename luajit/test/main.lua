@@ -117,7 +117,7 @@ end
 -- ---- run ---------------------------------------------------------------------------
 
 local files = {}
-for _, name in ipairs({ "reader_test", "blacksmith_test" }) do
+for _, name in ipairs({ "reader_test", "blacksmith_test", "view_test" }) do
   local f = io.open(here .. "/" .. name .. ".lua", "rb")
   if f then
     f:close()

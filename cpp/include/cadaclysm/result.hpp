@@ -173,7 +173,7 @@ public:
     }
 
     template <class F>
-    auto and_then(F&& f) const -> std::invoke_result_t<F> {
+    std::invoke_result_t<F> and_then(F&& f) const {
         using R = std::invoke_result_t<F>;
         static_assert(detail::is_result<R>::value, "and_then's function must return a Result");
         if (failed_) return R(error_);
@@ -181,7 +181,7 @@ public:
     }
 
     template <class F>
-    auto map(F&& f) const -> Result<std::invoke_result_t<F>> {
+    Result<std::invoke_result_t<F>> map(F&& f) const {
         using U = std::invoke_result_t<F>;
         if (failed_) return Result<U>(error_);
         if constexpr (std::is_void_v<U>) {
@@ -243,7 +243,7 @@ public:
     }
 
     template <class F>
-    auto map(F&& f) && -> Result<std::invoke_result_t<F, T&&>> {
+    Result<std::invoke_result_t<F, T&&>> map(F&& f) && {
         using U = std::invoke_result_t<F, T&&>;
         if (!ok()) return Result<U>(std::move(*std::get_if<1>(&v_)));
         if constexpr (std::is_void_v<U>) {
@@ -255,7 +255,7 @@ public:
     }
 
     template <class F>
-    auto map(F&& f) const& -> Result<std::invoke_result_t<F, const T&>> {
+    Result<std::invoke_result_t<F, const T&>> map(F&& f) const& {
         using U = std::invoke_result_t<F, const T&>;
         if (!ok()) return Result<U>(*std::get_if<1>(&v_));
         if constexpr (std::is_void_v<U>) {
@@ -267,7 +267,7 @@ public:
     }
 
     template <class F>
-    auto and_then(F&& f) && -> std::invoke_result_t<F, T&&> {
+    std::invoke_result_t<F, T&&> and_then(F&& f) && {
         using R = std::invoke_result_t<F, T&&>;
         static_assert(detail::is_result<R>::value, "and_then's function must return a Result");
         if (!ok()) return R(std::move(*std::get_if<1>(&v_)));
@@ -275,7 +275,7 @@ public:
     }
 
     template <class F>
-    auto and_then(F&& f) const& -> std::invoke_result_t<F, const T&> {
+    std::invoke_result_t<F, const T&> and_then(F&& f) const& {
         using R = std::invoke_result_t<F, const T&>;
         static_assert(detail::is_result<R>::value, "and_then's function must return a Result");
         if (!ok()) return R(*std::get_if<1>(&v_));

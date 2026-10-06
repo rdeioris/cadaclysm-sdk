@@ -76,15 +76,68 @@
 //! kernel's own boolean tests run at; `fillet`, `chamfer` and `shell` want the
 //! tighter [`FILLET_TOLERANCE`].
 
+use std::collections::BTreeMap;
 use std::ffi::{c_char, CString};
 use std::fmt;
 use std::path::{Path as FsPath, PathBuf};
 use std::ptr::{self, NonNull};
+use std::rc::Rc;
 use std::sync::Mutex;
 
-use crate::{borrowed, groups, groups64, text, Error, Manifold, Mesh, Mesh64, Node, OpenOptions, Result, Scene, SvgOptions, SvgView, Up};
-use crate::viewer::draw::{self, split_by_colour, Drawing, LineBatch, MeshPart};
-use crate::viewer::{Camera, ViewOptions};
+use crate::{
+    borrowed, groups, groups64, text, Error, FreedomAxis, Manifold, Mesh, Mesh64, Motion, Node, OpenOptions, PairKind, Result, Scene,
+    StateValue, SvgOptions, SvgView, Up,
+};
+use crate::view::objects::{polyline_segments, present, Shown};
+use crate::view::{current, Camera, ViewOptions};
+
+/// What a solid measures, per unit density, each figure beside a bound on its own error.
+///
+/// Per unit density is the primitive: a body's weight is `density * volume` and its inertia
+/// scales the same way, so [`Mass::weight`] is the only figure that takes one. Nothing here
+/// multiplies by a density on your behalf -- an assembly of two materials would have to undo it.
+///
+/// `volume`, `centroid`, `inertia` and `principal_moments` mean something only where `closed`.
+/// Where `accuracy_met` is false the refinement stopped before the accuracy asked for: the
+/// figures are honest, they are simply less certain, and the errors say by how much.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Mass {
+    /// Closed, so the volume-side figures mean something.
+    pub closed: bool,
+    /// Every face pointed inward; the figures are given as if they had not.
+    pub inverted: bool,
+    /// Every error came under the accuracy asked for.
+    pub accuracy_met: bool,
+    /// Measured on a mesh rather than exact surfaces, so the errors are the rounding floor.
+    pub from_mesh: bool,
+    pub area: f64,
+    /// A bound on `area`'s own error.
+    pub area_error: f64,
+    pub volume: f64,
+    /// A bound on `volume`'s own error.
+    pub volume_error: f64,
+    pub centroid: [f64; 3],
+    /// A bound on the distance from `centroid` to the true centroid.
+    pub centroid_error: f64,
+    /// Row-major about the centroid, products of inertia negated.
+    pub inertia: [[f64; 3]; 3],
+    /// A bound on every entry of `inertia`.
+    pub inertia_error: f64,
+    /// Ascending.
+    pub principal_moments: [f64; 3],
+    /// Unit, orthogonal, right-handed; row `i` belongs to moment `i`.
+    pub principal_axes: [[f64; 3]; 3],
+}
+
+impl Mass {
+    /// `density * volume`, in whatever units the model and the density agree on.
+    pub fn weight(&self, density: f64) -> f64 {
+        density * self.volume
+    }
+}
+
+/// Whether a brep's faces make a manifold, as plain data ([`Brep::manifold`]).
+
 
 pub mod sys;
 
@@ -136,6 +189,17 @@ fn profile_list(api: &'static Api, list: *mut sys::CadaclysmBlacksmithProfileLis
 
 fn c_text(what: &str, value: &str) -> Result<CString> {
     CString::new(value).map_err(|_| Error::new(format!("{what} contains a NUL byte")))
+}
+
+/// What the kernel says of a job name with a control character in it -- a NUL, which a C
+/// string would otherwise cut the name short at, is refused with it before the library is
+/// asked, as the Python SDK does for a `Job` name and a `write_camotics` stem.
+const JOB_NUL_NAME: &str = "job: a name must be non-empty and without brackets, slashes, quotes, control characters, or : * ? < > |";
+
+/// `value` as a C string for a job's name or a CAMotics stem: a NUL is refused in the
+/// kernel's words ([`JOB_NUL_NAME`]).
+fn job_text(value: &str) -> Result<CString> {
+    CString::new(value).map_err(|_| Error::new(JOB_NUL_NAME))
 }
 
 /// A kernel colour as the viewer's.
@@ -619,6 +683,28 @@ impl Profile {
         profile_list(self.api, list, "profile_common")
     }
 
+    /// This profile with every free-form side (a Bezier, a conic, a NURBS) replaced by lines
+    /// and arcs within `tolerance` of it -- what a G-code writer can say. Lines and arcs pass
+    /// through as they are, every loop closes on itself exactly, holes are converted the same
+    /// way. Fails for a `tolerance` not positive and finite, or a spline that does not
+    /// evaluate. Python's `tolerance` defaults to 0.01.
+    pub fn to_arcs(&self, tolerance: f64) -> Result<Profile> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_profile_to_arcs)(self.raw(), tolerance) };
+        Profile::wrap(self.api, raw, "profile_to_arcs")
+    }
+
+    /// This profile grown by `distance` (shrunk where it is negative), as zero or more
+    /// profiles, all lines and arcs: outward corners rounded by `|distance|`, holes moving
+    /// against the boundary (a hole shrinks as the profile grows). Free-form sides are fitted
+    /// to `tolerance` first ([`to_arcs`](Self::to_arcs)). A shrink that eats the whole profile
+    /// is an empty `Vec`. Fails for a `distance` not finite, a `tolerance` not positive and
+    /// finite, a loop with no sides, or loops that cross or touch. Python's `tolerance`
+    /// defaults to 0.01.
+    pub fn offset(&self, distance: f64, tolerance: f64) -> Result<Vec<Profile>> {
+        let list = unsafe { (self.api.cadaclysm_blacksmith_profile_offset)(self.raw(), distance, tolerance) };
+        profile_list(self.api, list, "profile_offset")
+    }
+
     /// `text` set in a font, one profile per closed shape -- a letter with its counters as
     /// holes (`o` one, `8` two; `i` is two profiles) -- on the sketch plane, the baseline
     /// along x from the origin, each outline counter-clockwise and its holes clockwise, a
@@ -649,10 +735,11 @@ impl Profile {
         Profile::wrap(self.api, raw, "translate_profile")
     }
 
-    /// This outline coloured `(r, g, b)` in 0..1 (see [`rgb`] for hex): how it is drawn.
-    /// The verbs that make a profile from one carry it; a solid made from it takes nothing.
-    pub fn coloured(&self, colour: [f64; 3]) -> Result<Profile> {
-        let [r, g, b] = colour;
+    /// This outline coloured `(r, g, b)` in 0..1, or from `"#rgb"`, `"#rrggbb"` or a CSS
+    /// colour name (see [`rgb`]): how it is drawn. The verbs that make a profile from
+    /// one carry it; a solid made from it takes nothing.
+    pub fn coloured(&self, colour: impl Into<Colour>) -> Result<Profile> {
+        let [r, g, b] = colour.into().rgb()?;
         let raw = unsafe { (self.api.cadaclysm_blacksmith_profile_coloured)(self.raw(), r, g, b) };
         Profile::wrap(self.api, raw, "profile_coloured")
     }
@@ -691,25 +778,29 @@ impl Profile {
         Ok(offsets.windows(2).map(|w| points.get(w[0] as usize..w[1] as usize).unwrap_or(&[]).to_vec()).collect())
     }
 
-    /// Draw the outline and holes with the viewer in use ([`crate::viewer::current`]),
-    /// from the top by default. `options.edges` is ignored: the lines are the picture.
+    /// Draw the outline and holes with the view library in use ([`crate::view::current`]),
+    /// from the top by default, as lines. `options.edges` is ignored: the lines are the
+    /// picture. On the terminal one still; elsewhere a window this call waits on.
     pub fn show<'o>(&self, options: impl Into<Option<&'o ViewOptions>>) -> Result<()> {
         let default = ViewOptions::default();
         let options = options.into().unwrap_or(&default);
-        draw::show(&self.drawing(options)?, options)
+        let (segments, rgb) = self.segments(options)?;
+        present(current()?, Shown::Lines(segments, rgb), options, "Profile", SvgView::Top, Up::Z, false).map(|_| ())
     }
 
-    /// Orbit the outline with the viewer in use; where the camera was left.
+    /// Orbit the outline until the window is closed; where the camera was left.
     pub fn view<'o>(&self, options: impl Into<Option<&'o ViewOptions>>) -> Result<Camera> {
         let default = ViewOptions::default();
         let options = options.into().unwrap_or(&default);
-        draw::view(&self.drawing(options)?, options)
+        let (segments, rgb) = self.segments(options)?;
+        present(current()?, Shown::Lines(segments, rgb), options, "Profile", SvgView::Top, Up::Z, true)?
+            .ok_or_else(|| Error::new("view: the view library gave back no camera"))
     }
 
-    pub(crate) fn drawing(&self, options: &ViewOptions) -> Result<Drawing<'static>> {
+    /// The outline and holes as segments at `options.tolerance`, and the profile's colour.
+    pub(crate) fn segments(&self, options: &ViewOptions) -> Result<(Vec<[[f32; 3]; 2]>, Option<[f32; 3]>)> {
         let runs = self.polylines(options.tolerance.unwrap_or(DEFAULT_TOLERANCE))?;
-        let colours = vec![rgb32(self.colour()?); runs.len()];
-        Ok(Drawing { name: "Profile".into(), meshes: Vec::new(), lines: LineBatch::grouped(&runs, &colours)?, view: SvgView::Top, up: Up::Z })
+        Ok((polyline_segments(&runs), rgb32(self.colour()?)))
     }
 
     /// This profile with its corners rounded by `radius` where two straight segments
@@ -1289,16 +1380,73 @@ pub enum Unit {
     Inch = 2,
 }
 
-/// `(r, g, b)` in 0..1 from `"#rgb"` or `"#rrggbb"` (the `#` optional).
-pub fn rgb(hex: &str) -> Result<[f64; 3]> {
-    let h = hex.trim();
-    let h = h.strip_prefix('#').unwrap_or(h);
-    let doubled: String = if h.len() == 3 { h.chars().flat_map(|c| [c, c]).collect() } else { h.to_string() };
-    if doubled.len() == 6 && doubled.chars().all(|c| c.is_ascii_hexdigit()) {
-        let at = |i: usize| u8::from_str_radix(&doubled[i..i + 2], 16).map(|v| f64::from(v) / 255.0).unwrap_or(0.0);
-        return Ok([at(0), at(2), at(4)]);
+/// A colour as `coloured` takes it: numbers in 0..1, or text -- `"#rgb"`, `"#rrggbb"` or a
+/// CSS colour name, read by the library's own parser.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum Colour {
+    Rgb([f64; 3]),
+    Text(String),
+}
+
+impl From<[f64; 3]> for Colour {
+    fn from(c: [f64; 3]) -> Self {
+        Colour::Rgb(c)
     }
-    Err(Error::new(format!("coloured: a colour is \"#rgb\" or \"#rrggbb\", not {hex:?}")))
+}
+
+impl From<&str> for Colour {
+    fn from(t: &str) -> Self {
+        Colour::Text(t.to_owned())
+    }
+}
+
+impl From<String> for Colour {
+    fn from(t: String) -> Self {
+        Colour::Text(t)
+    }
+}
+
+impl Colour {
+    fn rgb(self) -> Result<[f64; 3]> {
+        match self {
+            Colour::Rgb(c) => Ok(c),
+            Colour::Text(t) => rgb(&t),
+        }
+    }
+}
+
+/// The library's own colour parse, shared by [`rgb`] and [`packed`] rather than
+/// duplicating the call: `Some((r, g, b))` in 0..1, or `None` for text the library refuses.
+fn parse_colour(colour: &str) -> Result<Option<[f64; 3]>> {
+    let api = api()?;
+    let colour_text = c_text("colour", colour)?;
+    let mut out = [0.0f64; 3];
+    if unsafe { (api.cadaclysm_blacksmith_parse_colour)(colour_text.as_ptr(), out.as_mut_ptr()) } {
+        Ok(Some(out))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Colour text -- `"#rgb"`, `"#rrggbb"` (the `#` optional) or a CSS colour name, matched
+/// ASCII case-insensitively -- as `(r, g, b)` in 0..1, read by the library's own parser.
+pub fn rgb(colour: &str) -> Result<[f64; 3]> {
+    parse_colour(colour)?.ok_or_else(|| {
+        Error::new(format!(
+            "coloured: a colour is \"#rgb\", \"#rrggbb\", a CSS colour name or (r, g, b) in 0..1, not {colour:?}"
+        ))
+    })
+}
+
+/// A colour packed `0xRRGGBB` from `"#rgb"`, `"#rrggbb"` or a CSS colour name, read by
+/// the library's own parser -- for callers that want the kernel's parser without going
+/// through a paint entry point.
+pub fn packed(colour: &str) -> Result<u32> {
+    let [r, g, b] = parse_colour(colour)?.ok_or_else(|| {
+        Error::new(format!("colour: a colour is \"#rgb\", \"#rrggbb\" or a CSS colour name, not '{colour}'"))
+    })?;
+    Ok(((r * 255.0).round() as u32) << 16 | ((g * 255.0).round() as u32) << 8 | (b * 255.0).round() as u32)
 }
 
 // ---- solids -----------------------------------------------------------------------
@@ -1337,6 +1485,12 @@ impl Solid {
 
     fn raw(&self) -> *const sys::CadaclysmBlacksmithSolid {
         self.handle.as_ptr()
+    }
+
+    /// The solid's C handle, for libraries that take a `CadaclysmBlacksmithSolid *` --
+    /// `cadaclysm_view_show_solid`. Valid until this `Solid` is dropped; the pointee is opaque.
+    pub fn as_ptr(&self) -> *const std::ffi::c_void {
+        self.handle.as_ptr().cast()
     }
 
     fn next(&self, raw: *mut sys::CadaclysmBlacksmithSolid, what: &str) -> Result<Solid> {
@@ -1709,6 +1863,17 @@ impl Solid {
         self.next(raw, "common")
     }
 
+    /// This solid cut by the plane `Z = z`: its closed outlines there, in XY, nested into
+    /// profiles with holes (boundaries counter-clockwise, holes clockwise), a line or a circle
+    /// crossing kept exact and any other curve as lines within `tolerance`. A plane that
+    /// misses the solid is an empty `Vec`. Fails for a `z` not finite, a `tolerance` not
+    /// positive and finite, a face lying in the plane (section a little above or below it), or
+    /// a crossing that does not close. Python's `tolerance` defaults to 0.05.
+    pub fn section(&self, z: f64, tolerance: f64) -> Result<Vec<Profile>> {
+        let list = unsafe { (self.api.cadaclysm_blacksmith_solid_section)(self.raw(), z, tolerance) };
+        profile_list(self.api, list, "solid_section")
+    }
+
     /// `self` (a sheet or a solid) cut along the closed `tool`'s boundary and the
     /// pieces on one side thrown away; the kept pieces come in `self`'s face order.
     pub fn trim(&self, tool: &Solid, keep: Keep, tolerance: f64) -> Result<Solid> {
@@ -1960,12 +2125,12 @@ impl Solid {
 
     // -- colour
 
-    /// This solid coloured `(r, g, b)` in 0..1 (see [`rgb`] for hex) -- or, with `face`,
-    /// just that face, whose colour then wins over the solid's. What is made from a
-    /// coloured solid inherits its colours.
-    pub fn coloured(&self, colour: [f64; 3], face: Option<u32>) -> Result<Solid> {
+    /// This solid coloured `(r, g, b)` in 0..1, or from `"#rgb"`, `"#rrggbb"` or a CSS
+    /// colour name (see [`rgb`]) -- or, with `face`, just that face, whose colour then
+    /// wins over the solid's. What is made from a coloured solid inherits its colours.
+    pub fn coloured(&self, colour: impl Into<Colour>, face: Option<u32>) -> Result<Solid> {
         let face = self.face_or_none(face, "coloured")?;
-        let [r, g, b] = colour;
+        let [r, g, b] = colour.into().rgb()?;
         self.next(unsafe { (self.api.cadaclysm_blacksmith_coloured)(self.raw(), face, r, g, b) }, "coloured")
     }
 
@@ -2000,11 +2165,12 @@ impl Solid {
         Ok(None)
     }
 
-    /// This solid with its edges coloured `(r, g, b)`: every edge with `edges` `None`, else
-    /// just those (by index, as [`Solid::fillet`] takes them), whose colour then wins over the
-    /// all-edges one; `Some(&[])` colours none. Inherited as face colours are.
-    pub fn edges_coloured(&self, colour: [f64; 3], edges: Option<&[u32]>) -> Result<Solid> {
-        let [r, g, b] = colour;
+    /// This solid with its edges coloured `(r, g, b)` in 0..1, or from `"#rgb"`,
+    /// `"#rrggbb"` or a CSS colour name (see [`rgb`]): every edge with `edges` `None`,
+    /// else just those (by index, as [`Solid::fillet`] takes them), whose colour then
+    /// wins over the all-edges one; `Some(&[])` colours none. Inherited as face colours are.
+    pub fn edges_coloured(&self, colour: impl Into<Colour>, edges: Option<&[u32]>) -> Result<Solid> {
+        let [r, g, b] = colour.into().rgb()?;
         let (ptr, count) = match edges {
             None => (std::ptr::null(), 0),
             Some(list) => (list.as_ptr(), list.len()),
@@ -2137,6 +2303,16 @@ impl Solid {
         Ok((lo, hi))
     }
 
+    /// This solid's box at `tolerance`: its boolean mesh, padded by twice that -- the
+    /// broad phase's own shape, cheaper to move and test than the solid itself.
+    pub fn bounds_box(&self, tolerance: f64) -> Result<Aabb> {
+        let mut out = sys::CadaclysmBlacksmithBox { lo: [0.0; 3], hi: [0.0; 3] };
+        if !unsafe { (self.api.cadaclysm_blacksmith_solid_bounds_box)(self.raw(), tolerance, &mut out) } {
+            return Err(fail(self.api, "bounds_box"));
+        }
+        Ok(out.into())
+    }
+
     /// How many edges of the mesh at `tolerance` are bound by anything other than
     /// exactly two triangles -- zero for a closed solid.
     pub fn leaked_edges(&self, tolerance: f64) -> Result<u32> {
@@ -2170,6 +2346,37 @@ impl Solid {
             return Err(fail(self.api, "manifold"));
         }
         Ok(Manifold::from_row(out))
+    }
+
+    /// What this solid measures, per unit density, each figure beside a bound on its own error.
+    ///
+    /// `accuracy` is relative and 0 asks for the library's default. The volume-side figures mean
+    /// something only where [`Mass::closed`]; where `accuracy_met` is false the refinement stopped
+    /// early and the figures are honest but less certain, which the errors say.
+    pub fn mass(&self, accuracy: f64) -> Result<Mass> {
+        let mut raw = sys::CadaclysmBlacksmithMassProperties::default();
+        if !unsafe { (self.api.cadaclysm_blacksmith_mass_properties)(self.raw(), accuracy, &mut raw) } {
+            return Err(fail(self.api, "mass_properties"));
+        }
+        let rows = |flat: &[f64; 9]| {
+            [[flat[0], flat[1], flat[2]], [flat[3], flat[4], flat[5]], [flat[6], flat[7], flat[8]]]
+        };
+        Ok(Mass {
+            closed: raw.closed != 0,
+            inverted: raw.inverted != 0,
+            accuracy_met: raw.accuracy_met != 0,
+            from_mesh: raw.from_mesh != 0,
+            area: raw.area,
+            area_error: raw.area_error,
+            volume: raw.volume,
+            volume_error: raw.volume_error,
+            centroid: raw.centroid,
+            centroid_error: raw.centroid_error,
+            inertia: rows(&raw.inertia),
+            inertia_error: raw.inertia_error,
+            principal_moments: raw.principal_moments,
+            principal_axes: rows(&raw.principal_axes),
+        })
     }
 
     /// The edges a fillet indexes, copied out.
@@ -2372,51 +2579,22 @@ impl Solid {
         Ok(unsafe { borrowed(raw.counts, raw.face_count as usize) })
     }
 
-    /// Draw the solid with the viewer in use ([`crate::viewer::current`]) -- in a
-    /// terminal, the picture is left in the scrollback. Each face in its own colour
-    /// ([`Solid::face_colour`]). `None` for `options` draws with the defaults.
-    pub fn show<'o>(&mut self, options: impl Into<Option<&'o ViewOptions>>) -> Result<()> {
+    /// Draw the solid with the view library in use ([`crate::view::current`]), by handle:
+    /// exact surfaces where they draw, its paint, its edges (`options.edges`). On the
+    /// terminal one still in the scrollback; on the wgpu library ([`crate::view::use_wgpu`])
+    /// a window this call waits on until it is closed. `None` for `options` is the defaults.
+    pub fn show<'o>(&self, options: impl Into<Option<&'o ViewOptions>>) -> Result<()> {
         let default = ViewOptions::default();
         let options = options.into().unwrap_or(&default);
-        let drawing = self.drawing(options)?;
-        draw::show(&drawing, options)
+        present(current()?, Shown::Solid(self), options, "Solid", SvgView::Iso, Up::Z, false).map(|_| ())
     }
 
-    /// Orbit the solid with the viewer in use until it is closed; where the camera was left.
-    pub fn view<'o>(&mut self, options: impl Into<Option<&'o ViewOptions>>) -> Result<Camera> {
+    /// Orbit the solid until the window is closed; where the camera was left.
+    pub fn view<'o>(&self, options: impl Into<Option<&'o ViewOptions>>) -> Result<Camera> {
         let default = ViewOptions::default();
         let options = options.into().unwrap_or(&default);
-        let drawing = self.drawing(options)?;
-        draw::view(&drawing, options)
-    }
-
-    pub(crate) fn drawing(&mut self, options: &ViewOptions) -> Result<Drawing<'static>> {
-        let tolerance = options.tolerance.unwrap_or(DEFAULT_TOLERANCE);
-        let whole = self.colour()?;
-        let colours = (0..self.faces()?).map(|f| self.face_colour(f)).collect::<Result<Vec<_>>>()?;
-        let mesh = self.mesh(tolerance)?;
-        let (positions, normals, indices) = (mesh.positions.to_vec(), mesh.normals.map(<[_]>::to_vec), mesh.indices.to_vec());
-        let meshes = if colours.iter().all(|c| *c == whole) {
-            vec![MeshPart {
-                positions: positions.into(),
-                normals: normals.map(Into::into),
-                indices: indices.into(),
-                matrix: None,
-                rgb: rgb32(whole),
-            }]
-        } else {
-            let counts = self.face_triangles(tolerance)?.to_vec();
-            let colours: Vec<_> = colours.into_iter().map(rgb32).collect();
-            split_by_colour(&positions, normals.as_deref(), &indices, &counts, &colours)?
-        };
-        let lines = if options.edges {
-            let runs: Vec<Vec<[f32; 3]>> = self.edge_polylines(tolerance)?.into_iter().map(<[_]>::to_vec).collect();
-            let colours: Vec<_> = self.edge_polyline_colours(tolerance)?.into_iter().map(rgb32).collect();
-            LineBatch::grouped(&runs, &colours)?
-        } else {
-            Vec::new()
-        };
-        Ok(Drawing { name: "Solid".into(), meshes, lines, view: SvgView::Iso, up: Up::Z })
+        present(current()?, Shown::Solid(self), options, "Solid", SvgView::Iso, Up::Z, true)?
+            .ok_or_else(|| Error::new("view: the view library gave back no camera"))
     }
 
     /// This solid as STEP text: AP203 unless `schema` names another -- see
@@ -2478,6 +2656,792 @@ impl Solid {
     }
 }
 
+// ---- machining ----------------------------------------------------------------------
+
+/// The library's own default for [`Job::new`]'s `clearance`.
+pub const JOB_DEFAULT_CLEARANCE: f64 = 1.0;
+/// The library's own default for [`Job::new`]'s `tolerance`.
+pub const JOB_DEFAULT_TOLERANCE: f64 = 0.01;
+/// The library's own default for [`Job::new`]'s `name`.
+pub const JOB_DEFAULT_NAME: &str = "job";
+/// The library's own default for [`Job::new`]'s `spindle_dwell`, in seconds.
+pub const JOB_DEFAULT_SPINDLE_DWELL: f64 = 2.0;
+/// The library's own default for [`Job::new`]'s `resolution`, in mm.
+pub const JOB_DEFAULT_RESOLUTION: f64 = 0.1;
+/// The library's own default ramp angle for [`Tool::flat`] and [`Tool::ball`], in degrees.
+pub const TOOL_DEFAULT_RAMP_ANGLE: f64 = 3.0;
+
+/// A cutter: Grbl tool `number` (1 to 255, the `T` word), `diameter` and `flute_length` in
+/// mm, `feed` and `plunge` in mm/min, `rpm` its spindle speed, ramping into its cuts at
+/// `ramp_angle` degrees. Immutable; a job keeps its own copy, so dropping a tool a job has
+/// used changes nothing there. Dropping it frees it.
+pub struct Tool {
+    handle: NonNull<sys::CadaclysmBlacksmithTool>,
+    api: &'static Api,
+}
+
+unsafe impl Send for Tool {}
+
+impl Drop for Tool {
+    fn drop(&mut self) {
+        unsafe { (self.api.cadaclysm_blacksmith_tool_free)(self.handle.as_ptr()) }
+    }
+}
+
+impl fmt::Debug for Tool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Tool({:p})", self.handle)
+    }
+}
+
+impl Tool {
+    fn wrap(api: &'static Api, raw: *mut sys::CadaclysmBlacksmithTool, what: &str) -> Result<Tool> {
+        NonNull::new(raw).map(|handle| Tool { handle, api }).ok_or_else(|| fail(api, what))
+    }
+
+    fn raw(&self) -> *const sys::CadaclysmBlacksmithTool {
+        self.handle.as_ptr()
+    }
+
+    /// A flat end mill: Grbl tool `number` (at least 1), `diameter` and `flute_length` in mm,
+    /// `feed` and `plunge` in mm/min, `rpm` its spindle speed. It ramps into its cuts at
+    /// `ramp_angle` degrees ([`TOOL_DEFAULT_RAMP_ANGLE`] is the library's own). Fails for a
+    /// `number` of 0 or above 255, a size, feed or speed not positive and finite, or a
+    /// `ramp_angle` outside (0, 90].
+    pub fn flat(number: u32, diameter: f64, flute_length: f64, feed: f64, plunge: f64, rpm: f64, ramp_angle: f64) -> Result<Tool> {
+        let api = api()?;
+        let made = unsafe { (api.cadaclysm_blacksmith_tool_flat)(number, diameter, flute_length, feed, plunge, rpm) };
+        ramped(api, made, ramp_angle, "tool_flat")
+    }
+
+    /// A ball end mill, as [`Tool::flat`], its tip a half sphere of the diameter; in 2.5D it
+    /// cuts where a flat does, `bottom` being the tip.
+    pub fn ball(number: u32, diameter: f64, flute_length: f64, feed: f64, plunge: f64, rpm: f64, ramp_angle: f64) -> Result<Tool> {
+        let api = api()?;
+        let made = unsafe { (api.cadaclysm_blacksmith_tool_ball)(number, diameter, flute_length, feed, plunge, rpm) };
+        ramped(api, made, ramp_angle, "tool_ball")
+    }
+
+    /// A drill: as [`Tool::flat`], plunging at `feed`. A job takes it for [`Job::drill`] (and
+    /// [`Job::machine`]'s drills) only.
+    pub fn drill(number: u32, diameter: f64, flute_length: f64, feed: f64, rpm: f64) -> Result<Tool> {
+        let api = api()?;
+        Tool::wrap(api, unsafe { (api.cadaclysm_blacksmith_tool_drill)(number, diameter, flute_length, feed, rpm) }, "tool_drill")
+    }
+
+    /// A new tool: this one, ramping into its cuts at `degrees` from the horizontal instead.
+    /// Fails for an angle outside (0, 90].
+    pub fn with_ramp_angle(&self, degrees: f64) -> Result<Tool> {
+        Tool::wrap(self.api, unsafe { (self.api.cadaclysm_blacksmith_tool_with_ramp_angle)(self.raw(), degrees) }, "tool_with_ramp_angle")
+    }
+}
+
+/// `made` wrapped, then turned to `ramp_angle` when it is not the library's own default -- the
+/// unramped handle dropped at once rather than kept around.
+fn ramped(api: &'static Api, made: *mut sys::CadaclysmBlacksmithTool, ramp_angle: f64, what: &str) -> Result<Tool> {
+    let tool = Tool::wrap(api, made, what)?;
+    if ramp_angle == TOOL_DEFAULT_RAMP_ANGLE {
+        return Ok(tool);
+    }
+    tool.with_ramp_angle(ramp_angle)
+}
+
+/// The block of material a job cuts, an axis-aligned box. Immutable; a job keeps its own
+/// copy. Dropping it frees it.
+pub struct Stock {
+    handle: NonNull<sys::CadaclysmBlacksmithStock>,
+    api: &'static Api,
+}
+
+unsafe impl Send for Stock {}
+
+impl Drop for Stock {
+    fn drop(&mut self) {
+        unsafe { (self.api.cadaclysm_blacksmith_stock_free)(self.handle.as_ptr()) }
+    }
+}
+
+impl fmt::Debug for Stock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Stock({:p})", self.handle)
+    }
+}
+
+impl Stock {
+    fn wrap(api: &'static Api, raw: *mut sys::CadaclysmBlacksmithStock, what: &str) -> Result<Stock> {
+        NonNull::new(raw).map(|handle| Stock { handle, api }).ok_or_else(|| fail(api, what))
+    }
+
+    fn raw(&self) -> *const sys::CadaclysmBlacksmithStock {
+        self.handle.as_ptr()
+    }
+
+    /// The box from `min` (x, y, z) to `max`. Fails unless every min is below its max and all
+    /// six are finite. Named `box_`: `box` is a Rust keyword.
+    pub fn box_(min: [f64; 3], max: [f64; 3]) -> Result<Stock> {
+        let api = api()?;
+        let raw = unsafe { (api.cadaclysm_blacksmith_stock_box)(min[0], min[1], min[2], max[0], max[1], max[2]) };
+        Stock::wrap(api, raw, "stock_box")
+    }
+
+    /// `solid`'s bounds grown by `margin` in -X, +X, -Y, +Y and +Z; the bottom stays at the
+    /// solid's lowest Z. Fails for a `margin` negative or not finite.
+    pub fn around(solid: &Solid, margin: f64) -> Result<Stock> {
+        let raw = unsafe { (solid.api.cadaclysm_blacksmith_stock_around)(solid.raw(), margin) };
+        Stock::wrap(solid.api, raw, "stock_around")
+    }
+}
+
+/// One file a job wrote: a Grbl program (`tool` its `T` number, `name` `<job name>-T<n>`, or
+/// `<job name>-<k>-T<n>` for a repeated tool) from [`Job::gcode`], or one of
+/// [`Job::write_camotics`]'s files (`tool` 0 for the simulation copies and the project).
+/// Copied out; immutable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Program {
+    pub tool: u32,
+    pub name: String,
+    pub text: String,
+}
+
+/// One operation of a [`Job`], read back by [`Job::operations`]: `kind` (`"face"`,
+/// `"contour"`, `"pocket"` or `"drill"`), `tool` (its Grbl `T` number) and `params`, a
+/// [`BTreeMap`] (sorted, for a stable order) of the operation's own arguments in the
+/// library's own numbers -- `side` 0 outside, 1 inside or 2 on its line; `climb` and `open` 1
+/// or 0; `points` a count; a `peck` of none is `None`. Copied out; immutable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Operation {
+    pub kind: String,
+    pub tool: u32,
+    pub params: BTreeMap<String, Option<f64>>,
+}
+
+/// One thing [`Job::machine`] left uncut, one of [`Report`]'s items. Copied out; immutable.
+#[derive(Debug)]
+pub struct ReportItem {
+    /// `"corner"` (material the end mill doesn't reach), `"hole"` (a round hole no drill
+    /// matches or a matched drill can't make), `"slope"` (a face that is neither horizontal
+    /// nor vertical, cut as steps), `"undercut"` (material under an overhang) or `"too_deep"`
+    /// (a level below the end mill's flute length, cut only that far).
+    pub kind: String,
+    /// The item's XYZ location -- a centroid for an area, the axis point at the top for a
+    /// hole.
+    pub at: [f64; 3],
+    /// An area in mm^2 for `corner`/`undercut`, a diameter in mm for `hole`, and a height in
+    /// mm (its Z range) for `slope` and `too_deep`.
+    pub size: f64,
+    /// One sentence naming the cause and the tool involved.
+    pub reason: String,
+    /// The XY area the item covers.
+    pub region: Vec<Profile>,
+}
+
+/// What [`Job::machine`] could not make: [`items`](Self::items), in order, read once when
+/// `machine` returns, and the kernel's own [`Display`](fmt::Display) -- one line per item, or
+/// `"nothing left uncut"`. Copied out; immutable.
+#[derive(Debug)]
+pub struct Report {
+    items: Vec<ReportItem>,
+    text: String,
+}
+
+impl Report {
+    /// What [`Job::machine`] left uncut, in order.
+    pub fn items(&self) -> &[ReportItem] {
+        &self.items
+    }
+
+    /// [`items`](Self::items), consumed: for a caller (the Godot wrapper, which builds its
+    /// own owned records from them rather than borrowing) that wants the `Vec` itself.
+    pub fn into_items(self) -> Vec<ReportItem> {
+        self.items
+    }
+
+    /// Whether nothing was left uncut (no items).
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// The kernel's own text: one line per item, or `"nothing left uncut"`. The same as
+    /// [`Display`](fmt::Display), spelled out.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+impl fmt::Display for Report {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+/// A machining job on a [`Stock`]: operations kept in the order they are added, written as
+/// one Grbl 1.1 program per run of operations sharing a tool. Mutable -- each operation is
+/// added in place, and a refused one leaves the job as it was. `safe_z` is the absolute Z of
+/// rapids between operations and at a program's start and end, above the stock's top;
+/// `clearance` is how far above an operation's top it enters and leaves its passes;
+/// `tolerance` fits free-form sides and offsets; `name` names the programs (`<name>-T<n>`);
+/// `spindle_dwell` is how long every program waits after starting the spindle; `resolution`
+/// is the CAMotics project's voxel size in mm. Dropping it frees it -- there is no `close` of
+/// its own; drop is the close.
+pub struct Job {
+    handle: NonNull<sys::CadaclysmBlacksmithJob>,
+    api: &'static Api,
+}
+
+unsafe impl Send for Job {}
+
+impl Drop for Job {
+    fn drop(&mut self) {
+        unsafe { (self.api.cadaclysm_blacksmith_job_free)(self.handle.as_ptr()) }
+    }
+}
+
+impl fmt::Debug for Job {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Job({:p})", self.handle)
+    }
+}
+
+/// `side`'s library code, or the refusal for any other side -- checked here so a bad spelling never
+/// reaches the library.
+fn job_side(side: &str) -> Result<u32> {
+    match side {
+        "outside" => Ok(0),
+        "inside" => Ok(1),
+        "on" => Ok(2),
+        _ => Err(Error::new("side must be 'outside', 'inside' or 'on'")),
+    }
+}
+
+/// The files of one `job_gcode`/`job_camotics` call, copied out, the list freed.
+fn programs(api: &'static Api, raw: *mut sys::CadaclysmBlacksmithPrograms, what: &str) -> Result<Vec<Program>> {
+    if raw.is_null() {
+        return Err(fail(api, what));
+    }
+    let count = unsafe { (api.cadaclysm_blacksmith_programs_count)(raw) };
+    let out = (0..count)
+        .map(|i| Program {
+            tool: unsafe { (api.cadaclysm_blacksmith_programs_tool)(raw, i) },
+            name: unsafe { text((api.cadaclysm_blacksmith_programs_name)(raw, i)) },
+            text: unsafe { text((api.cadaclysm_blacksmith_programs_text)(raw, i)) },
+        })
+        .collect();
+    unsafe { (api.cadaclysm_blacksmith_programs_free)(raw) };
+    Ok(out)
+}
+
+/// A `job_machine` report, read field by field, the report freed.
+fn read_report(api: &'static Api, raw: *mut sys::CadaclysmBlacksmithReport) -> Result<Report> {
+    let read = || -> Result<Report> {
+        let count = unsafe { (api.cadaclysm_blacksmith_report_count)(raw) };
+        let mut items = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let mut at = [0.0; 3];
+            if !unsafe { (api.cadaclysm_blacksmith_report_at)(raw, i, at.as_mut_ptr()) } {
+                return Err(fail(api, "report_at"));
+            }
+            let region = profile_list(api, unsafe { (api.cadaclysm_blacksmith_report_region)(raw, i) }, "report_region")?;
+            items.push(ReportItem {
+                kind: unsafe { text((api.cadaclysm_blacksmith_report_kind)(raw, i)) },
+                at,
+                size: unsafe { (api.cadaclysm_blacksmith_report_size)(raw, i) },
+                reason: unsafe { text((api.cadaclysm_blacksmith_report_reason)(raw, i)) },
+                region,
+            });
+        }
+        let text = unsafe { text((api.cadaclysm_blacksmith_report_text)(raw)) };
+        Ok(Report { items, text })
+    };
+    let found = read();
+    unsafe { (api.cadaclysm_blacksmith_report_free)(raw) };
+    found
+}
+
+/// Every operation of one `job_operations` call, read field by field, the list freed.
+fn read_operations(api: &'static Api, raw: *mut sys::CadaclysmBlacksmithOperations) -> Vec<Operation> {
+    let count = unsafe { (api.cadaclysm_blacksmith_operations_count)(raw) };
+    let out = (0..count)
+        .map(|i| {
+            let param_count = unsafe { (api.cadaclysm_blacksmith_operations_param_count)(raw, i) };
+            let params = (0..param_count)
+                .map(|k| {
+                    let name = unsafe { text((api.cadaclysm_blacksmith_operations_param_name)(raw, i, k)) };
+                    let value = unsafe { (api.cadaclysm_blacksmith_operations_param_value)(raw, i, k) };
+                    (name, (!value.is_nan()).then_some(value))
+                })
+                .collect();
+            Operation {
+                kind: unsafe { text((api.cadaclysm_blacksmith_operations_kind)(raw, i)) },
+                tool: unsafe { (api.cadaclysm_blacksmith_operations_tool)(raw, i) },
+                params,
+            }
+        })
+        .collect();
+    unsafe { (api.cadaclysm_blacksmith_operations_free)(raw) };
+    out
+}
+
+impl Job {
+    /// An empty job on `stock`, rapids at `safe_z` (above the stock's top). Fails for a
+    /// `safe_z` not above the stock's top, or a setting the job refuses.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(stock: &Stock, safe_z: f64, clearance: f64, tolerance: f64, name: &str, spindle_dwell: f64, resolution: f64) -> Result<Job> {
+        let api = api()?;
+        let raw = unsafe { (api.cadaclysm_blacksmith_job_new)(stock.raw(), safe_z) };
+        let job = Job { handle: NonNull::new(raw).ok_or_else(|| fail(api, "job_new"))?, api };
+        let jp = job.raw();
+        if !unsafe { (api.cadaclysm_blacksmith_job_set_clearance)(jp, clearance) } {
+            return Err(fail(api, "job_set_clearance"));
+        }
+        if !unsafe { (api.cadaclysm_blacksmith_job_set_tolerance)(jp, tolerance) } {
+            return Err(fail(api, "job_set_tolerance"));
+        }
+        if !unsafe { (api.cadaclysm_blacksmith_job_set_spindle_dwell)(jp, spindle_dwell) } {
+            return Err(fail(api, "job_set_spindle_dwell"));
+        }
+        if !unsafe { (api.cadaclysm_blacksmith_job_set_resolution)(jp, resolution) } {
+            return Err(fail(api, "job_set_resolution"));
+        }
+        let cname = job_text(name)?;
+        if !unsafe { (api.cadaclysm_blacksmith_job_set_name)(jp, cname.as_ptr()) } {
+            return Err(fail(api, "job_set_name"));
+        }
+        Ok(job)
+    }
+
+    fn raw(&self) -> *mut sys::CadaclysmBlacksmithJob {
+        self.handle.as_ptr()
+    }
+
+    /// Face the stock's top down to `z`, in zigzag rows along X `stepover` apart and passes
+    /// at most `stepdown` deep, with `tool`. Fails for a drill, a `z` above the stock's top, a
+    /// stepover past the tool's diameter, or what the job otherwise refuses.
+    pub fn face(&mut self, tool: &Tool, z: f64, stepover: f64, stepdown: f64) -> Result<()> {
+        let ok = unsafe { (self.api.cadaclysm_blacksmith_job_face)(self.raw(), tool.raw(), z, stepover, stepdown) };
+        if ok { Ok(()) } else { Err(fail(self.api, "job_face")) }
+    }
+
+    /// Cut along `profile` from `top` to `bottom` in passes at most `stepdown` deep, with
+    /// `tool`: `side` "outside" the profile, "inside" it, or "on" its line; `climb` for climb
+    /// milling, else conventional; `open` to cut the outline as an open chain (only "on" its
+    /// line, and with no holes). Fails for any other `side`, or what the job otherwise
+    /// refuses.
+    #[allow(clippy::too_many_arguments)]
+    pub fn contour(&mut self, tool: &Tool, profile: &Profile, top: f64, bottom: f64, side: &str, stepdown: f64, climb: bool, open: bool) -> Result<()> {
+        let code = job_side(side)?;
+        let ok = unsafe {
+            (self.api.cadaclysm_blacksmith_job_contour)(self.raw(), tool.raw(), profile.raw(), top, bottom, code, stepdown, climb, open)
+        };
+        if ok { Ok(()) } else { Err(fail(self.api, "job_contour")) }
+    }
+
+    /// Clear `profile` -- its holes left standing as islands -- from `top` to `bottom`, in
+    /// rings `stepover` apart (at most the tool's radius) and passes at most `stepdown` deep,
+    /// with `tool`. Fails for what the job refuses; a pocket too small for the tool is refused
+    /// by [`gcode`](Self::gcode), naming the operation.
+    pub fn pocket(&mut self, tool: &Tool, profile: &Profile, top: f64, bottom: f64, stepover: f64, stepdown: f64) -> Result<()> {
+        let ok = unsafe {
+            (self.api.cadaclysm_blacksmith_job_pocket)(self.raw(), tool.raw(), profile.raw(), top, bottom, stepover, stepdown)
+        };
+        if ok { Ok(()) } else { Err(fail(self.api, "job_pocket")) }
+    }
+
+    /// A hole at each (x, y) of `points`, from `top` to `bottom` with `tool`, pecking `peck`
+    /// deep at a time (retracting between pecks), or straight to depth for `None`. Fails for
+    /// what the job refuses (a tool that is not a drill, no points, ...).
+    pub fn drill(&mut self, tool: &Tool, points: &[[f64; 2]], top: f64, bottom: f64, peck: Option<f64>) -> Result<()> {
+        let xy: *const f64 = if points.is_empty() { ptr::null() } else { points.as_ptr().cast() };
+        let ok = unsafe {
+            (self.api.cadaclysm_blacksmith_job_drill)(self.raw(), tool.raw(), xy, points.len(), top, bottom, peck.unwrap_or(f64::NAN))
+        };
+        if ok { Ok(()) } else { Err(fail(self.api, "job_drill")) }
+    }
+
+    /// Recognise `part` and append the operations that make it: faced, contoured and pocketed
+    /// with `end_mill`, its holes drilled with whichever of `drills` fits each -- a tool per
+    /// required diameter. A `None` element of `drills` is the library's own "null drill <i>".
+    /// `stepover` and `stepdown` of `None` are the kernel's own defaults; `skin` (at least 0)
+    /// is how far above the part's lowest point the outline stops, so the part stays attached
+    /// to the stock -- 0 cuts through; `peck` of `None` is none (a drill straight to depth).
+    /// Returns a [`Report`] of what could not be cut. Fails for what the kernel refuses (a
+    /// drill as `end_mill`, a null drill, ...); the job changes only on success -- a refusal
+    /// leaves it exactly as it was.
+    #[allow(clippy::too_many_arguments)]
+    pub fn machine(
+        &mut self,
+        part: &Solid,
+        end_mill: &Tool,
+        drills: &[Option<&Tool>],
+        stepover: Option<f64>,
+        stepdown: Option<f64>,
+        skin: f64,
+        peck: Option<f64>,
+    ) -> Result<Report> {
+        let handles: Vec<*const sys::CadaclysmBlacksmithTool> = drills.iter().map(|t| t.map_or(ptr::null(), Tool::raw)).collect();
+        let drills_ptr = if handles.is_empty() { ptr::null() } else { handles.as_ptr() };
+        let raw = unsafe {
+            (self.api.cadaclysm_blacksmith_job_machine)(
+                self.raw(),
+                part.raw(),
+                end_mill.raw(),
+                drills_ptr,
+                handles.len(),
+                stepover.unwrap_or(f64::NAN),
+                stepdown.unwrap_or(f64::NAN),
+                skin,
+                peck.unwrap_or(f64::NAN),
+            )
+        };
+        if raw.is_null() {
+            return Err(fail(self.api, "job_machine"));
+        }
+        read_report(self.api, raw)
+    }
+
+    /// Every operation added to this job so far, in order -- whether added by
+    /// [`face`](Self::face), [`contour`](Self::contour), [`pocket`](Self::pocket),
+    /// [`drill`](Self::drill) or [`machine`](Self::machine).
+    pub fn operations(&self) -> Result<Vec<Operation>> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_job_operations)(self.raw()) };
+        if raw.is_null() {
+            return Err(fail(self.api, "job_operations"));
+        }
+        Ok(read_operations(self.api, raw))
+    }
+
+    /// The job as Grbl 1.1 programs, one per run of consecutive operations sharing a tool
+    /// (T1, T2, T1 gives three), each named `<name>-T<n>` (or `<name>-<k>-T<n>` for run `k`
+    /// of a tool that runs more than once); an empty `Vec` for a job with no operations.
+    /// Fails for an operation whose geometry the tool cannot cut (named by its index and
+    /// kind).
+    pub fn gcode(&self) -> Result<Vec<Program>> {
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_job_gcode)(self.raw()) };
+        programs(self.api, raw, "job_gcode")
+    }
+
+    /// `job_camotics(stem)`, copied out.
+    fn camotics_files(&self, stem: &str) -> Result<Vec<Program>> {
+        let cstem = job_text(stem)?;
+        let raw = unsafe { (self.api.cadaclysm_blacksmith_job_camotics)(self.raw(), cstem.as_ptr()) };
+        programs(self.api, raw, "job_camotics")
+    }
+
+    /// A CAMotics project at `path` and its files beside it, named after the project's file
+    /// stem (`out/part.camotics` writes `out/part-T1.nc`), not the job's name: each program, a
+    /// simulation copy of it (`.sim.nc`, which the project lists), and the project last.
+    /// Creates the directory. Returns the paths written, the project last, written here (not
+    /// by the library) byte for byte, as plain UTF-8 with no byte-order mark. Fails for a
+    /// path with no file stem, what [`gcode`](Self::gcode) refuses, or a file that cannot be
+    /// written.
+    pub fn write_camotics(&self, path: impl AsRef<FsPath>) -> Result<Vec<PathBuf>> {
+        let path = path.as_ref();
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| Error::new(format!("job_camotics: {} has no file stem", path.display())))?;
+        let files = self.camotics_files(stem)?;
+        let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
+        if let Some(dir) = dir {
+            std::fs::create_dir_all(dir).map_err(|e| Error::new(format!("job_camotics: {}: {e}", path.display())))?;
+        }
+        let dir = dir.unwrap_or_else(|| FsPath::new(""));
+        let mut written = Vec::with_capacity(files.len());
+        for (i, file) in files.iter().enumerate() {
+            let at = if i + 1 == files.len() { path.to_path_buf() } else { dir.join(&file.name) };
+            std::fs::write(&at, &file.text).map_err(|e| Error::new(format!("job_camotics: {}: {e}", path.display())))?;
+            written.push(at);
+        }
+        Ok(written)
+    }
+}
+
+// ---- collider -----------------------------------------------------------------------
+
+/// An axis-aligned box: `lo` and `hi`, three numbers each. The broad phase's own shape
+/// ([`Solid::bounds_box`], [`Collider`]'s own boxes): cheap to move and to test against
+/// another, before anything is meshed. Named `Aabb` rather than `Box`, which the
+/// standard library reserves.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Aabb {
+    pub lo: [f64; 3],
+    pub hi: [f64; 3],
+}
+
+impl From<sys::CadaclysmBlacksmithBox> for Aabb {
+    fn from(r: sys::CadaclysmBlacksmithBox) -> Aabb {
+        Aabb { lo: r.lo, hi: r.hi }
+    }
+}
+
+fn box_words(b: Aabb) -> sys::CadaclysmBlacksmithBox {
+    sys::CadaclysmBlacksmithBox { lo: b.lo, hi: b.hi }
+}
+
+impl Aabb {
+    pub fn new(lo: [f64; 3], hi: [f64; 3]) -> Aabb {
+        Aabb { lo, hi }
+    }
+
+    /// This box moved by `frame` (rigid), boxed again on the world axes -- not this
+    /// box's corners individually moved, which would not in general be a box at all:
+    /// the *bounding* box of the moved corners.
+    pub fn moved(&self, frame: &Frame) -> Result<Aabb> {
+        let api = api()?;
+        let raw = box_words(*self);
+        let mut out = sys::CadaclysmBlacksmithBox { lo: [0.0; 3], hi: [0.0; 3] };
+        if !unsafe { (api.cadaclysm_blacksmith_box_moved)(&raw, frame.raw().as_ptr(), &mut out) } {
+            return Err(fail(api, "box_moved"));
+        }
+        Ok(out.into())
+    }
+
+    /// Whether this box and `other` share a point (touching counts).
+    pub fn overlaps(&self, other: &Aabb) -> Result<bool> {
+        let api = api()?;
+        let a = box_words(*self);
+        let b = box_words(*other);
+        Ok(unsafe { (api.cadaclysm_blacksmith_box_overlaps)(&a, &b) })
+    }
+}
+
+/// True only if box `a` at `frame_a` and box `b` at `frame_b` cannot touch -- a
+/// separating axis among the boxes' face normals and edge-direction crosses; touching
+/// is not apart. Sharper than moving each box and asking [`Aabb::overlaps`], which boxes
+/// the *result* on the world axes again and so can call two oriented boxes overlapping
+/// when they are not (two unit boxes, the second turned 45 degrees about z and moved 2.3
+/// along x: their world boxes overlap, but the boxes themselves do not touch).
+pub fn boxes_apart(a: &Aabb, frame_a: &Frame, b: &Aabb, frame_b: &Frame) -> Result<bool> {
+    let api = api()?;
+    let ra = box_words(*a);
+    let rb = box_words(*b);
+    let mut apart = false;
+    if !unsafe { (api.cadaclysm_blacksmith_boxes_apart)(&ra, frame_a.raw().as_ptr(), &rb, frame_b.raw().as_ptr(), &mut apart) } {
+        return Err(fail(api, "boxes_apart"));
+    }
+    Ok(apart)
+}
+
+/// Counts of one [`Collider::check`] call: the candidate pairs `considered`, how many
+/// of them the world boxes and the oriented boxes cleared, how many the share left to
+/// another call, how the rest were answered (`cached`, `closed_form`, `meshed`), and
+/// how many were `refused`. `confirmed` is the subset of `meshed` that were thin
+/// mesh-path overlaps sent to [`Solid::common`] itself for a final answer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ColliderStats {
+    pub considered: u32,
+    pub world_boxes: u32,
+    pub oriented_boxes: u32,
+    pub skipped_share: u32,
+    pub cached: u32,
+    pub closed_form: u32,
+    pub meshed: u32,
+    pub refused: u32,
+    pub confirmed: u32,
+}
+
+impl From<sys::CadaclysmBlacksmithColliderStats> for ColliderStats {
+    fn from(r: sys::CadaclysmBlacksmithColliderStats) -> ColliderStats {
+        ColliderStats {
+            considered: r.considered,
+            world_boxes: r.world_boxes,
+            oriented_boxes: r.oriented_boxes,
+            skipped_share: r.skipped_share,
+            cached: r.cached,
+            closed_form: r.closed_form,
+            meshed: r.meshed,
+            refused: r.refused,
+            confirmed: r.confirmed,
+        }
+    }
+}
+
+/// Keeps one [`Collider::check`] answer alive for as long as any [`CollisionHit`] of it
+/// is: each hit holds a clone of this (`Rc`), and the last one dropped frees the handle
+/// -- a `CollisionHit` needs the handle itself back for `solid()`.
+struct CollisionsHandle {
+    handle: NonNull<sys::CadaclysmBlacksmithCollisions>,
+    api: &'static Api,
+}
+
+impl Drop for CollisionsHandle {
+    fn drop(&mut self) {
+        unsafe { (self.api.cadaclysm_blacksmith_collisions_free)(self.handle.as_ptr()) }
+    }
+}
+
+/// One pair [`Collider::check`] found overlapping (`overlap` true), or could not
+/// decide (`overlap` false; `text` says why, empty for an overlap). `positions`/
+/// `normals` are world xyz triples, three per triangle (unwelded); `indices` indexes
+/// them -- all empty for a refused pair. `depth` is the thinnest side of the overlap's
+/// world box, 0 for a refused pair.
+///
+/// `solid()` rebuilds the exact overlap now, from the frames `check` found it at; this
+/// keeps the collisions handle behind every hit of one `check` call alive until the
+/// last of them is dropped, freeing it only then.
+pub struct CollisionHit {
+    pub a: u32,
+    pub b: u32,
+    pub overlap: bool,
+    /// `"overlap"` or `"refused"` -- the same answer as `overlap`, spelled the way
+    /// every other `kind` in this module is.
+    pub kind: String,
+    pub depth: f64,
+    pub text: String,
+    pub positions: Vec<[f64; 3]>,
+    pub normals: Vec<[f64; 3]>,
+    pub indices: Vec<u32>,
+    keeper: Rc<CollisionsHandle>,
+    index: u32,
+}
+
+impl fmt::Debug for CollisionHit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CollisionHit")
+            .field("a", &self.a)
+            .field("b", &self.b)
+            .field("overlap", &self.overlap)
+            .field("kind", &self.kind)
+            .field("depth", &self.depth)
+            .field("text", &self.text)
+            .finish()
+    }
+}
+
+impl CollisionHit {
+    /// Copied out of the C struct: the pointers are read here and nowhere kept.
+    ///
+    /// # Safety
+    /// `raw` as `cadaclysm_blacksmith_collisions_hit` filled it, its result still alive.
+    unsafe fn from_raw(raw: &sys::CadaclysmBlacksmithCollisionHit, keeper: Rc<CollisionsHandle>, index: u32) -> CollisionHit {
+        CollisionHit {
+            a: raw.a,
+            b: raw.b,
+            overlap: raw.overlap,
+            kind: if raw.overlap { "overlap".to_string() } else { "refused".to_string() },
+            depth: raw.depth,
+            text: text(raw.text),
+            positions: points_of(borrowed(raw.positions, 3 * raw.vertex_count as usize)),
+            normals: points_of(borrowed(raw.normals, 3 * raw.vertex_count as usize)),
+            indices: borrowed(raw.indices, raw.index_count as usize).to_vec(),
+            keeper,
+            index,
+        }
+    }
+
+    /// The exact overlap of this pair at the frames [`Collider::check`] found it at,
+    /// as a new solid. Fails for a refused pair (`overlap` false) or a collisions
+    /// handle already closed some other way.
+    pub fn solid(&self) -> Result<Solid> {
+        let raw = unsafe { (self.keeper.api.cadaclysm_blacksmith_collisions_solid)(self.keeper.handle.as_ptr(), self.index) };
+        Solid::wrap(self.keeper.api, raw, "collisions_solid")
+    }
+}
+
+/// Parts meshed once, asked pose after pose which of them interfere: `solids` at rest,
+/// meshed at `tolerance`; `groups` one group index per solid (`None`: each solid its
+/// own group -- [`Collider::check`] then takes one frame per solid), `allowed` pairs of
+/// part indices never tested (designed contacts). Dropping it frees the handle.
+pub struct Collider {
+    handle: NonNull<sys::CadaclysmBlacksmithCollider>,
+    api: &'static Api,
+}
+
+unsafe impl Send for Collider {}
+
+impl Drop for Collider {
+    fn drop(&mut self) {
+        unsafe { (self.api.cadaclysm_blacksmith_collider_free)(self.handle.as_ptr()) }
+    }
+}
+
+impl fmt::Debug for Collider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Collider({:p})", self.handle)
+    }
+}
+
+impl Collider {
+    /// `solids` at rest, meshed at `tolerance`; `groups` one group index per solid
+    /// (`None`: each solid its own group), `allowed` pairs of part indices never
+    /// tested (designed contacts, by part index).
+    pub fn new(solids: &[&Solid], tolerance: f64, groups: Option<&[u32]>, allowed: &[(u32, u32)]) -> Result<Collider> {
+        if let Some(groups) = groups {
+            if groups.len() != solids.len() {
+                return Err(Error::new(format!(
+                    "Collider: groups must have one entry per solid ({} solids, {} groups)",
+                    solids.len(),
+                    groups.len()
+                )));
+            }
+        }
+        let api = api()?;
+        let handles: Vec<*const sys::CadaclysmBlacksmithSolid> = solids.iter().map(|s| s.raw()).collect();
+        let allowed_flat: Vec<u32> = allowed.iter().flat_map(|&(a, b)| [a, b]).collect();
+        let groups_ptr = groups.map(|g| g.as_ptr()).unwrap_or(ptr::null());
+        let allowed_ptr = if allowed_flat.is_empty() { ptr::null() } else { allowed_flat.as_ptr() };
+        let raw = unsafe {
+            (api.cadaclysm_blacksmith_collider_new)(
+                handles.as_ptr(),
+                handles.len() as u32,
+                tolerance,
+                groups_ptr,
+                allowed_ptr,
+                allowed.len() as u32,
+            )
+        };
+        NonNull::new(raw).map(|handle| Collider { handle, api }).ok_or_else(|| fail(api, "collider_new"))
+    }
+
+    fn raw(&self) -> *mut sys::CadaclysmBlacksmithCollider {
+        self.handle.as_ptr()
+    }
+
+    /// How many groups this collider has -- the highest group index past the
+    /// constructor, plus one.
+    pub fn group_count(&self) -> u32 {
+        unsafe { (self.api.cadaclysm_blacksmith_collider_group_count)(self.raw()) }
+    }
+
+    /// Counts of the last [`Collider::check`] call (all zero before the first one).
+    pub fn stats(&self) -> Result<ColliderStats> {
+        let mut out = sys::CadaclysmBlacksmithColliderStats::default();
+        if !unsafe { (self.api.cadaclysm_blacksmith_collider_stats)(self.raw(), &mut out) } {
+            return Err(fail(self.api, "collider_stats"));
+        }
+        Ok(out.into())
+    }
+
+    /// The pairs that interfere, or could not be decided, with each group placed at
+    /// its matching frame in `frames` (one per group, in group order). `share`:
+    /// `None`, every pair past the box filters is decided now; `Some((k, n))`, only
+    /// those whose index is `k` modulo `n` (the shares of one pose are disjoint and
+    /// cover it -- split one `check` across `n` workers).
+    pub fn check(&self, frames: &[Frame], share: Option<(u32, u32)>) -> Result<Vec<CollisionHit>> {
+        let flat: Vec<f64> = frames.iter().flat_map(|f| f.raw()).collect();
+        let (share_k, share_n) = share.unwrap_or((0, 0));
+        let raw = unsafe {
+            (self.api.cadaclysm_blacksmith_collider_check)(self.raw(), flat.as_ptr(), frames.len() as u32, share_k, share_n)
+        };
+        let Some(handle) = NonNull::new(raw) else { return Err(fail(self.api, "collider_check")) };
+        let count = unsafe { (self.api.cadaclysm_blacksmith_collisions_count)(handle.as_ptr()) };
+        if count == 0 {
+            unsafe { (self.api.cadaclysm_blacksmith_collisions_free)(handle.as_ptr()) };
+            return Ok(Vec::new());
+        }
+        let keeper = Rc::new(CollisionsHandle { handle, api: self.api });
+        let mut hits = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let mut raw_hit = sys::CadaclysmBlacksmithCollisionHit::default();
+            if !unsafe { (self.api.cadaclysm_blacksmith_collisions_hit)(keeper.handle.as_ptr(), i, &mut raw_hit) } {
+                return Err(fail(self.api, "collisions_hit"));
+            }
+            hits.push(unsafe { CollisionHit::from_raw(&raw_hit, Rc::clone(&keeper), i) });
+        }
+        Ok(hits)
+    }
+}
+
 // ---- assemblies -------------------------------------------------------------------
 
 /// A mutable tree of placements: a name, and zero or more solids or other assemblies
@@ -2508,6 +3472,20 @@ impl fmt::Debug for Assembly {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Assembly({:p})", self.handle)
     }
+}
+
+/// [`Assembly::pair`]'s optional arguments -- Rust's spelling of Python's keyword
+/// arguments. `end_frame` `None` is "the pair's rest frame itself" (all-zero rest
+/// values); `ranges` `None` is "no ranges given" (a kind that allows none, or every
+/// freedom left unbounded by omission); within `ranges`, each side `None` is that side
+/// unbounded. `pitch` `None` is NaN -- required and non-zero for `"screw"`, refused for
+/// any other kind. [`pair_freedom_count`] sizes `ranges`: one entry per freedom of
+/// `kind`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PairOptions {
+    pub end_frame: Option<Frame>,
+    pub ranges: Option<Vec<(Option<f64>, Option<f64>)>>,
+    pub pitch: Option<f64>,
 }
 
 impl Assembly {
@@ -2605,6 +3583,132 @@ impl Assembly {
         }
     }
 
+    /// Gives joint `joint` its pair: `kind` (a name of the kind table -- `"revolute"`,
+    /// `"prismatic"`, `"cylindrical"`, `"screw"`, `"spherical"`, `"spherical_with_pin"`,
+    /// `"planar"`, `"universal"`, `"homokinetic"`, `"fully_constrained"` or
+    /// `"unconstrained"`), the contact frame at rest, and `options` -- see
+    /// [`PairOptions`]. An unknown or already-paired joint, an unknown kind, a bad pitch,
+    /// ranges given where none are allowed or of the wrong length, a non-finite or
+    /// inverted range, or an end frame this kind's motion cannot reach is refused; the
+    /// assembly is then unchanged.
+    pub fn pair(&self, joint: &str, kind: &str, frame: &Frame, options: &PairOptions) -> Result<()> {
+        let joint_c = c_text("joint", joint)?;
+        let kind_c = c_text("kind", kind)?;
+        let end_frame = options.end_frame.as_ref().map(|f| f.v);
+        // `ranges` being `Some(..)` -- even `Some(vec![])` -- means ranges were GIVEN, and
+        // the C ABI must see non-null pointers with the given count (possibly 0), never
+        // "no ranges" (all four pointers null, which only `None` means). A `Vec`'s pointer
+        // is always non-null (dangling-but-valid when empty), so no extra buffer is needed.
+        let ranges_given = options.ranges.is_some();
+        let (lower, upper, has_lower, has_upper, freedom_count) = match &options.ranges {
+            None => (Vec::new(), Vec::new(), Vec::new(), Vec::new(), 0usize),
+            Some(ranges) => {
+                let mut lower = Vec::with_capacity(ranges.len());
+                let mut upper = Vec::with_capacity(ranges.len());
+                let mut has_lower = Vec::with_capacity(ranges.len());
+                let mut has_upper = Vec::with_capacity(ranges.len());
+                for (lo, hi) in ranges {
+                    lower.push(lo.unwrap_or(0.0));
+                    upper.push(hi.unwrap_or(0.0));
+                    has_lower.push(lo.is_some());
+                    has_upper.push(hi.is_some());
+                }
+                (lower, upper, has_lower, has_upper, ranges.len())
+            }
+        };
+        let pitch = options.pitch.unwrap_or(f64::NAN);
+        let ok = unsafe {
+            (self.api.cadaclysm_blacksmith_assembly_pair)(
+                self.raw(),
+                joint_c.as_ptr(),
+                kind_c.as_ptr(),
+                frame.v.as_ptr(),
+                end_frame.as_ref().map_or(ptr::null(), |f| f.as_ptr()),
+                if ranges_given { lower.as_ptr() } else { ptr::null() },
+                if ranges_given { upper.as_ptr() } else { ptr::null() },
+                if ranges_given { has_lower.as_ptr() } else { ptr::null() },
+                if ranges_given { has_upper.as_ptr() } else { ptr::null() },
+                freedom_count,
+                pitch,
+            )
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(fail(self.api, "assembly_pair"))
+        }
+    }
+
+    /// Adds a named state: `rows` sets each named joint to its values, in that joint's
+    /// pair's freedom order. An empty or duplicate name, no rows, an unknown joint, a
+    /// joint set twice, a joint with no pair or none of its pair's freedoms, a row of the
+    /// wrong length, or a non-finite or out-of-range value is refused; the assembly is
+    /// then unchanged.
+    pub fn state(&self, name: &str, rows: &[(&str, &[f64])]) -> Result<()> {
+        let name_c = c_text("name", name)?;
+        let joints: Vec<CString> = rows.iter().map(|(j, _)| c_text("joint", j)).collect::<Result<_>>()?;
+        let joint_ptrs: Vec<*const c_char> = joints.iter().map(|c| c.as_ptr()).collect();
+        let counts: Vec<u32> = rows.iter().map(|(_, v)| v.len() as u32).collect();
+        let flat: Vec<f64> = rows.iter().flat_map(|(_, v)| v.iter().copied()).collect();
+        let ok = unsafe {
+            (self.api.cadaclysm_blacksmith_assembly_state)(
+                self.raw(),
+                name_c.as_ptr(),
+                if joint_ptrs.is_empty() { ptr::null() } else { joint_ptrs.as_ptr() },
+                if counts.is_empty() { ptr::null() } else { counts.as_ptr() },
+                if flat.is_empty() { ptr::null() } else { flat.as_ptr() },
+                rows.len(),
+            )
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(fail(self.api, "assembly_state"))
+        }
+    }
+
+    /// Adds a named motion sequence: each segment is `(state name, t, interpolation word)`,
+    /// the word one of `"undefined"`, `"discontinuous"`, `"synchronous"` or `"linear"`. The
+    /// sequence is closed unless its last segment is `"discontinuous"`; `seconds` says its
+    /// parameter is in seconds. An empty or duplicate name, fewer than two segments, an
+    /// unknown state, a non-finite or decreasing parameter or an unknown word is refused;
+    /// the assembly is then unchanged.
+    pub fn sequence(&self, name: &str, segments: &[(&str, f64, &str)], seconds: bool) -> Result<()> {
+        let name_c = c_text("name", name)?;
+        let states: Vec<CString> = segments.iter().map(|(s, _, _)| c_text("state", s)).collect::<Result<_>>()?;
+        let words: Vec<CString> = segments.iter().map(|(_, _, w)| c_text("interpolation", w)).collect::<Result<_>>()?;
+        let state_ptrs: Vec<*const c_char> = states.iter().map(|c| c.as_ptr()).collect();
+        let word_ptrs: Vec<*const c_char> = words.iter().map(|c| c.as_ptr()).collect();
+        let ts: Vec<f64> = segments.iter().map(|(_, t, _)| *t).collect();
+        let ok = unsafe {
+            (self.api.cadaclysm_blacksmith_assembly_sequence)(
+                self.raw(),
+                name_c.as_ptr(),
+                if state_ptrs.is_empty() { ptr::null() } else { state_ptrs.as_ptr() },
+                if ts.is_empty() { ptr::null() } else { ts.as_ptr() },
+                if word_ptrs.is_empty() { ptr::null() } else { word_ptrs.as_ptr() },
+                segments.len(),
+                seconds,
+            )
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(fail(self.api, "assembly_sequence"))
+        }
+    }
+
+    /// Declares this assembly's base link. `link` naming no link of this assembly, or a
+    /// base already declared, is refused, naming the link already there.
+    pub fn base(&self, link: &str) -> Result<()> {
+        let link = c_text("link", link)?;
+        if unsafe { (self.api.cadaclysm_blacksmith_assembly_base)(self.raw(), link.as_ptr()) } {
+            Ok(())
+        } else {
+            Err(fail(self.api, "assembly_base"))
+        }
+    }
+
     /// This assembly, and everything placed under it, as one STEP file: this assembly
     /// the root product, each sub-assembly and each distinct part written once, each
     /// placement an occurrence named as it was placed. `schema` and `unit` as
@@ -2649,6 +3753,15 @@ impl Assembly {
         }
         options.open_memory(text.as_bytes(), "stp")
     }
+}
+
+/// How many freedoms a pair kind has, so a caller can size [`PairOptions::ranges`]: one
+/// entry per freedom of `kind`. 0 for an unknown name, for `"fully_constrained"` (which
+/// has none), and if the kernel library cannot be loaded.
+pub fn pair_freedom_count(kind: &str) -> u32 {
+    let Ok(api) = api() else { return 0 };
+    let Ok(kind) = c_text("kind", kind) else { return 0 };
+    unsafe { (api.cadaclysm_blacksmith_pair_freedom_count)(kind.as_ptr()) }
 }
 
 /// The owned text `place_solid`/`place_assembly` return -- the placement's name -- read
@@ -3326,7 +4439,8 @@ fn build_svg_options(api: &Api, options: &SvgOptions) -> sys::CadaclysmBlacksmit
     raw.flags = u32::from(options.edges)
         | (u32::from(options.curves) << 1)
         | (u32::from(options.isocurves) << 2)
-        | (u32::from(options.polylines) << 3);
+        | (u32::from(options.polylines) << 3)
+        | (u32::from(options.silhouettes) << 4);
     raw
 }
 
@@ -3426,11 +4540,48 @@ mod tests {
         assert!(!Frame::xz([0.0; 3]).raw().iter().any(|v| v.is_sign_negative() && *v == 0.0));
     }
 
+    /// Needs the real kernel library (`CADACLYSM_BLACKSMITH_LIBRARY`), like the other
+    /// kernel tests in this module that build a solid; skips quietly without one. The
+    /// skip check is `version()`, not `rgb` itself: a `rgb` that always errs (broken
+    /// colour parsing, say) must not be able to hide behind a "no library" skip.
     #[test]
-    fn hex_colours_read_as_python_reads_them() {
-        assert_eq!(rgb("#fff").unwrap(), [1.0, 1.0, 1.0]);
-        assert_eq!(rgb("ff0000").unwrap(), [1.0, 0.0, 0.0]);
-        assert!(rgb("#ff00").is_err());
+    fn rgb_reads_css_names_through_the_library() {
+        if let Err(err) = version() {
+            eprintln!("skipped: {err} (no kernel library to read colour names with)");
+            return;
+        }
+        assert_eq!(rgb("red").unwrap(), [1.0, 0.0, 0.0]);
+        assert_eq!(rgb("#0f0").unwrap(), [0.0, 1.0, 0.0]);
+        assert_eq!(rgb(" RebeccaPurple ").unwrap(), [0x66 as f64 / 255.0, 0x33 as f64 / 255.0, 0x99 as f64 / 255.0]);
+        assert!(rgb("notacolour").unwrap_err().to_string().contains("a CSS colour name"));
+        let solid = Solid::cuboid(1.0, 1.0, 1.0).unwrap(); // the file's real box constructor
+        assert_eq!(solid.coloured("navy", None).unwrap().colour().unwrap(), Some([0.0, 0.0, 128.0 / 255.0]));
+        assert_eq!(solid.coloured([0.5, 0.5, 0.5], None).unwrap().colour().unwrap(), Some([0.5, 0.5, 0.5]));
+    }
+
+    #[test]
+    fn packed_refuses_bogus_text_without_the_paint_clause() {
+        if api().is_err() {
+            eprintln!("skipped: no kernel library to read colour names with");
+            return;
+        }
+        assert_eq!(packed("navy").unwrap(), 0x00_00_80);
+        let err = packed("bogus").unwrap_err().to_string();
+        assert!(err.contains("not 'bogus'"), "{err}");
+        assert!(!err.contains("0..1"), "{err}");
+    }
+
+    /// Needs the real kernel library, like `rgb_reads_css_names_through_the_library`.
+    #[test]
+    fn svg_stroke_takes_a_css_name() {
+        if version().is_err() {
+            eprintln!("skipped: no kernel library to read colour names with");
+            return;
+        }
+        let solid = Solid::cuboid(1.0, 1.0, 1.0).unwrap();
+        let options = SvgOptions { stroke: packed("red").unwrap(), ..Default::default() };
+        let text = solid.svg_text(&options).unwrap();
+        assert!(text.to_lowercase().contains("#ff0000"), "{text}");
     }
 
     #[test]
@@ -3691,7 +4842,7 @@ mod tests {
         assert_eq!(placed.name().as_deref(), Some("bolt"));
     }
 
-    use crate::viewer::{draw::draw_with, fake, ViewOptions};
+    use crate::view::{fake, objects::{present, Shown}, ViewOptions};
 
     #[test]
     fn a_rectangle_profile_draws_as_one_closed_line_from_the_top() {
@@ -3707,14 +4858,31 @@ mod tests {
         assert_eq!(runs[0].len(), 5, "four corners and the first again");
         assert_eq!(runs[0].first(), runs[0].last());
         assert!(runs[0].iter().all(|p| p[2] == 0.0));
-        let d = rect.drawing(&ViewOptions::default()).unwrap();
-        assert!(d.meshes.is_empty());
-        assert_eq!((d.view, d.up, &d.lines[0].counts[..]), (SvgView::Top, Up::Z, &[5][..]));
-        // Lines are the whole picture: edges off does not set NO_EDGES.
+        let (segments, rgb) = rect.segments(&ViewOptions::default()).unwrap();
+        assert_eq!((segments.len(), rgb), (4, None));
+        // Lines are the whole picture: edges off does not touch the edges layer.
         fake::take();
-        draw_with(&fake::viewer(), &d, &ViewOptions { edges: false, ..ViewOptions::default() }, false).unwrap();
+        present(fake::leaked(), Shown::Lines(segments, rgb), &ViewOptions { edges: false, ..ViewOptions::default() }, "Profile", SvgView::Top, Up::Z, false).unwrap();
         let log = fake::take();
-        assert!(log.iter().any(|l| l.starts_with("show az=-90 el=90") && l.contains("flags=0")), "{log:?}");
+        assert!(log.iter().any(|l| l == "standard 0"), "the top view: {log:?}");
+        assert!(!log.iter().any(|l| l.starts_with("layer 1")), "{log:?}");
+    }
+
+    #[test]
+    fn a_solid_is_shown_by_its_handle() {
+        let cube = match Solid::cuboid(1.0, 1.0, 1.0) {
+            Ok(cube) => cube,
+            Err(err) => {
+                eprintln!("skipped: {err} (no kernel library)");
+                return;
+            }
+        };
+        let view = crate::view::View::open(fake::leaked(), crate::view::target_own(), &ViewOptions::default(), "part", Up::Z).unwrap();
+        fake::take();
+        let item = view.show_solid(&cube, 0.05, Some([1.0, 0.0, 0.0])).unwrap();
+        assert_eq!(item.id(), 15);
+        assert_eq!(fake::take(), ["solid 0.05 rgb=[1.0, 0.0, 0.0]"]);
+        assert!(!cube.as_ptr().is_null());
     }
 
     /// `Profile` is `Sync`, and the kernel caches a profile's polylines on it: threads
@@ -3777,7 +4945,7 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_solid_draws_one_mesh_and_its_edges() {
+    fn face_triangles_count_every_triangle_face_by_face() {
         let mut cube = match Solid::cuboid(1.0, 1.0, 1.0) {
             Ok(cube) => cube,
             Err(err) => {
@@ -3789,20 +4957,10 @@ mod tests {
         let counts = cube.face_triangles(DEFAULT_TOLERANCE).unwrap().to_vec();
         assert_eq!(counts.len(), 6);
         assert_eq!(counts.iter().sum::<u32>() as usize, triangles);
-        let d = cube.drawing(&ViewOptions::default()).unwrap();
-        assert_eq!(d.meshes.len(), 1);
-        assert_eq!(d.meshes[0].indices.len(), triangles * 3);
-        assert_eq!((d.meshes[0].rgb, d.view, d.up), (None, SvgView::Iso, Up::Z));
-        // As many polylines as `edge_polylines` gives, however it chains them.
-        let edges = cube.edge_polylines(DEFAULT_TOLERANCE).unwrap().len();
-        assert!(edges > 0);
-        assert_eq!(d.lines.iter().map(|b| b.counts.len()).sum::<usize>(), edges);
-        let bare = cube.drawing(&ViewOptions { edges: false, ..ViewOptions::default() }).unwrap();
-        assert!(bare.lines.is_empty());
     }
 
     #[test]
-    fn a_solid_with_a_face_painted_draws_one_mesh_per_colour() {
+    fn a_solid_is_shown_by_handle_with_the_edges_layer_as_asked() {
         let cube = match Solid::cuboid(1.0, 1.0, 1.0) {
             Ok(cube) => cube,
             Err(err) => {
@@ -3810,13 +4968,21 @@ mod tests {
                 return;
             }
         };
-        let mut painted = cube.coloured([0.0, 0.0, 1.0], None).unwrap().coloured([1.0, 0.0, 0.0], Some(0)).unwrap();
-        let triangles = painted.mesh(DEFAULT_TOLERANCE).unwrap().indices.len() / 3;
-        let d = painted.drawing(&ViewOptions::default()).unwrap();
-        assert_eq!(d.meshes.len(), 2);
-        let rgbs: Vec<_> = d.meshes.iter().map(|m| m.rgb).collect();
-        assert!(rgbs.contains(&Some([1.0, 0.0, 0.0])) && rgbs.contains(&Some([0.0, 0.0, 1.0])), "{rgbs:?}");
-        assert_eq!(d.meshes.iter().map(|m| m.indices.len() / 3).sum::<usize>(), triangles);
+        fake::take();
+        present(fake::leaked(), Shown::Solid(&cube), &ViewOptions { edges: false, ..ViewOptions::default() }, "Solid", SvgView::Iso, Up::Z, false).unwrap();
+        assert_eq!(
+            fake::take(),
+            [
+                "create Solid y_up=0 w=0 h=0 surfaces=0 window=- offscreen=0",
+                "solid 0.05 rgb=-",
+                "layer 1 false",
+                "standard 1",
+                "orbit -69.813 48.869",
+                "frame 0",
+                "run",
+                "destroy",
+            ]
+        );
     }
 
     fn count_of(text: &str, needle: &str) -> usize {
@@ -3829,17 +4995,17 @@ mod tests {
         text.lines().filter(|line| !line.starts_with("FILE_NAME(")).collect::<Vec<_>>().join("\n")
     }
 
-    /// `Assembly::link`/`Assembly::joint`, at parity with the Python reference's
-    /// `_mechanism()` and its two mechanism tests in `test_cadaclysm_blacksmith.py` --
-    /// see Node's `test/blacksmith.test.js` for the same facts worked out. Skips quietly
-    /// without a kernel library, as the other library-backed test in this module does.
-    #[test]
-    fn mechanism_facts_hold_as_the_shared_spec_checks_them() {
+    /// Spec 2026-09-25 section 6's fixture, as `mechanism_facts_hold_as_the_shared_spec_checks_them`
+    /// built it inline and `paired` (below) builds on too: a bolt and plate, a bracket
+    /// joining two bolts to the plate by a `"screw"` joint, and an arm placing the plate,
+    /// the bracket and a pin bolt, joined by a `"shoulder"` joint. `None` without a kernel
+    /// library, as every library-backed test in this module reports.
+    fn mechanism() -> Option<(Solid, Solid, Assembly, Assembly)> {
         let bolt = match Solid::cylinder(1.0, 6.0).and_then(|s| s.named("bolt")) {
             Ok(bolt) => bolt,
             Err(err) => {
                 eprintln!("skipped: {err} (no kernel library)");
-                return;
+                return None;
             }
         };
         let plate = Solid::cuboid(20.0, 10.0, 2.0).and_then(|s| s.named("plate")).expect("plate");
@@ -3859,6 +5025,16 @@ mod tests {
         arm.link("ground", &["base"]).expect("link ground");
         arm.link("upper arm", &["upper", "pin"]).expect("link upper arm");
         arm.joint("shoulder", "ground", "upper arm").expect("joint shoulder");
+        Some((bolt, plate, bracket, arm))
+    }
+
+    /// `Assembly::link`/`Assembly::joint`, at parity with the Python reference's
+    /// `_mechanism()` and its two mechanism tests in `test_cadaclysm_blacksmith.py` --
+    /// see Node's `test/blacksmith.test.js` for the same facts worked out. Skips quietly
+    /// without a kernel library, as the other library-backed test in this module does.
+    #[test]
+    fn mechanism_facts_hold_as_the_shared_spec_checks_them() {
+        let Some((_bolt, _plate, _bracket, arm)) = mechanism() else { return };
 
         // Fact 1: the default schema (no explicit schema) carries the kinematic entities.
         let step = arm.step_text(None, Unit::Millimetre).expect("step_text");
@@ -3918,5 +5094,499 @@ mod tests {
 
         // Fact 4: the reverse pair is a new joint.
         arm.joint("back", "upper arm", "ground").expect("joint back");
+    }
+
+    /// Within `1e-9` -- the tolerance every pair-facts assertion below checks frames,
+    /// freedom ranges and posed coordinates at.
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
+    /// A frame's origin, as rows ([`crate::blacksmith::Pair::frame_start`]'s shape) give it.
+    fn frame_origin(frame: &[[f64; 4]; 4]) -> [f64; 3] {
+        [frame[0][3], frame[1][3], frame[2][3]]
+    }
+
+    /// A frame's z axis, as rows give it.
+    fn frame_z(frame: &[[f64; 4]; 4]) -> [f64; 3] {
+        [frame[0][2], frame[1][2], frame[2][2]]
+    }
+
+    /// Spec 2026-09-28's fixture: [`mechanism`]'s bracket and arm, each given a pair, plus
+    /// a state and a declared base on `arm` -- Python's `_paired()`.
+    fn paired() -> Option<(Solid, Solid, Assembly, Assembly)> {
+        let (bolt, plate, bracket, arm) = mechanism()?;
+        bracket
+            .pair(
+                "screw",
+                "prismatic",
+                &Frame::xy([1.0, 2.0, 3.0]),
+                &PairOptions { end_frame: Some(Frame::xy([4.0, 2.0, 3.0])), ..Default::default() },
+            )
+            .expect("pair screw");
+        arm.pair(
+            "shoulder",
+            "revolute",
+            &Frame::xy([0.0, 0.0, 10.0]),
+            &PairOptions { ranges: Some(vec![(Some(-1.5), Some(1.5))]), ..Default::default() },
+        )
+        .expect("pair shoulder");
+        arm.state("reach", &[("shoulder", &[0.5])]).expect("state reach");
+        arm.base("ground").expect("base ground");
+        Some((bolt, plate, bracket, arm))
+    }
+
+    /// Fact 1: `arm.step_text()` carries exactly the pair/state entity counts the Python
+    /// reference's `_paired()` fixture gives (`test_a_paired_mechanism_is_written_as_ap242_kinematic_pairs_and_states`).
+    #[test]
+    fn a_paired_mechanism_is_written_as_ap242_kinematic_pairs_and_states() {
+        let Some((_bolt, _plate, _bracket, arm)) = paired() else { return };
+        let text = arm.step_text(None, Unit::Millimetre).expect("step_text");
+        assert_eq!(count_of(&text, "=MECHANISM_REPRESENTATION("), 2);
+        assert_eq!(count_of(&text, "=PAIR_REPRESENTATION_RELATIONSHIP("), 2);
+        assert_eq!(count_of(&text, "REVOLUTE_PAIR_WITH_RANGE"), 1);
+        assert_eq!(count_of(&text, "PRISMATIC_PAIR"), 1);
+        assert_eq!(count_of(&text, "=KINEMATIC_PROPERTY_MECHANISM_REPRESENTATION("), 1);
+        assert_eq!(count_of(&text, "=MECHANISM_STATE_REPRESENTATION("), 1);
+    }
+
+    /// Facts 2, 3, 4, 5, 6 and 9: read back through `to_scene`, at parity with
+    /// `test_a_paired_mechanism_reads_back_through_to_scene`. Skips quietly without the
+    /// reader library too, as `mechanism_facts_hold_as_the_shared_spec_checks_them`'s own
+    /// read-back fact does.
+    #[test]
+    fn a_paired_mechanism_reads_back_through_to_scene() {
+        let Some((_bolt, _plate, _bracket, arm)) = paired() else { return };
+        let scene = match arm.to_scene(None) {
+            Ok(scene) => scene,
+            Err(err) => {
+                eprintln!("skipped: {err} (no reader library)");
+                return;
+            }
+        };
+
+        // Fact 2: shoulder's pair is revolute, both world frames at (0, 0, 10) with z
+        // (0, 0, 1), one freedom Rz ranged [-1.5, 1.5].
+        let shoulder = scene.joints().into_iter().find(|j| j.name() == "shoulder").expect("shoulder joint");
+        let s_pair = shoulder.pair().expect("shoulder pair");
+        assert_eq!(s_pair.kind(), PairKind::Revolute);
+        for frame in [s_pair.frame_start(), s_pair.frame_end()] {
+            assert!(frame_origin(&frame).iter().zip([0.0, 0.0, 10.0]).all(|(a, b)| close(*a, b)), "{frame:?}");
+            assert!(frame_z(&frame).iter().zip([0.0, 0.0, 1.0]).all(|(a, b)| close(*a, b)), "{frame:?}");
+        }
+        let freedoms = s_pair.freedoms();
+        assert_eq!(freedoms.len(), 1);
+        assert_eq!(freedoms[0].motion, Motion::Rotation);
+        assert_eq!(freedoms[0].axis, FreedomAxis::Z);
+        assert!(close(freedoms[0].lower.expect("lower"), -1.5));
+        assert!(close(freedoms[0].upper.expect("upper"), 1.5));
+
+        // Fact 3: screw's pair is prismatic with no ranges; world start (1, 2, 13), end (4, 2, 13).
+        let screw = scene.joints().into_iter().find(|j| j.name() == "screw").expect("screw joint");
+        let sc_pair = screw.pair().expect("screw pair");
+        assert_eq!(sc_pair.kind(), PairKind::Prismatic);
+        assert!(sc_pair.freedoms().iter().all(|f| f.lower.is_none() && f.upper.is_none()));
+        assert!(frame_origin(&sc_pair.frame_start()).iter().zip([1.0, 2.0, 13.0]).all(|(a, b)| close(*a, b)));
+        assert!(frame_origin(&sc_pair.frame_end()).iter().zip([4.0, 2.0, 13.0]).all(|(a, b)| close(*a, b)));
+
+        // Fact 4: the base is 'ground'; one state 'reach' with one row (shoulder, [0.5]).
+        let base = scene.base().expect("base");
+        assert_eq!(base.name(), "ground");
+        let states = scene.states();
+        assert_eq!(states.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["reach"]);
+        let reach = &states[0];
+        assert_eq!(reach.values.len(), 1);
+        assert_eq!(reach.values[0].joint.name(), "shoulder");
+        assert!(close(reach.values[0].values[0], 0.5));
+
+        // Fact 5: pose_state(reach) carries the pin node's origin (5, 5, 2) to
+        // (5cos0.5 - 5sin0.5, 5sin0.5 + 5cos0.5, 2) within 1e-9.
+        let pose = scene.pose_state(reach, None).expect("pose_state");
+        let upper_arm = scene.links().into_iter().find(|l| l.name() == "upper arm").expect("upper arm link");
+        let pin_node = upper_arm
+            .nodes()
+            .into_iter()
+            .find(|n| {
+                let t = n.transform();
+                close(t[0][3], 5.0) && close(t[1][3], 5.0) && close(t[2][3], 2.0)
+            })
+            .expect("pin node at (5, 5, 2)");
+        let want = [5.0 * 0.5f64.cos() - 5.0 * 0.5f64.sin(), 5.0 * 0.5f64.sin() + 5.0 * 0.5f64.cos(), 2.0];
+        let posed = pose.transform(pin_node);
+        assert!(close(posed[0][3], want[0]) && close(posed[1][3], want[1]) && close(posed[2][3], want[2]), "{posed:?}");
+
+        // Fact 6: pose([(screw, [3.0])]) leaves every node at rest (drawn at 3); pose at
+        // 5.0 moves each 'bolts' node by (2, 0, 0).
+        let pose3 = scene.pose(&[StateValue { joint: screw, values: vec![3.0] }], None).expect("pose 3");
+        let pose5 = scene.pose(&[StateValue { joint: screw, values: vec![5.0] }], None).expect("pose 5");
+        let bolts = scene.links().into_iter().find(|l| l.name() == "bolts").expect("bolts link");
+        for node in bolts.nodes() {
+            let rest = node.transform();
+            let t3 = pose3.transform(node);
+            let t5 = pose5.transform(node);
+            for i in 0..3 {
+                assert!(close(t3[i][3], rest[i][3]), "pose at rest value moved a node");
+            }
+            assert!(close(t5[0][3], rest[0][3] + 2.0) && close(t5[1][3], rest[1][3]) && close(t5[2][3], rest[2][3]));
+        }
+
+        // Fact 9: no diagnostic names kinematics.
+        assert!(!scene.diagnostics().iter().any(|d| d.starts_with("kinematics:")));
+    }
+
+    /// Motion sequences: `sequence` writes one, the reader reads it back; an unknown state
+    /// is refused with the kernel's exact text.
+    #[test]
+    fn a_written_sequence_reads_back_and_a_bad_state_is_refused() {
+        let Some((_bolt, _plate, _bracket, arm)) = paired() else { return };
+        arm.state("rest", &[("shoulder", &[0.0])]).expect("state rest");
+        arm.sequence("swing", &[("rest", 0.0, "linear"), ("reach", 1.0, "linear")], true).expect("sequence swing");
+        assert_eq!(
+            arm.sequence("bad", &[("rest", 0.0, "linear"), ("nowhere", 1.0, "linear")], false).unwrap_err().to_string(),
+            "sequence: assembly 'arm' has no state named 'nowhere'"
+        );
+        let scene = match arm.to_scene(None) {
+            Ok(scene) => scene,
+            Err(err) => {
+                eprintln!("skipped: {err} (no reader library)");
+                return;
+            }
+        };
+        let sequences = scene.sequences();
+        assert_eq!(sequences.len(), 1);
+        let swing = &sequences[0];
+        assert_eq!(swing.name, "swing");
+        assert!(swing.closed);
+        assert_eq!(swing.seconds_per_unit, Some(1.0));
+        let rows: Vec<(String, f64, &str)> =
+            swing.segments.iter().map(|s| (s.state.name.clone(), s.t, s.interpolation.name())).collect();
+        assert_eq!(rows, [("rest".to_string(), 0.0, "linear"), ("reach".to_string(), 1.0, "linear")]);
+    }
+
+    /// Fact 7: every bad `pair`/`state`/`base` call refuses with exactly its message and
+    /// changes nothing -- the unpaired `"back"` trick: `step_text()`'s refusal text is
+    /// identical before and after the batch.
+    #[test]
+    fn every_bad_pair_state_or_base_call_is_refused_and_changes_nothing() {
+        let Some((_bolt, _plate, _bracket, arm)) = paired() else { return };
+        arm.joint("back", "upper arm", "ground").expect("joint back");
+
+        let unpaired_message = || arm.step_text(None, Unit::Millimetre).unwrap_err().to_string();
+        let before = unpaired_message();
+
+        let xy0 = Frame::xy([0.0; 3]);
+        let turned = Frame::at([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], Some([0.0, 1.0, 0.0])).expect("frame at");
+        let refusals: Vec<(Box<dyn Fn() -> Result<()> + '_>, &str)> = vec![
+            (Box::new(|| arm.pair("shoulder", "revolute", &Frame::xy([0.0, 0.0, 10.0]), &PairOptions::default())),
+             "pair: joint 'shoulder' already has a pair"),
+            (Box::new(|| arm.pair("back", "orbital", &xy0, &PairOptions::default())),
+             "pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, spherical, \
+              spherical_with_pin, planar, universal, homokinetic, fully_constrained, unconstrained)"),
+            (Box::new(|| arm.pair("back", "screw", &xy0, &PairOptions::default())), "pair: a screw needs a non-zero pitch"),
+            (
+                Box::new(|| {
+                    arm.pair(
+                        "back",
+                        "revolute",
+                        &xy0,
+                        &PairOptions { ranges: Some(vec![(Some(-1.0), Some(1.0)), (Some(-1.0), Some(1.0))]), ..Default::default() },
+                    )
+                }),
+                "pair: 'revolute' has 1 freedoms, but 2 ranges were given",
+            ),
+            (
+                Box::new(|| arm.pair("back", "revolute", &xy0, &PairOptions { ranges: Some(vec![]), ..Default::default() })),
+                "pair: 'revolute' has 1 freedoms, but 0 ranges were given",
+            ),
+            (
+                Box::new(|| {
+                    arm.pair("back", "revolute", &xy0, &PairOptions { ranges: Some(vec![(Some(1.0), Some(-1.0))]), ..Default::default() })
+                }),
+                "pair: range 0 of joint 'back' has lower >= upper",
+            ),
+            (
+                Box::new(|| arm.pair("back", "prismatic", &turned, &PairOptions { end_frame: Some(xy0), ..Default::default() })),
+                "pair: joint 'back' is prismatic, but its end frame is turned 90\u{b0} about -z, \
+                 which prismatic (does not turn) cannot make",
+            ),
+            (Box::new(|| arm.state("overreach", &[("shoulder", &[5.0])])), "state: value 0 of joint 'shoulder' is outside its range"),
+            (Box::new(|| arm.base("upper arm")), "base: assembly 'arm' already has base 'ground'"),
+        ];
+        for (call, message) in &refusals {
+            let err = call().unwrap_err();
+            assert_eq!(err.to_string(), *message);
+        }
+        assert_eq!(unpaired_message(), before);
+    }
+
+    /// Fact 8: a joint with no pair is refused only when `step_text()` is written, with
+    /// exactly this message.
+    #[test]
+    fn a_joint_without_a_pair_is_refused_at_write_time() {
+        let Some((_bolt, _plate, _bracket, arm)) = paired() else { return };
+        arm.joint("back", "upper arm", "ground").expect("joint back");
+        let err = arm.step_text(None, Unit::Millimetre).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "assembly_step: assembly 'arm': joint 'back' has no pair; a mechanism with pairs needs one on every joint (AP242)"
+        );
+    }
+
+    /// Fact 9's `pair_freedom_count` half.
+    #[test]
+    fn pair_freedom_count_reports_known_and_unknown_kinds() {
+        if let Err(err) = Solid::cylinder(1.0, 6.0) {
+            eprintln!("skipped: {err} (no kernel library)");
+            return;
+        }
+        assert_eq!(pair_freedom_count("spherical"), 3);
+        assert_eq!(pair_freedom_count("revolute"), 1);
+        assert_eq!(pair_freedom_count("fully_constrained"), 0);
+        assert_eq!(pair_freedom_count("not_a_kind"), 0);
+    }
+
+    /// Controller ruling, fact 10: a one-sided range survives the round trip. An
+    /// implementation that always sent `has_lower`/`has_upper` as true would pass every
+    /// other fact but fail this one.
+    #[test]
+    fn a_one_sided_pair_range_survives_the_round_trip() {
+        let plate = match Solid::cuboid(20.0, 10.0, 2.0) {
+            Ok(plate) => plate,
+            Err(err) => {
+                eprintln!("skipped: {err} (no kernel library)");
+                return;
+            }
+        };
+        let bolt = Solid::cylinder(1.0, 6.0).expect("bolt");
+        let hinge = Assembly::new("hinge").expect("hinge");
+        hinge.place_solid(&plate, &Frame::xy([0.0; 3]), Some("base")).expect("place base");
+        hinge.place_solid(&bolt, &Frame::xy([0.0, 0.0, 2.0]), Some("arm")).expect("place arm");
+        hinge.link("base", &["base"]).expect("link base");
+        hinge.link("arm", &["arm"]).expect("link arm");
+        hinge.joint("j", "base", "arm").expect("joint j");
+        hinge
+            .pair("j", "revolute", &Frame::xy([0.0; 3]), &PairOptions { ranges: Some(vec![(None, Some(1.0))]), ..Default::default() })
+            .expect("pair j");
+
+        let scene = match hinge.to_scene(None) {
+            Ok(scene) => scene,
+            Err(err) => {
+                eprintln!("skipped: {err} (no reader library)");
+                return;
+            }
+        };
+        let j = scene.joints().into_iter().find(|j| j.name() == "j").expect("joint j");
+        let freedoms = j.pair().expect("pair").freedoms();
+        assert_eq!(freedoms.len(), 1);
+        assert_eq!(freedoms[0].lower, None);
+        assert!(close(freedoms[0].upper.expect("upper"), 1.0));
+    }
+
+    // ---- machining ----------------------------------------------------------------------
+
+    /// `p` extruded by 1 and read back through `Solid::bounds`: `[xmin, xmax, ymin, ymax]`,
+    /// as Go's and Node's own smoke fixtures measure a profile's footprint.
+    fn footprint(p: &Profile) -> [f64; 4] {
+        let solid = Solid::extrude(p, &Frame::xy([0.0; 3]), 1.0).expect("extrude for footprint");
+        let (min, max) = solid.bounds().expect("bounds for footprint");
+        [min[0], max[0], min[1], max[1]]
+    }
+
+    fn assert_footprint(p: &Profile, expected: [f64; 4], tolerance: f64) {
+        let got = footprint(p);
+        for i in 0..4 {
+            assert!((got[i] - expected[i]).abs() <= tolerance, "footprint {got:?} != {expected:?}");
+        }
+    }
+
+    /// A 40x30x10 block on z=0 with a 20x10 pocket 8 deep: four corners a 6 mm end mill
+    /// misses.
+    fn pocketed_block() -> Solid {
+        let block = Solid::cuboid(40.0, 30.0, 10.0).unwrap().translate(0.0, 0.0, 5.0).unwrap();
+        let pocket = Solid::cuboid(20.0, 10.0, 8.0).unwrap().translate(0.0, 0.0, 6.0).unwrap();
+        block.cut(&pocket, DEFAULT_TOLERANCE).unwrap()
+    }
+
+    #[test]
+    fn profile_offset_grows_and_shrinks_a_rectangle() {
+        let rect = Profile::rect(20.0, 10.0).unwrap();
+        let grown = rect.offset(2.0, 0.01).unwrap();
+        assert_eq!(grown.len(), 1);
+        assert_footprint(&grown[0], [-12.0, 12.0, -7.0, 7.0], 1e-3);
+        let shrunk = rect.offset(-2.0, 0.01).unwrap();
+        assert_eq!(shrunk.len(), 1);
+        assert_footprint(&shrunk[0], [-8.0, 8.0, -3.0, 3.0], 1e-3);
+        let eaten = rect.offset(-6.0, 0.01).unwrap();
+        assert!(eaten.is_empty());
+        let err = rect.offset(f64::NAN, 0.01).unwrap_err();
+        assert_eq!(err.to_string(), "profile_offset: distance must be finite");
+    }
+
+    #[test]
+    fn profile_to_arcs_fits_a_spline_within_tolerance() {
+        let spline = Profile::spline(&[[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]], 3, None, true).unwrap();
+        let fitted = spline.to_arcs(0.01).unwrap();
+        assert_footprint(&fitted, footprint(&spline), 0.011);
+        let err = spline.to_arcs(0.0).unwrap_err();
+        assert_eq!(err.to_string(), "profile_to_arcs: tolerance must be positive and finite");
+    }
+
+    #[test]
+    fn solid_section_cuts_a_cuboid() {
+        let cuboid = Solid::cuboid(20.0, 10.0, 5.0).unwrap();
+        let middle = cuboid.section(0.0, 0.05).unwrap();
+        assert_eq!(middle.len(), 1);
+        assert_footprint(&middle[0], [-10.0, 10.0, -5.0, 5.0], 1e-3);
+        let miss = cuboid.section(50.0, 0.05).unwrap();
+        assert!(miss.is_empty());
+        let err = cuboid.section(2.5, 0.05).unwrap_err();
+        assert_eq!(err.to_string(), "solid_section: a face lies in the plane -- section a little above or below it");
+    }
+
+    #[test]
+    fn a_pocketed_block_reports_four_corners_a_six_mm_end_mill_misses() {
+        let block = pocketed_block();
+        let end_mill = Tool::flat(1, 6.0, 20.0, 800.0, 200.0, 12000.0, TOOL_DEFAULT_RAMP_ANGLE).unwrap();
+        let stock = Stock::around(&block, 2.0).unwrap();
+        let mut job = Job::new(&stock, 30.0, JOB_DEFAULT_CLEARANCE, JOB_DEFAULT_TOLERANCE, JOB_DEFAULT_NAME, JOB_DEFAULT_SPINDLE_DWELL, JOB_DEFAULT_RESOLUTION)
+            .unwrap();
+        let report = job.machine(&block, &end_mill, &[], None, None, 0.3, None).unwrap();
+        assert_eq!(report.items().len(), 4);
+        assert_eq!(report.text().lines().count(), 4);
+        assert_eq!(report.to_string(), report.text());
+        for item in report.items() {
+            assert_eq!(item.kind, "corner");
+            assert!(item.size > 0.0);
+            assert!(!item.region.is_empty());
+            assert!(!item.reason.is_empty());
+        }
+        let ops = job.operations().unwrap();
+        assert!(!ops.is_empty());
+        for op in &ops {
+            assert!(!op.kind.is_empty());
+            assert_eq!(op.tool, 1);
+            assert!(!op.params.is_empty());
+        }
+
+        // A drill as the end mill is refused, and leaves the job as it was.
+        let drill = Tool::drill(2, 5.0, 30.0, 150.0, 3000.0).unwrap();
+        let fresh_stock = Stock::around(&block, 2.0).unwrap();
+        let mut fresh = Job::new(&fresh_stock, 30.0, JOB_DEFAULT_CLEARANCE, JOB_DEFAULT_TOLERANCE, JOB_DEFAULT_NAME, JOB_DEFAULT_SPINDLE_DWELL, JOB_DEFAULT_RESOLUTION)
+            .unwrap();
+        let err = fresh.machine(&block, &drill, &[], None, None, 0.3, None).unwrap_err();
+        assert!(err.to_string().contains("end mill must not be a drill"), "{err}");
+        assert!(fresh.operations().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_plate_is_machined_cleanly_by_one_end_mill_and_one_drill() {
+        let plate_outline = Profile::rect(80.0, 50.0).unwrap().round(6.0, None, false).unwrap();
+        let mut part = Solid::extrude(&plate_outline, &Frame::xy([0.0; 3]), 12.0).unwrap();
+        let pocket_outline = Profile::rect(40.0, 24.0).unwrap().round(4.0, None, false).unwrap().with_hole(&Profile::circle(5.0).unwrap()).unwrap();
+        let pocket_solid = Solid::extrude(&pocket_outline, &Frame::xy([0.0, 0.0, 7.0]), 5.0).unwrap();
+        part = part.cut(&pocket_solid, DEFAULT_TOLERANCE).unwrap();
+        for [x, y] in [[-32.0, -17.0], [-32.0, 17.0], [32.0, -17.0], [32.0, 17.0]] {
+            let bore = Solid::cylinder(3.0, 12.0).unwrap().translate(x, y, 0.0).unwrap();
+            part = part.cut(&bore, DEFAULT_TOLERANCE).unwrap();
+        }
+
+        let end_mill = Tool::flat(1, 6.0, 20.0, 800.0, 200.0, 12000.0, TOOL_DEFAULT_RAMP_ANGLE).unwrap();
+        let drill = Tool::drill(2, 6.0, 30.0, 150.0, 3000.0).unwrap();
+        let stock = Stock::around(&part, 3.0).unwrap();
+        let mut job = Job::new(&stock, 25.0, 1.0, 0.01, "plate", JOB_DEFAULT_SPINDLE_DWELL, JOB_DEFAULT_RESOLUTION).unwrap();
+        let report = job.machine(&part, &end_mill, &[Some(&drill)], None, None, 0.3, None).unwrap();
+        assert!(report.is_empty());
+        assert_eq!(report.text(), "nothing left uncut");
+
+        let ops = job.operations().unwrap();
+        assert!(!ops.is_empty());
+        assert_eq!(ops[0].kind, "face");
+        assert!(ops.iter().any(|o| o.kind == "pocket"));
+        let last = ops.last().unwrap();
+        assert_eq!(last.kind, "drill");
+        assert_eq!(last.params.get("points"), Some(&Some(4.0)));
+        assert_eq!(last.params.get("peck"), Some(&None));
+
+        let programs = job.gcode().unwrap();
+        assert_eq!(programs.len(), 2);
+        for p in &programs {
+            assert!(p.tool >= 1);
+            assert!(!p.name.is_empty());
+            assert!(!p.text.is_empty());
+        }
+
+        let dir = std::env::temp_dir().join(format!("cadaclysm-smoke-cam-rust-{}", std::process::id()));
+        let written = job.write_camotics(dir.join("plate.camotics")).unwrap();
+        assert!(!written.is_empty());
+        assert!(written.last().unwrap().ends_with("plate.camotics"));
+        for w in &written {
+            assert!(w.is_file(), "{} was not written", w.display());
+        }
+        std::fs::remove_dir_all(&dir).ok();
+
+        // A NUL in a CAMotics stem is refused in the kernel's words, before the library is asked.
+        let nul_stem = job.write_camotics(dir.join("a\0b.camotics")).unwrap_err();
+        assert_eq!(nul_stem.to_string(), JOB_NUL_NAME);
+        assert!(!dir.exists(), "a refused stem must not create the folder");
+        // ... and a NUL in a name, whatever else is wrong with the job.
+        let nul_name = Job::new(&stock, 25.0, 1.0, 0.01, "a\0b", JOB_DEFAULT_SPINDLE_DWELL, JOB_DEFAULT_RESOLUTION).unwrap_err();
+        assert_eq!(nul_name.to_string(), JOB_NUL_NAME);
+    }
+
+    /// The spec's own example (2026-09-28-cam-automatic-design.md), driven with `face`,
+    /// `contour`, `pocket` and `drill` called directly rather than through `machine` --
+    /// the same inputs and expected values as Go's "four verbs by hand" fixture (commit
+    /// `74b9553ec`), which exists for exactly this reason: `machine` is one separate C
+    /// entry point that never calls these four wrapper methods, so nothing above proves
+    /// their own FFI call shapes (argument order, `job_side`'s "outside"/"inside"/"on"
+    /// mapping, the `xy` pointer/count in `drill`).
+    #[test]
+    fn the_four_verbs_by_hand_give_two_programs_with_the_specs_own_numbers() {
+        let outline = Profile::rect(60.0, 40.0).unwrap().round(5.0, None, false).unwrap();
+        let part = Solid::extrude(&outline, &Frame::xy([0.0; 3]), 20.0).unwrap();
+        let end = Tool::flat(1, 6.0, 20.0, 800.0, 200.0, 12000.0, TOOL_DEFAULT_RAMP_ANGLE).unwrap();
+        let drill = Tool::drill(2, 5.0, 30.0, 150.0, 3000.0).unwrap();
+        let stock = Stock::around(&part, 2.0).unwrap();
+        let mut job = Job::new(&stock, 30.0, JOB_DEFAULT_CLEARANCE, JOB_DEFAULT_TOLERANCE, JOB_DEFAULT_NAME, JOB_DEFAULT_SPINDLE_DWELL, JOB_DEFAULT_RESOLUTION)
+            .unwrap();
+
+        job.face(&end, 20.0, 3.0, 1.0).unwrap();
+        job.contour(&end, &outline, 20.0, 0.0, "outside", 2.0, true, false).unwrap();
+        let levels = part.section(15.0, 0.05).unwrap();
+        assert!(!levels.is_empty(), "job: section(15) is empty");
+        job.pocket(&end, &levels[0], 20.0, 10.0, 2.4, 2.0).unwrap();
+        job.drill(&drill, &[[10.0, 10.0], [40.0, 10.0]], 20.0, -1.0, Some(3.0)).unwrap();
+
+        let programs = job.gcode().unwrap();
+        assert_eq!(programs.len(), 2);
+        assert_eq!(programs[0].tool, 1);
+        assert_eq!(programs[0].name, "job-T1");
+        assert!(programs[0].text.starts_with("(cadaclysm: job-T1, T1 flat D6)\n"), "{}", programs[0].text);
+        assert_eq!(programs[1].tool, 2);
+        assert_eq!(programs[1].name, "job-T2");
+        assert!(programs[1].text.starts_with("(cadaclysm: job-T2, T2 drill D5)\n"), "{}", programs[1].text);
+
+        let ops = job.operations().unwrap();
+        let kinds: Vec<&str> = ops.iter().map(|o| o.kind.as_str()).collect();
+        assert_eq!(kinds, ["face", "contour", "pocket", "drill"]);
+        // `job_side`'s mapping: "outside" is the library's own 0.
+        assert_eq!(ops[1].params.get("side"), Some(&Some(0.0)));
+        let drill_op = &ops[3];
+        assert_eq!(drill_op.params.get("peck"), Some(&Some(3.0)));
+        assert_eq!(drill_op.params.get("points"), Some(&Some(2.0)));
+
+        // A bad `side` is refused before the library is asked, and leaves the job unchanged.
+        let before = job.operations().unwrap().len();
+        let bad_side = job.contour(&end, &outline, 20.0, 0.0, "left", 2.0, true, false).unwrap_err();
+        assert_eq!(bad_side.to_string(), "side must be 'outside', 'inside' or 'on'");
+        assert_eq!(job.operations().unwrap().len(), before);
+
+        // A `None` peck reads back as no peck at all through `Job::drill` directly, not
+        // only through `Job::machine` (the plate fixture above covers that path).
+        let mut no_peck_job = Job::new(&stock, 30.0, JOB_DEFAULT_CLEARANCE, JOB_DEFAULT_TOLERANCE, JOB_DEFAULT_NAME, JOB_DEFAULT_SPINDLE_DWELL, JOB_DEFAULT_RESOLUTION)
+            .unwrap();
+        no_peck_job.drill(&drill, &[[0.0, 0.0]], 20.0, -1.0, None).unwrap();
+        let no_peck_ops = no_peck_job.operations().unwrap();
+        assert_eq!(no_peck_ops[0].params.get("peck"), Some(&None));
     }
 }

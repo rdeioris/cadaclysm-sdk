@@ -1,6 +1,6 @@
 [package]
 name = "cadaclysm-sdk"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 rust-version = "1.70"
 description = "Read CAD files (STEP, IGES, IFC, Rhino 3dm, ACIS SAT, OCCT BREP, OpenSCAD) and build exact B-rep solids, over the prebuilt cadaclysm libraries loaded at run time."
@@ -26,13 +26,18 @@ name = "cadaclysm_sdk"
 # `default-features = false`, or CADACLYSM_NO_DOWNLOAD=1 in the build's environment.
 default = ["download"]
 download = []
+# `view::RawWindow::of`/`from_handles`: a winit, egui or other host's window, through the
+# `raw-window-handle` 0.6 traits, for `View::in_window`.
+raw-window-handle = ["dep:raw-window-handle"]
 
 [dependencies]
-# The only dependency: the library is opened when the program runs, the way
+# The one dependency always built: the library is opened when the program runs, the way
 # Python's ctypes and Node's koffi open it, so nothing here links against it and
 # nothing needs a C toolchain or an import library to build. (build.rs only
 # downloads; it compiles and links nothing.)
 libloading = "0.8"
+# Optional, for the feature above; no C toolchain either.
+raw-window-handle = { version = "0.6", optional = true }
 
 # Standalone on purpose. This crate must build with nothing of cadaclysm but the
 # shared library it loads, exactly as it does for a customer who has only the SDK

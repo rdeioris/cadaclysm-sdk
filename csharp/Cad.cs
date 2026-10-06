@@ -147,7 +147,7 @@ public enum FreedomAxis
 // ---- SVG ---------------------------------------------------------------------------------
 
 /// <summary>One of the seven camera angles <see cref="SvgOptions.View"/> understands -- the
-/// same table `cadaclysm_viewer.VIEWS` gives Python's `show()` and `svg()` both.</summary>
+/// same table `cadaclysm_view.VIEWS` gives Python's `show()` and `svg()` both.</summary>
 public enum SvgView
 {
     /// <summary>Azimuth -90, elevation 0 -- looks from -Y.</summary>
@@ -224,14 +224,16 @@ public sealed class SvgOptions
     /// <summary>How far a written curve may stray, in page units. Default 0.1.</summary>
     public double Tolerance { get; set; } = 0.1;
 
-    /// <summary>The pen colour, `'#rrggbb'`. Default black.</summary>
+    /// <summary>The pen colour: `"#rgb"`, `"#rrggbb"` or a CSS colour name. Default black.</summary>
     public string Stroke { get; set; } = "#000000";
 
     /// <summary>The pen's width, page units. Default 1.</summary>
     public double StrokeWidth { get; set; } = 1.0;
 
     /// <summary>`0xRRGGBB`, or null (the default) for no `&lt;rect&gt;` behind the drawing --
-    /// the page left to whatever the viewer composites it onto.</summary>
+    /// the page left to whatever the viewer composites it onto. <see cref="Cadaclysm.Packed"/>
+    /// reads a `"#rgb"`, `"#rrggbb"` or CSS colour name string, e.g. `Background =
+    /// Cadaclysm.Packed("navy")`.</summary>
     public uint? Background { get; set; }
 
     /// <summary>Each shape's feature edges -- the exact curves the flattened polylines are
@@ -249,6 +251,14 @@ public sealed class SvgOptions
     /// <summary>Write every line as straight segments within <see cref="Tolerance"/>, instead
     /// of being fitted back to cubic Béziers. Default false.</summary>
     public bool Polylines { get; set; } = false;
+
+    /// <summary>Also draw where each body's surfaces turn away from the eye -- the outline a
+    /// sphere has no edge for. One group per placement, after that placement's lines. Default
+    /// true: a sphere's and a torus's only curves are the seams where their one face meets
+    /// itself, which are not edges of the body and are never drawn, so without this those two
+    /// draw a blank page. A line set in its own right -- set it with <see cref="Edges"/> false
+    /// for the outline alone, or clear it for the lines alone.</summary>
+    public bool Silhouettes { get; set; } = true;
 }
 
 // ---- the structs the ABI returns by value ----------------------------------------------
@@ -668,6 +678,10 @@ internal static class Loader
     /// installed beside it.</summary>
     internal static Func<IntPtr>? Kernel;
 
+    /// <summary>The view library `View.cs` chose (`ViewLibrary`), resolved under the name
+    /// `cadaclysm_view` whichever file it is -- the terminal's, the wgpu one, or a path.</summary>
+    internal static Func<IntPtr>? View;
+
     /// <summary>Install this assembly's `DllImport` resolver, once. Both native classes call
     /// this from their static constructors: the runtime allows one resolver per assembly and
     /// throws on a second, so neither class may set its own.</summary>
@@ -679,6 +693,7 @@ internal static class Loader
             _registered = true;
             NativeLibrary.SetDllImportResolver(typeof(Loader).Assembly, (name, assembly, path) =>
                 name == "cadaclysm_blacksmith" ? Kernel?.Invoke() ?? IntPtr.Zero
+                : name == "cadaclysm_view" ? View?.Invoke() ?? IntPtr.Zero
                 : name.StartsWith("cadaclysm_", StringComparison.Ordinal) ? Resolve(name)
                 : IntPtr.Zero);
         }
@@ -862,6 +877,7 @@ internal static class Native
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_brep_layout_id();
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_brep_manifold(BrepHandle brep, [Out] uint[] outRow);
+    [DllImport(Lib)] internal static extern BrepHandle cadaclysm_brep_sew(BrepHandle brep, double tolerance, double vertex, [Out] uint[] counts, [Out] double[] gaps);
     [DllImport(Lib)] internal static extern void cadaclysm_surface_matrix(SceneHandle scene, [Out] float[] outMatrix);
     [DllImport(Lib)] internal static extern RawBounds cadaclysm_node_bounds(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawBounds64 cadaclysm_node_bounds64(SceneHandle scene, uint node);
@@ -894,6 +910,32 @@ internal static class Native
     [DllImport(Lib)] internal static extern uint cadaclysm_state_value_count(SceneHandle scene, uint state);
     [DllImport(Lib)] internal static extern uint cadaclysm_state_value(SceneHandle scene, uint state, uint row,
         out uint joint, [Out] double[]? values, uint capacity);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_pose(SceneHandle scene, uint[]? joints,
+        uint[]? counts, double[]? values, uint rowCount, uint ground);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_pose_state(SceneHandle scene, uint state, uint ground);
+    [DllImport(Lib)] internal static extern uint cadaclysm_sequence_count(SceneHandle scene);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_sequence_name(SceneHandle scene, uint sequence);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_sequence_closed(SceneHandle scene, uint sequence);
+    [DllImport(Lib)] internal static extern double cadaclysm_sequence_seconds_per_unit(SceneHandle scene, uint sequence);
+    [DllImport(Lib)] internal static extern uint cadaclysm_sequence_segment_count(SceneHandle scene, uint sequence);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_sequence_segment(SceneHandle scene, uint sequence, uint segment,
+        out uint state, out double t, out uint interpolation);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_pose_sequence(SceneHandle scene, uint sequence,
+        double t, uint ground);
+    [DllImport(Lib)] internal static extern void cadaclysm_pose_free(IntPtr pose);
+    [DllImport(Lib)] internal static extern uint cadaclysm_pose_ground(IntPtr pose);
+    [DllImport(Lib)] internal static extern uint cadaclysm_pose_node_count(IntPtr pose);
+    [DllImport(Lib)] internal static extern void cadaclysm_pose_node_transform(IntPtr pose, uint node,
+        [Out] double[] outMatrix);
+    [DllImport(Lib)] internal static extern uint cadaclysm_pose_unsolved_count(IntPtr pose);
+    [DllImport(Lib)] internal static extern uint cadaclysm_pose_unsolved(IntPtr pose, uint index);
+    [DllImport(Lib)] internal static extern uint cadaclysm_pose_out_of_range_count(IntPtr pose);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_pose_out_of_range(IntPtr pose, uint index, out uint joint,
+        out uint freedom, out double value);
+    [DllImport(Lib)] internal static extern uint cadaclysm_kinematics_base(SceneHandle scene);
     [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_edges(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawEdgeColors cadaclysm_node_edge_colors(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawPolylines cadaclysm_node_curves(SceneHandle scene, uint node);
@@ -952,6 +994,9 @@ internal static class Native
         [MarshalAs(UnmanagedType.LPUTF8Str)] string path);
     [DllImport(Lib)] internal static extern void cadaclysm_forget_meshes(SceneHandle scene);
     [DllImport(Lib)] internal static extern void cadaclysm_svg_options_init(ref RawSvgOptions options);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_parse_colour(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string text, [Out] double[] rgb);
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_scene_svg_text(SceneHandle scene, ref RawSvgOptions options);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_scene_svg(SceneHandle scene,
@@ -1162,6 +1207,8 @@ public sealed record MeshData64(double[] Positions, double[] Normals, double[]? 
 public sealed class Mesh64
 {
     private readonly RawMesh64 _raw;
+    // The scene's forget count when this was made; see Scene.Forgets.
+    private readonly ulong _forgets;
 
     /// <summary>The scene this borrows from.</summary>
     public Scene Scene { get; }
@@ -1170,6 +1217,7 @@ public sealed class Mesh64
     {
         Scene = scene;
         _raw = raw;
+        _forgets = scene.Forgets;
     }
 
     public uint VertexCount => _raw.VertexCount;
@@ -1177,10 +1225,14 @@ public sealed class Mesh64
     public uint TriangleCount => _raw.IndexCount / 3;
 
     /// <summary>As <see cref="Mesh"/>'s: a closed scene throws rather than hands out a span
-    /// over freed memory.</summary>
+    /// over freed memory -- and so does a scene that has forgotten its meshes since this was
+    /// made, the forget having freed the mesh this lends.</summary>
     private unsafe ReadOnlySpan<T> View<T>(IntPtr at, uint length)
     {
         _ = Scene.Handle;
+        if (Scene.Forgets != _forgets)
+            throw new CadaclysmException(
+                "mesh64: stale view: the scene has forgotten its meshes since, freeing the document's own mesh this lends (ask the node again)");
         return at == IntPtr.Zero ? ReadOnlySpan<T>.Empty : new ReadOnlySpan<T>((void*)at, (int)length);
     }
 
@@ -1235,7 +1287,8 @@ public sealed class Polylines
     /// <summary>`(VertexCount * 3)` floats, the runs end to end.</summary>
     public ReadOnlySpan<float> Positions => View<float>(_raw.Positions, _raw.VertexCount * 3);
 
-    /// <summary>`(PolylineCount)` vertex counts saying where each run stops.</summary>
+    /// <summary>`(PolylineCount)` vertex counts: how many points each run has, not where
+    /// it ends, so twelve two-point edges read `2, 2, 2, ...`.</summary>
     public ReadOnlySpan<uint> Counts => View<uint>(_raw.Counts, _raw.PolylineCount);
 
     /// <summary>Indices into <see cref="Positions"/> making line-segment endpoint pairs: a
@@ -1783,6 +1836,159 @@ public sealed class State : IEquatable<State>
     public override string ToString() => $"<State {Index} {Name}>";
 }
 
+/// <summary>One keyframe of a <see cref="Sequence"/>: a state, the parameter it is reached
+/// at, and how the motion leaves it -- the lower-case word `"undefined"`, `"discontinuous"`,
+/// `"synchronous"` or `"linear"`. From <see cref="Sequence.Segments"/>.</summary>
+public sealed class Segment
+{
+    public State State { get; }
+    public double T { get; }
+    public string Interpolation { get; }
+
+    internal Segment(State state, double t, string interpolation)
+    {
+        State = state;
+        T = t;
+        Interpolation = interpolation;
+    }
+
+    public override string ToString() => $"<Segment {State.Name} {T} {Interpolation}>";
+}
+
+/// <summary>A motion the file records: an `INTERPOLATED_CONFIGURATION_SEQUENCE`, its states
+/// at increasing parameter values. From <see cref="Scene.Sequences"/>.
+///
+/// <para><see cref="Pose"/> poses it at parameter `t`, in the file's own parameter: a segment
+/// is a keyframe of its state, a `"discontinuous"` segment holds until the next and every
+/// other kind moves linearly, an open sequence holds its ends and a closed one wraps. To
+/// play it on a clock: with a duration, stretch <see cref="Start"/>..<see cref="End"/> (plus
+/// the closing span when closed) to it; with none, read the parameter as seconds -- times
+/// <see cref="SecondsPerUnit"/> where the file states a time unit.</para></summary>
+public sealed class Sequence : IEquatable<Sequence>
+{
+    private static readonly string[] Interpolations = { "undefined", "discontinuous", "synchronous", "linear" };
+
+    private readonly Scene _scene;
+    public uint Index { get; }
+
+    internal Sequence(Scene scene, uint index)
+    {
+        _scene = scene;
+        Index = index;
+    }
+
+    /// <summary>The sequence's name: its representation's (`name #2` and on for further
+    /// sequences in one representation).</summary>
+    public string Name => Marshal.PtrToStringUTF8(Native.cadaclysm_sequence_name(_scene.Handle, Index)) ?? "";
+
+    /// <summary>Whether the motion returns to its first segment (its last is not
+    /// discontinuous).</summary>
+    public bool Closed => Native.cadaclysm_sequence_closed(_scene.Handle, Index);
+
+    /// <summary>Seconds per unit of the parameter where the file states a time unit; null
+    /// where it states none (the parameter is then read as seconds).</summary>
+    public double? SecondsPerUnit
+    {
+        get
+        {
+            var value = Native.cadaclysm_sequence_seconds_per_unit(_scene.Handle, Index);
+            return value == 0.0 ? null : value;
+        }
+    }
+
+    /// <summary>The segments, in file order (at least two).</summary>
+    public IReadOnlyList<Segment> Segments
+    {
+        get
+        {
+            var count = Native.cadaclysm_sequence_segment_count(_scene.Handle, Index);
+            var found = new List<Segment>((int)count);
+            for (uint i = 0; i < count; i++)
+            {
+                Native.cadaclysm_sequence_segment(_scene.Handle, Index, i, out var state, out var t, out var interpolation);
+                found.Add(new Segment(new State(_scene, state), t,
+                    interpolation < Interpolations.Length ? Interpolations[interpolation] : "undefined"));
+            }
+            return found;
+        }
+    }
+
+    /// <summary>The first segment's parameter.</summary>
+    public double Start => Segments[0].T;
+
+    /// <summary>The last segment's parameter (the closing span not included).</summary>
+    public double End => Segments[^1].T;
+
+    /// <summary>The mechanism posed by this sequence at parameter `t`, with `ground` held
+    /// fixed as <see cref="Scene.PoseState"/> does. Throws <see cref="CadaclysmException"/>
+    /// for a `t` that is not finite.</summary>
+    public Pose Pose(double t, Link? ground = null)
+    {
+        var groundIndex = ground?.Index ?? uint.MaxValue;
+        var ptr = Native.cadaclysm_pose_sequence(_scene.Handle, Index, t, groundIndex);
+        if (ptr == IntPtr.Zero) throw new CadaclysmException(Cadaclysm.LastErrorOr("pose_sequence"));
+        return _scene.CopyPose(ptr);
+    }
+
+    public bool Equals(Sequence? other) => other is not null && other.Index == Index && ReferenceEquals(other._scene, _scene);
+    public override bool Equals(object? obj) => Equals(obj as Sequence);
+    public override int GetHashCode() => HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(_scene), Index);
+    public override string ToString() => $"<Sequence {Index} {Name}>";
+}
+
+/// <summary>A posed mechanism: <see cref="Scene.Pose"/> or <see cref="Scene.PoseState"/>'s
+/// answer. The document itself is unchanged.
+///
+/// <para>Copied eagerly out of the C handle when it is made (<see cref="Scene"/>'s private
+/// copy-then-free helper), so a <see cref="Pose"/> holds no C pointer and outlives the call
+/// that made it -- closing the scene does not invalidate its transforms. <see cref="Show"/> and
+/// <see cref="View"/> need the scene open, since they draw it by handle.</para></summary>
+public sealed class Pose
+{
+    /// <summary>The link held fixed.</summary>
+    public Link Ground { get; }
+
+    /// <summary>Joints that close a loop and were not honoured, in file order.</summary>
+    public IReadOnlyList<Joint> Unsolved { get; }
+
+    /// <summary>`(joint, freedom index, value)` for every given value outside its freedom's
+    /// range.</summary>
+    public IReadOnlyList<(Joint Joint, uint Freedom, double Value)> OutOfRange { get; }
+
+    private readonly double[][] _transforms;
+    private readonly Scene _scene;
+
+    internal Pose(Scene scene, Link ground, IReadOnlyList<Joint> unsolved,
+        IReadOnlyList<(Joint, uint, double)> outOfRange, double[][] transforms)
+    {
+        _scene = scene;
+        Ground = ground;
+        Unsolved = unsolved;
+        OutOfRange = outOfRange;
+        _transforms = transforms;
+    }
+
+    /// <summary>`node`'s posed transform, as a row-major 4x4 double matrix -- the same type
+    /// <see cref="Node.Transform"/> returns.</summary>
+    public double[,] Transform(Node node) => Matrices.ToRowMajor(RawTransform(node));
+
+    /// <summary>The same matrix in the ABI's own column-major order, as 16 doubles, exactly as
+    /// <see cref="Node.RawTransform"/> lays them out.</summary>
+    public double[] RawTransform(Node node) => (double[])_transforms[node.Index].Clone();
+
+    /// <summary>Draw this pose's scene as Scene.Show does -- by handle -- with every node's posed
+    /// transform handed to the view (cadaclysm_view_set_node_transforms). An unposed pose draws
+    /// exactly what Scene.Show does.</summary>
+    public void Show(global::Cadaclysm.Viewing.ShowOptions? options = null) =>
+        global::Cadaclysm.Viewing.View.Present(_scene, options, false, _transforms);
+
+    /// <summary>Pose.Show's orbiting twin; returns what Scene.View returns.</summary>
+    public global::Cadaclysm.Viewing.Camera View(global::Cadaclysm.Viewing.ShowOptions? options = null) =>
+        global::Cadaclysm.Viewing.View.Present(_scene, options, true, _transforms)!;
+
+    public override string ToString() => $"<Pose ground={Ground}>";
+}
+
 /// <summary>A body's exact B-rep -- the trimmed surfaces its mesh is cut from -- shared with
 /// the scene rather than copied: a reference of this object's own, given back by
 /// <see cref="Dispose"/>. Nothing here reads it; it is for the blacksmith library, which
@@ -1820,6 +2026,29 @@ public sealed class Brep : IDisposable
                 throw new CadaclysmException(Cadaclysm.LastErrorOr("manifold"));
             return new Manifold(row);
         }
+    }
+
+    /// <summary>This brep with its free edges sewn, and what was sewn, as a new
+    /// <see cref="Brep"/> and a <see cref="SewReport"/>; this one is left as it was. Two free
+    /// edges become one shared edge where both their ends coincide within <c>vertex</c> -- by
+    /// default the rounding <see cref="Manifold"/> merges vertices at -- and their curves lie
+    /// within <c>tolerance</c> of each other, by default <c>vertex</c> too, so only edges that
+    /// are one curve written twice are joined. A larger <c>tolerance</c> also joins two curves
+    /// between the same two vertices that part by up to it; <c>vertex</c> is what decides which
+    /// edges are candidates at all, and raising it is what could close a slot. Nothing
+    /// moves. The new brep is the caller's to dispose.</summary>
+    public (Brep Brep, SewReport Report) Sewed(double? tolerance = null, double? vertex = null)
+    {
+        if (Handle.IsClosed) throw new CadaclysmException("brep: released");
+        var counts = new uint[4];
+        var gaps = new double[3];
+        var sewn = Native.cadaclysm_brep_sew(Handle, tolerance ?? double.NaN, vertex ?? double.NaN, counts, gaps);
+        if (sewn.IsInvalid)
+        {
+            sewn.Dispose();
+            throw new CadaclysmException(Cadaclysm.LastErrorOr("sew"));
+        }
+        return (new Brep(sewn), new SewReport(counts[0], counts[1], counts[2], counts[3], gaps[0], gaps[1], gaps[2]));
     }
 
     public void Dispose() => Handle.Dispose();
@@ -1864,6 +2093,13 @@ public readonly struct Manifold
         $"non_manifold_edges={NonManifoldEdges}, non_manifold_vertices={NonManifoldVertices}, " +
         $"is_manifold={IsManifold}, is_closed={IsClosed})";
 }
+
+/// <summary>What <see cref="Brep.Sewed"/> did, as plain data: the edges it joined
+/// (<c>Pairs</c>), the free edges before and after, how many groups of free edges between the
+/// same two vertices it left free (<c>Refused</c>: too far apart for the tolerance, or more
+/// than two), the widest gap it sewed, and the two tolerances it used.</summary>
+public sealed record SewReport(uint Pairs, uint FreeBefore, uint FreeAfter, uint Refused, double WorstGap,
+                               double Tolerance, double Vertex);
 
 /// <summary>One meshlet, copied out: the arrays are yours.</summary>
 public sealed record Meshlet(uint Index, uint Level, uint Group, float Error, uint VertexCount, uint TriangleCount,
@@ -2371,6 +2607,14 @@ public sealed class Node : IEquatable<Node>
         Scene = scene;
         Index = index;
     }
+
+    /// <summary>Draw with the view library in use: blocks until the window is closed; on the terminal, prints a still.
+    /// Choose the library with <see cref="Cadaclysm.Viewing.ViewLibrary"/> before the first view.</summary>
+    public void Show(global::Cadaclysm.Viewing.ShowOptions? options = null) => global::Cadaclysm.Viewing.View.Present(this, options, false);
+
+    /// <summary>Orbit until the window is closed; the camera it was left at and the last pick.</summary>
+    public global::Cadaclysm.Viewing.Camera View(global::Cadaclysm.Viewing.ShowOptions? options = null) =>
+        global::Cadaclysm.Viewing.View.Present(this, options, true)!;
 
     public string Name => Marshal.PtrToStringUTF8(Native.cadaclysm_node_name(Scene.Handle, Index)) ?? "";
 
@@ -2934,11 +3178,26 @@ public sealed class Scene : IDisposable
 
     /// <summary>Give the scene back. Idempotent. Every borrowed <see cref="Mesh"/> and <see
     /// cref="Polylines"/> still held throws on its next read.</summary>
-    public void Close() => _handle.Dispose();
+    /// <remarks>What a view of this thread shows of the scene is removed first (a view of
+    /// another thread still showing it makes this throw, and the scene stays open): the view
+    /// library needs a shown scene open until its item is gone.</remarks>
+    public void Close()
+    {
+        if (!_handle.IsClosed) global::Cadaclysm.Viewing.View.Release(this);
+        _handle.Dispose();
+    }
 
     /// <summary><see cref="Close"/>. A scene never disposed is closed when the runtime
     /// collects its handle.</summary>
     public void Dispose() => Close();
+
+    /// <summary>Draw with the view library in use: blocks until the window is closed; on the terminal, prints a still.
+    /// Choose the library with <see cref="Cadaclysm.Viewing.ViewLibrary"/> before the first view.</summary>
+    public void Show(global::Cadaclysm.Viewing.ShowOptions? options = null) => global::Cadaclysm.Viewing.View.Present(this, options, false);
+
+    /// <summary>Orbit until the window is closed; the camera it was left at and the last pick.</summary>
+    public global::Cadaclysm.Viewing.Camera View(global::Cadaclysm.Viewing.ShowOptions? options = null) =>
+        global::Cadaclysm.Viewing.View.Present(this, options, true)!;
 
     /// <summary>The version of the library that read it.</summary>
     public string Version => Cadaclysm.Version();
@@ -3056,6 +3315,117 @@ public sealed class Scene : IDisposable
         }
     }
 
+    /// <summary>The file's motion sequences, in file order; empty for a file that records
+    /// none.</summary>
+    public IReadOnlyList<Sequence> Sequences
+    {
+        get
+        {
+            var count = Native.cadaclysm_sequence_count(Handle);
+            var found = new List<Sequence>((int)count);
+            for (uint i = 0; i < count; i++) found.Add(new Sequence(this, i));
+            return found;
+        }
+    }
+
+    /// <summary>The link the file declares as the mechanism's base, or null when it declares
+    /// none (the default ground is then the link on the most joints; see <see
+    /// cref="Pose"/>).</summary>
+    public Link? Base
+    {
+        get
+        {
+            var index = Native.cadaclysm_kinematics_base(Handle);
+            return index == uint.MaxValue ? null : new Link(this, index);
+        }
+    }
+
+    /// <summary>The mechanism posed by `values`: rows of a joint and the values it sets, one
+    /// per freedom of its pair, in the pair's freedom order -- exactly <see
+    /// cref="State.Values"/>'s row type, so `Pose(state.Values)` poses like `PoseState(state)`
+    /// -- with `ground` (a link, or null for the default ground) held fixed. Values outside a
+    /// freedom's range are used as given and reported in the answer's <see
+    /// cref="Pose.OutOfRange"/>.
+    ///
+    /// <para>Also overloaded to take <see cref="State.Values"/>' own row type directly, so
+    /// `Pose(state.Values)` needs no conversion; this tuple form remains for hand-built rows.
+    /// </para>
+    ///
+    /// <para>Throws <see cref="CadaclysmException"/> on a bad row (a joint given twice, one
+    /// with the wrong number of values, ...) or a file with no mechanism, carrying
+    /// `cadaclysm_last_error`'s text unchanged.</para></summary>
+    public Pose Pose(IEnumerable<(Joint Joint, IReadOnlyList<double> Values)> values, Link? ground = null) =>
+        Pose(values.Select(row => new StateValue(row.Joint, row.Values)), ground);
+
+    /// <summary>Overload taking <see cref="State.Values"/>'s own row type directly, so
+    /// `Pose(state.Values)` compiles and poses without a conversion.</summary>
+    public Pose Pose(IEnumerable<StateValue> values, Link? ground = null)
+    {
+        var rows = values.ToList();
+        var rowCount = (uint)rows.Count;
+        var joints = new uint[rows.Count];
+        var counts = new uint[rows.Count];
+        var flat = new List<double>();
+        for (var i = 0; i < rows.Count; i++)
+        {
+            joints[i] = rows[i].Joint.Index;
+            counts[i] = (uint)rows[i].Values.Count;
+            flat.AddRange(rows[i].Values);
+        }
+        var groundIndex = ground?.Index ?? uint.MaxValue;
+        var ptr = Native.cadaclysm_pose(Handle, rows.Count == 0 ? null : joints, rows.Count == 0 ? null : counts,
+            flat.Count == 0 ? null : flat.ToArray(), rowCount, groundIndex);
+        if (ptr == IntPtr.Zero) throw new CadaclysmException(Cadaclysm.LastErrorOr("pose"));
+        return CopyPose(ptr);
+    }
+
+    /// <summary>The mechanism posed by `state`'s values, with `ground` held fixed as <see
+    /// cref="Pose"/> does. Throws as <see cref="Pose"/> does.</summary>
+    public Pose PoseState(State state, Link? ground = null)
+    {
+        var groundIndex = ground?.Index ?? uint.MaxValue;
+        var ptr = Native.cadaclysm_pose_state(Handle, state.Index, groundIndex);
+        if (ptr == IntPtr.Zero) throw new CadaclysmException(Cadaclysm.LastErrorOr("pose_state"));
+        return CopyPose(ptr);
+    }
+
+    /// <summary>Reads everything out of a `CadaclysmPose *` into a <see cref="Pose"/>, then
+    /// frees it (ruling 2 of the posing plan: wrappers copy eagerly, never holding the C
+    /// pointer). Runs in a `finally` so an exception midway through copying still frees the
+    /// handle.</summary>
+    internal Pose CopyPose(IntPtr ptr)
+    {
+        try
+        {
+            var ground = new Link(this, Native.cadaclysm_pose_ground(ptr));
+            var nodeCount = Native.cadaclysm_pose_node_count(ptr);
+            var transforms = new double[nodeCount][];
+            for (uint node = 0; node < nodeCount; node++)
+            {
+                var raw = new double[16];
+                Native.cadaclysm_pose_node_transform(ptr, node, raw);
+                transforms[node] = raw;
+            }
+            var unsolved = new List<Joint>();
+            for (uint i = 0; i < Native.cadaclysm_pose_unsolved_count(ptr); i++)
+            {
+                var joint = Native.cadaclysm_pose_unsolved(ptr, i);
+                if (joint != uint.MaxValue) unsolved.Add(new Joint(this, joint));
+            }
+            var outOfRange = new List<(Joint, uint, double)>();
+            for (uint i = 0; i < Native.cadaclysm_pose_out_of_range_count(ptr); i++)
+            {
+                if (Native.cadaclysm_pose_out_of_range(ptr, i, out var joint, out var freedom, out var value))
+                    outOfRange.Add((new Joint(this, joint), freedom, value));
+            }
+            return new Pose(this, ground, unsolved, outOfRange, transforms);
+        }
+        finally
+        {
+            Native.cadaclysm_pose_free(ptr);
+        }
+    }
+
     /// <summary>The archive member this was read from, or null for a plain file.</summary>
     public string? SourceName
     {
@@ -3161,10 +3531,22 @@ public sealed class Scene : IDisposable
     /// scene.</summary>
     public void Cancel() => Native.cadaclysm_cancel(Handle);
 
-    /// <summary>Drop every mesh the scene has built; the next ask rebuilds. Every
-    /// <see cref="Mesh"/> and <see cref="Polylines"/> handed out before this is over freed
-    /// memory.</summary>
-    public void ForgetMeshes() => Native.cadaclysm_forget_meshes(Handle);
+    /// <summary>Drop every mesh the scene has built; the next ask rebuilds. What it frees is
+    /// the document's own mesh: the <see cref="Mesh64"/>s handed out before it lend that, so
+    /// this counts the forget and one of them read afterwards throws a stale view rather than
+    /// reading freed memory. <see cref="Mesh"/>, <see cref="Polylines"/> and the Béziers are
+    /// the library's own caches, which a forget does not touch and which stay good until the
+    /// scene closes.</summary>
+    public void ForgetMeshes()
+    {
+        Native.cadaclysm_forget_meshes(Handle);
+        Forgets++;
+    }
+
+    /// <summary>How many times <see cref="ForgetMeshes"/> has run. Only <see cref="Mesh64"/>
+    /// stamps itself with this: it lends the document's own mesh, which a forget frees, where
+    /// the float mesh and the line views are the library's own caches and outlive one.</summary>
+    internal ulong Forgets { get; private set; }
 
     /// <summary>Write the whole scene to `path`: "glb", "gltf" or "obj" -- every placement of
     /// every shape, named and placed as the tree is, unlike <see cref="Node.SaveMesh"/> which
@@ -3387,7 +3769,8 @@ public static class Cadaclysm
     }
 
     /// <summary>`SvgOptions`, packed into `RawSvgOptions`: `View` fills `Azimuth`/`Elevation`
-    /// unless they are set directly, `Up` defaults to `defaultUp`, colours are `'#rrggbb'`.
+    /// unless they are set directly, `Up` defaults to `defaultUp`, colours are `'#rgb'`,
+    /// `'#rrggbb'` or a CSS colour name.
     /// Shared by <see cref="Scene.SvgText"/>/<see cref="Scene.Svg"/> and <see
     /// cref="Node.SvgText"/>/<see cref="Node.Svg"/>, as Python's `_svg_options` is shared by
     /// `Scene.svg` and `Node.svg`.</summary>
@@ -3406,20 +3789,28 @@ public static class Cadaclysm
         raw.Margin = o.Margin;
         raw.Tolerance = o.Tolerance;
         raw.StrokeWidth = o.StrokeWidth;
-        raw.Stroke = ParseColour(o.Stroke);
+        raw.Stroke = Packed(o.Stroke);
         raw.Background = o.Background ?? 0xFFFFFFFFu; // CADACLYSM_SVG_TRANSPARENT
-        raw.Flags = (o.Edges ? 1u : 0u) | (o.Curves ? 2u : 0u) | (o.Isocurves ? 4u : 0u) | (o.Polylines ? 8u : 0u);
+        raw.Flags = (o.Edges ? 1u : 0u) | (o.Curves ? 2u : 0u) | (o.Isocurves ? 4u : 0u) | (o.Polylines ? 8u : 0u)
+            | (o.Silhouettes ? 16u : 0u);
         return raw;
     }
 
-    /// <summary>A colour as the ABI's packed `0xRRGGBB`: `'#rrggbb'`, the leading `#` optional.
-    /// </summary>
-    internal static uint ParseColour(string colour)
+    /// <summary>(r, g, b) in 0..1 from colour text -- `"#rgb"`, `"#rrggbb"` or a CSS colour name --
+    /// read by the library's own parser, so every wrapper takes the same forms. There is no
+    /// reader-side paint API, so this has no numeric-triple twin and no `what` of its own: its
+    /// only caller is <see cref="Packed"/>, whose refusal names itself.</summary>
+    private static bool TryParse(string colour, double[] rgb) => Native.cadaclysm_parse_colour(colour, rgb);
+
+    /// <summary>A colour as the ABI's packed `0xRRGGBB`, from `"#rgb"`, `"#rrggbb"` or a CSS colour name --
+    /// for <see cref="SvgOptions.Background"/>, which takes the packed number. Takes no numeric
+    /// triple of its own, so its refusal lists only the text forms.</summary>
+    public static uint Packed(string colour)
     {
-        var hex = colour.StartsWith('#') ? colour[1..] : colour;
-        if (hex.Length != 6 || !uint.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var value))
-            throw new CadaclysmException($"colour {colour}: expected '#rrggbb'");
-        return value;
+        var rgb = new double[3];
+        if (!TryParse(colour, rgb))
+            throw new CadaclysmException($"colour: a colour is \"#rgb\", \"#rrggbb\" or a CSS colour name, not '{colour}'");
+        return ((uint)Math.Round(rgb[0] * 255) << 16) | ((uint)Math.Round(rgb[1] * 255) << 8) | (uint)Math.Round(rgb[2] * 255);
     }
 
     private static RawOpenOptions BuildOptions(Convention convention, bool colours, double sourceMetresPerUnit)
@@ -3457,7 +3848,7 @@ public static class Cadaclysm
         }
     }
 
-    /// <summary>Open a CAD file, or a `.zip` holding one.</summary>
+    /// <summary>Open a CAD file, or a `.zip`, `.stpZ` or `.gz` holding one.</summary>
     /// <param name="schema">An EXPRESS schema (`.exp`) beyond the ones built into the
     /// library, or a directory of them matched against what the file says it speaks. Every
     /// schema the project ships is compiled in, so a STEP or IFC file opens with null.</param>
@@ -3469,8 +3860,9 @@ public static class Cadaclysm
     /// private `_options` helper does); it is exposed here because the brief for this binding
     /// asked for it explicitly.</param>
     /// <remarks>Raises <see cref="CadaclysmException"/> on failure, carrying what the library
-    /// said. A `.zip` opens its first readable member; <see cref="Scene.SourceName"/> says
-    /// which.</remarks>
+    /// said. A `.zip` (or `.stpZ`, STEP's zip) opens its first readable member;
+    /// <see cref="Scene.SourceName"/> says which. A `.gz` is read as the format named
+    /// before it: `part.step.gz` as `.step`.</remarks>
     public static Scene Open(string path, Convention convention = Convention.Native, string? schema = null,
         bool colours = false, double sourceMetresPerUnit = 0)
     {

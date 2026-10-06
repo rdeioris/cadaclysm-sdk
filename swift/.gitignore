@@ -1,3 +1,5 @@
 # swift build output
 .build/
 .swiftpm/
+# CadaclysmCapi.xcframework (iOS), copied in by scripts/build-render-metal-xcframework.sh
+Frameworks/

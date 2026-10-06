@@ -104,7 +104,7 @@ func test_placements_transforms_and_meshes():
 		eq(t.origin, Vector3(raw[12], raw[13], raw[14]), "the origin is the fourth column")
 		eq(t.basis.x, Vector3(raw[0], raw[1], raw[2]), "column-major basis")
 		eq(p.select.index, p.geometry.index)
-	eq(triangles, 522)  # 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound): 542 -> 522
+	eq(triangles, 274)  # 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound): 542 -> 522; 2026-10-04, one row along a ruling (the display's filler lays one row along a cylinder's or cone's straight axis, not six): 522 -> 274
 	# The second body sits 8 along x, the third 8 along y.
 	eq(placements[1].raw_transform[12], 8.0)
 	eq(placements[1].transform.origin.x, 8.0)
@@ -295,6 +295,10 @@ func test_svg():
 	ok(z_up != y_up, "z-up and y-up read the same")
 	var painted: String = scene.svg_text_with({"background": "#ff0000"})
 	ok(painted.contains('fill="#ff0000"'), painted.left(300))
+	var named: String = scene.svg_text_with({"background": "red"})
+	ok(named.contains('fill="#ff0000"'), named.left(300))
+	eq(scene.svg_text_with({"background": "notacolour"}), "")
+	ok(Cadaclysm.last_error().contains("a CSS colour name"), Cadaclysm.last_error())
 
 	eq(scene.svg_text_with({"fov": 200}), "")
 	ok(Cadaclysm.last_error().contains("fov"), Cadaclysm.last_error())
@@ -508,6 +512,150 @@ func test_mechanism_links_and_joints():
 	eq(row.joint.index, 0)
 	eq(row.values.size(), 1)
 	near(row.values[0], 0.5, 1e-9, "state row value")
+
+# Motion sequences (motion sequences plan 2): `samples/mechanism-sequence.stp` has states
+# open 0, shut 1, wide 2 and two sequences, `swing` and `snap`.
+func test_a_file_reads_its_motion_sequences():
+	var path := fixture("samples/mechanism-sequence.stp")
+	if path == "":
+		return
+	var scene := CadaclysmScene.open(path)
+	ok(scene != null, Cadaclysm.last_error())
+	if scene == null:
+		return
+	var sequences: Array = scene.sequences
+	eq(sequences.size(), 2)
+	var swing: CadaclysmSequence = sequences[0]
+	eq(swing.index, 0)
+	eq(swing.name, "swing")
+	eq(swing.closed, true)
+	eq(swing.seconds_per_unit, 1.0)
+	var rows := swing.segments.map(func(s): return [s.state.name, s.t, s.interpolation])
+	eq(rows, [["shut", 0.0, "linear"], ["open", 1.0, "synchronous"], ["wide", 2.0, "linear"]])
+	eq(swing.start, 0.0)
+	eq(swing.end, 2.0)
+	var snap: CadaclysmSequence = sequences[1]
+	eq(snap.name, "snap")
+	eq(snap.closed, false)
+	ok(is_nan(snap.seconds_per_unit), "snap has no unit")
+	var snap_rows := snap.segments.map(func(s): return [s.state.name, s.t, s.interpolation])
+	eq(snap_rows, [["shut", 0.0, "discontinuous"], ["wide", 0.5, "discontinuous"]])
+
+	# pose at each segment equals pose_state of its state, on every node.
+	for segment: CadaclysmSegment in swing.segments:
+		var by_sequence := swing.pose(segment.t, null)
+		var by_state := scene.pose_state(segment.state, null)
+		ok(by_sequence != null and by_state != null, Cadaclysm.last_error())
+		for link: CadaclysmLink in scene.links:
+			for node: CadaclysmNode in link.nodes:
+				eq(by_sequence.raw_transform(node), by_state.raw_transform(node), "pose at t=%s" % segment.t)
+
+	# A non-finite parameter is refused.
+	eq(swing.pose(NAN, null), null)
+	eq(Cadaclysm.last_error(), "the sequence parameter must be a finite number")
+	scene.close()
+
+# The pose facts (posing plan 2, wrapper brief facts 1-6), on the same file and the same
+# `native` convention the pair/state facts above use. Godot's own `Transform3D` is single
+# precision (f32) even though the SDK underneath stays f64 all the way to the pose, so
+# this compares at 1e-4 rather than the other wrappers' 1e-9.
+func test_a_mechanism_poses_its_state():
+	var path := fixture("samples/mechanism.stp")
+	if path == "":
+		return
+	var native := CadaclysmScene.open_with(path, {"convention": "native"})
+	ok(native != null, Cadaclysm.last_error())
+	if native == null:
+		return
+	var links: Array = native.links
+	var base_link: CadaclysmLink = links[0]
+	var arm_link: CadaclysmLink = links[1]
+	var base_node: CadaclysmNode = base_link.nodes[0]
+	var arm_node: CadaclysmNode = arm_link.nodes[0]
+	var hinge: CadaclysmJoint = native.joints[0]
+	var tol := 1e-4
+
+	# Fact 1: no declared base.
+	eq(native.base, null)
+
+	# Fact 2: pose_state(open) grounds base, solves cleanly, and turns the arm by -0.5.
+	var state: CadaclysmState = native.states[0]
+	var pose: CadaclysmPose = native.pose_state(state, null)
+	ok(pose != null, Cadaclysm.last_error())
+	if pose == null:
+		return
+	eq(pose.ground.index, base_link.index)
+	eq(pose.unsolved.size(), 0)
+	eq(pose.out_of_range.size(), 0)
+	var q := 0.5
+	var p1: Vector3 = pose.transform(arm_node) * Vector3(10, 0, 0)
+	near(p1.x, 10.0 * cos(q), tol, "pose_state: arm (10,0,0).x")
+	near(p1.y, -10.0 * sin(q), tol, "pose_state: arm (10,0,0).y")
+	near(p1.z, 100.0, tol, "pose_state: arm (10,0,0).z")
+	var p2: Vector3 = pose.transform(arm_node) * Vector3(0, 0, 0)
+	near(p2.x, 0.0, tol, "pose_state: arm origin x")
+	near(p2.y, 0.0, tol, "pose_state: arm origin y")
+	near(p2.z, 100.0, tol, "pose_state: arm origin z")
+	var base_raw: PackedFloat64Array = pose.raw_transform(base_node)
+	var base_rest: PackedFloat64Array = base_node.raw_transform
+	for i in range(16):
+		near(base_raw[i], base_rest[i], tol, "pose_state: base_node.raw_transform[%d]" % i)
+
+	# Fact 3: a value past its range is used and reported.
+	var past_range: CadaclysmPose = native.pose([CadaclysmStateValue.create(hinge, PackedFloat64Array([2.0]))], null)
+	ok(past_range != null, Cadaclysm.last_error())
+	if past_range != null:
+		eq(past_range.out_of_range.size(), 1)
+		var entry: Dictionary = past_range.out_of_range[0]
+		eq(entry["joint"].index, hinge.index)
+		eq(entry["freedom"], 0)
+		near(entry["value"], 2.0, 1e-12, "out_of_range value")
+		var p3: Vector3 = past_range.transform(arm_node) * Vector3(10, 0, 0)
+		near(p3.x, 10.0 * cos(2.0), tol, "pose(q=2.0): arm (10,0,0).x")
+		near(p3.y, -10.0 * sin(2.0), tol, "pose(q=2.0): arm (10,0,0).y")
+		near(p3.z, 100.0, tol, "pose(q=2.0): arm (10,0,0).z")
+
+	# Fact 4: the ground can be named.
+	var arm_grounded: CadaclysmPose = native.pose([CadaclysmStateValue.create(hinge, PackedFloat64Array([0.5]))], arm_link)
+	ok(arm_grounded != null, Cadaclysm.last_error())
+	if arm_grounded != null:
+		eq(arm_grounded.ground.index, arm_link.index)
+		var grounded_raw: PackedFloat64Array = arm_grounded.raw_transform(arm_node)
+		var arm_rest: PackedFloat64Array = arm_node.raw_transform
+		for i in range(16):
+			near(grounded_raw[i], arm_rest[i], tol, "pose(ground=arm): arm_node.raw_transform[%d]" % i)
+
+	# Fact 5: state.values poses like pose_state, and pose([]) is the rest pose.
+	var via_values: CadaclysmPose = native.pose(state.values, null)
+	var via_state: CadaclysmPose = native.pose_state(state, null)
+	ok(via_values != null and via_state != null)
+	if via_values != null and via_state != null:
+		var vv: PackedFloat64Array = via_values.raw_transform(arm_node)
+		var vs: PackedFloat64Array = via_state.raw_transform(arm_node)
+		for i in range(16):
+			near(vv[i], vs[i], tol, "pose(state.values) vs pose_state(state)[%d]" % i)
+	var rest: CadaclysmPose = native.pose([], null)
+	ok(rest != null, Cadaclysm.last_error())
+	if rest != null:
+		for node in native.nodes:
+			var node_raw: PackedFloat64Array = rest.raw_transform(node)
+			var node_rest: PackedFloat64Array = node.raw_transform
+			for i in range(16):
+				near(node_raw[i], node_rest[i], tol, "pose([]): node %s raw_transform[%d]" % [node.name, i])
+
+	# Fact 6: a bad row fails with the core's own message; a file with no mechanism too.
+	var bad: CadaclysmPose = native.pose([CadaclysmStateValue.create(hinge, PackedFloat64Array([1.0, 2.0]))], null)
+	eq(bad, null)
+	ok(Cadaclysm.last_error().contains("takes 1 value(s)"), Cadaclysm.last_error())
+
+	var cube_path := fixture("samples/cube.scad")
+	if cube_path != "":
+		var cube := CadaclysmScene.open(cube_path)
+		ok(cube != null, Cadaclysm.last_error())
+		if cube != null:
+			var no_mechanism: CadaclysmPose = cube.pose([], null)
+			eq(no_mechanism, null)
+			ok(Cadaclysm.last_error().contains("no mechanism"), Cadaclysm.last_error())
 
 func test_cube_has_no_links_or_joints():
 	var path := fixture("samples/cube.scad")

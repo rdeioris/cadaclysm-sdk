@@ -207,10 +207,13 @@ return function(t)
     local z_up, y_up = plate:svg_text({ up = "z" }), plate:svg_text({ up = "y" })
     t.ok(z_up ~= y_up, "z-up and y-up read the same")
 
-    -- Several solids, each its own group.
+    -- Several solids, each its own group -- three, not two: the drawing carries each body's
+    -- outline by default, so the curved plate adds a `-silhouettes` group; a cuboid adds none.
     local both = bs.write_svg_text({ plate, bs.Solid.cuboid(1, 1, 1) })
     local _, groups = both:gsub('<g id="', "")
-    t.eq(groups, 2)
+    t.eq(groups, 3)
+    local _, outlines = both:gsub('<g id="[^"]*%-silhouettes"', "")
+    t.eq(outlines, 1)
 
     t.raises(function() plate:svg_text({ fov = 200 }) end, "fov")
     t.raises(function() plate:svg(t.tmp("no/such/dir/plate.svg"), { fov = 200 }) end, "fov")
@@ -398,7 +401,15 @@ return function(t)
     t.raises(function() block:coloured({ 1.5, 0, 0 }) end, "coloured: r, g and b must be in 0%.%.1")
     t.raises(function() block:coloured("#fff", -1) end, "coloured: face %-1 is not one of the solid's 6")
     t.raises(function() block:face_colour(6) end, "colour: face 6 is not one of the solid's 6")
-    t.raises(function() block:coloured("red") end, "coloured: a colour is")
+    local red = block:coloured("red").colour
+    t.eq(red[1], 1); t.eq(red[2], 0); t.eq(red[3], 0)
+    local lime = block:coloured("#0f0").colour
+    t.eq(lime[2], 1)
+    local ok, err = pcall(function() return block:coloured("notacolour") end)
+    t.eq(ok, false)
+    t.eq(tostring(err):find("a CSS colour name", 1, true) ~= nil, true)
+    local svg = block:svg_text({ stroke = "red", background = "navy" })
+    t.eq(svg:lower():find("#ff0000", 1, true) ~= nil, true)
   end)
 
   t.test("profile and edge colours", function()
@@ -688,6 +699,78 @@ return function(t)
       for _, p in ipairs(ring) do t.ok(off_a(p) < 50 * tol and p[3] >= 2 - 50 * tol and p[3] <= 4 + 50 * tol) end
     end
     t.eq(tostring(o), ("Overlap(faces=(%d, %d), loops=%d)"):format(o.faces[1], o.faces[2], #o.loops))
+  end)
+
+  t.test("boxes_apart on the 45 degree case", function()
+    -- Two unit boxes (bounds_box.rs's own fixture), the second turned 45 degrees about
+    -- z: corner to face apart along x by more than sqrt(2) + 1 -> apart; closer -> not
+    -- apart, even though their world AABBs already overlap there.
+    local unit = bs.Box({ -1, -1, -1 }, { 1, 1, 1 })
+    local identity = { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 }
+    local function rot_z(degrees, origin)
+      local r = math.rad(degrees)
+      return { origin[1], origin[2], origin[3], math.cos(r), math.sin(r), 0, -math.sin(r), math.cos(r), 0, 0, 0, 1 }
+    end
+    t.ok(bs.boxes_apart(unit, identity, unit, rot_z(45, { 2.5, 0, 0 })))
+    t.ok(not bs.boxes_apart(unit, identity, unit, rot_z(45, { 2.3, 0, 0 })))
+    t.ok(unit:moved(identity):overlaps(unit:moved(rot_z(45, { 2.3, 0, 0 }))))
+    t.ok(not bs.boxes_apart(unit, identity, unit, { 2, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 }))
+  end)
+
+  t.test("the collider finds overlapping parts and rebuilds the overlap", function()
+    local xy0 = { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 }
+    local a = bs.Solid.cuboid(2, 2, 2)
+    local b = bs.Solid.cuboid(2, 2, 2):translate(1, 0, 0)
+    local collider = bs.Collider({ a, b }, 0.05)
+    t.eq(collider.group_count, 2)
+    local stats0 = collider.stats
+    t.eq(stats0.considered, 0)
+    local hits = collider:check({ xy0, xy0 })
+    t.eq(#hits, 1)
+    local hit = hits[1]
+    t.ok(getmetatable(hit) == bs.CollisionHit)
+    t.ok(hit.overlap and hit.kind == "overlap" and hit.text == "")
+    t.eq(hit.a, 0)
+    t.eq(hit.b, 1)
+    t.ok(hit.depth > 0)
+    t.ok(#hit.positions > 0 and #hit.positions[1] == 3)
+    t.ok(#hit.normals == #hit.positions)
+    local overlap = hit:solid()
+    t.ok(getmetatable(overlap) == bs.Solid and overlap.faces > 0)
+    local stats1 = collider.stats
+    t.eq(stats1.considered, 1)
+    t.ok(stats1.confirmed + stats1.closed_form + stats1.meshed >= 1)
+    -- apart: no hits, sharing the group's own frame count
+    local far = collider:check({ xy0, { 100, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 } })
+    t.eq(#far, 0)
+    collider:close()
+    t.raises(function() collider:check({ xy0, xy0 }) end, "collider: closed")
+  end)
+
+  t.test("a collision hit's solid survives the collider closing", function()
+    -- solid() keeps the collisions handle (not the collider) alive: closing the
+    -- collider itself must not take the hit's own rebuild with it.
+    local xy0 = { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 }
+    local a = bs.Solid.cuboid(2, 2, 2)
+    local b = bs.Solid.cuboid(2, 2, 2):translate(1, 0, 0)
+    local collider = bs.Collider({ a, b })
+    local hits = collider:check({ xy0, xy0 })
+    collider:close()
+    t.eq(#hits, 1)
+    local overlap = hits[1]:solid()
+    t.ok(overlap.faces > 0)
+  end)
+
+  t.test("the collider refuses a part that is not a closed solid", function()
+    local sheet = bs.Solid.cuboid(2, 2, 2):face_sheet(0)
+    t.raises(function() bs.Collider({ sheet }) end, "collider_new: part 0 is not a closed solid")
+  end)
+
+  t.test("the collider refuses a short groups list", function()
+    local a = bs.Solid.cuboid(2, 2, 2)
+    local b = bs.Solid.cuboid(2, 2, 2):translate(1, 0, 0)
+    t.raises(function() bs.Collider({ a, b }, 0.05, { 0 }) end,
+      "Collider: groups must have one entry per solid %(2 solids, 1 groups%)")
   end)
 
   t.test("a line through a cuboid hits twice and cuts three pieces", function()
@@ -1747,6 +1830,235 @@ return function(t)
     plate:close()
   end)
 
+  -- Assembly:pair, state and base, and M.pair_freedom_count, at parity with the Python
+  -- reference's _paired() and its tests in test_cadaclysm_blacksmith.py (spec
+  -- 2026-09-28). See Node's test/blacksmith.test.js, Rust's mod tests and Swift's
+  -- KernelTests.swift for the same facts worked out.
+  t.test("a paired mechanism is written as AP242 kinematic pairs and states, reads back "
+    .. "through to_scene, every bad pair/state/base is refused with its exact message "
+    .. "and changes nothing, and pair_freedom_count reports kind sizes", function()
+    local bolt, plate, bracket, arm = mechanism()
+    bracket:pair("screw", "prismatic", bs.Frame.xy({ 1, 2, 3 }), { end_frame = bs.Frame.xy({ 4, 2, 3 }) })
+    arm:pair("shoulder", "revolute", bs.Frame.xy({ 0, 0, 10 }), { ranges = { { -1.5, 1.5 } } })
+    arm:state("reach", { { "shoulder", { 0.5 } } })
+    arm:base("ground")
+
+    local function count_of(haystack, needle)
+      local n, start = 0, 1
+      while true do
+        local from = haystack:find(needle, start, true)
+        if not from then return n end
+        n, start = n + 1, from + #needle
+      end
+    end
+
+    -- Fact 1: the written STEP text carries the pairs and the state.
+    local step = arm:step_text()
+    t.eq(count_of(step, "=MECHANISM_REPRESENTATION("), 2)
+    t.eq(count_of(step, "=PAIR_REPRESENTATION_RELATIONSHIP("), 2)
+    t.eq(count_of(step, "REVOLUTE_PAIR_WITH_RANGE"), 1)
+    t.eq(count_of(step, "PRISMATIC_PAIR"), 1)
+    t.eq(count_of(step, "=KINEMATIC_PROPERTY_MECHANISM_REPRESENTATION("), 1)
+    t.eq(count_of(step, "=MECHANISM_STATE_REPRESENTATION("), 1)
+
+    -- Facts 2-6, 9: read back through to_scene.
+    local scene = arm:to_scene()
+    local shoulder, screw
+    for _, j in ipairs(scene.joints) do
+      if j.name == "shoulder" then shoulder = j end
+      if j.name == "screw" then screw = j end
+    end
+    local shoulder_pair = shoulder.pair
+    t.eq(shoulder_pair.kind, "revolute")
+    for _, frame in ipairs({ shoulder_pair.frame_start, shoulder_pair.frame_end }) do
+      t.ok(all_near({ frame[1][4], frame[2][4], frame[3][4] }, { 0, 0, 10 }, 1e-9))
+      t.ok(all_near({ frame[1][3], frame[2][3], frame[3][3] }, { 0, 0, 1 }, 1e-9))
+    end
+    local shoulder_freedoms = shoulder_pair.freedoms
+    t.eq(#shoulder_freedoms, 1)
+    t.eq(shoulder_freedoms[1].motion, "rotation")
+    t.eq(shoulder_freedoms[1].axis, "z")
+    t.near(shoulder_freedoms[1].lower, -1.5, 1e-9)
+    t.near(shoulder_freedoms[1].upper, 1.5, 1e-9)
+
+    local screw_pair = screw.pair
+    t.eq(screw_pair.kind, "prismatic")
+    for _, f in ipairs(screw_pair.freedoms) do
+      t.eq(f.lower, nil)
+      t.eq(f.upper, nil)
+    end
+    t.ok(all_near({ screw_pair.frame_start[1][4], screw_pair.frame_start[2][4], screw_pair.frame_start[3][4] },
+      { 1, 2, 13 }, 1e-9))
+    t.ok(all_near({ screw_pair.frame_end[1][4], screw_pair.frame_end[2][4], screw_pair.frame_end[3][4] },
+      { 4, 2, 13 }, 1e-9))
+
+    t.ok(scene.base ~= nil and scene.base.name == "ground")
+    local state_names = {}
+    for i, s in ipairs(scene.states) do state_names[i] = s.name end
+    t.eq(table.concat(state_names, ","), "reach")
+    local reach = scene.states[1]
+    t.eq(#reach.values, 1)
+    t.eq(reach.values[1].joint.name, "shoulder")
+    t.ok(all_near(reach.values[1].values, { 0.5 }, 1e-9))
+
+    -- Fact 5: pose_state(reach) carries the pin node (the upper arm node at (5, 5, 2))
+    -- to (5cos0.5 - 5sin0.5, 5sin0.5 + 5cos0.5, 2).
+    local pose = scene:pose_state(reach)
+    local upper_arm
+    for _, l in ipairs(scene.links) do if l.name == "upper arm" then upper_arm = l end end
+    local pin_node
+    for _, n in ipairs(upper_arm.nodes) do
+      local tr = n.transform
+      if all_near({ tr[1][4], tr[2][4], tr[3][4] }, { 5, 5, 2 }, 1e-9) then pin_node = n end
+    end
+    t.ok(pin_node ~= nil, "the upper arm node at (5, 5, 2) exists")
+    local posed = pose:transform(pin_node)
+    t.ok(all_near({ posed[1][4], posed[2][4], posed[3][4] },
+      { 5 * math.cos(0.5) - 5 * math.sin(0.5), 5 * math.sin(0.5) + 5 * math.cos(0.5), 2.0 }, 1e-9))
+
+    -- Fact 6: pose([(screw, [3.0])]) leaves every 'bolts' node at rest; [5.0] moves each
+    -- by (2, 0, 0).
+    local pose3 = scene:pose({ { joint = screw, values = { 3.0 } } })
+    local pose5 = scene:pose({ { joint = screw, values = { 5.0 } } })
+    local bolts
+    for _, l in ipairs(scene.links) do if l.name == "bolts" then bolts = l end end
+    for _, node in ipairs(bolts.nodes) do
+      local rest = node.transform
+      local at3 = pose3:transform(node)
+      local at5 = pose5:transform(node)
+      for row = 1, 3 do t.near(at3[row][4], rest[row][4], 1e-9) end
+      t.near(at5[1][4], rest[1][4] + 2.0, 1e-9)
+      t.near(at5[2][4], rest[2][4], 1e-9)
+      t.near(at5[3][4], rest[3][4], 1e-9)
+    end
+
+    -- Fact 9: no diagnostic names kinematics.
+    for _, d in ipairs(scene.diagnostics) do t.ok(d:sub(1, 11) ~= "kinematics:", d) end
+    scene:close()
+
+    -- Fact 7: the eight refusals of test_every_bad_pair_state_or_base_is_refused_and_
+    -- changes_nothing, each with exactly its message, and the unpaired-'back' trick:
+    -- step_text()'s refusal text is identical before and after the batch.
+    arm:joint("back", "upper arm", "ground")
+    local function unpaired_message()
+      local e = t.raises(function() arm:step_text() end)
+      return e.message
+    end
+    local before = unpaired_message()
+    local refusals = {
+      { function() arm:pair("shoulder", "revolute", bs.Frame.xy({ 0, 0, 10 })) end,
+        "pair: joint 'shoulder' already has a pair" },
+      { function() arm:pair("back", "orbital", bs.Frame.xy()) end,
+        "pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, spherical, "
+        .. "spherical_with_pin, planar, universal, homokinetic, fully_constrained, unconstrained)" },
+      { function() arm:pair("back", "screw", bs.Frame.xy()) end, "pair: a screw needs a non-zero pitch" },
+      { function() arm:pair("back", "revolute", bs.Frame.xy(), { ranges = { { -1, 1 }, { -1, 1 } } }) end,
+        "pair: 'revolute' has 1 freedoms, but 2 ranges were given" },
+      { function() arm:pair("back", "revolute", bs.Frame.xy(), { ranges = { { 1, -1 } } }) end,
+        "pair: range 0 of joint 'back' has lower >= upper" },
+      { function()
+          arm:pair("back", "prismatic", bs.Frame.at({ 0, 0, 0 }, { 0, 0, 1 }, { 0, 1, 0 }), { end_frame = bs.Frame.xy() })
+        end,
+        "pair: joint 'back' is prismatic, but its end frame is turned 90\xC2\xB0 about -z, "
+        .. "which prismatic (does not turn) cannot make" },
+      { function() arm:state("overreach", { { "shoulder", { 5.0 } } }) end,
+        "state: value 0 of joint 'shoulder' is outside its range" },
+      { function() arm:base("upper arm") end, "base: assembly 'arm' already has base 'ground'" },
+    }
+    for _, r in ipairs(refusals) do
+      local call, message = r[1], r[2]
+      local e = t.raises(call)
+      t.ok(is_build_error(e) and e.message == message, e.message)
+    end
+    t.eq(unpaired_message(), before)
+
+    -- Fact 8: a joint with no pair is refused at write time.
+    local e = t.raises(function() arm:step_text() end)
+    t.ok(is_build_error(e) and e.message ==
+      "assembly_step: assembly 'arm': joint 'back' has no pair; a mechanism with pairs needs one on every joint (AP242)",
+      e.message)
+
+    -- Fact 9: pair_freedom_count.
+    t.eq(bs.pair_freedom_count("spherical"), 3)
+    t.eq(bs.pair_freedom_count("revolute"), 1)
+    t.eq(bs.pair_freedom_count("fully_constrained"), 0)
+    t.eq(bs.pair_freedom_count("not_a_kind"), 0)
+
+    -- A rows/ranges argument of the wrong shape is refused with a BuildError before any
+    -- C call.
+    e = t.raises(function() arm:pair("free", "revolute", bs.Frame.xy(), { ranges = "not a list" }) end)
+    t.ok(is_build_error(e) and e.message:find("ranges must be a list", 1, true), e.message)
+    e = t.raises(function() arm:state("free", "not a list") end)
+    t.ok(is_build_error(e) and e.message:find("rows must be a list", 1, true), e.message)
+
+    arm:close()
+    bracket:close()
+    bolt:close()
+    plate:close()
+  end)
+
+  t.test("a sequence is written and reads back, and a bad one is refused exactly", function()
+    local bolt, plate, bracket, arm = mechanism()
+    arm:pair("shoulder", "revolute", bs.Frame.xy({ 0, 0, 10 }), { ranges = { { -1.5, 1.5 } } })
+    bracket:pair("screw", "prismatic", bs.Frame.xy({ 1, 2, 3 }), { end_frame = bs.Frame.xy({ 4, 2, 3 }) })
+    arm:state("reach", { { "shoulder", { 0.5 } } })
+    arm:state("rest", { { "shoulder", { 0.0 } } })
+    arm:sequence("swing", { { "rest", 0.0, "linear" }, { "reach", 1.0, "linear" } }, true)
+    local scene = arm:to_scene()
+    local sequences = scene.sequences
+    t.eq(#sequences, 1)
+    local swing = sequences[1]
+    t.eq(swing.name, "swing")
+    t.eq(swing.closed, true)
+    t.eq(swing.seconds_per_unit, 1)
+    t.eq(#swing.segments, 2)
+    t.eq(swing.segments[1].state.name, "rest")
+    t.eq(swing.segments[1].t, 0)
+    t.eq(swing.segments[1].interpolation, "linear")
+    t.eq(swing.segments[2].state.name, "reach")
+    t.eq(swing.segments[2].t, 1)
+    t.eq(swing.segments[2].interpolation, "linear")
+    scene:close()
+    local e = t.raises(function()
+      arm:sequence("bad", { { "rest", 0.0, "linear" }, { "nowhere", 1.0, "linear" } })
+    end)
+    t.ok(is_build_error(e), e.message)
+    t.eq(e.message, "sequence: assembly 'arm' has no state named 'nowhere'")
+    arm:close()
+    bracket:close()
+    bolt:close()
+    plate:close()
+  end)
+
+  -- Controller ruling: fact 10 -- a one-sided range survives the round trip. Without
+  -- this, an implementation that sends has_lower/has_upper as always-true would pass
+  -- every other fact.
+  t.test("a pair's one-sided range survives the round trip", function()
+    local plate = bs.Solid.cuboid(20, 10, 2):named("plate")
+    local bolt = bs.Solid.cylinder(1, 6):named("bolt")
+
+    local hinge = bs.Assembly("hinge")
+    hinge:place(plate, XY, "base")
+    hinge:place(bolt, { 0, 0, 2, 1, 0, 0, 0, 1, 0, 0, 0, 1 }, "arm")
+    hinge:link("base", { "base" })
+    hinge:link("arm", { "arm" })
+    hinge:joint("j", "base", "arm")
+    hinge:pair("j", "revolute", bs.Frame.xy(), { ranges = { { nil, 1.0 } } })
+
+    local scene = hinge:to_scene()
+    local j
+    for _, joint in ipairs(scene.joints) do if joint.name == "j" then j = joint end end
+    local freedoms = j.pair.freedoms
+    t.eq(#freedoms, 1)
+    t.eq(freedoms[1].lower, nil)
+    t.near(freedoms[1].upper, 1.0, 1e-9)
+    scene:close()
+
+    hinge:close()
+    bolt:close()
+    plate:close()
+  end)
+
   -- One edge, face or corner where a list is taken is refused, named, before the kernel is
   -- asked (docs/superpowers/specs/2026-09-25-list-arguments-refused-clearly-design.md): this
   -- wrapper once read `fillet(edge, 1)` as no edges.
@@ -1844,5 +2156,224 @@ return function(t)
       local keyed = { 0, 1, foo = "bar" }
       says(t.raises(function() run(keyed) end), ("%s: %s must be a list of %s, not %s"):format(call, param, items, tostring(keyed)))
     end
+  end)
+
+  -- ---- machining: to_arcs, offset, section, and a CAM job -----------------------------
+
+  -- The XY footprint of `profile`: extrude it by 1 and read the solid's bounds, as the
+  -- shared recipe suggests for a wrapper with no dedicated outline reader for this.
+  local function footprint(profile)
+    local b = bs.Solid.extrude(profile, XY, 1).bounds
+    return b[1][1], b[2][1], b[1][2], b[2][2]
+  end
+
+  t.test("offset grows and shrinks a rectangle, an empty table past its own width", function()
+    local grown = bs.Profile.rect(20, 10):offset(2)
+    t.eq(#grown, 1)
+    local x0, x1, y0, y1 = footprint(grown[1])
+    t.near(x0, -12, 1e-6) t.near(x1, 12, 1e-6) t.near(y0, -7, 1e-6) t.near(y1, 7, 1e-6)
+
+    local shrunk = bs.Profile.rect(20, 10):offset(-2)
+    t.eq(#shrunk, 1)
+    x0, x1, y0, y1 = footprint(shrunk[1])
+    t.near(x0, -8, 1e-6) t.near(x1, 8, 1e-6) t.near(y0, -3, 1e-6) t.near(y1, 3, 1e-6)
+
+    t.eq(#bs.Profile.rect(20, 10):offset(-6), 0)
+
+    local e = t.raises(function() bs.Profile.rect(20, 10):offset(0 / 0) end, "profile_offset: distance must be finite")
+    t.ok(is_build_error(e))
+  end)
+
+  t.test("to_arcs fits a closed spline's free-form sides within tolerance", function()
+    local spline = bs.Profile.spline({ { 0, 0 }, { 10, 0 }, { 10, 10 }, { 0, 10 } }, 3, nil, true)
+    local sx0, sx1, sy0, sy1 = footprint(spline)
+    local arcs = spline:to_arcs(0.01)
+    local ax0, ax1, ay0, ay1 = footprint(arcs)
+    t.ok(math.abs(ax0 - sx0) < 0.011 and math.abs(ax1 - sx1) < 0.011, "to_arcs footprint stays within tolerance")
+    t.ok(math.abs(ay0 - sy0) < 0.011 and math.abs(ay1 - sy1) < 0.011, "to_arcs footprint stays within tolerance")
+
+    local e = t.raises(function() bs.Profile.rect(5, 5):to_arcs(0) end,
+      "profile_to_arcs: tolerance must be positive and finite")
+    t.ok(is_build_error(e))
+  end)
+
+  t.test("section cuts a cuboid at Z, empty past it, refused inside a face", function()
+    local cub = bs.Solid.cuboid(20, 10, 5)
+    local secs = cub:section(0)
+    t.eq(#secs, 1)
+    local x0, x1, y0, y1 = footprint(secs[1])
+    t.near(x0, -10, 1e-6) t.near(x1, 10, 1e-6) t.near(y0, -5, 1e-6) t.near(y1, 5, 1e-6)
+
+    t.eq(#cub:section(50), 0)
+
+    local e = t.raises(function() cub:section(2.5) end)
+    t.ok(is_build_error(e))
+    t.ok(e.message:find("solid_section: a face lies in the plane", 1, true) ~= nil, e.message)
+  end)
+
+  t.test("a pocketed block reports its four uncut corners, and lists operations", function()
+    local part = bs.Solid.cuboid(40, 30, 10):translate(0, 0, 5)
+    local cutter = bs.Solid.cuboid(20, 10, 8):translate(0, 0, 6)
+    part = part:cut(cutter)
+
+    local flat = bs.Tool.flat(1, 6, 20, 800, 200, 12000)
+    local job = bs.Job(bs.Stock.around(part, 2), 30)
+    local report = job:machine(part, flat)
+    t.eq(#report, 4)
+    local lines = 0
+    for _ in report.text:gmatch("[^\n]+") do lines = lines + 1 end
+    t.eq(lines, 4)
+    for _, item in ipairs(report) do
+      t.eq(item.kind, "corner")
+      t.eq(#item.at, 3)
+      t.ok(item.size > 0)
+      t.ok(#item.region > 0)
+    end
+    local ops = job:operations()
+    t.ok(#ops > 0)
+    for _, op in ipairs(ops) do
+      t.eq(type(op.kind), "string")
+      t.eq(type(op.tool), "number")
+      t.eq(type(op.params), "table")
+    end
+    job:close()
+  end)
+
+  t.test("the plate: faced, pocketed and drilled, an empty report, gcode and camotics files", function()
+    local base = bs.Profile.rect(80, 50):round(6)
+    local part = bs.Solid.extrude(base, XY, 12)
+    local pocket_profile = bs.Profile.rect(40, 24):round(4):with_hole(bs.Profile.circle(5))
+    local pocket_frame = { 0, 0, 7, 1, 0, 0, 0, 1, 0, 0, 0, 1 }
+    part = part:cut(bs.Solid.extrude(pocket_profile, pocket_frame, 5))
+    for _, xy in ipairs({ { 32, 17 }, { 32, -17 }, { -32, 17 }, { -32, -17 } }) do
+      part = part:cut(bs.Solid.cylinder(3, 12):translate(xy[1], xy[2], 0))
+    end
+
+    local flat = bs.Tool.flat(1, 6, 20, 800, 200, 12000)
+    local drill_tool = bs.Tool.drill(2, 6, 30, 150, 3000)
+    local job = bs.Job(bs.Stock.around(part, 3), 25, 1.0, 0.01, "plate")
+    local report = job:machine(part, flat, { drill_tool })
+    t.eq(#report, 0)
+    t.eq(report.text, "nothing left uncut")
+
+    local ops = job:operations()
+    t.ok(#ops > 0)
+    t.eq(ops[1].kind, "face")
+    local has_pocket = false
+    for _, op in ipairs(ops) do if op.kind == "pocket" then has_pocket = true end end
+    t.ok(has_pocket, "operations() contains a pocket")
+    local last = ops[#ops]
+    t.eq(last.kind, "drill")
+    t.eq(last.params.points, 4)
+    t.eq(last.params.peck, nil)
+
+    local progs = job:gcode()
+    t.eq(#progs, 2)
+    for _, p in ipairs(progs) do
+      t.eq(type(p.tool), "number")
+      t.ok(p.name ~= "")
+      t.ok(#p.text > 0)
+    end
+
+    local out = t.tmp("plate-camotics/plate.camotics")
+    local written = job:write_camotics(out)
+    t.ok(#written > 0)
+    for _, w in ipairs(written) do
+      local f = io.open(w, "rb")
+      t.ok(f ~= nil, "write_camotics wrote " .. w)
+      if f then f:close() end
+    end
+    job:close()
+  end)
+
+  t.test("write_camotics makes a directory whose name has a single quote and a space", function()
+    local part = bs.Solid.cuboid(40, 30, 10)
+    local flat = bs.Tool.flat(1, 6, 20, 800, 200, 12000)
+    local job = bs.Job(bs.Stock.around(part, 2), 20)
+    job:face(flat, 2, 2, 2)
+
+    local out = t.tmp("o'brien's plate/plate.camotics")
+    local written = job:write_camotics(out)
+    t.ok(#written > 0)
+    for _, w in ipairs(written) do
+      local f = io.open(w, "rb")
+      t.ok(f ~= nil, "write_camotics wrote " .. w)
+      if f then f:close() end
+    end
+    job:close()
+  end)
+
+  t.test("a drill as the end mill is refused, and leaves operations() empty", function()
+    local part = bs.Solid.cuboid(40, 30, 10)
+    local drill_tool = bs.Tool.drill(2, 6, 30, 150, 3000)
+    local job = bs.Job(bs.Stock.around(part, 2), 30)
+    local e = t.raises(function() job:machine(part, drill_tool) end)
+    t.ok(is_build_error(e))
+    t.ok(e.message:find("end mill must not be a drill", 1, true) ~= nil, e.message)
+    t.eq(#job:operations(), 0)
+    job:close()
+  end)
+
+  t.test("a NUL in a job name or a CAMotics stem is refused in the kernel's words", function()
+    local part = bs.Solid.cuboid(40, 30, 10)
+    local nul_name = "job: a name must be non-empty and without brackets, slashes, quotes, control characters, or : * ? < > |"
+    local e = t.raises(function() bs.Job(bs.Stock.around(part, 2), 30, 1.0, 0.01, "a\0b") end)
+    t.ok(is_build_error(e))
+    t.eq(e.message, nul_name)
+    local job = bs.Job(bs.Stock.around(part, 2), 30)
+    e = t.raises(function() job:write_camotics(t.tmp("nul-stem/a\0b.camotics")) end)
+    t.ok(is_build_error(e))
+    t.eq(e.message, nul_name)
+    job:close()
+  end)
+
+  t.test("a closed Job refuses a later call", function()
+    local part = bs.Solid.cuboid(40, 30, 10)
+    local job = bs.Job(bs.Stock.around(part, 2), 30)
+    job:close()
+    job:close() -- idempotent
+    local e = t.raises(function() job:operations() end, "job: closed")
+    t.ok(is_build_error(e))
+  end)
+
+  t.test("job-T1/job-T2: face, contour, pocket and drill driven by hand, side mapping and refusals", function()
+    local part = bs.Solid.cuboid(40, 30, 10)
+    local flat = bs.Tool.flat(1, 6, 20, 800, 200, 12000)
+    local drill_tool = bs.Tool.drill(2, 5, 30, 150, 3000)
+    local outline = bs.Profile.rect(20, 10)
+    local job = bs.Job(bs.Stock.around(part, 2), 30, 1.0, 0.01, "job", 2.0, 0.1)
+
+    job:face(flat, 4, 4, 2)
+    job:contour(flat, outline, 4, 0, "outside", 1.0, true, false)
+    job:pocket(flat, outline, 4, 1, 3, 1.0)
+
+    local contour_op
+    for _, op in ipairs(job:operations()) do if op.kind == "contour" then contour_op = op end end
+    t.ok(contour_op ~= nil)
+    t.eq(contour_op.params.side, "outside") -- the library's own 0, read as Python reads it
+    t.eq(contour_op.params.climb, true)
+    t.eq(contour_op.params.open, false)
+
+    -- a bad side is refused before the job changes, and leaves it unchanged
+    local before = #job:operations()
+    local e = t.raises(function() job:contour(flat, outline, 4, 0, "left") end)
+    t.ok(is_build_error(e))
+    t.eq(e.message, "side must be 'outside', 'inside' or 'on'")
+    t.eq(#job:operations(), before)
+
+    job:drill(drill_tool, { { 5, 5 }, { -5, -5 } }, 4, -2, 3)
+
+    local ops = job:operations()
+    local drill_op
+    for _, op in ipairs(ops) do if op.kind == "drill" then drill_op = op end end
+    t.ok(drill_op ~= nil)
+    t.eq(drill_op.params.points, 2)
+    t.eq(drill_op.params.peck, 3)
+
+    local progs = job:gcode()
+    t.eq(#progs, 2)
+    t.eq(progs[1].text:sub(1, #"(cadaclysm: job-T1, T1 flat D6)\n"), "(cadaclysm: job-T1, T1 flat D6)\n")
+    t.eq(progs[2].text:sub(1, #"(cadaclysm: job-T2, T2 drill D5)\n"), "(cadaclysm: job-T2, T2 drill D5)\n")
+    job:close()
   end)
 end

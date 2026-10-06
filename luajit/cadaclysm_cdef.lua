@@ -26,6 +26,8 @@ static const uint32_t CADACLYSM_SVG_ISOCURVES = 4;
 
 static const uint32_t CADACLYSM_SVG_POLYLINES = 8;
 
+static const uint32_t CADACLYSM_SVG_SILHOUETTES = 16;
+
 typedef enum CadaclysmAxis {
   CADACLYSM_AXIS_X = 0,
   CADACLYSM_AXIS_Y = 1,
@@ -101,11 +103,20 @@ typedef enum CadaclysmFreedomAxis {
   CADACLYSM_FREEDOM_Z = 2,
 } CadaclysmFreedomAxis;
 
+typedef enum CadaclysmInterpolation {
+  CADACLYSM_INTERPOLATION_UNDEFINED = 0,
+  CADACLYSM_INTERPOLATION_DISCONTINUOUS = 1,
+  CADACLYSM_INTERPOLATION_SYNCHRONOUS = 2,
+  CADACLYSM_INTERPOLATION_LINEAR = 3,
+} CadaclysmInterpolation;
+
 typedef struct CadaclysmBrep CadaclysmBrep;
 
 typedef struct CadaclysmFemMesh CadaclysmFemMesh;
 
 typedef struct CadaclysmMeshlets CadaclysmMeshlets;
+
+typedef struct CadaclysmPose CadaclysmPose;
 
 typedef struct CadaclysmScene CadaclysmScene;
 
@@ -272,6 +283,7 @@ typedef struct CadaclysmFace {
   uint32_t reversed;
 
   uint32_t transposed;
+
   uint32_t reserved;
   float origin[4];
   float ax[4];
@@ -464,6 +476,8 @@ const char *cadaclysm_last_error(void);
 
 const char *cadaclysm_version(void);
 
+bool cadaclysm_parse_colour(const char *text, double *out);
+
 struct CadaclysmScene *cadaclysm_open(const char *path, const struct CadaclysmOpenOptions *options);
 
 struct CadaclysmScene *cadaclysm_open_memory(const uint8_t *bytes,
@@ -647,6 +661,61 @@ uint32_t cadaclysm_state_value(const struct CadaclysmScene *scene,
                                double *values,
                                uint32_t capacity);
 
+uint32_t cadaclysm_sequence_count(const struct CadaclysmScene *scene);
+
+const char *cadaclysm_sequence_name(const struct CadaclysmScene *scene, uint32_t sequence);
+
+bool cadaclysm_sequence_closed(const struct CadaclysmScene *scene, uint32_t sequence);
+
+double cadaclysm_sequence_seconds_per_unit(const struct CadaclysmScene *scene, uint32_t sequence);
+
+uint32_t cadaclysm_sequence_segment_count(const struct CadaclysmScene *scene, uint32_t sequence);
+
+bool cadaclysm_sequence_segment(const struct CadaclysmScene *scene,
+                                uint32_t sequence,
+                                uint32_t segment,
+                                uint32_t *state,
+                                double *t,
+                                uint32_t *interpolation);
+
+struct CadaclysmPose *cadaclysm_pose(const struct CadaclysmScene *scene,
+                                     const uint32_t *joints,
+                                     const uint32_t *counts,
+                                     const double *values,
+                                     uint32_t row_count,
+                                     uint32_t ground);
+
+struct CadaclysmPose *cadaclysm_pose_state(const struct CadaclysmScene *scene,
+                                           uint32_t state,
+                                           uint32_t ground);
+
+struct CadaclysmPose *cadaclysm_pose_sequence(const struct CadaclysmScene *scene,
+                                              uint32_t sequence,
+                                              double t,
+                                              uint32_t ground);
+
+void cadaclysm_pose_free(struct CadaclysmPose *pose);
+
+uint32_t cadaclysm_pose_ground(const struct CadaclysmPose *pose);
+
+uint32_t cadaclysm_pose_node_count(const struct CadaclysmPose *pose);
+
+void cadaclysm_pose_node_transform(const struct CadaclysmPose *pose, uint32_t node, double *out);
+
+uint32_t cadaclysm_pose_unsolved_count(const struct CadaclysmPose *pose);
+
+uint32_t cadaclysm_pose_unsolved(const struct CadaclysmPose *pose, uint32_t index);
+
+uint32_t cadaclysm_pose_out_of_range_count(const struct CadaclysmPose *pose);
+
+bool cadaclysm_pose_out_of_range(const struct CadaclysmPose *pose,
+                                 uint32_t index,
+                                 uint32_t *joint,
+                                 uint32_t *freedom,
+                                 double *value);
+
+uint32_t cadaclysm_kinematics_base(const struct CadaclysmScene *scene);
+
 struct CadaclysmPolylines cadaclysm_node_edges(const struct CadaclysmScene *scene, uint32_t node);
 
 struct CadaclysmEdgeColors cadaclysm_node_edge_colors(const struct CadaclysmScene *scene,
@@ -780,6 +849,12 @@ void cadaclysm_brep_release(const struct CadaclysmBrep *brep);
 
 bool cadaclysm_brep_manifold(const struct CadaclysmBrep *brep, uint32_t *out);
 
+const struct CadaclysmBrep *cadaclysm_brep_sew(const struct CadaclysmBrep *brep,
+                                               double tolerance,
+                                               double vertex,
+                                               uint32_t *out,
+                                               double *gaps);
+
 void cadaclysm_svg_options_init(struct CadaclysmSvgOptions *options);
 
 const char *cadaclysm_scene_svg_text(const struct CadaclysmScene *scene,
@@ -797,6 +872,10 @@ bool cadaclysm_node_svg(const struct CadaclysmScene *scene,
                         uint32_t node,
                         const char *path,
                         const struct CadaclysmSvgOptions *options);
+
+struct CadaclysmBeziers64 cadaclysm_node_silhouette_beziers(const struct CadaclysmScene *scene,
+                                                            uint32_t node,
+                                                            const struct CadaclysmSvgOptions *options);
 
 struct CadaclysmMeshlets *cadaclysm_meshlets_build(const float *positions,
                                                    const float *normals,

@@ -21,6 +21,13 @@
 // build run before the libraries were fetched would otherwise stay pointed at the wrong
 // place after they were. On macOS and Linux the directory is also written into the
 // executables' rpath; on Windows it has to be on PATH when a program runs.
+//
+// iOS (the cadaclysm repository only, for the Metal viewer's iOS app): the reader comes as
+// CadaclysmCapi.xcframework, a dynamic framework per slice, which
+// scripts/build-render-metal-xcframework.sh copies into Frameworks/ here (git-ignored). The
+// binary target is declared only when it is there (SwiftPM refuses a missing one on every
+// platform) and linked on iOS only; every other platform keeps the -L route below. The
+// kernel has no iOS build.
 import Foundation
 import PackageDescription
 
@@ -46,7 +53,7 @@ let windowsSuffix = cargoTarget ? ".dll" : ""
 let readerLinks: [LinkerSetting] = [
     .linkedLibrary("cadaclysm_capi", .when(platforms: [.macOS, .linux])),
     .linkedLibrary("cadaclysm_capi" + windowsSuffix, .when(platforms: [.windows])),
-    .unsafeFlags(["-L", libDir]),
+    .unsafeFlags(["-L", libDir], .when(platforms: [.macOS, .linux, .windows])),
     .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", libDir], .when(platforms: [.macOS, .linux])),
 ]
 let kernelLinks: [LinkerSetting] = [
@@ -54,9 +61,12 @@ let kernelLinks: [LinkerSetting] = [
     .linkedLibrary("cadaclysm_blacksmith" + windowsSuffix, .when(platforms: [.windows])),
 ]
 
+let readerFramework = "Frameworks/CadaclysmCapi.xcframework"
+let haveReaderFramework = FileManager.default.fileExists(atPath: here.appendingPathComponent(readerFramework).path)
+
 let package = Package(
     name: "Cadaclysm",
-    platforms: [.macOS(.v13)],
+    platforms: [.macOS(.v13), .iOS(.v16)],
     products: [
         .library(name: "Cadaclysm", targets: ["Cadaclysm"]),
         .library(name: "Blacksmith", targets: ["Blacksmith"]),
@@ -65,10 +75,13 @@ let package = Package(
     targets: [
         .systemLibrary(name: "CCadaclysm", path: "Sources/CCadaclysm"),
         .systemLibrary(name: "CCadaclysmBlacksmith", path: "Sources/CCadaclysmBlacksmith"),
-        .target(name: "Cadaclysm", dependencies: ["CCadaclysm"], linkerSettings: readerLinks),
+        .target(name: "Cadaclysm",
+                dependencies: ["CCadaclysm"]
+                    + (haveReaderFramework ? [.target(name: "CadaclysmCapi", condition: .when(platforms: [.iOS]))] : []),
+                linkerSettings: readerLinks),
         .target(name: "Blacksmith", dependencies: ["CCadaclysmBlacksmith", "Cadaclysm"],
                 linkerSettings: kernelLinks),
         .executableTarget(name: "cadaclysm-smoke", dependencies: ["Cadaclysm", "Blacksmith"]),
         .testTarget(name: "CadaclysmTests", dependencies: ["Cadaclysm", "Blacksmith"]),
-    ]
+    ] + (haveReaderFramework ? [.binaryTarget(name: "CadaclysmCapi", path: readerFramework)] : [])
 )

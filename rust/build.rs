@@ -136,10 +136,10 @@ fn has_both(lib: &Path) -> bool {
     file_names().iter().all(|name| lib.join(name).is_file())
 }
 
-/// Everything copied beside the binaries: the two, and the terminal viewer that `show()`
-/// and `view()` draw with by default.
-fn shipped() -> [String; 3] {
-    ["cadaclysm_capi", "cadaclysm_blacksmith", "cadaclysm_terminal"].map(file_name)
+/// Everything copied beside the binaries: the two, and the two view libraries -- the
+/// terminal that `show()` and `view()` draw with by default, and `cadaclysm_view` (wgpu).
+fn shipped() -> [String; 4] {
+    ["cadaclysm_capi", "cadaclysm_blacksmith", "cadaclysm_terminal", "cadaclysm_view"].map(file_name)
 }
 
 /// `curl` or `tar`: on Windows the system's own, by path, since a Git or MSYS shell puts
@@ -180,7 +180,8 @@ fn beside_the_binaries(lib: &Path) {
     let Some(profile_dir) = out.ancestors().nth(3) else { return };
     for name in shipped() {
         if !lib.join(&name).is_file() {
-            println!("cargo:warning=cadaclysm-sdk: {name} is not in the release archive; show() and view() will look for it elsewhere (CADACLYSM_TERMINAL_LIBRARY)");
+            let variable = if name.contains("cadaclysm_view") { "CADACLYSM_VIEW_LIBRARY" } else { "CADACLYSM_TERMINAL_LIBRARY" };
+            println!("cargo:warning=cadaclysm-sdk: {name} is not in the release archive; the view will look for it elsewhere ({variable})");
             continue;
         }
         let (from, to) = (lib.join(&name), profile_dir.join(&name));

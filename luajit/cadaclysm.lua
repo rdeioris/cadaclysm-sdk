@@ -230,7 +230,7 @@ local ENTRY_POINTS = {
   "cadaclysm_node_surfaces", "cadaclysm_node_brep",
   "cadaclysm_node_edges", "cadaclysm_node_curves", "cadaclysm_node_isocurves",
   "cadaclysm_node_edge_colors", "cadaclysm_node_surface_edge_colors",
-  "cadaclysm_brep_layout_id", "cadaclysm_brep_manifold", "cadaclysm_brep_release",
+  "cadaclysm_brep_layout_id", "cadaclysm_brep_manifold", "cadaclysm_brep_sew", "cadaclysm_brep_release",
   "cadaclysm_mesh_format_count", "cadaclysm_mesh_format", "cadaclysm_mesh_format_extension",
   "cadaclysm_pick_file",
   "cadaclysm_mesh_format_label", "cadaclysm_format_count", "cadaclysm_format_name", "cadaclysm_format_extensions",
@@ -573,6 +573,9 @@ end
 --- **A `scene:forget_meshes()` frees what this points into**, unlike `Mesh`'s arrays,
 --- which are the library's own narrowed copy and survive a forget untouched. A
 --- `Mesh64` read before a forget must not be read after one; ask `node.mesh64` again.
+--- Each one is stamped with the scene's forget count, so reading one of its arrays
+--- after a forget raises a `CadaclysmError` ("stale view") rather than reading freed
+--- memory -- a pointer already taken out of it before the forget is not caught.
 --- `:copy()` makes Lua tables of the caller's own, safe past a forget or a close.
 local Mesh64_get = {}
 ---@class Mesh64
@@ -588,7 +591,29 @@ M.Mesh64 = Mesh64
 
 function Mesh64_get.triangle_count(self) return math.floor(self.index_count / 3) end
 --- True for a node with no triangles (a curve, an assembly).
-function Mesh64_get.is_empty(self) return self.index_count == 0 or self.positions == nil end
+function Mesh64_get.is_empty(self)
+  return self.index_count == 0 or (rawget(self, "positions") or rawget(self, "_positions")) == nil
+end
+
+-- The arrays of a lent Mesh64 are getters, so each read checks the scene first: still
+-- open, and no forget since this was made. A `:copy()` holds its arrays as plain fields
+-- and never gets here, save for an array it does not have, which has no scene to check.
+local function lent(name)
+  local key = "_" .. name
+  return function(self)
+    local scene = rawget(self, "scene")
+    if scene then
+      scene:handle()
+      if (rawget(scene, "_forgets") or 0) ~= rawget(self, "_forgets") then
+        fail("mesh64: stale view: the scene has forgotten its meshes since, freeing the document's own mesh this lends (ask the node again)", 3)
+      end
+    end
+    return rawget(self, key)
+  end
+end
+for _, name in ipairs({ "positions", "normals", "uvs", "colors", "indices" }) do
+  Mesh64_get[name] = lent(name)
+end
 
 --- The position of vertex `i` (from zero), as three numbers.
 function Mesh64:position(i)
@@ -614,11 +639,13 @@ Mesh64.__tostring = function(m) return ("Mesh64(vertices=%d, triangles=%d)"):for
 local function mesh64(scene, raw)
   return setmetatable({
     scene = scene,
-    positions = null_to_nil(raw.positions),
-    normals = null_to_nil(raw.normals),
-    uvs = null_to_nil(raw.uvs),
-    colors = null_to_nil(raw.colors),
-    indices = null_to_nil(raw.indices),
+    -- The scene's forget count when this was made; see Scene:forget_meshes.
+    _forgets = rawget(scene, "_forgets") or 0,
+    _positions = null_to_nil(raw.positions),
+    _normals = null_to_nil(raw.normals),
+    _uvs = null_to_nil(raw.uvs),
+    _colors = null_to_nil(raw.colors),
+    _indices = null_to_nil(raw.indices),
     vertex_count = raw.vertex_count,
     index_count = raw.index_count,
   }, Mesh64)
@@ -932,6 +959,49 @@ function Brep_get.manifold(self)
     non_manifold_edges = out[4], non_manifold_vertices = out[5],
     is_manifold = out[6] ~= 0, is_closed = out[7] ~= 0,
   }, Manifold)
+end
+
+--- What `Brep:sewed` did, as plain data: `pairs` (the edges it joined), `free_before`
+--- and `free_after` (the free edges), `refused` (how many groups of free edges between
+--- the same two vertices it left free: too far apart for the tolerance, or more than
+--- two), `worst_gap` (the widest gap it sewed), and the two tolerances it used,
+--- `tolerance` and `vertex`.
+---@class SewReport
+---@field pairs integer
+---@field free_before integer
+---@field free_after integer
+---@field refused integer
+---@field worst_gap number
+---@field tolerance number
+---@field vertex number
+local SewReport = {}
+SewReport.__index = SewReport
+M.SewReport = SewReport
+
+--- This brep with its free edges sewn, and what was sewn: a new `Brep` (yours to
+--- `release()`) and a `SewReport`; this one is left as it was. Two free edges become one
+--- shared edge where both their ends coincide within `vertex` -- by default the rounding
+--- `manifold` merges vertices at -- and their curves lie within `tolerance` of each
+--- other, by default `vertex` too, so only edges that are one curve written twice are
+--- joined. A larger `tolerance` also joins two curves between the same two vertices that
+--- part by up to it; `vertex` is what decides which edges are candidates at all, and
+--- raising it is what could close a slot. Nothing moves. `nil` takes the default.
+---@param tolerance number|nil
+---@param vertex number|nil
+---@return Brep, SewReport
+function Brep:sewed(tolerance, vertex)
+  local counts = ffi.new("uint32_t[4]")
+  local gaps = ffi.new("double[3]")
+  local p = lib().cadaclysm_brep_sew(self.pointer, tolerance or 0 / 0, vertex or 0 / 0, counts, gaps)
+  if p == nil then
+    local reason = last_error()
+    fail(reason ~= "" and reason or "sew", 2)
+  end
+  return setmetatable({ _ptr = ffi.gc(p, lib().cadaclysm_brep_release) }, Brep),
+    setmetatable({
+      pairs = counts[0], free_before = counts[1], free_after = counts[2], refused = counts[3],
+      worst_gap = gaps[0], tolerance = gaps[1], vertex = gaps[2],
+    }, SewReport)
 end
 
 --- Give the reference back now. Idempotent.
@@ -1413,7 +1483,7 @@ end
 -- ---- svg -----------------------------------------------------------------------------
 
 --- The seven camera angles `svg_text`/`svg`'s `view=` understands, as (azimuth,
---- elevation) in degrees -- the same table `cadaclysm_viewer.VIEWS` gives
+--- elevation) in degrees -- the same table `cadaclysm_view.VIEWS` gives
 --- Python's `show()` and `svg()` both.
 local SVG_VIEWS = {
   front = { -90, 0 }, back = { 90, 0 }, left = { 180, 0 }, right = { 0, 0 },
@@ -1424,12 +1494,24 @@ local SVG_VIEWS = {
 --- drawing, the page left to whatever the viewer composites it onto.
 local SVG_TRANSPARENT = 0xffffffff
 
---- A colour as the ABI's packed `0xRRGGBB`: `"#rrggbb"` or a `{r, g, b}` table.
-local function svg_colour(colour)
+-- r, g, b in 0..1 from colour text -- "#rgb", "#rrggbb" or a CSS colour name -- read by the
+-- library's own parser; nil if it refused the text.
+local function colour_text(text)
+  local out = ffi.new("double[3]")
+  if lib().cadaclysm_parse_colour(text, out) then return out[0], out[1], out[2] end
+  return nil
+end
+
+--- A colour as the ABI's packed `0xRRGGBB`: `"#rrggbb"`, a CSS colour name or a `{r, g,
+--- b}` table (0..255). `what` names the field in the error, e.g. "svg: stroke".
+local function svg_colour(colour, what)
   if type(colour) == "string" then
-    local hex = colour:gsub("^#", "")
-    if #hex ~= 6 then fail(("colour '%s': '#rrggbb' or {r, g, b}"):format(colour), 3) end
-    return tonumber(hex, 16)
+    local r, g, b = colour_text(colour)
+    if r then
+      return math.floor(r * 255 + 0.5) * 65536 + math.floor(g * 255 + 0.5) * 256 + math.floor(b * 255 + 0.5)
+    end
+    fail(("%s: a colour is \"#rgb\", \"#rrggbb\", a CSS colour name or {r, g, b} in 0..255, not '%s'")
+      :format(what, colour), 3)
   end
   return bit.bor(bit.lshift(math.floor(colour[1]), 16), bit.lshift(math.floor(colour[2]), 8), math.floor(colour[3]))
 end
@@ -1456,12 +1538,20 @@ local function svg_options(default_up, words)
   o.width, o.height = size[1], size[2]
   o.margin = words.margin or 0.05
   o.tolerance = words.tolerance or 0.1
-  o.stroke = words.stroke ~= nil and svg_colour(words.stroke) or 0x000000
+  o.stroke = words.stroke ~= nil and svg_colour(words.stroke, "svg: stroke") or 0x000000
   o.stroke_width = words.width or 1.0
-  o.background = words.background ~= nil and svg_colour(words.background) or SVG_TRANSPARENT
+  o.background = words.background ~= nil and svg_colour(words.background, "svg: background") or SVG_TRANSPARENT
   local edges = words.edges
   if edges == nil then edges = true end
-  o.flags = bit.bor(edges and 1 or 0, words.curves and 2 or 0, words.isocurves and 4 or 0, words.polylines and 8 or 0)
+  -- `silhouettes` (16) is ON by default, as the library is: a sphere's and a torus's
+  -- only curves are the seams where their one face meets itself, which are not edges
+  -- of the body and are never drawn, so without the outline those two draw a blank
+  -- page. A line set in its own right -- `silhouettes` with `edges = false` draws the
+  -- outline alone, and `silhouettes = false` draws the lines alone.
+  local silhouettes = words.silhouettes
+  if silhouettes == nil then silhouettes = true end
+  o.flags = bit.bor(edges and 1 or 0, words.curves and 2 or 0, words.isocurves and 4 or 0, words.polylines and 8 or 0,
+                    silhouettes and 16 or 0)
   return o
 end
 
@@ -1481,6 +1571,16 @@ function Node.new(scene, index)
   return setmetatable({ scene = scene, index = index }, Node)
 end
 local node = Node.new
+
+--- Draw this node: its scene by handle with the siblings along the path from its root hidden
+--- (the ancestors' own geometry stays), framed on the node. Options as `Scene:show`.
+function Node:show(options)
+  return require(prefix .. "cadaclysm_view")._present(self, self.scene:_drawing(options), false)
+end
+--- Orbit this node as `Node:show` draws it; the camera it was left at and the last pick.
+function Node:view(options)
+  return require(prefix .. "cadaclysm_view")._present(self, self.scene:_drawing(options), true)
+end
 
 local function node_or_nil(scene, index)
   if index == M.NONE then return nil end
@@ -2020,6 +2120,171 @@ local function read_state(scene, index)
 end
 State.__tostring = function(self) return ("<State %d %s>"):format(self.index, self.name) end
 
+-- ---- sequences -------------------------------------------------------------------
+
+local copy_pose -- defined with `Pose`, below
+local INTERPOLATIONS = { [0] = "undefined", "discontinuous", "synchronous", "linear" }
+
+--- One step of a `Sequence`: the `State` it reaches, its parameter `t`, and how the
+--- motion leaves it for the next -- `interpolation`, one of `"undefined"`,
+--- `"discontinuous"`, `"synchronous"`, `"linear"`.
+---@class Segment
+---@field state State
+---@field t number
+---@field interpolation string
+local Segment = {}
+Segment.__index = Segment
+M.Segment = Segment
+Segment.__tostring = function(self)
+  return ("<Segment %s t=%s %s>"):format(self.state.name, self.t, self.interpolation)
+end
+
+--- A motion the file records: an `INTERPOLATED_CONFIGURATION_SEQUENCE`, its states at
+--- increasing parameter values. From `Scene.sequences`.
+---
+--- `pose(t)` poses it at parameter `t`, in the file's own parameter: a segment is a
+--- keyframe of its state, a `"discontinuous"` segment holds until the next and every
+--- other kind moves linearly, an open sequence holds its ends and a `closed` one wraps.
+--- To play it on a clock: with a duration, stretch `start`..`end` (plus the closing
+--- span when closed) to it; with none, read the parameter as seconds -- times
+--- `seconds_per_unit` where the file states a time unit.
+---
+--- Lua reserves `end`, so the last segment's parameter is `end_`, as `Joint.end_` is.
+local Sequence_get = {}
+---@class Sequence
+---@field index integer  its position in the scene's sequences
+---@field name string  the sequence's name
+---@field closed boolean  whether the motion returns to its first segment
+---@field seconds_per_unit number|nil  seconds per unit of the parameter, or nil where the
+---  file states no time unit (the parameter is then read as seconds)
+---@field segments Segment[]  in file order (at least two)
+---@field start number  the first segment's parameter
+---@field end_ number  the last segment's parameter (the closing span not included)
+local Sequence = class(Sequence_get)
+M.Sequence = Sequence
+
+local function read_sequence(scene, index)
+  return setmetatable({ index = index, _scene = scene }, Sequence)
+end
+Sequence.__tostring = function(self) return ("<Sequence %d %s>"):format(self.index, self.name) end
+function Sequence_get.name(self)
+  return text(lib().cadaclysm_sequence_name(self._scene:handle(), self.index))
+end
+function Sequence_get.closed(self)
+  return lib().cadaclysm_sequence_closed(self._scene:handle(), self.index)
+end
+function Sequence_get.seconds_per_unit(self)
+  local value = lib().cadaclysm_sequence_seconds_per_unit(self._scene:handle(), self.index)
+  if value == 0 then return nil end
+  return value
+end
+function Sequence_get.segments(self)
+  local L, handle, out = lib(), self._scene:handle(), {}
+  for i = 0, L.cadaclysm_sequence_segment_count(handle, self.index) - 1 do
+    local state, t, interpolation = ffi.new("uint32_t[1]"), ffi.new("double[1]"), ffi.new("uint32_t[1]")
+    L.cadaclysm_sequence_segment(handle, self.index, i, state, t, interpolation)
+    out[i + 1] = setmetatable({
+      state = read_state(self._scene, state[0]),
+      t = t[0],
+      interpolation = INTERPOLATIONS[interpolation[0]] or "undefined",
+    }, Segment)
+  end
+  return out
+end
+function Sequence_get.start(self) return self.segments[1].t end
+Sequence_get.end_ = function(self)
+  local segments = self.segments
+  return segments[#segments].t
+end
+--- The mechanism posed by this sequence at parameter `t`, with `ground` (a `Link`, or
+--- nil for the default ground) held fixed as `Scene.pose` does. Raises `CadaclysmError`
+--- for a `t` that is not finite.
+function Sequence:pose(t, ground)
+  local ground_index = ground == nil and M.NONE or ground.index
+  local ptr = lib().cadaclysm_pose_sequence(self._scene:handle(), self.index, t, ground_index)
+  if ptr == nil then fail(last_error(), 2) end
+  return copy_pose(self._scene, ptr)
+end
+
+-- ---- posing ----------------------------------------------------------------------
+
+--- A posed mechanism: `Scene.pose` or `Scene.pose_state`'s answer. The document itself
+--- is unchanged.
+---
+--- Copied eagerly out of the C handle at construction time (`copy_pose`), so a `Pose`
+--- holds no C pointer and outlives the call that made it -- closing the scene does not
+--- invalidate it.
+local Pose_get = {}
+---@class Pose
+---@field ground Link  the link held fixed
+---@field unsolved Joint[]  loop-closing joints not honoured, in file order
+---@field out_of_range table[]  {joint=Joint, freedom=integer, value=number}, one per given
+---  value outside its freedom's range
+local Pose = class(Pose_get)
+M.Pose = Pose
+
+local function pose_obj(scene, ground, unsolved, out_of_range, transforms)
+  return setmetatable({
+    scene = scene, ground = ground, unsolved = unsolved, out_of_range = out_of_range,
+    _transforms = transforms,
+  }, Pose)
+end
+Pose.__tostring = function(self) return ("<Pose ground=%s>"):format(tostring(self.ground)) end
+
+--- `node`'s posed transform, as a 4x4 `m[row][col]` -- the same shape `Node.transform`
+--- returns.
+function Pose:transform(node) return rows(self:raw_transform(node)) end
+--- The same matrix in the ABI's own column-major order, as 16 numbers, exactly as
+--- `Node.raw_transform` lays them out.
+function Pose:raw_transform(node) return self._transforms[node.index + 1] end
+
+--- Draw this pose's scene as `Scene:show` does -- by handle -- with every node's posed transform
+--- handed to the view (`cadaclysm_view_set_node_transforms`). An unposed pose draws exactly what
+--- `Scene:show` does. Options as `Scene:show`.
+function Pose:show(options)
+  return require(prefix .. "cadaclysm_view")._present(self.scene, self.scene:_drawing(options), false, self._transforms)
+end
+--- `Pose:show`'s orbiting twin; returns what `Scene:view` returns.
+function Pose:view(options)
+  return require(prefix .. "cadaclysm_view")._present(self.scene, self.scene:_drawing(options), true, self._transforms)
+end
+
+-- Reads everything out of a `CadaclysmPose *` into a `Pose`, then frees it (ruling 2 of
+-- the posing plan: wrappers copy eagerly, never holding the C pointer). `ffi.gc` is not
+-- needed here: the free runs in a `pcall`-protected copy, so an error midway through
+-- copying still frees the handle before it propagates.
+function copy_pose(scene, ptr)
+  local L = lib()
+  local ok, result = pcall(function()
+    local ground = link(scene, L.cadaclysm_pose_ground(ptr))
+    local transforms = {}
+    for i = 0, L.cadaclysm_pose_node_count(ptr) - 1 do
+      local raw = ffi.new("double[16]")
+      L.cadaclysm_pose_node_transform(ptr, i, raw)
+      transforms[i + 1] = sixteen(raw)
+    end
+    local unsolved = {}
+    for i = 0, L.cadaclysm_pose_unsolved_count(ptr) - 1 do
+      local j = L.cadaclysm_pose_unsolved(ptr, i)
+      if j ~= M.NONE then unsolved[#unsolved + 1] = joint(scene, j) end
+    end
+    local out_of_range = {}
+    for i = 0, L.cadaclysm_pose_out_of_range_count(ptr) - 1 do
+      local joint_out = ffi.new("uint32_t[1]")
+      local freedom_out = ffi.new("uint32_t[1]")
+      local value_out = ffi.new("double[1]")
+      if L.cadaclysm_pose_out_of_range(ptr, i, joint_out, freedom_out, value_out) then
+        out_of_range[#out_of_range + 1] = { joint = joint(scene, joint_out[0]),
+          freedom = tonumber(freedom_out[0]), value = value_out[0] }
+      end
+    end
+    return pose_obj(scene, ground, unsolved, out_of_range, transforms)
+  end)
+  L.cadaclysm_pose_free(ptr)
+  if not ok then error(result, 0) end
+  return result
+end
+
 -- ---- the scene ---------------------------------------------------------------------
 
 --- An open document: `path`, `schema_path` (the `.exp` used, or nil) and
@@ -2045,11 +2310,33 @@ end
 function Scene:close()
   local p = rawget(self, "_ptr")
   if p ~= nil then
+    -- A view drawing this scene holds its handle: the items showing it go first. Only when the
+    -- view module was ever loaded, so closing a scene opens no library.
+    local view = package.loaded[prefix .. "cadaclysm_view"]
+    if type(view) == "table" then view._release(self) end
     self._ptr = nil
     ffi.gc(p, nil)
     lib().cadaclysm_close(p)
   end
 end
+
+-- The options a draw is given, with `up` defaulted from the scene when the caller named none.
+function Scene:_drawing(options)
+  if options == nil then options = {} end
+  if type(options) ~= "table" then return options end
+  local o = {}
+  for k, v in pairs(options) do o[k] = v end
+  if o.up == nil then o.up = self:_default_up() end
+  return o
+end
+
+--- Draw every visible placement by handle with the view library in use (cadaclysm_view.lua):
+--- blocks until the window is closed on the GPU library, prints a still on the terminal.
+--- Options: view, azimuth, elevation, zoom, up (default from the convention), edges, width,
+--- height, title. No tolerance: a document is drawn at the tolerance it was read with.
+function Scene:show(options) return require(prefix .. "cadaclysm_view")._present(self, self:_drawing(options), false) end
+--- Orbit the model until the window is closed; the camera it was left at and the last pick.
+function Scene:view(options) return require(prefix .. "cadaclysm_view")._present(self, self:_drawing(options), true) end
 
 --- Whether `close` has run.
 function Scene_get.closed(self) return rawget(self, "_ptr") == nil end
@@ -2105,6 +2392,55 @@ function Scene_get.states(self)
   local L, handle, out = lib(), self:handle(), {}
   for i = 0, L.cadaclysm_state_count(handle) - 1 do out[#out + 1] = read_state(self, i) end
   return out
+end
+--- The file's motion sequences, e.g. STEP's `INTERPOLATED_CONFIGURATION_SEQUENCE`s.
+--- Empty for a file that records none.
+function Scene_get.sequences(self)
+  local L, handle, out = lib(), self:handle(), {}
+  for i = 0, L.cadaclysm_sequence_count(handle) - 1 do out[#out + 1] = read_sequence(self, i) end
+  return out
+end
+--- The link the file declares as the mechanism's base, or nil when it declares none
+--- (the default ground is then the link on the most joints; see `pose`).
+function Scene_get.base(self)
+  local index = lib().cadaclysm_kinematics_base(self:handle())
+  if index == M.NONE then return nil end
+  return link(self, index)
+end
+--- The mechanism posed by `values`: rows naming a `Joint` and the values to set it to,
+--- one per freedom of its pair -- exactly `State.values`'s row type, so
+--- `pose(state.values)` poses like `pose_state(state)` -- with `ground` (a `Link`, or
+--- nil for the default ground) held fixed. Values outside a freedom's range are used
+--- as given and reported in the answer's `out_of_range`.
+---
+--- Raises `CadaclysmError` on a bad row (a joint given twice, one with the wrong
+--- number of values, ...) or a file with no mechanism, carrying
+--- `cadaclysm_last_error`'s text unchanged.
+function Scene:pose(values, ground)
+  local L, handle = lib(), self:handle()
+  values = values or {}
+  local n = #values
+  local joints_arr, counts_arr = ffi.new("uint32_t[?]", n), ffi.new("uint32_t[?]", n)
+  local flat = {}
+  for i, row in ipairs(values) do
+    joints_arr[i - 1] = row.joint.index
+    counts_arr[i - 1] = #row.values
+    for _, v in ipairs(row.values) do flat[#flat + 1] = v end
+  end
+  local values_arr = ffi.new("double[?]", #flat)
+  for i, v in ipairs(flat) do values_arr[i - 1] = v end
+  local ground_index = ground == nil and M.NONE or ground.index
+  local ptr = L.cadaclysm_pose(handle, joints_arr, counts_arr, values_arr, n, ground_index)
+  if ptr == nil then fail(last_error(), 2) end
+  return copy_pose(self, ptr)
+end
+--- The mechanism posed by `state`'s values, with `ground` held fixed as `pose` does.
+--- Raises `CadaclysmError` as `pose` does.
+function Scene:pose_state(state, ground)
+  local ground_index = ground == nil and M.NONE or ground.index
+  local ptr = lib().cadaclysm_pose_state(self:handle(), state.index, ground_index)
+  if ptr == nil then fail(last_error(), 2) end
+  return copy_pose(self, ptr)
 end
 --- What the reader built but the geometry stage could not finish: a face that would
 --- not trim, a surface that would not mesh. `diagnostics` is what the file held that
@@ -2209,9 +2545,14 @@ function Scene:realize_meshes(skip_surfaced)
   return lib().cadaclysm_realize_meshes(self:handle(), skip_surfaced and 1 or 0)
 end
 
---- Drop every mesh the scene has built; the next ask rebuilds. Every mesh and
---- polylines table handed out before this points at freed memory.
-function Scene:forget_meshes() lib().cadaclysm_forget_meshes(self:handle()) end
+--- Drop every mesh the scene has built; the next ask rebuilds. What it frees is the
+--- document's own mesh: this counts the forget, because `node.mesh64` lends that, so a
+--- `Mesh64` from before it raises a stale view when read. `mesh`, the line views and the
+--- Béziers are the library's own caches, which a forget does not touch.
+function Scene:forget_meshes()
+  lib().cadaclysm_forget_meshes(self:handle())
+  self._forgets = (rawget(self, "_forgets") or 0) + 1
+end
 
 --- Ask a running `realize_all` to stop. One-way, for the life of the scene.
 function Scene:cancel() lib().cadaclysm_cancel(self:handle()) end

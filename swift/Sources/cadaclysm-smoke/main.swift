@@ -269,6 +269,37 @@ for ring in shared.overlaps[0].loops {
           "intersect: an overlap ring leaves the shared band: \(shared.overlaps[0])")
 }
 print("intersect: \(found) (\(ellipses) ellipses); \(shared.overlaps[0])")
+// The collider: two cuboids overlapping by 2 along x, plus one far away -> one hit (0, 1),
+// depth 2, solid() non-null.
+let xy0 = must("frame") { try Frame.xy() }
+let partA = must("cuboid") { try Solid.cuboid(4, 4, 4) }
+let partB = must("translate") { try Solid.cuboid(4, 4, 4).translate(2, 0, 0) }
+let partC = must("translate") { try Solid.cuboid(4, 4, 4).translate(100, 0, 0) }
+let boxA = must("bounds_box") { try partA.boundsBox }
+let boxB = must("bounds_box") { try partB.boundsBox }
+check(boxA.overlaps(boxB), "collider: the two overlapping cuboids' bounds boxes do not overlap")
+let collider = must("collider") { try Collider([partA, partB, partC]) }
+check((try? collider.groupCount) == 3, "collider: the group count is not one per part")
+let hits = must("collider_check") { try collider.check([xy0, xy0, xy0]) }
+check(hits.count == 1, "collider: found other than one hit: \(hits)")
+let hit = hits[0]
+check(hit.a == 0 && hit.b == 1, "collider: the hit does not name parts 0 and 1: \(hit)")
+check(hit.overlap && hit.kind == "overlap" && hit.text.isEmpty, "collider: the hit is not a clean overlap: \(hit)")
+check(abs(hit.depth - 2.0) < 1e-9, "collider: the hit's depth is not exactly 2: \(hit)")
+let overlapSolid = must("collisions_solid") { try hit.solid() }
+check((try? overlapSolid.faces) ?? 0 > 0, "collider: the hit's rebuilt solid has no faces")
+let colliderStats = must("collider_stats") { try collider.stats }
+check(colliderStats.considered == 3, "collider: the stats do not consider all three pairs: \(colliderStats)")
+do {
+    _ = try Collider([partA, partB, partC], groups: [0, 1])
+    fail("collider: a short groups list was accepted")
+} catch let error as BuildError {
+    check(error.message.contains("groups must have one entry per solid"),
+          "collider: a short groups list was refused in other words: \(error)")
+} catch {
+    fail("collider: a short groups list's refusal is not a BuildError: \(error)")
+}
+print("collider: \(hits.count) hit(s), depth \(hit.depth), \(colliderStats)")
 // Solid x profile hits: a line through a cuboid pierces two faces and is cut into three
 // pieces, outside/inside/outside, the middle one spanning the box.
 let cuboid = must("cuboid") { try Solid.cuboid(10, 20, 30) }

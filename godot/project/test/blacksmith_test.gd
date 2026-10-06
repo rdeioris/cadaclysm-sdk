@@ -181,7 +181,8 @@ func test_svg():
 	ok(z_up != y_up, "z-up and y-up read the same")
 
 	var both := CadaclysmBlacksmith.write_svg_text([plate, CadaclysmSolid.cuboid(1, 1, 1)])
-	eq(both.count("<g id=\""), 2)
+	# Two bodies' line groups plus the plate's silhouette group (on by default since fc978acfc).
+	eq(both.count("<g id=\""), 3)
 
 	refuses(func(): return plate.svg_text_with({"fov": 200}), "fov")
 	eq(plate.svg_text_with({"fov": 200}), "")
@@ -371,7 +372,8 @@ func test_colours_are_set_read_back_and_inherited():
 	refuses(func(): return block.coloured("#fff", -2), "coloured: face -2 is not one of the solid's 6")
 	refuses(func(): return block.coloured("#fff", 6), "face 6")
 	refuses(func(): return block.face_colour(6), "colour: face 6 is not one of the solid's 6")
-	refuses(func(): return block.coloured("red"), "coloured: a colour is")
+	eq(block.coloured("red").colour, Color(1, 0, 0))
+	refuses(func(): return block.coloured("notacolour"), "coloured: a colour is")
 	var painted_mesh := painted.array_mesh()
 	ok((painted_mesh.surface_get_material(0) as StandardMaterial3D).albedo_color.is_equal_approx(Color(0.8, 0.6, 0.4)), "the mesh is painted the solid's colour")
 
@@ -514,6 +516,120 @@ func test_manifold_is_read_off_the_topology():
 	eq(sheet["is_manifold"], true)
 	eq(sheet["is_closed"], false)
 	eq(sheet["boundary_edges"], 8)
+
+func test_the_collider_finds_overlapping_parts_and_rebuilds_the_overlap():
+	# Two cuboids overlapping by 2 along x, plus one far away -> one hit (0, 1), depth 2.
+	var a := CadaclysmSolid.cuboid(4, 4, 4)
+	var b := CadaclysmSolid.cuboid(4, 4, 4).translate(2, 0, 0)
+	var c := CadaclysmSolid.cuboid(4, 4, 4).translate(100, 0, 0)
+	ok(a.bounds_box().overlaps(b.bounds_box()), "the two overlapping cuboids' bounds boxes do not overlap")
+	var collider := CadaclysmCollider.create([a, b, c])
+	eq(collider.group_count, 3)
+	var stats0 := collider.stats()
+	eq(stats0.considered, 0, "no check yet")
+	var hits: Array = collider.check([XY, XY, XY])
+	eq(hits.size(), 1)
+	var hit: CadaclysmCollisionHit = hits[0]
+	eq(hit.a, 0)
+	eq(hit.b, 1)
+	ok(hit.overlap and hit.kind == "overlap" and hit.text == "", "the hit is not a clean overlap")
+	near(hit.depth, 2.0, 1e-9)
+	var overlap := hit.solid()
+	ok(overlap != null and overlap.faces > 0, "the hit's rebuilt solid has no faces")
+	var stats1 := collider.stats()
+	eq(stats1.considered, 3)
+	ok(stats1.confirmed + stats1.closed_form + stats1.meshed >= 1, "no pair was answered")
+	collider.close()
+	ok(collider.closed, "close() did not close the collider")
+
+func test_a_collision_hits_solid_survives_the_collider_closing():
+	# solid() keeps the collisions handle (not the collider) alive: closing the
+	# collider itself must not take the hit's own rebuild with it.
+	var a := CadaclysmSolid.cuboid(2, 2, 2)
+	var b := CadaclysmSolid.cuboid(2, 2, 2).translate(1, 0, 0)
+	var collider := CadaclysmCollider.create([a, b])
+	var hits: Array = collider.check([XY, XY])
+	collider.close()
+	eq(hits.size(), 1)
+	var overlap: CadaclysmSolid = hits[0].solid()
+	ok(overlap != null and overlap.faces > 0)
+
+func test_a_refused_check_is_null_never_an_empty_clear_array():
+	# check() returns [] only when every pair is proved clear; a refusal is null with
+	# the reason in last_error() -- the two must never read alike. (Called directly, not
+	# through refuses(): a lambda captures `hits` by value, so it could not hand it back.)
+	var a := CadaclysmSolid.cuboid(2, 2, 2)
+	var b := CadaclysmSolid.cuboid(2, 2, 2).translate(1, 0, 0)
+	var collider := CadaclysmCollider.create([a, b])
+	var hits = collider.check([XY])
+	ok(typeof(hits) == TYPE_NIL, "a check with one frame for two groups returned %s, not null" % [hits])
+	ok(Cadaclysm.last_error().contains("1 frames for 2 groups"), Cadaclysm.last_error())
+	hits = collider.check([XY, XY], -1, 2)
+	ok(typeof(hits) == TYPE_NIL, "a negative share_k returned %s, not null" % [hits])
+	ok(Cadaclysm.last_error().contains("share (-1, 2)"), Cadaclysm.last_error())
+	hits = collider.check([XY, XY], 2, 2)
+	ok(typeof(hits) == TYPE_NIL, "share_k == share_n returned %s, not null" % [hits])
+	ok(Cadaclysm.last_error().contains("share (2, 2)"), Cadaclysm.last_error())
+	hits = collider.check([XY, [0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 1]])
+	ok(typeof(hits) == TYPE_NIL, "a scaled frame returned %s, not null" % [hits])
+	ok(Cadaclysm.last_error() != "", "a scaled frame left no error")
+	hits = collider.check([XY, XY])
+	ok(hits is Array and hits.size() == 1, "the same collider no longer checks a good pose: %s" % [hits])
+	collider.close()
+	hits = collider.check([XY, XY])
+	ok(typeof(hits) == TYPE_NIL, "a closed collider's check returned %s, not null" % [hits])
+	ok(Cadaclysm.last_error().contains("closed"), Cadaclysm.last_error())
+
+func test_the_collider_refuses_odd_allowed_and_negative_indices():
+	var a := CadaclysmSolid.cuboid(2, 2, 2)
+	var b := CadaclysmSolid.cuboid(2, 2, 2).translate(1, 0, 0)
+	var message := refuses(func(): return CadaclysmCollider.create([a, b], 0.05, PackedInt32Array(), PackedInt32Array([0, 1, 1])))
+	ok(message.contains("allowed is 3 numbers"), message)
+	message = refuses(func(): return CadaclysmCollider.create([a, b], 0.05, PackedInt32Array([0, -1])))
+	ok(message.contains("negative"), message)
+	message = refuses(func(): return CadaclysmCollider.create([a, b], 0.05, PackedInt32Array(), PackedInt32Array([0, -1])))
+	ok(message.contains("negative"), message)
+
+func test_a_float_transform3d_pose_is_squared_up_not_refused():
+	# A Transform3D's basis is float32: a turned one is off square by ~1e-8, past the
+	# kernel's 1e-9 -- the wrapper squares it up, so the pose is checked, not refused.
+	var a := CadaclysmSolid.cuboid(2, 2, 2)
+	var b := CadaclysmSolid.cuboid(2, 2, 2)
+	var collider := CadaclysmCollider.create([a, b])
+	var turned := Transform3D(Basis(Vector3(0.3, 0.4, 0.866).normalized(), deg_to_rad(37.0)), Vector3(1, 0, 0))
+	var hits = collider.check([Transform3D.IDENTITY, turned])
+	ok(hits is Array, "a turned Transform3D pose was refused: " + Cadaclysm.last_error())
+	if hits is Array:
+		eq(hits.size(), 1)
+
+func test_the_collider_refuses_a_part_that_is_not_a_closed_solid():
+	var sheet := CadaclysmSolid.cuboid(2, 2, 2).face_sheet(0)
+	var message := refuses(func(): return CadaclysmCollider.create([sheet]))
+	ok(message.contains("collider_new: part 0 is not a closed solid"), message)
+
+func test_the_collider_refuses_a_short_groups_list():
+	var a := CadaclysmSolid.cuboid(2, 2, 2)
+	var b := CadaclysmSolid.cuboid(2, 2, 2).translate(1, 0, 0)
+	var groups := PackedInt32Array([0])
+	var message := refuses(func(): return CadaclysmCollider.create([a, b], 0.05, groups))
+	ok(message.contains("groups must have one entry per solid (2 solids, 1 groups)"), message)
+
+func rot_z(degrees: float, origin: Array) -> Array:
+	var r := deg_to_rad(degrees)
+	return [origin[0], origin[1], origin[2], cos(r), sin(r), 0, -sin(r), cos(r), 0, 0, 0, 1]
+
+func test_boxes_apart_on_the_45_degree_case():
+	# Two unit boxes, the second turned 45 degrees about z: corner to face apart along x
+	# by more than sqrt(2) + 1 -> apart; closer -> not apart, even though their world
+	# AABBs already overlap there. Frames as raw twelve-number arrays, as every other
+	# frame-taking call here accepts.
+	var unit := CadaclysmBox.create(Vector3(-1, -1, -1), Vector3(1, 1, 1))
+	var identity := XY
+	ok(CadaclysmBox.boxes_apart(unit, identity, unit, rot_z(45.0, [2.5, 0, 0])))
+	ok(not CadaclysmBox.boxes_apart(unit, identity, unit, rot_z(45.0, [2.3, 0, 0])))
+	ok(unit.moved(identity).overlaps(unit.moved(rot_z(45.0, [2.3, 0, 0]))))
+	var touching := [2, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]
+	ok(not CadaclysmBox.boxes_apart(unit, identity, unit, touching))
 
 func test_split_sheet_cuts_a_sheet_along_a_solids_boundary():
 	var sheet := CadaclysmSolid.extrude_open(CadaclysmProfile.rect(40, 40), XY, 20)
@@ -1586,3 +1702,428 @@ func test_a_mechanism_reads_back_through_to_scene():
 			kinematics_diagnostics += 1
 	eq(kinematics_diagnostics, 0, "no kinematics: diagnostic")
 	scene.close()
+
+# `CadaclysmAssembly.pair`/`state`/`base`, at parity with the Python reference's
+# `_paired()` and its tests -- see the Rust SDK's `blacksmith::tests::paired` for the
+# same facts worked out, and the LuaJIT/Node suites for the same build in their own
+# forms. Godot compares frames as `Transform3D` (single precision), so facts 2 and 3
+# check origins and axes within 1e-4, not the Rust SDK's 1e-9.
+func _paired_arm() -> Array:
+	var shared := _mechanism_arm()
+	var bracket: CadaclysmAssembly = shared[0]
+	var arm: CadaclysmAssembly = shared[1]
+	ok(bracket.pair("screw", "prismatic", CadaclysmFrame.xy(Vector3(1, 2, 3)), CadaclysmFrame.xy(Vector3(4, 2, 3)), [], NAN),
+		"bracket.pair screw: " + Cadaclysm.last_error())
+	ok(arm.pair("shoulder", "revolute", CadaclysmFrame.xy(Vector3(0, 0, 10)), null, [[-1.5, 1.5]], NAN),
+		"arm.pair shoulder: " + Cadaclysm.last_error())
+	ok(arm.state("reach", [["shoulder", PackedFloat64Array([0.5])]]), "arm.state reach: " + Cadaclysm.last_error())
+	ok(arm.base("ground"), "arm.base ground: " + Cadaclysm.last_error())
+	return shared
+
+# Fact 1: `arm.step_text()` carries exactly the pair/state entity counts the Python
+# reference's `_paired()` fixture gives.
+func test_a_paired_mechanism_is_written_as_ap242_kinematic_pairs_and_states():
+	var shared := _paired_arm()
+	var arm: CadaclysmAssembly = shared[1]
+	var text := arm.step_text()
+	eq(text.count("=MECHANISM_REPRESENTATION("), 2)
+	eq(text.count("=PAIR_REPRESENTATION_RELATIONSHIP("), 2)
+	eq(text.count("REVOLUTE_PAIR_WITH_RANGE"), 1)
+	eq(text.count("PRISMATIC_PAIR"), 1)
+	eq(text.count("=KINEMATIC_PROPERTY_MECHANISM_REPRESENTATION("), 1)
+	eq(text.count("=MECHANISM_STATE_REPRESENTATION("), 1)
+
+# Facts 2, 3, 4, 5, 6 and 9: read back through `to_scene`.
+func test_a_paired_mechanism_reads_back_through_to_scene():
+	var shared := _paired_arm()
+	var arm: CadaclysmAssembly = shared[1]
+	var scene := arm.to_scene()
+	if not ok(scene != null, "to_scene: " + Cadaclysm.last_error()):
+		return
+
+	# Fact 2: shoulder's pair is revolute, both world frames at (0, 0, 10) with z
+	# (0, 0, 1), one freedom about z ranged [-1.5, 1.5].
+	var shoulder: CadaclysmJoint
+	for j in scene.joints:
+		if j.name == "shoulder":
+			shoulder = j
+	ok(shoulder != null, "shoulder joint not found")
+	var s_pair: CadaclysmPair = shoulder.pair
+	eq(s_pair.kind, "revolute")
+	for t in [s_pair.frame_start, s_pair.frame_end]:
+		ok(v3near(t.origin, Vector3(0, 0, 10), 1e-4), "shoulder frame origin: " + str(t.origin))
+		ok(v3near(t.basis.z, Vector3(0, 0, 1), 1e-4), "shoulder frame z: " + str(t.basis.z))
+	var freedoms := s_pair.freedoms
+	eq(freedoms.size(), 1)
+	eq(freedoms[0].motion, "rotation")
+	eq(freedoms[0].axis, "z")
+	ok(absf(freedoms[0].lower - (-1.5)) < 1e-4, "shoulder lower")
+	ok(absf(freedoms[0].upper - 1.5) < 1e-4, "shoulder upper")
+
+	# Fact 3: screw's pair is prismatic with no ranges; world start (1, 2, 13), end
+	# (4, 2, 13).
+	var screw: CadaclysmJoint
+	for j in scene.joints:
+		if j.name == "screw":
+			screw = j
+	ok(screw != null, "screw joint not found")
+	var sc_pair: CadaclysmPair = screw.pair
+	eq(sc_pair.kind, "prismatic")
+	for f in sc_pair.freedoms:
+		ok(is_nan(f.lower) and is_nan(f.upper), "screw: expected an unbounded freedom")
+	ok(v3near(sc_pair.frame_start.origin, Vector3(1, 2, 13), 1e-4), "screw frame_start origin")
+	ok(v3near(sc_pair.frame_end.origin, Vector3(4, 2, 13), 1e-4), "screw frame_end origin")
+
+	# Fact 4: the base is 'ground'; one state 'reach' with one row (shoulder, [0.5]).
+	eq(scene.base.name, "ground")
+	eq(scene.states.map(func(s): return s.name), ["reach"])
+	var reach: CadaclysmState = scene.states[0]
+	eq(reach.values.size(), 1)
+	eq(reach.values[0].joint.name, "shoulder")
+	ok(absf(reach.values[0].values[0] - 0.5) < 1e-9, "reach value")
+
+	# Fact 5: pose_state(reach) carries the pin node's origin (5, 5, 2) to
+	# (5cos0.5 - 5sin0.5, 5sin0.5 + 5cos0.5, 2) within 1e-4.
+	var pose := scene.pose_state(reach, null)
+	var upper_arm: CadaclysmLink
+	for l in scene.links:
+		if l.name == "upper arm":
+			upper_arm = l
+	var pin_node: CadaclysmNode
+	for n in upper_arm.nodes:
+		if v3near(n.transform.origin, Vector3(5, 5, 2), 1e-4):
+			pin_node = n
+	ok(pin_node != null, "pin node at (5, 5, 2) not found")
+	var want := Vector3(5 * cos(0.5) - 5 * sin(0.5), 5 * sin(0.5) + 5 * cos(0.5), 2)
+	var posed := pose.transform(pin_node)
+	ok(v3near(posed.origin, want, 1e-4), "posed pin node: " + str(posed.origin))
+
+	# Fact 6: pose([(screw, [3.0])]) leaves every node at rest (drawn at 3); pose at
+	# 5.0 moves each 'bolts' node by (2, 0, 0).
+	var pose3 := scene.pose([CadaclysmStateValue.create(screw, PackedFloat64Array([3.0]))], null)
+	var pose5 := scene.pose([CadaclysmStateValue.create(screw, PackedFloat64Array([5.0]))], null)
+	var bolts: CadaclysmLink
+	for l in scene.links:
+		if l.name == "bolts":
+			bolts = l
+	for n in bolts.nodes:
+		var rest: Transform3D = n.transform
+		var t3: Transform3D = pose3.transform(n)
+		var t5: Transform3D = pose5.transform(n)
+		ok(v3near(t3.origin, rest.origin, 1e-4), "pose at the rest value moved a node")
+		ok(v3near(t5.origin, rest.origin + Vector3(2, 0, 0), 1e-4), "pose at 5.0")
+
+	# Fact 9: no diagnostic names kinematics.
+	var kinematics_diagnostics := 0
+	for d in scene.diagnostics:
+		if String(d).begins_with("kinematics:"):
+			kinematics_diagnostics += 1
+	eq(kinematics_diagnostics, 0, "no kinematics: diagnostic")
+	scene.close()
+
+# `CadaclysmAssembly.sequence`: written, read back, and one exact refusal.
+func test_a_written_sequence_reads_back_and_a_bad_state_is_refused():
+	var shared := _paired_arm()
+	var arm: CadaclysmAssembly = shared[1]
+	ok(arm.state("rest", [["shoulder", PackedFloat64Array([0.0])]]), "arm.state rest: " + Cadaclysm.last_error())
+	ok(arm.sequence("swing", [["rest", 0.0, "linear"], ["reach", 1.0, "linear"]], true), "arm.sequence: " + Cadaclysm.last_error())
+	refuses(func(): return arm.sequence("bad", [["rest", 0.0, "linear"], ["nowhere", 1.0, "linear"]]),
+		"sequence: assembly 'arm' has no state named 'nowhere'")
+	var scene := arm.to_scene()
+	if not ok(scene != null, "to_scene: " + Cadaclysm.last_error()):
+		return
+	var sequences: Array = scene.sequences
+	eq(sequences.size(), 1)
+	var swing: CadaclysmSequence = sequences[0]
+	eq(swing.name, "swing")
+	eq(swing.closed, true)
+	eq(swing.seconds_per_unit, 1.0)
+	eq(swing.segments.map(func(s): return [s.state.name, s.t, s.interpolation]),
+		[["rest", 0.0, "linear"], ["reach", 1.0, "linear"]])
+	scene.close()
+
+# Fact 7: each of the eight refusals fails with exactly its message, and afterwards the
+# STEP text (with `FILE_NAME(` lines stripped) is unchanged -- the unpaired-"back" trick.
+func test_every_bad_pair_state_or_base_call_is_refused_and_changes_nothing():
+	var shared := _paired_arm()
+	var arm: CadaclysmAssembly = shared[1]
+	ok(arm.joint("back", "upper arm", "ground"), "joint back: " + Cadaclysm.last_error())
+	var no_stamp := func(text: String) -> String:
+		var lines := []
+		for line in text.split("\n"):
+			if not line.begins_with("FILE_NAME("):
+				lines.append(line)
+		return "\n".join(lines)
+	var before: String = no_stamp.call(arm.step_text())
+	var xy0 := CadaclysmFrame.xy(Vector3(0, 0, 0))
+	var turned := CadaclysmFrame.at(Vector3(0, 0, 0), Vector3(0, 0, 1), Vector3(0, 1, 0))
+	var refusals := [
+		[func(): return arm.pair("shoulder", "revolute", CadaclysmFrame.xy(Vector3(0, 0, 10)), null, [], NAN),
+			"pair: joint 'shoulder' already has a pair"],
+		[func(): return arm.pair("back", "orbital", xy0, null, [], NAN),
+			"pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, spherical, " + \
+			"spherical_with_pin, planar, universal, homokinetic, fully_constrained, unconstrained)"],
+		[func(): return arm.pair("back", "screw", xy0, null, [], NAN), "pair: a screw needs a non-zero pitch"],
+		[func(): return arm.pair("back", "revolute", xy0, null, [[-1.0, 1.0], [-1.0, 1.0]], NAN),
+			"pair: 'revolute' has 1 freedoms, but 2 ranges were given"],
+		[func(): return arm.pair("back", "revolute", xy0, null, [[1.0, -1.0]], NAN),
+			"pair: range 0 of joint 'back' has lower >= upper"],
+		[func(): return arm.pair("back", "prismatic", turned, xy0, [], NAN),
+			"pair: joint 'back' is prismatic, but its end frame is turned 90° about -z, which prismatic (does not turn) cannot make"],
+		[func(): return arm.state("overreach", [["shoulder", PackedFloat64Array([5.0])]]),
+			"state: value 0 of joint 'shoulder' is outside its range"],
+		[func(): return arm.base("upper arm"), "base: assembly 'arm' already has base 'ground'"],
+	]
+	for pair in refusals:
+		var message: String = refuses(pair[0])
+		eq(message, pair[1], "refusal message")
+	eq(no_stamp.call(arm.step_text()), before, "arm.step_text() changed across the eight refused calls")
+
+# Fact 8: a joint with no pair is refused only when `step_text()` is written, with
+# exactly this message.
+func test_a_joint_without_a_pair_is_refused_at_write_time():
+	var shared := _paired_arm()
+	var arm: CadaclysmAssembly = shared[1]
+	ok(arm.joint("back", "upper arm", "ground"), "joint back: " + Cadaclysm.last_error())
+	refuses(func(): return arm.step_text(),
+		"assembly_step: assembly 'arm': joint 'back' has no pair; a mechanism with pairs needs one on every joint (AP242)")
+
+# Fact 9's `pair_freedom_count` half.
+func test_pair_freedom_count_reports_known_and_unknown_kinds():
+	eq(CadaclysmBlacksmith.pair_freedom_count("spherical"), 3)
+	eq(CadaclysmBlacksmith.pair_freedom_count("revolute"), 1)
+	eq(CadaclysmBlacksmith.pair_freedom_count("fully_constrained"), 0)
+	eq(CadaclysmBlacksmith.pair_freedom_count("not_a_kind"), 0)
+
+# Controller ruling, fact 10: a one-sided range survives the round trip. An
+# implementation that always sent has_lower/has_upper as true would pass every other
+# fact but fail this one.
+func test_a_one_sided_pair_range_survives_the_round_trip():
+	var plate := CadaclysmSolid.cuboid(20, 10, 2)
+	var bolt := CadaclysmSolid.cylinder(1, 6)
+	var hinge := CadaclysmAssembly.create("hinge")
+	hinge.place(plate, CadaclysmFrame.xy(Vector3(0, 0, 0)), "base")
+	hinge.place(bolt, CadaclysmFrame.xy(Vector3(0, 0, 2)), "arm")
+	ok(hinge.link("base", ["base"]), "hinge.link base: " + Cadaclysm.last_error())
+	ok(hinge.link("arm", ["arm"]), "hinge.link arm: " + Cadaclysm.last_error())
+	ok(hinge.joint("j", "base", "arm"), "hinge.joint j: " + Cadaclysm.last_error())
+	ok(hinge.pair("j", "revolute", CadaclysmFrame.xy(Vector3(0, 0, 0)), null, [[null, 1.0]], NAN),
+		"hinge.pair j: " + Cadaclysm.last_error())
+	var scene := hinge.to_scene()
+	if not ok(scene != null, "to_scene: " + Cadaclysm.last_error()):
+		return
+	var j: CadaclysmJoint
+	for joint in scene.joints:
+		if joint.name == "j":
+			j = joint
+	ok(j != null, "joint j not found")
+	var freedoms := j.pair.freedoms
+	eq(freedoms.size(), 1)
+	ok(is_nan(freedoms[0].lower), "freedom 0 should have no lower limit")
+	ok(absf(freedoms[0].upper - 1.0) < 1e-9, "freedom 0 upper")
+	scene.close()
+# ---- CAM: to_arcs, offset, section, Tool, Stock, Job ------------------------------------
+# The Rust wrapper's own suite (crates/cadaclysm-capi/examples/rust/src/blacksmith.rs,
+# `mod tests`, from `profile_offset_grows_and_shrinks_a_rectangle` on -- itself the shared
+# recipe the CAM plan gives every wrapper) ported to GDScript with the same numbers, plus
+# the spec's own hand-driven four verbs fixture (Go's `74b9553ec`, Rust's
+# `the_four_verbs_by_hand_gives_two_programs_with_the_specs_own_numbers`).
+
+# `p` extruded by 1 and read back through `bounds`: `[xmin, xmax, ymin, ymax]`, as the
+# other wrappers' own smoke fixtures measure a profile's footprint.
+func cam_footprint(p: CadaclysmProfile) -> Array:
+	var solid := CadaclysmSolid.extrude(p, XY, 1)
+	var b: AABB = solid.bounds
+	return [b.position.x, b.position.x + b.size.x, b.position.y, b.position.y + b.size.y]
+
+func assert_cam_footprint(p: CadaclysmProfile, expected: Array, tolerance: float, message := ""):
+	var got := cam_footprint(p)
+	for i in 4:
+		near(got[i], expected[i], tolerance, "%s footprint[%d]" % [message, i])
+
+# A 40x30x10 block on z=0 with a 20x10 pocket 8 deep: four corners a 6 mm end mill misses.
+func cam_pocketed_block() -> CadaclysmSolid:
+	var block := CadaclysmSolid.cuboid(40, 30, 10).translate(0, 0, 5)
+	var pocket := CadaclysmSolid.cuboid(20, 10, 8).translate(0, 0, 6)
+	return block.cut(pocket)
+
+func test_profile_offset_grows_and_shrinks_a_rectangle():
+	var rect := CadaclysmProfile.rect(20, 10)
+	var grown := rect.offset(2, 0.01)
+	eq(grown.size(), 1)
+	assert_cam_footprint(grown[0], [-12, 12, -7, 7], 1e-3, "grown")
+	var shrunk := rect.offset(-2, 0.01)
+	eq(shrunk.size(), 1)
+	assert_cam_footprint(shrunk[0], [-8, 8, -3, 3], 1e-3, "shrunk")
+	var eaten := rect.offset(-6, 0.01)
+	eq(eaten.size(), 0)
+	refuses(func(): return rect.offset(NAN, 0.01), "profile_offset: distance must be finite")
+
+func test_profile_to_arcs_fits_a_spline_within_tolerance():
+	var spline := CadaclysmProfile.spline([[0, 0], [10, 0], [10, 10], [0, 10]], 3, PackedFloat64Array(), true)
+	var fitted := spline.to_arcs(0.01)
+	assert_cam_footprint(fitted, cam_footprint(spline), 0.011, "fitted")
+	refuses(func(): return spline.to_arcs(0.0), "profile_to_arcs: tolerance must be positive and finite")
+
+func test_solid_section_cuts_a_cuboid():
+	var cuboid := CadaclysmSolid.cuboid(20, 10, 5)
+	var middle := cuboid.section(0, 0.05)
+	eq(middle.size(), 1)
+	assert_cam_footprint(middle[0], [-10, 10, -5, 5], 1e-3, "middle")
+	var miss := cuboid.section(50, 0.05)
+	eq(miss.size(), 0)
+	refuses(func(): return cuboid.section(2.5, 0.05),
+		"solid_section: a face lies in the plane -- section a little above or below it")
+
+func test_a_pocketed_block_reports_four_corners_a_six_mm_end_mill_misses():
+	var block := cam_pocketed_block()
+	var end_mill := CadaclysmTool.flat(1, 6, 20, 800, 200, 12000)
+	var stock := CadaclysmStock.around(block, 2)
+	var job := CadaclysmJob.create(stock, 30)
+	var report := job.machine(block, end_mill)
+	if not ok(report != null, "machine: " + Cadaclysm.last_error()):
+		return
+	eq(report.items.size(), 4)
+	eq(report.text.split("\n").size(), 4)
+	eq(str(report), report.text)
+	for item in report.items:
+		eq(item.kind, "corner")
+		ok(item.size > 0)
+		ok(item.region.size() > 0)
+		ok(item.reason != "")
+	var ops := job.operations()
+	ok(ops.size() > 0)
+	for op in ops:
+		ok(op.kind != "")
+		eq(op.tool, 1)
+		ok(op.params.size() > 0)
+
+	# A drill as the end mill is refused, and leaves the job as it was.
+	var drill := CadaclysmTool.drill(2, 5, 30, 150, 3000)
+	var fresh_stock := CadaclysmStock.around(block, 2)
+	var fresh := CadaclysmJob.create(fresh_stock, 30)
+	var message := refuses(func(): return fresh.machine(block, drill))
+	ok(message.contains("end mill must not be a drill"), message)
+	eq(fresh.operations().size(), 0)
+
+func test_the_plate_is_machined_cleanly_by_one_end_mill_and_one_drill():
+	var plate_outline := CadaclysmProfile.rect(80, 50).round(6)
+	var part := CadaclysmSolid.extrude(plate_outline, XY, 12)
+	var pocket_outline := CadaclysmProfile.rect(40, 24).round(4).with_hole(CadaclysmProfile.circle(5))
+	var pocket_solid := CadaclysmSolid.extrude(pocket_outline, CadaclysmFrame.xy(Vector3(0, 0, 7)), 5)
+	part = part.cut(pocket_solid)
+	for xy in [[-32, -17], [-32, 17], [32, -17], [32, 17]]:
+		var bore := CadaclysmSolid.cylinder(3, 12).translate(xy[0], xy[1], 0)
+		part = part.cut(bore)
+
+	var end_mill := CadaclysmTool.flat(1, 6, 20, 800, 200, 12000)
+	var drill := CadaclysmTool.drill(2, 6, 30, 150, 3000)
+	var stock := CadaclysmStock.around(part, 3)
+	var job := CadaclysmJob.create(stock, 25, 1.0, 0.01, "plate")
+	var report := job.machine_with_drills(part, end_mill, [drill])
+	if not ok(report != null, "machine_with_drills: " + Cadaclysm.last_error()):
+		return
+	eq(report.is_empty, true)
+	eq(report.text, "nothing left uncut")
+
+	var ops := job.operations()
+	ok(ops.size() > 0)
+	eq(ops[0].kind, "face")
+	var has_pocket := false
+	for op in ops:
+		if op.kind == "pocket":
+			has_pocket = true
+	ok(has_pocket, "a pocket operation")
+	var last: CadaclysmOperation = ops[ops.size() - 1]
+	eq(last.kind, "drill")
+	eq(last.params.get("points"), 4.0)
+	ok(last.params.has("peck") and last.params["peck"] == null, "no peck")
+
+	var programs := job.gcode()
+	eq(programs.size(), 2)
+	for p in programs:
+		ok(p.tool >= 1)
+		ok(p.name != "")
+		ok(p.text != "")
+
+	var dir := tmp("plate-camotics")
+	DirAccess.make_dir_recursive_absolute(dir)
+	var written := job.write_camotics(dir.path_join("plate.camotics"))
+	ok(written.size() > 0)
+	ok(String(written[written.size() - 1]).ends_with("plate.camotics"))
+	for w in written:
+		ok(FileAccess.file_exists(w), "%s was not written" % w)
+
+func test_the_four_verbs_by_hand_give_two_programs_with_the_specs_own_numbers():
+	var outline := CadaclysmProfile.rect(60, 40).round(5)
+	var part := CadaclysmSolid.extrude(outline, XY, 20)
+	var end := CadaclysmTool.flat(1, 6, 20, 800, 200, 12000)
+	var drill := CadaclysmTool.drill(2, 5, 30, 150, 3000)
+	var stock := CadaclysmStock.around(part, 2)
+	var job := CadaclysmJob.create(stock, 30)
+
+	ok(job.face(end, 20, 3, 1), "face: " + Cadaclysm.last_error())
+	ok(job.contour(end, outline, 20, 0, "outside", 2, true, false), "contour: " + Cadaclysm.last_error())
+	var levels := part.section(15, 0.05)
+	if not ok(levels.size() > 0, "job: section(15) is empty"):
+		return
+	ok(job.pocket(end, levels[0], 20, 10, 2.4, 2), "pocket: " + Cadaclysm.last_error())
+	ok(job.drill(drill, [[10, 10], [40, 10]], 20, -1, 3), "drill: " + Cadaclysm.last_error())
+
+	var programs := job.gcode()
+	eq(programs.size(), 2)
+	eq(programs[0].tool, 1)
+	eq(programs[0].name, "job-T1")
+	ok(programs[0].text.begins_with("(cadaclysm: job-T1, T1 flat D6)\n"), programs[0].text)
+	eq(programs[1].tool, 2)
+	eq(programs[1].name, "job-T2")
+	ok(programs[1].text.begins_with("(cadaclysm: job-T2, T2 drill D5)\n"), programs[1].text)
+
+	var ops := job.operations()
+	var kinds := ops.map(func(o): return o.kind)
+	eq(kinds, ["face", "contour", "pocket", "drill"])
+	# `job_side`'s mapping: "outside" is the library's own 0.
+	eq(ops[1].params.get("side"), 0.0)
+	var drill_op: CadaclysmOperation = ops[3]
+	eq(drill_op.params.get("peck"), 3.0)
+	eq(drill_op.params.get("points"), 2.0)
+
+	# A bad `side` is refused before the library is asked, and leaves the job unchanged.
+	var before := job.operations().size()
+	var bad_side := refuses(func(): return job.contour(end, outline, 20, 0, "left", 2, true, false))
+	eq(bad_side, "side must be 'outside', 'inside' or 'on'")
+	eq(job.operations().size(), before)
+
+	# A peck-less drill reads back as no peck at all through `drill` directly, not only
+	# through `machine` (the plate fixture above covers that path).
+	var no_peck_job := CadaclysmJob.create(stock, 30)
+	ok(no_peck_job.drill(drill, [[0, 0]], 20, -1, NAN), "no-peck drill: " + Cadaclysm.last_error())
+	var no_peck_ops := no_peck_job.operations()
+	ok(no_peck_ops[0].params.has("peck") and no_peck_ops[0].params["peck"] == null, "no peck")
+
+# A negative tool number is clamped to 0, as every other wrapper does, and refused in the
+# library's own words: the ones it gives 0 (not "flat: number: -1 is not an index" from here).
+func test_a_negative_tool_number_is_refused_in_the_librarys_words():
+	var at_zero := refuses(func(): return CadaclysmTool.flat(0, 6, 20, 800, 200, 12000), "number must be at least 1")
+	eq(at_zero, "tool: number must be at least 1")
+	eq(refuses(func(): return CadaclysmTool.flat(-1, 6, 20, 800, 200, 12000)), at_zero)
+	eq(refuses(func(): return CadaclysmTool.ball(-1, 6, 20, 800, 200, 12000)), at_zero)
+	eq(refuses(func(): return CadaclysmTool.drill(-1, 6, 30, 150, 3000)), at_zero)
+
+func test_a_closed_job_refuses_every_later_call():
+	var part := CadaclysmSolid.cuboid(20, 10, 5)
+	var end_mill := CadaclysmTool.flat(1, 6, 20, 800, 200, 12000)
+	var stock := CadaclysmStock.around(part, 2)
+	var job := CadaclysmJob.create(stock, 30)
+	eq(job.closed, false)
+	job.close()
+	eq(job.closed, true)
+	refuses(func(): return job.face(end_mill, 0, 3, 1), "job: closed")
+	refuses(func(): return job.contour(end_mill, CadaclysmProfile.rect(10, 10), 0, -5, "outside", 1, true, false), "job: closed")
+	refuses(func(): return job.pocket(end_mill, CadaclysmProfile.rect(10, 10), 0, -5, 2, 1), "job: closed")
+	refuses(func(): return job.drill(CadaclysmTool.drill(2, 5, 30, 150, 3000), [[0, 0]], 0, -5), "job: closed")
+	refuses(func(): return job.machine(part, end_mill), "job: closed")
+	refuses(func(): return job.operations(), "job: closed")
+	refuses(func(): return job.gcode(), "job: closed")
+	refuses(func(): return job.write_camotics(tmp("closed.camotics")), "job: closed")
+	job.close()   # idempotent

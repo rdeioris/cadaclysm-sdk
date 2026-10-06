@@ -7,8 +7,10 @@ import java.nio.IntBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 // "try": a smoke builds things inside try-with-resources only to prove the call succeeds
@@ -121,6 +123,108 @@ public final class Smoke {
                         || values.get(0).values().length != 1 || !close(values.get(0).values()[0], 0.5))
                     fail("state open does not set hinge to [0.5]");
                 System.out.println("pair: " + pair.kind() + ", freedoms " + freedoms.size() + ", states " + states.size());
+
+                // Posing: Scene.base/pose/poseState and Pose, at parity with the Python reference's
+                // six pose facts (mechanism.stp declares no base; base=links[0], arm=links[1]).
+                Cad.Link baseLink = links.get(0), armLink = links.get(1);
+                Cad.Node armNode = armLink.nodes().get(0), baseNode = baseLink.nodes().get(0);
+                if (mechanism.base() != null) fail("mechanism.stp declares a base but declares none");
+                Cad.Pose posedState = mechanism.poseState(states.get(0));
+                if (posedState.ground().index() != baseLink.index()) fail("poseState's ground is not the base link");
+                if (!posedState.unsolved().isEmpty() || !posedState.outOfRange().isEmpty())
+                    fail("poseState reports unsolved or out-of-range joints");
+                double q = 0.5; // the arm is the joint's start, reached from its end: it turns by -q
+                double[][] armTransform = posedState.transform(armNode);
+                double[] armTip = apply(armTransform, 10, 0, 0);
+                if (!close(armTip[0], 10 * Math.cos(q)) || !close(armTip[1], -10 * Math.sin(q)) || !close(armTip[2], 100))
+                    fail("poseState does not turn the arm by -0.5");
+                double[] armOrigin = apply(armTransform, 0, 0, 0);
+                if (!close(armOrigin[0], 0) || !close(armOrigin[1], 0) || !close(armOrigin[2], 100))
+                    fail("poseState's arm origin is not (0, 0, 100)");
+                if (!Arrays.equals(posedState.rawTransform(baseNode), baseNode.rawTransform()))
+                    fail("poseState moves the ground link's own node");
+
+                Cad.Pose pastRange = mechanism.pose(List.of(new Cad.StateValue(joint, new double[]{2.0})));
+                List<Cad.OutOfRange> outOfRange = pastRange.outOfRange();
+                if (outOfRange.size() != 1 || outOfRange.get(0).joint().index() != joint.index()
+                        || outOfRange.get(0).freedom() != 0 || !close(outOfRange.get(0).value(), 2.0))
+                    fail("pose does not report the out-of-range value");
+                double[] pastRangeTip = apply(pastRange.transform(armNode), 10, 0, 0);
+                if (!close(pastRangeTip[0], 10 * Math.cos(2.0)) || !close(pastRangeTip[1], -10 * Math.sin(2.0)) || !close(pastRangeTip[2], 100))
+                    fail("pose does not use the out-of-range value");
+
+                Cad.Pose groundedOnArm = mechanism.pose(List.of(new Cad.StateValue(joint, new double[]{0.5})), armLink);
+                if (groundedOnArm.ground().index() != armLink.index()) fail("pose does not hold the named ground");
+                if (!Arrays.equals(groundedOnArm.rawTransform(armNode), armNode.rawTransform()))
+                    fail("pose does not leave the named ground at its rest transform");
+
+                Cad.Pose fromStateValues = mechanism.pose(values);
+                if (!Arrays.equals(fromStateValues.rawTransform(armNode), posedState.rawTransform(armNode)))
+                    fail("pose(state.values()) does not match poseState(state)");
+                Cad.Pose rest = mechanism.pose(List.of());
+                for (Cad.Node node : mechanism.nodes())
+                    if (!Arrays.equals(rest.rawTransform(node), node.rawTransform()))
+                        fail("pose([]) does not leave every node at its rest transform");
+
+                try {
+                    mechanism.pose(List.of(new Cad.StateValue(joint, new double[]{1.0, 2.0})));
+                    fail("a joint given the wrong number of values was accepted");
+                } catch (Cad.CadaclysmException e) {
+                    if (!e.getMessage().contains("takes 1 value(s)")) fail("wrong pose error: " + e.getMessage());
+                }
+                System.out.println("pose: base=" + mechanism.base() + ", ground=" + posedState.ground().name()
+                        + ", out-of-range " + outOfRange.size());
+            }
+            // Motion sequences: samples/mechanism-sequence.stp's two sequences, at parity with
+            // the Python reference (plan 2026-10-05-motion-sequences-2).
+            Path sequencePath = Path.of(path).toAbsolutePath().getParent().resolve("mechanism-sequence.stp");
+            try (Cad.Scene sequenceScene = Cad.open(sequencePath.toString())) {
+                List<Cad.Sequence> sequences = sequenceScene.sequences();
+                if (sequences.size() != 2 || !sequences.get(0).name().equals("swing") || !sequences.get(1).name().equals("snap"))
+                    fail("sequences: the file does not carry swing then snap");
+                Cad.Sequence swing = sequences.get(0), snap = sequences.get(1);
+                if (!swing.closed() || swing.secondsPerUnit() == null || swing.secondsPerUnit().doubleValue() != 1.0)
+                    fail("sequences: swing is not closed at 1 second per unit");
+                if (snap.closed() || snap.secondsPerUnit() != null)
+                    fail("sequences: snap is not open with no unit");
+                String swingSegments = swing.segments().stream()
+                        .map(g -> g.state().name() + "@" + g.t() + " " + g.interpolation())
+                        .collect(java.util.stream.Collectors.joining(", "));
+                if (!swingSegments.equals("shut@0.0 linear, open@1.0 synchronous, wide@2.0 linear"))
+                    fail("sequences: swing's segments are " + swingSegments);
+                String snapSegments = snap.segments().stream()
+                        .map(g -> g.state().name() + "@" + g.t() + " " + g.interpolation())
+                        .collect(java.util.stream.Collectors.joining(", "));
+                if (!snapSegments.equals("shut@0.0 discontinuous, wide@0.5 discontinuous"))
+                    fail("sequences: snap's segments are " + snapSegments);
+                if (swing.start() != 0.0 || swing.end() != 2.0) fail("sequences: swing does not run 0 to 2");
+                for (Cad.Segment g : swing.segments()) {
+                    Cad.Pose at = swing.pose(g.t());
+                    Cad.Pose want = sequenceScene.poseState(g.state());
+                    for (Cad.Node node : sequenceScene.nodes())
+                        if (!Arrays.equals(at.rawTransform(node), want.rawTransform(node)))
+                            fail("sequences: swing at " + g.t() + " does not match state " + g.state().name());
+                }
+                try {
+                    swing.pose(Double.NaN);
+                    fail("sequences: pose(NaN) was accepted");
+                } catch (Cad.CadaclysmException e) {
+                    if (!e.getMessage().contains("the sequence parameter must be a finite number"))
+                        fail("sequences: pose(NaN) was refused with " + e.getMessage());
+                }
+                System.out.println("sequences: swing and snap read as the file records them, and swing poses at each keyframe");
+            }
+
+            // pose([]) on the cube sample (no mechanism) fails with a message naming that, as
+            // the Python reference's test_a_bad_pose_raises checks on the same file.
+            Path cubePath = Path.of(path).toAbsolutePath().getParent().resolve("cube.scad");
+            try (Cad.Scene cubeScene = Cad.open(cubePath.toString())) {
+                try {
+                    cubeScene.pose(List.of());
+                    fail("pose([]) on a file without a mechanism was accepted");
+                } catch (Cad.CadaclysmException e) {
+                    if (!e.getMessage().contains("no mechanism")) fail("wrong no-mechanism error: " + e.getMessage());
+                }
             }
             scene.forgetMeshes();
             long rebuiltTriangles = 0;
@@ -163,6 +267,38 @@ public final class Smoke {
                 fail("scene bounds64's max does not equal bounds's max widened");
             System.out.printf("reader f64 twins: mesh64 %d triangles, edgeBeziers64 %d, bounds64 max (%s,%s,%s)%n",
                     mesh64.triangleCount(), edgeBeziers64.count(), sceneBounds64.max()[0], sceneBounds64.max()[1], sceneBounds64.max()[2]);
+
+            // forgetMeshes frees the document's own mesh, which Mesh64 lends, so a Mesh64 made
+            // before the forget throws a stale view rather than being read. The float mesh and
+            // the edge views are the scene's own caches and survive it, as the C ABI says they
+            // do -- they must not be reported stale, nor must the node.
+            {
+                Cad.Mesh64 lent = first.mesh64();
+                Cad.Mesh keptMesh = first.mesh();
+                Cad.Polylines keptEdges = first.edges();
+                int lentTriangles = lent.triangleCount();
+                double[] early = lent.copy().positions();
+                scene.forgetMeshes();
+                boolean tripped = false;
+                try {
+                    lent.positions();
+                } catch (Cad.CadaclysmException e) {
+                    tripped = e.getMessage().contains("forgotten");
+                }
+                if (!tripped) fail("a Mesh64 read after forgetMeshes did not throw a stale view");
+                tripped = false;
+                try {
+                    lent.copy();
+                } catch (Cad.CadaclysmException e) {
+                    tripped = e.getMessage().contains("forgotten");
+                }
+                if (!tripped) fail("a Mesh64 copied after forgetMeshes did not throw a stale view");
+                if (keptMesh.positions().remaining() != keptMesh.vertexCount() * 3 || keptEdges.positions().remaining() == 0 || !first.canMesh())
+                    fail("forgetMeshes staled the float mesh, an edge view or the node");
+                Cad.Mesh64 relent = first.mesh64();
+                if (relent.triangleCount() != lentTriangles || !java.util.Arrays.equals(relent.copy().positions(), early))
+                    fail("a Mesh64 asked for after forgetMeshes does not read");
+            }
 
             Cad.Collision fit = first.collision(0);
             if (fit == null || fit.error() != 0 || fit.frame().length != 16 || fit.hullVertexCount() != 8) fail("the collision fit is off");
@@ -283,12 +419,27 @@ public final class Smoke {
             if (!nodeSvgText.startsWith("<svg") || !nodeSvgText.contains("<path")) fail("node SVG text did not look like an SVG wireframe");
             try {
                 scene.svgText(new Cad.SvgOptions(null, null, null, null, 200.0, 1000.0, 1000.0, 0.05, 0.1,
-                        "#000000", 1.0, null, true, false, false, false));
+                        "#000000", 1.0, null, true, false, false, false, true));
                 fail("scene svg: fov=200 was accepted");
             } catch (Cad.CadaclysmException expected) {
                 // the library's own refusal
             }
             System.out.println("svg: scene and node text, file written, fov=200 refused");
+
+            // CSS colour names: Cad.packed(String) turns one into the ABI's packed 0xRRGGBB
+            // (SvgOptions.background's own type), and SvgOptions.stroke reads names too.
+            if (Cad.packed("navy") != 0x000080) fail("Cad.packed(\"navy\") is not 0x000080");
+            try {
+                Cad.packed("bogus");
+                fail("Cad.packed(\"bogus\") was accepted");
+            } catch (Cad.CadaclysmException expected) {
+                String msg = expected.getMessage();
+                if (!msg.contains("not 'bogus'") || msg.contains("0..1")) fail("Cad.packed(\"bogus\"): " + msg);
+            }
+            String redStrokeSvg = scene.svgText(new Cad.SvgOptions(null, null, null, null, 0.0, 1000.0, 1000.0, 0.05, 0.1,
+                    "Red", 1.0, null, true, false, false, false, true));
+            if (!redStrokeSvg.contains("#ff0000")) fail("SvgOptions.stroke(\"Red\") did not draw #ff0000: " + redStrokeSvg);
+            System.out.println("colour: Cad.packed(\"navy\")=0x000080, packed(\"bogus\") refused, stroke(\"Red\") drew #ff0000");
         }
     }
 
@@ -319,8 +470,10 @@ public final class Smoke {
             sheetVerbs(plate);
             frames();
             hits();
+            machining();
             edgeCurves();
             intersections();
+            collider();
             solidHits();
             assemblies();
             mechanism();
@@ -368,6 +521,36 @@ public final class Smoke {
                             fail("an empty edge list should colour nothing");
                     }
                 }
+
+                // CSS colour names: every paint entry point's String overload reads them through
+                // the library's own parser, and Blacksmith.packed(String) turns one into the
+                // ABI's packed 0xRRGGBB (SvgOptions.background's own type).
+                try (Blacksmith.Solid red = Blacksmith.Solid.cuboid(1, 1, 1).coloured("red")) {
+                    if (!Arrays.equals(red.colour(), new double[] {1, 0, 0})) fail("coloured(\"red\") did not read as (1, 0, 0)");
+                }
+                try (Blacksmith.Solid bogus = Blacksmith.Solid.cuboid(1, 1, 1).coloured("notacolour")) {
+                    fail("coloured(\"notacolour\") was accepted");
+                } catch (Blacksmith.BuildException expected) {
+                    if (!expected.getMessage().contains("a CSS colour name")) fail("coloured(\"notacolour\"): " + expected.getMessage());
+                }
+                if (Blacksmith.packed("navy") != 0x000080) fail("Blacksmith.packed(\"navy\") is not 0x000080");
+                try {
+                    Blacksmith.packed("bogus");
+                    fail("Blacksmith.packed(\"bogus\") was accepted");
+                } catch (Blacksmith.BuildException expected) {
+                    String msg = expected.getMessage();
+                    if (!msg.contains("not 'bogus'") || msg.contains("0..1")) fail("Blacksmith.packed(\"bogus\"): " + msg);
+                }
+                try (Blacksmith.Solid redEdges = Blacksmith.Solid.cuboid(1, 1, 1).edgesColoured("red")) {
+                    if (!Arrays.equals(redEdges.edgeColour(0), new double[] {1, 0, 0})) fail("edgesColoured(\"red\") did not read as (1, 0, 0)");
+                }
+                try (Blacksmith.Profile redRect = Blacksmith.Profile.rect(10, 4).coloured("red")) {
+                    if (!Arrays.equals(redRect.colour(), new double[] {1, 0, 0})) fail("Profile.coloured(\"red\") did not read as (1, 0, 0)");
+                }
+                String redStrokeSvg = Blacksmith.Solid.cuboid(1, 1, 1).svgText(new Blacksmith.SvgOptions(null, null, null, null,
+                        0.0, 1000.0, 1000.0, 0.05, 0.1, "red", 1.0, null, true, false, false, false, true));
+                if (!redStrokeSvg.contains("#ff0000")) fail("SvgOptions.stroke(\"red\") did not draw #ff0000: " + redStrokeSvg);
+                System.out.println("blacksmith colour: CSS colour names accepted on coloured/edgesColoured/stroke, bad names refused, packed(\"navy\")=0x000080");
 
                 // A face: the outline as a sheet, which pushed out is the plate again.
                 try (Blacksmith.Solid sheet = Blacksmith.Solid.face(outline, new double[] {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1});
@@ -417,6 +600,11 @@ public final class Smoke {
                             if (brep != null) {
                                 Cad.Manifold read = brep.manifold();
                                 if (!read.isClosed() || read.faces() != 15) fail("the read body is not the closed manifold written: " + read);
+                                Cad.Sewn sewn = brep.sewed(null, null);
+                                try (Cad.Brep sewnBrep = sewn.brep()) {
+                                    if (sewn.report().freeBefore() != read.boundaryEdges() || brep.manifold().boundaryEdges() != read.boundaryEdges())
+                                        fail("sewed reports " + sewn.report().freeBefore() + " free edges before, the brep has " + read.boundaryEdges());
+                                }
                                 body = p.geometry();
                                 break;
                             }
@@ -465,7 +653,7 @@ public final class Smoke {
                 if (Files.size(solidSvgPath) == 0) fail("Solid.svg wrote an empty file");
                 try {
                     rounded.svgText(new Blacksmith.SvgOptions(null, null, null, null, 200.0, 1000.0, 1000.0, 0.05, 0.1,
-                            "#000000", 1.0, null, true, false, false, false));
+                            "#000000", 1.0, null, true, false, false, false, true));
                     fail("blacksmith svg: fov=200 was accepted");
                 } catch (Blacksmith.BuildException expected) {
                     // the library's own refusal
@@ -479,7 +667,7 @@ public final class Smoke {
                 String profileSvgText = outline.svgText();
                 if (!profileSvgText.startsWith("<svg") || !profileSvgText.contains("<path")) fail("profile SVG text did not look like an SVG wireframe");
                 String profileSvgIso = outline.svgText(new Blacksmith.SvgOptions(Blacksmith.SvgView.ISO, null, null, null,
-                        0.0, 1000.0, 1000.0, 0.05, 0.1, "#000000", 1.0, null, true, false, false, false));
+                        0.0, 1000.0, 1000.0, 0.05, 0.1, "#000000", 1.0, null, true, false, false, false, true));
                 if (profileSvgText.equals(profileSvgIso)) fail("profile svg: top default did not differ from an explicit iso view");
                 Path profileSvgPath = Files.createTempFile("cadaclysm-smoke-profile", ".svg");
                 outline.svg(profileSvgPath.toString());
@@ -971,6 +1159,323 @@ public final class Smoke {
         }
     }
 
+    // Machining: the Python SDK's to_arcs, offset and section, then Tool, Stock and Job -- the
+    // fixtures of test_cadaclysm_blacksmith.py's "machining" block and Node's pocketedBlock on.
+    // A profile is measured by extruding it 1 and reading the solid's bounds.
+    private static void machining() {
+        try (Blacksmith.Profile rect2010 = Blacksmith.Profile.rect(20, 10)) {
+            List<Blacksmith.Profile> grown = rect2010.offset(2);
+            if (grown.size() != 1 || !near(footprint(grown.get(0)), new double[] {-12, 12, -7, 7}, 1e-3))
+                fail("offset: grown by 2 is " + grown.size() + " profile(s)");
+            grown.get(0).close();
+            List<Blacksmith.Profile> shrunk = rect2010.offset(-2);
+            if (shrunk.size() != 1 || !near(footprint(shrunk.get(0)), new double[] {-8, 8, -3, 3}, 1e-3))
+                fail("offset: shrunk by 2 is not one profile over [-8, 8, -3, 3]");
+            shrunk.get(0).close();
+            if (!rect2010.offset(-6).isEmpty()) fail("offset: a shrink past half the width left something");
+            try {
+                rect2010.offset(Double.NaN);
+                fail("offset: a NaN distance was accepted");
+            } catch (Blacksmith.BuildException e) {
+                if (!e.getMessage().equals("profile_offset: distance must be finite")) fail("offset: wrong message: " + e.getMessage());
+            }
+            System.out.println("offset: grown to [-12, 12, -7, 7], shrunk to [-8, 8, -3, 3], eaten at -6, NaN refused");
+        }
+
+        try (Blacksmith.Profile spline = Blacksmith.Profile.spline(
+                new double[][] {{0, 0}, {10, 0}, {10, 10}, {0, 10}}, 3, null, true);
+             Blacksmith.Profile fitted = spline.toArcs(0.01)) {
+            if (!near(footprint(fitted), footprint(spline), 0.011))
+                fail("to_arcs: the fit's footprint is not within 0.011 of the spline's");
+            try {
+                spline.toArcs(0);
+                fail("to_arcs: a zero tolerance was accepted");
+            } catch (Blacksmith.BuildException e) {
+                if (!e.getMessage().equals("profile_to_arcs: tolerance must be positive and finite")) fail("to_arcs: wrong message: " + e.getMessage());
+            }
+            System.out.println("to_arcs: the fit bounds the spline within 0.011, zero tolerance refused");
+        }
+
+        try (Blacksmith.Solid box2010 = Blacksmith.Solid.cuboid(20, 10, 5)) {
+            List<Blacksmith.Profile> middle = box2010.section(0);
+            if (middle.size() != 1 || !near(footprint(middle.get(0)), new double[] {-10, 10, -5, 5}, 1e-3))
+                fail("section: the box's middle is not one profile over [-10, 10, -5, 5]");
+            middle.get(0).close();
+            if (!box2010.section(50).isEmpty()) fail("section: a plane missing the box cut something");
+            try {
+                box2010.section(2.5);
+                fail("section: a plane on the top face was accepted");
+            } catch (Blacksmith.BuildException e) {
+                if (!e.getMessage().equals("solid_section: a face lies in the plane -- section a little above or below it"))
+                    fail("section: wrong message: " + e.getMessage());
+            }
+            System.out.println("section: the box's middle, a miss above it, a face in the plane refused");
+        }
+
+        // The pocketed block: a 6 mm end mill is too big for the pocket's four square corners.
+        try (Blacksmith.Solid block = pocketedBlock();
+             Blacksmith.Tool endMill = Blacksmith.Tool.flat(1, 6, 20, 800, 200, 12000)) {
+            try (Blacksmith.Job job = new Blacksmith.Job(Blacksmith.Stock.around(block, 2), 30)) {
+                Blacksmith.Report report = job.machine(block, endMill);
+                if (report.size() != 4) fail("machine: the pocketed block reports " + report.size() + " item(s), not 4:\n" + report);
+                if (!report.toString().equals(report.text()) || report.text().split("\n").length != 4)
+                    fail("machine: the report's text is not four lines:\n" + report.text());
+                // the records are read-only: a copy in and out of the array, an unmodifiable list
+                Blacksmith.ReportItem first = report.get(0);
+                double was = first.at()[0];
+                first.at()[0] = was + 1e9;
+                if (first.at()[0] != was) fail("machine: an item's at is shared with the array a caller changed");
+                // and in: the array and list a record is built from are copied, not kept
+                double[] given = {1, 2, 3};
+                List<Blacksmith.Profile> regionGiven = new java.util.ArrayList<>();
+                Blacksmith.ReportItem built = new Blacksmith.ReportItem("corner", given, 1, "why", regionGiven);
+                given[0] = 99;
+                regionGiven.add(null);
+                if (built.at()[0] != 1 || !built.region().isEmpty())
+                    fail("machine: a ReportItem kept the array or list it was built from: " + built);
+                try {
+                    first.region().add(null);
+                    fail("machine: an item's region accepted an add");
+                } catch (UnsupportedOperationException expected) {
+                    // read-only
+                }
+                for (Blacksmith.ReportItem item : report) {
+                    if (!item.kind().equals("corner") || !(item.size() > 0) || item.region().isEmpty() || item.reason().isEmpty()
+                            || !Double.isFinite(item.at()[0]) || !Double.isFinite(item.at()[1]) || !Double.isFinite(item.at()[2]))
+                        fail("machine: " + item + " is not a corner with a location, a size and a region");
+                    for (Blacksmith.Profile p : item.region()) p.close();
+                }
+                List<Blacksmith.Operation> ops = job.operations();
+                if (ops.isEmpty() || ops.stream().anyMatch(o -> o.kind().isEmpty() || o.tool() != 1 || o.params().isEmpty()))
+                    fail("machine: the pocketed block's operations are missing a kind, a tool or params");
+                try {
+                    ops.get(0).params().put("z", 1.0);
+                    fail("machine: an operation's params accepted a put");
+                } catch (UnsupportedOperationException expected) {
+                    // read-only
+                }
+                System.out.println("machine: the pocketed block leaves four corners, " + ops.size() + " operations (" + report.get(0) + ")");
+            }
+
+            // A drill as the end mill is refused, and leaves the job as it was.
+            try (Blacksmith.Tool drill5 = Blacksmith.Tool.drill(2, 5, 30, 150, 3000);
+                 Blacksmith.Job fresh = new Blacksmith.Job(Blacksmith.Stock.around(block, 2), 30)) {
+                try {
+                    fresh.machine(block, drill5);
+                    fail("machine: a drill as the end mill was accepted");
+                } catch (Blacksmith.BuildException e) {
+                    if (!e.getMessage().contains("end mill must not be a drill")) fail("machine: wrong message: " + e.getMessage());
+                }
+                if (!fresh.operations().isEmpty()) fail("machine: a refused call changed the job");
+
+                // A closed job refuses every later call.
+                fresh.close();
+                fresh.close();   // idempotent
+                if (!fresh.closed()) fail("job: closed but not closed()");
+                try {
+                    fresh.machine(block, endMill);
+                    fail("job: machine() after close() was accepted");
+                } catch (IllegalStateException e) {
+                    if (!e.getMessage().contains("job: closed")) fail("job: wrong message: " + e.getMessage());
+                }
+                try {
+                    fresh.operations();
+                    fail("job: operations() after close() was accepted");
+                } catch (IllegalStateException e) {
+                    if (!e.getMessage().contains("job: closed")) fail("job: wrong message: " + e.getMessage());
+                }
+                try {
+                    fresh.gcode();
+                    fail("job: gcode() after close() was accepted");
+                } catch (IllegalStateException e) {
+                    if (!e.getMessage().contains("job: closed")) fail("job: wrong message: " + e.getMessage());
+                }
+                System.out.println("machine: a drill as the end mill refused, the job unchanged; a closed job refuses");
+            }
+        }
+
+        // The plate of spec 2026-09-28: machined cleanly by one end mill and one drill.
+        Blacksmith.Profile plateOutline = Blacksmith.Profile.rect(80, 50).round(6);
+        Blacksmith.Solid platePart = Blacksmith.Solid.extrude(plateOutline, Blacksmith.Frame.xy().toArray(), 12);
+        try (Blacksmith.Profile pocketOutline = Blacksmith.Profile.rect(40, 24).round(4).withHole(Blacksmith.Profile.circle(5));
+             Blacksmith.Solid pocket = Blacksmith.Solid.extrude(pocketOutline, Blacksmith.Frame.xy(new double[] {0, 0, 7}).toArray(), 5)) {
+            Blacksmith.Solid was = platePart;
+            platePart = was.cut(pocket);
+            was.close();
+        }
+        for (double x : new double[] {-32, 32}) {
+            for (double y : new double[] {-17, 17}) {
+                try (Blacksmith.Solid bore = Blacksmith.Solid.cylinder(3, 12).translate(x, y, 0)) {
+                    Blacksmith.Solid was = platePart;
+                    platePart = was.cut(bore);
+                    was.close();
+                }
+            }
+        }
+        try (Blacksmith.Solid plateSolid = platePart;
+             Blacksmith.Tool plateEndMill = Blacksmith.Tool.flat(1, 6, 20, 800, 200, 12000);
+             Blacksmith.Tool plateDrill = Blacksmith.Tool.drill(2, 6, 30, 150, 3000);
+             Blacksmith.Job job = new Blacksmith.Job(Blacksmith.Stock.around(plateSolid, 3), 25, 1.0, 0.01, "plate")) {
+            Blacksmith.Report report = job.machine(plateSolid, plateEndMill, new Blacksmith.Tool[] {plateDrill});
+            if (!report.isEmpty() || !report.toString().equals("nothing left uncut")) fail("plate: the report is not empty:\n" + report);
+            List<Blacksmith.Operation> ops = job.operations();
+            if (!ops.get(0).kind().equals("face") || ops.stream().noneMatch(o -> o.kind().equals("pocket"))
+                    || !ops.get(ops.size() - 1).kind().equals("drill"))
+                fail("plate: the operations run " + ops.stream().map(Blacksmith.Operation::kind).toList());
+            Blacksmith.Operation lastOp = ops.get(ops.size() - 1);
+            if (!Double.valueOf(4).equals(lastOp.params().get("points")) || !lastOp.params().containsKey("peck")
+                    || lastOp.params().get("peck") != null)
+                fail("plate: the drill's params are " + lastOp);
+            List<Blacksmith.Program> programs = job.gcode();
+            if (programs.size() != 2 || programs.stream().anyMatch(p -> p.tool() < 1 || p.name().isEmpty() || p.text().isEmpty()))
+                fail("plate: gcode() gives " + programs);
+            Path folder = Path.of(System.getProperty("java.io.tmpdir"), "cadaclysm-smoke-cam-" + ProcessHandle.current().pid());
+            try {
+                List<String> written = job.writeCamotics(folder.resolve("plate.camotics").toString());
+                if (written.isEmpty() || written.stream().anyMatch(p -> !Files.exists(Path.of(p)))
+                        || !written.get(written.size() - 1).endsWith("plate.camotics"))
+                    fail("plate: write_camotics wrote " + written);
+                System.out.println("plate: nothing left uncut, " + ops.size() + " operations, " + programs.size()
+                        + " programs, " + written.size() + " CAMotics files");
+            } finally {
+                deleteRecursive(folder);
+            }
+        }
+
+        // The four verbs by hand -- the spec's own example -- and the refusals in the kernel's words.
+        try (Blacksmith.Profile specOutline = Blacksmith.Profile.rect(60, 40).round(5);
+             Blacksmith.Solid specPart = Blacksmith.Solid.extrude(specOutline, Blacksmith.Frame.xy().toArray(), 20);
+             Blacksmith.Tool end = Blacksmith.Tool.flat(1, 6, 20, 800, 200, 12000);
+             Blacksmith.Tool drill = Blacksmith.Tool.drill(2, 5, 30, 150, 3000);
+             Blacksmith.Job job = new Blacksmith.Job(Blacksmith.Stock.around(specPart, 2), 30)) {
+            job.face(end, 20, 3, 1);
+            job.contour(end, specOutline, 20, 0, "outside", 2, true, false);
+            try (Blacksmith.Profile level = specPart.section(15).get(0)) {
+                job.pocket(end, level, 20, 10, 2.4, 2);
+            }
+            job.drill(drill, new double[][] {{10, 10}, {40, 10}}, 20, -1, 3.0);
+            List<Blacksmith.Program> programs = job.gcode();
+            if (programs.size() != 2 || programs.get(0).tool() != 1 || !programs.get(0).name().equals("job-T1")
+                    || programs.get(1).tool() != 2 || !programs.get(1).name().equals("job-T2")
+                    || !programs.get(0).text().startsWith("(cadaclysm: job-T1, T1 flat D6)\n")
+                    || !programs.get(1).text().startsWith("(cadaclysm: job-T2, T2 drill D5)\n"))
+                fail("job: the spec example's programs are " + programs);
+            List<String> kinds = job.operations().stream().map(Blacksmith.Operation::kind).toList();
+            if (!kinds.equals(List.of("face", "contour", "pocket", "drill"))) fail("job: the operations are " + kinds);
+            Map<String, Double> drilled = job.operations().get(3).params();
+            if (!Double.valueOf(3).equals(drilled.get("peck")) || !Double.valueOf(2).equals(drilled.get("points")))
+                fail("job: the drill's params are " + job.operations().get(3));
+
+            String root = Path.of(System.getProperty("java.io.tmpdir")).getRoot().toString();
+            try {
+                job.writeCamotics(root);
+                fail("job: write_camotics(" + root + ") was accepted");
+            } catch (Blacksmith.BuildException e) {
+                if (!e.getMessage().equals("job_camotics: " + root + " has no file stem"))
+                    fail("job: write_camotics(root) message: " + e.getMessage());
+            } catch (NullPointerException e) {
+                fail("job: write_camotics(root) threw NPE instead of BuildException: " + e);
+            }
+
+            try (Blacksmith.Stock stock = Blacksmith.Stock.box(new double[] {-15, -10, 0}, new double[] {15, 10, 10});
+                 Blacksmith.Profile square = Blacksmith.Profile.rect(20, 10)) {
+                record Refusal(Runnable make, String text) {
+                }
+                for (Refusal r : List.of(
+                        new Refusal(() -> Blacksmith.Tool.flat(0, 6, 20, 800, 200, 12000).close(), "tool: number must be at least 1"),
+                        new Refusal(() -> Blacksmith.Tool.ball(1, 6, 20, 800, 200, 12000, 91).close(), "tool: ramp angle must be in (0, 90] degrees"),
+                        new Refusal(() -> Blacksmith.Stock.box(new double[] {0, 0, 0}, new double[] {0, 10, 10}).close(),
+                                "stock: min must be below max on every axis, all finite"),
+                        new Refusal(() -> new Blacksmith.Job(stock, 5).close(), "job: safe z must be above the stock's top"),
+                        new Refusal(() -> new Blacksmith.Job(stock, 30, 0, 0.01, "job").close(), "job: clearance must be positive and finite"),
+                        new Refusal(() -> new Blacksmith.Job(stock, 30, 1.0, 0.01, "a/b").close(),
+                                "job: a name must be non-empty and without brackets"),
+                        new Refusal(() -> new Blacksmith.Job(stock, 30, 1.0, 0.01, "a\0b").close(),
+                                "job: a name must be non-empty and without brackets"))) {
+                    try {
+                        r.make().run();
+                        fail("cam: \"" + r.text() + "\" was accepted");
+                    } catch (Blacksmith.BuildException e) {
+                        if (!e.getMessage().startsWith(r.text())) fail("cam: wrong message: " + e.getMessage());
+                    }
+                }
+                try (Blacksmith.Job empty = new Blacksmith.Job(stock, 30)) {
+                    record Refusal2(Runnable add, String text) {
+                    }
+                    for (Refusal2 r : List.of(
+                            new Refusal2(() -> empty.contour(drill, square, 10, 5), "contour: a drill only drills"),
+                            new Refusal2(() -> empty.drill(end, new double[][] {{0, 0}}, 10, 5), "drill: drilling needs a drill"),
+                            new Refusal2(() -> empty.drill(drill, new double[0][], 10, 5), "drill: there are no points"),
+                            new Refusal2(() -> empty.pocket(end, square, 10, 5, 4, 1),
+                                    "pocket: stepover must be at most the tool's radius for a pocket"),
+                            new Refusal2(() -> empty.face(end, 11, 3, 1), "face: z must be finite and not above the stock's top"))) {
+                        try {
+                            r.add().run();
+                            fail("cam: \"" + r.text() + "\" was accepted");
+                        } catch (Blacksmith.BuildException e) {
+                            if (!e.getMessage().equals(r.text())) fail("cam: wrong message: " + e.getMessage());
+                        }
+                    }
+                    try {
+                        empty.contour(end, square, 10, 5, "left", 1.0, true, false);
+                        fail("contour: side \"left\" was accepted");
+                    } catch (IllegalArgumentException e) {
+                        if (!e.getMessage().equals("side must be 'outside', 'inside' or 'on'")) fail("contour: wrong message: " + e.getMessage());
+                    }
+                    if (!empty.gcode().isEmpty()) fail("cam: a refused operation changed the job");
+                    // a NUL in a CAMotics stem is refused in the kernel's words, before the library
+                    try {
+                        empty.writeCamotics("cadaclysm-nul/a\0b.camotics");
+                        fail("write_camotics: a NUL stem was accepted");
+                    } catch (Blacksmith.BuildException e) {
+                        if (!e.getMessage().equals("job: a name must be non-empty and without brackets, slashes, quotes, control characters, or : * ? < > |"))
+                            fail("write_camotics: wrong message: " + e.getMessage());
+                    }
+                }
+            }
+            System.out.println("job: face, contour, pocket and drill by hand give two programs; every refusal in the kernel's words");
+        }
+    }
+
+    // A profile's [x0, x1, y0, y1], read off the bounds of it extruded 1, at a fine tolerance.
+    private static double[] footprint(Blacksmith.Profile profile) {
+        try (Blacksmith.Solid solid = Blacksmith.Solid.extrude(profile, Blacksmith.Frame.xy().toArray(), 1)) {
+            Blacksmith.Bounds b = solid.boundsAt(0.001);
+            return new double[] {b.min()[0], b.max()[0], b.min()[1], b.max()[1]};
+        }
+    }
+
+    private static boolean near(double[] a, double[] b, double tolerance) {
+        if (a.length != b.length) return false;
+        for (int i = 0; i < a.length; i++) if (Math.abs(a[i] - b[i]) > tolerance) return false;
+        return true;
+    }
+
+    // A 40x30x10 block on z = 0 with a 20x10 pocket 8 deep: four corners a 6 mm end mill misses.
+    private static Blacksmith.Solid pocketedBlock() {
+        try (Blacksmith.Solid block0 = Blacksmith.Solid.cuboid(40, 30, 10);
+             Blacksmith.Solid block = block0.translate(0, 0, 5);
+             Blacksmith.Solid pocket0 = Blacksmith.Solid.cuboid(20, 10, 8);
+             Blacksmith.Solid pocket = pocket0.translate(0, 0, 6)) {
+            return block.cut(pocket);
+        }
+    }
+
+    private static void deleteRecursive(Path dir) {
+        if (!Files.exists(dir)) return;
+        try (var stream = Files.walk(dir)) {
+            stream.sorted(Comparator.reverseOrder()).forEach(p -> {
+                try {
+                    Files.delete(p);
+                } catch (IOException ignored) {
+                    // best-effort cleanup
+                }
+            });
+        } catch (IOException ignored) {
+            // best-effort cleanup
+        }
+    }
+
     // Edge curves: a cylinder's rims are circles of its radius about a cap centre in a unit
     // frame, a whole turn each; a cuboid's edges are lines whose origin + x is the far end;
     // an extruded closed spline keeps a nurbs edge with knots = poles + degree + 1.
@@ -1067,6 +1572,41 @@ public final class Smoke {
                         fail("intersect: an overlap ring leaves the shared band: " + shared.overlaps().get(0));
             }
             System.out.println("intersect: " + found + " (" + ellipses + " ellipses); " + shared.overlaps().get(0));
+        }
+    }
+
+    // The collider: two cuboids overlapping by 2 along x, plus one far away -> one hit (0, 1),
+    // depth 2, solid() non-null.
+    private static void collider() {
+        double[] xy0 = {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1};
+        try (Blacksmith.Solid partA = Blacksmith.Solid.cuboid(4, 4, 4);
+             Blacksmith.Solid partB = Blacksmith.Solid.cuboid(4, 4, 4).translate(2, 0, 0);
+             Blacksmith.Solid partC = Blacksmith.Solid.cuboid(4, 4, 4).translate(100, 0, 0)) {
+            Blacksmith.Box boxA = partA.boundsBox();
+            Blacksmith.Box boxB = partB.boundsBox();
+            if (!boxA.overlaps(boxB)) fail("collider: the two overlapping cuboids' bounds boxes do not overlap");
+            try (Blacksmith.Collider collider = new Blacksmith.Collider(new Blacksmith.Solid[] {partA, partB, partC})) {
+                if (collider.groupCount() != 3) fail("collider: the group count is not one per part");
+                List<Blacksmith.CollisionHit> hits = collider.check(new double[][] {xy0, xy0, xy0});
+                if (hits.size() != 1) fail("collider: found other than one hit: " + hits);
+                Blacksmith.CollisionHit hit = hits.get(0);
+                if (hit.a != 0 || hit.b != 1) fail("collider: the hit does not name parts 0 and 1: " + hit);
+                if (!hit.overlap || !"overlap".equals(hit.kind) || !hit.text.isEmpty())
+                    fail("collider: the hit is not a clean overlap: " + hit);
+                if (Math.abs(hit.depth - 2.0) > 1e-9) fail("collider: the hit's depth is not exactly 2: " + hit);
+                try (Blacksmith.Solid overlapSolid = hit.solid()) {
+                    if (overlapSolid.faces() == 0) fail("collider: the hit's rebuilt solid has no faces");
+                }
+                Blacksmith.ColliderStats stats = collider.stats();
+                if (stats.considered() != 3) fail("collider: the stats do not consider all three pairs: " + stats);
+                System.out.println("collider: " + hits.size() + " hit(s), depth " + hit.depth + ", " + stats);
+            }
+            try (Blacksmith.Collider shortGroups =
+                    new Blacksmith.Collider(new Blacksmith.Solid[] {partA, partB, partC}, 0.05, new int[] {0, 1}, null)) {
+                fail("collider: a short groups list was accepted");
+            } catch (Blacksmith.BuildException e) {
+                if (!e.getMessage().contains("groups must have one entry per solid")) throw e;
+            }
         }
     }
 
@@ -1351,10 +1891,225 @@ public final class Smoke {
                 System.out.println("mechanism: read-back through arm.toScene() matches links, joints and diagnostics");
             }
 
+            // Pairs: Assembly.pair/Assembly.state/Assembly.base and the static
+            // Blacksmith.pairFreedomCount, at parity with the Python reference's _paired()
+            // fixture and its tests (spec 2026-09-29). Built on bracket/arm before "back" is
+            // added below: a joint with no pair refuses stepText(), so facts 1-6 and 9's
+            // diagnostics check need arm without it.
+            bracket.pair("screw", "prismatic", Blacksmith.Frame.xy(new double[] {1, 2, 3}),
+                    new Blacksmith.PairOptions(Blacksmith.Frame.xy(new double[] {4, 2, 3}), null, null));
+            arm.pair("shoulder", "revolute", Blacksmith.Frame.xy(new double[] {0, 0, 10}),
+                    new Blacksmith.PairOptions(null, List.of(new Blacksmith.Range(-1.5, 1.5)), null));
+            arm.state("reach", List.of(new Blacksmith.StateRow("shoulder", new double[] {0.5})));
+            arm.base("ground");
+
+            // Fact 1: the pair/state entity counts in the default schema.
+            String pairedStepText = arm.stepText();
+            int mechReprCount = countOf(pairedStepText, "=MECHANISM_REPRESENTATION(");
+            int pairRelCount = countOf(pairedStepText, "=PAIR_REPRESENTATION_RELATIONSHIP(");
+            int revoluteRangeCount = countOf(pairedStepText, "REVOLUTE_PAIR_WITH_RANGE");
+            int prismaticCount = countOf(pairedStepText, "PRISMATIC_PAIR");
+            int kinPropCount = countOf(pairedStepText, "=KINEMATIC_PROPERTY_MECHANISM_REPRESENTATION(");
+            int mechStateCount = countOf(pairedStepText, "=MECHANISM_STATE_REPRESENTATION(");
+            if (mechReprCount != 2 || pairRelCount != 2 || revoluteRangeCount != 1 || prismaticCount != 1
+                    || kinPropCount != 1 || mechStateCount != 1)
+                fail("pairs: arm.stepText() has " + mechReprCount + " mechanism reps, " + pairRelCount + " pair rels, "
+                        + revoluteRangeCount + " revolute-with-range, " + prismaticCount + " prismatic, " + kinPropCount
+                        + " kinematic property reps, " + mechStateCount + " mechanism states, not 2/2/1/1/1/1");
+            System.out.println("pairs: arm.stepText() writes " + mechReprCount + " mechanism reps, " + pairRelCount
+                    + " pair rels, " + revoluteRangeCount + " revolute-with-range, " + prismaticCount + " prismatic, "
+                    + kinPropCount + " kinematic property reps, " + mechStateCount + " mechanism states");
+
+            // Facts 2-6 and 9 (diagnostics half): read back through the reader.
+            try (Cad.Scene pairedScene = arm.toScene()) {
+                Cad.Joint shoulder = pairedScene.joints().stream().filter(j -> j.name().equals("shoulder")).findFirst().orElseThrow();
+                Cad.Pair shoulderPair = shoulder.pair();
+                if (shoulderPair == null) fail("pairs: shoulder has no pair");
+                if (shoulderPair.kind() != Cad.PairKind.REVOLUTE) fail("pairs: shoulder's pair is not revolute");
+                for (double[][] frame : new double[][][] {shoulderPair.frameStart(), shoulderPair.frameEnd()}) {
+                    if (!close(frame[0][3], 0.0) || !close(frame[1][3], 0.0) || !close(frame[2][3], 10.0)
+                            || !close(frame[0][2], 0.0) || !close(frame[1][2], 0.0) || !close(frame[2][2], 1.0))
+                        fail("pairs: shoulder's pair frames are not at (0,0,10) with z (0,0,1)");
+                }
+                List<Cad.Freedom> shoulderFreedoms = shoulderPair.freedoms();
+                if (shoulderFreedoms.size() != 1 || shoulderFreedoms.get(0).motion() != Cad.Motion.ROTATION
+                        || shoulderFreedoms.get(0).axis() != Cad.FreedomAxis.Z
+                        || shoulderFreedoms.get(0).lower() == null || !close(shoulderFreedoms.get(0).lower(), -1.5)
+                        || shoulderFreedoms.get(0).upper() == null || !close(shoulderFreedoms.get(0).upper(), 1.5))
+                    fail("pairs: shoulder's pair is not one rotation-about-z freedom ranged [-1.5, 1.5]");
+                System.out.println("pairs: shoulder's pair is revolute, one rotation-about-z freedom ranged [-1.5, 1.5]");
+
+                Cad.Joint screw = pairedScene.joints().stream().filter(j -> j.name().equals("screw")).findFirst().orElseThrow();
+                Cad.Pair screwPair = screw.pair();
+                if (screwPair == null) fail("pairs: screw has no pair");
+                if (screwPair.kind() != Cad.PairKind.PRISMATIC) fail("pairs: screw's pair is not prismatic");
+                for (Cad.Freedom f : screwPair.freedoms())
+                    if (f.lower() != null || f.upper() != null) fail("pairs: screw's pair has a ranged freedom");
+                if (!close(screwPair.frameStart()[0][3], 1.0) || !close(screwPair.frameStart()[1][3], 2.0) || !close(screwPair.frameStart()[2][3], 13.0)
+                        || !close(screwPair.frameEnd()[0][3], 4.0) || !close(screwPair.frameEnd()[1][3], 2.0) || !close(screwPair.frameEnd()[2][3], 13.0))
+                    fail("pairs: screw's pair frames are not (1,2,13) to (4,2,13)");
+                System.out.println("pairs: screw's pair is prismatic with no ranges, frames (1,2,13) to (4,2,13)");
+
+                Cad.Link pairedBase = pairedScene.base();
+                if (pairedBase == null || !pairedBase.name().equals("ground")) fail("pairs: the scene's base is not 'ground'");
+                List<Cad.State> pairedStates = pairedScene.states();
+                if (pairedStates.size() != 1 || !pairedStates.get(0).name().equals("reach"))
+                    fail("pairs: the scene does not carry exactly one state named 'reach'");
+                List<Cad.StateValue> reachValues = pairedStates.get(0).values();
+                if (reachValues.size() != 1 || !reachValues.get(0).joint().name().equals("shoulder")
+                        || reachValues.get(0).values().length != 1 || !close(reachValues.get(0).values()[0], 0.5))
+                    fail("pairs: state 'reach' is not exactly one row (shoulder, [0.5])");
+                System.out.println("pairs: the scene's base is 'ground', with one state 'reach' of (shoulder, [0.5])");
+
+                // Fact 5: poseState(reach) carries the pin node to (5cos0.5-5sin0.5, 5sin0.5+5cos0.5, 2).
+                Cad.Pose reachPose = pairedScene.poseState(pairedStates.get(0));
+                Cad.Link upperArmLink = pairedScene.links().stream().filter(l -> l.name().equals("upper arm")).findFirst().orElseThrow();
+                Cad.Node pinNode = upperArmLink.nodes().stream()
+                        .filter(n -> close(n.transform()[0][3], 5.0) && close(n.transform()[1][3], 5.0) && close(n.transform()[2][3], 2.0))
+                        .findFirst().orElseThrow();
+                double[][] posedPin = reachPose.transform(pinNode);
+                double wantX = 5 * Math.cos(0.5) - 5 * Math.sin(0.5);
+                double wantY = 5 * Math.sin(0.5) + 5 * Math.cos(0.5);
+                if (!close(posedPin[0][3], wantX) || !close(posedPin[1][3], wantY) || !close(posedPin[2][3], 2.0))
+                    fail("pairs: poseState(reach) did not carry the pin node to the expected point");
+                System.out.println("pairs: poseState(reach) carries the pin node to the expected point");
+
+                // Fact 6: pose([(screw, [3.0])]) leaves every 'bolts' node at rest; [5.0] moves by (2,0,0).
+                Cad.Pose pose3 = pairedScene.pose(List.of(new Cad.StateValue(screw, new double[] {3.0})));
+                Cad.Pose pose5 = pairedScene.pose(List.of(new Cad.StateValue(screw, new double[] {5.0})));
+                Cad.Link bolts = pairedScene.links().stream().filter(l -> l.name().equals("bolts")).findFirst().orElseThrow();
+                for (Cad.Node node : bolts.nodes()) {
+                    double[][] rest = node.transform();
+                    double[][] at3 = pose3.transform(node);
+                    double[][] at5 = pose5.transform(node);
+                    if (!close(at3[0][3], rest[0][3]) || !close(at3[1][3], rest[1][3]) || !close(at3[2][3], rest[2][3]))
+                        fail("pairs: pose([(screw, [3.0])]) moved a 'bolts' node off rest");
+                    if (!close(at5[0][3], rest[0][3] + 2.0) || !close(at5[1][3], rest[1][3]) || !close(at5[2][3], rest[2][3]))
+                        fail("pairs: pose([(screw, [5.0])]) did not move a 'bolts' node by (2,0,0)");
+                }
+                System.out.println("pairs: pose([(screw, [3.0])]) rests, pose([(screw, [5.0])]) moves 'bolts' by (2,0,0)");
+
+                // Fact 9 (diagnostics half): no diagnostic names kinematics.
+                for (String d : pairedScene.diagnostics())
+                    if (d.startsWith("kinematics:")) fail("pairs: the paired scene carries a kinematics: diagnostic");
+            }
+
+            // Motion sequences, written: a state rest and a swing over rest and reach, read back.
+            arm.state("rest", List.of(new Blacksmith.StateRow("shoulder", new double[] {0.0})));
+            arm.sequence("swing", List.of(new Blacksmith.SequenceSegment("rest", 0.0, "linear"),
+                    new Blacksmith.SequenceSegment("reach", 1.0, "linear")), true);
+            try (Cad.Scene swingScene = arm.toScene()) {
+                List<Cad.Sequence> written = swingScene.sequences();
+                if (written.size() != 1 || !written.get(0).name().equals("swing") || !written.get(0).closed()
+                        || written.get(0).secondsPerUnit() == null || written.get(0).secondsPerUnit().doubleValue() != 1.0)
+                    fail("sequences: the written swing did not read back closed at 1 second per unit");
+                List<Cad.Segment> writtenSegments = written.get(0).segments();
+                if (writtenSegments.size() != 2
+                        || !writtenSegments.get(0).state().name().equals("rest") || writtenSegments.get(0).t() != 0.0 || !writtenSegments.get(0).interpolation().equals("linear")
+                        || !writtenSegments.get(1).state().name().equals("reach") || writtenSegments.get(1).t() != 1.0 || !writtenSegments.get(1).interpolation().equals("linear"))
+                    fail("sequences: the written swing's segments are not rest@0 then reach@1, linear");
+            }
+            try {
+                arm.sequence("bad", List.of(new Blacksmith.SequenceSegment("rest", 0.0, "linear"),
+                        new Blacksmith.SequenceSegment("nowhere", 1.0, "linear")), false);
+                fail("sequences: a sequence over an unknown state was accepted");
+            } catch (Blacksmith.BuildException e) {
+                if (!e.getMessage().equals("sequence: assembly 'arm' has no state named 'nowhere'"))
+                    fail("sequences: a sequence over an unknown state was not refused exactly: " + e.getMessage());
+            }
+            System.out.println("sequences: Assembly.sequence round-trips and refuses an unknown state exactly");
+
             // Fact 4: the reverse pair is a new joint.
             arm.joint("back", "upper arm", "ground");
             System.out.println("mechanism: the reverse pair (\"back\") is accepted as a new joint");
+
+            // Fact 7: the eight bad pair/state/base calls are refused with exactly their
+            // message, and Fact 8's unpaired-joint refusal ("back" has no pair) stays
+            // byte-identical before and after -- proof none of them mutated "back", or
+            // anything else stepText() would notice, even though a wholly valid stepText()
+            // snapshot is unavailable while "back" has no pair.
+            String pairedBefore = pairedUnpairedMessage(arm);
+            record PairRefusal(Runnable call, String message) {}
+            List<PairRefusal> pairRefusals = List.of(
+                    new PairRefusal(() -> arm.pair("shoulder", "revolute", Blacksmith.Frame.xy(new double[] {0, 0, 10})),
+                            "pair: joint 'shoulder' already has a pair"),
+                    new PairRefusal(() -> arm.pair("back", "orbital", Blacksmith.Frame.xy()),
+                            "pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, spherical, "
+                                    + "spherical_with_pin, planar, universal, homokinetic, fully_constrained, unconstrained)"),
+                    new PairRefusal(() -> arm.pair("back", "screw", Blacksmith.Frame.xy()), "pair: a screw needs a non-zero pitch"),
+                    new PairRefusal(() -> arm.pair("back", "revolute", Blacksmith.Frame.xy(),
+                            new Blacksmith.PairOptions(null, List.of(new Blacksmith.Range(-1.0, 1.0), new Blacksmith.Range(-1.0, 1.0)), null)),
+                            "pair: 'revolute' has 1 freedoms, but 2 ranges were given"),
+                    new PairRefusal(() -> arm.pair("back", "revolute", Blacksmith.Frame.xy(),
+                            new Blacksmith.PairOptions(null, List.of(new Blacksmith.Range(1.0, -1.0)), null)),
+                            "pair: range 0 of joint 'back' has lower >= upper"),
+                    new PairRefusal(() -> arm.pair("back", "prismatic",
+                            Blacksmith.Frame.at(new double[3], new double[] {0, 0, 1}, new double[] {0, 1, 0}),
+                            new Blacksmith.PairOptions(Blacksmith.Frame.xy(), null, null)),
+                            "pair: joint 'back' is prismatic, but its end frame is turned 90\u00b0 about -z, "
+                                    + "which prismatic (does not turn) cannot make"),
+                    new PairRefusal(() -> arm.state("overreach", List.of(new Blacksmith.StateRow("shoulder", new double[] {5.0}))),
+                            "state: value 0 of joint 'shoulder' is outside its range"),
+                    new PairRefusal(() -> arm.base("upper arm"), "base: assembly 'arm' already has base 'ground'"));
+            for (PairRefusal r : pairRefusals) {
+                try {
+                    r.call().run();
+                    fail("pairs: \"" + r.message() + "\" was accepted");
+                } catch (Blacksmith.BuildException e) {
+                    if (!r.message().equals(e.getMessage())) fail("pairs: got \"" + e.getMessage() + "\", not \"" + r.message() + "\"");
+                }
+            }
+            System.out.println("pairs: all eight bad pair/state/base calls are refused with their exact message");
+
+            // Fact 8: joint "back" with no pair refuses stepText() with exactly this message.
+            String noPairMessage = "assembly_step: assembly 'arm': joint 'back' has no pair; "
+                    + "a mechanism with pairs needs one on every joint (AP242)";
+            if (!pairedBefore.equals(noPairMessage))
+                fail("pairs: stepText()'s unpaired-joint refusal is \"" + pairedBefore + "\", not the expected text");
+            String pairedAfter = pairedUnpairedMessage(arm);
+            if (!pairedAfter.equals(pairedBefore)) fail("pairs: a refused pair/state/base call changed the unpaired-joint refusal");
+            System.out.println("pairs: joint 'back' with no pair refuses stepText() with exactly its message, unchanged by any refusal above");
+
+            // Fact 9 (freedom-count half): Blacksmith.pairFreedomCount.
+            if (Blacksmith.pairFreedomCount("spherical") != 3 || Blacksmith.pairFreedomCount("revolute") != 1
+                    || Blacksmith.pairFreedomCount("fully_constrained") != 0 || Blacksmith.pairFreedomCount("not_a_kind") != 0)
+                fail("pairs: Blacksmith.pairFreedomCount does not give 3/1/0/0 for spherical/revolute/fully_constrained/unknown");
+            System.out.println("pairs: Blacksmith.pairFreedomCount gives 3/1/0/0 for spherical/revolute/fully_constrained/an unknown name");
+
+            // Fact 10 (controller ruling, added after review): a one-sided range survives
+            // the round trip. Without has_lower/has_upper actually carried (an
+            // implementation that always sends true for both would pass every other fact),
+            // joint "j"'s freedom would come back with a lower limit it was never given.
+            try (Blacksmith.Assembly hinge = new Blacksmith.Assembly("hinge")) {
+                hinge.place(mechPlate, Blacksmith.Frame.xy().toArray(), "base");
+                hinge.place(mechBolt, Blacksmith.Frame.xy(new double[] {0, 0, 2}).toArray(), "arm");
+                hinge.link("base", "base");
+                hinge.link("arm", "arm");
+                hinge.joint("j", "base", "arm");
+                hinge.pair("j", "revolute", Blacksmith.Frame.xy(),
+                        new Blacksmith.PairOptions(null, List.of(new Blacksmith.Range(null, 1.0)), null));
+                try (Cad.Scene hingeScene = hinge.toScene()) {
+                    Cad.Joint hingeJoint = hingeScene.joints().stream().filter(j -> j.name().equals("j")).findFirst().orElseThrow();
+                    Cad.Pair hingePair = hingeJoint.pair();
+                    if (hingePair == null) fail("pairs: hinge joint 'j' has no pair");
+                    List<Cad.Freedom> hingeFreedoms = hingePair.freedoms();
+                    if (hingeFreedoms.size() != 1 || hingeFreedoms.get(0).lower() != null
+                            || hingeFreedoms.get(0).upper() == null || !close(hingeFreedoms.get(0).upper(), 1.0))
+                        fail("pairs: hinge joint 'j' is not one freedom with no lower limit and upper exactly 1.0");
+                    System.out.println("pairs: a one-sided range (no lower, upper 1.0) survives the round trip");
+                }
+            }
         }
+    }
+
+    private static String pairedUnpairedMessage(Blacksmith.Assembly arm) {
+        try {
+            arm.stepText();
+        } catch (Blacksmith.BuildException e) {
+            return e.getMessage();
+        }
+        fail("pairs: arm.stepText() with an unpaired joint 'back' was accepted");
+        return null;
     }
 
     // A refused link or joint changes nothing: STEP text compared with every FILE_NAME( line
@@ -1536,5 +2291,13 @@ public final class Smoke {
 
     private static boolean close(double a, double b) {
         return Math.abs(a - b) <= 1e-9;
+    }
+
+    // The point (x, y, z) carried by the row-major 4x4 matrix m -- rotation columns, then origin.
+    private static double[] apply(double[][] m, double x, double y, double z) {
+        return new double[]{
+                m[0][0] * x + m[0][1] * y + m[0][2] * z + m[0][3],
+                m[1][0] * x + m[1][1] * y + m[1][2] * z + m[1][3],
+                m[2][0] * x + m[2][1] * y + m[2][2] * z + m[2][3]};
     }
 }

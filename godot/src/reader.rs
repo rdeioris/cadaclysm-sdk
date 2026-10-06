@@ -106,6 +106,28 @@ fn bounds(b: sdk::Bounds) -> Aabb {
     aabb(b.min, b.max)
 }
 
+/// A posed mechanism's contents, copied out of `sdk::Pose` (which borrows the scene) into
+/// owned data `CadaclysmPose::wrap` can hold past the call that made it -- the Rust SDK's
+/// own eager copy (ruling 2 of the posing plan), read here rather than re-copied.
+struct PoseData {
+    ground: u32,
+    unsolved: Vec<u32>,
+    out_of_range: Vec<(u32, u32, f64)>,
+    transforms: Vec<[f64; 16]>,
+}
+
+fn pose_data(s: &sdk::Scene, p: &sdk::Pose<'_>) -> PoseData {
+    let node_count = s.len() as u32;
+    PoseData {
+        ground: p.ground.index(),
+        unsolved: p.unsolved.iter().map(|j| j.index()).collect(),
+        out_of_range: p.out_of_range.iter().map(|(j, freedom, value)| (j.index(), *freedom, *value)).collect(),
+        transforms: (0..node_count)
+            .map(|i| p.raw_transform(s.node(i).expect("i < node_count")))
+            .collect(),
+    }
+}
+
 pub(crate) fn strings(items: impl IntoIterator<Item = impl AsRef<str>>) -> PackedStringArray {
     items.into_iter().map(|s| GString::from(s.as_ref())).collect()
 }
@@ -262,8 +284,9 @@ fn number(v: &Variant, key: &str) -> Result<f64, String> {
     }
 }
 
-/// A colour a `svg_text`/`svg` option may give: a `Color`, `"#rgb"`/`"#rrggbb"`, or an
-/// already packed `0xRRGGBB` int, as `CadaclysmSvgOptions.stroke`/`background` want it.
+/// A colour a `svg_text`/`svg` option may give: a `Color`, `"#rgb"`/`"#rrggbb"`/a CSS
+/// colour name, or an already packed `0xRRGGBB` int, as
+/// `CadaclysmSvgOptions.stroke`/`background` want it.
 fn packed_colour(v: &Variant, what: &str) -> Option<u32> {
     match v.get_type() {
         VariantType::COLOR => {
@@ -274,14 +297,13 @@ fn packed_colour(v: &Variant, what: &str) -> Option<u32> {
         VariantType::INT => Some(v.to::<i64>() as u32),
         VariantType::STRING | VariantType::STRING_NAME => {
             let text = v.to_string();
-            let hex = text.strip_prefix('#').unwrap_or(&text);
-            let hex = if hex.len() == 3 { hex.chars().flat_map(|c| [c, c]).collect::<String>() } else { hex.to_string() };
-            match (hex.len(), u32::from_str_radix(&hex, 16)) {
-                (6, Ok(value)) => Some(value),
-                _ => fail(format!("{what}: colour must be '#rrggbb' or a Color, not {text:?}")),
+            match sdk::packed(&text) {
+                Ok(value) => Some(value),
+                // sdk::packed's own error already starts with "colour: ..."; don't double it.
+                Err(_) => fail(format!("{what}: a colour is \"#rgb\", \"#rrggbb\" or a CSS colour name, not '{text}'")),
             }
         }
-        _ => fail(format!("{what}: colour must be '#rrggbb' or a Color")),
+        _ => fail(format!("{what}: colour must be '#rrggbb', a CSS colour name or a Color")),
     }
 }
 
@@ -292,7 +314,24 @@ fn packed_colour(v: &Variant, what: &str) -> Option<u32> {
 /// it. See `CadaclysmScene.svg_text_with`'s doc for every key.
 pub(crate) fn svg_options(options: &VarDictionary) -> Option<sdk::SvgOptions> {
     let mut known =
-        vec!["view", "az", "el", "up", "fov", "size", "margin", "tolerance", "stroke", "width", "background", "edges", "curves", "isocurves", "polylines"];
+        vec![
+            "view",
+            "az",
+            "el",
+            "up",
+            "fov",
+            "size",
+            "margin",
+            "tolerance",
+            "stroke",
+            "width",
+            "background",
+            "edges",
+            "curves",
+            "isocurves",
+            "polylines",
+            "silhouettes",
+        ];
     known.sort_unstable();
     for key in options.keys_array().iter_shared() {
         let key = key.to_string();
@@ -371,6 +410,10 @@ pub(crate) fn svg_options(options: &VarDictionary) -> Option<sdk::SvgOptions> {
     opts.curves = flag("curves", false);
     opts.isocurves = flag("isocurves", false);
     opts.polylines = flag("polylines", false);
+    // On by default, as the library is: a sphere's and a torus's only curves are their
+    // seams, which are not edges of the body and are never drawn, so without the
+    // outline those two draw a blank page.
+    opts.silhouettes = flag("silhouettes", true);
     Some(opts)
 }
 
@@ -509,6 +552,10 @@ pub struct CadaclysmScene {
     joints: PhantomVar<Array<Gd<CadaclysmJoint>>>,
     #[var(get = get_states, no_set)]
     states: PhantomVar<Array<Gd<CadaclysmState>>>,
+    #[var(get = get_sequences, no_set)]
+    sequences: PhantomVar<Array<Gd<CadaclysmSequence>>>,
+    #[var(get = get_base, no_set)]
+    base: PhantomVar<Option<Gd<CadaclysmLink>>>,
     #[var(get = get_realized, no_set)]
     realized: PhantomVar<i64>,
     #[var(get = get_realize_total, no_set)]
@@ -540,6 +587,8 @@ impl CadaclysmScene {
             links: PhantomVar::default(),
             joints: PhantomVar::default(),
             states: PhantomVar::default(),
+            sequences: PhantomVar::default(),
+            base: PhantomVar::default(),
             realized: PhantomVar::default(),
             realize_total: PhantomVar::default(),
         })
@@ -557,7 +606,7 @@ impl CadaclysmScene {
 #[godot_api]
 impl CadaclysmScene {
     /// Open a CAD file: STEP, IGES, IFC, Rhino 3dm, ACIS SAT, OCCT BREP, OpenSCAD, or a
-    /// `.zip` holding one, read Y up in metres (Godot's own space). `res://` and
+    /// `.zip`, `.stpZ` or `.gz` (`part.step.gz`) holding one, read Y up in metres (Godot's own space). `res://` and
     /// `user://` paths work, in the editor and in an exported game alike.
     ///
     /// Returns `null` on failure; `Cadaclysm.last_error()` says why.
@@ -758,6 +807,88 @@ impl CadaclysmScene {
         raw.into_iter().map(|(index, name, values)| CadaclysmState::wrap(self.shared.clone(), index, name, values)).collect()
     }
 
+    /// The file's motion sequences: each an `INTERPOLATED_CONFIGURATION_SEQUENCE`. Empty
+    /// where the file records none.
+    #[func]
+    fn get_sequences(&self) -> Array<Gd<CadaclysmSequence>> {
+        let raw = with_scene(&self.shared, |s| {
+            s.sequences()
+                .into_iter()
+                .map(|q| {
+                    let segments: Vec<(u32, f64, &'static str)> =
+                        q.segments.iter().map(|g| (g.state.index, g.t, g.interpolation.name())).collect();
+                    (q.index, q.name.clone(), q.closed, q.seconds_per_unit, segments)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+        raw.into_iter()
+            .map(|(index, name, closed, seconds, segments)| CadaclysmSequence::wrap(self.shared.clone(), index, name, closed, seconds, segments))
+            .collect()
+    }
+
+    /// The link the file declares as the mechanism's base, or `null` when it declares
+    /// none (the default ground is then the link on the most joints; see `pose`).
+    #[func]
+    fn get_base(&self) -> Option<Gd<CadaclysmLink>> {
+        with_scene(&self.shared, |s| s.base().map(|l| l.index())).flatten().map(|i| CadaclysmLink::wrap(self.shared.clone(), i))
+    }
+
+    /// The mechanism posed by `values` -- one row per joint to set, each a
+    /// `CadaclysmStateValue` naming the joint and giving one value per freedom of its
+    /// pair, exactly what `CadaclysmState.values` holds, so `pose(state.values)` poses
+    /// like `pose_state(state)` -- with `ground` (a `CadaclysmLink`, or `null` for the
+    /// default ground) held fixed. Values outside a freedom's range are used as given
+    /// and reported in the answer's `out_of_range`.
+    ///
+    /// `null` on a bad row (a joint given twice, one with the wrong number of values,
+    /// ...) or a file with no mechanism; `Cadaclysm.last_error()` says why.
+    #[func]
+    fn pose(&self, values: Array<Gd<CadaclysmStateValue>>, ground: Option<Gd<CadaclysmLink>>) -> Option<Gd<CadaclysmPose>> {
+        let rows: Vec<(u32, Vec<f64>)> = values.iter_shared().map(|v| { let b = v.bind(); (b.joint, b.values.clone()) }).collect();
+        let ground_index = ground.map(|g| g.bind().index);
+        let result = with_scene(&self.shared, |s| {
+            let joints = s.joints();
+            let mut state_values = Vec::with_capacity(rows.len());
+            for (joint_index, row_values) in &rows {
+                match joints.get(*joint_index as usize) {
+                    Some(joint) => state_values.push(sdk::StateValue { joint: *joint, values: row_values.clone() }),
+                    None => return Err(format!("no joint {joint_index}")),
+                }
+            }
+            let ground_link = match ground_index {
+                Some(i) => match s.links().get(i as usize) {
+                    Some(link) => Some(*link),
+                    None => return Err(format!("no link {i}")),
+                },
+                None => None,
+            };
+            s.pose(&state_values, ground_link).map(|p| pose_data(s, &p)).map_err(|e| e.to_string())
+        });
+        result.and_then(ok).map(|data| CadaclysmPose::wrap(self.shared.clone(), data))
+    }
+
+    /// The mechanism posed by `state`'s values, with `ground` held fixed as `pose`
+    /// does. `null` as `pose` does.
+    #[func]
+    fn pose_state(&self, state: Gd<CadaclysmState>, ground: Option<Gd<CadaclysmLink>>) -> Option<Gd<CadaclysmPose>> {
+        let state_index = state.bind().index;
+        let ground_index = ground.map(|g| g.bind().index);
+        let result = with_scene(&self.shared, |s| {
+            let states = s.states();
+            let Some(state) = states.get(state_index as usize) else { return Err(format!("no state {state_index}")) };
+            let ground_link = match ground_index {
+                Some(i) => match s.links().get(i as usize) {
+                    Some(link) => Some(*link),
+                    None => return Err(format!("no link {i}")),
+                },
+                None => None,
+            };
+            s.pose_state(state, ground_link).map(|p| pose_data(s, &p)).map_err(|e| e.to_string())
+        });
+        result.and_then(ok).map(|data| CadaclysmPose::wrap(self.shared.clone(), data))
+    }
+
     /// Mesh every body now (in parallel inside the library) rather than one by one on
     /// first use. Returns how many were meshed.
     #[func]
@@ -833,7 +964,7 @@ impl CadaclysmScene {
     /// the default, is orthographic), `size` (a `Vector2` or `[width, height]`, `0` is
     /// `1000`), `margin` (fraction of the content's extent left each side, default
     /// `0.05`), `tolerance` (how far a written curve may stray, in page units, default
-    /// `0.1`), `stroke` (a `Color`, `"#rrggbb"` or a packed int, default black),
+    /// `0.1`), `stroke` (a `Color`, `"#rrggbb"`, a CSS colour name or a packed int, default black),
     /// `width` (the stroke's, in page units, default `1`), `background` (as `stroke`,
     /// left out for none), `edges`, `curves`, `isocurves`, `polylines` (which line
     /// sets are drawn; edges alone by default).
@@ -1683,6 +1814,18 @@ impl CadaclysmStateValue {
 
 #[godot_api]
 impl CadaclysmStateValue {
+    /// Build a row for `CadaclysmScene.pose`: `joint` set to `values`, one number per
+    /// freedom of its pair -- what a `state.values` row already is, and what this
+    /// builds fresh for a `pose` call that does not start from a `CadaclysmState`.
+    #[func]
+    fn create(joint: Gd<CadaclysmJoint>, values: PackedFloat64Array) -> Gd<CadaclysmStateValue> {
+        let (shared, index) = {
+            let bound = joint.bind();
+            (bound.shared.clone(), bound.index)
+        };
+        CadaclysmStateValue::wrap(shared, index, values.as_slice().to_vec())
+    }
+
     /// The joint this row sets.
     #[func]
     fn get_joint(&self) -> Gd<CadaclysmJoint> {
@@ -1744,6 +1887,269 @@ impl CadaclysmState {
     #[func]
     fn get_values(&self) -> Array<Gd<CadaclysmStateValue>> {
         self.values.iter().map(|(joint, values)| CadaclysmStateValue::wrap(self.shared.clone(), *joint, values.clone())).collect()
+    }
+}
+
+/// One step of a `CadaclysmSequence`: the state it reaches, its parameter, and how the
+/// motion leaves it. From `CadaclysmSequence.segments`.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmSegment {
+    state: Gd<CadaclysmState>,
+    t: f64,
+    interpolation: &'static str,
+    #[var(rename = state, get = get_state, no_set)]
+    state_: PhantomVar<Gd<CadaclysmState>>,
+    #[var(rename = t, get = get_t, no_set)]
+    t_: PhantomVar<f64>,
+    #[var(rename = interpolation, get = get_interpolation, no_set)]
+    interpolation_: PhantomVar<GString>,
+}
+
+#[godot_api]
+impl CadaclysmSegment {
+    /// The state this segment reaches.
+    #[func]
+    fn get_state(&self) -> Gd<CadaclysmState> {
+        self.state.clone()
+    }
+
+    /// This segment's parameter.
+    #[func]
+    fn get_t(&self) -> f64 {
+        self.t
+    }
+
+    /// How the motion leaves this segment: `"undefined"`, `"discontinuous"`,
+    /// `"synchronous"` or `"linear"`.
+    #[func]
+    fn get_interpolation(&self) -> GString {
+        gs(self.interpolation)
+    }
+}
+
+/// A motion the file records: an `INTERPOLATED_CONFIGURATION_SEQUENCE`. From
+/// `CadaclysmScene.sequences`. `pose` poses the mechanism at a parameter.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmSequence {
+    shared: Shared,
+    index: u32,
+    name: String,
+    closed: bool,
+    seconds_per_unit: Option<f64>,
+    segments: Vec<(u32, f64, &'static str)>,
+    #[var(rename = index, get = get_index, no_set)]
+    index_: PhantomVar<i64>,
+    #[var(rename = name, get = get_name, no_set)]
+    name_: PhantomVar<GString>,
+    #[var(rename = closed, get = get_closed, no_set)]
+    closed_: PhantomVar<bool>,
+    #[var(rename = seconds_per_unit, get = get_seconds_per_unit, no_set)]
+    seconds_per_unit_: PhantomVar<f64>,
+    #[var(rename = segments, get = get_segments, no_set)]
+    segments_: PhantomVar<Array<Gd<CadaclysmSegment>>>,
+    #[var(rename = start, get = get_start, no_set)]
+    start_: PhantomVar<f64>,
+    #[var(rename = end, get = get_end, no_set)]
+    end_: PhantomVar<f64>,
+}
+
+impl CadaclysmSequence {
+    fn wrap(
+        shared: Shared,
+        index: u32,
+        name: String,
+        closed: bool,
+        seconds_per_unit: Option<f64>,
+        segments: Vec<(u32, f64, &'static str)>,
+    ) -> Gd<CadaclysmSequence> {
+        Gd::from_object(CadaclysmSequence {
+            shared,
+            index,
+            name,
+            closed,
+            seconds_per_unit,
+            segments,
+            index_: PhantomVar::default(),
+            name_: PhantomVar::default(),
+            closed_: PhantomVar::default(),
+            seconds_per_unit_: PhantomVar::default(),
+            segments_: PhantomVar::default(),
+            start_: PhantomVar::default(),
+            end_: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl CadaclysmSequence {
+    #[func]
+    fn get_index(&self) -> i64 {
+        self.index as i64
+    }
+
+    /// Its name, as the file gives it.
+    #[func]
+    fn get_name(&self) -> GString {
+        gs(&self.name)
+    }
+
+    /// Whether the motion returns to its first segment.
+    #[func]
+    fn get_closed(&self) -> bool {
+        self.closed
+    }
+
+    /// Seconds per parameter unit where the file states a time unit, `NAN` where it
+    /// states none (read the parameter as seconds).
+    #[func]
+    fn get_seconds_per_unit(&self) -> f64 {
+        self.seconds_per_unit.unwrap_or(f64::NAN)
+    }
+
+    /// The steps of the motion, in file order.
+    #[func]
+    fn get_segments(&self) -> Array<Gd<CadaclysmSegment>> {
+        let states = with_scene(&self.shared, |s| {
+            s.states()
+                .into_iter()
+                .map(|st| (st.index, st.name, st.values.into_iter().map(|v| (v.joint.index(), v.values)).collect::<Vec<_>>()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+        self.segments
+            .iter()
+            .filter_map(|(state, t, word)| {
+                let (index, name, values) = states.get(*state as usize)?.clone();
+                Some(Gd::from_object(CadaclysmSegment {
+                    state: CadaclysmState::wrap(self.shared.clone(), index, name, values),
+                    t: *t,
+                    interpolation: word,
+                    state_: PhantomVar::default(),
+                    t_: PhantomVar::default(),
+                    interpolation_: PhantomVar::default(),
+                }))
+            })
+            .collect()
+    }
+
+    /// The first segment's parameter.
+    #[func]
+    fn get_start(&self) -> f64 {
+        self.segments.first().map_or(0.0, |s| s.1)
+    }
+
+    /// The last segment's parameter (the closing span not included).
+    #[func]
+    fn get_end(&self) -> f64 {
+        self.segments.last().map_or(0.0, |s| s.1)
+    }
+
+    /// The mechanism posed by this sequence at parameter `t`, with `ground` (a
+    /// `CadaclysmLink`, or `null` for the default ground) held fixed as
+    /// `CadaclysmScene.pose` does. A closed sequence wraps, each joint looping on its own
+    /// keys. `null` for a `t` that is not finite (`Cadaclysm.last_error()` says why).
+    #[func]
+    fn pose(&self, t: f64, ground: Option<Gd<CadaclysmLink>>) -> Option<Gd<CadaclysmPose>> {
+        let ground_index = ground.map(|g| g.bind().index);
+        let result = with_scene(&self.shared, |s| {
+            let sequences = s.sequences();
+            let Some(sequence) = sequences.get(self.index as usize) else { return Err(format!("no sequence {}", self.index)) };
+            let ground_link = match ground_index {
+                Some(i) => match s.links().get(i as usize) {
+                    Some(link) => Some(*link),
+                    None => return Err(format!("no link {i}")),
+                },
+                None => None,
+            };
+            sequence.pose(t, ground_link).map(|p| pose_data(s, &p)).map_err(|e| e.to_string())
+        });
+        result.and_then(ok).map(|data| CadaclysmPose::wrap(self.shared.clone(), data))
+    }
+}
+
+// ---- CadaclysmPose -----------------------------------------------------------------------
+
+/// A posed mechanism: `CadaclysmScene.pose` or `CadaclysmScene.pose_state`'s answer. The
+/// document itself is unchanged.
+///
+/// Copied eagerly out of the Rust SDK's `sdk::Pose` at construction time (`pose_data`),
+/// which itself copies eagerly out of the C handle (ruling 2 of the posing plan): this
+/// class holds no C pointer and no scene borrow, so it outlives a `CadaclysmScene.close`.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmPose {
+    shared: Shared,
+    data: PoseData,
+    #[var(get = get_ground, no_set)]
+    ground: PhantomVar<Gd<CadaclysmLink>>,
+    #[var(get = get_unsolved, no_set)]
+    unsolved: PhantomVar<Array<Gd<CadaclysmJoint>>>,
+    #[var(get = get_out_of_range, no_set)]
+    out_of_range: PhantomVar<Array<VarDictionary>>,
+}
+
+impl CadaclysmPose {
+    fn wrap(shared: Shared, data: PoseData) -> Gd<CadaclysmPose> {
+        Gd::from_object(CadaclysmPose {
+            shared,
+            data,
+            ground: PhantomVar::default(),
+            unsolved: PhantomVar::default(),
+            out_of_range: PhantomVar::default(),
+        })
+    }
+}
+
+#[godot_api]
+impl CadaclysmPose {
+    /// The link held fixed.
+    #[func]
+    fn get_ground(&self) -> Gd<CadaclysmLink> {
+        CadaclysmLink::wrap(self.shared.clone(), self.data.ground)
+    }
+
+    /// Joints that close a loop and were not honoured, in file order.
+    #[func]
+    fn get_unsolved(&self) -> Array<Gd<CadaclysmJoint>> {
+        self.data.unsolved.iter().map(|&i| CadaclysmJoint::wrap(self.shared.clone(), i)).collect()
+    }
+
+    /// One dictionary per given value that fell outside its freedom's range:
+    /// `{"joint": CadaclysmJoint, "freedom": int, "value": float}`.
+    #[func]
+    fn get_out_of_range(&self) -> Array<VarDictionary> {
+        self.data
+            .out_of_range
+            .iter()
+            .map(|&(joint, freedom, value)| {
+                dict(&[
+                    ("joint", CadaclysmJoint::wrap(self.shared.clone(), joint).to_variant()),
+                    ("freedom", (freedom as i64).to_variant()),
+                    ("value", value.to_variant()),
+                ])
+            })
+            .collect()
+    }
+
+    /// `node`'s posed transform, in the same form `CadaclysmNode.transform` returns.
+    #[func]
+    fn transform(&self, node: Gd<CadaclysmNode>) -> Transform3D {
+        transform(self.raw(&node))
+    }
+
+    /// The same matrix as 16 numbers, column-major, exactly as
+    /// `CadaclysmNode.raw_transform` lays it out.
+    #[func]
+    fn raw_transform(&self, node: Gd<CadaclysmNode>) -> PackedFloat64Array {
+        PackedFloat64Array::from(&self.raw(&node)[..])
+    }
+}
+
+impl CadaclysmPose {
+    fn raw(&self, node: &Gd<CadaclysmNode>) -> [f64; 16] {
+        self.data.transforms[node.bind().index as usize]
     }
 }
 
