@@ -51,7 +51,10 @@ alive through their `.base`, and `free()` (or leaving its own `with` block) is
 what invalidates them, not `Scene.close()`.
 """
 
+from __future__ import annotations
+
 import ctypes
+import datetime
 import decimal
 import enum
 import math
@@ -61,6 +64,58 @@ import re
 import sys
 from ctypes import POINTER, c_bool, c_char_p, c_double, c_float, c_size_t, c_uint32, c_uint64, c_void_p
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, Tuple, Union, cast, overload
+
+if TYPE_CHECKING:
+    # Never imported at run time: numpy stays a lazy import (see `_numpy`), and these
+    # names appear only in annotations, which `from __future__ import annotations`
+    # keeps from ever being evaluated.
+    import numpy
+    from numpy.typing import ArrayLike, NDArray
+    from typing import Literal, TypedDict
+    from typing_extensions import Unpack
+
+    #: A camera direction `VIEWS` names (`cadaclysm_view.VIEWS`).
+    _ViewName = Literal["front", "back", "left", "right", "top", "bottom", "iso"]
+
+#: A colour as a parameter takes it: colour text -- `"#rgb"`, `"#rrggbb"` or a CSS
+#: colour name, read by the library's own parser -- or an `(r, g, b)` triple. Each
+#: parameter's docstring says the triple's range (`Scene.svg`'s is 0..255).
+Colour = Union[str, Tuple[float, float, float]]
+
+if TYPE_CHECKING:
+    class _ShowWords(TypedDict, total=False):
+        """The keywords `Scene.show`, `Scene.view`, `Node.show`/`view` and `Pose.show`/`view` take."""
+
+        view: _ViewName | tuple[float, float]
+        az: float | None
+        el: float | None
+        zoom: float | None
+        up: str | None
+        edges: bool
+        width: int | None
+        height: int | None
+        hint: str | None
+
+    class _SvgWords(TypedDict, total=False):
+        """The keywords `Scene.svg` and `Node.svg` take."""
+
+        view: _ViewName
+        az: float | None
+        el: float | None
+        up: str | None
+        fov: float
+        size: tuple[float, float]
+        margin: float
+        tolerance: float
+        stroke: Colour
+        width: float
+        background: Colour | None
+        edges: bool
+        curves: bool
+        isocurves: bool
+        polylines: bool
+        silhouettes: bool
 
 __all__ = [
     "Attribute",
@@ -71,6 +126,7 @@ __all__ = [
     "Collision",
     "CollisionHull",
     "Convention",
+    "ElementState",
     "FILE_UNITS",
     "FemEdge",
     "FemMesh",
@@ -93,9 +149,14 @@ __all__ = [
     "Segment",
     "Sequence",
     "State",
+    "Task",
+    "TaskLink",
+    "TaskTime",
     "UV_WORLD",
     "ValueKind",
+    "WorkSchedule",
     "build_date",
+    "datetime_of",
     "declared_schema",
     "formats",
     "library_path",
@@ -109,6 +170,7 @@ __all__ = [
     "pick_file",
     "pick_save",
     "resolve_schema",
+    "seconds_of",
     "version",
 ]
 
@@ -592,6 +654,39 @@ class _Freedom(ctypes.Structure):
     ]
 
 
+class _TaskTime(ctypes.Structure):
+    _fields_ = [
+        ("has_schedule_start", c_bool),
+        ("schedule_start", c_double),
+        ("has_schedule_finish", c_bool),
+        ("schedule_finish", c_double),
+        ("has_early_start", c_bool),
+        ("early_start", c_double),
+        ("has_early_finish", c_bool),
+        ("early_finish", c_double),
+        ("has_late_start", c_bool),
+        ("late_start", c_double),
+        ("has_late_finish", c_bool),
+        ("late_finish", c_double),
+        ("has_actual_start", c_bool),
+        ("actual_start", c_double),
+        ("has_actual_finish", c_bool),
+        ("actual_finish", c_double),
+        ("has_duration", c_bool),
+        ("duration", c_double),
+    ]
+
+
+class _ElementState(ctypes.Structure):
+    _fields_ = [
+        ("node", c_uint32),
+        ("phase", c_uint32),
+        ("progress", c_double),
+        ("has_variance", c_bool),
+        ("variance", c_double),
+    ]
+
+
 # ---- loading the library --------------------------------------------------
 
 #: Every entry point in `include/cadaclysm.h`, as `(name, restype, argtypes)`.
@@ -708,6 +803,8 @@ _ENTRY_POINTS = [
     ("cadaclysm_joint_end", c_uint32, [c_void_p, c_uint32]),
     ("cadaclysm_joint_pair_kind", ctypes.c_int32, [c_void_p, c_uint32]),
     ("cadaclysm_joint_pair_type", c_char_p, [c_void_p, c_uint32]),
+    ("cadaclysm_joint_pair_kind_name", c_char_p, [c_void_p, c_uint32]),
+    ("cadaclysm_joint_pair_parameters", c_size_t, [c_void_p, c_uint32, POINTER(c_double), c_size_t]),
     ("cadaclysm_joint_pair_pitch", c_double, [c_void_p, c_uint32]),
     ("cadaclysm_joint_pair_frames", c_bool,
      [c_void_p, c_uint32, POINTER(c_double), POINTER(c_double)]),
@@ -725,6 +822,31 @@ _ENTRY_POINTS = [
     ("cadaclysm_sequence_segment_count", c_uint32, [c_void_p, c_uint32]),
     ("cadaclysm_sequence_segment", c_bool,
      [c_void_p, c_uint32, c_uint32, POINTER(c_uint32), POINTER(c_double), POINTER(c_uint32)]),
+    ("cadaclysm_schedule_count", c_uint32, [c_void_p]),
+    ("cadaclysm_schedule_name", c_char_p, [c_void_p, c_uint32]),
+    ("cadaclysm_schedule_identification", c_char_p, [c_void_p, c_uint32]),
+    ("cadaclysm_schedule_kind", c_uint32, [c_void_p, c_uint32]),
+    ("cadaclysm_schedule_kind_name", c_char_p, [c_void_p, c_uint32]),
+    ("cadaclysm_schedule_start", c_bool, [c_void_p, c_uint32, POINTER(c_double)]),
+    ("cadaclysm_schedule_finish", c_bool, [c_void_p, c_uint32, POINTER(c_double)]),
+    ("cadaclysm_task_count", c_uint32, [c_void_p, c_uint32]),
+    ("cadaclysm_task_name", c_char_p, [c_void_p, c_uint32, c_uint32]),
+    ("cadaclysm_task_identification", c_char_p, [c_void_p, c_uint32, c_uint32]),
+    ("cadaclysm_task_kind", c_uint32, [c_void_p, c_uint32, c_uint32]),
+    ("cadaclysm_task_kind_name", c_char_p, [c_void_p, c_uint32, c_uint32]),
+    ("cadaclysm_task_status", c_char_p, [c_void_p, c_uint32, c_uint32]),
+    ("cadaclysm_task_milestone", c_bool, [c_void_p, c_uint32, c_uint32]),
+    ("cadaclysm_task_parent", c_bool, [c_void_p, c_uint32, c_uint32, POINTER(c_uint32)]),
+    ("cadaclysm_task_time", c_bool, [c_void_p, c_uint32, c_uint32, POINTER(_TaskTime)]),
+    ("cadaclysm_task_node_count", c_uint32, [c_void_p, c_uint32, c_uint32]),
+    ("cadaclysm_task_nodes", c_uint32, [c_void_p, c_uint32, c_uint32, POINTER(c_uint32), c_uint32]),
+    ("cadaclysm_task_link_count", c_uint32, [c_void_p, c_uint32]),
+    ("cadaclysm_task_link", c_bool,
+     [c_void_p, c_uint32, c_uint32, POINTER(c_uint32), POINTER(c_uint32), POINTER(c_uint32),
+      POINTER(c_double), POINTER(c_bool)]),
+    ("cadaclysm_task_link_kind_name", c_char_p, [c_void_p, c_uint32, c_uint32]),
+    ("cadaclysm_schedule_at", ctypes.c_int64,
+     [c_void_p, c_uint32, c_double, c_uint32, POINTER(_ElementState), c_uint32]),
     ("cadaclysm_pose", c_void_p,
      [c_void_p, POINTER(c_uint32), POINTER(c_uint32), POINTER(c_double), c_uint32, c_uint32]),
     ("cadaclysm_pose_state", c_void_p, [c_void_p, c_uint32, c_uint32]),
@@ -735,6 +857,8 @@ _ENTRY_POINTS = [
     ("cadaclysm_pose_node_transform", None, [c_void_p, c_uint32, POINTER(c_double)]),
     ("cadaclysm_pose_unsolved_count", c_uint32, [c_void_p]),
     ("cadaclysm_pose_unsolved", c_uint32, [c_void_p, c_uint32]),
+    ("cadaclysm_pose_diagnostic_count", c_uint32, [c_void_p]),
+    ("cadaclysm_pose_diagnostic", c_char_p, [c_void_p, c_uint32]),
     ("cadaclysm_pose_out_of_range_count", c_uint32, [c_void_p]),
     ("cadaclysm_pose_out_of_range", c_bool,
      [c_void_p, c_uint32, POINTER(c_uint32), POINTER(c_uint32), POINTER(c_double)]),
@@ -752,6 +876,7 @@ _ENTRY_POINTS = [
     ("cadaclysm_node_edge_beziers64", _Beziers64, [c_void_p, c_uint32]),
     ("cadaclysm_node_curve_beziers64", _Beziers64, [c_void_p, c_uint32]),
     ("cadaclysm_node_isocurve_beziers64", _Beziers64, [c_void_p, c_uint32]),
+    ("cadaclysm_node_silhouette_beziers", _Beziers64, [c_void_p, c_uint32, POINTER(_SvgOptions)]),
     ("cadaclysm_realize_all", c_uint32, [c_void_p]),
     ("cadaclysm_realize_meshes", c_uint32, [c_void_p, c_uint32]),
     ("cadaclysm_realized", c_uint32, [c_void_p]),
@@ -890,12 +1015,12 @@ def _numpy():
     return _numpy_module
 
 
-def _text(raw) -> str:
+def _text(raw: bytes | None) -> str:
     """A borrowed `char *` as a `str`. Null and empty both come back as `""`."""
     return raw.decode("utf-8", "replace") if raw else ""
 
 
-def _transform_matrix(raw):
+def _transform_matrix(raw: Iterable[float]) -> NDArray[numpy.float64]:
     """16 ABI doubles (column-major, as `Node.raw_transform` lays them out) as a 4x4
     float64 numpy array, transposed into numpy's row-major convention: `M[:3, :3]` is the
     rotation and scale block and `M[:3, 3]` is the offset. Shared by every `raw_transform`
@@ -909,7 +1034,7 @@ def _last_error() -> str:
     return _text(_lib().cadaclysm_last_error())
 
 
-def _colour_text(text: str):
+def _colour_text(text: str) -> tuple[float, float, float] | None:
     """(r, g, b) in 0..1 from colour text -- "#rgb", "#rrggbb" or a CSS colour name --
     read by the library's own parser, so every wrapper takes the same forms; None if
     the library refused it."""
@@ -919,7 +1044,7 @@ def _colour_text(text: str):
     return None
 
 
-def _packed(colour) -> int:
+def _packed(colour: Colour) -> int:
     """A colour as the ABI's packed `0xRRGGBB`: "#rgb", "#rrggbb", a CSS colour name or
     an `(r, g, b)` triple in 0..255."""
     if isinstance(colour, str):
@@ -932,9 +1057,11 @@ def _packed(colour) -> int:
     return (int(r) << 16) | (int(g) << 8) | int(b)
 
 
-def _svg_options(default_up, *, view="iso", az=None, el=None, up=None, fov=0.0, size=(1000, 1000), margin=0.05,
-                 tolerance=0.1, stroke="#000000", width=1.0, background=None, edges=True, curves=False,
-                 isocurves=False, polylines=False, silhouettes=True) -> _SvgOptions:
+def _svg_options(default_up: str, *, view: str = "iso", az: float | None = None, el: float | None = None,
+                 up: str | None = None, fov: float = 0.0, size: tuple[float, float] = (1000, 1000),
+                 margin: float = 0.05, tolerance: float = 0.1, stroke: Colour = "#000000", width: float = 1.0,
+                 background: Colour | None = None, edges: bool = True, curves: bool = False,
+                 isocurves: bool = False, polylines: bool = False, silhouettes: bool = True) -> _SvgOptions:
     """`Scene.svg`/`Node.svg`'s keywords, packed into `CadaclysmSvgOptions`: `view`
     through the view's own table (`cadaclysm_view.VIEWS`, the one `show` reads
     too), `az`/`el` over it, `up` from the scene's convention unless given, colours
@@ -970,7 +1097,7 @@ def version() -> str:
     return _text(_lib().cadaclysm_version())
 
 
-def license(text_or_path) -> None:
+def license(text_or_path: str | os.PathLike[str]) -> None:
     """Load a license: the certificate text, or the path of a file holding it.
 
     Without this the library looks in ``CADACLYSM_LICENSE``, then for
@@ -1066,7 +1193,7 @@ def pick_file() -> "Path | None":
     return Path(_text(raw))
 
 
-def pick_save(suggested_name=None) -> "Path | None":
+def pick_save(suggested_name: str | None = None) -> Path | None:
     """Ask the user where to save, through the library's own dialog.
 
     `suggested_name` prefills the file name. `None` if they cancelled or no
@@ -1106,7 +1233,7 @@ class _Borrowed:
 
     __slots__ = ("_owner", "__array_interface__")
 
-    def __init__(self, owner, pointer, shape, typestr):
+    def __init__(self, owner: object, pointer: Any, shape: tuple[int, ...], typestr: str):
         self._owner = owner
         self.__array_interface__ = {
             "version": 3,
@@ -1116,7 +1243,7 @@ class _Borrowed:
         }
 
 
-def _view(owner, pointer, shape, dtype):
+def _view(owner: object, pointer: Any, shape: tuple[int, ...], dtype: str) -> NDArray[Any] | None:
     """A read-only numpy view of `shape` over memory borrowed from `owner`
     (a `Scene`, or a `FemMesh`), or None if null."""
     if not pointer:
@@ -1133,9 +1260,14 @@ class Bounds:
 
     __slots__ = ("min", "max")
 
-    def __init__(self, low, high):
-        self.min = tuple(float(v) for v in low)
-        self.max = tuple(float(v) for v in high)
+    #: The low corner, `(x, y, z)`.
+    min: tuple[float, float, float]
+    #: The high corner, `(x, y, z)`.
+    max: tuple[float, float, float]
+
+    def __init__(self, low: Iterable[float], high: Iterable[float]):
+        self.min = cast("tuple[float, float, float]", tuple(float(v) for v in low))
+        self.max = cast("tuple[float, float, float]", tuple(float(v) for v in high))
 
     @property
     def is_empty(self) -> bool:
@@ -1143,18 +1275,20 @@ class Bounds:
         return not any(self.min) and not any(self.max)
 
     @property
-    def size(self):
-        return tuple(b - a for a, b in zip(self.min, self.max))
+    def size(self) -> tuple[float, float, float]:
+        """`max - min` on each axis."""
+        return cast("tuple[float, float, float]", tuple(b - a for a, b in zip(self.min, self.max)))
 
     @property
-    def centre(self):
-        return tuple((a + b) / 2.0 for a, b in zip(self.min, self.max))
+    def centre(self) -> tuple[float, float, float]:
+        """The box's middle point."""
+        return cast("tuple[float, float, float]", tuple((a + b) / 2.0 for a, b in zip(self.min, self.max)))
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[tuple[float, float, float]]:
         """Unpacks as `low, high`, so `low, high = node.bounds` works."""
         return iter((self.min, self.max))
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"Bounds(min={self.min}, max={self.max})"
 
 
@@ -1187,7 +1321,11 @@ class Attribute:
 
     __slots__ = ("name", "kind", "value")
 
-    def __init__(self, name, kind, value):
+    name: str
+    kind: ValueKind
+    value: str | int | float | bool | None
+
+    def __init__(self, name: str, kind: ValueKind, value: str | int | float | bool | None):
         self.name = name
         self.kind = kind
         self.value = value
@@ -1204,14 +1342,14 @@ class Attribute:
         if self.value is None:
             return ""
         if self.kind is ValueKind.REAL:
-            return _decimal_text(self.value)
+            return _decimal_text(cast(float, self.value))
         if self.kind is ValueKind.BOOLEAN:
             # Go's "%t" and C#'s bool.ToString() lowercased: "true"/"false",
             # not Python's "True"/"False".
             return "true" if self.value else "false"
         return str(self.value)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"Attribute(name={self.name!r}, kind={self.kind.name}, value={self.value!r})"
 
 
@@ -1265,7 +1403,21 @@ class Mesh:
     __slots__ = ("positions", "normals", "uvs", "colors", "indices",
                  "vertex_count", "index_count")
 
-    def __init__(self, positions, normals, uvs, colors, indices, vertex_count, index_count):
+    #: `(vertex_count, 3)`, float32 (float64 from `Node.mesh64`); None for an empty mesh.
+    positions: NDArray[Any] | None
+    #: `(vertex_count, 3)` like `positions`, or None for a mesh that carries none.
+    normals: NDArray[Any] | None
+    #: `(vertex_count, 2)` like `positions`, or None (see `UV_WORLD`).
+    uvs: NDArray[Any] | None
+    colors: NDArray[numpy.float32] | None
+    #: `(index_count,)` uint32, three a triangle.
+    indices: NDArray[numpy.uint32] | None
+    vertex_count: int
+    index_count: int
+
+    def __init__(self, positions: NDArray[Any] | None, normals: NDArray[Any] | None,
+                 uvs: NDArray[Any] | None, colors: NDArray[numpy.float32] | None,
+                 indices: NDArray[numpy.uint32] | None, vertex_count: int, index_count: int):
         self.positions = positions
         self.normals = normals
         self.uvs = uvs
@@ -1306,11 +1458,11 @@ class Mesh:
             self.index_count,
         )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"Mesh(vertices={self.vertex_count}, triangles={self.triangle_count})"
 
 
-def _lent_array(name):
+def _lent_array(name: str) -> Any:   # a `property`, typed as the `Mesh` field it stands in for
     slot = Mesh.__dict__[name]
 
     def read(self):
@@ -1367,7 +1519,15 @@ class Polylines:
 
     __slots__ = ("positions", "counts", "polyline_count", "vertex_count")
 
-    def __init__(self, positions, counts, polyline_count, vertex_count):
+    #: `(vertex_count, 3)` float32, the runs end to end; None when there are none.
+    positions: NDArray[numpy.float32] | None
+    #: `(polyline_count,)` uint32: how many points each run has.
+    counts: NDArray[numpy.uint32] | None
+    polyline_count: int
+    vertex_count: int
+
+    def __init__(self, positions: NDArray[numpy.float32] | None, counts: NDArray[numpy.uint32] | None,
+                 polyline_count: int, vertex_count: int):
         self.positions = positions
         self.counts = counts
         self.polyline_count = polyline_count
@@ -1376,7 +1536,7 @@ class Polylines:
     def __bool__(self) -> bool:
         return self.polyline_count > 0 and self.positions is not None
 
-    def segment_indices(self):
+    def segment_indices(self) -> NDArray[numpy.int64]:
         """Indices into `positions` making line-segment endpoint pairs.
 
         `GL_LINES` and every other pair-taking API want two endpoints per
@@ -1394,7 +1554,7 @@ class Polylines:
         empty = numpy.empty(0, numpy.int64)
         if not self:
             return empty
-        counts = self.counts
+        counts = cast("NDArray[numpy.uint32]", self.counts)   # set whenever `self` is true
         # Where each run starts, and which runs are long enough to have a
         # segment at all: a one-point run is a point, not a line.
         starts = numpy.concatenate(([0], numpy.cumsum(counts[:-1], dtype=numpy.int64)))
@@ -1414,11 +1574,11 @@ class Polylines:
         pairs[0::2], pairs[1::2] = a, a + 1
         return pairs
 
-    def segments(self):
+    def segments(self) -> NDArray[numpy.float32]:
         """The endpoint pairs themselves, `(2 * segment_count, 3)` in the node's own frame."""
-        return self.positions[self.segment_indices()]
+        return self.positions[self.segment_indices()]  # type: ignore[index]  # None only when empty
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"Polylines(polylines={self.polyline_count}, vertices={self.vertex_count})"
 
 
@@ -1436,7 +1596,13 @@ class Beziers:
 
     __slots__ = ("points", "weights", "count")
 
-    def __init__(self, points, weights, count):
+    #: `(count, 4, 3)` float32 (float64 from the `...64` twins); None when there are none.
+    points: NDArray[Any] | None
+    #: `(count, 4)`, the same dtype as `points`.
+    weights: NDArray[Any] | None
+    count: int
+
+    def __init__(self, points: NDArray[Any] | None, weights: NDArray[Any] | None, count: int):
         self.points = points
         self.weights = weights
         self.count = count
@@ -1451,7 +1617,7 @@ class Beziers:
             self.count,
         )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"Beziers(count={self.count})"
 
 
@@ -1465,7 +1631,20 @@ class Collision:
                  "error", "hull_vertex_count", "hull_index_count")
     _NAMES = ("none", "box", "sphere", "capsule", "cylinder", "hull")
 
-    def __init__(self, raw):
+    #: 0 none, 1 box, 2 sphere, 3 capsule, 4 cylinder, 5 hull; `shape_name` names it.
+    shape: int
+    confidence: int
+    axis: int
+    #: The oriented box's frame: 16 numbers, column-major.
+    frame: tuple[float, ...]
+    half_extent: tuple[float, float, float]
+    radius: float
+    height: float
+    error: float
+    hull_vertex_count: int
+    hull_index_count: int
+
+    def __init__(self, raw: _Collision):
         self.shape = raw.shape
         self.confidence = raw.confidence
         self.axis = raw.axis
@@ -1482,7 +1661,7 @@ class Collision:
         """`none`, `box`, `sphere`, `capsule`, `cylinder` or `hull`."""
         return self._NAMES[self.shape] if self.shape < len(self._NAMES) else str(self.shape)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"Collision({self.shape_name}, error={self.error})"
 
 
@@ -1493,7 +1672,15 @@ class CollisionHull:
 
     __slots__ = ("positions", "indices", "vertex_count", "index_count")
 
-    def __init__(self, positions, indices, vertex_count, index_count):
+    #: `(vertex_count, 3)` float32; None for a node that draws nothing.
+    positions: NDArray[numpy.float32] | None
+    #: `(index_count,)` uint32, three a triangle.
+    indices: NDArray[numpy.uint32] | None
+    vertex_count: int
+    index_count: int
+
+    def __init__(self, positions: NDArray[numpy.float32] | None, indices: NDArray[numpy.uint32] | None,
+                 vertex_count: int, index_count: int):
         self.positions = positions
         self.indices = indices
         self.vertex_count = vertex_count
@@ -1502,7 +1689,7 @@ class CollisionHull:
     def __bool__(self) -> bool:
         return self.vertex_count > 0 and self.positions is not None
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"CollisionHull(vertices={self.vertex_count}, triangles={self.index_count // 3})"
 
 
@@ -1524,11 +1711,32 @@ class Face:
     __slots__ = ("kind", "reversed", "transposed", "origin", "ax", "ay", "az",
                  "domain", "scalars", "loops", "profile", "profile2", "nurbs")
 
-    def __init__(self, **fields):
+    #: 0 plane, 1 cylinder, 2 cone, 3 sphere, 4 torus, 5 revolution, 6 extrusion, 7 NURBS, 8 sum.
+    kind: int
+    reversed: bool
+    transposed: bool
+    #: The frame's origin, `(3,)` float64.
+    origin: NDArray[numpy.float64]
+    ax: NDArray[numpy.float64]
+    ay: NDArray[numpy.float64]
+    az: NDArray[numpy.float64]
+    #: `(u_min, v_min, u_max, v_max)`, `(4,)` float64.
+    domain: NDArray[numpy.float64]
+    #: Kind-dependent, `(4,)` float64.
+    scalars: NDArray[numpy.float64]
+    #: One `(N, 2)` float32 array of `(u, v)` a loop, each closing implicitly.
+    loops: list[NDArray[numpy.float32]]
+    #: `(N, 4)` float32 samples a swept surface needs.
+    profile: NDArray[numpy.float32]
+    profile2: NDArray[numpy.float32]
+    #: The flat float32 record a NURBS surface needs.
+    nurbs: NDArray[numpy.float32]
+
+    def __init__(self, **fields: Any):
         for name, value in fields.items():
             setattr(self, name, value)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         names = ("plane", "cylinder", "cone", "sphere", "torus", "revolution",
                  "extrusion", "nurbs", "sum")
         kind = names[self.kind] if self.kind < len(names) else self.kind
@@ -1544,7 +1752,9 @@ class Surfaces:
 
     __slots__ = ("faces",)
 
-    def __init__(self, faces):
+    faces: list[Face]
+
+    def __init__(self, faces: list[Face]):
         self.faces = faces
 
     def __bool__(self) -> bool:
@@ -1553,10 +1763,10 @@ class Surfaces:
     def __len__(self) -> int:
         return len(self.faces)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Face]:
         return iter(self.faces)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"Surfaces({len(self.faces)} faces)"
 
 
@@ -1576,6 +1786,9 @@ class Placement:
     """
 
     __slots__ = ("scene", "index")
+
+    scene: Scene
+    index: int
 
     def __init__(self, scene: "Scene", index: int):
         self.scene = scene
@@ -1603,7 +1816,7 @@ class Placement:
                     _lib().cadaclysm_placement_select(self.scene._handle, self.index))
 
     @property
-    def transform(self):
+    def transform(self) -> NDArray[numpy.float64]:
         """Where to draw it, as a 4x4 float64 numpy array.
 
         Already composed through every frame between the document's root and this
@@ -1614,13 +1827,13 @@ class Placement:
         return _transform_matrix(self.raw_transform)
 
     @property
-    def raw_transform(self):
+    def raw_transform(self) -> tuple[float, ...]:
         """The same matrix in the ABI's own column-major order, as 16 floats."""
         out = (c_double * 16)()
         _lib().cadaclysm_placement_transform(self.scene._handle, self.index, out)
         return tuple(out)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"Placement(index={self.index}, geometry={self.geometry.index})"
 
 
@@ -1630,21 +1843,24 @@ class Link:
 
     __slots__ = ("scene", "index")
 
+    scene: Scene
+    index: int
+
     def __init__(self, scene: "Scene", index: int):
         self.scene = scene
         self.index = index
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         return (
             isinstance(other, Link)
             and other.index == self.index
             and other.scene is self.scene
         )
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         return hash((id(self.scene), self.index))
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<Link {self.index} {self.name}>"
 
     @property
@@ -1686,16 +1902,24 @@ class Freedom:
 
     __slots__ = ("motion", "axis", "lower", "upper")
 
+    #: `"rotation"` or `"translation"`.
+    motion: str
+    #: `"x"`, `"y"` or `"z"`, of the pair's contact frame.
+    axis: str
+    #: The range's ends, None where the file gives none.
+    lower: float | None
+    upper: float | None
+
     _MOTIONS = ("rotation", "translation")
     _AXES = ("x", "y", "z")
 
-    def __init__(self, motion: str, axis: str, lower, upper):
+    def __init__(self, motion: str, axis: str, lower: float | None, upper: float | None):
         self.motion = motion
         self.axis = axis
         self.lower = lower
         self.upper = upper
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<Freedom {self.motion} {self.axis} [{self.lower}, {self.upper}]>"
 
 
@@ -1710,7 +1934,7 @@ class Pair:
         self._joint = joint
         self._kind = kind
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<Pair {self.kind}>"
 
     @property
@@ -1722,43 +1946,62 @@ class Pair:
         return _PAIR_KIND_NAMES[self._kind]
 
     @property
-    def type_name(self):
+    def type_name(self) -> str | None:
         """For `"other"`: the pair's entity type name (`"GEAR_PAIR"`). None otherwise."""
         raw = _lib().cadaclysm_joint_pair_type(self._scene._handle, self._joint)
         return raw.decode("utf-8", "replace") if raw is not None else None
 
     @property
-    def pitch(self):
+    def kind_name(self) -> str:
+        """The kind by name, finer than `kind`: the same thirteen names, and `"gear"` and
+        `"rack_and_pinion"` for the two coupled pairs `kind` reads as `"other"`."""
+        raw = _lib().cadaclysm_joint_pair_kind_name(self._scene._handle, self._joint)
+        return raw.decode("utf-8", "replace") if raw is not None else self.kind
+
+    @property
+    def parameters(self) -> list[float]:
+        """The pair's own numbers, in the order `Assembly.pair_with` takes them:
+        `"screw"` `[pitch]`, `"rack_and_pinion"` `[pinion_radius]`, `"gear"`
+        `[radius_first, radius_second, ratio, bevel, helical_angle]` (always five, the
+        ratio the second link's rotation over the first's); `[]` for every other kind."""
+        library, handle = _lib(), self._scene._handle
+        count = library.cadaclysm_joint_pair_parameters(handle, self._joint, None, 0)
+        out = (c_double * count)()
+        library.cadaclysm_joint_pair_parameters(handle, self._joint, out, count)
+        return list(out)
+
+    @property
+    def pitch(self) -> float | None:
         """For `"screw"`: its pitch, a length per revolution in the scene's units.
         None otherwise."""
         value = _lib().cadaclysm_joint_pair_pitch(self._scene._handle, self._joint)
         return None if math.isnan(value) else value
 
-    def _raw_frames(self):
+    def _raw_frames(self) -> tuple[tuple[float, ...], tuple[float, ...]]:
         start, end = (c_double * 16)(), (c_double * 16)()
         _lib().cadaclysm_joint_pair_frames(self._scene._handle, self._joint, start, end)
         return tuple(start), tuple(end)
 
     @property
-    def raw_frame_start(self):
+    def raw_frame_start(self) -> tuple[float, ...]:
         """`frame_start` in the ABI's own column-major order, as 16 floats -- the same
         layout `Node.raw_transform` uses."""
         return self._raw_frames()[0]
 
     @property
-    def raw_frame_end(self):
+    def raw_frame_end(self) -> tuple[float, ...]:
         """`frame_end` in the ABI's own column-major order, as 16 floats."""
         return self._raw_frames()[1]
 
     @property
-    def frame_start(self):
+    def frame_start(self) -> NDArray[numpy.float64]:
         """The pair's contact frame fixed in its joint's `start` link, as a 4x4
         float64 numpy array -- like `Node.transform`."""
         numpy = _numpy()
         return numpy.array(self.raw_frame_start, numpy.float64).reshape(4, 4).T
 
     @property
-    def frame_end(self):
+    def frame_end(self) -> NDArray[numpy.float64]:
         """The pair's contact frame fixed in its joint's `end` link, as a 4x4 float64
         numpy array."""
         numpy = _numpy()
@@ -1789,21 +2032,24 @@ class Joint:
 
     __slots__ = ("scene", "index")
 
+    scene: Scene
+    index: int
+
     def __init__(self, scene: "Scene", index: int):
         self.scene = scene
         self.index = index
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         return (
             isinstance(other, Joint)
             and other.index == self.index
             and other.scene is self.scene
         )
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         return hash((id(self.scene), self.index))
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<Joint {self.index} {self.name}>"
 
     @property
@@ -1823,7 +2069,7 @@ class Joint:
         return Link(self.scene, _lib().cadaclysm_joint_end(self.scene._handle, self.index))
 
     @property
-    def pair(self):
+    def pair(self) -> Pair | None:
         """How this joint moves: the kinematic pair naming it, or None when the file
         gives it none."""
         kind = _lib().cadaclysm_joint_pair_kind(self.scene._handle, self.index)
@@ -1836,21 +2082,23 @@ class State:
 
     __slots__ = ("_scene", "index")
 
+    index: int
+
     def __init__(self, scene: "Scene", index: int):
         self._scene = scene
         self.index = index
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         return (
             isinstance(other, State)
             and other.index == self.index
             and other._scene is self._scene
         )
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         return hash((id(self._scene), self.index))
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<State {self.index} {self.name}>"
 
     @property
@@ -1885,12 +2133,16 @@ class Segment:
 
     __slots__ = ("state", "t", "interpolation")
 
+    state: State
+    t: float
+    interpolation: str
+
     def __init__(self, state: "State", t: float, interpolation: str):
         self.state = state
         self.t = t
         self.interpolation = interpolation
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<Segment {self.state.name} t={self.t} {self.interpolation}>"
 
 
@@ -1910,17 +2162,19 @@ class Sequence:
 
     __slots__ = ("_scene", "index")
 
+    index: int
+
     def __init__(self, scene: "Scene", index: int):
         self._scene = scene
         self.index = index
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         return isinstance(other, Sequence) and other.index == self.index and other._scene is self._scene
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         return hash((id(self._scene), self.index))
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<Sequence {self.index} {self.name}>"
 
     @property
@@ -1976,6 +2230,274 @@ class Sequence:
         return _copy_pose(self._scene, ptr)
 
 
+def datetime_of(seconds: float) -> "datetime.datetime":
+    """A schedule date (seconds since 1970-01-01T00:00) as a naive `datetime`."""
+    return datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=seconds)
+
+
+def seconds_of(when: "datetime.datetime") -> float:
+    """A naive `datetime` as a schedule date: seconds since 1970-01-01T00:00."""
+    return (when - datetime.datetime(1970, 1, 1)).total_seconds()
+
+
+# The words of the C enums, indexed by their values.
+_SCHEDULE_KINDS = ("planned", "actual", "baseline", "notdefined", "other")
+_TASK_KINDS = (
+    "attendance", "construction", "demolition", "dismantle", "disposal", "installation",
+    "logistic", "maintenance", "move", "operation", "removal", "renovation", "notdefined", "other",
+)
+_LINK_KINDS = ("finish_start", "start_start", "finish_finish", "start_finish", "notdefined", "other")
+_DATES = {"scheduled": 0, "actual": 1}
+_PHASES = ("unbuilt", "building", "built", "demolishing", "demolished")
+
+
+class ElementState:
+    """What one element is doing on a date: `WorkSchedule.at`'s rows.
+
+    `node` is the `Node`; `phase` is `"unbuilt"`, `"building"`, `"built"`, `"demolishing"`
+    or `"demolished"`; `progress` is 0..1 through the window that governs the phase; and
+    `variance` is the seconds late (positive) or early (negative) against the schedule, or
+    None where there is none to give."""
+
+    __slots__ = ("node", "phase", "progress", "variance")
+
+    def __init__(self, node: "Node", phase: str, progress: float, variance: "float | None"):
+        self.node = node
+        self.phase = phase
+        self.progress = progress
+        self.variance = variance
+
+    def __repr__(self) -> str:
+        return f"<ElementState {self.node.name} {self.phase} {self.progress:.2f}>"
+
+
+class TaskTime:
+    """Every date pair a task gives, each a float (seconds since 1970-01-01T00:00; see
+    `datetime_of`) or None where the file gives none: `schedule_start`, `schedule_finish`,
+    `early_start`, `early_finish`, `late_start`, `late_finish`, `actual_start`,
+    `actual_finish`, and `duration` (seconds)."""
+
+    __slots__ = (
+        "schedule_start", "schedule_finish", "early_start", "early_finish", "late_start",
+        "late_finish", "actual_start", "actual_finish", "duration",
+    )
+
+    def __init__(self, raw: "_TaskTime"):
+        for name in self.__slots__:
+            setattr(self, name, getattr(raw, name) if getattr(raw, "has_" + name) else None)
+
+    def __repr__(self) -> str:
+        given = ", ".join(f"{n}={getattr(self, n)}" for n in self.__slots__ if getattr(self, n) is not None)
+        return f"<TaskTime {given}>"
+
+
+class WorkSchedule:
+    """A building's programme: an `IfcWorkSchedule` and the tasks it controls. From
+    `Scene.schedules`.
+
+    `at(date)` says what each element it names is doing on a date. Dates are floats,
+    seconds since 1970-01-01T00:00; `datetime_of` and `seconds_of` convert."""
+
+    __slots__ = ("_scene", "index")
+
+    def __init__(self, scene: "Scene", index: int):
+        self._scene = scene
+        self.index = index
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, WorkSchedule) and other.index == self.index and other._scene is self._scene
+
+    def __hash__(self) -> int:
+        return hash((id(self._scene), self.index))
+
+    def __repr__(self) -> str:
+        return f"<WorkSchedule {self.index} {self.name}>"
+
+    @property
+    def name(self) -> str:
+        """Its name, else its identification, else `schedule #k` (k from 1, in file order)."""
+        return _text(_lib().cadaclysm_schedule_name(self._scene._handle, self.index))
+
+    @property
+    def identification(self) -> str:
+        """Its identification, `""` where none."""
+        return _text(_lib().cadaclysm_schedule_identification(self._scene._handle, self.index))
+
+    @property
+    def kind(self) -> str:
+        """`"planned"`, `"actual"`, `"baseline"`, `"notdefined"` or `"other"`."""
+        return _SCHEDULE_KINDS[_lib().cadaclysm_schedule_kind(self._scene._handle, self.index)]
+
+    @property
+    def kind_name(self) -> str:
+        """The text of a user-defined kind (`kind == "other"`); `""` otherwise."""
+        return _text(_lib().cadaclysm_schedule_kind_name(self._scene._handle, self.index))
+
+    @property
+    def start(self) -> "float | None":
+        """The schedule's start, or None where the file gives none."""
+        out = c_double()
+        return out.value if _lib().cadaclysm_schedule_start(self._scene._handle, self.index, ctypes.byref(out)) else None
+
+    @property
+    def finish(self) -> "float | None":
+        """The schedule's finish, or None where the file gives none."""
+        out = c_double()
+        return out.value if _lib().cadaclysm_schedule_finish(self._scene._handle, self.index, ctypes.byref(out)) else None
+
+    @property
+    def tasks(self) -> "list[Task]":
+        """Its tasks, in file order."""
+        return [Task(self, i) for i in range(_lib().cadaclysm_task_count(self._scene._handle, self.index))]
+
+    @property
+    def links(self) -> "list[TaskLink]":
+        """Its task links (`IfcRelSequence`), in file order."""
+        library, handle = _lib(), self._scene._handle
+        tasks = self.tasks
+        out = []
+        for i in range(library.cadaclysm_task_link_count(handle, self.index)):
+            origin, target, kind = c_uint32(), c_uint32(), c_uint32()
+            lag, has_lag = c_double(), c_bool()
+            library.cadaclysm_task_link(
+                handle, self.index, i, ctypes.byref(origin), ctypes.byref(target), ctypes.byref(kind),
+                ctypes.byref(lag), ctypes.byref(has_lag),
+            )
+            out.append(TaskLink(self, i, tasks[origin.value], tasks[target.value], kind.value,
+                                lag.value if has_lag.value else None))
+        return out
+
+    def at(self, date: float, dates: str = "scheduled") -> "list[ElementState]":
+        """What each element this schedule names is doing on `date` (seconds since
+        1970-01-01T00:00), in node order; elements no task names are not listed. `dates` is
+        `"scheduled"` or `"actual"` -- which of a task's dates to play. Raises `ValueError`
+        for any other `dates` and `CadaclysmError` for a `date` that is not finite."""
+        if dates not in _DATES:
+            raise ValueError("dates must be 'scheduled' or 'actual'")
+        library, handle = _lib(), self._scene._handle
+        which = _DATES[dates]
+        count = library.cadaclysm_schedule_at(handle, self.index, float(date), which, None, 0)
+        if count < 0:
+            raise CadaclysmError(_last_error())
+        rows = (_ElementState * count)()
+        library.cadaclysm_schedule_at(handle, self.index, float(date), which, rows, count)
+        return [
+            ElementState(Node(self._scene, r.node), _PHASES[r.phase], r.progress,
+                         r.variance if r.has_variance else None)
+            for r in rows
+        ]
+
+
+class Task:
+    """One task of a `WorkSchedule`. From `WorkSchedule.tasks`.
+
+    `kind` is `"attendance"`, `"construction"`, `"demolition"`, `"dismantle"`,
+    `"disposal"`, `"installation"`, `"logistic"`, `"maintenance"`, `"move"`, `"operation"`,
+    `"removal"`, `"renovation"`, `"notdefined"` or `"other"`; `kind_name` is the text of
+    a user-defined one. `parent` is the summary task nesting it, None at the top. `nodes`
+    are the nodes it builds or removes."""
+
+    __slots__ = ("schedule", "index")
+
+    def __init__(self, schedule: "WorkSchedule", index: int):
+        self.schedule = schedule
+        self.index = index
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Task) and other.index == self.index and other.schedule == self.schedule
+
+    def __hash__(self) -> int:
+        return hash((self.schedule, self.index))
+
+    def __repr__(self) -> str:
+        return f"<Task {self.index} {self.name}>"
+
+    def _args(self):
+        return _lib(), self.schedule._scene._handle, self.schedule.index, self.index
+
+    @property
+    def name(self) -> str:
+        library, handle, s, t = self._args()
+        return _text(library.cadaclysm_task_name(handle, s, t))
+
+    @property
+    def identification(self) -> str:
+        """Its identification, `""` where none."""
+        library, handle, s, t = self._args()
+        return _text(library.cadaclysm_task_identification(handle, s, t))
+
+    @property
+    def kind(self) -> str:
+        library, handle, s, t = self._args()
+        return _TASK_KINDS[library.cadaclysm_task_kind(handle, s, t)]
+
+    @property
+    def kind_name(self) -> str:
+        """The text of a user-defined kind (`kind == "other"`); `""` otherwise."""
+        library, handle, s, t = self._args()
+        return _text(library.cadaclysm_task_kind_name(handle, s, t))
+
+    @property
+    def status(self) -> str:
+        """Its status as the file writes it, `""` where none."""
+        library, handle, s, t = self._args()
+        return _text(library.cadaclysm_task_status(handle, s, t))
+
+    @property
+    def milestone(self) -> bool:
+        library, handle, s, t = self._args()
+        return bool(library.cadaclysm_task_milestone(handle, s, t))
+
+    @property
+    def parent(self) -> "Task | None":
+        library, handle, s, t = self._args()
+        out = c_uint32()
+        return Task(self.schedule, out.value) if library.cadaclysm_task_parent(handle, s, t, ctypes.byref(out)) else None
+
+    @property
+    def time(self) -> "TaskTime":
+        library, handle, s, t = self._args()
+        raw = _TaskTime()
+        library.cadaclysm_task_time(handle, s, t, ctypes.byref(raw))
+        return TaskTime(raw)
+
+    @property
+    def nodes(self) -> "list[Node]":
+        library, handle, s, t = self._args()
+        count = library.cadaclysm_task_node_count(handle, s, t)
+        out = (c_uint32 * count)()
+        library.cadaclysm_task_nodes(handle, s, t, out, count)
+        return [Node(self.schedule._scene, n) for n in out]
+
+
+class TaskLink:
+    """A sequence between two tasks of one schedule. From `WorkSchedule.links`.
+
+    `from_task` is the predecessor, `to_task` the successor; `kind` is `"finish_start"`,
+    `"start_start"`, `"finish_finish"`, `"start_finish"`, `"notdefined"` or `"other"`
+    (`kind_name` is the text of a user-defined one, `""` otherwise); `lag` is the time lag
+    in seconds, or None where the file gives none."""
+
+    __slots__ = ("_schedule", "_index", "from_task", "to_task", "kind", "lag")
+
+    def __init__(self, schedule: "WorkSchedule", index: int, from_task: "Task", to_task: "Task",
+                 kind: int, lag: "float | None"):
+        self._schedule = schedule
+        self._index = index
+        self.from_task = from_task
+        self.to_task = to_task
+        self.kind = _LINK_KINDS[kind]
+        self.lag = lag
+
+    @property
+    def kind_name(self) -> str:
+        return _text(_lib().cadaclysm_task_link_kind_name(
+            self._schedule._scene._handle, self._schedule.index, self._index))
+
+    def __repr__(self) -> str:
+        return f"<TaskLink {self.from_task.name} -> {self.to_task.name} {self.kind}>"
+
+
 class Pose:
     """A posed mechanism: `Scene.pose`, `Scene.pose_state` or `Sequence.pose`'s answer. The document itself
     is unchanged.
@@ -1985,10 +2507,16 @@ class Pose:
     invalidate it.
     """
 
-    __slots__ = ("_scene", "ground", "unsolved", "out_of_range", "_transforms")
+    __slots__ = ("_scene", "ground", "unsolved", "out_of_range", "diagnostics", "_transforms")
+
+    ground: Link
+    unsolved: list[Joint]
+    out_of_range: list[tuple[Joint, int, float]]
+    diagnostics: list[str]
 
     def __init__(self, scene: "Scene", ground: Link, unsolved: "list[Joint]",
-                 out_of_range: "list[tuple[Joint, int, float]]", transforms: "list[tuple]"):
+                 out_of_range: "list[tuple[Joint, int, float]]", transforms: "list[tuple[float, ...]]",
+                 diagnostics: "list[str] | None" = None):
         self._scene = scene
         #: The link held fixed.
         self.ground = ground
@@ -1996,22 +2524,26 @@ class Pose:
         self.unsolved = unsolved
         #: `(joint, freedom index, value)` for every given value outside its freedom's range.
         self.out_of_range = out_of_range
+        #: What the couplings (gear, rack and pinion, a loop-closing screw) could not
+        #: solve, or found disagreeing, in file order, in the kernel's words:
+        #: `coupling 'mesh': both 'a' and 'b' are given and disagree by 0.1`.
+        self.diagnostics = diagnostics if diagnostics is not None else []
         self._transforms = transforms
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<Pose ground={self.ground!r}>"
 
-    def transform(self, node: "Node"):
+    def transform(self, node: Node) -> NDArray[numpy.float64]:
         """`node`'s posed transform, as a 4x4 float64 numpy array -- the same type
         `Node.transform` returns."""
         return _transform_matrix(self.raw_transform(node))
 
-    def raw_transform(self, node: "Node") -> tuple:
+    def raw_transform(self, node: Node) -> tuple[float, ...]:
         """The same matrix in the ABI's own column-major order, as 16 floats, exactly as
         `Node.raw_transform` lays them out."""
         return self._transforms[node.index]
 
-    def show(self, **options) -> None:
+    def show(self, **options: Unpack[_ShowWords]) -> None:
         """Draw this pose's scene with the viewer in use, as `Scene.show` does -- the scene by
         handle -- with every node's posed transform handed to the view
         (`cadaclysm_view_set_node_transforms`), which moves each node's geometry by
@@ -2020,12 +2552,12 @@ class Pose:
         not merely close to it. Same keywords as `Scene.show`."""
         self._scene._draw("show", options, "Pose", transforms=self._transforms)
 
-    def view(self, **options):
+    def view(self, **options: Unpack[_ShowWords]) -> dict[str, Any] | None:
         """`Pose.show`'s orbiting twin; returns what `Scene.view` returns."""
         return self._scene._draw("view", options, "Pose", transforms=self._transforms)
 
 
-def _copy_pose(scene: "Scene", pose_ptr) -> Pose:
+def _copy_pose(scene: Scene, pose_ptr: int) -> Pose:
     """Reads everything out of a `CadaclysmPose *` into a `Pose`, then frees it (ruling 2 of
     the posing plan: wrappers copy eagerly, never holding the C pointer). Runs in a
     `try`/`finally` so an exception midway through copying still frees the handle."""
@@ -2049,7 +2581,12 @@ def _copy_pose(scene: "Scene", pose_ptr) -> Pose:
                 pose_ptr, i, ctypes.byref(joint), ctypes.byref(freedom), ctypes.byref(value)
             ):
                 out_of_range.append((Joint(scene, joint.value), freedom.value, value.value))
-        return Pose(scene, ground, unsolved, out_of_range, transforms)
+        diagnostics = []
+        for i in range(library.cadaclysm_pose_diagnostic_count(pose_ptr)):
+            raw = library.cadaclysm_pose_diagnostic(pose_ptr, i)
+            if raw is not None:
+                diagnostics.append(raw.decode("utf-8", "replace"))
+        return Pose(scene, ground, unsolved, out_of_range, transforms, diagnostics)
     finally:
         library.cadaclysm_pose_free(pose_ptr)
 
@@ -2114,13 +2651,13 @@ class Brep:
     def __init__(self, pointer: int):
         self._pointer = pointer
 
-    def __enter__(self):
+    def __enter__(self) -> Brep:
         return self
 
-    def __exit__(self, *_):
+    def __exit__(self, *_: object) -> None:
         self.release()
 
-    def __del__(self):
+    def __del__(self) -> None:
         self.release()
 
     @property
@@ -2186,12 +2723,24 @@ class Manifold:
     __slots__ = ("faces", "edges", "vertices", "boundary_edges", "non_manifold_edges", "non_manifold_vertices",
                  "is_manifold", "is_closed")
 
-    def __init__(self, row):
+    faces: int
+    edges: int
+    vertices: int
+    #: Edges one face borders: a sheet's rim.
+    boundary_edges: int
+    #: Edges three or more faces border.
+    non_manifold_edges: int
+    #: Vertices whose faces make more than one fan.
+    non_manifold_vertices: int
+    is_manifold: bool
+    is_closed: bool
+
+    def __init__(self, row: tuple[int, ...]):
         (self.faces, self.edges, self.vertices, self.boundary_edges, self.non_manifold_edges,
          self.non_manifold_vertices) = (int(v) for v in row[:6])
         self.is_manifold, self.is_closed = bool(row[6]), bool(row[7])
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (f"Manifold(faces={self.faces}, edges={self.edges}, vertices={self.vertices}, "
                 f"boundary_edges={self.boundary_edges}, non_manifold_edges={self.non_manifold_edges}, "
                 f"non_manifold_vertices={self.non_manifold_vertices}, is_manifold={self.is_manifold}, "
@@ -2206,11 +2755,19 @@ class SewReport:
 
     __slots__ = ("pairs", "free_before", "free_after", "refused", "worst_gap", "tolerance", "vertex")
 
-    def __init__(self, counts, gaps):
+    pairs: int
+    free_before: int
+    free_after: int
+    refused: int
+    worst_gap: float
+    tolerance: float
+    vertex: float
+
+    def __init__(self, counts: tuple[int, ...], gaps: tuple[float, ...]):
         self.pairs, self.free_before, self.free_after, self.refused = (int(v) for v in counts)
         self.worst_gap, self.tolerance, self.vertex = (float(v) for v in gaps)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (f"SewReport(pairs={self.pairs}, free_before={self.free_before}, free_after={self.free_after}, "
                 f"refused={self.refused}, worst_gap={self.worst_gap:g}, tolerance={self.tolerance:g}, "
                 f"vertex={self.vertex:g})")
@@ -2222,8 +2779,20 @@ class Meshlet:
     __slots__ = ("index", "level", "group", "error", "vertex_count", "triangle_count",
                  "positions", "normals", "indices", "children")
 
-    def __init__(self, index, level, group, error, vertex_count, triangle_count,
-                 positions, normals, indices, children):
+    index: int
+    level: int
+    group: int
+    error: float
+    vertex_count: int
+    triangle_count: int
+    positions: NDArray[numpy.float32]
+    normals: NDArray[numpy.float32]
+    indices: NDArray[numpy.uint32]
+    children: NDArray[numpy.uint32]
+
+    def __init__(self, index: int, level: int, group: int, error: float, vertex_count: int, triangle_count: int,
+                 positions: NDArray[numpy.float32], normals: NDArray[numpy.float32],
+                 indices: NDArray[numpy.uint32], children: NDArray[numpy.uint32]):
         self.index = index
         self.level = level
         self.group = group
@@ -2239,7 +2808,7 @@ class Meshlet:
         #: `(child_count,)` uint32: the finer meshlets below this one, for a levelled build.
         self.children = children
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"Meshlet(index={self.index}, level={self.level}, vertices={self.vertex_count}, triangles={self.triangle_count})"
 
 
@@ -2255,7 +2824,8 @@ class Meshlets:
         self._pointer = pointer
 
     @staticmethod
-    def build(positions, normals, indices, max_triangles: int, max_vertices: int, levels: int = 0) -> "Meshlets":
+    def build(positions: ArrayLike, normals: ArrayLike | None, indices: ArrayLike, max_triangles: int,
+              max_vertices: int, levels: int = 0) -> Meshlets:
         """Split `positions` (three floats a vertex), `normals` (the same, or None) and
         `indices` (three a triangle) into meshlets of at most `max_triangles` and
         `max_vertices` each -- the consumer's own limits, with no default: Nanite
@@ -2303,10 +2873,10 @@ class Meshlets:
     def __enter__(self) -> "Meshlets":
         return self
 
-    def __exit__(self, *_):
+    def __exit__(self, *_: object) -> None:
         self.free()
 
-    def __del__(self):
+    def __del__(self) -> None:
         try:
             self.free()
         except Exception:  # noqa: BLE001 - the interpreter may be going down
@@ -2361,7 +2931,7 @@ class Meshlets:
             positions.reshape(vertex_count, 3), normals.reshape(vertex_count, 3), indices, children,
         )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return "Meshlets(freed)" if self.freed else f"Meshlets(count={self.count})"
 
 
@@ -2401,7 +2971,16 @@ class FemEdge:
 
     __slots__ = ("id", "nodes", "runs", "faces", "ends", "closed", "seam")
 
-    def __init__(self, id, nodes, runs, faces, ends, closed, seam):
+    id: int
+    nodes: tuple[int, ...]
+    runs: tuple[int, ...]
+    faces: tuple[int, int]
+    ends: tuple[int, int]
+    closed: bool
+    seam: bool
+
+    def __init__(self, id: int, nodes: tuple[int, ...], runs: tuple[int, ...], faces: tuple[int, int],  # noqa: A002
+                 ends: tuple[int, int], closed: bool, seam: bool):
         #: The body's own B-rep edge id -- not this mesh's edge index.
         self.id = id
         #: This mesh's node indices, in order along the edge.
@@ -2415,7 +2994,7 @@ class FemEdge:
         self.closed = closed
         self.seam = seam
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (f"FemEdge(id={self.id}, nodes={len(self.nodes)}, runs={len(self.runs)}, "
                 f"faces={self.faces}, ends={self.ends}, closed={self.closed}, seam={self.seam})")
 
@@ -2439,12 +3018,16 @@ class FemVertex:
 
     __slots__ = ("node", "point", "has_position")
 
-    def __init__(self, node, point, has_position):
+    node: int
+    point: tuple[float, float, float]
+    has_position: bool
+
+    def __init__(self, node: int, point: tuple[float, float, float], has_position: bool):
         self.node = node
         self.point = point
         self.has_position = has_position
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"FemVertex(node={self.node}, point={self.point}, has_position={self.has_position})"
 
 
@@ -2511,53 +3094,53 @@ class FemMesh:
     def __enter__(self) -> "FemMesh":
         return self
 
-    def __exit__(self, *_):
+    def __exit__(self, *_: object) -> None:
         self.free()
 
-    def __del__(self):
+    def __del__(self) -> None:
         try:
             self.free()
         except Exception:  # noqa: BLE001 - the interpreter may be going down
             pass
 
-    # -- the flat arrays, borrowed
+    # -- the flat arrays, borrowed (never null: a FemMesh has triangles, or was refused)
 
     @property
-    def nodes(self):
+    def nodes(self) -> NDArray[numpy.float64]:
         """Every node's position, a read-only float64 `(node_count, 3)` view --
         placed, and in the space `Node.fem_mesh` and `from_mesh` describe."""
         raw = self._live
-        return _view(self, raw.nodes, (raw.node_count, 3), "float64")
+        return cast("NDArray[numpy.float64]", _view(self, raw.nodes, (raw.node_count, 3), "float64"))
 
     @property
-    def triangles(self):
+    def triangles(self) -> NDArray[numpy.uint32]:
         """Three node indices a triangle, wound outward: a read-only uint32
         `(triangle_count, 3)` view."""
         raw = self._live
-        return _view(self, raw.triangles, (raw.triangle_count, 3), "uint32")
+        return cast("NDArray[numpy.uint32]", _view(self, raw.triangles, (raw.triangle_count, 3), "uint32"))
 
     @property
-    def triangle_face(self):
+    def triangle_face(self) -> NDArray[numpy.uint32]:
         """The brep face each triangle lies on, one per triangle: a read-only
         uint32 `(triangle_count,)` view into `range(face_count)`."""
         raw = self._live
-        return _view(self, raw.triangle_face, (raw.triangle_count,), "uint32")
+        return cast("NDArray[numpy.uint32]", _view(self, raw.triangle_face, (raw.triangle_count,), "uint32"))
 
     @property
-    def node_kind(self):
+    def node_kind(self) -> NDArray[numpy.uint32]:
         """What each node lies on -- `0` a vertex, `1` an edge, `2` a face -- one
         per node, as a read-only uint32 view. Gmsh's own classification rule: the
         lowest-dimension entity the node lies on. `node_entity` says which one."""
         raw = self._live
-        return _view(self, raw.node_kind, (raw.node_count,), "uint32")
+        return cast("NDArray[numpy.uint32]", _view(self, raw.node_kind, (raw.node_count,), "uint32"))
 
     @property
-    def node_entity(self):
+    def node_entity(self) -> NDArray[numpy.uint32]:
         """Which vertex, edge or face each node lies on, by the matching
         `node_kind`: an index into `vertices`, into `edges`, or into the body's
         faces. One per node, a read-only uint32 view."""
         raw = self._live
-        return _view(self, raw.node_entity, (raw.node_count,), "uint32")
+        return cast("NDArray[numpy.uint32]", _view(self, raw.node_entity, (raw.node_count,), "uint32"))
 
     # -- the topology, copied out
 
@@ -2654,7 +3237,7 @@ class FemMesh:
             out.append((a.value, b.value))
         return out
 
-    def _census(self, call, count: int, what: str) -> "list[tuple[int, int, int]]":
+    def _census(self, call: Any, count: int, what: str) -> "list[tuple[int, int, int]]":
         """One flattened census, row by row: the shape `open_edges` and
         `folded_edges` share, so the two cannot drift."""
         handle = self._handle
@@ -2751,7 +3334,7 @@ class FemMesh:
             raise CadaclysmError(_last_error() or "msh text")
         return _text(raw)
 
-    def save_msh(self, path) -> None:
+    def save_msh(self, path: str | os.PathLike[str]) -> None:
         """`msh_text()` written to `path` by the library itself: the same bytes
         from the same writer, straight to the file rather than through the
         borrowed slot, so a `msh_text()` call on this handle from another thread
@@ -2762,7 +3345,7 @@ class FemMesh:
         if not _lib().cadaclysm_fem_mesh_save_msh(self._handle, str(path).encode()):
             raise CadaclysmError(_last_error() or f"could not write {path}")
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         if self.freed:
             return "FemMesh(freed)"
         raw = self._raw
@@ -2782,23 +3365,26 @@ class Node:
 
     __slots__ = ("scene", "index")
 
+    scene: Scene
+    index: int
+
     def __init__(self, scene: "Scene", index: int):
         self.scene = scene
         self.index = index
 
     # Identity is the pair, so a node from one lookup equals the same node from
     # another and can key a dict of, say, what the viewer has uploaded.
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         return (
             isinstance(other, Node)
             and other.index == self.index
             and other.scene is self.scene
         )
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         return hash((id(self.scene), self.index))
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<Node {self.index} {self.name or self.kind or '?'}>"
 
     @property
@@ -2942,7 +3528,7 @@ class Node:
         """
         return _lib().cadaclysm_node_can_mesh(self.scene._handle, self.index)
 
-    def save_mesh(self, path, fmt: str = "stl") -> None:
+    def save_mesh(self, path: str | os.PathLike[str], fmt: str = "stl") -> None:
         """Write this node's mesh to `path` in `fmt`.
 
         `fmt` is one of `mesh_formats()`. Raises `CadaclysmError` if the node
@@ -2961,7 +3547,7 @@ class Node:
             raise CadaclysmError(_last_error() or f"could not write {path}")
 
     @property
-    def colour(self):
+    def colour(self) -> tuple[float, float, float, float] | None:
         """`(r, g, b, a)` if the file gave one, else None.
 
         None rather than a default: most STEP files carry no colour at all, and
@@ -2970,10 +3556,10 @@ class Node:
         rgba = (c_float * 4)()
         if not _lib().cadaclysm_node_color(self.scene._handle, self.index, rgba):
             return None
-        return tuple(float(v) for v in rgba)
+        return cast("tuple[float, float, float, float]", tuple(float(v) for v in rgba))
 
     @property
-    def transform(self):
+    def transform(self) -> NDArray[numpy.float64]:
         """Where this node's geometry sits, as a 4x4 float64 numpy array.
 
         The ABI writes it column-major, as OpenGL and every engine do; this
@@ -2990,7 +3576,7 @@ class Node:
         return _transform_matrix(self.raw_transform)
 
     @property
-    def raw_transform(self):
+    def raw_transform(self) -> tuple[float, ...]:
         """The same matrix in the ABI's own column-major order, as 16 floats."""
         out = (c_double * 16)()
         _lib().cadaclysm_node_transform(self.scene._handle, self.index, out)
@@ -3035,7 +3621,7 @@ class Node:
         lent = self._mesh_of(_lib().cadaclysm_node_mesh64(self.scene._handle, self.index), "float64")
         return _LentMesh(self.scene, forgets, lent)
 
-    def _mesh_of(self, raw, real="float32") -> Mesh:
+    def _mesh_of(self, raw: Any, real: str = "float32") -> Mesh:
         n = raw.vertex_count
         return Mesh(
             _view(self.scene, raw.positions, (n, 3), real),
@@ -3063,7 +3649,8 @@ class Node:
         what to pick a level by against the pixel size on screen. Zero at level 0."""
         return _lib().cadaclysm_node_lod_error(self.scene._handle, self.index, level)
 
-    def fem_mesh(self, tolerance: float = 0.01, max_size: float = 0.0, placement=None) -> FemMesh:
+    def fem_mesh(self, tolerance: float = 0.01, max_size: float = 0.0,
+                 placement: Iterable[float] | None = None) -> FemMesh:
         """This node's body meshed for a solver, as a `FemMesh`: nodes welded by
         bits, triangles wound outward, each node tagged with the lowest-dimension
         B-rep entity it lies on, and every crack reported rather than closed.
@@ -3141,10 +3728,11 @@ class Node:
         raw = _lib().cadaclysm_node_surfaces(self.scene._handle, self.index)
         if not raw.face_count:
             return Surfaces([])
-        loops = _view(self.scene, raw.loops, (raw.loop_count, 2), "uint32")
-        points = _view(self.scene, raw.points, (raw.point_count, 2), "float32")
-        profiles = _view(self.scene, raw.profiles, (raw.profile_count, 4), "float32")
-        nurbs = _view(self.scene, raw.nurbs, (raw.nurbs_count,), "float32")
+        loops = cast("NDArray[numpy.uint32]", _view(self.scene, raw.loops, (raw.loop_count, 2), "uint32"))
+        points = cast("NDArray[numpy.float32]", _view(self.scene, raw.points, (raw.point_count, 2), "float32"))
+        profiles = cast("NDArray[numpy.float32]",
+                        _view(self.scene, raw.profiles, (raw.profile_count, 4), "float32"))
+        nurbs = cast("NDArray[numpy.float32]", _view(self.scene, raw.nurbs, (raw.nurbs_count,), "float32"))
 
         out = []
         for i in range(raw.face_count):
@@ -3184,17 +3772,17 @@ class Node:
         return self._polylines(_lib().cadaclysm_node_edges)
 
     @property
-    def edge_colours(self) -> "list":
+    def edge_colours(self) -> list[tuple[float, float, float, float] | None]:
         """One RGBA per polyline of `edges`, `None` for an edge the file does not style;
         empty when nothing is styled."""
         return self._edge_colours(_lib().cadaclysm_node_edge_colors)
 
     @property
-    def surface_edge_colours(self) -> "list":
+    def surface_edge_colours(self) -> list[tuple[float, float, float, float] | None]:
         """`edge_colours` for `surface_edges`."""
         return self._edge_colours(_lib().cadaclysm_node_surface_edge_colors)
 
-    def _edge_colours(self, fn) -> "list":
+    def _edge_colours(self, fn: Any) -> list[tuple[float, float, float, float] | None]:
         raw = fn(self.scene._handle, self.index)
         if not raw.rgba or not raw.count:
             return []
@@ -3217,7 +3805,7 @@ class Node:
         """
         return self._polylines(_lib().cadaclysm_node_isocurves)
 
-    def _polylines(self, function) -> Polylines:
+    def _polylines(self, function: Any) -> Polylines:
         raw = function(self.scene._handle, self.index)
         return Polylines(
             _view(self.scene, raw.positions, (raw.vertex_count, 3), "float32"),
@@ -3257,13 +3845,67 @@ class Node:
         """`isocurve_beziers` in float64; see `edge_beziers64`."""
         return self._beziers(_lib().cadaclysm_node_isocurve_beziers64, "float64")
 
-    def _beziers(self, function, real="float32") -> Beziers:
+    def _beziers(self, function: Any, real: str = "float32") -> Beziers:
         raw = function(self.scene._handle, self.index)
         return Beziers(
             _view(self.scene, raw.points, (raw.count, 4, 3), real),
             _view(self.scene, raw.weights, (raw.count, 4), real),
             raw.count,
         )
+
+    def silhouette_beziers(self, **words: Unpack[_SvgWords]) -> Beziers:
+        """This node's silhouette from the camera the keywords describe -- where
+        its surfaces turn away from the eye, which no edge of it lies on.
+
+        `svg`'s own camera words: `view`, `az`, `el`, `up`, `fov`, and `size` and
+        `tolerance`, which matter here -- the library reads the tolerance as a
+        fraction of the page, `tolerance / size[0]`. `margin`, `stroke`,
+        `width` and `background` do not change the curves, and neither do the
+        line-set words (`edges`, `curves`, `isocurves`, `polylines`,
+        `silhouettes`): none of them is read.
+
+        **The arrays are copies, unlike every other `Beziers` here.** The
+        library keeps one silhouette slot per scene and the next silhouette call
+        on this scene overwrites it, which is a far shorter life than the views
+        `edge_beziers` and its twins hand out (those last as long as the scene).
+        Copying is what makes the obvious code safe on one thread:
+
+            first = node.silhouette_beziers(view="iso")
+            second = node.silhouette_beziers(view="front")   # replaces the slot `first` borrowed
+
+        `first` still holds its own numbers afterwards. The same goes for
+        collecting the silhouettes of several nodes in a loop.
+
+        Threads are another matter: ctypes releases the GIL during the call, so
+        a second thread asking the same scene can refill the slot while the
+        first is still copying out of it. As the library documents, callers
+        sharing a scene across threads must serialise their silhouette calls.
+
+        Do not turn this back into a `_view` call. `ValueError` on a `view`
+        name that is not one of the viewer's; `CadaclysmError` on any other
+        refused option, a body with no measurable geometry, or a node that
+        holds no shape of its own (a container above the parts: `bounds` is all
+        zeros there); a falsey `Beziers` with `count` 0 where the body simply
+        has no silhouette.
+        """
+        # This wrapper's `_svg_options` takes the scene's default `up` first --
+        # `_svg_options(default_up, *, view="iso", ...)` -- exactly as `svg` calls
+        # it. It is NOT the kernel wrapper's same-named helper, which takes only
+        # keywords.
+        options = _svg_options(self.scene._default_up(), **words)
+        raw = _lib().cadaclysm_node_silhouette_beziers(self.scene._handle, self.index, ctypes.byref(options))
+        if not raw.points or raw.count == 0:
+            # The call clears the thread's error at entry (the ABI says so), and
+            # the empty answer sets none: a reason here is this call's own
+            # refusal, none is the empty answer.
+            message = _last_error()
+            if message:
+                raise CadaclysmError(message)
+            return Beziers(None, None, 0)
+        points = _view(self.scene, raw.points, (raw.count, 4, 3), "float64")
+        weights = _view(self.scene, raw.weights, (raw.count, 4), "float64")
+        # Copied here, not handed out: see the doc comment.
+        return Beziers(points.copy(), weights.copy(), raw.count)
 
     def collision(self, hull_budget: int = 0) -> "Collision | None":
         """The collision body for what this node draws, building its mesh if it is
@@ -3290,7 +3932,7 @@ class Node:
 
     # -- the surface path: for a renderer drawing exact surfaces, never triangles --
 
-    def bounds_placed(self, placement=None) -> Bounds:
+    def bounds_placed(self, placement: Iterable[float] | None = None) -> Bounds:
         """The box of what this node draws **under a placement**, for a part drawn
         from its surfaces: every sample is carried through the document's convention
         and then `placement` (16 numbers, column-major, as `Placement.raw_transform`;
@@ -3304,7 +3946,7 @@ class Node:
         raw = _lib().cadaclysm_node_bounds_placed(self.scene._handle, self.index, matrix)
         return Bounds(raw.min, raw.max)
 
-    def bounds_placed64(self, placement=None) -> Bounds:
+    def bounds_placed64(self, placement: Iterable[float] | None = None) -> Bounds:
         """`bounds_placed` in float64; see `bounds64`."""
         values = None if placement is None else [float(v) for v in placement]
         if values is not None and len(values) != 16:
@@ -3345,7 +3987,7 @@ class Node:
         surfaces."""
         return self._polylines(_lib().cadaclysm_node_surface_isocurves)
 
-    def surface_pick(self, from_, to):
+    def surface_pick(self, from_: Iterable[float], to: Iterable[float]) -> tuple[float, float, float] | None:
         """Where the segment `from_`..`to` first meets this part's surfaces, as
         `(x, y, z)`, or None where it meets none (or the part has no surfaces).
         Exact: answers from the surface and tests the trims at the hit's own (u, v).
@@ -3377,26 +4019,31 @@ class Node:
         and for a node that draws nothing. Treat `-1` as unknown, never as zero."""
         return _lib().cadaclysm_node_triangle_estimate(self.scene._handle, self.index)
 
-    def walk(self):
+    def walk(self) -> Iterator[Node]:
         """This node and every node under it, parents before children."""
-        stack = [self]
+        stack: list[Node] = [self]
         while stack:
             node = stack.pop()
             yield node
             stack.extend(reversed(node.children))
 
-    def show(self, **options) -> None:
+    def show(self, **options: Unpack[_ShowWords]) -> None:
         """Draw this node: its scene with the siblings along the path from its root hidden
         (the ancestors' own geometry stays), framed on the node. Keywords as `Scene.show`."""
         self.scene._draw("show", options, "Node", node=self)
 
-    def view(self, **options):
+    def view(self, **options: Unpack[_ShowWords]) -> dict[str, Any] | None:
         """Draw this node: its scene with the siblings along the path from its root hidden
         (the ancestors' own geometry stays), framed on the node. Orbit it; returns the camera
         (eye, target, up, orthographic) and the last pick."""
         return self.scene._draw("view", options, "Node", node=self)
 
-    def svg(self, path=None, **words) -> "str | None":
+    @overload
+    def svg(self, path: None = None, **words: Unpack[_SvgWords]) -> str: ...
+    @overload
+    def svg(self, path: str | os.PathLike[str], **words: Unpack[_SvgWords]) -> None: ...
+
+    def svg(self, path: str | os.PathLike[str] | None = None, **words: Unpack[_SvgWords]) -> str | None:
         """This node's own wireframe as SVG, in its own frame -- `Scene.svg`'s
         words, read from just this node rather than every placement.
 
@@ -3427,7 +4074,11 @@ class Scene:
 
     __slots__ = ("_pointer", "path", "schema_path", "convention", "_forgets", "__weakref__")
 
-    def __init__(self, pointer: int, path: Path, schema_path, convention=0):
+    path: Path
+    schema_path: Path | None
+    convention: int
+
+    def __init__(self, pointer: int, path: Path, schema_path: Path | None, convention: int = 0):
         self._pointer = pointer
         # How many times `forget_meshes` has run. Only `Node.mesh64` stamps itself with
         # this: it lends the document's own mesh, which a forget frees, where the float
@@ -3459,7 +4110,7 @@ class Scene:
         return self._pointer
 
     @property
-    def surface_matrix(self):
+    def surface_matrix(self) -> NDArray[numpy.float64]:
         """The 4x4 that puts `Node.surfaces` in the space everything else is already in.
 
         Only the surfaces need it. Meshes, polylines and Bezier curves arrive in the
@@ -3496,10 +4147,10 @@ class Scene:
     def __enter__(self) -> "Scene":
         return self
 
-    def __exit__(self, *exception) -> None:
+    def __exit__(self, *exception: object) -> None:
         self.close()
 
-    def __del__(self):
+    def __del__(self) -> None:
         # Only reached once nothing refers to the scene, and a borrowed view
         # refers to it through its `.base` — so this cannot pull memory out
         # from under an array that is still alive.
@@ -3508,7 +4159,7 @@ class Scene:
         except Exception:
             pass
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         state = "closed" if self.closed else f"{len(self)} nodes"
         return f"<Scene {self.path.name} ({state})>"
 
@@ -3604,6 +4255,12 @@ class Scene:
         return [State(self, i) for i in range(_lib().cadaclysm_state_count(self._handle))]
 
     @property
+    def schedules(self) -> "list[WorkSchedule]":
+        """The file's work schedules (IFC 4D), in file order; empty for a file that
+        records none."""
+        return [WorkSchedule(self, i) for i in range(_lib().cadaclysm_schedule_count(self._handle))]
+
+    @property
     def sequences(self) -> "list[Sequence]":
         """The file's motion sequences, in file order; empty for a file that records
         none."""
@@ -3616,7 +4273,7 @@ class Scene:
         index = _lib().cadaclysm_kinematics_base(self._handle)
         return None if index == NONE else Link(self, index)
 
-    def pose(self, values=(), ground: "Link | None" = None) -> "Pose":
+    def pose(self, values: Iterable[tuple[Joint, Iterable[float]]] = (), ground: Link | None = None) -> Pose:
         """The mechanism posed by `values`: an iterable of `(Joint, sequence of numbers)`
         rows -- exactly `State.values`' row type, so `pose(state.values)` poses like
         `pose_state(state)` -- with `ground` (a `Link`, or None for the default ground)
@@ -3684,7 +4341,7 @@ class Scene:
             raise IndexError(f"node {index} of {count}")
         return Node(self, index)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Node]:
         """Every node in index order, without building a list of them."""
         return (Node(self, i) for i in range(len(self)))
 
@@ -3754,7 +4411,7 @@ class Scene:
         """A node index as a `Node`, or None for `CADACLYSM_NONE`."""
         return None if index == NONE else Node(self, index)
 
-    def walk(self):
+    def walk(self) -> Iterator[Node]:
         """Every node reachable from the roots, parents before children."""
         for root in self.roots:
             yield from root.walk()
@@ -3814,7 +4471,7 @@ class Scene:
 
     # -- writing --
 
-    def save(self, path, fmt: str = "glb") -> None:
+    def save(self, path: str | os.PathLike[str], fmt: str = "glb") -> None:
         """Write the whole scene to `path`: `"glb"` (binary glTF), `"gltf"`
         (text glTF, one file either way) or `"obj"` (Wavefront, every
         placement baked to its own named object, a `.mtl` beside it under the
@@ -3834,7 +4491,7 @@ class Scene:
 
     # -- drawing --
 
-    def show(self, **options) -> None:
+    def show(self, **options: Unpack[_ShowWords]) -> None:
         """Draw every visible placement with the viewer in use. Keywords: view= (front
         back left right top bottom iso), az=, el=, zoom=, up= (default from the convention
         the scene was opened with), edges= (the B-rep edges over the shapes; on the
@@ -3843,12 +4500,17 @@ class Scene:
         tolerance it was read with."""
         self._draw("show", options, "Scene")
 
-    def view(self, **options):
+    def view(self, **options: Unpack[_ShowWords]) -> dict[str, Any] | None:
         """Orbit the model with the view library in use; returns the camera (eye,
         target, up, orthographic) and the last pick."""
         return self._draw("view", options, "Scene")
 
-    def svg(self, path=None, **words) -> "str | None":
+    @overload
+    def svg(self, path: None = None, **words: Unpack[_SvgWords]) -> str: ...
+    @overload
+    def svg(self, path: str | os.PathLike[str], **words: Unpack[_SvgWords]) -> None: ...
+
+    def svg(self, path: str | os.PathLike[str] | None = None, **words: Unpack[_SvgWords]) -> str | None:
         """Every visible placement's wireframe as SVG, from the camera the keywords
         describe -- the same words `show` takes, read by the library itself rather
         than a viewer: view= (front back left right top bottom iso), az=, el= over
@@ -3885,11 +4547,12 @@ class Scene:
         other's notion of "default"."""
         return "y" if (self.convention & 0xFF) in _Y_UP else "z"
 
-    def _draw(self, mode, options, owner, node=None, transforms=None):
+    def _draw(self, mode: str, options: Any, owner: str, node: Node | None = None,
+              transforms: list[tuple[float, ...]] | None = None) -> Any:
         if "tolerance" in options:
             raise TypeError(f"{owner}.{mode} takes no tolerance: a document is drawn at the "
                             "tolerance it was read with")
-        extra = {} if transforms is None else {"transforms": transforms}
+        extra: dict[str, Any] = {} if transforms is None else {"transforms": transforms}
         return _viewer().present(mode, self if node is None else node, name=self.path.name, default_view="iso",
                                  keywords=dict(options, default_up=self._default_up()), owner=owner.lower(), **extra)
 
@@ -3897,7 +4560,7 @@ class Scene:
 # ---- opening --------------------------------------------------------------
 
 
-def declared_schema(model: Path) -> str:
+def declared_schema(model: str | os.PathLike[str]) -> str:
     """The schema a STEP or IFC file says it speaks, from its own header.
 
     `FILE_SCHEMA(('IFC2X3'))` sits near the top of the file, so a few kilobytes
@@ -3913,7 +4576,8 @@ def _plain(name: str) -> str:
     return "".join(c for c in name.upper() if c.isalnum())
 
 
-def resolve_schema(model: Path, schema):
+def resolve_schema(model: str | os.PathLike[str],
+                   schema: str | os.PathLike[str] | None) -> tuple[Path | None, list[Path]]:
     """`schema` resolved to `(chosen, fallbacks)` — one `.exp`, or a list to try.
 
     A file is taken as given. A directory is matched against what the model
@@ -3947,8 +4611,8 @@ def resolve_schema(model: Path, schema):
     return None, available
 
 
-def open(path, schema=None, convention=Convention.NATIVE,  # noqa: A001 - the verb this module is for
-         colors=False) -> Scene:
+def open(path: str | os.PathLike[str], schema: str | os.PathLike[str] | None = None,  # noqa: A001 - the verb
+         convention: int = Convention.NATIVE, colors: bool = False) -> Scene:
     """Open a CAD file.
 
     `schema` names an EXPRESS schema (`.exp`) beyond the ones built into the
@@ -4009,8 +4673,9 @@ def open(path, schema=None, convention=Convention.NATIVE,  # noqa: A001 - the ve
     raise CadaclysmError(f"{path.name}: {_last_error()}")
 
 
-def open_memory(data, format, schema=None, name="<memory>",  # noqa: A002
-                convention=Convention.NATIVE, colors=False) -> Scene:
+def open_memory(data: bytes | bytearray | memoryview, format: str,  # noqa: A002
+                schema: str | os.PathLike[str] | None = None, name: str = "<memory>",
+                convention: int = Convention.NATIVE, colors: bool = False) -> Scene:
     """Open a CAD file already in bytes.
 
     `format` names the kind as an extension would — `"step"`, `"ifc"`, `"igs"`,

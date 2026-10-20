@@ -349,6 +349,35 @@ const CadaclysmFreedom = koffi.struct('CadaclysmFreedom', {
   has_upper: 'bool',
   upper: 'double',
 });
+// Every date pair of a task (IFC work schedules): each `has_*` says its value is given.
+const CadaclysmTaskTime = koffi.struct('CadaclysmTaskTime', {
+  has_schedule_start: 'bool',
+  schedule_start: 'double',
+  has_schedule_finish: 'bool',
+  schedule_finish: 'double',
+  has_early_start: 'bool',
+  early_start: 'double',
+  has_early_finish: 'bool',
+  early_finish: 'double',
+  has_late_start: 'bool',
+  late_start: 'double',
+  has_late_finish: 'bool',
+  late_finish: 'double',
+  has_actual_start: 'bool',
+  actual_start: 'double',
+  has_actual_finish: 'bool',
+  actual_finish: 'double',
+  has_duration: 'bool',
+  duration: 'double',
+});
+// One element's state on a date: `cadaclysm_schedule_at`'s rows.
+const CadaclysmElementState = koffi.struct('CadaclysmElementState', {
+  node: 'uint32_t',
+  phase: 'uint32_t',
+  progress: 'double',
+  has_variance: 'bool',
+  variance: 'double',
+});
 
 // ---- the function table ----------------------------------------------------
 
@@ -457,6 +486,8 @@ function _lib() {
     scene_svg: f('bool cadaclysm_scene_svg(const CadaclysmScene *scene, const char *path, const CadaclysmSvgOptions *options)'),
     node_svg_text: f('const char *cadaclysm_node_svg_text(const CadaclysmScene *scene, uint32_t node, const CadaclysmSvgOptions *options)'),
     node_svg: f('bool cadaclysm_node_svg(const CadaclysmScene *scene, uint32_t node, const char *path, const CadaclysmSvgOptions *options)'),
+    // BORROWED into a per-scene slot that the next silhouette call on that scene replaces.
+    node_silhouette_beziers: f('CadaclysmBeziers64 cadaclysm_node_silhouette_beziers(const CadaclysmScene *scene, uint32_t node, const CadaclysmSvgOptions *options)'),
     source_name: f('const char *cadaclysm_source_name(const CadaclysmScene *scene)'),
     pick_file: f('const char *cadaclysm_pick_file(const CadaclysmWindow *parent)'),
     pick_save: f('const char *cadaclysm_pick_save(const CadaclysmWindow *parent, const char *suggested_name)'),
@@ -490,6 +521,8 @@ function _lib() {
     // the named poses a file records.
     joint_pair_kind: f('int32_t cadaclysm_joint_pair_kind(const CadaclysmScene *scene, uint32_t joint)'),
     joint_pair_type: f('const char *cadaclysm_joint_pair_type(const CadaclysmScene *scene, uint32_t joint)'),
+    joint_pair_kind_name: f('const char *cadaclysm_joint_pair_kind_name(const CadaclysmScene *scene, uint32_t joint)'),
+    joint_pair_parameters: f('size_t cadaclysm_joint_pair_parameters(const CadaclysmScene *scene, uint32_t joint, _Out_ double *out, size_t capacity)'),
     joint_pair_pitch: f('double cadaclysm_joint_pair_pitch(const CadaclysmScene *scene, uint32_t joint)'),
     joint_pair_frames: f('bool cadaclysm_joint_pair_frames(const CadaclysmScene *scene, uint32_t joint, _Out_ double *out_start, _Out_ double *out_end)'),
     joint_freedom_count: f('uint32_t cadaclysm_joint_freedom_count(const CadaclysmScene *scene, uint32_t joint)'),
@@ -511,12 +544,38 @@ function _lib() {
     sequence_seconds_per_unit: f('double cadaclysm_sequence_seconds_per_unit(const CadaclysmScene *scene, uint32_t sequence)'),
     sequence_segment_count: f('uint32_t cadaclysm_sequence_segment_count(const CadaclysmScene *scene, uint32_t sequence)'),
     sequence_segment: f('bool cadaclysm_sequence_segment(const CadaclysmScene *scene, uint32_t sequence, uint32_t segment, _Out_ uint32_t *state, _Out_ double *t, _Out_ uint32_t *interpolation)'),
+    // IFC work schedules: the programme a file records, its tasks and links, and the
+    // elements' states on a date (`cadaclysm_schedule_at` fills `CadaclysmElementState` rows).
+    schedule_count: f('uint32_t cadaclysm_schedule_count(const CadaclysmScene *scene)'),
+    schedule_name: f('const char *cadaclysm_schedule_name(const CadaclysmScene *scene, uint32_t s)'),
+    schedule_identification: f('const char *cadaclysm_schedule_identification(const CadaclysmScene *scene, uint32_t s)'),
+    schedule_kind: f('uint32_t cadaclysm_schedule_kind(const CadaclysmScene *scene, uint32_t s)'),
+    schedule_kind_name: f('const char *cadaclysm_schedule_kind_name(const CadaclysmScene *scene, uint32_t s)'),
+    schedule_start: f('bool cadaclysm_schedule_start(const CadaclysmScene *scene, uint32_t s, _Out_ double *out)'),
+    schedule_finish: f('bool cadaclysm_schedule_finish(const CadaclysmScene *scene, uint32_t s, _Out_ double *out)'),
+    task_count: f('uint32_t cadaclysm_task_count(const CadaclysmScene *scene, uint32_t s)'),
+    task_name: f('const char *cadaclysm_task_name(const CadaclysmScene *scene, uint32_t s, uint32_t t)'),
+    task_identification: f('const char *cadaclysm_task_identification(const CadaclysmScene *scene, uint32_t s, uint32_t t)'),
+    task_kind: f('uint32_t cadaclysm_task_kind(const CadaclysmScene *scene, uint32_t s, uint32_t t)'),
+    task_kind_name: f('const char *cadaclysm_task_kind_name(const CadaclysmScene *scene, uint32_t s, uint32_t t)'),
+    task_status: f('const char *cadaclysm_task_status(const CadaclysmScene *scene, uint32_t s, uint32_t t)'),
+    task_milestone: f('bool cadaclysm_task_milestone(const CadaclysmScene *scene, uint32_t s, uint32_t t)'),
+    task_parent: f('bool cadaclysm_task_parent(const CadaclysmScene *scene, uint32_t s, uint32_t t, _Out_ uint32_t *out)'),
+    task_time: f('bool cadaclysm_task_time(const CadaclysmScene *scene, uint32_t s, uint32_t t, _Out_ CadaclysmTaskTime *out)'),
+    task_node_count: f('uint32_t cadaclysm_task_node_count(const CadaclysmScene *scene, uint32_t s, uint32_t t)'),
+    task_nodes: f('uint32_t cadaclysm_task_nodes(const CadaclysmScene *scene, uint32_t s, uint32_t t, _Out_ uint32_t *out, uint32_t capacity)'),
+    task_link_count: f('uint32_t cadaclysm_task_link_count(const CadaclysmScene *scene, uint32_t s)'),
+    task_link: f('bool cadaclysm_task_link(const CadaclysmScene *scene, uint32_t s, uint32_t l, _Out_ uint32_t *from, _Out_ uint32_t *to, _Out_ uint32_t *kind, _Out_ double *lag, _Out_ bool *has_lag)'),
+    task_link_kind_name: f('const char *cadaclysm_task_link_kind_name(const CadaclysmScene *scene, uint32_t s, uint32_t l)'),
+    schedule_at: f('int64_t cadaclysm_schedule_at(const CadaclysmScene *scene, uint32_t s, double date, uint32_t dates, CadaclysmElementState *out, uint32_t capacity)'),
     pose_sequence: f('CadaclysmPose *cadaclysm_pose_sequence(const CadaclysmScene *scene, uint32_t sequence, double t, uint32_t ground)'),
     pose_free: f('void cadaclysm_pose_free(CadaclysmPose *pose)'),
     pose_ground: f('uint32_t cadaclysm_pose_ground(const CadaclysmPose *pose)'),
     pose_node_count: f('uint32_t cadaclysm_pose_node_count(const CadaclysmPose *pose)'),
     pose_node_transform: f('void cadaclysm_pose_node_transform(const CadaclysmPose *pose, uint32_t node, _Out_ double *out)'),
     pose_unsolved_count: f('uint32_t cadaclysm_pose_unsolved_count(const CadaclysmPose *pose)'),
+    pose_diagnostic_count: f('uint32_t cadaclysm_pose_diagnostic_count(const CadaclysmPose *pose)'),
+    pose_diagnostic: f('const char *cadaclysm_pose_diagnostic(const CadaclysmPose *pose, uint32_t index)'),
     pose_unsolved: f('uint32_t cadaclysm_pose_unsolved(const CadaclysmPose *pose, uint32_t index)'),
     pose_out_of_range_count: f('uint32_t cadaclysm_pose_out_of_range_count(const CadaclysmPose *pose)'),
     pose_out_of_range: f('bool cadaclysm_pose_out_of_range(const CadaclysmPose *pose, uint32_t index, _Out_ uint32_t *joint, _Out_ uint32_t *freedom, _Out_ double *value)'),
@@ -1122,10 +1181,15 @@ class Joint {
         raw.has_upper ? raw.upper : null,
       ));
     }
+    const kindNameRaw = l.joint_pair_kind_name(h, this.index);
+    const count = Number(l.joint_pair_parameters(h, this.index, null, 0));
+    const parameters = new Float64Array(count);
+    if (count > 0) l.joint_pair_parameters(h, this.index, parameters, count);
     return new Pair(
       _PAIR_KIND_NAMES[kind], typeName == null ? null : String(typeName),
       Number.isNaN(pitchRaw) ? null : pitchRaw,
       _rows(rawStart), _rows(rawEnd), rawStart, rawEnd, freedoms,
+      kindNameRaw == null ? _PAIR_KIND_NAMES[kind] : String(kindNameRaw), Array.from(parameters),
     );
   }
 }
@@ -1151,7 +1215,7 @@ class Freedom {
  * links -- what `Joint.pair` returns.
  */
 class Pair {
-  constructor(kind, typeName, pitch, frameStart, frameEnd, rawFrameStart, rawFrameEnd, freedoms) {
+  constructor(kind, typeName, pitch, frameStart, frameEnd, rawFrameStart, rawFrameEnd, freedoms, kindName, parameters) {
     /** One of thirteen kinds: `revolute`, `prismatic`, `cylindrical`, `spherical`,
      *  `spherical_with_pin`, `planar`, `universal`, `homokinetic`, `screw`,
      *  `fully_constrained`, `unconstrained`, `low_order`, `other`. */
@@ -1169,6 +1233,14 @@ class Pair {
     /** `frameEnd` in the ABI's own column-major order, as 16 doubles. */
     this.rawFrameEnd = rawFrameEnd;
     this._freedoms = freedoms;
+    /** The kind by name, finer than `kind`: the same thirteen names, and `gear` and
+     *  `rack_and_pinion` for the two coupled pairs `kind` reads as `other`. */
+    this.kindName = kindName;
+    /** The pair's own numbers, in the order `Assembly.pairWith` takes them: `screw`
+     *  `[pitch]`, `rack_and_pinion` `[pinion_radius]`, `gear` `[radius_first, radius_second,
+     *  ratio, bevel, helical_angle]` (always five, the ratio the second link's rotation over
+     *  the first's); `[]` for every other kind. */
+    this.parameters = parameters;
   }
   /** Its degrees of freedom, in the reader's per-kind order, each a `Freedom`. A
    *  `State`'s values compose in this order. */
@@ -1255,6 +1327,153 @@ class Sequence {
   }
 }
 
+// The words of the C enums, indexed by their values (cadaclysm.h).
+const _SCHEDULE_KINDS = ['planned', 'actual', 'baseline', 'notdefined', 'other'];
+const _TASK_KINDS = [
+  'attendance', 'construction', 'demolition', 'dismantle', 'disposal', 'installation',
+  'logistic', 'maintenance', 'move', 'operation', 'removal', 'renovation', 'notdefined', 'other',
+];
+const _LINK_KINDS = ['finish_start', 'start_start', 'finish_finish', 'start_finish', 'notdefined', 'other'];
+const _DATES = { scheduled: 0, actual: 1 };
+const _PHASES = ['unbuilt', 'building', 'built', 'demolishing', 'demolished'];
+
+/**
+ * What one element is doing on a date: `WorkSchedule.at()`'s rows. `phase` is `'unbuilt'`,
+ * `'building'`, `'built'`, `'demolishing'` or `'demolished'`; `progress` is 0..1 through the
+ * window that governs the phase; `variance` is the seconds late (positive) or early
+ * (negative) against the schedule, or null where there is none to give.
+ */
+class ElementState {
+  constructor(node, phase, progress, variance) { this.node = node; this.phase = phase; this.progress = progress; this.variance = variance; }
+}
+
+/**
+ * Every date pair a task gives, each a number (seconds since 1970-01-01T00:00, no zone:
+ * `new Date(seconds * 1000)`, read with `toISOString()` or the `getUTC*` accessors) or null
+ * where the file gives none. `duration` is in seconds.
+ */
+class TaskTime {
+  constructor(raw) {
+    const given = (name) => (raw['has_' + name] ? raw[name] : null);
+    this.scheduleStart = given('schedule_start');
+    this.scheduleFinish = given('schedule_finish');
+    this.earlyStart = given('early_start');
+    this.earlyFinish = given('early_finish');
+    this.lateStart = given('late_start');
+    this.lateFinish = given('late_finish');
+    this.actualStart = given('actual_start');
+    this.actualFinish = given('actual_finish');
+    this.duration = given('duration');
+  }
+}
+
+/** A sequence between two tasks of one schedule. From `WorkSchedule.links`; `lag` is in seconds, or null. */
+class TaskLink {
+  constructor(schedule, index, from, to, kind, lag) {
+    this._schedule = schedule; this._index = index;
+    /** The predecessor. */ this.from = from;
+    /** The successor. */ this.to = to;
+    /** `'finish_start'`, `'start_start'`, `'finish_finish'`, `'start_finish'`, `'notdefined'` or `'other'`. */
+    this.kind = _LINK_KINDS[kind] ?? 'notdefined';
+    this.lag = lag;
+  }
+  /** The text of a user-defined kind (`kind === 'other'`); `''` otherwise. */
+  get kindName() { return _text(_lib().task_link_kind_name(this._schedule._scene._handle, this._schedule.index, this._index)); }
+}
+
+/**
+ * One task of a `WorkSchedule`. From `WorkSchedule.tasks`. `kind` is `'attendance'`,
+ * `'construction'`, `'demolition'`, `'dismantle'`, `'disposal'`, `'installation'`,
+ * `'logistic'`, `'maintenance'`, `'move'`, `'operation'`, `'removal'`, `'renovation'`,
+ * `'notdefined'` or `'other'`; `kindName` is the text of a user-defined one. `parent` is the
+ * summary task nesting it (null at the top); `nodes` are the nodes it builds or removes.
+ */
+class Task {
+  constructor(schedule, index) { this.schedule = schedule; this.index = index; }
+  equals(other) { return other instanceof Task && other.index === this.index && other.schedule.equals(this.schedule); }
+  get name() { return _text(_lib().task_name(this.schedule._scene._handle, this.schedule.index, this.index)); }
+  /** Its identification, `''` where none. */
+  get identification() { return _text(_lib().task_identification(this.schedule._scene._handle, this.schedule.index, this.index)); }
+  get kind() { return _TASK_KINDS[_lib().task_kind(this.schedule._scene._handle, this.schedule.index, this.index)] ?? 'notdefined'; }
+  /** The text of a user-defined kind (`kind === 'other'`); `''` otherwise. */
+  get kindName() { return _text(_lib().task_kind_name(this.schedule._scene._handle, this.schedule.index, this.index)); }
+  /** Its status as the file writes it, `''` where none. */
+  get status() { return _text(_lib().task_status(this.schedule._scene._handle, this.schedule.index, this.index)); }
+  get milestone() { return Boolean(_lib().task_milestone(this.schedule._scene._handle, this.schedule.index, this.index)); }
+  get parent() {
+    const out = new Uint32Array(1);
+    return _lib().task_parent(this.schedule._scene._handle, this.schedule.index, this.index, out) ? new Task(this.schedule, out[0]) : null;
+  }
+  get time() {
+    const raw = {};
+    _lib().task_time(this.schedule._scene._handle, this.schedule.index, this.index, raw);
+    return new TaskTime(raw);
+  }
+  get nodes() {
+    const l = _lib(); const h = this.schedule._scene._handle; const s = this.schedule.index;
+    const count = l.task_node_count(h, s, this.index);
+    const out = new Uint32Array(count);
+    if (count > 0) l.task_nodes(h, s, this.index, out, count);
+    return Array.from(out, (n) => new Node(this.schedule._scene, n));
+  }
+}
+
+/**
+ * A building's programme: an `IfcWorkSchedule` and the tasks it controls. From
+ * `Scene.schedules()`. `at(date)` says what each element it names is doing on a date; dates
+ * are numbers, seconds since 1970-01-01T00:00 (see `TaskTime`).
+ */
+class WorkSchedule {
+  constructor(scene, index) { this._scene = scene; this.index = index; }
+  equals(other) { return other instanceof WorkSchedule && other.index === this.index && other._scene === this._scene; }
+  /** Its name, else its identification, else `schedule #k` (k from 1, in file order). */
+  get name() { return _text(_lib().schedule_name(this._scene._handle, this.index)); }
+  /** Its identification, `''` where none. */
+  get identification() { return _text(_lib().schedule_identification(this._scene._handle, this.index)); }
+  /** `'planned'`, `'actual'`, `'baseline'`, `'notdefined'` or `'other'`. */
+  get kind() { return _SCHEDULE_KINDS[_lib().schedule_kind(this._scene._handle, this.index)] ?? 'notdefined'; }
+  /** The text of a user-defined kind (`kind === 'other'`); `''` otherwise. */
+  get kindName() { return _text(_lib().schedule_kind_name(this._scene._handle, this.index)); }
+  /** The schedule's start, or null where the file gives none. */
+  get start() { const out = new Float64Array(1); return _lib().schedule_start(this._scene._handle, this.index, out) ? out[0] : null; }
+  /** The schedule's finish, or null where the file gives none. */
+  get finish() { const out = new Float64Array(1); return _lib().schedule_finish(this._scene._handle, this.index, out) ? out[0] : null; }
+  /** Its tasks, in file order. */
+  get tasks() {
+    const out = [];
+    for (let i = 0, n = _lib().task_count(this._scene._handle, this.index); i < n; i++) out.push(new Task(this, i));
+    return out;
+  }
+  /** Its task links (`IfcRelSequence`), in file order. */
+  get links() {
+    const l = _lib(); const h = this._scene._handle; const tasks = this.tasks; const out = [];
+    for (let i = 0, n = l.task_link_count(h, this.index); i < n; i++) {
+      const from = new Uint32Array(1); const to = new Uint32Array(1); const kind = new Uint32Array(1);
+      const lag = new Float64Array(1); const hasLag = new Uint8Array(1);
+      l.task_link(h, this.index, i, from, to, kind, lag, hasLag);
+      out.push(new TaskLink(this, i, tasks[from[0]], tasks[to[0]], kind[0], hasLag[0] ? lag[0] : null));
+    }
+    return out;
+  }
+  /**
+   * What each element this schedule names is doing on `date` (seconds since
+   * 1970-01-01T00:00), in node order; elements no task names are not listed. `dates` is
+   * `'scheduled'` or `'actual'`: which of a task's dates to play. Throws `Error` for any other
+   * `dates` and `CadaclysmError` for a `date` that is not finite.
+   */
+  at(date, dates = 'scheduled') {
+    if (!Object.prototype.hasOwnProperty.call(_DATES, dates)) throw new Error("dates must be 'scheduled' or 'actual'");
+    const l = _lib(); const h = this._scene._handle; const which = _DATES[dates];
+    const count = Number(l.schedule_at(h, this.index, Number(date), which, null, 0));
+    if (count < 0) throw new CadaclysmError(_lastError());
+    if (count === 0) return [];
+    const buffer = Buffer.alloc(count * koffi.sizeof(CadaclysmElementState));
+    l.schedule_at(h, this.index, Number(date), which, buffer, count);
+    const rows = koffi.decode(buffer, 'CadaclysmElementState', count);
+    return rows.map((r) => new ElementState(new Node(this._scene, r.node), _PHASES[r.phase] ?? 'unbuilt', r.progress, r.has_variance ? r.variance : null));
+  }
+}
+
 /**
  * A posed mechanism: `Scene.pose()` or `Scene.poseState()`'s answer. The document
  * itself is unchanged.
@@ -1264,7 +1483,7 @@ class Sequence {
  * invalidate it.
  */
 class Pose {
-  constructor(scene, ground, unsolved, outOfRange, transforms) {
+  constructor(scene, ground, unsolved, outOfRange, transforms, diagnostics = []) {
     this._scene = scene;
     /** The link held fixed. */
     this.ground = ground;
@@ -1272,6 +1491,10 @@ class Pose {
     this.unsolved = unsolved;
     /** `[joint, freedom index, value]` for every given value outside its freedom's range. */
     this.outOfRange = outOfRange;
+    /** What the couplings (gear, rack and pinion, a loop-closing screw) could not solve, or
+     *  found disagreeing, in file order, in the kernel's words:
+     *  `coupling 'mesh': both 'a' and 'b' are given and disagree by 0.1`. */
+    this.diagnostics = diagnostics;
     this._transforms = transforms;
   }
   /** `node`'s posed transform, as four rows -- the same type `Node.transform` returns. */
@@ -1316,7 +1539,12 @@ function _copyPose(scene, posePtr) {
         outOfRange.push([new Joint(scene, joint[0]), freedom[0], value[0]]);
       }
     }
-    return new Pose(scene, ground, unsolved, outOfRange, transforms);
+    const diagnostics = [];
+    for (let i = 0, n = l.pose_diagnostic_count(posePtr); i < n; i++) {
+      const text = l.pose_diagnostic(posePtr, i);
+      if (text != null) diagnostics.push(String(text));
+    }
+    return new Pose(scene, ground, unsolved, outOfRange, transforms, diagnostics);
   } finally {
     l.pose_free(posePtr);
   }
@@ -1550,6 +1778,33 @@ class Node {
     if (ptr == null) throw new CadaclysmError(_lastError() || 'svg');
     return _text(ptr);
   }
+  /**
+   * This node's silhouette -- where its surfaces turn away from the eye, which no edge of it lies
+   * on -- as rational cubic Beziers in `double`, from the camera `options` describes (see
+   * `svgOptionsDefaults`): `view`, `azimuth`, `elevation`, `up`, `fov`, and `width` with
+   * `tolerance`, which the library reads together as the page fraction `tolerance / width`.
+   * Nothing else in the options changes the curves.
+   *
+   * A `Beziers64` whose arrays are the caller's own: the library keeps one silhouette slot per
+   * scene and the next silhouette call on that scene -- for any node -- overwrites it, and
+   * `koffi.decode` (`_doubles`) copies out of that slot, so a later call leaves this answer alone.
+   *
+   * A body with no silhouette (every face planar) answers `count` 0 with empty arrays, which is
+   * not an error; a refused option, a body with no measurable geometry or a node holding no shape
+   * of its own throws a `CadaclysmError`.
+   */
+  silhouetteBeziers(options = {}) {
+    const raw = _svgOptions(options, this.scene._defaultUp());
+    const curves = _lib().node_silhouette_beziers(this.scene._handle, this.index, raw);
+    if (curves.points == null || curves.count === 0) {
+      // The call clears the thread's error at entry and the empty answer sets none: a reason
+      // here is this call's own refusal, none is the empty answer.
+      const reason = _lastError();
+      if (reason) throw new CadaclysmError(reason);
+      return new Beziers64(new Float64Array(0), new Float64Array(0), 0);
+    }
+    return _beziers64Of(curves);
+  }
   /** `svgText(options)` written to `filePath` by the library itself. */
   svg(filePath, options = {}) {
     const raw = _svgOptions(options, this.scene._defaultUp());
@@ -1682,6 +1937,12 @@ class Scene {
   sequences() {
     const out = [];
     for (let i = 0, n = _lib().sequence_count(this._handle); i < n; i++) out.push(new Sequence(this, i));
+    return out;
+  }
+  /** The file's IFC work schedules, in file order. Empty for a file that records none. */
+  schedules() {
+    const out = [];
+    for (let i = 0, n = _lib().schedule_count(this._handle); i < n; i++) out.push(new WorkSchedule(this, i));
     return out;
   }
   /** The link the file declares as the mechanism's base, or null when it declares
@@ -2382,7 +2643,7 @@ module.exports = {
   libraryPath, version, buildDate, license, licenseInfo, licenseNoticeCount, meshFormats, formats, lodLevels,
   svgOptionsDefaults,
   _lib, _text, _lastError, _floats, _uint32s, _doubles, _searchedPaths, _notFoundMessage,
-  Bounds, Bounds64, Attribute, Brep, Placement, Node, Link, Joint, Pair, Freedom, State, StateValue, Segment, Sequence, Pose, Scene, open, openMemory, _openRaw, openAsync, openMemoryAsync, declaredSchema, resolveSchema, _options, _rows, _attribute,
+  Bounds, Bounds64, Attribute, Brep, Placement, Node, Link, Joint, Pair, Freedom, State, StateValue, Segment, Sequence, ElementState, TaskTime, TaskLink, Task, WorkSchedule, Pose, Scene, open, openMemory, _openRaw, openAsync, openMemoryAsync, declaredSchema, resolveSchema, _options, _rows, _attribute,
   Mesh, Mesh64, Polylines, Beziers, Beziers64, Face, Surfaces, Collision, CollisionHull, Meshlets, pickFile, pickSave,
   FemMesh, FemEdge, FemVertex,
   _meshOf, _mesh64Of, _polylinesOf, _beziersOf, _beziers64Of, _surfacesOf, _svgOptions,

@@ -110,6 +110,53 @@ typedef enum CadaclysmInterpolation {
   CADACLYSM_INTERPOLATION_LINEAR = 3,
 } CadaclysmInterpolation;
 
+typedef enum CadaclysmScheduleKind {
+  CADACLYSM_SCHEDULE_PLANNED = 0,
+  CADACLYSM_SCHEDULE_ACTUAL = 1,
+  CADACLYSM_SCHEDULE_BASELINE = 2,
+  CADACLYSM_SCHEDULE_NOTDEFINED = 3,
+  CADACLYSM_SCHEDULE_OTHER = 4,
+} CadaclysmScheduleKind;
+
+typedef enum CadaclysmTaskKind {
+  CADACLYSM_TASK_ATTENDANCE = 0,
+  CADACLYSM_TASK_CONSTRUCTION = 1,
+  CADACLYSM_TASK_DEMOLITION = 2,
+  CADACLYSM_TASK_DISMANTLE = 3,
+  CADACLYSM_TASK_DISPOSAL = 4,
+  CADACLYSM_TASK_INSTALLATION = 5,
+  CADACLYSM_TASK_LOGISTIC = 6,
+  CADACLYSM_TASK_MAINTENANCE = 7,
+  CADACLYSM_TASK_MOVE = 8,
+  CADACLYSM_TASK_OPERATION = 9,
+  CADACLYSM_TASK_REMOVAL = 10,
+  CADACLYSM_TASK_RENOVATION = 11,
+  CADACLYSM_TASK_NOTDEFINED = 12,
+  CADACLYSM_TASK_OTHER = 13,
+} CadaclysmTaskKind;
+
+typedef enum CadaclysmLinkKind {
+  CADACLYSM_LINK_FINISH_START = 0,
+  CADACLYSM_LINK_START_START = 1,
+  CADACLYSM_LINK_FINISH_FINISH = 2,
+  CADACLYSM_LINK_START_FINISH = 3,
+  CADACLYSM_LINK_NOTDEFINED = 4,
+  CADACLYSM_LINK_OTHER = 5,
+} CadaclysmLinkKind;
+
+typedef enum CadaclysmDates {
+  CADACLYSM_DATES_SCHEDULED = 0,
+  CADACLYSM_DATES_ACTUAL = 1,
+} CadaclysmDates;
+
+typedef enum CadaclysmPhase {
+  CADACLYSM_PHASE_UNBUILT = 0,
+  CADACLYSM_PHASE_BUILDING = 1,
+  CADACLYSM_PHASE_BUILT = 2,
+  CADACLYSM_PHASE_DEMOLISHING = 3,
+  CADACLYSM_PHASE_DEMOLISHED = 4,
+} CadaclysmPhase;
+
 typedef struct CadaclysmBrep CadaclysmBrep;
 
 typedef struct CadaclysmFemMesh CadaclysmFemMesh;
@@ -252,6 +299,35 @@ typedef struct CadaclysmFreedom {
   bool has_upper;
   double upper;
 } CadaclysmFreedom;
+
+typedef struct CadaclysmTaskTime {
+  bool has_schedule_start;
+  double schedule_start;
+  bool has_schedule_finish;
+  double schedule_finish;
+  bool has_early_start;
+  double early_start;
+  bool has_early_finish;
+  double early_finish;
+  bool has_late_start;
+  double late_start;
+  bool has_late_finish;
+  double late_finish;
+  bool has_actual_start;
+  double actual_start;
+  bool has_actual_finish;
+  double actual_finish;
+  bool has_duration;
+  double duration;
+} CadaclysmTaskTime;
+
+typedef struct CadaclysmElementState {
+  uint32_t node;
+  uint32_t phase;
+  double progress;
+  bool has_variance;
+  double variance;
+} CadaclysmElementState;
 
 typedef struct CadaclysmPolylines {
   const float *positions;
@@ -634,6 +710,13 @@ int32_t cadaclysm_joint_pair_kind(const struct CadaclysmScene *scene, uint32_t j
 
 const char *cadaclysm_joint_pair_type(const struct CadaclysmScene *scene, uint32_t joint);
 
+const char *cadaclysm_joint_pair_kind_name(const struct CadaclysmScene *scene, uint32_t joint);
+
+size_t cadaclysm_joint_pair_parameters(const struct CadaclysmScene *scene,
+                                       uint32_t joint,
+                                       double *out,
+                                       size_t capacity);
+
 double cadaclysm_joint_pair_pitch(const struct CadaclysmScene *scene, uint32_t joint);
 
 bool cadaclysm_joint_pair_frames(const struct CadaclysmScene *scene,
@@ -678,6 +761,76 @@ bool cadaclysm_sequence_segment(const struct CadaclysmScene *scene,
                                 double *t,
                                 uint32_t *interpolation);
 
+uint32_t cadaclysm_schedule_count(const struct CadaclysmScene *scene);
+
+const char *cadaclysm_schedule_name(const struct CadaclysmScene *scene, uint32_t s);
+
+const char *cadaclysm_schedule_identification(const struct CadaclysmScene *scene, uint32_t s);
+
+uint32_t cadaclysm_schedule_kind(const struct CadaclysmScene *scene, uint32_t s);
+
+const char *cadaclysm_schedule_kind_name(const struct CadaclysmScene *scene, uint32_t s);
+
+bool cadaclysm_schedule_start(const struct CadaclysmScene *scene, uint32_t s, double *out);
+
+bool cadaclysm_schedule_finish(const struct CadaclysmScene *scene, uint32_t s, double *out);
+
+uint32_t cadaclysm_task_count(const struct CadaclysmScene *scene, uint32_t s);
+
+const char *cadaclysm_task_name(const struct CadaclysmScene *scene, uint32_t s, uint32_t t);
+
+const char *cadaclysm_task_identification(const struct CadaclysmScene *scene,
+                                          uint32_t s,
+                                          uint32_t t);
+
+uint32_t cadaclysm_task_kind(const struct CadaclysmScene *scene, uint32_t s, uint32_t t);
+
+const char *cadaclysm_task_kind_name(const struct CadaclysmScene *scene, uint32_t s, uint32_t t);
+
+const char *cadaclysm_task_status(const struct CadaclysmScene *scene, uint32_t s, uint32_t t);
+
+bool cadaclysm_task_milestone(const struct CadaclysmScene *scene, uint32_t s, uint32_t t);
+
+bool cadaclysm_task_parent(const struct CadaclysmScene *scene,
+                           uint32_t s,
+                           uint32_t t,
+                           uint32_t *out);
+
+bool cadaclysm_task_time(const struct CadaclysmScene *scene,
+                         uint32_t s,
+                         uint32_t t,
+                         struct CadaclysmTaskTime *out);
+
+uint32_t cadaclysm_task_node_count(const struct CadaclysmScene *scene, uint32_t s, uint32_t t);
+
+uint32_t cadaclysm_task_nodes(const struct CadaclysmScene *scene,
+                              uint32_t s,
+                              uint32_t t,
+                              uint32_t *out,
+                              uint32_t capacity);
+
+uint32_t cadaclysm_task_link_count(const struct CadaclysmScene *scene, uint32_t s);
+
+bool cadaclysm_task_link(const struct CadaclysmScene *scene,
+                         uint32_t s,
+                         uint32_t l,
+                         uint32_t *from,
+                         uint32_t *to,
+                         uint32_t *kind,
+                         double *lag,
+                         bool *has_lag);
+
+const char *cadaclysm_task_link_kind_name(const struct CadaclysmScene *scene,
+                                          uint32_t s,
+                                          uint32_t l);
+
+int64_t cadaclysm_schedule_at(const struct CadaclysmScene *scene,
+                              uint32_t s,
+                              double date,
+                              uint32_t dates,
+                              struct CadaclysmElementState *out,
+                              uint32_t capacity);
+
 struct CadaclysmPose *cadaclysm_pose(const struct CadaclysmScene *scene,
                                      const uint32_t *joints,
                                      const uint32_t *counts,
@@ -705,6 +858,10 @@ void cadaclysm_pose_node_transform(const struct CadaclysmPose *pose, uint32_t no
 uint32_t cadaclysm_pose_unsolved_count(const struct CadaclysmPose *pose);
 
 uint32_t cadaclysm_pose_unsolved(const struct CadaclysmPose *pose, uint32_t index);
+
+uint32_t cadaclysm_pose_diagnostic_count(const struct CadaclysmPose *pose);
+
+const char *cadaclysm_pose_diagnostic(const struct CadaclysmPose *pose, uint32_t index);
 
 uint32_t cadaclysm_pose_out_of_range_count(const struct CadaclysmPose *pose);
 

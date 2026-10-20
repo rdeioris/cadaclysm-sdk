@@ -40,9 +40,13 @@
 //!
 //! # Threads
 //!
-//! A [`Scene`] is `Send` and `Sync`: every accessor of the ABI takes a `const` handle
-//! and may be called concurrently, which is what lets [`Scene::realize_all`] run on
-//! one thread while another reads [`Scene::realized`] or calls [`Scene::cancel`].
+//! A [`Scene`] is `Send` and `Sync`: the ABI's accessors take a `const` handle, which is
+//! what lets [`Scene::realize_all`] run on one thread while another reads
+//! [`Scene::realized`] or calls [`Scene::cancel`]. Silhouette queries
+//! ([`Node::silhouette_beziers`]) are serialised by a per-scene lock, because the library
+//! answers them from one slot per scene that the next call replaces. This section makes no
+//! claim about any other accessor that returns something the library lends from a
+//! per-scene slot.
 
 use std::ffi::{c_char, CStr, CString, OsStr};
 use std::fmt;
@@ -50,6 +54,7 @@ use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
+use std::sync::Mutex;
 
 mod loader;
 pub mod blacksmith;
@@ -159,14 +164,66 @@ fn parse_colour(colour: &str) -> Result<Option<[f64; 3]>> {
 }
 
 /// A colour packed `0xRRGGBB` from colour text -- `"#rgb"`, `"#rrggbb"` or a CSS colour
-/// name, matched ASCII case-insensitively -- read by the library's own parser. For
-/// [`SvgOptions::stroke`]/[`SvgOptions::background`], which stay numeric: e.g.
-/// `packed("navy")?` for a colour name or hex.
+/// name, matched ASCII case-insensitively -- read by the library's own parser. For a host
+/// that wants the number itself; [`SvgOptions::stroke`]/[`SvgOptions::background`] take the
+/// text directly, as an [`SvgColour`].
 pub fn packed(colour: &str) -> Result<u32> {
     let [r, g, b] = parse_colour(colour)?.ok_or_else(|| {
         Error::new(format!("colour: a colour is \"#rgb\", \"#rrggbb\" or a CSS colour name, not '{colour}'"))
     })?;
     Ok(((r * 255.0).round() as u32) << 16 | ((g * 255.0).round() as u32) << 8 | (b * 255.0).round() as u32)
+}
+
+/// A colour [`SvgOptions::stroke`]/[`SvgOptions::background`] take: a packed `0xRRGGBB`,
+/// or colour text -- `"#rgb"`, `"#rrggbb"` or a CSS colour name, matched ASCII
+/// case-insensitively. Either converts with `.into()`: `stroke: "navy".into()`,
+/// `stroke: 0x00_0080.into()`. The text is read when the drawing is made, by the library
+/// whose drawing it is (the reader's parser for a scene, the kernel's for a solid); text it
+/// refuses, or a number past `0xFFFFFF`, is an [`Error`] naming the field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SvgColour {
+    Packed(u32),
+    Text(String),
+}
+
+impl From<u32> for SvgColour {
+    fn from(packed: u32) -> Self {
+        SvgColour::Packed(packed)
+    }
+}
+
+impl From<&str> for SvgColour {
+    fn from(text: &str) -> Self {
+        SvgColour::Text(text.to_owned())
+    }
+}
+
+impl From<String> for SvgColour {
+    fn from(text: String) -> Self {
+        SvgColour::Text(text)
+    }
+}
+
+impl SvgColour {
+    /// `0xRRGGBB`: a number range-checked, text through `parse` (the reader's or the
+    /// kernel's own parser, `None` where it refuses). `what` names the field.
+    pub(crate) fn packed_with(&self, what: &str, parse: impl Fn(&str) -> Result<Option<[f64; 3]>>) -> Result<u32> {
+        match self {
+            SvgColour::Packed(packed) if *packed <= 0xFF_FFFF => Ok(*packed),
+            SvgColour::Packed(packed) => {
+                Err(Error::new(format!("{what}: a packed colour is 0x000000..0xFFFFFF, not {packed:#X}")))
+            }
+            SvgColour::Text(text) => {
+                let [r, g, b] = parse(text)?.ok_or_else(|| {
+                    Error::new(format!(
+                        "{what}: a colour is \"#rgb\", \"#rrggbb\", a CSS colour name or 0xRRGGBB, not '{text}'"
+                    ))
+                })?;
+                Ok(((r * 255.0).round() as u32) << 16 | ((g * 255.0).round() as u32) << 8 | (b * 255.0).round() as u32)
+            }
+        }
+    }
 }
 
 /// A slice over the library's memory, empty where the pointer is null.
@@ -806,6 +863,36 @@ impl<'s> Beziers64<'s> {
 
     /// One curve's four control points at a time.
     pub fn iter(&self) -> impl Iterator<Item = &'s [[f64; 3]]> + 's {
+        self.points.chunks_exact(4)
+    }
+
+    /// The same curves in memory of the program's own.
+    pub fn copy(&self) -> Beziers64Data {
+        Beziers64Data { points: self.points.to_vec(), weights: self.weights.to_vec() }
+    }
+}
+
+/// A [`Beziers64`] in memory of the program's own: what [`Node::silhouette_beziers`] and
+/// [`blacksmith::Solid::silhouette_beziers`] return. Four control points and four weights a
+/// curve, as [`Beziers64`] has them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Beziers64Data {
+    pub points: Vec<[f64; 3]>,
+    pub weights: Vec<f64>,
+}
+
+impl Beziers64Data {
+    /// How many curves.
+    pub fn count(&self) -> usize {
+        self.weights.len() / 4
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
+
+    /// One curve's four control points at a time.
+    pub fn iter(&self) -> impl Iterator<Item = &[[f64; 3]]> {
         self.points.chunks_exact(4)
     }
 }
@@ -1908,6 +1995,25 @@ impl PairKind {
             _ => return None,
         })
     }
+
+    /// The kind's snake_case name, the spelling `cadaclysm_joint_pair_kind_name` uses.
+    pub fn name(self) -> &'static str {
+        match self {
+            PairKind::Revolute => "revolute",
+            PairKind::Prismatic => "prismatic",
+            PairKind::Cylindrical => "cylindrical",
+            PairKind::Spherical => "spherical",
+            PairKind::SphericalWithPin => "spherical_with_pin",
+            PairKind::Planar => "planar",
+            PairKind::Universal => "universal",
+            PairKind::Homokinetic => "homokinetic",
+            PairKind::Screw => "screw",
+            PairKind::FullyConstrained => "fully_constrained",
+            PairKind::Unconstrained => "unconstrained",
+            PairKind::LowOrder => "low_order",
+            PairKind::Other => "other",
+        }
+    }
 }
 
 /// Which motion a [`Freedom`] is -- `CadaclysmMotion`.
@@ -1995,6 +2101,32 @@ impl<'s> Pair<'s> {
     pub fn type_name(&self) -> Option<String> {
         let raw = unsafe { (self.scene.api.cadaclysm_joint_pair_type)(self.scene.raw(), self.joint) };
         (!raw.is_null()).then(|| unsafe { text(raw) })
+    }
+
+    /// The kind by name, finer than [`kind`](Self::kind): the same thirteen names, with
+    /// `"gear"` and `"rack_and_pinion"` for the two coupled pairs `kind` reads as
+    /// [`PairKind::Other`].
+    pub fn kind_name(&self) -> String {
+        let raw = unsafe { (self.scene.api.cadaclysm_joint_pair_kind_name)(self.scene.raw(), self.joint) };
+        if raw.is_null() {
+            self.kind.name().to_string()
+        } else {
+            unsafe { text(raw) }
+        }
+    }
+
+    /// The pair's own numbers, in the order `Assembly::pair_with` takes them: `"screw"`
+    /// `[pitch]`, `"rack_and_pinion"` `[pinion_radius]`, `"gear"` `[radius_first,
+    /// radius_second, ratio, bevel, helical_angle]` (always five, the ratio the second
+    /// link's rotation over the first's); empty for every other kind.
+    pub fn parameters(&self) -> Vec<f64> {
+        let api = self.scene.api;
+        let count = unsafe { (api.cadaclysm_joint_pair_parameters)(self.scene.raw(), self.joint, std::ptr::null_mut(), 0) };
+        let mut out = vec![0.0; count];
+        if count > 0 {
+            unsafe { (api.cadaclysm_joint_pair_parameters)(self.scene.raw(), self.joint, out.as_mut_ptr(), count) };
+        }
+        out
     }
 
     /// Its pitch -- length per revolution, in the scene's units -- for
@@ -2162,6 +2294,428 @@ impl<'s> Sequence<'s> {
     }
 }
 
+/// A work schedule's kind: the schema's `IfcWorkScheduleTypeEnum`
+/// (`cadaclysm_schedule_kind`). [`ScheduleKind::Other`]'s text is
+/// [`WorkSchedule::kind_name`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScheduleKind {
+    Planned,
+    Actual,
+    Baseline,
+    NotDefined,
+    Other,
+}
+
+impl ScheduleKind {
+    fn from_raw(raw: u32) -> ScheduleKind {
+        match raw {
+            0 => ScheduleKind::Planned,
+            1 => ScheduleKind::Actual,
+            2 => ScheduleKind::Baseline,
+            4 => ScheduleKind::Other,
+            _ => ScheduleKind::NotDefined,
+        }
+    }
+
+    /// `"planned"`, `"actual"`, `"baseline"`, `"notdefined"` or `"other"`.
+    pub fn name(&self) -> &'static str {
+        match self {
+            ScheduleKind::Planned => "planned",
+            ScheduleKind::Actual => "actual",
+            ScheduleKind::Baseline => "baseline",
+            ScheduleKind::NotDefined => "notdefined",
+            ScheduleKind::Other => "other",
+        }
+    }
+}
+
+/// A task's kind: the schema's `IfcTaskTypeEnum` (`cadaclysm_task_kind`).
+/// [`TaskKind::Other`]'s text is [`Task::kind_name`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskKind {
+    Attendance,
+    Construction,
+    Demolition,
+    Dismantle,
+    Disposal,
+    Installation,
+    Logistic,
+    Maintenance,
+    Move,
+    Operation,
+    Removal,
+    Renovation,
+    NotDefined,
+    Other,
+}
+
+impl TaskKind {
+    fn from_raw(raw: u32) -> TaskKind {
+        match raw {
+            0 => TaskKind::Attendance,
+            1 => TaskKind::Construction,
+            2 => TaskKind::Demolition,
+            3 => TaskKind::Dismantle,
+            4 => TaskKind::Disposal,
+            5 => TaskKind::Installation,
+            6 => TaskKind::Logistic,
+            7 => TaskKind::Maintenance,
+            8 => TaskKind::Move,
+            9 => TaskKind::Operation,
+            10 => TaskKind::Removal,
+            11 => TaskKind::Renovation,
+            13 => TaskKind::Other,
+            _ => TaskKind::NotDefined,
+        }
+    }
+
+    /// `"attendance"`, `"construction"`, `"demolition"`, `"dismantle"`, `"disposal"`,
+    /// `"installation"`, `"logistic"`, `"maintenance"`, `"move"`, `"operation"`,
+    /// `"removal"`, `"renovation"`, `"notdefined"` or `"other"`.
+    pub fn name(&self) -> &'static str {
+        match self {
+            TaskKind::Attendance => "attendance",
+            TaskKind::Construction => "construction",
+            TaskKind::Demolition => "demolition",
+            TaskKind::Dismantle => "dismantle",
+            TaskKind::Disposal => "disposal",
+            TaskKind::Installation => "installation",
+            TaskKind::Logistic => "logistic",
+            TaskKind::Maintenance => "maintenance",
+            TaskKind::Move => "move",
+            TaskKind::Operation => "operation",
+            TaskKind::Removal => "removal",
+            TaskKind::Renovation => "renovation",
+            TaskKind::NotDefined => "notdefined",
+            TaskKind::Other => "other",
+        }
+    }
+}
+
+/// How a [`TaskLink`] ties its two tasks: the schema's `IfcSequenceEnum`
+/// (`cadaclysm_task_link`'s `kind`). [`LinkKind::Other`]'s text is [`TaskLink::kind_name`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkKind {
+    FinishStart,
+    StartStart,
+    FinishFinish,
+    StartFinish,
+    NotDefined,
+    Other,
+}
+
+impl LinkKind {
+    fn from_raw(raw: u32) -> LinkKind {
+        match raw {
+            0 => LinkKind::FinishStart,
+            1 => LinkKind::StartStart,
+            2 => LinkKind::FinishFinish,
+            3 => LinkKind::StartFinish,
+            5 => LinkKind::Other,
+            _ => LinkKind::NotDefined,
+        }
+    }
+
+    /// `"finish_start"`, `"start_start"`, `"finish_finish"`, `"start_finish"`,
+    /// `"notdefined"` or `"other"`.
+    pub fn name(&self) -> &'static str {
+        match self {
+            LinkKind::FinishStart => "finish_start",
+            LinkKind::StartStart => "start_start",
+            LinkKind::FinishFinish => "finish_finish",
+            LinkKind::StartFinish => "start_finish",
+            LinkKind::NotDefined => "notdefined",
+            LinkKind::Other => "other",
+        }
+    }
+}
+
+/// What an element is doing on a date: [`ElementState::phase`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    Unbuilt,
+    Building,
+    Built,
+    Demolishing,
+    Demolished,
+}
+
+impl Phase {
+    fn from_raw(raw: u32) -> Phase {
+        match raw {
+            1 => Phase::Building,
+            2 => Phase::Built,
+            3 => Phase::Demolishing,
+            4 => Phase::Demolished,
+            _ => Phase::Unbuilt,
+        }
+    }
+
+    /// `"unbuilt"`, `"building"`, `"built"`, `"demolishing"` or `"demolished"`.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Phase::Unbuilt => "unbuilt",
+            Phase::Building => "building",
+            Phase::Built => "built",
+            Phase::Demolishing => "demolishing",
+            Phase::Demolished => "demolished",
+        }
+    }
+}
+
+/// Which of a task's dates [`WorkSchedule::at`] plays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dates {
+    /// The dates the programme planned (`schedule_*`).
+    Scheduled,
+    /// The dates the work really took (`actual_*`), against which variances are read.
+    Actual,
+}
+
+impl Dates {
+    /// `"scheduled"` or `"actual"`.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Dates::Scheduled => "scheduled",
+            Dates::Actual => "actual",
+        }
+    }
+}
+
+/// Every date pair a task gives, each `None` where the file gives none: seconds since
+/// 1970-01-01T00:00, no zone (`duration` is in seconds).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TaskTime {
+    pub schedule_start: Option<f64>,
+    pub schedule_finish: Option<f64>,
+    pub early_start: Option<f64>,
+    pub early_finish: Option<f64>,
+    pub late_start: Option<f64>,
+    pub late_finish: Option<f64>,
+    pub actual_start: Option<f64>,
+    pub actual_finish: Option<f64>,
+    pub duration: Option<f64>,
+}
+
+impl TaskTime {
+    fn from_raw(raw: sys::CadaclysmTaskTime) -> TaskTime {
+        TaskTime {
+            schedule_start: raw.has_schedule_start.then_some(raw.schedule_start),
+            schedule_finish: raw.has_schedule_finish.then_some(raw.schedule_finish),
+            early_start: raw.has_early_start.then_some(raw.early_start),
+            early_finish: raw.has_early_finish.then_some(raw.early_finish),
+            late_start: raw.has_late_start.then_some(raw.late_start),
+            late_finish: raw.has_late_finish.then_some(raw.late_finish),
+            actual_start: raw.has_actual_start.then_some(raw.actual_start),
+            actual_finish: raw.has_actual_finish.then_some(raw.actual_finish),
+            duration: raw.has_duration.then_some(raw.duration),
+        }
+    }
+}
+
+/// What one element is doing on a date: [`WorkSchedule::at`]'s rows.
+#[derive(Clone, Copy, Debug)]
+pub struct ElementState<'s> {
+    pub node: Node<'s>,
+    pub phase: Phase,
+    /// 0..1 through the window that governs the phase.
+    pub progress: f64,
+    /// Seconds late (positive) or early (negative) against the schedule, `None` where
+    /// there is none to give.
+    pub variance: Option<f64>,
+}
+
+/// A building's programme: an `IfcWorkSchedule` and the tasks it controls. From
+/// [`Scene::schedules`]. [`WorkSchedule::at`] says what each element it names is doing on
+/// a date; dates are seconds since 1970-01-01T00:00, no zone.
+#[derive(Clone)]
+pub struct WorkSchedule<'s> {
+    scene: &'s Scene,
+    pub index: u32,
+    /// Its name, else its identification, else `schedule #k`.
+    pub name: String,
+    /// Its identification, `""` where none.
+    pub identification: String,
+    pub kind: ScheduleKind,
+    /// The text of a user-defined kind ([`ScheduleKind::Other`]); `""` otherwise.
+    pub kind_name: String,
+    pub start: Option<f64>,
+    pub finish: Option<f64>,
+}
+
+impl std::fmt::Debug for WorkSchedule<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkSchedule")
+            .field("index", &self.index)
+            .field("name", &self.name)
+            .field("identification", &self.identification)
+            .field("kind", &self.kind)
+            .field("kind_name", &self.kind_name)
+            .field("start", &self.start)
+            .field("finish", &self.finish)
+            .finish()
+    }
+}
+
+impl<'s> WorkSchedule<'s> {
+    fn task_at(&self, index: u32) -> Task<'s> {
+        WorkSchedule::task_of(self.scene, self.index, index)
+    }
+
+    fn task_of(owner: &'s Scene, s: u32, index: u32) -> Task<'s> {
+        let api = owner.api;
+        let scene = owner.raw();
+        let mut raw = sys::CadaclysmTaskTime::default();
+        unsafe { (api.cadaclysm_task_time)(scene, s, index, &mut raw) };
+        Task {
+            scene: owner,
+            schedule: s,
+            index,
+            name: unsafe { text((api.cadaclysm_task_name)(scene, s, index)) },
+            identification: unsafe { text((api.cadaclysm_task_identification)(scene, s, index)) },
+            kind: TaskKind::from_raw(unsafe { (api.cadaclysm_task_kind)(scene, s, index) }),
+            kind_name: unsafe { text((api.cadaclysm_task_kind_name)(scene, s, index)) },
+            status: unsafe { text((api.cadaclysm_task_status)(scene, s, index)) },
+            milestone: unsafe { (api.cadaclysm_task_milestone)(scene, s, index) },
+            time: TaskTime::from_raw(raw),
+        }
+    }
+
+    /// Task `index` (file order), or `None` past the last one -- one task without building
+    /// the rest.
+    pub fn task(&self, index: usize) -> Option<Task<'s>> {
+        let count = unsafe { (self.scene.api.cadaclysm_task_count)(self.scene.raw(), self.index) };
+        let index = u32::try_from(index).ok().filter(|&i| i < count)?;
+        Some(self.task_at(index))
+    }
+
+    /// Its tasks, in file order.
+    pub fn tasks(&self) -> Vec<Task<'s>> {
+        let count = unsafe { (self.scene.api.cadaclysm_task_count)(self.scene.raw(), self.index) };
+        (0..count).map(|i| self.task_at(i)).collect()
+    }
+
+    /// Its task links (`IfcRelSequence`), in file order.
+    pub fn links(&self) -> Vec<TaskLink<'s>> {
+        let api = self.scene.api;
+        let count = unsafe { (api.cadaclysm_task_link_count)(self.scene.raw(), self.index) };
+        (0..count)
+            .filter_map(|l| {
+                let (mut from, mut to, mut kind, mut lag, mut has_lag) = (0u32, 0u32, 0u32, 0f64, false);
+                let ok = unsafe { (api.cadaclysm_task_link)(self.scene.raw(), self.index, l, &mut from, &mut to, &mut kind, &mut lag, &mut has_lag) };
+                ok.then(|| TaskLink {
+                    from: self.task_at(from),
+                    to: self.task_at(to),
+                    kind: LinkKind::from_raw(kind),
+                    kind_name: unsafe { text((api.cadaclysm_task_link_kind_name)(self.scene.raw(), self.index, l)) },
+                    lag: has_lag.then_some(lag),
+                })
+            })
+            .collect()
+    }
+
+    /// What each element this schedule names is doing on `date` (seconds since
+    /// 1970-01-01T00:00), in node order; elements no task names are not listed. `dates`
+    /// picks which of a task's dates to play. Fails for a `date` that is not finite.
+    pub fn at(&self, date: f64, dates: Dates) -> Result<Vec<ElementState<'s>>> {
+        let api = self.scene.api;
+        let which = match dates {
+            Dates::Scheduled => 0,
+            Dates::Actual => 1,
+        };
+        let count = unsafe { (api.cadaclysm_schedule_at)(self.scene.raw(), self.index, date, which, std::ptr::null_mut(), 0) };
+        if count < 0 {
+            return Err(Error::new(last_error(api)));
+        }
+        let mut rows = vec![sys::CadaclysmElementState::default(); count as usize];
+        unsafe { (api.cadaclysm_schedule_at)(self.scene.raw(), self.index, date, which, rows.as_mut_ptr(), count as u32) };
+        Ok(rows
+            .into_iter()
+            .map(|r| ElementState {
+                node: Node { scene: self.scene, index: r.node },
+                phase: Phase::from_raw(r.phase),
+                progress: r.progress,
+                variance: r.has_variance.then_some(r.variance),
+            })
+            .collect())
+    }
+}
+
+/// One task of a [`WorkSchedule`]. From [`WorkSchedule::tasks`]; [`Task::parent`] is the
+/// summary task nesting it and [`Task::nodes`] the nodes it builds or removes.
+#[derive(Clone)]
+pub struct Task<'s> {
+    scene: &'s Scene,
+    schedule: u32,
+    pub index: u32,
+    pub name: String,
+    /// Its identification, `""` where none.
+    pub identification: String,
+    pub kind: TaskKind,
+    /// The text of a user-defined kind ([`TaskKind::Other`]); `""` otherwise.
+    pub kind_name: String,
+    /// Its status as the file writes it, `""` where none.
+    pub status: String,
+    pub milestone: bool,
+    pub time: TaskTime,
+}
+
+// Identity is the triple, so the same task from two lookups is equal.
+impl PartialEq for Task<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.index == other.index && self.schedule == other.schedule && std::ptr::eq(self.scene, other.scene)
+    }
+}
+
+impl Eq for Task<'_> {}
+
+impl Hash for Task<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (self.scene as *const Scene).hash(state);
+        self.schedule.hash(state);
+        self.index.hash(state);
+    }
+}
+
+impl std::fmt::Debug for Task<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<Task {} {}>", self.index, self.name)
+    }
+}
+
+impl<'s> Task<'s> {
+    /// The summary task nesting this one, `None` at the top.
+    pub fn parent(&self) -> Option<Task<'s>> {
+        let mut out = 0u32;
+        let found = unsafe { (self.scene.api.cadaclysm_task_parent)(self.scene.raw(), self.schedule, self.index, &mut out) };
+        found.then(|| WorkSchedule::task_of(self.scene, self.schedule, out))
+    }
+
+    /// The nodes this task builds or removes, sorted, without repeats.
+    pub fn nodes(&self) -> Vec<Node<'s>> {
+        let api = self.scene.api;
+        let count = unsafe { (api.cadaclysm_task_node_count)(self.scene.raw(), self.schedule, self.index) };
+        let mut out = vec![0u32; count as usize];
+        unsafe { (api.cadaclysm_task_nodes)(self.scene.raw(), self.schedule, self.index, out.as_mut_ptr(), count) };
+        out.into_iter().map(|index| Node { scene: self.scene, index }).collect()
+    }
+}
+
+/// A sequence between two tasks of one schedule (`IfcRelSequence`). From
+/// [`WorkSchedule::links`].
+#[derive(Clone, Debug)]
+pub struct TaskLink<'s> {
+    /// The predecessor.
+    pub from: Task<'s>,
+    /// The successor.
+    pub to: Task<'s>,
+    pub kind: LinkKind,
+    /// The text of a user-defined kind ([`LinkKind::Other`]); `""` otherwise.
+    pub kind_name: String,
+    /// The time lag in seconds, `None` where the file gives none.
+    pub lag: Option<f64>,
+}
+
 /// A posed mechanism: [`Scene::pose`], [`Scene::pose_state`] or [`Sequence::pose`]'s answer. The document
 /// itself is unchanged.
 ///
@@ -2177,6 +2731,10 @@ pub struct Pose<'s> {
     pub unsolved: Vec<Joint<'s>>,
     /// `(joint, freedom index, value)` for every given value outside its freedom's range.
     pub out_of_range: Vec<(Joint<'s>, u32, f64)>,
+    /// What the couplings (gear, rack and pinion, a loop-closing screw) could not solve,
+    /// or found disagreeing, in file order, in the kernel's words:
+    /// `coupling 'mesh': both 'a' and 'b' are given and disagree by 0.1`.
+    pub diagnostics: Vec<String>,
     transforms: Vec<[f64; 16]>,
 }
 
@@ -2261,8 +2819,15 @@ fn copy_pose(scene: &Scene, ptr: *mut sys::CadaclysmPose) -> Pose<'_> {
             ok.then(|| (Joint { scene, index: joint }, freedom, value))
         })
         .collect();
+    let diagnostic_count = unsafe { (api.cadaclysm_pose_diagnostic_count)(guard.ptr) };
+    let diagnostics = (0..diagnostic_count)
+        .filter_map(|i| {
+            let raw = unsafe { (api.cadaclysm_pose_diagnostic)(guard.ptr, i) };
+            (!raw.is_null()).then(|| unsafe { text(raw) })
+        })
+        .collect();
     // `guard` drops here, freeing the C pose now that everything is copied.
-    Pose { ground, unsolved, out_of_range, transforms }
+    Pose { ground, unsolved, out_of_range, diagnostics, transforms }
 }
 
 // ---- nodes ------------------------------------------------------------------------
@@ -2838,17 +3403,58 @@ impl<'s> Node<'s> {
 
     /// This node's own wireframe as SVG text, in its own frame -- [`Scene::svg_text`]'s
     /// `options`, read from just this node rather than every placement.
+    ///
+    /// The library lends the text from one slot per scene, shared with [`Scene::svg_text`] and
+    /// replaced by the next call of either; this holds the scene's `svg_text` lock for the call
+    /// and the copy, so the slot is serialised and two threads cannot free each other's text.
+    /// `the_svg_text_calls_wait_for_the_scenes_lock` witnesses that it waits for that lock.
     pub fn svg_text<'o>(&self, options: impl Into<Option<&'o SvgOptions>>) -> Result<String> {
         let default = SvgOptions::default();
         let options = options.into().unwrap_or(&default);
         let api = self.scene.api;
-        let raw = build_svg_options(api, options, self.scene.default_up());
+        let raw = build_svg_options(api, options, self.scene.default_up())?;
+        let _slot = self.scene.svg_text.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let ptr = unsafe { (api.cadaclysm_node_svg_text)(self.scene.raw(), self.index, &raw) };
         if ptr.is_null() {
             let reason = last_error(api);
             return Err(Error::new(if reason.is_empty() { "svg".to_string() } else { reason }));
         }
         Ok(unsafe { text(ptr) })
+    }
+
+    /// This node's silhouette -- where its surfaces turn away from the eye, which no edge of it
+    /// lies on -- as rational cubic Béziers in `double`, from the camera `options` describes
+    /// (`None` for [`SvgOptions::default`]). The same [`SvgOptions`] that draw a picture:
+    /// `view`, `azimuth`, `elevation`, `up` and `fov`, and `width` with `tolerance`, which the
+    /// library reads together as the page fraction `tolerance / width`. Nothing else in them
+    /// changes the curves.
+    ///
+    /// Unlike [`Node::edge_beziers64`] this is a copy, not a borrow. The library keeps one
+    /// silhouette slot per scene and the next silhouette call on that scene, for any node,
+    /// replaces it, so a `&[f64]` into it would change under a caller who asked twice. This copies
+    /// out of the slot before it returns, holding a lock on the scene for the call and the copy
+    /// because the library says two threads calling it free each other's arrays.
+    ///
+    /// A body with no silhouette (every face planar) is an empty answer, not an error; a refused
+    /// option, a body with no measurable geometry or a node holding no shape of its own is an
+    /// `Err`.
+    pub fn silhouette_beziers<'o>(&self, options: impl Into<Option<&'o SvgOptions>>) -> Result<Beziers64Data> {
+        let default = SvgOptions::default();
+        let options = options.into().unwrap_or(&default);
+        let api = self.scene.api;
+        let raw = build_svg_options(api, options, self.scene.default_up())?;
+        let _slot = self.scene.silhouette.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let got = unsafe { (api.cadaclysm_node_silhouette_beziers)(self.scene.raw(), self.index, &raw) };
+        if got.count == 0 || got.points.is_null() {
+            // The library clears the thread's error at entry and the empty answer sets none: a
+            // reason here is this call's own refusal, none is the empty answer.
+            let reason = last_error(api);
+            if reason.is_empty() {
+                return Ok(Beziers64Data::default());
+            }
+            return Err(Error::new(reason));
+        }
+        Ok(Beziers64::from_raw(got).copy())
     }
 
     /// [`Node::svg_text`] written to `path` by the library itself.
@@ -2858,7 +3464,7 @@ impl<'s> Node<'s> {
         let path = path.as_ref();
         let c_path = c_path(path)?;
         let api = self.scene.api;
-        let raw = build_svg_options(api, options, self.scene.default_up());
+        let raw = build_svg_options(api, options, self.scene.default_up())?;
         if unsafe { (api.cadaclysm_node_svg)(self.scene.raw(), self.index, c_path.as_ptr(), &raw) } {
             return Ok(());
         }
@@ -2964,15 +3570,15 @@ pub struct SvgOptions {
     pub margin: f64,
     /// How far a written curve may stray, in page units. Default 0.1.
     pub tolerance: f64,
-    /// The pen colour, `0xRRGGBB` -- [`packed`]`("navy")?` for a colour name or hex.
-    /// Default black.
-    pub stroke: u32,
+    /// The pen colour, an [`SvgColour`]: `"navy".into()`, `"#000080".into()` or
+    /// `0x00_0080.into()`. Default black.
+    pub stroke: SvgColour,
     /// The pen's width, page units. Default 1.
     pub stroke_width: f64,
-    /// `0xRRGGBB` -- [`packed`]`("navy")?` for a colour name or hex -- or `None` (the
-    /// default) for no `<rect>` behind the drawing -- the page left to whatever the
+    /// An [`SvgColour`] -- `Some("navy".into())` or `Some(0x00_0080.into())` -- or `None`
+    /// (the default) for no `<rect>` behind the drawing -- the page left to whatever the
     /// viewer composites it onto.
-    pub background: Option<u32>,
+    pub background: Option<SvgColour>,
     /// Each shape's feature edges -- the exact curves the flattened polylines are drawn
     /// from. Default `true`.
     pub edges: bool,
@@ -3013,7 +3619,7 @@ impl Default for SvgOptions {
             height: 1000.0,
             margin: 0.05,
             tolerance: 0.1,
-            stroke: 0x00_0000,
+            stroke: SvgColour::Packed(0x00_0000),
             stroke_width: 1.0,
             background: None,
             edges: true,
@@ -3032,8 +3638,14 @@ const SVG_TRANSPARENT: u32 = 0xFFFF_FFFF;
 /// `options` packed into a `CadaclysmSvgOptions`: `view` fills `azimuth`/`elevation`
 /// unless they are set directly, `up` falls back to `default_up`. `cadaclysm_svg_options_init`
 /// fills the struct first -- `size` included -- so a field this crate never sets still
-/// carries the library's own default rather than a zeroed struct's.
-fn build_svg_options(api: &Api, options: &SvgOptions, default_up: Up) -> sys::CadaclysmSvgOptions {
+/// carries the library's own default rather than a zeroed struct's. An [`Error`] where
+/// `stroke` or `background` is colour text the library refuses.
+fn build_svg_options(api: &Api, options: &SvgOptions, default_up: Up) -> Result<sys::CadaclysmSvgOptions> {
+    let stroke = options.stroke.packed_with("svg: stroke", parse_colour)?;
+    let background = match &options.background {
+        Some(colour) => colour.packed_with("svg: background", parse_colour)?,
+        None => SVG_TRANSPARENT,
+    };
     let mut raw: sys::CadaclysmSvgOptions = unsafe { std::mem::zeroed() };
     unsafe { (api.cadaclysm_svg_options_init)(&mut raw) };
     let (base_azimuth, base_elevation) = options.view.angles();
@@ -3049,14 +3661,14 @@ fn build_svg_options(api: &Api, options: &SvgOptions, default_up: Up) -> sys::Ca
     raw.margin = options.margin;
     raw.tolerance = options.tolerance;
     raw.stroke_width = options.stroke_width;
-    raw.stroke = options.stroke;
-    raw.background = options.background.unwrap_or(SVG_TRANSPARENT);
+    raw.stroke = stroke;
+    raw.background = background;
     raw.flags = u32::from(options.edges)
         | (u32::from(options.curves) << 1)
         | (u32::from(options.isocurves) << 2)
         | (u32::from(options.polylines) << 3)
         | (u32::from(options.silhouettes) << 4);
-    raw
+    Ok(raw)
 }
 
 // ---- the scene --------------------------------------------------------------------
@@ -3068,10 +3680,28 @@ pub struct Scene {
     path: PathBuf,
     schema_path: Option<PathBuf>,
     convention: u32,
+    /// Held across a silhouette call and the copy out of the slot it fills: the library keeps one
+    /// slot per scene and says two threads calling it free each other's arrays, while a `Scene`
+    /// is `Sync`.
+    silhouette: Mutex<()>,
+    /// Held across an `svg_text` call and the copy out of the text it returns, by both
+    /// [`Scene::svg_text`] and [`Node::svg_text`]: they share one per-scene slot in the library,
+    /// `svg_text: Mutex<Option<CString>>`, and that mutex guards the slot's REPLACEMENT, not a
+    /// caller's read of the `CString` it lends, so a second thread's call could free the text the
+    /// first is still copying. A lock of its own, not `silhouette`'s, so the two slots do not
+    /// contend. `the_svg_text_calls_wait_for_the_scenes_lock` witnesses that both methods take it:
+    /// with the test thread holding this lock, neither completes until it is released. (The
+    /// silhouette lock above has its own twin, `the_silhouette_call_waits_for_the_scenes_lock`; it
+    /// does not witness this one.)
+    svg_text: Mutex<()>,
 }
 
-// The ABI's accessors all take a `const` handle and may run concurrently -- the
-// library asserts its scene is `Sync` at compile time -- and closing takes `self`.
+// The ABI's accessors take a `const` handle and the library asserts its scene is `Sync` at
+// compile time, and closing takes `self`. That is not a promise that every accessor is safe to
+// call from two threads at once: `Node::silhouette_beziers` takes the `silhouette` lock above
+// for exactly that reason, and the two `svg_text` methods take the `svg_text` lock above for the
+// same one (the library lends their text from one per-scene slot too). This comment says nothing
+// about the others.
 unsafe impl Send for Scene {}
 unsafe impl Sync for Scene {}
 
@@ -3253,6 +3883,38 @@ impl Scene {
                 Sequence { scene: self, index, name, closed, seconds_per_unit: (seconds != 0.0).then_some(seconds), segments }
             })
             .collect()
+    }
+
+    /// The file's work schedules -- see [`WorkSchedule`]. Empty where the file records none.
+    pub fn schedules(&self) -> Vec<WorkSchedule<'_>> {
+        let count = unsafe { (self.api.cadaclysm_schedule_count)(self.raw()) };
+        (0..count).map(|index| self.schedule_of(index)).collect()
+    }
+
+    /// Work schedule `index` (file order), or `None` past the last one -- one schedule
+    /// without building the rest.
+    pub fn schedule(&self, index: usize) -> Option<WorkSchedule<'_>> {
+        let count = unsafe { (self.api.cadaclysm_schedule_count)(self.raw()) };
+        let index = u32::try_from(index).ok().filter(|&i| i < count)?;
+        Some(self.schedule_of(index))
+    }
+
+    fn schedule_of(&self, index: u32) -> WorkSchedule<'_> {
+        let api = self.api;
+        let mut start = 0f64;
+        let mut finish = 0f64;
+        let has_start = unsafe { (api.cadaclysm_schedule_start)(self.raw(), index, &mut start) };
+        let has_finish = unsafe { (api.cadaclysm_schedule_finish)(self.raw(), index, &mut finish) };
+        WorkSchedule {
+            scene: self,
+            index,
+            name: unsafe { text((api.cadaclysm_schedule_name)(self.raw(), index)) },
+            identification: unsafe { text((api.cadaclysm_schedule_identification)(self.raw(), index)) },
+            kind: ScheduleKind::from_raw(unsafe { (api.cadaclysm_schedule_kind)(self.raw(), index) }),
+            kind_name: unsafe { text((api.cadaclysm_schedule_kind_name)(self.raw(), index)) },
+            start: has_start.then_some(start),
+            finish: has_finish.then_some(finish),
+        }
     }
 
     /// The link the file declares as the mechanism's base, or `None` when it declares
@@ -3485,12 +4147,18 @@ impl Scene {
     /// Every visible placement's wireframe as SVG text, from the camera `options`
     /// describes -- the library's own camera, not a viewer. See [`SvgOptions`].
     /// Borrowed by the library: copied out before this returns, and replaced by this
-    /// scene's next `svg_text` or `svg` call.
+    /// scene's next `svg_text` call, on the scene or on any of its nodes (`svg` writes straight to
+    /// a file and leaves the slot alone).
+    ///
+    /// The slot is serialised: this holds the scene's `svg_text` lock (the one [`Node::svg_text`]
+    /// takes too) for the call and the copy, so two threads cannot free each other's text.
+    /// `the_svg_text_calls_wait_for_the_scenes_lock` witnesses that both methods wait for it.
     pub fn svg_text<'o>(&self, options: impl Into<Option<&'o SvgOptions>>) -> Result<String> {
         let default = SvgOptions::default();
         let options = options.into().unwrap_or(&default);
         let api = self.api;
-        let raw = build_svg_options(api, options, self.default_up());
+        let raw = build_svg_options(api, options, self.default_up())?;
+        let _slot = self.svg_text.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let ptr = unsafe { (api.cadaclysm_scene_svg_text)(self.raw(), &raw) };
         if ptr.is_null() {
             let reason = last_error(api);
@@ -3506,7 +4174,7 @@ impl Scene {
         let path = path.as_ref();
         let c_path = c_path(path)?;
         let api = self.api;
-        let raw = build_svg_options(api, options, self.default_up());
+        let raw = build_svg_options(api, options, self.default_up())?;
         if unsafe { (api.cadaclysm_scene_svg)(self.raw(), c_path.as_ptr(), &raw) } {
             return Ok(());
         }
@@ -3612,7 +4280,7 @@ impl OpenOptions {
 
     fn scene(&self, api: &'static Api, pointer: *mut sys::CadaclysmScene, path: PathBuf, what: &str) -> Result<Scene> {
         match NonNull::new(pointer) {
-            Some(handle) => Ok(Scene { handle, api, path, schema_path: self.schema.clone(), convention: self.convention }),
+            Some(handle) => Ok(Scene { handle, api, path, schema_path: self.schema.clone(), convention: self.convention, silhouette: Mutex::new(()), svg_text: Mutex::new(()) }),
             None => Err(Error::new(format!("{what}: {}", last_error(api)))),
         }
     }
@@ -4208,6 +4876,130 @@ mod tests {
         assert_eq!(swing.pose(f64::NAN, None).unwrap_err().to_string(), "the sequence parameter must be a finite number");
     }
 
+    const DAY: f64 = 86400.0;
+    const T0: f64 = 1772438400.0;
+
+    /// `samples/schedule.ifc`: one programme, seven tasks. Skips quietly without a library.
+    fn scheduled() -> Option<Scene> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../../samples/schedule.ifc");
+        match open(path) {
+            Ok(scene) => Some(scene),
+            Err(err) => {
+                eprintln!("skipped: {err} (no library to open the schedule with)");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn schedule_a_file_reads_its_programme() {
+        let Some(scene) = scheduled() else { return };
+        let schedules = scene.schedules();
+        assert_eq!(schedules.len(), 1);
+        let s = &schedules[0];
+        assert_eq!(
+            (s.name.as_str(), s.identification.as_str(), s.kind, s.kind_name.as_str(), s.start, s.finish),
+            ("Programme", "WS-1", ScheduleKind::Planned, "", Some(T0), None)
+        );
+        assert_eq!(s.kind.name(), "planned");
+    }
+
+    #[test]
+    fn schedule_tasks_come_in_order_with_their_parents_kinds_and_dates() {
+        let Some(scene) = scheduled() else { return };
+        let s = &scene.schedules()[0];
+        let tasks = s.tasks();
+        let names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["Slab", "Structure", "Walls north", "Walls south", "Topping out", "Demolish shed", "Fit-out"]);
+        let (slab, structure, north, south, topping, shed) = (&tasks[0], &tasks[1], &tasks[2], &tasks[3], &tasks[4], &tasks[5]);
+        assert_eq!((north.parent().as_ref(), south.parent().as_ref(), slab.parent()), (Some(structure), Some(structure), None));
+        assert_eq!((slab.kind, shed.kind, topping.kind), (TaskKind::Construction, TaskKind::Demolition, TaskKind::NotDefined));
+        assert_eq!(slab.kind.name(), "construction");
+        assert!(topping.milestone && !slab.milestone);
+        assert_eq!((slab.identification.as_str(), slab.status.as_str()), ("T1", "COMPLETED"));
+        assert_eq!((slab.time.schedule_start, slab.time.schedule_finish, slab.time.duration), (Some(T0), None, Some(10.0 * DAY)));
+        assert_eq!((slab.time.actual_start, slab.time.actual_finish), (Some(T0), Some(T0 + 8.0 * DAY)));
+    }
+
+    #[test]
+    fn schedule_and_task_by_index_match_the_lists_and_stop_at_the_end() {
+        let Some(scene) = scheduled() else { return };
+        let s = scene.schedule(0).expect("schedule 0");
+        assert_eq!(s.name, scene.schedules()[0].name);
+        assert!(scene.schedule(1).is_none() && scene.schedule(usize::MAX).is_none());
+        let tasks = s.tasks();
+        assert_eq!(s.task(1).expect("task 1").name, tasks[1].name);
+        assert!(s.task(tasks.len()).is_none() && s.task(usize::MAX).is_none());
+    }
+
+    #[test]
+    fn schedule_tasks_name_their_nodes() {
+        let Some(scene) = scheduled() else { return };
+        let tasks = scene.schedules()[0].tasks();
+        let names = |t: &Task| {
+            let mut names: Vec<String> = t.nodes().iter().map(|n| n.name()).collect();
+            names.sort();
+            names
+        };
+        assert_eq!(names(&tasks[3]), ["Wall S1", "Wall S2"]);
+        assert_eq!(names(&tasks[6]), ["Desk", "Room"]);
+    }
+
+    #[test]
+    fn schedule_links_run_between_tasks() {
+        let Some(scene) = scheduled() else { return };
+        let links = scene.schedules()[0].links();
+        let got: Vec<(String, String, LinkKind, Option<f64>)> =
+            links.iter().map(|l| (l.from.name.clone(), l.to.name.clone(), l.kind, l.lag)).collect();
+        let want = |a: &str, b: &str, k, lag| (a.to_string(), b.to_string(), k, lag);
+        assert_eq!(
+            got,
+            [
+                want("Slab", "Structure", LinkKind::FinishStart, None),
+                want("Walls north", "Walls south", LinkKind::StartStart, Some(2.0 * DAY)),
+                want("Walls south", "Topping out", LinkKind::FinishStart, None),
+                want("Topping out", "Fit-out", LinkKind::FinishStart, None),
+            ]
+        );
+        assert_eq!(links[0].kind_name, "");
+        assert_eq!(LinkKind::StartStart.name(), "start_start");
+    }
+
+    #[test]
+    fn schedule_says_what_each_element_is_doing() {
+        let Some(scene) = scheduled() else { return };
+        let s = &scene.schedules()[0];
+        let states: std::collections::HashMap<String, ElementState> =
+            s.at(T0 + 3.0 * DAY, Dates::Scheduled).unwrap().into_iter().map(|e| (e.node.name(), e)).collect();
+        let mut names: Vec<&str> = states.keys().map(String::as_str).collect();
+        names.sort();
+        assert_eq!(names, ["Desk", "Room", "Shed", "Slab", "Wall N1", "Wall N2", "Wall S1", "Wall S2"]);
+        assert_eq!(states["Slab"].phase, Phase::Building);
+        assert!((states["Slab"].progress - 0.3).abs() < 1e-9);
+        assert_eq!(states["Shed"].phase, Phase::Demolishing);
+        assert_eq!(states["Wall S1"].phase, Phase::Unbuilt);
+        assert_eq!(Phase::Demolished.name(), "demolished");
+
+        let late: std::collections::HashMap<String, ElementState> =
+            s.at(T0 + 32.0 * DAY, Dates::Actual).unwrap().into_iter().map(|e| (e.node.name(), e)).collect();
+        assert_eq!(late["Wall S1"].phase, Phase::Building);
+        assert_eq!(late["Wall S1"].variance, Some(5.0 * DAY));
+        assert_eq!(late["Slab"].variance, Some(-2.0 * DAY));
+    }
+
+    #[test]
+    fn schedule_refuses_a_date_that_is_not_finite() {
+        let Some(scene) = scheduled() else { return };
+        let err = scene.schedules()[0].at(f64::NAN, Dates::Scheduled).unwrap_err();
+        assert_eq!(err.to_string(), "the date must be a finite number");
+    }
+
+    #[test]
+    fn schedule_a_file_without_one_has_none() {
+        let Some(scene) = two_cubes("schedule") else { return };
+        assert!(scene.schedules().is_empty());
+    }
+
     /// `Pose::raw_transform` against the real solved pose -- no geometry needed for this
     /// one, so `mechanism.stp` (kinematics only) is enough.
     #[test]
@@ -4258,6 +5050,227 @@ mod tests {
         let Some(mechanism) = open_mechanism_solid() else { return };
         let pose = mechanism.pose(&[], None).unwrap();
         let camera = mechanism.shown_with(fake::leaked(), Shown::Pose(&mechanism, &pose.transforms), &ViewOptions::default(), true).unwrap().expect("a camera");
-        assert_eq!(camera.pick, Some(crate::view::Pick { item: 3, node: 4, face: 5 }));
+        assert_eq!(camera.pick, Some(crate::view::Pick { item: 3, node: 4, face: 5, clicks: 1, point: None }));
+    }
+
+    // ---- Node::silhouette_beziers --------------------------------------------------------
+    // The fixtures are the repository's own. The box is our STEP writer's, not a Rhino export: Rhino
+    // writes a planar face as a NURBS patch, so the exact-plane path would never be reached and an
+    // empty answer would prove nothing. Each test skips quietly without the library or the fixture,
+    // like this module's other library-needing tests.
+
+    fn silhouette_fixture(name: &str) -> Option<Scene> {
+        let path = format!("{}/../../../cadaclysm-acis/tests/fixtures/rhino/{name}", env!("CARGO_MANIFEST_DIR"));
+        match open(&path) {
+            Ok(scene) => Some(scene),
+            Err(err) => {
+                eprintln!("skipped: {err} (no library or no {name} to take a silhouette of)");
+                None
+            }
+        }
+    }
+
+    /// The body node above the lump holds no shape of its own; the first node with extent is the part.
+    fn silhouette_part(scene: &Scene) -> Node<'_> {
+        scene.walk().find(|n| n.bounds64().size().iter().any(|s| *s > 0.0)).expect("the fixture has a part with extent")
+    }
+
+    #[test]
+    fn a_spheres_control_points_stay_within_the_fit_budget_of_it_in_arrays_of_the_documented_lengths() {
+        let Some(scene) = silhouette_fixture("sphere.sat") else { return };
+        let node = silhouette_part(&scene);
+        let iso = SvgOptions { view: SvgView::Iso, ..Default::default() };
+        let rim = node.silhouette_beziers(&iso).unwrap();
+        assert!(rim.count() > 0, "a sphere gave no rim");
+        assert_eq!(rim.points.len(), rim.count() * 4);
+        assert_eq!(rim.weights.len(), rim.count() * 4);
+        assert!(rim.weights.iter().all(|w| w.is_finite() && *w > 0.0), "a weight is not finite and positive");
+        // Every control point lies within the library's fit budget of the sphere, at the bounds
+        // radius from the bounds centre. That is NOT because control points lie on the sphere: the
+        // silhouette curve does, but a cubic's interior control points do not (here, on iso, they
+        // stray up to 3.0e-3 where the end points stray under 1e-14). It holds because the arcs are
+        // short (half a unit on a radius of 10), and the budget below is the tolerance the library
+        // fits the CURVE to, not its control polygon. The margin is narrow: the curve itself uses
+        // nearly the whole budget (3.42e-3 against 3.46e-3) since the lattice's spacing became a
+        // length in space (44efabc88); before, a lattice ten times too fine left it at 1e-4. So this catches a displaced or scaled result and a mis-strided unpack.
+        // It does NOT pin the eye or `up` (a silhouette point is a point of the surface, so it is
+        // on the sphere from any view), the node choice (a wrong node fails earlier, as a refusal
+        // or an empty answer), the weights (all 1.0 on this fixture), or the radius separately from
+        // the centre (both come from the same bounds).
+        // The bound is the library's own budget, `world_tolerance`: extent * (tolerance / width), read
+        // off the options this call was given rather than copied from their defaults. The library's
+        // extent is the box of the body's sampled feature edges, falling back to declared bounds only
+        // when there are none; the node's bounds diagonal stands in for it, which can differ from
+        // that box.
+        // And it is blind to a one-CONTROL-POINT slip of the unpack. That is a shift of 3 doubles,
+        // so every point is replaced by a DIFFERENT control point, which is within the budget just
+        // the same: the worst deviation is the same before and after (3.0e-3 here on iso either
+        // way, against a budget of about 3.5e-3). A one-DOUBLE slip is another matter: it mixes
+        // coordinates across neighbouring points, leaves the sphere, and is caught (0.87 on iso,
+        // 8.8 on front). The chaining assertion below is what catches the one-control-point slip.
+        let b = node.bounds64();
+        let (centre, size) = (b.centre(), b.size());
+        let radius = size[0] / 2.0;
+        let budget = (size[0] * size[0] + size[1] * size[1] + size[2] * size[2]).sqrt() * (iso.tolerance / iso.width);
+        let worst = rim
+            .points
+            .iter()
+            .map(|p| ((p[0] - centre[0]).powi(2) + (p[1] - centre[1]).powi(2) + (p[2] - centre[2]).powi(2)).sqrt() - radius)
+            .fold(0.0f64, |worst, off| worst.max(off.abs()));
+        assert!(radius > 0.0 && worst <= budget, "control points stray {worst} from the bounds centre's radius {radius}, past the budget {budget}");
+        // Chaining: the last control point of arc c is the first of arc c + 1, to 1e-9 per coordinate
+        // (each of x, y and z is tested, so a passing pair can be up to 1.73e-9 apart). The arcs come
+        // back in RUNS, not as one ordered traversal, so this is a COUNT with a margin and not an
+        // identity: on this iso answer 232 of the 235 consecutive pairs chain (98.7%, four runs). The
+        // count drifts with how the sphere is tessellated; a lower bound of 80 is safe only because it
+        // sits about three times below it. It has drifted once: the bound was 400 against 1206 of 1209
+        // until the lattice's spacing became a length in space (44efabc88) and the same four runs came
+        // back in arcs five times longer. (Front, which this test does not ask, chains much less: 96 of
+        // 173 pairs, 55%, which is why a bound taken from the wrong view is either toothless or red.)
+        // A slip of the unpack by one double or by one control point leaves none of them (0 of 235),
+        // so the count falls from over two hundred to zero. Those figures are for wrap-around slips,
+        // which keep the length and the count, so the denominator stays the unshifted pair count; a
+        // truncating slip would drop it by one.
+        // Its limit: a slip by a whole CURVE (12 doubles) PRESERVES the chaining (231 of 235 on iso,
+        // 95 of 173 on front) and is NOT caught by this or by the radius check above.
+        let chained = rim
+            .points
+            .chunks_exact(4)
+            .zip(rim.points.chunks_exact(4).skip(1))
+            .filter(|(curve, next)| (0..3).all(|axis| (curve[3][axis] - next[0][axis]).abs() <= 1e-9))
+            .count();
+        assert!(
+            chained >= 80,
+            "only {chained} of {} consecutive arcs chain (last control point = the next one's first), want at least 80",
+            rim.count() - 1
+        );
+    }
+
+    /// Asked larger first, so the second call refills the same slot in place (`refill` clears and
+    /// extends the Vec: a larger second ask could grow and move the block, and a view would then read
+    /// freed memory that merely still holds the old values). A view would show the second answer
+    /// through the first, so the copy is the only thing this passes on. Here the answer is an owned
+    /// `Vec`, which cannot be a view, so the assertions after the second call are STRUCTURAL: no
+    /// mutation of this wrapper can fail them short of changing its return type. They are kept as the
+    /// statement of the property, not as a witness of it; the Python and LuaJIT reader tests, whose
+    /// answers can be views, are the witnessed ones.
+    #[test]
+    fn the_answer_is_the_callers_own_a_later_call_on_the_scene_leaves_it_alone() {
+        let Some(scene) = silhouette_fixture("sphere.sat") else { return };
+        let node = silhouette_part(&scene);
+        let front = SvgOptions { view: SvgView::Front, ..Default::default() };
+        let iso = SvgOptions { view: SvgView::Iso, ..Default::default() };
+        // Iso is the larger (236 curves against front's 174); front was, 1248 against 1210, until the
+        // lattice's spacing became a length in space (44efabc88).
+        let first = node.silhouette_beziers(&iso).unwrap();
+        let (kept_points, kept_weights) = (first.points[..].to_vec(), first.weights[..].to_vec());
+        let second = node.silhouette_beziers(&front).unwrap();
+        assert!(second.count() > 0, "the second view gave no rim");
+        assert!(second.count() <= first.count(), "the larger answer must come first (iso {}, front {})", first.count(), second.count());
+        assert_ne!(second.points[..], kept_points[..], "the two views gave the same silhouette, so this cannot tell a copy from a view");
+        assert_eq!(first.points[..], kept_points[..], "the first answer's points changed under the second call");
+        assert_eq!(first.weights[..], kept_weights[..], "the first answer's weights changed under the second call");
+    }
+
+    /// `Scene` is `Sync`, and the library documents that two threads calling this on one scene free
+    /// each other's arrays, which is why `Node::silhouette_beziers` holds a lock. This checks that
+    /// four threads asking alternately for two eyes each get the whole answer they asked for. It is
+    /// a smoke test, not a proof of the lock: with the lock removed it still passed on this machine
+    /// (three runs), so a race it would catch has not been shown.
+    #[test]
+    fn threads_asking_one_scene_each_get_their_own_answer() {
+        let Some(scene) = silhouette_fixture("sphere.sat") else { return };
+        let node = silhouette_part(&scene);
+        let front = SvgOptions { view: SvgView::Front, ..Default::default() };
+        let iso = SvgOptions { view: SvgView::Iso, ..Default::default() };
+        let (want_front, want_iso) = (node.silhouette_beziers(&front).unwrap(), node.silhouette_beziers(&iso).unwrap());
+        std::thread::scope(|scope| {
+            for t in 0..4 {
+                let (node, front, iso, want_front, want_iso) = (&node, &front, &iso, &want_front, &want_iso);
+                scope.spawn(move || {
+                    for i in 0..10 {
+                        let (options, want) = if (t + i) % 2 == 0 { (front, want_front) } else { (iso, want_iso) };
+                        let got = node.silhouette_beziers(options).unwrap();
+                        assert_eq!(got.points[..], want.points[..], "thread {t}, ask {i}: points");
+                        assert_eq!(got.weights[..], want.weights[..], "thread {t}, ask {i}: weights");
+                    }
+                });
+            }
+        });
+    }
+
+    /// `Node::silhouette_beziers` takes the scene's `silhouette` lock. With the test thread holding
+    /// it, a call on another thread must not complete; once it is released, the call completes. Only
+    /// the first half is timing-based, and the timeout is a floor rather than a margin: it has to be
+    /// long enough that the spawned thread has certainly reached the call and blocked, so that a
+    /// pass means it waited there rather than that it had not started yet. 2 s is far longer than a
+    /// thread needs to get there, and a call that ignored the lock returns in well under a second
+    /// here, so the only cost of the margin is 2 s on a green run. This proves the call waits for
+    /// the lock. It does NOT prove the lock is held across the copy out of the library's slot: that
+    /// would need a hook between the C call and the copy, which the C ABI does not offer.
+    #[test]
+    fn the_silhouette_call_waits_for_the_scenes_lock() {
+        let Some(scene) = silhouette_fixture("sphere.sat") else { return };
+        let node = silhouette_part(&scene);
+        let (done, completed) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            // Taken inside the scope's closure so that a failed assertion drops it while unwinding,
+            // before the scope joins the spawned thread, which would otherwise wait on it for ever.
+            let held = scene.silhouette.lock().unwrap();
+            scope.spawn(move || done.send(node.silhouette_beziers(None).map(|beziers| beziers.count())).unwrap());
+            assert!(
+                completed.recv_timeout(std::time::Duration::from_millis(2000)).is_err(),
+                "the silhouette call completed while the scene's lock was held, so it does not take it"
+            );
+            drop(held);
+            let count = completed.recv().expect("the call never completed after the lock was released").unwrap();
+            assert!(count > 0, "a sphere gave no rim");
+        });
+    }
+
+    /// The twin of the test above, for the `svg_text` slot: `Scene::svg_text` and `Node::svg_text` both
+    /// take the scene's `svg_text` lock (a different mutex from the silhouette one, so the test above
+    /// cannot witness it). With the test thread holding it, a call to each on its own thread must not
+    /// complete; once it is released, both do. Same shape and same cost as the silhouette twin: only
+    /// the first half is timing-based, and 2 s is a floor, not a margin, long enough that the spawned
+    /// threads have certainly reached their calls and blocked. Like that test, it proves the calls wait
+    /// for the lock, not that the lock is held across the copy out of the library's slot.
+    #[test]
+    fn the_svg_text_calls_wait_for_the_scenes_lock() {
+        let Some(scene) = silhouette_fixture("sphere.sat") else { return };
+        let node = silhouette_part(&scene);
+        let (done, completed) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            // Taken inside the scope's closure so that a failed assertion drops it while unwinding,
+            // before the scope joins the spawned threads, which would otherwise wait on it for ever.
+            let held = scene.svg_text.lock().unwrap();
+            let (scene, node) = (&scene, &node);
+            let from_scene = done.clone();
+            scope.spawn(move || from_scene.send(("Scene::svg_text", scene.svg_text(None).map(|text| text.len()))).unwrap());
+            scope.spawn(move || done.send(("Node::svg_text", node.svg_text(None).map(|text| text.len()))).unwrap());
+            assert!(
+                completed.recv_timeout(std::time::Duration::from_millis(2000)).is_err(),
+                "an svg_text call completed while the scene's svg_text lock was held, so it does not take it"
+            );
+            drop(held);
+            for _ in 0..2 {
+                let (which, length) = completed.recv().expect("an svg_text call never completed after the lock was released");
+                assert!(length.unwrap() > 0, "{which} gave no text");
+            }
+        });
+    }
+
+    #[test]
+    fn an_infinite_tolerance_is_refused_and_an_all_planar_body_is_the_empty_answer_after_it() {
+        let Some(scene) = silhouette_fixture("box-chamfer-all.blacksmith.stp") else { return };
+        let node = silhouette_part(&scene);
+        let infinite = SvgOptions { tolerance: f64::INFINITY, ..Default::default() };
+        let err = node.silhouette_beziers(&infinite).unwrap_err();
+        assert!(err.message().contains("silhouette: "), "{err}");
+        // The refusal above left its reason in the thread's error slot; the empty answer must not
+        // read it as its own.
+        let none = node.silhouette_beziers(None).expect("an empty silhouette is an answer");
+        assert_eq!(none.count(), 0);
+        assert!(none.points.is_empty() && none.weights.is_empty());
     }
 }

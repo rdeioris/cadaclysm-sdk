@@ -298,6 +298,16 @@ func test_push_pull_split_and_rounds_and_bevels_remade():
 	eq(box.lumps().size(), 1)
 	refuses(func(): return box.split_by_plane([[0, 0, 50], [1, 0, 0], [0, 1, 0], [0, 0, 1]]), "split_by_plane: the plane does not cross")
 	eq(box.split_by_plane([[0, 0, 50], [1, 0, 0], [0, 1, 0], [0, 0, 1]]).size(), 0)
+	# A rectangle drawn above a sphere cores it: the ball with a square hole, then the core.
+	var ball := CadaclysmSolid.sphere(10)
+	var cored := ball.split_by_profile(CadaclysmProfile.rect(6, 6), [[0, 0, 40], [1, 0, 0], [0, 1, 0], [0, 0, 1]])
+	eq(cored.size(), 2)
+	var outside: float = cored[0].mass()["volume"]
+	var inside: float = cored[1].mass()["volume"]
+	var whole: float = ball.mass()["volume"]
+	ok(inside > 0 and inside < outside, "the core is the smaller body: %f %f" % [outside, inside])
+	ok(absf(outside + inside - whole) < 0.01 * whole, "the hole and the core add up to the ball")
+	refuses(func(): return ball.split_by_profile(CadaclysmProfile.rect(6, 6), [[30, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]), "split_by_profile: ")
 	var slab := CadaclysmSolid.cuboid(40, 20, 2)
 	var parts := box.split(slab)
 	ok(parts.size() >= 2, "a box split by a slab through it is at least two bodies, got %d" % parts.size())
@@ -1861,7 +1871,7 @@ func test_every_bad_pair_state_or_base_call_is_refused_and_changes_nothing():
 		[func(): return arm.pair("shoulder", "revolute", CadaclysmFrame.xy(Vector3(0, 0, 10)), null, [], NAN),
 			"pair: joint 'shoulder' already has a pair"],
 		[func(): return arm.pair("back", "orbital", xy0, null, [], NAN),
-			"pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, spherical, " + \
+			"pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, gear, rack_and_pinion, spherical, " + \
 			"spherical_with_pin, planar, universal, homokinetic, fully_constrained, unconstrained)"],
 		[func(): return arm.pair("back", "screw", xy0, null, [], NAN), "pair: a screw needs a non-zero pitch"],
 		[func(): return arm.pair("back", "revolute", xy0, null, [[-1.0, 1.0], [-1.0, 1.0]], NAN),
@@ -1922,6 +1932,143 @@ func test_a_one_sided_pair_range_survives_the_round_trip():
 	ok(is_nan(freedoms[0].lower), "freedom 0 should have no lower limit")
 	ok(absf(freedoms[0].upper - 1.0) < 1e-9, "freedom 0 upper")
 	scene.close()
+# Drives plan 4's round trip, at parity with the Python reference's `_geared()`: a pinion
+# turning on `drive` meshes, by the gear pair `mesh` (radii 10 and 20, ratio -0.5, bevel
+# 0.25, helical 0.125), with a wheel turning on `driven` about (30, 0); the wheel's part
+# sits 5 off its axis, at (35, 0, 2). The two are different parts: AP242 refuses a pair
+# between two placements of one.
+func _geared(mesh := true) -> CadaclysmAssembly:
+	var gears := CadaclysmAssembly.create("gears")
+	gears.place(CadaclysmSolid.cuboid(40, 10, 2).named("plate"), CadaclysmFrame.xy(Vector3(0, 0, 0)), "frame")
+	gears.place(CadaclysmSolid.cylinder(1, 6).named("pin"), CadaclysmFrame.xy(Vector3(0, 0, 2)), "pinion")
+	gears.place(CadaclysmSolid.cylinder(2, 4).named("hub"), CadaclysmFrame.xy(Vector3(35, 0, 2)), "wheel")
+	ok(gears.link("base", ["frame"]), Cadaclysm.last_error())
+	ok(gears.link("driver", ["pinion"]), Cadaclysm.last_error())
+	ok(gears.link("follower", ["wheel"]), Cadaclysm.last_error())
+	ok(gears.joint("drive", "base", "driver"), Cadaclysm.last_error())
+	ok(gears.joint("driven", "base", "follower"), Cadaclysm.last_error())
+	ok(gears.joint("mesh", "driver", "follower"), Cadaclysm.last_error())
+	ok(gears.pair("drive", "revolute", CadaclysmFrame.xy(Vector3(0, 0, 2)), null, [], NAN), Cadaclysm.last_error())
+	ok(gears.pair("driven", "revolute", CadaclysmFrame.xy(Vector3(30, 0, 2)), null, [], NAN), Cadaclysm.last_error())
+	if mesh:
+		ok(gears.pair_with("mesh", "gear", CadaclysmFrame.xy(Vector3(0, 0, 2)), null, [],
+			PackedFloat64Array([10, 20, -0.5, 0.25, 0.125])), Cadaclysm.last_error())
+	return gears
+
+func test_a_gear_pair_round_trips_and_poses_from_its_driver():
+	var scene := _geared().to_scene()
+	if not ok(scene != null, "to_scene: " + Cadaclysm.last_error()):
+		return
+	var joints := {}
+	for j in scene.joints:
+		joints[j.name] = j
+	var mesh: CadaclysmPair = joints["mesh"].pair
+	eq([mesh.kind, mesh.kind_name], ["other", "gear"])
+	ok(all_near(mesh.parameters, PackedFloat64Array([10, 20, -0.5, 0.25, 0.125])), "mesh parameters: " + str(mesh.parameters))
+	var drive_pair: CadaclysmPair = joints["drive"].pair
+	eq(drive_pair.kind_name, "revolute")
+	eq(drive_pair.parameters.size(), 0)
+
+	# the driver alone turns the wheel by ratio x 0.4 about (30, 0): nothing to report
+	var pose := scene.pose([CadaclysmStateValue.create(joints["drive"], PackedFloat64Array([0.4]))], null)
+	eq(pose.diagnostics.size(), 0)
+	eq(pose.unsolved.size(), 0)
+	var wheel: CadaclysmNode = scene.links[2].nodes[0]
+	ok(v3near(pose.transform(wheel).origin, Vector3(30 + 5 * cos(-0.2), 5 * sin(-0.2), 2), 1e-9),
+		"wheel origin: " + str(pose.transform(wheel).origin))
+
+	# both sides given, against the law: one diagnostic, in the kernel's words
+	pose = scene.pose([
+		CadaclysmStateValue.create(joints["drive"], PackedFloat64Array([0.4])),
+		CadaclysmStateValue.create(joints["driven"], PackedFloat64Array([0.4])),
+	], null)
+	eq(pose.diagnostics.size(), 1)
+	ok(pose.diagnostics[0].begins_with("coupling 'mesh': both 'drive' and 'driven' are given and disagree by"),
+		str(pose.diagnostics))
+	scene.close()
+
+func test_pair_with_refuses_a_wrong_parameter_count():
+	var gears := _geared(false)
+	var message := refuses(func(): return gears.pair_with("mesh", "gear", CadaclysmFrame.xy(Vector3(0, 0, 0)), null, [],
+		PackedFloat64Array([10, 20])), "pair: a gear takes 3 or 5 parameters, not 2")
+	eq(message, "pair: a gear takes 3 or 5 parameters, not 2")
+	# unchanged: it takes one now
+	ok(gears.pair_with("mesh", "gear", CadaclysmFrame.xy(Vector3(0, 0, 0)), null, [],
+		PackedFloat64Array([10, 20, -0.5])), Cadaclysm.last_error())
+
+# `CadaclysmAssembly.posed`, at parity with the Python reference's posed tests and the
+# Rust SDK's `posed_*` tests, compared by STEP text (stamp stripped). NOT RUN locally:
+# there is no Godot binary on the authoring machine.
+func _posed_no_stamp(a: CadaclysmAssembly) -> String:
+	var lines := []
+	for line in a.step_text().split("\n"):
+		if not line.begins_with("FILE_NAME("):
+			lines.append(line)
+	return "\n".join(lines)
+
+# Python's `_posed_frame()`: two copies of a bracket whose bolt turns on `turn` (revolute
+# about z through (10, 5, 2)), placed as `left` and `right/rear`.
+func _posed_frame() -> CadaclysmAssembly:
+	var bracket := CadaclysmAssembly.create("bracket")
+	bracket.place(CadaclysmSolid.cuboid(20, 10, 2).named("plate"), XY)
+	bracket.place(CadaclysmSolid.cuboid(1, 1, 6).named("bolt"), CadaclysmFrame.xy(Vector3(5, 5, 2)))
+	ok(bracket.link("fixed", ["plate"]), Cadaclysm.last_error())
+	ok(bracket.link("bolts", ["bolt"]), Cadaclysm.last_error())
+	ok(bracket.joint("turn", "fixed", "bolts"), Cadaclysm.last_error())
+	ok(bracket.pair("turn", "revolute", CadaclysmFrame.xy(Vector3(10, 5, 2)), null, [], NAN), Cadaclysm.last_error())
+	var frame := CadaclysmAssembly.create("frame")
+	frame.place(bracket, XY, "left")
+	frame.place(bracket, CadaclysmFrame.xy(Vector3(100, 0, 0)), "right/rear")
+	return frame
+
+func test_posed_moves_the_shoulder():
+	var arm: CadaclysmAssembly = _paired_arm()[1]
+	var before := _posed_no_stamp(arm)
+	var posed: CadaclysmAssembly = arm.posed({"shoulder": 0.5})
+	if not ok(posed != null, "posed: " + Cadaclysm.last_error()):
+		return
+	eq(posed.name, "arm")
+	ok(_posed_no_stamp(posed) != before, "the posed copy differs from the rest")
+	eq(_posed_no_stamp(arm), before, "the original is unchanged")
+	# rows as an array of pairs, a list value, and no rows at all
+	eq(_posed_no_stamp(arm.posed([["shoulder", [0.5]]])), _posed_no_stamp(posed))
+	eq(_posed_no_stamp(arm.posed({})), before)
+
+func test_posed_refuses_an_ambiguous_name_and_takes_a_path_with_a_slash():
+	var frame := _posed_frame()
+	var before := _posed_no_stamp(frame)
+	refuses(func(): return frame.posed({"turn": 0.3}),
+		"posed: 'turn' names 2 joints: left/turn, right\\/rear/turn; give one by its path")
+	var posed: CadaclysmAssembly = frame.posed({"right\\/rear/turn": 0.3})
+	if not ok(posed != null, "posed: " + Cadaclysm.last_error()):
+		return
+	eq(posed.name, "frame")
+	ok(_posed_no_stamp(posed) != before, "posed by path differs from the rest")
+	# an array of names is escaped and joined
+	eq(_posed_no_stamp(frame.posed({["right/rear", "turn"]: 0.3})), _posed_no_stamp(posed))
+	eq(_posed_no_stamp(frame.posed({"right\\/rear/turn": 0.0})), before)
+	eq(_posed_no_stamp(frame), before)
+
+func test_posed_takes_a_state_and_a_ground_and_refuses_with_the_kernels_words():
+	var arm: CadaclysmAssembly = _paired_arm()[1]
+	var before := _posed_no_stamp(arm)
+	eq(_posed_no_stamp(arm.posed({}, "reach")), _posed_no_stamp(arm.posed({"shoulder": [0.5]})))
+	var held: CadaclysmAssembly = arm.posed({"shoulder": 0.5}, "", "upper arm")
+	ok(_posed_no_stamp(held) != _posed_no_stamp(arm.posed({"shoulder": 0.5})), "the ground link changes the pose")
+	eq(refuses(func(): return arm.posed({"shoulder": 2.0})), "posed: value 0 of joint 'shoulder' is 2, outside its range")
+	eq(refuses(func(): return arm.posed({}, "fold")), "posed: assembly 'arm' has no state named 'fold'")
+	eq(_posed_no_stamp(arm), before)
+
+func test_posed_refuses_a_disagreeing_coupling():
+	var gears := _geared()
+	var before := _posed_no_stamp(gears)
+	var posed: CadaclysmAssembly = gears.posed({"drive": 0.4})
+	if ok(posed != null, "posed drive alone: " + Cadaclysm.last_error()):
+		eq(posed.name, "gears")
+	refuses(func(): return gears.posed({"drive": 0.4, "driven": 0.4}),
+		"posed: assembly 'gears': coupling 'mesh': both 'drive' and 'driven' are given and disagree by")
+	eq(_posed_no_stamp(gears), before)
+
 # ---- CAM: to_arcs, offset, section, Tool, Stock, Job ------------------------------------
 # The Rust wrapper's own suite (crates/cadaclysm-capi/examples/rust/src/blacksmith.rs,
 # `mod tests`, from `profile_offset_grows_and_shrinks_a_rectangle` on -- itself the shared

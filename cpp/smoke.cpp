@@ -734,6 +734,19 @@ static Result<void> save_checks(const cadaclysm::Scene& scene) {
     Result<std::string> bad_fov = scene.svg_text(refused);
     EXPECT(!bad_fov, "fov = 200 was accepted");
     EXPECT(bad_fov.error().message.find("fov") != std::string::npos, "the fov refusal does not name the field");
+
+    // stroke and background take colour text or a packed number, through SvgColour.
+    cadaclysm::SvgOptions named;
+    named.stroke = 0x00FF00;
+    named.background = "Navy";
+    CADACLYSM_TRY(named_text, scene.svg_text(named));
+    EXPECT(named_text.find("#000080") != std::string::npos, "background = \"Navy\" did not draw as #000080");
+    EXPECT(named_text.find("#00ff00") != std::string::npos, "stroke = 0x00FF00 did not draw as #00ff00");
+    cadaclysm::SvgOptions bogus;
+    bogus.background = std::string("bogus");
+    Result<std::string> bad_background = scene.svg_text(bogus);
+    EXPECT(!bad_background && bad_background.error().message.rfind("svg: background:", 0) == 0,
+           "background = \"bogus\": " + (bad_background ? std::string("accepted") : bad_background.error().message));
     return {};
 }
 
@@ -1111,6 +1124,17 @@ static Result<void> kernel_values() {
         std::string red_stroke_lower = red_stroke_text;
         std::transform(red_stroke_lower.begin(), red_stroke_lower.end(), red_stroke_lower.begin(), ::tolower);
         EXPECT(red_stroke_lower.find("#ff0000") != std::string::npos, "SvgOptions.stroke = *packed(\"red\") did not draw as #ff0000");
+        bs::SvgOptions named;
+        named.stroke = "Lime";
+        named.background = "Navy";
+        CADACLYSM_TRY(named_text, colour_box.svg_text(named));
+        EXPECT(named_text.find("#000080") != std::string::npos, "SvgOptions.background = \"Navy\" did not draw as #000080");
+        EXPECT(named_text.find("#00ff00") != std::string::npos, "SvgOptions.stroke = \"Lime\" did not draw as #00ff00");
+        bs::SvgOptions bogus;
+        bogus.background = "bogus";
+        Result<std::string> bad_background = colour_box.svg_text(bogus);
+        EXPECT(!bad_background && bad_background.error().message.rfind("svg: background:", 0) == 0,
+               "SvgOptions.background = \"bogus\": " + (bad_background ? std::string("accepted") : bad_background.error().message));
     }
 
     bs::SweepPath bend = bs::SweepPath::at({0, 0, 0});
@@ -1885,6 +1909,19 @@ static Result<std::pair<bs::Solid, std::uint32_t>> solids() {
     CADACLYSM_TRY(across, bs::Frame::yz());
     CADACLYSM_TRY(halves, plate.split_by_plane(across));
     EXPECT(halves.size() == 2, "split_by_plane gave " + std::to_string(halves.size()) + " bodies, not 2");
+
+    // A rectangle drawn above a sphere cores it: the ball with a square hole, then the core.
+    CADACLYSM_TRY(ball, bs::Solid::sphere(10));
+    CADACLYSM_TRY(square, bs::Profile::rect(6, 6));
+    CADACLYSM_TRY(above, bs::Frame::at({0, 0, 40}, {0, 0, 1}));
+    CADACLYSM_TRY(cored, ball.split_by_profile(square, above));
+    EXPECT(cored.size() == 2, "split_by_profile gave " + std::to_string(cored.size()) + " bodies, not 2");
+    CADACLYSM_TRY(whole, ball.mass());
+    CADACLYSM_TRY(outside, cored[0].mass());
+    CADACLYSM_TRY(inside, cored[1].mass());
+    EXPECT(inside.volume > 0 && inside.volume < outside.volume &&
+               std::fabs(outside.volume + inside.volume - whole.volume) < 0.01 * whole.volume,
+           "split_by_profile: the hole and the core do not add up to the ball");
 
     // A profile draws its own plane, top by default -- unlike a solid, a sketch has no
     // camera-facing convention of its own, so its plane (z = 0) is already the page. The

@@ -36,7 +36,14 @@ end
 
 local M = {}
 
-local ABI_MAJOR, ABI_MINOR = 1, 4
+-- 1.6: text -- cadaclysm_view_show_text, _set_text, _load_font and the text layer.
+-- 1.7: the machining and timeline calls (not bound here yet).
+-- 1.8: the pick's `clicks` and `point`, cadaclysm_view_set_double_click_frames, _focus, _navigation.
+-- 1.9: cadaclysm_view_set_lighting and _lighting (headlight or studio).
+-- 1.10: the viewport cameras -- each move's trailing viewport, camera/set_camera, viewport_rects, aim, pivot, tap.
+-- 1.11: cadaclysm_view_show_points.
+local ABI_MAJOR, ABI_MINOR = 1, 11
+local NAVIGATION_FLY = 1   -- CADACLYSM_VIEW_NAVIGATION_FLY (ORBIT is 0)
 local OPEN, CLOSED = 1, 2
 local INPUT_CLOSE, NONE_COMING = 1, 0xFFFFFFFF
 local UINT_MAX = 4294967295
@@ -48,11 +55,17 @@ local function names(list)
   return t
 end
 local STANDARD = names({ "top", "front", "right", "iso" })
-local LAYERS = names({ "surfaces", "edges", "curves", "isocurves", "grid" })
+local LAYERS = names({ "surfaces", "edges", "curves", "isocurves", "grid", "text" })
 local GRIDS = names({ "none", "top", "front", "right" })
 local LOD_MOTION = names({ "detailed", "smooth" })
 local SURFACES = names({ "exact", "triangles" })
+local LIGHTING = names({ "headlight", "studio" })
+local ALIGN = names({ "top-left", "top", "top-right", "left", "centre", "right", "bottom-left", "bottom", "bottom-right" })
+ALIGN.center = ALIGN.centre   -- the American spelling is taken too (and named in the message)
+ALIGN._list = { "top-left", "top", "top-right", "left", "centre", "center", "right", "bottom-left", "bottom", "bottom-right" }
+local TEXT_MODES = names({ "label", "world" })
 local POINTERS = names({ "mouse", "touch", "pen" })
+local CAMERA_KINDS = names({ "orbit", "fly", "ortho", "fixed" })
 local EVENTS = { pointer_down = 1, pointer_move = 2, pointer_up = 3, pointer_cancel = 4, wheel = 5, key = 6,
   _list = { "pointer_down", "pointer_move", "pointer_up", "pointer_cancel", "wheel", "key" } }
 local WINDOWS = { win32 = 1, xlib = 2, xcb = 3, wayland = 4, appkit = 5,
@@ -122,9 +135,10 @@ local function number(v, what)
   return v
 end
 
-local function uint(v, what)
+-- `level`: how many calls up the caller to blame is, counted from uint's caller (default 1).
+local function uint(v, what, level)
   if type(v) ~= "number" or v ~= math.floor(v) or v < 0 or v > UINT_MAX then
-    fail(what .. ": a whole number from 0 to " .. UINT_MAX .. ", not " .. describe(v), 3)
+    fail(what .. ": a whole number from 0 to " .. UINT_MAX .. ", not " .. describe(v), 2 + (level or 1))
   end
   return v
 end
@@ -168,12 +182,28 @@ local function exactly(ctype, t, n, what)
   return a
 end
 
-local function floats3(t, what) return exactly("float", t, 3, what) end
+-- A colour's numbers (Python's `_colour`): text -- "#rgb", "#rrggbb" (the "#" optional) or one
+-- of the 148 CSS colour names, any case -- read by the library's own cadaclysm_view_parse_colour
+-- (three, in 0..1; a ViewError with the library's message where it is no colour), anything else
+-- as given. `lib`: the view's library.
+local function colour_of(lib, value)
+  if type(value) ~= "string" then return value end
+  local out = ffi.new("float[3]")
+  if not lib.C.cadaclysm_view_parse_colour(value, out) then
+    local why = ffi.string(lib.C.cadaclysm_view_last_error())
+    fail(why ~= "" and why or ("colour " .. describe(value)), 3)
+  end
+  return { out[0], out[1], out[2] }
+end
 
--- Three or four numbers as four floats (alpha 1 where only three were given); nil stays nil.
-local function rgba4(c, what)
+-- A colour as three floats: text (through the library), or exactly three numbers; nil stays nil.
+local function floats3(t, what, lib) return exactly("float", colour_of(lib, t), 3, what) end
+
+-- A colour as four floats: text (alpha 1), or three or four numbers (alpha 1 where only three
+-- were given); nil stays nil.
+local function rgba4(c, what, lib)
   if c == nil then return nil end
-  local a, n = carray("float", c, what)
+  local a, n = carray("float", colour_of(lib, c), what)
   if n ~= 3 and n ~= 4 then fail(("%s: 3 or 4 numbers, not %d"):format(what, n), 3) end
   local out = ffi.new("float[4]", a[0], a[1], a[2], n == 4 and a[3] or 1)
   return out
@@ -196,6 +226,16 @@ local function file_name(base)
   return "lib" .. base .. ".so"
 end
 
+local function is_dir(p)
+  local f = io.open(p, "rb")
+  if f then
+    local _, _, code = f:read(1)
+    f:close()
+    return code == 21 -- EISDIR: POSIX opens a directory and fails the read
+  end
+  return os.rename(p, p) and true or false -- Windows refuses to open one at all
+end
+
 local function exists(p)
   local f = io.open(p, "rb")
   if f then f:close() return true end
@@ -210,16 +250,23 @@ end
 
 local function parent_of(dir) return dir:match("^(.*)/[^/]+$") end
 
-local function find(base, variable)
+-- `override` and `here` stand in for the variable's value and this file's folder (tests; ""
+-- for no variable).
+local function find(base, variable, override, here)
   local name = file_name(base)
-  local override = os.getenv(variable)
+  local terminal = base:sub(-9) == "_terminal"
+  if override == nil then override = os.getenv(variable) end
   if override and override ~= "" then
     override = override:gsub("\\", "/")
-    if exists(override .. "/" .. name) then return override .. "/" .. name end
-    if exists(override) then return override end
-    fail(variable .. "=" .. override .. " names nothing that exists", 3)
+    local directory = is_dir(override)
+    if directory and exists(override .. "/" .. name) then return override .. "/" .. name end
+    if not directory and exists(override) then return override end
+    -- Python's words: the terminal's variable also says which file a directory lacks.
+    fail(variable .. "=" .. override .. " names nothing that exists"
+      .. ((terminal and directory) and (" (no " .. name .. " in that directory)") or ""), 3)
   end
-  local searched, here = {}, module_dir()
+  local searched = {}
+  if here == nil then here = module_dir() end
   if here then searched[#searched + 1] = here .. "/" .. name end
   local dirs, dir = {}, here
   while dir and dir ~= "" do dirs[#dirs + 1] = dir; dir = parent_of(dir) end
@@ -229,9 +276,15 @@ local function find(base, variable)
     searched[#searched + 1] = d .. "/target/debug/" .. name
   end
   for _, c in ipairs(searched) do if exists(c) then return c end end
-  fail("no view library: " .. name .. " not found. Looked in:\n    " .. table.concat(searched, "\n    ")
-    .. "\nSet " .. variable .. ", or CADACLYSM_VIEW to a library's path.", 3)
+  local where = table.concat(searched, ", ")
+  if terminal then
+    fail("no view library: the terminal library was not found (searched: " .. where .. ") "
+      .. "-- reinstall cadaclysm, set CADACLYSM_TERMINAL_LIBRARY to the library, or set CADACLYSM_VIEW", 3)
+  end
+  fail("no view library: " .. name .. " was not found (searched: " .. where .. ") "
+    .. "-- reinstall cadaclysm, set " .. variable .. " to it, or use_terminal()", 3)
 end
+M._find = find
 
 -- Every function this module calls, checked at load: LuaJIT resolves a symbol on first use,
 -- so a library missing one would otherwise fail in the middle of a draw.
@@ -245,9 +298,16 @@ local ENTRY_POINTS = {
   "cadaclysm_view_set_node_highlight", "cadaclysm_view_set_viewports", "cadaclysm_view_request_pick",
   "cadaclysm_view_request_pick_in", "cadaclysm_view_pick_result", "cadaclysm_view_frame_node", "cadaclysm_view_look",
   "cadaclysm_view_dolly", "cadaclysm_view_input", "cadaclysm_view_show_mesh", "cadaclysm_view_show_lines",
-  "cadaclysm_view_show_curves", "cadaclysm_view_show_image", "cadaclysm_view_set_colour", "cadaclysm_view_set_xray",
+  "cadaclysm_view_show_points", "cadaclysm_view_show_curves", "cadaclysm_view_show_image", "cadaclysm_view_set_colour", "cadaclysm_view_set_xray",
   "cadaclysm_view_set_face_colours", "cadaclysm_view_set_placement", "cadaclysm_view_show_solid", "cadaclysm_view_image",
   "cadaclysm_view_size", "cadaclysm_view_set_lod", "cadaclysm_view_wake_ms", "cadaclysm_view_set_node_transforms",
+  "cadaclysm_view_parse_colour", "cadaclysm_view_load_font", "cadaclysm_view_show_text", "cadaclysm_view_set_text",
+  "cadaclysm_view_set_double_click_frames", "cadaclysm_view_focus", "cadaclysm_view_navigation",
+  "cadaclysm_view_set_lighting", "cadaclysm_view_lighting",
+  "cadaclysm_view_viewport_camera", "cadaclysm_view_set_viewport_camera", "cadaclysm_view_set_viewport_rects",
+  "cadaclysm_view_aim", "cadaclysm_view_set_pivot", "cadaclysm_view_set_tap", "cadaclysm_view_orbit_in",
+  "cadaclysm_view_pan_in", "cadaclysm_view_zoom_in", "cadaclysm_view_look_in", "cadaclysm_view_dolly_in",
+  "cadaclysm_view_frame_in", "cadaclysm_view_standard_in",
 }
 
 local open_views = {}   -- windows of a view's own on the wgpu library, in the order made
@@ -262,11 +322,10 @@ end
 -- library is chosen. So none is let go while this module lives.
 local loaded_clibs = {}
 
-local function load(path)
-  local ok, C = pcall(ffi.load, path)
-  if not ok then fail(path .. ": could not load the view library: " .. tostring(C), 3) end
-  loaded_clibs[path] = C
-  -- The ABI version first, so a library missing a newer call says its version, not "no symbol".
+-- A loaded library `C` (a clib, or a table of functions standing in for one) checked as a view
+-- library: its ABI version first, so a library missing a newer call says its version, not "no
+-- symbol"; then every entry point; then its name.
+local function bound(path, C)
   if not pcall(function() return C.cadaclysm_view_abi_version end) then
     fail(path .. ": not a view library (no abi version)", 3)
   end
@@ -280,6 +339,14 @@ local function load(path)
   end
   local name = ffi.string(C.cadaclysm_view_name())
   return { C = C, path = path, name = name, kind = library_kind(name) }
+end
+M._bound = bound
+
+local function load(path)
+  local ok, C = pcall(ffi.load, path)
+  if not ok then fail(path .. ": could not load the view library: " .. tostring(C), 3) end
+  loaded_clibs[path] = C
+  return bound(path, C)
 end
 
 local current
@@ -319,6 +386,27 @@ local function last_error(lib) return ffi.string(lib.C.cadaclysm_view_last_error
 local function failure(lib, level)
   local why = last_error(lib)
   fail(why ~= "" and why or "the view library failed", (level or 1) + 1)
+end
+
+--- A TTF/OTF font for every view of the library in use: a string naming an existing file is
+--- read as a path, any other string is the font's own bytes (so a misspelt path is the
+--- library's "not a font", not a file error). Its id is show_text's `font`; font 0 is the
+--- bundled Liberation Sans. Choose the library first (use_wgpu/use_terminal/use): a font id
+--- belongs to the library that loaded it, and means nothing -- or another font -- to a library
+--- chosen afterwards.
+function M.load_font(font)
+  if type(font) ~= "string" then fail("load_font: a path or the font's bytes, not " .. describe(font), 2) end
+  local bytes = font
+  local f = #font < 4096 and not font:find(string.char(0), 1, true) and io.open(font, "rb")   -- a long string, or one with a NUL, is bytes, never a path
+  if f then
+    local read = f:read("*a")   -- nil for a directory
+    f:close()
+    bytes = read or font
+  end
+  local lib = M.current()
+  local id = lib.C.cadaclysm_view_load_font(bytes, #bytes)
+  if id == 0 then failure(lib, 2) end
+  return tonumber(id)
 end
 
 -- ---- View and Item -----------------------------------------------------------------------
@@ -415,6 +503,21 @@ function View:_item(id, shown)
   return item
 end
 
+-- Text for a C string: a NUL would end it early, so it is refused rather than cut.
+local function text_of(text)
+  if type(text) ~= "string" then fail(("text: a string, not %s"):format(type(text)), 3) end
+  if text:find("\0", 1, true) then
+    fail(("text %q: a NUL character cannot be shown (the C string ends there)"):format(text), 3)
+  end
+  return text
+end
+
+-- A vector of exactly n numbers (never colour text); nil is refused, naming the field.
+local function vector(t, n, what)
+  if t == nil then fail(("%s: %d numbers, not nil"):format(what, n), 3) end
+  return exactly("float", t, n, what)
+end
+
 local function ok(self, done) if not done then failure(self._lib, 3) end end
 
 -- After a call with no result: a refusal is the library's last error (Python's `_void`).
@@ -453,7 +556,7 @@ end
 function View:show_solid(solid, tolerance, rgb)
   if kind_of(solid) ~= "solid" then fail("show_solid: a Solid, not " .. describe(solid), 2) end
   tolerance = tolerance == nil and 0.05 or number(tolerance, "show_solid tolerance")
-  local colour = floats3(rgb, "show_solid rgb")
+  local colour = floats3(rgb, "show_solid rgb", self._lib)
   return self:_item(self._lib.C.cadaclysm_view_show_solid(self:_live("cadaclysm_view_show_solid"), solid:_h(), tolerance, colour), solid)
 end
 
@@ -497,7 +600,7 @@ function View:show_mesh(mesh)
     edges, ne = carray("float", mesh.edges, "show_mesh edges")
     if ne % 6 ~= 0 then fail(("show_mesh: edges are two points a segment (6 numbers), not %d"):format(ne), 2) end
   end
-  local rgb = floats3(mesh.rgb, "show_mesh rgb")
+  local rgb = floats3(mesh.rgb, "show_mesh rgb", self._lib)
   local m = ffi.new("CadaclysmViewMesh", {
     size = ffi.sizeof("CadaclysmViewMesh"), positions = positions, vertex_count = math.floor(np / 3), normals = normals,
     indices = indices, index_count = ni, edges = edges, edge_count = ne and ne / 6 or 0,
@@ -512,14 +615,26 @@ end
 function View:show_lines(segments, rgb)
   local s, n = carray("float", segments, "show_lines")
   if n % 6 ~= 0 then fail(("show_lines: 6 numbers a segment, not %d"):format(n), 2) end
-  return self:_item(self._lib.C.cadaclysm_view_show_lines(self:_live("cadaclysm_view_show_lines"), s, n / 6, floats3(rgb, "show_lines rgb")), nil)
+  return self:_item(self._lib.C.cadaclysm_view_show_lines(self:_live("cadaclysm_view_show_lines"), s, n / 6, floats3(rgb, "show_lines rgb", self._lib)), nil)
+end
+
+--- Three numbers a point: { x0, y0, z0, x1, y1, z1, ... }, each drawn as a disc `size_px` device
+--- pixels across (1 to 64, default 8) in `rgb` (nil: the edge colour), as one item. A point does
+--- not pick; the item is framed by its points' box. The library refuses a value that is not
+--- finite and a size out of range; the terminal library refuses points.
+function View:show_points(positions, rgb, size_px)
+  local p, n = carray("float", positions, "show_points")
+  if n % 3 ~= 0 then fail(("show_points: three numbers a point, not %d"):format(n), 2) end
+  if size_px == nil then size_px = 8 end
+  if type(size_px) ~= "number" then fail("show_points size_px: a number, not " .. describe(size_px), 2) end
+  return self:_item(self._lib.C.cadaclysm_view_show_points(self:_live("cadaclysm_view_show_points"), p, n / 3, floats3(rgb, "show_points rgb", self._lib), size_px), nil)
 end
 
 --- Sixteen numbers a rational cubic: four control points as x, y, z, w.
 function View:show_curves(beziers, rgb)
   local b, n = carray("float", beziers, "show_curves")
   if n % 16 ~= 0 then fail(("show_curves: 16 numbers a curve, not %d"):format(n), 2) end
-  return self:_item(self._lib.C.cadaclysm_view_show_curves(self:_live("cadaclysm_view_show_curves"), b, n / 16, floats3(rgb, "show_curves rgb")), nil)
+  return self:_item(self._lib.C.cadaclysm_view_show_curves(self:_live("cadaclysm_view_show_curves"), b, n / 16, floats3(rgb, "show_curves rgb", self._lib)), nil)
 end
 
 --- corners: twelve numbers (bottom-left, bottom-right, top-right, top-left); rgba: a string,
@@ -553,41 +668,195 @@ end
 
 -- ---- the camera
 
-function View:orbit(dx, dy)
+-- 1.10: every move takes a trailing optional viewport (default 0). Viewport 0 is the plain
+-- call, as before (the library's plain calls are viewport 0's); any other the `_in` form.
+-- A bad viewport is reported at the caller of the View method, not at the method.
+local function viewport_of(viewport, what)
+  if viewport == nil then return 0 end
+  return (uint(viewport, what .. " viewport", 2))
+end
+
+function View:orbit(dx, dy, viewport)
   number(dx, "orbit dx"); number(dy, "orbit dy")
-  self._lib.C.cadaclysm_view_orbit(self:_live("cadaclysm_view_orbit"), dx, dy)
+  local vp = viewport_of(viewport, "orbit")
+  if vp == 0 then
+    self._lib.C.cadaclysm_view_orbit(self:_live("cadaclysm_view_orbit"), dx, dy)
+  else
+    self._lib.C.cadaclysm_view_orbit_in(self:_live("cadaclysm_view_orbit_in"), vp, dx, dy)
+  end
   void_ok(self)
 end
-function View:pan(dx, dy)
+function View:pan(dx, dy, viewport)
   number(dx, "pan dx"); number(dy, "pan dy")
-  self._lib.C.cadaclysm_view_pan(self:_live("cadaclysm_view_pan"), dx, dy)
+  local vp = viewport_of(viewport, "pan")
+  if vp == 0 then
+    self._lib.C.cadaclysm_view_pan(self:_live("cadaclysm_view_pan"), dx, dy)
+  else
+    self._lib.C.cadaclysm_view_pan_in(self:_live("cadaclysm_view_pan_in"), vp, dx, dy)
+  end
   void_ok(self)
 end
-function View:zoom(steps)
+function View:zoom(steps, viewport)
   number(steps, "zoom steps")
-  self._lib.C.cadaclysm_view_zoom(self:_live("cadaclysm_view_zoom"), steps)
+  local vp = viewport_of(viewport, "zoom")
+  if vp == 0 then
+    self._lib.C.cadaclysm_view_zoom(self:_live("cadaclysm_view_zoom"), steps)
+  else
+    self._lib.C.cadaclysm_view_zoom_in(self:_live("cadaclysm_view_zoom_in"), vp, steps)
+  end
   void_ok(self)
 end
-function View:look(dx, dy)
+function View:look(dx, dy, viewport)
   number(dx, "look dx"); number(dy, "look dy")
-  self._lib.C.cadaclysm_view_look(self:_live("cadaclysm_view_look"), dx, dy)
+  local vp = viewport_of(viewport, "look")
+  if vp == 0 then
+    self._lib.C.cadaclysm_view_look(self:_live("cadaclysm_view_look"), dx, dy)
+  else
+    self._lib.C.cadaclysm_view_look_in(self:_live("cadaclysm_view_look_in"), vp, dx, dy)
+  end
   void_ok(self)
 end
-function View:dolly(ratio)
+function View:dolly(ratio, viewport)
   number(ratio, "dolly ratio")
-  self._lib.C.cadaclysm_view_dolly(self:_live("cadaclysm_view_dolly"), ratio)
+  local vp = viewport_of(viewport, "dolly")
+  if vp == 0 then
+    self._lib.C.cadaclysm_view_dolly(self:_live("cadaclysm_view_dolly"), ratio)
+  else
+    self._lib.C.cadaclysm_view_dolly_in(self:_live("cadaclysm_view_dolly_in"), vp, ratio)
+  end
   void_ok(self)
 end
 function View:orthographic(on)
   self._lib.C.cadaclysm_view_set_orthographic(self:_live("cadaclysm_view_set_orthographic"), on ~= false)
   void_ok(self)
 end
-function View:standard(name)
-  local which = name_of(STANDARD, name, "standard view")
-  ok(self, self._lib.C.cadaclysm_view_standard(self:_live("cadaclysm_view_standard"), which))
+--- Whether a double click frames what it hit (off by default: it is a pick answered with
+--- `clicks` 2 and the camera stays). Applies where the view takes the pick itself (its own
+--- window, pump, run); a host reading picks frames if it chooses.
+function View:set_double_click_frames(on)
+  self._lib.C.cadaclysm_view_set_double_click_frames(self:_live("cadaclysm_view_set_double_click_frames"), on and true or false)
+  void_ok(self)
 end
---- Fit the camera to everything shown.
-function View:frame() ok(self, self._lib.C.cadaclysm_view_frame(self:_live("cadaclysm_view_frame"), 0)) end
+--- Moves the orbit point to `point` ({x, y, z}, as a pick's `point`): the eye keeps its direction
+--- and distance from it, so the camera moves sideways and does not turn. Leaves fly mode. Other
+--- than three numbers is refused before the call; the library refuses a point that is not
+--- finite, or while viewports are set, with its own reason.
+function View:focus(point)
+  if point == nil then fail("focus: 3 numbers, not nil", 2) end
+  local at = exactly("float", point, 3, "focus")
+  ok(self, self._lib.C.cadaclysm_view_focus(self:_live("cadaclysm_view_focus"), at))
+end
+--- How a left drag moves the camera: "orbit" (about the target) or "fly" (the view turns about
+--- the eye). A fly key (W, A, S, D, E, Q) sent through `input` enters fly mode and it stays after
+--- the key is let go; Tab toggles it; frame, standard and focus leave it.
+function View:navigation()
+  return self._lib.C.cadaclysm_view_navigation(self:_live("cadaclysm_view_navigation")) == NAVIGATION_FLY and "fly" or "orbit"
+end
+function View:standard(name, viewport)
+  local which = name_of(STANDARD, name, "standard view")
+  local vp = viewport_of(viewport, "standard")
+  if vp == 0 then
+    ok(self, self._lib.C.cadaclysm_view_standard(self:_live("cadaclysm_view_standard"), which))
+  else
+    ok(self, self._lib.C.cadaclysm_view_standard_in(self:_live("cadaclysm_view_standard_in"), vp, which))
+  end
+end
+--- Fit the camera (of `viewport`, default 0) to everything shown.
+function View:frame(viewport)
+  local vp = viewport_of(viewport, "frame")
+  if vp == 0 then
+    ok(self, self._lib.C.cadaclysm_view_frame(self:_live("cadaclysm_view_frame"), 0))
+  else
+    ok(self, self._lib.C.cadaclysm_view_frame_in(self:_live("cadaclysm_view_frame_in"), vp, 0))
+  end
+end
+
+-- The fields of CadaclysmViewViewportCamera that are arrays, with their lengths, and its numbers.
+local CAMERA_ARRAYS = {
+  { "view", 16 }, { "projection", 16 }, { "eye", 3 }, { "target", 3 },
+  { "axis_view", 3 }, { "axis_right", 3 }, { "axis_up", 3 },
+}
+local CAMERA_NUMBERS = { "distance", "yaw", "pitch", "speed", "radius", "height" }
+
+--- Viewport `viewport`'s camera (default 0; with no viewports set, the built-in orbit camera):
+--- { kind = "orbit"|"fly"|"ortho"|"fixed", rect = {x, y, w, h}, view = 16, projection = 16,
+--- eye, target, distance, yaw, pitch, orthographic (a boolean), speed, radius, height,
+--- axis_view, axis_right, axis_up }, arrays 1-based, matrices column-major. set_camera takes it back.
+function View:camera(viewport)
+  local vp = viewport == nil and 0 or uint(viewport, "camera viewport")
+  local out = ffi.new("CadaclysmViewViewportCamera", { size = ffi.sizeof("CadaclysmViewViewportCamera") })
+  ok(self, self._lib.C.cadaclysm_view_viewport_camera(self:_live("cadaclysm_view_viewport_camera"), vp, out))
+  local c = {
+    kind = CAMERA_KINDS._list[out.kind + 1] or out.kind,
+    rect = { out.rect[0], out.rect[1], out.rect[2], out.rect[3] },
+    orthographic = out.orthographic ~= 0,
+  }
+  for _, f in ipairs(CAMERA_ARRAYS) do
+    local name, n = f[1], f[2]
+    local a = {}
+    for k = 0, n - 1 do a[k + 1] = out[name][k] end
+    c[name] = a
+  end
+  for _, name in ipairs(CAMERA_NUMBERS) do c[name] = out[name] end
+  return c
+end
+
+--- Gives viewport `viewport` a camera from table `t` (as `camera` returns it): `kind` by name;
+--- an ortho camera's basis is `axis_view`, `axis_right`, `axis_up`; a fixed camera's `view`,
+--- `projection` and `eye`. Any other field may be left out (zero: the library's default).
+--- `rect` is not read (`viewport_rects` moves a viewport).
+function View:set_camera(viewport, t)
+  uint(viewport, "set_camera viewport")
+  if type(t) ~= "table" then fail("set_camera: a camera table, not " .. describe(t), 2) end
+  local raw = ffi.new("CadaclysmViewViewportCamera", { size = ffi.sizeof("CadaclysmViewViewportCamera") })
+  raw.kind = name_of(CAMERA_KINDS, t.kind, "camera kind")
+  for _, f in ipairs(CAMERA_ARRAYS) do
+    local name, n = f[1], f[2]
+    local a = exactly("float", t[name], n, "camera " .. name)
+    if a then for k = 0, n - 1 do raw[name][k] = a[k] end end
+  end
+  for _, name in ipairs(CAMERA_NUMBERS) do
+    if t[name] ~= nil then raw[name] = number(t[name], "camera " .. name) end
+  end
+  local o = t.orthographic
+  raw.orthographic = (o == true or (type(o) == "number" and o ~= 0)) and 1 or 0
+  ok(self, self._lib.C.cadaclysm_view_set_viewport_camera(self:_live("cadaclysm_view_set_viewport_camera"), viewport, raw))
+end
+
+--- Moves the viewports: one { x, y, w, h } (physical pixels) per viewport set, their cameras kept.
+function View:viewport_rects(rects)
+  table_of(rects, "viewport_rects")
+  local flat = {}
+  for i, r in ipairs(rects) do
+    if type(r) ~= "table" or #r ~= 4 then fail(("viewport_rects: rect %d is { x, y, w, h }, not %s"):format(i, describe(r)), 2) end
+    for k = 1, 4 do flat[#flat + 1] = uint(r[k], ("viewport_rects: rect %d's %s"):format(i, ({ "x", "y", "w", "h" })[k]), 1) end
+  end
+  local a = carray("uint32_t", flat, "viewport_rects")
+  ok(self, self._lib.C.cadaclysm_view_set_viewport_rects(self:_live("cadaclysm_view_set_viewport_rects"), a, #rects))
+end
+
+--- Turns viewport `viewport`'s camera to look along `direction` (world); `up`, an ortho
+--- camera's screen up, defaults to +Z (+Y for a look along Z). True, or raises with the library's reason.
+function View:aim(viewport, direction, up)
+  uint(viewport, "aim viewport")
+  local d = vector(direction, 3, "aim direction")
+  local u = up ~= nil and vector(up, 3, "aim up") or nil
+  ok(self, self._lib.C.cadaclysm_view_aim(self:_live("cadaclysm_view_aim"), viewport, d, u))
+  return true
+end
+
+--- The point (world) Alt and the left button orbit viewport `viewport` about; nil: its own target again.
+function View:pivot(viewport, point)
+  uint(viewport, "pivot viewport")
+  local p = point ~= nil and vector(point, 3, "pivot point") or nil
+  ok(self, self._lib.C.cadaclysm_view_set_pivot(self:_live("cadaclysm_view_set_pivot"), viewport, p))
+end
+
+--- A click's most travel (`px`, physical pixels) and longest press (`ms`; 0: no limit) for `input` to pick.
+function View:tap(px, ms)
+  number(px, "tap px"); number(ms, "tap ms")
+  ok(self, self._lib.C.cadaclysm_view_set_tap(self:_live("cadaclysm_view_set_tap"), px, ms))
+end
 
 --- { { rect = {x, y, w, h}, view = 16, projection = 16, eye = 3, grid = "none"|"top"|"front"|"right" }, ... },
 --- matrices column-major. An empty list clears them (the view draws one pane again), as Python's does.
@@ -619,10 +888,47 @@ function View:layer(name, on)
   local which = name_of(LAYERS, name, "layer")
   ok(self, self._lib.C.cadaclysm_view_set_layer(self:_live("cadaclysm_view_set_layer"), which, on ~= false))
 end
---- Three numbers, the clear colour.
+--- Text shown as one item (cadaclysm_view_show_text): a label anchored to `at`, or world text
+--- (`opts.mode = "world"`) in the plane of `opts.right` and `opts.up` through `at`. `opts`: mode
+--- ("label"/"world"), size, colour, align (nine names, "centre"/"center"), offset {x, y}, box
+--- (a colour, or 3-4 numbers), padding, on_top, font (from load_font), right, up.
+function View:show_text(text, at, opts)
+  opts = opts or {}
+  local s = text_of(text)
+  local lib = self._lib
+  local t = ffi.new("CadaclysmViewText")
+  t.size = ffi.sizeof("CadaclysmViewText")
+  t.text = s
+  t.mode = name_of(TEXT_MODES, opts.mode or "label", "mode")
+  local a = vector(at, 3, "show_text at")
+  local size = opts.size == nil and 12 or opts.size
+  local padding = opts.padding == nil and 4 or opts.padding
+  local font = opts.font == nil and 0 or opts.font
+  if type(size) ~= "number" or size ~= size then fail("show_text size: a number, not " .. describe(size), 2) end
+  if type(padding) ~= "number" or padding ~= padding then fail("show_text padding: a number, not " .. describe(padding), 2) end
+  uint(font, "show_text font")
+  local offset = opts.offset ~= nil and vector(opts.offset, 2, "show_text offset") or nil
+  local right = opts.right ~= nil and vector(opts.right, 3, "show_text right") or nil
+  local up = opts.up ~= nil and vector(opts.up, 3, "show_text up") or nil
+  local rgb = floats3(opts.colour or "white", "show_text colour", lib)
+  for k = 0, 2 do t.at[k], t.rgb[k] = a[k], rgb[k] end
+  if right then for k = 0, 2 do t.right[k] = right[k] end end
+  if up then for k = 0, 2 do t.up[k] = up[k] end end
+  t.height = size
+  t.align = name_of(ALIGN, opts.align or "bottom-left", "align")
+  if offset then t.offset[0], t.offset[1] = offset[0], offset[1] end
+  if opts.box then local b = rgba4(opts.box, "show_text box", lib); for k = 0, 3 do t.box_rgba[k] = b[k] end end
+  t.box_padding = padding
+  t.on_top = opts.on_top and 1 or 0
+  t.font = font
+  local id = lib.C.cadaclysm_view_show_text(self:_live("cadaclysm_view_show_text"), t)
+  return self:_item(id, s)   -- the item holds the string while C reads it (it copies; belt and braces)
+end
+
+--- The clear colour: text ("#rgb", "#rrggbb", a CSS colour name) or three numbers in 0..1.
 function View:background(rgb)
   if rgb == nil then fail("background: 3 numbers, not nil", 2) end
-  local c = floats3(rgb, "background")
+  local c = floats3(rgb, "background", self._lib)
   self._lib.C.cadaclysm_view_set_background(self:_live("cadaclysm_view_set_background"), c)
   void_ok(self)
 end
@@ -633,9 +939,28 @@ function View:surfaces(name)
   end
   ok(self, self._lib.C.cadaclysm_view_set_surfaces(self:_live("cadaclysm_view_set_surfaces"), name_of(SURFACES, name, "surfaces")))
 end
+--- "headlight" or "studio": how plain parts are lit, as Python's View.lighting -- the headlight
+--- (the default) brightens whatever faces the camera; studio is a key light fixed above the scene
+--- with an ambient and a camera fill. With an argument, sets it; another name is refused before C.
+function View:lighting(name)
+  if name == nil then
+    return self._lib.C.cadaclysm_view_lighting(self:_live("cadaclysm_view_lighting")) == 1 and "studio" or "headlight"
+  end
+  ok(self, self._lib.C.cadaclysm_view_set_lighting(self:_live("cadaclysm_view_set_lighting"), name_of(LIGHTING, name, "lighting")))
+end
 function View:needs_draw() return self._lib.C.cadaclysm_view_needs_draw(self:_live("cadaclysm_view_needs_draw")) end
 
---- What is under pixel (x, y) of `viewport` (default 0): { item, node, face }, or nil for nothing.
+-- A hit as every pick answer carries it (Python's `_pick_dict`): the item, node and face,
+-- `clicks` (2 for a double click, else 1) and `point` -- where the ray met the model, in the
+-- coordinates the items were shown in -- or nil where the library read no depth (no hit to
+-- place, a machining stock, the terminal library). Nil for no item.
+local function pick_of(raw)
+  if raw.item == 0 then return nil end
+  return { item = raw.item, node = raw.node, face = raw.face, clicks = raw.clicks,
+    point = raw.has_point ~= 0 and { raw.point[0], raw.point[1], raw.point[2] } or nil }
+end
+
+--- What is under pixel (x, y) of `viewport` (default 0): { item, node, face, clicks, point }, or nil for nothing.
 --- A view never drawn is drawn first: the library answers a pick from the frame it has drawn.
 --- A failure other than "no answer yet" raises at once with the library's own message.
 function View:pick(x, y, viewport)
@@ -653,15 +978,27 @@ function View:pick(x, y, viewport)
   local waiting = ""
   for _ = 1, 200 do
     self:draw()
-    if self._lib.C.cadaclysm_view_pick_result(p, out) then
-      if out.item == 0 then return nil end
-      return { item = out.item, node = out.node, face = out.face }
-    end
+    if self._lib.C.cadaclysm_view_pick_result(p, out) then return pick_of(out) end
     waiting = last_error(self._lib)
     if waiting ~= "" and waiting:sub(-14) ~= "no pick result" then fail(waiting, 2) end
     sleep_ms(10)
   end
   fail("pick: the answer never landed (" .. (waiting ~= "" and waiting or "no error reported") .. ")", 2)
+end
+
+--- The newest pick answer that has landed, without asking or waiting (Python's `last_pick`): a
+--- click or tap in the view's own window (`pump` lands them as it draws), a double click's
+--- (`clicks` 2), or one an `input` asked for, landed by the draws after it. nil while none has;
+--- false for a click on nothing; else { item, node, face, clicks, point }. Each answer is read
+--- once, and a newer one replaces one not read yet. A failure other than "no answer yet" raises
+--- the library's own message.
+function View:last_pick()
+  local p = self:_live("cadaclysm_view_pick_result")
+  local out = ffi.new("CadaclysmViewPick", { size = ffi.sizeof("CadaclysmViewPick") })
+  if self._lib.C.cadaclysm_view_pick_result(p, out) then return pick_of(out) or false end
+  local waiting = last_error(self._lib)
+  if waiting ~= "" and waiting:sub(-14) ~= "no pick result" then fail(waiting, 2) end
+  return nil
 end
 
 function View:draw() ok(self, self._lib.C.cadaclysm_view_draw(self:_live("cadaclysm_view_draw"))); self._drawn = true end
@@ -686,7 +1023,7 @@ local function camera_of(cam, pick, y_up)
   end
   local elevation = math.deg(math.asin(math.max(-1, math.min(1, d[3]))))
   return { eye = eye, target = target, up = up, orthographic = cam.orthographic ~= 0, azimuth = azimuth,
-    elevation = elevation, pick = pick.item ~= 0 and { item = pick.item, node = pick.node, face = pick.face } or nil }
+    elevation = elevation, pick = pick_of(pick) }
 end
 
 --- Blocks until the window is closed; the camera it ended on and the last pick.
@@ -922,18 +1259,25 @@ function Item:node_transforms(transforms)
   end
   item_ok(self, self.view._lib.C.cadaclysm_view_set_node_transforms(self.view:_live("cadaclysm_view_set_node_transforms"), self.id, flat, #transforms))
 end
+--- Recolours the item: text ("#rgb", "#rrggbb", a CSS colour name, any case) or three numbers in 0..1.
 function Item:colour(rgb)
   if rgb == nil then fail("colour: 3 numbers, not nil", 2) end
-  local c = floats3(rgb, "colour")
+  local c = floats3(rgb, "colour", self.view._lib)
   item_ok(self, self.view._lib.C.cadaclysm_view_set_colour(self.view:_live("cadaclysm_view_set_colour"), self.id, c))
+end
+--- The text item's string replaced, nothing else changed (cadaclysm_view_set_text).
+function Item:set_text(text)
+  local view = self.view
+  item_ok(self, view._lib.C.cadaclysm_view_set_text(view:_live("cadaclysm_view_set_text"), self.id, text_of(text)))
 end
 --- Sixteen numbers, column-major; nil puts it back.
 function Item:placement(m)
   local raw = exactly("double", m, 16, "placement")
   item_ok(self, self.view._lib.C.cadaclysm_view_set_placement(self.view:_live("cadaclysm_view_set_placement"), self.id, raw))
 end
---- `faces` (pick numbers) coloured by `rgba` (four numbers a face, flat or as { r, g, b, a } tables);
---- `faces` nil clears every face's colour; an empty list colours none, which clears them too (Python's).
+--- `faces` (pick numbers) coloured by `rgba`: four numbers a face, flat, or one colour a face --
+--- colour text (alpha 1) or a { r, g, b, a } table; `faces` nil clears every face's colour; an
+--- empty list colours none, which clears them too (Python's).
 function Item:face_colours(faces, rgba)
   local view = self.view
   if faces == nil then
@@ -943,7 +1287,10 @@ function Item:face_colours(faces, rgba)
   local f, n = carray("uint32_t", faces, "face_colours faces")
   local flat = {}
   for _, q in ipairs(table_of(rgba or {}, "face_colours rgba")) do
-    if type(q) == "table" then for _, c in ipairs(q) do flat[#flat + 1] = c end else flat[#flat + 1] = q end
+    if type(q) == "string" then
+      local c = colour_of(view._lib, q)
+      flat[#flat + 1], flat[#flat + 2], flat[#flat + 3], flat[#flat + 4] = c[1], c[2], c[3], 1
+    elseif type(q) == "table" then for _, c in ipairs(q) do flat[#flat + 1] = c end else flat[#flat + 1] = q end
   end
   local c, nc = carray("float", flat, "face_colours rgba")
   if nc ~= 4 * n then fail(("face_colours: %d numbers (rgba, 4 a face), not %d"):format(4 * n, nc), 2) end
@@ -957,15 +1304,16 @@ function Item:node_visible(node, on)
   local index = node_index(node, "node_visible node")
   item_ok(self, self.view._lib.C.cadaclysm_view_set_node_visible(self.view:_live("cadaclysm_view_set_node_visible"), self.id, index, on ~= false))
 end
+--- Colours `node` and its subtree: text (alpha 1) or three or four numbers; nil clears.
 function Item:node_colour(node, rgba)
   local index = node_index(node, "node_colour node")
-  local c = rgba4(rgba, "node_colour")
+  local c = rgba4(rgba, "node_colour", self.view._lib)
   item_ok(self, self.view._lib.C.cadaclysm_view_set_node_color(self.view:_live("cadaclysm_view_set_node_color"), self.id, index, c))
 end
---- Tint `node` toward rgba's colour by its alpha; nil clears.
+--- Tint `node` toward rgba's colour by its alpha (text: alpha 1, the colour itself); nil clears.
 function Item:node_highlight(node, rgba)
   local index = node_index(node, "node_highlight node")
-  local c = rgba4(rgba, "node_highlight")
+  local c = rgba4(rgba, "node_highlight", self.view._lib)
   item_ok(self, self.view._lib.C.cadaclysm_view_set_node_highlight(self.view:_live("cadaclysm_view_set_node_highlight"), self.id, index, c))
 end
 function Item:frame_node(node)
@@ -1009,7 +1357,8 @@ end
 --- camera and last pick); elsewhere (the terminal, a library of your own) show prints a still.
 --- `transforms`, for a scene (Pose:show): one posed world transform per node, set on its item first.
 --- options: view ("front", "back", "left", "right", "top", "bottom", "iso", or { azimuth, elevation }),
---- azimuth/az, elevation/el, zoom, up ("y"|"z"), edges, width, height, title, rgb, tolerance (a Solid's).
+--- azimuth/az, elevation/el, zoom, up ("y"|"z"), edges, width, height, title, rgb (colour text or three
+--- numbers), tolerance (a Solid's).
 function M._present(obj, opts, orbit, transforms)
   if opts ~= nil and type(opts) ~= "table" then fail("options are a table, not " .. describe(opts), 2) end
   opts = opts or {}

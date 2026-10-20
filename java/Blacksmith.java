@@ -34,25 +34,25 @@
 // tessellation of its own (`cadaclysm_blacksmith_tessellation`) and the view keeps that
 // handle alive, so closing the solid or meshing it again at another tolerance -- through
 // `mesh`, `mesh64`, `edgePolylines` or `boundsAt` -- never touches a view already in hand:
-// nothing about it goes stale. Only the view itself going unreachable frees its handle, the
-// same as `FemMesh` below. A buffer read from it does not keep the view reachable on its own,
-// so keep the view reachable while a buffer cut from it is still in use, the same rule
-// `FemMesh` documents next. `copy()` gives memory of your own, safe to outlive the view.
+// nothing about it goes stale. Only the view going unreachable frees its handle -- and a
+// buffer cut from it counts: the buffer holds the view's arena, so the tessellation stays
+// alive while the buffer is still in use. `copy()` gives memory of your own, safe to outlive
+// the view.
 // Strings are copied on the way out and are always safe. A view pins its *whole*
 // tessellation -- positions, normals, indices, edges, face counts, in both precisions -- not
-// just the buffer you asked for, until the view itself is unreachable; release waits for the
-// `Cleaner`, which runs on the garbage collector's own schedule. For data that must outlive
-// the view, `copy()` it and drop the view.
+// just the buffer you asked for, until the view and every buffer cut from it are unreachable;
+// release waits for the garbage collector's own schedule. For data that must outlive the view,
+// `copy()` it and drop the view and its buffers.
 //
 // `Solid.femMesh` follows the same shape: a `FemMesh` is a handle of its own, and its buffers
 // borrow from *it* rather than from the solid. Closing the solid neither frees one nor stales
-// one, and meshing the solid again does not either -- only `FemMesh.free()` (or `close()`, or
-// the `Cleaner`) does. Every accessor on it asks its handle first, so a buffer **asked for**
-// after the free throws `IllegalStateException`; a buffer **already in hand** is a window on
-// an address with no owner left to ask, and reads the freed block instead -- measured:
-// 1.29e-311 where the mesh had 4.0, no throw. Copy anything that must outlive the handle,
-// and keep the `FemMesh` itself reachable while you read its buffers -- a buffer alone does not,
-// and the `Cleaner` frees what is unreachable.
+// one, and meshing the solid again does not either -- only `FemMesh.free()` (or `close()`), or
+// nothing reaching the mesh any more, does. A buffer cut from it reaches it: a dropped
+// `FemMesh` whose buffer is still being read stays alive. Every accessor asks its handle
+// first, so a buffer **asked for** after an explicit free throws `IllegalStateException`; a
+// buffer **already in hand** when you free it explicitly reads the freed block instead --
+// measured: 1.29e-311 where the mesh had 4.0, no throw. Free it only once you are done with
+// its buffers, or copy what must outlive it.
 //
 // ## The chain mirrors the Rust `Workplane`
 //
@@ -106,6 +106,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * The kernel's module-level entry points -- the library's version and licensing, the default
@@ -285,6 +286,55 @@ public final class Blacksmith {
             ValueLayout.JAVA_INT.withName("refused"),
             ValueLayout.JAVA_INT.withName("confirmed"));
 
+    /** {@code CadaclysmBlacksmithSubdParts}: a cage's parts, as views into its handle, valid
+     *  until the handle is freed. */
+    private static final MemoryLayout SUBD_PARTS = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("positions"),
+            ValueLayout.JAVA_INT.withName("vertex_count"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("face_sizes"),
+            ValueLayout.JAVA_INT.withName("face_count"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("face_indices"),
+            ValueLayout.JAVA_INT.withName("index_count"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("creases"),
+            ValueLayout.JAVA_INT.withName("crease_count"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("pins"),
+            ValueLayout.JAVA_INT.withName("pin_count"),
+            ValueLayout.JAVA_INT.withName("symmetry_axis"),
+            ValueLayout.JAVA_DOUBLE.withName("symmetry_tolerance"),
+            ValueLayout.JAVA_INT.withName("selection_kind"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("selection"),
+            ValueLayout.JAVA_INT.withName("selection_count"),
+            MemoryLayout.paddingLayout(4));
+
+    /** {@code CadaclysmBlacksmithSubdMesh}: one level of a cage's smooth surface, as views valid
+     *  until the cage is freed. */
+    private static final MemoryLayout SUBD_MESH = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("positions"),
+            ValueLayout.JAVA_INT.withName("vertex_count"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("normals"),
+            ValueLayout.ADDRESS.withName("indices"),
+            ValueLayout.JAVA_INT.withName("index_count"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("triangle_face"));
+
+    /** {@code CadaclysmBlacksmithSubdReport}: what {@code subd_to_solid} did and how close it
+     *  came. */
+    private static final MemoryLayout SUBD_REPORT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("regular"),
+            ValueLayout.JAVA_INT.withName("refined"),
+            ValueLayout.JAVA_INT.withName("steps"),
+            ValueLayout.JAVA_INT.withName("levels"),
+            ValueLayout.JAVA_DOUBLE.withName("deviation"),
+            ValueLayout.JAVA_DOUBLE.withName("g1_angle_deg"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("deviation_at"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("g1_at"));
+
     /** {@code CadaclysmBlacksmithCollisionHit}: a pair the collider found overlapping, or
      *  could not decide; seven bytes of padding after {@code overlap}, which lands {@code
      *  depth} on an eight-byte boundary. */
@@ -415,17 +465,17 @@ public final class Blacksmith {
             SWEEP_PATH_LINE_TO, SWEEP_PATH_ARC, SWEEP_PATH_ALONG, SWEEP_PATH_FREE, SWEEP, SWEEP_OPEN,
             EXTRUDE_FACES, FACE, FACE_SHEET, DROP_FACES, PLACE, TRANSLATE, SCALED, ROTATE, MIRROR, JOIN, CUT,
             COMMON, SPLIT_SHEET, TRIM, FILLET, CHAMFER,
-            SHELL, THICKEN, PUSH_PULL, PUSH_PULL_FACES, MERGE_FLUSH, REFILLET, UNFILLET, RECHAMFER, UNCHAMFER, COIL, PIPE, SPLIT, SPLIT_BY_PLANE, LUMP_COUNT, LUMP, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_REF, FIND_FACE, FACE_KIND, MASS_PROPERTIES, COLOURED, COLOUR,
+            SHELL, THICKEN, PUSH_PULL, PUSH_PULL_FACES, MERGE_FLUSH, REFILLET, UNFILLET, RECHAMFER, UNCHAMFER, COIL, PIPE, SPLIT, SPLIT_BY_PLANE, SPLIT_BY_PROFILE, LUMP_COUNT, LUMP, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_REF, FIND_FACE, FACE_KIND, MASS_PROPERTIES, COLOURED, COLOUR,
             PROFILE_COLOURED, PROFILE_COLOUR, EDGES_COLOURED, EDGE_COLOUR, EDGE_POLYLINE_COLOURS,
             EDGE_COUNT, EDGE_AT, EDGE_CURVE, INTERSECT, INTERSECTION_FREE, INTERSECTION_CHAIN_COUNT, INTERSECTION_CHAIN, INTERSECTION_CURVE, INTERSECTION_OVERLAP_COUNT, INTERSECTION_OVERLAP, MESH_AT, MESH_FACE_TRIANGLES,
             EDGE_POLYLINES, BOUNDS, LEAKED_EDGES, UNPAIRED_EDGES, MANIFOLD, STEP, SAT_TEXT, SAT, BREP_TEXT, BREP, STRING_FREE, FROM_BREP,
-            BREP_LAYOUT_ID, SVG_OPTIONS_INIT, SVG_TEXT, SVG, DRAWING_SVG_TEXT, DRAWING_SVG,
+            BREP_LAYOUT_ID, SVG_OPTIONS_INIT, SVG_TEXT, SVG, DRAWING_SVG_TEXT, DRAWING_SVG, SILHOUETTE_BEZIERS, SILHOUETTE_BEZIERS_FREE,
             MESH_AT64, BOUNDS64, BOX_AT,
             TESSELLATION, TESSELLATION_FREE, TESSELLATION_MESH, TESSELLATION_MESH64, TESSELLATION_FACE_TRIANGLES, TESSELLATION_EDGE_POLYLINES,
             FEM_OPTIONS_INIT, SOLID_FEM_MESH, FEM_VIEW, FEM_EDGE_AT, FEM_VERTEX_AT,
             FEM_OPEN_EDGE, FEM_FOLDED_EDGE, FEM_CROSSING_COUNT, FEM_CROSSING, FEM_MSH_TEXT, FEM_SAVE_MSH, FEM_FREE,
             NAMED, SOLID_NAME, ASSEMBLY_NEW, ASSEMBLY_FREE, ASSEMBLY_NAME, ASSEMBLY_PLACE_SOLID, ASSEMBLY_PLACE_ASSEMBLY, ASSEMBLY_STEP,
-            ASSEMBLY_LINK, ASSEMBLY_JOINT, ASSEMBLY_PAIR, ASSEMBLY_STATE, ASSEMBLY_SEQUENCE, ASSEMBLY_BASE, PAIR_FREEDOM_COUNT,
+            ASSEMBLY_LINK, ASSEMBLY_JOINT, ASSEMBLY_PAIR, ASSEMBLY_PAIR_WITH, ASSEMBLY_STATE, ASSEMBLY_POSED, ASSEMBLY_SEQUENCE, ASSEMBLY_BASE, PAIR_FREEDOM_COUNT,
             SOLID_BOUNDS_BOX, BOX_MOVED, BOX_OVERLAPS, BOXES_APART, COLLIDER_NEW, COLLIDER_FREE, COLLIDER_GROUP_COUNT,
             COLLIDER_STATS_CALL, COLLIDER_CHECK, COLLISIONS_FREE, COLLISIONS_COUNT, COLLISIONS_HIT, COLLISIONS_SOLID,
             PROFILE_TO_ARCS, PROFILE_OFFSET, SOLID_SECTION,
@@ -437,7 +487,10 @@ public final class Blacksmith {
             JOB_MACHINE, REPORT_COUNT, REPORT_KIND, REPORT_AT, REPORT_SIZE, REPORT_REASON, REPORT_REGION, REPORT_TEXT, REPORT_FREE,
             JOB_OPERATIONS, OPERATIONS_COUNT, OPERATIONS_KIND, OPERATIONS_TOOL, OPERATIONS_PARAM_COUNT,
             OPERATIONS_PARAM_NAME, OPERATIONS_PARAM_VALUE, OPERATIONS_FREE,
-            PARSE_COLOUR;
+            SUBD_CUBOID, SUBD_CYLINDER, SUBD_SPHERE, SUBD_TORUS, SUBD_FROM_PARTS, SUBD_PARTS_CALL, SUBD_FREE, SUBD_TRANSFORM,
+            SUBD_SET_CREASE, SUBD_SET_PIN, SUBD_EXTRUDE, SUBD_INSET, SUBD_INSERT_LOOP, SUBD_MIRROR_ON, SUBD_MIRROR_OFF, SUBD_FULL,
+            SUBD_EDGE_LOOP, SUBD_SMOOTH_MESH, SUBD_PICK, SUBD_TO_SOLID,
+            PARSE_COLOUR, OPTION_SET, OPTION_GET;
 
     static {
         SymbolLookup lib = library();
@@ -563,6 +616,7 @@ public final class Blacksmith {
         PIPE = bind(linker, lib, "cadaclysm_blacksmith_pipe", FunctionDescriptor.of(A, A, D, D));
         SPLIT = bind(linker, lib, "cadaclysm_blacksmith_split", FunctionDescriptor.of(A, A, A, D, A, A));
         SPLIT_BY_PLANE = bind(linker, lib, "cadaclysm_blacksmith_split_by_plane", FunctionDescriptor.of(A, A, A, D, A, A));
+        SPLIT_BY_PROFILE = bind(linker, lib, "cadaclysm_blacksmith_split_by_profile", FunctionDescriptor.of(A, A, A, A, D, A, A));
         LUMP_COUNT = bind(linker, lib, "cadaclysm_blacksmith_lump_count", FunctionDescriptor.of(I, A));
         LUMP = bind(linker, lib, "cadaclysm_blacksmith_lump", FunctionDescriptor.of(A, A, I));
         FACE_COUNT = bind(linker, lib, "cadaclysm_blacksmith_face_count", FunctionDescriptor.of(I, A));
@@ -603,11 +657,17 @@ public final class Blacksmith {
         FROM_BREP = bind(linker, lib, "cadaclysm_blacksmith_from_brep", FunctionDescriptor.of(A, A, A));
         BREP_LAYOUT_ID = bind(linker, lib, "cadaclysm_blacksmith_brep_layout_id", FunctionDescriptor.of(A));
         PARSE_COLOUR = bind(linker, lib, "cadaclysm_blacksmith_parse_colour", FunctionDescriptor.of(B, A, A));
+        OPTION_SET = bind(linker, lib, "cadaclysm_blacksmith_option_set", FunctionDescriptor.of(B, A, D));
+        OPTION_GET = bind(linker, lib, "cadaclysm_blacksmith_option_get", FunctionDescriptor.of(B, A, A));
         SVG_OPTIONS_INIT = bind(linker, lib, "cadaclysm_blacksmith_svg_options_init", FunctionDescriptor.ofVoid(A));
         SVG_TEXT = bind(linker, lib, "cadaclysm_blacksmith_svg_text", FunctionDescriptor.of(A, A, L, A));
         SVG = bind(linker, lib, "cadaclysm_blacksmith_svg", FunctionDescriptor.of(B, A, L, A, A));
         DRAWING_SVG_TEXT = bind(linker, lib, "cadaclysm_blacksmith_drawing_svg_text", FunctionDescriptor.of(A, A, L, A, L, A));
         DRAWING_SVG = bind(linker, lib, "cadaclysm_blacksmith_drawing_svg", FunctionDescriptor.of(B, A, L, A, L, A, A));
+        // OWNED: 16 doubles a curve, released by the matching free with the same count, which
+        // Solid.silhouetteBeziers calls before it returns.
+        SILHOUETTE_BEZIERS = bind(linker, lib, "cadaclysm_blacksmith_silhouette_beziers", FunctionDescriptor.of(A, A, A, A));
+        SILHOUETTE_BEZIERS_FREE = bind(linker, lib, "cadaclysm_blacksmith_silhouette_beziers_free", FunctionDescriptor.ofVoid(A, I));
         MESH_AT64 = bind(linker, lib, "cadaclysm_blacksmith_mesh64", FunctionDescriptor.of(MESH64, A, D));
         BOUNDS64 = bind(linker, lib, "cadaclysm_blacksmith_bounds64", FunctionDescriptor.of(B, A, D, A, A));
         // A held tessellation: one solid meshed at one tolerance, kept alive on its own
@@ -658,7 +718,14 @@ public final class Blacksmith {
         // link's name; pair_freedom_count takes just a kind name and returns its freedom
         // count (uint32_t -> JAVA_INT, as every other uint32_t return in this file does).
         ASSEMBLY_PAIR = bind(linker, lib, "cadaclysm_blacksmith_assembly_pair", FunctionDescriptor.of(B, A, A, A, A, A, A, A, A, A, L, D));
+        // assembly_pair_with is assembly_pair with the pitch replaced by a params array and its
+        // length (size_t -> JAVA_LONG): the kind's own numbers, for the coupled pairs.
+        ASSEMBLY_PAIR_WITH = bind(linker, lib, "cadaclysm_blacksmith_assembly_pair_with", FunctionDescriptor.of(B, A, A, A, A, A, A, A, A, A, L, A, L));
         ASSEMBLY_STATE = bind(linker, lib, "cadaclysm_blacksmith_assembly_state", FunctionDescriptor.of(B, A, A, A, A, A, L));
+        // assembly_posed takes the state's rows as assembly_state does (joint paths, per-row counts,
+        // flattened values, row count), then an optional state path and an optional ground link
+        // name (null for none), and returns a new assembly handle (null on refusal).
+        ASSEMBLY_POSED = bind(linker, lib, "cadaclysm_blacksmith_assembly_posed", FunctionDescriptor.of(A, A, A, A, A, L, A, A));
         // assembly_sequence takes the sequence name, parallel arrays of state names, parameters
         // and interpolation words, their count and whether the parameter is in seconds.
         ASSEMBLY_SEQUENCE = bind(linker, lib, "cadaclysm_blacksmith_assembly_sequence", FunctionDescriptor.of(B, A, A, A, A, A, L, B));
@@ -677,6 +744,28 @@ public final class Blacksmith {
         COLLISIONS_COUNT = bind(linker, lib, "cadaclysm_blacksmith_collisions_count", FunctionDescriptor.of(I, A));
         COLLISIONS_HIT = bind(linker, lib, "cadaclysm_blacksmith_collisions_hit", FunctionDescriptor.of(B, A, I, A));
         COLLISIONS_SOLID = bind(linker, lib, "cadaclysm_blacksmith_collisions_solid", FunctionDescriptor.of(A, A, I));
+        // The SubD cage. Every edit returns a new owned cage (null with last_error set); the
+        // input is untouched. subd_pick answers false with an empty last_error for nothing near.
+        SUBD_CUBOID = bind(linker, lib, "cadaclysm_blacksmith_subd_cuboid", FunctionDescriptor.of(A, D, D, D, I, I, I));
+        SUBD_CYLINDER = bind(linker, lib, "cadaclysm_blacksmith_subd_cylinder", FunctionDescriptor.of(A, D, D, I, I, B));
+        SUBD_SPHERE = bind(linker, lib, "cadaclysm_blacksmith_subd_sphere", FunctionDescriptor.of(A, D, I));
+        SUBD_TORUS = bind(linker, lib, "cadaclysm_blacksmith_subd_torus", FunctionDescriptor.of(A, D, D, I, I));
+        SUBD_FROM_PARTS = bind(linker, lib, "cadaclysm_blacksmith_subd_from_parts", FunctionDescriptor.of(A, A, I, A, I, A, I, A, I, A, I, I, D));
+        SUBD_PARTS_CALL = bind(linker, lib, "cadaclysm_blacksmith_subd_parts", FunctionDescriptor.of(B, A, A));
+        SUBD_FREE = bind(linker, lib, "cadaclysm_blacksmith_subd_free", FunctionDescriptor.ofVoid(A));
+        SUBD_TRANSFORM = bind(linker, lib, "cadaclysm_blacksmith_subd_transform", FunctionDescriptor.of(A, A, I, A, I, A));
+        SUBD_SET_CREASE = bind(linker, lib, "cadaclysm_blacksmith_subd_set_crease", FunctionDescriptor.of(A, A, A, I, B));
+        SUBD_SET_PIN = bind(linker, lib, "cadaclysm_blacksmith_subd_set_pin", FunctionDescriptor.of(A, A, A, I, B));
+        SUBD_EXTRUDE = bind(linker, lib, "cadaclysm_blacksmith_subd_extrude", FunctionDescriptor.of(A, A, A, I, D));
+        SUBD_INSET = bind(linker, lib, "cadaclysm_blacksmith_subd_inset", FunctionDescriptor.of(A, A, A, I, D, B));
+        SUBD_INSERT_LOOP = bind(linker, lib, "cadaclysm_blacksmith_subd_insert_loop", FunctionDescriptor.of(A, A, I, I, D));
+        SUBD_MIRROR_ON = bind(linker, lib, "cadaclysm_blacksmith_subd_mirror_on", FunctionDescriptor.of(A, A, I));
+        SUBD_MIRROR_OFF = bind(linker, lib, "cadaclysm_blacksmith_subd_mirror_off", FunctionDescriptor.of(A, A));
+        SUBD_FULL = bind(linker, lib, "cadaclysm_blacksmith_subd_full", FunctionDescriptor.of(A, A));
+        SUBD_EDGE_LOOP = bind(linker, lib, "cadaclysm_blacksmith_subd_edge_loop", FunctionDescriptor.of(A, A, I, I));
+        SUBD_SMOOTH_MESH = bind(linker, lib, "cadaclysm_blacksmith_subd_smooth_mesh", FunctionDescriptor.of(B, A, I, A));
+        SUBD_PICK = bind(linker, lib, "cadaclysm_blacksmith_subd_pick", FunctionDescriptor.of(B, A, A, I, A));
+        SUBD_TO_SOLID = bind(linker, lib, "cadaclysm_blacksmith_subd_to_solid", FunctionDescriptor.of(A, A, D, D, I, A));
         // Machining. Tools, stocks and jobs are handles of their own; `job_gcode`/`job_camotics`,
         // `job_machine` and `job_operations` hand back lists whose strings are **borrowed** from
         // the list (good until its free), so each is read through `string()` -- a copy -- before
@@ -873,6 +962,38 @@ public final class Blacksmith {
         return out;
     }
 
+    /** An arena that frees {@code handle} once nothing reaches it. A mesh view's or a FEM mesh's
+     *  buffers are cut from its arena, so a buffer still being read keeps the handle -- and the
+     *  memory it reads -- alive; the owner itself holds the arena too. The cleanup holds only
+     *  the handle, never the owner, or nothing would ever let it go. */
+    @SuppressWarnings("restricted") // reinterpret: only to attach the free to the arena.
+    private static Arena lifetimeOf(Handle handle) {
+        Arena lifetime = Arena.ofAuto();
+        MemorySegment.ofAddress(handle.live().address()).reinterpret(lifetime, ignored -> handle.run());
+        return lifetime;
+    }
+
+    @SuppressWarnings("restricted")
+    private static FloatBuffer floatView(Arena owner, long address, long count) {
+        if (address == 0 || count == 0) return FloatBuffer.allocate(0).asReadOnlyBuffer();
+        return MemorySegment.ofAddress(address).reinterpret(count * Float.BYTES, owner, null)
+                .asByteBuffer().order(ByteOrder.nativeOrder()).asFloatBuffer().asReadOnlyBuffer();
+    }
+
+    @SuppressWarnings("restricted")
+    private static IntBuffer intView(Arena owner, long address, long count) {
+        if (address == 0 || count == 0) return IntBuffer.allocate(0).asReadOnlyBuffer();
+        return MemorySegment.ofAddress(address).reinterpret(count * Integer.BYTES, owner, null)
+                .asByteBuffer().order(ByteOrder.nativeOrder()).asIntBuffer().asReadOnlyBuffer();
+    }
+
+    @SuppressWarnings("restricted")
+    private static DoubleBuffer doubleView(Arena owner, long address, long count) {
+        if (address == 0 || count == 0) return DoubleBuffer.allocate(0).asReadOnlyBuffer();
+        return MemorySegment.ofAddress(address).reinterpret(count * Double.BYTES, owner, null)
+                .asByteBuffer().order(ByteOrder.nativeOrder()).asDoubleBuffer().asReadOnlyBuffer();
+    }
+
     @SuppressWarnings("restricted")
     private static FloatBuffer floatView(long address, long count) {
         if (address == 0 || count == 0) return FloatBuffer.allocate(0).asReadOnlyBuffer();
@@ -1002,6 +1123,36 @@ public final class Blacksmith {
             ok = call(() -> (boolean) LICENSE_SET.invokeExact(text));
         }
         if (!ok) throw failure("license refused");
+    }
+
+    /**
+     * Set a kernel option, by its name, for the whole process from the next call on:
+     * {@code "boolean.mesh_budget"}, {@code "boolean.finest_tolerance"},
+     * {@code "profile_boolean.point_budget"} or {@code "measure.default_accuracy"}. Throws --
+     * and changes nothing -- for a name that is not an option or a value it does not take,
+     * saying which and what it takes.
+     */
+    public static void setOption(String name, double value) {
+        boolean ok;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment text = arena.allocateFrom(name);
+            ok = call(() -> (boolean) OPTION_SET.invokeExact(text, value));
+        }
+        if (!ok) throw failure("option '" + name + "' refused");
+    }
+
+    /**
+     * A kernel option's value, by its name: what {@link #setOption} last set, else its
+     * default. Throws for a name that is not an option, listing the ones there are.
+     */
+    public static double option(String name) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment text = arena.allocateFrom(name);
+            MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE);
+            boolean ok = call(() -> (boolean) OPTION_GET.invokeExact(text, out));
+            if (!ok) throw failure("no option '" + name + "'");
+            return out.get(ValueLayout.JAVA_DOUBLE, 0);
+        }
     }
 
     /**
@@ -1140,9 +1291,10 @@ public final class Blacksmith {
      * BuildException} naming the field, worded by the library itself.
      *
      * <p>{@code stroke} is the pen colour: {@code "#rgb"}, {@code "#rrggbb"} or a CSS colour
-     * name. {@code background} stays the packed {@code 0xRRGGBB} number, or null for no {@code
-     * <rect>} behind the drawing -- {@link #packed(String)} reads a {@code "#rgb"}, {@code
-     * "#rrggbb"} or CSS colour name string, e.g. {@code background = Blacksmith.packed("navy")}.
+     * name. {@code background} is the packed {@code 0xRRGGBB} number, or null for no {@code
+     * <rect>} behind the drawing. Both take either form through {@link #withStroke(String)}/{@link
+     * #withStroke(int)} and {@link #withBackground(String)}/{@link #withBackground(int)}, e.g.
+     * {@code SvgOptions.defaults().withBackground("navy")}.
      */
     public record SvgOptions(SvgView view, Double azimuth, Double elevation, String up, double fov,
                               double width, double height, double margin, double tolerance,
@@ -1171,6 +1323,50 @@ public final class Blacksmith {
             return new SvgOptions(view, null, null, null, 0.0, 1000.0, 1000.0, 0.05, 0.1,
                     "#000000", 1.0, null, true, false, false, false, true);
         }
+
+        /** These options with {@code stroke} as colour text: {@code "#rgb"}, {@code "#rrggbb"}
+         *  or a CSS colour name, read when the drawing is made. */
+        public SvgOptions withStroke(String colour) {
+            return new SvgOptions(view, azimuth, elevation, up, fov, width, height, margin, tolerance,
+                    colour, strokeWidth, background, edges, curves, isocurves, polylines, silhouettes);
+        }
+
+        /** These options with {@code stroke} a packed {@code 0xRRGGBB}. */
+        public SvgOptions withStroke(int packed) {
+            return withStroke(hexColour(packed, "svg: stroke"));
+        }
+
+        /** These options with {@code background} from colour text -- {@code "#rgb"}, {@code
+         *  "#rrggbb"} or a CSS colour name, read by the kernel's own parser now -- or null for
+         *  no {@code <rect>} behind the drawing. Text it refuses throws {@link BuildException}. */
+        public SvgOptions withBackground(String colour) {
+            return new SvgOptions(view, azimuth, elevation, up, fov, width, height, margin, tolerance,
+                    stroke, strokeWidth, colour == null ? null : packedField(colour, "svg: background"), edges,
+                    curves, isocurves, polylines, silhouettes);
+        }
+
+        /** These options with {@code background} a packed {@code 0xRRGGBB}. */
+        public SvgOptions withBackground(int packed) {
+            hexColour(packed, "svg: background");
+            return new SvgOptions(view, azimuth, elevation, up, fov, width, height, margin, tolerance,
+                    stroke, strokeWidth, packed, edges, curves, isocurves, polylines, silhouettes);
+        }
+    }
+
+    /** {@code packed} as {@code "#rrggbb"}, refused past {@code 0xFFFFFF}; {@code what} names
+     *  the field. */
+    private static String hexColour(int packed, String what) {
+        if (packed < 0 || packed > 0xFFFFFF)
+            throw new BuildException(what + ": a packed colour is 0x000000..0xFFFFFF, not 0x" + Integer.toHexString(packed));
+        return String.format("#%06x", packed);
+    }
+
+    /** {@link #packed(String)}, its refusal naming {@code what}. */
+    private static int packedField(String colour, String what) {
+        double[] c = tryParseRgb(colour);
+        if (c == null)
+            throw new BuildException(what + ": a colour is \"#rgb\", \"#rrggbb\", a CSS colour name or 0xRRGGBB, not '" + colour + "'");
+        return ((int) Math.round(c[0] * 255) << 16) | ((int) Math.round(c[1] * 255) << 8) | (int) Math.round(c[2] * 255);
     }
 
     /** (r, g, b) in 0..1 from colour text -- {@code "#rgb"}, {@code "#rrggbb"} or a CSS colour
@@ -1193,8 +1389,9 @@ public final class Blacksmith {
     }
 
     /** A colour as the ABI's packed {@code 0xRRGGBB}, from {@code "#rgb"}, {@code "#rrggbb"} or a
-     *  CSS colour name -- for {@link SvgOptions#background()}, which takes the packed number.
-     *  Takes no numeric triple of its own, so its refusal lists only the text forms. */
+     *  CSS colour name -- for a host that wants the number itself ({@link
+     *  SvgOptions#withBackground(String)} takes the text directly). Takes no numeric triple of
+     *  its own, so its refusal lists only the text forms. */
     public static int packed(String colour) {
         double[] c = tryParseRgb(colour);
         if (c == null) throw new BuildException("colour: a colour is \"#rgb\", \"#rrggbb\" or a CSS colour name, not '" + colour + "'");
@@ -2509,6 +2706,7 @@ public final class Blacksmith {
         private final Solid solid;
         private final double tolerance;
         private final Handle held;
+        private final Arena lifetime;
         private final long positions, normals, indices;
         private final int vertexCount, indexCount;
 
@@ -2516,7 +2714,7 @@ public final class Blacksmith {
             this.solid = solid;
             this.tolerance = tolerance;
             held = new Handle(TESSELLATION_FREE, "tessellation: freed", tessellationChecked(tessellation, "mesh"));
-            CLEANER.register(this, held);
+            lifetime = lifetimeOf(held);
             try (Arena arena = Arena.ofConfined()) {
                 SegmentAllocator allocator = arena;
                 MemorySegment h = held.live();
@@ -2556,7 +2754,7 @@ public final class Blacksmith {
 
         public FloatBuffer positions() {
             try {
-                return floatView(positions, vertexCount * 3L);
+                return floatView(lifetime, positions, vertexCount * 3L);
             } finally {
                 keep(this);
             }
@@ -2564,7 +2762,7 @@ public final class Blacksmith {
 
         public FloatBuffer normals() {
             try {
-                return floatView(normals, vertexCount * 3L);
+                return floatView(lifetime, normals, vertexCount * 3L);
             } finally {
                 keep(this);
             }
@@ -2572,7 +2770,7 @@ public final class Blacksmith {
 
         public IntBuffer indices() {
             try {
-                return intView(indices, indexCount);
+                return intView(lifetime, indices, indexCount);
             } finally {
                 keep(this);
             }
@@ -2600,6 +2798,7 @@ public final class Blacksmith {
         private final Solid solid;
         private final double tolerance;
         private final Handle held;
+        private final Arena lifetime;
         private final long positions, normals, indices;
         private final int vertexCount, indexCount;
 
@@ -2607,7 +2806,7 @@ public final class Blacksmith {
             this.solid = solid;
             this.tolerance = tolerance;
             held = new Handle(TESSELLATION_FREE, "tessellation: freed", tessellationChecked(tessellation, "mesh64"));
-            CLEANER.register(this, held);
+            lifetime = lifetimeOf(held);
             try (Arena arena = Arena.ofConfined()) {
                 SegmentAllocator allocator = arena;
                 MemorySegment h = held.live();
@@ -2647,7 +2846,7 @@ public final class Blacksmith {
 
         public DoubleBuffer positions() {
             try {
-                return doubleView(positions, vertexCount * 3L);
+                return doubleView(lifetime, positions, vertexCount * 3L);
             } finally {
                 keep(this);
             }
@@ -2655,7 +2854,7 @@ public final class Blacksmith {
 
         public DoubleBuffer normals() {
             try {
-                return doubleView(normals, vertexCount * 3L);
+                return doubleView(lifetime, normals, vertexCount * 3L);
             } finally {
                 keep(this);
             }
@@ -2663,7 +2862,7 @@ public final class Blacksmith {
 
         public IntBuffer indices() {
             try {
-                return intView(indices, indexCount);
+                return intView(lifetime, indices, indexCount);
             } finally {
                 keep(this);
             }
@@ -2684,6 +2883,7 @@ public final class Blacksmith {
         private final Solid solid;
         private final double tolerance;
         private final Handle held;
+        private final Arena lifetime;
         private final long points, offsets;
         private final int pointCount, polylineCount;
 
@@ -2691,7 +2891,7 @@ public final class Blacksmith {
             this.solid = solid;
             this.tolerance = tolerance;
             held = new Handle(TESSELLATION_FREE, "tessellation: freed", tessellationChecked(tessellation, "edge_polylines"));
-            CLEANER.register(this, held);
+            lifetime = lifetimeOf(held);
             try (Arena arena = Arena.ofConfined()) {
                 SegmentAllocator allocator = arena;
                 MemorySegment h = held.live();
@@ -2726,7 +2926,7 @@ public final class Blacksmith {
         /** {@code pointCount * 3} floats, the polylines end to end. */
         public FloatBuffer points() {
             try {
-                return floatView(points, pointCount * 3L);
+                return floatView(lifetime, points, pointCount * 3L);
             } finally {
                 keep(this);
             }
@@ -2735,7 +2935,7 @@ public final class Blacksmith {
         /** {@code polylineCount + 1} point offsets; the last equals {@link #pointCount()}. */
         public IntBuffer offsets() {
             try {
-                return intView(offsets, polylineCount + 1L);
+                return intView(lifetime, offsets, polylineCount + 1L);
             } finally {
                 keep(this);
             }
@@ -2837,8 +3037,8 @@ public final class Blacksmith {
      * One solid meshed for a solver: nodes welded by bits, triangles wound outward, every node
      * tagged with the lowest-dimension B-rep entity it lies on, and every crack reported rather
      * than closed. What {@link Solid#femMesh(double, double, double[])} returns, and <b>owned by
-     * you</b>: close it (a try-with-resources), {@link #free()} it, or let the {@link Cleaner} do
-     * it when it is unreachable.
+     * you</b>: close it (a try-with-resources), {@link #free()} it, or drop it: it is freed once
+     * nothing reaches it, and a buffer cut from it does.
      *
      * <p>A handle rather than a snapshot, and its big arrays are read-only
      * {@link DoubleBuffer}/{@link IntBuffer} views over the library's own memory, as
@@ -2849,8 +3049,8 @@ public final class Blacksmith {
      * neither frees a FEM mesh nor stales one, and meshing the solid again at another tolerance
      * does not either -- the same shape {@link Mesh} and {@link Mesh64} now have with their
      * own held tessellation, except a FEM mesh is freed explicitly, by {@link #free()} (or
-     * {@code close()}, or the {@link Cleaner}), where a mesh view exposes no free of its own
-     * and is freed only once it is unreachable.
+     * {@code close()}), where a mesh view exposes no free of its own; either is also freed
+     * once nothing reaches it -- and a buffer cut from it does.
      *
      * <p><b>What the guard does and does not do.</b> Every accessor below asks the handle first,
      * so a buffer <em>asked for</em> after {@link #free()} throws {@link IllegalStateException}.
@@ -2859,14 +3059,12 @@ public final class Blacksmith {
      * block instead, and hands back whatever is there by then: measured once, a
      * {@link DoubleBuffer} taken before the free and read after gave {@code 1.29e-311} where the
      * mesh had {@code 4.0} -- it does <em>not</em> throw, and it does not reliably give the old
-     * numbers either. Copy anything that must outlive the handle, and hold this object while you
-     * read its buffers: a buffer alone does not keep it reachable, so a {@code FemMesh} the
-     * program has finished with can be collected -- and freed by the {@link Cleaner} -- under a
-     * buffer still being read.
+     * numbers either. Copy anything that must outlive an explicit free. Dropping it instead is
+     * safe: its buffers are cut from its own arena, so one still being read keeps it alive.
      */
     public static final class FemMesh implements AutoCloseable {
         private final Handle handle;
-        private final Cleaner.Cleanable cleanable;
+        private final Arena lifetime;
 
         // The view, read once in the constructor: every pointer in it is built with the handle
         // and good until it is freed, so asking again per accessor would be one C call per array
@@ -2879,7 +3077,7 @@ public final class Blacksmith {
 
         private FemMesh(MemorySegment raw) {
             handle = new Handle(FEM_FREE, "fem mesh: freed", checked(raw, "fem_mesh"));
-            cleanable = CLEANER.register(this, handle);
+            lifetime = lifetimeOf(handle);
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment out = arena.allocate(FEM_MESH_VIEW);
                 MemorySegment h = handle.live();
@@ -2916,11 +3114,11 @@ public final class Blacksmith {
         }
 
         /** Give the mesh back, and with it every buffer taken from it. Idempotent; the
-         *  {@link Cleaner} or the try-with-resources does it otherwise. A {@code .msh} text
+         *  try-with-resources, or nothing reaching it, does it otherwise. A {@code .msh} text
          *  already read is <em>not</em> given back with it: each is a {@code String} of your
          *  own. */
         public void free() {
-            cleanable.clean();
+            handle.run();
         }
 
         @Override
@@ -2934,7 +3132,7 @@ public final class Blacksmith {
         public DoubleBuffer nodes() {
             try {
                 handle.live();
-                return doubleView(nodes, nodeCount * 3L);
+                return doubleView(lifetime, nodes, nodeCount * 3L);
             } finally {
                 keep(this);
             }
@@ -2945,7 +3143,7 @@ public final class Blacksmith {
         public IntBuffer triangles() {
             try {
                 handle.live();
-                return intView(triangles, triangleCount * 3L);
+                return intView(lifetime, triangles, triangleCount * 3L);
             } finally {
                 keep(this);
             }
@@ -2957,7 +3155,7 @@ public final class Blacksmith {
         public IntBuffer triangleFace() {
             try {
                 handle.live();
-                return intView(triangleFace, triangleCount);
+                return intView(lifetime, triangleFace, triangleCount);
             } finally {
                 keep(this);
             }
@@ -2969,7 +3167,7 @@ public final class Blacksmith {
         public IntBuffer nodeKind() {
             try {
                 handle.live();
-                return intView(nodeKind, nodeCount);
+                return intView(lifetime, nodeKind, nodeCount);
             } finally {
                 keep(this);
             }
@@ -2981,7 +3179,7 @@ public final class Blacksmith {
         public IntBuffer nodeEntity() {
             try {
                 handle.live();
-                return intView(nodeEntity, nodeCount);
+                return intView(lifetime, nodeEntity, nodeCount);
             } finally {
                 keep(this);
             }
@@ -4384,6 +4582,59 @@ public final class Blacksmith {
             writeSvg(path, List.of(this), options);
         }
 
+        /** {@link #silhouetteBeziers(SvgOptions)} with every default. */
+        public Cad.BeziersData64 silhouetteBeziers() {
+            return silhouetteBeziers(null);
+        }
+
+        /** This solid's silhouette from the camera {@code options} describes -- the curves where
+         *  its surfaces turn away from the eye, which no edge of it lies on, so a sphere has an
+         *  outline here that its wireframe has none of. The same {@link SvgOptions} that draw a
+         *  picture ask about the same eye; {@code width} is the image width the library reads
+         *  {@code tolerance} against, so set both or neither. The line-set flags are not read.
+         *  Exact Béziers where the surface has a closed silhouette form -- sphere, cylinder,
+         *  cone, extrusion -- and a straight-chord polyline carried as degree-1 Béziers for
+         *  every other surface.
+         *
+         *  <p>Owned by this call: the library's block is copied into the two arrays of {@link
+         *  Cad.BeziersData64} and released before this returns. A solid with no silhouette
+         *  (every face planar) gives a result with {@code count()} 0, which is not an error; a
+         *  refused option throws {@link BuildException}. */
+        @SuppressWarnings("restricted") // reinterpret: the count the library wrote says how far the block reaches.
+        public Cad.BeziersData64 silhouetteBeziers(SvgOptions options) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment h = handle();
+                MemorySegment o = buildSvgOptions(arena, options);
+                MemorySegment countOut = arena.allocate(ValueLayout.JAVA_INT);
+                MemorySegment data = call(() -> (MemorySegment) SILHOUETTE_BEZIERS.invokeExact(h, o, countOut));
+                int n = countOut.get(ValueLayout.JAVA_INT, 0);
+                if (data.address() == 0) {
+                    // Null is the empty answer or a refusal, told apart by the error slot. The
+                    // library clears it as this call starts (it runs under its `guard`), so
+                    // the slot read straight after is this call's own.
+                    if (!lastError().isEmpty()) throw failure("silhouette");
+                    return new Cad.BeziersData64(new double[0], new double[0]);
+                }
+                try {
+                    double[] flat = data.reinterpret(n * 16L * Double.BYTES).toArray(ValueLayout.JAVA_DOUBLE);
+                    double[] points = new double[n * 12];
+                    double[] weights = new double[n * 4];
+                    for (int i = 0; i < n; i++) {
+                        System.arraycopy(flat, i * 16, points, i * 12, 12);
+                        System.arraycopy(flat, i * 16 + 12, weights, i * 4, 4);
+                    }
+                    return new Cad.BeziersData64(points, weights);
+                } finally {
+                    call(() -> {
+                        SILHOUETTE_BEZIERS_FREE.invokeExact(data, n);
+                        return null;
+                    });
+                }
+            } finally {
+                keep(this);
+            }
+        }
+
         // -- selecting and edges
 
         /** The face {@code selector} picks; throws when none does. */
@@ -4867,6 +5118,31 @@ public final class Blacksmith {
             }
         }
 
+        /** {@link #splitByProfile(Profile, double[], double)} at 0.05. */
+        public List<Solid> splitByProfile(Profile profile, double[] frame) {
+            return splitByProfile(profile, frame, 0.05);
+        }
+
+        /** This solid split by the closed {@code profile} drawn on {@code frame} (twelve
+         *  numbers), pushed straight through it along the frame's z both ways: the bodies
+         *  outside the profile first, then those inside. Where the plane lies along z does not
+         *  matter. */
+        public List<Solid> splitByProfile(Profile profile, double[] frame, double tolerance) {
+            double[] f = frame(frame);
+            Solid all;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment fs = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, f);
+                MemorySegment h = handle();
+                MemorySegment p = profile.handle();
+                all = new Solid(call(() -> (MemorySegment) SPLIT_BY_PROFILE.invokeExact(h, p, fs, tolerance, MemorySegment.NULL, MemorySegment.NULL)));
+            } finally {
+                keep(this, profile);
+            }
+            try (all) {
+                return all.lumps();
+            }
+        }
+
         /** This solid's connected bodies, each a solid of its own -- faces sharing an edge are
          *  one body -- in the order of their first faces. */
         public List<Solid> lumps() {
@@ -5257,6 +5533,12 @@ public final class Blacksmith {
             cleanable = CLEANER.register(this, handle);
         }
 
+        /** Wrap an assembly the kernel handed back as a new, caller-owned handle. */
+        private Assembly(MemorySegment owned, boolean fromKernel) {
+            handle = new Handle(ASSEMBLY_FREE, "assembly: closed", owned);
+            cleanable = CLEANER.register(this, handle);
+        }
+
         MemorySegment handle() {
             return handle.live();
         }
@@ -5438,6 +5720,62 @@ public final class Blacksmith {
             }
         }
 
+        /** {@link #pair} with the kind's own numbers in place of the pitch, for the coupled
+         *  pairs: {@code kind} any name {@code pair} takes, or "gear" or "rack_and_pinion";
+         *  {@code params} {@code [pitch]} for a screw, {@code [pinion_radius]} for a rack and
+         *  pinion, {@code [radius_first, radius_second, ratio]} or those plus {@code [bevel,
+         *  helical_angle]} (radians) for a gear -- the ratio the second link's rotation over
+         *  the first's, signed (two meshing external gears turn opposite ways, so theirs is
+         *  negative) -- and none for any other kind. {@code endFrame} and {@code ranges} read
+         *  as in {@link PairOptions} (either may be null). Throws {@link BuildException} with
+         *  the kernel's own text when a rule refuses it (a wrong number of parameters among
+         *  them); the assembly is then unchanged. */
+        public void pairWith(String joint, String kind, Frame frame, Frame endFrame, List<Range> ranges, double... params) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment j = arena.allocateFrom(joint);
+                MemorySegment k = arena.allocateFrom(kind);
+                MemorySegment fs = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, frame.toArray());
+                MemorySegment ef = endFrame == null ? MemorySegment.NULL
+                        : arena.allocateFrom(ValueLayout.JAVA_DOUBLE, endFrame.toArray());
+                MemorySegment lowerSeg = MemorySegment.NULL, upperSeg = MemorySegment.NULL;
+                MemorySegment hasLowerSeg = MemorySegment.NULL, hasUpperSeg = MemorySegment.NULL;
+                int freedomCount = 0;
+                if (ranges != null) {
+                    freedomCount = ranges.size();
+                    lowerSeg = arena.allocate(ValueLayout.JAVA_DOUBLE, freedomCount);
+                    upperSeg = arena.allocate(ValueLayout.JAVA_DOUBLE, freedomCount);
+                    hasLowerSeg = arena.allocate(ValueLayout.JAVA_BOOLEAN, freedomCount);
+                    hasUpperSeg = arena.allocate(ValueLayout.JAVA_BOOLEAN, freedomCount);
+                    for (int i = 0; i < freedomCount; i++) {
+                        Range r = ranges.get(i);
+                        Double lo = r == null ? null : r.lower();
+                        Double hi = r == null ? null : r.upper();
+                        lowerSeg.setAtIndex(ValueLayout.JAVA_DOUBLE, i, lo == null ? 0.0 : lo);
+                        upperSeg.setAtIndex(ValueLayout.JAVA_DOUBLE, i, hi == null ? 0.0 : hi);
+                        hasLowerSeg.setAtIndex(ValueLayout.JAVA_BOOLEAN, i, lo != null);
+                        hasUpperSeg.setAtIndex(ValueLayout.JAVA_BOOLEAN, i, hi != null);
+                    }
+                }
+                MemorySegment paramSeg = arena.allocate(ValueLayout.JAVA_DOUBLE, Math.max(1, params.length));
+                for (int i = 0; i < params.length; i++) paramSeg.setAtIndex(ValueLayout.JAVA_DOUBLE, i, params[i]);
+                MemorySegment h = handle();
+                MemorySegment lowerF = lowerSeg, upperF = upperSeg, hasLowerF = hasLowerSeg, hasUpperF = hasUpperSeg;
+                long fc = freedomCount;
+                long pc = params.length;
+                boolean ok = call(() -> (boolean) ASSEMBLY_PAIR_WITH.invokeExact(
+                        h, j, k, fs, ef, lowerF, upperF, hasLowerF, hasUpperF, fc, paramSeg, pc));
+                if (!ok) throw failure("assembly_pair_with");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #pairWith(String, String, Frame, Frame, List, double...)} with no end frame
+         *  and no ranges. */
+        public void pairWith(String joint, String kind, Frame frame, double... params) {
+            pairWith(joint, kind, frame, null, null, params);
+        }
+
         /** Add a named state {@code name} to this assembly: {@code rows} sets each named
          *  joint to its values, in that joint's pair's freedom order. Throws {@link
          *  BuildException} with the kernel's own text when a rule refuses it; the assembly
@@ -5465,6 +5803,47 @@ public final class Blacksmith {
             } finally {
                 keep(this);
             }
+        }
+
+        /** This assembly with its mechanism posed, as a new {@link Assembly} the caller owns
+         *  (close it like any other): {@code rows} sets each named joint to its values, in that
+         *  joint's pair's freedom order, in radians or the assembly's units. A row's joint is a
+         *  path of placement names then the joint's name joined by "/", a "/" or "\\" inside a
+         *  name escaped with "\\". {@code state} is a state's path, applied first and overridden
+         *  row by row, or null for none; {@code ground} is one of this assembly's own links held
+         *  fixed, or null for the default. A sub-assembly no row reaches is shared with this
+         *  one. Throws {@link BuildException} with the kernel's own text when a rule refuses it;
+         *  this assembly is unchanged either way. */
+        public Assembly posed(List<StateRow> rows, String state, String ground) {
+            try (Arena arena = Arena.ofConfined()) {
+                int count = rows.size();
+                MemorySegment joints = count == 0 ? MemorySegment.NULL : arena.allocate(ValueLayout.ADDRESS, count);
+                MemorySegment counts = count == 0 ? MemorySegment.NULL : arena.allocate(ValueLayout.JAVA_INT, count);
+                int flatCount = 0;
+                for (StateRow row : rows) flatCount += row.values().length;
+                MemorySegment values = flatCount == 0 ? MemorySegment.NULL : arena.allocate(ValueLayout.JAVA_DOUBLE, flatCount);
+                int p = 0;
+                for (int i = 0; i < count; i++) {
+                    StateRow row = rows.get(i);
+                    joints.setAtIndex(ValueLayout.ADDRESS, i, arena.allocateFrom(row.joint()));
+                    counts.setAtIndex(ValueLayout.JAVA_INT, i, row.values().length);
+                    for (double v : row.values()) values.setAtIndex(ValueLayout.JAVA_DOUBLE, p++, v);
+                }
+                MemorySegment s = state == null ? MemorySegment.NULL : arena.allocateFrom(state);
+                MemorySegment g = ground == null ? MemorySegment.NULL : arena.allocateFrom(ground);
+                MemorySegment h = handle();
+                long rowCount = count;
+                MemorySegment raw = call(() -> (MemorySegment) ASSEMBLY_POSED.invokeExact(h, joints, counts, values, rowCount, s, g));
+                return new Assembly(checked(raw, "assembly_posed"), true);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #posed(List, String, String)} with just {@code rows}: no state, the default
+         *  ground. */
+        public Assembly posed(List<StateRow> rows) {
+            return posed(rows, null, null);
         }
 
         /** Add a motion sequence {@code name} over this assembly's named states: one {@link
@@ -6117,6 +6496,631 @@ public final class Blacksmith {
                 }
             }
             return hits;
+        }
+    }
+
+    // ---- The SubD cage ----------------------------------------------------------------------
+
+    /** An edge of a cage: its two vertex ids. {@link Subd#creases} and {@link Subd#edgeLoop}
+     *  answer them smaller id first. */
+    public record SubdEdge(int a, int b) {
+    }
+
+    /** The plane a mirrored cage is the positive half across: perpendicular to this axis. */
+    public enum SubdAxis { X, Y, Z }
+
+    /** What kind of cage element a selection, or a {@link Subd#pick}, names. */
+    public enum SubdElements { VERTICES, EDGES, FACES }
+
+    /** A mirrored half's plane: its {@code axis}, and how far from it a vertex counts as on it. */
+    public record SubdSymmetry(SubdAxis axis, double tolerance) {
+    }
+
+    /**
+     * Cage elements of one kind: vertex or face ids in {@code ids}, or edges in {@code edges}
+     * (the other is empty). What the edit that made a cage touched, and what {@link
+     * Subd#transform} moves.
+     */
+    public record SubdSelection(SubdElements kind, int[] ids, List<SubdEdge> edges) {
+        public static SubdSelection ofVertices(int... ids) {
+            return new SubdSelection(SubdElements.VERTICES, ids.clone(), List.of());
+        }
+
+        public static SubdSelection ofEdges(SubdEdge... edges) {
+            return new SubdSelection(SubdElements.EDGES, new int[0], List.of(edges));
+        }
+
+        public static SubdSelection ofEdges(List<SubdEdge> edges) {
+            return new SubdSelection(SubdElements.EDGES, new int[0], List.copyOf(edges));
+        }
+
+        public static SubdSelection ofFaces(int... ids) {
+            return new SubdSelection(SubdElements.FACES, ids.clone(), List.of());
+        }
+
+        /** Equal when the kinds match and so does every id and edge, in order. A record would
+         *  otherwise compare {@code ids} by reference, so no two selections read back would ever
+         *  be equal. */
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof SubdSelection s && kind == s.kind && Arrays.equals(ids, s.ids) && edges.equals(s.edges);
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * (31 * kind.hashCode() + Arrays.hashCode(ids)) + edges.hashCode();
+        }
+
+        @Override
+        public String toString() {
+            return kind == SubdElements.EDGES
+                    ? "SubdSelection(EDGES, " + edges + ")"
+                    : "SubdSelection(" + kind + ", " + Arrays.toString(ids) + ")";
+        }
+    }
+
+    /**
+     * One level of a cage's smooth surface, as {@link Subd#smoothMesh} returns it, copied out of
+     * the cage so it outlives it. {@code positions} and {@code normals} are {@code 3n} doubles:
+     * limit positions and unit outward limit normals; {@code indices} is three vertex ids a
+     * triangle; {@code triangleFace} one entry a triangle: the face of the <b>full</b> cage it
+     * lies on (on a mirrored half, face {@code f} of the half is {@code f} and its reflection
+     * {@code f} plus the half's face count).
+     */
+    public record SubdMesh(double[] positions, double[] normals, int[] indices, int[] triangleFace) {
+        @Override
+        public String toString() {
+            return "SubdMesh(vertices=" + positions.length / 3 + ", triangles=" + indices.length / 3 + ")";
+        }
+    }
+
+    /**
+     * What {@link Subd#toSolid} did and how close it came: {@code regular} patches exact from
+     * their own net and {@code refined} ones from a refined neighbourhood; the Catmull-Clark
+     * {@code steps} taken first (1 or 2); {@code levels}, the deepest local refinement a patch
+     * took (0 when none was refined); the largest {@code deviation} from the limit surface, as a
+     * fraction of the cage's bounding-box diagonal; the largest tangent break {@code g1AngleDeg}
+     * across a side that is not creased, in degrees; and the world points they were measured at,
+     * {@code deviationAt} and {@code g1At} (three doubles each).
+     */
+    public record SubdReport(int regular, int refined, int steps, int levels, double deviation, double g1AngleDeg,
+                             double[] deviationAt, double[] g1At) {
+        static SubdReport of(MemorySegment raw) {
+            return new SubdReport(
+                    raw.get(ValueLayout.JAVA_INT, offset(SUBD_REPORT, "regular")),
+                    raw.get(ValueLayout.JAVA_INT, offset(SUBD_REPORT, "refined")),
+                    raw.get(ValueLayout.JAVA_INT, offset(SUBD_REPORT, "steps")),
+                    raw.get(ValueLayout.JAVA_INT, offset(SUBD_REPORT, "levels")),
+                    raw.get(ValueLayout.JAVA_DOUBLE, offset(SUBD_REPORT, "deviation")),
+                    raw.get(ValueLayout.JAVA_DOUBLE, offset(SUBD_REPORT, "g1_angle_deg")),
+                    raw.asSlice(offset(SUBD_REPORT, "deviation_at"), 24).toArray(ValueLayout.JAVA_DOUBLE),
+                    raw.asSlice(offset(SUBD_REPORT, "g1_at"), 24).toArray(ValueLayout.JAVA_DOUBLE));
+        }
+
+        @Override
+        public String toString() {
+            return "SubdReport(regular=" + regular + ", refined=" + refined + ", steps=" + steps + ", levels=" + levels
+                    + ", deviation=" + deviation + ", g1AngleDeg=" + g1AngleDeg
+                    + ", deviationAt=" + Arrays.toString(deviationAt) + ", g1At=" + Arrays.toString(g1At) + ")";
+        }
+    }
+
+    /** What {@link Subd#toSolid} returns: the exact {@code solid} and the {@code report}. */
+    public record SubdSolid(Solid solid, SubdReport report) {
+    }
+
+    @SuppressWarnings("restricted") // reinterpret: the count beside the pointer says how far it reaches.
+    private static int[] copyInts(MemorySegment at, long count) {
+        return count == 0 || at.address() == 0
+                ? new int[0]
+                : MemorySegment.ofAddress(at.address()).reinterpret(count * Integer.BYTES).toArray(ValueLayout.JAVA_INT);
+    }
+
+    @SuppressWarnings("restricted") // reinterpret: the count beside the pointer says how far it reaches.
+    private static double[] copyDoubles(MemorySegment at, long count) {
+        return count == 0 || at.address() == 0
+                ? new double[0]
+                : MemorySegment.ofAddress(at.address()).reinterpret(count * Double.BYTES).toArray(ValueLayout.JAVA_DOUBLE);
+    }
+
+    /** {@code ids}, refused when any is negative: the C ABI takes unsigned ids. */
+    private static int[] subdIds(int[] ids, String what) {
+        for (int id : ids) {
+            if (id < 0) throw new BuildException(what + ": ids are not negative, got " + id);
+        }
+        return ids;
+    }
+
+    /** {@code value}, refused when negative: the C ABI takes it unsigned. */
+    private static int subdCount(int value, String what) {
+        if (value < 0) throw new BuildException(what + ": must not be negative, got " + value);
+        return value;
+    }
+
+    /** Edges flattened to {@code (a0, b0, a1, b1, ...)}. */
+    private static int[] flatEdges(List<SubdEdge> edges, String what) {
+        int[] flat = new int[edges.size() * 2];
+        int at = 0;
+        for (SubdEdge e : edges) {
+            if (e.a() < 0 || e.b() < 0) throw new BuildException(what + ": ids are not negative, got (" + e.a() + ", " + e.b() + ")");
+            flat[at++] = e.a();
+            flat[at++] = e.b();
+        }
+        return flat;
+    }
+
+    private static List<SubdEdge> edgesOf(int[] flat) {
+        List<SubdEdge> edges = new ArrayList<>(flat.length / 2);
+        for (int k = 0; k + 1 < flat.length; k += 2) edges.add(new SubdEdge(flat[k], flat[k + 1]));
+        return edges;
+    }
+
+    private static int subdAxis(SubdAxis axis, String what) {
+        if (axis == null) throw new BuildException(what + ": axis must be X, Y or Z, not null");
+        return axis.ordinal();
+    }
+
+    private static MemorySegment subdInts(Arena arena, int[] values) {
+        return values.length == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_INT, values);
+    }
+
+    /**
+     * A Catmull-Clark control cage: positions ({@code 3n} doubles), faces, creased edges, pinned
+     * vertices, an optional mirror plane, and the selection of the edit that made it. Immutable:
+     * every edit returns a new {@code Subd}, with {@link #selection} naming what that edit
+     * touched, and leaves this one as it was. {@link #toSolid} turns it into an exact B-rep.
+     * {@link #close} frees this handle; so does the garbage collector. A refusal throws {@link
+     * BuildException} with the kernel's own words; a use after {@link #close} throws {@link
+     * IllegalStateException}.
+     */
+    public static final class Subd implements AutoCloseable {
+        private final Handle handle;
+        private final Cleaner.Cleanable cleanable;
+
+        private Subd(MemorySegment raw, String what) {
+            handle = new Handle(SUBD_FREE, "subd: closed", checked(raw, what));
+            cleanable = CLEANER.register(this, handle);
+        }
+
+        MemorySegment handle() {
+            return handle.live();
+        }
+
+        public boolean closed() {
+            return handle.closed();
+        }
+
+        /** Give the cage back. Idempotent. A {@link SubdMesh} already read owns its own copy and
+         *  reads on. */
+        @Override
+        public void close() {
+            cleanable.clean();
+        }
+
+        // -- the primitives
+
+        /** A box of size 2 x 2 x 2, centred on the origin, one quad a side. */
+        public static Subd cuboid() {
+            return cuboid(null, null);
+        }
+
+        /** A box of {@code size} (three doubles; null: 2 x 2 x 2), centred on the origin, with
+         *  {@code segments} quads along each axis (three ints, 1 to 1024; null: 1 x 1 x 1). */
+        public static Subd cuboid(double[] size, int[] segments) {
+            double[] s = size == null ? new double[] {2, 2, 2} : size;
+            int[] n = segments == null ? new int[] {1, 1, 1} : segments;
+            if (s.length != 3) throw new BuildException("cuboid size: expected 3 numbers, got " + s.length);
+            if (n.length != 3) throw new BuildException("cuboid segments: expected 3 numbers, got " + n.length);
+            for (int v : n) subdCount(v, "cuboid segments");
+            MemorySegment raw = call(() -> (MemorySegment) SUBD_CUBOID.invokeExact(s[0], s[1], s[2], n[0], n[1], n[2]));
+            return new Subd(raw, "subd_cuboid");
+        }
+
+        /** {@link #cylinder(double, double, int, int, boolean)} of radius 1, height 2, 8 sides,
+         *  one ring, rims creased. */
+        public static Subd cylinder() {
+            return cylinder(1.0, 2.0, 8, 1, true);
+        }
+
+        /** A cylinder along +Z: one n-gon cap per end with {@code sides} sides and {@code rings}
+         *  bands of quads between them; with {@code creasedRims} the two rim loops are creased,
+         *  so the caps stay flat. The rims are creased by default (the no-argument form), which
+         *  is what converts: an uncreased cylinder of 7 or more sides is refused by {@link
+         *  #toSolid} at the default tolerances. */
+        public static Subd cylinder(double radius, double height, int sides, int rings, boolean creasedRims) {
+            subdCount(sides, "cylinder sides");
+            subdCount(rings, "cylinder rings");
+            MemorySegment raw = call(() -> (MemorySegment) SUBD_CYLINDER.invokeExact(radius, height, sides, rings, creasedRims));
+            return new Subd(raw, "subd_cylinder");
+        }
+
+        /** {@link #sphere(double, int)} of radius 1 and 2 segments. */
+        public static Subd sphere() {
+            return sphere(1.0, 2);
+        }
+
+        /** A quad ball of {@code radius}: a cube grid with {@code segments} quads per edge, each
+         *  vertex pushed out to the radius. */
+        public static Subd sphere(double radius, int segments) {
+            subdCount(segments, "sphere segments");
+            MemorySegment raw = call(() -> (MemorySegment) SUBD_SPHERE.invokeExact(radius, segments));
+            return new Subd(raw, "subd_sphere");
+        }
+
+        /** {@link #torus(double, double, int, int)} of major 3, minor 1, 12 around, 8 tube. */
+        public static Subd torus() {
+            return torus(3.0, 1.0, 12, 8);
+        }
+
+        /** A torus around +Z: {@code around} steps about the axis at {@code major}, {@code tube}
+         *  steps round the tube of {@code minor}, all quads. */
+        public static Subd torus(double major, double minor, int around, int tube) {
+            subdCount(around, "torus around");
+            subdCount(tube, "torus tube");
+            MemorySegment raw = call(() -> (MemorySegment) SUBD_TORUS.invokeExact(major, minor, around, tube));
+            return new Subd(raw, "subd_torus");
+        }
+
+        /** {@link #fromParts(double[], int[][], List, int[], SubdSymmetry)} with no creases, no
+         *  pins and no symmetry. */
+        public static Subd fromParts(double[] positions, int[][] faces) {
+            return fromParts(positions, faces, List.of(), new int[0], null);
+        }
+
+        /** A cage from its parts, the lossless inverse of reading them back: {@code positions}
+         *  ({@code 3n} doubles), {@code faces} lists of vertex ids, {@code creases} edges, {@code
+         *  pins} vertex ids, and {@code symmetry} null or the axis and tolerance of a mirrored
+         *  half, as {@link #symmetry} reports it. The new cage selects nothing. */
+        public static Subd fromParts(double[] positions, int[][] faces, List<SubdEdge> creases, int[] pins, SubdSymmetry symmetry) {
+            if (positions.length % 3 != 0) {
+                throw new BuildException("from_parts: positions are three numbers a point, not " + positions.length);
+            }
+            int[] sizes = new int[faces.length];
+            int total = 0;
+            for (int k = 0; k < faces.length; k++) {
+                sizes[k] = faces[k].length;
+                total += faces[k].length;
+            }
+            int[] loop = new int[total];
+            int at = 0;
+            for (int[] face : faces) {
+                subdIds(face, "from_parts faces");
+                System.arraycopy(face, 0, loop, at, face.length);
+                at += face.length;
+            }
+            int[] crease = flatEdges(creases, "from_parts creases");
+            int[] pin = subdIds(pins, "from_parts pins");
+            int axis = symmetry == null ? -1 : subdAxis(symmetry.axis(), "from_parts symmetry");
+            double tolerance = symmetry == null ? 0.0 : symmetry.tolerance();
+            int vertexCount = positions.length / 3, faceCount = sizes.length, indexCount = loop.length;
+            int creaseCount = crease.length / 2, pinCount = pin.length;
+            MemorySegment raw;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment p = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, positions);
+                MemorySegment sz = subdInts(arena, sizes), lp = subdInts(arena, loop), cr = subdInts(arena, crease), pn = subdInts(arena, pin);
+                raw = call(() -> (MemorySegment) SUBD_FROM_PARTS.invokeExact(
+                        p, vertexCount, sz, faceCount, lp, indexCount, cr, creaseCount, pn, pinCount, axis, tolerance));
+            }
+            return new Subd(raw, "subd_from_parts");
+        }
+
+        // -- the parts
+
+        /** {@code read} over this cage's parts while their views are alive. */
+        private <T> T parts(java.util.function.Function<MemorySegment, T> read) {
+            MemorySegment h = handle();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment raw = arena.allocate(SUBD_PARTS);
+                boolean ok = call(() -> (boolean) SUBD_PARTS_CALL.invokeExact(h, raw));
+                if (!ok) throw failure("subd_parts");
+                return read.apply(raw);
+            } finally {
+                keep(this);
+            }
+        }
+
+        private static int partInt(MemorySegment raw, String field) {
+            return raw.get(ValueLayout.JAVA_INT, offset(SUBD_PARTS, field));
+        }
+
+        private static MemorySegment partAt(MemorySegment raw, String field) {
+            return raw.get(ValueLayout.ADDRESS, offset(SUBD_PARTS, field));
+        }
+
+        /** The cage's vertices, {@code 3n} doubles of your own: a copy. */
+        public double[] positions() {
+            return parts(p -> copyDoubles(partAt(p, "positions"), 3L * partInt(p, "vertex_count")));
+        }
+
+        /** Each face's vertex ids, in loop order. */
+        public int[][] faces() {
+            return parts(p -> {
+                int[] sizes = copyInts(partAt(p, "face_sizes"), partInt(p, "face_count"));
+                int[] loop = copyInts(partAt(p, "face_indices"), partInt(p, "index_count"));
+                int[][] faces = new int[sizes.length][];
+                int at = 0;
+                for (int k = 0; k < sizes.length; k++) {
+                    faces[k] = Arrays.copyOfRange(loop, at, at + sizes[k]);
+                    at += sizes[k];
+                }
+                return faces;
+            });
+        }
+
+        /** The creased edges, each smaller id first, sorted. */
+        public List<SubdEdge> creases() {
+            return parts(p -> edgesOf(copyInts(partAt(p, "creases"), 2L * partInt(p, "crease_count"))));
+        }
+
+        /** The pinned vertices: they refine as corners and stay put. */
+        public int[] pins() {
+            return parts(p -> copyInts(partAt(p, "pins"), partInt(p, "pin_count")));
+        }
+
+        /** Empty for an ordinary cage; for a mirrored half the plane's axis and how far from it
+         *  a vertex counts as on it. */
+        public Optional<SubdSymmetry> symmetry() {
+            return parts(p -> {
+                int axis = partInt(p, "symmetry_axis");
+                return axis < 0
+                        ? Optional.<SubdSymmetry>empty()
+                        : Optional.of(new SubdSymmetry(SubdAxis.values()[axis],
+                                p.get(ValueLayout.JAVA_DOUBLE, offset(SUBD_PARTS, "symmetry_tolerance"))));
+            });
+        }
+
+        /** What the edit that made this cage touched; empty for a cage no edit selected (a
+         *  primitive, {@link #fromParts}, the mirror calls). */
+        public Optional<SubdSelection> selection() {
+            return parts(p -> {
+                int kind = partInt(p, "selection_kind");
+                int count = partInt(p, "selection_count");
+                if (kind < 0 || kind > 2) return Optional.<SubdSelection>empty();
+                if (kind == 1) return Optional.of(SubdSelection.ofEdges(edgesOf(copyInts(partAt(p, "selection"), 2L * count))));
+                int[] ids = copyInts(partAt(p, "selection"), count);
+                return Optional.of(kind == 0 ? SubdSelection.ofVertices(ids) : SubdSelection.ofFaces(ids));
+            });
+        }
+
+        // -- the edits
+
+        /** A new cage with the selected elements moved by {@code matrix}: sixteen numbers,
+         *  column-major; a rotation about a point is baked in by the caller. The new cage
+         *  selects the same elements. */
+        public Subd transform(SubdSelection selection, double[] matrix) {
+            if (matrix.length != 16) throw new BuildException("transform matrix: expected 16 numbers, got " + matrix.length);
+            int[] ids = selection.kind() == SubdElements.EDGES
+                    ? flatEdges(selection.edges(), "transform selection")
+                    : subdIds(selection.ids(), "transform selection");
+            int kind = selection.kind().ordinal();
+            int count = selection.kind() == SubdElements.EDGES ? ids.length / 2 : ids.length;
+            MemorySegment h = handle();
+            MemorySegment raw;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment idSeg = subdInts(arena, ids);
+                MemorySegment m = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, matrix);
+                raw = call(() -> (MemorySegment) SUBD_TRANSFORM.invokeExact(h, kind, idSeg, count, m));
+            } finally {
+                keep(this);
+            }
+            return new Subd(raw, "subd_transform");
+        }
+
+        /** {@link #crease(List, boolean)} with {@code on} true. */
+        public Subd crease(List<SubdEdge> edges) {
+            return crease(edges, true);
+        }
+
+        /** A new cage with {@code edges} creased, or un-creased when {@code on} is false; it
+         *  selects them. */
+        public Subd crease(List<SubdEdge> edges, boolean on) {
+            int[] flat = flatEdges(edges, "crease edges");
+            int count = flat.length / 2;
+            MemorySegment h = handle();
+            MemorySegment raw;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment seg = subdInts(arena, flat);
+                raw = call(() -> (MemorySegment) SUBD_SET_CREASE.invokeExact(h, seg, count, on));
+            } finally {
+                keep(this);
+            }
+            return new Subd(raw, "subd_set_crease");
+        }
+
+        /** {@link #pin(int[], boolean)} with {@code on} true. */
+        public Subd pin(int[] vertices) {
+            return pin(vertices, true);
+        }
+
+        /** A new cage with {@code vertices} pinned (they refine as corners and stay put), or
+         *  released when {@code on} is false; it selects them. */
+        public Subd pin(int[] vertices, boolean on) {
+            subdIds(vertices, "pin vertices");
+            int count = vertices.length;
+            MemorySegment h = handle();
+            MemorySegment raw;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment seg = subdInts(arena, vertices);
+                raw = call(() -> (MemorySegment) SUBD_SET_PIN.invokeExact(h, seg, count, on));
+            } finally {
+                keep(this);
+            }
+            return new Subd(raw, "subd_set_pin");
+        }
+
+        /** A new cage with {@code faces} pushed out by {@code distance} along each connected
+         *  region's average normal, a quad wall on each boundary edge; the moved faces keep
+         *  their ids and the new cage selects them. */
+        public Subd extrude(int[] faces, double distance) {
+            subdIds(faces, "extrude faces");
+            int count = faces.length;
+            MemorySegment h = handle();
+            MemorySegment raw;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment seg = subdInts(arena, faces);
+                raw = call(() -> (MemorySegment) SUBD_EXTRUDE.invokeExact(h, seg, count, distance));
+            } finally {
+                keep(this);
+            }
+            return new Subd(raw, "subd_extrude");
+        }
+
+        /** {@link #inset(int[], double, boolean)} with {@code individual} false. */
+        public Subd inset(int[] faces, double amount) {
+            return inset(faces, amount, false);
+        }
+
+        /** A new cage with {@code faces} shrunk by {@code amount}, in (0, 1), within their
+         *  surface and a ring of quads round each region (each face, with {@code individual});
+         *  the new cage selects the inner faces. */
+        public Subd inset(int[] faces, double amount, boolean individual) {
+            subdIds(faces, "inset faces");
+            int count = faces.length;
+            MemorySegment h = handle();
+            MemorySegment raw;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment seg = subdInts(arena, faces);
+                raw = call(() -> (MemorySegment) SUBD_INSET.invokeExact(h, seg, count, amount, individual));
+            } finally {
+                keep(this);
+            }
+            return new Subd(raw, "subd_inset");
+        }
+
+        /** {@link #insertLoop(SubdEdge, double)} at 0.5. */
+        public Subd insertLoop(SubdEdge edge) {
+            return insertLoop(edge, 0.5);
+        }
+
+        /** A new cage with a loop of edges cut across the ring of quads through {@code edge},
+         *  at {@code a + at * (b - a)} with {@code at} in (0, 1); it selects the new loop. */
+        public Subd insertLoop(SubdEdge edge, double at) {
+            flatEdges(List.of(edge), "insert_loop edge");
+            MemorySegment h = handle();
+            MemorySegment raw = call(() -> (MemorySegment) SUBD_INSERT_LOOP.invokeExact(h, edge.a(), edge.b(), at));
+            keep(this);
+            return new Subd(raw, "subd_insert_loop");
+        }
+
+        /** The loop of edges through {@code edge}, straight across each valence-four vertex,
+         *  the picked edge first, each smaller id first; empty when it is not an edge of the
+         *  cage. */
+        public List<SubdEdge> edgeLoop(SubdEdge edge) {
+            flatEdges(List.of(edge), "edge_loop edge");
+            MemorySegment h = handle();
+            MemorySegment raw = call(() -> (MemorySegment) SUBD_EDGE_LOOP.invokeExact(h, edge.a(), edge.b()));
+            keep(this);
+            try (Subd looped = new Subd(raw, "subd_edge_loop")) {
+                return looped.selection().map(SubdSelection::edges).orElse(List.of());
+            }
+        }
+
+        /** The positive half of the cage across the plane perpendicular to {@code axis} as a
+         *  mirrored cage: every later edit keeps it symmetric. */
+        public Subd mirrorOn(SubdAxis axis) {
+            int a = subdAxis(axis, "mirror_on");
+            MemorySegment h = handle();
+            MemorySegment raw = call(() -> (MemorySegment) SUBD_MIRROR_ON.invokeExact(h, a));
+            keep(this);
+            return new Subd(raw, "subd_mirror_on");
+        }
+
+        /** The mirror baked: the whole cage as an ordinary one, no longer mirrored. */
+        public Subd mirrorOff() {
+            MemorySegment h = handle();
+            MemorySegment raw = call(() -> (MemorySegment) SUBD_MIRROR_OFF.invokeExact(h));
+            keep(this);
+            return new Subd(raw, "subd_mirror_off");
+        }
+
+        /** The whole cage of a mirrored half -- the half's vertices first, then the reflections
+         *  of those off the plane -- or a copy of an ordinary cage. */
+        public Subd full() {
+            MemorySegment h = handle();
+            MemorySegment raw = call(() -> (MemorySegment) SUBD_FULL.invokeExact(h));
+            keep(this);
+            return new Subd(raw, "subd_full");
+        }
+
+        // -- the surface
+
+        /** {@link #smoothMesh(int)} at 3 levels. */
+        public SubdMesh smoothMesh() {
+            return smoothMesh(3);
+        }
+
+        /** The smooth surface refined {@code levels} times (1 to 6), as a {@link SubdMesh} of
+         *  copies. */
+        public SubdMesh smoothMesh(int levels) {
+            subdCount(levels, "smooth_mesh levels");
+            MemorySegment h = handle();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment raw = arena.allocate(SUBD_MESH);
+                boolean ok = call(() -> (boolean) SUBD_SMOOTH_MESH.invokeExact(h, levels, raw));
+                if (!ok) throw failure("subd_smooth_mesh");
+                int vertices = raw.get(ValueLayout.JAVA_INT, offset(SUBD_MESH, "vertex_count"));
+                int indices = raw.get(ValueLayout.JAVA_INT, offset(SUBD_MESH, "index_count"));
+                return new SubdMesh(
+                        copyDoubles(raw.get(ValueLayout.ADDRESS, offset(SUBD_MESH, "positions")), 3L * vertices),
+                        copyDoubles(raw.get(ValueLayout.ADDRESS, offset(SUBD_MESH, "normals")), 3L * vertices),
+                        copyInts(raw.get(ValueLayout.ADDRESS, offset(SUBD_MESH, "indices")), indices),
+                        copyInts(raw.get(ValueLayout.ADDRESS, offset(SUBD_MESH, "triangle_face")), indices / 3));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The cage element of {@code kind} under {@code point} (three numbers), a point on or
+         *  near the smooth surface: a vertex or face id, or an edge with the smaller id first,
+         *  as a one-element {@link SubdSelection}. Empty when nothing is within 0.05 of the
+         *  cage's diagonal -- not an error; a point that is not finite is refused. */
+        public Optional<SubdSelection> pick(double[] point, SubdElements kind) {
+            if (point.length != 3) throw new BuildException("pick point: expected 3 numbers, got " + point.length);
+            int k = kind.ordinal();
+            MemorySegment h = handle();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment pt = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, point);
+                MemorySegment found = arena.allocate(ValueLayout.JAVA_INT, 2);
+                boolean ok = call(() -> (boolean) SUBD_PICK.invokeExact(h, pt, k, found));
+                if (!ok) {
+                    if (lastError().isEmpty()) return Optional.empty();
+                    throw failure("subd_pick");
+                }
+                int a = found.getAtIndex(ValueLayout.JAVA_INT, 0), b = found.getAtIndex(ValueLayout.JAVA_INT, 1);
+                return Optional.of(switch (kind) {
+                    case EDGES -> SubdSelection.ofEdges(new SubdEdge(a, b));
+                    case FACES -> SubdSelection.ofFaces(a);
+                    case VERTICES -> SubdSelection.ofVertices(a);
+                });
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #toSolid(double, double, int)} at the defaults: 1e-4, 0.1, 6. */
+        public SubdSolid toSolid() {
+            return toSolid(1e-4, 0.1, 6);
+        }
+
+        /** The cage as an exact solid, one NURBS face per patch, that every solid call takes,
+         *  and a {@link SubdReport} of what the conversion did. {@code tolerance} is the
+         *  largest deviation from the limit surface as a fraction of the cage's diagonal,
+         *  {@code g1Angle} the largest tangent break across an uncreased side in degrees,
+         *  {@code maxLevels} the deepest local refinement (2 to 6). A tolerance or angle of 0
+         *  or less, or a {@code maxLevels} of 0, takes the default; any other {@code maxLevels}
+         *  outside 2 to 6 is refused. A cage that cannot be held within them is refused with
+         *  the figures it measured. */
+        public SubdSolid toSolid(double tolerance, double g1Angle, int maxLevels) {
+            subdCount(maxLevels, "to_solid max_levels");
+            MemorySegment h = handle();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment report = arena.allocate(SUBD_REPORT);
+                MemorySegment raw = call(() -> (MemorySegment) SUBD_TO_SOLID.invokeExact(h, tolerance, g1Angle, maxLevels, report));
+                Solid solid = new Solid(checked(raw, "subd_to_solid"));
+                return new SubdSolid(solid, SubdReport.of(report));
+            } finally {
+                keep(this);
+            }
         }
     }
 

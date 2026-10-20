@@ -21,6 +21,12 @@
 // own "closed" exception, as the kernel's views refuse a stale cache, rather than handing
 // out a span over freed memory.
 //
+// A span cannot keep its scene alive: `ReadOnlySpan<T>` is a stack-only pointer and length,
+// with no room for a reference. So a scene dropped without `Dispose()` can be collected --
+// and its handle's finalizer free the document -- while a span cut from it is still being
+// read in the same method, once nothing else in that method uses the scene. Hold it in a
+// `using`, or `GC.KeepAlive(scene)` after the last read; the same holds for a `FemMesh`.
+//
 // Strings are the easy half: every `char *` this ABI returns is marshalled into a copied
 // `string` on the way out, so `Node.Name` and friends outlive anything.
 //
@@ -184,6 +190,48 @@ public static class SvgViewAngles
     public static (double Azimuth, double Elevation) For(SvgView view) => Table[view];
 }
 
+/// <summary>A colour <see cref="SvgOptions.Stroke"/>/<see cref="SvgOptions.Background"/> take:
+/// colour text -- `"#rgb"`, `"#rrggbb"` or a CSS colour name, any case -- or a packed
+/// `0xRRGGBB` number, each converted implicitly, so `Stroke = "navy"` and `Stroke = 0x000080`
+/// both compile. Text is read by the library's own parser when the drawing is made; text it
+/// refuses, or a number past `0xFFFFFF`, throws <see cref="CadaclysmException"/> naming the
+/// field.</summary>
+public readonly struct SvgColour : IEquatable<SvgColour>
+{
+    private SvgColour(string? text, long packed) { Text = text; Number = packed; }
+
+    /// <summary>The colour text given, or null for a number.</summary>
+    public string? Text { get; }
+
+    /// <summary>The packed number given; meaningless when <see cref="Text"/> is set.</summary>
+    public long Number { get; }
+
+    public static implicit operator SvgColour(string text) => new(text ?? throw new ArgumentNullException(nameof(text)), 0);
+    public static implicit operator SvgColour(uint packed) => new(null, packed);
+    public static implicit operator SvgColour(int packed) => new(null, packed);
+
+    /// <summary>`0xRRGGBB`, through the library's parser for text; <paramref name="what"/>
+    /// names the field in a refusal.</summary>
+    internal uint Packed(string what)
+    {
+        if (Text is null)
+        {
+            if (Number < 0 || Number > 0xFFFFFF)
+                throw new CadaclysmException($"{what}: a packed colour is 0x000000..0xFFFFFF, not 0x{Number:X}");
+            return (uint)Number;
+        }
+        var rgb = new double[3];
+        if (!Native.cadaclysm_parse_colour(Text, rgb))
+            throw new CadaclysmException($"{what}: a colour is \"#rgb\", \"#rrggbb\", a CSS colour name or 0xRRGGBB, not '{Text}'");
+        return ((uint)Math.Round(rgb[0] * 255) << 16) | ((uint)Math.Round(rgb[1] * 255) << 8) | (uint)Math.Round(rgb[2] * 255);
+    }
+
+    public bool Equals(SvgColour other) => Text == other.Text && (Text is not null || Number == other.Number);
+    public override bool Equals(object? obj) => obj is SvgColour other && Equals(other);
+    public override int GetHashCode() => Text is null ? Number.GetHashCode() : Text.GetHashCode();
+    public override string ToString() => Text ?? $"0x{Number:X6}";
+}
+
 /// <summary>How an SVG drawing is made -- the camera in the viewer's words, the page, the pen
 /// and which line sets. Mirrors `CadaclysmSvgOptions`, defaulted the way
 /// `cadaclysm_svg_options_init` defaults the struct, with <see cref="View"/> supplying <see
@@ -224,17 +272,18 @@ public sealed class SvgOptions
     /// <summary>How far a written curve may stray, in page units. Default 0.1.</summary>
     public double Tolerance { get; set; } = 0.1;
 
-    /// <summary>The pen colour: `"#rgb"`, `"#rrggbb"` or a CSS colour name. Default black.</summary>
-    public string Stroke { get; set; } = "#000000";
+    /// <summary>The pen colour: `"#rgb"`, `"#rrggbb"`, a CSS colour name or a packed `0xRRGGBB`
+    /// (a <see cref="SvgColour"/>). Default black.</summary>
+    public SvgColour Stroke { get; set; } = "#000000";
 
     /// <summary>The pen's width, page units. Default 1.</summary>
     public double StrokeWidth { get; set; } = 1.0;
 
-    /// <summary>`0xRRGGBB`, or null (the default) for no `&lt;rect&gt;` behind the drawing --
-    /// the page left to whatever the viewer composites it onto. <see cref="Cadaclysm.Packed"/>
-    /// reads a `"#rgb"`, `"#rrggbb"` or CSS colour name string, e.g. `Background =
-    /// Cadaclysm.Packed("navy")`.</summary>
-    public uint? Background { get; set; }
+    /// <summary>`"#rgb"`, `"#rrggbb"`, a CSS colour name or a packed `0xRRGGBB` (a <see
+    /// cref="SvgColour"/>) -- `Background = "navy"` or `Background = 0x000080` -- or null (the
+    /// default) for no `&lt;rect&gt;` behind the drawing, the page left to whatever the viewer
+    /// composites it onto.</summary>
+    public SvgColour? Background { get; set; }
 
     /// <summary>Each shape's feature edges -- the exact curves the flattened polylines are
     /// drawn from. Default true.</summary>
@@ -458,6 +507,43 @@ internal struct RawFreedom
     public double Lower;
     [MarshalAs(UnmanagedType.I1)] public bool HasUpper;
     public double Upper;
+}
+
+/// <summary>`CadaclysmTaskTime`: nine `has_*`/value pairs. C `bool` is one byte, so each
+/// `Has*` is attributed `I1`. Pinned by `tests/bindings.rs`.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawTaskTime
+{
+    [MarshalAs(UnmanagedType.I1)] public bool HasScheduleStart;
+    public double ScheduleStart;
+    [MarshalAs(UnmanagedType.I1)] public bool HasScheduleFinish;
+    public double ScheduleFinish;
+    [MarshalAs(UnmanagedType.I1)] public bool HasEarlyStart;
+    public double EarlyStart;
+    [MarshalAs(UnmanagedType.I1)] public bool HasEarlyFinish;
+    public double EarlyFinish;
+    [MarshalAs(UnmanagedType.I1)] public bool HasLateStart;
+    public double LateStart;
+    [MarshalAs(UnmanagedType.I1)] public bool HasLateFinish;
+    public double LateFinish;
+    [MarshalAs(UnmanagedType.I1)] public bool HasActualStart;
+    public double ActualStart;
+    [MarshalAs(UnmanagedType.I1)] public bool HasActualFinish;
+    public double ActualFinish;
+    [MarshalAs(UnmanagedType.I1)] public bool HasDuration;
+    public double Duration;
+}
+
+/// <summary>`CadaclysmElementState`: `Node` and `Phase` are `uint32_t`. Pinned by
+/// `tests/bindings.rs`.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawElementState
+{
+    public uint Node;
+    public uint Phase;
+    public double Progress;
+    [MarshalAs(UnmanagedType.I1)] public bool HasVariance;
+    public double Variance;
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -898,6 +984,9 @@ internal static class Native
     [DllImport(Lib)] internal static extern uint cadaclysm_joint_end(SceneHandle scene, uint joint);
     [DllImport(Lib)] internal static extern int cadaclysm_joint_pair_kind(SceneHandle scene, uint joint);
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_joint_pair_type(SceneHandle scene, uint joint);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_joint_pair_kind_name(SceneHandle scene, uint joint);
+    [DllImport(Lib)] internal static extern nuint cadaclysm_joint_pair_parameters(SceneHandle scene, uint joint,
+        double[]? @out, nuint capacity);
     [DllImport(Lib)] internal static extern double cadaclysm_joint_pair_pitch(SceneHandle scene, uint joint);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_joint_pair_frames(SceneHandle scene, uint joint,
@@ -924,6 +1013,37 @@ internal static class Native
         out uint state, out double t, out uint interpolation);
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_pose_sequence(SceneHandle scene, uint sequence,
         double t, uint ground);
+    [DllImport(Lib)] internal static extern uint cadaclysm_schedule_count(SceneHandle scene);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_schedule_name(SceneHandle scene, uint schedule);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_schedule_identification(SceneHandle scene, uint schedule);
+    [DllImport(Lib)] internal static extern uint cadaclysm_schedule_kind(SceneHandle scene, uint schedule);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_schedule_kind_name(SceneHandle scene, uint schedule);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_schedule_start(SceneHandle scene, uint schedule, out double outValue);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_schedule_finish(SceneHandle scene, uint schedule, out double outValue);
+    [DllImport(Lib)] internal static extern uint cadaclysm_task_count(SceneHandle scene, uint schedule);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_task_name(SceneHandle scene, uint schedule, uint task);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_task_identification(SceneHandle scene, uint schedule, uint task);
+    [DllImport(Lib)] internal static extern uint cadaclysm_task_kind(SceneHandle scene, uint schedule, uint task);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_task_kind_name(SceneHandle scene, uint schedule, uint task);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_task_status(SceneHandle scene, uint schedule, uint task);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_task_milestone(SceneHandle scene, uint schedule, uint task);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_task_parent(SceneHandle scene, uint schedule, uint task, out uint outValue);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_task_time(SceneHandle scene, uint schedule, uint task, out RawTaskTime outValue);
+    [DllImport(Lib)] internal static extern uint cadaclysm_task_node_count(SceneHandle scene, uint schedule, uint task);
+    [DllImport(Lib)] internal static extern uint cadaclysm_task_nodes(SceneHandle scene, uint schedule, uint task,
+        [Out] uint[]? outNodes, uint capacity);
+    [DllImport(Lib)] internal static extern uint cadaclysm_task_link_count(SceneHandle scene, uint schedule);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_task_link(SceneHandle scene, uint schedule, uint link,
+        out uint from, out uint to, out uint kind, out double lag, [MarshalAs(UnmanagedType.I1)] out bool hasLag);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_task_link_kind_name(SceneHandle scene, uint schedule, uint link);
+    [DllImport(Lib)] internal static extern long cadaclysm_schedule_at(SceneHandle scene, uint schedule, double date,
+        uint dates, [Out] RawElementState[]? outStates, uint capacity);
     [DllImport(Lib)] internal static extern void cadaclysm_pose_free(IntPtr pose);
     [DllImport(Lib)] internal static extern uint cadaclysm_pose_ground(IntPtr pose);
     [DllImport(Lib)] internal static extern uint cadaclysm_pose_node_count(IntPtr pose);
@@ -931,6 +1051,8 @@ internal static class Native
         [Out] double[] outMatrix);
     [DllImport(Lib)] internal static extern uint cadaclysm_pose_unsolved_count(IntPtr pose);
     [DllImport(Lib)] internal static extern uint cadaclysm_pose_unsolved(IntPtr pose, uint index);
+    [DllImport(Lib)] internal static extern uint cadaclysm_pose_diagnostic_count(IntPtr pose);
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_pose_diagnostic(IntPtr pose, uint index);
     [DllImport(Lib)] internal static extern uint cadaclysm_pose_out_of_range_count(IntPtr pose);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_pose_out_of_range(IntPtr pose, uint index, out uint joint,
@@ -1005,6 +1127,8 @@ internal static class Native
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_node_svg(SceneHandle scene, uint node,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string path, ref RawSvgOptions options);
+    // BORROWED into a per-scene slot that the next silhouette call on that scene replaces.
+    [DllImport(Lib)] internal static extern RawBeziers64 cadaclysm_node_silhouette_beziers(SceneHandle scene, uint node, ref RawSvgOptions options);
 }
 
 /// <summary>A 4x4 column-major ABI matrix (16 doubles or 16 floats) as the row-major 2D array
@@ -1400,7 +1524,12 @@ public sealed class Beziers64
 }
 
 /// <summary>A <see cref="Beziers64"/> in memory of your own.</summary>
-public sealed record BeziersData64(double[] Points, double[] Weights);
+public sealed record BeziersData64(double[] Points, double[] Weights)
+{
+    /// <summary>How many curves: <see cref="Weights"/> holds four a curve, <see cref="Points"/>
+    /// twelve.</summary>
+    public int Count => Weights.Length / 4;
+}
 
 /// <summary>What a node turned out to be for a physics engine: a box, sphere, capsule or
 /// cylinder where one fits within <see cref="Error"/>, else a convex hull. <see cref="Frame"/>
@@ -1721,6 +1850,34 @@ public sealed class Pair
         }
     }
 
+    /// <summary>The kind by name, finer than <see cref="Kind"/>: the same thirteen names
+    /// (`"spherical_with_pin"`, ...), and `"gear"` and `"rack_and_pinion"` for the two coupled
+    /// pairs <see cref="Kind"/> reads as <see cref="PairKind.Other"/>.</summary>
+    public string KindName
+    {
+        get
+        {
+            var raw = Native.cadaclysm_joint_pair_kind_name(_scene.Handle, _joint);
+            if (raw != IntPtr.Zero) return Marshal.PtrToStringUTF8(raw) ?? "";
+            return System.Text.RegularExpressions.Regex.Replace(Kind.ToString(), "(?<!^)([A-Z])", "_$1").ToLowerInvariant();
+        }
+    }
+
+    /// <summary>The pair's own numbers, in the order <c>Assembly.PairWith</c> takes them:
+    /// `"screw"` [pitch], `"rack_and_pinion"` [pinion_radius], `"gear"` [radius_first,
+    /// radius_second, ratio, bevel, helical_angle] (always five, the ratio the second link's
+    /// rotation over the first's); empty for every other kind.</summary>
+    public IReadOnlyList<double> Parameters
+    {
+        get
+        {
+            var count = Native.cadaclysm_joint_pair_parameters(_scene.Handle, _joint, null, 0);
+            var values = new double[(int)count];
+            if (count > 0) Native.cadaclysm_joint_pair_parameters(_scene.Handle, _joint, values, count);
+            return values;
+        }
+    }
+
     /// <summary>For <see cref="PairKind.Screw"/>: its pitch, a length per revolution in the
     /// scene's units. Null otherwise.</summary>
     public double? Pitch
@@ -1936,6 +2093,277 @@ public sealed class Sequence : IEquatable<Sequence>
     public override string ToString() => $"<Sequence {Index} {Name}>";
 }
 
+/// <summary>What one element is doing on a date: <see cref="WorkSchedule.At"/>'s rows.
+/// `Phase` is `"unbuilt"`, `"building"`, `"built"`, `"demolishing"` or `"demolished"`;
+/// `Progress` is 0..1 through the window that governs the phase; `Variance` is the seconds
+/// late (positive) or early (negative) against the schedule, or null where there is none to
+/// give.</summary>
+public sealed class ElementState
+{
+    public Node Node { get; }
+    public string Phase { get; }
+    public double Progress { get; }
+    public double? Variance { get; }
+
+    internal ElementState(Node node, string phase, double progress, double? variance)
+    {
+        Node = node;
+        Phase = phase;
+        Progress = progress;
+        Variance = variance;
+    }
+
+    public override string ToString() => $"<ElementState {Node.Name} {Phase} {Progress:F2}>";
+}
+
+/// <summary>Every date pair a task gives, each seconds since 1970-01-01T00:00 (no zone;
+/// <c>DateTime.UnixEpoch.AddSeconds(seconds)</c> converts) or null where the file gives none,
+/// and `Duration` in seconds. From <see cref="ScheduleTask.Time"/>.</summary>
+public sealed class TaskTime
+{
+    public double? ScheduleStart { get; }
+    public double? ScheduleFinish { get; }
+    public double? EarlyStart { get; }
+    public double? EarlyFinish { get; }
+    public double? LateStart { get; }
+    public double? LateFinish { get; }
+    public double? ActualStart { get; }
+    public double? ActualFinish { get; }
+    public double? Duration { get; }
+
+    internal TaskTime(in RawTaskTime raw)
+    {
+        ScheduleStart = raw.HasScheduleStart ? raw.ScheduleStart : null;
+        ScheduleFinish = raw.HasScheduleFinish ? raw.ScheduleFinish : null;
+        EarlyStart = raw.HasEarlyStart ? raw.EarlyStart : null;
+        EarlyFinish = raw.HasEarlyFinish ? raw.EarlyFinish : null;
+        LateStart = raw.HasLateStart ? raw.LateStart : null;
+        LateFinish = raw.HasLateFinish ? raw.LateFinish : null;
+        ActualStart = raw.HasActualStart ? raw.ActualStart : null;
+        ActualFinish = raw.HasActualFinish ? raw.ActualFinish : null;
+        Duration = raw.HasDuration ? raw.Duration : null;
+    }
+
+    public override string ToString() => $"<TaskTime start={ScheduleStart} finish={ScheduleFinish} duration={Duration}>";
+}
+
+/// <summary>One task of a <see cref="WorkSchedule"/>. From <see cref="WorkSchedule.Tasks"/>.
+/// Named `ScheduleTask` because `System.Threading.Tasks.Task` sits in most files' usings.
+/// `Kind` is `"attendance"`, `"construction"`, `"demolition"`, `"dismantle"`, `"disposal"`,
+/// `"installation"`, `"logistic"`, `"maintenance"`, `"move"`, `"operation"`, `"removal"`,
+/// `"renovation"`, `"notdefined"` or `"other"`; `KindName` is the text of a user-defined one.
+/// `Parent` is the summary task nesting it, null at the top. `Nodes` are the nodes it builds
+/// or removes.</summary>
+public sealed class ScheduleTask : IEquatable<ScheduleTask>
+{
+    private static readonly string[] Kinds =
+    {
+        "attendance", "construction", "demolition", "dismantle", "disposal", "installation",
+        "logistic", "maintenance", "move", "operation", "removal", "renovation", "notdefined", "other",
+    };
+
+    /// <summary>The schedule it belongs to.</summary>
+    public WorkSchedule Schedule { get; }
+    public uint Index { get; }
+
+    internal ScheduleTask(WorkSchedule schedule, uint index)
+    {
+        Schedule = schedule;
+        Index = index;
+    }
+
+    private SceneHandle Handle => Schedule.Scene.Handle;
+
+    public string Name => Marshal.PtrToStringUTF8(Native.cadaclysm_task_name(Handle, Schedule.Index, Index)) ?? "";
+
+    /// <summary>Its identification, empty where none.</summary>
+    public string Identification => Marshal.PtrToStringUTF8(Native.cadaclysm_task_identification(Handle, Schedule.Index, Index)) ?? "";
+
+    public string Kind
+    {
+        get
+        {
+            var kind = Native.cadaclysm_task_kind(Handle, Schedule.Index, Index);
+            return kind < Kinds.Length ? Kinds[kind] : "notdefined";
+        }
+    }
+
+    /// <summary>The text of a user-defined kind (`Kind` is `"other"`); empty otherwise.</summary>
+    public string KindName => Marshal.PtrToStringUTF8(Native.cadaclysm_task_kind_name(Handle, Schedule.Index, Index)) ?? "";
+
+    /// <summary>Its status as the file writes it, empty where none.</summary>
+    public string Status => Marshal.PtrToStringUTF8(Native.cadaclysm_task_status(Handle, Schedule.Index, Index)) ?? "";
+
+    /// <summary>Whether it is a milestone: an instant, not a span.</summary>
+    public bool Milestone => Native.cadaclysm_task_milestone(Handle, Schedule.Index, Index);
+
+    /// <summary>The summary task nesting it, or null for a top-level task.</summary>
+    public ScheduleTask? Parent =>
+        Native.cadaclysm_task_parent(Handle, Schedule.Index, Index, out var parent) ? new ScheduleTask(Schedule, parent) : null;
+
+    /// <summary>Its dates.</summary>
+    public TaskTime Time
+    {
+        get
+        {
+            Native.cadaclysm_task_time(Handle, Schedule.Index, Index, out var raw);
+            return new TaskTime(raw);
+        }
+    }
+
+    /// <summary>The nodes it builds or removes.</summary>
+    public IReadOnlyList<Node> Nodes
+    {
+        get
+        {
+            var count = Native.cadaclysm_task_node_count(Handle, Schedule.Index, Index);
+            var indices = new uint[count];
+            Native.cadaclysm_task_nodes(Handle, Schedule.Index, Index, indices, count);
+            var found = new List<Node>((int)count);
+            foreach (var index in indices) found.Add(new Node(Schedule.Scene, index));
+            return found;
+        }
+    }
+
+    public bool Equals(ScheduleTask? other) => other is not null && other.Index == Index && other.Schedule.Equals(Schedule);
+    public override bool Equals(object? obj) => Equals(obj as ScheduleTask);
+    public override int GetHashCode() => HashCode.Combine(Schedule, Index);
+    public override string ToString() => $"<ScheduleTask {Index} {Name}>";
+}
+
+/// <summary>A sequence between two tasks of one schedule (`IfcRelSequence`). From
+/// <see cref="WorkSchedule.Links"/>. `From` is the predecessor, `To` the successor; `Kind` is
+/// `"finish_start"`, `"start_start"`, `"finish_finish"`, `"start_finish"`, `"notdefined"` or
+/// `"other"` (`KindName` is the text of a user-defined one, empty otherwise); `Lag` is the time
+/// lag in seconds, or null where the file gives none.</summary>
+public sealed class TaskLink
+{
+    public ScheduleTask From { get; }
+    public ScheduleTask To { get; }
+    public string Kind { get; }
+    public string KindName { get; }
+    public double? Lag { get; }
+
+    internal TaskLink(ScheduleTask from, ScheduleTask to, string kind, string kindName, double? lag)
+    {
+        From = from;
+        To = to;
+        Kind = kind;
+        KindName = kindName;
+        Lag = lag;
+    }
+
+    public override string ToString() => $"<TaskLink {From.Name} -> {To.Name} {Kind}>";
+}
+
+/// <summary>A building's programme: an `IfcWorkSchedule` and the tasks it controls. From
+/// <see cref="Scene.Schedules"/>. Dates are seconds since 1970-01-01T00:00, no zone
+/// (<c>DateTime.UnixEpoch.AddSeconds(seconds)</c> converts); durations and lags are seconds.
+/// <see cref="At"/> says what each element it names is doing on a date.</summary>
+public sealed class WorkSchedule : IEquatable<WorkSchedule>
+{
+    private static readonly string[] Kinds = { "planned", "actual", "baseline", "notdefined", "other" };
+    private static readonly string[] LinkKinds = { "finish_start", "start_start", "finish_finish", "start_finish", "notdefined", "other" };
+    private static readonly string[] Phases = { "unbuilt", "building", "built", "demolishing", "demolished" };
+
+    internal Scene Scene { get; }
+    public uint Index { get; }
+
+    internal WorkSchedule(Scene scene, uint index)
+    {
+        Scene = scene;
+        Index = index;
+    }
+
+    /// <summary>Its name, else its identification, else `schedule #k` (k from 1, in file
+    /// order).</summary>
+    public string Name => Marshal.PtrToStringUTF8(Native.cadaclysm_schedule_name(Scene.Handle, Index)) ?? "";
+
+    /// <summary>Its identification, empty where the file gives none.</summary>
+    public string Identification => Marshal.PtrToStringUTF8(Native.cadaclysm_schedule_identification(Scene.Handle, Index)) ?? "";
+
+    /// <summary>`"planned"`, `"actual"`, `"baseline"`, `"notdefined"` or `"other"`.</summary>
+    public string Kind
+    {
+        get
+        {
+            var kind = Native.cadaclysm_schedule_kind(Scene.Handle, Index);
+            return kind < Kinds.Length ? Kinds[kind] : "notdefined";
+        }
+    }
+
+    /// <summary>The text of a user-defined kind (`Kind` is `"other"`); empty otherwise.</summary>
+    public string KindName => Marshal.PtrToStringUTF8(Native.cadaclysm_schedule_kind_name(Scene.Handle, Index)) ?? "";
+
+    /// <summary>The schedule's start date, or null where the file gives none.</summary>
+    public double? Start => Native.cadaclysm_schedule_start(Scene.Handle, Index, out var value) ? value : null;
+
+    /// <summary>The schedule's finish date, or null where the file gives none.</summary>
+    public double? Finish => Native.cadaclysm_schedule_finish(Scene.Handle, Index, out var value) ? value : null;
+
+    /// <summary>Its tasks, in file order.</summary>
+    public IReadOnlyList<ScheduleTask> Tasks
+    {
+        get
+        {
+            var count = Native.cadaclysm_task_count(Scene.Handle, Index);
+            var found = new List<ScheduleTask>((int)count);
+            for (uint i = 0; i < count; i++) found.Add(new ScheduleTask(this, i));
+            return found;
+        }
+    }
+
+    /// <summary>Its task links (`IfcRelSequence`), in file order.</summary>
+    public IReadOnlyList<TaskLink> Links
+    {
+        get
+        {
+            var tasks = Tasks;
+            var count = Native.cadaclysm_task_link_count(Scene.Handle, Index);
+            var found = new List<TaskLink>((int)count);
+            for (uint i = 0; i < count; i++)
+            {
+                Native.cadaclysm_task_link(Scene.Handle, Index, i, out var from, out var to, out var kind, out var lag, out var hasLag);
+                found.Add(new TaskLink(tasks[(int)from], tasks[(int)to],
+                    kind < LinkKinds.Length ? LinkKinds[kind] : "notdefined",
+                    Marshal.PtrToStringUTF8(Native.cadaclysm_task_link_kind_name(Scene.Handle, Index, i)) ?? "",
+                    hasLag ? lag : null));
+            }
+            return found;
+        }
+    }
+
+    /// <summary>What each element this schedule names is doing on `date` (seconds since
+    /// 1970-01-01T00:00), in node order; an element no task names is not listed. `dates` is
+    /// `"scheduled"` (the default) or `"actual"` -- which of a task's dates to play, each actual
+    /// date overriding its scheduled one. Throws <see cref="ArgumentException"/> for any other
+    /// `dates` and <see cref="CadaclysmException"/> for a `date` that is not finite.</summary>
+    public IReadOnlyList<ElementState> At(double date, string dates = "scheduled")
+    {
+        uint which = dates switch
+        {
+            "scheduled" => 0,
+            "actual" => 1,
+            _ => throw new ArgumentException("dates must be 'scheduled' or 'actual'"),
+        };
+        var count = Native.cadaclysm_schedule_at(Scene.Handle, Index, date, which, null, 0);
+        if (count < 0) throw new CadaclysmException(Cadaclysm.LastErrorOr("schedule_at"));
+        var rows = new RawElementState[count];
+        Native.cadaclysm_schedule_at(Scene.Handle, Index, date, which, rows, (uint)count);
+        var found = new List<ElementState>(rows.Length);
+        foreach (var row in rows)
+            found.Add(new ElementState(new Node(Scene, row.Node),
+                row.Phase < Phases.Length ? Phases[row.Phase] : "unbuilt", row.Progress,
+                row.HasVariance ? row.Variance : null));
+        return found;
+    }
+
+    public bool Equals(WorkSchedule? other) => other is not null && other.Index == Index && ReferenceEquals(other.Scene, Scene);
+    public override bool Equals(object? obj) => Equals(obj as WorkSchedule);
+    public override int GetHashCode() => HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(Scene), Index);
+    public override string ToString() => $"<WorkSchedule {Index} {Name}>";
+}
+
 /// <summary>A posed mechanism: <see cref="Scene.Pose"/> or <see cref="Scene.PoseState"/>'s
 /// answer. The document itself is unchanged.
 ///
@@ -1955,12 +2383,19 @@ public sealed class Pose
     /// range.</summary>
     public IReadOnlyList<(Joint Joint, uint Freedom, double Value)> OutOfRange { get; }
 
+    /// <summary>What the couplings (gear, rack and pinion, a loop-closing screw) could not
+    /// solve, or found disagreeing, in file order, in the kernel's words:
+    /// `coupling 'mesh': both 'a' and 'b' are given and disagree by 0.1`.</summary>
+    public IReadOnlyList<string> Diagnostics { get; }
+
     private readonly double[][] _transforms;
     private readonly Scene _scene;
 
     internal Pose(Scene scene, Link ground, IReadOnlyList<Joint> unsolved,
-        IReadOnlyList<(Joint, uint, double)> outOfRange, double[][] transforms)
+        IReadOnlyList<(Joint, uint, double)> outOfRange, double[][] transforms,
+        IReadOnlyList<string>? diagnostics = null)
     {
+        Diagnostics = diagnostics ?? Array.Empty<string>();
         _scene = scene;
         Ground = ground;
         Unsolved = unsolved;
@@ -2780,6 +3215,35 @@ public sealed class Node : IEquatable<Node>
             throw new CadaclysmException(Cadaclysm.LastErrorOr($"could not write {path}"));
     }
 
+    /// <summary>This node's silhouette from the camera <paramref name="options"/> describes --
+    /// where its surfaces turn away from the eye, which no edge of it lies on. The same
+    /// <see cref="SvgOptions"/> that draw a picture: `View`, `Azimuth`, `Elevation`, `Up`, `Fov`,
+    /// and `Width` with `Tolerance`, which matter here -- the library reads the tolerance as a
+    /// fraction of the page, `Tolerance / Width`. Nothing else in the options changes the curves.
+    /// <para><b>A copy, unlike <see cref="EdgeBeziers64"/>.</b> The library keeps one silhouette
+    /// slot per scene and the next silhouette call on that scene overwrites it, so a view over it
+    /// would change under the caller; this copies out of the slot (`Beziers64.Copy`) before it
+    /// returns. Calls sharing a scene across threads must serialise, as the library documents.
+    /// </para>
+    /// A body with no silhouette (every face planar) gives a result with <see
+    /// cref="BeziersData64.Count"/> 0, which is not an error; a refused option, a body with no
+    /// measurable geometry or a node holding no shape of its own throws <see
+    /// cref="CadaclysmException"/>.</summary>
+    public BeziersData64 SilhouetteBeziers(SvgOptions? options = null)
+    {
+        var raw = Cadaclysm.BuildSvgOptions(options, Scene.DefaultUp);
+        var curves = Native.cadaclysm_node_silhouette_beziers(Scene.Handle, Index, ref raw);
+        if (curves.Points == IntPtr.Zero || curves.Count == 0)
+        {
+            // The call clears the thread's error at entry and the empty answer sets none: a
+            // reason here is this call's own refusal, none is the empty answer.
+            var reason = Marshal.PtrToStringUTF8(Native.cadaclysm_last_error());
+            if (!string.IsNullOrEmpty(reason)) throw new CadaclysmException(reason);
+            return new BeziersData64(Array.Empty<double>(), Array.Empty<double>());
+        }
+        return new Beziers64(Scene, curves).Copy();
+    }
+
     /// <summary>`(r, g, b, a)` if the file gave one, else null -- most STEP files carry no
     /// colour at all, and the honest answer lets the caller use its own.</summary>
     public float[]? Colour
@@ -3328,6 +3792,19 @@ public sealed class Scene : IDisposable
         }
     }
 
+    /// <summary>The file's IFC work schedules (`IfcWorkSchedule` and the tasks it controls), in
+    /// file order; empty for a file that records none.</summary>
+    public IReadOnlyList<WorkSchedule> Schedules
+    {
+        get
+        {
+            var count = Native.cadaclysm_schedule_count(Handle);
+            var found = new List<WorkSchedule>((int)count);
+            for (uint i = 0; i < count; i++) found.Add(new WorkSchedule(this, i));
+            return found;
+        }
+    }
+
     /// <summary>The link the file declares as the mechanism's base, or null when it declares
     /// none (the default ground is then the link on the most joints; see <see
     /// cref="Pose"/>).</summary>
@@ -3418,7 +3895,13 @@ public sealed class Scene : IDisposable
                 if (Native.cadaclysm_pose_out_of_range(ptr, i, out var joint, out var freedom, out var value))
                     outOfRange.Add((new Joint(this, joint), freedom, value));
             }
-            return new Pose(this, ground, unsolved, outOfRange, transforms);
+            var diagnostics = new List<string>();
+            for (uint i = 0; i < Native.cadaclysm_pose_diagnostic_count(ptr); i++)
+            {
+                var raw = Native.cadaclysm_pose_diagnostic(ptr, i);
+                if (raw != IntPtr.Zero) diagnostics.Add(Marshal.PtrToStringUTF8(raw) ?? "");
+            }
+            return new Pose(this, ground, unsolved, outOfRange, transforms, diagnostics);
         }
         finally
         {
@@ -3789,8 +4272,8 @@ public static class Cadaclysm
         raw.Margin = o.Margin;
         raw.Tolerance = o.Tolerance;
         raw.StrokeWidth = o.StrokeWidth;
-        raw.Stroke = Packed(o.Stroke);
-        raw.Background = o.Background ?? 0xFFFFFFFFu; // CADACLYSM_SVG_TRANSPARENT
+        raw.Stroke = o.Stroke.Packed("svg: stroke");
+        raw.Background = o.Background is { } background ? background.Packed("svg: background") : 0xFFFFFFFFu; // CADACLYSM_SVG_TRANSPARENT
         raw.Flags = (o.Edges ? 1u : 0u) | (o.Curves ? 2u : 0u) | (o.Isocurves ? 4u : 0u) | (o.Polylines ? 8u : 0u)
             | (o.Silhouettes ? 16u : 0u);
         return raw;
@@ -3803,8 +4286,9 @@ public static class Cadaclysm
     private static bool TryParse(string colour, double[] rgb) => Native.cadaclysm_parse_colour(colour, rgb);
 
     /// <summary>A colour as the ABI's packed `0xRRGGBB`, from `"#rgb"`, `"#rrggbb"` or a CSS colour name --
-    /// for <see cref="SvgOptions.Background"/>, which takes the packed number. Takes no numeric
-    /// triple of its own, so its refusal lists only the text forms.</summary>
+    /// for a host that wants the number itself (<see cref="SvgOptions.Stroke"/>/<see
+    /// cref="SvgOptions.Background"/> take the text directly). Takes no numeric triple of its
+    /// own, so its refusal lists only the text forms.</summary>
     public static uint Packed(string colour)
     {
         var rgb = new double[3];

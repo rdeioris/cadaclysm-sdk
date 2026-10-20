@@ -1,4 +1,4 @@
-# cadaclysmConfig.cmake -- imported targets cadaclysm::reader, cadaclysm::blacksmith and,
+# cadaclysmConfig.cmake -- imported targets cadaclysm::reader, cadaclysm::blacksmith, cadaclysm::view_loader and,
 # where the library is there, cadaclysm::view.
 #
 # In a release archive this file sits at lib/cmake/cadaclysm/ and finds lib/ and
@@ -6,6 +6,7 @@
 #   find_package(cadaclysm CONFIG REQUIRED)
 #   target_link_libraries(app PRIVATE cadaclysm::blacksmith)   # or cadaclysm::reader
 #   target_link_libraries(app PRIVATE cadaclysm::view)       # the viewer; brings the reader
+#   target_link_libraries(app PRIVATE cadaclysm::view_loader)  # cadaclysm/view.hpp: opens the view library at run time
 #
 # Against a cargo target directory instead, set CADACLYSM_LIBRARY_DIR (the directory
 # holding the built libraries) and CADACLYSM_INCLUDE_DIRS before including this file,
@@ -89,7 +90,20 @@ _cadaclysm_import_optional(cadaclysm::view cadaclysm_view)
 if(TARGET cadaclysm::view)
   set_property(TARGET cadaclysm::view APPEND PROPERTY INTERFACE_LINK_LIBRARIES cadaclysm::reader)
 endif()
+# cadaclysm/view.hpp, the C++ view wrapper: it opens the view library (the terminal, wgpu,
+# any other) at run time, so it links none -- only the platform's dlopen. Where to look is
+# compiled in: this package's library directory, after the reader's and the executable's.
+# cadaclysm::view above stays the linked C library, for a host that calls cadaclysm_view.h.
+# The directory goes into a C string literal: forward slashes, so no backslash escapes.
+file(TO_CMAKE_PATH "${_cadaclysm_library_dir}" _cadaclysm_view_dir)
+add_library(cadaclysm::view_loader INTERFACE IMPORTED GLOBAL)
+set_target_properties(cadaclysm::view_loader PROPERTIES
+  INTERFACE_INCLUDE_DIRECTORIES "${_cadaclysm_include_dirs}"
+  INTERFACE_COMPILE_FEATURES cxx_std_17
+  INTERFACE_COMPILE_DEFINITIONS "CADACLYSM_VIEW_LIBRARY_DIR=\"${_cadaclysm_view_dir}\""
+  INTERFACE_LINK_LIBRARIES "${CMAKE_DL_LIBS}")
 set(cadaclysm_FOUND TRUE)
 unset(_cadaclysm_prefix)
 unset(_cadaclysm_library_dir)
+unset(_cadaclysm_view_dir)
 unset(_cadaclysm_include_dirs)

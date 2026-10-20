@@ -65,6 +65,7 @@
 // No progress callbacks: every call passes none, as every wrapper but Python does.
 import CCadaclysmBlacksmith
 import Cadaclysm
+import CadaclysmView
 import Foundation
 
 /// What the library refused, in its own words (`cadaclysm_blacksmith_last_error`).
@@ -138,6 +139,14 @@ func rgb(_ colour: String) throws -> SIMD3<Double> {
     return SIMD3(out[0], out[1], out[2])
 }
 
+/// An `SvgColour` packed through the kernel's own parser, for a kernel drawing.
+func kernelPacked(_ colour: SvgColour, _ what: String) throws -> UInt32 {
+    try colour.packed(what, parse: { text in
+        var out = [Double](repeating: 0, count: 3)
+        return cadaclysm_blacksmith_parse_colour(text, &out) ? SIMD3(out[0], out[1], out[2]) : nil
+    }, fail: { BuildError($0) })
+}
+
 /// Twelve numbers, as every call taking a frame reads them.
 func frameValues(_ values: [Double]) throws -> [Double] {
     guard values.count == 12 else { throw BuildError("frame: expected 12 numbers, got \(values.count)") }
@@ -154,6 +163,22 @@ func axisValues(_ axis: (origin: SIMD3<Double>, direction: SIMD3<Double>)) -> [D
 /// one in use (if any) stays.
 public func license(_ textOrPath: String) throws {
     if !cadaclysm_blacksmith_license_set(textOrPath) { throw failure("license refused") }
+}
+
+/// Set a kernel option, by its name, for the whole process from the next call on:
+/// `"boolean.mesh_budget"`, `"boolean.finest_tolerance"`, `"profile_boolean.point_budget"`
+/// or `"measure.default_accuracy"`. Throws -- and changes nothing -- for a name that is not
+/// an option or a value it does not take, saying which and what it takes.
+public func setOption(_ name: String, _ value: Double) throws {
+    if !cadaclysm_blacksmith_option_set(name, value) { throw failure("option '\(name)' refused") }
+}
+
+/// A kernel option's value, by its name: what `setOption` last set, else its default.
+/// Throws for a name that is not an option, listing the ones there are.
+public func option(_ name: String) throws -> Double {
+    var out: Double = 0
+    guard cadaclysm_blacksmith_option_get(name, &out) else { throw failure("no option '\(name)'") }
+    return out
 }
 
 /// One line about the license the library is running under: the license line, or, without
@@ -302,8 +327,11 @@ public func writeBrep(_ path: String, _ solids: [Solid]) throws {
 
 /// `options` packed into a `CadaclysmBlacksmithSvgOptions` -- as `Cadaclysm`'s own reader-side
 /// packing, but with no scene to default `up` from: a solid carries no convention of its own,
-/// so `options.up` falls back to `.z` rather than a scene's.
-func buildSvgOptions(_ options: SvgOptions) -> CadaclysmBlacksmithSvgOptions {
+/// so `options.up` falls back to `.z` rather than a scene's. Colour text in `stroke` or
+/// `background` is read by the kernel's own parser; text it refuses throws.
+func buildSvgOptions(_ options: SvgOptions) throws -> CadaclysmBlacksmithSvgOptions {
+    let stroke = try kernelPacked(options.stroke, "svg: stroke")
+    let background = try options.background.map { try kernelPacked($0, "svg: background") } ?? svgTransparent
     var raw = CadaclysmBlacksmithSvgOptions()
     cadaclysm_blacksmith_svg_options_init(&raw)
     let (baseAzimuth, baseElevation) = options.view.angles
@@ -316,8 +344,8 @@ func buildSvgOptions(_ options: SvgOptions) -> CadaclysmBlacksmithSvgOptions {
     raw.margin = options.margin
     raw.tolerance = options.tolerance
     raw.stroke_width = options.strokeWidth
-    raw.stroke = options.stroke
-    raw.background = options.background ?? svgTransparent
+    raw.stroke = stroke
+    raw.background = background
     raw.flags = (options.edges ? UInt32(1) : 0) | (options.curves ? UInt32(2) : 0)
         | (options.isocurves ? UInt32(4) : 0) | (options.polylines ? UInt32(8) : 0)
         | (options.silhouettes ? UInt32(16) : 0)
@@ -333,7 +361,7 @@ func buildSvgOptions(_ options: SvgOptions) -> CadaclysmBlacksmithSvgOptions {
 /// whether it is still called. The two pairs refuse in identical words either way.
 public func writeSvgText(_ solids: [Solid], options: SvgOptions = SvgOptions()) throws -> String {
     let handles: [OpaquePointer?] = try solids.map { try $0.h() }
-    var cOptions = buildSvgOptions(options)
+    var cOptions = try buildSvgOptions(options)
     let raw: UnsafeMutablePointer<CChar>? = withExtendedLifetime(solids) {
         withUnsafePointer(to: &cOptions) { cadaclysm_blacksmith_svg_text(handles, handles.count, $0) }
     }
@@ -346,7 +374,7 @@ public func writeSvgText(_ solids: [Solid], options: SvgOptions = SvgOptions()) 
 /// pair, for the same reason `writeSvgText` above does -- see its comment.
 public func writeSvg(_ path: String, _ solids: [Solid], options: SvgOptions = SvgOptions()) throws {
     let handles: [OpaquePointer?] = try solids.map { try $0.h() }
-    var cOptions = buildSvgOptions(options)
+    var cOptions = try buildSvgOptions(options)
     let ok = withExtendedLifetime(solids) {
         withUnsafePointer(to: &cOptions) { cadaclysm_blacksmith_svg(handles, handles.count, path, $0) }
     }
@@ -360,7 +388,7 @@ public func writeSvg(_ path: String, _ solids: [Solid], options: SvgOptions = Sv
 public func writeSvgText(_ solids: [Solid], _ profiles: [Profile], options: SvgOptions = SvgOptions()) throws -> String {
     let solidHandles: [OpaquePointer?] = try solids.map { try $0.h() }
     let profileHandles: [OpaquePointer?] = profiles.map { $0.handle }
-    var cOptions = buildSvgOptions(options)
+    var cOptions = try buildSvgOptions(options)
     let raw: UnsafeMutablePointer<CChar>? = withExtendedLifetime(solids) {
         withExtendedLifetime(profiles) {
             withUnsafePointer(to: &cOptions) {
@@ -377,7 +405,7 @@ public func writeSvgText(_ solids: [Solid], _ profiles: [Profile], options: SvgO
 public func writeSvg(_ path: String, _ solids: [Solid], _ profiles: [Profile], options: SvgOptions = SvgOptions()) throws {
     let solidHandles: [OpaquePointer?] = try solids.map { try $0.h() }
     let profileHandles: [OpaquePointer?] = profiles.map { $0.handle }
-    var cOptions = buildSvgOptions(options)
+    var cOptions = try buildSvgOptions(options)
     let ok = withExtendedLifetime(solids) {
         withExtendedLifetime(profiles) {
             withUnsafePointer(to: &cOptions) {
@@ -1447,6 +1475,28 @@ public final class Solid {
         return handle
     }
 
+    // MARK: Drawing
+
+    /// Draw the solid with the view library in use (`ViewLibrary.useWgpu()` /
+    /// `useTerminal()`, else CADACLYSM_VIEW, else the terminal): the wgpu library's window
+    /// blocks until it is closed; any other library prints a still. `options.tolerance` nil
+    /// is 0.05.
+    public func show(_ options: ShowOptions = ShowOptions()) throws {
+        _ = try draw(options, interactive: false)
+    }
+
+    /// Orbit the solid until its window is closed: where the camera was left, the last pick.
+    @discardableResult
+    public func view(_ options: ShowOptions = ShowOptions()) throws -> Camera {
+        try draw(options, interactive: true)
+    }
+
+    private func draw(_ options: ShowOptions, interactive: Bool) throws -> Camera {
+        defer { withExtendedLifetime(self) {} }
+        return try drawObject(solid: h(), scene: nil, tolerance: options.tolerance ?? 0.05, label: "Solid",
+                              defaultUp: .z, focus: nil, options: options, interactive: interactive)
+    }
+
     // MARK: Naming
 
     /// This solid, named `name`. The name rides through an operation with exactly one
@@ -2156,6 +2206,42 @@ public final class Solid {
         try writeSvg(path, [self], options: options)
     }
 
+    /// This solid's silhouette -- where its surfaces turn away from the eye, which no edge of it lies
+    /// on -- as rational cubic Béziers in `double`, from the camera `options` describes. The same
+    /// `SvgOptions` that draw a picture: `view`, `azimuth`, `elevation`, `up` and `fov`, and `width`
+    /// with `tolerance`, which the library reads together as the page fraction `tolerance / width`.
+    /// Nothing else in them changes the curves.
+    ///
+    /// The library hands over an owned block; this copies it out and releases it before it returns,
+    /// whichever way it returns, so there is nothing for the caller to free.
+    ///
+    /// A body with no silhouette (every face planar) is an empty answer (`count == 0`), not an error;
+    /// a refused option or a body with no measurable geometry throws.
+    public func silhouetteBeziers(_ options: SvgOptions = SvgOptions()) throws -> Beziers64 {
+        let h = try h()
+        var cOptions = try buildSvgOptions(options)
+        var count: UInt32 = 0
+        let data = withExtendedLifetime(self) {
+            withUnsafePointer(to: &cOptions) { cadaclysm_blacksmith_silhouette_beziers(h, $0, &count) }
+        }
+        guard let data else {
+            // The library clears the thread's error at entry and the empty answer sets none: a
+            // reason here is this call's own refusal, none is the empty answer.
+            if !lastError().isEmpty { throw failure("silhouette_beziers") }
+            return Beziers64(points: [], weights: [])
+        }
+        defer { cadaclysm_blacksmith_silhouette_beziers_free(data, count) }
+        let block = UnsafeBufferPointer(start: data, count: Int(count) * 16)
+        var points: [Double] = [], weights: [Double] = []
+        points.reserveCapacity(Int(count) * 12)
+        weights.reserveCapacity(Int(count) * 4)
+        for curve in 0..<Int(count) {
+            points.append(contentsOf: block[curve * 16 ..< curve * 16 + 12])
+            weights.append(contentsOf: block[curve * 16 + 12 ..< curve * 16 + 16])
+        }
+        return Beziers64(points: points, weights: weights)
+    }
+
     // MARK: Selecting
 
     /// The index of the face `selector` picks; throws when none does.
@@ -2456,6 +2542,17 @@ public final class Solid {
         return try all.lumps()
     }
 
+    /// This solid split by the closed `profile` drawn on `frame`, pushed straight through it
+    /// along the frame's z both ways: the bodies outside the profile first, then those inside.
+    /// Where the plane lies along z does not matter.
+    public func splitByProfile(_ profile: Profile, _ frame: Frame, tolerance: Double = 0.05) throws -> [Solid] {
+        let all = try withExtendedLifetime(profile) {
+            try Solid(cadaclysm_blacksmith_split_by_profile(try h(), profile.handle, frame.values, tolerance, nil, nil))
+        }
+        defer { all.close() }
+        return try all.lumps()
+    }
+
     /// This solid's connected bodies, each a solid of its own -- faces sharing an edge are one
     /// body -- in the order of their first faces. One body comes back as itself.
     public func lumps() throws -> [Solid] {
@@ -2640,6 +2737,8 @@ public final class Assembly {
         handle = try checked(cadaclysm_blacksmith_assembly_new(name), "assembly_new")
     }
 
+    private init(adopting handle: OpaquePointer) { self.handle = handle }
+
     deinit { close() }
 
     /// Free the assembly now. Idempotent; every call on it afterwards throws.
@@ -2771,6 +2870,46 @@ public final class Assembly {
         guard ok else { throw failure("assembly_pair") }
     }
 
+    /// `pair`, for every kind: `params` are the kind's own numbers -- `screw` `[pitch]`;
+    /// `rack_and_pinion` `[pinion_radius]`; `gear` `[radius_first, radius_second, ratio]` or
+    /// plus `[bevel, helical_angle]` in radians, the ratio being the second link's rotation
+    /// over the first's, signed; none for any other kind. Throws the kernel's own text when
+    /// a rule refuses it (a wrong count among them); the assembly is then unchanged.
+    public func pairWith(
+        _ joint: String, _ kind: String, _ frame: Frame,
+        endFrame: Frame? = nil, ranges: [(Double?, Double?)]? = nil, params: [Double] = []
+    ) throws {
+        let handle = try h()
+        let frameVals = try frameValues(frame.values)
+        let endFrameVals = try endFrame.map { try frameValues($0.values) }
+        // As in `pair`: non-nil `ranges` (even `[]`) must reach the ABI as non-null pointers.
+        let lower = ranges.map { $0.map { $0.0 ?? 0.0 } + [0.0] }
+        let upper = ranges.map { $0.map { $0.1 ?? 0.0 } + [0.0] }
+        let hasLower = ranges.map { $0.map { $0.0 != nil } + [false] }
+        let hasUpper = ranges.map { $0.map { $0.1 != nil } + [false] }
+        let count = ranges?.count ?? 0
+        // Padded like the ranges, so an empty `params` is still a non-null pointer; the
+        // count passed is the real one.
+        let paramVals = params + [0.0]
+
+        let ok = withOptionalArray(endFrameVals) { endPtr in
+            withOptionalArray(lower) { lowerPtr in
+                withOptionalArray(upper) { upperPtr in
+                    withOptionalArray(hasLower) { hasLowerPtr in
+                        withOptionalArray(hasUpper) { hasUpperPtr in
+                            cadaclysm_blacksmith_assembly_pair_with(
+                                handle, joint, kind, frameVals, endPtr,
+                                lowerPtr, upperPtr, hasLowerPtr, hasUpperPtr, count,
+                                paramVals, params.count
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        guard ok else { throw failure("assembly_pair_with") }
+    }
+
     /// Add a named state to this assembly: `rows` gives each joint's values, in its
     /// pair's freedom order, in the caller's order. Throws the kernel's own text when a
     /// rule refuses it; the assembly is then unchanged.
@@ -2791,6 +2930,35 @@ public final class Assembly {
             }
             guard ok else { throw failure("assembly_state") }
         }
+    }
+
+    /// This assembly with its mechanism posed, as a new `Assembly`: `rows` gives each joint's
+    /// values, in its pair's freedom order (radians, the assembly's units) -- a joint a path
+    /// of placement names then the joint's name joined by "/" (a "/" or "\" inside a name
+    /// escaped with "\"). `state` is a state's path, applied first and overridden row by row;
+    /// `ground` one of this assembly's own links, held fixed. A sub-assembly no row reaches is
+    /// shared with this one. No rows is allowed. Throws the kernel's own text when a rule
+    /// refuses it; this assembly is unchanged either way.
+    public func posed(
+        _ rows: [(String, [Double])] = [], state: String? = nil, ground: String? = nil
+    ) throws -> Assembly {
+        let handle = try h()
+        let joints = rows.map { $0.0 }
+        let counts = rows.map { UInt32($0.1.count) }
+        let flat = rows.flatMap { $0.1 }
+        let made: OpaquePointer? = try withCStrings(joints) { pointers in
+            pointers.withUnsafeBufferPointer { jointsBuf in
+                withOptionalArray(counts) { countsPtr in
+                    withOptionalArray(flat) { flatPtr in
+                        cadaclysm_blacksmith_assembly_posed(
+                            handle, jointsBuf.baseAddress, countsPtr, flatPtr, rows.count, state, ground
+                        )
+                    }
+                }
+            }
+        }
+        guard let made else { throw failure("assembly_posed") }
+        return Assembly(adopting: made)
     }
 
     /// Add a named motion sequence over this assembly's states: each segment is
@@ -3513,6 +3681,428 @@ public final class Collider {
             hits.append(CollisionHit(raw, collisions, i))
         }
         return hits
+    }
+}
+
+// MARK: - Subd
+
+/// One edge of a cage: a pair of vertex ids, as `Subd.creases`, `Subd.edgeLoop` and an edge
+/// selection hold them (the smaller id first where the kernel returns them).
+public struct SubdEdge: Equatable, CustomStringConvertible {
+    public var a: UInt32
+    public var b: UInt32
+
+    public init(_ a: UInt32, _ b: UInt32) {
+        self.a = a
+        self.b = b
+    }
+
+    public var description: String { "SubdEdge(\(a), \(b))" }
+}
+
+/// An axis of a mirror plane (`Subd.mirrorOn`, `Subd.symmetry`).
+public enum SubdAxis: Int, Equatable {
+    case x = 0, y = 1, z = 2
+}
+
+/// What a selection or a pick names: cage vertices, edges or faces.
+public enum SubdElements: Int, Equatable {
+    case vertices = 0, edges = 1, faces = 2
+}
+
+/// Cage elements: vertex ids, edges as vertex pairs, or face ids. What `Subd.selection`
+/// reads, `Subd.transform` takes and `Subd.pick` answers (one element).
+public enum SubdSelection: Equatable {
+    case vertices([UInt32])
+    case edges([SubdEdge])
+    case faces([UInt32])
+
+    /// Which kind of element this selects.
+    public var kind: SubdElements {
+        switch self {
+        case .vertices: return .vertices
+        case .edges: return .edges
+        case .faces: return .faces
+        }
+    }
+
+    /// The ids as the C ABI reads them: edges flat, two vertex ids each.
+    var flat: [UInt32] {
+        switch self {
+        case .vertices(let ids), .faces(let ids): return ids
+        case .edges(let edges): return edges.flatMap { [$0.a, $0.b] }
+        }
+    }
+}
+
+/// The mirror plane of a mirrored half: its `axis` and how far from it a vertex counts as on
+/// it (`Subd.symmetry`, `Subd.fromParts`).
+public struct SubdSymmetry: Equatable {
+    public var axis: SubdAxis
+    public var tolerance: Double
+
+    public init(_ axis: SubdAxis, tolerance: Double) {
+        self.axis = axis
+        self.tolerance = tolerance
+    }
+}
+
+/// One level of a cage's smooth surface, as `Subd.smoothMesh` returns it, copied out of the
+/// cage so it outlives it. `positions` and `normals` are limit positions and unit outward
+/// limit normals; `indices` is three vertex ids a triangle; `triangleFace` is the face of the
+/// **full** cage each triangle lies on (on a mirrored half, face `f` of the half is `f` and
+/// its reflection `f + faces.count`).
+public struct SubdMesh {
+    public let positions: [SIMD3<Double>]
+    public let normals: [SIMD3<Double>]
+    public let indices: [UInt32]
+    public let triangleFace: [UInt32]
+
+    init(_ raw: CadaclysmBlacksmithSubdMesh) {
+        func vectors(_ pointer: UnsafePointer<Double>?, _ count: Int) -> [SIMD3<Double>] {
+            guard let pointer, count > 0 else { return [] }
+            return (0..<count).map { SIMD3(pointer[3 * $0], pointer[3 * $0 + 1], pointer[3 * $0 + 2]) }
+        }
+        func ids(_ pointer: UnsafePointer<UInt32>?, _ count: Int) -> [UInt32] {
+            guard let pointer, count > 0 else { return [] }
+            return Array(UnsafeBufferPointer(start: pointer, count: count))
+        }
+        let n = Int(raw.vertex_count), m = Int(raw.index_count)
+        positions = vectors(raw.positions, n)
+        normals = vectors(raw.normals, n)
+        indices = ids(raw.indices, m)
+        triangleFace = ids(raw.triangle_face, m / 3)
+    }
+}
+
+/// What `Subd.toSolid` did and how close it came: `regular` patches exact from their own net
+/// and `refined` ones from a refined neighbourhood; the Catmull-Clark `steps` taken first (1
+/// or 2); `levels`, the deepest local refinement a patch took (0 when none was refined); the
+/// largest `deviation` from the limit surface, as a fraction of the cage's bounding-box
+/// diagonal; the largest tangent break `g1AngleDeg` across a side that is not creased, in
+/// degrees; and the world points they were measured at, `deviationAt` and `g1At`.
+public struct SubdReport: Equatable {
+    public let regular: UInt32
+    public let refined: UInt32
+    public let steps: UInt32
+    public let levels: UInt32
+    public let deviation: Double
+    public let g1AngleDeg: Double
+    public let deviationAt: SIMD3<Double>
+    public let g1At: SIMD3<Double>
+
+    init(_ raw: CadaclysmBlacksmithSubdReport) {
+        regular = raw.regular
+        refined = raw.refined
+        steps = raw.steps
+        levels = raw.levels
+        deviation = raw.deviation
+        g1AngleDeg = raw.g1_angle_deg
+        deviationAt = SIMD3(raw.deviation_at.0, raw.deviation_at.1, raw.deviation_at.2)
+        g1At = SIMD3(raw.g1_at.0, raw.g1_at.1, raw.g1_at.2)
+    }
+}
+
+/// A Catmull-Clark control cage: positions, faces, creased edges, pinned vertices, an
+/// optional mirror plane, and the selection of the edit that made it. Immutable: every edit
+/// returns a new `Subd`, with `selection` naming what that edit touched. `toSolid` turns it
+/// into an exact B-rep. `close()` frees this handle; so does `deinit`. A refusal throws
+/// `BuildError` with the kernel's own words; a closed cage throws `subd: closed`.
+public final class Subd {
+    private var handle: OpaquePointer?
+
+    init(_ raw: OpaquePointer?, _ what: String = "subd") throws {
+        handle = try checked(raw, what)
+    }
+
+    deinit { close() }
+
+    /// Free the cage now. Idempotent; every call on the cage throws after. A `SubdMesh`
+    /// already read is a copy and reads on regardless.
+    public func close() {
+        if let handle { cadaclysm_blacksmith_subd_free(handle) }
+        handle = nil
+    }
+
+    /// Whether `close()` has run.
+    public var isClosed: Bool { handle == nil }
+
+    func h() throws -> OpaquePointer {
+        guard let handle else { throw BuildError("subd: closed") }
+        return handle
+    }
+
+    // MARK: The primitives
+
+    /// A box of `size` (x, y, z), centred on the origin, with `segments` quads along each
+    /// axis (1 to 1024).
+    public static func cuboid(size: SIMD3<Double> = SIMD3(2, 2, 2),
+                              segments: (UInt32, UInt32, UInt32) = (1, 1, 1)) throws -> Subd {
+        try Subd(cadaclysm_blacksmith_subd_cuboid(size.x, size.y, size.z, segments.0, segments.1, segments.2),
+                 "subd_cuboid")
+    }
+
+    /// A cylinder along +Z: one n-gon cap per end with `sides` sides and `rings` bands of
+    /// quads between them; with `creasedRims` the two rim loops are creased, so the caps stay
+    /// flat. The rims are creased by default, which is what converts: an uncreased cylinder of
+    /// 7 or more sides is refused by `toSolid` at the default tolerances.
+    public static func cylinder(radius: Double = 1.0, height: Double = 2.0, sides: UInt32 = 8, rings: UInt32 = 1,
+                                creasedRims: Bool = true) throws -> Subd {
+        try Subd(cadaclysm_blacksmith_subd_cylinder(radius, height, sides, rings, creasedRims), "subd_cylinder")
+    }
+
+    /// A quad ball of `radius`: a cube grid with `segments` quads per edge (at most 1024),
+    /// each vertex pushed out to the radius.
+    public static func sphere(radius: Double = 1.0, segments: UInt32 = 2) throws -> Subd {
+        try Subd(cadaclysm_blacksmith_subd_sphere(radius, segments), "subd_sphere")
+    }
+
+    /// A torus around +Z: `around` steps about the axis at `major`, `tube` steps round the
+    /// tube of `minor`, all quads.
+    public static func torus(major: Double = 3.0, minor: Double = 1.0, around: UInt32 = 12,
+                             tube: UInt32 = 8) throws -> Subd {
+        try Subd(cadaclysm_blacksmith_subd_torus(major, minor, around, tube), "subd_torus")
+    }
+
+    /// A cage from its parts, the lossless inverse of reading them back: `positions`, `faces`
+    /// lists of vertex ids, `creases` pairs that are edges, `pins` vertex ids, and `symmetry`
+    /// nil or the mirror plane of a mirrored half, as `symmetry` reports it. The new cage
+    /// selects nothing.
+    public static func fromParts(_ positions: [SIMD3<Double>], _ faces: [[UInt32]], creases: [SubdEdge] = [],
+                                 pins: [UInt32] = [], symmetry: SubdSymmetry? = nil) throws -> Subd {
+        var flat: [Double] = []
+        flat.reserveCapacity(positions.count * 3)
+        for p in positions { flat.append(contentsOf: [p.x, p.y, p.z]) }
+        let sizes = faces.map { UInt32($0.count) }
+        let loop = faces.flatMap { $0 }
+        let creaseIds = creases.flatMap { [$0.a, $0.b] }
+        let axis = Int32(symmetry?.axis.rawValue ?? -1)
+        return try Subd(cadaclysm_blacksmith_subd_from_parts(
+            flat, UInt32(positions.count), sizes, UInt32(sizes.count), loop, UInt32(loop.count),
+            creaseIds, UInt32(creases.count), pins, UInt32(pins.count), axis, symmetry?.tolerance ?? 0.0),
+                 "subd_from_parts")
+    }
+
+    // MARK: The parts
+
+    /// `read` over this cage's parts while their views are alive.
+    private func withParts<T>(_ read: (CadaclysmBlacksmithSubdParts) -> T) throws -> T {
+        var parts = CadaclysmBlacksmithSubdParts()
+        let handle = try h()
+        return try withExtendedLifetime(self) {
+            if !cadaclysm_blacksmith_subd_parts(handle, &parts) { throw failure("subd_parts") }
+            return read(parts)
+        }
+    }
+
+    private static func ids(_ pointer: UnsafePointer<UInt32>?, _ count: Int) -> [UInt32] {
+        guard let pointer, count > 0 else { return [] }
+        return Array(UnsafeBufferPointer(start: pointer, count: count))
+    }
+
+    private static func edges(_ flat: [UInt32]) -> [SubdEdge] {
+        stride(from: 0, to: flat.count - 1, by: 2).map { SubdEdge(flat[$0], flat[$0 + 1]) }
+    }
+
+    /// The cage's vertices: a copy.
+    public var positions: [SIMD3<Double>] {
+        get throws {
+            try withParts { p in
+                guard let pointer = p.positions, p.vertex_count > 0 else { return [] }
+                return (0..<Int(p.vertex_count)).map {
+                    SIMD3(pointer[3 * $0], pointer[3 * $0 + 1], pointer[3 * $0 + 2])
+                }
+            }
+        }
+    }
+
+    /// Each face's vertex ids, in loop order.
+    public var faces: [[UInt32]] {
+        get throws {
+            try withParts { p in
+                let sizes = Subd.ids(p.face_sizes, Int(p.face_count))
+                let loop = Subd.ids(p.face_indices, Int(p.index_count))
+                var faces: [[UInt32]] = []
+                var at = 0
+                for size in sizes {
+                    faces.append(Array(loop[at..<at + Int(size)]))
+                    at += Int(size)
+                }
+                return faces
+            }
+        }
+    }
+
+    /// The creased edges, each (smaller id, larger id), sorted.
+    public var creases: [SubdEdge] {
+        get throws {
+            try withParts { p in Subd.edges(Subd.ids(p.creases, 2 * Int(p.crease_count))) }
+        }
+    }
+
+    /// The pinned vertices: they refine as corners and stay put.
+    public var pins: [UInt32] {
+        get throws { try withParts { p in Subd.ids(p.pins, Int(p.pin_count)) } }
+    }
+
+    /// nil for an ordinary cage; for a mirrored half the plane's axis and how far from it a
+    /// vertex counts as on it.
+    public var symmetry: SubdSymmetry? {
+        get throws {
+            try withParts { p in
+                guard p.symmetry_axis >= 0, let axis = SubdAxis(rawValue: Int(p.symmetry_axis)) else { return nil }
+                return SubdSymmetry(axis, tolerance: p.symmetry_tolerance)
+            }
+        }
+    }
+
+    /// What the edit that made this cage touched; nil for a cage no edit selected (a
+    /// primitive, `fromParts`, the mirror calls).
+    public var selection: SubdSelection? {
+        get throws {
+            try withParts { p in
+                switch p.selection_kind {
+                case 0: return .vertices(Subd.ids(p.selection, Int(p.selection_count)))
+                case 1: return .edges(Subd.edges(Subd.ids(p.selection, 2 * Int(p.selection_count))))
+                case 2: return .faces(Subd.ids(p.selection, Int(p.selection_count)))
+                default: return nil
+                }
+            }
+        }
+    }
+
+    // MARK: The edits
+
+    /// A new cage from `make` over this one's handle, kept alive for the call.
+    private func edit(_ what: String, _ make: (OpaquePointer) -> OpaquePointer?) throws -> Subd {
+        let handle = try h()
+        return try withExtendedLifetime(self) { try Subd(make(handle), what) }
+    }
+
+    /// A new cage with the selected elements moved by `matrix`: sixteen numbers column-major
+    /// (a rotation about a point is baked in by the caller). The new cage selects the same
+    /// elements.
+    public func transform(_ selection: SubdSelection, _ matrix: [Double]) throws -> Subd {
+        guard matrix.count == 16 else {
+            throw BuildError("transform: matrix must be 16 numbers (column-major), not \(matrix.count)")
+        }
+        let ids = selection.flat
+        let count = UInt32(selection.kind == .edges ? ids.count / 2 : ids.count)
+        return try edit("subd_transform") {
+            cadaclysm_blacksmith_subd_transform($0, UInt32(selection.kind.rawValue), ids, count, matrix)
+        }
+    }
+
+    /// A new cage with `edges` creased, or un-creased when `on` is false; it selects them.
+    public func crease(_ edges: [SubdEdge], on: Bool = true) throws -> Subd {
+        let flat = edges.flatMap { [$0.a, $0.b] }
+        return try edit("subd_set_crease") {
+            cadaclysm_blacksmith_subd_set_crease($0, flat, UInt32(edges.count), on)
+        }
+    }
+
+    /// A new cage with `vertices` pinned (they refine as corners and stay put), or released
+    /// when `on` is false; it selects them.
+    public func pin(_ vertices: [UInt32], on: Bool = true) throws -> Subd {
+        try edit("subd_set_pin") { cadaclysm_blacksmith_subd_set_pin($0, vertices, UInt32(vertices.count), on) }
+    }
+
+    /// A new cage with `faces` pushed out by `distance` along each connected region's average
+    /// normal, a quad wall on each boundary edge; the moved faces keep their ids and the new
+    /// cage selects them.
+    public func extrude(_ faces: [UInt32], _ distance: Double) throws -> Subd {
+        try edit("subd_extrude") { cadaclysm_blacksmith_subd_extrude($0, faces, UInt32(faces.count), distance) }
+    }
+
+    /// A new cage with `faces` shrunk by `amount`, in (0, 1), within their surface and a ring
+    /// of quads round each region (each face, with `individual`); the new cage selects the
+    /// inner faces.
+    public func inset(_ faces: [UInt32], _ amount: Double, individual: Bool = false) throws -> Subd {
+        try edit("subd_inset") {
+            cadaclysm_blacksmith_subd_inset($0, faces, UInt32(faces.count), amount, individual)
+        }
+    }
+
+    /// A new cage with a loop of edges cut across the ring of quads through `edge`, at
+    /// `a + at * (b - a)` with `at` in (0, 1); it selects the new loop.
+    public func insertLoop(_ edge: SubdEdge, at: Double = 0.5) throws -> Subd {
+        try edit("subd_insert_loop") { cadaclysm_blacksmith_subd_insert_loop($0, edge.a, edge.b, at) }
+    }
+
+    /// The loop of edges through `edge`, straight across each valence-four vertex, the picked
+    /// edge first, each pair smaller id first; empty when `edge` is not an edge of the cage.
+    public func edgeLoop(_ edge: SubdEdge) throws -> [SubdEdge] {
+        let looped = try edit("subd_edge_loop") { cadaclysm_blacksmith_subd_edge_loop($0, edge.a, edge.b) }
+        defer { looped.close() }
+        guard case .edges(let loop)? = try looped.selection else { return [] }
+        return loop
+    }
+
+    /// The positive half of the cage across the plane perpendicular to `axis` as a mirrored
+    /// cage: every later edit keeps it symmetric.
+    public func mirrorOn(_ axis: SubdAxis) throws -> Subd {
+        try edit("subd_mirror_on") { cadaclysm_blacksmith_subd_mirror_on($0, UInt32(axis.rawValue)) }
+    }
+
+    /// The mirror baked: the whole cage as an ordinary one, no longer mirrored.
+    public func mirrorOff() throws -> Subd {
+        try edit("subd_mirror_off") { cadaclysm_blacksmith_subd_mirror_off($0) }
+    }
+
+    /// The whole cage of a mirrored half -- the half's vertices first, then the reflections of
+    /// those off the plane -- or a copy of an ordinary cage.
+    public func full() throws -> Subd {
+        try edit("subd_full") { cadaclysm_blacksmith_subd_full($0) }
+    }
+
+    // MARK: The surface
+
+    /// The smooth surface refined `levels` times (1 to 6), as a `SubdMesh` of copies.
+    public func smoothMesh(_ levels: UInt32 = 3) throws -> SubdMesh {
+        var raw = CadaclysmBlacksmithSubdMesh()
+        let handle = try h()
+        return try withExtendedLifetime(self) {
+            if !cadaclysm_blacksmith_subd_smooth_mesh(handle, levels, &raw) { throw failure("subd_smooth_mesh") }
+            return SubdMesh(raw)
+        }
+    }
+
+    /// The cage element of `kind` under `point`, a point on or near the smooth surface: one
+    /// vertex or face id, or an edge as a pair with the smaller id first, as a one-element
+    /// `SubdSelection`. nil when nothing is within 0.05 of the cage's diagonal -- not an
+    /// error; a point that is not finite is refused.
+    public func pick(_ point: SIMD3<Double>, _ kind: SubdElements) throws -> SubdSelection? {
+        var out: [UInt32] = [0, 0]
+        let handle = try h()
+        let found = withExtendedLifetime(self) {
+            cadaclysm_blacksmith_subd_pick(handle, [point.x, point.y, point.z], UInt32(kind.rawValue), &out)
+        }
+        if !found {
+            if lastError().isEmpty { return nil }
+            throw failure("subd_pick")
+        }
+        switch kind {
+        case .vertices: return .vertices([out[0]])
+        case .edges: return .edges([SubdEdge(out[0], out[1])])
+        case .faces: return .faces([out[0]])
+        }
+    }
+
+    /// The cage as an exact solid, one NURBS face per patch, and a `SubdReport` of what the
+    /// conversion did. `tolerance` is the largest deviation from the limit surface as a
+    /// fraction of the cage's diagonal, `g1Angle` the largest tangent break across an
+    /// uncreased side in degrees, `maxLevels` the deepest local refinement (2 to 6). A
+    /// `tolerance` or `g1Angle` of 0 or less, or a `maxLevels` of 0, takes the default; any
+    /// other `maxLevels` outside 2 to 6 is refused. A cage that cannot be held within them is
+    /// refused with the figures it measured.
+    public func toSolid(tolerance: Double = 1e-4, g1Angle: Double = 0.1,
+                        maxLevels: UInt32 = 6) throws -> (Solid, SubdReport) {
+        var report = CadaclysmBlacksmithSubdReport()
+        let handle = try h()
+        let raw = withExtendedLifetime(self) {
+            cadaclysm_blacksmith_subd_to_solid(handle, tolerance, g1Angle, maxLevels, &report)
+        }
+        return (try Solid(raw, "subd_to_solid"), SubdReport(report))
     }
 }
 

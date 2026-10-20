@@ -10,6 +10,77 @@ minor release may change the API).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-19
+
+Cameras, text, studio lighting, point clouds and machining in the View (`cadaclysm_view.h` 1.12, with textures a host's own renderer can sample), the browser Viewer's per-viewport cameras and a forge that builds in a worker, and Go, Swift and C++ drawing through the view. IFC work schedules (4D), gear and rack pairs, posed copies of assemblies, kernel options, the SubD cage, measurement beside the mass (oriented box, lengths, containment, closest points) and a split by a closed curve. A robot bench and the Kiln, a SubD modeller, on the website, and a long list of mesher, boolean, silhouette and writer fixes.
+
+### Changed
+
+- A double click in the View no longer frames what it hits: it is reported as a pick with `clicks` 2 and the point hit (`cadaclysm_view.h` 1.8 grows `CadaclysmViewPick` by `clicks`, `has_point` and `point`, in the coordinates the items were shown in), and the camera stays put. `cadaclysm_view_set_double_click_frames(view, true)` brings the framing back; `cadaclysm_view_focus(view, point)` moves the orbit point to a point of your choosing, keeping the eye's direction and distance. Flying is now a mode: a fly key (W, A, S, D, E, Q) enters it and it stays on after the key is let go, the left drag turning the view about the eye, until Tab (in the View's own window and in the browser), a framing, a standard view or `focus` leaves it; `cadaclysm_view_navigation` says which mode is on (`CADACLYSM_VIEW_NAVIGATION_ORBIT` or `_FLY`). Every binding has them: Python (`View.set_double_click_frames`, `focus`, the `navigation` property, `"clicks"` and `"point"` in a pick), the Rust SDK (`View::set_double_click_frames`, `focus`, `navigation() -> Navigation`), Node (`setDoubleClickFrames`, `focus`, the `navigation` getter), C# (`SetDoubleClickFrames`, `Focus`, `Navigation`), Java (`setDoubleClickFrames`, `focus`, `navigation()`), LuaJIT (`set_double_click_frames`, `focus`, `navigation`), Go (`SetDoubleClickFrames`, `Focus`, `Navigation`), Swift (`setDoubleClickFrames(_:)`, `focus(_:)`, `navigation`) and C++ (`set_double_click_frames`, `focus`, `navigation`), and every pick carries its clicks and point. Node, C#, Java, LuaJIT, Go, Swift and C++ also gain a public `last_pick` (`lastPick`, `LastPick`) -- the click a view's own window answered, read without waiting -- as Python and the Rust SDK have. The web Viewer has `setDoubleClickFrames(on)`, `focus(point)` and a `navigation` getter, readable from a worker page with `await client.view.navigation()`.
+- Alt and the left button now orbit the viewport's pivot, and an Alt press never picks: on every web page (`view.js`'s `normalise` now sends `alt`, so an Alt-click no longer picks and an Alt-drag orbits the pivot -- the camera's own target until a page sets one) and in the C view's own window. A host forwarding events through `cadaclysm_view_input` gets the same once it fills `CadaclysmViewEvent.alt`. A Wheel event's `x` and `y` (C's `CadaclysmViewEvent`, the web `input`'s `"wheel"`) now name the viewport it zooms and where it zooms toward -- a C host sending 0, 0 with viewports set zooms the pane at the window's top left. The web `Viewer`'s `setViewports` throws on a refusal the view makes, where it logged one.
+- Cadaclysm Lite's wheel and trackpad pinch zoom toward the point under the cursor, not toward the model's centre, so zooming at a line on a surface no longer flies the eye through it. The pick behind it returns the point hit (`View::zoom_at` in the Rust core; the web awaits `pick` and zooms about it).
+- Edges and the floor grid are drawn thinner and smoother in every viewer on the View (Lite, the phones, the web Viewer and the view library): edges 1.2 points wide (1.5 px on a desktop at 125% scaling; they were 2), feathered, the nearer part's outline over a farther one's, and the grid fades before it crowds. The grid stays smooth with anti-aliasing off and on a model of thousands of parts, where it used to fall back to staircases.
+- The forge (web): its four views are the web viewer's own cameras and gestures (`web/camera.js` is gone). Three gestures change: Shift with the left button now pans (it turned the camera), as in every other viewer; an Alt-click in the Top, Front or Right view no longer selects (Alt with the left button pans there); a double click is still two clicks and frames nothing. A sideways-only scroll no longer zooms the Top, Front or Right view. Shift-click still picks several faces in extrude (and split).
+- The forge (web) builds every body in its worker and draws there too, so the page never freezes while a body builds -- a join, a cut, a fillet or a shell of seconds no longer stops the pointer and the panels. The kernel's builds and the view share that one worker, so the views stop turning while a long build runs and move again when it ends. If the worker stops, the forge starts another and rebuilds the bodies; a body whose build stopped it is marked and not rebuilt until it changes. After the worker restarts, the views return to their start framing.
+- Kernel fillets, chamfers and shells now refuse what they used to return wrong: a fillet or chamfer whose result is not closed (a box with a face turned inside out rounded "fine" to 104 open edges) answers "the blended solid does not close" -- the solid you gave is checked only then; and a shell whose inner skin would cross itself (a roof thinner than one wall) answers "too thick" instead of returning that skin.
+- Colour and type changes that may stop a build, from colour text being accepted everywhere. Rust: the SVG options' `stroke` and `background` are an `SvgColour` (`stroke: "navy".into()`, `background: Some(0x00_0080.into())`; a bare `u32` field value now needs `.into()`), and `Pick` gains `clicks` and `point` (a struct literal must name them; `Pick` is `PartialEq` only). Java: `showMesh`/`showLines`/`showCurves` gain colourless overloads because a bare `null` colour is now ambiguous (C# callers pass `(float[]?)null`), and the SVG option records gain `withStroke(String|int)` and `withBackground(String|int)`. C# and C++ `Stroke`/`Background` are an `SvgColour` that converts implicitly from a string, `uint` or `int`, so assignments compile unchanged; Swift's is an `SvgColour` that a string or integer literal already is (`SvgColour(value)` for a `UInt32` variable). Go's `Pick` gains `Clicks`, `HasPoint` and `Point`.
+- C++ programs that call `show()` or `view()` include `cadaclysm/view.hpp` and link `cadaclysm::view_loader` (and `cadaclysm::blacksmith`); Go's reader and kernel packages now import the new `view` package, which links `-ldl -lm` on Linux; Swift's `Cadaclysm` and `Blacksmith` modules depend on `CadaclysmView`. No existing call changed.
+- View ABI: the view libraries are now `cadaclysm_view.h` **1.12**, and every view binding -- Python, the Rust SDK, Node, Java, C#, LuaJIT, and the C++, Go and Swift loader -- needs a **1.11** or later library (the minor that adds `show_points`) and refuses an older one with its own message. The texture calls of 1.12 are C only.
+- Unreal plugin: the five materials moved into one pack folder, `Content/Cadaclysm/Materials`, and were re-authored there; the old package paths under `/Cadaclysm/` are gone, so a project that referenced them points at the new ones.
+
+### Added
+
+- Cameras in the View: each viewport owns a camera the View moves -- an **orbit** camera (the built-in one), a **fly** camera (an eye that looks, dollies and flies on W/S/A/D/E/Q, Shift faster), an **ortho** camera (a parallel view of the top, front, right or any plane, which pans and zooms about the cursor) or a **fixed** one (the host's own matrices, as before) -- and the gestures are read by the camera under the press: a left drag orbits, looks or pans by kind, Alt and the left button orbit a host-set pivot, the right drag or Shift and the left pans every kind, the wheel zooms, dollies or zooms about the cursor, and a drag stays with the viewport it started in. Tab, like the fly keys, enters fly mode in the pane under the pointer, and framing leaves fly mode only when it frames the pane being flown. `cadaclysm_view.h` 1.10 appends thirteen calls -- `cadaclysm_view_viewport_camera` (a viewport's kind, state, rect, drawn matrices and eye, in the new `CadaclysmViewViewportCamera`), `cadaclysm_view_set_viewport_camera`, `cadaclysm_view_set_viewport_rects` (move the panes, cameras kept), `cadaclysm_view_aim`, `cadaclysm_view_set_pivot`, `cadaclysm_view_set_tap` (a click's travel and time), and `cadaclysm_view_orbit_in`, `_pan_in`, `_zoom_in`, `_look_in`, `_dolly_in`, `_frame_in` and `_standard_in` on a viewport -- and `CadaclysmViewEvent.alt`, in both view libraries; a 1.9-sized event still reads, with `alt` 0. The web `Viewer` takes `setViewports([{ rect, camera, grid }])` beside the matrices form, and gains `camera(vp)`/`setCamera(vp, camera)`, `aim`, `frameAll(vp)`, `frameSphere(vp, centre, radius)`, `zoomAt(vp, x, y, steps)`, `setPivot`, `setViewportRects`, `setViewportGrid`, `setTap(px, ms)`, `setPickOnTap(false)` (a tap comes back as `{ tap, viewport, double }` for a page that hit-tests itself) and `frameReport()` (each viewport's rect, matrices, eye and kind as last drawn, which the site's worker-hosted viewers post with every frame as `view.frame`); `orbit`, `pan`, `zoom`, `look`, `dolly`, `view` and `frame` take a trailing viewport. Python, the Rust SDK, Node, Java, C#, LuaJIT and the linked loader (C++, Go, Swift) bind the 1.10 calls and the new struct; LuaJIT's moves (`orbit`, `pan`, `zoom`, `look`, `dolly`, `standard`) take a trailing viewport, 0 when left out.
+- Text in the View: `cadaclysm_view.h` 1.6 adds `cadaclysm_view_show_text` (a `CadaclysmViewText`: a **label** -- screen pixels, anchored to a point, optionally boxed and offset, drawn on top or hidden with its anchor -- or **world text** lying in a plane of the model), `cadaclysm_view_set_text` (replace the string) and `cadaclysm_view_load_font` (TTF/OTF bytes; font 0 is the bundled Liberation Sans), and `CADACLYSM_VIEW_LAYER_TEXT`. Text items are ordinary items -- removed, recoloured, moved, x-rayed and picked (the pick's `face` is the line hit). Both view libraries draw it: the GPU view with distance-field glyphs, the terminal with labels as real characters. Every view binding has it -- Python (`View.show_text`, `Item.set_text`, `cadaclysm.view.load_font`), the Rust SDK (`View::show_text(&Text)`, `Item::set_text`, `view::load_font`), Node (`View.showText`, `Item.setText`, `loadFont`), C# (`View.ShowText` with `TextOptions`), Java (`View.showText` with `TextOptions`), LuaJIT (`View:show_text`), Go (`View.ShowText` with `*view.TextOptions`, `view.LoadFont`/`LoadFontFile`), Swift (`View.showText(...)`, `loadFont(_:)`/`loadFont(path:)`) and C++ (`View::show_text` with `cadaclysm::TextOptions`, `view::load_font`) -- and the browser Viewer has `showText(text, options)`, `setText(id, text)`, `loadFont(bytes)` and `setVisible("text", on)`.
+- Studio lighting in the View: `cadaclysm_view.h` 1.9 adds `cadaclysm_view_set_lighting` and `_lighting` -- `CADACLYSM_VIEW_LIGHTING_HEADLIGHT` (the default: whatever faces the camera is bright) or `CADACLYSM_VIEW_LIGHTING_STUDIO` (a key light fixed above the model, ambient light and a fill from the camera, so a top reads brighter than its sides from anywhere). Both view libraries draw it, the terminal's raster included; in Python `View.lighting`, in the web Viewer `setLighting`/`lighting`, and in every other view wrapper.
+- Points in the View: `cadaclysm_view_show_points` (`cadaclysm_view.h` 1.11) draws a point cloud as one item, a disc of 1 to 64 device pixels at each point, framed by their box; it never picks, and the terminal refuses it. `show_points` in every view wrapper -- Python, C#, Java, Node, the Rust SDK, Go, Swift, C++ and LuaJIT -- and in the web Viewer (`showPoints`).
+- The View drawing into a texture for a host's own renderer: `cadaclysm_view.h` 1.12 adds `cadaclysm_view_create_on_device`, which builds the wgpu view library's view on the host's own Vulkan device and queue (any Vulkan platform but Apple's) or Metal device and queue (Apple's) -- a `CadaclysmViewDevice` naming them, nothing of the host's ever destroyed -- and `cadaclysm_view_texture`, which hands back the texture each draw leaves in sampled use (`VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL` on Vulkan) with its size, a generation that bumps on a resize, and `drawn` 0 for a new texture the host adopts before the next draw. A texture a resize retires is freed only once the host's work submitted before it has completed. Every call on such a view may submit on the host's queue or wait on it (`destroy` waits for it to go idle), so the host makes them where it submits its own work. A Vulkan device must have been made with the core and extension features wgpu relies on wherever the GPU has them (named in the refusal), read from the `VkPhysicalDeviceFeatures2` chain the host passes, or trusted with `CADACLYSM_VIEW_DEVICE_WGPU` for a device wgpu made; a D3D12 device is refused for now, pointing at shared textures. `cadaclysm_view_create_shared` draws on the view's own queue on the host's GPU (matched by the adapter's LUID, Vulkan's deviceUUID and driverUUID, or Metal's registryID) into a ring of three textures exported as native shared handles -- NT handles for Direct3D 12 and Direct3D 11 hosts and Vulkan on Windows, fds for Vulkan elsewhere, `MTLSharedTextureHandle`s on Metal -- with a ready fence the view signals and a release fence the host signals (Direct3D fences, Vulkan timeline semaphores with `CADACLYSM_VIEW_SHARED_HOST_SEMAPHORES`, `MTLSharedEvent`s); every texture is viewable as UNORM or sRGB. Frames are numbered from 1; the view never waits for the host: with no texture released, `cadaclysm_view_draw` returns false and the frame stays owed. A Vulkan host without semaphores gets its frame done when `draw` returns and releases with `cadaclysm_view_release`. A new docs page, *Embedding the View in your own UI*, walks through both ways. `cadaclysm_view_image` on a texture view reads its last frame back. The terminal library refuses the four calls ("textures need the wgpu view library"); the wrappers do not bind them.
+- `cadaclysm_view.h` 1.7: a CAM job plays on a stock in any view of the wgpu library -- `cadaclysm_view_show_machining` (programs with their tools, the stock box, an optional part mesh, cell, tolerance, skin, rapid rate), the machining's own calls (`_machining_seek` by move, `_colour_by`, `_overlays`, `_info`, `_heights`), and the view's timeline (`cadaclysm_view_timeline_play`, `_pause`, `_seek`, `_set_loop`, `_time`, `_duration`, `_playing`, `_status`), ticked by the wall clock inside `draw`; a playing timeline keeps `needs_draw` true and `wake_ms` 0. The view's own window drives it from the keyboard (space, left/right, up/down, Home/End, L) and shows the status line as its title. The terminal library refuses a machining. In Python, `Job.show(part=None)` and `Job.view(part=None)` play a job on its stock in the GPU view library's window, with `cadaclysm.view.View.show_machining`, `Machining` and the timeline's `play`/`pause`/`seek`/`loop`/`status`; a job and its tools read back what they are (`Tool.number`, `shape`, `diameter`, `flute_length`, `angle` and `corner_radius`, `Job.stock` and `Job.tools`, in Python and Node; `cadaclysm_blacksmith_tool_*` and `cadaclysm_blacksmith_job_stock` in the C ABI and the web build).
+- The Python notebook plays a machining job: `show(job, part=None)`, or a cell that ends in a `Job`, cuts the job's stock in the cell's Viewer with the timeline's controls under it -- play, speed, loop, a scrubber in time, a step per move, colour by height, tool or deviation from the part -- and a view scrolled away and back keeps its time. A "Machining a plate" example notebook shows it, and a combat-robot example builds a hull from strips.
+- Colour text in every colour the view takes: `cadaclysm_view.h` 1.5 adds `cadaclysm_view_parse_colour(text, float out[3])`, the same `"#rgb"`, `"#rrggbb"` and 148 CSS names as the reader's parser, in both view libraries and with no reader loaded. Python's `cadaclysm.view` (`Item.colour`, `face_colours`, `node_colour`, `node_highlight`, `View.background` and every `show*`'s `rgb=`), the Rust SDK's `view` (`impl Into<Colour>`, `Rgb` and `Rgba`), the web `Viewer` (`showCurves`, `showLines`, `showExact`, `setFaceColours` and `setNodeHighlights` too, typed `string | [number, number, number]`), Node, Java, C#, LuaJIT, Go (`view.Colour`), Swift (`Colour`) and C++ (`Colour`) read it -- Node and LuaJIT take text wherever they took numbers (Node's `.d.ts` adds `Colour` and `ColourAlpha`), Java and C# gain a `String`/`string` overload beside each `float[]` one (`faceColours` takes one text a face; C#'s `ShowOptions` adds `RgbText`, Java's `ShowOptions.rgb(String)`); text where an alpha is taken means alpha 1, and text the library refuses raises its own message.
+- Colour text for the SVG options that still took only numbers, and for Godot's `instantiate` edge colour: `stroke` and `background` now take `"#rgb"`, `"#rrggbb"` or a CSS colour name beside a packed `0xRRGGBB`, on the reader's and the kernel's drawings alike, read by `cadaclysm_parse_colour`/`cadaclysm_blacksmith_parse_colour` when the drawing is made (text either refuses names the field: `svg: background: ...`). Godot's `instantiate_with({"edge_color": ...})` takes a name as well as a `Color`, and refuses anything else instead of ignoring it.
+- Go, Swift and C++ draw through `cadaclysm_view.h`: the library choice (`view.UseTerminal`/`UseWgpu`/`Use`, `ViewLibrary.useTerminal()`/`useWgpu()`/`use(_:)`, `cadaclysm::view::use_terminal()`/`use_wgpu()`/`use()`; the terminal stays the default and `CADACLYSM_VIEW` picks one without code), `View` (a window of its own, a host's window, or offscreen), `Item`, `pump`, `image` and `save` (PNG), and `show()`/`view()` on solids, scenes, nodes and poses -- blocking until the window is closed on the wgpu library, a still on the terminal -- plus `lod`, `wake_ms` and `node_transforms` in each language's casing. The view library is opened at run time and must speak the wrapper's view ABI minor (see Changed). Go's package is `view` (`go/view`, shipped in the SDK), Swift's `CadaclysmView` and C++'s `cadaclysm/view.hpp`; each wrapper's tests run against the real wgpu library.
+- CMake: `cadaclysm::view_loader`, the C++ view wrapper's target -- it opens the view library at run time and links none. `cadaclysm::view` is unchanged.
+- IFC work schedules (4D): a file's `IfcWorkSchedule`s, their tasks, scheduled and actual dates, durations, milestones, lags and links (finish-start and the other kinds), and what each task builds, demolishes or uses, are read into the scene's schedules, for IFC4 and IFC2X3 dates alike. `WorkSchedule.at(date)` says what every element is doing on a date -- unbuilt, building, built, demolishing or demolished, with its progress through that phase and its variance in seconds late or early -- from the scheduled or the actual dates. In the C ABI (`cadaclysm_schedule_*`, `cadaclysm_task_*`, `cadaclysm_schedule_at`), Python (`Scene.schedules`, `WorkSchedule.at`) and the other reader wrappers (C#, Go, Java, Node, Rust, Swift, C++, LuaJIT, Godot), and in the browser as `scene.scheduleJson` and `scene.scheduleAt`; the web Viewer plays one on the timeline with `showSchedule`. The site's construction page shows a pavilion going up on it. IFC occurrences also inherit the property sets of their type (and name their type), so a wall that carries `Pset_WallCommon` on its type alone answers an `IsExternal` query.
+- Gear and rack-and-pinion pairs: a mechanism can carry them -- kernel `Assembly.pair_with` (a pair's kind and parameters, a gear's two radii, signed ratio and optional bevel and helical angles; a rack and pinion's pinion radius; a screw's pitch) in the C ABI (`cadaclysm_blacksmith_assembly_pair_with`), WebAssembly and every kernel wrapper; the STEP reader and writer round-trip them as coupled pairs, and a pose solves a coupling inside a loop, rests it when nothing drives it, and reports one it cannot solve or finds disagreeing. On the reader side `cadaclysm_joint_pair_kind_name` and `cadaclysm_joint_pair_parameters` name and read a joint's pair finely (`"gear"`, `"rack_and_pinion"`, ...; `cadaclysm_joint_pair_kind` is unchanged and reads both as other), and `cadaclysm_pose_diagnostic_count`/`cadaclysm_pose_diagnostic` list a pose's unsolved couplings, through every reader wrapper.
+- A posed copy of an assembly: `Assembly.posed` (joint paths, a state, a ground link) returns a new assembly with its mechanism posed, each definition built in its own coordinates, its motion sequences kept and every refusal named; `cadaclysm_blacksmith_assembly_posed` in the C ABI, WebAssembly and every kernel wrapper.
+- Kernel options: `cadaclysm_blacksmith_option_set(name, value)` and `_option_get` reach named process-wide settings through one pair, so an option added later needs no new entry point -- `boolean.mesh_budget`, `boolean.finest_tolerance`, `profile_boolean.point_budget` and `measure.default_accuracy` at first, each refused with the list of options (or what the value must be) when wrong. In every kernel wrapper (Python `set_option`/`option`) and the web build.
+- Measurement beside the mass, in the C ABI, wasm and Python: `cadaclysm_blacksmith_oriented_box` (a closed solid's box on its principal axes -- not the minimal box, and with equal moments the axes are a free choice; the half-extents are grown by the measuring tolerance, no less than about 3.1e-5 of the diagonal on a body whose mass settles at once, so an accuracy of 0 asks for the box's own default of 1e-5 rather than `measure.default_accuracy`; it costs as much as `cadaclysm_blacksmith_mass_properties` at the same accuracy, tens of seconds at 1e-7 on a free-form body read from a file, so pass a coarser accuracy such as 1e-3 for speed). In Python (`Solid.oriented_box`, `OrientedBox`); the other wrappers follow.
+- Curve length: `cadaclysm_blacksmith_edge_length` and `cadaclysm_blacksmith_profile_length`, each a length beside an error estimate, whether the accuracy was met and whether the curve was a sampled polyline. A body whose trims are 2D-only (`.3dm`, IGES 144) has no fillet-table edges, so an edge's length cannot be asked of it. In Python (`Solid.edge_length`, which takes an `Edge` or an index, `Profile.length`, `Length`); the other wrappers follow.
+- Point containment: `cadaclysm_blacksmith_contains` (inside, outside or on within a tolerance; meshes the body on every call) and `cadaclysm_blacksmith_classifier_new` / `_contains` / `_free` for many points -- a classifier keeps its own reference to the body, and calls on one classifier take turns, so build one per thread. In Python (`Solid.contains`, `Solid.classifier`, `Classifier`); the other wrappers follow.
+- Closest points between two solids: `cadaclysm_blacksmith_closest`, the distance with a point on each boundary and the face, edge or vertex it lies on (the fillet-table index of an edge, or none). Boundaries are measured, so a nested body is not 0 apart; `refined` says whether the answer is the exact minimum (within the tolerance) or the mesh's, within `[d - 2/3 tolerance, d + tolerance]` of the true minimum `d`. In Python (`Solid.closest`, `Closest`); the other wrappers follow.
+- Split by a closed curve: `Solid.split_by_profile(profile, frame)` pushes a closed profile drawn on a frame straight through a solid, along its normal both ways, and returns the bodies outside the profile and inside, side by side (`cadaclysm_blacksmith_split_by_profile`; refused where the profile misses the solid, takes all of it or encloses nothing). In the C ABI, WebAssembly and every kernel wrapper, as a node in the loom and in the Blender add-on.
+- The SubD cage -- `Subd`, `SubdMesh` and `SubdReport`: a Catmull-Clark control cage you edit (extrude, inset, edge loops, creases, pins, a mirror plane, transforms, picking) and convert with `to_solid` to an exact B-rep -- in every SDK wrapper but Godot: C#, Java, Node, the Rust SDK, Go, Swift, C++ and LuaJIT, each in its own spelling, beside Python, the C ABI (`cadaclysm_blacksmith_subd_*`) and the kernel wasm module. A cage is immutable: every edit returns a new one, and its mesh and parts are copied out of the handle. The Kiln, a SubD modeller on the website, drives it: sculpt a cage with a move/rotate/scale gizmo, then fire it into a B-rep to boolean, fillet and export as STEP.
+- Kernel: `torus(major, minor)` builds a spindle torus (`minor > major`) as the apple its tube sweeps, where it refused every `minor >= major`; a horn torus (`minor == major`) is still refused.
+- The robot bench, on the website: build a robot from a catalogue of real parts -- aluminium extrusion and its T-nuts, joining plates and corner brackets, screws and nuts, hobby and stepper motors, servos and horns, bearings, rods, linear blocks, couplers, pulleys, wheels, lead screws, belts, boards and batteries -- by picking a part and clicking where it goes (the mate solver offers every placement a part's connectors allow, and fasteners are chosen to reach), with bores that turn or slide posed as revolute and prismatic joints, belts, gear and rack pairs, and a stepper that drives its carriage through a lead nut. Six starters (rover, six-servo arm, gantry, car, Z-axis, desktop arm) open on the page, and a file that no longer builds opens with what broke dropped and listed. Checks run at every pose: does each screw reach and not overreach, mass and centre of gravity, tip-over margin, servo and stepper load against stall and holding torque, collisions and joint sweeps. Exports: STEP with its mechanism, a bill of materials, URDF and MJCF.
+- Silhouette Béziers in every wrapper: `Solid.silhouette_beziers` and `Node.silhouette_beziers` in Python, and both queries in C#, Java, Go, Node, the Rust SDK, Swift, C++ and LuaJIT, and `silhouette_beziers` in the web build (the C ABI had them in 0.10.0).
+- Rust SDK from source: a `path` dependency on a cadaclysm checkout, or a `git` dependency on the repository, now builds the four libraries from that same source tree on the first `cargo build` (into `<target>/cadaclysm-source`, rebuilt incrementally after `cargo update`) and copies them beside the binaries, instead of leaving the project with none -- the wrapper and its libraries always match, with no environment variables. `CADACLYSM_SDK_SOURCE=0` downloads the release instead; crates.io's copy downloads as before. `View::last_pick()` reads the click a view's own window answered without waiting (`None` while none has landed, `Some(None)` for a click on nothing, `Some(Some(pick))` for a hit), as Python's.
+- Python: type annotations on the whole public API -- every parameter and return of the reader, the kernel, `cadaclysm.view` and `cadaclysm.terminal` -- so VS Code (Pylance) and other editors complete and check them; pyright scores the package 100% type-complete, and the wheel ships `py.typed`. `import cadaclysm_blacksmith` (and `cadaclysm_terminal`) completes in an editor too: the wheel carries a `.pyi` stub beside each shim. The Python API page shows the annotated signatures, with the shorthand types they use (`FrameLike`, `Point3`, `Colour`, ...) defined in a Types section. Points, frames and axes accept numpy arrays.
+- Cadaclysm Lite and every wgpu View start faster: with no backend named, the View asks Vulkan (Metal on Apple) for an adapter before starting the others, which lands on the same adapter and cuts a device on Windows from about 810 ms to about 440 ms.
+- IGES: a conic arc of entity 104, form 1 (ellipse) and form 0 (the kind its equation says), is read; both returned nothing before.
+- OCCT .brep: parabolas and hyperbolas are written (as a plane's parameter curve and in space), so a body with conic edges writes a file OCCT reads; reading a parabola-swept prism measures all of it (31.67 of 32 before).
+
+### Fixed
+
+- The View drew cones in bands (the tip's corners carried a normal) in the GPU View, the desktop viewer and the Unreal plugin, and a cut cone's edge as a staircase; both are smooth now. Exact surfaces in the Unreal plugin draw at the same default roughness (0.5) as triangles, an edge no longer fights its own face, and the surface-statistics readback compiles for Android.
+- Unreal plugin: the coarse levels of a Nanite mesh keep a hard edge's normals and state a measured error, so the Nanite copy of a model no longer shows black wedges across vents and torn, speckled nuts and motor bells up close.
+- Kernel: `Solid.hits` keeps its mesh per tolerance, so repeated rays no longer re-mesh the body.
+- View robustness: a device lost with a pick's readback mapped, during an upload or before a readback drops the call instead of panicking; hidden layers no longer make a wireframe dense; an empty view frames its world grid; A held fly key whose auto-repeat re-entered fly mode, a fly key let go under Ctrl, Alt or Super that stayed held, and a drag while a fly key is held that turned the wrong way are fixed.
+- Web viewer: its pipelines compile in the background and off the GPU process's main thread (the base ones before the first frame, the x-ray, text and machining-stock ones before the frame that first draws them, the exact-surface ones while the view draws triangles, and the pick ones ahead of the first click), so a page showing solids no longer stalls every view and tab on WebGPU while they compile.
+- Terminal view: the cursor-position report waits for a slow ssh link, more emoji count as two columns, labels show over kitty graphics and place from the reported top and the help no longer lists a key the terminal lacks.
+- Machining: `Job.machine` keeps only the tools its programs use and refuses two tools under one number; stepping back passes a zero-time move; a machining removes cleanly after a lost device; `Job.show` with a part colours the stock by deviation and starts with the loop off, and names a missing tool.
+- The forge's STL, GLB and OBJ exports now include the bodies built in its worker (joins, cuts, fillets, shells, primitives and the rest of the made bodies), which they left out before.
+- Booleans: a boolean at a tolerance far too fine no longer runs for hours (a motor bell, a cylinder bored six times, cut at 1e-6 was still running after 49 minutes; its stages scaled quadratically or worse with the mesh); two spheres meet on their exact circle, and coaxial surfaces of revolution on exact circles, rather than on fitted splines up to 5e-6 off the spheres (a body of drilled balls: seven splines to none, its STEP 125 KB to 24 KB); a face a grazing sphere breaks is cut on both sides or neither; free-form spline pairs no longer go through the exact engine; joints a snap swapped along an edge unfold; two seams on one rim pair stay two edges; big flat cuts chunk, and a cut far from the origin names a turned sphere's seam.
+- Far from the origin: a ball's rim rounds and bevels, section traces start where the faces are rather than over twice their distance from the origin, a collision hull's error is a share of the part's size, a loop along a pole winds back along it, and and a closed NURBS surface drawn on the GPU wraps at its seam instead of clamping.
+- Fillets and shells: a shell meets walls at a shallow angle (a nose floor 5 degrees off the chassis floor was refused as "the walls' offsets no longer meet"), and `thicken` of a sheet creased 5 degrees does the same.
+- Meshing: a terrain-like loft meshed far finer than a viewer would no longer loses every face after the mesher's triangle ceiling (the side walls, bottom and caps came back empty); the ceiling now scales with the tolerance. Through the wrappers' `mesh`, `face_triangles` and `bounds` a body stays within the tolerance (52 of the 773 bodies of the facet census stood over it; 3 do now). Faces with a pole carried as one ring vertex, a cone past its apex, a bow with no interior point, an outer loop enclosing nothing beside holes, a flat face's finely stored rim, a spindle torus off the origin, and a revolution whose ring collapses onto a line mesh without open edges or false refusals. A seam reaches only its own face's edges, and faces weld across only where their edges still run together, so fewer cracks open on large bodies.
+- Reading: ACIS SAT spline edges that are reversed draw as their spline, not as their chords; `.3dm` trims held finer than their neighbour match it on the exact curve, and their chords follow the edge in uv.
+- Measuring: mass properties integrate a flat face on its exact edges (including a reversed spline edge and a planar face of a `.3dm`), integrate a curved face's chord lunes rather than bound them, take exact derivatives on surfaces of revolution, and a measurement that stalls returns its best round, not its last.
+- Silhouettes: a sphere's rim closes (it stopped 1.4 to 2.8 degrees short from some eyes), a grazing branch at the trim ring is kept, the lattice spacing is a length in space rather than a parameter span, the same curve is drawn once when two faces share it, a crease seam is drawn once, and an exactly negated eye draws the same curve.
+- Writers: `.brep` files written for bodies with an extruded closed spline, a left-handed frame, a parameter curve with a non-unit direction, or a parameter curve whose direction was not a unit vector are valid for OCCT (the writer restarts an extruded closed spline at its faces' seam and states an edge's gap off its plane); the STEP writer restarts the same spline at its seam too.
+- Garbage-collected wrappers: a dropped Go handle, Java scene, buffer or view and Node collider is freed instead of leaked, and a Java buffer or view keeps its scene open while it is in use.
+- Android: a file sent to the app that could not be opened says why.
+
 ## [0.10.0] - 2026-10-05
 
 One view API everywhere: a C view that opens a native window of its own, the terminal drawing through the same view contract, `show()`/`view()` through it in Python, Rust, Node, Java, C# and LuaJIT, and the web viewer's own gesture input and timeline. Mechanisms can be posed from every wrapper, written by the kernel and played through their own motion sequences, moving parts checked for interference, and open edges sewn. Also mass properties, compressed STEP files, a modelling guide for language models, and mesher and kernel fixes on real-world files.
@@ -105,7 +176,6 @@ One view API everywhere: a C view that opens a native window of its own, the ter
 - Silhouettes: a ruling lying on a face's seam is drawn once from either side -- a cylinder or cone seen from behind drew it twice, and a torus most of its curves.
 - IFC: the GPU trim tolerance of each solid follows its size rather than its distance from the origin.
 - Cadaclysm Lite: the open dialog starts on every supported file type, instead of only ACIS SAT.
-
 ## [0.9.0] - 2026-09-28
 
 CNC machining (CAM) arrives in the kernel, STEP mechanisms can be read and posed, and a new embeddable 3D view ships in every archive.
@@ -142,7 +212,6 @@ CNC machining (CAM) arrives in the kernel, STEP mechanisms can be read and posed
 - Documents far from the origin keep their lines, boxes and surfaces in place in Unreal and the C API; moved bodies draw correct isocurves.
 - Cadaclysm Lite picks a GPU adapter that can present to the window and recovers from a lost device.
 - Python kernel mesh arrays could read freed memory.
-
 ## [0.8.1] - 2026-09-26
 
 A small follow-up to 0.8.0 for the viewers and the Cadaclysm Lite installer.
@@ -151,7 +220,6 @@ A small follow-up to 0.8.0 for the viewers and the Cadaclysm Lite installer.
 
 - Anti-aliasing now also smooths one-pixel wireframe edges and the ground grid, not only the shaded mesh.
 - The Cadaclysm Lite Windows setup and its uninstaller are both code-signed.
-
 ## [0.8.0] - 2026-09-26
 
 The first release of Cadaclysm Lite, the free desktop viewer for Windows and Linux, together with a WebAssembly `Viewer`, assembly and kinematics support, and edge colours throughout.
@@ -187,7 +255,6 @@ The first release of Cadaclysm Lite, the free desktop viewer for Windows and Lin
 - STEP: a sub-assembly placed twice in the same parent now reads as two separate nodes.
 - 3DM extrusion objects are read as exact surfaces instead of falling back.
 - Viewer: correct lighting in linear colour space, WebGL2 line and hidden-edge drawing, and anti-aliasing on OpenGL.
-
 ## [0.7.1] - 2026-09-24
 
 Sketch and edge colours reach every language, and STEP files now carry colours.
@@ -208,7 +275,6 @@ Sketch and edge colours reach every language, and STEP files now carry colours.
 
 - Node.js: `Profile.round` with an empty corner list rounded the first corner on the WebAssembly route; it now rounds none.
 - Booleans where a cone's wall passes through a cylinder's rim circle now cut cleanly.
-
 ## [0.7.0] - 2026-09-23
 
 SVG drawings of sketches, body/body intersection curves, FEM-ready meshes, STEP assembly writing, parabolas and hyperbolas, and double-precision outputs.
@@ -241,7 +307,6 @@ SVG drawings of sketches, body/body intersection curves, FEM-ready meshes, STEP 
 - Sketch arcs reach the kernel as single arcs, so a trimmed circle extrudes to one cylinder.
 - Mesher: open sheets are oriented more reliably, and sphere facets no longer stray from the surface beyond tolerance.
 - GPU surface rendering: a seam fix applied to all renderers; Unreal no longer shows a hole where two trimmed faces meet.
-
 ## [0.6.0] - 2026-09-21
 
 SVG drawings of models and solids, SAT and OCCT .brep writers for the kernel, a new C++ wrapper, and full API parity across every language binding.
@@ -276,7 +341,6 @@ SVG drawings of models and solids, SAT and OCCT .brep writers for the kernel, a 
 - Text in the kernel now renders on Android and iOS (fonts were not found).
 - Lofted pegs in lofted bores, and faces extruded off spline solids, now produce clean booleans.
 - Android viewer: files opened from a `file:` URI keep their name and extension.
-
 ## [0.5.1] - 2026-09-19
 
 Faces keep their own colours when drawn, and mirrored solids export to STEP.
@@ -296,7 +360,6 @@ Faces keep their own colours when drawn, and mirrored solids export to STEP.
 - Fillets and blends that would run off their face are refused cleanly instead of producing a broken solid.
 - Mesher: fewer cracks along straight, circular and merged edges on real-world models, and correct meshing of spindle tori and cusped edges.
 - The mobile viewer draws scenes far from the world origin as sharply as scenes at it.
-
 ## [0.5.0] - 2026-09-19
 
 See a model right in your terminal, loft through any number of profiles, and a new Godot addon.
@@ -318,7 +381,6 @@ See a model right in your terminal, loft through any number of profiles, and a n
 - Faces written with the wrong orientation in a file are turned to agree with their neighbours when a closed body is meshed.
 - Mesher: steep cone apexes and bands with overlapping rims mesh correctly.
 - GPU surface drawing: trims follow the edge's exact curve, and sphere poles stay closed on bodies far from the origin.
-
 ## [0.4.5] - 2026-09-19
 
 A LuaJIT wrapper, multi-face press-pull, and shell/thicken on free-form faces.
@@ -342,7 +404,6 @@ A LuaJIT wrapper, multi-face press-pull, and shell/thicken on free-form faces.
 - Loosely joined 3DM files: trims now end on their vertices, closing bodies that used to crack.
 - Several SAT corners that did not close at shared vertices.
 - A shelled coil no longer cracks after being moved.
-
 ## [0.4.4] - 2026-09-19
 
 A Swift package, thicken, and removable chamfers.
@@ -363,7 +424,6 @@ A Swift package, thicken, and removable chamfers.
 - Sphere caps crossing a pole keep their trims when drawn on the GPU.
 - Some SAT bodies with self-touching seams now mesh closed.
 - NURBS faces above degree 7 draw correctly.
-
 ## [0.4.3] - 2026-09-19
 
 ### Added
@@ -376,7 +436,6 @@ A Swift package, thicken, and removable chamfers.
 - A brep made only of planes reported a one-unit bounding box.
 - NURBS sphere caps drawn dark on the CPU mesh; sphere caps crossing a pole on the GPU.
 - Some SAT bodies with a seam that touches itself now mesh closed.
-
 ## [0.4.2] - 2026-09-19
 
 ### Added
@@ -396,7 +455,6 @@ A Swift package, thicken, and removable chamfers.
 - Booleans keep planar faces' mesh vertices exactly in their plane, and crossings on a solid's own edges are shared by every face along them.
 - A sphere's bore rim no longer cracks; small bores close.
 - Viewer: moving a part with the gizmo moves its GPU surfaces too.
-
 ## [0.4.1] - 2026-09-19
 
 STEP export needs no schema file, and Python 3.8 is supported.
@@ -420,7 +478,6 @@ STEP export needs no schema file, and Python 3.8 is supported.
 - Some NURBS caps passing through a pole did not draw.
 - Pulling in a cylinder's top leaves a clean shorter cylinder.
 - Viewer: colour edits and glass materials apply to GPU-drawn surfaces; no dark spots at poles; whole spheres tessellate round.
-
 ## [0.4.0] - 2026-09-18
 
 `pip install cadaclysm`, imported bodies as kernel solids, press-pull and manifold checks.
@@ -448,7 +505,6 @@ STEP export needs no schema file, and Python 3.8 is supported.
 - Mesher: many cracks fixed around sphere poles, cone apexes, closed-spline seams and faces with many holes; small parts far from the origin mesh correctly.
 - Signed volume of a small solid far from the origin no longer comes out negative.
 - Python, C# and Java find the kernel library and schema files in the SDK layout.
-
 ## [0.3.1] - 2026-09-18
 
 A small follow-up to 0.3.0: planar faces from profiles in every wrapper, and a more forgiving web license check.
@@ -460,7 +516,6 @@ A small follow-up to 0.3.0: planar faces from profiles in every wrapper, and a m
 ### Changed
 
 - In the WebAssembly packages, `load()` now warns and runs unlicensed when it cannot fetch or verify the license, instead of failing, so a mistyped license URL cannot take a site down. `useLicense()` still throws.
-
 ## [0.3.0] - 2026-09-18
 
 WebAssembly builds ship as release packages, and the kernel gains faces, trimming, colours and new path and profile tools.
@@ -480,7 +535,6 @@ WebAssembly builds ship as release packages, and the kernel gains faces, trimmin
 - The kernel refuses a slant, point or normal array of the wrong length instead of reading past it.
 - WebAssembly: a re-entrant progress callback raises an error instead of aborting the module.
 - Mesher: twisted edges are subdivided finely enough to meet the requested tolerance.
-
 ## [0.2.0] - 2026-09-17
 
 Node.js, C#, Go and Java get full reader and kernel bindings, OBJ and glTF export arrive, and the library no longer needs a license to be evaluated.
@@ -508,7 +562,6 @@ Node.js, C#, Go and Java get full reader and kernel bindings, OBJ and glTF expor
 - C#: operands are held by SafeHandles, so they stay alive for the whole call.
 - Go: a call and the read of its error message stay on one OS thread; open options with schemas no longer trip cgo's pointer checks; `Close` is nil-safe.
 - Java and Go: `openMemory` takes a format; views of a closed scene throw; the Java loader looks next to the jar.
-
 ## [0.1.0] - 2026-09-15
 
 The first public release: CAD file readers, the B-rep mesher and the blacksmith modelling kernel behind one C ABI, with Python, C#, Go and Java wrappers, for Windows, macOS and Linux.

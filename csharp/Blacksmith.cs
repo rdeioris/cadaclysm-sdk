@@ -126,6 +126,49 @@ public static class SvgViewAngles
     public static (double Azimuth, double Elevation) For(SvgView view) => Table[view];
 }
 
+/// <summary>A colour <see cref="SvgOptions.Stroke"/>/<see cref="SvgOptions.Background"/> take:
+/// colour text -- `"#rgb"`, `"#rrggbb"` or a CSS colour name, any case -- or a packed
+/// `0xRRGGBB` number, each converted implicitly, so `Stroke = "navy"` and `Stroke = 0x000080`
+/// both compile. Text is read by the kernel library's own parser when the drawing is made;
+/// text it refuses, or a number past `0xFFFFFF`, throws <see cref="BuildException"/> naming the
+/// field. The reader's `Cadaclysm.SvgColour` twin, kept separate because this file is the
+/// whole kernel binding on its own.</summary>
+public readonly struct SvgColour : IEquatable<SvgColour>
+{
+    private SvgColour(string? text, long packed) { Text = text; Number = packed; }
+
+    /// <summary>The colour text given, or null for a number.</summary>
+    public string? Text { get; }
+
+    /// <summary>The packed number given; meaningless when <see cref="Text"/> is set.</summary>
+    public long Number { get; }
+
+    public static implicit operator SvgColour(string text) => new(text ?? throw new ArgumentNullException(nameof(text)), 0);
+    public static implicit operator SvgColour(uint packed) => new(null, packed);
+    public static implicit operator SvgColour(int packed) => new(null, packed);
+
+    /// <summary>`0xRRGGBB`, through the kernel's parser for text; <paramref name="what"/>
+    /// names the field in a refusal.</summary>
+    internal uint Packed(string what)
+    {
+        if (Text is null)
+        {
+            if (Number < 0 || Number > 0xFFFFFF)
+                throw new BuildException($"{what}: a packed colour is 0x000000..0xFFFFFF, not 0x{Number:X}");
+            return (uint)Number;
+        }
+        var rgb = new double[3];
+        if (!BlacksmithNative.cadaclysm_blacksmith_parse_colour(Text, rgb))
+            throw new BuildException($"{what}: a colour is \"#rgb\", \"#rrggbb\", a CSS colour name or 0xRRGGBB, not '{Text}'");
+        return ((uint)Math.Round(rgb[0] * 255) << 16) | ((uint)Math.Round(rgb[1] * 255) << 8) | (uint)Math.Round(rgb[2] * 255);
+    }
+
+    public bool Equals(SvgColour other) => Text == other.Text && (Text is not null || Number == other.Number);
+    public override bool Equals(object? obj) => obj is SvgColour other && Equals(other);
+    public override int GetHashCode() => Text is null ? Number.GetHashCode() : Text.GetHashCode();
+    public override string ToString() => Text ?? $"0x{Number:X6}";
+}
+
 /// <summary>How an SVG drawing is made -- the camera in the viewer's words, the page, the pen
 /// and which line sets. Mirrors `CadaclysmBlacksmithSvgOptions`, defaulted the way
 /// `cadaclysm_blacksmith_svg_options_init` defaults the struct, with <see cref="View"/>
@@ -168,16 +211,17 @@ public sealed class SvgOptions
     /// <summary>How far a written curve may stray, in page units. Default 0.1.</summary>
     public double Tolerance { get; set; } = 0.1;
 
-    /// <summary>The pen colour: `"#rgb"`, `"#rrggbb"` or a CSS colour name. Default black.</summary>
-    public string Stroke { get; set; } = "#000000";
+    /// <summary>The pen colour: `"#rgb"`, `"#rrggbb"`, a CSS colour name or a packed `0xRRGGBB`
+    /// (a <see cref="SvgColour"/>). Default black.</summary>
+    public SvgColour Stroke { get; set; } = "#000000";
 
     /// <summary>The pen's width, page units. Default 1.</summary>
     public double StrokeWidth { get; set; } = 1.0;
 
-    /// <summary>`0xRRGGBB`, or null (the default) for no `&lt;rect&gt;` behind the drawing --
-    /// <see cref="Blacksmith.Packed"/> reads a `"#rgb"`, `"#rrggbb"` or CSS colour name string,
-    /// e.g. `Background = Blacksmith.Packed("navy")`.</summary>
-    public uint? Background { get; set; }
+    /// <summary>`"#rgb"`, `"#rrggbb"`, a CSS colour name or a packed `0xRRGGBB` (a <see
+    /// cref="SvgColour"/>) -- `Background = "navy"` or `Background = 0x000080` -- or null (the
+    /// default) for no `&lt;rect&gt;` behind the drawing.</summary>
+    public SvgColour? Background { get; set; }
 
     /// <summary>Each shape's feature edges. Default true.</summary>
     public bool Edges { get; set; } = true;
@@ -597,6 +641,56 @@ internal struct RawBlacksmithCollisionHit
     public IntPtr Text;
 }
 
+/// <summary>`CadaclysmBlacksmithSubdParts`: a cage's parts, as views into its handle, valid until
+/// the handle is freed. Pinned by `tests/bindings.rs`.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawBlacksmithSubdParts
+{
+    public IntPtr Positions;
+    public uint VertexCount;
+    public IntPtr FaceSizes;
+    public uint FaceCount;
+    public IntPtr FaceIndices;
+    public uint IndexCount;
+    public IntPtr Creases;
+    public uint CreaseCount;
+    public IntPtr Pins;
+    public uint PinCount;
+    public int SymmetryAxis;
+    public double SymmetryTolerance;
+    public uint SelectionKind;
+    public IntPtr Selection;
+    public uint SelectionCount;
+}
+
+/// <summary>`CadaclysmBlacksmithSubdMesh`: one level of a cage's smooth surface, as views valid
+/// until the cage is freed. Pinned by `tests/bindings.rs`.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct RawBlacksmithSubdMesh
+{
+    public IntPtr Positions;
+    public uint VertexCount;
+    public IntPtr Normals;
+    public IntPtr Indices;
+    public uint IndexCount;
+    public IntPtr TriangleFace;
+}
+
+/// <summary>`CadaclysmBlacksmithSubdReport`: what `subd_to_solid` did and how close it came.
+/// Pinned by `tests/bindings.rs`.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct RawBlacksmithSubdReport
+{
+    public uint Regular;
+    public uint Refined;
+    public uint Steps;
+    public uint Levels;
+    public double Deviation;
+    public double G1AngleDeg;
+    public fixed double DeviationAt[3];
+    public fixed double G1At[3];
+}
+
 // ---- the handles the ABI hands out ------------------------------------------------------
 //
 // One `SafeHandle` a kind, each knowing its own free. `Path`'s is the one the library can
@@ -654,6 +748,20 @@ internal sealed class ColliderHandle : CadaclysmHandle
     protected override bool ReleaseHandle()
     {
         BlacksmithNative.cadaclysm_blacksmith_collider_free(handle);
+        return true;
+    }
+}
+
+/// <summary>`CadaclysmBlacksmithSubd *`.</summary>
+internal sealed class SubdHandle : CadaclysmHandle
+{
+    public SubdHandle()
+    {
+    }
+
+    protected override bool ReleaseHandle()
+    {
+        BlacksmithNative.cadaclysm_blacksmith_subd_free(handle);
         return true;
     }
 }
@@ -1120,6 +1228,8 @@ internal static class BlacksmithNative
         IntPtr progress, IntPtr user);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_split_by_plane(SolidHandle solid, double[] plane,
         double tolerance, IntPtr progress, IntPtr user);
+    [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_split_by_profile(SolidHandle solid, ProfileHandle profile,
+        double[] frame, double tolerance, IntPtr progress, IntPtr user);
     [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_lump_count(SolidHandle solid);
     [DllImport(Lib)] internal static extern SolidHandle cadaclysm_blacksmith_lump(SolidHandle solid, uint index);
     [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_face_count(SolidHandle solid);
@@ -1191,6 +1301,44 @@ internal static class BlacksmithNative
     [DllImport(Lib)]
     internal static extern CollisionsHandle cadaclysm_blacksmith_collider_check(ColliderHandle collider, double[] frames, uint frameCount,
         uint shareK, uint shareN);
+    // The SubD cage. Every edit returns a new owned cage, or null with `last_error` set; the
+    // input is untouched. `subd_pick` answers false with an empty `last_error` for nothing near.
+    [DllImport(Lib)] internal static extern SubdHandle cadaclysm_blacksmith_subd_cuboid(double sx, double sy, double sz, uint nx, uint ny, uint nz);
+    [DllImport(Lib)]
+    internal static extern SubdHandle cadaclysm_blacksmith_subd_cylinder(double radius, double height, uint sides, uint rings,
+        [MarshalAs(UnmanagedType.I1)] bool creasedRims);
+    [DllImport(Lib)] internal static extern SubdHandle cadaclysm_blacksmith_subd_sphere(double radius, uint segments);
+    [DllImport(Lib)] internal static extern SubdHandle cadaclysm_blacksmith_subd_torus(double major, double minor, uint around, uint tube);
+    [DllImport(Lib)]
+    internal static extern SubdHandle cadaclysm_blacksmith_subd_from_parts(double[] positions, uint vertexCount, uint[] faceSizes, uint faceCount,
+        uint[] faceIndices, uint indexCount, uint[] creases, uint creaseCount, uint[] pins, uint pinCount, int symmetryAxis, double symmetryTolerance);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_subd_parts(SubdHandle subd, out RawBlacksmithSubdParts outParts);
+    [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_subd_free(IntPtr subd);
+    [DllImport(Lib)]
+    internal static extern SubdHandle cadaclysm_blacksmith_subd_transform(SubdHandle subd, uint kind, uint[] ids, uint idCount, double[] matrix);
+    [DllImport(Lib)]
+    internal static extern SubdHandle cadaclysm_blacksmith_subd_set_crease(SubdHandle subd, uint[] edges, uint edgeCount,
+        [MarshalAs(UnmanagedType.I1)] bool on);
+    [DllImport(Lib)]
+    internal static extern SubdHandle cadaclysm_blacksmith_subd_set_pin(SubdHandle subd, uint[] vertices, uint vertexCount,
+        [MarshalAs(UnmanagedType.I1)] bool on);
+    [DllImport(Lib)] internal static extern SubdHandle cadaclysm_blacksmith_subd_extrude(SubdHandle subd, uint[] faces, uint faceCount, double distance);
+    [DllImport(Lib)]
+    internal static extern SubdHandle cadaclysm_blacksmith_subd_inset(SubdHandle subd, uint[] faces, uint faceCount, double amount,
+        [MarshalAs(UnmanagedType.I1)] bool individual);
+    [DllImport(Lib)] internal static extern SubdHandle cadaclysm_blacksmith_subd_insert_loop(SubdHandle subd, uint a, uint b, double at);
+    [DllImport(Lib)] internal static extern SubdHandle cadaclysm_blacksmith_subd_mirror_on(SubdHandle subd, uint axis);
+    [DllImport(Lib)] internal static extern SubdHandle cadaclysm_blacksmith_subd_mirror_off(SubdHandle subd);
+    [DllImport(Lib)] internal static extern SubdHandle cadaclysm_blacksmith_subd_full(SubdHandle subd);
+    [DllImport(Lib)] internal static extern SubdHandle cadaclysm_blacksmith_subd_edge_loop(SubdHandle subd, uint a, uint b);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_subd_smooth_mesh(SubdHandle subd, uint levels, out RawBlacksmithSubdMesh outMesh);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_subd_pick(SubdHandle subd, double[] point, uint kind, uint[] output);
+    [DllImport(Lib)]
+    internal static extern SolidHandle cadaclysm_blacksmith_subd_to_solid(SubdHandle subd, double tolerance, double g1AngleDeg, uint maxLevels,
+        out RawBlacksmithSubdReport report);
     [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_collisions_free(IntPtr collisions);
     [DllImport(Lib)] internal static extern uint cadaclysm_blacksmith_collisions_count(CollisionsHandle collisions);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
@@ -1284,6 +1432,14 @@ internal static class BlacksmithNative
         double[] frame, double[]? endFrame,
         double[]? lower, double[]? upper, byte[]? hasLower, byte[]? hasUpper,
         nuint freedomCount, double pitch);
+    // `assembly_pair` with `params` (`paramCount` doubles) in place of the pitch, for the
+    // coupled pairs; the ranges are the same four parallel arrays.
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_assembly_pair_with(AssemblyHandle a,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string joint, [MarshalAs(UnmanagedType.LPUTF8Str)] string kind,
+        double[] frame, double[]? endFrame,
+        double[]? lower, double[]? upper, byte[]? hasLower, byte[]? hasUpper,
+        nuint freedomCount, double[]? @params, nuint paramCount);
     // `joints` is a raw `IntPtr[]` of UTF-8 C strings, allocated and freed exactly as
     // `assembly_link`'s `placements` is; row i sets joint `joints[i]` to `counts[i]` values,
     // consecutive in `values`.
@@ -1297,6 +1453,12 @@ internal static class BlacksmithNative
     internal static extern bool cadaclysm_blacksmith_assembly_sequence(AssemblyHandle a,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string name, IntPtr[] states, double[] ts,
         IntPtr[] interpolations, nuint count, [MarshalAs(UnmanagedType.I1)] bool seconds);
+    // The posed copy: `joints`, `counts`, `values` laid out as `assembly_state`'s are; null `state`
+    // or `ground` means none. Returns a new owned assembly, or null with `last_error` set.
+    [DllImport(Lib)]
+    internal static extern AssemblyHandle cadaclysm_blacksmith_assembly_posed(AssemblyHandle a,
+        IntPtr[]? joints, uint[]? counts, double[]? values, nuint rowCount,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state, [MarshalAs(UnmanagedType.LPUTF8Str)] string? ground);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_assembly_base(AssemblyHandle a,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string link);
@@ -1308,10 +1470,24 @@ internal static class BlacksmithNative
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_parse_colour(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string text, [Out] double[] rgb);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_option_set(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string name, double value);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_blacksmith_option_get(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string name, out double value);
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_svg_text(IntPtr[] solids, nuint count, ref RawBlacksmithSvgOptions options);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_blacksmith_svg(IntPtr[] solids, nuint count,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string path, ref RawBlacksmithSvgOptions options);
+
+    // OWNED: 16 doubles a curve (four control points xyz, then four weights), released by the
+    // matching `_free` with the same count. `BlacksmithNative`'s only caller of the pair is
+    // `Blacksmith.SilhouetteBeziersOf`, which frees before it returns.
+    [DllImport(Lib)] internal static extern IntPtr cadaclysm_blacksmith_silhouette_beziers(SolidHandle solid,
+        ref RawBlacksmithSvgOptions options, out uint count);
+    [DllImport(Lib)] internal static extern void cadaclysm_blacksmith_silhouette_beziers_free(IntPtr data, uint count);
+
     // The drawing pair widens `svg_text`/`svg` to profiles as well as solids; either
     // count may be 0 (null array), both 0 is refused, and every refusal is worded
     // exactly as the pair above's, so `WriteSvgText`/`WriteSvg` call only this pair now
@@ -1428,6 +1604,23 @@ public static class Blacksmith
     public static void License(string textOrPath)
     {
         if (!BlacksmithNative.cadaclysm_blacksmith_license_set(textOrPath)) throw Failure("license refused");
+    }
+
+    /// <summary>Set a kernel option, by its name, for the whole process from the next call on:
+    /// "boolean.mesh_budget", "boolean.finest_tolerance", "profile_boolean.point_budget" or
+    /// "measure.default_accuracy". Throws -- and changes nothing -- for a name that is not an
+    /// option or a value it does not take, saying which and what it takes.</summary>
+    public static void SetOption(string name, double value)
+    {
+        if (!BlacksmithNative.cadaclysm_blacksmith_option_set(name, value)) throw Failure($"option '{name}' refused");
+    }
+
+    /// <summary>A kernel option's value, by its name: what <see cref="SetOption"/> last set,
+    /// else its default. Throws for a name that is not an option, listing the ones there are.</summary>
+    public static double Option(string name)
+    {
+        if (!BlacksmithNative.cadaclysm_blacksmith_option_get(name, out var value)) throw Failure($"no option '{name}'");
+        return value;
     }
 
     /// <summary>One line about the license the library is running under. Never null: the
@@ -1630,6 +1823,42 @@ public static class Blacksmith
         if (!ok) throw Failure("svg");
     }
 
+    /// <summary>The curves where <paramref name="solid"/>'s surfaces turn away from the camera
+    /// <paramref name="options"/> describes, as cubic Béziers -- <see cref="Solid.SilhouetteBeziers"/>.
+    /// The library hands back one owned block of 16 doubles a curve; this unpacks it into the two
+    /// arrays <see cref="BeziersData64"/> carries and frees the block before it returns, so
+    /// nothing here outlives the call. An empty answer is a null block with no message, a refusal
+    /// is a null block with one: the library clears the error slot as this call starts (it runs under
+    /// its `guard`), so the slot read straight after is this call's own.</summary>
+    internal static BeziersData64 SilhouetteBeziersOf(Solid solid, SvgOptions? options)
+    {
+        var raw = BuildSvgOptions(options);
+        var data = BlacksmithNative.cadaclysm_blacksmith_silhouette_beziers(solid.Handle, ref raw, out var count);
+        if (data == IntPtr.Zero)
+        {
+            if (LastError().Length > 0) throw Failure("silhouette");
+            return new BeziersData64(Array.Empty<double>(), Array.Empty<double>());
+        }
+        try
+        {
+            var n = checked((int)count);
+            var flat = new double[n * 16];
+            Marshal.Copy(data, flat, 0, flat.Length);
+            var points = new double[n * 12];
+            var weights = new double[n * 4];
+            for (var i = 0; i < n; i++)
+            {
+                Array.Copy(flat, i * 16, points, i * 12, 12);
+                Array.Copy(flat, i * 16 + 12, weights, i * 4, 4);
+            }
+            return new BeziersData64(points, weights);
+        }
+        finally
+        {
+            BlacksmithNative.cadaclysm_blacksmith_silhouette_beziers_free(data, count);
+        }
+    }
+
     /// <summary><see cref="SvgOptions"/>, packed into `RawBlacksmithSvgOptions`: `View` fills
     /// `Azimuth`/`Elevation` unless they are set directly, `Up` defaults to "z" (a solid
     /// carries no convention of its own), colours are `'#rgb'`, `'#rrggbb'` or a CSS colour name -- as the reader's own
@@ -1649,8 +1878,8 @@ public static class Blacksmith
         raw.Margin = o.Margin;
         raw.Tolerance = o.Tolerance;
         raw.StrokeWidth = o.StrokeWidth;
-        raw.Stroke = Packed(o.Stroke);
-        raw.Background = o.Background ?? 0xFFFFFFFFu; // CADACLYSM_BLACKSMITH_SVG_TRANSPARENT
+        raw.Stroke = o.Stroke.Packed("svg: stroke");
+        raw.Background = o.Background is { } background ? background.Packed("svg: background") : 0xFFFFFFFFu; // CADACLYSM_BLACKSMITH_SVG_TRANSPARENT
         raw.Flags = (o.Edges ? 1u : 0u) | (o.Curves ? 2u : 0u) | (o.Isocurves ? 4u : 0u) | (o.Polylines ? 8u : 0u)
             | (o.Silhouettes ? 16u : 0u);
         return raw;
@@ -1675,8 +1904,9 @@ public static class Blacksmith
         ((uint)Math.Round(rgb[0] * 255) << 16) | ((uint)Math.Round(rgb[1] * 255) << 8) | (uint)Math.Round(rgb[2] * 255);
 
     /// <summary>A colour as the ABI's packed `0xRRGGBB`, from `"#rgb"`, `"#rrggbb"` or a CSS colour name --
-    /// for <see cref="SvgOptions.Background"/>, which takes the packed number. Takes no numeric
-    /// triple of its own, so its refusal lists only the text forms.</summary>
+    /// for a host that wants the number itself (<see cref="SvgOptions.Stroke"/>/<see
+    /// cref="SvgOptions.Background"/> take the text directly). Takes no numeric triple of its
+    /// own, so its refusal lists only the text forms.</summary>
     public static uint Packed(string colour)
     {
         var rgb = new double[3];
@@ -1732,6 +1962,11 @@ public static class Blacksmith
         for (var k = 0; k < points.Length; k++) points[k] = flat.Slice(3 * k, 3).ToArray();
         return points;
     }
+
+    /// <summary>`count` values at `at`, copied out as an array of the caller's own (empty for a null
+    /// pointer or a zero count).</summary>
+    internal static unsafe T[] CopyOf<T>(IntPtr at, uint count) where T : unmanaged =>
+        at == IntPtr.Zero || count == 0 ? Array.Empty<T>() : new ReadOnlySpan<T>((void*)at, (int)count).ToArray();
 
     internal static T Checked<T>(T handle, string what) where T : CadaclysmHandle =>
         !handle.IsInvalid ? handle : throw Failure(what);
@@ -3509,6 +3744,20 @@ public sealed class Solid : IDisposable
     /// <summary>This solid written as an SVG file by the library itself.</summary>
     public void Svg(string path, SvgOptions? options = null) => Blacksmith.WriteSvg(path, new[] { this }, options);
 
+    /// <summary>This solid's silhouette from the camera <paramref name="options"/> describes --
+    /// the curves where its surfaces turn away from the eye, which no edge of it lies on, so a
+    /// sphere has an outline here that its wireframe has none of. The same <see cref="SvgOptions"/>
+    /// that draw a picture ask about the same eye; `Width` is the image width the library reads
+    /// the `Tolerance` against, so set both or neither. The line-set flags are not read.
+    /// Exact Béziers where the surface has a closed silhouette form -- sphere, cylinder, cone,
+    /// extrusion -- and a straight-chord polyline carried as degree-1 Béziers for every other
+    /// surface.
+    /// <para>Owned by this call: the library's block is copied into <see cref="BeziersData64"/>
+    /// and released before this returns. A solid with no silhouette (every face planar) gives a
+    /// result with <see cref="BeziersData64.Count"/> 0, which is not an error; a refused option
+    /// throws <see cref="BuildException"/>.</para></summary>
+    public BeziersData64 SilhouetteBeziers(SvgOptions? options = null) => Blacksmith.SilhouetteBeziersOf(this, options);
+
     // -- selecting and edges
 
     /// <summary>The face `selector` picks; throws when none does.</summary>
@@ -3739,6 +3988,15 @@ public sealed class Solid : IDisposable
         return all.Lumps();
     }
 
+    /// <summary>This solid split by the closed `profile` drawn on `frame` (twelve numbers),
+    /// pushed straight through it along the frame's z both ways: the bodies outside the
+    /// profile first, then those inside. Where the plane lies along z does not matter.</summary>
+    public IReadOnlyList<Solid> SplitByProfile(Profile profile, double[] frame, double tolerance = 0.05)
+    {
+        using var all = new Solid(BlacksmithNative.cadaclysm_blacksmith_split_by_profile(Handle, profile.Handle, Blacksmith.Frame(frame), tolerance, IntPtr.Zero, IntPtr.Zero));
+        return all.Lumps();
+    }
+
     /// <summary>This solid's connected bodies, each a solid of its own -- faces sharing an
     /// edge are one body -- in the order of their first faces.</summary>
     public IReadOnlyList<Solid> Lumps()
@@ -3953,6 +4211,8 @@ public sealed class Assembly : IDisposable
         _handle = Blacksmith.Checked(BlacksmithNative.cadaclysm_blacksmith_assembly_new(name), "assembly");
     }
 
+    private Assembly(AssemblyHandle handle) => _handle = handle;
+
     /// <summary>The handle, refusing to hand over a disposed one, so a use-after-dispose throws
     /// at the call site instead of passing a dangling pointer into the library.</summary>
     internal AssemblyHandle Handle => !_handle.IsClosed ? _handle : throw new ObjectDisposedException(nameof(Assembly), "assembly: closed");
@@ -4092,6 +4352,44 @@ public sealed class Assembly : IDisposable
         if (!ok) throw Blacksmith.Failure("assembly_pair");
     }
 
+    /// <summary><see cref="Pair"/> with the kind's own numbers in place of the pitch, for the
+    /// coupled pairs: <paramref name="kind"/> any name <see cref="Pair"/> takes, or "gear" or
+    /// "rack_and_pinion"; <paramref name="parameters"/> [pitch] for a screw, [pinion_radius]
+    /// for a rack and pinion, [radius_first, radius_second, ratio] or those plus [bevel,
+    /// helical_angle] (radians) for a gear -- the ratio the second link's rotation over the
+    /// first's, signed (two meshing external gears turn opposite ways, so theirs is
+    /// negative) -- and none for any other kind. <paramref name="frame"/>, <paramref
+    /// name="endFrame"/> and <paramref name="ranges"/> read as in <see cref="Pair"/>. Throws
+    /// <see cref="BuildException"/> with the kernel's own text when a rule refuses it (a wrong
+    /// number of parameters among them); the assembly is then unchanged.</summary>
+    public void PairWith(string joint, string kind, Frame frame, Frame? endFrame = null,
+        IReadOnlyList<(double? Lower, double? Upper)>? ranges = null, IEnumerable<double>? parameters = null)
+    {
+        double[]? lower = null, upper = null;
+        byte[]? hasLower = null, hasUpper = null;
+        var freedomCount = ranges is null ? 0 : (nuint)ranges.Count;
+        if (ranges is not null)
+        {
+            lower = new double[ranges.Count];
+            upper = new double[ranges.Count];
+            hasLower = new byte[ranges.Count];
+            hasUpper = new byte[ranges.Count];
+            for (var i = 0; i < ranges.Count; i++)
+            {
+                lower[i] = ranges[i].Lower ?? 0.0;
+                upper[i] = ranges[i].Upper ?? 0.0;
+                hasLower[i] = (byte)(ranges[i].Lower is not null ? 1 : 0);
+                hasUpper[i] = (byte)(ranges[i].Upper is not null ? 1 : 0);
+            }
+        }
+        var values = parameters is null ? Array.Empty<double>() : parameters.ToArray();
+        var ok = BlacksmithNative.cadaclysm_blacksmith_assembly_pair_with(Handle, joint, kind,
+            Blacksmith.Frame(frame), endFrame is null ? null : Blacksmith.Frame(endFrame),
+            lower, upper, hasLower, hasUpper, freedomCount, values.Length == 0 ? null : values, (nuint)values.Length);
+        GC.KeepAlive(this);
+        if (!ok) throw Blacksmith.Failure("assembly_pair_with");
+    }
+
     /// <summary>Add a named state <paramref name="name"/> to this assembly: <paramref
     /// name="rows"/> sets each named joint to its values, in that joint's pair's freedom
     /// order. Throws <see cref="BuildException"/> with the kernel's own text when a rule
@@ -4115,6 +4413,44 @@ public sealed class Assembly : IDisposable
                 flat.Count == 0 ? null : flat.ToArray(), (nuint)count);
             GC.KeepAlive(this);
             if (!ok) throw Blacksmith.Failure("assembly_state");
+        }
+        finally
+        {
+            if (joints is not null) foreach (var p in joints) if (p != IntPtr.Zero) Marshal.FreeCoTaskMem(p);
+        }
+    }
+
+    /// <summary>A new assembly: this one with the joints in <paramref name="rows"/> moved, every
+    /// placement on a moving link carrying its pose, so any writer or reader shows the mechanism
+    /// posed. Each row is a joint -- a path of placement names then the joint name, joined by
+    /// "/", a "/" or "\" inside a name escaped with "\" -- and its values in that joint's pair's
+    /// freedom order; a bare name is enough when it names one joint. <paramref name="state"/>
+    /// names a state to pose from first (<paramref name="rows"/> then override it), and
+    /// <paramref name="ground"/> the link held still (default: the declared base). This
+    /// assembly is unchanged either way. Throws <see cref="BuildException"/> with the kernel's
+    /// own text when a rule refuses it (an ambiguous name, a value outside its range, a coupling
+    /// given two disagreeing answers, an unknown state).</summary>
+    public Assembly Posed(IEnumerable<(string Joint, IReadOnlyList<double> Values)>? rows = null,
+        string? state = null, string? ground = null)
+    {
+        var list = rows is null ? new List<(string Joint, IReadOnlyList<double> Values)>()
+            : rows as IReadOnlyList<(string Joint, IReadOnlyList<double> Values)> ?? rows.ToList();
+        var count = list.Count;
+        var joints = count == 0 ? null : new IntPtr[count];
+        var counts = new uint[count];
+        var flat = new List<double>();
+        try
+        {
+            for (var i = 0; i < count; i++)
+            {
+                joints![i] = Marshal.StringToCoTaskMemUTF8(list[i].Joint);
+                counts[i] = (uint)list[i].Values.Count;
+                flat.AddRange(list[i].Values);
+            }
+            var posed = BlacksmithNative.cadaclysm_blacksmith_assembly_posed(Handle, joints,
+                count == 0 ? null : counts, flat.Count == 0 ? null : flat.ToArray(), (nuint)count, state, ground);
+            GC.KeepAlive(this);
+            return new Assembly(Blacksmith.Checked(posed, "assembly_posed"));
         }
         finally
         {
@@ -4691,6 +5027,374 @@ public sealed class Collider : IDisposable
             hits.Add(new CollisionHit(raw, collisions, i));
         }
         return hits;
+    }
+}
+
+// ---- The SubD cage ----------------------------------------------------------------------
+
+/// <summary>An edge of a cage: its two vertex ids. <see cref="Subd.Creases"/> and <see
+/// cref="Subd.EdgeLoop"/> answer them smaller id first.</summary>
+public readonly record struct SubdEdge(uint A, uint B);
+
+/// <summary>The plane a mirrored cage is the positive half across: perpendicular to this axis.
+/// </summary>
+public enum SubdAxis { X, Y, Z }
+
+/// <summary>What kind of cage element a selection, or a <see cref="Subd.Pick"/>, names.</summary>
+public enum SubdElements { Vertices, Edges, Faces }
+
+/// <summary>Cage elements of one kind: vertex or face ids in <see cref="Ids"/>, or edges in
+/// <see cref="Edges"/> (the other is empty). What the edit that made a cage touched, and what
+/// <see cref="Subd.Transform"/> moves.</summary>
+public sealed record SubdSelection(SubdElements Kind, uint[] Ids, SubdEdge[] Edges)
+{
+    public static SubdSelection OfVertices(params uint[] ids) => new(SubdElements.Vertices, ids, Array.Empty<SubdEdge>());
+    public static SubdSelection OfEdges(params SubdEdge[] edges) => new(SubdElements.Edges, Array.Empty<uint>(), edges);
+    public static SubdSelection OfFaces(params uint[] ids) => new(SubdElements.Faces, ids, Array.Empty<SubdEdge>());
+
+    /// <summary>Equal when the kinds match and so does every id and edge, in order. A record
+    /// would otherwise compare its arrays by reference, so no two selections read back would
+    /// ever be equal.</summary>
+    public bool Equals(SubdSelection? other) =>
+        other is not null && Kind == other.Kind && Ids.SequenceEqual(other.Ids) && Edges.SequenceEqual(other.Edges);
+
+    public override int GetHashCode()
+    {
+        var hash = new HashCode();
+        hash.Add(Kind);
+        foreach (var id in Ids) hash.Add(id);
+        foreach (var edge in Edges) hash.Add(edge);
+        return hash.ToHashCode();
+    }
+
+    public override string ToString() => Kind == SubdElements.Edges
+        ? $"SubdSelection(Edges, [{string.Join(", ", Edges.Select(e => $"({e.A}, {e.B})"))}])"
+        : $"SubdSelection({Kind}, [{string.Join(", ", Ids)}])";
+}
+
+/// <summary>One level of a cage's smooth surface, as <see cref="Subd.SmoothMesh"/> returns it,
+/// copied out of the cage so it outlives it. <see cref="Positions"/> and <see cref="Normals"/>
+/// are `3n` doubles -- limit positions and unit outward limit normals; <see cref="Indices"/> is
+/// three vertex ids a triangle; <see cref="TriangleFace"/> is one entry a triangle: the face of
+/// the **full** cage it lies on (on a mirrored half, face `f` of the half is `f` and its
+/// reflection `f` plus the half's face count).</summary>
+public sealed class SubdMesh
+{
+    public double[] Positions { get; }
+    public double[] Normals { get; }
+    public uint[] Indices { get; }
+    public uint[] TriangleFace { get; }
+
+    internal SubdMesh(RawBlacksmithSubdMesh raw)
+    {
+        Positions = Blacksmith.CopyOf<double>(raw.Positions, 3 * raw.VertexCount);
+        Normals = Blacksmith.CopyOf<double>(raw.Normals, 3 * raw.VertexCount);
+        Indices = Blacksmith.CopyOf<uint>(raw.Indices, raw.IndexCount);
+        TriangleFace = Blacksmith.CopyOf<uint>(raw.TriangleFace, raw.IndexCount / 3);
+    }
+
+    public override string ToString() => $"SubdMesh(vertices={Positions.Length / 3}, triangles={Indices.Length / 3})";
+}
+
+/// <summary>What <see cref="Subd.ToSolid"/> did and how close it came: <see cref="Regular"/>
+/// patches exact from their own net and <see cref="Refined"/> ones from a refined neighbourhood;
+/// the Catmull-Clark <see cref="Steps"/> taken first (1 or 2); <see cref="Levels"/>, the deepest
+/// local refinement a patch took (0 when none was refined); the largest <see cref="Deviation"/>
+/// from the limit surface, as a fraction of the cage's bounding-box diagonal; the largest tangent
+/// break <see cref="G1AngleDeg"/> across a side that is not creased, in degrees; and the world
+/// points they were measured at, <see cref="DeviationAt"/> and <see cref="G1At"/>.</summary>
+public sealed class SubdReport
+{
+    public uint Regular { get; }
+    public uint Refined { get; }
+    public uint Steps { get; }
+    public uint Levels { get; }
+    public double Deviation { get; }
+    public double G1AngleDeg { get; }
+    public double[] DeviationAt { get; }
+    public double[] G1At { get; }
+
+    internal unsafe SubdReport(RawBlacksmithSubdReport raw)
+    {
+        Regular = raw.Regular;
+        Refined = raw.Refined;
+        Steps = raw.Steps;
+        Levels = raw.Levels;
+        Deviation = raw.Deviation;
+        G1AngleDeg = raw.G1AngleDeg;
+        DeviationAt = new[] { raw.DeviationAt[0], raw.DeviationAt[1], raw.DeviationAt[2] };
+        G1At = new[] { raw.G1At[0], raw.G1At[1], raw.G1At[2] };
+    }
+
+    public override string ToString() =>
+        $"SubdReport(regular={Regular}, refined={Refined}, steps={Steps}, levels={Levels}, deviation={Deviation}, g1AngleDeg={G1AngleDeg}, " +
+        $"deviationAt=({string.Join(", ", DeviationAt)}), g1At=({string.Join(", ", G1At)}))";
+}
+
+/// <summary>A Catmull-Clark control cage: positions (`3n` doubles), faces, creased edges, pinned
+/// vertices, an optional mirror plane, and the selection of the edit that made it. Immutable:
+/// every edit returns a new <see cref="Subd"/>, with <see cref="Selection"/> naming what that
+/// edit touched, and leaves this one as it was. <see cref="ToSolid"/> turns it into an exact
+/// B-rep. <see cref="Dispose"/> frees this handle; so does the garbage collector. A refusal
+/// throws <see cref="BuildException"/> with the kernel's own words; a use after
+/// <see cref="Dispose"/> throws <see cref="ObjectDisposedException"/>.</summary>
+public sealed class Subd : IDisposable
+{
+    private readonly SubdHandle _handle;
+
+    internal Subd(SubdHandle handle)
+    {
+        _handle = Blacksmith.Checked(handle, "subd");
+    }
+
+    internal SubdHandle Handle => !_handle.IsClosed ? _handle : throw new ObjectDisposedException(nameof(Subd), "subd: closed");
+
+    public bool Closed => _handle.IsClosed;
+
+    /// <summary>Give the cage back. Idempotent. A <see cref="SubdMesh"/> already read owns its
+    /// own copy and reads on.</summary>
+    public void Dispose() => _handle.Dispose();
+
+    // -- the primitives
+
+    /// <summary>A box of `size` (default 2 x 2 x 2), centred on the origin, with `segments`
+    /// quads along each axis (default 1 x 1 x 1; 1 to 1024).</summary>
+    public static Subd Cuboid((double X, double Y, double Z)? size = null, (uint X, uint Y, uint Z)? segments = null)
+    {
+        var (sx, sy, sz) = size ?? (2.0, 2.0, 2.0);
+        var (nx, ny, nz) = segments ?? (1u, 1u, 1u);
+        return new Subd(BlacksmithNative.cadaclysm_blacksmith_subd_cuboid(sx, sy, sz, nx, ny, nz));
+    }
+
+    /// <summary>A cylinder along +Z: one n-gon cap per end with `sides` sides and `rings` bands of
+    /// quads between them; with <paramref name="creasedRims"/> the two rim loops are creased, so
+    /// the caps stay flat. The rims are creased by default, which is what converts: an uncreased
+    /// cylinder of 7 or more sides is refused by <see cref="ToSolid"/> at the default tolerances.
+    /// </summary>
+    public static Subd Cylinder(double radius = 1.0, double height = 2.0, uint sides = 8, uint rings = 1, bool creasedRims = true) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_subd_cylinder(radius, height, sides, rings, creasedRims));
+
+    /// <summary>A quad ball of `radius`: a cube grid with `segments` quads per edge, each vertex
+    /// pushed out to the radius.</summary>
+    public static Subd Sphere(double radius = 1.0, uint segments = 2) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_subd_sphere(radius, segments));
+
+    /// <summary>A torus around +Z: `around` steps about the axis at `major`, `tube` steps round
+    /// the tube of `minor`, all quads.</summary>
+    public static Subd Torus(double major = 3.0, double minor = 1.0, uint around = 12, uint tube = 8) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_subd_torus(major, minor, around, tube));
+
+    /// <summary>A cage from its parts, the lossless inverse of reading them back: `positions`
+    /// (`3n` doubles), `faces` lists of vertex ids, `creases` edges, `pins` vertex ids, and
+    /// `symmetry` null or the axis and tolerance of a mirrored half, as <see cref="Symmetry"/>
+    /// reports it. The new cage selects nothing.</summary>
+    public static Subd FromParts(double[] positions, uint[][] faces, IEnumerable<SubdEdge>? creases = null, IEnumerable<uint>? pins = null,
+        (SubdAxis Axis, double Tolerance)? symmetry = null)
+    {
+        if (positions.Length % 3 != 0) throw new BuildException($"from_parts: positions are three numbers a point, not {positions.Length}");
+        var sizes = faces.Select(f => (uint)f.Length).ToArray();
+        var loop = faces.SelectMany(f => f).ToArray();
+        var crease = Flat(creases ?? Array.Empty<SubdEdge>());
+        var pin = (pins ?? Array.Empty<uint>()).ToArray();
+        var (axis, tolerance) = symmetry is { } s ? (CheckedAxis(s.Axis, "from_parts symmetry"), s.Tolerance) : (-1, 0.0);
+        return new Subd(BlacksmithNative.cadaclysm_blacksmith_subd_from_parts(positions, (uint)(positions.Length / 3), sizes, (uint)sizes.Length,
+            loop, (uint)loop.Length, crease, (uint)(crease.Length / 2), pin, (uint)pin.Length, axis, tolerance));
+    }
+
+    private static uint[] Flat(IEnumerable<SubdEdge> edges)
+    {
+        var flat = new List<uint>();
+        foreach (var e in edges) { flat.Add(e.A); flat.Add(e.B); }
+        return flat.ToArray();
+    }
+
+    private static int CheckedAxis(SubdAxis axis, string what) =>
+        Enum.IsDefined(axis) ? (int)axis : throw new BuildException($"{what}: axis must be X, Y or Z, not {axis}");
+
+    // -- the parts
+
+    /// <summary>`read(parts)` over this cage's parts while their views are alive.</summary>
+    private T Parts<T>(Func<RawBlacksmithSubdParts, T> read)
+    {
+        var h = Handle;
+        if (!BlacksmithNative.cadaclysm_blacksmith_subd_parts(h, out var raw)) throw Blacksmith.Failure("subd_parts");
+        var answer = read(raw);
+        GC.KeepAlive(h);
+        return answer;
+    }
+
+    /// <summary>The cage's vertices, `3n` doubles of your own: a copy.</summary>
+    public double[] Positions => Parts(p => Blacksmith.CopyOf<double>(p.Positions, 3 * p.VertexCount));
+
+    /// <summary>Each face's vertex ids, in loop order.</summary>
+    public uint[][] Faces => Parts(p =>
+    {
+        var sizes = Blacksmith.CopyOf<uint>(p.FaceSizes, p.FaceCount);
+        var loop = Blacksmith.CopyOf<uint>(p.FaceIndices, p.IndexCount);
+        var faces = new uint[sizes.Length][];
+        var at = 0;
+        for (var k = 0; k < sizes.Length; k++)
+        {
+            faces[k] = loop.AsSpan(at, (int)sizes[k]).ToArray();
+            at += (int)sizes[k];
+        }
+        return faces;
+    });
+
+    /// <summary>The creased edges, each smaller id first, sorted.</summary>
+    public SubdEdge[] Creases => Parts(p => Edges(Blacksmith.CopyOf<uint>(p.Creases, 2 * p.CreaseCount)));
+
+    /// <summary>The pinned vertices: they refine as corners and stay put.</summary>
+    public uint[] Pins => Parts(p => Blacksmith.CopyOf<uint>(p.Pins, p.PinCount));
+
+    /// <summary>Null for an ordinary cage; for a mirrored half the plane's axis and how far from
+    /// it a vertex counts as on it.</summary>
+    public (SubdAxis Axis, double Tolerance)? Symmetry => Parts<(SubdAxis, double)?>(p =>
+        p.SymmetryAxis < 0 ? null : ((SubdAxis)p.SymmetryAxis, p.SymmetryTolerance));
+
+    /// <summary>What the edit that made this cage touched; null for a cage no edit selected (a
+    /// primitive, <see cref="FromParts"/>, the mirror calls).</summary>
+    public SubdSelection? Selection => Parts(p =>
+    {
+        if (p.SelectionKind > 2) return null;
+        if (p.SelectionKind == 1)
+            return SubdSelection.OfEdges(Edges(Blacksmith.CopyOf<uint>(p.Selection, 2 * p.SelectionCount)));
+        var ids = Blacksmith.CopyOf<uint>(p.Selection, p.SelectionCount);
+        return p.SelectionKind == 0 ? SubdSelection.OfVertices(ids) : SubdSelection.OfFaces(ids);
+    });
+
+    private static SubdEdge[] Edges(uint[] flat)
+    {
+        var edges = new SubdEdge[flat.Length / 2];
+        for (var k = 0; k < edges.Length; k++) edges[k] = new SubdEdge(flat[2 * k], flat[2 * k + 1]);
+        return edges;
+    }
+
+    // -- the edits
+
+    /// <summary>A new cage with the selected elements moved by <paramref name="matrix"/>: sixteen
+    /// numbers, column-major; a rotation about a point is baked in by the caller. The new cage
+    /// selects the same elements.</summary>
+    public Subd Transform(SubdSelection selection, double[] matrix)
+    {
+        if (!Enum.IsDefined(selection.Kind)) throw new BuildException($"transform: kind must be Vertices, Edges or Faces, not {selection.Kind}");
+        if (matrix.Length != 16) throw new BuildException($"transform matrix: expected 16 numbers, got {matrix.Length}");
+        var ids = selection.Kind == SubdElements.Edges ? Flat(selection.Edges) : selection.Ids;
+        var count = (uint)(selection.Kind == SubdElements.Edges ? ids.Length / 2 : ids.Length);
+        return new Subd(BlacksmithNative.cadaclysm_blacksmith_subd_transform(Handle, (uint)selection.Kind, ids, count, matrix));
+    }
+
+    /// <summary>A new cage with <paramref name="edges"/> creased, or un-creased when <paramref
+    /// name="on"/> is false; it selects them.</summary>
+    public Subd Crease(IEnumerable<SubdEdge> edges, bool on = true)
+    {
+        var flat = Flat(edges);
+        return new Subd(BlacksmithNative.cadaclysm_blacksmith_subd_set_crease(Handle, flat, (uint)(flat.Length / 2), on));
+    }
+
+    /// <summary>A new cage with <paramref name="vertices"/> pinned (they refine as corners and
+    /// stay put), or released when <paramref name="on"/> is false; it selects them.</summary>
+    public Subd Pin(IEnumerable<uint> vertices, bool on = true)
+    {
+        var ids = vertices.ToArray();
+        return new Subd(BlacksmithNative.cadaclysm_blacksmith_subd_set_pin(Handle, ids, (uint)ids.Length, on));
+    }
+
+    /// <summary>A new cage with <paramref name="faces"/> pushed out by <paramref name="distance"/>
+    /// along each connected region's average normal, a quad wall on each boundary edge; the moved
+    /// faces keep their ids and the new cage selects them.</summary>
+    public Subd Extrude(IEnumerable<uint> faces, double distance)
+    {
+        var ids = faces.ToArray();
+        return new Subd(BlacksmithNative.cadaclysm_blacksmith_subd_extrude(Handle, ids, (uint)ids.Length, distance));
+    }
+
+    /// <summary>A new cage with <paramref name="faces"/> shrunk by <paramref name="amount"/>, in
+    /// (0, 1), within their surface and a ring of quads round each region (each face, with
+    /// <paramref name="individual"/>); the new cage selects the inner faces.</summary>
+    public Subd Inset(IEnumerable<uint> faces, double amount, bool individual = false)
+    {
+        var ids = faces.ToArray();
+        return new Subd(BlacksmithNative.cadaclysm_blacksmith_subd_inset(Handle, ids, (uint)ids.Length, amount, individual));
+    }
+
+    /// <summary>A new cage with a loop of edges cut across the ring of quads through <paramref
+    /// name="edge"/>, at `a + at * (b - a)` with <paramref name="at"/> in (0, 1); it selects the
+    /// new loop.</summary>
+    public Subd InsertLoop(SubdEdge edge, double at = 0.5) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_subd_insert_loop(Handle, edge.A, edge.B, at));
+
+    /// <summary>The loop of edges through <paramref name="edge"/>, straight across each
+    /// valence-four vertex, the picked edge first, each smaller id first; empty when it is not an
+    /// edge of the cage.</summary>
+    public SubdEdge[] EdgeLoop(SubdEdge edge)
+    {
+        using var looped = new Subd(BlacksmithNative.cadaclysm_blacksmith_subd_edge_loop(Handle, edge.A, edge.B));
+        return looped.Selection?.Edges ?? Array.Empty<SubdEdge>();
+    }
+
+    /// <summary>The positive half of the cage across the plane perpendicular to <paramref
+    /// name="axis"/> as a mirrored cage: every later edit keeps it symmetric.</summary>
+    public Subd MirrorOn(SubdAxis axis) =>
+        new(BlacksmithNative.cadaclysm_blacksmith_subd_mirror_on(Handle, (uint)CheckedAxis(axis, "mirror_on")));
+
+    /// <summary>The mirror baked: the whole cage as an ordinary one, no longer mirrored.</summary>
+    public Subd MirrorOff() => new(BlacksmithNative.cadaclysm_blacksmith_subd_mirror_off(Handle));
+
+    /// <summary>The whole cage of a mirrored half -- the half's vertices first, then the
+    /// reflections of those off the plane -- or a copy of an ordinary cage.</summary>
+    public Subd Full() => new(BlacksmithNative.cadaclysm_blacksmith_subd_full(Handle));
+
+    // -- the surface
+
+    /// <summary>The smooth surface refined <paramref name="levels"/> times (1 to 6), as a
+    /// <see cref="SubdMesh"/> of copies.</summary>
+    public SubdMesh SmoothMesh(uint levels = 3)
+    {
+        var h = Handle;
+        if (!BlacksmithNative.cadaclysm_blacksmith_subd_smooth_mesh(h, levels, out var raw)) throw Blacksmith.Failure("subd_smooth_mesh");
+        var mesh = new SubdMesh(raw);
+        GC.KeepAlive(h);
+        return mesh;
+    }
+
+    /// <summary>The cage element of <paramref name="kind"/> under <paramref name="point"/> (three
+    /// numbers), a point on or near the smooth surface: a vertex or face id, or an edge with the
+    /// smaller id first, as a one-element <see cref="SubdSelection"/>. Null when nothing is within
+    /// 0.05 of the cage's diagonal -- not an error.</summary>
+    public SubdSelection? Pick(double[] point, SubdElements kind)
+    {
+        if (point.Length != 3) throw new BuildException($"pick point: expected 3 numbers, got {point.Length}");
+        if (!Enum.IsDefined(kind)) throw new BuildException($"pick: kind must be Vertices, Edges or Faces, not {kind}");
+        var found = new uint[2];
+        if (!BlacksmithNative.cadaclysm_blacksmith_subd_pick(Handle, point, (uint)kind, found))
+        {
+            if (Blacksmith.LastError().Length == 0) return null;
+            throw Blacksmith.Failure("subd_pick");
+        }
+        return kind switch
+        {
+            SubdElements.Edges => SubdSelection.OfEdges(new SubdEdge(found[0], found[1])),
+            SubdElements.Faces => SubdSelection.OfFaces(found[0]),
+            _ => SubdSelection.OfVertices(found[0]),
+        };
+    }
+
+    /// <summary>The cage as an exact solid, one NURBS face per patch, that every solid call takes,
+    /// and a <see cref="SubdReport"/> of what the conversion did. <paramref name="tolerance"/> is
+    /// the largest deviation from the limit surface as a fraction of the cage's diagonal,
+    /// <paramref name="g1Angle"/> the largest tangent break across an uncreased side in degrees,
+    /// <paramref name="maxLevels"/> the deepest local refinement (2 to 6). A tolerance or angle of
+    /// 0 or less, or a <paramref name="maxLevels"/> of 0, takes the default; any other
+    /// <paramref name="maxLevels"/> outside 2 to 6 is refused. A cage that cannot be held within
+    /// them is refused with the figures it measured.</summary>
+    public (Solid Solid, SubdReport Report) ToSolid(double tolerance = 1e-4, double g1Angle = 0.1, uint maxLevels = 6)
+    {
+        var h = Handle;
+        var handle = BlacksmithNative.cadaclysm_blacksmith_subd_to_solid(h, tolerance, g1Angle, maxLevels, out var raw);
+        GC.KeepAlive(h);
+        var solid = new Solid(handle);
+        return (solid, new SubdReport(raw));
     }
 }
 

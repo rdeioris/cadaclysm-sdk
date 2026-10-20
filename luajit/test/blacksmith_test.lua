@@ -330,6 +330,15 @@ return function(t)
     t.eq(#box:lumps(), 1)
     t.raises(function() box:split_by_plane({ { 0, 0, 50 }, { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } }) end,
       "split_by_plane: the plane does not cross")
+    -- A rectangle drawn above a sphere cores it: the ball with a square hole, then the core.
+    local ball = bs.Solid.sphere(10)
+    local cored = ball:split_by_profile(bs.Profile.rect(6, 6), { { 0, 0, 40 }, { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } })
+    t.eq(#cored, 2)
+    local outside, inside, whole = cored[1]:mass().volume, cored[2]:mass().volume, ball:mass().volume
+    t.ok(inside > 0 and inside < outside, "the core is the smaller body: " .. outside .. " " .. inside)
+    t.ok(math.abs(outside + inside - whole) < 0.01 * whole, "the hole and the core add up to the ball")
+    t.raises(function() ball:split_by_profile(bs.Profile.circle(4), { { 30, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } }) end,
+      "split_by_profile: ")
     local slab = bs.Solid.cuboid(40, 20, 2)
     local parts = box:split(slab)
     t.ok(#parts >= 2, "a box split by a slab through it is at least two bodies, got " .. #parts)
@@ -656,7 +665,10 @@ return function(t)
     local phases = {}
     local found = a:intersect(b, tol, function(phase) phases[phase] = true end)
     t.ok(getmetatable(found) == bs.Intersection)
-    t.ok(phases.mesh and phases.cross and phases.snap)
+    -- Two analytic pipes must take the exact route, which reports only "meet" (a
+    -- fallback would add the mesh route's "mesh" .. "curve").
+    t.ok(phases.meet)
+    t.ok(not phases.mesh and not phases.cull and not phases.cross and not phases.snap and not phases.curve)
     t.ok(#found.chains >= 2)
     t.eq(#found.overlaps, 0)
     local ellipses = 0
@@ -1949,7 +1961,7 @@ return function(t)
       { function() arm:pair("shoulder", "revolute", bs.Frame.xy({ 0, 0, 10 })) end,
         "pair: joint 'shoulder' already has a pair" },
       { function() arm:pair("back", "orbital", bs.Frame.xy()) end,
-        "pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, spherical, "
+        "pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, gear, rack_and_pinion, spherical, "
         .. "spherical_with_pin, planar, universal, homokinetic, fully_constrained, unconstrained)" },
       { function() arm:pair("back", "screw", bs.Frame.xy()) end, "pair: a screw needs a non-zero pitch" },
       { function() arm:pair("back", "revolute", bs.Frame.xy(), { ranges = { { -1, 1 }, { -1, 1 } } }) end,
@@ -1995,6 +2007,191 @@ return function(t)
     bracket:close()
     bolt:close()
     plate:close()
+  end)
+
+  -- Drives plan 4's round trip, as Python's _geared(): a pinion turning on `drive` meshes,
+  -- by the gear pair `mesh` (radii 10 and 20, ratio -0.5, bevel 0.25, helical 0.125), with
+  -- a wheel turning on `driven` about (30, 0).
+  local function geared(mesh)
+    local plate = bs.Solid.cuboid(40, 10, 2):named("plate")
+    local pin = bs.Solid.cylinder(1, 6):named("pin")
+    local hub = bs.Solid.cylinder(2, 4):named("hub")
+    local gears = bs.Assembly("gears")
+    gears:place(plate, bs.Frame.xy(), "frame")
+    gears:place(pin, bs.Frame.xy({ 0, 0, 2 }), "pinion")
+    gears:place(hub, bs.Frame.xy({ 35, 0, 2 }), "wheel")
+    gears:link("base", { "frame" })
+    gears:link("driver", { "pinion" })
+    gears:link("follower", { "wheel" })
+    gears:joint("drive", "base", "driver")
+    gears:joint("driven", "base", "follower")
+    gears:joint("mesh", "driver", "follower")
+    gears:pair("drive", "revolute", bs.Frame.xy({ 0, 0, 2 }))
+    gears:pair("driven", "revolute", bs.Frame.xy({ 30, 0, 2 }))
+    if mesh then
+      gears:pair_with("mesh", "gear", bs.Frame.xy({ 0, 0, 2 }), nil, { 10, 20, -0.5, 0.25, 0.125 })
+    end
+    return gears, { plate, pin, hub }
+  end
+
+  t.test("a gear pair round trips and poses from its driver", function()
+    local gears, parts = geared(true)
+    local scene = gears:to_scene()
+    local joints = {}
+    for _, j in ipairs(scene.joints) do joints[j.name] = j end
+    local mesh = joints.mesh.pair
+    t.eq(mesh.kind, "other")
+    t.eq(mesh.kind_name, "gear")
+    local want_params = { 10, 20, -0.5, 0.25, 0.125 }
+    t.eq(#mesh.parameters, 5)
+    for i = 1, 5 do t.near(mesh.parameters[i], want_params[i], 1e-12) end
+    t.eq(joints.drive.pair.kind_name, "revolute")
+    t.eq(#joints.drive.pair.parameters, 0)
+
+    -- the driver alone turns the wheel by ratio x 0.4 about (30, 0): nothing to report
+    local pose = scene:pose({ { joint = joints.drive, values = { 0.4 } } })
+    t.eq(#pose.diagnostics, 0)
+    t.eq(#pose.unsolved, 0)
+    local wheel = scene.links[3].nodes[1]
+    local m = pose:transform(wheel)
+    t.near(m[1][4], 30 + 5 * math.cos(-0.2), 1e-9)
+    t.near(m[2][4], 5 * math.sin(-0.2), 1e-9)
+    t.near(m[3][4], 2.0, 1e-9)
+
+    -- both sides given, against the law: one diagnostic, in the kernel's words
+    pose = scene:pose({ { joint = joints.drive, values = { 0.4 } }, { joint = joints.driven, values = { 0.4 } } })
+    t.eq(#pose.diagnostics, 1)
+    local prefix = "coupling 'mesh': both 'drive' and 'driven' are given and disagree by"
+    t.eq(pose.diagnostics[1]:sub(1, #prefix), prefix)
+    scene:close()
+    gears:close()
+    for _, p in ipairs(parts) do p:close() end
+  end)
+
+  t.test("pair_with refuses a wrong parameter count", function()
+    local gears, parts = geared(false)
+    local e = t.raises(function() gears:pair_with("mesh", "gear", bs.Frame.xy(), nil, { 10, 20 }) end)
+    t.ok(is_build_error(e), e.message)
+    t.eq(e.message, "pair: a gear takes 3 or 5 parameters, not 2")
+    gears:pair_with("mesh", "gear", bs.Frame.xy(), nil, { 10, 20, -0.5 })   -- unchanged: it takes one now
+    gears:close()
+    for _, p in ipairs(parts) do p:close() end
+  end)
+
+  -- Python's _paired(): the mechanism's pairs, a state `reach` and a base.
+  local function paired()
+    local bolt, plate, bracket, arm = mechanism()
+    bracket:pair("screw", "prismatic", bs.Frame.xy({ 1, 2, 3 }), { end_frame = bs.Frame.xy({ 4, 2, 3 }) })
+    arm:pair("shoulder", "revolute", bs.Frame.xy({ 0, 0, 10 }), { ranges = { { -1.5, 1.5 } } })
+    arm:state("reach", { { "shoulder", { 0.5 } } })
+    arm:base("ground")
+    return arm, { bolt, plate, bracket }
+  end
+
+  -- Python's _posed_frame(): two copies of a bracket whose bolt turns on `turn`, placed as
+  -- `left` and `right/rear`.
+  local function posed_frame()
+    local bolt = bs.Solid.cuboid(1, 1, 6):named("bolt")
+    local plate = bs.Solid.cuboid(20, 10, 2):named("plate")
+    local bracket = bs.Assembly("bracket")
+    bracket:place(plate, bs.Frame.xy())
+    bracket:place(bolt, bs.Frame.xy({ 5, 5, 2 }))
+    bracket:link("fixed", { "plate" })
+    bracket:link("bolts", { "bolt" })
+    bracket:joint("turn", "fixed", "bolts")
+    bracket:pair("turn", "revolute", bs.Frame.xy({ 10, 5, 2 }))
+    local frame = bs.Assembly("frame")
+    frame:place(bracket, bs.Frame.xy(), "left")
+    frame:place(bracket, bs.Frame.xy({ 100, 0, 0 }), "right/rear")
+    return frame, { bolt, plate, bracket }
+  end
+
+  t.test("posed moves the shoulder and the screw, read back through to_scene", function()
+    local arm, keep = paired()
+    local rest_scene = arm:to_scene()
+    local function link_named(scene, name)
+      for _, l in ipairs(scene.links) do if l.name == name then return l end end
+    end
+    local upper = link_named(rest_scene, "upper arm")
+    local pin_i
+    for i, n in ipairs(upper.nodes) do
+      local tr = n.transform
+      if all_near({ tr[1][4], tr[2][4], tr[3][4] }, { 5, 5, 2 }, 1e-9) then pin_i = i end
+    end
+    t.ok(pin_i ~= nil, "the upper arm node at (5, 5, 2) exists")
+    local turned = arm:posed({ shoulder = 0.5 })
+    t.eq(turned.name, "arm")
+    local scene = turned:to_scene()
+    local tr = link_named(scene, "upper arm").nodes[pin_i].transform
+    t.ok(all_near({ tr[1][4], tr[2][4], tr[3][4] },
+      { 5 * math.cos(0.5) - 5 * math.sin(0.5), 5 * math.sin(0.5) + 5 * math.cos(0.5), 2.0 }, 1e-9))
+    -- a key given as a list of names, a row list, and a value as a list
+    local slid = arm:posed({ { { "upper", "screw" }, { 5.0 } } }):to_scene()
+    local rest_bolts, slid_bolts = link_named(rest_scene, "bolts").nodes, link_named(slid, "bolts").nodes
+    t.eq(#slid_bolts, #rest_bolts)
+    for i, n in ipairs(slid_bolts) do
+      local a, b = n.transform, rest_bolts[i].transform
+      t.ok(all_near({ a[1][4], a[2][4], a[3][4] }, { b[1][4] + 2, b[2][4], b[3][4] }, 1e-9))
+    end
+    slid:close()
+    scene:close()
+    rest_scene:close()
+    turned:close()
+    arm:close()
+    for _, p in ipairs(keep) do p:close() end
+  end)
+
+  t.test("posed refuses an ambiguous name and takes a path with a slash", function()
+    local frame, keep = posed_frame()
+    local before = no_stamp(frame:step_text())
+    local e = t.raises(function() frame:posed({ turn = 0.3 }) end)
+    t.ok(is_build_error(e), e.message)
+    t.eq(e.message, "posed: 'turn' names 2 joints: left/turn, right\\/rear/turn; give one by its path")
+    local posed = frame:posed({ { "right\\/rear/turn", 0.3 } })
+    t.eq(posed.name, "frame")
+    t.ok(no_stamp(posed:step_text()) ~= before)
+    local again = frame:posed({ { { "right/rear", "turn" }, 0.3 } })   -- the list form escapes for us
+    t.eq(no_stamp(again:step_text()), no_stamp(posed:step_text()))
+    local zero = frame:posed({ ["right\\/rear/turn"] = 0.0 })
+    t.eq(no_stamp(zero:step_text()), before)
+    t.eq(no_stamp(frame:posed():step_text()), before)   -- no rows at all
+    t.eq(no_stamp(frame:step_text()), before)
+    zero:close(); again:close(); posed:close(); frame:close()
+    for _, p in ipairs(keep) do p:close() end
+  end)
+
+  t.test("posed takes a state and a ground and refuses with the kernel's words", function()
+    local arm, keep = paired()
+    local before = no_stamp(arm:step_text())
+    local by_state = arm:posed(nil, "reach")
+    local by_row = arm:posed({ shoulder = { 0.5 } })
+    t.eq(no_stamp(by_state:step_text()), no_stamp(by_row:step_text()))
+    local held = arm:posed({ shoulder = 0.5 }, nil, "upper arm")
+    t.ok(no_stamp(held:step_text()) ~= no_stamp(by_row:step_text()))
+    local e = t.raises(function() arm:posed({ shoulder = 2.0 }) end)
+    t.ok(is_build_error(e), e.message)
+    t.eq(e.message, "posed: value 0 of joint 'shoulder' is 2, outside its range")
+    e = t.raises(function() arm:posed(nil, "fold") end)
+    t.ok(is_build_error(e), e.message)
+    t.eq(e.message, "posed: assembly 'arm' has no state named 'fold'")
+    t.eq(no_stamp(arm:step_text()), before)
+    held:close(); by_row:close(); by_state:close(); arm:close()
+    for _, p in ipairs(keep) do p:close() end
+  end)
+
+  t.test("posed refuses a gear coupling given on both sides and takes the driver alone", function()
+    local gears, parts = geared(true)
+    local before = no_stamp(gears:step_text())
+    local ok = gears:posed({ drive = 0.4 })
+    t.eq(ok.name, "gears")
+    local e = t.raises(function() gears:posed({ drive = 0.4, driven = 0.4 }) end)
+    t.ok(is_build_error(e), e.message)
+    local prefix = "posed: assembly 'gears': coupling 'mesh': both 'drive' and 'driven' are given and disagree by"
+    t.eq(e.message:sub(1, #prefix), prefix)
+    t.eq(no_stamp(gears:step_text()), before)
+    ok:close()
+    gears:close()
+    for _, p in ipairs(parts) do p:close() end
   end)
 
   t.test("a sequence is written and reads back, and a bad one is refused exactly", function()
@@ -2060,8 +2257,7 @@ return function(t)
   end)
 
   -- One edge, face or corner where a list is taken is refused, named, before the kernel is
-  -- asked (docs/superpowers/specs/2026-09-25-list-arguments-refused-clearly-design.md): this
-  -- wrapper once read `fillet(edge, 1)` as no edges.
+  -- asked: this wrapper once read `fillet(edge, 1)` as no edges.
   t.test("a list argument refuses one edge, face or corner, or a bad item, by name", function()
     local cube = bs.Solid.cuboid(10, 10, 10)
     local edge = cube.edges[1]
@@ -2375,5 +2571,409 @@ return function(t)
     t.eq(progs[1].text:sub(1, #"(cadaclysm: job-T1, T1 flat D6)\n"), "(cadaclysm: job-T1, T1 flat D6)\n")
     t.eq(progs[2].text:sub(1, #"(cadaclysm: job-T2, T2 drill D5)\n"), "(cadaclysm: job-T2, T2 drill D5)\n")
     job:close()
+  end)
+
+  -- ---- Solid:silhouette_beziers ---------------------------------------------------------
+  -- The curves where a body's surfaces turn away from the eye. The assertions are on values
+  -- that pin the layout, not only on lengths: a stride-16 unpack that reads a weight as a
+  -- coordinate, or points shifted by one slice, still gives tables of the right length.
+
+  t.test("a sphere's rim has its end points on it to 1e-9 and its end weights exactly one", function()
+    local rim = bs.Solid.sphere(2):silhouette_beziers()
+    t.ok(rim.count > 0, "a sphere gave no rim")
+    t.eq(#rim.points, rim.count * 12, "three numbers a control point, four a curve")
+    t.eq(#rim.weights, rim.count * 4, "four weights a curve")
+    for c = 0, rim.count - 1 do
+      -- Control points 0 and 3 are the arc's ends: on the sphere to 1e-9, with the end
+      -- weights exactly 1. The interior control points are not checked, and the interior weights
+      -- only to lie in (0, 1): both move with how the rim is subdivided.
+      local o = c * 12
+      local first = math.sqrt(rim.points[o + 1] ^ 2 + rim.points[o + 2] ^ 2 + rim.points[o + 3] ^ 2)
+      local last = math.sqrt(rim.points[o + 10] ^ 2 + rim.points[o + 11] ^ 2 + rim.points[o + 12] ^ 2)
+      t.near(first, 2, 1e-9, "arc " .. c .. ": first control point's radius")
+      t.near(last, 2, 1e-9, "arc " .. c .. ": last control point's radius")
+      local w = c * 4
+      t.eq(rim.weights[w + 1], 1, "arc " .. c .. ": first weight")
+      t.eq(rim.weights[w + 4], 1, "arc " .. c .. ": last weight")
+      for k = 2, 3 do
+        local weight = rim.weights[w + k]
+        t.ok(weight > 0 and weight < 1, "arc " .. c .. ": interior weight " .. weight .. " is not in (0, 1)")
+      end
+    end
+  end)
+
+  t.test("a cylinder's rulings are polynomial, on its wall at y = 0, and span its height", function()
+    local r, height = 1, 3
+    local rulings = bs.Solid.cylinder(r, height):silhouette_beziers({ view = "front" })
+    t.ok(rulings.count > 0, "a cylinder gave no rulings")
+    t.eq(#rulings.points, rulings.count * 12)
+    t.eq(#rulings.weights, rulings.count * 4)
+    for k, w in ipairs(rulings.weights) do t.eq(w, 1, "weight " .. k .. " of a ruling is not 1") end
+    local low, high = math.huge, -math.huge
+    for k = 0, rulings.count * 4 - 1 do
+      local x, y, z = rulings.points[k * 3 + 1], rulings.points[k * 3 + 2], rulings.points[k * 3 + 3]
+      local where = "control point " .. k .. " (" .. x .. ", " .. y .. ", " .. z .. ")"
+      t.near(math.sqrt(x * x + y * y), r, 1e-6, where .. " is off the cylinder's wall")
+      -- hypot(x, y) is symmetric in x and y, so it cannot tell them apart. The front view looks
+      -- along y and the silhouette of the cylinder sits on the x axis, at y = 0: that is what
+      -- pins x against y. Only |x| and |y| are asserted, not the sign of x and not how many
+      -- rulings there are.
+      t.near(math.abs(x), r, 1e-6, where .. " is not at |x| = " .. r)
+      t.ok(math.abs(y) <= 1e-6, where .. " is not at y = 0")
+      low, high = math.min(low, z), math.max(high, z)
+    end
+    -- The rulings run cap to cap, so their z extent is the height: that pins z against x and y.
+    t.near(high - low, height, 1e-6, "the rulings span z " .. low .. ".." .. high)
+  end)
+
+  t.test("an infinite tolerance is refused, and an all-planar body is the empty answer after it", function()
+    local sphere = bs.Solid.sphere(2)
+    -- Built BEFORE the refusal, not between it and the empty answer: every call that builds, reads or writes
+    -- geometry in the library runs under its `guard` and clears the thread's error as its first act, so
+    -- building the cuboid in between would have wiped the reason this test exists to leave behind. The frees
+    -- do not clear (they only drop a box, outside the library's guard) and neither does reading the error, so
+    -- a finalizer or destructor running between the refusal and the empty answer cannot wipe the slot either:
+    -- the ordering holds even under a collection at the worst moment.
+    local cuboid = bs.Solid.cuboid(10, 10, 10)
+    local e = t.raises(function() sphere:silhouette_beziers({ tolerance = math.huge }) end, "silhouette: ")
+    t.ok(is_build_error(e), "a refusal is a BuildError")
+    -- The refusal above left its reason in the thread's error slot; the empty answer must not
+    -- read it as its own. Nothing clears the slot between the refusal and the native call: this
+    -- wrapper's default stroke is the literal 0x000000 (a string stroke would go through
+    -- `colour_text` and `cadaclysm_blacksmith_parse_colour`, a `guard`, which would clear it), and
+    -- `cadaclysm_blacksmith_svg_options_init` is a bare struct fill. So this pins the library's own
+    -- clearing at the call's entry as well as the wrapper's not reading the slot early. Do not
+    -- narrow it to the wording of the wrappers whose default stroke is colour text, where packing
+    -- does clear the slot: that is not true here.
+    local none
+    t.ok(pcall(function() none = cuboid:silhouette_beziers() end),
+      "an empty silhouette is an answer, not an error")
+    t.eq(none.count, 0)
+    t.eq(#none.points, 0)
+    t.eq(#none.weights, 0)
+  end)
+
+  t.test("a silhouette is the caller's own: asking again for another eye leaves it alone", function()
+    local sphere = bs.Solid.sphere(2)
+    local first = sphere:silhouette_beziers({ view = "front" })
+    local kept_points, kept_weights = {}, {}
+    for i, v in ipairs(first.points) do kept_points[i] = v end
+    for i, v in ipairs(first.weights) do kept_weights[i] = v end
+    local second = sphere:silhouette_beziers({ view = "iso" })
+    t.ok(second.count > 0, "the second view gave no rim")
+    t.ok(second ~= first, "the second answer is the first table again")
+    t.ok(not same(second.points, kept_points), "the two views gave the same silhouette, so this cannot tell a copy from a reused table")
+    t.eq(first.count * 12, #kept_points)
+    t.ok(same(first.points, kept_points), "the first answer's points changed under the second ask")
+    t.ok(same(first.weights, kept_weights), "the first answer's weights changed under the second ask")
+  end)
+  -- ---- The Kiln: the SubD cage ----------------------------------------------------------
+  -- Python's test_subd_* one for one (the plan's cage facts 1-16), with Lua's spellings: an
+  -- edge is `{a, b}`, a selection `{kind = ..., ids = ...}`, positions a list of `{x, y, z}`.
+
+  -- A list of the cages a test makes, every one closed by `keep.close()` (fact 16).
+  local function subd_scope()
+    local made = {}
+    local keep = {}
+    setmetatable(keep, { __call = function(_, cage) made[#made + 1] = cage return cage end })
+    function keep.close() for _, cage in ipairs(made) do cage:close() end made = {} end
+    return keep
+  end
+
+  -- A value as text, nested tables included, so two read-backs compare by equality.
+  local function show(v)
+    if type(v) ~= "table" then return tostring(v) end
+    local parts = {}
+    for i = 1, #v do parts[i] = show(v[i]) end
+    local keys = {}
+    for k in pairs(v) do if type(k) ~= "number" then keys[#keys + 1] = k end end
+    table.sort(keys)
+    for _, k in ipairs(keys) do parts[#parts + 1] = k .. "=" .. show(v[k]) end
+    return "{" .. table.concat(parts, ",") .. "}"
+  end
+
+  local function flat_of(points)
+    local out = {}
+    for _, p in ipairs(points) do out[#out + 1] = p[1] out[#out + 1] = p[2] out[#out + 1] = p[3] end
+    return out
+  end
+
+  t.test("subd: a cuboid round-trips through its parts, and every read is a copy", function()   -- fact 1
+    local keep = subd_scope()
+    local cube = keep(bs.Subd.cuboid())
+    local positions = cube.positions
+    t.eq(#positions, 8)
+    t.eq(#positions[1], 3)
+    local sizes = {}
+    for i, f in ipairs(cube.faces) do sizes[i] = #f end
+    t.eq(show(sizes), show({ 4, 4, 4, 4, 4, 4 }))
+    t.eq(#cube.creases, 0)
+    t.eq(#cube.pins, 0)
+    t.eq(cube.symmetry, nil)
+    t.eq(cube.selection, nil)
+    local was = positions[1][1]
+    positions[1][1] = 99   -- a copy: writing to it changes nothing
+    t.eq(cube.positions[1][1], was)
+    local again = keep(bs.Subd.from_parts(cube.positions, cube.faces))
+    t.eq(show(again.positions), show(cube.positions))
+    t.eq(show(again.faces), show(cube.faces))
+    -- a flat run of three a vertex is the same cage as `{x, y, z}` each
+    t.eq(show(keep(bs.Subd.from_parts(flat_of(cube.positions), cube.faces)).positions), show(cube.positions))
+    keep.close()
+  end)
+
+  t.test("subd: an edit returns a new cage with its selection and leaves the input alone", function()   -- fact 2
+    local keep = subd_scope()
+    local cube = keep(bs.Subd.cuboid())
+    local out = keep(cube:extrude({ 1 }, 1))
+    t.eq(#out.positions, 12)
+    t.eq(show(out.selection), show({ kind = "faces", ids = { 1 } }))
+    t.eq(#cube.positions, 8, "the input is untouched")
+    keep.close()
+  end)
+
+  t.test("subd: creases and pins round-trip", function()   -- fact 3
+    local keep = subd_scope()
+    local cube = keep(bs.Subd.cuboid())
+    local creased = keep(cube:crease({ { 0, 1 } }))
+    local pinned = keep(creased:pin({ 6 }))
+    t.eq(show(creased.selection), show({ kind = "edges", ids = { { 0, 1 } } }))
+    t.eq(show(pinned.creases), show({ { 0, 1 } }))
+    t.eq(show(pinned.pins), show({ 6 }))
+    t.eq(show(pinned.selection), show({ kind = "vertices", ids = { 6 } }))
+    local again = keep(bs.Subd.from_parts(pinned.positions, pinned.faces, pinned.creases, pinned.pins))
+    t.eq(show({ again.creases, again.pins }), show({ { { 0, 1 } }, { 6 } }))
+    t.eq(#keep(pinned:crease({ { 0, 1 } }, false)).creases, 0)
+    t.eq(#keep(pinned:pin({ 6 }, false)).pins, 0)
+    keep.close()
+  end)
+
+  t.test("subd: a mirrored half round-trips, and full/mirror_off bake it", function()   -- fact 4
+    local keep = subd_scope()
+    local whole = keep(bs.Subd.cuboid({ 2, 2, 2 }, { 2, 1, 1 }))
+    local half = keep(whole:mirror_on("x"))
+    t.eq(half.symmetry.axis, "x")
+    t.ok(half.symmetry.tolerance > 0)
+    t.eq(half.selection, nil)
+    t.ok(#half.positions < #whole.positions)
+    local again = keep(bs.Subd.from_parts(half.positions, half.faces, half.creases, half.pins, half.symmetry))
+    t.eq(show(again.positions), show(half.positions))
+    t.eq(show(again.symmetry), show(half.symmetry))
+    t.eq(#keep(half:full()).positions, #whole.positions)
+    t.eq(keep(half:mirror_off()).symmetry, nil)
+    t.raises(function() whole:mirror_on("w") end, "axis")
+    keep.close()
+  end)
+
+  t.test("subd: edge_loop lists the loop, the picked edge first", function()   -- fact 5
+    local keep = subd_scope()
+    local cube = keep(bs.Subd.cuboid({ 2, 2, 2 }, { 2, 2, 2 }))
+    local a, b = cube.faces[1][1], cube.faces[1][2]
+    local loop = cube:edge_loop({ a, b })
+    t.ok(#loop >= 4)
+    for _, e in ipairs(loop) do t.eq(#e, 2) end
+    t.eq(show(loop[1]), show({ math.min(a, b), math.max(a, b) }), "the picked edge first")
+    keep.close()
+  end)
+
+  t.test("subd: edge_loop of a pair that is not an edge is empty, not a refusal", function()   -- fact 5
+    local keep = subd_scope()
+    local cube = keep(bs.Subd.cuboid())
+    local f = cube.faces[1]
+    t.eq(#cube:edge_loop({ f[1], f[3] }), 0, "a face's diagonal is no edge")
+    t.eq(#cube:edge_loop({ 0, 99 }), 0, "nor is a pair naming no vertex")
+    keep.close()
+  end)
+
+  t.test("subd: transform rotates every vertex, or only the selected one", function()   -- fact 6
+    -- 90 degrees about Z: (x, y, z) -> (-y, x, z), every corner of the cube; column-major.
+    local flat = { 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 }
+    local nested = { { 0, -1, 0, 0 }, { 1, 0, 0, 0 }, { 0, 0, 1, 0 }, { 0, 0, 0, 1 } }   -- row-major
+    local keep = subd_scope()
+    local cube = keep(bs.Subd.cuboid())
+    local before = cube.positions
+    local everything = { kind = "vertices", ids = { 0, 1, 2, 3, 4, 5, 6, 7 } }
+    for _, matrix in ipairs({ flat, nested }) do
+      local turned = keep(cube:transform(everything, matrix)).positions
+      for i = 1, 8 do
+        local x, y, z = before[i][1], before[i][2], before[i][3]
+        t.near(turned[i][1], -y, 1e-12, "vertex " .. i .. " x")
+        t.near(turned[i][2], x, 1e-12, "vertex " .. i .. " y")
+        t.near(turned[i][3], z, 1e-12, "vertex " .. i .. " z")
+      end
+    end
+    local one = keep(cube:transform({ kind = "vertices", ids = { 0 } }, flat)).positions
+    t.near(one[1][1], -before[1][2], 1e-12)
+    t.near(one[1][2], before[1][1], 1e-12)
+    t.near(one[1][3], before[1][3], 1e-12)
+    for i = 2, 8 do t.eq(show(one[i]), show(before[i]), "only vertex 0 moved") end
+    keep.close()
+  end)
+
+  t.test("subd: transform translates an edge, inset and insert_loop edit, and bad ones are refused", function()   -- facts 6, 7
+    local translate = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 0, 0, 1 }   -- column-major
+    local keep = subd_scope()
+    local cube = keep(bs.Subd.cuboid())
+    local moved = keep(cube:transform({ kind = "edges", ids = { { 0, 1 } } }, translate))
+    t.eq(moved.positions[1][1], cube.positions[1][1] + 3)
+    t.eq(show(moved.selection), show({ kind = "edges", ids = { { 0, 1 } } }))
+    t.eq(#keep(cube:inset({ 1 }, 0.25)).faces, 6 + 4)
+    local looped = keep(cube:insert_loop({ 0, 1 }))
+    t.eq(#looped.positions, 8 + 4)
+    t.eq(looped.selection.kind, "edges")
+    t.raises(function() cube:insert_loop({ 0, 1 }, 1.5) end, "^bad selection: ")
+    t.raises(function() cube:transform({ kind = "bodies", ids = { 0 } }, translate) end, "kind")
+    t.raises(function() cube:transform({ kind = "vertices", ids = { 0 } }, { 1, 2, 3 }) end, "matrix")
+    keep.close()
+  end)
+
+  t.test("subd: smooth_mesh is consistent, kept per level, and outlives its cage", function()   -- fact 8
+    local cube = bs.Subd.cuboid()
+    local mesh = cube:smooth_mesh(2)
+    t.ok(getmetatable(mesh) == bs.SubdMesh)
+    local n = #mesh.positions
+    t.ok(n > 8)
+    t.eq(#mesh.normals, n)
+    for i = 1, n do
+      local v = mesh.normals[i]
+      t.near(math.sqrt(v[1] * v[1] + v[2] * v[2] + v[3] * v[3]), 1, 1e-9, "normal " .. i)
+    end
+    t.eq(#mesh.indices % 3, 0)
+    for _, k in ipairs(mesh.indices) do t.ok(k < n) end
+    t.eq(#mesh.triangle_face, #mesh.indices / 3)
+    for _, f in ipairs(mesh.triangle_face) do t.ok(f < 6) end
+    t.ok(#cube:smooth_mesh(1).positions < n)
+    t.eq(show(cube:smooth_mesh(2).positions), show(mesh.positions))
+    t.eq(#cube:smooth_mesh().positions, #cube:smooth_mesh(3).positions, "levels defaults to 3")
+    t.raises(function() cube:smooth_mesh(7) end, "levels")
+    cube:close()
+    collectgarbage("collect")
+    t.eq(#mesh.positions, n, "a mesh is a copy: it outlives its cage")
+    t.eq(#mesh.normals, n)
+    for _, k in ipairs(mesh.indices) do t.ok(k < n) end
+    local v = mesh.normals[n]
+    t.near(math.sqrt(v[1] * v[1] + v[2] * v[2] + v[3] * v[3]), 1, 1e-9)
+  end)
+
+  t.test("subd: pick finds the element, nil when nothing is near, and refuses a point not finite", function()   -- fact 9
+    local keep = subd_scope()
+    local cube = keep(bs.Subd.cuboid())
+    local corner = cube.positions[7]
+    local mesh = cube:smooth_mesh(3)
+    local best, best_d = 1, math.huge
+    for i, p in ipairs(mesh.positions) do
+      local d = (p[1] - corner[1]) ^ 2 + (p[2] - corner[2]) ^ 2 + (p[3] - corner[3]) ^ 2
+      if d < best_d then best, best_d = i, d end
+    end
+    local point = mesh.positions[best]
+    t.eq(cube:pick(point, "vertex"), 6)
+    local edge = cube:pick(point, "edge")
+    t.eq(type(edge), "table")
+    t.eq(#edge, 2)
+    t.ok(edge[1] == 6 or edge[2] == 6, show(edge))
+    t.eq(type(cube:pick(point, "face")), "number")
+    t.eq(cube:pick({ 100, 100, 100 }, "vertex"), nil, "nothing near is nil, not an error")
+    t.raises(function() cube:pick(point, "body") end, "kind")
+    t.raises(function() cube:pick({ 0 / 0, 0, 0 }, "face") end, "^bad selection: pick: point is not finite$")
+    t.eq(cube:pick({ 100, 100, 100 }, "vertex"), nil, "a refusal before leaves no stale error behind")
+    keep.close()
+  end)
+
+  t.test("subd: to_solid converts a cube and reports what it did", function()   -- fact 10
+    local keep = subd_scope()
+    local cube = keep(bs.Subd.cuboid())
+    local solid, report = cube:to_solid()
+    t.ok(getmetatable(solid) == bs.Solid)
+    t.ok(getmetatable(report) == bs.SubdReport)
+    t.eq(report.regular, 0)
+    t.eq(report.refined, 24)
+    t.ok(report.levels >= 2 and report.steps >= 1)
+    t.ok(report.deviation <= 1e-4 and report.g1_angle_deg <= 0.1, show({ report.deviation, report.g1_angle_deg }))
+    t.eq(#report.deviation_at, 3)
+    t.eq(#report.g1_at, 3)
+    t.ok(solid.manifold.is_closed)
+    t.ok(solid:mass().volume > 0)
+    solid:close()
+    local again = cube:to_solid(1e-4, 0.1, 6)
+    t.ok(getmetatable(again) == bs.Solid)
+    again:close()
+    keep.close()
+  end)
+
+  t.test("subd: an uncreased cylinder is refused with the figures", function()   -- fact 11
+    local cylinder = bs.Subd.cylinder(1, 2, 8, 1, false)
+    t.raises(function() cylinder:to_solid() end, "subd:.*tangent break")
+    cylinder:close()
+  end)
+
+  t.test("subd: the default cylinder has creased rims and converts", function()   -- fact 12
+    local cylinder = bs.Subd.cylinder()
+    local solid, report = cylinder:to_solid()
+    t.ok(report.deviation <= 1e-4 and report.g1_angle_deg <= 0.1)
+    t.ok(solid.manifold.is_closed and solid:mass().volume > 0)
+    solid:close()
+    cylinder:close()
+  end)
+
+  t.test("subd: the other primitives build and bad ones are refused", function()   -- fact 13
+    for _, make in ipairs({
+      function() return bs.Subd.cylinder(1, 2, 8, 2, true) end,
+      function() return bs.Subd.sphere(1, 2) end,
+      function() return bs.Subd.torus(3, 1, 12, 8) end,
+    }) do
+      local cage = make()
+      t.ok(#cage.faces > 0)
+      cage:close()
+    end
+    t.raises(function() bs.Subd.cuboid({ 2, 2, 2 }, { 0, 1, 1 }) end, "^bad selection: cuboid: segments >= 1$")
+    t.raises(function() bs.Subd.sphere(1, 2000) end, "1024")
+  end)
+
+  t.test("subd: bad parts are refused", function()   -- fact 14
+    local cube = bs.Subd.cuboid()
+    local positions, faces = cube.positions, cube.faces
+    cube:close()
+    t.raises(function() bs.Subd.from_parts(positions, faces, { { 0, 6 } }) end, "^bad selection: ")
+    t.raises(function() bs.Subd.from_parts({}, faces) end, "vertex_count")
+    t.raises(function() bs.Subd.from_parts(positions, faces, {}, {}, { axis = "w", tolerance = 1e-6 }) end, "symmetry")
+    local sixteen = {}
+    for i = 1, 16 do sixteen[i] = 0 end
+    t.raises(function() bs.Subd.from_parts(sixteen, faces) end, "positions")
+  end)
+
+  t.test("subd: the pipeline writes STEP the reader opens as one body", function()   -- fact 15
+    local keep = subd_scope()
+    local inset = keep(keep(keep(bs.Subd.cuboid()):extrude({ 1 }, 0.5)):inset({ 1 }, 0.25))
+    local solid, report = inset:to_solid()
+    t.ok(solid.manifold.is_closed and report.deviation <= 1e-4)
+    local step = solid:step_text()
+    solid:close()
+    keep.close()
+    t.eq(step:sub(1, 13), "ISO-10303-21;")
+    t.ok(step:find("ADVANCED_FACE", 1, true))
+    local scene = require("cadaclysm").open_memory(step, "stp")
+    local meshable = 0
+    for _, n in ipairs(scene.nodes) do if n.can_mesh then meshable = meshable + 1 end end
+    t.eq(meshable, 1, "the STEP the SubD cage wrote is one body")
+    scene:close()
+  end)
+
+  t.test("subd: a nil edge or a pair with a hole is refused by name", function()
+    local cube = bs.Subd.cuboid()
+    t.raises(function() cube:insert_loop(nil) end, "insert_loop: edge%[1%] is not an {a, b} vertex pair: nil")
+    t.raises(function() cube:edge_loop(nil) end, "edge_loop: edge%[1%] is not an {a, b} vertex pair: nil")
+    t.raises(function() cube:crease({ { nil, 2 } }) end, "crease: .*%[1%] is not an {a, b} vertex pair")
+    cube:close()
+  end)
+
+  t.test("subd: a closed cage refuses every call, and closing twice is harmless", function()   -- fact 16
+    local cube = bs.Subd.cuboid()
+    cube:close()
+    cube:close()
+    t.raises(function() return cube.positions end, "^subd: closed$")
+    t.raises(function() cube:extrude({ 1 }, 1) end, "^subd: closed$")
+    t.raises(function() cube:smooth_mesh(1) end, "^subd: closed$")
+    t.raises(function() cube:pick({ 0, 0, 0 }, "face") end, "^subd: closed$")
+    t.raises(function() cube:to_solid() end, "^subd: closed$")
   end)
 end

@@ -113,6 +113,7 @@ koffi.opaque('CadaclysmBlacksmithPrograms');
 koffi.opaque('CadaclysmBlacksmithReport');
 koffi.opaque('CadaclysmBlacksmithSolid');
 koffi.opaque('CadaclysmBlacksmithStock');
+koffi.opaque('CadaclysmBlacksmithSubd');
 koffi.opaque('CadaclysmBlacksmithSweepPath');
 koffi.opaque('CadaclysmBlacksmithTessellation');
 koffi.opaque('CadaclysmBlacksmithTool');
@@ -315,6 +316,44 @@ const CadaclysmBlacksmithFemVertex = koffi.struct('CadaclysmBlacksmithFemVertex'
   point: koffi.array('double', 3),
   has_position: 'bool',
 });
+// The Kiln's SubD cage: `parts` and `smooth_mesh` are views into the cage's handle (the
+// arrays good until it is freed), which `Subd` copies out with `koffi.decode` before the
+// call returns; the report is plain figures.
+const CadaclysmBlacksmithSubdParts = koffi.struct('CadaclysmBlacksmithSubdParts', {
+  positions: 'const double *',
+  vertex_count: 'uint32_t',
+  face_sizes: 'const uint32_t *',
+  face_count: 'uint32_t',
+  face_indices: 'const uint32_t *',
+  index_count: 'uint32_t',
+  creases: 'const uint32_t *',
+  crease_count: 'uint32_t',
+  pins: 'const uint32_t *',
+  pin_count: 'uint32_t',
+  symmetry_axis: 'int32_t',
+  symmetry_tolerance: 'double',
+  selection_kind: 'uint32_t',
+  selection: 'const uint32_t *',
+  selection_count: 'uint32_t',
+});
+const CadaclysmBlacksmithSubdMesh = koffi.struct('CadaclysmBlacksmithSubdMesh', {
+  positions: 'const double *',
+  vertex_count: 'uint32_t',
+  normals: 'const double *',
+  indices: 'const uint32_t *',
+  index_count: 'uint32_t',
+  triangle_face: 'const uint32_t *',
+});
+const CadaclysmBlacksmithSubdReport = koffi.struct('CadaclysmBlacksmithSubdReport', {
+  regular: 'uint32_t',
+  refined: 'uint32_t',
+  steps: 'uint32_t',
+  levels: 'uint32_t',
+  deviation: 'double',
+  g1_angle_deg: 'double',
+  deviation_at: koffi.array('double', 3),
+  g1_at: koffi.array('double', 3),
+});
 const CadaclysmBlacksmithProgress = koffi.proto('void CadaclysmBlacksmithProgress(const char *phase, size_t done, size_t total, void *user)');
 const CadaclysmBlacksmithSvgOptions = koffi.struct('CadaclysmBlacksmithSvgOptions', {
   size: 'uint32_t',
@@ -378,10 +417,10 @@ function _wasmLibrary(w) {
   // handle, or a count the caller checks `last_error` on) for everything else
   const BOOLS = new Set(['path_line_to', 'path_arc_to', 'path_bezier_to', 'path_nurbs_to', 'path_conic_to', 'path_parabola_by_vertex',
     'path_parabola_by_focus', 'sweep_path_line_to', 'sweep_path_arc',
-    'slant_of_plane', 'face_frame', 'face_ref', 'frame_midplane', 'frame_through', 'bounds', 'bounds64', 'box', 'edge', 'colour', 'profile_colour', 'edge_colour', 'parse_colour', 'manifold', 'license_set', 'hit', 'edge_curve',
+    'slant_of_plane', 'face_frame', 'face_ref', 'frame_midplane', 'frame_through', 'bounds', 'bounds64', 'box', 'job_stock', 'edge', 'colour', 'profile_colour', 'edge_colour', 'parse_colour', 'manifold', 'license_set', 'hit', 'edge_curve',
     'mass_properties',
     'intersection_chain', 'intersection_curve', 'intersection_overlap', 'hits_piece', 'assembly_link', 'assembly_joint',
-    'assembly_pair', 'assembly_state', 'assembly_sequence', 'assembly_base',
+    'assembly_pair', 'assembly_pair_with', 'assembly_state', 'assembly_sequence', 'assembly_base',
     'fem_mesh_view', 'fem_mesh_edge', 'fem_mesh_vertex', 'fem_mesh_open_edge', 'fem_mesh_folded_edge', 'fem_mesh_crossing',
     // collider: `solid_bounds_box`/`box_moved` write a Box out-param, `boxes_apart` a bool,
     // `collider_stats`/`collisions_hit` a record -- the C return is a plain success flag
@@ -400,12 +439,21 @@ function _wasmLibrary(w) {
     // natively.
     'job_set_clearance', 'job_set_tolerance', 'job_set_spindle_dwell', 'job_set_resolution', 'job_set_name',
     // The four manual verbs: plain bool wasm exports too, as job_set_* above.
-    'job_face', 'job_contour', 'job_pocket', 'job_drill']);
+    'job_face', 'job_contour', 'job_pocket', 'job_drill',
+    // the kernel options: `option_set` returns C's success flag, and `option_get`'s export
+    // returns the value C writes through `*out` (see `back`)
+    'option_set', 'option_get',
+    // SubD: `subd_parts`/`subd_smooth_mesh` fill a views struct and `subd_pick` an id pair,
+    // C returning a success flag; `subd_pick`'s null (nothing near) is `false` with an empty
+    // `last_error` (see `back`)
+    'subd_parts', 'subd_smooth_mesh', 'subd_pick']);
   const FAILS = { select_face: NONE, leaked_edges: NONE, unpaired_edges: NONE, mesh: { positions: null }, mesh64: { positions: null }, mesh_face_triangles: { counts: null },
     edge_polylines: { offsets: null }, profile_polylines: { offsets: null }, edge_polyline_colours: { rgb: null, count: 0 },
-    step: null, sat_text: null, svg_text: null, drawing_svg_text: null, face_kind: null, brep_layout_id: null,
+    step: null, sat_text: null, svg_text: null, drawing_svg_text: null, silhouette_beziers: null, face_kind: null, brep_layout_id: null,
     fem_mesh_msh_text: null, solid_name: null, assembly_name: null, assembly_place_solid: null,
-    assembly_place_assembly: null, assembly_step: null };
+    assembly_place_assembly: null, assembly_step: null,
+    // the CAM getters: NONE and NaN are the C ABI's own refusals for them
+    tool_number: NONE, tool_shape: null, tool_diameter: NaN, tool_flute_length: NaN, tool_angle: NaN, tool_corner_radius: NaN };
   // results that C writes into an out-array of doubles at this position, and the
   // wasm returns as an array (`bounds` fills two, `edge` and `hit` a record: see `back`)
   const OUT = { slant_of_plane: 3, face_frame: 2, face_ref: 2, frame_midplane: 2, frame_through: 3, report_at: 2 };
@@ -418,15 +466,21 @@ function _wasmLibrary(w) {
     job_machine: [4],
     // job_drill: the xy array's own count, the same way.
     job_drill: [3],
+    // job_stock: the two out-arrays, written from the one six-number array (see `back`).
+    job_stock: [1, 2],
     profile_round: [3], profile_spline: [1], profile_chain: [1], profile_from_loops: [1], profile_piece_count: [2], profile_piece: [2],
     profile_trim_count: [2], profile_trim_chain: [2], loft_through: [2], loft_through_open: [2], fillet: [2, 6], chamfer: [2], shell: [3, 6],
-    thicken: [4], push_pull: [5], push_pull_faces: [2, 6], split: [4], split_by_plane: [4], step: [1], sat_text: [1], svg_text: [1], drawing_svg_text: [1, 3], profile_text: [4],
+    thicken: [4], push_pull: [5], push_pull_faces: [2, 6], split: [4], split_by_plane: [4], split_by_profile: [5], step: [1], sat_text: [1], svg_text: [1], drawing_svg_text: [1, 3], profile_text: [4],
+    // the count out-param: the export returns the curves' own array (see `back`)
+    silhouette_beziers: [2],
     slant_of_plane: [3], face_frame: [2], face_ref: [2], bounds: [2, 3], bounds64: [2, 3], box: [1, 2], edge: [2], colour: [2], profile_colour: [1], edges_coloured: [2], edge_colour: [2], parse_colour: [1], manifold: [1], hit: [2], edge_curve: [2],
     intersect: [4], intersection_chain: [2], intersection_curve: [2], intersection_overlap: [2],
     solid_profile_hits: [5], hits_piece: [2, 3, 4], assembly_link: [3],
     // `assembly_state`'s row_count (args[5]) drops: joints/counts/values are arrays, each
     // carrying its own length, as `assembly_link`'s placement count does above.
     assembly_state: [5],
+    // `assembly_posed`'s row_count (args[4]) drops the same way.
+    assembly_posed: [4],
     // `assembly_sequence`'s count (args[5]) drops the same way: states/ts/interpolations are arrays.
     assembly_sequence: [5],
     // `fem_mesh`'s index counts the tuple `call` rewrites below, not the C call's:
@@ -442,7 +496,14 @@ function _wasmLibrary(w) {
     // `mass_properties` drops its CadaclysmBlacksmithMassProperties out-param: the export
     // returns the figures as a flat array of doubles instead. It was already in BOOLS and
     // missing here, so `.mass()` over the wasm handed back an unfilled struct.
-    mass_properties: [2] };
+    mass_properties: [2],
+    // `option_get` drops its `*out`: the export returns the value instead
+    option_get: [1],
+    // SubD: the counts a typed array carries itself, and the out-params -- `subd_parts`/
+    // `subd_smooth_mesh`'s struct, `subd_pick`'s id pair and `subd_to_solid`'s report --
+    // which the exports return instead (see `back`)
+    subd_from_parts: [1, 3, 5, 7, 9], subd_parts: [1], subd_transform: [3], subd_set_crease: [2], subd_set_pin: [2],
+    subd_extrude: [2], subd_inset: [2], subd_smooth_mesh: [2], subd_pick: [3], subd_to_solid: [4] };
   let error = null;
   /** A `WebAssembly.RuntimeError`: the wasm trapped (a panic aborts, the tables stay borrowed), which no `last_error` can stand for. */
   const trapped = (e) => typeof WebAssembly !== 'undefined' && e instanceof WebAssembly.RuntimeError;
@@ -462,6 +523,11 @@ function _wasmLibrary(w) {
   );
   /** The wasm's return, as the C call's: written into the out-argument and `true` where C fills one, the arrays under the C struct's names, else as it is. */
   function back(short, args, result) {
+    if (short === 'silhouette_beziers') {
+      // sixteen doubles a curve; an empty array is the empty answer, which C gives as null
+      args[2][0] = result.length / 16;
+      return result.length ? result : null;
+    }
     if (short === 'edge') {
       const raw = args[2];
       raw.kind = String(result.kind); raw.faces = result.faces; raw.face_count = result.faces.length;
@@ -581,11 +647,51 @@ function _wasmLibrary(w) {
       args[2][0] = result.a; args[3][0] = result.b;
       return true;
     }
+    if (short === 'subd_parts') {
+      // The copies, into the out-struct at args[1], under the C struct's names: `Subd` reads
+      // them through `_doublesAt`/`_uint32s`, which pass a typed array through as it is. The
+      // counts are the C struct's (vertices, faces, pairs), not the arrays' lengths.
+      const raw = args[1];
+      const kind = Number(result.selection_kind);
+      raw.positions = result.positions; raw.vertex_count = result.positions.length / 3;
+      raw.face_sizes = result.face_sizes; raw.face_count = result.face_sizes.length;
+      raw.face_indices = result.face_indices; raw.index_count = result.face_indices.length;
+      raw.creases = result.creases; raw.crease_count = result.creases.length / 2;
+      raw.pins = result.pins; raw.pin_count = result.pins.length;
+      raw.symmetry_axis = Number(result.symmetry_axis); raw.symmetry_tolerance = Number(result.symmetry_tolerance);
+      raw.selection_kind = kind; raw.selection = result.selection;
+      raw.selection_count = kind === 1 ? result.selection.length / 2 : result.selection.length;
+      return true;
+    }
+    if (short === 'subd_smooth_mesh') {
+      const raw = args[2];
+      raw.positions = result.positions; raw.vertex_count = result.positions.length / 3;
+      raw.normals = result.normals; raw.indices = result.indices; raw.index_count = result.indices.length;
+      raw.triangle_face = result.triangle_face;
+      return true;
+    }
+    if (short === 'subd_pick') {
+      // `[a, b]` into C's two-id out-array; null is "nothing near", which C gives as `false`
+      // with an **empty** `last_error` -- never a refusal's text, and never the `null` that
+      // says no call failed.
+      if (result == null) { error = ''; return false; }
+      args[3][0] = result[0]; args[3][1] = result[1];
+      return true;
+    }
+    if (short === 'subd_to_solid') {
+      // `[solid, report]`: the report into the out-struct at args[4], the handle returned.
+      const [handle, report] = result;
+      const raw = args[4];
+      for (const name of ['regular', 'refined', 'steps', 'levels', 'deviation', 'g1_angle_deg']) raw[name] = Number(report[name]);
+      raw.deviation_at = Array.from(report.deviation_at); raw.g1_at = Array.from(report.g1_at);
+      return handle;
+    }
     if (short === 'colour' || short === 'profile_colour' || short === 'edge_colour') { if (result == null) return false; args[short === 'profile_colour' ? 1 : 2].set(result); return true; }
     if (short === 'parse_colour') { if (result == null) return false; args[1].set(result); return true; }
+    if (short === 'option_get') { args[1][0] = result; return true; }
     if (short === 'manifold') { args[1].set(result); return true; }
     if (short === 'bounds' || short === 'bounds64') { args[2].set(result.slice(0, 3)); args[3].set(result.slice(3, 6)); return true; }
-    if (short === 'box') { args[1].set(result.slice(0, 3)); args[2].set(result.slice(3, 6)); return true; }
+    if (short === 'box' || short === 'job_stock') { args[1].set(result.slice(0, 3)); args[2].set(result.slice(3, 6)); return true; }
     if (short in OUT) { args[OUT[short]].set(result); return true; }
     if (BOOLS.has(short)) return true;
     if (short === 'mesh' || short === 'mesh64') return { ...result, vertex_count: result.positions.length / 3, index_count: result.indices.length };
@@ -598,6 +704,8 @@ function _wasmLibrary(w) {
     // the two the C side owns memory for, and the browser has none
     last_error: () => error,
     string_free: () => {},
+    // the curves come back as a JS array; there is no C block to release
+    silhouette_beziers_free: () => {},
     /** Every body a file draws, as solid handles -- the wasm reads the file itself, readers and kernel being one module. The wasm's own export, not a C entry point (named so `tests/bindings.rs` does not take it for one). */
     open_file(bytes, extension) {
       const read = w['cadaclysm_blacksmith_' + 'open_file'];
@@ -630,6 +738,13 @@ function _wasmLibrary(w) {
           // _svgOptions() built) becomes `svgWords`'s flat array.
           args = [args[0], args[1], svgWords(args[2])];
         }
+        if (short === 'silhouette_beziers') {
+          // cadaclysm_blacksmith_silhouette_beziers(solid: u32, words: &[f64]) in
+          // crates/cadaclysm-wasm/src/blacksmith.rs: the same `svgWords` flattening as
+          // svg_text, the options behind args[1]; DROP's [2] drops the count, which
+          // `back` fills from the returned array's length.
+          args = [args[0], svgWords(args[1]), args[2]];
+        }
         if (short === 'drawing_svg_text') {
           // cadaclysm_blacksmith_drawing_svg_text(solids: &[u32], profiles: &[u32], words: &[f64])
           // in crates/cadaclysm-wasm/src/blacksmith.rs: the same `svgWords` flattening as
@@ -656,6 +771,23 @@ function _wasmLibrary(w) {
           }
           args = [assembly, joint, kind, frame, endFrame, loNan, upNan, pitch];
         }
+        if (short === 'assembly_pair_with') {
+          // cadaclysm_blacksmith_assembly_pair_with(assembly, joint, kind, frame, end_frame,
+          // lower, upper, params): the ranges fold as assembly_pair's do, and param_count
+          // (args[11]) drops with freedom_count -- params (args[10]) is a typed array
+          // carrying its own length, never null.
+          const [assembly, joint, kind, frame, endFrame, lower, upper, hasLower, hasUpper, count, params] = args;
+          let loNan = null, upNan = null;
+          if (lower != null) {
+            loNan = new Float64Array(count);
+            upNan = new Float64Array(count);
+            for (let i = 0; i < count; i++) {
+              loNan[i] = hasLower[i] ? lower[i] : NaN;
+              upNan[i] = hasUpper[i] ? upper[i] : NaN;
+            }
+          }
+          args = [assembly, joint, kind, frame, endFrame, loNan, upNan, params.subarray(0, args[11])];
+        }
         // `assembly_sequence`'s states (2 after the name) and interpolations (4) are names too.
         // `assembly_link`'s placements, and `assembly_state`'s joints, are names, not handles:
         // cadaclysm_blacksmith_assembly_link/_state in crates/cadaclysm-wasm/src/blacksmith.rs
@@ -663,6 +795,7 @@ function _wasmLibrary(w) {
         // turned into a `Uint32Array`) must not touch them.
         const passed = args.filter((_, i) => !dropped.includes(i))
           .map((a, i) => (((short === 'assembly_link' || short === 'assembly_state') && i === 2)
+            || (short === 'assembly_posed' && i === 1)
             || (short === 'assembly_sequence' && (i === 2 || i === 4)) ? Array.from(a, String) : arg(a)));
         let result;
         try { result = fn(...passed); } catch (e) {
@@ -734,6 +867,10 @@ function _lib() {
     svg_options_init: f('void cadaclysm_blacksmith_svg_options_init(_Out_ CadaclysmBlacksmithSvgOptions *options)'),
     svg_text: f('CadaclysmBlacksmithOwnedString cadaclysm_blacksmith_svg_text(const CadaclysmBlacksmithSolid **solids, size_t count, const CadaclysmBlacksmithSvgOptions *options)'),
     svg: f('bool cadaclysm_blacksmith_svg(const CadaclysmBlacksmithSolid **solids, size_t count, const char *path, const CadaclysmBlacksmithSvgOptions *options)'),
+    // OWNED, but not as a string: a `double *` of `*count * 16` doubles, freed by the matching
+    // `_free(data, count)` -- not `string_free`, and the count must be the one this call wrote.
+    silhouette_beziers: f('double *cadaclysm_blacksmith_silhouette_beziers(const CadaclysmBlacksmithSolid *solid, const CadaclysmBlacksmithSvgOptions *options, _Out_ uint32_t *count)'),
+    silhouette_beziers_free: f('void cadaclysm_blacksmith_silhouette_beziers_free(double *data, uint32_t count)'),
     // The FEM surface mesh: a handle of the caller's own, and its accessors.
     // `cadaclysm_blacksmith_fem_mesh_msh_text` returns an **owned** `char *` -- this
     // library's convention, as `step`/`sat_text`/`brep_text` above -- where the
@@ -835,6 +972,28 @@ function _lib() {
     collisions_count: f('uint32_t cadaclysm_blacksmith_collisions_count(const CadaclysmBlacksmithCollisions *collisions)'),
     collisions_hit: f('bool cadaclysm_blacksmith_collisions_hit(const CadaclysmBlacksmithCollisions *collisions, uint32_t i, _Out_ CadaclysmBlacksmithCollisionHit *out)'),
     collisions_solid: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_collisions_solid(const CadaclysmBlacksmithCollisions *collisions, uint32_t i)'),
+    // The Kiln's SubD cage. Every edit returns a new handle (or null and `last_error`), the
+    // input untouched; `subd_pick` is false with an **empty** `last_error` for nothing near.
+    subd_cuboid: f('CadaclysmBlacksmithSubd *cadaclysm_blacksmith_subd_cuboid(double sx, double sy, double sz, uint32_t nx, uint32_t ny, uint32_t nz)'),
+    subd_cylinder: f('CadaclysmBlacksmithSubd *cadaclysm_blacksmith_subd_cylinder(double radius, double height, uint32_t sides, uint32_t rings, bool creased_rims)'),
+    subd_sphere: f('CadaclysmBlacksmithSubd *cadaclysm_blacksmith_subd_sphere(double radius, uint32_t segments)'),
+    subd_torus: f('CadaclysmBlacksmithSubd *cadaclysm_blacksmith_subd_torus(double major, double minor, uint32_t around, uint32_t tube)'),
+    subd_from_parts: f('CadaclysmBlacksmithSubd *cadaclysm_blacksmith_subd_from_parts(const double *positions, uint32_t vertex_count, const uint32_t *face_sizes, uint32_t face_count, const uint32_t *face_indices, uint32_t index_count, const uint32_t *creases, uint32_t crease_count, const uint32_t *pins, uint32_t pin_count, int32_t symmetry_axis, double symmetry_tolerance)'),
+    subd_parts: f('bool cadaclysm_blacksmith_subd_parts(const CadaclysmBlacksmithSubd *subd, _Out_ CadaclysmBlacksmithSubdParts *out)'),
+    subd_free: f('void cadaclysm_blacksmith_subd_free(CadaclysmBlacksmithSubd *subd)'),
+    subd_transform: f('CadaclysmBlacksmithSubd *cadaclysm_blacksmith_subd_transform(const CadaclysmBlacksmithSubd *subd, uint32_t kind, const uint32_t *ids, uint32_t id_count, const double *matrix)'),
+    subd_set_crease: f('CadaclysmBlacksmithSubd *cadaclysm_blacksmith_subd_set_crease(const CadaclysmBlacksmithSubd *subd, const uint32_t *edges, uint32_t edge_count, bool on)'),
+    subd_set_pin: f('CadaclysmBlacksmithSubd *cadaclysm_blacksmith_subd_set_pin(const CadaclysmBlacksmithSubd *subd, const uint32_t *vertices, uint32_t vertex_count, bool on)'),
+    subd_extrude: f('CadaclysmBlacksmithSubd *cadaclysm_blacksmith_subd_extrude(const CadaclysmBlacksmithSubd *subd, const uint32_t *faces, uint32_t face_count, double distance)'),
+    subd_inset: f('CadaclysmBlacksmithSubd *cadaclysm_blacksmith_subd_inset(const CadaclysmBlacksmithSubd *subd, const uint32_t *faces, uint32_t face_count, double amount, bool individual)'),
+    subd_insert_loop: f('CadaclysmBlacksmithSubd *cadaclysm_blacksmith_subd_insert_loop(const CadaclysmBlacksmithSubd *subd, uint32_t a, uint32_t b, double at)'),
+    subd_mirror_on: f('CadaclysmBlacksmithSubd *cadaclysm_blacksmith_subd_mirror_on(const CadaclysmBlacksmithSubd *subd, uint32_t axis)'),
+    subd_mirror_off: f('CadaclysmBlacksmithSubd *cadaclysm_blacksmith_subd_mirror_off(const CadaclysmBlacksmithSubd *subd)'),
+    subd_full: f('CadaclysmBlacksmithSubd *cadaclysm_blacksmith_subd_full(const CadaclysmBlacksmithSubd *subd)'),
+    subd_edge_loop: f('CadaclysmBlacksmithSubd *cadaclysm_blacksmith_subd_edge_loop(const CadaclysmBlacksmithSubd *subd, uint32_t a, uint32_t b)'),
+    subd_smooth_mesh: f('bool cadaclysm_blacksmith_subd_smooth_mesh(const CadaclysmBlacksmithSubd *subd, uint32_t levels, _Out_ CadaclysmBlacksmithSubdMesh *out)'),
+    subd_pick: f('bool cadaclysm_blacksmith_subd_pick(const CadaclysmBlacksmithSubd *subd, const double *point, uint32_t kind, _Out_ uint32_t *out)'),
+    subd_to_solid: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_subd_to_solid(const CadaclysmBlacksmithSubd *subd, double tolerance, double g1_angle_deg, uint32_t max_levels, _Out_ CadaclysmBlacksmithSubdReport *report)'),
     leaked_edges: f('uint32_t cadaclysm_blacksmith_leaked_edges(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
     unpaired_edges: f('uint32_t cadaclysm_blacksmith_unpaired_edges(const CadaclysmBlacksmithSolid *solid, double tolerance)'),
     manifold: f('bool cadaclysm_blacksmith_manifold(const CadaclysmBlacksmithSolid *solid, _Out_ uint32_t *out)'),
@@ -869,6 +1028,8 @@ function _lib() {
     profile_coloured: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_coloured(const CadaclysmBlacksmithProfile *profile, double r, double g, double b)'),
     profile_colour: f('bool cadaclysm_blacksmith_profile_colour(const CadaclysmBlacksmithProfile *profile, _Out_ double *out)'),
     parse_colour: f('bool cadaclysm_blacksmith_parse_colour(const char *text, _Out_ double *out)'),
+    option_set: f('bool cadaclysm_blacksmith_option_set(const char *name, double value)'),
+    option_get: f('bool cadaclysm_blacksmith_option_get(const char *name, _Out_ double *out)'),
     profile_round: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_round(const CadaclysmBlacksmithProfile *profile, double radius, const uint32_t *corners, size_t count, bool open)'),
     profile_close_loop: f('CadaclysmBlacksmithProfile *cadaclysm_blacksmith_profile_close_loop(const CadaclysmBlacksmithProfile *profile)'),
     profile_polylines: f('CadaclysmBlacksmithPolylines cadaclysm_blacksmith_profile_polylines(const CadaclysmBlacksmithProfile *profile, double tolerance)'),
@@ -903,6 +1064,7 @@ function _lib() {
     unchamfer: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_unchamfer(const CadaclysmBlacksmithSolid *solid, uint32_t face)'),
     split: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_split(const CadaclysmBlacksmithSolid *solid, const CadaclysmBlacksmithSolid *tool, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     split_by_plane: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_split_by_plane(const CadaclysmBlacksmithSolid *solid, const double *plane, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
+    split_by_profile: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_split_by_profile(const CadaclysmBlacksmithSolid *solid, const CadaclysmBlacksmithProfile *profile, const double *frame, double tolerance, CadaclysmBlacksmithProgress *progress, void *user)'),
     lump_count: f('uint32_t cadaclysm_blacksmith_lump_count(const CadaclysmBlacksmithSolid *solid)'),
     lump: f('CadaclysmBlacksmithSolid *cadaclysm_blacksmith_lump(const CadaclysmBlacksmithSolid *solid, uint32_t index)'),
     sweep_path_begin: f('CadaclysmBlacksmithSweepPath *cadaclysm_blacksmith_sweep_path_begin(double x, double y, double z)'),
@@ -920,6 +1082,12 @@ function _lib() {
     tool_drill: f('CadaclysmBlacksmithTool *cadaclysm_blacksmith_tool_drill(uint32_t number, double diameter, double flute_length, double feed, double rpm)'),
     tool_with_ramp_angle: f('CadaclysmBlacksmithTool *cadaclysm_blacksmith_tool_with_ramp_angle(const CadaclysmBlacksmithTool *t, double degrees)'),
     tool_free: f('void cadaclysm_blacksmith_tool_free(CadaclysmBlacksmithTool *t)'),
+    tool_number: f('uint32_t cadaclysm_blacksmith_tool_number(const CadaclysmBlacksmithTool *t)'),
+    tool_shape: f('const char *cadaclysm_blacksmith_tool_shape(const CadaclysmBlacksmithTool *t)'),
+    tool_diameter: f('double cadaclysm_blacksmith_tool_diameter(const CadaclysmBlacksmithTool *t)'),
+    tool_flute_length: f('double cadaclysm_blacksmith_tool_flute_length(const CadaclysmBlacksmithTool *t)'),
+    tool_angle: f('double cadaclysm_blacksmith_tool_angle(const CadaclysmBlacksmithTool *t)'),
+    tool_corner_radius: f('double cadaclysm_blacksmith_tool_corner_radius(const CadaclysmBlacksmithTool *t)'),
     stock_box: f('CadaclysmBlacksmithStock *cadaclysm_blacksmith_stock_box(double min_x, double min_y, double min_z, double max_x, double max_y, double max_z)'),
     stock_around: f('CadaclysmBlacksmithStock *cadaclysm_blacksmith_stock_around(const CadaclysmBlacksmithSolid *s, double margin)'),
     stock_free: f('void cadaclysm_blacksmith_stock_free(CadaclysmBlacksmithStock *s)'),
@@ -930,7 +1098,7 @@ function _lib() {
     job_set_resolution: f('bool cadaclysm_blacksmith_job_set_resolution(CadaclysmBlacksmithJob *j, double resolution)'),
     job_set_name: f('bool cadaclysm_blacksmith_job_set_name(CadaclysmBlacksmithJob *j, const char *name)'),
     // The four manual verbs, and write_camotics's own file list -- header order, beside
-    // job_machine's own binding below (docs/superpowers/plans/2026-09-30-cam-in-the-other-wrappers.md, task 7b).
+    // job_machine's own binding below.
     job_face: f('bool cadaclysm_blacksmith_job_face(CadaclysmBlacksmithJob *j, const CadaclysmBlacksmithTool *t, double z, double stepover, double stepdown)'),
     job_contour: f('bool cadaclysm_blacksmith_job_contour(CadaclysmBlacksmithJob *j, const CadaclysmBlacksmithTool *t, const CadaclysmBlacksmithProfile *p, double top, double bottom, uint32_t side, double stepdown, bool climb, bool open)'),
     job_pocket: f('bool cadaclysm_blacksmith_job_pocket(CadaclysmBlacksmithJob *j, const CadaclysmBlacksmithTool *t, const CadaclysmBlacksmithProfile *p, double top, double bottom, double stepover, double stepdown)'),
@@ -939,6 +1107,7 @@ function _lib() {
     job_operations: f('CadaclysmBlacksmithOperations *cadaclysm_blacksmith_job_operations(const CadaclysmBlacksmithJob *j)'),
     job_gcode: f('CadaclysmBlacksmithPrograms *cadaclysm_blacksmith_job_gcode(const CadaclysmBlacksmithJob *j)'),
     job_camotics: f('CadaclysmBlacksmithPrograms *cadaclysm_blacksmith_job_camotics(const CadaclysmBlacksmithJob *j, const char *stem)'),
+    job_stock: f('bool cadaclysm_blacksmith_job_stock(const CadaclysmBlacksmithJob *j, _Out_ double *min, _Out_ double *max)'),
     job_free: f('void cadaclysm_blacksmith_job_free(CadaclysmBlacksmithJob *j)'),
     report_count: f('uint32_t cadaclysm_blacksmith_report_count(const CadaclysmBlacksmithReport *r)'),
     report_kind: f('const char *cadaclysm_blacksmith_report_kind(const CadaclysmBlacksmithReport *r, uint32_t i)'),
@@ -975,11 +1144,14 @@ function _lib() {
     // `frame`/`end_frame`, `lower`/`upper` and `has_lower`/`has_upper` stay alive for the call's
     // duration as the caller's typed arrays; either all four of lower/upper/has_lower/has_upper
     // are null (freedom_count 0) or all four are non-null with freedom_count entries each.
+    assembly_pair_with: f('bool cadaclysm_blacksmith_assembly_pair_with(CadaclysmBlacksmithAssembly *assembly, const char *joint, const char *kind, const double *frame, const double *end_frame, const double *lower, const double *upper, const bool *has_lower, const bool *has_upper, size_t freedom_count, const double *params, size_t param_count)'),
     assembly_pair: f('bool cadaclysm_blacksmith_assembly_pair(CadaclysmBlacksmithAssembly *assembly, const char *joint, const char *kind, const double *frame, const double *end_frame, const double *lower, const double *upper, const bool *has_lower, const bool *has_upper, size_t freedom_count, double pitch)'),
     // koffi marshals the joints string array into `const char **`, as `assembly_link` does.
     // koffi marshals the states and interpolations string arrays into `const char *const *`, as `assembly_state`'s joints.
     assembly_sequence: f('bool cadaclysm_blacksmith_assembly_sequence(CadaclysmBlacksmithAssembly *assembly, const char *name, const char *const *states, const double *ts, const char *const *interpolations, size_t count, bool seconds)'),
     assembly_state: f('bool cadaclysm_blacksmith_assembly_state(CadaclysmBlacksmithAssembly *assembly, const char *name, const char **joints, const uint32_t *counts, const double *values, size_t row_count)'),
+    // Returns a NEW assembly (null on refusal); `state` and `ground` may be null.
+    assembly_posed: f('CadaclysmBlacksmithAssembly *cadaclysm_blacksmith_assembly_posed(const CadaclysmBlacksmithAssembly *assembly, const char **joints, const uint32_t *counts, const double *values, size_t row_count, const char *state, const char *ground)'),
     assembly_base: f('bool cadaclysm_blacksmith_assembly_base(CadaclysmBlacksmithAssembly *assembly, const char *link)'),
     pair_freedom_count: f('uint32_t cadaclysm_blacksmith_pair_freedom_count(const char *kind)'),
   };
@@ -1057,8 +1229,7 @@ function _rgb(colour) {
 }
 // A list argument as indices: `value` must be a list -- any iterable but a string -- and
 // each item an index (a whole number, 0 to 4294967295) or, where `edges`, an `Edge`.
-// Refused here, named, before the kernel is asked: one edge is `[edge]`, never read as none
-// (docs/superpowers/specs/2026-09-25-list-arguments-refused-clearly-design.md).
+// Refused here, named, before the kernel is asked: one edge is `[edge]`, never read as none.
 function _indices(value, call, param, edges = false) {
   const described = (v) => (v instanceof Edge ? 'an Edge'
     : typeof v === 'string' ? JSON.stringify(v)
@@ -1081,8 +1252,7 @@ function _indices(value, call, param, edges = false) {
 }
 // A list argument of names: `value` must be a list -- any iterable but a string -- and each
 // item a string. Refused here, named, before the kernel is asked: one name is `[name]`,
-// never split into characters
-// (docs/superpowers/specs/2026-09-25-list-arguments-refused-clearly-design.md).
+// never split into characters.
 function _names(value, call, param) {
   const described = (v) => (typeof v === 'string' ? JSON.stringify(v)
     : (v != null && typeof v !== 'number' && typeof v !== 'boolean' && typeof v[Symbol.iterator] === 'function') ? 'a list'
@@ -1138,6 +1308,28 @@ function _stateRows(value, call) {
     const [joint, values] = row;
     if (typeof joint !== 'string') throw new TypeError(`${call}: rows[${i}][0] is not a name: ${described(joint)}`);
     return [joint, Array.from(values, Number)];
+  });
+}
+// A joint key as the kernel reads it: a string as it is; an array (any iterable but a string)
+// of names, each backslash and slash in a name escaped with a backslash, joined by "/".
+function _jointPath(key) {
+  if (typeof key === 'string') return key;
+  if (key == null || typeof key[Symbol.iterator] !== 'function') throw new TypeError(`posed: a joint key must be a path string or a list of names, not ${String(key)}`);
+  return Array.from(key, (n) => String(n).replace(/[\\/]/g, '\\$&')).join('/');
+}
+// `posed`'s values argument: nothing, a `Map`, a plain object, or an iterable of `[key, values]`
+// pairs -- a value one number for a one-freedom joint, else a list.
+function _posedRows(value) {
+  if (value == null) return [];
+  if (typeof value === 'string' || typeof value !== 'object') throw new TypeError(`posed: values must be a Map, an object or a list of [joint, values] pairs, not ${typeof value === 'string' ? JSON.stringify(value) : String(value)}`);
+  const pairs = value instanceof Map ? Array.from(value)
+    : typeof value[Symbol.iterator] === 'function' ? Array.from(value) : Object.entries(value);
+  return pairs.map((row, i) => {
+    if (row == null || typeof row[Symbol.iterator] !== 'function') throw new TypeError(`posed: values[${i}] is not a [joint, values] pair`);
+    const [key, v] = row;
+    if (typeof v === 'number' || typeof v === 'bigint') return [_jointPath(key), [Number(v)]];
+    if (v == null || typeof v === 'string' || typeof v[Symbol.iterator] !== 'function') throw new TypeError(`posed: values[${i}][1] must be a number or a list of numbers, not ${String(v)}`);
+    return [_jointPath(key), Array.from(v, Number)];
   });
 }
 /** A face index for the C call, NONE for the whole solid; a negative one would wrap to NONE. */
@@ -1278,6 +1470,24 @@ function _svgOptions(options) {
 function version() { return _text(_lib().version()); }
 function buildDate() { return _text(_lib().build_date()); }
 function license(textOrPath) { if (!_lib().license_set(String(textOrPath))) throw new BuildError(_lastError() || 'license refused'); }
+/**
+ * Set a kernel option, by its name, for the whole process from the next call on:
+ * `boolean.mesh_budget`, `boolean.finest_tolerance`, `profile_boolean.point_budget` or
+ * `measure.default_accuracy`. Throws -- and changes nothing -- for a name that is not an
+ * option or a value it does not take, saying which and what it takes.
+ */
+function setOption(name, value) {
+  if (!_lib().option_set(String(name), Number(value))) throw new BuildError(_lastError() || `option '${name}' refused`);
+}
+/**
+ * A kernel option's value, by its name: what `setOption` last set, else its default.
+ * Throws for a name that is not an option, listing the ones there are.
+ */
+function option(name) {
+  const out = new Float64Array(1);
+  if (!_lib().option_get(String(name), out)) throw new BuildError(_lastError() || `no option '${name}'`);
+  return out[0];
+}
 /**
  * One line about the license the library is running under. Never null: the
  * license line, or, without one, `unlicensed` (`unlicensed -- <reason>` when
@@ -1850,7 +2060,8 @@ class Solid {
    * passing within it without their meshes crossing -- can be missed; near-tangent
    * contact is where this bites.
    *
-   * `progress(phase, done, total)` hears `mesh`, `cull`, `cross`, `snap` and `curve`.
+   * `progress(phase, done, total)` hears `meet` on the exact route; `mesh`, `cull`,
+   * `cross`, `snap` and `curve` where it falls back to the mesh route.
    * Throws `BuildError` for a `tolerance` not positive and finite, a solid with no faces,
    * or one that meshes to nothing.
    */
@@ -2143,6 +2354,44 @@ class Solid {
   svgText(options = {}) { return writeSvgText([this], options); }
   /** `svgText(options)` written to `filePath` by the library itself. */
   svg(filePath, options = {}) { writeSvg(filePath, [this], options); }
+  /**
+   * This solid's silhouette -- where its surfaces turn away from the eye, which no edge of it
+   * lies on -- as rational cubic Beziers in `double`, from the camera `options` describes (see
+   * `svgOptionsDefaults`): `view`, `azimuth`, `elevation`, `up`, `fov`, and `width` with
+   * `tolerance`, which the library reads together as the page fraction `tolerance / width`.
+   * Nothing else in the options changes the curves.
+   *
+   * `{ points, weights, count }`: `points` holds twelve numbers a curve (four control points,
+   * x y z), `weights` four. The library hands over an owned block; this copies it out and
+   * releases it before it returns, whichever way it returns, so there is nothing to free.
+   *
+   * A body with no silhouette (every face planar) answers `count` 0 with empty arrays, which is
+   * not an error; a refused option or a body with no measurable geometry throws a `BuildError`.
+   */
+  silhouetteBeziers(options = {}) {
+    const raw = _svgOptions(options);
+    const l = _lib();
+    const count = new Uint32Array(1);
+    const data = l.silhouette_beziers(this._handle, raw, count);
+    if (data == null) {
+      // The call clears the thread's error at entry and the empty answer sets none: a reason
+      // here is this call's own refusal, none is the empty answer.
+      if (_lastError()) _fail('silhouette_beziers');
+      return { points: new Float64Array(0), weights: new Float64Array(0), count: 0 };
+    }
+    const n = count[0];
+    try {
+      const block = _doublesAt(data, n * 16) ?? new Float64Array(0);
+      const points = new Float64Array(n * 12), weights = new Float64Array(n * 4);
+      for (let c = 0; c < n; c++) {
+        points.set(block.subarray(c * 16, c * 16 + 12), c * 12);
+        weights.set(block.subarray(c * 16 + 12, c * 16 + 16), c * 4);
+      }
+      return { points, weights, count: n };
+    } finally {
+      l.silhouette_beziers_free(data, n);
+    }
+  }
   /** `svgText`, on the worker thread. `options` is validated and packed on the caller's
    * thread first (fail fast), same as the reader's `Scene.svgAsync`/`Node.svgAsync`. */
   async svgAsync(options = {}) {
@@ -2318,6 +2567,15 @@ class Solid {
   /** This solid split by the plane through `plane`'s origin, square to its z: the bodies in front of it first, then those behind. */
   splitByPlane(plane, tolerance = 0.05, progress = null) {
     const all = new Solid(_lib().split_by_plane(this._handle, _frame(plane), tolerance, _progress(progress), null));
+    try { return all.lumps(); } finally { all.close(); }
+  }
+  /**
+   * This solid split by the closed `profile` drawn on `frame`, pushed straight through it
+   * along the frame's z both ways: the bodies outside the profile first, then those inside.
+   * Where the plane lies along z does not matter.
+   */
+  splitByProfile(profile, frame, tolerance = 0.05, progress = null) {
+    const all = new Solid(_lib().split_by_profile(this._handle, profile._handle, _frame(frame), tolerance, _progress(progress), null));
     try { return all.lumps(); } finally { all.close(); }
   }
   /** This solid's connected bodies, each a solid of its own -- faces sharing an edge are one body -- in the order of their first faces. */
@@ -2507,14 +2765,19 @@ class Solid {
 }
 
 // ---- CAM: tools, stock and a job ---------------------------------------------------
-// The automatic layer (`Job.machine`) only, matching `cadaclysm_blacksmith.py`'s object
-// model name for name -- `machine`, `report()`'s items and `operations()`. `Job`'s manual
-// verbs (`face`/`contour`/`pocket`/`drill`) and `writeCamotics` stay off this wrapper for
-// now (docs/superpowers/plans/2026-09-28-cam-abi-python.md's plan 4 is where the other
-// nine wrappers gain the whole surface); nothing here stops that plan adding them later.
+// The whole job surface, matching `cadaclysm_blacksmith.py`'s object model name for name:
+// `Job`'s manual verbs (`face`/`contour`/`pocket`/`drill`), the automatic `machine`,
+// `report()`'s items, `operations()`, `gcode()` and `writeCamotics`, and a job's `stock` and
+// `tools` read back. `Tool` has the flat, ball and drill makers.
 
 const _toolFinalizer = typeof FinalizationRegistry === 'function'
   ? new FinalizationRegistry((h) => { try { _lib().tool_free(h); } catch (_) { /* exiting */ } }) : null;
+
+/** A tool's size as the library read it, or its refusal: NaN is only ever a failure here. */
+function _toolSize(v, what) {
+  if (Number.isNaN(v)) _fail(what);
+  return v;
+}
 
 /** A cutter: Grbl tool `number` (1 to 255, the `T` word), `diameter` and `fluteLength` in
  * mm, `feed` and `plunge` in mm/min, `rpm` its spindle speed, ramping into its cuts at
@@ -2539,11 +2802,30 @@ class Tool {
   static ball(number, diameter, fluteLength, feed, plunge, rpm, rampAngle = 3.0) {
     return Tool._ramped(_lib().tool_ball(number, diameter, fluteLength, feed, plunge, rpm), rampAngle, 'tool_ball');
   }
-  /** A drill, plunging at `feed`. A job takes it for automatic holes, or its own `drill` (not
-   * yet wrapped here) only. */
+  /** A drill, plunging at `feed`. A job takes it for automatic holes, or its own `drill`. */
   static drill(number, diameter, fluteLength, feed, rpm) {
     return new Tool(_lib().tool_drill(number, diameter, fluteLength, feed, rpm));
   }
+  /** The Grbl tool number, 1 to 255 (the `T` word). */
+  get number() {
+    const n = _lib().tool_number(this._handle);
+    if (n === NONE) _fail('tool_number');
+    return n;
+  }
+  /** The cutting end: `'flat'`, `'ball'`, `'drill'`, `'vbit'` or `'bullnose'`. */
+  get shape() {
+    const s = _lib().tool_shape(this._handle);
+    if (!s) _fail('tool_shape');
+    return s;
+  }
+  /** The cutting diameter, in mm. */
+  get diameter() { return _toolSize(_lib().tool_diameter(this._handle), 'tool_diameter'); }
+  /** How far up the cutting edge reaches from the tip, in mm. */
+  get fluteLength() { return _toolSize(_lib().tool_flute_length(this._handle), 'tool_flute_length'); }
+  /** A V-bit's included angle, in degrees; `null` for every other shape. */
+  get angle() { return this.shape === 'vbit' ? _toolSize(_lib().tool_angle(this._handle), 'tool_angle') : null; }
+  /** A bull-nose's corner radius, in mm; `null` for every other shape. */
+  get cornerRadius() { return this.shape === 'bullnose' ? _toolSize(_lib().tool_corner_radius(this._handle), 'tool_corner_radius') : null; }
 }
 
 const _stockFinalizer = typeof FinalizationRegistry === 'function'
@@ -2591,6 +2873,10 @@ function _programs(handle, what) {
  * kind-specific order the operation stores. In `params`: `side` reads as
  * `"outside"`/`"inside"`/`"on"`; `climb` and `open` as `bool`; `points` as an integer; a
  * `NaN` `peck` as `null`; every other value stays a number. Read-only. */
+/** What makes two tools the same cutter: shape, diameter, flute length and the shape's
+ * own angle or corner radius. */
+function _toolKey(t) { return [t.shape, t.diameter, t.fluteLength, t.angle, t.cornerRadius].join('|'); }
+
 class Operation {
   constructor(kind, tool, params) { this.kind = kind; this.tool = tool; this.params = params; Object.freeze(this); }
 }
@@ -2708,6 +2994,7 @@ class Job {
   // an options object.
   constructor(stock, safeZ, clearance = 1.0, tolerance = 0.01, name = 'job', spindleDwell = 2.0, resolution = 0.1) {
     _rejectNul(name);
+    this._tools = new Map();
     const l = _lib();
     this._handle = _checked(l.job_new(stock._handle, safeZ), 'job_new');
     if (_jobFinalizer) _jobFinalizer.register(this, this._handle, this);
@@ -2723,6 +3010,19 @@ class Job {
     return this._handle;
   }
   get closed() { return this._handle === null; }
+  _keep(...tools) { for (const t of tools) this._tools.set(t.number, t); }
+  /** The stock's box as the job holds it, `[[minX, minY, minZ], [maxX, maxY, maxZ]]` --
+   * what `Stock.box` was given, or what `Stock.around` worked out. */
+  get stock() {
+    const lo = new Float64Array(3), hi = new Float64Array(3);
+    if (!_lib().job_stock(this._live, lo, hi)) _fail('job_stock');
+    return [Array.from(lo), Array.from(hi)];
+  }
+  /** The tools this job was given -- by `face`, `contour`, `pocket`, `drill` and `machine`
+   * (its end mill and each drill it used) -- by Grbl number, so a `Program.tool` finds its
+   * tool. A refused call adds none; the later of two tools with one number wins. A new
+   * `Map` each time. */
+  get tools() { return new Map(this._tools); }
   close() {
     if (this._handle === null) return;
     const h = this._handle; this._handle = null;
@@ -2737,6 +3037,7 @@ class Job {
    */
   face(tool, z, stepover, stepdown) {
     if (!_lib().job_face(this._live, tool._handle, z, stepover, stepdown)) _fail('job_face');
+    this._keep(tool);
   }
   /**
    * Cut along `profile` from `top` to `bottom` in passes at most `stepdown` deep, with
@@ -2751,6 +3052,7 @@ class Job {
     if (!_lib().job_contour(this._live, tool._handle, profile._handle, top, bottom, code, stepdown, Boolean(climb), Boolean(open))) {
       _fail('job_contour');
     }
+    this._keep(tool);
   }
   /**
    * Clear `profile` -- its holes left standing as islands -- from `top` to `bottom`, in
@@ -2760,6 +3062,7 @@ class Job {
    */
   pocket(tool, profile, top, bottom, stepover, stepdown) {
     if (!_lib().job_pocket(this._live, tool._handle, profile._handle, top, bottom, stepover, stepdown)) _fail('job_pocket');
+    this._keep(tool);
   }
   /**
    * Drill a hole at each (x, y) of `points` from `top` to `bottom` with `tool`, pecking
@@ -2772,6 +3075,7 @@ class Job {
     if (pairs.some((p) => p.length !== 2)) throw new BuildError('drill: every point must be (x, y)');
     const xy = Float64Array.from(pairs.flat());
     if (!_lib().job_drill(this._live, tool._handle, xy, pairs.length, top, bottom, peck == null ? NaN : peck)) _fail('job_drill');
+    this._keep(tool);
   }
   /**
    * Recognise `part` and append the operations that make it: faced, contoured and
@@ -2784,7 +3088,8 @@ class Job {
    * `Report` (see `_report`) of what could not be cut. Throws for a `part` that is not a
    * solid handle, an `endMill` or a drill that is not a `Tool`, or what the kernel refuses
    * (a drill as `endMill`, ...); the job changes only on success -- a refusal leaves it
-   * exactly as it was.
+   * exactly as it was. Throws when two of the offered tools share a number but are
+   * different tools; `Job.tools` keeps only the tools the added operations use.
    */
   machine(part, endMill, drills = [], stepover = null, stepdown = null, skin = 0.3, peck = null) {
     // Checked here, before the C call: a wrong type would otherwise hit `part._handle` or
@@ -2802,6 +3107,17 @@ class Job {
       if (!(t instanceof Tool)) throw new TypeError(`machine: drills[${i}] must be a Tool, not ${_typeName(t)}`);
       return t._handle;
     });
+    // Two offered tools under one number must be one tool: a program can only pick one
+    // tool per number (the kernel's own rule for an earlier operation's tool).
+    const offered = new Map();
+    for (const t of [endMill, ...tools]) {
+      const other = offered.get(t.number);
+      if (other === undefined) offered.set(t.number, t);
+      else if (other !== t && _toolKey(other) !== _toolKey(t)) {
+        throw new Error(`machine: tool T${t.number} differs from the tool T${other.number} offered with it`);
+      }
+    }
+    const before = this.operations().length;
     const handle = _lib().job_machine(
       this._live, part._handle, endMill._handle, handles, handles.length,
       stepover == null ? NaN : stepover,
@@ -2809,7 +3125,11 @@ class Job {
       skin,
       peck == null ? NaN : peck,
     );
-    return _report(handle, 'job_machine');
+    const report = _report(handle, 'job_machine');
+    // only a tool a program uses can be found by its T number
+    const used = new Set(this.operations().slice(before).map((op) => op.tool));
+    this._keep(...[endMill, ...tools].filter((t) => used.has(t.number)));
+    return report;
   }
   /** Every operation added to this job so far, in order -- whether added by
    * `face`/`contour`/`pocket`/`drill` or by `machine`. */
@@ -2958,6 +3278,43 @@ class Assembly {
     if (!_lib().assembly_pair(this._live, joint, kind, f, ef, lower, upper, hasLower, hasUpper, freedomCount, pitchArg)) _fail('assembly_pair');
   }
   /**
+   * `pair` with the kind's own numbers in place of the pitch, for the coupled pairs: `kind` any
+   * name `pair` takes, or `gear` or `rack_and_pinion`; `params` `[pitch]` for a screw,
+   * `[pinionRadius]` for a rack and pinion, `[radiusFirst, radiusSecond, ratio]` or those plus
+   * `[bevel, helicalAngle]` (radians) for a gear -- the ratio the second link's rotation over the
+   * first's, signed (two meshing external gears turn opposite ways, so theirs is negative) --
+   * and none for any other kind. `frame`, `endFrame` and `ranges` read as in `pair`. Throws the
+   * kernel's own text when a rule refuses it (a wrong number of parameters among them); the
+   * assembly is then unchanged.
+   */
+  pairWith(joint, kind, frame, { endFrame = null, ranges = null, params = [] } = {}) {
+    const f = _frame(frame);
+    const ef = endFrame == null ? null : _frame(endFrame);
+    if (params == null || typeof params === 'string' || typeof params[Symbol.iterator] !== 'function') {
+      throw new TypeError(`pairWith: params must be a list of numbers, not ${typeof params === 'string' ? JSON.stringify(params) : String(params)}`);
+    }
+    const values = Array.from(params, Number);
+    let lower = null, upper = null, hasLower = null, hasUpper = null, freedomCount = 0;
+    if (ranges != null) {
+      const rows = _ranges(ranges, 'pairWith');
+      freedomCount = rows.length;
+      const bufLen = freedomCount || 1;   // non-null pointers for an empty `ranges`, as in `pair`
+      lower = new Float64Array(bufLen);
+      upper = new Float64Array(bufLen);
+      hasLower = new Uint8Array(bufLen);
+      hasUpper = new Uint8Array(bufLen);
+      rows.forEach((r, i) => {
+        const lo = r == null ? null : r[0];
+        const hi = r == null ? null : r[1];
+        if (lo != null) { lower[i] = Number(lo); hasLower[i] = 1; }
+        if (hi != null) { upper[i] = Number(hi); hasUpper[i] = 1; }
+      });
+    }
+    const raw = new Float64Array(values.length || 1);   // padded: koffi passes an empty array as null
+    raw.set(values);
+    if (!_lib().assembly_pair_with(this._live, joint, kind, f, ef, lower, upper, hasLower, hasUpper, freedomCount, raw, values.length)) _fail('assembly_pair_with');
+  }
+  /**
    * Add a named state to this assembly: `rows` is a `Map` or an iterable of `[joint, values]`
    * pairs, each joint's values in its pair's freedom order. Throws the kernel's own text when
    * a rule refuses it; the assembly is then unchanged. `rows` a bare string, or an item not a
@@ -2969,6 +3326,31 @@ class Assembly {
     const counts = Uint32Array.from(entries, ([, values]) => values.length);
     const flat = Float64Array.from(entries.flatMap(([, values]) => values));
     if (!_lib().assembly_state(this._live, name, joints, counts, flat, entries.length)) _fail('assembly_state');
+  }
+  /**
+   * This assembly with its mechanism posed, as a NEW `Assembly` the caller owns (`close()` it);
+   * this one is unchanged either way. `values` is a `Map`, a plain object, or an iterable of
+   * `[joint, value]` pairs (or omitted): a joint a path of placement names then the joint's name
+   * joined by "/" (a "/" or backslash inside a name escaped with a backslash), or an array of the names,
+   * which this escapes and joins; a value one number for a one-freedom joint, else a list in the
+   * pair's freedom order (radians, the assembly's units). `state` is a state's path (a string or
+   * an array of names), applied first and overridden row by row; `ground` one of this assembly's
+   * own links, held fixed. A sub-assembly no key reaches is shared with this one. Throws the
+   * kernel's own text when it refuses.
+   */
+  posed(values = null, { state = null, ground = null } = {}) {
+    const rows = _posedRows(values);
+    const pad = (a) => (a.length || _wasm() ? a : new a.constructor(1));   // koffi passes an empty array as null; the count says 0
+    const joints = pad(rows.map(([joint]) => joint));
+    const counts = pad(Uint32Array.from(rows, ([, v]) => v.length));
+    const flat = pad(Float64Array.from(rows.flatMap(([, v]) => v)));
+    const handle = _lib().assembly_posed(this._live, joints, counts, flat, rows.length,
+      state == null ? null : _jointPath(state), ground == null ? null : String(ground));
+    if (!handle) _fail('assembly_posed');
+    const posed = Object.create(Assembly.prototype);
+    posed._handle = handle;
+    if (_assemblyFinalizer) _assemblyFinalizer.register(posed, handle, posed);
+    return posed;
   }
   /**
    * Add a named motion sequence over this assembly's states: `segments` are `[state name,
@@ -3584,6 +3966,9 @@ function _collisionHitOf(raw, keeper, index) {
     keeper, index);
 }
 
+const _colliderFinalizer = typeof FinalizationRegistry === 'function'
+  ? new FinalizationRegistry((h) => { try { _lib().collider_free(h); } catch (_) { /* exiting */ } }) : null;
+
 /**
  * Parts meshed once, asked pose after pose which of them interfere. `close()` frees this
  * handle; so does leaving a `using` block or the garbage collector.
@@ -3603,6 +3988,7 @@ class Collider {
     const allowedArr = Uint32Array.from(allowed, Number);
     const h = _lib().collider_new(handles, handles.length, tolerance, groupsArr, allowedArr, allowedArr.length / 2);
     this._pointer = _checked(h, 'collider_new');
+    if (_colliderFinalizer) _colliderFinalizer.register(this, this._pointer, this);
   }
   get _handle() {
     if (!this._pointer) throw new BuildError('collider: closed');
@@ -3612,6 +3998,7 @@ class Collider {
   close() {
     if (this._pointer === null) return;
     const h = this._pointer; this._pointer = null;
+    if (_colliderFinalizer) _colliderFinalizer.unregister(this);
     _lib().collider_free(h);
   }
   [Symbol.for('nodejs.dispose')]() { this.close(); }
@@ -3652,6 +4039,349 @@ class Collider {
       hits.push(_collisionHitOf(raw, keeper, i));
     }
     return hits;
+  }
+}
+
+// ---- the Kiln: the SubD cage --------------------------------------------------------------
+
+const _SUBD_AXES = Object.freeze({ x: 0, y: 1, z: 2 });
+const _SUBD_KINDS = Object.freeze({ vertices: 0, edges: 1, faces: 2 });
+const _SUBD_PICKS = Object.freeze({ vertex: 0, edge: 1, face: 2 });
+const _subdShown = (v) => (typeof v === 'string' ? JSON.stringify(v) : Array.isArray(v) ? `[${v.map(_subdShown).join(', ')}]` : String(v));
+const _isList = (v) => v != null && typeof v !== 'string' && typeof v[Symbol.iterator] === 'function';
+
+/** A count or id as the C ABI reads it (a whole number, 0 to 4294967295), refused here, named, rather than wrapped by koffi. */
+function _subdCount(value, what) {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 0xffffffff) {
+    throw new TypeError(`${what} must be a whole number from 0 to 4294967295, not ${_subdShown(value)}`);
+  }
+  return value;
+}
+function _subdAxis(axis, what) {
+  const key = typeof axis === 'string' ? axis.toLowerCase() : null;
+  if (key === null || !Object.hasOwn(_SUBD_AXES, key)) throw new BuildError(`${what}: axis must be 'x', 'y' or 'z', not ${_subdShown(axis)}`);
+  return _SUBD_AXES[key];
+}
+/** `[a, b]` vertex pairs -- edges -- as the flat ids the C ABI reads. */
+function _subdPairs(value, call, param) {
+  if (!_isList(value)) throw new TypeError(`${call}: ${param} must be a list of [a, b] vertex pairs, not ${_subdShown(value)}`);
+  const flat = [];
+  let i = 0;
+  for (const pair of value) {
+    const ab = _isList(pair) ? Array.from(pair) : null;
+    if (ab === null || ab.length !== 2) throw new TypeError(`${call}: ${param}[${i}] is not an [a, b] vertex pair: ${_subdShown(pair)}`);
+    flat.push(..._indices(ab, call, `${param}[${i}]`));
+    i++;
+  }
+  return Uint32Array.from(flat);
+}
+/** Flat ids read back as `[a, b]` pairs. */
+function _subdPairsOf(ids) {
+  const out = [];
+  for (let i = 0; i + 1 < ids.length; i += 2) out.push([ids[i], ids[i + 1]]);
+  return out;
+}
+/** `n` ids or doubles copied out of a view (a koffi pointer, or the wasm's typed array), as a plain array or a `Float64Array`. */
+function _subdIds(ptr, n) { return n === 0 ? [] : Array.from(_uint32s(ptr, n)); }
+function _subdDoubles(ptr, n) { return n === 0 ? new Float64Array(0) : Float64Array.from(_doublesAt(ptr, n)); }
+function _subdUints(ptr, n) { return n === 0 ? new Uint32Array(0) : Uint32Array.from(_uint32s(ptr, n)); }
+/** Positions as the flat doubles the C ABI reads: a flat run of three a vertex, or `[x, y, z]` each. */
+function _subdPoints(positions, call) {
+  if (!_isList(positions)) throw new TypeError(`${call}: positions must be numbers, three a vertex, not ${_subdShown(positions)}`);
+  const items = Array.from(positions);
+  let flat = items;
+  if (items.length > 0 && typeof items[0] !== 'number') {
+    flat = [];
+    items.forEach((p, i) => {
+      const xyz = _isList(p) ? Array.from(p, Number) : [];
+      if (xyz.length !== 3) throw new BuildError(`${call}: positions[${i}] must be [x, y, z], not ${_subdShown(p)}`);
+      flat.push(...xyz);
+    });
+  }
+  if (flat.length % 3) throw new BuildError(`${call}: positions must be three numbers a vertex, not ${flat.length}`);
+  return Float64Array.from(flat, Number);
+}
+/** Sixteen numbers column-major, as the C ABI reads them, or a 4x4 of rows (row-major, as Python's `transform` takes one). */
+function _subdMatrix(matrix) {
+  if (!_isList(matrix)) throw new BuildError(`transform matrix: sixteen numbers column-major or a 4x4, not ${_subdShown(matrix)}`);
+  const rows = Array.from(matrix, (row) => (_isList(row) ? Array.from(row) : row));
+  if (rows.some(Array.isArray)) {
+    if (rows.length !== 4 || !rows.every((row) => Array.isArray(row) && row.length === 4)) {
+      throw new BuildError(`transform: a nested matrix must be 4x4 (four rows of four numbers), not rows of [${rows.map((row) => (Array.isArray(row) ? row.length : 1)).join(', ')}]`);
+    }
+    const columns = [];
+    for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) columns.push(rows[r][c]);
+    return _doubles(columns, 16, 'transform matrix');
+  }
+  return _doubles(rows, 16, 'transform matrix');
+}
+
+/**
+ * One level of a cage's smooth surface, as `Subd.smoothMesh` returns it, copied out of the cage
+ * so it outlives it. `positions` and `normals` are 3n doubles -- limit positions and unit outward
+ * limit normals; `indices` three vertex ids a triangle; `triangleFace` the face of the **full**
+ * cage each triangle lies on (on a mirrored half, face `f` of the half is `f` and its reflection
+ * `f + faces.length`).
+ */
+class SubdMesh {
+  constructor(positions, normals, indices, triangleFace) {
+    this.positions = positions; this.normals = normals; this.indices = indices; this.triangleFace = triangleFace;
+  }
+}
+function _subdMeshOf(raw) {
+  const n = raw.vertex_count, m = raw.index_count;
+  return new SubdMesh(_subdDoubles(raw.positions, 3 * n), _subdDoubles(raw.normals, 3 * n),
+    _subdUints(raw.indices, m), _subdUints(raw.triangle_face, m / 3));
+}
+
+/**
+ * What `Subd.toSolid` did and how close it came: `regular` patches exact from their own net and
+ * `refined` ones from a refined neighbourhood; the Catmull-Clark `steps` taken first (1 or 2);
+ * `levels`, the deepest local refinement a patch took (0 when none was refined); the largest
+ * `deviation` from the limit surface, as a fraction of the cage's bounding-box diagonal; the
+ * largest tangent break `g1AngleDeg` across a side that is not creased, in degrees; and the world
+ * points they were measured at, `deviationAt` and `g1At`.
+ */
+class SubdReport {
+  constructor(raw) {
+    this.regular = raw.regular; this.refined = raw.refined; this.steps = raw.steps; this.levels = raw.levels;
+    this.deviation = raw.deviation; this.g1AngleDeg = raw.g1_angle_deg;
+    this.deviationAt = Array.from(raw.deviation_at, Number); this.g1At = Array.from(raw.g1_at, Number);
+  }
+}
+
+const _subdFinalizer = typeof FinalizationRegistry === 'function'
+  ? new FinalizationRegistry((h) => { try { _lib().subd_free(h); } catch (_) { /* exiting */ } }) : null;
+
+/**
+ * A Catmull-Clark control cage: positions, faces, creased edges, pinned vertices, an optional
+ * mirror plane, and the selection of the edit that made it. Immutable: every edit returns a new
+ * `Subd`, with `selection` naming what that edit touched. `toSolid` turns it into an exact B-rep.
+ * `close()` frees this handle; so does leaving a `using` block or the garbage collector. A
+ * refusal throws `BuildError` with the kernel's own words. An edge is `[a, b]`; a selection is
+ * `{kind: 'vertices' | 'edges' | 'faces', ids}`, an edge selection's ids `[a, b]` pairs.
+ */
+class Subd {
+  constructor(handle) {
+    this._pointer = _checked(handle, 'subd');
+    if (_subdFinalizer) _subdFinalizer.register(this, this._pointer, this);
+  }
+  get _handle() {
+    if (!this._pointer) throw new BuildError('subd: closed');
+    return this._pointer;
+  }
+  get closed() { return this._pointer === null; }
+  close() {
+    if (this._pointer === null) return;
+    const h = this._pointer; this._pointer = null;
+    if (_subdFinalizer) _subdFinalizer.unregister(this);
+    _lib().subd_free(h);
+  }
+  [Symbol.for('nodejs.dispose')]() { this.close(); }
+
+  // -- the primitives
+  /** A box of `size` (x, y, z), centred on the origin, with `segments` quads along each axis (1 to 1024). */
+  static cuboid(size = [2, 2, 2], segments = [1, 1, 1]) {
+    const [sx, sy, sz] = _doubles(size ?? [2, 2, 2], 3, 'cuboid size');
+    const counts = _indices(segments ?? [1, 1, 1], 'cuboid', 'segments');
+    if (counts.length !== 3) throw new BuildError(`cuboid segments: expected 3 numbers, got ${counts.length}`);
+    return new Subd(_lib().subd_cuboid(sx, sy, sz, counts[0], counts[1], counts[2]));
+  }
+  /**
+   * A cylinder along +Z: one n-gon cap per end with `sides` sides and `rings` bands of quads
+   * between them; with `creasedRims` the two rim loops are creased, so the caps stay flat. The
+   * rims are creased by default, which is what converts: an uncreased cylinder of 7 or more
+   * sides is refused by `toSolid` at the default tolerances.
+   */
+  static cylinder(radius = 1, height = 2, sides = 8, rings = 1, creasedRims = true) {
+    return new Subd(_lib().subd_cylinder(Number(radius ?? 1), Number(height ?? 2), _subdCount(sides ?? 8, 'cylinder sides'),
+      _subdCount(rings ?? 1, 'cylinder rings'), Boolean(creasedRims ?? true)));
+  }
+  /** A quad ball of `radius`: a cube grid with `segments` quads per edge, each vertex pushed out to the radius. */
+  static sphere(radius = 1, segments = 2) {
+    return new Subd(_lib().subd_sphere(Number(radius ?? 1), _subdCount(segments ?? 2, 'sphere segments')));
+  }
+  /** A torus around +Z: `around` steps about the axis at `major`, `tube` steps round the tube of `minor`, all quads. */
+  static torus(major = 3, minor = 1, around = 12, tube = 8) {
+    return new Subd(_lib().subd_torus(Number(major ?? 3), Number(minor ?? 1), _subdCount(around ?? 12, 'torus around'),
+      _subdCount(tube ?? 8, 'torus tube')));
+  }
+  /**
+   * A cage from its parts, the lossless inverse of reading them back: `positions` (a flat run of
+   * three a vertex, or `[x, y, z]` each), `faces` lists of vertex ids, `creases` `[a, b]` pairs
+   * that are edges, `pins` vertex ids, and `symmetry` null or `{axis: 'x' | 'y' | 'z',
+   * tolerance}` for a mirrored half, as `symmetry` reports it. The new cage selects nothing.
+   */
+  static fromParts(positions, faces, creases = [], pins = [], symmetry = null) {
+    const points = _subdPoints(positions, 'from_parts');
+    if (!_isList(faces)) throw new TypeError(`from_parts: faces must be a list of vertex-id lists, not ${_subdShown(faces)}`);
+    const sizes = [], loop = [];
+    let i = 0;
+    for (const face of faces) {
+      const ids = _indices(face, 'from_parts', `faces[${i}]`);
+      sizes.push(ids.length);
+      loop.push(...ids);
+      i++;
+    }
+    const creaseIds = _subdPairs(creases, 'from_parts', 'creases');
+    const pinIds = _indices(pins, 'from_parts', 'pins');
+    let axis = -1, tolerance = 0;
+    if (symmetry != null) {
+      const [name, within] = Array.isArray(symmetry) ? symmetry : [symmetry.axis, symmetry.tolerance];
+      axis = _subdAxis(name, 'from_parts symmetry');
+      tolerance = Number(within);
+    }
+    return new Subd(_lib().subd_from_parts(points, points.length / 3, Uint32Array.from(sizes), sizes.length,
+      Uint32Array.from(loop), loop.length, creaseIds, creaseIds.length / 2, pinIds, pinIds.length, axis, tolerance));
+  }
+
+  // -- the parts, every one a copy
+  _parts(read) {
+    const out = {};
+    if (!_lib().subd_parts(this._handle, out)) _fail('subd_parts');
+    return read(out);
+  }
+  /** The cage's vertices, a `Float64Array` of 3n numbers of your own: a copy. */
+  get positions() { return this._parts((p) => _subdDoubles(p.positions, 3 * p.vertex_count)); }
+  /** Each face's vertex ids, in loop order. */
+  get faces() {
+    return this._parts((p) => {
+      const sizes = _subdIds(p.face_sizes, p.face_count), loop = _subdIds(p.face_indices, p.index_count);
+      const faces = [];
+      let at = 0;
+      for (const size of sizes) { faces.push(loop.slice(at, at + size)); at += size; }
+      return faces;
+    });
+  }
+  /** The creased edges, each `[smaller id, larger id]`, sorted. */
+  get creases() { return this._parts((p) => _subdPairsOf(_subdIds(p.creases, 2 * p.crease_count))); }
+  /** The pinned vertices: they refine as corners and stay put. */
+  get pins() { return this._parts((p) => _subdIds(p.pins, p.pin_count)); }
+  /** Null for an ordinary cage; for a mirrored half, `{axis, tolerance}`: the plane's axis and how far from it a vertex counts as on it. */
+  get symmetry() {
+    return this._parts((p) => (p.symmetry_axis < 0 ? null : { axis: 'xyz'[p.symmetry_axis], tolerance: p.symmetry_tolerance }));
+  }
+  /**
+   * What the edit that made this cage touched: `{kind: 'vertices' | 'faces', ids}` or
+   * `{kind: 'edges', ids: [[a, b], ...]}`; null for a cage no edit selected (a primitive,
+   * `fromParts`, the mirror calls).
+   */
+  get selection() {
+    return this._parts((p) => {
+      if (p.selection_kind > 2) return null;
+      if (p.selection_kind === 1) return { kind: 'edges', ids: _subdPairsOf(_subdIds(p.selection, 2 * p.selection_count)) };
+      return { kind: p.selection_kind === 0 ? 'vertices' : 'faces', ids: _subdIds(p.selection, p.selection_count) };
+    });
+  }
+
+  // -- the edits, every one a new cage
+  _edit(make, what) { return new Subd(_checked(make(), what)); }
+  _selected(selection, call) {
+    if (selection == null || typeof selection !== 'object' || Array.isArray(selection)) {
+      throw new TypeError(`${call}: selection must be {kind: 'vertices' | 'edges' | 'faces', ids}, not ${_subdShown(selection)}`);
+    }
+    const { kind, ids } = selection;
+    if (typeof kind !== 'string' || !Object.hasOwn(_SUBD_KINDS, kind)) {
+      throw new BuildError(`${call}: kind must be 'vertices', 'edges' or 'faces', not ${_subdShown(kind)}`);
+    }
+    const flat = kind === 'edges' ? _subdPairs(ids, call, 'selection ids') : _indices(ids, call, 'selection ids');
+    return [_SUBD_KINDS[kind], flat, kind === 'edges' ? flat.length / 2 : flat.length];
+  }
+  /**
+   * A new cage with the selected elements moved by `matrix`, and the same elements selected.
+   * `selection` is `{kind, ids}`; `matrix` sixteen numbers column-major, or a 4x4 of rows
+   * (row-major); a rotation about a point is baked in by the caller.
+   */
+  transform(selection, matrix) {
+    const [kind, ids, count] = this._selected(selection, 'transform');
+    const m = _subdMatrix(matrix);
+    return this._edit(() => _lib().subd_transform(this._handle, kind, ids, count, m), 'subd_transform');
+  }
+  /** A new cage with `edges` (`[a, b]` pairs) creased, or un-creased when `on` is false; it selects them. */
+  crease(edges, on = true) {
+    const flat = _subdPairs(edges, 'crease', 'edges');
+    return this._edit(() => _lib().subd_set_crease(this._handle, flat, flat.length / 2, Boolean(on ?? true)), 'subd_set_crease');
+  }
+  /** A new cage with `vertices` pinned (they refine as corners and stay put), or released when `on` is false; it selects them. */
+  pin(vertices, on = true) {
+    const ids = _indices(vertices, 'pin', 'vertices');
+    return this._edit(() => _lib().subd_set_pin(this._handle, ids, ids.length, Boolean(on ?? true)), 'subd_set_pin');
+  }
+  /** A new cage with `faces` pushed out by `distance` along each connected region's average normal, a quad wall on each boundary edge; it selects the moved faces. */
+  extrude(faces, distance) {
+    const ids = _indices(faces, 'extrude', 'faces');
+    return this._edit(() => _lib().subd_extrude(this._handle, ids, ids.length, Number(distance)), 'subd_extrude');
+  }
+  /** A new cage with `faces` shrunk by `amount`, in (0, 1), within their surface and a ring of quads round each region (each face, with `individual`); it selects the inner faces. */
+  inset(faces, amount, individual = false) {
+    const ids = _indices(faces, 'inset', 'faces');
+    return this._edit(() => _lib().subd_inset(this._handle, ids, ids.length, Number(amount), Boolean(individual ?? false)), 'subd_inset');
+  }
+  /** A new cage with a loop of edges cut across the ring of quads through `edge` (`[a, b]`), at `a + at * (b - a)` with `at` in (0, 1); it selects the new loop. */
+  insertLoop(edge, at = 0.5) {
+    const [a, b] = _subdPairs([edge], 'insert_loop', 'edge');
+    return this._edit(() => _lib().subd_insert_loop(this._handle, a, b, Number(at ?? 0.5)), 'subd_insert_loop');
+  }
+  /** The loop of edges through `edge`, straight across each valence-four vertex, the picked edge first, each `[smaller, larger]`; empty when `edge` is not an edge of the cage. */
+  edgeLoop(edge) {
+    const [a, b] = _subdPairs([edge], 'edge_loop', 'edge');
+    const looped = this._edit(() => _lib().subd_edge_loop(this._handle, a, b), 'subd_edge_loop');
+    try {
+      const selection = looped.selection;
+      return selection ? selection.ids : [];
+    } finally { looped.close(); }
+  }
+  /** The positive half of the cage across the plane perpendicular to `axis` ('x', 'y' or 'z'), as a mirrored cage: every later edit keeps it symmetric. */
+  mirrorOn(axis) {
+    const k = _subdAxis(axis, 'mirror_on');
+    return this._edit(() => _lib().subd_mirror_on(this._handle, k), 'subd_mirror_on');
+  }
+  /** The mirror baked: the whole cage as an ordinary one, no longer mirrored. */
+  mirrorOff() { return this._edit(() => _lib().subd_mirror_off(this._handle), 'subd_mirror_off'); }
+  /** The whole cage of a mirrored half -- the half's vertices first, then their reflections -- or a copy of an ordinary cage. */
+  full() { return this._edit(() => _lib().subd_full(this._handle), 'subd_full'); }
+
+  // -- the surface
+  /** The smooth surface refined `levels` times (1 to 6), as a `SubdMesh` of copies. */
+  smoothMesh(levels = 3) {
+    const n = _subdCount(levels ?? 3, 'smooth_mesh levels');
+    const out = {};
+    if (!_lib().subd_smooth_mesh(this._handle, n, out)) _fail('subd_smooth_mesh');
+    return _subdMeshOf(out);
+  }
+  /**
+   * The cage element of `kind` ('vertex', 'edge' or 'face') under `point`, a point on or near the
+   * smooth surface: a vertex or face id, or an edge as `[a, b]` with the smaller id first. Null
+   * when nothing is within 0.05 of the cage's diagonal -- not an error; a point that is not finite
+   * is refused.
+   */
+  pick(point, kind) {
+    if (typeof kind !== 'string' || !Object.hasOwn(_SUBD_PICKS, kind)) {
+      throw new BuildError(`pick: kind must be 'vertex', 'edge' or 'face', not ${_subdShown(kind)}`);
+    }
+    const at = _doubles(point, 3, 'pick point');
+    const out = new Uint32Array(2);
+    const l = _lib();
+    if (!l.subd_pick(this._handle, at, _SUBD_PICKS[kind], out)) {
+      // Nothing near leaves an empty `last_error`; a refusal's text is never empty.
+      if (_lastError() === '') return null;
+      _fail('subd_pick');
+    }
+    return kind === 'edge' ? [out[0], out[1]] : out[0];
+  }
+  /**
+   * The cage as an exact solid, one NURBS face per patch, and a `SubdReport` of what the
+   * conversion did, as `{solid, report}`. `tolerance` is the largest deviation from the limit
+   * surface as a fraction of the cage's diagonal, `g1Angle` the largest tangent break across an
+   * uncreased side in degrees, `maxLevels` the deepest local refinement (2 to 6). A `tolerance`
+   * or `g1Angle` of 0 or less, or a `maxLevels` of 0, takes the default. A cage that cannot be
+   * held within them is refused with the figures it measured.
+   */
+  toSolid(tolerance = 1e-4, g1Angle = 0.1, maxLevels = 6) {
+    const report = {};
+    const h = _lib().subd_to_solid(this._handle, Number(tolerance ?? 1e-4), Number(g1Angle ?? 0.1), _subdCount(maxLevels ?? 6, 'to_solid maxLevels'), report);
+    const solid = new Solid(h);
+    return { solid, report: new SubdReport(report) };
   }
 }
 
@@ -3922,10 +4652,12 @@ function writeSvg(filePath, things, options = {}) {
 module.exports = {
   BuildError, NONE, UNITS, Axis, SvgView,
   libraryPath, defaultSchema, version, buildDate, license, licenseInfo, licenseNoticeCount, brepLayoutId, pairFreedomCount,
+  setOption, option,
   svgOptionsDefaults,
   Frame, Profile, Path, SweepPath, Slant, Solid, Assembly, Selector, Edge, Curve, Intersection, Chain, Overlap, Hit, Spot, SolidHits, Piece, Workplane, writeStep, writeStepText, writeSat, writeSatText, writeBrep, writeBrepText, writeSvg, writeSvgText,
   FemMesh, FemEdge, FemVertex,
   Box, boxesApart, Collider, CollisionHit,
+  Subd, SubdMesh, SubdReport,
   Tool, Stock, Job, Program, Operation, ReportItem,
   _lib, _lastError, _frame, _axis, _progress, _searchedPaths, _notFoundMessage, _floats, _uint32s, _doublesAt, _svgOptions,
   _femEdgeOf, _femVertexOf, _censusRows, _femOptions,

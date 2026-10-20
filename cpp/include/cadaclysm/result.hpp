@@ -66,8 +66,8 @@
 namespace cadaclysm {
 inline namespace CADACLYSM_ABI {
 
-// Which library said no.
-enum class Origin { reader, kernel };
+// Which library said no (view: a view library, or cadaclysm/view.hpp before it).
+enum class Origin { reader, kernel, view };
 
 // A failed call: the library's own message (cadaclysm_last_error or
 // cadaclysm_blacksmith_last_error), or the wrapper's where it refused first.

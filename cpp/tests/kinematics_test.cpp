@@ -5,12 +5,15 @@
 // named state ("open": hinge set to 0.5).
 //
 //     cadaclysm_kinematics_test samples/cube.scad
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <limits>
+#include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -252,6 +255,121 @@ static Result<void> run(const std::string& cube_path) {
                    snap.segments[0].interpolation == "discontinuous" && snap.segments[1].state.name == "wide" &&
                    snap.segments[1].t == 0.5 && snap.segments[1].interpolation == "discontinuous",
                "snap's segments are not shut@0 and wide@0.5, both discontinuous");
+    }
+
+    // Work schedules: schedule.ifc holds one schedule, Programme, with seven tasks and four
+    // links. D is a day in seconds and T0 2026-03-02T08:00:00.
+    const double day = 86400.0;
+    const double t0 = 1772438400.0;
+    expect(cube.schedules().empty(), "the cube scene has schedules");
+    CADACLYSM_TRY(scheduled, cadaclysm::open(cadaclysm::detail::utf8(
+                                 cadaclysm::detail::fs_path(cube_path).parent_path() / "schedule.ifc")));
+    std::vector<cadaclysm::WorkSchedule> schedules = scheduled.schedules();
+    expect(schedules.size() == 1, "schedule.ifc does not have exactly one schedule");
+    if (schedules.size() == 1) {
+        const cadaclysm::WorkSchedule& programme = schedules[0];
+        expect(programme.name == "Programme" && programme.identification == "WS-1" && programme.kind == "planned" &&
+                   programme.kind_name.empty() && programme.start.has_value() && *programme.start == t0 &&
+                   !programme.finish.has_value(),
+               "the schedule's name, identification, kind, start and finish are not Programme, WS-1, planned, T0, none");
+        std::vector<cadaclysm::Task> tasks = programme.tasks();
+        const char* task_names[7] = {"Slab", "Structure", "Walls north", "Walls south", "Topping out", "Demolish shed", "Fit-out"};
+        expect(tasks.size() == 7, "the schedule does not have seven tasks");
+        if (tasks.size() == 7) {
+            for (int i = 0; i < 7; ++i) {
+                expect(tasks[i].name == task_names[i], "task " + std::to_string(i) + " is " + tasks[i].name);
+            }
+            const cadaclysm::Task& slab = tasks[0];
+            const cadaclysm::Task& structure = tasks[1];
+            const cadaclysm::Task& north = tasks[2];
+            const cadaclysm::Task& south = tasks[3];
+            const cadaclysm::Task& topping = tasks[4];
+            const cadaclysm::Task& shed = tasks[5];
+            const cadaclysm::Task& fit = tasks[6];
+            std::optional<cadaclysm::Task> north_parent = north.parent();
+            std::optional<cadaclysm::Task> south_parent = south.parent();
+            expect(north_parent.has_value() && *north_parent == structure, "Walls north's parent is not Structure");
+            expect(south_parent.has_value() && *south_parent == structure, "Walls south's parent is not Structure");
+            expect(!slab.parent().has_value(), "Slab has a parent");
+            expect(slab.kind == "construction" && shed.kind == "demolition" && topping.kind == "notdefined",
+                   "the task kinds are not construction, demolition, notdefined");
+            expect(topping.milestone && !slab.milestone, "Topping out is not the milestone, or Slab is");
+            expect(slab.identification == "T1" && slab.status == "COMPLETED", "Slab is not T1, COMPLETED");
+            expect(slab.time.schedule_start.has_value() && *slab.time.schedule_start == t0 &&
+                       !slab.time.schedule_finish.has_value() && slab.time.duration.has_value() &&
+                       *slab.time.duration == 10 * day,
+                   "Slab's schedule dates are not T0, none, 10 days");
+            expect(slab.time.actual_start.has_value() && *slab.time.actual_start == t0 &&
+                       slab.time.actual_finish.has_value() && *slab.time.actual_finish == t0 + 8 * day,
+                   "Slab's actual dates are not T0, T0 + 8 days");
+            std::vector<std::string> south_nodes;
+            for (const cadaclysm::Node& node : south.nodes()) south_nodes.push_back(node.name());
+            std::sort(south_nodes.begin(), south_nodes.end());
+            expect(south_nodes == std::vector<std::string>({"Wall S1", "Wall S2"}), "Walls south's nodes are not Wall S1, Wall S2");
+            std::vector<std::string> fit_nodes;
+            for (const cadaclysm::Node& node : fit.nodes()) fit_nodes.push_back(node.name());
+            std::sort(fit_nodes.begin(), fit_nodes.end());
+            expect(fit_nodes == std::vector<std::string>({"Desk", "Room"}), "Fit-out's nodes are not Desk, Room");
+        }
+        std::vector<cadaclysm::TaskLink> task_links = programme.links();
+        expect(task_links.size() == 4, "the schedule does not have four links");
+        if (task_links.size() == 4) {
+            const char* from_names[4] = {"Slab", "Walls north", "Walls south", "Topping out"};
+            const char* to_names[4] = {"Structure", "Walls south", "Topping out", "Fit-out"};
+            const char* kinds[4] = {"finish_start", "start_start", "finish_start", "finish_start"};
+            for (int i = 0; i < 4; ++i) {
+                expect(task_links[i].from.name == from_names[i] && task_links[i].to.name == to_names[i] &&
+                           task_links[i].kind == kinds[i],
+                       "link " + std::to_string(i) + " is " + task_links[i].from.name + " -> " + task_links[i].to.name + " " +
+                           task_links[i].kind);
+            }
+            expect(!task_links[0].lag.has_value() && task_links[1].lag.has_value() && *task_links[1].lag == 2 * day &&
+                       !task_links[2].lag.has_value() && !task_links[3].lag.has_value(),
+                   "the links' lags are not none, 2 days, none, none");
+        }
+
+        Result<std::vector<cadaclysm::ElementState>> early = programme.at(t0 + 3 * day);
+        expect(early.ok(), "at(T0 + 3 days) failed");
+        if (early) {
+            std::map<std::string, cadaclysm::ElementState> by_name;
+            for (const cadaclysm::ElementState& row : *early) by_name.emplace(row.node.name(), row);
+            std::set<std::string> names;
+            for (const std::pair<const std::string, cadaclysm::ElementState>& entry : by_name) names.insert(entry.first);
+            expect(names == std::set<std::string>({"Slab", "Wall N1", "Wall N2", "Wall S1", "Wall S2", "Shed", "Room", "Desk"}),
+                   "at(T0 + 3 days) does not name exactly the eight elements");
+            if (by_name.count("Slab") && by_name.count("Shed") && by_name.count("Wall S1")) {
+                expect(by_name.at("Slab").phase == "building" && std::abs(by_name.at("Slab").progress - 0.3) < 1e-9,
+                       "Slab at T0 + 3 days is not building at 0.3");
+                expect(by_name.at("Shed").phase == "demolishing", "Shed at T0 + 3 days is not demolishing");
+                expect(by_name.at("Wall S1").phase == "unbuilt", "Wall S1 at T0 + 3 days is not unbuilt");
+            }
+        }
+        Result<std::vector<cadaclysm::ElementState>> late = programme.at(t0 + 32 * day, "actual");
+        expect(late.ok(), "at(T0 + 32 days, actual) failed");
+        if (late) {
+            std::map<std::string, cadaclysm::ElementState> by_name;
+            for (const cadaclysm::ElementState& row : *late) by_name.emplace(row.node.name(), row);
+            if (by_name.count("Wall S1") && by_name.count("Slab")) {
+                const cadaclysm::ElementState& wall = by_name.at("Wall S1");
+                const cadaclysm::ElementState& slab_state = by_name.at("Slab");
+                expect(wall.phase == "building" && wall.variance.has_value() && *wall.variance == 5 * day,
+                       "Wall S1 at T0 + 32 days (actual) is not building, 5 days late");
+                expect(slab_state.variance.has_value() && *slab_state.variance == -2 * day,
+                       "Slab's variance at T0 + 32 days (actual) is not -2 days");
+            } else {
+                expect(false, "at(T0 + 32 days, actual) does not name Wall S1 and Slab");
+            }
+        }
+
+        Result<std::vector<cadaclysm::ElementState>> not_a_date =
+            programme.at(std::numeric_limits<double>::quiet_NaN());
+        expect(!not_a_date.ok() && not_a_date.error().message.find("the date must be a finite number") != std::string::npos,
+               "at(NaN) did not fail with 'the date must be a finite number': " +
+                   (not_a_date.ok() ? std::string("ok") : not_a_date.error().message));
+        Result<std::vector<cadaclysm::ElementState>> bad_word = programme.at(t0, "compare");
+        expect(!bad_word.ok() && bad_word.error().message.find("dates must be 'scheduled' or 'actual'") != std::string::npos,
+               "at(T0, \"compare\") did not fail with \"dates must be 'scheduled' or 'actual'\": " +
+                   (bad_word.ok() ? std::string("ok") : bad_word.error().message));
     }
 
     return {};

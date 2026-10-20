@@ -10,7 +10,7 @@ use std::process::ExitCode;
 
 use cadaclysm_sdk::blacksmith::{
     self, Assembly, Axis, Collider, Curve, Frame, Intersection, Keep, PairOptions, Path as Outline, Profile, Selector, Solid, SolidHits,
-    SweepPath, Unit, Workplane, DEFAULT_TOLERANCE, FILLET_TOLERANCE,
+    SweepPath, Subd, SubdSolidOptions, Unit, Workplane, DEFAULT_TOLERANCE, FILLET_TOLERANCE,
 };
 use cadaclysm_sdk::{Convention, Link, Node, OpenOptions, Scene, StateValue, SvgOptions};
 
@@ -225,7 +225,17 @@ fn run() -> Result<(), String> {
     check(node_svg_text.starts_with("<svg") && node_svg_text.contains("<path"), "node SVG text did not look like an SVG wireframe")?;
     let bad_fov = SvgOptions { fov: 200.0, ..Default::default() };
     check(scene.svg_text(&bad_fov).is_err(), "scene svg: fov=200 was accepted")?;
-    println!("svg: scene and node text, file written, fov=200 refused");
+    // stroke and background take colour text or a packed number, as an SvgColour.
+    let named = SvgOptions { stroke: 0x00_ff00.into(), background: Some("Navy".into()), ..Default::default() };
+    let named_text = scene.svg_text(&named).map_err(e)?;
+    check(named_text.contains("#000080"), "scene svg: background \"Navy\" did not draw #000080")?;
+    check(named_text.contains("#00ff00"), "scene svg: stroke 0x00ff00 did not draw #00ff00")?;
+    let bogus = SvgOptions { background: Some("bogus".into()), ..Default::default() };
+    check(
+        scene.svg_text(&bogus).is_err_and(|err| err.to_string().starts_with("svg: background:")),
+        "scene svg: background \"bogus\" was not refused naming the field",
+    )?;
+    println!("svg: scene and node text, file written, fov=200 refused, colour text background");
 
     check(cadaclysm_sdk::open("no/such/file.stp").is_err(), "a missing file opened")?;
     kernel(license.as_deref())?;
@@ -492,6 +502,7 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
     frames()?;
     assemblies()?;
     mechanisms()?;
+    gears()?;
 
     // Colour: a gold plate joined with a blue pin -- gold overall, the pin's top blue.
     let gold = plate.coloured([0.8, 0.6, 0.4], None).map_err(e)?;
@@ -574,6 +585,34 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
     let text = rounded.step_text(None, Unit::Millimetre).map_err(e)?;
     check(text.starts_with("ISO-10303-21;"), "step_text with no schema did not write valid STEP")?;
     check(rounded.step_text(Some("NO_SUCH_SCHEMA"), Unit::Millimetre).is_err(), "an unknown schema name was accepted")?;
+
+    // The SubD cage (The Kiln): a cuboid cage converts to a closed exact solid within its report,
+    // and the pipeline extrude -> inset -> to_solid writes STEP the reader reads back as one body.
+    let cage = Subd::cuboid([2.0, 2.0, 2.0], [1, 1, 1]).map_err(e)?;
+    let (cube_solid, cube_report) = cage.to_solid(SubdSolidOptions::default()).map_err(e)?;
+    check(
+        cube_solid.manifold().map_err(e)?.is_closed && cube_solid.mass(0.0).map_err(e)?.volume > 0.0,
+        "subd: a cuboid cage did not convert to a closed solid of volume",
+    )?;
+    check(
+        cube_report.regular == 0 && cube_report.refined == 24 && cube_report.deviation <= 1e-4 && cube_report.g1_angle_deg <= 0.1,
+        &format!("subd: the cuboid's report is not the documented one: {cube_report:?}"),
+    )?;
+    let piped = cage.extrude(&[1], 0.5).and_then(|c| c.inset(&[1], 0.25, false)).map_err(e)?;
+    let (piped_solid, piped_report) = piped.to_solid(SubdSolidOptions::default()).map_err(e)?;
+    check(
+        piped_solid.manifold().map_err(e)?.is_closed && piped_report.deviation <= 1e-4,
+        &format!("subd: the extruded, inset cage is not closed within tolerance: {piped_report:?}"),
+    )?;
+    let cage_step = piped_solid.step_text(None, Unit::Millimetre).map_err(e)?;
+    check(
+        cage_step.starts_with("ISO-10303-21;") && cage_step.contains("ADVANCED_FACE"),
+        "subd: the cage's STEP text is not STEP with advanced faces",
+    )?;
+    let cage_scene = cadaclysm_sdk::open_memory(cage_step.as_bytes(), "step").map_err(e)?;
+    let meshable = cage_scene.walk().filter(|node| node.can_mesh()).count();
+    check(meshable == 1, &format!("subd: the cage's STEP reads back as {meshable} meshable nodes, not one"))?;
+    println!("subd: cuboid {cube_report:?}; extruded and inset deviation {}", piped_report.deviation);
 
     let step = std::env::temp_dir().join("cadaclysm-smoke-rust.stp");
     rounded.step(&step, None, Unit::Millimetre).map_err(e)?;
@@ -680,6 +719,18 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
     // Split by a plane across the plate's length: two bodies, front first.
     let halves = plate.split_by_plane(&Frame::yz([0.0; 3]), DEFAULT_TOLERANCE).map_err(e)?;
     check(halves.len() == 2, &format!("split_by_plane gave {} bodies, not 2", halves.len()))?;
+
+    // A rectangle drawn above a sphere cores it: the ball with a square hole, then the core.
+    let ball = Solid::sphere(10.0).map_err(e)?;
+    let square = Profile::rect(6.0, 6.0).map_err(e)?;
+    let cored = ball.split_by_profile(&square, &Frame::xy([0.0, 0.0, 40.0]), DEFAULT_TOLERANCE).map_err(e)?;
+    check(cored.len() == 2, &format!("split_by_profile gave {} bodies, not 2", cored.len()))?;
+    let whole = ball.mass(0.0).map_err(e)?.volume;
+    let (outside, inside) = (cored[0].mass(0.0).map_err(e)?.volume, cored[1].mass(0.0).map_err(e)?.volume);
+    check(
+        inside > 0.0 && inside < outside && (outside + inside - whole).abs() < 0.01 * whole,
+        &format!("split_by_profile: {outside} + {inside} is not the ball's {whole}"),
+    )?;
 
     // Scaled: every length times factor, exactly; a non-positive or non-finite factor is refused.
     let big = Solid::cuboid(1.0, 2.0, 3.0).map_err(e)?.scaled(2.0).map_err(e)?;
@@ -1320,7 +1371,7 @@ fn mechanisms() -> Result<(), String> {
         (Box::new(|| arm.pair("shoulder", "revolute", &at([0.0, 0.0, 10.0]), &PairOptions::default())), "pair: joint 'shoulder' already has a pair"),
         (
             Box::new(|| arm.pair("back", "orbital", &xy0, &PairOptions::default())),
-            "pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, spherical, \
+            "pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, gear, rack_and_pinion, spherical, \
              spherical_with_pin, planar, universal, homokinetic, fully_constrained, unconstrained)",
         ),
         (Box::new(|| arm.pair("back", "screw", &xy0, &PairOptions::default())), "pair: a screw needs a non-zero pitch"),
@@ -1395,6 +1446,118 @@ fn mechanisms() -> Result<(), String> {
     println!("pairs: a one-sided range (None, 1.0) survives the round trip as (None, 1.0)");
 
     println!("mechanisms: 5 facts checked (kinematic STEP counts, eleven exact refusals, unchanged file, reverse joint, Scene read-back)");
+    Ok(())
+}
+
+/// Drives plan 4's round trip, at parity with the Python reference's `_geared()` and its two
+/// gear tests: a pinion turning on `drive` meshes, by the gear pair `mesh` (radii 10 and 20,
+/// ratio -0.5, bevel 0.25, helical 0.125), with a wheel turning on `driven` about (30, 0);
+/// the wheel's part sits 5 off its axis, at (35, 0, 2). The two are different parts: AP242
+/// refuses a pair between two placements of one.
+fn geared(mesh: bool) -> Result<Assembly, String> {
+    let e = |e: cadaclysm_sdk::Error| format!("gears: {e}");
+    let plate = Solid::cuboid(40.0, 10.0, 2.0).and_then(|s| s.named("plate")).map_err(e)?;
+    let pin = Solid::cylinder(1.0, 6.0).and_then(|s| s.named("pin")).map_err(e)?;
+    let hub = Solid::cylinder(2.0, 4.0).and_then(|s| s.named("hub")).map_err(e)?;
+    let gears = Assembly::new("gears").map_err(e)?;
+    gears.place_solid(&plate, &Frame::xy([0.0; 3]), Some("frame")).map_err(e)?;
+    gears.place_solid(&pin, &Frame::xy([0.0, 0.0, 2.0]), Some("pinion")).map_err(e)?;
+    gears.place_solid(&hub, &Frame::xy([35.0, 0.0, 2.0]), Some("wheel")).map_err(e)?;
+    gears.link("base", &["frame"]).map_err(e)?;
+    gears.link("driver", &["pinion"]).map_err(e)?;
+    gears.link("follower", &["wheel"]).map_err(e)?;
+    gears.joint("drive", "base", "driver").map_err(e)?;
+    gears.joint("driven", "base", "follower").map_err(e)?;
+    gears.joint("mesh", "driver", "follower").map_err(e)?;
+    gears.pair("drive", "revolute", &Frame::xy([0.0, 0.0, 2.0]), &PairOptions::default()).map_err(e)?;
+    gears.pair("driven", "revolute", &Frame::xy([30.0, 0.0, 2.0]), &PairOptions::default()).map_err(e)?;
+    if mesh {
+        gears
+            .pair_with("mesh", "gear", &Frame::xy([0.0, 0.0, 2.0]), &PairOptions::default(), &[10.0, 20.0, -0.5, 0.25, 0.125])
+            .map_err(e)?;
+    }
+    Ok(gears)
+}
+
+fn gears() -> Result<(), String> {
+    let e = |e: cadaclysm_sdk::Error| format!("gears: {e}");
+    let scene = geared(true)?.to_scene(None).map_err(e)?;
+    let joints = scene.joints();
+    let joint = |name: &str| joints.iter().find(|j| j.name() == name).copied().ok_or(format!("gears: no joint {name:?}"));
+    let (drive, driven, mesh) = (joint("drive")?, joint("driven")?, joint("mesh")?);
+
+    let pair = mesh.pair().ok_or("gears: 'mesh' has no pair")?;
+    check(
+        pair.kind() == cadaclysm_sdk::PairKind::Other && pair.kind_name() == "gear",
+        &format!("gears: mesh is ({:?}, {:?}), not (Other, \"gear\")", pair.kind(), pair.kind_name()),
+    )?;
+    let want = [10.0, 20.0, -0.5, 0.25, 0.125];
+    let got = pair.parameters();
+    check(got.len() == 5 && got.iter().zip(want).all(|(g, w)| (g - w).abs() < 1e-9), &format!("gears: mesh parameters are {got:?}, not {want:?}"))?;
+    let drive_pair = drive.pair().ok_or("gears: 'drive' has no pair")?;
+    check(
+        drive_pair.kind_name() == "revolute" && drive_pair.parameters().is_empty(),
+        "gears: drive is not (\"revolute\", [])",
+    )?;
+
+    // The driver alone turns the wheel by ratio x 0.4 about (30, 0): nothing to report.
+    let pose = scene.pose(&[StateValue { joint: drive, values: vec![0.4] }], None).map_err(e)?;
+    check(pose.diagnostics.is_empty() && pose.unsolved.is_empty(), &format!("gears: driver-only pose reports {:?} / {:?}", pose.diagnostics, pose.unsolved))?;
+    let wheel = scene.links()[2].nodes()[0];
+    let raw = pose.raw_transform(wheel);
+    let want = [30.0 + 5.0 * (-0.2f64).cos(), 5.0 * (-0.2f64).sin(), 2.0];
+    check(
+        (0..3).all(|i| (raw[12 + i] - want[i]).abs() < 1e-9),
+        &format!("gears: wheel origin is {:?}, not {want:?}", &raw[12..15]),
+    )?;
+
+    // Both sides given, against the law: one diagnostic, in the kernel's words.
+    let pose = scene
+        .pose(&[StateValue { joint: drive, values: vec![0.4] }, StateValue { joint: driven, values: vec![0.4] }], None)
+        .map_err(e)?;
+    check(
+        pose.diagnostics.len() == 1
+            && pose.diagnostics[0].starts_with("coupling 'mesh': both 'drive' and 'driven' are given and disagree by"),
+        &format!("gears: disagreeing pose diagnostics are {:?}", pose.diagnostics),
+    )?;
+    println!("gears: gear pair round-trips as (Other, \"gear\", 5 parameters); pose from the driver, one diagnostic when both are given");
+
+    // A wrong parameter count is refused, and the joint stays unpaired until a good one.
+    let bare = geared(false)?;
+    let refused = bare
+        .pair_with("mesh", "gear", &Frame::xy([0.0; 3]), &PairOptions::default(), &[10.0, 20.0])
+        .err()
+        .map(|err| err.to_string())
+        .unwrap_or_default();
+    check(refused == "pair: a gear takes 3 or 5 parameters, not 2", &format!("gears: wrong count was refused as {refused:?}"))?;
+    bare.pair_with("mesh", "gear", &Frame::xy([0.0; 3]), &PairOptions::default(), &[10.0, 20.0, -0.5]).map_err(e)?;
+    println!("gears: pair_with refuses a wrong parameter count with its exact message, then takes three");
+
+    // posed: the driver alone poses; both sides against the law are refused in the kernel's words.
+    let geared_up = geared(true)?;
+    let no_stamp = |a: &Assembly| -> Result<String, String> {
+        Ok(a.step_text(None, Unit::Millimetre)
+            .map_err(e)?
+            .lines()
+            .filter(|l| !l.starts_with("FILE_NAME("))
+            .collect::<Vec<_>>()
+            .join("
+"))
+    };
+    let before = no_stamp(&geared_up)?;
+    let posed = geared_up.posed(&[("drive", &[0.4])], None, None).map_err(e)?;
+    check(posed.name() == "gears", "gears: posed drive alone is not named gears")?;
+    let refused = geared_up
+        .posed(&[("drive", &[0.4]), ("driven", &[0.4])], None, None)
+        .err()
+        .map(|err| err.to_string())
+        .unwrap_or_default();
+    check(
+        refused.starts_with("posed: assembly 'gears': coupling 'mesh': both 'drive' and 'driven' are given and disagree by"),
+        &format!("gears: posed with both sides was refused as {refused:?}"),
+    )?;
+    check(no_stamp(&geared_up)? == before, "gears: posing changed the original")?;
+    println!("gears: posed takes the driver alone and refuses both sides against the law in the kernel's words");
     Ok(())
 }
 

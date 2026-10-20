@@ -18,7 +18,9 @@
 // ## Everything borrows from the scene
 //
 // Every pointer this ABI hands back -- names, ids, attribute text, vertex and index arrays --
-// points into the open document and dies with it. `Mesh` and `Polylines` hand back read-only
+// points into the open document and dies with it. A scene dropped without `close()` is closed
+// once nothing reaches it -- and a buffer cut from one of its meshes reaches it, so reading a
+// buffer you still hold is safe until you close the scene yourself. `Mesh` and `Polylines` hand back read-only
 // `FloatBuffer`/`IntBuffer` *views* straight over the library's own memory rather than copies:
 // an assembly with tens of millions of triangles makes a defensive copy of every mesh a cost
 // most callers never asked for, most meshes being uploaded to a GPU and dropped. Call
@@ -31,19 +33,17 @@
 // ## One exception: FemMesh owns its own memory
 //
 // `FemMesh` (`Node.femMesh(..)`) is the one borrowed view here whose owner is **not** the
-// scene. It is a handle of your own -- close it (a try-with-resources) or let the `Cleaner`
-// free it -- and its buffers belong to that handle: `Scene.close()` neither frees one nor
-// stales one, and meshing the body again does not either. Only `FemMesh.free()`, or the
-// `Cleaner` finding the mesh unreachable, does.
+// scene. It is a handle of your own -- close it (a try-with-resources), or drop it and it is
+// freed once nothing reaches it -- and its buffers belong to that handle: `Scene.close()` neither frees one nor
+// stales one, and meshing the body again does not either. Only `FemMesh.free()`, or nothing
+// reaching the mesh or any buffer cut from it, does.
 //
 // Every accessor on it asks the handle first, so a buffer **asked for** after `free()` throws
 // `CadaclysmException`. A buffer **already in hand** is not protected and cannot be: a
 // read-only NIO buffer over a reinterpreted address is a window with no owner left to ask, so
 // it reads the freed block instead -- measured: 1.29e-311 where the mesh had 4.0, no throw.
-// Copy anything that must outlive the handle
-// (`nodes().get(new double[..])`), and hold the `FemMesh` itself for as long as you read its
-// buffers -- a buffer alone does not keep it reachable, and the `Cleaner` frees what is
-// unreachable.
+// Copy anything that must outlive an explicit free (`nodes().get(new double[..])`); a buffer of
+// a FemMesh merely dropped keeps it alive.
 //
 // FFM is final since JDK 22 (JEP 454), which is what this file is written against: it needs
 // JDK 22 or later. No compiler flags; run with --enable-native-access=ALL-UNNAMED to silence
@@ -247,6 +247,47 @@ public final class Cad {
             ValueLayout.JAVA_BOOLEAN.withName("boolean"),
             MemoryLayout.paddingLayout(7));
 
+    // CadaclysmTaskTime: nine (bool, double) pairs; each bool is followed by seven bytes of
+    // padding to the double's 8-byte alignment -- 144 bytes. Pinned by bindings.rs.
+    private static final MemoryLayout TASK_TIME = MemoryLayout.structLayout(
+            ValueLayout.JAVA_BOOLEAN.withName("has_schedule_start"),
+            MemoryLayout.paddingLayout(7),
+            ValueLayout.JAVA_DOUBLE.withName("schedule_start"),
+            ValueLayout.JAVA_BOOLEAN.withName("has_schedule_finish"),
+            MemoryLayout.paddingLayout(7),
+            ValueLayout.JAVA_DOUBLE.withName("schedule_finish"),
+            ValueLayout.JAVA_BOOLEAN.withName("has_early_start"),
+            MemoryLayout.paddingLayout(7),
+            ValueLayout.JAVA_DOUBLE.withName("early_start"),
+            ValueLayout.JAVA_BOOLEAN.withName("has_early_finish"),
+            MemoryLayout.paddingLayout(7),
+            ValueLayout.JAVA_DOUBLE.withName("early_finish"),
+            ValueLayout.JAVA_BOOLEAN.withName("has_late_start"),
+            MemoryLayout.paddingLayout(7),
+            ValueLayout.JAVA_DOUBLE.withName("late_start"),
+            ValueLayout.JAVA_BOOLEAN.withName("has_late_finish"),
+            MemoryLayout.paddingLayout(7),
+            ValueLayout.JAVA_DOUBLE.withName("late_finish"),
+            ValueLayout.JAVA_BOOLEAN.withName("has_actual_start"),
+            MemoryLayout.paddingLayout(7),
+            ValueLayout.JAVA_DOUBLE.withName("actual_start"),
+            ValueLayout.JAVA_BOOLEAN.withName("has_actual_finish"),
+            MemoryLayout.paddingLayout(7),
+            ValueLayout.JAVA_DOUBLE.withName("actual_finish"),
+            ValueLayout.JAVA_BOOLEAN.withName("has_duration"),
+            MemoryLayout.paddingLayout(7),
+            ValueLayout.JAVA_DOUBLE.withName("duration"));
+
+    // CadaclysmElementState: two ints, a double, a bool padded to the next double -- 32
+    // bytes. Pinned by bindings.rs.
+    private static final MemoryLayout ELEMENT_STATE = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("node"),
+            ValueLayout.JAVA_INT.withName("phase"),
+            ValueLayout.JAVA_DOUBLE.withName("progress"),
+            ValueLayout.JAVA_BOOLEAN.withName("has_variance"),
+            MemoryLayout.paddingLayout(7),
+            ValueLayout.JAVA_DOUBLE.withName("variance"));
+
     // CadaclysmFace: no pointers at all, so every field is naturally 4-byte aligned and the
     // struct needs no padding of its own -- unlike SURFACES below, whose pointers force a gap
     // after each interleaved count.
@@ -403,16 +444,19 @@ public final class Cad {
             MESHLET_NORMALS, MESHLET_INDICES, MESHLET_CHILDREN,
             NODE_BOUNDS_PLACED, NODE_IS_MESHED, NODE_SURFACE_EDGES, NODE_SURFACE_EDGE_BEZIERS, NODE_SURFACE_ISOCURVES,
             NODE_SURFACE_PICK, NODE_SURFACE_PROXY_MESH, NODE_TRIANGLE_ESTIMATE, REALIZE_MESHES,
-            SVG_OPTIONS_INIT, SCENE_SVG_TEXT, SCENE_SVG, NODE_SVG_TEXT, NODE_SVG,
+            SVG_OPTIONS_INIT, SCENE_SVG_TEXT, SCENE_SVG, NODE_SVG_TEXT, NODE_SVG, NODE_SILHOUETTE_BEZIERS,
             NODE_MESH64, NODE_EDGE_BEZIERS64, NODE_CURVE_BEZIERS64, NODE_ISOCURVE_BEZIERS64,
             NODE_BOUNDS64, NODE_BOUNDS_PLACED64, BOUNDS64_ALL,
             LINK_COUNT, LINK_NAME, LINK_NODE_COUNT, LINK_NODE,
             JOINT_COUNT, JOINT_NAME, JOINT_START, JOINT_END,
-            JOINT_PAIR_KIND, JOINT_PAIR_TYPE, JOINT_PAIR_PITCH, JOINT_PAIR_FRAMES,
+            JOINT_PAIR_KIND, JOINT_PAIR_TYPE, JOINT_PAIR_KIND_NAME, JOINT_PAIR_PARAMETERS, JOINT_PAIR_PITCH, JOINT_PAIR_FRAMES,
             JOINT_FREEDOM_COUNT, JOINT_FREEDOM, STATE_COUNT, STATE_NAME, STATE_VALUE_COUNT, STATE_VALUE,
             SEQUENCE_COUNT, SEQUENCE_NAME, SEQUENCE_CLOSED, SEQUENCE_SECONDS_PER_UNIT, SEQUENCE_SEGMENT_COUNT, SEQUENCE_SEGMENT, POSE_SEQUENCE,
+            SCHEDULE_COUNT, SCHEDULE_NAME, SCHEDULE_IDENTIFICATION, SCHEDULE_KIND, SCHEDULE_KIND_NAME, SCHEDULE_START, SCHEDULE_FINISH,
+            TASK_COUNT, TASK_NAME, TASK_IDENTIFICATION, TASK_KIND, TASK_KIND_NAME, TASK_STATUS, TASK_MILESTONE, TASK_PARENT,
+            TASK_TIME_OF, TASK_NODE_COUNT, TASK_NODES, TASK_LINK_COUNT, TASK_LINK, TASK_LINK_KIND_NAME, SCHEDULE_AT,
             POSE, POSE_STATE, POSE_FREE, POSE_GROUND, POSE_NODE_COUNT, POSE_NODE_TRANSFORM,
-            POSE_UNSOLVED_COUNT, POSE_UNSOLVED, POSE_OUT_OF_RANGE_COUNT, POSE_OUT_OF_RANGE, KINEMATICS_BASE,
+            POSE_UNSOLVED_COUNT, POSE_UNSOLVED, POSE_DIAGNOSTIC_COUNT, POSE_DIAGNOSTIC, POSE_OUT_OF_RANGE_COUNT, POSE_OUT_OF_RANGE, KINEMATICS_BASE,
             FEM_OPTIONS_INIT, NODE_FEM_MESH, FEM_VIEW, FEM_EDGE_AT, FEM_VERTEX_AT,
             FEM_OPEN_EDGE, FEM_FOLDED_EDGE, FEM_CROSSING_COUNT, FEM_CROSSING, FEM_MSH_TEXT, FEM_SAVE_MSH, FEM_FREE,
             NODE_EDGE_COLORS, NODE_SURFACE_EDGE_COLORS, PARSE_COLOUR;
@@ -551,6 +595,8 @@ public final class Cad {
         SCENE_SVG = bind(linker, lib, "cadaclysm_scene_svg", FunctionDescriptor.of(B, A, A, A));
         NODE_SVG_TEXT = bind(linker, lib, "cadaclysm_node_svg_text", FunctionDescriptor.of(A, A, I, A));
         NODE_SVG = bind(linker, lib, "cadaclysm_node_svg", FunctionDescriptor.of(B, A, I, A, A));
+        // BORROWED into a per-scene slot that the next silhouette call on that scene replaces.
+        NODE_SILHOUETTE_BEZIERS = bind(linker, lib, "cadaclysm_node_silhouette_beziers", FunctionDescriptor.of(BEZIERS64, A, I, A));
         NODE_MESH64 = bind(linker, lib, "cadaclysm_node_mesh64", FunctionDescriptor.of(MESH64, A, I));
         NODE_EDGE_BEZIERS64 = bind(linker, lib, "cadaclysm_node_edge_beziers64", FunctionDescriptor.of(BEZIERS64, A, I));
         NODE_CURVE_BEZIERS64 = bind(linker, lib, "cadaclysm_node_curve_beziers64", FunctionDescriptor.of(BEZIERS64, A, I));
@@ -568,6 +614,8 @@ public final class Cad {
         JOINT_END = bind(linker, lib, "cadaclysm_joint_end", FunctionDescriptor.of(I, A, I));
         JOINT_PAIR_KIND = bind(linker, lib, "cadaclysm_joint_pair_kind", FunctionDescriptor.of(I, A, I));
         JOINT_PAIR_TYPE = bind(linker, lib, "cadaclysm_joint_pair_type", FunctionDescriptor.of(A, A, I));
+        JOINT_PAIR_KIND_NAME = bind(linker, lib, "cadaclysm_joint_pair_kind_name", FunctionDescriptor.of(A, A, I));
+        JOINT_PAIR_PARAMETERS = bind(linker, lib, "cadaclysm_joint_pair_parameters", FunctionDescriptor.of(L, A, I, A, L));
         JOINT_PAIR_PITCH = bind(linker, lib, "cadaclysm_joint_pair_pitch", FunctionDescriptor.of(D, A, I));
         JOINT_PAIR_FRAMES = bind(linker, lib, "cadaclysm_joint_pair_frames", FunctionDescriptor.of(B, A, I, A, A));
         JOINT_FREEDOM_COUNT = bind(linker, lib, "cadaclysm_joint_freedom_count", FunctionDescriptor.of(I, A, I));
@@ -586,7 +634,31 @@ public final class Cad {
         SEQUENCE_SEGMENT_COUNT = bind(linker, lib, "cadaclysm_sequence_segment_count", FunctionDescriptor.of(I, A, I));
         SEQUENCE_SEGMENT = bind(linker, lib, "cadaclysm_sequence_segment", FunctionDescriptor.of(B, A, I, I, A, A, A));
         POSE_SEQUENCE = bind(linker, lib, "cadaclysm_pose_sequence", FunctionDescriptor.of(A, A, I, D, I));
-        // Posing (docs/superpowers/plans/2026-09-28-mechanism-posing-2.md): the mechanism posed by
+        // IFC work schedules (plan 2026-10-06-ifc-4d-2): a schedule's words and dates, its tasks
+        // and the links between them, and the state of every element on a date.
+        SCHEDULE_COUNT = bind(linker, lib, "cadaclysm_schedule_count", FunctionDescriptor.of(I, A));
+        SCHEDULE_NAME = bind(linker, lib, "cadaclysm_schedule_name", FunctionDescriptor.of(A, A, I));
+        SCHEDULE_IDENTIFICATION = bind(linker, lib, "cadaclysm_schedule_identification", FunctionDescriptor.of(A, A, I));
+        SCHEDULE_KIND = bind(linker, lib, "cadaclysm_schedule_kind", FunctionDescriptor.of(I, A, I));
+        SCHEDULE_KIND_NAME = bind(linker, lib, "cadaclysm_schedule_kind_name", FunctionDescriptor.of(A, A, I));
+        SCHEDULE_START = bind(linker, lib, "cadaclysm_schedule_start", FunctionDescriptor.of(B, A, I, A));
+        SCHEDULE_FINISH = bind(linker, lib, "cadaclysm_schedule_finish", FunctionDescriptor.of(B, A, I, A));
+        TASK_COUNT = bind(linker, lib, "cadaclysm_task_count", FunctionDescriptor.of(I, A, I));
+        TASK_NAME = bind(linker, lib, "cadaclysm_task_name", FunctionDescriptor.of(A, A, I, I));
+        TASK_IDENTIFICATION = bind(linker, lib, "cadaclysm_task_identification", FunctionDescriptor.of(A, A, I, I));
+        TASK_KIND = bind(linker, lib, "cadaclysm_task_kind", FunctionDescriptor.of(I, A, I, I));
+        TASK_KIND_NAME = bind(linker, lib, "cadaclysm_task_kind_name", FunctionDescriptor.of(A, A, I, I));
+        TASK_STATUS = bind(linker, lib, "cadaclysm_task_status", FunctionDescriptor.of(A, A, I, I));
+        TASK_MILESTONE = bind(linker, lib, "cadaclysm_task_milestone", FunctionDescriptor.of(B, A, I, I));
+        TASK_PARENT = bind(linker, lib, "cadaclysm_task_parent", FunctionDescriptor.of(B, A, I, I, A));
+        TASK_TIME_OF = bind(linker, lib, "cadaclysm_task_time", FunctionDescriptor.of(B, A, I, I, A));
+        TASK_NODE_COUNT = bind(linker, lib, "cadaclysm_task_node_count", FunctionDescriptor.of(I, A, I, I));
+        TASK_NODES = bind(linker, lib, "cadaclysm_task_nodes", FunctionDescriptor.of(I, A, I, I, A, I));
+        TASK_LINK_COUNT = bind(linker, lib, "cadaclysm_task_link_count", FunctionDescriptor.of(I, A, I));
+        TASK_LINK = bind(linker, lib, "cadaclysm_task_link", FunctionDescriptor.of(B, A, I, I, A, A, A, A, A));
+        TASK_LINK_KIND_NAME = bind(linker, lib, "cadaclysm_task_link_kind_name", FunctionDescriptor.of(A, A, I, I));
+        SCHEDULE_AT = bind(linker, lib, "cadaclysm_schedule_at", FunctionDescriptor.of(L, A, I, D, I, A, I));
+        // Posing: the mechanism posed by
         // explicit values or a named state, copied eagerly into a Pose and freed (POSE_FREE) before
         // the C handle escapes anywhere -- see Scene.copyPose.
         POSE = bind(linker, lib, "cadaclysm_pose", FunctionDescriptor.of(A, A, A, A, A, I, I));
@@ -597,6 +669,8 @@ public final class Cad {
         POSE_NODE_TRANSFORM = bind(linker, lib, "cadaclysm_pose_node_transform", FunctionDescriptor.ofVoid(A, I, A));
         POSE_UNSOLVED_COUNT = bind(linker, lib, "cadaclysm_pose_unsolved_count", FunctionDescriptor.of(I, A));
         POSE_UNSOLVED = bind(linker, lib, "cadaclysm_pose_unsolved", FunctionDescriptor.of(I, A, I));
+        POSE_DIAGNOSTIC_COUNT = bind(linker, lib, "cadaclysm_pose_diagnostic_count", FunctionDescriptor.of(I, A));
+        POSE_DIAGNOSTIC = bind(linker, lib, "cadaclysm_pose_diagnostic", FunctionDescriptor.of(A, A, I));
         POSE_OUT_OF_RANGE_COUNT = bind(linker, lib, "cadaclysm_pose_out_of_range_count", FunctionDescriptor.of(I, A));
         POSE_OUT_OF_RANGE = bind(linker, lib, "cadaclysm_pose_out_of_range", FunctionDescriptor.of(B, A, I, A, A, A));
         KINEMATICS_BASE = bind(linker, lib, "cadaclysm_kinematics_base", FunctionDescriptor.of(I, A));
@@ -1201,9 +1275,10 @@ public final class Cad {
      * field, worded by the library itself.
      *
      * <p>{@code stroke} is the pen colour: {@code "#rgb"}, {@code "#rrggbb"} or a CSS colour
-     * name. {@code background} stays the packed {@code 0xRRGGBB} number, or null for no {@code
-     * <rect>} behind the drawing -- {@link #packed(String)} reads a {@code "#rgb"}, {@code
-     * "#rrggbb"} or CSS colour name string, e.g. {@code background = Cad.packed("navy")}.
+     * name. {@code background} is the packed {@code 0xRRGGBB} number, or null for no {@code
+     * <rect>} behind the drawing. Both take either form through {@link #withStroke(String)}/{@link
+     * #withStroke(int)} and {@link #withBackground(String)}/{@link #withBackground(int)}, e.g.
+     * {@code SvgOptions.defaults().withBackground("navy")}.
      */
     public record SvgOptions(SvgView view, Double azimuth, Double elevation, String up, double fov,
                               double width, double height, double margin, double tolerance,
@@ -1226,6 +1301,52 @@ public final class Cad {
             return new SvgOptions(SvgView.ISO, null, null, null, 0.0, 1000.0, 1000.0, 0.05, 0.1,
                     "#000000", 1.0, null, true, false, false, false, true);
         }
+
+        /** These options with {@code stroke} as colour text: {@code "#rgb"}, {@code "#rrggbb"}
+         *  or a CSS colour name, read when the drawing is made. */
+        public SvgOptions withStroke(String colour) {
+            return new SvgOptions(view, azimuth, elevation, up, fov, width, height, margin, tolerance,
+                    colour, strokeWidth, background, edges, curves, isocurves, polylines, silhouettes);
+        }
+
+        /** These options with {@code stroke} a packed {@code 0xRRGGBB}. */
+        public SvgOptions withStroke(int packed) {
+            return withStroke(hexColour(packed, "svg: stroke"));
+        }
+
+        /** These options with {@code background} from colour text -- {@code "#rgb"}, {@code
+         *  "#rrggbb"} or a CSS colour name, read by the library's own parser now -- or null for
+         *  no {@code <rect>} behind the drawing. Text it refuses throws {@link
+         *  CadaclysmException}. */
+        public SvgOptions withBackground(String colour) {
+            return new SvgOptions(view, azimuth, elevation, up, fov, width, height, margin, tolerance,
+                    stroke, strokeWidth, colour == null ? null : packedField(colour, "svg: background"), edges,
+                    curves, isocurves, polylines, silhouettes);
+        }
+
+        /** These options with {@code background} a packed {@code 0xRRGGBB}. */
+        public SvgOptions withBackground(int packed) {
+            hexColour(packed, "svg: background");
+            return new SvgOptions(view, azimuth, elevation, up, fov, width, height, margin, tolerance,
+                    stroke, strokeWidth, packed, edges, curves, isocurves, polylines, silhouettes);
+        }
+    }
+
+    /** {@code packed} as {@code "#rrggbb"}, refused past {@code 0xFFFFFF}; {@code what} names
+     *  the field. */
+    private static String hexColour(int packed, String what) {
+        if (packed < 0 || packed > 0xFFFFFF)
+            throw new CadaclysmException(what + ": a packed colour is 0x000000..0xFFFFFF, not 0x" + Integer.toHexString(packed));
+        return String.format("#%06x", packed);
+    }
+
+    /** {@link #packed(String)}, its refusal naming {@code what}. */
+    private static int packedField(String colour, String what) {
+        try {
+            return parseColour(colour);
+        } catch (CadaclysmException e) {
+            throw new CadaclysmException(what + ": a colour is \"#rgb\", \"#rrggbb\", a CSS colour name or 0xRRGGBB, not '" + colour + "'");
+        }
     }
 
     /** A colour as the ABI's packed {@code 0xRRGGBB}, from {@code "#rgb"}, {@code "#rrggbb"} or a
@@ -1245,7 +1366,8 @@ public final class Cad {
     }
 
     /** A colour as the ABI's packed {@code 0xRRGGBB}, from {@code "#rgb"}, {@code "#rrggbb"} or a
-     *  CSS colour name -- for {@link SvgOptions#background()}, which takes the packed number. */
+     *  CSS colour name -- for a host that wants the number itself ({@link
+     *  SvgOptions#withBackground(String)} takes the text directly). */
     public static int packed(String colour) {
         return parseColour(colour);
     }
@@ -1432,6 +1554,29 @@ public final class Cad {
     // size the struct beside it said: the trust the whole "everything borrows from the scene"
     // design rests on, and why this file is the one place that trust is spent.
 
+    // A scene's views are cut from the scene's own arena: a buffer keeps that arena, and with
+    // it the scene, reachable, so the scene is not closed under a buffer still being read.
+    @SuppressWarnings("restricted")
+    private static FloatBuffer floatView(Arena owner, long address, long count) {
+        if (address == 0 || count == 0) return null;
+        return MemorySegment.ofAddress(address).reinterpret(count * Float.BYTES, owner, null)
+                .asByteBuffer().order(ByteOrder.nativeOrder()).asFloatBuffer().asReadOnlyBuffer();
+    }
+
+    @SuppressWarnings("restricted")
+    private static IntBuffer intView(Arena owner, long address, long count) {
+        if (address == 0 || count == 0) return null;
+        return MemorySegment.ofAddress(address).reinterpret(count * Integer.BYTES, owner, null)
+                .asByteBuffer().order(ByteOrder.nativeOrder()).asIntBuffer().asReadOnlyBuffer();
+    }
+
+    @SuppressWarnings("restricted")
+    private static DoubleBuffer doubleView(Arena owner, long address, long count) {
+        if (address == 0 || count == 0) return null;
+        return MemorySegment.ofAddress(address).reinterpret(count * Double.BYTES, owner, null)
+                .asByteBuffer().order(ByteOrder.nativeOrder()).asDoubleBuffer().asReadOnlyBuffer();
+    }
+
     @SuppressWarnings("restricted")
     private static FloatBuffer floatView(long address, long count) {
         if (address == 0 || count == 0) return null;
@@ -1530,30 +1675,30 @@ public final class Cad {
 
         public FloatBuffer positions() {
             open();
-            return floatView(positions, vertexCount * 3L);
+            return floatView(scene.lifetime(), positions, vertexCount * 3L);
         }
 
         public FloatBuffer normals() {
             open();
-            return floatView(normals, vertexCount * 3L);
+            return floatView(scene.lifetime(), normals, vertexCount * 3L);
         }
 
         /** Two floats a vertex, not three. Null for a node whose reader produced none. */
         public FloatBuffer uvs() {
             open();
-            return floatView(uvs, vertexCount * 2L);
+            return floatView(scene.lifetime(), uvs, vertexCount * 2L);
         }
 
         /** Four floats a vertex, RGBA -- present only for a body opened asking for per-vertex
          *  colour whose faces carry more than one between them. */
         public FloatBuffer colours() {
             open();
-            return floatView(colours, vertexCount * 4L);
+            return floatView(scene.lifetime(), colours, vertexCount * 4L);
         }
 
         public IntBuffer indices() {
             open();
-            return intView(indices, indexCount);
+            return intView(scene.lifetime(), indices, indexCount);
         }
 
         /**
@@ -1637,30 +1782,30 @@ public final class Cad {
 
         public DoubleBuffer positions() {
             open();
-            return doubleView(positions, vertexCount * 3L);
+            return doubleView(scene.lifetime(), positions, vertexCount * 3L);
         }
 
         public DoubleBuffer normals() {
             open();
-            return doubleView(normals, vertexCount * 3L);
+            return doubleView(scene.lifetime(), normals, vertexCount * 3L);
         }
 
         /** Two doubles a vertex, not three. Null for a node whose reader produced none. */
         public DoubleBuffer uvs() {
             open();
-            return doubleView(uvs, vertexCount * 2L);
+            return doubleView(scene.lifetime(), uvs, vertexCount * 2L);
         }
 
         /** Four floats a vertex, RGBA -- still {@code float}, as {@code CadaclysmMesh64::colors}'s
          *  own note says: RGBA in 0..1 needs no more precision. */
         public FloatBuffer colours() {
             open();
-            return floatView(colours, vertexCount * 4L);
+            return floatView(scene.lifetime(), colours, vertexCount * 4L);
         }
 
         public IntBuffer indices() {
             open();
-            return intView(indices, indexCount);
+            return intView(scene.lifetime(), indices, indexCount);
         }
 
         /** The same triangles in memory of our own, safe to outlive the scene. */
@@ -1710,14 +1855,14 @@ public final class Cad {
          *  {@link CadaclysmException} here, as {@link Mesh}'s views do. */
         public FloatBuffer positions() {
             scene.handle();
-            return floatView(positions, vertexCount * 3L);
+            return floatView(scene.lifetime(), positions, vertexCount * 3L);
         }
 
         /** {@code polylineCount} vertex counts: how many points each run has, not where it
          * ends, so twelve two-point edges read {@code 2, 2, 2, ...}. */
         public IntBuffer counts() {
             scene.handle();
-            return intView(counts, polylineCount);
+            return intView(scene.lifetime(), counts, polylineCount);
         }
 
         /**
@@ -1793,14 +1938,14 @@ public final class Cad {
         /** {@code count * 12} floats: four control points a curve, three floats each. */
         public FloatBuffer points() {
             scene.handle();
-            return floatView(points, count * 12L);
+            return floatView(scene.lifetime(), points, count * 12L);
         }
 
         /** {@code count * 4} floats: a weight per control point, all ones for a polynomial
          *  curve, and the weights that make a circular arc exact for a rational one. */
         public FloatBuffer weights() {
             scene.handle();
-            return floatView(weights, count * 4L);
+            return floatView(scene.lifetime(), weights, count * 4L);
         }
 
         /** The same curves in memory of your own, safe to keep after the scene closes. */
@@ -1847,13 +1992,13 @@ public final class Cad {
         /** {@code count * 12} doubles: four control points a curve, three doubles each. */
         public DoubleBuffer points() {
             scene.handle();
-            return doubleView(points, count * 12L);
+            return doubleView(scene.lifetime(), points, count * 12L);
         }
 
         /** {@code count * 4} doubles: a weight per control point. */
         public DoubleBuffer weights() {
             scene.handle();
-            return doubleView(weights, count * 4L);
+            return doubleView(scene.lifetime(), weights, count * 4L);
         }
 
         /** The same curves in memory of your own, safe to keep after the scene closes. */
@@ -1865,6 +2010,10 @@ public final class Cad {
 
     /** A {@link Beziers64} copied out as plain arrays. */
     public record BeziersData64(double[] points, double[] weights) {
+        /** How many curves: {@code weights} holds four a curve, {@code points} twelve. */
+        public int count() {
+            return weights.length / 4;
+        }
     }
 
     private static Beziers64 buildBeziers64(Scene scene, MemorySegment raw) {
@@ -1913,13 +2062,13 @@ public final class Cad {
         /** {@code vertexCount * 3} floats. */
         public FloatBuffer positions() {
             scene.handle();
-            return floatView(positions, vertexCount * 3L);
+            return floatView(scene.lifetime(), positions, vertexCount * 3L);
         }
 
         /** {@code indexCount} indices, three a triangle. */
         public IntBuffer indices() {
             scene.handle();
-            return intView(indices, indexCount);
+            return intView(scene.lifetime(), indices, indexCount);
         }
     }
 
@@ -2487,7 +2636,7 @@ public final class Cad {
         }
     }
 
-    /** The one handle a {@link FemMesh} holds, freed once by the {@link Cleaner} or by
+    /** The one handle a {@link FemMesh} holds, freed once by its arena or by
      *  {@link FemMesh#free()}; the address is zeroed first, exactly as
      *  {@link MeshletsReference} does it, and for the same two-ways-over reason. */
     private static final class FemMeshReference implements Runnable {
@@ -2514,8 +2663,8 @@ public final class Cad {
      * One body meshed for a solver: nodes welded by bits, triangles wound outward, every node
      * tagged with the lowest-dimension B-rep entity it lies on, and every crack reported rather
      * than closed. What {@link Node#femMesh(double, double, double[])} returns, and <b>owned by
-     * you</b>: close it (a try-with-resources), {@link #free()} it, or let the {@link Cleaner}
-     * do it.
+     * you</b>: close it (a try-with-resources), {@link #free()} it, or drop it: it is freed once
+     * nothing reaches it, and a buffer cut from it does.
      *
      * <p>A handle rather than a snapshot, and its big arrays are read-only
      * {@link DoubleBuffer}/{@link IntBuffer} views over the library's own memory, exactly as
@@ -2539,13 +2688,13 @@ public final class Cad {
      * outlive the handle ({@code nodes().get(new double[..])}), and read the rest inside the
      * try-with-resources.
      *
-     * <p>And hold this object itself while you read its buffers: a buffer alone does not keep it
-     * reachable, so a {@code FemMesh} the program has finished with can be collected -- and
-     * freed by the {@link Cleaner} -- while a buffer taken from it is still being read.
+     * <p>Dropping it instead of freeing it is safe: its buffers are cut from its own arena, so a
+     * {@code FemMesh} the program has finished with stays alive while a buffer taken from it is
+     * still being read, and is freed once neither is reachable.
      */
     public static final class FemMesh implements AutoCloseable {
         private final FemMeshReference reference;
-        private final Cleaner.Cleanable cleanable;
+        private final Arena lifetime = Arena.ofAuto();
 
         // The view, read once in the constructor. Every pointer in it is built with the handle
         // and good until it is freed -- nothing in this ABI is built lazily -- so asking again
@@ -2556,9 +2705,12 @@ public final class Cad {
         private final boolean watertight, fromMesh;
         private final double minAngle, longestEdge;
 
+        @SuppressWarnings("restricted") // reinterpret: only to attach the free to the arena.
         private FemMesh(MemorySegment raw) {
             reference = new FemMeshReference(raw.address());
-            cleanable = CLEANER.register(this, reference);
+            FemMeshReference ref = reference;
+            // The cleanup is ref's alone: it must not reach this mesh, or nothing would.
+            MemorySegment.ofAddress(raw.address()).reinterpret(lifetime, ignored -> ref.run());
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment out = arena.allocate(FEM_MESH_VIEW);
                 boolean ok;
@@ -2605,9 +2757,9 @@ public final class Cad {
         }
 
         /** Give the mesh back, and with it every buffer taken from it. Idempotent; the
-         *  {@link Cleaner} or the try-with-resources does it otherwise. */
+         *  try-with-resources, or nothing reaching it, does it otherwise. */
         public void free() {
-            cleanable.clean();
+            reference.run();
         }
 
         @Override
@@ -2620,21 +2772,21 @@ public final class Cad {
          *  Every node is used by at least one triangle. */
         public DoubleBuffer nodes() {
             handle();
-            return doubleView(nodes, nodeCount * 3L);
+            return doubleView(lifetime, nodes, nodeCount * 3L);
         }
 
         /** Three node indices a triangle, wound outward -- a mirroring placement is wound
          *  back. */
         public IntBuffer triangles() {
             handle();
-            return intView(triangles, triangleCount * 3L);
+            return intView(lifetime, triangles, triangleCount * 3L);
         }
 
         /** The B-rep face each triangle lies on, one per triangle, into {@link #faceCount()}
          *  faces. */
         public IntBuffer triangleFace() {
             handle();
-            return intView(triangleFace, triangleCount);
+            return intView(lifetime, triangleFace, triangleCount);
         }
 
         /** What each node lies on -- 0 a B-rep vertex, 1 an edge, 2 a face -- one per node: the
@@ -2642,7 +2794,7 @@ public final class Cad {
          *  classification rule. {@link #nodeEntity()} says which entity of that kind. */
         public IntBuffer nodeKind() {
             handle();
-            return intView(nodeKind, nodeCount);
+            return intView(lifetime, nodeKind, nodeCount);
         }
 
         /** Which vertex, edge or face each node lies on, read by the matching
@@ -2650,7 +2802,7 @@ public final class Cad {
          *  into the body's faces. One per node. */
         public IntBuffer nodeEntity() {
             handle();
-            return intView(nodeEntity, nodeCount);
+            return intView(lifetime, nodeEntity, nodeCount);
         }
 
         /** The body's faces; {@link #triangleFace()} and a {@link #nodeKind()} of 2 index them.
@@ -3127,11 +3279,22 @@ public final class Cad {
             } catch (Throwable t) {
                 throw new RuntimeException(t);
             }
+            String kindName = stringOrNull(invokeStringAt(JOINT_PAIR_KIND_NAME, scene.handle(), index));
+            if (kindName == null) kindName = PairKind.of(kind).name().toLowerCase(java.util.Locale.ROOT);
+            List<Double> parameters = new ArrayList<>();
+            try (Arena arena = Arena.ofConfined()) {
+                long count = (long) JOINT_PAIR_PARAMETERS.invokeExact(scene.handle(), index, MemorySegment.NULL, 0L);
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, Math.max(1L, count));
+                long written = (long) JOINT_PAIR_PARAMETERS.invokeExact(scene.handle(), index, out, count);
+                for (long i = 0; i < written; i++) parameters.add(out.getAtIndex(ValueLayout.JAVA_DOUBLE, i));
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
             int freedomCount = invokeIntAt(JOINT_FREEDOM_COUNT, scene.handle(), index);
             List<Freedom> freedoms = new ArrayList<>(freedomCount);
             for (int i = 0; i < freedomCount; i++) freedoms.add(readFreedom(scene.handle(), index, i));
             return new Pair(PairKind.of(kind), typeName, pitch, toRowMajor(rawStart), toRowMajor(rawEnd),
-                    rawStart, rawEnd, List.copyOf(freedoms));
+                    rawStart, rawEnd, List.copyOf(freedoms), kindName, List.copyOf(parameters));
         }
 
         @Override
@@ -3224,11 +3387,19 @@ public final class Cad {
      * contact frames as row-major 4x4 matrices, exactly as {@link Node#transform()} renders one;
      * {@code rawFrameStart}/{@code rawFrameEnd} are the same frames in the ABI's own
      * column-major sixteen-double form, as {@link Node#rawTransform()} gives.
+     *
+     * <p>{@code kindName} is the kind by name, finer than {@code kind}: the same thirteen
+     * names, and {@code "gear"} and {@code "rack_and_pinion"} for the two coupled pairs
+     * {@code kind} reads as {@link PairKind#OTHER}. {@code parameters} are the pair's own
+     * numbers, in the order {@code Assembly.pairWith} takes them: screw {@code [pitch]},
+     * rack_and_pinion {@code [pinion_radius]}, gear {@code [radius_first, radius_second,
+     * ratio, bevel, helical_angle]} (always five, the ratio the second link's rotation over
+     * the first's); empty for every other kind.
      */
     public record Pair(PairKind kind, String typeName, Double pitch,
                         double[][] frameStart, double[][] frameEnd,
                         double[] rawFrameStart, double[] rawFrameEnd,
-                        List<Freedom> freedoms) {}
+                        List<Freedom> freedoms, String kindName, List<Double> parameters) {}
 
     /** One row of a {@link State}: a joint the state sets, and the values it sets it to. */
     public record StateValue(Joint joint, double[] values) {}
@@ -3326,6 +3497,227 @@ public final class Cad {
                 List.copyOf(segments), scene);
     }
 
+    // ---- Work schedules -------------------------------------------------------------------
+
+    /** Every date pair of a {@link Task}, in seconds since 1970-01-01T00:00 (no zone), each null
+     *  where the file gives none; {@code duration} is in seconds. From {@link Task#time()}. */
+    public record TaskTime(Double scheduleStart, Double scheduleFinish, Double earlyStart, Double earlyFinish,
+                           Double lateStart, Double lateFinish, Double actualStart, Double actualFinish,
+                           Double duration) {}
+
+    /** One task of a {@link WorkSchedule} ({@code IfcTask}). {@code kind} is {@code "attendance"},
+     *  {@code "construction"}, {@code "demolition"}, {@code "dismantle"}, {@code "disposal"},
+     *  {@code "installation"}, {@code "logistic"}, {@code "maintenance"}, {@code "move"},
+     *  {@code "operation"}, {@code "removal"}, {@code "renovation"}, {@code "notdefined"} or
+     *  {@code "other"}; {@code kindName} is the text of a user-defined kind, empty otherwise.
+     *  {@code parent} is the summary task nesting this one, null for a top-level task. From
+     *  {@link WorkSchedule#tasks()}. */
+    public record Task(int schedule, int index, String name, String identification, String kind, String kindName,
+                       String status, boolean milestone, Task parent, TaskTime time, Scene scene) {
+        /** The nodes this task builds or removes, in node order. */
+        public List<Node> nodes() {
+            int count = invokeIntAt(TASK_NODE_COUNT, scene.handle(), schedule, index);
+            List<Node> found = new ArrayList<>(count);
+            if (count == 0) return found;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_INT, count);
+                int written = (int) TASK_NODES.invokeExact(scene.handle(), schedule, index, out, count);
+                for (int i = 0; i < Math.min(count, written); i++)
+                    found.add(new Node(scene, out.getAtIndex(ValueLayout.JAVA_INT, i)));
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+            return found;
+        }
+    }
+
+    /** A sequence between two tasks of one schedule ({@code IfcRelSequence}). {@code kind} is
+     *  {@code "finish_start"}, {@code "start_start"}, {@code "finish_finish"},
+     *  {@code "start_finish"}, {@code "notdefined"} or {@code "other"}; {@code lag} is in seconds,
+     *  null where the file gives none. From {@link WorkSchedule#links()}. */
+    public record TaskLink(Task from, Task to, String kind, String kindName, Double lag) {}
+
+    /** What one node is doing on a date, from {@link WorkSchedule#at(double)}: its {@code phase}
+     *  ({@code "unbuilt"}, {@code "building"}, {@code "built"}, {@code "demolishing"} or
+     *  {@code "demolished"}), {@code progress} 0..1 through the window that governs the phase, and
+     *  {@code variance} -- seconds late (positive) or early (negative) -- null where there is none. */
+    public record ElementState(Node node, String phase, double progress, Double variance) {}
+
+    /** An IFC work schedule ({@code IfcWorkSchedule}): tasks, the links between them and the dates
+     *  they run on. {@code name} is its name, else its identification, else {@code "schedule #k"};
+     *  {@code kind} is {@code "planned"}, {@code "actual"}, {@code "baseline"},
+     *  {@code "notdefined"} or {@code "other"}. {@code start} and {@code finish} are seconds since
+     *  1970-01-01T00:00 (no zone), null where the file gives none. From {@link Scene#schedules()}. */
+    public record WorkSchedule(int index, String name, String identification, String kind, String kindName,
+                               Double start, Double finish, Scene scene) {
+        /** The schedule's tasks, in file order. */
+        public List<Task> tasks() {
+            int count = invokeIntAt(TASK_COUNT, scene.handle(), index);
+            Task[] tasks = new Task[count];
+            for (int i = 0; i < count; i++) buildTask(tasks, i, new boolean[count]);
+            return List.of(tasks);
+        }
+
+        // A parent is built before its child, whichever comes first in the file; `visiting`
+        // stops a malformed cycle from recursing forever (the parent is then dropped).
+        private Task buildTask(Task[] tasks, int i, boolean[] visiting) {
+            if (tasks[i] != null) return tasks[i];
+            visiting[i] = true;
+            Task parent = null;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_INT);
+                boolean has = (boolean) TASK_PARENT.invokeExact(scene.handle(), index, i, out);
+                int p = out.get(ValueLayout.JAVA_INT, 0);
+                if (has && p >= 0 && p < tasks.length && !visiting[p]) parent = buildTask(tasks, p, visiting);
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+            MemorySegment h = scene.handle();
+            boolean milestone;
+            try {
+                milestone = (boolean) TASK_MILESTONE.invokeExact(h, index, i);
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+            tasks[i] = new Task(index, i,
+                    string(invokeStringAt(TASK_NAME, h, index, i)),
+                    string(invokeStringAt(TASK_IDENTIFICATION, h, index, i)),
+                    word(TASK_KINDS, invokeIntAt(TASK_KIND, h, index, i)),
+                    string(invokeStringAt(TASK_KIND_NAME, h, index, i)),
+                    string(invokeStringAt(TASK_STATUS, h, index, i)),
+                    milestone, parent, readTaskTime(scene, index, i), scene);
+            visiting[i] = false;
+            return tasks[i];
+        }
+
+        /** The schedule's task links, in file order. */
+        public List<TaskLink> links() {
+            List<Task> tasks = tasks();
+            int count = invokeIntAt(TASK_LINK_COUNT, scene.handle(), index);
+            List<TaskLink> found = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) {
+                try (Arena arena = Arena.ofConfined()) {
+                    MemorySegment from = arena.allocate(ValueLayout.JAVA_INT);
+                    MemorySegment to = arena.allocate(ValueLayout.JAVA_INT);
+                    MemorySegment kind = arena.allocate(ValueLayout.JAVA_INT);
+                    MemorySegment lag = arena.allocate(ValueLayout.JAVA_DOUBLE);
+                    MemorySegment hasLag = arena.allocate(ValueLayout.JAVA_BOOLEAN);
+                    boolean ok = (boolean) TASK_LINK.invokeExact(scene.handle(), index, i, from, to, kind, lag, hasLag);
+                    if (!ok) continue;
+                    found.add(new TaskLink(tasks.get(from.get(ValueLayout.JAVA_INT, 0)), tasks.get(to.get(ValueLayout.JAVA_INT, 0)),
+                            word(LINK_KINDS, kind.get(ValueLayout.JAVA_INT, 0)),
+                            string(invokeStringAt(TASK_LINK_KIND_NAME, scene.handle(), index, i)),
+                            hasLag.get(ValueLayout.JAVA_BOOLEAN, 0) ? lag.get(ValueLayout.JAVA_DOUBLE, 0) : null));
+                } catch (Throwable t) {
+                    throw new RuntimeException(t);
+                }
+            }
+            return found;
+        }
+
+        /** {@link #at(double, String)} on the scheduled dates. */
+        public List<ElementState> at(double date) {
+            return at(date, "scheduled");
+        }
+
+        /** What every node the schedule names is doing on {@code date}, in seconds since
+         *  1970-01-01T00:00, under {@code dates}: {@code "scheduled"} or {@code "actual"}. Throws
+         *  {@link CadaclysmException} for any other word or a date that is not finite. */
+        public List<ElementState> at(double date, String dates) {
+            int which;
+            if ("scheduled".equals(dates)) which = 0;
+            else if ("actual".equals(dates)) which = 1;
+            else throw new CadaclysmException("dates must be 'scheduled' or 'actual'");
+            MemorySegment h = scene.handle();
+            try (Arena arena = Arena.ofConfined()) {
+                long count = (long) SCHEDULE_AT.invokeExact(h, index, date, which, MemorySegment.NULL, 0);
+                if (count < 0) throw new CadaclysmException(lastErrorOr("schedule_at"));
+                List<ElementState> found = new ArrayList<>((int) count);
+                if (count == 0) return found;
+                MemorySegment out = arena.allocate(ELEMENT_STATE.byteSize() * count, ELEMENT_STATE.byteAlignment());
+                long got = (long) SCHEDULE_AT.invokeExact(h, index, date, which, out, (int) count);
+                if (got < 0) throw new CadaclysmException(lastErrorOr("schedule_at"));
+                long nodeAt = ELEMENT_STATE.byteOffset(MemoryLayout.PathElement.groupElement("node"));
+                long phaseAt = ELEMENT_STATE.byteOffset(MemoryLayout.PathElement.groupElement("phase"));
+                long progressAt = ELEMENT_STATE.byteOffset(MemoryLayout.PathElement.groupElement("progress"));
+                long hasAt = ELEMENT_STATE.byteOffset(MemoryLayout.PathElement.groupElement("has_variance"));
+                long varianceAt = ELEMENT_STATE.byteOffset(MemoryLayout.PathElement.groupElement("variance"));
+                for (long i = 0; i < Math.min(got, count); i++) {
+                    long base = i * ELEMENT_STATE.byteSize();
+                    found.add(new ElementState(new Node(scene, out.get(ValueLayout.JAVA_INT, base + nodeAt)),
+                            word(PHASES, out.get(ValueLayout.JAVA_INT, base + phaseAt), "unbuilt"),
+                            out.get(ValueLayout.JAVA_DOUBLE, base + progressAt),
+                            out.get(ValueLayout.JAVA_BOOLEAN, base + hasAt) ? out.get(ValueLayout.JAVA_DOUBLE, base + varianceAt) : null));
+                }
+                return found;
+            } catch (CadaclysmException e) {
+                throw e;
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+    }
+
+    private static final String[] SCHEDULE_KINDS = {"planned", "actual", "baseline", "notdefined", "other"};
+    private static final String[] TASK_KINDS = {"attendance", "construction", "demolition", "dismantle", "disposal",
+            "installation", "logistic", "maintenance", "move", "operation", "removal", "renovation", "notdefined", "other"};
+    private static final String[] LINK_KINDS = {"finish_start", "start_start", "finish_finish", "start_finish", "notdefined", "other"};
+    private static final String[] PHASES = {"unbuilt", "building", "built", "demolishing", "demolished"};
+
+    private static String word(String[] words, int code) {
+        return word(words, code, "notdefined");
+    }
+
+    private static String word(String[] words, int code, String fallback) {
+        return code >= 0 && code < words.length ? words[code] : fallback;
+    }
+
+    private static Double optionalDouble(MemorySegment s, String has, String value) {
+        return s.get(ValueLayout.JAVA_BOOLEAN, TASK_TIME.byteOffset(MemoryLayout.PathElement.groupElement(has)))
+                ? s.get(ValueLayout.JAVA_DOUBLE, TASK_TIME.byteOffset(MemoryLayout.PathElement.groupElement(value)))
+                : null;
+    }
+
+    private static TaskTime readTaskTime(Scene scene, int schedule, int task) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment s = arena.allocate(TASK_TIME);
+            boolean ok = (boolean) TASK_TIME_OF.invokeExact(scene.handle(), schedule, task, s);
+            if (!ok) throw new CadaclysmException(lastErrorOr("task_time"));
+            return new TaskTime(
+                    optionalDouble(s, "has_schedule_start", "schedule_start"),
+                    optionalDouble(s, "has_schedule_finish", "schedule_finish"),
+                    optionalDouble(s, "has_early_start", "early_start"),
+                    optionalDouble(s, "has_early_finish", "early_finish"),
+                    optionalDouble(s, "has_late_start", "late_start"),
+                    optionalDouble(s, "has_late_finish", "late_finish"),
+                    optionalDouble(s, "has_actual_start", "actual_start"),
+                    optionalDouble(s, "has_actual_finish", "actual_finish"),
+                    optionalDouble(s, "has_duration", "duration"));
+        } catch (CadaclysmException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
+
+    private static WorkSchedule readSchedule(Scene scene, int index) {
+        MemorySegment h = scene.handle();
+        Double start = null, finish = null;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE);
+            if ((boolean) SCHEDULE_START.invokeExact(h, index, out)) start = out.get(ValueLayout.JAVA_DOUBLE, 0);
+            if ((boolean) SCHEDULE_FINISH.invokeExact(h, index, out)) finish = out.get(ValueLayout.JAVA_DOUBLE, 0);
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+        return new WorkSchedule(index,
+                string(invokeStringAt(SCHEDULE_NAME, h, index)),
+                string(invokeStringAt(SCHEDULE_IDENTIFICATION, h, index)),
+                word(SCHEDULE_KINDS, invokeIntAt(SCHEDULE_KIND, h, index)),
+                string(invokeStringAt(SCHEDULE_KIND_NAME, h, index)),
+                start, finish, scene);
+    }
+
     private static StateValue readStateValue(Scene scene, int state, int row) {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment jointOut = arena.allocate(ValueLayout.JAVA_INT);
@@ -3362,13 +3754,15 @@ public final class Cad {
         private final Link ground;
         private final List<Joint> unsolved;
         private final List<OutOfRange> outOfRange;
+        private final List<String> diagnostics;
         private final double[][] transforms;
 
-        private Pose(Scene scene, Link ground, List<Joint> unsolved, List<OutOfRange> outOfRange, double[][] transforms) {
+        private Pose(Scene scene, Link ground, List<Joint> unsolved, List<OutOfRange> outOfRange, List<String> diagnostics, double[][] transforms) {
             this.scene = scene;
             this.ground = ground;
             this.unsolved = unsolved;
             this.outOfRange = outOfRange;
+            this.diagnostics = diagnostics;
             this.transforms = transforms;
         }
 
@@ -3385,6 +3779,13 @@ public final class Cad {
         /** One entry per given value outside its freedom's range. */
         public List<OutOfRange> outOfRange() {
             return outOfRange;
+        }
+
+        /** What the couplings (gear, rack and pinion, a loop-closing screw) could not solve, or
+         *  found disagreeing, in file order, in the kernel's words:
+         *  {@code coupling 'mesh': both 'a' and 'b' are given and disagree by 0.1}. */
+        public List<String> diagnostics() {
+            return diagnostics;
         }
 
         /** {@code node}'s posed transform, as a row-major 4x4 double matrix -- the same type
@@ -3641,6 +4042,45 @@ public final class Cad {
                 ok = invokeNodeSvg(scene.handle(), index, p, o);
             }
             if (!ok) throw new CadaclysmException(lastErrorOr("could not write " + path));
+        }
+
+        /** {@link #silhouetteBeziers(SvgOptions)} with every default. */
+        public BeziersData64 silhouetteBeziers() {
+            return silhouetteBeziers(null);
+        }
+
+        /** This node's silhouette from the camera {@code options} describes -- where its
+         *  surfaces turn away from the eye, which no edge of it lies on. The same {@link
+         *  SvgOptions} that draw a picture: {@code view}, {@code azimuth}, {@code elevation},
+         *  {@code up}, {@code fov}, and {@code width} with {@code tolerance}, which matter here
+         *  -- the library reads the tolerance as a fraction of the page, {@code tolerance /
+         *  width}. Nothing else in the options changes the curves.
+         *
+         *  <p><b>A copy, unlike {@link #edgeBeziers64()}.</b> The library keeps one silhouette
+         *  slot per scene and the next silhouette call on that scene overwrites it, so a view
+         *  over it would change under the caller; this copies out of the slot ({@link
+         *  Beziers64#copy()}, whose {@code MemorySegment.toArray} allocates the Java arrays)
+         *  before it returns. Calls sharing a scene across threads must serialise, as the
+         *  library documents.
+         *
+         *  <p>A body with no silhouette (every face planar) gives a result with {@code count()}
+         *  0, which is not an error; a refused option, a body with no measurable geometry or a
+         *  node holding no shape of its own throws {@link CadaclysmException}. */
+        public BeziersData64 silhouetteBeziers(SvgOptions options) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment o = buildSvgOptions(arena, options, scene.defaultUp());
+                SegmentAllocator allocator = SegmentAllocator.prefixAllocator(arena.allocate(BEZIERS64));
+                MemorySegment raw = invokeNodeSilhouetteBeziers(allocator, scene.handle(), index, o);
+                Beziers64 curves = buildBeziers64(scene, raw);
+                if (curves.points == 0 || curves.count == 0) {
+                    // The call clears the thread's error at entry and the empty answer sets none:
+                    // a reason here is this call's own refusal, none is the empty answer.
+                    String reason = lastError();
+                    if (!reason.isEmpty()) throw new CadaclysmException(reason);
+                    return new BeziersData64(new double[0], new double[0]);
+                }
+                return curves.copy();
+            }
         }
 
         /** {@code (r, g, b, a)} if the file gave one, else null -- most STEP files carry no
@@ -4216,6 +4656,14 @@ public final class Cad {
         }
     }
 
+    private static MemorySegment invokeNodeSilhouetteBeziers(SegmentAllocator allocator, MemorySegment scene, int node, MemorySegment options) {
+        try {
+            return (MemorySegment) NODE_SILHOUETTE_BEZIERS.invokeExact(allocator, scene, node, options);
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
+
     private static boolean invokeNodeSvg(MemorySegment scene, int node, MemorySegment path, MemorySegment options) {
         try {
             return (boolean) NODE_SVG.invokeExact(scene, node, path, options);
@@ -4250,12 +4698,41 @@ public final class Cad {
 
     // ---- Scene ------------------------------------------------------------------------
 
+    /** The one document a {@link Scene} holds, and what closes it -- what the scene's arena
+     *  runs once nothing reaches the scene, so it holds the bare address and never the
+     *  scene. Closed once: the address is zeroed first. */
+    private static final class SceneReference implements Runnable {
+        private long address;
+
+        SceneReference(long address) {
+            this.address = address;
+        }
+
+        @Override
+        public void run() {
+            long a = address;
+            address = 0;
+            if (a == 0) return;
+            try {
+                CLOSE.invokeExact(MemorySegment.ofAddress(a));
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+        }
+    }
+
     /**
      * An open document. Close it when done, or use it in a try-with-resources block --
-     * everything it hands back borrows from it.
+     * everything it hands back borrows from it. One dropped without {@link #close()} is
+     * closed once nothing reaches it: not the scene, a node, a placement, a mesh, a buffer
+     * cut from one, nor a view showing it. Its arena is what tracks that -- every buffer it
+     * hands out is a segment of that arena, and a view showing it holds the arena too (so the
+     * view is destroyed first, as cadaclysm_view.h requires).
      */
     public static final class Scene implements AutoCloseable {
         private MemorySegment handle;
+        private final SceneReference reference;
+        private final Arena lifetime = Arena.ofAuto();
         // How many times forgetMeshes has run. Only Mesh64 stamps itself with this: it lends
         // the document's own mesh, which a forget frees, where the float mesh and the line
         // views are the library's own caches and outlive one.
@@ -4265,8 +4742,13 @@ public final class Cad {
         private final String schemaPath;
         private final Convention convention;
 
+        @SuppressWarnings("restricted") // reinterpret: only to attach the close to the arena.
         private Scene(MemorySegment handle, String label, String path, String schemaPath, Convention convention) {
             this.handle = handle;
+            SceneReference ref = new SceneReference(handle.address());
+            this.reference = ref;
+            // The cleanup is ref's alone: it must not reach this scene, or nothing would.
+            MemorySegment.ofAddress(handle.address()).reinterpret(lifetime, ignored -> ref.run());
             this.label = label;
             this.path = path;
             this.schemaPath = schemaPath;
@@ -4303,21 +4785,22 @@ public final class Cad {
             return handle;
         }
 
-        /** Give the scene back. Idempotent. Every borrowed {@link Mesh} and {@link Polylines}
-         *  still held is reading freed memory afterwards. */
+        /** The arena every borrowed buffer is cut from, and what a view showing this holds. */
+        Arena lifetime() {
+            return lifetime;
+        }
+
+        /** Give the scene back now rather than when nothing reaches it. Idempotent. Every
+         *  borrowed {@link Mesh} and {@link Polylines} buffer still held is reading freed
+         *  memory afterwards: an explicit close does not wait for them. */
         @Override
         public void close() {
             if (handle == null) return;
             // What a view shows of this scene is removed first; a view of another thread that
             // still shows it makes this throw, and the scene stays open.
             View.release(this);
-            MemorySegment h = handle;
             handle = null;
-            try {
-                CLOSE.invokeExact(h);
-            } catch (Throwable t) {
-                throw new RuntimeException(t);
-            }
+            reference.run();
         }
 
         /** Draw with the view library in use: blocks until the window is closed; on the terminal, prints a still. */
@@ -4456,6 +4939,15 @@ public final class Cad {
             return found;
         }
 
+        /** The IFC work schedules the file records, in file order. Empty for a file that records
+         *  none. */
+        public List<WorkSchedule> schedules() {
+            int count = invokeIntOf(SCHEDULE_COUNT, handle());
+            List<WorkSchedule> found = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) found.add(readSchedule(this, i));
+            return found;
+        }
+
         /** The link the file declares as the mechanism's base, or null when it declares
          *  none (the default ground is then the link on the most joints; see {@link #pose}). */
         public Link base() {
@@ -4569,7 +5061,13 @@ public final class Cad {
                         throw new RuntimeException(t);
                     }
                 }
-                return new Pose(this, ground, List.copyOf(unsolved), List.copyOf(outOfRange), transforms);
+                int diagnosticCount = invokeIntOf(POSE_DIAGNOSTIC_COUNT, ptr);
+                List<String> diagnostics = new ArrayList<>(diagnosticCount);
+                for (int i = 0; i < diagnosticCount; i++) {
+                    String text = stringOrNull(invokeStringAt(POSE_DIAGNOSTIC, ptr, i));
+                    if (text != null) diagnostics.add(text);
+                }
+                return new Pose(this, ground, List.copyOf(unsolved), List.copyOf(outOfRange), List.copyOf(diagnostics), transforms);
             } finally {
                 invokePoseFree(ptr);
             }
@@ -4794,6 +5292,14 @@ public final class Cad {
     private static int invokeIntOf(MethodHandle function, MemorySegment scene) {
         try {
             return (int) function.invokeExact(scene);
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
+
+    private static MemorySegment invokeStringAt(MethodHandle function, MemorySegment scene, int a, int b) {
+        try {
+            return (MemorySegment) function.invokeExact(scene, a, b);
         } catch (Throwable t) {
             throw new RuntimeException(t);
         }

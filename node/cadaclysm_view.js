@@ -23,15 +23,27 @@ const { constants: bufferConstants } = require('node:buffer');
 const koffi = require('koffi');
 
 const ABI_MAJOR = 1;
-const ABI_MINOR = 4;
+// 1.5: `cadaclysm_view_parse_colour`, which every colour argument's text goes through.
+// 1.6: text -- cadaclysm_view_show_text, _set_text, _load_font and the text layer.
+// 1.7: the machining and timeline calls (not bound here yet).
+// 1.8: the pick's `clicks` and `point`, cadaclysm_view_set_double_click_frames, _focus, _navigation.
+// 1.9: cadaclysm_view_set_lighting and _lighting (headlight or studio).
+// 1.10: the viewport cameras (bound; Node's own API for them comes later).
+// 1.11: cadaclysm_view_show_points.
+const ABI_MINOR = 11;
 const OPEN = 1;
 const CLOSED = 2;
 const SURFACES = Object.freeze({ exact: 0, triangles: 1 });
+const LIGHTING = Object.freeze({ headlight: 0, studio: 1 });
 const STANDARD = Object.freeze({ top: 0, front: 1, right: 2, iso: 3 });
-const LAYER = Object.freeze({ surfaces: 0, edges: 1, curves: 2, isocurves: 3, grid: 4 });
+const ALIGN = Object.freeze({ 'top-left': 0, top: 1, 'top-right': 2, left: 3, centre: 4, center: 4, right: 5,
+  'bottom-left': 6, bottom: 7, 'bottom-right': 8 });
+const TEXT_MODES = Object.freeze({ label: 0, world: 1 });
+const LAYER = Object.freeze({ surfaces: 0, edges: 1, curves: 2, isocurves: 3, grid: 4, text: 5 });
 const EVENT = Object.freeze({ pointer_down: 1, pointer_move: 2, pointer_up: 3, pointer_cancel: 4, wheel: 5, key: 6 });
 const GRID = Object.freeze({ none: 0, top: 1, front: 2, right: 3 });
 const LOD_MOTION = Object.freeze({ detailed: 0, smooth: 1 });
+const NAVIGATION_FLY = 1;       // CADACLYSM_VIEW_NAVIGATION_FLY (ORBIT is 0)
 const INPUT_CLOSE = 1;
 const NONE_COMING = 0xFFFFFFFF;   // cadaclysm_view_wake_ms: no wake is coming
 const POINTER = Object.freeze({ mouse: 0, touch: 1, pen: 2 });
@@ -79,6 +91,9 @@ koffi.struct('CadaclysmViewPick', {
   item: 'uint32_t',
   node: 'uint32_t',
   face: 'uint32_t',
+  clicks: 'uint32_t',
+  has_point: 'uint32_t',
+  point: koffi.array('float', 3),
 });
 koffi.struct('CadaclysmViewLod', {
   size: 'uint32_t',
@@ -106,6 +121,7 @@ koffi.struct('CadaclysmViewEvent', {
   key: 'const char *',
   key_down: 'uint32_t',
   time_ms: 'double',
+  alt: 'uint32_t',
 });
 koffi.struct('CadaclysmViewMesh', {
   size: 'uint32_t',
@@ -128,6 +144,41 @@ koffi.struct('CadaclysmViewImage', {
   flip_x: 'uint32_t',
   flip_y: 'uint32_t',
 });
+koffi.struct('CadaclysmViewText', {
+  size: 'uint32_t',
+  text: 'const char *',
+  mode: 'uint32_t',
+  at: koffi.array('float', 3),
+  right: koffi.array('float', 3),
+  up: koffi.array('float', 3),
+  height: 'float',
+  rgb: koffi.array('float', 3),
+  align: 'uint32_t',
+  offset: koffi.array('float', 2),
+  box_rgba: koffi.array('float', 4),
+  box_padding: 'float',
+  on_top: 'uint32_t',
+  font: 'uint32_t',
+});
+koffi.struct('CadaclysmViewViewportCamera', {
+  size: 'uint32_t',
+  kind: 'uint32_t',
+  rect: koffi.array('uint32_t', 4),
+  view: koffi.array('float', 16),
+  projection: koffi.array('float', 16),
+  eye: koffi.array('float', 3),
+  target: koffi.array('float', 3),
+  distance: 'float',
+  yaw: 'float',
+  pitch: 'float',
+  orthographic: 'uint32_t',
+  speed: 'float',
+  radius: 'float',
+  height: 'float',
+  axis_view: koffi.array('float', 3),
+  axis_right: koffi.array('float', 3),
+  axis_up: koffi.array('float', 3),
+});
 const SIZE = (name) => koffi.sizeof(name);
 
 // ---- the function table: every call of the header ------------------------------------
@@ -140,6 +191,7 @@ function _bind(l) {
     abi_version: f('uint32_t cadaclysm_view_abi_version(void)'),
     last_error: f('const char *cadaclysm_view_last_error(void)'),
     name: f('const char *cadaclysm_view_name(void)'),
+    parse_colour: f('bool cadaclysm_view_parse_colour(const char *text, _Out_ float *out)'),
     create: f('CadaclysmView *cadaclysm_view_create(const CadaclysmViewWindow *window, const CadaclysmViewOptions *options)'),
     destroy: f('void cadaclysm_view_destroy(CadaclysmView *view)'),
     pump: f('uint32_t cadaclysm_view_pump(CadaclysmView *view, uint32_t timeout_ms)'),
@@ -159,6 +211,8 @@ function _bind(l) {
     set_orthographic: f('void cadaclysm_view_set_orthographic(CadaclysmView *view, bool on)'),
     set_layer: f('bool cadaclysm_view_set_layer(CadaclysmView *view, uint32_t layer, bool on)'),
     set_background: f('void cadaclysm_view_set_background(CadaclysmView *view, const float *rgb)'),
+    set_lighting: f('bool cadaclysm_view_set_lighting(CadaclysmView *view, uint32_t lighting)'),
+    lighting: f('uint32_t cadaclysm_view_lighting(const CadaclysmView *view)'),
     set_lod: f('bool cadaclysm_view_set_lod(CadaclysmView *view, const CadaclysmViewLod *lod)'),
     wake_ms: f('uint32_t cadaclysm_view_wake_ms(const CadaclysmView *view)'),
     set_node_visible: f('bool cadaclysm_view_set_node_visible(CadaclysmView *view, uint32_t item, uint32_t node, bool visible)'),
@@ -174,8 +228,25 @@ function _bind(l) {
     input: f('uint32_t cadaclysm_view_input(CadaclysmView *view, const CadaclysmViewEvent *event)'),
     show_mesh: f('uint32_t cadaclysm_view_show_mesh(CadaclysmView *view, const CadaclysmViewMesh *mesh)'),
     show_lines: f('uint32_t cadaclysm_view_show_lines(CadaclysmView *view, const float *segments, uint32_t segment_count, const float *rgb)'),
+    show_points: f('uint32_t cadaclysm_view_show_points(CadaclysmView *view, const float *positions, uint32_t point_count, const float *rgb, float size_px)'),
     show_curves: f('uint32_t cadaclysm_view_show_curves(CadaclysmView *view, const float *beziers, uint32_t curve_count, const float *rgb)'),
     show_image: f('uint32_t cadaclysm_view_show_image(CadaclysmView *view, const CadaclysmViewImage *image)'),
+    load_font: f('uint32_t cadaclysm_view_load_font(const uint8_t *bytes, size_t length)'),
+    show_text: f('uint32_t cadaclysm_view_show_text(CadaclysmView *view, const CadaclysmViewText *text)'),
+    set_text: f('bool cadaclysm_view_set_text(CadaclysmView *view, uint32_t item, const char *text)'),
+    viewport_camera: f('bool cadaclysm_view_viewport_camera(const CadaclysmView *view, uint32_t viewport, _Inout_ CadaclysmViewViewportCamera *out)'),
+    set_viewport_camera: f('bool cadaclysm_view_set_viewport_camera(CadaclysmView *view, uint32_t viewport, const CadaclysmViewViewportCamera *camera)'),
+    set_viewport_rects: f('bool cadaclysm_view_set_viewport_rects(CadaclysmView *view, const uint32_t *rects, uint32_t count)'),
+    aim: f('bool cadaclysm_view_aim(CadaclysmView *view, uint32_t viewport, const float *direction, const float *up)'),
+    set_pivot: f('bool cadaclysm_view_set_pivot(CadaclysmView *view, uint32_t viewport, const float *point)'),
+    set_tap: f('bool cadaclysm_view_set_tap(CadaclysmView *view, float px, double ms)'),
+    orbit_in: f('void cadaclysm_view_orbit_in(CadaclysmView *view, uint32_t viewport, float dx, float dy)'),
+    pan_in: f('void cadaclysm_view_pan_in(CadaclysmView *view, uint32_t viewport, float dx, float dy)'),
+    zoom_in: f('void cadaclysm_view_zoom_in(CadaclysmView *view, uint32_t viewport, float steps)'),
+    look_in: f('void cadaclysm_view_look_in(CadaclysmView *view, uint32_t viewport, float dx, float dy)'),
+    dolly_in: f('void cadaclysm_view_dolly_in(CadaclysmView *view, uint32_t viewport, float ratio)'),
+    frame_in: f('bool cadaclysm_view_frame_in(CadaclysmView *view, uint32_t viewport, uint32_t item)'),
+    standard_in: f('bool cadaclysm_view_standard_in(CadaclysmView *view, uint32_t viewport, uint32_t which)'),
     set_colour: f('bool cadaclysm_view_set_colour(CadaclysmView *view, uint32_t item, const float *rgb)'),
     set_xray: f('bool cadaclysm_view_set_xray(CadaclysmView *view, uint32_t item, bool on)'),
     set_face_colours: f('bool cadaclysm_view_set_face_colours(CadaclysmView *view, uint32_t item, const uint32_t *faces, const float *rgba, uint32_t count)'),
@@ -184,6 +255,9 @@ function _bind(l) {
     show_solid: f('uint32_t cadaclysm_view_show_solid(CadaclysmView *view, const void *solid, double tolerance, const float *rgb)'),
     image: f('bool cadaclysm_view_image(CadaclysmView *view, uint8_t *rgba, size_t capacity)'),
     size: f('bool cadaclysm_view_size(CadaclysmView *view, _Out_ uint32_t *width, _Out_ uint32_t *height)'),
+    set_double_click_frames: f('void cadaclysm_view_set_double_click_frames(CadaclysmView *view, bool on)'),
+    focus: f('bool cadaclysm_view_focus(CadaclysmView *view, const float *point)'),
+    navigation: f('uint32_t cadaclysm_view_navigation(CadaclysmView *view)'),
   };
 }
 
@@ -205,23 +279,29 @@ const LIBRARIES = Object.freeze({
   wgpu: ['cadaclysm_view', 'CADACLYSM_VIEW_LIBRARY'],
 });
 
-/** Where `which` ('terminal' or 'wgpu') is: its variable, beside this file, `lib/` or `target/{release,debug}` above it. */
-function _find(which) {
+/** Where `which` ('terminal' or 'wgpu') is: its variable, beside this file, `lib/` or `target/{release,debug}` above it.
+ * `override` and `here` stand in for the variable's value and this file's folder (tests). */
+function _find(which, override = process.env[LIBRARIES[which][1]], here = __dirname) {
   const [base, variable] = LIBRARIES[which];
   const name = _fileName(base);
-  const override = process.env[variable];
   if (override) {
     let candidate = override;
-    if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) candidate = path.join(candidate, name);
+    const isDir = fs.existsSync(candidate) && fs.statSync(candidate).isDirectory();
+    if (isDir) candidate = path.join(candidate, name);
     if (fs.existsSync(candidate)) return candidate;
-    throw new ViewError(`${variable}=${override} names nothing that exists`);
+    // Python's words: the terminal's variable also says which file a directory lacks.
+    throw new ViewError(`${variable}=${override} names nothing that exists`
+      + (which === 'terminal' && isDir ? ` (no ${name} in that directory)` : ''));
   }
-  const searched = [path.join(__dirname, name)];
-  for (const a of _ancestors(__dirname)) searched.push(path.join(a, 'lib', name));
-  for (const a of _ancestors(__dirname)) searched.push(path.join(a, 'target', 'release', name), path.join(a, 'target', 'debug', name));
+  const searched = [path.join(here, name)];
+  for (const a of _ancestors(here)) searched.push(path.join(a, 'lib', name));
+  for (const a of _ancestors(here)) searched.push(path.join(a, 'target', 'release', name), path.join(a, 'target', 'debug', name));
   for (const candidate of searched) if (fs.existsSync(candidate)) return candidate;
-  throw new ViewError(`no view library: ${name} not found. Looked in:\n` + searched.map((p) => `    ${p}\n`).join('')
-    + `Set ${variable}, or CADACLYSM_VIEW to a library's path.`);
+  throw new ViewError(which === 'terminal'
+    ? `no view library: the terminal library was not found (searched: ${searched.join(', ')}) `
+      + '-- reinstall cadaclysm, set CADACLYSM_TERMINAL_LIBRARY to the library, or set CADACLYSM_VIEW'
+    : `no view library: ${name} was not found (searched: ${searched.join(', ')}) `
+      + `-- reinstall cadaclysm, set ${variable} to it, or useTerminal()`);
 }
 
 /** One loaded view library: `fn` is its function table, by the header's names less the prefix. */
@@ -265,6 +345,22 @@ let _current = null;
 
 /** Draw with the terminal library (the default) from now on. */
 function useTerminal() { return _choose(_load(_find('terminal'))); }
+// A TTF/OTF font for every view of the library in use: bytes (Uint8Array, Buffer or
+// ArrayBuffer), or a file's path. Its id for showText's `font`; font 0 is the bundled Liberation Sans.
+// Choose the library first (useWgpu/useTerminal/use): a font id belongs to the library that
+// loaded it, and means nothing -- or another font -- to a library chosen afterwards.
+function loadFont(font) {
+  let bytes;
+  if (typeof font === 'string') {
+    try { bytes = fs.readFileSync(font); } catch (e) { throw new ViewError(`loadFont: cannot read ${JSON.stringify(font)}: ${e.code ?? e.message}`); }
+  } else if (font instanceof ArrayBuffer) bytes = new Uint8Array(font);
+  else if (font instanceof Uint8Array) bytes = font;
+  else throw new ViewError(`loadFont: a path, a Uint8Array or an ArrayBuffer, not ${font === null ? 'null' : typeof font === 'object' ? font.constructor?.name ?? 'object' : typeof font}`);
+  const lib = current();
+  const id = lib.fn.load_font(bytes, bytes.length);
+  if (!id) throw lib.failure('loadFont');
+  return id;
+}
 /** Draw with the GPU window library, `cadaclysm_view`, from now on. */
 function useWgpu() { return _choose(_load(_find('wgpu'))); }
 /** Draw with the library at `library` -- or, for tests, a table of the header's functions by their short names. */
@@ -372,17 +468,32 @@ const _finalizer = new FinalizationRegistry(({ fn, pointer }) => { try { fn.dest
 
 const _f32 = (a) => (a == null ? null : a instanceof Float32Array ? a : Float32Array.from(a));
 const _u32 = (a) => (a == null ? null : a instanceof Uint32Array ? a : Uint32Array.from(a));
-/** Exactly three numbers as floats (Python's `_f32(rgb, 3)`: C reads three). */
-function _rgb(rgb, what = 'rgb') {
+/**
+ * A colour's numbers (Python's `_colour`): text -- '#rgb', '#rrggbb' or a CSS colour name, any
+ * case -- read by the library's own `cadaclysm_view_parse_colour` (three, in 0..1; a ViewError
+ * with the library's message where it is no colour), anything else as given. `lib`: the view's
+ * library; none, the one in use.
+ */
+function _colour(value, lib = null) {
+  if (typeof value === 'string') {
+    const library = lib ?? current();
+    const out = new Float32Array(3);
+    if (!library.fn.parse_colour(value, out)) throw new ViewError(library.lastError() || `colour ${JSON.stringify(value)}`);
+    return Array.from(out);
+  }
+  return Array.from(value);
+}
+/** Exactly three numbers as floats (Python's `_f32(rgb, 3)`: C reads three); text through `_colour`. */
+function _rgb(rgb, what = 'rgb', lib = null) {
   if (rgb == null) return null;
-  const v = Array.from(rgb);
+  const v = _colour(rgb, lib);
   if (v.length !== 3) throw new ViewError(`${what}: 3 numbers, not ${v.length}`);
   return Float32Array.from(v);
 }
-/** Three or four numbers as four floats (alpha 1 where only three were given). */
-function _rgba(c, what = 'rgba') {
+/** Text, or three or four numbers, as four floats (alpha 1 where there is none). */
+function _rgba(c, what = 'rgba', lib = null) {
   if (c == null) return null;
-  const v = Array.from(c);
+  const v = _colour(c, lib);
   if (v.length !== 3 && v.length !== 4) throw new ViewError(`${what}: 3 or 4 numbers, not ${v.length}`);
   return Float32Array.from([v[0], v[1], v[2], v.length > 3 ? v[3] : 1]);
 }
@@ -404,6 +515,40 @@ function _floatsOf(a, unit, what, noun) {
   const f = _f32(a);
   if (f.length % unit) throw new ViewError(`${what}: ${unit} numbers a ${noun}, not ${f.length}`);
   return f;
+}
+// Text for a C string: a NUL would end it early, so it is refused rather than cut.
+function _textOf(text, what) {
+  if (typeof text !== 'string') throw new ViewError(`${what}: text is a string, not ${typeof text}`);
+  if (text.includes('\0')) throw new ViewError(`text ${JSON.stringify(text)}: a NUL character cannot be shown (the C string ends there)`);
+  return text;
+}
+
+// `n` finite numbers, as an array koffi copies into a fixed array field. Only an array or a
+// typed array: a string is array-like too, and "123" would otherwise be [1, 2, 3].
+function _fixed(values, n, what) {
+  if (!Array.isArray(values) && !(ArrayBuffer.isView(values) && !(values instanceof DataView))) {
+    throw new ViewError(`${what}: ${n} finite numbers, not ${_kind(values)}`);
+  }
+  const a = Array.from(values, Number);
+  if (a.length !== n || !a.every(Number.isFinite)) throw new ViewError(`${what}: ${n} finite numbers`);
+  return a;
+}
+// A number showText copies into a float field: finite, or refused naming the field.
+function _finite(value, what) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw new ViewError(`${what}: a finite number, not ${_kind(value)}`);
+  return value;
+}
+// What a refused value was, for the message.
+function _kind(value) {
+  if (value === null) return 'null';
+  if (typeof value === 'number' || typeof value === 'string') return JSON.stringify(value) ?? String(value);
+  if (typeof value === 'object') return value.constructor?.name ?? 'object';
+  return typeof value;
+}
+// A font id from loadFont (0 = the bundled font): a whole number the u32 field holds.
+function _fontId(font) {
+  if (!Number.isInteger(font) || font < 0 || font > 0xFFFFFFFF) throw new ViewError(`showText font: a font id from loadFont (a whole number, 0 or more), not ${_kind(font)}`);
+  return font;
 }
 function _name(table, value, what) {
   if (!(value in table)) throw new ViewError(`${what} ${JSON.stringify(value)}: one of ${Object.keys(table).join(', ')}`);
@@ -461,7 +606,7 @@ class Item {
     this._ok(this.view._lib.fn.set_node_transforms(this.view._live('cadaclysm_view_set_node_transforms'), this.id, _nonNull(flat), list.length), 'nodeTransforms');
   }
   colour(rgb) {
-    const c = _rgb(rgb, 'colour');
+    const c = _rgb(rgb, 'colour', this.view._lib);
     if (!c) throw new ViewError('colour: 3 numbers, not none');
     this._ok(this.view._lib.fn.set_colour(this.view._live('cadaclysm_view_set_colour'), this.id, c), 'colour');
   }
@@ -469,20 +614,30 @@ class Item {
   placement(matrix) {
     this._ok(this.view._lib.fn.set_placement(this.view._live('cadaclysm_view_set_placement'), this.id, _doubles(matrix, 16, 'placement')), 'placement');
   }
-  /** `faces` (pick numbers) coloured by `rgba` (four numbers a face); `faces` null clears every one. */
+  /**
+   * `faces` (pick numbers) coloured by `rgba`: one colour a face -- text, or 3 or 4 numbers (the
+   * alpha is not drawn; text and 3 numbers mean alpha 1) -- or four numbers a face, flat; `faces`
+   * null clears every one.
+   */
   faceColours(faces, rgba) {
     const f = _u32(faces);
     if (f == null) { this._ok(this.view._lib.fn.set_face_colours(this.view._live('cadaclysm_view_set_face_colours'), this.id, null, null, 0), 'faceColours'); return; }
-    const c = _f32(Array.from(rgba ?? []).flat());
+    const lib = this.view._lib;
+    const c = _f32(Array.from(rgba ?? []).flatMap((e) => (typeof e === 'number' ? [e] : Array.from(_rgba(e, 'faceColours', lib)))));
     if (c.length !== 4 * f.length) throw new ViewError(`faceColours: ${4 * f.length} numbers (rgba, 4 a face), not ${c.length}`);
     this._ok(this.view._lib.fn.set_face_colours(this.view._live('cadaclysm_view_set_face_colours'), this.id, _nonNull(f), _nonNull(c), f.length), 'faceColours');
+  }
+  /** The text item's string replaced, nothing else changed (cadaclysm_view_set_text). */
+  setText(text) {
+    const t = _textOf(text, 'setText');
+    this._ok(this.view._lib.fn.set_text(this.view._live('cadaclysm_view_set_text'), this.id, t), 'setText');
   }
   frame() { this._ok(this.view._lib.fn.frame(this.view._live('cadaclysm_view_frame'), this.id), 'frame'); }
   xray(on) { this._ok(this.view._lib.fn.set_xray(this.view._live('cadaclysm_view_set_xray'), this.id, Boolean(on)), 'xray'); }
   nodeVisible(node, on) { this._ok(this.view._lib.fn.set_node_visible(this.view._live('cadaclysm_view_set_node_visible'), this.id, node, Boolean(on)), 'nodeVisible'); }
-  nodeColour(node, rgba) { this._ok(this.view._lib.fn.set_node_color(this.view._live('cadaclysm_view_set_node_color'), this.id, node, _rgba(rgba)), 'nodeColour'); }
+  nodeColour(node, rgba) { this._ok(this.view._lib.fn.set_node_color(this.view._live('cadaclysm_view_set_node_color'), this.id, node, _rgba(rgba, 'nodeColour', this.view._lib)), 'nodeColour'); }
   /** Tint `node` toward `rgba`'s colour by its alpha; null clears. */
-  nodeHighlight(node, rgba) { this._ok(this.view._lib.fn.set_node_highlight(this.view._live('cadaclysm_view_set_node_highlight'), this.id, node, _rgba(rgba)), 'nodeHighlight'); }
+  nodeHighlight(node, rgba) { this._ok(this.view._lib.fn.set_node_highlight(this.view._live('cadaclysm_view_set_node_highlight'), this.id, node, _rgba(rgba, 'nodeHighlight', this.view._lib)), 'nodeHighlight'); }
   frameNode(node) { this._ok(this.view._lib.fn.frame_node(this.view._live('cadaclysm_view_frame_node'), this.id, node), 'frameNode'); }
 }
 
@@ -577,7 +732,7 @@ class View {
     throw new ViewError(`show: a Solid, Scene or Node, not ${name ?? typeof obj}`);
   }
   showSolid(solid, tolerance = 0.05, rgb = null) {
-    return this._item(this._lib.fn.show_solid(this._live('cadaclysm_view_show_solid'), solid._handle, tolerance, _rgb(rgb, 'showSolid')), solid, 'showSolid');
+    return this._item(this._lib.fn.show_solid(this._live('cadaclysm_view_show_solid'), solid._handle, tolerance, _rgb(rgb, 'showSolid', this._lib)), solid, 'showSolid');
   }
   showScene(scene, shown = scene) {
     return this._item(this._lib.fn.show(this._live('cadaclysm_view_show'), scene._handle), shown, 'showScene');
@@ -602,19 +757,39 @@ class View {
     if (edges && edges.length % 6) throw new ViewError(`showMesh: edges are two points a segment (6 numbers), not ${edges.length}`);
     const raw = {
       size: SIZE('CadaclysmViewMesh'), positions, vertex_count: Math.floor(positions.length / 3), normals,
-      indices, index_count: indices.length, edges, edge_count: edges ? edges.length / 6 : 0, rgb: _rgb(mesh.rgb, 'showMesh rgb'),
+      indices, index_count: indices.length, edges, edge_count: edges ? edges.length / 6 : 0, rgb: _rgb(mesh.rgb, 'showMesh rgb', this._lib),
     };
     return this._item(this._lib.fn.show_mesh(this._live('cadaclysm_view_show_mesh'), raw), null, 'showMesh');
   }
   /** Six floats a segment. */
   showLines(segments, rgb = null) {
     const s = _floatsOf(segments, 6, 'showLines', 'segment');
-    return this._item(this._lib.fn.show_lines(this._live('cadaclysm_view_show_lines'), _nonNull(s), s.length / 6, _rgb(rgb, 'showLines rgb')), null, 'showLines');
+    return this._item(this._lib.fn.show_lines(this._live('cadaclysm_view_show_lines'), _nonNull(s), s.length / 6, _rgb(rgb, 'showLines rgb', this._lib)), null, 'showLines');
+  }
+  /**
+   * Points, three numbers each (a flat run, or `[x, y, z]` a point): a disc `sizePx` device
+   * pixels across (1 to 64) at each, in `colour` (null: the edge colour; any colour `showLines`
+   * takes), as one item. A point does not pick; the item is framed by its points' box. The
+   * library refuses a number that is not finite and a size outside 1..64.
+   */
+  showPoints(positions, colour = null, sizePx = 8) {
+    const items = ArrayBuffer.isView(positions) ? positions : Array.from(positions ?? []);
+    const flat = !ArrayBuffer.isView(items) && items.length && typeof items[0] !== 'number'
+      ? items.flatMap((q) => {
+        const xyz = Array.from(q ?? []);
+        if (xyz.length !== 3) throw new ViewError(`showPoints: three numbers a point, not ${xyz.length}`);
+        return xyz;
+      })
+      : items;
+    const p = _f32(flat);
+    if (p.length % 3) throw new ViewError(`showPoints: three numbers a point, not ${p.length}`);
+    const rgb = _rgb(colour, 'showPoints rgb', this._lib);
+    return this._item(this._lib.fn.show_points(this._live('cadaclysm_view_show_points'), _nonNull(p), p.length / 3, rgb, Number(sizePx ?? 8)), null, 'showPoints');
   }
   /** Sixteen floats a rational cubic: four control points as x, y, z, w. */
   showCurves(beziers, rgb = null) {
     const b = _floatsOf(beziers, 16, 'showCurves', 'curve');
-    return this._item(this._lib.fn.show_curves(this._live('cadaclysm_view_show_curves'), _nonNull(b), b.length / 16, _rgb(rgb, 'showCurves rgb')), null, 'showCurves');
+    return this._item(this._lib.fn.show_curves(this._live('cadaclysm_view_show_curves'), _nonNull(b), b.length / 16, _rgb(rgb, 'showCurves rgb', this._lib)), null, 'showCurves');
   }
   /** `corners`: twelve floats, bottom-left, bottom-right, top-right, top-left; `rgba` rows from the top, `width * height * 4` bytes. */
   showImage(corners, rgba, width, height, opacity = 1) {
@@ -639,6 +814,29 @@ class View {
   /** Fit the camera to everything shown. */
   frame() { this._ok(this._lib.fn.frame(this._live('cadaclysm_view_frame'), 0), 'frame'); }
   orthographic(on) { this._void('set_orthographic', Boolean(on)); }
+  /**
+   * Whether a double click frames what it hit (off by default: it is a pick answered with
+   * `clicks` 2 and the camera stays). Applies where the view takes the pick itself (its own
+   * window, `pump`, `run`); a host reading picks frames if it chooses.
+   */
+  setDoubleClickFrames(on) { this._void('set_double_click_frames', Boolean(on)); }
+  /**
+   * Moves the orbit point to `point` ([x, y, z], as a pick's `point`): the eye keeps its
+   * direction and distance from it, so the camera moves sideways and does not turn. Leaves fly
+   * mode. Throws for other than three numbers before the call, and the library's reason for a
+   * point that is not finite, or while viewports are set.
+   */
+  focus(point) {
+    const v = point == null || typeof point === 'string' ? [] : Array.from(point, Number);
+    if (v.length !== 3) throw new ViewError(`focus: 3 numbers, not ${point == null || typeof point === 'string' ? _kind(point) : v.length}`);
+    this._ok(this._lib.fn.focus(this._live('cadaclysm_view_focus'), Float32Array.from(v)), 'focus');
+  }
+  /**
+   * How a left drag moves the camera: 'orbit' (about the target) or 'fly' (the view turns about
+   * the eye). A fly key (W, A, S, D, E, Q) sent through `input` enters fly mode and it stays after
+   * the key is let go; Tab toggles it; `frame`, `standard` and `focus` leave it.
+   */
+  get navigation() { return this._lib.fn.navigation(this._live('cadaclysm_view_navigation')) === NAVIGATION_FLY ? 'fly' : 'orbit'; }
   /** `[{ rect: [x, y, w, h], view: 16, projection: 16, eye: 3, grid: 'none'|'top'|'front'|'right' }]`, matrices column-major. */
   viewports(list) {
     const exact = (a, n, what) => { const v = Array.from(a ?? []); if (v.length !== n) throw new ViewError(`viewport ${what}: ${n} numbers, not ${v.length}`); return v; };
@@ -646,38 +844,80 @@ class View {
     this._ok(this._lib.fn.set_viewports(this._live('cadaclysm_view_set_viewports'), raw, raw.length), 'viewports');
   }
   layer(name, on) { this._ok(this._lib.fn.set_layer(this._live('cadaclysm_view_set_layer'), _name(LAYER, name, 'layer'), Boolean(on)), 'layer'); }
-  /** Three numbers, the clear colour. */
-  background(rgb) { this._void('set_background', _rgb(rgb ?? [], 'background')); }
+  /** The clear colour: text ('#rgb', '#rrggbb', a CSS name) or three numbers in 0..1. */
+  background(rgb) { this._void('set_background', _rgb(rgb ?? [], 'background', this._lib)); }
   get surfaces() { return this._lib.fn.surfaces(this._live('cadaclysm_view_surfaces')) === 1 ? 'triangles' : 'exact'; }
   set surfaces(name) { this._ok(this._lib.fn.set_surfaces(this._live('cadaclysm_view_set_surfaces'), _name(SURFACES, name, 'surfaces')), 'surfaces'); }
+  /** How plain parts are lit, as Python's View.lighting: 'headlight' (the default) or 'studio' (a key light fixed above the scene, an ambient and a camera fill). */
+  get lighting() { return this._lib.fn.lighting(this._live('cadaclysm_view_lighting')) === 1 ? 'studio' : 'headlight'; }
+  set lighting(name) { this._ok(this._lib.fn.set_lighting(this._live('cadaclysm_view_set_lighting'), _name(LIGHTING, name, 'lighting')), 'lighting'); }
   get needsDraw() { return Boolean(this._lib.fn.needs_draw(this._live('cadaclysm_view_needs_draw'))); }
   // -- the rest
-  /** What is under pixel (x, y) of `viewport`: `{ item, node, face }`, or null for nothing. */
+  /** What is under pixel (x, y) of `viewport`: `{ item, node, face, clicks, point }`, or null for nothing. */
   // A view never drawn is drawn first: the library answers a pick from the frame it has drawn.
   // A failure other than "no answer yet" throws at once with the library's own message.
   pick(x, y, viewport = 0) {
     if (!this._drawn) this.draw();
     const p = this._live('cadaclysm_view_request_pick_in');
     this._void('request_pick_in', viewport, x, y);
-    const out = { size: SIZE('CadaclysmViewPick'), item: 0, node: 0, face: 0 };
+    const out = _rawPick();
     let waiting = '';
     for (let i = 0; i < 200; i++) {
       this.draw();
-      if (this._lib.fn.pick_result(p, out)) return out.item ? { item: out.item, node: out.node, face: out.face } : null;
+      if (this._lib.fn.pick_result(p, out)) return out.item ? _pick(out) : null;
       waiting = this._lib.lastError();
       if (waiting && !waiting.endsWith('no pick result')) throw new ViewError(waiting);
       _sleep(10);
     }
     throw new ViewError(`pick: the answer never landed (${waiting || 'no error reported'})`);
   }
+  /**
+   * The newest pick answer that has landed, without asking or waiting (Python's `last_pick`):
+   * a click or tap in the view's own window (`pump` lands them as it draws), a double click's
+   * (`clicks` 2), or one an `input` asked for, landed by the draws after it. `undefined` while
+   * none has; `null` for a click on nothing; else `{ item, node, face, clicks, point }`. Each
+   * answer is read once, and a newer one replaces one not read yet. A failure other than "no
+   * answer yet" throws the library's own message.
+   */
+  lastPick() {
+    const out = _rawPick();
+    if (this._lib.fn.pick_result(this._live('cadaclysm_view_pick_result'), out)) return out.item ? _pick(out) : null;
+    const waiting = this._lib.lastError();
+    if (waiting && !waiting.endsWith('no pick result')) throw new ViewError(waiting);
+    return undefined;
+  }
   draw() { this._ok(this._lib.fn.draw(this._live('cadaclysm_view_draw')), 'draw'); this._drawn = true; }
   /** Blocks until the window is closed; the camera it ended on and the last pick. */
   run() {
     const cam = { size: SIZE('CadaclysmViewCamera'), eye: [0, 0, 0], target: [0, 0, 0], up: [0, 0, 0], orthographic: 0 };
-    const pick = { size: SIZE('CadaclysmViewPick'), item: 0, node: 0, face: 0 };
+    const pick = _rawPick();
     this._ok(this._lib.fn.run(this._live('cadaclysm_view_run'), cam, pick), 'run');
     this._markClosed();
     return _camera(cam, pick, this._yUp);
+  }
+  /**
+   * Text shown as one item: a label (pixels, anchored to `at`) or world text (`mode: 'world'`,
+   * lying in the plane of `right` and `up` through `at`). See cadaclysm_view_show_text.
+   */
+  showText(text, at, options = {}) {
+    const o = options ?? {};
+    const raw = {
+      size: SIZE('CadaclysmViewText'),
+      text: _textOf(text, 'showText'),
+      mode: _name(TEXT_MODES, o.mode ?? 'label', 'mode'),
+      at: _fixed(at, 3, 'showText at'),
+      right: o.right == null ? [0, 0, 0] : _fixed(o.right, 3, 'showText right'),
+      up: o.up == null ? [0, 0, 0] : _fixed(o.up, 3, 'showText up'),
+      height: _finite(o.size ?? 12, 'showText size'),
+      rgb: Array.from(_rgb(o.colour ?? 'white', 'showText colour', this._lib)),
+      align: _name(ALIGN, o.align ?? 'bottom-left', 'align'),
+      offset: o.offset == null ? [0, 0] : _fixed(o.offset, 2, 'showText offset'),
+      box_rgba: o.box == null ? [0, 0, 0, 0] : Array.from(_rgba(o.box, 'showText box', this._lib)),
+      box_padding: _finite(o.padding ?? 4, 'showText padding'),
+      on_top: o.onTop ? 1 : 0,
+      font: _fontId(o.font ?? 0),
+    };
+    return this._item(this._lib.fn.show_text(this._live('cadaclysm_view_show_text'), raw), null, 'showText');
   }
   /** One frame read back: `{ width, height, rgba }`, RGBA8, rows from the top. */
   image() {
@@ -770,7 +1010,23 @@ function _camera(cam, pick, yUp) {
   } else azimuth = Math.atan2(d[1], d[0]) * deg;
   const elevation = Math.asin(Math.max(-1, Math.min(1, d[2]))) * deg;
   return { eye, target, up, orthographic: Boolean(cam.orthographic), azimuth, elevation,
-    pick: pick.item ? { item: pick.item, node: pick.node, face: pick.face } : null };
+    pick: pick.item ? _pick(pick) : null };
+}
+
+/** A CadaclysmViewPick for the library to fill: `size` set, every other field zero. */
+function _rawPick() {
+  return { size: SIZE('CadaclysmViewPick'), item: 0, node: 0, face: 0, clicks: 0, has_point: 0, point: [0, 0, 0] };
+}
+
+/**
+ * A hit as every pick answer carries it (cadaclysm_view.py's `_pick_dict`): the item, node and
+ * face, `clicks` (2 for a double click, else 1) and `point` -- where the ray met the model, in the
+ * coordinates the items were shown in -- or null where the library read no depth (no hit to
+ * place, a machining stock, the terminal library).
+ */
+function _pick(raw) {
+  return { item: raw.item, node: raw.node, face: raw.face, clicks: raw.clicks,
+    point: raw.has_point ? Array.from(raw.point) : null };
 }
 
 /** Forget the library, the shared window and the window list (tests; nothing of this module's own may leak between them). */
@@ -861,6 +1117,6 @@ function _present(obj, options = {}, mode = 'show', transforms = null) {
 }
 
 module.exports = {
-  ViewError, View, Item, Library, useTerminal, useWgpu, use, current, pump,
-  OPEN, CLOSED, VIEWS, _camera, _png, _reset, _open, _release, _views, _present, _aim, _shared,
+  ViewError, View, Item, Library, useTerminal, useWgpu, use, current, pump, loadFont,
+  OPEN, CLOSED, VIEWS, _find, _camera, _pick, _png, _reset, _open, _release, _views, _present, _aim, _shared,
 };

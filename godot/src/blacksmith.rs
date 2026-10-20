@@ -190,6 +190,60 @@ fn state_rows_arg(v: &AnyArray, what: &str) -> Option<Vec<(String, Vec<f64>)>> {
     Some(out)
 }
 
+/// A joint key for `CadaclysmAssembly.posed`: a `String` already a path (placement names
+/// then the joint's name joined by "/", a "/" or "\" inside a name escaped with "\"), or an
+/// array of the names, which this escapes and joins like Python's `_joint_path`.
+fn joint_path(v: &Variant, what: &str) -> Option<String> {
+    match v.get_type() {
+        VariantType::STRING | VariantType::STRING_NAME => Some(v.to_string()),
+        VariantType::ARRAY | VariantType::PACKED_STRING_ARRAY => {
+            let names: Vec<String> = match v.get_type() {
+                VariantType::ARRAY => v.try_to::<AnyArray>().ok()?.iter_shared().map(|n| n.to_string()).collect(),
+                _ => v.to::<PackedStringArray>().as_slice().iter().map(|n| n.to_string()).collect(),
+            };
+            if names.is_empty() {
+                return fail(format!("{what}: a joint path needs at least the joint's name"));
+            }
+            let escaped: Vec<String> = names.iter().map(|n| n.replace('\\', "\\\\").replace('/', "\\/")).collect();
+            Some(escaped.join("/"))
+        }
+        _ => fail(format!("{what}: expected a joint path (a String or an array of names), not {v}")),
+    }
+}
+
+/// `CadaclysmAssembly.posed`'s `values`: a `Dictionary` of joint key to value, an array
+/// of `[key, value]` rows, or nil for none; a value is one number (a one-freedom joint)
+/// or a list of numbers in the pair's freedom order.
+fn posed_rows_arg(v: &Variant, what: &str) -> Option<Vec<(String, Vec<f64>)>> {
+    let mut pairs: Vec<(Variant, Variant)> = Vec::new();
+    match v.get_type() {
+        VariantType::NIL => {}
+        VariantType::DICTIONARY => pairs.extend(v.to::<VarDictionary>().iter_shared()),
+        VariantType::ARRAY => {
+            for (i, item) in v.to::<AnyArray>().iter_shared().enumerate() {
+                let Ok(row) = item.try_to::<AnyArray>() else {
+                    return fail(format!("{what}[{i}]: expected [joint, values], not {item}"));
+                };
+                if row.len() != 2 {
+                    return fail(format!("{what}[{i}]: expected [joint, values], got {} items", row.len()));
+                }
+                pairs.push((row.at(0), row.at(1)));
+            }
+        }
+        _ => return fail(format!("{what}: expected a Dictionary or an array of [joint, values] rows, not {v}")),
+    }
+    let mut out = Vec::with_capacity(pairs.len());
+    for (i, (key, value)) in pairs.iter().enumerate() {
+        let path = joint_path(key, &format!("{what}[{i}]"))?;
+        let values = match number(value) {
+            Some(x) => vec![x],
+            None => number_list(value, &format!("{what}[{i}].values"))?,
+        };
+        out.push((path, values));
+    }
+    Some(out)
+}
+
 /// `[[state, t, interpolation], ...]` as `Assembly::sequence` takes it.
 fn sequence_rows_arg(v: &AnyArray, what: &str) -> Option<Vec<(String, f64, String)>> {
     let mut out = Vec::with_capacity(v.len());
@@ -541,6 +595,24 @@ impl CadaclysmBlacksmith {
         let text = text_or_path.to_string();
         let given = if text.starts_with("res://") || text.starts_with("user://") { os_path(&text_or_path) } else { text };
         ok(bs::license(given)).is_some()
+    }
+
+    /// Set a kernel option, by its name, for the whole process from the next call on:
+    /// `"boolean.mesh_budget"`, `"boolean.finest_tolerance"`,
+    /// `"profile_boolean.point_budget"` or `"measure.default_accuracy"`. False -- and
+    /// nothing changed -- for a name that is not an option or a value it does not take,
+    /// the reason in `Cadaclysm.last_error()`.
+    #[func]
+    fn set_option(name: GString, value: f64) -> bool {
+        ok(bs::set_option(&name.to_string(), value)).is_some()
+    }
+
+    /// A kernel option's value, by its name: what `set_option` last set, else its default.
+    /// NaN for a name that is not an option, the reason (listing the ones there are) in
+    /// `Cadaclysm.last_error()`.
+    #[func]
+    fn option(name: GString) -> f64 {
+        ok(bs::option(&name.to_string())).unwrap_or(f64::NAN)
     }
 
     #[func]
@@ -3158,6 +3230,15 @@ impl CadaclysmSolid {
         Self::many(s.split_by_plane(&f, tolerance))
     }
 
+    /// This solid split by the closed `profile` drawn on `frame`, pushed straight
+    /// through it along the frame's z both ways: the bodies outside the profile first,
+    /// then those inside. Empty on failure.
+    #[func]
+    fn split_by_profile(&self, profile: Gd<CadaclysmProfile>, frame: Variant, #[opt(default = 0.05)] tolerance: f64) -> Array<Gd<CadaclysmSolid>> {
+        let (Some(f), Some(s)) = (self::frame(&frame, "split_by_profile: frame"), self.held()) else { return Array::new() };
+        Self::many(s.split_by_profile(&profile.bind().profile, &f, tolerance))
+    }
+
     /// This solid's connected bodies, each a solid of its own, in the order of their
     /// first faces.
     #[func]
@@ -3734,6 +3815,18 @@ impl CadaclysmAssembly {
         ok(self.held()?.pair(joint, kind, frame, options))
     }
 
+    /// Gives `joint` its pair with the kind's own numbers, through the SDK's own
+    /// `Assembly::pair_with` -- see the `#[func]` doc comment for the rules it enforces.
+    fn paired_with(&self, joint: &str, kind: &str, frame: &bs::Frame, options: &bs::PairOptions, params: &[f64]) -> Option<()> {
+        ok(self.held()?.pair_with(joint, kind, frame, options, params))
+    }
+
+    /// A posed copy, through the SDK's own `Assembly::posed` -- see the `#[func]` doc
+    /// comment for the rules it enforces.
+    fn posed_copy(&self, rows: &[(&str, &[f64])], state: Option<&str>, ground: Option<&str>) -> Option<Gd<CadaclysmAssembly>> {
+        Self::made(self.held()?.posed(rows, state, ground))
+    }
+
     /// Adds a named state, through the SDK's own `Assembly::state` -- see the `#[func]`
     /// doc comment for the rules it enforces.
     fn stated(&self, name: &str, rows: &[(&str, &[f64])]) -> Option<()> {
@@ -3837,6 +3930,27 @@ impl CadaclysmAssembly {
         self.paired(&joint.to_string(), &kind.to_string(), &f, &options).is_some()
     }
 
+    /// `pair`, with the kind's own numbers as `params` (a `PackedFloat64Array`) in place
+    /// of `pitch`: `"screw"` `[pitch]`; `"rack_and_pinion"` `[pinion_radius]`; `"gear"`
+    /// `[radius_first, radius_second, ratio]` or plus `[bevel, helical_angle]`
+    /// (radians), `ratio` the second link's rotation over the first's, signed; empty for
+    /// every other kind. A wrong count fails (`pair: a gear takes 3 or 5 parameters, not
+    /// 2`), and the assembly is left as it was -- check `Cadaclysm.last_error()`. The
+    /// rest is `pair`'s.
+    #[func]
+    fn pair_with(&self, joint: GString, kind: GString, frame: Variant, end_frame: Variant, ranges: AnyArray, params: PackedFloat64Array) -> bool {
+        let Some(f) = self::frame(&frame, "pair_with: frame") else { return false };
+        let end_frame = if end_frame.is_nil() {
+            None
+        } else {
+            let Some(e) = self::frame(&end_frame, "pair_with: end_frame") else { return false };
+            Some(e)
+        };
+        let Some(ranges) = ranges_arg(&ranges, "pair_with: ranges") else { return false };
+        let options = bs::PairOptions { end_frame, ranges, pitch: None };
+        self.paired_with(&joint.to_string(), &kind.to_string(), &f, &options, params.as_slice()).is_some()
+    }
+
     /// Adds a named state: `rows` (an array of `[joint, values]`, `values` a
     /// `PackedFloat64Array` of one number per freedom of that joint's pair, in the
     /// pair's freedom order) sets each named joint, in that order. An empty or
@@ -3849,6 +3963,26 @@ impl CadaclysmAssembly {
         let Some(rows) = state_rows_arg(&rows, "state: rows") else { return false };
         let refs: Vec<(&str, &[f64])> = rows.iter().map(|(joint, values)| (joint.as_str(), values.as_slice())).collect();
         self.stated(&name.to_string(), &refs).is_some()
+    }
+
+    /// This assembly with its mechanism posed, as a new `CadaclysmAssembly` (this one is
+    /// unchanged either way; null on a refusal, with the kernel's own text in
+    /// `Cadaclysm.last_error()`). `values` is a `Dictionary` of joint to value (or an array
+    /// of `[joint, value]` rows, or `{}`): a joint is a path of placement names then the
+    /// joint's name joined by "/" (a "/" or "\" inside a name escaped with "\"), or an
+    /// array of the names, which this escapes and joins; a value is one number for a
+    /// one-freedom joint, else an array of numbers in the pair's freedom order (radians,
+    /// the assembly's units). `state` is a state's path, applied first and overridden row
+    /// by row; `ground` is one of this assembly's own links, held fixed; "" for either
+    /// means none. A sub-assembly no row reaches is shared with this one. A name that
+    /// matches several joints, an unknown joint or state, or an out-of-range value is
+    /// refused.
+    #[func]
+    fn posed(&self, values: Variant, #[opt(default = "")] state: GString, #[opt(default = "")] ground: GString) -> Option<Gd<CadaclysmAssembly>> {
+        let rows = posed_rows_arg(&values, "posed: values")?;
+        let refs: Vec<(&str, &[f64])> = rows.iter().map(|(joint, values)| (joint.as_str(), values.as_slice())).collect();
+        let (state, ground) = (state.to_string(), ground.to_string());
+        self.posed_copy(&refs, Some(state.as_str()).filter(|s| !s.is_empty()), Some(ground.as_str()).filter(|s| !s.is_empty()))
     }
 
     /// Adds a named motion sequence: `segments` (an array of `[state, t, interpolation]`,

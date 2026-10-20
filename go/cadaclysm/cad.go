@@ -110,6 +110,8 @@ import (
 	"strings"
 	"unicode"
 	"unsafe"
+
+	"github.com/rdeioris/cadaclysm-sdk/go/view"
 )
 
 // noneIndex is what the ABI returns for "no such node": a parent that is a root, an
@@ -134,6 +136,23 @@ func pin() func() {
 	runtime.LockOSThread()
 	return runtime.UnlockOSThread
 }
+
+// noTiny gives a handle struct a Go pointer, so the collector frees (and finalizes) it on
+// its own. cgo makes an incomplete C struct not-in-heap, so a *C.X is not a pointer the
+// collector traces: a struct whose only field is one is pointer-free, and at 8 bytes the
+// runtime's tiny allocator packs it into a 16-byte block with whatever pointer-free object
+// was allocated next to it -- another handle, a float, a short string's bytes. A tiny
+// block is freed only when everything in it is unreachable, so a dropped, unclosed Brep or
+// Meshlets would keep its finalizer from running, and its C object alive, for as long as
+// its neighbour lived: the leak the finalizer exists to prevent. Whether an allocation may
+// be tiny is decided by its type (pointer-free and under 16 bytes), never by a pointer's
+// value, so the field stays nil and costs 8 bytes. Byte padding would also lift a struct
+// out of the tiny size range, but leaves it pointer-free and one field removal away from
+// the same leak. FemMesh already holds Go pointers (its slice fields).
+//
+// handle_finalizer_test.go allocates every finalized type, keeps every other one, and
+// fails if a dropped one is not finalized.
+type noTiny struct{ _ *byte }
 
 // lastError is the library's own reason for the last failure on this OS thread, or "".
 // Read only under pin, in the function that made the failing call.
@@ -953,6 +972,9 @@ type BeziersData64 struct {
 	Weights []float64
 }
 
+// Count is how many curves this holds: Weights has four a curve, Points twelve.
+func (b BeziersData64) Count() int { return len(b.Weights) / 4 }
+
 // Copy is the same curves in memory of our own, safe to outlive the scene.
 func (b *Beziers64) Copy() BeziersData64 {
 	return BeziersData64{Points: append([]float64(nil), b.Points...), Weights: append([]float64(nil), b.Weights...)}
@@ -1250,6 +1272,49 @@ type Pair struct {
 	HasPitch bool
 }
 
+// pairKindNames is the reader's own name for each PairKind -- KindName's fallback when
+// the library has no finer name.
+var pairKindNames = map[PairKind]string{
+	PairRevolute: "revolute", PairPrismatic: "prismatic", PairCylindrical: "cylindrical",
+	PairSpherical: "spherical", PairSphericalWithPin: "spherical_with_pin", PairPlanar: "planar",
+	PairUniversal: "universal", PairHomokinetic: "homokinetic", PairScrew: "screw",
+	PairFullyConstrained: "fully_constrained", PairUnconstrained: "unconstrained",
+	PairLowOrder: "low_order", PairOther: "other",
+}
+
+// KindName is the kind by name, finer than Kind: the same thirteen names, and "gear" and
+// "rack_and_pinion" for the two coupled pairs Kind reads as PairOther.
+func (p *Pair) KindName() string {
+	if raw := C.cadaclysm_joint_pair_kind_name(p.scene.h(), C.uint32_t(p.joint)); raw != nil {
+		return C.GoString(raw)
+	}
+	if name, ok := pairKindNames[p.Kind]; ok {
+		return name
+	}
+	return "other"
+}
+
+// Parameters is the pair's own numbers, in the order blacksmith's Assembly.PairWith takes
+// them: "screw" [pitch], "rack_and_pinion" [pinion_radius], "gear" [radius_first,
+// radius_second, ratio, bevel, helical_angle] (always five, the ratio the second link's
+// rotation over the first's); empty for every other kind.
+func (p *Pair) Parameters() []float64 {
+	count := int(C.cadaclysm_joint_pair_parameters(p.scene.h(), C.uint32_t(p.joint), nil, 0))
+	out := make([]float64, count)
+	if count == 0 {
+		return out
+	}
+	buf := make([]C.double, count)
+	got := int(C.cadaclysm_joint_pair_parameters(p.scene.h(), C.uint32_t(p.joint), &buf[0], C.size_t(count)))
+	if got < count {
+		count = got
+	}
+	for i := 0; i < count; i++ {
+		out[i] = float64(buf[i])
+	}
+	return out
+}
+
 func (p *Pair) rawFrames() (start, end [16]float64) {
 	var rawStart, rawEnd [16]C.double
 	C.cadaclysm_joint_pair_frames(p.scene.h(), C.uint32_t(p.joint),
@@ -1386,6 +1451,10 @@ type Pose struct {
 	Unsolved []*Joint
 	// OutOfRange is one entry per given value outside its freedom's range.
 	OutOfRange []PoseOutOfRange
+	// Diagnostics is what the couplings (gear, rack and pinion, a loop-closing screw)
+	// could not solve, or found disagreeing, in file order, in the kernel's words:
+	// "coupling 'mesh': both 'a' and 'b' are given and disagree by 0.1".
+	Diagnostics []string
 
 	transforms [][16]float64
 }
@@ -1400,6 +1469,27 @@ func (p *Pose) Transform(node *Node) [16]float64 {
 // doubles, exactly as Node.RawTransform lays them out.
 func (p *Pose) RawTransform(node *Node) [16]float64 {
 	return p.transforms[node.index]
+}
+
+// Show draws the pose's scene, as Scene.Show does, with every node at its posed transform
+// (cadaclysm_view_set_node_transforms): the wgpu window blocks until it is closed; any
+// other library prints a still. The scene must still be open.
+func (p *Pose) Show(o *view.ShowOptions) error {
+	s := p.Ground.scene
+	if err := s.closedError(); err != nil {
+		return err
+	}
+	_, err := view.DrawPose(s, s.label, s.defaultUp(), p.transforms, o, false)
+	return err
+}
+
+// View orbits the posed scene until its window is closed: the camera and the last pick.
+func (p *Pose) View(o *view.ShowOptions) (view.Camera, error) {
+	s := p.Ground.scene
+	if err := s.closedError(); err != nil {
+		return view.Camera{}, err
+	}
+	return view.DrawPose(s, s.label, s.defaultUp(), p.transforms, o, true)
 }
 
 // Base is the link the file declares as the mechanism's base, or nil when it declares
@@ -1568,6 +1658,273 @@ func (q Sequence) Pose(t float64, ground *Link) (*Pose, error) {
 	return s.copyPose(ptr), nil
 }
 
+// TaskTime is every date pair of a Task, in seconds since 1970-01-01T00:00 (no zone), each
+// nil where the file gives none; Duration is in seconds. From Task.Time.
+type TaskTime struct {
+	ScheduleStart, ScheduleFinish *float64
+	EarlyStart, EarlyFinish       *float64
+	LateStart, LateFinish         *float64
+	ActualStart, ActualFinish     *float64
+	Duration                      *float64
+}
+
+// Task is one task of a WorkSchedule (IfcTask). From WorkSchedule.Tasks.
+type Task struct {
+	// Schedule is the WorkSchedule it belongs to.
+	Schedule WorkSchedule
+	// Index is its position in the schedule's tasks.
+	Index uint32
+	Name  string
+	// Identification is its identification, "" where the file gives none.
+	Identification string
+	// Kind is "attendance", "construction", "demolition", "dismantle", "disposal",
+	// "installation", "logistic", "maintenance", "move", "operation", "removal",
+	// "renovation", "notdefined" or "other".
+	Kind string
+	// KindName is the text of a user-defined kind ("other"), "" otherwise.
+	KindName string
+	// Status is the file's own status text, "" where none.
+	Status    string
+	Milestone bool
+	// Parent is the summary task nesting this one, or nil for a top-level task.
+	Parent *Task
+	Time   TaskTime
+	scene  *Scene
+}
+
+// TaskLink is a sequence between two tasks of a WorkSchedule (IfcRelSequence). From
+// WorkSchedule.Links.
+type TaskLink struct {
+	From, To Task
+	// Kind is "finish_start", "start_start", "finish_finish", "start_finish", "notdefined" or
+	// "other".
+	Kind string
+	// KindName is the text of a user-defined kind ("other"), "" otherwise.
+	KindName string
+	// Lag is the time lag in seconds, or nil where the file gives none.
+	Lag *float64
+}
+
+// ElementState is what one node is doing on a date, from WorkSchedule.At: its Phase
+// ("unbuilt", "building", "built", "demolishing" or "demolished"), Progress 0..1 through
+// the window that governs the phase, and Variance -- seconds late (positive) or early
+// (negative) -- or nil where there is none.
+type ElementState struct {
+	Node     *Node
+	Phase    string
+	Progress float64
+	Variance *float64
+}
+
+// WorkSchedule is an IFC work schedule (IfcWorkSchedule): tasks, the links between them
+// and the dates they run on. From Scene.Schedules.
+type WorkSchedule struct {
+	Index uint32
+	// Name is its name, else its identification, else "schedule #k" (k from 1).
+	Name string
+	// Identification is its identification, "" where the file gives none.
+	Identification string
+	// Kind is "planned", "actual", "baseline", "notdefined" or "other".
+	Kind string
+	// KindName is the text of a user-defined kind ("other"), "" otherwise.
+	KindName string
+	// Start and Finish are seconds since 1970-01-01T00:00 (no zone), nil where the file
+	// gives none.
+	Start, Finish *float64
+	scene         *Scene
+}
+
+var (
+	scheduleKindWords = [...]string{"planned", "actual", "baseline", "notdefined", "other"}
+	taskKindWords     = [...]string{"attendance", "construction", "demolition", "dismantle", "disposal", "installation",
+		"logistic", "maintenance", "move", "operation", "removal", "renovation", "notdefined", "other"}
+	linkKindWords = [...]string{"finish_start", "start_start", "finish_finish", "start_finish", "notdefined", "other"}
+	phaseWords    = [...]string{"unbuilt", "building", "built", "demolishing", "demolished"}
+)
+
+func kindWord(words []string, code uint32) string {
+	if int(code) < len(words) {
+		return words[code]
+	}
+	return "notdefined"
+}
+
+// Schedules is the file's work schedules, in file order; empty for a file that records
+// none.
+func (s *Scene) Schedules() []WorkSchedule {
+	h := s.h()
+	n := uint32(C.cadaclysm_schedule_count(h))
+	out := make([]WorkSchedule, n)
+	for i := uint32(0); i < n; i++ {
+		w := WorkSchedule{
+			Index:          i,
+			Name:           C.GoString(C.cadaclysm_schedule_name(h, C.uint32_t(i))),
+			Identification: C.GoString(C.cadaclysm_schedule_identification(h, C.uint32_t(i))),
+			Kind:           kindWord(scheduleKindWords[:], uint32(C.cadaclysm_schedule_kind(h, C.uint32_t(i)))),
+			KindName:       C.GoString(C.cadaclysm_schedule_kind_name(h, C.uint32_t(i))),
+			scene:          s,
+		}
+		var v C.double
+		if bool(C.cadaclysm_schedule_start(h, C.uint32_t(i), &v)) {
+			start := float64(v)
+			w.Start = &start
+		}
+		if bool(C.cadaclysm_schedule_finish(h, C.uint32_t(i), &v)) {
+			finish := float64(v)
+			w.Finish = &finish
+		}
+		out[i] = w
+	}
+	return out
+}
+
+// Tasks are the schedule's tasks, in file order.
+func (w WorkSchedule) Tasks() []Task {
+	h := w.scene.h()
+	s := C.uint32_t(w.Index)
+	n := uint32(C.cadaclysm_task_count(h, s))
+	out := make([]Task, n)
+	for i := uint32(0); i < n; i++ {
+		t := C.uint32_t(i)
+		task := Task{
+			Schedule:       w,
+			Index:          i,
+			Name:           C.GoString(C.cadaclysm_task_name(h, s, t)),
+			Identification: C.GoString(C.cadaclysm_task_identification(h, s, t)),
+			Kind:           kindWord(taskKindWords[:], uint32(C.cadaclysm_task_kind(h, s, t))),
+			KindName:       C.GoString(C.cadaclysm_task_kind_name(h, s, t)),
+			Status:         C.GoString(C.cadaclysm_task_status(h, s, t)),
+			Milestone:      bool(C.cadaclysm_task_milestone(h, s, t)),
+			scene:          w.scene,
+		}
+		var raw C.CadaclysmTaskTime
+		C.cadaclysm_task_time(h, s, t, &raw)
+		opt := func(has C.bool, v C.double) *float64 {
+			if !bool(has) {
+				return nil
+			}
+			f := float64(v)
+			return &f
+		}
+		task.Time = TaskTime{
+			ScheduleStart:  opt(raw.has_schedule_start, raw.schedule_start),
+			ScheduleFinish: opt(raw.has_schedule_finish, raw.schedule_finish),
+			EarlyStart:     opt(raw.has_early_start, raw.early_start),
+			EarlyFinish:    opt(raw.has_early_finish, raw.early_finish),
+			LateStart:      opt(raw.has_late_start, raw.late_start),
+			LateFinish:     opt(raw.has_late_finish, raw.late_finish),
+			ActualStart:    opt(raw.has_actual_start, raw.actual_start),
+			ActualFinish:   opt(raw.has_actual_finish, raw.actual_finish),
+			Duration:       opt(raw.has_duration, raw.duration),
+		}
+		out[i] = task
+	}
+	// Parents point into the same slice, so a parent's own Parent is already set by the
+	// time a caller reads it.
+	for i := uint32(0); i < n; i++ {
+		var parent C.uint32_t
+		if bool(C.cadaclysm_task_parent(h, s, C.uint32_t(i), &parent)) && uint32(parent) < n {
+			out[i].Parent = &out[parent]
+		}
+	}
+	return out
+}
+
+// Nodes are the nodes this task builds or removes, in node order.
+func (t Task) Nodes() []*Node {
+	h := t.scene.h()
+	s, i := C.uint32_t(t.Schedule.Index), C.uint32_t(t.Index)
+	n := uint32(C.cadaclysm_task_node_count(h, s, i))
+	out := make([]*Node, n)
+	if n == 0 {
+		return out
+	}
+	raw := make([]C.uint32_t, n)
+	C.cadaclysm_task_nodes(h, s, i, &raw[0], C.uint32_t(n))
+	for k, idx := range raw {
+		out[k] = &Node{scene: t.scene, index: uint32(idx)}
+	}
+	return out
+}
+
+// Links are the schedule's task links (IfcRelSequence), in file order.
+func (w WorkSchedule) Links() []TaskLink {
+	h := w.scene.h()
+	tasks := w.Tasks()
+	n := uint32(C.cadaclysm_task_link_count(h, C.uint32_t(w.Index)))
+	out := make([]TaskLink, 0, n)
+	for i := uint32(0); i < n; i++ {
+		var from, to, kind C.uint32_t
+		var lag C.double
+		var hasLag C.bool
+		if !bool(C.cadaclysm_task_link(h, C.uint32_t(w.Index), C.uint32_t(i), &from, &to, &kind, &lag, &hasLag)) {
+			continue
+		}
+		link := TaskLink{
+			From:     tasks[from],
+			To:       tasks[to],
+			Kind:     kindWord(linkKindWords[:], uint32(kind)),
+			KindName: C.GoString(C.cadaclysm_task_link_kind_name(h, C.uint32_t(w.Index), C.uint32_t(i))),
+		}
+		if bool(hasLag) {
+			l := float64(lag)
+			link.Lag = &l
+		}
+		out = append(out, link)
+	}
+	return out
+}
+
+// At is what every node the schedule names is doing on date, in seconds since
+// 1970-01-01T00:00, under dates: "scheduled" or "actual". Returns an error carrying
+// "dates must be 'scheduled' or 'actual'" for any other word, or the library's own message
+// ("the date must be a finite number") for a date that is not finite.
+func (w WorkSchedule) At(date float64, dates string) ([]ElementState, error) {
+	var which C.uint32_t
+	switch dates {
+	case "scheduled":
+		which = 0
+	case "actual":
+		which = 1
+	default:
+		return nil, &CadaclysmError{Message: "dates must be 'scheduled' or 'actual'"}
+	}
+	if err := w.scene.closedError(); err != nil {
+		return nil, err
+	}
+	defer pin()()
+	h := w.scene.h()
+	count := int64(C.cadaclysm_schedule_at(h, C.uint32_t(w.Index), C.double(date), which, nil, 0))
+	if count < 0 {
+		return nil, &CadaclysmError{Message: lastErrorOr("schedule_at")}
+	}
+	out := make([]ElementState, 0, count)
+	if count == 0 {
+		return out, nil
+	}
+	rows := make([]C.CadaclysmElementState, count)
+	got := int64(C.cadaclysm_schedule_at(h, C.uint32_t(w.Index), C.double(date), which, &rows[0], C.uint32_t(count)))
+	if got < 0 {
+		return nil, &CadaclysmError{Message: lastErrorOr("schedule_at")}
+	}
+	for _, r := range rows[:min(got, count)] {
+		state := ElementState{
+			Node:     &Node{scene: w.scene, index: uint32(r.node)},
+			Phase:    "unbuilt",
+			Progress: float64(r.progress),
+		}
+		if int(r.phase) < len(phaseWords) {
+			state.Phase = phaseWords[r.phase]
+		}
+		if bool(r.has_variance) {
+			v := float64(r.variance)
+			state.Variance = &v
+		}
+		out = append(out, state)
+	}
+	return out, nil
+}
+
 // copyPose reads everything out of a *C.CadaclysmPose into a Pose, then frees it
 // (ruling 2 of the posing plan: wrappers copy eagerly, never holding the C pointer). The
 // free runs in a defer, so a panic partway through copying still frees the handle.
@@ -1604,10 +1961,18 @@ func (s *Scene) copyPose(ptr *C.CadaclysmPose) *Pose {
 			})
 		}
 	}
+	diagCount := uint32(C.cadaclysm_pose_diagnostic_count(ptr))
+	diagnostics := make([]string, 0, diagCount)
+	for i := uint32(0); i < diagCount; i++ {
+		if raw := C.cadaclysm_pose_diagnostic(ptr, C.uint32_t(i)); raw != nil {
+			diagnostics = append(diagnostics, C.GoString(raw))
+		}
+	}
 	return &Pose{
-		Ground:     &Link{scene: s, index: groundIndex},
-		Unsolved:   unsolved,
-		OutOfRange: outOfRange,
+		Ground:      &Link{scene: s, index: groundIndex},
+		Unsolved:    unsolved,
+		OutOfRange:  outOfRange,
+		Diagnostics: diagnostics,
 		transforms: transforms,
 	}
 }
@@ -1624,6 +1989,7 @@ func (s *Scene) copyPose(ptr *C.CadaclysmPose) *Pose {
 // release; it checks [BrepLayoutID] and refuses otherwise.
 type Brep struct {
 	ptr *C.CadaclysmBrep
+	_   noTiny // see noTiny
 }
 
 // BrepLayoutID is how this library lays a brep out in memory: its compiler, target and
@@ -1752,6 +2118,7 @@ type Meshlet struct {
 // caller: Close it.
 type Meshlets struct {
 	handle *C.CadaclysmMeshlets
+	_      noTiny // see noTiny
 }
 
 // BuildMeshlets splits positions (three floats a vertex), normals (the same, or nil)
@@ -2337,6 +2704,52 @@ type Node struct {
 // map of what it has drawn, or matching a selection back to a row, needs a stable
 // identity to key it with.
 func (n *Node) Index() uint32 { return n.index }
+
+// Show draws the scene with the siblings along this node's path hidden -- the other roots,
+// and at every ancestor the children not on the path -- and this node framed: its
+// ancestors' own geometry and its subtree stay. As Scene.Show otherwise.
+func (n *Node) Show(o *view.ShowOptions) error {
+	_, err := n.draw(o, false)
+	return err
+}
+
+// View orbits this node, as Show draws it, until its window is closed: the camera and the
+// last pick.
+func (n *Node) View(o *view.ShowOptions) (view.Camera, error) { return n.draw(o, true) }
+
+func (n *Node) draw(o *view.ShowOptions, interactive bool) (view.Camera, error) {
+	if err := n.scene.closedError(); err != nil {
+		return view.Camera{}, err
+	}
+	focus := &view.Focus{Node: n.index, Hide: n.siblingsAlongPath()}
+	return view.DrawScene(n.scene, n.scene.label, n.scene.defaultUp(), focus, o, interactive)
+}
+
+// siblingsAlongPath is node focus, as every wrapper does it: every root but this node's own,
+// then at each level down to this node every child but the next one on the path. Nothing on
+// the path is hidden, so nothing has to be shown again.
+func (n *Node) siblingsAlongPath() []uint32 {
+	path := []*Node{n} // this node .. its root
+	for up := n.Parent(); up != nil; up = up.Parent() {
+		path = append(path, up)
+	}
+	var hide []uint32
+	root := path[len(path)-1].index
+	for _, r := range n.scene.Roots() {
+		if r.index != root {
+			hide = append(hide, r.index)
+		}
+	}
+	for level := len(path) - 1; level > 0; level-- {
+		keep := path[level-1].index
+		for _, child := range path[level].Children() {
+			if child.index != keep {
+				hide = append(hide, child.index)
+			}
+		}
+	}
+	return hide
+}
 
 // Name is the node's own name, or "" past the end.
 func (n *Node) Name() string {
@@ -3025,12 +3438,18 @@ type Scene struct {
 // Close gives the scene back. Idempotent. Every Mesh and Polylines still held is reading
 // freed memory afterwards.
 //
-// The error return is always nil: nothing in the ABI reports a close failing. It exists
-// so Scene satisfies io.Closer and so a caller need not special-case this one call among
-// every other resource it defers closing.
+// The items of this goroutine's views that show the scene (view.View.ShowScene) are
+// removed first (view.Release), as Python's close does. A view of another goroutine
+// cannot be reached from this one: while one still shows the scene, Close returns Python's
+// refusal and the scene stays open -- close that view from its own goroutine, then this
+// again. Nothing else fails: the ABI reports no close failing. The error return also makes
+// Scene an io.Closer.
 func (s *Scene) Close() error {
 	if s.handle == nil {
 		return nil
+	}
+	if err := view.Release(s); err != nil {
+		return err
 	}
 	h := s.handle
 	s.handle = nil
@@ -3048,6 +3467,36 @@ func (s *Scene) closedError() error {
 		return &CadaclysmError{Message: s.label + ": the scene is closed"}
 	}
 	return nil
+}
+
+// SceneHandle is the C handle, nil once closed: what view.View.ShowScene reads the scene
+// through, and for code that calls the C ABI directly.
+func (s *Scene) SceneHandle() unsafe.Pointer {
+	if s == nil {
+		return nil
+	}
+	return unsafe.Pointer(s.handle)
+}
+
+// Show draws every visible placement with the view library in use (view.UseWgpu,
+// view.UseTerminal): the wgpu window blocks until it is closed; any other library prints
+// a still. nil o: the defaults; up defaults from the convention, the title is the file's
+// name.
+func (s *Scene) Show(o *view.ShowOptions) error {
+	if err := s.closedError(); err != nil {
+		return err
+	}
+	_, err := view.DrawScene(s, s.label, s.defaultUp(), nil, o, false)
+	return err
+}
+
+// View orbits the scene until its window is closed: where the camera was left (as
+// ShowOptions takes it) and what was last clicked.
+func (s *Scene) View(o *view.ShowOptions) (view.Camera, error) {
+	if err := s.closedError(); err != nil {
+		return view.Camera{}, err
+	}
+	return view.DrawScene(s, s.label, s.defaultUp(), nil, o, true)
 }
 
 // h is the handle every call into the library reads through, so a closed scene is refused
@@ -3580,6 +4029,44 @@ func (s *Scene) Svg(path string, opts *SvgOptions) error {
 		return &CadaclysmError{Message: lastErrorOr(fmt.Sprintf("could not write %s", path))}
 	}
 	return nil
+}
+
+// SilhouetteBeziers is this node's silhouette -- where its surfaces turn away from the
+// eye, which no edge of it lies on -- as rational cubic Béziers, in double, from the
+// camera opts describes (nil for NewSvgOptions()'s defaults). The same SvgOptions that
+// draw a picture: View, Azimuth, Elevation, Up and Fov, and Width with Tolerance, which
+// the library reads together as the page fraction Tolerance/Width. Nothing else in them
+// changes the curves.
+//
+// Unlike EdgeBeziers64 this is a copy. The library keeps one silhouette slot per scene
+// and the next silhouette call on that scene -- for any node -- overwrites it, so the
+// slice Beziers64 would hand back is a view that changes under the caller; this copies out
+// of the slot before it returns. Calls sharing a scene across goroutines must serialise
+// their silhouette calls, as the library documents.
+//
+// A body with no silhouette (every face planar) gives a result with Count() 0 and a nil
+// error. A refused option, a body with no measurable geometry or a node holding no shape
+// of its own is an error.
+func (n *Node) SilhouetteBeziers(opts *SvgOptions) (BeziersData64, error) {
+	if err := n.scene.closedError(); err != nil {
+		return BeziersData64{}, err
+	}
+	defer pin()()
+	raw, err := buildSvgOptions(opts, n.scene.defaultUp())
+	if err != nil {
+		return BeziersData64{}, err
+	}
+	curves := beziersFrom64(C.cadaclysm_node_silhouette_beziers(n.scene.h(), C.uint32_t(n.index), &raw))
+	runtime.KeepAlive(n.scene)
+	if curves.Count() == 0 {
+		// The call clears the thread's error at entry and the empty answer sets none: a
+		// reason here is this call's own refusal, none is the empty answer.
+		if reason := lastError(); reason != "" {
+			return BeziersData64{}, &CadaclysmError{Message: reason}
+		}
+		return BeziersData64{Points: []float64{}, Weights: []float64{}}, nil
+	}
+	return curves.Copy(), nil
 }
 
 // SvgText is this node's own wireframe as SVG text, in its own frame — Scene.SvgText's

@@ -503,8 +503,8 @@ return function(t)
     local scene = cadaclysm.open(path)
     local bracket, pin = scene.nodes[2], scene.nodes[3]
     t.eq(bracket.is_meshed, false)
-    t.eq(bracket.triangle_estimate, 18)
-    t.eq(pin.triangle_estimate, 318)  -- 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound): 480 -> 468; 2026-10-04, one row along a ruling (the display's filler lays one row along a cylinder's or cone's straight axis, not six): 468 -> 318
+    t.eq(bracket.triangle_estimate, 12)  -- 2026-10-06, d945a0458 (the estimate calls the mesher's own sampling and stations): bracket 18 -> 12, pin 318 -> 248
+    t.eq(pin.triangle_estimate, 248)  -- 2026-10-06, d945a0458 (the estimate calls the mesher's own sampling and stations): bracket 18 -> 12, pin 318 -> 248; 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound): 480 -> 468; 2026-10-04, one row along a ruling (the display's filler lays one row along a cylinder's or cone's straight axis, not six): 468 -> 318
     t.eq(bracket.surface_edges.polyline_count, 12)
     t.eq(bracket.surface_edges.vertex_count, 24)
     t.eq(bracket.surface_isocurves.polyline_count, 0)
@@ -1065,6 +1065,114 @@ return function(t)
     scene:close()
   end)
 
+  -- IFC work schedules: samples/schedule.ifc, at parity with the Python reference's tests.
+  local D, T0 = 86400, 1772438400
+
+  local function names(list)
+    local out = {}
+    for i, v in ipairs(list) do out[i] = v.name end
+    return out
+  end
+  local function sorted_names(list)
+    local out = names(list)
+    table.sort(out)
+    return out
+  end
+  local function by_name(rows)
+    local out = {}
+    for _, e in ipairs(rows) do out[e.node.name] = e end
+    return out
+  end
+
+  t.test("a file reads its work schedule", function()
+    local scene = cadaclysm.open(t.fixture("samples/schedule.ifc"))
+    local schedules = scene.schedules
+    t.eq(#schedules, 1)
+    local s = schedules[1]
+    t.eq(s.name, "Programme")
+    t.eq(s.identification, "WS-1")
+    t.eq(s.kind, "planned")
+    t.eq(s.kind_name, "")
+    t.eq(s.start, T0)
+    t.eq(s.finish, nil)
+    local tasks = s.tasks
+    t.eq(table.concat(names(tasks), ","), "Slab,Structure,Walls north,Walls south,Topping out,Demolish shed,Fit-out")
+    local slab, structure, north, south, topping, shed, fit =
+      tasks[1], tasks[2], tasks[3], tasks[4], tasks[5], tasks[6], tasks[7]
+    t.eq(north.parent.index, structure.index)
+    t.eq(south.parent.index, structure.index)
+    t.eq(slab.parent, nil)
+    t.eq(slab.kind, "construction")
+    t.eq(shed.kind, "demolition")
+    t.eq(topping.kind, "notdefined")
+    t.eq(slab.kind_name, "")
+    t.eq(topping.milestone, true)
+    t.eq(slab.milestone, false)
+    t.eq(slab.identification, "T1")
+    t.eq(slab.status, "COMPLETED")
+    local time = slab.time
+    t.eq(time.schedule_start, T0)
+    t.eq(time.schedule_finish, nil)
+    t.eq(time.duration, 10 * D)
+    t.eq(time.actual_start, T0)
+    t.eq(time.actual_finish, T0 + 8 * D)
+    t.eq(time.early_start, nil)
+    t.eq(table.concat(sorted_names(south.nodes), ","), "Wall S1,Wall S2")
+    t.eq(table.concat(sorted_names(fit.nodes), ","), "Desk,Room")
+    local links = s.links
+    t.eq(#links, 4)
+    local want = {
+      { "Slab", "Structure", "finish_start", nil },
+      { "Walls north", "Walls south", "start_start", 2 * D },
+      { "Walls south", "Topping out", "finish_start", nil },
+      { "Topping out", "Fit-out", "finish_start", nil },
+    }
+    for i, w in ipairs(want) do
+      local l = links[i]
+      t.eq(l.from.name, w[1])
+      t.eq(l.to.name, w[2])
+      t.eq(l.kind, w[3])
+      t.eq(l.kind_name, "")
+      t.eq(l.lag, w[4])
+    end
+    scene:close()
+  end)
+
+  t.test("a schedule says what each element is doing", function()
+    local scene = cadaclysm.open(t.fixture("samples/schedule.ifc"))
+    local s = scene.schedules[1]
+    local states = by_name(s:at(T0 + 3 * D))
+    local got = {}
+    for name in pairs(states) do got[#got + 1] = name end
+    table.sort(got)
+    t.eq(table.concat(got, ","), "Desk,Room,Shed,Slab,Wall N1,Wall N2,Wall S1,Wall S2")
+    t.eq(states["Slab"].phase, "building")
+    t.near(states["Slab"].progress, 0.3, 1e-9, "Slab progress")
+    t.eq(states["Shed"].phase, "demolishing")
+    t.eq(states["Wall S1"].phase, "unbuilt")
+    local late = by_name(s:at(T0 + 32 * D, "actual"))
+    t.eq(late["Wall S1"].phase, "building")
+    t.eq(late["Wall S1"].variance, 5 * D)
+    t.eq(late["Slab"].variance, -2 * D)
+    scene:close()
+  end)
+
+  t.test("a schedule refuses a bad date and dates word", function()
+    local scene = cadaclysm.open(t.fixture("samples/schedule.ifc"))
+    local s = scene.schedules[1]
+    local e = t.raises(function() s:at(0 / 0) end)
+    t.eq(e.message, "the date must be a finite number")
+    e = t.raises(function() s:at(T0, "compare") end)
+    t.eq(e.message, "dates must be 'scheduled' or 'actual'")
+    scene:close()
+  end)
+
+  t.test("a file without a schedule has none", function()
+    local cube = cadaclysm.open(t.fixture("samples/cube.scad"))
+    t.eq(#cube.schedules, 0)
+    cube:close()
+  end)
+
   t.test("state values pose like the state", function()
     local scene = cadaclysm.open(t.fixture("samples/mechanism.stp"))
     local base_link, arm_link, hinge, state, arm_node, base_node = mechanism_parts(scene)
@@ -1126,6 +1234,146 @@ return function(t)
       t.eq(#n.edge_colours, 0)
       t.eq(#n.surface_edge_colours, 0)
     end
+    scene:close()
+  end)
+
+  -- ---- Node:silhouette_beziers ------------------------------------------------------------
+  -- The fixtures are the repository's own. The box is our STEP writer's, not a Rhino export: Rhino
+  -- writes a planar face as a NURBS patch, so the exact-plane path would never be reached and an
+  -- empty answer would prove nothing.
+
+  local RHINO = "crates/cadaclysm-acis/tests/fixtures/rhino/"
+
+  --- The body node above the lump holds no shape of its own; the first node with extent is the part.
+  local function silhouette_part(scene)
+    for _, n in ipairs(scene.nodes) do
+      local b = n.bounds64
+      for i = 1, 3 do
+        if b.max[i] - b.min[i] > 0 then return n end
+      end
+    end
+    error("the fixture has no part with extent")
+  end
+
+  t.test("a sphere's silhouette sits on it, in tables of the documented lengths", function()
+    local scene = cadaclysm.open(t.fixture(RHINO .. "sphere.sat"))
+    local node = silhouette_part(scene)
+    local words = { view = "iso", tolerance = 0.1, size = { 1000, 1000 } }
+    local rim = node:silhouette_beziers(words)
+    t.ok(rim.count > 0, "a sphere gave no rim")
+    t.eq(#rim.points, rim.count * 12)
+    t.eq(#rim.weights, rim.count * 4)
+    for k, w in ipairs(rim.weights) do t.ok(w > 0 and w < math.huge, "weight " .. k .. " is not finite and positive") end
+    -- Every control point lies within the library's fit budget of the sphere, at the bounds radius from the
+    -- bounds centre. That is NOT because control points lie on the sphere: the silhouette curve does, but a
+    -- cubic's interior control points do not. Here they stray up to 3.0e-3, while the end points are on it
+    -- to about 1e-14 -- a Bezier interpolates its first and last control point, so for a curve lying on the
+    -- sphere those two lie on it exactly. It holds because the arcs are short (half a unit on a radius of
+    -- 10), and the budget is the tolerance the library fits the CURVE to, not its control polygon. The
+    -- margin is narrow: the curve itself uses nearly the whole budget (3.42e-3 against 3.46e-3), since the
+    -- lattice's spacing became a length in space (44efabc88); before, a lattice ten times too fine left it
+    -- at 1e-4. So this catches a displaced
+    -- or scaled result and a wildly mis-strided unpack. It is blind to a one-CONTROL-POINT slip of the
+    -- unpack: that is a shift of 3 doubles, so every point is replaced by ANOTHER control point, which
+    -- lies within the same budget, and the worst deviation is the same before and after (3.04e-3 here
+    -- on iso, against a budget of about 3.5e-3). A one-DOUBLE slip is another matter: it mixes
+    -- coordinates across neighbouring points, leaves the sphere, and is caught (0.87 on iso, 8.8 on
+    -- front). The chaining assertion below is what catches the one-control-point slip. The budget also
+    -- does NOT pin the eye (a silhouette point is a point of the surface, so it is on the sphere from any
+    -- view), the weights (all 1.0 on this fixture) or the radius separately from the centre.
+    -- The bound is the library's own budget, `world_tolerance`: extent * (tolerance / width), read off the
+    -- options this call was given (`words`, above) rather than copied from their defaults; the node's
+    -- bounds diagonal stands in for the extent.
+    local b = node.bounds64
+    local centre, size = {}, {}
+    for i = 1, 3 do
+      centre[i] = (b.min[i] + b.max[i]) / 2
+      size[i] = b.max[i] - b.min[i]
+    end
+    local radius = size[1] / 2
+    local budget = math.sqrt(size[1] ^ 2 + size[2] ^ 2 + size[3] ^ 2) * (words.tolerance / words.size[1])
+    local worst = 0
+    for k = 0, rim.count * 4 - 1 do
+      local dx, dy, dz = rim.points[k * 3 + 1] - centre[1], rim.points[k * 3 + 2] - centre[2], rim.points[k * 3 + 3] - centre[3]
+      worst = math.max(worst, math.abs(math.sqrt(dx * dx + dy * dy + dz * dz) - radius))
+    end
+    t.ok(radius > 0 and worst <= budget, ("control points stray %g from the bounds centre's radius %g, past the budget %g")
+      :format(worst, radius, budget))
+    -- Chaining, the assertion that sees an offset slip. The arcs come back in runs, not as one ordered
+    -- traversal, so "every arc ends where the next begins" is false: on this fixture 232 of the 235
+    -- consecutive pairs have the last control point of one arc equal to the first of the next, to 1e-9 per
+    -- coordinate (each of x, y and z is tested, so a passing pair can be up to 1.73e-9 apart): four runs,
+    -- the three breaks each a jump of 17 to 20 to the next run's start. A read
+    -- shifted by a double or by a control point leaves none (0 of 235), so a slip takes the count from
+    -- over two hundred to zero. The count varies with how the sphere is tessellated; what makes a lower
+    -- bound of 80 safe is not that it cannot drift but that it sits about three times below the count on
+    -- this fixture. It has drifted once: the bound was 400 against 1206 of 1209 until the lattice's
+    -- spacing became a length in space (44efabc88) and the same four runs came back in arcs five times
+    -- longer. Every slip quoted here is a wrap-around, so the length and the count are preserved and
+    -- each denominator stays the unshifted pair count.
+    -- The front view's figures are a measurement no test chains, kept because they explain the
+    -- threshold: there the property is much weaker (96 of 173 pairs, 55%, against 98.7% here;
+    -- 0 after a one-double or a one-control-point slip; 95 of 173 after a whole-curve slip), which
+    -- is why the bound is 80 and not near 230.
+    -- Its limit: a shift by a whole CURVE (12 doubles) keeps the chaining (231 of 235 still chain
+    -- here) and is NOT caught: it survives because the chaining is preserved. A wrap-around slip of
+    -- that size reads only inside the allocation, so it is reachable and silent.
+    local chained = 0
+    for c = 0, rim.count - 2 do
+      local last, first = c * 12 + 9, (c + 1) * 12
+      if math.abs(rim.points[last + 1] - rim.points[first + 1]) <= 1e-9
+          and math.abs(rim.points[last + 2] - rim.points[first + 2]) <= 1e-9
+          and math.abs(rim.points[last + 3] - rim.points[first + 3]) <= 1e-9 then
+        chained = chained + 1
+      end
+    end
+    t.ok(chained >= 80, ("only %d of %d consecutive arcs chain (last control point = the next one's first), want at least 80")
+      :format(chained, rim.count - 1))
+    scene:close()
+  end)
+
+  -- Asked larger first, so the second call refills the same slot in place: iso gives more curves
+  -- than front (236 against 174 here), so a view would show the second answer through the head of
+  -- the first. The reverse order can pass with a view. It was front first until the lattice's spacing
+  -- became a length in space (44efabc88): front gave 1248 against iso's 1210 then.
+  t.test("the answer is the caller's own: a later call on the scene leaves it alone", function()
+    local scene = cadaclysm.open(t.fixture(RHINO .. "sphere.sat"))
+    local node = silhouette_part(scene)
+    local first = node:silhouette_beziers({ view = "iso" })
+    local kept_points, kept_weights = {}, {}
+    for i = 1, first.count * 12 do kept_points[i] = first.points[i] end
+    for i = 1, first.count * 4 do kept_weights[i] = first.weights[i] end
+    local kept_count = first.count
+    local second = node:silhouette_beziers({ view = "front" })
+    t.ok(second.count > 0, "the second view gave no rim")
+    t.ok(second.count <= kept_count, ("the larger answer must come first (iso %d, front %d)"):format(kept_count, second.count))
+    local differs = second.count ~= kept_count
+    for i = 1, math.min(second.count * 12, kept_count * 12) do
+      if second.points[i] ~= kept_points[i] then differs = true; break end
+    end
+    t.ok(differs, "the two views gave the same silhouette, so this cannot tell a copy from a view")
+    t.eq(first.count, kept_count)
+    for i = 1, kept_count * 12 do
+      if first.points[i] ~= kept_points[i] then error("the first answer's point " .. i .. " changed under the second call") end
+    end
+    for i = 1, kept_count * 4 do
+      if first.weights[i] ~= kept_weights[i] then error("the first answer's weight " .. i .. " changed under the second call") end
+    end
+    scene:close()
+  end)
+
+  t.test("an infinite tolerance is refused, and an all-planar body is the empty answer after it", function()
+    local scene = cadaclysm.open(t.fixture(RHINO .. "box-chamfer-all.blacksmith.stp"))
+    local node = silhouette_part(scene)
+    local e = t.raises(function() node:silhouette_beziers({ tolerance = math.huge }) end, "silhouette: ")
+    t.eq(getmetatable(e), cadaclysm.CadaclysmError, "a refusal is a CadaclysmError")
+    -- The refusal above left its reason in the thread's error slot; the empty answer must not
+    -- read it as its own.
+    local none
+    t.ok(pcall(function() none = node:silhouette_beziers() end), "an empty silhouette is an answer, not an error")
+    t.eq(none.count, 0)
+    t.eq(#none.points, 0)
+    t.eq(#none.weights, 0)
     scene:close()
   end)
 end

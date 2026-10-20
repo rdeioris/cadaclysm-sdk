@@ -19,8 +19,14 @@ mod control;
 
 mod png;
 
-pub use options::{Camera, Pick, SurfaceMode, ViewOptions};
+mod colour;
+
+mod text;
+
+pub use colour::{Colour, Rgb, Rgba};
+pub use options::{Camera, Lighting, Navigation, Pick, SurfaceMode, ViewOptions};
 pub use items::{Item, View};
+pub use text::{Align, Text, TextMode};
 pub use target::{RawWindow, WindowKind};
 pub use control::{Button, Event, Grid, Image, Input, Layer, Lod, LodMotion, Pointer, Standard, Viewport};
 
@@ -149,15 +155,25 @@ impl Library {
 fn check_abi_version(version: u32, path: &Path) -> Result<()> {
     let (major, minor) = (version >> 16, version & 0xFFFF);
     if major != sys::CADACLYSM_VIEW_ABI_MAJOR || minor < sys::CADACLYSM_VIEW_ABI_MINOR {
-        return Err(Error::new(format!(
+        return Err(Error::new(abi_mismatch(major, minor, path, loader::BUILD_ERROR)));
+    }
+    Ok(())
+}
+
+/// The message for a view library of ABI `major.minor`, with why the build gave no
+/// libraries of its own (`build_error`) when it gave none: the too-old library is then
+/// usually one an earlier build left beside the binaries.
+fn abi_mismatch(major: u32, minor: u32, path: &Path, build_error: Option<&str>) -> String {
+    loader::with_build_note(
+        format!(
             "{}: view ABI {major}.{minor}, this SDK needs {}.{} or a later {}.x",
             path.display(),
             sys::CADACLYSM_VIEW_ABI_MAJOR,
             sys::CADACLYSM_VIEW_ABI_MINOR,
             sys::CADACLYSM_VIEW_ABI_MAJOR
-        )));
-    }
-    Ok(())
+        ),
+        build_error,
+    )
 }
 
 static LOADED: Mutex<Vec<&'static Library>> = Mutex::new(Vec::new());
@@ -207,6 +223,21 @@ pub fn use_terminal() -> Result<&'static Library> {
 /// window, offscreen views. Where it is not found, the error names the places searched.
 pub fn use_wgpu() -> Result<&'static Library> {
     use_library(wgpu_library()?)
+}
+
+/// Loads a TrueType or OpenType font (the bytes of a `.ttf`/`.otf`, copied) into the
+/// library in use and returns its id, for [`Text::font`] (0 is the built-in face). The
+/// error carries the library's reason when the bytes are not a font.
+pub fn load_font(bytes: &[u8]) -> Result<u32> {
+    load_font_with(current()?, bytes)
+}
+
+pub(crate) fn load_font_with(library: &Library, bytes: &[u8]) -> Result<u32> {
+    let id = unsafe { (library.api().cadaclysm_view_load_font)(bytes.as_ptr(), bytes.len()) };
+    if id == 0 {
+        return Err(library.error());
+    }
+    Ok(id)
 }
 
 /// The library `show`, `view` and [`View`] draw with: the last [`use_library`],
@@ -284,7 +315,7 @@ fn no_library(message: String, what: &str, variable: &str) -> Error {
          to it, or CADACLYSM_VIEW to another view library",
         searched.join(", ")
     );
-    if let Some(download) = message.lines().find(|line| line.starts_with("The build did not download")) {
+    if let Some(download) = message.lines().find(|line| line.starts_with(loader::BUILD_NOTE)) {
         text.push('\n');
         text.push_str(download);
     }
@@ -329,7 +360,7 @@ mod tests {
     fn a_viewer_reports_its_name_and_version() {
         let v = fake::library();
         assert_eq!(v.name(), "fake 1.0");
-        assert_eq!(v.abi_version(), (1, 4));
+        assert_eq!(v.abi_version(), (1, 11));
         assert_eq!(v.path(), Path::new("fake"));
     }
 
@@ -402,26 +433,42 @@ mod tests {
 
     #[test]
     fn another_abi_major_is_refused_with_both_versions() {
-        fake::abi((2 << 16) | 4);
+        fake::abi((2 << 16) | 5);
         let err = Library::from_api(fake::api(), PathBuf::from("v2.dll"), None).expect_err("ABI 2 refused");
-        fake::abi((1 << 16) | 4);
-        assert_eq!(err.message(), "v2.dll: view ABI 2.4, this SDK needs 1.4 or a later 1.x");
+        fake::abi((1 << 16) | 11);
+        assert_eq!(err.message(), "v2.dll: view ABI 2.5, this SDK needs 1.11 or a later 1.x");
     }
 
     #[test]
-    fn a_minor_version_below_4_is_refused_with_the_abi_message() {
-        fake::abi((1 << 16) | 3);
-        let err = Library::from_api(fake::api(), PathBuf::from("v1.3.dll"), None).expect_err("1.3 is too old");
+    fn an_abi_mismatch_says_why_the_build_gave_no_libraries() {
+        let reason = "they were not built from R:\\src: cargo build failed";
+        let m = abi_mismatch(1, 5, Path::new("old.dll"), Some(reason));
+        assert_eq!(
+            m,
+            "old.dll: view ABI 1.5, this SDK needs 1.11 or a later 1.x\n\
+             The build gave no libraries of its own: they were not built from R:\\src: cargo build failed"
+        );
+        assert_eq!(abi_mismatch(1, 5, Path::new("old.dll"), None), "old.dll: view ABI 1.5, this SDK needs 1.11 or a later 1.x");
+    }
+
+    #[test]
+    fn a_minor_version_below_11_is_refused_with_the_abi_message() {
         fake::abi((1 << 16) | 4);
-        assert_eq!(err.message(), "v1.3.dll: view ABI 1.3, this SDK needs 1.4 or a later 1.x");
+        let err = Library::from_api(fake::api(), PathBuf::from("v1.4.dll"), None).expect_err("1.4 is too old");
+        fake::abi((1 << 16) | 11);
+        assert_eq!(err.message(), "v1.4.dll: view ABI 1.4, this SDK needs 1.11 or a later 1.x");
+        fake::abi((1 << 16) | 10);
+        let err = Library::from_api(fake::api(), PathBuf::from("v1.10.dll"), None).expect_err("1.10 is too old");
+        fake::abi((1 << 16) | 11);
+        assert_eq!(err.message(), "v1.10.dll: view ABI 1.10, this SDK needs 1.11 or a later 1.x");
     }
 
     #[test]
     fn a_later_minor_version_is_accepted() {
-        fake::abi((1 << 16) | 7);
-        let v = Library::from_api(fake::api(), PathBuf::from("v1.7"), None);
-        fake::abi((1 << 16) | 4);
-        assert_eq!(v.expect("1.7 is 1.4 or later").abi_version(), (1, 7));
+        fake::abi((1 << 16) | 12);
+        let v = Library::from_api(fake::api(), PathBuf::from("v1.12"), None);
+        fake::abi((1 << 16) | 11);
+        assert_eq!(v.expect("1.12 is 1.11 or later").abi_version(), (1, 12));
     }
 
     #[test]
@@ -454,19 +501,19 @@ mod tests {
     #[test]
     fn a_viewer_prints_its_name_path_and_version() {
         let text = format!("{:?}", fake::library());
-        assert_eq!(text, r#"Library { name: "fake 1.0", path: "fake", abi_version: (1, 4) }"#);
+        assert_eq!(text, r#"Library { name: "fake 1.0", path: "fake", abi_version: (1, 11) }"#);
     }
 
     #[test]
     fn no_library_names_the_places_searched_and_the_libraries_variable() {
         let found = "cadaclysm_terminal.dll not found. Looked in:\n    C:\\app\\cadaclysm_terminal.dll\n    \
-                     C:\\lib\\cadaclysm_terminal.dll\nThe build did not download the libraries: offline\n\
+                     C:\\lib\\cadaclysm_terminal.dll\nThe build gave no libraries of its own: offline\n\
                      Point CADACLYSM_TERMINAL_LIBRARY at it, or load it with its path first.";
         let m = no_library(found.to_string(), "terminal", TERMINAL_VARIABLE).message().to_string();
         assert!(m.starts_with("no view library: the terminal library was not found (searched: "), "{m}");
         assert_eq!(m.matches("CADACLYSM_TERMINAL_LIBRARY").count(), 1, "{m}");
         assert!(m.contains("C:\\app\\cadaclysm_terminal.dll, C:\\lib\\cadaclysm_terminal.dll)"), "{m}");
-        assert!(m.contains("The build did not download the libraries: offline"), "{m}");
+        assert!(m.contains("The build gave no libraries of its own: offline"), "{m}");
         assert!(!m.contains("load it with its path first"), "{m}");
         let wgpu = no_library("libcadaclysm_view.so not found. Looked in:\n    /app/libcadaclysm_view.so\n".to_string(), "wgpu", WGPU_VARIABLE);
         assert!(wgpu.message().starts_with("no view library: the wgpu library was not found (searched: /app/libcadaclysm_view.so)"), "{}", wgpu.message());
@@ -494,6 +541,11 @@ mod tests {
         assert!(library.name().starts_with("cadaclysm-view "), "{}", library.name());
         assert!(!library.is_terminal());
         assert!(std::ptr::eq(current().unwrap(), library));
+        // Colour text is the real library's own parser (1.5).
+        let purple = library.parse_colour("RebeccaPurple").unwrap();
+        assert_eq!(purple.map(|c| (c * 255.0).round()), [102.0, 51.0, 153.0]);
+        let err = library.rgb(Colour::from("blurple")).unwrap_err();
+        assert!(err.message().contains("not 'blurple'"), "{}", err.message());
         *lock(&CURRENT) = before;
     }
 
@@ -578,5 +630,58 @@ mod tests {
         let cube = crate::blacksmith::Solid::cuboid(1.0, 1.0, 1.0).unwrap();
         use_terminal().unwrap();
         cube.show(&ViewOptions { hint: Some("blocks".into()), width: 64, height: 32, ..ViewOptions::default() }).unwrap();
+    }
+
+    /// `objects::aim`'s `RADIANS_PER_PIXEL`/`ZOOM_PER_STEP` mirror cadaclysm-view's own
+    /// constants; the fake uses the same numbers, so only the real library tells when they
+    /// drift. Off a terminal `run` returns at once, with the camera `view(az 30, el 20)`
+    /// aimed -- once at the fit and once at twice the zoom, half the distance. The child
+    /// is `aims_in_a_child`, as for `the_terminal_viewer_draws_half_blocks`.
+    #[test]
+    fn the_terminal_viewer_hands_back_the_camera_it_was_aimed_at() {
+        if terminal_library().is_err() || crate::blacksmith::Solid::cuboid(1.0, 1.0, 1.0).is_err() {
+            return skip("needs the terminal and kernel libraries");
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["view::tests::aims_in_a_child", "--exact", "--ignored", "--nocapture", "--test-threads=1"])
+            .env("CADACLYSM_VIEW_CHILD", "1")
+            .output()
+            .expect("the test binary runs again");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "the child failed: {stderr}");
+        let cameras: Vec<Vec<f64>> = stderr
+            .lines()
+            .filter_map(|l| l.strip_prefix("camera "))
+            .map(|l| l.split(' ').map(|x| x.parse().unwrap()).collect())
+            .collect();
+        assert_eq!(cameras.len(), 2, "{stderr}");
+        for c in &cameras {
+            assert!((c[0] - 30.0).abs() < 0.5 && (c[1] - 20.0).abs() < 0.5, "{stderr}");
+        }
+        assert!((cameras[1][2] / cameras[0][2] - 0.5).abs() < 0.01, "{stderr}");
+    }
+
+    #[test]
+    #[ignore = "run by the_terminal_viewer_hands_back_the_camera_it_was_aimed_at, in a child process"]
+    fn aims_in_a_child() {
+        if std::env::var_os("CADACLYSM_VIEW_CHILD").is_none() {
+            return;
+        }
+        let cube = crate::blacksmith::Solid::cuboid(1.0, 1.0, 1.0).unwrap();
+        use_terminal().unwrap();
+        for zoom in [None, Some(2.0)] {
+            let options = ViewOptions {
+                azimuth: Some(30.0),
+                elevation: Some(20.0),
+                zoom,
+                hint: Some("blocks".into()),
+                width: 64,
+                height: 32,
+                ..ViewOptions::default()
+            };
+            let c = cube.view(&options).unwrap();
+            let distance = c.eye.iter().zip(c.target).map(|(e, t)| f64::from(e - t).powi(2)).sum::<f64>().sqrt();
+            eprintln!("camera {} {} {distance}", c.azimuth, c.elevation);
+        }
     }
 }

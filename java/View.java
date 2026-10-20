@@ -34,6 +34,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.WeakHashMap;
 import java.util.zip.CRC32;
 import java.util.zip.Deflater;
@@ -50,7 +51,18 @@ public final class View implements AutoCloseable {
     }
 
     static final int ABI_MAJOR = 1;
-    static final int ABI_MINOR = 4;
+    /**
+     * 1.6: text -- {@code cadaclysm_view_show_text}, {@code _set_text}, {@code _load_font} and the text layer.
+     * 1.7: the machining and timeline calls (not bound here yet).
+     * 1.8: the pick's {@code clicks} and {@code point}, {@code cadaclysm_view_set_double_click_frames},
+     * {@code _focus}, {@code _navigation}.
+     * 1.9: {@code cadaclysm_view_set_lighting} and {@code _lighting} (headlight or studio).
+     * 1.10: the viewport cameras (bound; Java's own API for them comes later).
+     * 1.11: {@code cadaclysm_view_show_points}.
+     */
+    static final int ABI_MINOR = 11;
+    /** CADACLYSM_VIEW_NAVIGATION_FLY (ORBIT is 0). */
+    static final int NAVIGATION_FLY = 1;
     static final int OPEN = 1;
     static final int CLOSED = 2;
     public static final int WINDOW_WIN32 = 1;
@@ -59,12 +71,18 @@ public final class View implements AutoCloseable {
     public static final int WINDOW_WAYLAND = 4;
     public static final int WINDOW_APPKIT = 5;
     static final Map<String, Integer> STANDARD = Map.of("top", 0, "front", 1, "right", 2, "iso", 3);
-    static final Map<String, Integer> LAYERS = Map.of("surfaces", 0, "edges", 1, "curves", 2, "isocurves", 3, "grid", 4);
+    static final Map<String, Integer> LAYERS = Map.of("surfaces", 0, "edges", 1, "curves", 2, "isocurves", 3, "grid", 4,
+            "text", 5);
+    /** cadaclysm_view.h's CADACLYSM_VIEW_ALIGN_*: where the anchor sits on the text ("center" is "centre"). */
+    static final Map<String, Integer> ALIGN = Map.of("top-left", 0, "top", 1, "top-right", 2, "left", 3, "centre", 4,
+            "center", 4, "right", 5, "bottom-left", 6, "bottom", 7, "bottom-right", 8);
+    static final Map<String, Integer> TEXT_MODES = Map.of("label", 0, "world", 1);
     static final Map<String, Integer> EVENTS = Map.of("pointer_down", 1, "pointer_move", 2, "pointer_up", 3,
             "pointer_cancel", 4, "wheel", 5, "key", 6);
     static final Map<String, Integer> GRIDS = Map.of("none", 0, "top", 1, "front", 2, "right", 3);
     static final Map<String, Integer> LOD_MOTION = Map.of("detailed", 0, "smooth", 1);
     static final Map<String, Integer> SURFACES = Map.of("exact", 0, "triangles", 1);
+    static final Map<String, Integer> LIGHTING = Map.of("headlight", 0, "studio", 1);
     static final int INPUT_CLOSE = 1;
     static final Map<String, Integer> POINTERS = Map.of("mouse", 0, "touch", 1, "pen", 2);
     static final Map<String, double[]> VIEWS = Map.of(
@@ -104,7 +122,10 @@ public final class View implements AutoCloseable {
             ValueLayout.JAVA_INT.withName("size"),
             ValueLayout.JAVA_INT.withName("item"),
             ValueLayout.JAVA_INT.withName("node"),
-            ValueLayout.JAVA_INT.withName("face"));
+            ValueLayout.JAVA_INT.withName("face"),
+            ValueLayout.JAVA_INT.withName("clicks"),
+            ValueLayout.JAVA_INT.withName("has_point"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("point"));
     static final MemoryLayout LOD = MemoryLayout.structLayout(
             ValueLayout.JAVA_INT.withName("size"),
             ValueLayout.JAVA_INT.withName("min_triangles"),
@@ -130,7 +151,9 @@ public final class View implements AutoCloseable {
             ValueLayout.ADDRESS.withName("key"),
             ValueLayout.JAVA_INT.withName("key_down"),
             MemoryLayout.paddingLayout(4),
-            ValueLayout.JAVA_DOUBLE.withName("time_ms"));
+            ValueLayout.JAVA_DOUBLE.withName("time_ms"),
+            ValueLayout.JAVA_INT.withName("alt"),
+            MemoryLayout.paddingLayout(4));
     static final MemoryLayout MESH = MemoryLayout.structLayout(
             ValueLayout.JAVA_INT.withName("size"),
             MemoryLayout.paddingLayout(4),
@@ -156,6 +179,40 @@ public final class View implements AutoCloseable {
             ValueLayout.JAVA_INT.withName("flip_x"),
             ValueLayout.JAVA_INT.withName("flip_y"),
             MemoryLayout.paddingLayout(4));
+    static final MemoryLayout TEXT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("size"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.ADDRESS.withName("text"),
+            ValueLayout.JAVA_INT.withName("mode"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("at"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("right"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("up"),
+            ValueLayout.JAVA_FLOAT.withName("height"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("rgb"),
+            ValueLayout.JAVA_INT.withName("align"),
+            MemoryLayout.sequenceLayout(2, ValueLayout.JAVA_FLOAT).withName("offset"),
+            MemoryLayout.sequenceLayout(4, ValueLayout.JAVA_FLOAT).withName("box_rgba"),
+            ValueLayout.JAVA_FLOAT.withName("box_padding"),
+            ValueLayout.JAVA_INT.withName("on_top"),
+            ValueLayout.JAVA_INT.withName("font"));
+    static final MemoryLayout VIEWPORT_CAMERA = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("size"),
+            ValueLayout.JAVA_INT.withName("kind"),
+            MemoryLayout.sequenceLayout(4, ValueLayout.JAVA_INT).withName("rect"),
+            MemoryLayout.sequenceLayout(16, ValueLayout.JAVA_FLOAT).withName("view"),
+            MemoryLayout.sequenceLayout(16, ValueLayout.JAVA_FLOAT).withName("projection"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("eye"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("target"),
+            ValueLayout.JAVA_FLOAT.withName("distance"),
+            ValueLayout.JAVA_FLOAT.withName("yaw"),
+            ValueLayout.JAVA_FLOAT.withName("pitch"),
+            ValueLayout.JAVA_INT.withName("orthographic"),
+            ValueLayout.JAVA_FLOAT.withName("speed"),
+            ValueLayout.JAVA_FLOAT.withName("radius"),
+            ValueLayout.JAVA_FLOAT.withName("height"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("axis_view"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("axis_right"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("axis_up"));
 
     static long off(MemoryLayout layout, String field) {
         return layout.byteOffset(MemoryLayout.PathElement.groupElement(field));
@@ -201,8 +258,11 @@ public final class View implements AutoCloseable {
         MethodHandle lastError, create, destroy, pump, run, resize, needsDraw, draw, show, remove, setSurfaces,
                 surfaces, orbit, pan, zoom, frame, standard, setOrthographic, setLayer, setBackground, setNodeVisible,
                 setNodeColor, setNodeHighlight, setViewports, requestPick, requestPickIn, pickResult, frameNode, look,
-                dolly, input, showMesh, showLines, showCurves, showImage, setColour, setXray, setFaceColours,
-                setPlacement, showSolid, image, size, setLod, wakeMs, setNodeTransforms;
+                dolly, input, showMesh, showLines, showPoints, showCurves, showImage, setColour, setXray, setFaceColours,
+                setPlacement, showSolid, image, size, setLod, wakeMs, setNodeTransforms, parseColour, loadFont, showText,
+                setText, setDoubleClickFrames, focus, navigation, setLighting, lighting, viewportCamera,
+                setViewportCamera, setViewportRects, aim, setPivot, setTap, orbitIn, panIn, zoomIn, lookIn, dollyIn,
+                frameIn, standardIn;
 
         @SuppressWarnings("restricted") // libraryLookup: the view library chosen.
         Library(Path file) {
@@ -218,13 +278,11 @@ public final class View implements AutoCloseable {
             final ValueLayout B = ValueLayout.JAVA_BOOLEAN, D = ValueLayout.JAVA_DOUBLE, L = ValueLayout.JAVA_LONG;
             MethodHandle abi = bind(linker, lib, "cadaclysm_view_abi_version", FunctionDescriptor.of(I));
             int version = View.<Integer>call(() -> (int) abi.invoke());
-            int major = version >>> 16, minor = version & 0xFFFF;
-            if (major != ABI_MAJOR || minor < ABI_MINOR) {
-                throw new ViewException(path + ": view ABI " + major + "." + minor + ", this wrapper needs "
-                        + ABI_MAJOR + "." + ABI_MINOR + " or a later " + ABI_MAJOR + ".x");
-            }
+            String refusal = abiRefusal(path, version);
+            if (refusal != null) throw new ViewException(refusal);
             MethodHandle nameFn = bind(linker, lib, "cadaclysm_view_name", FunctionDescriptor.of(A));
             lastError = bind(linker, lib, "cadaclysm_view_last_error", FunctionDescriptor.of(A));
+            parseColour = bind(linker, lib, "cadaclysm_view_parse_colour", FunctionDescriptor.of(B, A, A));
             create = bind(linker, lib, "cadaclysm_view_create", FunctionDescriptor.of(A, A, A));
             destroy = bind(linker, lib, "cadaclysm_view_destroy", FunctionDescriptor.ofVoid(A));
             pump = bind(linker, lib, "cadaclysm_view_pump", FunctionDescriptor.of(I, A, I));
@@ -259,6 +317,7 @@ public final class View implements AutoCloseable {
             input = bind(linker, lib, "cadaclysm_view_input", FunctionDescriptor.of(I, A, A));
             showMesh = bind(linker, lib, "cadaclysm_view_show_mesh", FunctionDescriptor.of(I, A, A));
             showLines = bind(linker, lib, "cadaclysm_view_show_lines", FunctionDescriptor.of(I, A, A, I, A));
+            showPoints = bind(linker, lib, "cadaclysm_view_show_points", FunctionDescriptor.of(I, A, A, I, A, F));
             showCurves = bind(linker, lib, "cadaclysm_view_show_curves", FunctionDescriptor.of(I, A, A, I, A));
             showImage = bind(linker, lib, "cadaclysm_view_show_image", FunctionDescriptor.of(I, A, A));
             setColour = bind(linker, lib, "cadaclysm_view_set_colour", FunctionDescriptor.of(B, A, I, A));
@@ -269,6 +328,28 @@ public final class View implements AutoCloseable {
             showSolid = bind(linker, lib, "cadaclysm_view_show_solid", FunctionDescriptor.of(I, A, A, D, A));
             image = bind(linker, lib, "cadaclysm_view_image", FunctionDescriptor.of(B, A, A, L));
             size = bind(linker, lib, "cadaclysm_view_size", FunctionDescriptor.of(B, A, A, A));
+            loadFont = bind(linker, lib, "cadaclysm_view_load_font", FunctionDescriptor.of(I, A, L));
+            showText = bind(linker, lib, "cadaclysm_view_show_text", FunctionDescriptor.of(I, A, A));
+            setText = bind(linker, lib, "cadaclysm_view_set_text", FunctionDescriptor.of(B, A, I, A));
+            setDoubleClickFrames = bind(linker, lib, "cadaclysm_view_set_double_click_frames", FunctionDescriptor.ofVoid(A, B));
+            focus = bind(linker, lib, "cadaclysm_view_focus", FunctionDescriptor.of(B, A, A));
+            navigation = bind(linker, lib, "cadaclysm_view_navigation", FunctionDescriptor.of(I, A));
+            setLighting = bind(linker, lib, "cadaclysm_view_set_lighting", FunctionDescriptor.of(B, A, I));
+            lighting = bind(linker, lib, "cadaclysm_view_lighting", FunctionDescriptor.of(I, A));
+            // 1.10: bound only; the viewport cameras get a Java API in a later wrappers plan.
+            viewportCamera = bind(linker, lib, "cadaclysm_view_viewport_camera", FunctionDescriptor.of(B, A, I, A));
+            setViewportCamera = bind(linker, lib, "cadaclysm_view_set_viewport_camera", FunctionDescriptor.of(B, A, I, A));
+            setViewportRects = bind(linker, lib, "cadaclysm_view_set_viewport_rects", FunctionDescriptor.of(B, A, A, I));
+            aim = bind(linker, lib, "cadaclysm_view_aim", FunctionDescriptor.of(B, A, I, A, A));
+            setPivot = bind(linker, lib, "cadaclysm_view_set_pivot", FunctionDescriptor.of(B, A, I, A));
+            setTap = bind(linker, lib, "cadaclysm_view_set_tap", FunctionDescriptor.of(B, A, F, D));
+            orbitIn = bind(linker, lib, "cadaclysm_view_orbit_in", FunctionDescriptor.ofVoid(A, I, F, F));
+            panIn = bind(linker, lib, "cadaclysm_view_pan_in", FunctionDescriptor.ofVoid(A, I, F, F));
+            zoomIn = bind(linker, lib, "cadaclysm_view_zoom_in", FunctionDescriptor.ofVoid(A, I, F));
+            lookIn = bind(linker, lib, "cadaclysm_view_look_in", FunctionDescriptor.ofVoid(A, I, F, F));
+            dollyIn = bind(linker, lib, "cadaclysm_view_dolly_in", FunctionDescriptor.ofVoid(A, I, F));
+            frameIn = bind(linker, lib, "cadaclysm_view_frame_in", FunctionDescriptor.of(B, A, I, I));
+            standardIn = bind(linker, lib, "cadaclysm_view_standard_in", FunctionDescriptor.of(B, A, I, I));
             name = text(View.<MemorySegment>call(() -> (MemorySegment) nameFn.invoke()));
         }
 
@@ -289,6 +370,38 @@ public final class View implements AutoCloseable {
             return text(View.<MemorySegment>call(() -> (MemorySegment) lastError.invoke()));
         }
 
+        /**
+         * A colour's text as r, g, b in 0..1 -- {@code "#rgb"}, {@code "#rrggbb"} (the {@code #}
+         * optional) or one of the 148 CSS colour names, any case -- read by the library's own
+         * {@code cadaclysm_view_parse_colour} (Python's {@code _colour}), so every wrapper takes the
+         * same forms; null stays null. A ViewException with the library's message for text that
+         * is no colour. Needs no view.
+         */
+        public float[] colour(String text) {
+            if (text == null) return null;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment t = arena.allocateFrom(text), out = arena.allocate(ValueLayout.JAVA_FLOAT, 3);
+                boolean ok = View.<Boolean>call(() -> (boolean) parseColour.invoke(t, out));
+                if (!ok) {
+                    String why = lastErrorText();
+                    throw new ViewException(why.isEmpty() ? "colour '" + text + "'" : why);
+                }
+                return out.toArray(ValueLayout.JAVA_FLOAT);
+            }
+        }
+
+        /** A TTF/OTF font for every view of this library; its id (0 is the bundled font, never returned). */
+        public int loadFont(byte[] bytes) {
+            if (bytes == null) throw new ViewException("loadFont: font bytes, not null");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment b = arena.allocateFrom(ValueLayout.JAVA_BYTE, bytes);
+                long length = bytes.length;
+                int id = View.<Integer>call(() -> (int) loadFont.invoke(b, length));
+                if (id == 0) throw failure("loadFont");
+                return id;
+            }
+        }
+
         /** The library's own reason, bare (Python's _error); {@code what} names the call for the reader of the code only. */
         ViewException failure(String what) {
             return new ViewException(reason(lastErrorText()));
@@ -304,16 +417,23 @@ public final class View implements AutoCloseable {
 
     /** {@code variable} (a file or a directory), then beside this class, then lib/ and target/{release,debug} above it. */
     static Path find(String base, String variable) {
+        Path start = Cad.Loader.codeLocation();
+        return find(base, variable, System.getenv(variable), start == null || Files.isDirectory(start) ? start : start.getParent());
+    }
+
+    /** {@link #find(String, String)} with the variable's value and this class's folder given (tests). */
+    static Path find(String base, String variable, String override, Path here) {
         String name = fileName(base);
-        String override = System.getenv(variable);
+        boolean terminal = base.endsWith("_terminal");
         if (override != null && !override.isEmpty()) {
             Path candidate = Path.of(override);
-            if (Files.isDirectory(candidate)) candidate = candidate.resolve(name);
+            boolean directory = Files.isDirectory(candidate);
+            if (directory) candidate = candidate.resolve(name);
             if (Files.exists(candidate)) return candidate;
-            throw new ViewException(variable + "=" + override + " names nothing that exists");
+            // Python's words: the terminal's variable also says which file a directory lacks.
+            throw new ViewException(variable + "=" + override + " names nothing that exists"
+                + (terminal && directory ? " (no " + name + " in that directory)" : ""));
         }
-        Path start = Cad.Loader.codeLocation();
-        Path here = start == null || Files.isDirectory(start) ? start : start.getParent();
         List<Path> ancestors = new ArrayList<>();
         for (Path at = here; at != null; at = at.getParent()) ancestors.add(at);
         List<Path> searched = new ArrayList<>();
@@ -324,10 +444,12 @@ public final class View implements AutoCloseable {
             searched.add(at.resolve("target").resolve("debug").resolve(name));
         }
         for (Path candidate : searched) if (Files.exists(candidate)) return candidate;
-        StringBuilder message = new StringBuilder("no view library: ").append(name).append(" not found. Looked in:\n");
-        for (Path candidate : searched) message.append("    ").append(candidate).append('\n');
-        message.append("Set ").append(variable).append(", or CADACLYSM_VIEW to a library's path.");
-        throw new ViewException(message.toString());
+        String where = String.join(", ", searched.stream().map(Path::toString).toList());
+        throw new ViewException(terminal
+            ? "no view library: the terminal library was not found (searched: " + where + ") "
+                + "-- reinstall cadaclysm, set CADACLYSM_TERMINAL_LIBRARY to the library, or set CADACLYSM_VIEW"
+            : "no view library: " + name + " was not found (searched: " + where + ") "
+                + "-- reinstall cadaclysm, set " + variable + " to it, or View.useTerminal()");
     }
 
     /** Draw with the terminal library (the default) from now on. */
@@ -338,6 +460,30 @@ public final class View implements AutoCloseable {
     /** Draw with the GPU window library, cadaclysm_view, from now on. */
     public static synchronized Library useWgpu() {
         return current = new Library(find("cadaclysm" + "_view", "CADACLYSM_VIEW_LIBRARY"));
+    }
+
+    /**
+     * A TTF/OTF font for every view of the library in use; its id for {@link TextOptions#font} (0 is the bundled font).
+     * Choose the library first ({@link #useWgpu}, {@link #useTerminal}, {@link #use}): a font id belongs to the library
+     * that loaded it, and means nothing -- or another font -- to a library chosen afterwards.
+     */
+    public static int loadFont(byte[] bytes) {
+        if (bytes == null) throw new ViewException("loadFont: font bytes, not null");
+        return current().loadFont(bytes);
+    }
+
+    /** {@link #loadFont(byte[])} from a file; a file that cannot be read is a ViewException naming it and why. */
+    public static int loadFont(Path path) {
+        if (path == null) throw new ViewException("loadFont: a font path, not null");
+        byte[] bytes;
+        try {
+            bytes = Files.readAllBytes(path);
+        } catch (IOException | SecurityException e) {
+            String detail = e.getMessage();
+            String why = e.getClass().getSimpleName() + (detail == null || detail.equals(path.toString()) ? "" : ": " + detail);
+            throw new ViewException(path + ": the font could not be read (" + why + ")");
+        }
+        return loadFont(bytes);
     }
 
     /** Draw with the view library at {@code path} from now on. */
@@ -390,6 +536,7 @@ public final class View implements AutoCloseable {
         String title;
         Double tolerance;
         float[] rgb;
+        String rgbText;
 
         /** front, back, left, right, top, bottom or iso; null is the default, iso (Python's view=None). */
         public ShowOptions view(String value) { view = value == null ? "iso" : value; return this; }
@@ -402,7 +549,38 @@ public final class View implements AutoCloseable {
         public ShowOptions height(int value) { height = value; return this; }
         public ShowOptions title(String value) { title = value; return this; }
         public ShowOptions tolerance(double value) { tolerance = value; return this; }
-        public ShowOptions rgb(float[] value) { rgb = value; return this; }
+        public ShowOptions rgb(float[] value) { rgb = value; rgbText = null; return this; }
+        /** The colour as text: {@code "#rgb"}, {@code "#rrggbb"} or a CSS colour name, read by the view library. */
+        public ShowOptions rgb(String value) { rgbText = value; rgb = null; return this; }
+    }
+
+    /** showText's options: a white 12 px label, bottom-left on its anchor, by default. */
+    public static final class TextOptions {
+        /** "label" (pixels, facing the camera) or "world" (model units, in the plane of right and up). */
+        public String mode = "label";
+        /** The text's height: pixels for a label, model units for world text. */
+        public float size = 12f;
+        /** The glyphs' colour as text ("#rgb", "#rrggbb", a CSS name); it wins over {@link #colour} when both are set, as
+         *  ShowOptions' text colour is read first. */
+        public String colourText;
+        /** The glyphs' colour, three numbers, used when {@link #colourText} is null; both null is white. */
+        public float[] colour;
+        /** top-left, top, top-right, left, centre (or center), right, bottom-left, bottom or bottom-right. */
+        public String align = "bottom-left";
+        /** A label's shift from its anchor in pixels, two numbers; null is none. */
+        public float[] offset;
+        /** The label's box as text (alpha 1); it wins over {@link #box} (3 or 4 numbers) when both are set; none by default. */
+        public String boxText;
+        public float[] box;
+        /** Pixels between a label's text and the edge of its box. */
+        public float padding = 4f;
+        /** Drawn over the model instead of hidden by it. */
+        public boolean onTop;
+        /** 0 is the bundled font; else an id from {@link View#loadFont(byte[])}. */
+        public int font;
+        /** World text's baseline and up directions, three numbers each; null is +X and +Y. */
+        public float[] right;
+        public float[] up;
     }
 
     /** A host's window: a {@code WINDOW_*} kind, the handle, an Xlib/XCB id, the display, its size in physical pixels. */
@@ -421,7 +599,36 @@ public final class View implements AutoCloseable {
     public record Viewport(int[] rect, float[] view, float[] projection, float[] eye, String grid) {
     }
 
-    public record Pick(int item, int node, int face) {
+    /**
+     * A pick answer: the item, node and face hit; {@code clicks} 2 for a double click, else 1;
+     * {@code point} where the ray met the model (x, y, z, in the coordinates the items were shown
+     * in), or null where the library read no depth (a machining stock, the terminal library).
+     */
+    public record Pick(int item, int node, int face, int clicks, float[] point) {
+    }
+
+    /** A CadaclysmViewPick as the answer: null for no item; the point only where has_point is set (Python's _pick_dict). */
+    static Pick pickOf(MemorySegment raw) {
+        return raw.get(ValueLayout.JAVA_INT, off(PICK, "item")) == 0 ? null : answerOf(raw);
+    }
+
+    /** A CadaclysmViewPick as it was answered, item 0 (nothing hit) included. */
+    static Pick answerOf(MemorySegment raw) {
+        float[] point = raw.get(ValueLayout.JAVA_INT, off(PICK, "has_point")) != 0
+                ? raw.asSlice(off(PICK, "point"), 12).toArray(ValueLayout.JAVA_FLOAT) : null;
+        return new Pick(raw.get(ValueLayout.JAVA_INT, off(PICK, "item")), raw.get(ValueLayout.JAVA_INT, off(PICK, "node")),
+                raw.get(ValueLayout.JAVA_INT, off(PICK, "face")), raw.get(ValueLayout.JAVA_INT, off(PICK, "clicks")), point);
+    }
+
+    /**
+     * Why the library at {@code path}, answering {@code version} from cadaclysm_view_abi_version,
+     * is refused -- null when this wrapper takes it (1.11 or a later 1.x).
+     */
+    static String abiRefusal(String path, int version) {
+        int major = version >>> 16, minor = version & 0xFFFF;
+        if (major == ABI_MAJOR && minor >= ABI_MINOR) return null;
+        return path + ": view ABI " + major + "." + minor + ", this wrapper needs " + ABI_MAJOR + "." + ABI_MINOR
+                + " or a later " + ABI_MAJOR + ".x";
     }
 
     public record Camera(float[] eye, float[] target, float[] up, boolean orthographic, double azimuth,
@@ -457,6 +664,12 @@ public final class View implements AutoCloseable {
     static double[] exact(double[] values, int n, String what) {
         if (values != null && values.length != n) throw new ViewException(what + ": " + n + " numbers, not " + values.length);
         return values;
+    }
+
+    /** Colour text as four floats, alpha 1 (text carries none); null stays null. */
+    static float[] rgba(Library lib, String text) {
+        float[] c = lib.colour(text);
+        return c == null ? null : new float[]{c[0], c[1], c[2], 1};
     }
 
     /** Three or four numbers as four floats (alpha 1 where only three were given); null stays null. */
@@ -497,6 +710,10 @@ public final class View implements AutoCloseable {
     private static final class Handle implements Runnable {
         private final MethodHandle destroy;
         long address;
+        /** The arena of every scene an item shows, one per item: held here, by what the cleaner
+         *  runs, so a scene dropped with its view stays open until the view is destroyed --
+         *  the order cadaclysm_view.h requires. */
+        final List<Object> scenes = Collections.synchronizedList(new ArrayList<>());
 
         Handle(MethodHandle destroy, MemorySegment raw) {
             this.destroy = destroy;
@@ -513,6 +730,7 @@ public final class View implements AutoCloseable {
                 destroy.invoke(p);
                 return null;
             });
+            scenes.clear();
         }
     }
 
@@ -640,6 +858,8 @@ public final class View implements AutoCloseable {
         if (id == 0) throw lib.failure(what);
         Item item = new Item(this, id, shown);
         items.put(id, item);
+        Cad.Scene scene = sceneOf(shown);
+        if (scene != null) handle.scenes.add(scene.lifetime());
         return item;
     }
 
@@ -651,7 +871,12 @@ public final class View implements AutoCloseable {
 
     /** A Blacksmith.Solid, a Cad.Scene or a Cad.Node, by handle. */
     public Item show(Object obj) {
-        return show(obj, null, 0.05);
+        return show(obj, (float[]) null, 0.05);
+    }
+
+    /** {@link #show(Object, float[], double)} with the colour as text ({@code "#rgb"}, {@code "#rrggbb"}, a CSS name). */
+    public Item show(Object obj, String rgb, double tolerance) {
+        return show(obj, lib.colour(rgb), tolerance);
     }
 
     public Item show(Object obj, float[] rgb, double tolerance) {
@@ -662,7 +887,12 @@ public final class View implements AutoCloseable {
     }
 
     public Item showSolid(Blacksmith.Solid solid) {
-        return showSolid(solid, 0.05, null);
+        return showSolid(solid, 0.05, (float[]) null);
+    }
+
+    /** {@link #showSolid(Blacksmith.Solid, double, float[])} with the colour as text. */
+    public Item showSolid(Blacksmith.Solid solid, double tolerance, String rgb) {
+        return showSolid(solid, tolerance, lib.colour(rgb));
     }
 
     public Item showSolid(Blacksmith.Solid solid, double tolerance, float[] rgb) {
@@ -698,6 +928,16 @@ public final class View implements AutoCloseable {
         return item;
     }
 
+    /** {@link #showMesh(float[], int[], float[], float[], float[])} in the default colour. */
+    public Item showMesh(float[] positions, int[] indices, float[] normals, float[] edges) {
+        return showMesh(positions, indices, normals, edges, (float[]) null);
+    }
+
+    /** {@link #showMesh(float[], int[], float[], float[], float[])} with the colour as text. */
+    public Item showMesh(float[] positions, int[] indices, float[] normals, float[] edges, String rgb) {
+        return showMesh(positions, indices, normals, edges, lib.colour(rgb));
+    }
+
     /** Three floats a vertex, three indices a triangle; normals (one a position) and edges (six floats a segment) may be null. */
     public Item showMesh(float[] positions, int[] indices, float[] normals, float[] edges, float[] rgb) {
         if (positions == null || indices == null) throw new ViewException("showMesh: positions and indices are required");
@@ -724,6 +964,16 @@ public final class View implements AutoCloseable {
         }
     }
 
+    /** {@link #showLines(float[], float[])} in the default colour. */
+    public Item showLines(float[] segments) {
+        return showLines(segments, (float[]) null);
+    }
+
+    /** {@link #showLines(float[], float[])} with the colour as text. */
+    public Item showLines(float[] segments, String rgb) {
+        return showLines(segments, lib.colour(rgb));
+    }
+
     /** Six floats a segment. */
     public Item showLines(float[] segments, float[] rgb) {
         records(segments, 6, "showLines", "segment");
@@ -733,6 +983,51 @@ public final class View implements AutoCloseable {
             MemorySegment s = floats(arena, segments), col = floats(arena, rgb);
             return item(call(() -> (int) lib.showLines.invoke(p, s, segments.length / 6, col)), null, "showLines");
         }
+    }
+
+    /** {@link #showPoints(float[], float[], float)} in the default colour, 8 pixels across. */
+    public Item showPoints(float[] positions) {
+        return showPoints(positions, (float[]) null, 8f);
+    }
+
+    /** {@link #showPoints(float[], float[], float)} with the colour as text, 8 pixels across. */
+    public Item showPoints(float[] positions, String rgb) {
+        return showPoints(positions, rgb, 8f);
+    }
+
+    /** {@link #showPoints(float[], float[], float)} with the colour as text. */
+    public Item showPoints(float[] positions, String rgb, float sizePx) {
+        return showPoints(positions, lib.colour(rgb), sizePx);
+    }
+
+    /** {@link #showPoints(float[], float[], float)} 8 pixels across. */
+    public Item showPoints(float[] positions, float[] rgb) {
+        return showPoints(positions, rgb, 8f);
+    }
+
+    /**
+     * Points as three floats each: a disc {@code sizePx} device pixels across (1 to 64) at each,
+     * in {@code rgb} (null: the edge colour), as one item. A point does not pick. The library
+     * refuses a number that is not finite and a size outside 1..64.
+     */
+    public Item showPoints(float[] positions, float[] rgb, float sizePx) {
+        if (positions.length % 3 != 0) throw new ViewException("showPoints: three numbers a point, not " + positions.length);
+        exact(rgb, 3, "showPoints rgb");
+        MemorySegment p = live(c("show_points"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment s = floats(arena, positions), col = floats(arena, rgb);
+            return item(call(() -> (int) lib.showPoints.invoke(p, s, positions.length / 3, col, sizePx)), null, "showPoints");
+        }
+    }
+
+    /** {@link #showCurves(float[], float[])} in the default colour. */
+    public Item showCurves(float[] beziers) {
+        return showCurves(beziers, (float[]) null);
+    }
+
+    /** {@link #showCurves(float[], float[])} with the colour as text. */
+    public Item showCurves(float[] beziers, String rgb) {
+        return showCurves(beziers, lib.colour(rgb));
     }
 
     /** Sixteen floats a rational cubic: four control points as x, y, z, w. */
@@ -766,6 +1061,57 @@ public final class View implements AutoCloseable {
             img.set(ValueLayout.JAVA_FLOAT, off(IMAGE, "opacity"), opacity);
             return item(call(() -> (int) lib.showImage.invoke(p, img)), null, "showImage");
         }
+    }
+
+    /** The text, or a ViewException for null or for one holding a NUL (the C string would end there). */
+    static String textOf(String text) {
+        if (text == null) throw new ViewException("text: a string, not null");
+        if (text.indexOf('\0') >= 0) {
+            throw new ViewException("text \"" + text + "\": a NUL character cannot be shown (the C string ends there)");
+        }
+        return text;
+    }
+
+    /** {@link #showText(String, float[], TextOptions)} with the default options: a white 12 px label. */
+    public Item showText(String text, float[] at) {
+        return showText(text, at, new TextOptions());
+    }
+
+    /** Text shown as one item (cadaclysm_view_show_text): a label anchored to {@code at}, or world text; null options are the defaults. */
+    public Item showText(String text, float[] at, TextOptions options) {
+        TextOptions o = options == null ? new TextOptions() : options;
+        String shown = textOf(text);
+        int mode = named(TEXT_MODES, o.mode, "mode"), align = named(ALIGN, o.align, "align");
+        if (at == null || at.length != 3) throw new ViewException("showText at: 3 numbers, not " + (at == null ? 0 : at.length));
+        float[] rgb = exact(o.colourText != null ? lib.colour(o.colourText) : o.colour != null ? o.colour : lib.colour("white"), 3, "showText colour");
+        float[] right = exact(o.right, 3, "showText right");
+        float[] up = exact(o.up, 3, "showText up");
+        float[] offset = exact(o.offset, 2, "showText offset");
+        float[] box = o.boxText != null ? rgba(lib, o.boxText) : rgba(o.box, "showText box");
+        MemorySegment p = live(c("show_text"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment t = arena.allocate(TEXT);   // zeroed: right, up, offset and box_rgba absent are all zero
+            t.set(ValueLayout.JAVA_INT, off(TEXT, "size"), (int) TEXT.byteSize());
+            t.set(ValueLayout.ADDRESS, off(TEXT, "text"), arena.allocateFrom(shown));
+            t.set(ValueLayout.JAVA_INT, off(TEXT, "mode"), mode);
+            put(t, "at", at);
+            if (right != null) put(t, "right", right);
+            if (up != null) put(t, "up", up);
+            t.set(ValueLayout.JAVA_FLOAT, off(TEXT, "height"), o.size);
+            put(t, "rgb", rgb);
+            t.set(ValueLayout.JAVA_INT, off(TEXT, "align"), align);
+            if (offset != null) put(t, "offset", offset);
+            if (box != null) put(t, "box_rgba", box);
+            t.set(ValueLayout.JAVA_FLOAT, off(TEXT, "box_padding"), o.padding);
+            t.set(ValueLayout.JAVA_INT, off(TEXT, "on_top"), o.onTop ? 1 : 0);
+            t.set(ValueLayout.JAVA_INT, off(TEXT, "font"), o.font);
+            return item(call(() -> (int) lib.showText.invoke(p, t)), null, "showText");
+        }
+    }
+
+    /** {@code values} (already length-checked) into TEXT's float array {@code field}. */
+    private static void put(MemorySegment t, String field, float[] values) {
+        MemorySegment.copy(values, 0, t, ValueLayout.JAVA_FLOAT, off(TEXT, field), values.length);
     }
 
     static MemorySegment floats(Arena arena, float[] values) {
@@ -811,6 +1157,41 @@ public final class View implements AutoCloseable {
         voidCall("set_orthographic", lib.setOrthographic, on);
     }
 
+    /**
+     * Whether a double click frames what it hit (off by default: it is a pick answered with
+     * {@code clicks} 2 and the camera stays). Applies where the view takes the pick itself (its own
+     * window, pump, run); a host reading picks frames if it chooses.
+     */
+    public void setDoubleClickFrames(boolean on) {
+        voidCall("set_double_click_frames", lib.setDoubleClickFrames, on);
+    }
+
+    /**
+     * Moves the orbit point to {@code point} (x, y, z, as a pick's point): the eye keeps its
+     * direction and distance from it, so the camera moves sideways and does not turn. Leaves fly
+     * mode. Other than three numbers is refused before the call; the library refuses a point that
+     * is not finite, or while viewports are set, with its own reason.
+     */
+    public void focus(float[] point) {
+        if (point == null) throw new ViewException("focus: 3 numbers, not null");
+        exact(point, 3, "focus");
+        MemorySegment p = live(c("focus"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment at = arena.allocateFrom(ValueLayout.JAVA_FLOAT, point);
+            ok(call(() -> (boolean) lib.focus.invoke(p, at)), "focus");
+        }
+    }
+
+    /**
+     * How a left drag moves the camera: "orbit" (about the target) or "fly" (the view turns about
+     * the eye). A fly key (W, A, S, D, E, Q) sent through input enters fly mode and it stays after
+     * the key is let go; Tab toggles it; frame, standard and focus leave it.
+     */
+    public String navigation() {
+        MemorySegment p = live(c("navigation"));
+        return View.<Integer>call(() -> (int) lib.navigation.invoke(p)) == NAVIGATION_FLY ? "fly" : "orbit";
+    }
+
     public void viewports(List<Viewport> list) {
         List<Integer> grids = new ArrayList<>();
         for (Viewport v : list) {
@@ -837,11 +1218,17 @@ public final class View implements AutoCloseable {
         }
     }
 
-    /** surfaces, edges, curves, isocurves or grid. */
+    /** surfaces, edges, curves, isocurves, grid or text. */
     public void layer(String name, boolean on) {
         int which = named(LAYERS, name, "layer");
         MemorySegment p = live(c("set_layer"));
         ok(call(() -> (boolean) lib.setLayer.invoke(p, which, on)), "layer");
+    }
+
+    /** The clear colour as text: {@code "#rgb"}, {@code "#rrggbb"} or a CSS colour name. */
+    public void background(String rgb) {
+        if (rgb == null) throw new ViewException("background: 3 numbers, not none");
+        background(lib.colour(rgb));
     }
 
     /** Three numbers, the clear colour. */
@@ -868,6 +1255,22 @@ public final class View implements AutoCloseable {
         ok(call(() -> (boolean) lib.setSurfaces.invoke(p, which)), "surfaces");
     }
 
+    /** How plain parts are lit, as Python's View.lighting: "headlight" (the default) or "studio". */
+    public String lighting() {
+        MemorySegment p = live(c("lighting"));
+        return call(() -> (int) lib.lighting.invoke(p)) == 1 ? "studio" : "headlight";
+    }
+
+    /**
+     * "headlight" -- whatever faces the camera is bright -- or "studio", a key light fixed above the
+     * scene with an ambient and a camera fill. Another name is refused before the library is called.
+     */
+    public void lighting(String name) {
+        int which = named(LIGHTING, name, "lighting");
+        MemorySegment p = live(c("set_lighting"));
+        ok(call(() -> (boolean) lib.setLighting.invoke(p, which)), "lighting");
+    }
+
     public boolean needsDraw() {
         MemorySegment p = live(c("needs_draw"));
         return call(() -> (boolean) lib.needsDraw.invoke(p));
@@ -890,17 +1293,33 @@ public final class View implements AutoCloseable {
             out.set(ValueLayout.JAVA_INT, off(PICK, "size"), (int) PICK.byteSize());
             for (int i = 0; i < 200; i++) {
                 draw();
-                if (call(() -> (boolean) lib.pickResult.invoke(p, out))) {
-                    int item = out.get(ValueLayout.JAVA_INT, off(PICK, "item"));
-                    return item == 0 ? null : new Pick(item, out.get(ValueLayout.JAVA_INT, off(PICK, "node")),
-                            out.get(ValueLayout.JAVA_INT, off(PICK, "face")));
-                }
+                if (call(() -> (boolean) lib.pickResult.invoke(p, out))) return pickOf(out);
                 waiting = lib.lastErrorText();
                 if (!waiting.isEmpty() && !waiting.endsWith("no pick result")) throw new ViewException(waiting);
                 sleep(10);
             }
         }
         throw new ViewException("pick: the answer never landed (" + (waiting.isEmpty() ? "no error reported" : waiting) + ")");
+    }
+
+    /**
+     * The newest pick answer that has landed, without asking or waiting (Python's
+     * {@code last_pick}): a click or tap in the view's own window ({@code pump} lands them as it
+     * draws), a double click's ({@code clicks} 2), or one an {@code input} asked for, landed by the
+     * draws after it. Empty while none has; a click on nothing is a Pick of item 0 (node and face
+     * 0, no point); else the pick hit. Each answer is read once, and a newer one replaces one not
+     * read yet. A failure other than "no answer yet" throws the library's own message.
+     */
+    public Optional<Pick> lastPick() {
+        MemorySegment p = live(c("pick_result"));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(PICK);
+            out.set(ValueLayout.JAVA_INT, off(PICK, "size"), (int) PICK.byteSize());
+            if (call(() -> (boolean) lib.pickResult.invoke(p, out))) return Optional.of(answerOf(out));
+        }
+        String waiting = lib.lastErrorText();
+        if (!waiting.isEmpty() && !waiting.endsWith("no pick result")) throw new ViewException(waiting);
+        return Optional.empty();
     }
 
     private static void sleep(long ms) {
@@ -936,10 +1355,7 @@ public final class View implements AutoCloseable {
             float[] target = cam.asSlice(off(CAMERA, "target"), 12).toArray(ValueLayout.JAVA_FLOAT);
             float[] up = cam.asSlice(off(CAMERA, "up"), 12).toArray(ValueLayout.JAVA_FLOAT);
             boolean ortho = cam.get(ValueLayout.JAVA_INT, off(CAMERA, "orthographic")) != 0;
-            int item = pick.get(ValueLayout.JAVA_INT, off(PICK, "item"));
-            Pick last = item == 0 ? null : new Pick(item, pick.get(ValueLayout.JAVA_INT, off(PICK, "node")),
-                    pick.get(ValueLayout.JAVA_INT, off(PICK, "face")));
-            return camera(eye, target, up, ortho, last, yUp);
+            return camera(eye, target, up, ortho, pickOf(pick), yUp);
         }
     }
 
@@ -1209,6 +1625,8 @@ public final class View implements AutoCloseable {
             MemorySegment p = view.live(c("remove"));
             view.ok(call(() -> (boolean) view.lib.remove.invoke(p, id)), "remove");
             view.items.remove(id);
+            Cad.Scene scene = sceneOf(shown);
+            if (scene != null) view.handle.scenes.remove(scene.lifetime());
             shown = null;
         }
 
@@ -1236,6 +1654,12 @@ public final class View implements AutoCloseable {
             }
         }
 
+        /** Recolours the item: {@code "#rgb"}, {@code "#rrggbb"} or a CSS colour name, any case. */
+        public void colour(String rgb) {
+            if (rgb == null) throw new ViewException("colour: 3 numbers, not none");
+            colour(view.lib.colour(rgb));
+        }
+
         public void colour(float[] rgb) {
             if (rgb == null) throw new ViewException("colour: 3 numbers, not none");
             exact(rgb, 3, "colour");
@@ -1243,6 +1667,16 @@ public final class View implements AutoCloseable {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment colour = floats(arena, rgb);
                 view.ok(call(() -> (boolean) view.lib.setColour.invoke(p, id, colour)), "colour");
+            }
+        }
+
+        /** The text item's string replaced, nothing else changed (cadaclysm_view_set_text). */
+        public void setText(String text) {
+            String replaced = textOf(text);
+            MemorySegment p = view.live(c("set_text"));
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment s = arena.allocateFrom(replaced);
+                view.ok(call(() -> (boolean) view.lib.setText.invoke(p, id, s)), "setText");
             }
         }
 
@@ -1254,6 +1688,21 @@ public final class View implements AutoCloseable {
                 MemorySegment m = matrix == null ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_DOUBLE, matrix);
                 view.ok(call(() -> (boolean) view.lib.setPlacement.invoke(p, id, m)), "placement");
             }
+        }
+
+        /** {@code faces} (pick numbers) coloured by {@code colours}, one text a face (alpha 1); faces null clears every one. */
+        public void faceColours(int[] faces, String[] colours) {
+            if (faces == null) {
+                faceColours(null, (float[]) null);
+                return;
+            }
+            float[] rgba = new float[4 * (colours == null ? 0 : colours.length)];
+            for (int k = 0; colours != null && k < colours.length; k++) {
+                float[] c = rgba(view.lib, colours[k]);
+                if (c == null) throw new ViewException("faceColours: colour " + k + " is null");
+                System.arraycopy(c, 0, rgba, 4 * k, 4);
+            }
+            faceColours(faces, rgba);
         }
 
         /** {@code faces} (pick numbers) in {@code rgba} (four floats a face); faces null clears every one. */
@@ -1286,6 +1735,11 @@ public final class View implements AutoCloseable {
             view.ok(call(() -> (boolean) view.lib.setNodeVisible.invoke(p, id, node, on)), "nodeVisible");
         }
 
+        /** {@link #nodeColour(int, float[])} with the colour as text (alpha 1); null clears. */
+        public void nodeColour(int node, String rgba) {
+            nodeColour(node, rgba(view.lib, rgba));
+        }
+
         /** Three or four numbers (alpha 1 when three); null clears. */
         public void nodeColour(int node, float[] rgba) {
             float[] four = rgba(rgba, "nodeColour");
@@ -1294,6 +1748,11 @@ public final class View implements AutoCloseable {
                 MemorySegment col = floats(arena, four);
                 view.ok(call(() -> (boolean) view.lib.setNodeColor.invoke(p, id, node, col)), "nodeColour");
             }
+        }
+
+        /** {@link #nodeHighlight(int, float[])} with the colour as text: alpha 1, the colour itself; null clears. */
+        public void nodeHighlight(int node, String rgba) {
+            nodeHighlight(node, rgba(view.lib, rgba));
         }
 
         /** Tint {@code node} toward rgba's colour by its alpha; null clears. */
@@ -1405,7 +1864,8 @@ public final class View implements AutoCloseable {
         System.out.flush();
         System.err.flush();
         try (View v = new View(vo)) {
-            Item item = v.show(obj, o.rgb, o.tolerance != null ? o.tolerance : 0.05);
+            double tolerance = o.tolerance != null ? o.tolerance : 0.05;
+            Item item = o.rgbText != null ? v.show(obj, o.rgbText, tolerance) : v.show(obj, o.rgb, tolerance);
             if (transforms != null) item.nodeTransforms(transforms);
             v.layer("edges", o.edges);
             v.aim(o, obj instanceof Cad.Node node ? () -> item.frameNode(node.index()) : () -> { });

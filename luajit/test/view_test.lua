@@ -111,9 +111,49 @@ local function nested_leaf(t, scene)
 end
 
 return function(t)
+  t.test("a missing view library is worded as Python words it", function()
+    local function file(b)
+      if ffi.os == "Windows" then return b .. ".dll" end
+      return ffi.os == "OSX" and ("lib" .. b .. ".dylib") or ("lib" .. b .. ".so")
+    end
+    local function words(...)
+      local ok, err = pcall(view._find, ...)
+      t.ok(not ok, "found a library: " .. tostring(err))
+      t.ok(is_view_error(err), "not a ViewError: " .. tostring(err))
+      return err.message
+    end
+    local empty = t.tmp("view-missing-library")
+    local windows = package.config:sub(1, 1) == "\\"
+    os.execute((windows and 'mkdir "%s"' or 'mkdir -p "%s"'):format(windows and empty:gsub("/", "\\") or empty))
+    local nowhere = empty .. "/nowhere"
+    t.eq(words("cadaclysm_view", "CADACLYSM_VIEW_LIBRARY", nowhere, empty),
+      "CADACLYSM_VIEW_LIBRARY=" .. nowhere .. " names nothing that exists")
+    t.eq(words("cadaclysm_terminal", "CADACLYSM_TERMINAL_LIBRARY", nowhere, empty),
+      "CADACLYSM_TERMINAL_LIBRARY=" .. nowhere .. " names nothing that exists")
+    t.eq(words("cadaclysm_terminal", "CADACLYSM_TERMINAL_LIBRARY", empty, empty),
+      "CADACLYSM_TERMINAL_LIBRARY=" .. empty .. " names nothing that exists (no "
+        .. file("cadaclysm_terminal") .. " in that directory)")
+    for _, c in ipairs({
+      { "cadaclysm_terminal", "CADACLYSM_TERMINAL_LIBRARY", "no view library: the terminal library was not found (searched: ",
+        ") -- reinstall cadaclysm, set CADACLYSM_TERMINAL_LIBRARY to the library, or set CADACLYSM_VIEW" },
+      { "cadaclysm_view", "CADACLYSM_VIEW_LIBRARY", "no view library: " .. file("cadaclysm_view") .. " was not found (searched: ",
+        ") -- reinstall cadaclysm, set CADACLYSM_VIEW_LIBRARY to it, or use_terminal()" },
+    }) do
+      local got = words(c[1], c[2], "", empty)
+      local head = c[3] .. empty .. "/" .. file(c[1]) .. ", " .. empty .. "/lib/" .. file(c[1]) .. ", "
+      t.eq(got:sub(1, #head), head, "the search's start")
+      t.eq(got:sub(-#c[4]), c[4], "the search's advice")
+      t.ok(not got:find("\n", 1, true), "one line: " .. got)
+    end
+    os.remove(empty)
+  end)
+
   t.test("an offscreen view draws a solid by handle, removes it, and refuses once closed", function()
     local v = offscreen(160, 120)
     if not v then return end
+    -- Off: the grid lies across the empty view's centre and moves with the camera, so the centre
+    -- and corner compare the cube against the background alone.
+    v:layer("grid", false)
     local empty = v:image()
     t.eq(empty.width * empty.height * 4, 160 * 120 * 4, "image size")
     local solid = bs.Solid.cuboid(20, 20, 20)
@@ -130,6 +170,10 @@ return function(t)
     t.ok(same(drawn, empty, 0, 0), "a corner outside the cube changed")
     item:remove()
     t.ok(same(v:image(), empty, 80, 60), "a removed item still draws")
+    -- Two points on the real library: an item.
+    local points = v:show_points({ 0, 0, 0, 1, 1, 1 }, "red")
+    t.ok(points.id > 0, "two points: no item")
+    points:remove()
     v:close()
     t.raises(function() v:draw() end, "closed")
     t.raises(function() item:colour({ 1, 0, 0 }) end, "closed")
@@ -373,6 +417,52 @@ return function(t)
     v:close()
   end)
 
+  -- 1.10: a viewport given an ortho top camera reads back as one, a viewport-0 orbit pans it,
+  -- camera() round-trips through set_camera(), the rects must match the count, a negative tap
+  -- is refused.
+  t.test("1.10: a viewport's camera is set, read back, moved, aimed and pivoted", function()
+    local v = offscreen(64, 48)
+    if not v then return end
+    local id = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 }
+    v:viewports({ { rect = { 0, 0, 64, 48 }, view = id, projection = id, eye = { 0, 0, 1 } } })
+    v:set_camera(0, { kind = "ortho", axis_view = { 0, 0, -1 }, axis_right = { 1, 0, 0 }, axis_up = { 0, 1, 0 }, height = 3, radius = 1 })
+    local c = v:camera(0)
+    t.eq(c.kind, "ortho"); t.eq(c.height, 3)
+    t.eq(c.axis_view[3], -1, "the basis reads back as given")
+    t.eq(c.axis_right[1], 1); t.eq(c.axis_up[2], 1)
+    local x0 = c.target[1]
+    v:orbit(10, 0, 0)
+    local moved = v:camera(0)
+    t.ok(moved.target[1] < x0, "an ortho orbit pans: the centre moved left")
+    v:set_camera(0, moved)
+    local again = v:camera(0)
+    t.eq(again.kind, "ortho")
+    for k = 1, 3 do
+      t.near(again.target[k], moved.target[k], 1e-6, "camera() -> set_camera() keeps the target")
+      t.near(again.axis_up[k], moved.axis_up[k], 1e-6, "camera() -> set_camera() keeps the basis")
+    end
+    t.eq(again.height, moved.height)
+    t.raises(function() v:viewport_rects({ { 0, 0, 64, 48 }, { 0, 0, 1, 1 } }) end, "cadaclysm_view_set_viewport_rects")
+    v:viewport_rects({ { 0, 0, 64, 48 } })
+    t.raises(function() v:viewport_rects({ { 0, 0, 64, -1 } }) end, "viewport_rects: rect 1's h")
+    t.raises(function() v:orbit(1, 1, -2) end, "orbit viewport")
+    v:tap(3, 0)
+    t.raises(function() v:tap(-1, 0) end, "cadaclysm_view_set_tap")
+    t.ok(v:aim(0, { 0, 1, 0 }, { 0, 0, 1 }))
+    v:pivot(0, { 1, 2, 3 }); v:pivot(0, nil)
+    v:standard("top", 0)   -- (frame needs something shown: the file's solid cases cover framing)
+    -- Another viewport's moves are its own (the `_in` calls): viewport 1's centre moves, 0's stays.
+    v:viewports({ { rect = { 0, 0, 32, 48 }, view = id, projection = id, eye = { 0, 0, 1 } },
+                  { rect = { 32, 0, 32, 48 }, view = id, projection = id, eye = { 0, 0, 1 } } })
+    local ortho = { kind = "ortho", axis_view = { 0, 0, -1 }, axis_right = { 1, 0, 0 }, axis_up = { 0, 1, 0 }, height = 3, radius = 1 }
+    v:set_camera(0, ortho); v:set_camera(1, ortho)
+    local a0, b0 = v:camera(0).target[1], v:camera(1).target[1]
+    v:orbit(10, 0, 1)
+    t.ok(v:camera(1).target[1] < b0, "orbit(dx, dy, 1) pans viewport 1")
+    t.eq(v:camera(0).target[1], a0, "orbit(dx, dy, 1) leaves viewport 0 alone")
+    v:close()
+  end)
+
   t.test("a bad argument is the module's own error, never a raw Lua one", function()
     local v = offscreen(32, 32)
     if not v then return end
@@ -458,6 +548,302 @@ return function(t)
     t.ok(ok or is_view_error(err), "no lines: " .. tostring(err))
     -- An empty viewport list clears them, as Python's does.
     v:viewports({})
+    v:close()
+  end)
+
+  -- A fake library that also parses colour text as the real one does (enough of its forms) and
+  -- records every colour a call was handed, rounded (Python's `_seen`).
+  local function colour_fake(state)
+    local lib = fake(state)
+    local C, seen = lib.C, {}
+    state.seen = seen
+    local names = { red = { 255, 0, 0 }, white = { 255, 255, 255 }, steelblue = { 70, 130, 180 }, lime = { 0, 255, 0 }, blue = { 0, 0, 255 } }
+    C.cadaclysm_view_parse_colour = function(text, out)
+      local s = ffi.string(text)
+      local low = s:lower():match("^%s*(.-)%s*$")
+      local hex = low:gsub("^#", "")
+      local rgb
+      if (#hex == 3 or #hex == 6) and not hex:find("[^0-9a-f]") then
+        if #hex == 3 then hex = hex:gsub(".", "%0%0") end
+        rgb = { tonumber(hex:sub(1, 2), 16), tonumber(hex:sub(3, 4), 16), tonumber(hex:sub(5, 6), 16) }
+      else
+        rgb = names[low]
+      end
+      if not rgb then
+        state.error = ("cadaclysm_view_parse_colour: colour: \"#rgb\", \"#rrggbb\" or a CSS colour name, not '%s'"):format(s)
+        return false
+      end
+      for k = 1, 3 do out[k - 1] = rgb[k] / 255 end
+      state.error = ""
+      return true
+    end
+    local function note(what, c, n)
+      if c == nil then seen[#seen + 1] = what .. " nil" return end
+      local parts = {}
+      for k = 0, n - 1 do parts[#parts + 1] = ("%.3f"):format(c[k]) end
+      seen[#seen + 1] = what .. " " .. table.concat(parts, ",")
+    end
+    local id = 0
+    local function item() id = id + 1 return id end
+    C.cadaclysm_view_show_mesh = function(_, m) note("mesh", m.rgb, 3) return item() end
+    C.cadaclysm_view_show_lines = function(_, _, _, c) note("lines", c, 3) return item() end
+    C.cadaclysm_view_show_curves = function(_, _, _, c) note("curves", c, 3) return item() end
+    C.cadaclysm_view_set_colour = function(_, _, c) note("colour", c, 3) return true end
+    C.cadaclysm_view_set_background = function(_, c) note("background", c, 3) end
+    C.cadaclysm_view_set_node_color = function(_, _, _, c) note("node_colour", c, 4) return true end
+    C.cadaclysm_view_set_node_highlight = function(_, _, _, c) note("node_highlight", c, 4) return true end
+    C.cadaclysm_view_set_face_colours = function(_, _, _, c, n) note("faces", c, 4 * n) return true end
+    return lib
+  end
+
+  t.test("show_text fills CadaclysmViewText with the defaults and the options", function()
+    local state = { calls = {} }
+    local lib = colour_fake(state)
+    local seen = {}
+    lib.C.cadaclysm_view_show_text = function(v, txt)
+      seen.size, seen.text, seen.mode = txt.size, ffi.string(txt.text), txt.mode
+      seen.at = { txt.at[0], txt.at[1], txt.at[2] }
+      seen.height, seen.align, seen.on_top, seen.font = txt.height, txt.align, txt.on_top, txt.font
+      seen.rgb = { txt.rgb[0], txt.rgb[1], txt.rgb[2] }
+      seen.box = { txt.box_rgba[0], txt.box_rgba[1], txt.box_rgba[2], txt.box_rgba[3] }
+      seen.padding, seen.offset = txt.box_padding, { txt.offset[0], txt.offset[1] }
+      seen.right, seen.up = { txt.right[0], txt.right[1], txt.right[2] }, { txt.up[0], txt.up[1], txt.up[2] }
+      return 9
+    end
+    lib.C.cadaclysm_view_set_text = function(v, id, text) seen.set = { id, ffi.string(text) }; return true end
+    view.use(lib)
+    local v = view.View.new({ width = 8, height = 8 })
+    local label = v:show_text("PART-7", { 1, 2, 3 })
+    t.eq(label.id, 9)
+    t.eq(seen.size, ffi.sizeof("CadaclysmViewText"))
+    t.eq(seen.text, "PART-7"); t.eq(seen.mode, 0); t.eq(seen.align, 6)
+    t.eq(seen.at[1], 1); t.eq(seen.at[3], 3); t.eq(seen.height, 12)
+    t.eq(seen.rgb[1], 1); t.eq(seen.rgb[3], 1); t.eq(seen.box[4], 0); t.eq(seen.padding, 4)
+    t.eq(seen.on_top, 0); t.eq(seen.font, 0); t.eq(seen.right[1], 0); t.eq(seen.up[2], 0)
+    v:show_text("T", { 0, 0, 0 }, { mode = "world", size = 2, colour = "red", align = "center", offset = { 3, 4 },
+      box = "blue", padding = 6, on_top = true, font = 2, right = { 0, 1, 0 }, up = { 0, 0, 1 } })
+    t.eq(seen.mode, 1); t.eq(seen.height, 2); t.eq(seen.align, 4)
+    t.eq(seen.rgb[1], 1); t.eq(seen.rgb[2], 0); t.eq(seen.box[3], 1); t.eq(seen.box[4], 1)
+    t.eq(seen.offset[2], 4); t.eq(seen.padding, 6); t.eq(seen.on_top, 1); t.eq(seen.font, 2)
+    t.eq(seen.right[2], 1); t.eq(seen.up[3], 1)
+    label:set_text("PART-8")
+    t.eq(seen.set[1], 9); t.eq(seen.set[2], "PART-8")
+    t.raises(function() v:show_text("x", { 0, 0, 0 }, { mode = "screen" }) end, 'mode "screen": one of')
+    t.raises(function() v:show_text("x", { 0, 0, 0 }, { align = "middle" }) end, 'align "middle": one of')
+    t.raises(function() v:show_text("a\0b", { 0, 0, 0 }) end, "a NUL character cannot be shown")
+    t.raises(function() v:show_text(nil, { 0, 0, 0 }) end, "text: a string, not nil")
+    t.raises(function() label:set_text("a\0b") end, "a NUL character cannot be shown")
+    t.raises(function() label:set_text(5) end, "text: a string, not number")
+    view._reset()
+  end)
+
+  t.test("show_text refuses what is not a vector or a number, and nothing reaches the library", function()
+    local state = {}
+    local lib = colour_fake(state)
+    local reached = 0
+    lib.C.cadaclysm_view_show_text = function() reached = reached + 1; return 9 end
+    view.use(lib)
+    local v = view.View.new({ width = 8, height = 8 })
+    local function refused(at, opts, pattern)
+      local err = t.raises(function() v:show_text("x", at, opts) end, pattern)
+      t.ok(is_view_error(err), "a ViewError: " .. tostring(err))
+    end
+    refused("red", nil, "show_text at")
+    refused(nil, nil, "show_text at: 3 numbers, not nil")
+    refused({ 1, 2 }, nil, "show_text at")
+    refused({ 0, 0, 0 }, { right = "red" }, "show_text right")
+    refused({ 0, 0, 0 }, { up = 5 }, "show_text up")
+    refused({ 0, 0, 0 }, { offset = 5 }, "show_text offset")
+    refused({ 0, 0, 0 }, { offset = { 1 } }, "show_text offset")
+    refused({ 0, 0, 0 }, { size = "big" }, "show_text size")
+    refused({ 0, 0, 0 }, { padding = {} }, "show_text padding")
+    refused({ 0, 0, 0 }, { font = -1 }, "show_text font")
+    refused({ 0, 0, 0 }, { font = 1.5 }, "show_text font")
+    refused({ 0, 0, 0 }, { font = "a" }, "show_text font")
+    t.eq(reached, 0)
+    view._reset()
+  end)
+
+  t.test("the text layer is layer 5", function()
+    local state = {}
+    local lib = colour_fake(state)
+    local got
+    lib.C.cadaclysm_view_set_layer = function(_, which, on) got = { which, on }; return true end
+    view.use(lib)
+    local v = view.View.new({ width = 8, height = 8 })
+    v:layer("text", false)
+    t.eq(got[1], 5); t.eq(got[2], false)
+    view._reset()
+  end)
+
+  t.test("load_font reads an existing file, takes any other string as bytes, refuses a non-string", function()
+    local state = {}
+    local lib = colour_fake(state)
+    local got = {}
+    lib.C.cadaclysm_view_load_font = function(bytes, n) got[#got + 1] = ffi.string(bytes, n); return state.font or 3 end
+    view.use(lib)
+    local path = t.tmp("font.bin")
+    local f = assert(io.open(path, "wb")); f:write("FILE\0BYTES"); f:close()
+    t.eq(view.load_font(path), 3)
+    t.eq(got[1], "FILE\0BYTES")
+    t.eq(view.load_font("not a file, just bytes"), 3)
+    -- io.open stops at a NUL, so a path with one would open the file: it must be bytes instead.
+    t.eq(view.load_font(path .. string.char(0) .. "x"), 3)
+    t.eq(got[3], path .. string.char(0) .. "x")
+    t.eq(got[2], "not a file, just bytes")
+    os.remove(path)
+    t.raises(function() view.load_font(nil) end, "load_font: a path or the font's bytes, not nil")
+    t.raises(function() view.load_font(12) end, "load_font: a path or the font's bytes, not number")
+    state.font, state.error = 0, "cadaclysm_view_load_font: not a font"
+    t.raises(function() view.load_font("\1\2\3") end, "cadaclysm_view_load_font")
+    view._reset()
+  end)
+
+  t.test("a label draws and picks on the real library", function()
+    local v = offscreen(64, 64)
+    if not v then return end
+    v:background("black")
+    -- Lime glyphs on a red box: a swapped colour/box pair would still show both colours,
+    -- so the counts tell them apart (the box is bigger than the glyphs).
+    local label = v:show_text("HH", { 0, 0, 0 }, { colour = "lime", size = 24, align = "centre", box = "red", on_top = true })
+    local img = v:image()
+    local red, lime = 0, 0
+    for y = 0, 63 do for x = 0, 63 do
+      local r, g, b = pixel(img, x, y)
+      if r > 200 and g < 60 and b < 60 then red = red + 1 end
+      if g > 200 and r < 60 and b < 60 then lime = lime + 1 end
+    end end
+    t.ok(lime > 20, ("the glyphs are drawn: %d lime pixels"):format(lime))
+    t.ok(red > 50, ("the box is drawn: %d red pixels"):format(red))
+    t.ok(red > lime, ("the box (%d red) covers more than the glyphs (%d lime)"):format(red, lime))
+    local hit = v:pick(32, 32)
+    t.ok(hit and hit.item == label.id and hit.face == 0, "the label picks at its anchor, line 0")
+    label:set_text("H")
+    t.ok(changed(img, v:image()) > 0, "set_text changed the picture")
+    label:remove()
+    -- A label with no box has no red in it at all.
+    v:show_text("HH", { 0, 0, 0 }, { colour = "lime", size = 24, align = "centre", on_top = true })
+    local bare = v:image()
+    local bare_red, bare_lime = 0, 0
+    for y = 0, 63 do for x = 0, 63 do
+      local r, g, b = pixel(bare, x, y)
+      if r > 60 and g < 60 and b < 60 then bare_red = bare_red + 1 end
+      if g > 200 and r < 60 and b < 60 then bare_lime = bare_lime + 1 end
+    end end
+    t.eq(bare_red, 0)
+    t.ok(bare_lime > 20, "the box-less label still draws its glyphs")
+    t.raises(function() view.load_font("\1\2\3") end, "cadaclysm_view_load_font")
+    -- Spec 5: the bundled font's bytes load and draw (the runner's cwd is the repository root).
+    local font = view.load_font("crates/cadaclysm-text/fonts/LiberationSans-Regular.ttf")
+    t.ok(font > 0, "the bundled font loads from its path")
+    local before = v:image()
+    v:show_text("W", { 0, 0, 0 }, { colour = "red", size = 24, on_top = true, font = font })
+    t.ok(changed(before, v:image()) > 0, "text in the loaded font draws")
+    v:close()
+  end)
+
+  t.test("every colour takes text through the library's cadaclysm_view_parse_colour; text where an alpha is taken means 1", function()
+    local state = {}
+    view.use(colour_fake(state))
+    local v = view.View.new({ width = 8, height = 8 })
+    local item = v:show_mesh({ positions = { 0, 0, 0, 1, 0, 0, 0, 1, 0 }, indices = { 0, 1, 2 }, rgb = "red" })
+    item:colour("#00f")
+    v:background("SteelBlue")
+    item:node_colour(0, "white")
+    item:node_highlight(0, "#f00")
+    item:face_colours({ 0, 1 }, { "00ff00", { 0, 0, 1, 0.5 } })
+    v:show_lines({ 0, 0, 0, 1, 1, 1 }, "#ffffff")
+    v:show_curves({ 0, 0, 0, 1, 1, 0, 0, 1, 2, 0, 0, 1, 3, 0, 0, 1 }, "LIME")
+    item:colour({ 0.5, 0.5, 0.5 })   -- numbers never reach the parser
+    t.eq(table.concat(state.seen, " | "), table.concat({
+      "mesh 1.000,0.000,0.000", "colour 0.000,0.000,1.000", "background 0.275,0.510,0.706",
+      "node_colour 1.000,1.000,1.000,1.000", "node_highlight 1.000,0.000,0.000,1.000",
+      "faces 0.000,1.000,0.000,1.000,0.000,0.000,1.000,0.500", "lines 1.000,1.000,1.000", "curves 0.000,1.000,0.000",
+      "colour 0.500,0.500,0.500" }, " | "))
+    v:close()
+    view._reset()
+  end)
+
+  -- 1.11's points: what show_points hands the library, and what it refuses before it.
+  t.test("show_points reaches the contract and returns an item", function()
+    local state = {}
+    local lib = colour_fake(state)
+    local got = {}
+    lib.C.cadaclysm_view_show_points = function(_, p, n, rgb, size)
+      got.calls = (got.calls or 0) + 1
+      got.positions = {}
+      for k = 0, 3 * n - 1 do got.positions[#got.positions + 1] = p[k] end
+      got.count = n
+      got.rgb = rgb ~= nil and { rgb[0], rgb[1], rgb[2] } or nil
+      got.size = size
+      return 17
+    end
+    view.use(lib)
+    local v = view.View.new({ width = 8, height = 8 })
+    local item = v:show_points({ 0, 0, 0, 1, 2, 3 }, "red", 12)
+    t.eq(item.id, 17, "the item")
+    t.eq(got.calls, 1, "calls")
+    t.eq(table.concat(got.positions, ","), "0,0,0,1,2,3", "the positions")
+    t.eq(got.count, 2, "the count")
+    t.eq(got.rgb and table.concat(got.rgb, ",") or "NULL", "1,0,0", "red reached the library as (1, 0, 0)")
+    t.eq(got.size, 12, "the size")
+    item = v:show_points({ 1, 2, 3 })
+    t.eq(item.id, 17, "one point's item")
+    t.eq(got.calls, 2, "calls")
+    t.eq(table.concat(got.positions, ","), "1,2,3", "one point")
+    t.eq(got.rgb, nil, "no colour is rgb NULL")
+    t.eq(got.size, 8, "no size is 8")
+    local ok, err = pcall(function() v:show_points({ 1, 2, 3, 4 }) end)
+    t.ok(not ok and is_view_error(err), "four numbers: not a ViewError: " .. tostring(err))
+    t.eq(tostring(err), "show_points: three numbers a point, not 4")
+    ok, err = pcall(function() v:show_points({ 1, 2, 3 }, { 1, 0 }) end)
+    t.ok(not ok and is_view_error(err), "a two-number rgb: not a ViewError: " .. tostring(err))
+    t.eq(tostring(err), "show_points rgb: 3 numbers, not 2")
+    t.eq(got.calls, 2, "a refused show_points reached the library")
+    v:close()
+    view._reset()
+  end)
+
+  t.test("colour text the library refuses raises its message, and nothing reaches the view", function()
+    local state = {}
+    view.use(colour_fake(state))
+    local v = view.View.new({ width = 8, height = 8 })
+    local item = v:show_mesh({ positions = { 0, 0, 0, 1, 0, 0, 0, 1, 0 }, indices = { 0, 1, 2 } })
+    local before = #state.seen
+    for _, case in ipairs({
+      { "blurple", function() item:colour("blurple") end },
+      { "transparent", function() v:background("transparent") end },
+      { "nope", function() item:node_highlight(0, "nope") end },
+      { "rgb(1, 2, 3)", function() item:face_colours({ 0 }, { "rgb(1, 2, 3)" }) end },
+      { "#f00a", function() v:show_lines({ 0, 0, 0, 1, 1, 1 }, "#f00a") end },
+    }) do
+      local ok, err = pcall(case[2])
+      t.ok(not ok and is_view_error(err), case[1] .. ": not a ViewError: " .. tostring(err))
+      t.eq(tostring(err), ("cadaclysm_view_parse_colour: colour: \"#rgb\", \"#rrggbb\" or a CSS colour name, not '%s'"):format(case[1]))
+    end
+    t.eq(#state.seen, before, "a refused colour reached the view")
+    v:close()
+    view._reset()
+  end)
+
+  t.test("colour text draws on the real library; text it refuses raises its own words", function()
+    local v = offscreen(64, 48)
+    if not v then return end
+    v:layer("grid", false)
+    v:background("#ff0")
+    local item = v:show_mesh({ positions = { -1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0 }, indices = { 0, 1, 2, 0, 2, 3 }, rgb = "Blue" })
+    v:standard("top")
+    v:frame()
+    local img = v:image()
+    local r, g, b = pixel(img, 32, 24)
+    t.ok(b > 150 and r < 80 and g < 80, ("the centre is not blue: %d %d %d"):format(r, g, b))
+    r, g, b = pixel(img, 1, 1)
+    t.ok(r > 150 and g > 150 and b < 80, ("the corner is not the yellow background: %d %d %d"):format(r, g, b))
+    item:colour("lime")
+    r, g, b = pixel(v:image(), 32, 24)
+    t.ok(g > 150 and r < 80 and b < 80, ("the centre is not lime: %d %d %d"):format(r, g, b))
+    local ok, err = pcall(function() item:colour("blurple") end)
+    t.ok(not ok and is_view_error(err) and tostring(err):find("^cadaclysm_view_parse_colour: .*not 'blurple'$") ~= nil, tostring(err))
     v:close()
   end)
 
@@ -548,5 +934,242 @@ return function(t)
     package.loaded["cadaclysm_view"] = loaded
     if not ok then error(err, 0) end
     t.eq(after, nil, "closing a scene loaded the view module")
+  end)
+
+  -- ---- view ABI 1.8: the pick's clicks and point, the double-click opt-in, focus, navigation ----
+
+  t.test("CadaclysmViewPick is the header 1.8 layout: clicks 16, has_point 20, point 24, 36 bytes", function()
+    t.eq(ffi.sizeof("CadaclysmViewPick"), 36)
+    local at = {}
+    for _, f in ipairs({ "size", "item", "node", "face", "clicks", "has_point", "point" }) do at[#at + 1] = ffi.offsetof("CadaclysmViewPick", f) end
+    t.eq(table.concat(at, ","), "0,4,8,12,16,20,24")
+  end)
+
+  t.test("a pick answer and run's pick carry clicks, and the point only where the library set one", function()
+    local state = {}
+    local f = fake(state)
+    local answers = { { 3, 4, 5, 2, 1, { 1.5, -2, 0.25 } }, { 3, 4, 5, 1, 0, { 9, 9, 9 } } }
+    local function fill(out, a)
+      out.item, out.node, out.face, out.clicks, out.has_point = a[1], a[2], a[3], a[4], a[5]
+      out.point[0], out.point[1], out.point[2] = a[6][1], a[6][2], a[6][3]
+    end
+    f.C.cadaclysm_view_pick_result = function(_, out) fill(out, table.remove(answers, 1)) return true end
+    f.C.cadaclysm_view_run = function(_, cam, pick)
+      cam.eye[2] = 1
+      cam.up[1] = 1
+      fill(pick, { 7, 0, 0, 2, 0, { 1, 2, 3 } })
+      return true
+    end
+    view.use(f)
+    local v = view.View.new({ width = 8, height = 8 })
+    local hit = v:pick(1, 1)
+    t.ok(hit and hit.item == 3 and hit.node == 4 and hit.face == 5 and hit.clicks == 2, "a double click's hit")
+    t.ok(hit.point and hit.point[1] == 1.5 and hit.point[2] == -2 and hit.point[3] == 0.25, "the point it hit")
+    local flat = v:pick(1, 1)
+    t.ok(flat and flat.clicks == 1, "a click's hit")
+    t.eq(flat.point, nil, "has_point 0: the point bytes mean nothing")
+    local cam = v:run()
+    t.ok(cam.pick and cam.pick.item == 7 and cam.pick.clicks == 2, "run's pick carries clicks")
+    t.eq(cam.pick.point, nil, "run's pick: no point without has_point")
+    view._reset()
+  end)
+
+  t.test("a library answering view ABI 1.8 (1.10 or 2.11) is refused with its version", function()
+    local function answering(version)
+      return { cadaclysm_view_abi_version = function() return version end }
+    end
+    local e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 8)) end, "view ABI 1.8")
+    t.eq(tostring(e), "stand-in: view ABI 1.8, this wrapper needs 1.11 or a later 1.x")
+    e = t.raises(function() view._bound("stand-in", answering(2 * 65536 + 11)) end, "view ABI 2.11")
+    t.eq(tostring(e), "stand-in: view ABI 2.11, this wrapper needs 1.11 or a later 1.x")
+    e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 10)) end, "view ABI 1.10")
+    t.eq(tostring(e), "stand-in: view ABI 1.10, this wrapper needs 1.11 or a later 1.x")
+    -- 1.11 passes the gate (this stand-in then fails a later check, never the version's).
+    local taken, why = pcall(view._bound, "stand-in", answering(1 * 65536 + 11))
+    t.ok(not taken and not tostring(why):find("view ABI", 1, true), "1.11 passes the version gate: " .. tostring(why))
+  end)
+
+  -- ---- view ABI 1.9: the lighting ----
+
+  t.test("lighting is set, read back, and another name is refused before the library", function()
+    local state = { lighting = 0 }
+    local f = fake(state)
+    f.C.cadaclysm_view_set_lighting = function(_, which)
+      state.calls[#state.calls + 1] = "set_lighting " .. tonumber(which)
+      state.lighting = tonumber(which)
+      return true
+    end
+    f.C.cadaclysm_view_lighting = function()
+      state.calls[#state.calls + 1] = "lighting"
+      return state.lighting
+    end
+    view.use(f)
+    local v = view.View.new({ width = 8, height = 8 })
+    state.calls = {}
+    t.eq(v:lighting(), "headlight")
+    v:lighting("studio")
+    t.eq(v:lighting(), "studio")
+    local e = t.raises(function() v:lighting("noon") end, "lighting")
+    t.ok(tostring(e):find('lighting "noon": one of headlight, studio', 1, true), tostring(e))
+    t.eq(v:lighting(), "studio")
+    v:lighting("headlight")
+    t.eq(v:lighting(), "headlight")
+    t.eq(table.concat(state.calls, ","), "lighting,set_lighting 1,lighting,lighting,set_lighting 0,lighting")
+    view._reset()
+  end)
+
+  t.test("last_pick reads a landed answer once without waiting: nil, false for nothing hit, the library error", function()
+    local state = {}
+    local f = fake(state)
+    local answers = { "none", { 3, 4, 5, 2, 1 }, { 0, 0, 0, 1, 0 } }
+    f.C.cadaclysm_view_pick_result = function(_, out)
+      local a = table.remove(answers, 1)
+      if a == nil or a == "none" then state.error = "cadaclysm_view_pick_result: no pick result" return false end
+      out.item, out.node, out.face, out.clicks, out.has_point = a[1], a[2], a[3], a[4], a[5]
+      out.point[0], out.point[1], out.point[2] = 1, 2, 3
+      return true
+    end
+    view.use(f)
+    local v = view.View.new({ width = 8, height = 8 })
+    local calls = #state.calls
+    t.eq(v:last_pick(), nil, "nothing landed yet")
+    local hit = v:last_pick()
+    t.ok(hit and hit.item == 3 and hit.node == 4 and hit.face == 5 and hit.clicks == 2, "a landed double click")
+    t.ok(hit.point and hit.point[1] == 1 and hit.point[2] == 2 and hit.point[3] == 3, "its point")
+    t.eq(v:last_pick(), false, "a click on nothing")
+    t.eq(v:last_pick(), nil, "each answer is read once")
+    state.error = ""
+    t.eq(v:last_pick(), nil, "nothing landed, nothing said")
+    f.C.cadaclysm_view_pick_result = function() state.error = "boom from pick_result" return false end
+    local e = t.raises(function() v:last_pick() end, "boom")
+    t.eq(tostring(e), "boom from pick_result", "the library's own message, bare")
+    t.eq(#state.calls, calls, "last_pick never asks or draws")
+    view._reset()
+  end)
+
+  t.test("set_double_click_frames, focus and navigation reach the library with their arguments", function()
+    local state = {}
+    local f = fake(state)
+    local seen, nav = {}, 0
+    f.C.cadaclysm_view_set_double_click_frames = function(_, on) seen[#seen + 1] = "dc " .. tostring(on) end
+    f.C.cadaclysm_view_focus = function(_, p)
+      seen[#seen + 1] = ("focus %g %g %g"):format(p[0], p[1], p[2])
+      if p[0] ~= p[0] then state.error = "cadaclysm_view_focus: the point is not finite" return false end
+      return true
+    end
+    f.C.cadaclysm_view_navigation = function() seen[#seen + 1] = "navigation" return nav end
+    view.use(f)
+    local v = view.View.new({ width = 8, height = 8 })
+    v:set_double_click_frames(true)
+    v:set_double_click_frames(false)
+    v:focus({ 1, -2, 3.5 })
+    t.eq(v:navigation(), "orbit")
+    nav = 1
+    t.eq(v:navigation(), "fly")
+    t.eq(table.concat(seen, "; "), "dc true; dc false; focus 1 -2 3.5; navigation; navigation")
+    local e = t.raises(function() v:focus({ 0 / 0, 0, 0 }) end, "not finite")
+    t.eq(tostring(e), "cadaclysm_view_focus: the point is not finite", "the library's own reason, bare")
+    state.error = ""
+    local before = #seen
+    t.raises(function() v:focus({ 1, 2 }) end, "focus: 3 numbers, not 2")
+    t.raises(function() v:focus(nil) end, "focus: 3 numbers, not nil")
+    t.raises(function() v:focus("123") end, "focus")
+    t.eq(#seen, before, "a refused point reached the library")
+    view._reset()
+  end)
+
+  local SQUARE = { positions = { -1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0 }, indices = { 0, 1, 2, 0, 2, 3 }, rgb = { 1, 0, 0 } }
+
+  -- The square from the top, zoomed out so a framing visibly changes the picture.
+  local function framed_square()
+    local v = offscreen(64, 48)
+    if not v then return nil end
+    v:layer("grid", false)
+    local item = v:show_mesh(SQUARE)
+    v:standard("top")
+    v:frame()
+    v:zoom(-3)
+    v:draw()
+    return v, item
+  end
+
+  -- Down, up, down, up at one pixel within the double-click time.
+  local function double_click(v, x, y)
+    for _, e in ipairs({ { 0, "pointer_down" }, { 10, "pointer_up" }, { 60, "pointer_down" }, { 70, "pointer_up" } }) do
+      v:input({ type = e[2], x = x, y = y, time_ms = 1000 + e[1] })
+    end
+  end
+
+  -- The answer an input asked for, read through last_pick as the view's draws land it: drawn
+  -- for up to ten seconds of wall time (a loaded machine lands it late; a count of draws alone
+  -- can run out in milliseconds). false for a click on nothing.
+  local function land(v)
+    local deadline = os.time() + 10
+    while os.time() <= deadline do
+      v:draw()
+      local answer = v:last_pick()
+      if answer ~= nil then return answer end
+    end
+    error("the pick never landed", 0)
+  end
+
+  t.test("a double click answers clicks 2 with its point and leaves the picture (real library)", function()
+    local v, item = framed_square()
+    if not v then return end
+    local before = v:image()
+    t.eq(v:last_pick(), nil, "nothing clicked yet")
+    double_click(v, 32, 24)
+    local hit = land(v)
+    t.ok(hit and hit.item == item.id and hit.clicks == 2, "a double click's answer")
+    t.ok(hit.point and math.abs(hit.point[3]) < 1e-3 and math.abs(hit.point[1]) < 0.2, "the square's centre, z 0")
+    t.eq(changed(before, v:image()), 0, "a double click moves nothing by default")
+    t.eq(v:last_pick(), nil, "each answer is read once")
+    -- One click on the background, well after: landed, with nothing hit.
+    v:input({ type = "pointer_down", x = 1, y = 1, time_ms = 5000 })
+    v:input({ type = "pointer_up", x = 1, y = 1, time_ms = 5010 })
+    t.eq(land(v), false, "a click on the background")
+    v:close()
+  end)
+
+  t.test("set_double_click_frames(true) makes the same double click frame (real library)", function()
+    local v = framed_square()
+    if not v then return end
+    local before = v:image()
+    v:set_double_click_frames(true)
+    double_click(v, 32, 24)
+    local hit = land(v)
+    t.ok(hit and hit.clicks == 2, "opted in: still a pick of clicks 2")
+    t.ok(changed(before, v:image()) > 0, "opted in, the double click framed what it hit")
+    v:close()
+  end)
+
+  t.test("navigation is fly after a fly key, Tab toggles it, focus leaves it (real library)", function()
+    local v = offscreen(64, 48)
+    if not v then return end
+    local function key(k) v:input({ type = "key", key = k, key_down = true }) v:input({ type = "key", key = k, key_down = false }) end
+    t.eq(v:navigation(), "orbit")
+    key("KeyW")
+    t.eq(v:navigation(), "fly", "the mode outlives the key")
+    key("Tab")
+    t.eq(v:navigation(), "orbit")
+    key("KeyW")
+    v:focus({ 1, 2, 3 })
+    t.eq(v:navigation(), "orbit", "focus leaves fly mode")
+    v:close()
+  end)
+
+  t.test("focus moves the orbit point and focus back restores the picture (real library)", function()
+    local v = framed_square()
+    if not v then return end
+    local before = v:image()
+    t.ok(math.abs(v:pick(32, 24).point[1]) < 0.2, "the centre looks at the middle of the square")
+    v:focus({ 0.5, 0, 0 })
+    local hit = v:pick(32, 24)
+    t.ok(hit and hit.point and math.abs(hit.point[1] - 0.5) < 0.1, "the centre now looks at x = 0.5")
+    t.ok(changed(before, v:image()) > 0, "the picture moved")
+    v:focus({ 0, 0, 0 })
+    t.eq(changed(before, v:image()), 0, "focus back restores it")
+    t.raises(function() v:focus({ 0 / 0, 0, 0 }) end, "cadaclysm_view_focus")
+    v:close()
   end)
 end

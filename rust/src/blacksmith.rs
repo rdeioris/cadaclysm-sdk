@@ -85,7 +85,7 @@ use std::rc::Rc;
 use std::sync::Mutex;
 
 use crate::{
-    borrowed, groups, groups64, text, Error, FreedomAxis, Manifold, Mesh, Mesh64, Motion, Node, OpenOptions, PairKind, Result, Scene,
+    borrowed, groups, groups64, text, Beziers64Data, Error, FreedomAxis, Manifold, Mesh, Mesh64, Motion, Node, OpenOptions, PairKind, Result, Scene,
     StateValue, SvgOptions, SvgView, Up,
 };
 use crate::view::objects::{polyline_segments, present, Shown};
@@ -243,6 +243,33 @@ pub fn license(text_or_path: impl AsRef<std::ffi::OsStr>) -> Result<()> {
         Ok(())
     } else {
         Err(fail(api, "license refused"))
+    }
+}
+
+/// Set a kernel option, by its name, for the whole process from the next call on:
+/// `"boolean.mesh_budget"`, `"boolean.finest_tolerance"`, `"profile_boolean.point_budget"`
+/// or `"measure.default_accuracy"`. An error -- and nothing changed -- for a name that is
+/// not an option or a value it does not take, saying which and what it takes.
+pub fn set_option(name: &str, value: f64) -> Result<()> {
+    let api = api()?;
+    let given = c_text("option name", name)?;
+    if unsafe { (api.cadaclysm_blacksmith_option_set)(given.as_ptr(), value) } {
+        Ok(())
+    } else {
+        Err(fail(api, &format!("option {name:?} refused")))
+    }
+}
+
+/// A kernel option's value, by its name: what [`set_option`] last set, else its default.
+/// An error for a name that is not an option, listing the ones there are.
+pub fn option(name: &str) -> Result<f64> {
+    let api = api()?;
+    let given = c_text("option name", name)?;
+    let mut out = 0.0f64;
+    if unsafe { (api.cadaclysm_blacksmith_option_get)(given.as_ptr(), &mut out) } {
+        Ok(out)
+    } else {
+        Err(fail(api, &format!("no option {name:?}")))
     }
 }
 
@@ -1380,8 +1407,9 @@ pub enum Unit {
     Inch = 2,
 }
 
-/// A colour as `coloured` takes it: numbers in 0..1, or text -- `"#rgb"`, `"#rrggbb"` or a
-/// CSS colour name, read by the library's own parser.
+/// A colour as `coloured` and the view's calls take it: numbers in 0..1, or text -- `"#rgb"`,
+/// `"#rrggbb"` or a CSS colour name, read by the library's own parser (the kernel's for
+/// `coloured`, the view library's for a [`View`](crate::view::View)).
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Colour {
@@ -1392,6 +1420,12 @@ pub enum Colour {
 impl From<[f64; 3]> for Colour {
     fn from(c: [f64; 3]) -> Self {
         Colour::Rgb(c)
+    }
+}
+
+impl From<[f32; 3]> for Colour {
+    fn from(c: [f32; 3]) -> Self {
+        Colour::Rgb(c.map(f64::from))
     }
 }
 
@@ -2064,6 +2098,16 @@ impl Solid {
         self.next(raw, "split_by_plane")?.lumps()
     }
 
+    /// This solid split by the closed `profile` drawn on `frame`, pushed straight
+    /// through it along the frame's z both ways: the bodies outside the profile first,
+    /// then those inside. Where the plane lies along z does not matter.
+    pub fn split_by_profile(&self, profile: &Profile, frame: &Frame, tolerance: f64) -> Result<Vec<Solid>> {
+        let raw = unsafe {
+            (self.api.cadaclysm_blacksmith_split_by_profile)(self.raw(), profile.raw(), frame.v.as_ptr(), tolerance, NO_PROGRESS, ptr::null_mut())
+        };
+        self.next(raw, "split_by_profile")?.lumps()
+    }
+
     /// This solid's connected bodies, each a solid of its own, in the order of their
     /// first faces.
     pub fn lumps(&self) -> Result<Vec<Solid>> {
@@ -2641,6 +2685,45 @@ impl Solid {
         let default = SvgOptions::default();
         let options = options.into().unwrap_or(&default);
         write_svg(path, &[self], options)
+    }
+
+    /// This solid's silhouette -- where its surfaces turn away from the eye, which no edge of it
+    /// lies on -- as rational cubic Béziers in `double`, from the camera `options` describes
+    /// (`None` for [`SvgOptions::default`]). The same [`SvgOptions`] that draw a picture:
+    /// `view`, `azimuth`, `elevation`, `up` and `fov`, and `width` with `tolerance`, which the
+    /// library reads together as the page fraction `tolerance / width`. Nothing else in them
+    /// changes the curves.
+    ///
+    /// The library hands over an owned block; this copies it out and releases it before it
+    /// returns, on every path (see [`SilhouetteBlock`]), so there is nothing for the caller to
+    /// free.
+    ///
+    /// A body with no silhouette (every face planar) is an empty answer, not an error; a refused
+    /// option or a body with no measurable geometry is an `Err`.
+    pub fn silhouette_beziers<'o>(&self, options: impl Into<Option<&'o SvgOptions>>) -> Result<Beziers64Data> {
+        let default = SvgOptions::default();
+        let options = options.into().unwrap_or(&default);
+        let raw = build_svg_options(self.api, options)?;
+        let mut count = 0u32;
+        let data = unsafe { (self.api.cadaclysm_blacksmith_silhouette_beziers)(self.raw(), &raw, &mut count) };
+        if data.is_null() {
+            // The library clears the thread's error at entry and the empty answer sets none: a
+            // reason here is this call's own refusal, none is the empty answer.
+            if failed(self.api) {
+                return Err(fail(self.api, "silhouette_beziers"));
+            }
+            return Ok(Beziers64Data::default());
+        }
+        // From here the block is owned by the guard, which frees it when this function returns
+        // by any path -- the end below, or a panic while copying.
+        let block = SilhouetteBlock { api: self.api, data, count };
+        let doubles = unsafe { std::slice::from_raw_parts(block.data, block.count as usize * 16) };
+        let mut out = Beziers64Data::default();
+        for curve in doubles.chunks_exact(16) {
+            out.points.extend(curve[..12].chunks_exact(3).map(|p| [p[0], p[1], p[2]]));
+            out.weights.extend_from_slice(&curve[12..]);
+        }
+        Ok(out)
     }
 
     /// This solid as a reader [`Scene`], through STEP text: the door to the tree walk
@@ -3442,6 +3525,478 @@ impl Collider {
     }
 }
 
+// ---- SubD cages -------------------------------------------------------------------
+
+/// The plane a mirrored cage is cut on, perpendicular to this axis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubdAxis {
+    X,
+    Y,
+    Z,
+}
+
+impl SubdAxis {
+    fn code(self) -> u32 {
+        self as u32
+    }
+
+    fn from_code(code: i32) -> Option<SubdAxis> {
+        match code {
+            0 => Some(SubdAxis::X),
+            1 => Some(SubdAxis::Y),
+            2 => Some(SubdAxis::Z),
+            _ => None,
+        }
+    }
+}
+
+/// Which kind of cage element a call means: vertices, edges or faces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubdElements {
+    Vertices,
+    Edges,
+    Faces,
+}
+
+impl SubdElements {
+    fn code(self) -> u32 {
+        self as u32
+    }
+}
+
+/// A set of cage elements, by kernel id: vertices, edges (as vertex pairs, smaller id first
+/// where the kernel reads them back) or faces. It is what [`Subd::selection`] reads, what
+/// [`Subd::transform`] takes, and what [`Subd::pick`] answers (one element).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubdSelection {
+    Vertices(Vec<u32>),
+    Edges(Vec<(u32, u32)>),
+    Faces(Vec<u32>),
+}
+
+impl SubdSelection {
+    fn kind(&self) -> SubdElements {
+        match self {
+            SubdSelection::Vertices(_) => SubdElements::Vertices,
+            SubdSelection::Edges(_) => SubdElements::Edges,
+            SubdSelection::Faces(_) => SubdElements::Faces,
+        }
+    }
+
+    /// The ids as the C ABI reads them: flat, an edge as two.
+    fn flat(&self) -> Vec<u32> {
+        match self {
+            SubdSelection::Vertices(ids) | SubdSelection::Faces(ids) => ids.clone(),
+            SubdSelection::Edges(edges) => flatten_pairs(edges),
+        }
+    }
+}
+
+fn flatten_pairs(pairs: &[(u32, u32)]) -> Vec<u32> {
+    pairs.iter().flat_map(|&(a, b)| [a, b]).collect()
+}
+
+fn pairs_of(flat: &[u32]) -> Vec<(u32, u32)> {
+    flat.chunks_exact(2).map(|p| (p[0], p[1])).collect()
+}
+
+/// `n` items at `p` copied out, or none for a null pointer or a zero count (the C ABI leaves
+/// the pointer unspecified for an empty run).
+///
+/// # Safety
+/// `p` must be null or point at `n` readable items.
+unsafe fn copied<T: Copy>(p: *const T, n: usize) -> Vec<T> {
+    if p.is_null() || n == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(p, n).to_vec()
+    }
+}
+
+/// One level of a cage's smooth surface, copied out of the cage so that it outlives it:
+/// [`Subd::smooth_mesh`]'s answer. `positions` and `normals` are limit positions and unit
+/// outward limit normals; `indices` is three vertex ids a triangle and `triangle_face` the
+/// face of the **full** cage each triangle lies on (on a mirrored half, face `f` of the half
+/// is `f` and its reflection `f` plus the half's face count).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubdMesh {
+    pub positions: Vec<[f64; 3]>,
+    pub normals: Vec<[f64; 3]>,
+    pub indices: Vec<[u32; 3]>,
+    pub triangle_face: Vec<u32>,
+}
+
+/// What [`Subd::to_solid`] did and how close it came: `regular` patches exact from their own
+/// net and `refined` ones from a refined neighbourhood; the Catmull-Clark `steps` taken first
+/// (1 or 2); `levels`, the deepest local refinement a patch took (0 when none was refined);
+/// the largest `deviation` from the limit surface, as a fraction of the cage's bounding-box
+/// diagonal; the largest tangent break `g1_angle_deg` across a side that is not creased, in
+/// degrees; and the world points they were measured at, `deviation_at` and `g1_at`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SubdReport {
+    pub regular: u32,
+    pub refined: u32,
+    pub steps: u32,
+    pub levels: u32,
+    pub deviation: f64,
+    pub g1_angle_deg: f64,
+    pub deviation_at: [f64; 3],
+    pub g1_at: [f64; 3],
+}
+
+impl From<sys::CadaclysmBlacksmithSubdReport> for SubdReport {
+    fn from(r: sys::CadaclysmBlacksmithSubdReport) -> SubdReport {
+        SubdReport {
+            regular: r.regular,
+            refined: r.refined,
+            steps: r.steps,
+            levels: r.levels,
+            deviation: r.deviation,
+            g1_angle_deg: r.g1_angle_deg,
+            deviation_at: r.deviation_at,
+            g1_at: r.g1_at,
+        }
+    }
+}
+
+/// [`Subd::to_solid`]'s limits. A `tolerance` or `g1_angle` of 0 or less, or a `max_levels` of
+/// 0, takes the default, which is also what `Default` holds: 1e-4, 0.1, 6.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SubdSolidOptions {
+    /// The largest deviation from the limit surface, as a fraction of the cage's diagonal.
+    pub tolerance: f64,
+    /// The largest tangent break across an uncreased side, in degrees.
+    pub g1_angle: f64,
+    /// The deepest local refinement (2 to 6).
+    pub max_levels: u32,
+}
+
+impl Default for SubdSolidOptions {
+    fn default() -> SubdSolidOptions {
+        SubdSolidOptions { tolerance: 1e-4, g1_angle: 0.1, max_levels: 6 }
+    }
+}
+
+/// A Catmull-Clark control cage: positions, faces, creased edges, pinned vertices, an
+/// optional mirror plane, and the selection of the edit that made it. Immutable: every edit
+/// returns a new `Subd`, whose [`selection`](Subd::selection) names what that edit touched;
+/// [`to_solid`](Subd::to_solid) turns it into an exact B-rep. Dropping it frees the handle
+/// instead of an explicit close; a cage made from another keeps its own. A refusal is the
+/// kernel's own words.
+pub struct Subd {
+    handle: NonNull<sys::CadaclysmBlacksmithSubd>,
+    api: &'static Api,
+}
+
+unsafe impl Send for Subd {}
+
+impl Drop for Subd {
+    fn drop(&mut self) {
+        unsafe { (self.api.cadaclysm_blacksmith_subd_free)(self.handle.as_ptr()) }
+    }
+}
+
+impl fmt::Debug for Subd {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Subd({:p})", self.handle)
+    }
+}
+
+impl Subd {
+    fn wrap(api: &'static Api, raw: *mut sys::CadaclysmBlacksmithSubd, what: &str) -> Result<Subd> {
+        NonNull::new(raw).map(|handle| Subd { handle, api }).ok_or_else(|| fail(api, what))
+    }
+
+    fn raw(&self) -> *const sys::CadaclysmBlacksmithSubd {
+        self.handle.as_ptr()
+    }
+
+    /// A box of `size` (x, y, z), centred on the origin, with `segments` quads along each
+    /// axis (1 to 1024).
+    pub fn cuboid(size: [f64; 3], segments: [u32; 3]) -> Result<Subd> {
+        let api = api()?;
+        let raw = unsafe {
+            (api.cadaclysm_blacksmith_subd_cuboid)(size[0], size[1], size[2], segments[0], segments[1], segments[2])
+        };
+        Subd::wrap(api, raw, "subd_cuboid")
+    }
+
+    /// A cylinder along +Z: one n-gon cap per end with `sides` sides and `rings` bands of
+    /// quads between them; with `creased_rims` the two rim loops are creased, so the caps
+    /// stay flat. **The other wrappers default `creased_rims` to `true`**, which is what
+    /// converts: an uncreased cylinder of 7 or more sides is refused by
+    /// [`to_solid`](Subd::to_solid) at the default limits.
+    pub fn cylinder(radius: f64, height: f64, sides: u32, rings: u32, creased_rims: bool) -> Result<Subd> {
+        let api = api()?;
+        let raw = unsafe { (api.cadaclysm_blacksmith_subd_cylinder)(radius, height, sides, rings, creased_rims) };
+        Subd::wrap(api, raw, "subd_cylinder")
+    }
+
+    /// A quad ball of `radius`: a cube grid with `segments` quads per edge, each vertex
+    /// pushed out to the radius.
+    pub fn sphere(radius: f64, segments: u32) -> Result<Subd> {
+        let api = api()?;
+        Subd::wrap(api, unsafe { (api.cadaclysm_blacksmith_subd_sphere)(radius, segments) }, "subd_sphere")
+    }
+
+    /// A torus around +Z: `around` steps about the axis at `major`, `tube` steps round the
+    /// tube of `minor`, all quads.
+    pub fn torus(major: f64, minor: f64, around: u32, tube: u32) -> Result<Subd> {
+        let api = api()?;
+        Subd::wrap(api, unsafe { (api.cadaclysm_blacksmith_subd_torus)(major, minor, around, tube) }, "subd_torus")
+    }
+
+    /// A cage from its parts, the lossless inverse of reading them back: `positions`, `faces`
+    /// (each a loop of vertex ids), `creases` (vertex pairs that are edges), `pins` vertex
+    /// ids, and `symmetry` the axis and tolerance of a mirrored half, as
+    /// [`symmetry`](Subd::symmetry) reports it. The new cage selects nothing.
+    pub fn from_parts<F: AsRef<[u32]>>(
+        positions: &[[f64; 3]],
+        faces: &[F],
+        creases: &[(u32, u32)],
+        pins: &[u32],
+        symmetry: Option<(SubdAxis, f64)>,
+    ) -> Result<Subd> {
+        let api = api()?;
+        let sizes: Vec<u32> = faces.iter().map(|f| f.as_ref().len() as u32).collect();
+        let loops: Vec<u32> = faces.iter().flat_map(|f| f.as_ref().iter().copied()).collect();
+        let crease_ids = flatten_pairs(creases);
+        let (axis, tolerance) = match symmetry {
+            Some((axis, tolerance)) => (axis.code() as i32, tolerance),
+            None => (-1, 0.0),
+        };
+        let raw = unsafe {
+            (api.cadaclysm_blacksmith_subd_from_parts)(
+                positions.as_ptr().cast(),
+                positions.len() as u32,
+                sizes.as_ptr(),
+                sizes.len() as u32,
+                loops.as_ptr(),
+                loops.len() as u32,
+                crease_ids.as_ptr(),
+                creases.len() as u32,
+                pins.as_ptr(),
+                pins.len() as u32,
+                axis,
+                tolerance,
+            )
+        };
+        Subd::wrap(api, raw, "subd_from_parts")
+    }
+
+    /// `read` over this cage's parts while their views into the handle are alive.
+    fn with_parts<R>(&self, read: impl FnOnce(&sys::CadaclysmBlacksmithSubdParts) -> R) -> Result<R> {
+        let mut out = sys::CadaclysmBlacksmithSubdParts::default();
+        if !unsafe { (self.api.cadaclysm_blacksmith_subd_parts)(self.raw(), &mut out) } {
+            return Err(fail(self.api, "subd_parts"));
+        }
+        Ok(read(&out))
+    }
+
+    /// The cage's vertices: a copy.
+    pub fn positions(&self) -> Result<Vec<[f64; 3]>> {
+        self.with_parts(|p| {
+            let flat: Vec<f64> = unsafe { copied(p.positions, 3 * p.vertex_count as usize) };
+            flat.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect()
+        })
+    }
+
+    /// Each face's vertex ids, in loop order.
+    pub fn faces(&self) -> Result<Vec<Vec<u32>>> {
+        self.with_parts(|p| {
+            let sizes = unsafe { copied(p.face_sizes, p.face_count as usize) };
+            let loops = unsafe { copied(p.face_indices, p.index_count as usize) };
+            let mut at = 0;
+            sizes
+                .iter()
+                .map(|&n| {
+                    let face = loops[at..at + n as usize].to_vec();
+                    at += n as usize;
+                    face
+                })
+                .collect()
+        })
+    }
+
+    /// The creased edges, each (smaller id, larger id), sorted.
+    pub fn creases(&self) -> Result<Vec<(u32, u32)>> {
+        self.with_parts(|p| pairs_of(&unsafe { copied(p.creases, 2 * p.crease_count as usize) }))
+    }
+
+    /// The pinned vertices: they refine as corners and stay put.
+    pub fn pins(&self) -> Result<Vec<u32>> {
+        self.with_parts(|p| unsafe { copied(p.pins, p.pin_count as usize) })
+    }
+
+    /// `None` for an ordinary cage; for a mirrored half the plane's axis and how far from it
+    /// a vertex counts as on it.
+    pub fn symmetry(&self) -> Result<Option<(SubdAxis, f64)>> {
+        self.with_parts(|p| SubdAxis::from_code(p.symmetry_axis).map(|axis| (axis, p.symmetry_tolerance)))
+    }
+
+    /// What the edit that made this cage touched; `None` for a cage no edit selected (a
+    /// primitive, [`from_parts`](Subd::from_parts), the mirror calls).
+    pub fn selection(&self) -> Result<Option<SubdSelection>> {
+        self.with_parts(|p| {
+            let n = p.selection_count as usize;
+            match p.selection_kind {
+                0 => Some(SubdSelection::Vertices(unsafe { copied(p.selection, n) })),
+                1 => Some(SubdSelection::Edges(pairs_of(&unsafe { copied(p.selection, 2 * n) }))),
+                2 => Some(SubdSelection::Faces(unsafe { copied(p.selection, n) })),
+                _ => None,
+            }
+        })
+    }
+
+    fn edit(&self, raw: *mut sys::CadaclysmBlacksmithSubd, what: &str) -> Result<Subd> {
+        Subd::wrap(self.api, raw, what)
+    }
+
+    /// A new cage with the selected elements moved by `matrix`: sixteen numbers,
+    /// column-major, with a rotation about a point baked in by the caller. The new cage
+    /// selects the same elements.
+    pub fn transform(&self, selection: &SubdSelection, matrix: &[f64]) -> Result<Subd> {
+        if matrix.len() != 16 {
+            return Err(Error::new(format!("transform matrix: expected 16 numbers, got {}", matrix.len())));
+        }
+        let ids = selection.flat();
+        let count = ids.len() / if selection.kind() == SubdElements::Edges { 2 } else { 1 };
+        self.edit(
+            unsafe {
+                (self.api.cadaclysm_blacksmith_subd_transform)(self.raw(), selection.kind().code(), ids.as_ptr(), count as u32, matrix.as_ptr())
+            },
+            "subd_transform",
+        )
+    }
+
+    /// A new cage with `edges` creased, or un-creased when `on` is false; it selects them.
+    pub fn crease(&self, edges: &[(u32, u32)], on: bool) -> Result<Subd> {
+        let flat = flatten_pairs(edges);
+        self.edit(
+            unsafe { (self.api.cadaclysm_blacksmith_subd_set_crease)(self.raw(), flat.as_ptr(), edges.len() as u32, on) },
+            "subd_set_crease",
+        )
+    }
+
+    /// A new cage with `vertices` pinned (they refine as corners and stay put), or released
+    /// when `on` is false; it selects them.
+    pub fn pin(&self, vertices: &[u32], on: bool) -> Result<Subd> {
+        self.edit(
+            unsafe { (self.api.cadaclysm_blacksmith_subd_set_pin)(self.raw(), vertices.as_ptr(), vertices.len() as u32, on) },
+            "subd_set_pin",
+        )
+    }
+
+    /// A new cage with `faces` pushed out by `distance` along each connected region's average
+    /// normal, a quad wall on each boundary edge; the moved faces keep their ids and the new
+    /// cage selects them.
+    pub fn extrude(&self, faces: &[u32], distance: f64) -> Result<Subd> {
+        self.edit(
+            unsafe { (self.api.cadaclysm_blacksmith_subd_extrude)(self.raw(), faces.as_ptr(), faces.len() as u32, distance) },
+            "subd_extrude",
+        )
+    }
+
+    /// A new cage with `faces` shrunk by `amount`, in (0, 1), within their surface and a ring
+    /// of quads round each region (each face, with `individual`); the new cage selects the
+    /// inner faces.
+    pub fn inset(&self, faces: &[u32], amount: f64, individual: bool) -> Result<Subd> {
+        self.edit(
+            unsafe {
+                (self.api.cadaclysm_blacksmith_subd_inset)(self.raw(), faces.as_ptr(), faces.len() as u32, amount, individual)
+            },
+            "subd_inset",
+        )
+    }
+
+    /// A new cage with a loop of edges cut across the ring of quads through `edge`, at
+    /// `a + at * (b - a)` with `at` in (0, 1) (0.5 is the middle); it selects the new loop.
+    pub fn insert_loop(&self, edge: (u32, u32), at: f64) -> Result<Subd> {
+        self.edit(
+            unsafe { (self.api.cadaclysm_blacksmith_subd_insert_loop)(self.raw(), edge.0, edge.1, at) },
+            "subd_insert_loop",
+        )
+    }
+
+    /// The loop of edges through `edge`, straight across each valence-four vertex, the picked
+    /// edge first, each pair smaller id first; empty when `edge` is not an edge of the cage.
+    pub fn edge_loop(&self, edge: (u32, u32)) -> Result<Vec<(u32, u32)>> {
+        // The kernel answers with a cage whose selection is the loop; it drops (is freed) on
+        // every path out of here, the empty loop's too.
+        let looped = self.edit(
+            unsafe { (self.api.cadaclysm_blacksmith_subd_edge_loop)(self.raw(), edge.0, edge.1) },
+            "subd_edge_loop",
+        )?;
+        Ok(match looped.selection()? {
+            Some(SubdSelection::Edges(edges)) => edges,
+            _ => Vec::new(),
+        })
+    }
+
+    /// The positive half of the cage across the plane perpendicular to `axis`, as a mirrored
+    /// cage: every later edit keeps it symmetric.
+    pub fn mirror_on(&self, axis: SubdAxis) -> Result<Subd> {
+        self.edit(unsafe { (self.api.cadaclysm_blacksmith_subd_mirror_on)(self.raw(), axis.code()) }, "subd_mirror_on")
+    }
+
+    /// The mirror baked: the whole cage as an ordinary one, no longer mirrored.
+    pub fn mirror_off(&self) -> Result<Subd> {
+        self.edit(unsafe { (self.api.cadaclysm_blacksmith_subd_mirror_off)(self.raw()) }, "subd_mirror_off")
+    }
+
+    /// The whole cage of a mirrored half -- the half's vertices first, then the reflections of
+    /// those off the plane -- or a copy of an ordinary cage.
+    pub fn full(&self) -> Result<Subd> {
+        self.edit(unsafe { (self.api.cadaclysm_blacksmith_subd_full)(self.raw()) }, "subd_full")
+    }
+
+    /// The smooth surface refined `levels` times (1 to 6; the other wrappers default to 3),
+    /// as a [`SubdMesh`] of copies.
+    pub fn smooth_mesh(&self, levels: u32) -> Result<SubdMesh> {
+        let mut out = sys::CadaclysmBlacksmithSubdMesh::default();
+        if !unsafe { (self.api.cadaclysm_blacksmith_subd_smooth_mesh)(self.raw(), levels, &mut out) } {
+            return Err(fail(self.api, "subd_smooth_mesh"));
+        }
+        let (n, m) = (out.vertex_count as usize, out.index_count as usize / 3);
+        let triples = |flat: Vec<f64>| -> Vec<[f64; 3]> { flat.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect() };
+        let ids: Vec<u32> = unsafe { copied(out.indices, 3 * m) };
+        Ok(SubdMesh {
+            positions: triples(unsafe { copied(out.positions, 3 * n) }),
+            normals: triples(unsafe { copied(out.normals, 3 * n) }),
+            indices: ids.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
+            triangle_face: unsafe { copied(out.triangle_face, m) },
+        })
+    }
+
+    /// The cage element of `kind` under `point`, a point on or near the smooth surface: a
+    /// one-element [`SubdSelection`] (an edge as its vertex pair, smaller id first). `None`
+    /// when nothing is within 0.05 of the cage's diagonal -- not an error; a refusal (a
+    /// point that is not finite) is.
+    pub fn pick(&self, point: [f64; 3], kind: SubdElements) -> Result<Option<SubdSelection>> {
+        let mut out = [0u32; 2];
+        if !unsafe { (self.api.cadaclysm_blacksmith_subd_pick)(self.raw(), point.as_ptr(), kind.code(), out.as_mut_ptr()) } {
+            // Nothing near leaves an empty `last_error`; a refusal never does.
+            return if failed(self.api) { Err(fail(self.api, "subd_pick")) } else { Ok(None) };
+        }
+        Ok(Some(match kind {
+            SubdElements::Vertices => SubdSelection::Vertices(vec![out[0]]),
+            SubdElements::Edges => SubdSelection::Edges(vec![(out[0], out[1])]),
+            SubdElements::Faces => SubdSelection::Faces(vec![out[0]]),
+        }))
+    }
+
+    /// The cage as an exact solid, one NURBS face per patch, that every solid call takes,
+    /// and a [`SubdReport`] of what the conversion did. A cage that cannot be held within
+    /// `options` is refused with the figures it measured.
+    pub fn to_solid(&self, options: SubdSolidOptions) -> Result<(Solid, SubdReport)> {
+        let mut report = sys::CadaclysmBlacksmithSubdReport::default();
+        let raw = unsafe {
+            (self.api.cadaclysm_blacksmith_subd_to_solid)(self.raw(), options.tolerance, options.g1_angle, options.max_levels, &mut report)
+        };
+        Ok((Solid::wrap(self.api, raw, "subd_to_solid")?, report.into()))
+    }
+}
+
 // ---- assemblies -------------------------------------------------------------------
 
 /// A mutable tree of placements: a name, and zero or more solids or other assemblies
@@ -3486,6 +4041,13 @@ pub struct PairOptions {
     pub end_frame: Option<Frame>,
     pub ranges: Option<Vec<(Option<f64>, Option<f64>)>>,
     pub pitch: Option<f64>,
+}
+
+/// What `pair_raw` hands the C ABI last: a pitch (`cadaclysm_blacksmith_assembly_pair`) or a
+/// parameter list (`..._pair_with`).
+enum PairArg<'a> {
+    Pitch(f64),
+    Params(&'a [f64]),
 }
 
 impl Assembly {
@@ -3592,6 +4154,11 @@ impl Assembly {
     /// inverted range, or an end frame this kind's motion cannot reach is refused; the
     /// assembly is then unchanged.
     pub fn pair(&self, joint: &str, kind: &str, frame: &Frame, options: &PairOptions) -> Result<()> {
+        let pitch = options.pitch.unwrap_or(f64::NAN);
+        self.pair_raw(joint, kind, frame, options, PairArg::Pitch(pitch))
+    }
+
+    fn pair_raw(&self, joint: &str, kind: &str, frame: &Frame, options: &PairOptions, arg: PairArg<'_>) -> Result<()> {
         let joint_c = c_text("joint", joint)?;
         let kind_c = c_text("kind", kind)?;
         let end_frame = options.end_frame.as_ref().map(|f| f.v);
@@ -3616,9 +4183,9 @@ impl Assembly {
                 (lower, upper, has_lower, has_upper, ranges.len())
             }
         };
-        let pitch = options.pitch.unwrap_or(f64::NAN);
         let ok = unsafe {
-            (self.api.cadaclysm_blacksmith_assembly_pair)(
+            match arg {
+            PairArg::Pitch(pitch) => (self.api.cadaclysm_blacksmith_assembly_pair)(
                 self.raw(),
                 joint_c.as_ptr(),
                 kind_c.as_ptr(),
@@ -3630,13 +4197,38 @@ impl Assembly {
                 if ranges_given { has_upper.as_ptr() } else { ptr::null() },
                 freedom_count,
                 pitch,
-            )
+            ),
+            PairArg::Params(params) => (self.api.cadaclysm_blacksmith_assembly_pair_with)(
+                self.raw(),
+                joint_c.as_ptr(),
+                kind_c.as_ptr(),
+                frame.v.as_ptr(),
+                end_frame.as_ref().map_or(ptr::null(), |f| f.as_ptr()),
+                if ranges_given { lower.as_ptr() } else { ptr::null() },
+                if ranges_given { upper.as_ptr() } else { ptr::null() },
+                if ranges_given { has_lower.as_ptr() } else { ptr::null() },
+                if ranges_given { has_upper.as_ptr() } else { ptr::null() },
+                freedom_count,
+                params.as_ptr(),
+                params.len(),
+            ),
+            }
         };
         if ok {
             Ok(())
         } else {
             Err(fail(self.api, "assembly_pair"))
         }
+    }
+
+    /// [`pair`](Self::pair) with the kind's own numbers as a list instead of a pitch:
+    /// `"screw"` `[pitch]`; `"rack_and_pinion"` `[pinion_radius]`; `"gear"`
+    /// `[radius_first, radius_second, ratio]` or plus `[bevel, helical_angle]` (radians),
+    /// `ratio` the second link's rotation over the first's, signed; none for any other
+    /// kind. A wrong count is refused (`pair: a gear takes 3 or 5 parameters, not 2`);
+    /// `options.pitch` is ignored. Everything else is [`pair`](Self::pair)'s.
+    pub fn pair_with(&self, joint: &str, kind: &str, frame: &Frame, options: &PairOptions, params: &[f64]) -> Result<()> {
+        self.pair_raw(joint, kind, frame, options, PairArg::Params(params))
     }
 
     /// Adds a named state: `rows` sets each named joint to its values, in that joint's
@@ -3665,6 +4257,36 @@ impl Assembly {
         } else {
             Err(fail(self.api, "assembly_state"))
         }
+    }
+
+    /// This assembly with its mechanism posed, as a new [`Assembly`] (this one is
+    /// unchanged either way). `rows` sets each joint to its values, in that joint's pair's
+    /// freedom order (radians, the assembly's units): a joint is a path of placement
+    /// names then the joint's name, joined by "/" (a "/" or "\\" inside a name escaped
+    /// with "\\"). `state` is a state's path, applied first and overridden row by row;
+    /// `ground` is one of this assembly's own links, held fixed. No rows is allowed. A
+    /// sub-assembly no row reaches is shared with this one. A name that matches several
+    /// joints, an unknown joint or state, or an out-of-range value is refused with the
+    /// kernel's own text (`posed: value 0 of joint 'shoulder' is 2, outside its range`).
+    pub fn posed(&self, rows: &[(&str, &[f64])], state: Option<&str>, ground: Option<&str>) -> Result<Assembly> {
+        let joints: Vec<CString> = rows.iter().map(|(j, _)| c_text("joint", j)).collect::<Result<_>>()?;
+        let joint_ptrs: Vec<*const c_char> = joints.iter().map(|c| c.as_ptr()).collect();
+        let counts: Vec<u32> = rows.iter().map(|(_, v)| v.len() as u32).collect();
+        let flat: Vec<f64> = rows.iter().flat_map(|(_, v)| v.iter().copied()).collect();
+        let state_c = state.map(|s| c_text("state", s)).transpose()?;
+        let ground_c = ground.map(|g| c_text("ground", g)).transpose()?;
+        let raw = unsafe {
+            (self.api.cadaclysm_blacksmith_assembly_posed)(
+                self.raw(),
+                if joint_ptrs.is_empty() { ptr::null() } else { joint_ptrs.as_ptr() },
+                if counts.is_empty() { ptr::null() } else { counts.as_ptr() },
+                if flat.is_empty() { ptr::null() } else { flat.as_ptr() },
+                rows.len(),
+                state_c.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
+                ground_c.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
+            )
+        };
+        NonNull::new(raw).map(|handle| Assembly { handle, api: self.api }).ok_or_else(|| fail(self.api, "assembly_posed"))
     }
 
     /// Adds a named motion sequence: each segment is `(state name, t, interpolation word)`,
@@ -4415,10 +5037,31 @@ pub fn write_brep(path: impl AsRef<FsPath>, solids: &[&Solid]) -> Result<()> {
 
 // ---- SVG ----------------------------------------------------------------------------
 
+/// A silhouette block the kernel handed over, freed when this drops. The kernel's
+/// `..._free` needs the very `count` the call wrote, and the block carries no length of its own,
+/// so the two travel together.
+struct SilhouetteBlock {
+    api: &'static Api,
+    data: *mut f64,
+    count: u32,
+}
+
+impl Drop for SilhouetteBlock {
+    fn drop(&mut self) {
+        unsafe { (self.api.cadaclysm_blacksmith_silhouette_beziers_free)(self.data, self.count) }
+    }
+}
+
 /// `options` packed into a `CadaclysmBlacksmithSvgOptions` -- as [`crate::SvgOptions`]'s
 /// own reader-side packing, but with no scene to default `up` from: a solid carries no
 /// convention of its own, so `options.up` falls back to [`Up::Z`] rather than a scene's.
-fn build_svg_options(api: &Api, options: &SvgOptions) -> sys::CadaclysmBlacksmithSvgOptions {
+/// Colour text in `stroke`/`background` is read by the kernel's own parser.
+fn build_svg_options(api: &Api, options: &SvgOptions) -> Result<sys::CadaclysmBlacksmithSvgOptions> {
+    let stroke = options.stroke.packed_with("svg: stroke", parse_colour)?;
+    let background = match &options.background {
+        Some(colour) => colour.packed_with("svg: background", parse_colour)?,
+        None => crate::SVG_TRANSPARENT,
+    };
     let mut raw: sys::CadaclysmBlacksmithSvgOptions = unsafe { std::mem::zeroed() };
     unsafe { (api.cadaclysm_blacksmith_svg_options_init)(&mut raw) };
     let (base_azimuth, base_elevation) = options.view.angles();
@@ -4434,21 +5077,21 @@ fn build_svg_options(api: &Api, options: &SvgOptions) -> sys::CadaclysmBlacksmit
     raw.margin = options.margin;
     raw.tolerance = options.tolerance;
     raw.stroke_width = options.stroke_width;
-    raw.stroke = options.stroke;
-    raw.background = options.background.unwrap_or(crate::SVG_TRANSPARENT);
+    raw.stroke = stroke;
+    raw.background = background;
     raw.flags = u32::from(options.edges)
         | (u32::from(options.curves) << 1)
         | (u32::from(options.isocurves) << 2)
         | (u32::from(options.polylines) << 3)
         | (u32::from(options.silhouettes) << 4);
-    raw
+    Ok(raw)
 }
 
 /// Several solids' wireframe as one SVG's text, each its own `<g>` -- see
 /// [`crate::SvgOptions`].
 pub fn write_svg_text(solids: &[&Solid], options: &SvgOptions) -> Result<String> {
     let api = api()?;
-    let raw = build_svg_options(api, options);
+    let raw = build_svg_options(api, options)?;
     let handles: Vec<_> = solids.iter().map(|s| s.raw()).collect();
     let text_ptr = unsafe { (api.cadaclysm_blacksmith_svg_text)(handles.as_ptr(), handles.len(), &raw) };
     if text_ptr.is_null() {
@@ -4463,7 +5106,7 @@ pub fn write_svg_text(solids: &[&Solid], options: &SvgOptions) -> Result<String>
 /// its refusal when it cannot.
 pub fn write_svg(path: impl AsRef<FsPath>, solids: &[&Solid], options: &SvgOptions) -> Result<()> {
     let api = api()?;
-    let raw = build_svg_options(api, options);
+    let raw = build_svg_options(api, options)?;
     let path = crate::c_path(path.as_ref())?;
     let handles: Vec<_> = solids.iter().map(|s| s.raw()).collect();
     let ok = unsafe { (api.cadaclysm_blacksmith_svg)(handles.as_ptr(), handles.len(), path.as_ptr(), &raw) };
@@ -4481,7 +5124,7 @@ pub fn write_svg(path: impl AsRef<FsPath>, solids: &[&Solid], options: &SvgOptio
 /// to `Top`.
 pub fn svg_text_of(solids: &[&Solid], profiles: &[&Profile], options: &SvgOptions) -> Result<String> {
     let api = api()?;
-    let raw = build_svg_options(api, options);
+    let raw = build_svg_options(api, options)?;
     let solid_handles: Vec<_> = solids.iter().map(|s| s.raw()).collect();
     let profile_handles: Vec<_> = profiles.iter().map(|p| p.raw()).collect();
     let text_ptr = unsafe {
@@ -4505,7 +5148,7 @@ pub fn svg_text_of(solids: &[&Solid], profiles: &[&Profile], options: &SvgOption
 /// its refusal when it cannot.
 pub fn svg_of(path: impl AsRef<FsPath>, solids: &[&Solid], profiles: &[&Profile], options: &SvgOptions) -> Result<()> {
     let api = api()?;
-    let raw = build_svg_options(api, options);
+    let raw = build_svg_options(api, options)?;
     let path = crate::c_path(path.as_ref())?;
     let solid_handles: Vec<_> = solids.iter().map(|s| s.raw()).collect();
     let profile_handles: Vec<_> = profiles.iter().map(|p| p.raw()).collect();
@@ -4525,6 +5168,289 @@ pub fn svg_of(path: impl AsRef<FsPath>, solids: &[&Solid], profiles: &[&Profile]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- the SubD cage (The Kiln, Plan 2b) ------------------------------------------
+
+    fn kernel_present() -> bool {
+        if api().is_err() {
+            eprintln!("skipped: no kernel library to build a SubD cage with");
+            return false;
+        }
+        true
+    }
+
+    fn refused<T: fmt::Debug>(result: Result<T>) -> String {
+        result.expect_err("the kernel should have refused this").message().to_string()
+    }
+
+    fn cube() -> Subd {
+        Subd::cuboid([2.0, 2.0, 2.0], [1, 1, 1]).unwrap()
+    }
+
+    #[test]
+    fn subd_structs_have_the_headers_sizes() {
+        assert_eq!(std::mem::size_of::<sys::CadaclysmBlacksmithSubdParts>(), 112);
+        assert_eq!(std::mem::size_of::<sys::CadaclysmBlacksmithSubdMesh>(), 48);
+        assert_eq!(std::mem::size_of::<sys::CadaclysmBlacksmithSubdReport>(), 80);
+    }
+
+    #[test]
+    fn a_cuboid_cage_reads_back_as_copies_and_from_parts_is_its_inverse() {
+        if !kernel_present() {
+            return;
+        }
+        let cage = cube();
+        let mut positions = cage.positions().unwrap();
+        assert_eq!(positions.len(), 8);
+        let faces = cage.faces().unwrap();
+        assert_eq!(faces.len(), 6);
+        assert!(faces.iter().all(|f| f.len() == 4));
+        assert!(cage.creases().unwrap().is_empty() && cage.pins().unwrap().is_empty());
+        assert_eq!(cage.symmetry().unwrap(), None);
+        assert_eq!(cage.selection().unwrap(), None);
+        let before = positions.clone();
+        positions[0] = [99.0; 3];
+        assert_eq!(cage.positions().unwrap(), before, "writing to a read-back must not reach the cage");
+        let again = Subd::from_parts(&before, &faces, &[], &[], None).unwrap();
+        assert_eq!(again.positions().unwrap(), before);
+        assert_eq!(again.faces().unwrap(), faces);
+    }
+
+    #[test]
+    fn extrude_makes_a_new_cage_and_selects_the_faces() {
+        if !kernel_present() {
+            return;
+        }
+        let cage = cube();
+        let out = cage.extrude(&[1], 1.0).unwrap();
+        assert_eq!(out.positions().unwrap().len(), 12);
+        assert_eq!(out.selection().unwrap(), Some(SubdSelection::Faces(vec![1])));
+        assert_eq!(cage.positions().unwrap().len(), 8);
+    }
+
+    #[test]
+    fn creases_and_pins_are_set_read_and_cleared() {
+        if !kernel_present() {
+            return;
+        }
+        let creased = cube().crease(&[(0, 1)], true).unwrap();
+        assert_eq!(creased.selection().unwrap(), Some(SubdSelection::Edges(vec![(0, 1)])));
+        let both = creased.pin(&[6], true).unwrap();
+        assert_eq!(both.creases().unwrap(), [(0, 1)]);
+        assert_eq!(both.pins().unwrap(), [6]);
+        assert_eq!(both.selection().unwrap(), Some(SubdSelection::Vertices(vec![6])));
+        let rebuilt = Subd::from_parts(&both.positions().unwrap(), &both.faces().unwrap(), &[(0, 1)], &[6], None).unwrap();
+        assert_eq!((rebuilt.creases().unwrap(), rebuilt.pins().unwrap()), (vec![(0, 1)], vec![6]));
+        let cleared = both.crease(&[(0, 1)], false).unwrap().pin(&[6], false).unwrap();
+        assert!(cleared.creases().unwrap().is_empty() && cleared.pins().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_mirrored_half_keeps_its_symmetry_until_it_is_baked_or_made_whole() {
+        if !kernel_present() {
+            return;
+        }
+        let whole = Subd::cuboid([2.0, 2.0, 2.0], [2, 1, 1]).unwrap();
+        let half = whole.mirror_on(SubdAxis::X).unwrap();
+        let (axis, tolerance) = half.symmetry().unwrap().expect("a mirrored half has a symmetry");
+        assert_eq!(axis, SubdAxis::X);
+        assert!(tolerance > 0.0);
+        assert_eq!(half.selection().unwrap(), None);
+        assert!(half.positions().unwrap().len() < whole.positions().unwrap().len());
+        let kept = Subd::from_parts(&half.positions().unwrap(), &half.faces().unwrap(), &[], &[], Some((axis, tolerance))).unwrap();
+        assert_eq!(kept.positions().unwrap(), half.positions().unwrap());
+        assert_eq!(kept.symmetry().unwrap(), Some((axis, tolerance)));
+        assert_eq!(half.full().unwrap().positions().unwrap().len(), whole.positions().unwrap().len());
+        assert_eq!(half.mirror_off().unwrap().symmetry().unwrap(), None);
+    }
+
+    #[test]
+    fn an_edge_loop_runs_round_the_ring_and_is_empty_off_an_edge() {
+        if !kernel_present() {
+            return;
+        }
+        let grid = Subd::cuboid([2.0, 2.0, 2.0], [2, 2, 2]).unwrap();
+        let face = grid.faces().unwrap().remove(0);
+        let (a, b) = (face[0], face[1]);
+        let ring = grid.edge_loop((a, b)).unwrap();
+        assert!(ring.len() >= 4, "{ring:?}");
+        assert_eq!(ring[0], (a.min(b), a.max(b)));
+        let cage = cube();
+        let face = cage.faces().unwrap().remove(0);
+        assert!(cage.edge_loop((face[0], face[2])).unwrap().is_empty(), "a diagonal is not an edge");
+        assert!(cage.edge_loop((0, 99)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn transform_moves_the_selection_by_a_column_major_matrix() {
+        if !kernel_present() {
+            return;
+        }
+        let cage = cube();
+        let before = cage.positions().unwrap();
+        let turn = [0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let all: Vec<u32> = (0..8).collect();
+        let turned = cage.transform(&SubdSelection::Vertices(all), &turn).unwrap().positions().unwrap();
+        for (p, q) in before.iter().zip(&turned) {
+            assert!((q[0] + p[1]).abs() < 1e-12 && (q[1] - p[0]).abs() < 1e-12 && (q[2] - p[2]).abs() < 1e-12, "{p:?} -> {q:?}");
+        }
+        let one = cage.transform(&SubdSelection::Vertices(vec![0]), &turn).unwrap().positions().unwrap();
+        assert_ne!(one[0], before[0]);
+        assert_eq!(&one[1..], &before[1..], "only vertex 0 moves");
+        let slide = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 3.0, 0.0, 0.0, 1.0];
+        let moved = cage.transform(&SubdSelection::Edges(vec![(0, 1)]), &slide).unwrap();
+        assert_eq!(moved.positions().unwrap()[0][0], before[0][0] + 3.0);
+        assert_eq!(moved.selection().unwrap(), Some(SubdSelection::Edges(vec![(0, 1)])));
+        let message = refused(cage.transform(&SubdSelection::Vertices(vec![0]), &[1.0, 2.0, 3.0]));
+        assert!(message.contains("matrix"), "{message}");
+    }
+
+    #[test]
+    fn inset_and_insert_loop_cut_the_cage_and_refuse_a_bad_position() {
+        if !kernel_present() {
+            return;
+        }
+        let cage = cube();
+        assert_eq!(cage.inset(&[1], 0.25, false).unwrap().faces().unwrap().len(), 10);
+        let looped = cage.insert_loop((0, 1), 0.5).unwrap();
+        assert_eq!(looped.positions().unwrap().len(), 12);
+        assert!(matches!(looped.selection().unwrap(), Some(SubdSelection::Edges(_))));
+        let message = refused(cage.insert_loop((0, 1), 1.5));
+        assert!(message.starts_with("bad selection: "), "{message}");
+    }
+
+    #[test]
+    fn a_smooth_mesh_is_a_whole_copy_that_outlives_its_cage() {
+        if !kernel_present() {
+            return;
+        }
+        let cage = cube();
+        let mesh = cage.smooth_mesh(2).unwrap();
+        let n = mesh.positions.len();
+        assert!(n > 8 && mesh.normals.len() == n);
+        for v in &mesh.normals {
+            assert!(((v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt() - 1.0).abs() < 1e-9, "{v:?}");
+        }
+        assert!(mesh.indices.iter().flatten().all(|&i| (i as usize) < n));
+        assert_eq!(mesh.triangle_face.len(), mesh.indices.len());
+        assert!(mesh.triangle_face.iter().all(|&f| f < 6));
+        assert!(cage.smooth_mesh(1).unwrap().positions.len() < n);
+        assert_eq!(cage.smooth_mesh(2).unwrap().positions, mesh.positions);
+        let message = refused(cage.smooth_mesh(7));
+        assert!(message.contains("levels"), "{message}");
+        let copy = mesh.clone();
+        // Dropping the cage frees the memory a view would have pointed into; the copy is whole.
+        drop(cage);
+        assert_eq!(mesh, copy);
+        assert_eq!(mesh.positions.len(), n);
+        let kept: f64 = mesh.positions.iter().flatten().map(|c| c.abs()).sum();
+        assert!(kept.is_finite() && kept > 0.0);
+    }
+
+    #[test]
+    fn pick_answers_an_element_nothing_near_or_a_refusal() {
+        if !kernel_present() {
+            return;
+        }
+        let cage = cube();
+        let corner = cage.positions().unwrap()[6];
+        let mesh = cage.smooth_mesh(3).unwrap();
+        let dist = |p: &[f64; 3]| (0..3).map(|k| (p[k] - corner[k]).powi(2)).sum::<f64>();
+        let near = *mesh.positions.iter().min_by(|a, b| dist(a).total_cmp(&dist(b))).unwrap();
+        assert_eq!(cage.pick(near, SubdElements::Vertices).unwrap(), Some(SubdSelection::Vertices(vec![6])));
+        match cage.pick(near, SubdElements::Edges).unwrap() {
+            Some(SubdSelection::Edges(e)) => assert!(e.len() == 1 && (e[0].0 == 6 || e[0].1 == 6), "{e:?}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(cage.pick(near, SubdElements::Faces).unwrap(), Some(SubdSelection::Faces(f)) if f.len() == 1));
+        // The refusal first, so a stale error would show on the far point's answer.
+        let message = refused(cage.pick([f64::NAN, 0.0, 0.0], SubdElements::Vertices));
+        assert_eq!(message, "bad selection: pick: point is not finite");
+        assert_eq!(cage.pick([100.0, 100.0, 100.0], SubdElements::Vertices).unwrap(), None);
+    }
+
+    #[test]
+    fn a_cuboid_cage_becomes_a_closed_solid_within_its_report() {
+        if !kernel_present() {
+            return;
+        }
+        let (solid, report) = cube().to_solid(SubdSolidOptions::default()).unwrap();
+        assert_eq!((report.regular, report.refined), (0, 24));
+        assert!(report.levels >= 2 && report.steps >= 1, "{report:?}");
+        assert!(report.deviation <= 1e-4 && report.g1_angle_deg <= 0.1, "{report:?}");
+        assert!(report.deviation_at.iter().chain(&report.g1_at).all(|c| c.is_finite()));
+        assert!(solid.manifold().unwrap().is_closed);
+        assert!(solid.mass(0.0).unwrap().volume > 0.0);
+        let explicit = SubdSolidOptions { tolerance: 1e-4, g1_angle: 0.1, max_levels: 6 };
+        assert!(cube().to_solid(explicit).is_ok());
+        assert_eq!(SubdSolidOptions::default(), explicit);
+    }
+
+    #[test]
+    fn an_uncreased_cylinder_is_refused_and_the_default_cylinder_converts() {
+        if !kernel_present() {
+            return;
+        }
+        let message = refused(Subd::cylinder(1.0, 2.0, 8, 1, false).unwrap().to_solid(SubdSolidOptions::default()));
+        assert!(message.contains("subd:") && message.contains("tangent break"), "{message}");
+        // `creased_rims` true is what the other wrappers default to: it must convert.
+        let (_, report) = Subd::cylinder(1.0, 2.0, 8, 1, true).unwrap().to_solid(SubdSolidOptions::default()).unwrap();
+        assert!(report.deviation <= 1e-4 && report.g1_angle_deg <= 0.1, "{report:?}");
+    }
+
+    #[test]
+    fn the_primitives_have_faces_and_their_refusals_are_the_kernels() {
+        if !kernel_present() {
+            return;
+        }
+        assert!(!Subd::cylinder(1.0, 2.0, 8, 2, true).unwrap().faces().unwrap().is_empty());
+        assert!(!Subd::sphere(1.0, 2).unwrap().faces().unwrap().is_empty());
+        assert!(!Subd::torus(3.0, 1.0, 12, 8).unwrap().faces().unwrap().is_empty());
+        assert_eq!(refused(Subd::cuboid([2.0; 3], [0, 1, 1])), "bad selection: cuboid: segments >= 1");
+        assert!(refused(Subd::sphere(1.0, 2000)).contains("1024"));
+    }
+
+    #[test]
+    fn from_parts_refusals_are_the_kernels() {
+        if !kernel_present() {
+            return;
+        }
+        let cage = cube();
+        let (positions, faces) = (cage.positions().unwrap(), cage.faces().unwrap());
+        let message = refused(Subd::from_parts(&positions, &faces, &[(0, 6)], &[], None));
+        assert!(message.starts_with("bad selection: "), "{message}");
+        let none: &[[f64; 3]] = &[];
+        let message = refused(Subd::from_parts(none, &faces, &[], &[], None));
+        assert!(message.contains("vertex_count"), "{message}");
+    }
+
+    #[test]
+    fn the_pipeline_extrude_inset_to_solid_is_closed_and_writes_step() {
+        if !kernel_present() {
+            return;
+        }
+        let cage = cube().extrude(&[1], 0.5).unwrap().inset(&[1], 0.25, false).unwrap();
+        let (solid, report) = cage.to_solid(SubdSolidOptions::default()).unwrap();
+        assert!(solid.manifold().unwrap().is_closed);
+        assert!(report.deviation <= 1e-4, "{report:?}");
+        let text = solid.step_text(None, Unit::Millimetre).unwrap();
+        assert!(text.starts_with("ISO-10303-21;") && text.contains("ADVANCED_FACE"));
+    }
+
+    #[test]
+    fn a_child_cage_outlives_its_parent_and_the_edge_loop_handle_is_freed() {
+        if !kernel_present() {
+            return;
+        }
+        let cage = cube();
+        for _ in 0..200 {
+            let _ = cage.edge_loop((0, 1)).unwrap();
+            let _ = cage.edge_loop((0, 99)).unwrap();
+        }
+        let child = cage.extrude(&[0], 1.0).unwrap();
+        drop(cage);
+        assert_eq!(child.positions().unwrap().len(), 12, "a child outlives the cage it was made from");
+    }
 
     #[test]
     fn frames_are_checked_as_python_checks_them() {
@@ -4579,9 +5505,27 @@ mod tests {
             return;
         }
         let solid = Solid::cuboid(1.0, 1.0, 1.0).unwrap();
-        let options = SvgOptions { stroke: packed("red").unwrap(), ..Default::default() };
+        let options = SvgOptions { stroke: packed("red").unwrap().into(), ..Default::default() };
         let text = solid.svg_text(&options).unwrap();
         assert!(text.to_lowercase().contains("#ff0000"), "{text}");
+    }
+
+    /// `stroke`/`background` take colour text, read by the kernel's own parser, and refuse
+    /// text it does not know naming the field. Needs the real kernel library.
+    #[test]
+    fn svg_background_takes_colour_text() {
+        if version().is_err() {
+            eprintln!("skipped: no kernel library to read colour names with");
+            return;
+        }
+        let solid = Solid::cuboid(1.0, 1.0, 1.0).unwrap();
+        let options = SvgOptions { stroke: "Lime".into(), background: Some("Navy".into()), ..Default::default() };
+        let text = solid.svg_text(&options).unwrap();
+        assert!(text.contains("#000080"), "{text}");
+        assert!(text.to_lowercase().contains("#00ff00"), "{text}");
+        let bogus = SvgOptions { background: Some("bogus".into()), ..Default::default() };
+        let err = solid.svg_text(&bogus).unwrap_err().to_string();
+        assert!(err.starts_with("svg: background:"), "{err}");
     }
 
     #[test]
@@ -5136,6 +6080,76 @@ mod tests {
         Some((bolt, plate, bracket, arm))
     }
 
+    /// Python's `_posed_frame()`: two copies of a bracket whose bolt turns on `turn`
+    /// (revolute about z through (10, 5, 2)), placed as `left` and `right/rear`.
+    fn posed_frame() -> Option<Assembly> {
+        let bolt = Solid::cuboid(1.0, 1.0, 6.0).and_then(|s| s.named("bolt")).ok()?;
+        let plate = Solid::cuboid(20.0, 10.0, 2.0).and_then(|s| s.named("plate")).ok()?;
+        let bracket = Assembly::new("bracket").expect("bracket");
+        bracket.place_solid(&plate, &Frame::xy([0.0; 3]), None).expect("plate");
+        bracket.place_solid(&bolt, &Frame::xy([5.0, 5.0, 2.0]), None).expect("bolt");
+        bracket.link("fixed", &["plate"]).expect("fixed");
+        bracket.link("bolts", &["bolt"]).expect("bolts");
+        bracket.joint("turn", "fixed", "bolts").expect("turn");
+        bracket.pair("turn", "revolute", &Frame::xy([10.0, 5.0, 2.0]), &PairOptions::default()).expect("pair turn");
+        let frame = Assembly::new("frame").expect("frame");
+        frame.place_assembly(&bracket, &Frame::xy([0.0; 3]), Some("left")).expect("left");
+        frame.place_assembly(&bracket, &Frame::xy([100.0, 0.0, 0.0]), Some("right/rear")).expect("right/rear");
+        Some(frame)
+    }
+
+    fn step_of(a: &Assembly) -> String {
+        no_stamp(&a.step_text(None, Unit::Millimetre).expect("step_text"))
+    }
+
+    /// Facts 1 and 2 (by step text): the posed copy differs from the rest, the original is unchanged.
+    #[test]
+    fn posed_moves_the_shoulder() {
+        let Some((_bolt, _plate, _bracket, arm)) = paired() else { return };
+        let before = step_of(&arm);
+        let posed = arm.posed(&[("shoulder", &[0.5])], None, None).expect("posed");
+        assert_eq!(posed.name(), "arm");
+        assert_ne!(step_of(&posed), before);
+        assert_eq!(step_of(&arm), before);
+        // no rows at all is allowed and poses nothing
+        assert_eq!(step_of(&arm.posed(&[], None, None).expect("posed nothing")), before);
+    }
+
+    /// Facts 3 and 4: the bare `turn` names both copies; a path escapes the `/` inside `right/rear`.
+    #[test]
+    fn posed_refuses_an_ambiguous_name_and_takes_a_path_with_a_slash() {
+        let Some(frame) = posed_frame() else { return };
+        let before = step_of(&frame);
+        let refused = frame.posed(&[("turn", &[0.3])], None, None).unwrap_err().to_string();
+        assert_eq!(refused, "posed: 'turn' names 2 joints: left/turn, right\\/rear/turn; give one by its path");
+        let posed = frame.posed(&[("right\\/rear/turn", &[0.3])], None, None).expect("posed by path");
+        assert_eq!(posed.name(), "frame");
+        assert_ne!(step_of(&posed), before);
+        assert_eq!(step_of(&frame.posed(&[("right\\/rear/turn", &[0.0])], None, None).expect("posed zero")), before);
+        assert_eq!(step_of(&frame), before);
+    }
+
+    /// A state, a ground link, and the kernel's own refusals.
+    #[test]
+    fn posed_takes_a_state_and_a_ground_and_refuses_with_the_kernels_words() {
+        let Some((_bolt, _plate, _bracket, arm)) = paired() else { return };
+        let before = step_of(&arm);
+        let by_state = arm.posed(&[], Some("reach"), None).expect("by state");
+        let by_row = arm.posed(&[("shoulder", &[0.5])], None, None).expect("by row");
+        assert_eq!(step_of(&by_state), step_of(&by_row));
+        let held = arm.posed(&[("shoulder", &[0.5])], None, Some("upper arm")).expect("held");
+        assert_ne!(step_of(&held), step_of(&by_row));
+        assert_eq!(
+            arm.posed(&[("shoulder", &[2.0])], None, None).unwrap_err().to_string(),
+            "posed: value 0 of joint 'shoulder' is 2, outside its range"
+        );
+        assert_eq!(
+            arm.posed(&[], Some("fold"), None).unwrap_err().to_string(),
+            "posed: assembly 'arm' has no state named 'fold'"
+        );
+        assert_eq!(step_of(&arm), before);
+    }
+
     /// Fact 1: `arm.step_text()` carries exactly the pair/state entity counts the Python
     /// reference's `_paired()` fixture gives (`test_a_paired_mechanism_is_written_as_ap242_kinematic_pairs_and_states`).
     #[test]
@@ -5280,7 +6294,7 @@ mod tests {
             (Box::new(|| arm.pair("shoulder", "revolute", &Frame::xy([0.0, 0.0, 10.0]), &PairOptions::default())),
              "pair: joint 'shoulder' already has a pair"),
             (Box::new(|| arm.pair("back", "orbital", &xy0, &PairOptions::default())),
-             "pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, spherical, \
+             "pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, gear, rack_and_pinion, spherical, \
               spherical_with_pin, planar, universal, homokinetic, fully_constrained, unconstrained)"),
             (Box::new(|| arm.pair("back", "screw", &xy0, &PairOptions::default())), "pair: a screw needs a non-zero pitch"),
             (
@@ -5588,5 +6602,122 @@ mod tests {
         no_peck_job.drill(&drill, &[[0.0, 0.0]], 20.0, -1.0, None).unwrap();
         let no_peck_ops = no_peck_job.operations().unwrap();
         assert_eq!(no_peck_ops[0].params.get("peck"), Some(&None));
+    }
+
+    // ---- Solid::silhouette_beziers ------------------------------------------------------
+    // The curves where a body's surfaces turn away from the eye. The assertions are on values that
+    // pin the layout, not only on lengths: a stride-16 unpack that reads a weight as a coordinate,
+    // or points shifted by one slice, still gives arrays of the right length. Each skips quietly
+    // without a kernel library, like this module's other library-needing tests.
+
+    #[test]
+    fn a_spheres_rim_has_its_end_points_on_it_to_1e_9_and_its_end_weights_exactly_one() {
+        if api().is_err() {
+            eprintln!("skipped: no kernel library to take a silhouette with");
+            return;
+        }
+        let rim = Solid::sphere(2.0).unwrap().silhouette_beziers(None).unwrap();
+        assert!(rim.count() > 0, "a sphere gave no rim");
+        assert_eq!(rim.points.len(), rim.count() * 4, "four control points a curve");
+        assert_eq!(rim.weights.len(), rim.count() * 4, "four weights a curve");
+        let radius = |p: &[f64; 3]| (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+        for (c, (curve, w)) in rim.points.chunks_exact(4).zip(rim.weights.chunks_exact(4)).enumerate() {
+            // Control points 0 and 3 are the arc's ends: on the sphere to 1e-9, with the
+            // end weights exactly 1. The interior control points are not checked at all, and the
+            // interior weights only to lie in (0, 1): both move with how the rim is subdivided.
+            assert!((radius(&curve[0]) - 2.0).abs() <= 1e-9, "arc {c}: first control point at radius {}", radius(&curve[0]));
+            assert!((radius(&curve[3]) - 2.0).abs() <= 1e-9, "arc {c}: last control point at radius {}", radius(&curve[3]));
+            assert!(
+                w[0] == 1.0 && w[3] == 1.0 && w[1] > 0.0 && w[1] < 1.0 && w[2] > 0.0 && w[2] < 1.0,
+                "arc {c}: weights {w:?}, not 1, then two weights in (0, 1), then 1"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cylinders_rulings_are_polynomial_and_span_its_height() {
+        if api().is_err() {
+            eprintln!("skipped: no kernel library to take a silhouette with");
+            return;
+        }
+        let (radius, height) = (1.0, 3.0);
+        let front = SvgOptions { view: SvgView::Front, ..Default::default() };
+        let rulings = Solid::cylinder(radius, height).unwrap().silhouette_beziers(&front).unwrap();
+        assert!(rulings.count() > 0, "a cylinder gave no rulings");
+        assert_eq!(rulings.points.len(), rulings.count() * 4);
+        assert_eq!(rulings.weights.len(), rulings.count() * 4);
+        assert!(rulings.weights.iter().all(|w| *w == 1.0), "a ruling carries a weight other than 1");
+        for (k, p) in rulings.points.iter().enumerate() {
+            assert!((p[0].hypot(p[1]) - radius).abs() <= 1e-6, "control point {k} {p:?} is off the cylinder's wall");
+            // `hypot(x, y)` is symmetric in x and y, so it cannot tell them apart. The front view
+            // looks along y and the silhouette of the cylinder sits on the x axis, at y = 0: that
+            // is what pins x against y. Only |x| and |y| are asserted, not the sign of x and not
+            // how many rulings there are.
+            assert!((p[0].abs() - radius).abs() <= 1e-6, "control point {k} {p:?} is not at |x| = {radius}");
+            assert!(p[1].abs() <= 1e-6, "control point {k} {p:?} is not at y = 0");
+        }
+        // The rulings run cap to cap, so their z extent is the height: that pins z against x and y.
+        let (low, high) = rulings.points.iter().fold((f64::MAX, f64::MIN), |(lo, hi), p| (lo.min(p[2]), hi.max(p[2])));
+        assert!((high - low - height).abs() <= 1e-6, "the rulings span z {low}..{high}, not a height of {height}");
+    }
+
+    #[test]
+    fn an_infinite_tolerance_is_refused_and_an_all_planar_body_is_the_empty_answer_after_it() {
+        if api().is_err() {
+            eprintln!("skipped: no kernel library to take a silhouette with");
+            return;
+        }
+        let sphere = Solid::sphere(2.0).unwrap();
+        // Built BEFORE the refusal, not between it and the ask: every call that builds, reads or
+        // writes geometry in the library runs under its `guard`, whose first act is `clear_error`
+        // (blacksmith-capi lib.rs:117), so building the cuboid in between would wipe the refusal's
+        // message. The order is build, refuse, ask. Nothing this wrapper does between the refusal
+        // and the native call clears the slot, though: it packs the stroke as a number
+        // (`SvgOptions::stroke` is a packed u32), so there is no
+        // `cadaclysm_blacksmith_parse_colour` call (a `guard`, lib.rs:200) to wipe it as there is
+        // in a wrapper that parses the text "#000000", and `build_svg_options` calls only
+        // `cadaclysm_blacksmith_svg_options_init`, a bare struct fill (output.rs:699) that does not
+        // clear. So the refusal's message is still in the slot when
+        // `cadaclysm_blacksmith_silhouette_beziers` begins, and this test pins two things. First,
+        // that the wrapper must not read the slot anywhere before the native call: a read before
+        // packing and a read after packing both fail it. Second, that the library's own entry
+        // clears the slot (the entry is a `guard`, output.rs:908): that one is read from the
+        // source, not mutation-witnessed, since proving it would take a rebuilt library. The
+        // reader's entry point has its own library-side pin,
+        // `an_empty_answer_after_a_refusal_carries_no_stale_error`
+        // (crates/cadaclysm-capi/tests/silhouette_abi.rs:401); there is no kernel-side equivalent.
+        // Only calls under `guard` clear: `cadaclysm_blacksmith_solid_free` and
+        // `cadaclysm_blacksmith_silhouette_beziers_free` just drop a box and the error getter does
+        // not clear either, so a `Drop` running between the refusal and the ask cannot wipe the
+        // slot.
+        let cuboid = Solid::cuboid(10.0, 10.0, 10.0).unwrap();
+        let infinite = SvgOptions { tolerance: f64::INFINITY, ..Default::default() };
+        let err = sphere.silhouette_beziers(&infinite).unwrap_err();
+        assert!(err.message().contains("silhouette: "), "{err}");
+        let none = cuboid.silhouette_beziers(None).expect("an empty silhouette is an answer");
+        assert_eq!(none.count(), 0);
+        assert!(none.points.is_empty() && none.weights.is_empty());
+    }
+
+    /// The block the kernel hands over is owned and is freed inside the call, so a second ask,
+    /// for another eye, leaves the first answer as it was: front then iso gives two different
+    /// silhouettes of one sphere, and the first is kept by the caller as a `Vec`.
+    #[test]
+    fn a_silhouette_outlives_the_next_one_asked() {
+        if api().is_err() {
+            eprintln!("skipped: no kernel library to take a silhouette with");
+            return;
+        }
+        let sphere = Solid::sphere(2.0).unwrap();
+        let front = SvgOptions { view: SvgView::Front, ..Default::default() };
+        let iso = SvgOptions { view: SvgView::Iso, ..Default::default() };
+        let first = sphere.silhouette_beziers(&front).unwrap();
+        let (kept_points, kept_weights) = (first.points.clone(), first.weights.clone());
+        let second = sphere.silhouette_beziers(&iso).unwrap();
+        assert!(second.count() > 0);
+        assert_ne!(second.points, kept_points, "the two views gave the same silhouette, so this cannot tell much");
+        assert_eq!(first.points, kept_points);
+        assert_eq!(first.weights, kept_weights);
+        assert_eq!(sphere.silhouette_beziers(&front).unwrap(), first, "asking again for the same eye gives the same curves");
     }
 }

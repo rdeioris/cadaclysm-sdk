@@ -46,11 +46,36 @@ macro_rules! entry_points {
 pub(crate) use entry_points;
 
 pub(crate) fn stale(path: &Path, name: &str, count: usize) -> String {
-    format!(
-        "{} has no {name}: the library is older than this copy of cadaclysm-sdk, which \
-         binds {count} entry points. Use the library from the same release as the crate.",
-        path.display()
+    with_build_note(
+        format!(
+            "{} has no {name}: the library is older than this copy of cadaclysm-sdk, which \
+             binds {count} entry points. Use the library from the same release as the crate.",
+            path.display()
+        ),
+        BUILD_ERROR,
     )
+}
+
+/// Why the build gave no libraries of its own (the `download` feature: a failed download,
+/// or a failed build from the source tree), baked in by build.rs.
+pub(crate) const BUILD_ERROR: Option<&str> = option_env!("CADACLYSM_SDK_DOWNLOAD_ERROR");
+
+/// The first words of [`build_note`]'s line, which the view looks for in a loader message.
+pub(crate) const BUILD_NOTE: &str = "The build gave no libraries of its own";
+
+/// The line saying why the build gave no libraries, for a message about a library that is
+/// missing, or found and too old -- an older one left beside the binaries by an earlier
+/// build is exactly what a program finds when this build's own failed.
+pub(crate) fn build_note(reason: &str) -> String {
+    format!("{BUILD_NOTE}: {reason}")
+}
+
+/// `message`, with [`build_note`] on a line of its own after it when there is a `reason`.
+pub(crate) fn with_build_note(message: String, reason: Option<&str>) -> String {
+    match reason {
+        Some(reason) => format!("{message}\n{}", build_note(reason)),
+        None => message,
+    }
 }
 
 /// The platform's file name for the library whose stem is `stem`: `cadaclysm_capi.dll`,
@@ -112,8 +137,9 @@ pub(crate) fn find(name: &str, env: &str) -> Result<PathBuf, String> {
     for candidate in &searched {
         message.push_str(&format!("    {}\n", candidate.display()));
     }
-    if let Some(reason) = option_env!("CADACLYSM_SDK_DOWNLOAD_ERROR") {
-        message.push_str(&format!("The build did not download the libraries: {reason}\n"));
+    if let Some(reason) = BUILD_ERROR {
+        message.push_str(&build_note(reason));
+        message.push('\n');
     }
     message.push_str(&format!("Point {env} at it, or load it with its path first."));
     Err(message)
@@ -208,5 +234,20 @@ fn same_file(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_build_error_follows_the_message_on_a_line_of_its_own() {
+        let reason = "they were not downloaded: curl could not fetch x";
+        assert_eq!(with_build_note("m".to_string(), None), "m");
+        assert_eq!(
+            with_build_note("m".to_string(), Some(reason)),
+            "m\nThe build gave no libraries of its own: they were not downloaded: curl could not fetch x"
+        );
     }
 }

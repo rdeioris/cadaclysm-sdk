@@ -310,6 +310,136 @@ func main() {
 	sequenceScene.Close()
 	fmt.Println("sequences: swing and snap read as the file records them, and swing poses at each keyframe")
 
+	// IFC work schedules: samples/schedule.ifc, at parity with the Python reference
+	// (plan 2026-10-06-ifc-4d-2). day is a day in seconds and t0 is 2026-03-02T08:00:00.
+	const day = 86400.0
+	const t0 = 1772438400.0
+	scheduleScene, shErr := cadaclysm.Open(filepath.Join(filepath.Dir(absPath), "schedule.ifc"))
+	if shErr != nil {
+		fail(shErr.Error())
+	}
+	schedules := scheduleScene.Schedules()
+	if len(schedules) != 1 {
+		fail("schedules: the file does not carry exactly one schedule")
+	}
+	programme := schedules[0]
+	if programme.Name != "Programme" || programme.Identification != "WS-1" || programme.Kind != "planned" || programme.KindName != "" ||
+		programme.Start == nil || *programme.Start != t0 || programme.Finish != nil {
+		fail("schedules: Programme is not planned WS-1 from T0 with no finish")
+	}
+	tasks := programme.Tasks()
+	taskNames := []string{}
+	byName := map[string]cadaclysm.Task{}
+	for _, task := range tasks {
+		taskNames = append(taskNames, task.Name)
+		byName[task.Name] = task
+	}
+	if !slices.Equal(taskNames, []string{"Slab", "Structure", "Walls north", "Walls south", "Topping out", "Demolish shed", "Fit-out"}) {
+		fail(fmt.Sprintf("schedules: the tasks are %v", taskNames))
+	}
+	if byName["Walls north"].Parent == nil || byName["Walls north"].Parent.Name != "Structure" ||
+		byName["Walls south"].Parent == nil || byName["Walls south"].Parent.Name != "Structure" || byName["Slab"].Parent != nil {
+		fail("schedules: the task parents are not Structure, Structure, none")
+	}
+	if byName["Slab"].Kind != "construction" || byName["Demolish shed"].Kind != "demolition" || byName["Topping out"].Kind != "notdefined" ||
+		!byName["Topping out"].Milestone || byName["Slab"].Milestone {
+		fail("schedules: the task kinds or milestones are off")
+	}
+	slab := byName["Slab"]
+	if slab.Identification != "T1" || slab.Status != "COMPLETED" {
+		fail("schedules: Slab is not T1, COMPLETED")
+	}
+	f64 := func(p *float64) string {
+		if p == nil {
+			return "none"
+		}
+		return fmt.Sprint(*p)
+	}
+	gotTimes := strings.Join([]string{f64(slab.Time.ScheduleStart), f64(slab.Time.ScheduleFinish), f64(slab.Time.Duration),
+		f64(slab.Time.ActualStart), f64(slab.Time.ActualFinish)}, ",")
+	wantTimes := strings.Join([]string{fmt.Sprint(t0), "none", fmt.Sprint(10 * day), fmt.Sprint(t0), fmt.Sprint(t0 + 8*day)}, ",")
+	if gotTimes != wantTimes {
+		fail("schedules: Slab's times are " + gotTimes)
+	}
+	if slab.Time.EarlyStart != nil || slab.Time.EarlyFinish != nil || slab.Time.LateStart != nil || slab.Time.LateFinish != nil {
+		fail("schedules: Slab has early or late times")
+	}
+	nodeNames := func(nodes []*cadaclysm.Node) []string {
+		out := []string{}
+		for _, n := range nodes {
+			out = append(out, n.Name())
+		}
+		sort.Strings(out)
+		return out
+	}
+	if !slices.Equal(nodeNames(byName["Walls south"].Nodes()), []string{"Wall S1", "Wall S2"}) ||
+		!slices.Equal(nodeNames(byName["Fit-out"].Nodes()), []string{"Desk", "Room"}) {
+		fail("schedules: the task nodes are off")
+	}
+	type linkRow struct {
+		from, to, kind, lag string
+	}
+	gotLinks := []linkRow{}
+	for _, l := range programme.Links() {
+		gotLinks = append(gotLinks, linkRow{l.From.Name, l.To.Name, l.Kind, f64(l.Lag)})
+	}
+	wantLinks := []linkRow{
+		{"Slab", "Structure", "finish_start", "none"},
+		{"Walls north", "Walls south", "start_start", fmt.Sprint(2 * day)},
+		{"Walls south", "Topping out", "finish_start", "none"},
+		{"Topping out", "Fit-out", "finish_start", "none"},
+	}
+	if !slices.Equal(gotLinks, wantLinks) {
+		fail(fmt.Sprintf("schedules: the links are %v", gotLinks))
+	}
+	atStates := func(date float64, dates string) map[string]cadaclysm.ElementState {
+		rows, aerr := programme.At(date, dates)
+		if aerr != nil {
+			fail("schedules: at: " + aerr.Error())
+		}
+		out := map[string]cadaclysm.ElementState{}
+		for _, r := range rows {
+			out[r.Node.Name()] = r
+		}
+		return out
+	}
+	early := atStates(t0+3*day, "scheduled")
+	earlyNames := []string{}
+	for name := range early {
+		earlyNames = append(earlyNames, name)
+	}
+	sort.Strings(earlyNames)
+	wantNames := []string{"Slab", "Wall N1", "Wall N2", "Wall S1", "Wall S2", "Shed", "Room", "Desk"}
+	sort.Strings(wantNames)
+	if !slices.Equal(earlyNames, wantNames) {
+		fail(fmt.Sprintf("schedules: at(T0+3D) names %v", earlyNames))
+	}
+	if early["Slab"].Phase != "building" || math.Abs(early["Slab"].Progress-0.3) > 1e-9 ||
+		early["Shed"].Phase != "demolishing" || early["Wall S1"].Phase != "unbuilt" {
+		fail("schedules: at(T0+3D) phases are off")
+	}
+	late := atStates(t0+32*day, "actual")
+	if late["Wall S1"].Phase != "building" || late["Wall S1"].Variance == nil || *late["Wall S1"].Variance != 5*day ||
+		late["Slab"].Variance == nil || *late["Slab"].Variance != -2*day {
+		fail("schedules: at(T0+32D, actual) variances are off")
+	}
+	if _, nanErr := programme.At(math.NaN(), "scheduled"); nanErr == nil || nanErr.Error() != "the date must be a finite number" {
+		fail(fmt.Sprintf("schedules: at(NaN) was not refused right: %v", nanErr))
+	}
+	if _, badErr := programme.At(t0, "compare"); badErr == nil || badErr.Error() != "dates must be 'scheduled' or 'actual'" {
+		fail(fmt.Sprintf("schedules: at(T0, compare) was not refused right: %v", badErr))
+	}
+	scheduleScene.Close()
+	noSchedule, nsErr := cadaclysm.Open(filepath.Join(filepath.Dir(absPath), "cube.scad"))
+	if nsErr != nil {
+		fail(nsErr.Error())
+	}
+	if len(noSchedule.Schedules()) != 0 {
+		fail("schedules: the cube has schedules")
+	}
+	noSchedule.Close()
+	fmt.Println("schedules: Programme reads as the file records it, plays at both dates and refuses what it should")
+
 	// pose([]) on the cube sample (no mechanism) fails with a message naming that, as the
 	// Python reference's test_a_bad_pose_raises checks on the same file.
 	cubePath := filepath.Join(filepath.Dir(absPath), "cube.scad")
@@ -704,6 +834,7 @@ func main() {
 	fmt.Println("svg: scene and node text, file written, fov=200 refused")
 
 	kernel(license)
+	silhouette(path)
 }
 
 // kernel is the smoke's second half: the plate with a hole and a pin, filleted, as STEP
@@ -740,6 +871,7 @@ func kernel(license string) {
 	edgeCurves()
 	intersections()
 	collider()
+	subd()
 	solidHits()
 	plate, err := blacksmith.XY().Extrude(outline, 6).Solid()
 	if err != nil {
@@ -1312,6 +1444,8 @@ func kernel(license string) {
 
 	assembly()
 	mechanism()
+	gearRoundTrip()
+	posedTests()
 }
 
 // assembly is Assembly, Solid.Named and Solid.Name, at parity with the Python reference's
@@ -1542,6 +1676,296 @@ func assembly() {
 	}
 	freshCube.Close()
 	fmt.Println("assembly: Named/Name ride through one-source operations and drop through two-source ones")
+}
+
+// geared builds Drives plan 4's round trip (Python's _geared): a pinion turning on "drive"
+// meshes, by the gear pair "mesh" (radii 10 and 20, ratio -0.5, bevel 0.25, helical 0.125),
+// with a wheel turning on "driven" about (30, 0); the wheel's part sits 5 off its axis, at
+// (35, 0, 2). The two are different parts: AP242 refuses a pair between two placements of
+// one.
+func geared(mesh bool) *blacksmith.Assembly {
+	must := func(err error) {
+		if err != nil {
+			fail(err.Error())
+		}
+	}
+	solid := func(s *blacksmith.Solid, err error, name string) *blacksmith.Solid {
+		must(err)
+		named, err := s.Named(name)
+		must(err)
+		s.Close()
+		return named
+	}
+	cube, cerr := blacksmith.Cuboid(40, 10, 2)
+	plate := solid(cube, cerr, "plate")
+	defer plate.Close()
+	cyl, perr := blacksmith.Cylinder(1, 6)
+	pin := solid(cyl, perr, "pin")
+	defer pin.Close()
+	cyl2, herr := blacksmith.Cylinder(2, 4)
+	hub := solid(cyl2, herr, "hub")
+	defer hub.Close()
+	gears, err := blacksmith.NewAssembly("gears")
+	must(err)
+	_, err = gears.PlaceSolid(plate, blacksmith.FrameXY([3]float64{}), "frame")
+	must(err)
+	_, err = gears.PlaceSolid(pin, blacksmith.FrameXY([3]float64{0, 0, 2}), "pinion")
+	must(err)
+	_, err = gears.PlaceSolid(hub, blacksmith.FrameXY([3]float64{35, 0, 2}), "wheel")
+	must(err)
+	must(gears.Link("base", []string{"frame"}))
+	must(gears.Link("driver", []string{"pinion"}))
+	must(gears.Link("follower", []string{"wheel"}))
+	must(gears.Joint("drive", "base", "driver"))
+	must(gears.Joint("driven", "base", "follower"))
+	must(gears.Joint("mesh", "driver", "follower"))
+	must(gears.Pair("drive", "revolute", blacksmith.FrameXY([3]float64{0, 0, 2}), blacksmith.PairOptions{}))
+	must(gears.Pair("driven", "revolute", blacksmith.FrameXY([3]float64{30, 0, 2}), blacksmith.PairOptions{}))
+	if mesh {
+		must(gears.PairWith("mesh", "gear", blacksmith.FrameXY([3]float64{0, 0, 2}), blacksmith.PairWithOptions{},
+			[]float64{10, 20, -0.5, 0.25, 0.125}))
+	}
+	return gears
+}
+
+// gearRoundTrip is the Python reference's test_a_gear_pair_round_trips_and_poses_from_its_driver
+// and test_pair_with_refuses_a_wrong_parameter_count.
+func gearRoundTrip() {
+	near := func(a, b float64) bool { return math.Abs(a-b) <= 1e-9 }
+	gears := geared(true)
+	defer gears.Close()
+	scene, err := gears.ToScene("")
+	if err != nil {
+		fail(err.Error())
+	}
+	defer scene.Close()
+	joints := map[string]*cadaclysm.Joint{}
+	for _, j := range scene.Joints() {
+		joints[j.Name()] = j
+	}
+	mesh := joints["mesh"].Pair()
+	if mesh == nil || mesh.Kind != cadaclysm.PairOther || mesh.KindName() != "gear" {
+		fail("gear: the mesh pair is not kind other / kind name gear")
+	}
+	want := []float64{10, 20, -0.5, 0.25, 0.125}
+	got := mesh.Parameters()
+	if len(got) != len(want) {
+		fail(fmt.Sprintf("gear: parameters %v, not %v", got, want))
+	}
+	for i := range want {
+		if !near(got[i], want[i]) {
+			fail(fmt.Sprintf("gear: parameters %v, not %v", got, want))
+		}
+	}
+	drive := joints["drive"].Pair()
+	if drive.KindName() != "revolute" || len(drive.Parameters()) != 0 {
+		fail("gear: the drive pair is not revolute with no parameters")
+	}
+
+	// the driver alone turns the wheel by ratio x 0.4 about (30, 0): nothing to report
+	pose, err := scene.Pose([]cadaclysm.StateValue{{Joint: joints["drive"], Values: []float64{0.4}}}, nil)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(pose.Diagnostics) != 0 || len(pose.Unsolved) != 0 {
+		fail(fmt.Sprintf("gear: a driver-only pose reports %v / %d unsolved", pose.Diagnostics, len(pose.Unsolved)))
+	}
+	wheel := scene.Links()[2].Nodes()[0]
+	m := pose.Transform(wheel)
+	if !near(m[3], 30+5*math.Cos(-0.2)) || !near(m[7], 5*math.Sin(-0.2)) || !near(m[11], 2) {
+		fail(fmt.Sprintf("gear: the wheel's posed origin is (%v, %v, %v)", m[3], m[7], m[11]))
+	}
+
+	// both sides given, against the law: one diagnostic, in the kernel's words
+	pose, err = scene.Pose([]cadaclysm.StateValue{
+		{Joint: joints["drive"], Values: []float64{0.4}}, {Joint: joints["driven"], Values: []float64{0.4}}}, nil)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(pose.Diagnostics) != 1 || !strings.HasPrefix(pose.Diagnostics[0],
+		"coupling 'mesh': both 'drive' and 'driven' are given and disagree by") {
+		fail(fmt.Sprintf("gear: a disagreeing pose reports %q", pose.Diagnostics))
+	}
+
+	bare := geared(false)
+	defer bare.Close()
+	rerr := bare.PairWith("mesh", "gear", blacksmith.FrameXY([3]float64{}), blacksmith.PairWithOptions{}, []float64{10, 20})
+	if rerr == nil || rerr.Error() != "pair: a gear takes 3 or 5 parameters, not 2" {
+		fail(fmt.Sprintf("gear: a two-parameter gear was not refused exactly: %v", rerr))
+	}
+	if err := bare.PairWith("mesh", "gear", blacksmith.FrameXY([3]float64{}), blacksmith.PairWithOptions{},
+		[]float64{10, 20, -0.5}); err != nil {
+		fail("gear: the refused pair left the joint unusable: " + err.Error())
+	}
+	fmt.Println("gear: PairWith round-trips through Kind/KindName/Parameters, poses from its driver, reports a disagreement, refuses a wrong count")
+}
+
+// posedTests is the Python reference's test_posed_* (the to_scene half compared as STEP text),
+// plus the gears' drive/driven refusal.
+func posedTests() {
+	must := func(err error) {
+		if err != nil {
+			fail(err.Error())
+		}
+	}
+	noStamp := func(text string) string {
+		var kept []string
+		for _, l := range strings.Split(text, "\n") {
+			if !strings.HasPrefix(l, "FILE_NAME(") {
+				kept = append(kept, l)
+			}
+		}
+		return strings.Join(kept, "\n")
+	}
+	stepOf := func(a *blacksmith.Assembly) string {
+		text, err := a.StepText("", "mm")
+		must(err)
+		return noStamp(text)
+	}
+	named := func(s *blacksmith.Solid, err error, name string) *blacksmith.Solid {
+		must(err)
+		n, err := s.Named(name)
+		must(err)
+		s.Close()
+		return n
+	}
+	str := func(s string) *string { return &s }
+
+	// _posed_frame: two copies of a bracket whose bolt turns on 'turn', 'left' and 'right/rear'
+	plateRaw, perr := blacksmith.Cuboid(20, 10, 2)
+	plate := named(plateRaw, perr, "plate")
+	defer plate.Close()
+	boltRaw, berr := blacksmith.Cuboid(1, 1, 6)
+	bolt := named(boltRaw, berr, "bolt")
+	defer bolt.Close()
+	bracket, err := blacksmith.NewAssembly("bracket")
+	must(err)
+	defer bracket.Close()
+	_, err = bracket.PlaceSolid(plate, blacksmith.FrameXY([3]float64{}), "")
+	must(err)
+	_, err = bracket.PlaceSolid(bolt, blacksmith.FrameXY([3]float64{5, 5, 2}), "")
+	must(err)
+	must(bracket.Link("fixed", []string{"plate"}))
+	must(bracket.Link("bolts", []string{"bolt"}))
+	must(bracket.Joint("turn", "fixed", "bolts"))
+	must(bracket.Pair("turn", "revolute", blacksmith.FrameXY([3]float64{10, 5, 2}), blacksmith.PairOptions{}))
+	frame, err := blacksmith.NewAssembly("frame")
+	must(err)
+	defer frame.Close()
+	_, err = frame.PlaceAssembly(bracket, blacksmith.FrameXY([3]float64{}), "left")
+	must(err)
+	_, err = frame.PlaceAssembly(bracket, blacksmith.FrameXY([3]float64{100, 0, 0}), "right/rear")
+	must(err)
+	frameBefore := stepOf(frame)
+
+	_, err = frame.Posed([]blacksmith.StateRow{{Joint: "turn", Values: []float64{0.3}}}, blacksmith.PosedOptions{})
+	const ambiguous = "posed: 'turn' names 2 joints: left/turn, right\\/rear/turn; give one by its path"
+	if err == nil || err.Error() != ambiguous {
+		fail(fmt.Sprintf("posed: the ambiguous name was not refused exactly: %v", err))
+	}
+	if _, isBuild := err.(*blacksmith.BuildError); !isBuild {
+		fail(fmt.Sprintf("posed: the refusal is a %T, not a *BuildError", err))
+	}
+	posed, err := frame.Posed([]blacksmith.StateRow{{Joint: "right\\/rear/turn", Values: []float64{0.3}}}, blacksmith.PosedOptions{})
+	must(err)
+	defer posed.Close()
+	if posed.Name() != "frame" {
+		fail(fmt.Sprintf("posed: the posed assembly is named %q, not frame", posed.Name()))
+	}
+	if stepOf(posed) == frameBefore {
+		fail("posed: a turned bolt left the STEP text unchanged")
+	}
+	zero, err := frame.Posed([]blacksmith.StateRow{{Joint: "right\\/rear/turn", Values: []float64{0.0}}}, blacksmith.PosedOptions{})
+	must(err)
+	defer zero.Close()
+	if stepOf(zero) != frameBefore {
+		fail("posed: a zero pose changed the STEP text")
+	}
+	if stepOf(frame) != frameBefore {
+		fail("posed: posing changed the original")
+	}
+	none, err := frame.Posed(nil, blacksmith.PosedOptions{})
+	must(err)
+	defer none.Close()
+	if stepOf(none) != frameBefore {
+		fail("posed: no rows changed the STEP text")
+	}
+
+	// the arm: a state, a ground, the kernel's words
+	armPlateRaw, aerr := blacksmith.Cuboid(40, 10, 2)
+	armPlate := named(armPlateRaw, aerr, "plate")
+	defer armPlate.Close()
+	pinRaw, pinerr := blacksmith.Cylinder(1, 6)
+	pin := named(pinRaw, pinerr, "pin")
+	defer pin.Close()
+	arm, err := blacksmith.NewAssembly("arm")
+	must(err)
+	defer arm.Close()
+	_, err = arm.PlaceSolid(armPlate, blacksmith.FrameXY([3]float64{}), "base")
+	must(err)
+	_, err = arm.PlaceSolid(pin, blacksmith.FrameXY([3]float64{5, 5, 2}), "pin")
+	must(err)
+	must(arm.Link("ground", []string{"base"}))
+	must(arm.Link("upper arm", []string{"pin"}))
+	must(arm.Joint("shoulder", "ground", "upper arm"))
+	lo, hi := -1.5, 1.5
+	must(arm.Pair("shoulder", "revolute", blacksmith.FrameXY([3]float64{0, 0, 10}),
+		blacksmith.PairOptions{Ranges: []blacksmith.Range{{Lower: &lo, Upper: &hi}}}))
+	must(arm.State("reach", []blacksmith.StateRow{{Joint: "shoulder", Values: []float64{0.5}}}))
+	must(arm.Base("ground"))
+	armBefore := stepOf(arm)
+	shoulder := func(v float64) []blacksmith.StateRow {
+		return []blacksmith.StateRow{{Joint: "shoulder", Values: []float64{v}}}
+	}
+	posedStep := func(rows []blacksmith.StateRow, opts blacksmith.PosedOptions) string {
+		p, err := arm.Posed(rows, opts)
+		must(err)
+		defer p.Close()
+		return stepOf(p)
+	}
+	byState := posedStep(nil, blacksmith.PosedOptions{State: str("reach")})
+	byRow := posedStep(shoulder(0.5), blacksmith.PosedOptions{})
+	if byState != byRow {
+		fail("posed: state 'reach' differs from shoulder = 0.5")
+	}
+	if byRow == armBefore {
+		fail("posed: shoulder = 0.5 left the STEP text unchanged")
+	}
+	if posedStep(shoulder(0.5), blacksmith.PosedOptions{Ground: str("upper arm")}) == byRow {
+		fail("posed: grounding 'upper arm' changed nothing")
+	}
+	_, err = arm.Posed(shoulder(2.0), blacksmith.PosedOptions{})
+	if err == nil || err.Error() != "posed: value 0 of joint 'shoulder' is 2, outside its range" {
+		fail(fmt.Sprintf("posed: an out-of-range value was not refused exactly: %v", err))
+	}
+	_, err = arm.Posed(nil, blacksmith.PosedOptions{State: str("fold")})
+	if err == nil || err.Error() != "posed: assembly 'arm' has no state named 'fold'" {
+		fail(fmt.Sprintf("posed: an unknown state was not refused exactly: %v", err))
+	}
+	if stepOf(arm) != armBefore {
+		fail("posed: posing or a refusal changed the arm")
+	}
+
+	// the drives' gears: drive alone is fine; drive and driven that disagree are refused
+	gears := geared(true)
+	defer gears.Close()
+	gearsBefore := stepOf(gears)
+	g, err := gears.Posed([]blacksmith.StateRow{{Joint: "drive", Values: []float64{0.4}}}, blacksmith.PosedOptions{})
+	must(err)
+	defer g.Close()
+	if g.Name() != "gears" {
+		fail(fmt.Sprintf("posed: the posed gears are named %q", g.Name()))
+	}
+	_, err = gears.Posed([]blacksmith.StateRow{
+		{Joint: "drive", Values: []float64{0.4}}, {Joint: "driven", Values: []float64{0.4}}}, blacksmith.PosedOptions{})
+	if err == nil || !strings.HasPrefix(err.Error(),
+		"posed: assembly 'gears': coupling 'mesh': both 'drive' and 'driven' are given and disagree by") {
+		fail(fmt.Sprintf("posed: a disagreeing pair of drives was not refused: %v", err))
+	}
+	if stepOf(gears) != gearsBefore {
+		fail("posed: posing or a refusal changed the gears")
+	}
+	fmt.Println("posed: Assembly.Posed poses by path, state and ground, refuses ambiguity, range, state and disagreeing drives in the kernel's words, and leaves the original unchanged")
 }
 
 // mechanism is Assembly.Link/Assembly.Joint, at parity with the Python reference's
@@ -1980,7 +2404,7 @@ func mechanism() {
 			return arm.Pair("shoulder", "revolute", blacksmith.FrameXY([3]float64{0, 0, 10}), blacksmith.PairOptions{})
 		}, "pair: joint 'shoulder' already has a pair"},
 		{func() error { return arm.Pair("back", "orbital", blacksmith.FrameXY([3]float64{}), blacksmith.PairOptions{}) },
-			"pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, spherical, " +
+			"pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, gear, rack_and_pinion, spherical, " +
 				"spherical_with_pin, planar, universal, homokinetic, fully_constrained, unconstrained)"},
 		{func() error { return arm.Pair("back", "screw", blacksmith.FrameXY([3]float64{}), blacksmith.PairOptions{}) },
 			"pair: a screw needs a non-zero pitch"},
@@ -2084,6 +2508,318 @@ func mechanism() {
 	fmt.Println("pairs: a one-sided range (no lower, upper 1.0) survives the round trip")
 	hingeScene.Close()
 	hinge.Close()
+}
+
+// radiusOf is the distance of the k-th control point of a Béziers64's Points from c.
+func radiusOf(points []float64, k int, c [3]float64) float64 {
+	dx, dy, dz := points[k*3]-c[0], points[k*3+1]-c[1], points[k*3+2]-c[2]
+	return math.Sqrt(dx*dx + dy*dy + dz*dz)
+}
+
+// silhouette is Solid.SilhouetteBeziers and Node.SilhouetteBeziers: the curves where a
+// body's surfaces turn away from the eye. The kernel assertions are on values that pin the
+// layout, not only on lengths: a stride-16 unpack that reads a weight as a coordinate, or
+// a points slice shifted by one, still gives arrays of the right length. path is the
+// sample the smoke was given; the reader's fixtures are the repository's, beside it.
+func silhouette(path string) {
+	// The error slot is thread-local and the binding's pin() unlocks after each call, so without
+	// this the refusal and the later ask below are not guaranteed to share an OS thread.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	// Kernel. A radius-2 sphere's rim: the end points of every arc lie ON the sphere
+	// (radius 2 within 1e-9), and the end weights are exactly 1 with the two interior ones
+	// in (0, 1). The interior points and weights are not
+	// bounded tighter: they move with how the rim is subdivided.
+	sphere, err := blacksmith.Sphere(2)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer sphere.Close()
+	rim, err := sphere.SilhouetteBeziers(nil)
+	if err != nil {
+		fail("silhouette: " + err.Error())
+	}
+	if rim.Count() == 0 {
+		fail("silhouette: a sphere gave no rim")
+	}
+	if len(rim.Points) != rim.Count()*4*3 || len(rim.Weights) != rim.Count()*4 {
+		fail(fmt.Sprintf("silhouette: %d curves but %d point numbers and %d weights", rim.Count(), len(rim.Points), len(rim.Weights)))
+	}
+	origin := [3]float64{}
+	for c := 0; c < rim.Count(); c++ {
+		r0, r3 := radiusOf(rim.Points, c*4, origin), radiusOf(rim.Points, c*4+3, origin)
+		if math.Abs(r0-2) > 1e-9 || math.Abs(r3-2) > 1e-9 {
+			fail(fmt.Sprintf("silhouette: arc %d end points are at radius %v and %v, not 2", c, r0, r3))
+		}
+		w := rim.Weights[c*4 : c*4+4]
+		if w[0] != 1 || w[3] != 1 || !(w[1] > 0 && w[1] < 1) || !(w[2] > 0 && w[2] < 1) {
+			fail(fmt.Sprintf("silhouette: arc %d weights are %v, not 1, then two weights in (0, 1), then 1", c, w))
+		}
+	}
+	fmt.Printf("silhouette: a radius-2 sphere gives %d arcs, ends at radius 2, end weights 1\n", rim.Count())
+
+	// A cylinder seen from the side is straight rulings: polynomial, every weight exactly
+	// 1 -- the path a sphere never exercises.
+	cylinder, err := blacksmith.Cylinder(1, 3)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer cylinder.Close()
+	front := blacksmith.NewSvgOptions()
+	front.View = blacksmith.SvgFront
+	rulings, err := cylinder.SilhouetteBeziers(&front)
+	if err != nil {
+		fail("silhouette: " + err.Error())
+	}
+	if rulings.Count() == 0 {
+		fail("silhouette: a cylinder gave no rulings")
+	}
+	for i, w := range rulings.Weights {
+		if w != 1 {
+			fail(fmt.Sprintf("silhouette: a cylinder's weight %d is %v, not 1", i, w))
+		}
+	}
+	low, high := math.Inf(1), math.Inf(-1)
+	for k := 0; k < rulings.Count()*4; k++ {
+		x, y, z := rulings.Points[k*3], rulings.Points[k*3+1], rulings.Points[k*3+2]
+		low, high = math.Min(low, z), math.Max(high, z)
+		if math.Abs(math.Hypot(x, y)-1) > 1e-6 {
+			fail("silhouette: a ruling's control point is off the cylinder's wall")
+		}
+		// The axis. hypot(x, y) and the z extent are both symmetric in x and y, so an unpack that
+		// returned [y, x, z] passes both; |x| at the radius and |y| at zero tell the two apart (seen from
+		// the front a ruling sits at x = +-radius, y = 0). Only the magnitude of x is asserted, not its
+		// sign, and the number of rulings is not asserted.
+		if math.Abs(math.Abs(x)-1) > 1e-6 {
+			fail(fmt.Sprintf("silhouette: a ruling's control point has |x| = %v, not the radius 1", math.Abs(x)))
+		}
+		if math.Abs(y) > 1e-6 {
+			fail(fmt.Sprintf("silhouette: a ruling's control point has |y| = %v, not 0", math.Abs(y)))
+		}
+	}
+	// The rulings run cap to cap, so their z extent is the height: that pins z against x and y.
+	if math.Abs(high-low-3) > 1e-6 {
+		fail(fmt.Sprintf("silhouette: the rulings span z %v..%v, not a height of 3", low, high))
+	}
+
+	// An infinite tolerance is refused in the library's words; and the refusal left in the error slot must not
+	// turn a later empty answer into an error. The cuboid is built BEFORE the refusal, not between it and the
+	// ask: every call that builds, reads or writes geometry in the library runs under its `guard`, whose first
+	// act is `clear_error` (blacksmith-capi lib.rs:117), so building one in between would wipe the refusal's
+	// message. The order is build, refuse, ask. What this pins is narrower than it looks, though: the slot is
+	// already clear when the silhouette's native call begins, because the wrapper first packs its options and
+	// packing the default stroke "#000000" goes through `cadaclysm_blacksmith_parse_colour`, itself a `guard`
+	// (lib.rs:200) that clears it (Go `buildSvgOptions` -> `parseSvgColour` -> `RGB` ->
+	// `cadaclysm_blacksmith_parse_colour`). `cadaclysm_blacksmith_svg_options_init` is a bare struct fill and
+	// does not clear. So the test pins that the wrapper must not read the slot BEFORE packing its options: a
+	// read there fails it, while a read placed after packing and before the native call would pass. The
+	// library's own clearing at the silhouette's entry is a library property, pinned for the reader's entry
+	// point by `an_empty_answer_after_a_refusal_carries_no_stale_error`
+	// (crates/cadaclysm-capi/tests/silhouette_abi.rs:401); this test covers the wrapper's half. Only
+	// calls under `guard` clear: `cadaclysm_blacksmith_solid_free` and
+	// `cadaclysm_blacksmith_silhouette_beziers_free` just drop a box and the error getter does not clear
+	// either, so a free running between the refusal and the ask cannot wipe the slot.
+	cuboid, err := blacksmith.Cuboid(10, 10, 10)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer cuboid.Close()
+	infinite := blacksmith.NewSvgOptions()
+	infinite.Tolerance = math.Inf(1)
+	if _, err := sphere.SilhouetteBeziers(&infinite); err == nil || !strings.Contains(err.Error(), "silhouette: ") {
+		fail(fmt.Sprintf("silhouette: an infinite tolerance was not refused with \"silhouette: \": %v", err))
+	}
+	none, err := cuboid.SilhouetteBeziers(nil)
+	if err != nil {
+		fail("silhouette: an all-planar body was an error: " + err.Error())
+	}
+	if none.Count() != 0 || len(none.Points) != 0 || len(none.Weights) != 0 {
+		fail("silhouette: an all-planar body gave a silhouette")
+	}
+	fmt.Println("silhouette: cylinder rulings all weight 1, infinite tolerance refused, a planar body is the empty answer")
+
+	// Reader. The fixtures are the repository's, not an SDK checkout's, so this runs where found.
+	fixtures := filepath.Join(filepath.Dir(filepath.Dir(mustAbs(path))), "crates", "cadaclysm-acis", "tests", "fixtures", "rhino")
+	spherePath := filepath.Join(fixtures, "sphere.sat")
+	boxPath := filepath.Join(fixtures, "box-chamfer-all.blacksmith.stp")
+	if _, err := os.Stat(spherePath); err != nil {
+		fmt.Println("silhouette (reader): skipped, no fixtures beside the sample:", spherePath)
+		return
+	}
+	if _, err := os.Stat(boxPath); err != nil {
+		fmt.Println("silhouette (reader): skipped, no fixtures beside the sample:", boxPath)
+		return
+	}
+	// The body node above the lump holds no shape of its own; the first node with extent
+	// is the part.
+	partOf := func(scene *cadaclysm.Scene) *cadaclysm.Node {
+		for _, node := range scene.Walk() {
+			if b := node.Bounds64(); b.Min != b.Max {
+				return node
+			}
+		}
+		fail("silhouette (reader): no node with extent in the scene")
+		return nil
+	}
+	readerScene, err := cadaclysm.Open(spherePath)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer readerScene.Close()
+	node := partOf(readerScene)
+	// Asked the LARGER answer first: iso gives 236 curves against front's 174, so the
+	// second call below refills the scene's one slot in place and overwrites the head of
+	// what was kept, which is what makes a non-copying implementation fail loudly. The
+	// reverse order can pass with a view. It was front first until the lattice's spacing
+	// became a length in space (44efabc88): front gave 1248 against iso's 1210 then.
+	isoView := cadaclysm.NewSvgOptions()
+	isoView.View = cadaclysm.SvgIso
+	first, err := node.SilhouetteBeziers(&isoView)
+	if err != nil {
+		fail("silhouette (reader): " + err.Error())
+	}
+	if first.Count() == 0 {
+		fail("silhouette (reader): a sphere gave no rim")
+	}
+	if len(first.Points) != first.Count()*4*3 || len(first.Weights) != first.Count()*4 {
+		fail("silhouette (reader): the arrays are not count*4*3 and count*4")
+	}
+	for _, w := range first.Weights {
+		if math.IsNaN(w) || math.IsInf(w, 0) || w <= 0 {
+			fail(fmt.Sprintf("silhouette (reader): a weight is %v, not finite and positive", w))
+		}
+	}
+	// Every control point lies within the library's fit budget of the sphere, at the bounds radius
+	// from the bounds centre. That is NOT because control points lie on the sphere: the silhouette
+	// curve does, but a cubic's interior control points do not. It holds because the arcs are short
+	// (half a unit on a radius of 10), and the budget is the tolerance the library fits the CURVE to,
+	// not its control polygon. The margin is narrow: the curve itself uses nearly the whole budget
+	// (3.42e-3 against 3.46e-3) since the lattice's spacing became a length in space (44efabc88);
+	// before, a lattice ten times too fine left it at 1e-4. So this
+	// catches a displaced or scaled result and a wildly mis-strided unpack. What it does with a slip
+	// of the unpack was measured here as the worst radius DEVIATION of any control point from the
+	// sphere's radius 10 (budget about 3.5e-3): a correct read deviates by 3.04e-3 on iso and 2.97e-3 on
+	// front; a one-double wrap slip by 0.87 on iso and 8.8 on front, over the budget at either view;
+	// a one-CONTROL-POINT slip by exactly the correct read's figure at either view, because it only
+	// moves whole points. So this catches a one-double slip but can never catch a one-control-point
+	// slip, which is why the chaining assertion below is the only one that does. This test asks iso,
+	// because the ownership order below forces it. It also does NOT pin the eye or `up` (a silhouette
+	// point is a point of the surface, so it is on the sphere from any view), the node choice (a wrong
+	// node fails earlier, as a refusal or an empty answer), or the weights (all 1.0 on this fixture:
+	// degree-1 chords). The bound is the library's own budget: it fits the silhouette to within
+	// `extent * tolerance / width` (`world_tolerance`, capi svg.rs), the extent being the bounds'
+	// diagonal. Measured on the iso view this test asks, the radius deviation is 3.04e-3 on a radius
+	// of 10 (front: 2.97e-3). The budget is read off the options this call was given, not copied from
+	// their defaults; the library's extent is the box of the body's sampled feature edges, falling
+	// back to declared bounds only when there are none, and the node's bounds diagonal stands in for
+	// it here, which can be looser than that box.
+	b := node.Bounds64()
+	centre := [3]float64{(b.Min[0] + b.Max[0]) / 2, (b.Min[1] + b.Max[1]) / 2, (b.Min[2] + b.Max[2]) / 2}
+	radius := (b.Max[0] - b.Min[0]) / 2
+	diagonal := math.Sqrt(math.Pow(b.Max[0]-b.Min[0], 2) + math.Pow(b.Max[1]-b.Min[1], 2) + math.Pow(b.Max[2]-b.Min[2], 2))
+	budget := diagonal * (isoView.Tolerance / isoView.Width)
+	worst := 0.0
+	for k := 0; k < first.Count()*4; k++ {
+		worst = math.Max(worst, math.Abs(radiusOf(first.Points, k, centre)-radius))
+	}
+	if radius <= 0 || worst > budget {
+		fail(fmt.Sprintf("silhouette (reader): control points stray %v from the bounds centre's radius %v, past the budget %v", worst, radius, budget))
+	}
+	keepPoints := append([]float64(nil), first.Points...)
+	keepWeights := append([]float64(nil), first.Weights...)
+	// The next silhouette call on this scene refills the library's one slot in place.
+	frontView := cadaclysm.NewSvgOptions()
+	frontView.View = cadaclysm.SvgFront
+	second, err := node.SilhouetteBeziers(&frontView)
+	if err != nil {
+		fail("silhouette (reader): " + err.Error())
+	}
+	if second.Count() == 0 {
+		fail("silhouette (reader): the second view gave no rim")
+	}
+	if second.Count() > first.Count() {
+		fail(fmt.Sprintf("silhouette (reader): the larger answer must come first (iso %d, front %d)", first.Count(), second.Count()))
+	}
+	if slices.Equal(second.Points, keepPoints) {
+		fail("silhouette (reader): the two views gave the same silhouette, so this cannot tell a copy from a view")
+	}
+	if !slices.Equal(first.Points, keepPoints) {
+		fail("silhouette (reader): the first answer's points changed when the second was asked")
+	}
+	if !slices.Equal(first.Weights, keepWeights) {
+		fail("silhouette (reader): the first answer's weights changed when the second was asked")
+	}
+	// Chaining, the assertion that sees an offset slip; asked of the iso answer, whose
+	// figures are quoted here (the front view chains much less). Count the consecutive
+	// pairs whose last control point equals the next curve's first, to 1e-9 per coordinate
+	// (x, y and z each, so a passing pair can be up to 1.73e-9 apart). The arcs come back in
+	// RUNS, not as one ordered traversal, so "every arc ends where the next begins" is false
+	// and this is a count with a margin, not an identity: measured on iso, 232 of the 235
+	// consecutive pairs chain (98.7%, four runs); the front view chains 96 of 173 (55%), which
+	// is why the eye matters and the bound is 80, not near 230. A read shifted by one double or
+	// by one control point leaves none (0 of 235 each). Those are wrap-around slips, which
+	// preserve the length and the count, so each denominator is the unshifted pair count (a
+	// truncating slip loses a curve and drops it by one). The count varies with how the
+	// sphere is tessellated; what makes a lower bound of 80 safe is not that it cannot
+	// drift but that it sits about three times below the count measured here. It has drifted
+	// once: the bound was 400 against 1206 of 1209 until the lattice's spacing became a length
+	// in space (44efabc88) and the same four runs came back in arcs five times longer.
+	// Its limit: a shift by a whole CURVE (12 doubles) is NOT caught, because it preserves the
+	// chaining: 231 of 235 pairs still chain on iso, since every arc is replaced by its neighbour's
+	// and the neighbours still join.
+	if len(second.Points) != second.Count()*4*3 || len(second.Weights) != second.Count()*4 {
+		fail("silhouette (reader): the front arrays are not count*4*3 and count*4")
+	}
+	for _, w := range second.Weights {
+		if math.IsNaN(w) || math.IsInf(w, 0) || w <= 0 {
+			fail(fmt.Sprintf("silhouette (reader): a front weight is %v, not finite and positive", w))
+		}
+	}
+	chained := 0
+	for c := 0; c+1 < first.Count(); c++ {
+		last, next := c*12+9, (c+1)*12
+		if math.Abs(first.Points[last]-first.Points[next]) <= 1e-9 &&
+			math.Abs(first.Points[last+1]-first.Points[next+1]) <= 1e-9 &&
+			math.Abs(first.Points[last+2]-first.Points[next+2]) <= 1e-9 {
+			chained++
+		}
+	}
+	if chained < 80 {
+		fail(fmt.Sprintf("silhouette (reader): only %d of %d consecutive arcs chain (last control point = the next one's first), want at least 80", chained, first.Count()-1))
+	}
+	badTolerance := cadaclysm.NewSvgOptions()
+	badTolerance.Tolerance = math.Inf(1)
+	if _, err := node.SilhouetteBeziers(&badTolerance); err == nil || !strings.Contains(err.Error(), "silhouette: ") {
+		fail(fmt.Sprintf("silhouette (reader): an infinite tolerance was not refused with \"silhouette: \": %v", err))
+	}
+
+	// A planar body: the empty answer, after a refusal has left its reason in the slot.
+	boxScene, err := cadaclysm.Open(boxPath)
+	if err != nil {
+		fail(err.Error())
+	}
+	defer boxScene.Close()
+	boxNode := partOf(boxScene)
+	if _, err := boxNode.SilhouetteBeziers(&badTolerance); err == nil {
+		fail("silhouette (reader): an infinite tolerance was accepted on the box")
+	}
+	boxAnswer, err := boxNode.SilhouetteBeziers(nil)
+	if err != nil {
+		fail("silhouette (reader): an all-planar body was an error: " + err.Error())
+	}
+	if boxAnswer.Count() != 0 || len(boxAnswer.Points) != 0 || len(boxAnswer.Weights) != 0 {
+		fail("silhouette (reader): an all-planar body gave a silhouette")
+	}
+	fmt.Printf("silhouette (reader): sphere %d then %d curves (worst radius error %.3g of budget %.3g), first answer kept; infinite tolerance refused; planar box empty\n",
+		first.Count(), second.Count(), worst, budget)
+}
+
+func mustAbs(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		fail(err.Error())
+	}
+	return abs
 }
 
 func fail(why string) {
@@ -3914,6 +4650,37 @@ func sheetVerbs(plate *blacksmith.Solid) {
 	for _, s := range append(halves, spring, pipe) {
 		s.Close()
 	}
+	// A rectangle drawn above a sphere cores it: the ball with a square hole, then the core.
+	ball, err := blacksmith.Sphere(10)
+	if err != nil {
+		fail(err.Error())
+	}
+	coreSquare, err := blacksmith.Rect(6, 6)
+	if err != nil {
+		fail(err.Error())
+	}
+	cored, err := ball.SplitByProfile(coreSquare, blacksmith.Frame{0, 0, 40, 1, 0, 0, 0, 1, 0, 0, 0, 1}, blacksmith.DefaultTolerance)
+	if err != nil {
+		fail(err.Error())
+	}
+	if len(cored) != 2 {
+		fail(fmt.Sprintf("split_by_profile: %d bodies, not 2", len(cored)))
+	}
+	volume := func(s *blacksmith.Solid) float64 {
+		m, err := s.Mass(0)
+		if err != nil {
+			fail(err.Error())
+		}
+		return m.Volume
+	}
+	whole, outside, inside := volume(ball), volume(cored[0]), volume(cored[1])
+	if !(inside > 0 && inside < outside) || math.Abs(outside+inside-whole) > 0.01*whole {
+		fail(fmt.Sprintf("split_by_profile: %g + %g is not the ball's %g", outside, inside, whole))
+	}
+	for _, s := range append(cored, ball) {
+		s.Close()
+	}
+	coreSquare.Close()
 	wire.Close()
 	wireCircle.Close()
 	pipePath.Close()
@@ -4050,4 +4817,357 @@ func sheetVerbs(plate *blacksmith.Solid) {
 		p.Close()
 	}
 	along.Close()
+}
+
+// subdMust folds an error into fail, for a smoke check that just wants the value.
+func subdMust[T any](v T, err error) T {
+	if err != nil {
+		fail("subd: " + err.Error())
+	}
+	return v
+}
+
+// subdNear: two point lists the same length, equal to within 1e-12 in every coordinate.
+func subdNear(a, b [][3]float64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		for k := 0; k < 3; k++ {
+			if math.Abs(a[i][k]-b[i][k]) > 1e-12 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func subdCheck(ok bool, what string) {
+	if !ok {
+		fail("subd: " + what)
+	}
+}
+
+// subdRefused requires err to be a refusal whose text satisfies ok.
+func subdRefused(err error, what string, ok func(string) bool) {
+	if err == nil {
+		fail("subd: " + what + " was accepted")
+	}
+	var be *blacksmith.BuildError
+	if !errors.As(err, &be) || !ok(be.Message) {
+		fail(fmt.Sprintf("subd: %s was refused in other words: %v", what, err))
+	}
+}
+
+func subdContains(sub string) func(string) bool {
+	return func(s string) bool { return strings.Contains(s, sub) }
+}
+
+func subdCuboid() *blacksmith.Subd {
+	return subdMust(blacksmith.SubdCuboid([3]float64{2, 2, 2}, [3]uint32{1, 1, 1}))
+}
+
+func subdEdges(a, b []blacksmith.SubdEdge) bool { return slices.Equal(a, b) }
+
+// subd ports Python's test_subd_* cage facts one for one.
+func subd() {
+	// Fact 1: a cuboid's parts, copies, from_parts the inverse.
+	cube := subdCuboid()
+	defer cube.Close()
+	positions := subdMust(cube.Positions())
+	faces := subdMust(cube.Faces())
+	subdCheck(len(positions) == 8 && len(faces) == 6, "a cuboid is not 8 vertices and 6 faces")
+	for _, f := range faces {
+		subdCheck(len(f) == 4, "a cuboid face is not a quad")
+	}
+	creases := subdMust(cube.Creases())
+	pins := subdMust(cube.Pins())
+	sym := subdMust(cube.Symmetry())
+	sel := subdMust(cube.Selection())
+	subdCheck(len(creases) == 0 && len(pins) == 0 && sym == nil && sel == nil, "a fresh cuboid has creases, pins, symmetry or a selection")
+	saved := positions[0]
+	savedFace := append([]uint32(nil), faces[0]...)
+	positions[0][0] += 99
+	faces[0][0] += 99
+	again := subdMust(cube.Positions())
+	againFaces := subdMust(cube.Faces())
+	subdCheck(again[0] == saved && slices.Equal(againFaces[0], savedFace), "writing to a read-back changed the next read")
+	positions[0] = saved
+	faces[0][0] -= 99
+	rebuilt := subdMust(blacksmith.SubdFromParts(positions, faces, nil, nil, nil))
+	defer rebuilt.Close()
+	rp := subdMust(rebuilt.Positions())
+	rf := subdMust(rebuilt.Faces())
+	subdCheck(slices.Equal(rp, positions) && len(rf) == len(faces), "from_parts did not give equal positions and faces")
+	for i := range rf {
+		subdCheck(slices.Equal(rf[i], faces[i]), "from_parts did not give equal faces")
+	}
+
+	// Fact 2: extrude.
+	raised := subdMust(cube.Extrude([]uint32{1}, 1))
+	defer raised.Close()
+	rpos := subdMust(raised.Positions())
+	rsel := subdMust(raised.Selection())
+	subdCheck(len(rpos) == 12 && rsel != nil && rsel.Kind == blacksmith.SubdFaces && slices.Equal(rsel.IDs, []uint32{1}),
+		"extrude([1], 1) is not 12 vertices selecting face 1")
+	subdCheck(len(subdMust(cube.Positions())) == 8, "extrude changed its input")
+
+	// Fact 3: crease and pin.
+	edge01 := []blacksmith.SubdEdge{{0, 1}}
+	creased := subdMust(cube.Crease(edge01, true))
+	defer creased.Close()
+	csel := subdMust(creased.Selection())
+	subdCheck(csel != nil && csel.Kind == blacksmith.SubdEdges && subdEdges(csel.Edges, edge01), "crease did not select its edge")
+	pinned := subdMust(creased.Pin([]uint32{6}, true))
+	defer pinned.Close()
+	subdCheck(subdEdges(subdMust(pinned.Creases()), edge01) && slices.Equal(subdMust(pinned.Pins()), []uint32{6}),
+		"crease then pin did not keep both")
+	psel := subdMust(pinned.Selection())
+	subdCheck(psel != nil && psel.Kind == blacksmith.SubdVertices && slices.Equal(psel.IDs, []uint32{6}), "pin did not select its vertex")
+	both := subdMust(blacksmith.SubdFromParts(positions, faces, edge01, []uint32{6}, nil))
+	defer both.Close()
+	subdCheck(subdEdges(subdMust(both.Creases()), edge01) && slices.Equal(subdMust(both.Pins()), []uint32{6}),
+		"from_parts lost its creases or pins")
+	uncreased := subdMust(pinned.Crease(edge01, false))
+	defer uncreased.Close()
+	unpinned := subdMust(uncreased.Pin([]uint32{6}, false))
+	defer unpinned.Close()
+	subdCheck(len(subdMust(unpinned.Creases())) == 0 && len(subdMust(unpinned.Pins())) == 0, "on=false did not empty creases and pins")
+
+	// Fact 4: mirror.
+	halves := subdMust(blacksmith.SubdCuboid([3]float64{2, 2, 2}, [3]uint32{2, 1, 1}))
+	defer halves.Close()
+	whole := len(subdMust(halves.Positions()))
+	half := subdMust(halves.MirrorOn(blacksmith.SubdX))
+	defer half.Close()
+	hs := subdMust(half.Symmetry())
+	subdCheck(hs != nil && hs.Axis == blacksmith.SubdX && hs.Tolerance > 0, "mirror_on(X) has no X symmetry with a tolerance")
+	subdCheck(subdMust(half.Selection()) == nil, "mirror_on selected something")
+	hpos, hfaces := subdMust(half.Positions()), subdMust(half.Faces())
+	subdCheck(len(hpos) < whole, "the mirrored half is not smaller than the whole")
+	loaded := subdMust(blacksmith.SubdFromParts(hpos, hfaces, nil, nil, hs))
+	defer loaded.Close()
+	ls := subdMust(loaded.Symmetry())
+	subdCheck(slices.Equal(subdMust(loaded.Positions()), hpos) && ls != nil && *ls == *hs, "from_parts did not keep a half's positions and symmetry")
+	fullCage := subdMust(half.Full())
+	defer fullCage.Close()
+	subdCheck(len(subdMust(fullCage.Positions())) == whole, "full() is not as big as the whole")
+	off := subdMust(half.MirrorOff())
+	defer off.Close()
+	subdCheck(subdMust(off.Symmetry()) == nil, "mirror_off still has symmetry")
+
+	// Fact 5: edge loops.
+	grid := subdMust(blacksmith.SubdCuboid([3]float64{2, 2, 2}, [3]uint32{2, 2, 2}))
+	defer grid.Close()
+	gf := subdMust(grid.Faces())
+	a, b := gf[0][0], gf[0][1]
+	loop := subdMust(grid.EdgeLoop(blacksmith.SubdEdge{a, b}))
+	subdCheck(len(loop) >= 4 && loop[0] == blacksmith.SubdEdge{min(a, b), max(a, b)}, "edge_loop is not >= 4 edges led by the picked edge")
+	diag := subdMust(cube.EdgeLoop(blacksmith.SubdEdge{faces[0][0], faces[0][2]}))
+	subdCheck(len(diag) == 0, "edge_loop of a diagonal is not empty")
+	subdCheck(len(subdMust(cube.EdgeLoop(blacksmith.SubdEdge{0, 99}))) == 0, "edge_loop((0, 99)) is not empty")
+
+	// Fact 6: transform.
+	rot := []float64{0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}
+	all := blacksmith.SubdOfVertices(0, 1, 2, 3, 4, 5, 6, 7)
+	turned := subdMust(cube.Transform(all, rot))
+	defer turned.Close()
+	tp := subdMust(turned.Positions())
+	for i, p := range positions {
+		want := [3]float64{-p[1], p[0], p[2]}
+		for k := 0; k < 3; k++ {
+			subdCheck(math.Abs(tp[i][k]-want[k]) <= 1e-12, "the rotation did not map (x, y, z) to (-y, x, z)")
+		}
+	}
+	one := subdMust(cube.Transform(blacksmith.SubdOfVertices(0), rot))
+	defer one.Close()
+	op := subdMust(one.Positions())
+	for i := range positions {
+		if i == 0 {
+			subdCheck(op[0] != positions[0], "vertex 0 did not move")
+		} else {
+			subdCheck(op[i] == positions[i], "a vertex other than 0 moved")
+		}
+	}
+	slide := []float64{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 0, 0, 1}
+	slid := subdMust(cube.Transform(blacksmith.SubdOfEdges(blacksmith.SubdEdge{0, 1}), slide))
+	defer slid.Close()
+	sp := subdMust(slid.Positions())
+	subdCheck(sp[0][0] == positions[0][0]+3, "the slide did not add exactly 3 to vertex 0's x")
+	ssel := subdMust(slid.Selection())
+	subdCheck(ssel != nil && ssel.Kind == blacksmith.SubdEdges && subdEdges(ssel.Edges, edge01), "the slide did not select its edge")
+	_, err := cube.Transform(all, []float64{1, 2, 3})
+	subdRefused(err, "a matrix of 3 numbers", subdContains("matrix"))
+
+	// Fact 7: inset and insert_loop.
+	inset := subdMust(cube.Inset([]uint32{1}, 0.25, false))
+	defer inset.Close()
+	subdCheck(len(subdMust(inset.Faces())) == 10, "inset([1], 0.25) is not 10 faces")
+	cut := subdMust(cube.InsertLoop(blacksmith.SubdEdge{0, 1}, 0.5))
+	defer cut.Close()
+	cutSel := subdMust(cut.Selection())
+	subdCheck(len(subdMust(cut.Positions())) == 12 && cutSel != nil && cutSel.Kind == blacksmith.SubdEdges, "insert_loop is not 12 vertices with an edge selection")
+	_, err = cube.InsertLoop(blacksmith.SubdEdge{0, 1}, 1.5)
+	subdRefused(err, "insert_loop at 1.5", func(s string) bool { return strings.HasPrefix(s, "bad selection: ") })
+
+	// Fact 8: the smooth mesh, copied.
+	var survivor *blacksmith.SubdMesh
+	func() {
+		mortal := subdCuboid()
+		defer mortal.Close()
+		survivor = subdMust(mortal.SmoothMesh(2))
+	}()
+	runtime.GC()
+	mesh := subdMust(cube.SmoothMesh(2))
+	n := len(mesh.Positions)
+	subdCheck(n > 8 && len(mesh.Normals) == n, "smooth_mesh(2) is not n > 8 positions and n normals")
+	for _, v := range mesh.Normals {
+		subdCheck(math.Abs(math.Sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2])-1) <= 1e-9, "a normal is not unit")
+	}
+	subdCheck(len(mesh.Indices)%3 == 0 && len(mesh.TriangleFace) == len(mesh.Indices)/3, "triangle_face is not one entry a triangle")
+	for _, i := range mesh.Indices {
+		subdCheck(int(i) < n, "an index is out of range")
+	}
+	for _, f := range mesh.TriangleFace {
+		subdCheck(f < 6, "a triangle_face is not a face of the cage")
+	}
+	subdCheck(len(subdMust(cube.SmoothMesh(1)).Positions) < n, "smooth_mesh(1) is not smaller than smooth_mesh(2)")
+	subdCheck(slices.Equal(subdMust(cube.SmoothMesh(2)).Positions, mesh.Positions), "a second smooth_mesh(2) differs")
+	_, err = cube.SmoothMesh(7)
+	subdRefused(err, "smooth_mesh(7)", subdContains("levels"))
+	// Another cage of the same topology meshes from kept weights: the same mesh to within
+	// rounding (its points may differ in the last bits), its triangles exactly.
+	subdCheck(subdNear(survivor.Positions, mesh.Positions) && slices.Equal(survivor.Indices, mesh.Indices) &&
+		subdNear(survivor.Normals, mesh.Normals) && slices.Equal(survivor.TriangleFace, mesh.TriangleFace),
+		"a mesh read after its cage closed is not whole")
+
+	// Fact 9: pick.
+	fine := subdMust(cube.SmoothMesh(3))
+	target, best := fine.Positions[0], math.Inf(1)
+	for _, p := range fine.Positions {
+		d := math.Hypot(math.Hypot(p[0]-positions[6][0], p[1]-positions[6][1]), p[2]-positions[6][2])
+		if d < best {
+			best, target = d, p
+		}
+	}
+	pv := subdMust(cube.Pick(target, blacksmith.SubdVertices))
+	subdCheck(pv != nil && pv.Kind == blacksmith.SubdVertices && slices.Equal(pv.IDs, []uint32{6}), "picking near vertex 6 for a vertex is not 6")
+	pe := subdMust(cube.Pick(target, blacksmith.SubdEdges))
+	subdCheck(pe != nil && len(pe.Edges) == 1 && (pe.Edges[0][0] == 6 || pe.Edges[0][1] == 6), "picking near vertex 6 for an edge is not an edge of 6")
+	pf := subdMust(cube.Pick(target, blacksmith.SubdFaces))
+	subdCheck(pf != nil && len(pf.IDs) == 1 && pf.IDs[0] < 6, "picking for a face is not a face")
+	far := subdMust(cube.Pick([3]float64{100, 100, 100}, blacksmith.SubdVertices))
+	subdCheck(far == nil, "a far point picked something")
+	_, err = cube.Pick([3]float64{math.NaN(), 0, 0}, blacksmith.SubdVertices)
+	subdRefused(err, "a NaN pick", func(s string) bool { return s == "bad selection: pick: point is not finite" })
+	// The refusal must not leave a stale error that reads a far point as a refusal.
+	subdCheck(subdMust(cube.Pick([3]float64{100, 100, 100}, blacksmith.SubdVertices)) == nil, "a far point after a refusal is not nothing near")
+
+	// Fact 10: to_solid.
+	solid, report, err := cube.ToSolid(blacksmith.SubdSolidOptions{})
+	if err != nil {
+		fail("subd: " + err.Error())
+	}
+	defer solid.Close()
+	subdCheck(report.Regular == 0 && report.Refined == 24 && report.Levels >= 2 && report.Steps >= 1 &&
+		report.Deviation <= 1e-4 && report.G1AngleDeg <= 0.1, fmt.Sprintf("the cuboid's report is off: %+v", report))
+	m := subdMust(solid.Manifold())
+	subdCheck(m.IsClosed, "the cuboid's solid is not closed")
+	subdCheck(subdMust(solid.Mass(0)).Volume > 0, "the cuboid's solid has no volume")
+	solid2, _, err := cube.ToSolid(blacksmith.SubdSolidOptions{Tolerance: 1e-4, G1Angle: 0.1, MaxLevels: 6})
+	if err != nil {
+		fail("subd: " + err.Error())
+	}
+	solid2.Close()
+
+	// Fact 11: a cylinder with sharp rims has a tangent break.
+	sharp := subdMust(blacksmith.SubdCylinder(1, 2, 8, 1, false))
+	defer sharp.Close()
+	_, _, err = sharp.ToSolid(blacksmith.SubdSolidOptions{})
+	subdRefused(err, "an uncreased cylinder's solid", func(s string) bool {
+		return strings.HasPrefix(s, "subd:") && strings.Contains(s, "tangent break")
+	})
+
+	// Fact 12: creased rims, with every other value the default.
+	can := subdMust(blacksmith.SubdCylinder(1, 2, 8, 1, true))
+	defer can.Close()
+	canSolid, canReport, err := can.ToSolid(blacksmith.SubdSolidOptions{})
+	if err != nil {
+		fail("subd: " + err.Error())
+	}
+	canSolid.Close()
+	subdCheck(canReport.Deviation <= 1e-4 && canReport.G1AngleDeg <= 0.1, fmt.Sprintf("the default cylinder's report is off: %+v", canReport))
+
+	// Fact 13: primitives and their refusals.
+	for name, build := range map[string]func() (*blacksmith.Subd, error){
+		"cylinder": func() (*blacksmith.Subd, error) { return blacksmith.SubdCylinder(1, 2, 8, 2, true) },
+		"sphere":   func() (*blacksmith.Subd, error) { return blacksmith.SubdSphere(1, 2) },
+		"torus":    func() (*blacksmith.Subd, error) { return blacksmith.SubdTorus(3, 1, 12, 8) },
+	} {
+		p := subdMust(build())
+		subdCheck(len(subdMust(p.Faces())) > 0, name+" has no faces")
+		p.Close()
+	}
+	_, err = blacksmith.SubdCuboid([3]float64{2, 2, 2}, [3]uint32{0, 1, 1})
+	subdRefused(err, "a cuboid of 0 segments", func(s string) bool { return s == "bad selection: cuboid: segments >= 1" })
+	_, err = blacksmith.SubdSphere(1, 2000)
+	subdRefused(err, "a sphere of 2000 segments", subdContains("1024"))
+
+	// Fact 14: from_parts refusals.
+	_, err = blacksmith.SubdFromParts(positions, faces, []blacksmith.SubdEdge{{0, 6}}, nil, nil)
+	subdRefused(err, "a crease that is not an edge", func(s string) bool { return strings.HasPrefix(s, "bad selection: ") })
+	_, err = blacksmith.SubdFromParts(nil, faces, nil, nil, nil)
+	subdRefused(err, "zero positions", subdContains("vertex_count"))
+
+	// Fact 15: the pipeline, and its STEP text.
+	rise := subdMust(cube.Extrude([]uint32{1}, 0.5))
+	defer rise.Close()
+	cutIn := subdMust(rise.Inset([]uint32{1}, 0.25, false))
+	defer cutIn.Close()
+	pipe, pipeReport, err := cutIn.ToSolid(blacksmith.SubdSolidOptions{})
+	if err != nil {
+		fail("subd: " + err.Error())
+	}
+	defer pipe.Close()
+	subdCheck(subdMust(pipe.Manifold()).IsClosed && pipeReport.Deviation <= 1e-4, "the pipeline's solid is not closed within tolerance")
+	text := subdMust(pipe.StepText("", "mm"))
+	subdCheck(strings.HasPrefix(text, "ISO-10303-21;") && strings.Contains(text, "ADVANCED_FACE"), "the pipeline's STEP text is not STEP with advanced faces")
+	scene, err := cadaclysm.OpenMemory([]byte(text), "subd.stp")
+	if err != nil {
+		fail("subd: " + err.Error())
+	}
+	meshed := 0
+	for _, node := range scene.Nodes() {
+		if node.CanMesh() {
+			meshed++
+		}
+	}
+	scene.Close()
+	subdCheck(meshed == 1, fmt.Sprintf("the STEP the cage wrote is %d meshable nodes, not one", meshed))
+
+	// Fact 16: close, twice, and use after close.
+	gone := subdCuboid()
+	gone.Close()
+	gone.Close()
+	subdCheck(gone.Closed(), "a closed cage is not Closed")
+	closedRefused := func(what string, err error) {
+		if !errors.Is(err, blacksmith.ErrClosed) {
+			fail(fmt.Sprintf("subd: %s on a closed cage is not ErrClosed: %v", what, err))
+		}
+	}
+	_, err = gone.Positions()
+	closedRefused("Positions", err)
+	_, err = gone.Extrude([]uint32{1}, 1)
+	closedRefused("Extrude", err)
+	_, err = gone.SmoothMesh(2)
+	closedRefused("SmoothMesh", err)
+	_, err = gone.Pick([3]float64{}, blacksmith.SubdVertices)
+	closedRefused("Pick", err)
+	_, _, err = gone.ToSolid(blacksmith.SubdSolidOptions{})
+	closedRefused("ToSolid", err)
+	_, err = gone.EdgeLoop(blacksmith.SubdEdge{0, 1})
+	closedRefused("EdgeLoop", err)
+
+	fmt.Printf("subd: cuboid %d vertices, smooth mesh %d vertices, to_solid %d refined patches (deviation %g)\n",
+		len(positions), n, report.Refined, report.Deviation)
 }

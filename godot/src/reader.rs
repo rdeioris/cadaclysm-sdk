@@ -113,6 +113,7 @@ struct PoseData {
     ground: u32,
     unsolved: Vec<u32>,
     out_of_range: Vec<(u32, u32, f64)>,
+    diagnostics: Vec<String>,
     transforms: Vec<[f64; 16]>,
 }
 
@@ -122,6 +123,7 @@ fn pose_data(s: &sdk::Scene, p: &sdk::Pose<'_>) -> PoseData {
         ground: p.ground.index(),
         unsolved: p.unsolved.iter().map(|j| j.index()).collect(),
         out_of_range: p.out_of_range.iter().map(|(j, freedom, value)| (j.index(), *freedom, *value)).collect(),
+        diagnostics: p.diagnostics.clone(),
         transforms: (0..node_count)
             .map(|i| p.raw_transform(s.node(i).expect("i < node_count")))
             .collect(),
@@ -397,13 +399,13 @@ pub(crate) fn svg_options(options: &VarDictionary) -> Option<sdk::SvgOptions> {
         opts.tolerance = ok(number(&tolerance, "tolerance"))?;
     }
     if let Some(stroke) = options.get("stroke") {
-        opts.stroke = packed_colour(&stroke, "stroke")?;
+        opts.stroke = packed_colour(&stroke, "stroke")?.into();
     }
     if let Some(width) = options.get("width") {
         opts.stroke_width = ok(number(&width, "width"))?;
     }
     if let Some(background) = options.get("background") {
-        opts.background = Some(packed_colour(&background, "background")?);
+        opts.background = Some(packed_colour(&background, "background")?.into());
     }
     let flag = |name: &str, default: bool| options.get(name).map(|v| v.booleanize()).unwrap_or(default);
     opts.edges = flag("edges", true);
@@ -554,6 +556,8 @@ pub struct CadaclysmScene {
     states: PhantomVar<Array<Gd<CadaclysmState>>>,
     #[var(get = get_sequences, no_set)]
     sequences: PhantomVar<Array<Gd<CadaclysmSequence>>>,
+    #[var(get = get_schedules, no_set)]
+    schedules: PhantomVar<Array<Gd<CadaclysmWorkSchedule>>>,
     #[var(get = get_base, no_set)]
     base: PhantomVar<Option<Gd<CadaclysmLink>>>,
     #[var(get = get_realized, no_set)]
@@ -588,6 +592,7 @@ impl CadaclysmScene {
             joints: PhantomVar::default(),
             states: PhantomVar::default(),
             sequences: PhantomVar::default(),
+            schedules: PhantomVar::default(),
             base: PhantomVar::default(),
             realized: PhantomVar::default(),
             realize_total: PhantomVar::default(),
@@ -827,6 +832,14 @@ impl CadaclysmScene {
             .collect()
     }
 
+    /// The file's work schedules: each an `IfcWorkSchedule` and its tasks. Empty where
+    /// the file records none.
+    #[func]
+    fn get_schedules(&self) -> Array<Gd<CadaclysmWorkSchedule>> {
+        let count = with_scene(&self.shared, |s| s.schedules().len()).unwrap_or_default();
+        (0..count as u32).map(|i| CadaclysmWorkSchedule::wrap(self.shared.clone(), i)).collect()
+    }
+
     /// The link the file declares as the mechanism's base, or `null` when it declares
     /// none (the default ground is then the link on the most joints; see `pose`).
     #[func]
@@ -925,7 +938,8 @@ impl CadaclysmScene {
     /// Each `MeshInstance3D` carries its file node's index as metadata: `cadaclysm_node` (the
     /// node a click selects), `cadaclysm_geometry` and `cadaclysm_placement`.
     ///
-    /// `instantiate_with`'s options: `edges` (true: each body's edges as a `lines` child), `edge_color`,
+    /// `instantiate_with`'s options: `edges` (true: each body's edges as a `lines` child), `edge_color`
+    /// (a `Color`, or `"#rgb"`/`"#rrggbb"`/a CSS colour name read by the library's own parser),
     /// `material` (a `Material` for every body instead of the file's colours), and
     /// `tree` (true: nest the placements under `Node3D`s following the file's tree).
     #[func]
@@ -1601,25 +1615,6 @@ impl CadaclysmJoint {
 
 // ---- CadaclysmPair, CadaclysmFreedom, CadaclysmState --------------------------------------
 
-/// `sdk::PairKind`'s name, as `CadaclysmPair.kind` and every other reader wrapper spell it.
-fn pair_kind_name(kind: sdk::PairKind) -> &'static str {
-    match kind {
-        sdk::PairKind::Revolute => "revolute",
-        sdk::PairKind::Prismatic => "prismatic",
-        sdk::PairKind::Cylindrical => "cylindrical",
-        sdk::PairKind::Spherical => "spherical",
-        sdk::PairKind::SphericalWithPin => "spherical_with_pin",
-        sdk::PairKind::Planar => "planar",
-        sdk::PairKind::Universal => "universal",
-        sdk::PairKind::Homokinetic => "homokinetic",
-        sdk::PairKind::Screw => "screw",
-        sdk::PairKind::FullyConstrained => "fully_constrained",
-        sdk::PairKind::Unconstrained => "unconstrained",
-        sdk::PairKind::LowOrder => "low_order",
-        sdk::PairKind::Other => "other",
-    }
-}
-
 /// A kinematic pair: the kind of relative motion a joint allows between its two links.
 /// From `CadaclysmJoint.pair`.
 #[derive(GodotClass)]
@@ -1629,6 +1624,10 @@ pub struct CadaclysmPair {
     joint: u32,
     #[var(get = get_kind, no_set)]
     kind: PhantomVar<GString>,
+    #[var(get = get_kind_name, no_set)]
+    kind_name: PhantomVar<GString>,
+    #[var(get = get_parameters, no_set)]
+    parameters: PhantomVar<PackedFloat64Array>,
     #[var(get = get_type_name, no_set)]
     type_name: PhantomVar<GString>,
     #[var(get = get_pitch, no_set)]
@@ -1651,6 +1650,8 @@ impl CadaclysmPair {
             shared,
             joint,
             kind: PhantomVar::default(),
+            kind_name: PhantomVar::default(),
+            parameters: PhantomVar::default(),
             type_name: PhantomVar::default(),
             pitch: PhantomVar::default(),
             frame_start: PhantomVar::default(),
@@ -1673,7 +1674,23 @@ impl CadaclysmPair {
     /// `fully_constrained`, `unconstrained`, `low_order`, `other`.
     #[func]
     fn get_kind(&self) -> GString {
-        gs(self.with(|p| pair_kind_name(p.kind())).unwrap_or(""))
+        gs(self.with(|p| p.kind().name()).unwrap_or(""))
+    }
+
+    /// The kind by name, finer than `kind`: the same thirteen names, with `gear` and
+    /// `rack_and_pinion` for the two coupled pairs `kind` reads as `other`.
+    #[func]
+    fn get_kind_name(&self) -> GString {
+        gs(self.with(|p| p.kind_name()).unwrap_or_default())
+    }
+
+    /// The pair's own numbers, in the order `CadaclysmAssembly.pair_with` takes them:
+    /// `screw` `[pitch]`, `rack_and_pinion` `[pinion_radius]`, `gear` `[radius_first,
+    /// radius_second, ratio, bevel, helical_angle]` (always five, the ratio the second
+    /// link's rotation over the first's); empty for every other kind.
+    #[func]
+    fn get_parameters(&self) -> PackedFloat64Array {
+        PackedFloat64Array::from(self.with(|p| p.parameters()).unwrap_or_default().as_slice())
     }
 
     /// For `other`: the pair's entity type name (`GEAR_PAIR`). `""` otherwise --
@@ -2069,6 +2086,505 @@ impl CadaclysmSequence {
     }
 }
 
+// ---- Work schedules ----------------------------------------------------------------------
+
+/// A date as Godot reads one: seconds since 1970-01-01T00:00, `NAN` where the file gives none.
+fn date(value: Option<f64>) -> f64 {
+    value.unwrap_or(f64::NAN)
+}
+
+/// A building's programme: an `IfcWorkSchedule` and the tasks it controls. From
+/// `CadaclysmScene.schedules`. `at` says what each element it names is doing on a date.
+/// Dates are seconds since 1970-01-01T00:00, no zone: read them with
+/// `Time.get_datetime_string_from_unix_time(int(seconds))`.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmWorkSchedule {
+    shared: Shared,
+    index: u32,
+    #[var(rename = index, get = get_index, no_set)]
+    index_: PhantomVar<i64>,
+    #[var(get = get_name, no_set)]
+    name: PhantomVar<GString>,
+    #[var(get = get_identification, no_set)]
+    identification: PhantomVar<GString>,
+    #[var(get = get_kind, no_set)]
+    kind: PhantomVar<GString>,
+    #[var(get = get_kind_name, no_set)]
+    kind_name: PhantomVar<GString>,
+    #[var(get = get_start, no_set)]
+    start: PhantomVar<f64>,
+    #[var(get = get_finish, no_set)]
+    finish: PhantomVar<f64>,
+    #[var(get = get_tasks, no_set)]
+    tasks: PhantomVar<Array<Gd<CadaclysmTask>>>,
+    #[var(get = get_links, no_set)]
+    links: PhantomVar<Array<Gd<CadaclysmTaskLink>>>,
+}
+
+impl CadaclysmWorkSchedule {
+    fn wrap(shared: Shared, index: u32) -> Gd<CadaclysmWorkSchedule> {
+        Gd::from_object(CadaclysmWorkSchedule {
+            shared,
+            index,
+            index_: PhantomVar::default(),
+            name: PhantomVar::default(),
+            identification: PhantomVar::default(),
+            kind: PhantomVar::default(),
+            kind_name: PhantomVar::default(),
+            start: PhantomVar::default(),
+            finish: PhantomVar::default(),
+            tasks: PhantomVar::default(),
+            links: PhantomVar::default(),
+        })
+    }
+
+    fn with<R>(&self, f: impl FnOnce(&sdk::WorkSchedule<'_>) -> R) -> Option<R> {
+        with_scene(&self.shared, |s| s.schedule(self.index as usize).map(|w| f(&w))).flatten()
+    }
+}
+
+#[godot_api]
+impl CadaclysmWorkSchedule {
+    #[func]
+    fn get_index(&self) -> i64 {
+        self.index as i64
+    }
+
+    /// Its name, else its identification, else `schedule #k` (k from 1, in file order).
+    #[func]
+    fn get_name(&self) -> GString {
+        gs(self.with(|s| s.name.clone()).unwrap_or_default())
+    }
+
+    /// Its identification, `""` where none.
+    #[func]
+    fn get_identification(&self) -> GString {
+        gs(self.with(|s| s.identification.clone()).unwrap_or_default())
+    }
+
+    /// `"planned"`, `"actual"`, `"baseline"`, `"notdefined"` or `"other"`.
+    #[func]
+    fn get_kind(&self) -> GString {
+        gs(self.with(|s| s.kind.name()).unwrap_or_default())
+    }
+
+    /// The text of a user-defined kind (`kind == "other"`); `""` otherwise.
+    #[func]
+    fn get_kind_name(&self) -> GString {
+        gs(self.with(|s| s.kind_name.clone()).unwrap_or_default())
+    }
+
+    /// The schedule's start, `NAN` where the file gives none.
+    #[func]
+    fn get_start(&self) -> f64 {
+        date(self.with(|s| s.start).flatten())
+    }
+
+    /// The schedule's finish, `NAN` where the file gives none.
+    #[func]
+    fn get_finish(&self) -> f64 {
+        date(self.with(|s| s.finish).flatten())
+    }
+
+    /// Its tasks, in file order.
+    #[func]
+    fn get_tasks(&self) -> Array<Gd<CadaclysmTask>> {
+        let count = self.with(|s| s.tasks().len()).unwrap_or_default();
+        (0..count as u32).map(|i| CadaclysmTask::wrap(self.shared.clone(), self.index, i)).collect()
+    }
+
+    /// Its task links (`IfcRelSequence`), in file order.
+    #[func]
+    fn get_links(&self) -> Array<Gd<CadaclysmTaskLink>> {
+        let rows = self
+            .with(|s| {
+                s.links()
+                    .into_iter()
+                    .map(|l| (l.from.index, l.to.index, l.kind.name(), l.kind_name, l.lag))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        rows.into_iter()
+            .map(|(from, to, kind, kind_name, lag)| {
+                Gd::from_object(CadaclysmTaskLink {
+                    from: CadaclysmTask::wrap(self.shared.clone(), self.index, from),
+                    to: CadaclysmTask::wrap(self.shared.clone(), self.index, to),
+                    kind,
+                    kind_name,
+                    lag,
+                    from_: PhantomVar::default(),
+                    to_: PhantomVar::default(),
+                    kind_: PhantomVar::default(),
+                    kind_name_: PhantomVar::default(),
+                    lag_: PhantomVar::default(),
+                })
+            })
+            .collect()
+    }
+
+    /// What each element this schedule names is doing on `date` (seconds since
+    /// 1970-01-01T00:00), in node order, as an array of `CadaclysmElementState`; elements
+    /// no task names are not listed. `dates` is `"scheduled"` or `"actual"` -- which of a
+    /// task's dates to play.
+    ///
+    /// `null` for a `date` that is not finite or any other `dates`; `Cadaclysm.last_error()`
+    /// says why.
+    #[func]
+    fn at(&self, date: f64, #[opt(default = "scheduled")] dates: GString) -> Variant {
+        let which = match dates.to_string().as_str() {
+            "scheduled" => sdk::Dates::Scheduled,
+            "actual" => sdk::Dates::Actual,
+            _ => {
+                fail::<()>("dates must be 'scheduled' or 'actual'");
+                return Variant::nil();
+            }
+        };
+        let result = self.with(|s| {
+            s.at(date, which).map(|rows| rows.into_iter().map(|e| (e.node.index(), e.phase.name(), e.progress, e.variance)).collect::<Vec<_>>())
+        });
+        match result.and_then(ok) {
+            Some(rows) => {
+                let states: Array<Gd<CadaclysmElementState>> = rows
+                    .into_iter()
+                    .map(|(node, phase, progress, variance)| {
+                        Gd::from_object(CadaclysmElementState {
+                            node: CadaclysmNode::wrap(self.shared.clone(), node),
+                            phase,
+                            progress,
+                            variance,
+                            node_: PhantomVar::default(),
+                            phase_: PhantomVar::default(),
+                            progress_: PhantomVar::default(),
+                            variance_: PhantomVar::default(),
+                        })
+                    })
+                    .collect();
+                states.to_variant()
+            }
+            None => Variant::nil(),
+        }
+    }
+}
+
+/// One task of a `CadaclysmWorkSchedule`. From `CadaclysmWorkSchedule.tasks`.
+///
+/// `kind` is `"attendance"`, `"construction"`, `"demolition"`, `"dismantle"`, `"disposal"`,
+/// `"installation"`, `"logistic"`, `"maintenance"`, `"move"`, `"operation"`, `"removal"`,
+/// `"renovation"`, `"notdefined"` or `"other"`; `kind_name` is the text of a user-defined
+/// one. `parent` is the summary task nesting it, `null` at the top. `nodes` are the nodes
+/// it builds or removes.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmTask {
+    shared: Shared,
+    schedule: u32,
+    index: u32,
+    #[var(rename = index, get = get_index, no_set)]
+    index_: PhantomVar<i64>,
+    #[var(get = get_name, no_set)]
+    name: PhantomVar<GString>,
+    #[var(get = get_identification, no_set)]
+    identification: PhantomVar<GString>,
+    #[var(get = get_kind, no_set)]
+    kind: PhantomVar<GString>,
+    #[var(get = get_kind_name, no_set)]
+    kind_name: PhantomVar<GString>,
+    #[var(get = get_status, no_set)]
+    status: PhantomVar<GString>,
+    #[var(get = get_milestone, no_set)]
+    milestone: PhantomVar<bool>,
+    #[var(get = get_parent, no_set)]
+    parent: PhantomVar<Option<Gd<CadaclysmTask>>>,
+    #[var(get = get_time, no_set)]
+    time: PhantomVar<Gd<CadaclysmTaskTime>>,
+    #[var(get = get_nodes, no_set)]
+    nodes: PhantomVar<Array<Gd<CadaclysmNode>>>,
+}
+
+impl CadaclysmTask {
+    fn wrap(shared: Shared, schedule: u32, index: u32) -> Gd<CadaclysmTask> {
+        Gd::from_object(CadaclysmTask {
+            shared,
+            schedule,
+            index,
+            index_: PhantomVar::default(),
+            name: PhantomVar::default(),
+            identification: PhantomVar::default(),
+            kind: PhantomVar::default(),
+            kind_name: PhantomVar::default(),
+            status: PhantomVar::default(),
+            milestone: PhantomVar::default(),
+            parent: PhantomVar::default(),
+            time: PhantomVar::default(),
+            nodes: PhantomVar::default(),
+        })
+    }
+
+    fn with<R>(&self, f: impl FnOnce(&sdk::Task<'_>) -> R) -> Option<R> {
+        with_scene(&self.shared, |s| {
+            let task = s.schedule(self.schedule as usize)?.task(self.index as usize)?;
+            Some(f(&task))
+        })
+        .flatten()
+    }
+}
+
+#[godot_api]
+impl CadaclysmTask {
+    #[func]
+    fn get_index(&self) -> i64 {
+        self.index as i64
+    }
+
+    /// Its name.
+    #[func]
+    fn get_name(&self) -> GString {
+        gs(self.with(|t| t.name.clone()).unwrap_or_default())
+    }
+
+    /// Its identification, `""` where none.
+    #[func]
+    fn get_identification(&self) -> GString {
+        gs(self.with(|t| t.identification.clone()).unwrap_or_default())
+    }
+
+    /// Its kind: see the class description.
+    #[func]
+    fn get_kind(&self) -> GString {
+        gs(self.with(|t| t.kind.name()).unwrap_or_default())
+    }
+
+    /// The text of a user-defined kind (`kind == "other"`); `""` otherwise.
+    #[func]
+    fn get_kind_name(&self) -> GString {
+        gs(self.with(|t| t.kind_name.clone()).unwrap_or_default())
+    }
+
+    /// Its status as the file writes it, `""` where none.
+    #[func]
+    fn get_status(&self) -> GString {
+        gs(self.with(|t| t.status.clone()).unwrap_or_default())
+    }
+
+    /// Whether it is a milestone.
+    #[func]
+    fn get_milestone(&self) -> bool {
+        self.with(|t| t.milestone).unwrap_or_default()
+    }
+
+    /// The summary task nesting it, `null` at the top.
+    #[func]
+    fn get_parent(&self) -> Option<Gd<CadaclysmTask>> {
+        self.with(|t| t.parent().map(|p| p.index)).flatten().map(|i| CadaclysmTask::wrap(self.shared.clone(), self.schedule, i))
+    }
+
+    /// Every date pair it gives.
+    #[func]
+    fn get_time(&self) -> Gd<CadaclysmTaskTime> {
+        let time = self.with(|t| t.time).unwrap_or_default();
+        Gd::from_object(CadaclysmTaskTime {
+            time,
+            schedule_start: PhantomVar::default(),
+            schedule_finish: PhantomVar::default(),
+            early_start: PhantomVar::default(),
+            early_finish: PhantomVar::default(),
+            late_start: PhantomVar::default(),
+            late_finish: PhantomVar::default(),
+            actual_start: PhantomVar::default(),
+            actual_finish: PhantomVar::default(),
+            duration: PhantomVar::default(),
+        })
+    }
+
+    /// The nodes it builds or removes (sorted, no repeats).
+    #[func]
+    fn get_nodes(&self) -> Array<Gd<CadaclysmNode>> {
+        self.with(|t| t.nodes().iter().map(|n| n.index()).collect::<Vec<u32>>())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|i| CadaclysmNode::wrap(self.shared.clone(), i))
+            .collect()
+    }
+}
+
+/// Every date pair a task gives, each `NAN` where the file gives none: seconds since
+/// 1970-01-01T00:00 (`duration` is in seconds). From `CadaclysmTask.time`.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmTaskTime {
+    time: sdk::TaskTime,
+    #[var(get = get_schedule_start, no_set)]
+    schedule_start: PhantomVar<f64>,
+    #[var(get = get_schedule_finish, no_set)]
+    schedule_finish: PhantomVar<f64>,
+    #[var(get = get_early_start, no_set)]
+    early_start: PhantomVar<f64>,
+    #[var(get = get_early_finish, no_set)]
+    early_finish: PhantomVar<f64>,
+    #[var(get = get_late_start, no_set)]
+    late_start: PhantomVar<f64>,
+    #[var(get = get_late_finish, no_set)]
+    late_finish: PhantomVar<f64>,
+    #[var(get = get_actual_start, no_set)]
+    actual_start: PhantomVar<f64>,
+    #[var(get = get_actual_finish, no_set)]
+    actual_finish: PhantomVar<f64>,
+    #[var(get = get_duration, no_set)]
+    duration: PhantomVar<f64>,
+}
+
+#[godot_api]
+impl CadaclysmTaskTime {
+    #[func]
+    fn get_schedule_start(&self) -> f64 {
+        date(self.time.schedule_start)
+    }
+
+    #[func]
+    fn get_schedule_finish(&self) -> f64 {
+        date(self.time.schedule_finish)
+    }
+
+    #[func]
+    fn get_early_start(&self) -> f64 {
+        date(self.time.early_start)
+    }
+
+    #[func]
+    fn get_early_finish(&self) -> f64 {
+        date(self.time.early_finish)
+    }
+
+    #[func]
+    fn get_late_start(&self) -> f64 {
+        date(self.time.late_start)
+    }
+
+    #[func]
+    fn get_late_finish(&self) -> f64 {
+        date(self.time.late_finish)
+    }
+
+    #[func]
+    fn get_actual_start(&self) -> f64 {
+        date(self.time.actual_start)
+    }
+
+    #[func]
+    fn get_actual_finish(&self) -> f64 {
+        date(self.time.actual_finish)
+    }
+
+    /// The task's duration in seconds.
+    #[func]
+    fn get_duration(&self) -> f64 {
+        date(self.time.duration)
+    }
+}
+
+/// A sequence between two tasks of one schedule. From `CadaclysmWorkSchedule.links`.
+///
+/// `from` is the predecessor, `to` the successor; `kind` is `"finish_start"`,
+/// `"start_start"`, `"finish_finish"`, `"start_finish"`, `"notdefined"` or `"other"`
+/// (`kind_name` is the text of a user-defined one, `""` otherwise); `lag` is the time lag
+/// in seconds, `NAN` where the file gives none.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmTaskLink {
+    from: Gd<CadaclysmTask>,
+    to: Gd<CadaclysmTask>,
+    kind: &'static str,
+    kind_name: String,
+    lag: Option<f64>,
+    #[var(rename = from, get = get_from, no_set)]
+    from_: PhantomVar<Gd<CadaclysmTask>>,
+    #[var(rename = to, get = get_to, no_set)]
+    to_: PhantomVar<Gd<CadaclysmTask>>,
+    #[var(rename = kind, get = get_kind, no_set)]
+    kind_: PhantomVar<GString>,
+    #[var(rename = kind_name, get = get_kind_name, no_set)]
+    kind_name_: PhantomVar<GString>,
+    #[var(rename = lag, get = get_lag, no_set)]
+    lag_: PhantomVar<f64>,
+}
+
+#[godot_api]
+impl CadaclysmTaskLink {
+    /// The predecessor.
+    #[func]
+    fn get_from(&self) -> Gd<CadaclysmTask> {
+        self.from.clone()
+    }
+
+    /// The successor.
+    #[func]
+    fn get_to(&self) -> Gd<CadaclysmTask> {
+        self.to.clone()
+    }
+
+    #[func]
+    fn get_kind(&self) -> GString {
+        gs(self.kind)
+    }
+
+    #[func]
+    fn get_kind_name(&self) -> GString {
+        gs(&self.kind_name)
+    }
+
+    #[func]
+    fn get_lag(&self) -> f64 {
+        date(self.lag)
+    }
+}
+
+/// What one element is doing on a date: `CadaclysmWorkSchedule.at`'s rows.
+///
+/// `node` is the `CadaclysmNode`; `phase` is `"unbuilt"`, `"building"`, `"built"`,
+/// `"demolishing"` or `"demolished"`; `progress` is 0..1 through the window that governs
+/// the phase; and `variance` is the seconds late (positive) or early (negative) against
+/// the schedule, `NAN` where there is none to give.
+#[derive(GodotClass)]
+#[class(no_init, base = RefCounted)]
+pub struct CadaclysmElementState {
+    node: Gd<CadaclysmNode>,
+    phase: &'static str,
+    progress: f64,
+    variance: Option<f64>,
+    #[var(rename = node, get = get_node, no_set)]
+    node_: PhantomVar<Gd<CadaclysmNode>>,
+    #[var(rename = phase, get = get_phase, no_set)]
+    phase_: PhantomVar<GString>,
+    #[var(rename = progress, get = get_progress, no_set)]
+    progress_: PhantomVar<f64>,
+    #[var(rename = variance, get = get_variance, no_set)]
+    variance_: PhantomVar<f64>,
+}
+
+#[godot_api]
+impl CadaclysmElementState {
+    #[func]
+    fn get_node(&self) -> Gd<CadaclysmNode> {
+        self.node.clone()
+    }
+
+    #[func]
+    fn get_phase(&self) -> GString {
+        gs(self.phase)
+    }
+
+    #[func]
+    fn get_progress(&self) -> f64 {
+        self.progress
+    }
+
+    #[func]
+    fn get_variance(&self) -> f64 {
+        date(self.variance)
+    }
+}
+
 // ---- CadaclysmPose -----------------------------------------------------------------------
 
 /// A posed mechanism: `CadaclysmScene.pose` or `CadaclysmScene.pose_state`'s answer. The
@@ -2088,6 +2604,8 @@ pub struct CadaclysmPose {
     unsolved: PhantomVar<Array<Gd<CadaclysmJoint>>>,
     #[var(get = get_out_of_range, no_set)]
     out_of_range: PhantomVar<Array<VarDictionary>>,
+    #[var(get = get_diagnostics, no_set)]
+    diagnostics: PhantomVar<PackedStringArray>,
 }
 
 impl CadaclysmPose {
@@ -2098,12 +2616,21 @@ impl CadaclysmPose {
             ground: PhantomVar::default(),
             unsolved: PhantomVar::default(),
             out_of_range: PhantomVar::default(),
+            diagnostics: PhantomVar::default(),
         })
     }
 }
 
 #[godot_api]
 impl CadaclysmPose {
+    /// What the couplings (gear, rack and pinion, a loop-closing screw) could not solve,
+    /// or found disagreeing, in file order, in the kernel's words:
+    /// `coupling 'mesh': both 'a' and 'b' are given and disagree by 0.1`.
+    #[func]
+    fn get_diagnostics(&self) -> PackedStringArray {
+        strings(&self.data.diagnostics)
+    }
+
     /// The link held fixed.
     #[func]
     fn get_ground(&self) -> Gd<CadaclysmLink> {

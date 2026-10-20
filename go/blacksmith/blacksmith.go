@@ -147,6 +147,7 @@ import (
 	"unsafe"
 
 	"github.com/rdeioris/cadaclysm-sdk/go/cadaclysm"
+	"github.com/rdeioris/cadaclysm-sdk/go/view"
 )
 
 // DefaultTolerance is the tolerance Python's join, cut, common, split_sheet, bounds,
@@ -193,6 +194,24 @@ func pin() func() {
 	runtime.LockOSThread()
 	return runtime.UnlockOSThread
 }
+
+// noTiny gives a handle struct a Go pointer, so the collector frees (and finalizes) it on
+// its own. cgo makes an incomplete C struct not-in-heap, so a *C.X is not a pointer the
+// collector traces: a struct whose only field is one is pointer-free, and at 8 bytes the
+// runtime's tiny allocator packs it into a 16-byte block with whatever pointer-free object
+// was allocated next to it -- another handle, a float, a short string's bytes. A tiny
+// block is freed only when everything in it is unreachable, so a dropped, unclosed Solid,
+// Profile, Tool, Stock, Job, Assembly, Collider or mesh view would keep its finalizer from
+// running, and its C object alive, for as long as its neighbour lived: the leak the
+// finalizer exists to prevent. Whether an allocation may be tiny is decided by its type
+// (pointer-free and under 16 bytes), never by a pointer's value, so the field stays nil
+// and costs 8 bytes. Byte padding would also lift a struct out of the tiny size range, but
+// leaves it pointer-free and one field removal away from the same leak. Path, SweepPath
+// and FemMesh already hold Go pointers (their err and slice fields).
+//
+// handle_finalizer_test.go allocates every finalized type, keeps every other one, and
+// fails if a dropped one is not finalized.
+type noTiny struct{ _ *byte }
 
 // lastError is the library's own reason for the last failure on this OS thread, or "".
 // Read only under pin, in (or called from) the function that made the failing call.
@@ -261,6 +280,34 @@ func License(textOrPath string) error {
 		return failure("license refused")
 	}
 	return nil
+}
+
+// SetOption sets a kernel option, by its name, for the whole process from the next call
+// on: "boolean.mesh_budget", "boolean.finest_tolerance", "profile_boolean.point_budget"
+// or "measure.default_accuracy". Returns the library's reason -- and changes nothing --
+// for a name that is not an option or a value it does not take.
+func SetOption(name string, value float64) error {
+	defer pin()()
+	c := C.CString(name)
+	defer C.free(unsafe.Pointer(c))
+	if !bool(C.cadaclysm_blacksmith_option_set(c, C.double(value))) {
+		return failure(fmt.Sprintf("option %q refused", name))
+	}
+	return nil
+}
+
+// Option is a kernel option's value, by its name: what SetOption last set, else its
+// default. Returns the library's reason, listing the options there are, for a name that
+// is not one.
+func Option(name string) (float64, error) {
+	defer pin()()
+	c := C.CString(name)
+	defer C.free(unsafe.Pointer(c))
+	var out C.double
+	if !bool(C.cadaclysm_blacksmith_option_get(c, &out)) {
+		return 0, failure(fmt.Sprintf("no option %q", name))
+	}
+	return float64(out), nil
 }
 
 // LicenseInfo is one line about the license the library is running under. Never empty:
@@ -1154,7 +1201,10 @@ func uint32sOf(at *C.uint32_t, n int) []uint32 {
 
 // Profile is a closed outline with holes, in its own x/y. Immutable; every method returns
 // a new one. Owns a handle: Close it once done, or let the finalizer.
-type Profile struct{ handle *C.CadaclysmBlacksmithProfile }
+type Profile struct {
+	handle *C.CadaclysmBlacksmithProfile
+	_      noTiny // see noTiny
+}
 
 // newProfile wraps a handle the library just returned, or reports why it returned none.
 func newProfile(handle *C.CadaclysmBlacksmithProfile, what string) (*Profile, error) {
@@ -2455,7 +2505,10 @@ func indices(list []int) ([]uint32, error) {
 // view already in hand. Only the view holding this going unreachable frees it, through
 // the finalizer holdTessellation sets below — the same rule [FemMesh] follows for its
 // own handle.
-type heldTessellation struct{ handle *C.CadaclysmBlacksmithTessellation }
+type heldTessellation struct {
+	handle *C.CadaclysmBlacksmithTessellation
+	_      noTiny // see noTiny
+}
 
 // holdTessellation tessellates s at tolerance and hands back a handle of its own
 // (cadaclysm_blacksmith_tessellation), or reports why the library refused -- a closed
@@ -3091,6 +3144,7 @@ func (m *FemMesh) String() string {
 // one. Close it to free it; the finalizer does so otherwise.
 type Solid struct {
 	handle *C.CadaclysmBlacksmithSolid
+	_      noTiny // see noTiny
 }
 
 // newSolid wraps a handle the library just returned, or reports why it returned none.
@@ -3137,6 +3191,35 @@ func (s *Solid) Close() error {
 	runtime.SetFinalizer(s, nil)
 	C.cadaclysm_blacksmith_solid_free(h)
 	return nil
+}
+
+// SolidHandle is the C handle, nil once closed: what view.View.ShowSolid reads the solid
+// through, and for code that calls the C ABI directly.
+func (s *Solid) SolidHandle() unsafe.Pointer {
+	if s == nil {
+		return nil
+	}
+	return unsafe.Pointer(s.handle)
+}
+
+// Show draws the solid with the view library in use (view.UseWgpu, view.UseTerminal): the
+// wgpu window blocks until it is closed; any other library prints a still. nil o: the
+// defaults (Tolerance 0: 0.05).
+func (s *Solid) Show(o *view.ShowOptions) error {
+	if _, err := s.h(); err != nil {
+		return err
+	}
+	_, err := view.DrawSolid(s, o, false)
+	return err
+}
+
+// View orbits the solid until its window is closed and returns where the camera was left
+// (as ShowOptions takes it) and what was last clicked.
+func (s *Solid) View(o *view.ShowOptions) (view.Camera, error) {
+	if _, err := s.h(); err != nil {
+		return view.Camera{}, err
+	}
+	return view.DrawSolid(s, o, true)
 }
 
 // -- building
@@ -3855,6 +3938,7 @@ func (s ColliderStats) String() string {
 // frees the handle only once nothing does -- a CollisionHit needs it back for Solid().
 type collisions struct {
 	handle *C.CadaclysmBlacksmithCollisions
+	_      noTiny // see noTiny
 }
 
 func newCollisions(handle *C.CadaclysmBlacksmithCollisions) *collisions {
@@ -3916,6 +4000,7 @@ func (h *CollisionHit) Solid() (*Solid, error) {
 // this handle; the finalizer does so otherwise.
 type Collider struct {
 	handle *C.CadaclysmBlacksmithCollider
+	_      noTiny // see noTiny
 }
 
 // NewCollider is solids at rest, meshed at tolerance; groups one group index per solid
@@ -4586,6 +4671,51 @@ func (s *Solid) Svg(path string, opts *SvgOptions) error {
 	return WriteSvg(path, []*Solid{s}, opts)
 }
 
+// SilhouetteBeziers is this solid's silhouette -- where its surfaces turn away from the
+// eye, which no edge of it lies on -- as rational cubic Béziers, in double, from the camera
+// opts describes (nil for NewSvgOptions()'s defaults). The same SvgOptions that draw a
+// picture: View, Azimuth, Elevation, Up and Fov, and Width with Tolerance, which the
+// library reads together as the page fraction Tolerance/Width. Nothing else in them
+// changes the curves.
+//
+// Points has twelve numbers a curve (four control points, x y z) and Weights four. The
+// library hands over an owned block; this copies it out and releases it before it returns,
+// whichever way it returns, so there is nothing for the caller to free.
+//
+// A body with no silhouette (every face planar) gives a result with Count() 0 and a nil
+// error; a refused option or a body with no measurable geometry is a BuildError.
+func (s *Solid) SilhouetteBeziers(opts *SvgOptions) (cadaclysm.BeziersData64, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return cadaclysm.BeziersData64{}, err
+	}
+	raw, err := buildSvgOptions(opts)
+	if err != nil {
+		return cadaclysm.BeziersData64{}, err
+	}
+	var count C.uint32_t
+	data := C.cadaclysm_blacksmith_silhouette_beziers(h, &raw, &count)
+	runtime.KeepAlive(s)
+	if data == nil {
+		// The call clears the thread's error at entry and the empty answer sets none: a
+		// reason here is this call's own refusal, none is the empty answer.
+		if reason := lastError(); reason != "" {
+			return cadaclysm.BeziersData64{}, &BuildError{Message: reason}
+		}
+		return cadaclysm.BeziersData64{Points: []float64{}, Weights: []float64{}}, nil
+	}
+	defer C.cadaclysm_blacksmith_silhouette_beziers_free(data, count)
+	n := int(count)
+	block := unsafe.Slice((*float64)(unsafe.Pointer(data)), n*16)
+	out := cadaclysm.BeziersData64{Points: make([]float64, 0, n*12), Weights: make([]float64, 0, n*4)}
+	for i := 0; i < n; i++ {
+		out.Points = append(out.Points, block[i*16:i*16+12]...)
+		out.Weights = append(out.Weights, block[i*16+12:i*16+16]...)
+	}
+	return out, nil
+}
+
 // -- selecting and edges
 
 // SelectFace is the face selector picks; a BuildError when none does.
@@ -5158,6 +5288,34 @@ func (s *Solid) SplitByPlane(plane Frame, tolerance float64) ([]*Solid, error) {
 	return all.Lumps()
 }
 
+// SplitByProfile is this solid split by the closed profile drawn on frame, pushed
+// straight through it along the frame's z both ways — Python's Solid.split_by_profile:
+// the bodies outside the profile first, then those inside. Where the plane lies along z
+// does not matter.
+func (s *Solid) SplitByProfile(profile *Profile, frame Frame, tolerance float64) ([]*Solid, error) {
+	all, err := func() (*Solid, error) {
+		defer pin()()
+		h, err := s.h()
+		if err != nil {
+			return nil, err
+		}
+		hp, err := profile.h()
+		if err != nil {
+			return nil, err
+		}
+		f := frame
+		out, err := newSolid(C.cadaclysm_blacksmith_split_by_profile(h, hp, doubles(&f[0]), C.double(tolerance), nil, nil), "solid")
+		runtime.KeepAlive(s)
+		runtime.KeepAlive(profile)
+		return out, err
+	}()
+	if err != nil {
+		return nil, err
+	}
+	defer all.Close()
+	return all.Lumps()
+}
+
 // Lumps is this solid's connected bodies, each a solid of its own — Python's
 // Solid.lumps: faces sharing an edge are one body, in the order of their first faces.
 func (s *Solid) Lumps() ([]*Solid, error) {
@@ -5513,6 +5671,7 @@ func (s *Solid) ToScene(schema string) (*cadaclysm.Scene, error) {
 // what was placed in it if that is still reachable from somewhere else.
 type Assembly struct {
 	handle *C.CadaclysmBlacksmithAssembly
+	_      noTiny // see noTiny
 }
 
 // NewAssembly is a new, empty assembly called name. An empty name is refused.
@@ -5741,6 +5900,19 @@ type PairOptions struct {
 // C a Go-allocated array it might read after this call returns, and nothing shorter-lived
 // than the call itself is safe to free early.
 func (a *Assembly) Pair(joint, kind string, frame Frame, opts PairOptions) error {
+	pitch := math.NaN()
+	if opts.Pitch != nil {
+		pitch = *opts.Pitch
+	}
+	return a.pairCall(joint, kind, frame, opts.EndFrame, opts.Ranges, func(ah *C.CadaclysmBlacksmithAssembly, cj, ck *C.char, f, ef, lower, upper *C.double, hl, hu *C.bool, n C.size_t) bool {
+		return bool(C.cadaclysm_blacksmith_assembly_pair(ah, cj, ck, f, ef, lower, upper, hl, hu, n, C.double(pitch)))
+	})
+}
+
+// pairCall is Pair and PairWith's shared body: it marshals the frames and ranges, and
+// invoke makes the one C call that differs between them.
+func (a *Assembly) pairCall(joint, kind string, frame Frame, endFrameOpt *Frame, ranges []Range,
+	invoke func(ah *C.CadaclysmBlacksmithAssembly, cj, ck *C.char, f, ef, lower, upper *C.double, hl, hu *C.bool, n C.size_t) bool) error {
 	defer pin()()
 	ah, err := a.h()
 	if err != nil {
@@ -5752,8 +5924,8 @@ func (a *Assembly) Pair(joint, kind string, frame Frame, opts PairOptions) error
 	defer C.free(unsafe.Pointer(ck))
 
 	var endFrame *C.double
-	if opts.EndFrame != nil {
-		ef := *opts.EndFrame
+	if endFrameOpt != nil {
+		ef := *endFrameOpt
 		endFrame = doubles(&ef[0])
 	}
 
@@ -5761,7 +5933,7 @@ func (a *Assembly) Pair(joint, kind string, frame Frame, opts PairOptions) error
 	// nil-vs-empty-slice distinction worth separate handling here, so both mean "no
 	// ranges" and send all four pointers null (controller ruling; this is this wrapper's
 	// own idiom, not a pass-through of the C ABI's null-vs-zero-count distinction).
-	n := len(opts.Ranges)
+	n := len(ranges)
 	var lower, upper *C.double
 	var hasLower, hasUpper *C.bool
 	if n > 0 {
@@ -5777,7 +5949,7 @@ func (a *Assembly) Pair(joint, kind string, frame Frame, opts PairOptions) error
 		upperSlice := unsafe.Slice((*C.double)(upperArr), n)
 		hasLowerSlice := unsafe.Slice((*C.bool)(hasLowerArr), n)
 		hasUpperSlice := unsafe.Slice((*C.bool)(hasUpperArr), n)
-		for i, r := range opts.Ranges {
+		for i, r := range ranges {
 			if r.Lower != nil {
 				lowerSlice[i] = C.double(*r.Lower)
 				hasLowerSlice[i] = C.bool(true)
@@ -5799,18 +5971,42 @@ func (a *Assembly) Pair(joint, kind string, frame Frame, opts PairOptions) error
 		hasUpper = (*C.bool)(hasUpperArr)
 	}
 
-	pitch := math.NaN()
-	if opts.Pitch != nil {
-		pitch = *opts.Pitch
-	}
-
-	ok := bool(C.cadaclysm_blacksmith_assembly_pair(ah, cj, ck, doubles(&frame[0]), endFrame,
-		lower, upper, hasLower, hasUpper, C.size_t(n), C.double(pitch)))
+	ok := invoke(ah, cj, ck, doubles(&frame[0]), endFrame, lower, upper, hasLower, hasUpper, C.size_t(n))
 	runtime.KeepAlive(a)
 	if !ok {
 		return failure("assembly_pair")
 	}
 	return nil
+}
+
+// PairWithOptions is PairWith's optional arguments: EndFrame nil is "frame itself", Ranges
+// nil is "none" -- as in [PairOptions].
+type PairWithOptions struct {
+	EndFrame *Frame
+	Ranges   []Range
+}
+
+// PairWith is [Assembly.Pair] with the kind's parameters in place of the pitch: "screw"
+// [pitch]; "rack_and_pinion" [pinion_radius]; "gear" [radius_first, radius_second,
+// ratio] or those plus [bevel, helical_angle] (radians), the ratio the second link's
+// rotation over the first's, signed; none for any other kind. Everything else, the
+// refusals included (a wrong parameter count among them), reads as in Pair, and the
+// assembly is left as it was on an error. params is copied into a C.malloc'd array freed
+// in a defer, for cgo's pointer rule.
+func (a *Assembly) PairWith(joint, kind string, frame Frame, opts PairWithOptions, params []float64) error {
+	var cparams *C.double
+	if len(params) > 0 {
+		arr := C.malloc(C.size_t(len(params)) * C.size_t(unsafe.Sizeof(C.double(0))))
+		defer C.free(arr)
+		slice := unsafe.Slice((*C.double)(arr), len(params))
+		for i, v := range params {
+			slice[i] = C.double(v)
+		}
+		cparams = (*C.double)(arr)
+	}
+	return a.pairCall(joint, kind, frame, opts.EndFrame, opts.Ranges, func(ah *C.CadaclysmBlacksmithAssembly, cj, ck *C.char, f, ef, lower, upper *C.double, hl, hu *C.bool, n C.size_t) bool {
+		return bool(C.cadaclysm_blacksmith_assembly_pair_with(ah, cj, ck, f, ef, lower, upper, hl, hu, n, cparams, C.size_t(len(params))))
+	})
 }
 
 // StateRow is one row of Assembly.State: joint set to values, in that joint's pair's
@@ -5837,45 +6033,8 @@ func (a *Assembly) State(name string, rows []StateRow) error {
 	cn := C.CString(name)
 	defer C.free(unsafe.Pointer(cn))
 
-	n := len(rows)
-	var joints unsafe.Pointer
-	var jointSlice []*C.char
-	var countsArr unsafe.Pointer
-	var valuesArr unsafe.Pointer
-	if n > 0 {
-		joints = C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof(uintptr(0))))
-		jointSlice = unsafe.Slice((**C.char)(joints), n)
-		countsArr = C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof(C.uint32_t(0))))
-		countsSlice := unsafe.Slice((*C.uint32_t)(countsArr), n)
-		total := 0
-		for _, r := range rows {
-			total += len(r.Values)
-		}
-		var valuesSlice []C.double
-		if total > 0 {
-			valuesArr = C.malloc(C.size_t(total) * C.size_t(unsafe.Sizeof(C.double(0))))
-			valuesSlice = unsafe.Slice((*C.double)(valuesArr), total)
-		}
-		offset := 0
-		for i, r := range rows {
-			jointSlice[i] = C.CString(r.Joint)
-			countsSlice[i] = C.uint32_t(len(r.Values))
-			for _, v := range r.Values {
-				valuesSlice[offset] = C.double(v)
-				offset++
-			}
-		}
-		defer func() {
-			for i := 0; i < n; i++ {
-				C.free(unsafe.Pointer(jointSlice[i]))
-			}
-			C.free(joints)
-			C.free(countsArr)
-			if valuesArr != nil {
-				C.free(valuesArr)
-			}
-		}()
-	}
+	joints, countsArr, valuesArr, n, release := stateRowArrays(rows)
+	defer release()
 
 	ok := bool(C.cadaclysm_blacksmith_assembly_state(ah, cn,
 		(**C.char)(joints), (*C.uint32_t)(countsArr), (*C.double)(valuesArr), C.size_t(n)))
@@ -5884,6 +6043,92 @@ func (a *Assembly) State(name string, rows []StateRow) error {
 		return failure("assembly_state")
 	}
 	return nil
+}
+
+// stateRowArrays is rows as State's and Posed's three C.malloc'd arrays (joint names, row
+// lengths, flattened values; nil when empty) and the row count; release frees them and
+// every C.CString.
+func stateRowArrays(rows []StateRow) (joints, countsArr, valuesArr unsafe.Pointer, n int, release func()) {
+	n = len(rows)
+	if n == 0 {
+		return nil, nil, nil, 0, func() {}
+	}
+	joints = C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof(uintptr(0))))
+	jointSlice := unsafe.Slice((**C.char)(joints), n)
+	countsArr = C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof(C.uint32_t(0))))
+	countsSlice := unsafe.Slice((*C.uint32_t)(countsArr), n)
+	total := 0
+	for _, r := range rows {
+		total += len(r.Values)
+	}
+	var valuesSlice []C.double
+	if total > 0 {
+		valuesArr = C.malloc(C.size_t(total) * C.size_t(unsafe.Sizeof(C.double(0))))
+		valuesSlice = unsafe.Slice((*C.double)(valuesArr), total)
+	}
+	offset := 0
+	for i, r := range rows {
+		jointSlice[i] = C.CString(r.Joint)
+		countsSlice[i] = C.uint32_t(len(r.Values))
+		for _, v := range r.Values {
+			valuesSlice[offset] = C.double(v)
+			offset++
+		}
+	}
+	release = func() {
+		for i := 0; i < n; i++ {
+			C.free(unsafe.Pointer(jointSlice[i]))
+		}
+		C.free(joints)
+		C.free(countsArr)
+		if valuesArr != nil {
+			C.free(valuesArr)
+		}
+	}
+	return
+}
+
+// PosedOptions is Posed's optional arguments: State a state's path applied first (nil is
+// none), Ground one of this assembly's own links held fixed (nil is the kernel's default).
+type PosedOptions struct {
+	State  *string
+	Ground *string
+}
+
+// Posed is this assembly with its mechanism posed, as a new *Assembly the caller owns
+// (Close it, or let the finalizer): rows sets each joint to its values (radians, the
+// assembly's units), in its pair's freedom order -- a row's Joint a path of placement
+// names then the joint's name joined by "/", a "/" or "\" inside a name escaped with
+// "\"; opts.State is a state's path, applied first and overridden row by row;
+// opts.Ground one of this assembly's own links held fixed. No rows is allowed. A
+// sub-assembly no row reaches is shared with this one. A refusal returns the kernel's own
+// *BuildError; this assembly is unchanged either way.
+func (a *Assembly) Posed(rows []StateRow, opts PosedOptions) (*Assembly, error) {
+	defer pin()()
+	ah, err := a.h()
+	if err != nil {
+		return nil, err
+	}
+	joints, countsArr, valuesArr, n, release := stateRowArrays(rows)
+	defer release()
+	var cstate, cground *C.char
+	if opts.State != nil {
+		cstate = C.CString(*opts.State)
+		defer C.free(unsafe.Pointer(cstate))
+	}
+	if opts.Ground != nil {
+		cground = C.CString(*opts.Ground)
+		defer C.free(unsafe.Pointer(cground))
+	}
+	h := C.cadaclysm_blacksmith_assembly_posed(ah,
+		(**C.char)(joints), (*C.uint32_t)(countsArr), (*C.double)(valuesArr), C.size_t(n), cstate, cground)
+	runtime.KeepAlive(a)
+	if h == nil {
+		return nil, failure("assembly_posed")
+	}
+	posed := &Assembly{handle: h}
+	runtime.SetFinalizer(posed, (*Assembly).finalize)
+	return posed, nil
 }
 
 // SequenceSegment is one segment of Assembly.Sequence: the named state it reaches, its
@@ -6260,7 +6505,10 @@ func orNaN(v *float64) C.double {
 // mm, feed and plunge in mm/min, rpm its spindle speed, ramping into its cuts at rampAngle
 // degrees. Immutable; a job keeps its own copy, so closing a tool a job has used changes
 // nothing there. Owns a handle: Close it, or let the finalizer.
-type Tool struct{ handle *C.CadaclysmBlacksmithTool }
+type Tool struct {
+	handle *C.CadaclysmBlacksmithTool
+	_      noTiny // see noTiny
+}
 
 func newTool(handle *C.CadaclysmBlacksmithTool, what string) (*Tool, error) {
 	if handle == nil {
@@ -6352,7 +6600,10 @@ func ToolDrill(number int, diameter, fluteLength, feed, rpm float64) (*Tool, err
 
 // Stock is the block of material a job cuts, an axis-aligned box. Immutable; a job keeps
 // its own copy. Owns a handle: Close it, or let the finalizer.
-type Stock struct{ handle *C.CadaclysmBlacksmithStock }
+type Stock struct {
+	handle *C.CadaclysmBlacksmithStock
+	_      noTiny // see noTiny
+}
 
 func newStock(handle *C.CadaclysmBlacksmithStock, what string) (*Stock, error) {
 	if handle == nil {
@@ -6494,7 +6745,10 @@ func (r Report) String() string { return r.Text }
 // is how long every program waits after starting the spindle; resolution is the CAMotics
 // project's voxel size in mm. Owns a handle: Close it, after which every call returns
 // ErrClosed wrapped as "job: closed" -- what Python's Job.__del__ frees.
-type Job struct{ handle *C.CadaclysmBlacksmithJob }
+type Job struct {
+	handle *C.CadaclysmBlacksmithJob
+	_      noTiny // see noTiny
+}
 
 // NewJob is an empty job on stock, rapids at safeZ (above the stock's top). Go has no
 // defaults, so every setting is spelled out: [JobDefaultClearance], [JobDefaultTolerance],
@@ -6892,4 +7146,555 @@ func (j *Job) WriteCamotics(path string) ([]string, error) {
 		written = append(written, at)
 	}
 	return written, nil
+}
+
+// ---- SubD cages -------------------------------------------------------------------------------------
+
+// SubdEdge is one edge of a cage: its two vertex ids. A selection or a crease lists them as
+// the kernel gives them, the smaller id first.
+type SubdEdge [2]uint32
+
+// SubdAxis is the axis a mirror plane is perpendicular to.
+type SubdAxis int
+
+const (
+	SubdX SubdAxis = iota
+	SubdY
+	SubdZ
+)
+
+// SubdElements is a kind of cage element: what a selection holds, or what Pick looks for.
+type SubdElements int
+
+const (
+	SubdVertices SubdElements = iota
+	SubdEdges
+	SubdFaces
+)
+
+func (e SubdElements) String() string {
+	switch e {
+	case SubdVertices:
+		return "vertices"
+	case SubdEdges:
+		return "edges"
+	case SubdFaces:
+		return "faces"
+	}
+	return fmt.Sprintf("SubdElements(%d)", int(e))
+}
+
+// SubdSelection is some elements of a cage. Kind says which: IDs holds vertex or face ids,
+// Edges holds edges (one of the two is empty).
+type SubdSelection struct {
+	Kind  SubdElements
+	IDs   []uint32
+	Edges []SubdEdge
+}
+
+// SubdOfVertices selects vertices by id.
+func SubdOfVertices(ids ...uint32) SubdSelection {
+	return SubdSelection{Kind: SubdVertices, IDs: ids}
+}
+
+// SubdOfEdges selects edges.
+func SubdOfEdges(edges ...SubdEdge) SubdSelection {
+	return SubdSelection{Kind: SubdEdges, Edges: edges}
+}
+
+// SubdOfFaces selects faces by id.
+func SubdOfFaces(ids ...uint32) SubdSelection {
+	return SubdSelection{Kind: SubdFaces, IDs: ids}
+}
+
+// SubdSymmetry is a mirrored half's plane: its Axis and how far from it a vertex counts as
+// on it.
+type SubdSymmetry struct {
+	Axis      SubdAxis
+	Tolerance float64
+}
+
+// SubdMesh is one level of a cage's smooth surface, copied out of the cage so it outlives
+// it. Positions and Normals are limit positions and unit outward limit normals; Indices is
+// three vertex ids a triangle (flat); TriangleFace is the face of the full cage each
+// triangle lies on (on a mirrored half, face f of the half is f and its reflection
+// f + len(faces)).
+type SubdMesh struct {
+	Positions    [][3]float64
+	Normals      [][3]float64
+	Indices      []uint32
+	TriangleFace []uint32
+}
+
+// SubdReport is what Subd.ToSolid did and how close it came: Regular patches exact from
+// their own net and Refined ones from a refined neighbourhood; the Catmull-Clark Steps taken
+// first (1 or 2); Levels, the deepest local refinement a patch took (0 when none was
+// refined); the largest Deviation from the limit surface, as a fraction of the cage's
+// bounding-box diagonal; the largest tangent break G1AngleDeg across a side that is not
+// creased, in degrees; and the world points they were measured at.
+type SubdReport struct {
+	Regular, Refined, Steps, Levels uint32
+	Deviation, G1AngleDeg           float64
+	DeviationAt, G1At               [3]float64
+}
+
+// SubdSolidOptions are ToSolid's limits. The zero value of each field takes the library's
+// default: Tolerance 1e-4 of the cage's diagonal, G1Angle 0.1 degrees, MaxLevels 6.
+type SubdSolidOptions struct {
+	Tolerance, G1Angle float64
+	MaxLevels          uint32
+}
+
+// Subd is a SubD control cage: a polygon mesh whose limit surface is smooth. Immutable;
+// every edit returns a new cage and leaves this one as it was. Close frees the handle; the
+// finalizer does so otherwise.
+type Subd struct {
+	handle *C.CadaclysmBlacksmithSubd
+	_      noTiny // see noTiny
+}
+
+func newSubd(handle *C.CadaclysmBlacksmithSubd, what string) (*Subd, error) {
+	if handle == nil {
+		return nil, failure(what)
+	}
+	s := &Subd{handle: handle}
+	runtime.SetFinalizer(s, (*Subd).finalize)
+	return s, nil
+}
+
+func (s *Subd) finalize() {
+	if s.handle != nil {
+		C.cadaclysm_blacksmith_subd_free(s.handle)
+		s.handle = nil
+	}
+}
+
+// Close gives the cage back. Idempotent. A SubdMesh or any slice already read survives it.
+func (s *Subd) Close() {
+	s.finalize()
+	runtime.SetFinalizer(s, nil)
+}
+
+// Closed is whether Close has already run. A nil Subd counts as closed.
+func (s *Subd) Closed() bool { return s == nil || s.handle == nil }
+
+func (s *Subd) h() (*C.CadaclysmBlacksmithSubd, error) {
+	if s == nil || s.handle == nil {
+		return nil, fmt.Errorf("subd: %w", ErrClosed)
+	}
+	return s.handle, nil
+}
+
+// cU32 is ids as a malloc'd C array (nil for none) and the func that frees it.
+func cU32(ids []uint32) (*C.uint32_t, func()) {
+	if len(ids) == 0 {
+		return nil, func() {}
+	}
+	p := C.malloc(C.size_t(len(ids)) * C.size_t(unsafe.Sizeof(C.uint32_t(0))))
+	copy(unsafe.Slice((*uint32)(p), len(ids)), ids)
+	return (*C.uint32_t)(p), func() { C.free(p) }
+}
+
+// cF64 is values as a malloc'd C array (nil for none) and the func that frees it.
+func cF64(values []float64) (*C.double, func()) {
+	if len(values) == 0 {
+		return nil, func() {}
+	}
+	p := C.malloc(C.size_t(len(values)) * C.size_t(unsafe.Sizeof(C.double(0))))
+	copy(unsafe.Slice((*float64)(p), len(values)), values)
+	return (*C.double)(p), func() { C.free(p) }
+}
+
+func flatEdges(edges []SubdEdge) []uint32 {
+	flat := make([]uint32, 0, 2*len(edges))
+	for _, e := range edges {
+		flat = append(flat, e[0], e[1])
+	}
+	return flat
+}
+
+func pairEdges(flat []uint32) []SubdEdge {
+	edges := make([]SubdEdge, 0, len(flat)/2)
+	for i := 0; i+1 < len(flat); i += 2 {
+		edges = append(edges, SubdEdge{flat[i], flat[i+1]})
+	}
+	return edges
+}
+
+func copyU32(p *C.uint32_t, n int) []uint32 {
+	out := make([]uint32, n)
+	if n > 0 && p != nil {
+		copy(out, unsafe.Slice((*uint32)(unsafe.Pointer(p)), n))
+	}
+	return out
+}
+
+func copyPoints(p *C.double, n int) [][3]float64 {
+	out := make([][3]float64, n)
+	if n > 0 && p != nil {
+		flat := unsafe.Slice((*float64)(unsafe.Pointer(p)), 3*n)
+		for i := range out {
+			out[i] = [3]float64{flat[3*i], flat[3*i+1], flat[3*i+2]}
+		}
+	}
+	return out
+}
+
+// SubdCuboid is a box of size centred on the origin, with segments quads along each axis.
+func SubdCuboid(size [3]float64, segments [3]uint32) (*Subd, error) {
+	defer pin()()
+	return newSubd(C.cadaclysm_blacksmith_subd_cuboid(C.double(size[0]), C.double(size[1]), C.double(size[2]),
+		C.uint32_t(segments[0]), C.uint32_t(segments[1]), C.uint32_t(segments[2])), "subd_cuboid")
+}
+
+// SubdCylinder is a cylinder along +Z: one n-gon cap per end with sides sides and rings
+// bands of quads between them. With creasedRims (the usual choice) the two rim loops are
+// creased, so the caps stay flat.
+func SubdCylinder(radius, height float64, sides, rings uint32, creasedRims bool) (*Subd, error) {
+	defer pin()()
+	return newSubd(C.cadaclysm_blacksmith_subd_cylinder(C.double(radius), C.double(height), C.uint32_t(sides),
+		C.uint32_t(rings), C.bool(creasedRims)), "subd_cylinder")
+}
+
+// SubdSphere is a quad ball of radius, with segments quads per cube edge.
+func SubdSphere(radius float64, segments uint32) (*Subd, error) {
+	defer pin()()
+	return newSubd(C.cadaclysm_blacksmith_subd_sphere(C.double(radius), C.uint32_t(segments)), "subd_sphere")
+}
+
+// SubdTorus is a torus around +Z: around steps about the axis at major, tube steps round
+// the tube of minor.
+func SubdTorus(major, minor float64, around, tube uint32) (*Subd, error) {
+	defer pin()()
+	return newSubd(C.cadaclysm_blacksmith_subd_torus(C.double(major), C.double(minor), C.uint32_t(around),
+		C.uint32_t(tube)), "subd_torus")
+}
+
+// SubdFromParts is a cage from its parts, the lossless inverse of Positions, Faces,
+// Creases, Pins and Symmetry. symmetry is nil for an ordinary cage. The new cage selects
+// nothing.
+func SubdFromParts(positions [][3]float64, faces [][]uint32, creases []SubdEdge, pins []uint32, symmetry *SubdSymmetry) (*Subd, error) {
+	defer pin()()
+	flat := make([]float64, 0, 3*len(positions))
+	for _, p := range positions {
+		flat = append(flat, p[0], p[1], p[2])
+	}
+	sizes := make([]uint32, len(faces))
+	var indices []uint32
+	for i, f := range faces {
+		sizes[i] = uint32(len(f))
+		indices = append(indices, f...)
+	}
+	cPos, freePos := cF64(flat)
+	defer freePos()
+	cSizes, freeSizes := cU32(sizes)
+	defer freeSizes()
+	cIdx, freeIdx := cU32(indices)
+	defer freeIdx()
+	flatCreases := flatEdges(creases)
+	cCreases, freeCreases := cU32(flatCreases)
+	defer freeCreases()
+	cPins, freePins := cU32(pins)
+	defer freePins()
+	axis, tolerance := C.int32_t(-1), 0.0
+	if symmetry != nil {
+		axis, tolerance = C.int32_t(symmetry.Axis), symmetry.Tolerance
+	}
+	return newSubd(C.cadaclysm_blacksmith_subd_from_parts(cPos, C.uint32_t(len(positions)), cSizes, C.uint32_t(len(faces)),
+		cIdx, C.uint32_t(len(indices)), cCreases, C.uint32_t(len(creases)), cPins, C.uint32_t(len(pins)), axis,
+		C.double(tolerance)), "subd_from_parts")
+}
+
+// parts reads the cage's parts through read, which runs while the views are valid.
+func (s *Subd) parts(read func(p *C.CadaclysmBlacksmithSubdParts)) error {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return err
+	}
+	var raw C.CadaclysmBlacksmithSubdParts
+	ok := bool(C.cadaclysm_blacksmith_subd_parts(h, &raw))
+	if !ok {
+		runtime.KeepAlive(s)
+		return failure("subd_parts")
+	}
+	read(&raw)
+	runtime.KeepAlive(s)
+	return nil
+}
+
+// Positions are the cage's vertices, a copy.
+func (s *Subd) Positions() ([][3]float64, error) {
+	var out [][3]float64
+	err := s.parts(func(p *C.CadaclysmBlacksmithSubdParts) { out = copyPoints(p.positions, int(p.vertex_count)) })
+	return out, err
+}
+
+// Faces are the cage's faces, each as its vertex loop, a copy.
+func (s *Subd) Faces() ([][]uint32, error) {
+	var out [][]uint32
+	err := s.parts(func(p *C.CadaclysmBlacksmithSubdParts) {
+		sizes := copyU32(p.face_sizes, int(p.face_count))
+		indices := copyU32(p.face_indices, int(p.index_count))
+		out = make([][]uint32, len(sizes))
+		at := 0
+		for i, n := range sizes {
+			out[i] = indices[at : at+int(n) : at+int(n)]
+			at += int(n)
+		}
+	})
+	return out, err
+}
+
+// Creases are the creased edges, smaller id first, a copy.
+func (s *Subd) Creases() ([]SubdEdge, error) {
+	var out []SubdEdge
+	err := s.parts(func(p *C.CadaclysmBlacksmithSubdParts) { out = pairEdges(copyU32(p.creases, 2*int(p.crease_count))) })
+	return out, err
+}
+
+// Pins are the pinned vertices: they refine as corners and stay put. A copy.
+func (s *Subd) Pins() ([]uint32, error) {
+	var out []uint32
+	err := s.parts(func(p *C.CadaclysmBlacksmithSubdParts) { out = copyU32(p.pins, int(p.pin_count)) })
+	return out, err
+}
+
+// Symmetry is nil for an ordinary cage; for a mirrored half, its plane.
+func (s *Subd) Symmetry() (*SubdSymmetry, error) {
+	var out *SubdSymmetry
+	err := s.parts(func(p *C.CadaclysmBlacksmithSubdParts) {
+		if p.symmetry_axis >= 0 {
+			out = &SubdSymmetry{Axis: SubdAxis(p.symmetry_axis), Tolerance: float64(p.symmetry_tolerance)}
+		}
+	})
+	return out, err
+}
+
+// Selection is what the edit that made this cage touched; nil for a cage no edit selected
+// (a primitive, SubdFromParts, the mirror calls).
+func (s *Subd) Selection() (*SubdSelection, error) {
+	var out *SubdSelection
+	err := s.parts(func(p *C.CadaclysmBlacksmithSubdParts) {
+		if p.selection_kind > 2 {
+			return
+		}
+		n := int(p.selection_count)
+		if p.selection_kind == C.uint32_t(SubdEdges) {
+			out = &SubdSelection{Kind: SubdEdges, Edges: pairEdges(copyU32(p.selection, 2*n))}
+			return
+		}
+		out = &SubdSelection{Kind: SubdElements(p.selection_kind), IDs: copyU32(p.selection, n)}
+	})
+	return out, err
+}
+
+// edit makes a new cage from a call on this one, which reports the new handle.
+func (s *Subd) edit(what string, call func(h *C.CadaclysmBlacksmithSubd) *C.CadaclysmBlacksmithSubd) (*Subd, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	out, err := newSubd(call(h), what)
+	runtime.KeepAlive(s)
+	return out, err
+}
+
+// Transform is a new cage with the selected elements moved by matrix: sixteen numbers,
+// column-major (a rotation about a point is baked in by the caller). The new cage selects
+// the same elements.
+func (s *Subd) Transform(selection SubdSelection, matrix []float64) (*Subd, error) {
+	if len(matrix) != 16 {
+		return nil, &BuildError{Message: fmt.Sprintf("transform: matrix must be 16 numbers, column-major, not %d", len(matrix))}
+	}
+	if selection.Kind < SubdVertices || selection.Kind > SubdFaces {
+		return nil, &BuildError{Message: fmt.Sprintf("transform: kind must be vertices, edges or faces, not %d", int(selection.Kind))}
+	}
+	ids, count := selection.IDs, len(selection.IDs)
+	if selection.Kind == SubdEdges {
+		ids, count = flatEdges(selection.Edges), len(selection.Edges)
+	}
+	cIDs, freeIDs := cU32(ids)
+	defer freeIDs()
+	cMatrix, freeMatrix := cF64(matrix)
+	defer freeMatrix()
+	return s.edit("subd_transform", func(h *C.CadaclysmBlacksmithSubd) *C.CadaclysmBlacksmithSubd {
+		return C.cadaclysm_blacksmith_subd_transform(h, C.uint32_t(selection.Kind), cIDs, C.uint32_t(count), cMatrix)
+	})
+}
+
+// Crease is a new cage with edges creased, or un-creased when on is false; it selects them.
+func (s *Subd) Crease(edges []SubdEdge, on bool) (*Subd, error) {
+	cEdges, freeEdges := cU32(flatEdges(edges))
+	defer freeEdges()
+	return s.edit("subd_set_crease", func(h *C.CadaclysmBlacksmithSubd) *C.CadaclysmBlacksmithSubd {
+		return C.cadaclysm_blacksmith_subd_set_crease(h, cEdges, C.uint32_t(len(edges)), C.bool(on))
+	})
+}
+
+// Pin is a new cage with vertices pinned (they refine as corners and stay put), or released
+// when on is false; it selects them.
+func (s *Subd) Pin(vertices []uint32, on bool) (*Subd, error) {
+	cIDs, freeIDs := cU32(vertices)
+	defer freeIDs()
+	return s.edit("subd_set_pin", func(h *C.CadaclysmBlacksmithSubd) *C.CadaclysmBlacksmithSubd {
+		return C.cadaclysm_blacksmith_subd_set_pin(h, cIDs, C.uint32_t(len(vertices)), C.bool(on))
+	})
+}
+
+// Extrude is a new cage with faces pushed out by distance along each connected region's
+// average normal, a quad wall on each boundary edge; the new cage selects them.
+func (s *Subd) Extrude(faces []uint32, distance float64) (*Subd, error) {
+	cIDs, freeIDs := cU32(faces)
+	defer freeIDs()
+	return s.edit("subd_extrude", func(h *C.CadaclysmBlacksmithSubd) *C.CadaclysmBlacksmithSubd {
+		return C.cadaclysm_blacksmith_subd_extrude(h, cIDs, C.uint32_t(len(faces)), C.double(distance))
+	})
+}
+
+// Inset is a new cage with faces shrunk by amount, in (0, 1), within their surface and a
+// ring of quads round each region (each face, with individual); it selects the inner faces.
+func (s *Subd) Inset(faces []uint32, amount float64, individual bool) (*Subd, error) {
+	cIDs, freeIDs := cU32(faces)
+	defer freeIDs()
+	return s.edit("subd_inset", func(h *C.CadaclysmBlacksmithSubd) *C.CadaclysmBlacksmithSubd {
+		return C.cadaclysm_blacksmith_subd_inset(h, cIDs, C.uint32_t(len(faces)), C.double(amount), C.bool(individual))
+	})
+}
+
+// InsertLoop is a new cage with a loop of edges cut across the ring of quads through edge,
+// at a + at*(b-a) with at in (0, 1); it selects the new loop. 0.5 is the middle.
+func (s *Subd) InsertLoop(edge SubdEdge, at float64) (*Subd, error) {
+	return s.edit("subd_insert_loop", func(h *C.CadaclysmBlacksmithSubd) *C.CadaclysmBlacksmithSubd {
+		return C.cadaclysm_blacksmith_subd_insert_loop(h, C.uint32_t(edge[0]), C.uint32_t(edge[1]), C.double(at))
+	})
+}
+
+// EdgeLoop is the loop of edges through edge, straight across each valence-four vertex, the
+// picked edge first, each smaller id first; empty when edge is not an edge of the cage.
+func (s *Subd) EdgeLoop(edge SubdEdge) ([]SubdEdge, error) {
+	looped, err := s.edit("subd_edge_loop", func(h *C.CadaclysmBlacksmithSubd) *C.CadaclysmBlacksmithSubd {
+		return C.cadaclysm_blacksmith_subd_edge_loop(h, C.uint32_t(edge[0]), C.uint32_t(edge[1]))
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer looped.Close()
+	selection, err := looped.Selection()
+	if err != nil {
+		return nil, err
+	}
+	if selection == nil {
+		return []SubdEdge{}, nil
+	}
+	return selection.Edges, nil
+}
+
+// MirrorOn is the positive half of the cage across the plane perpendicular to axis, as a
+// mirrored cage: every later edit keeps it symmetric.
+func (s *Subd) MirrorOn(axis SubdAxis) (*Subd, error) {
+	return s.edit("subd_mirror_on", func(h *C.CadaclysmBlacksmithSubd) *C.CadaclysmBlacksmithSubd {
+		return C.cadaclysm_blacksmith_subd_mirror_on(h, C.uint32_t(axis))
+	})
+}
+
+// MirrorOff is the mirror baked: the whole cage as an ordinary one.
+func (s *Subd) MirrorOff() (*Subd, error) {
+	return s.edit("subd_mirror_off", func(h *C.CadaclysmBlacksmithSubd) *C.CadaclysmBlacksmithSubd {
+		return C.cadaclysm_blacksmith_subd_mirror_off(h)
+	})
+}
+
+// Full is the whole cage of a mirrored half -- the half's vertices first, then the
+// reflections of those off the plane -- or a copy of an ordinary cage.
+func (s *Subd) Full() (*Subd, error) {
+	return s.edit("subd_full", func(h *C.CadaclysmBlacksmithSubd) *C.CadaclysmBlacksmithSubd {
+		return C.cadaclysm_blacksmith_subd_full(h)
+	})
+}
+
+// SmoothMesh is the smooth surface refined levels times (1 to 6; 3 is the usual choice), as
+// a SubdMesh of copies.
+func (s *Subd) SmoothMesh(levels uint32) (*SubdMesh, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	var raw C.CadaclysmBlacksmithSubdMesh
+	ok := bool(C.cadaclysm_blacksmith_subd_smooth_mesh(h, C.uint32_t(levels), &raw))
+	if !ok {
+		runtime.KeepAlive(s)
+		return nil, failure("subd_smooth_mesh")
+	}
+	n, m := int(raw.vertex_count), int(raw.index_count)/3
+	mesh := &SubdMesh{
+		Positions:    copyPoints(raw.positions, n),
+		Normals:      copyPoints(raw.normals, n),
+		Indices:      copyU32(raw.indices, int(raw.index_count)),
+		TriangleFace: copyU32(raw.triangle_face, m),
+	}
+	runtime.KeepAlive(s)
+	return mesh, nil
+}
+
+// Pick is the cage element of kind under point, a point on or near the smooth surface: a
+// selection of one vertex, edge or face. nil, nil when nothing is within 0.05 of the cage's
+// diagonal -- not an error.
+func (s *Subd) Pick(point [3]float64, kind SubdElements) (*SubdSelection, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, err
+	}
+	if kind < SubdVertices || kind > SubdFaces {
+		return nil, &BuildError{Message: fmt.Sprintf("pick: kind must be vertices, edges or faces, not %d", int(kind))}
+	}
+	cPoint, freePoint := cF64(point[:])
+	defer freePoint()
+	out := (*C.uint32_t)(C.malloc(2 * C.size_t(unsafe.Sizeof(C.uint32_t(0)))))
+	defer C.free(unsafe.Pointer(out))
+	ok := bool(C.cadaclysm_blacksmith_subd_pick(h, cPoint, C.uint32_t(kind), out))
+	runtime.KeepAlive(s)
+	if !ok {
+		if lastError() == "" {
+			return nil, nil
+		}
+		return nil, failure("subd_pick")
+	}
+	got := copyU32(out, 2)
+	if kind == SubdEdges {
+		return &SubdSelection{Kind: SubdEdges, Edges: []SubdEdge{{got[0], got[1]}}}, nil
+	}
+	return &SubdSelection{Kind: kind, IDs: []uint32{got[0]}}, nil
+}
+
+// ToSolid is the cage as an exact solid, one NURBS face per patch, that every solid call
+// takes, and a SubdReport of what the conversion did. Options' zero fields take the
+// defaults; a cage that cannot be held within the limits is refused with the figures it
+// measured.
+func (s *Subd) ToSolid(options SubdSolidOptions) (*Solid, SubdReport, error) {
+	defer pin()()
+	h, err := s.h()
+	if err != nil {
+		return nil, SubdReport{}, err
+	}
+	var raw C.CadaclysmBlacksmithSubdReport
+	handle := C.cadaclysm_blacksmith_subd_to_solid(h, C.double(options.Tolerance), C.double(options.G1Angle),
+		C.uint32_t(options.MaxLevels), &raw)
+	runtime.KeepAlive(s)
+	solid, err := newSolid(handle, "subd_to_solid")
+	if err != nil {
+		return nil, SubdReport{}, err
+	}
+	report := SubdReport{
+		Regular: uint32(raw.regular), Refined: uint32(raw.refined), Steps: uint32(raw.steps), Levels: uint32(raw.levels),
+		Deviation: float64(raw.deviation), G1AngleDeg: float64(raw.g1_angle_deg),
+	}
+	for i := 0; i < 3; i++ {
+		report.DeviationAt[i] = float64(raw.deviation_at[i])
+		report.G1At[i] = float64(raw.g1_at[i])
+	}
+	return solid, report, nil
 }

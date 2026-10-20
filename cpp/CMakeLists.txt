@@ -40,6 +40,9 @@ target_include_directories(cadaclysm_header_result PRIVATE "${CADACLYSM_CPP_INCL
 set(CADACLYSM_LIBRARY_DIR "" CACHE PATH
     "A cargo target directory holding cadaclysm_capi and cadaclysm_blacksmith (e.g. target/release)")
 set(_cadaclysm_sample "${CMAKE_CURRENT_SOURCE_DIR}/../../../../samples/cube.scad")
+if(NOT EXISTS "${_cadaclysm_sample}")  # the SDK layout: cpp/ sits beside samples/
+  set(_cadaclysm_sample "${CMAKE_CURRENT_SOURCE_DIR}/../samples/cube.scad")
+endif()
 if(NOT EXISTS "${_cadaclysm_sample}")
   set(_cadaclysm_sample "")
 endif()
@@ -49,8 +52,9 @@ set(CADACLYSM_LICENSE "" CACHE FILEPATH "A license file for the smoke, or empty"
 if(CADACLYSM_LIBRARY_DIR)
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../include/cadaclysm.h")
     set(_cadaclysm_c_headers "${CMAKE_CURRENT_SOURCE_DIR}/../../include"
-                             "${CMAKE_CURRENT_SOURCE_DIR}/../../../cadaclysm-blacksmith-capi/include")
-  else()  # the SDK repository: cpp/ sits beside include/
+                             "${CMAKE_CURRENT_SOURCE_DIR}/../../../cadaclysm-blacksmith-capi/include"
+                             "${CMAKE_CURRENT_SOURCE_DIR}/../../../cadaclysm-view-capi/include")
+  else()  # the SDK repository: cpp/ sits beside include/, which holds cadaclysm_view.h too
     set(_cadaclysm_c_headers "${CMAKE_CURRENT_SOURCE_DIR}/../include")
   endif()
   set(CADACLYSM_INCLUDE_DIRS "${CADACLYSM_CPP_INCLUDE}" ${_cadaclysm_c_headers})
@@ -117,6 +121,26 @@ if(CADACLYSM_LIBRARY_DIR)
             "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
             "$<TARGET_FILE_DIR:cadaclysm_pair_test>")
   add_test(NAME pair COMMAND cadaclysm_pair_test ${CADACLYSM_LICENSE})
+
+  # Subd, SubdMesh and SubdReport over the cadaclysm_blacksmith_subd_* calls, at parity with the
+  # Python reference's test_subd_* tests (The Kiln, plan 2b). Needs a license, no sample file;
+  # the STEP read-back opens the reader, which the copy step below stages beside it.
+  add_executable(cadaclysm_subd_test tests/subd_test.cpp)
+  target_link_libraries(cadaclysm_subd_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_subd_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_subd_test>")
+  add_test(NAME subd COMMAND cadaclysm_subd_test ${CADACLYSM_LICENSE})
+
+  # Assembly::posed over the paired arm, two copies of a bracket and plan 4's gears.
+  add_executable(cadaclysm_posed_test tests/posed_test.cpp)
+  target_link_libraries(cadaclysm_posed_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_posed_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_posed_test>")
+  add_test(NAME posed COMMAND cadaclysm_posed_test ${CADACLYSM_LICENSE})
   # to_arcs, offset, section, Tool, Stock and Job over the pocketed block and the plate
   # fixtures, plus face/contour/pocket/drill driven by hand and a closed job's refusal.
   # Needs a license, as assembly does; no sample file.
@@ -127,6 +151,20 @@ if(CADACLYSM_LIBRARY_DIR)
             "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
             "$<TARGET_FILE_DIR:cadaclysm_blacksmith_cam_test>")
   add_test(NAME blacksmith_cam COMMAND cadaclysm_blacksmith_cam_test ${CADACLYSM_LICENSE})
+
+  # Both silhouette queries, kernel and reader. The reader half opens the acis crate's own
+  # Rhino fixtures, which an SDK checkout does not carry: "-" skips it there.
+  set(_cadaclysm_rhino "${CMAKE_CURRENT_SOURCE_DIR}/../../../cadaclysm-acis/tests/fixtures/rhino")
+  if(NOT EXISTS "${_cadaclysm_rhino}/sphere.sat")
+    set(_cadaclysm_rhino "-")
+  endif()
+  add_executable(cadaclysm_silhouette_test tests/silhouette_test.cpp)
+  target_link_libraries(cadaclysm_silhouette_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_silhouette_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_silhouette_test>")
+  add_test(NAME silhouette COMMAND cadaclysm_silhouette_test "${_cadaclysm_rhino}" ${CADACLYSM_LICENSE})
 
   add_library(cadaclysm_header_reader OBJECT tests/include_reader.cpp)
   target_link_libraries(cadaclysm_header_reader PRIVATE cadaclysm::reader)
@@ -144,6 +182,53 @@ if(CADACLYSM_LIBRARY_DIR)
 
   add_library(cadaclysm_header_kernel OBJECT tests/include_kernel.cpp)
   target_link_libraries(cadaclysm_header_kernel PRIVATE cadaclysm::blacksmith)
+
+  # view_loader.h alone: the search, its messages, the camera maths and the PNG writer,
+  # and cvl_draw_object/cvl_pick over a table of fakes; cvl_open over a stand-in library
+  # that answers zero. No view library and no GPU; the build directory is the empty place
+  # it searches.
+  add_library(cadaclysm_view_loader_fake SHARED tests/view_loader_fake.cpp)
+  target_include_directories(cadaclysm_view_loader_fake PRIVATE ${CADACLYSM_INCLUDE_DIRS})
+  add_executable(cadaclysm_view_loader_test tests/view_loader_test.cpp)
+  target_include_directories(cadaclysm_view_loader_test PRIVATE ${CADACLYSM_INCLUDE_DIRS})
+  target_link_libraries(cadaclysm_view_loader_test PRIVATE ${CMAKE_DL_LIBS})
+  add_dependencies(cadaclysm_view_loader_test cadaclysm_view_loader_fake)
+  add_test(NAME view_loader COMMAND cadaclysm_view_loader_test "${CMAKE_CURRENT_BINARY_DIR}"
+                                    "$<TARGET_FILE:cadaclysm_view_loader_fake>")
+
+  # cadaclysm/view.hpp: View offscreen over a solid, a scene, a pose and a node, the
+  # refusals, the release on Scene::close, show() on the terminal, and the missing-library
+  # message. The GPU half skips without cadaclysm_view or an adapter unless
+  # CADACLYSM_REQUIRE_WGPU is set, the terminal half without cadaclysm_terminal unless
+  # CADACLYSM_REQUIRE_TERMINAL=1 (the Linux box and the Windows gate set both).
+  add_executable(cadaclysm_view_test tests/view_test.cpp)
+  target_link_libraries(cadaclysm_view_test PRIVATE cadaclysm::blacksmith cadaclysm::view_loader Threads::Threads)
+  add_dependencies(cadaclysm_view_test cadaclysm_view_loader_fake)
+  add_custom_command(TARGET cadaclysm_view_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_view_test>")
+  # samples/mechanism-solid.stp, found beside whichever sample CADACLYSM_SAMPLE names (as
+  # the kinematics test finds it); without one the scene, pose and node checks are skipped.
+  set(_cadaclysm_mechanism "")
+  if(CADACLYSM_SAMPLE)
+    get_filename_component(_cadaclysm_samples "${CADACLYSM_SAMPLE}" DIRECTORY)
+    set(_cadaclysm_mechanism "${_cadaclysm_samples}/mechanism-solid.stp")
+  endif()
+  # The bundled font (crates/cadaclysm-text/fonts), for load_font's checks; absent in the
+  # SDK's layout, where they are skipped.
+  set(_cadaclysm_font "${CMAKE_CURRENT_SOURCE_DIR}/../../../cadaclysm-text/fonts/LiberationSans-Regular.ttf")
+  if(NOT EXISTS "${_cadaclysm_font}")
+    set(_cadaclysm_font "")
+  endif()
+  add_test(NAME view COMMAND cadaclysm_view_test "${CMAKE_CURRENT_BINARY_DIR}" "${_cadaclysm_mechanism}"
+                             "$<TARGET_FILE:cadaclysm_view_loader_fake>" "${_cadaclysm_font}")
+  # A pump that sleeps instead of answering hangs: fail it.
+  set_tests_properties(view PROPERTIES TIMEOUT 600)
+
+  # The header compiles with nothing included before it.
+  add_library(cadaclysm_header_view OBJECT tests/include_view.cpp)
+  target_link_libraries(cadaclysm_header_view PRIVATE cadaclysm::blacksmith cadaclysm::view_loader)
 
   # What a user's code compiles, with the default hook: Release builds catch the
   # optimiser-only warnings in it.

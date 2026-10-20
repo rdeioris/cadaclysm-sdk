@@ -139,6 +139,13 @@ inline std::string real_text(double value) {
     return negative ? "-" + out : out;
 }
 
+// Set by cadaclysm/view.hpp: before a scene's handle is freed, the items of this thread's
+// views that show it are removed (a view whose window the user closed is destroyed), as
+// Python's Scene.close() does -- a view reads a shown scene in place. False when a view of
+// another thread still shows it: the scene then stays open (Python's refusal: it leaks
+// rather than crashes; close it again once that thread has closed its view).
+inline bool (*release_shown)(const void* state) = nullptr;
+
 // What a Scene owns; its borrowers reach it through Ref. Closing bumps the
 // generation, so a borrower made before a close can tell.
 struct SceneState {
@@ -156,6 +163,7 @@ struct SceneState {
     bool live() const noexcept { return handle != nullptr; }
     void close() noexcept {
         if (handle) {
+            if (release_shown && !release_shown(this)) return;
             ::cadaclysm_close(handle);
             handle = nullptr;
             ++generation;
@@ -221,8 +229,13 @@ private:
 
 // Lets cadaclysm_blacksmith.hpp read what a Node knows of its scene.
 struct Access;
+struct ViewAccess;  // cadaclysm/view.hpp
 
 }  // namespace detail
+
+// cadaclysm/view.hpp's: named here so show()/view() below can default to them.
+class View;
+struct ShowOptions;
 
 // ---- the library ------------------------------------------------------------------
 
@@ -345,9 +358,9 @@ inline Result<std::uint32_t> parse_convention(std::string_view text) {
 }
 
 // A colour as the ABI's packed 0xRRGGBB, from "#rgb", "#rrggbb" or a CSS colour name --
-// for SvgOptions::stroke / background, which take the packed number. Read by the
-// library's own parser, so every wrapper takes the same forms. Takes no numeric triple
-// of its own, so its refusal lists only the text forms.
+// for a host that wants the number itself (SvgOptions::stroke / background take the
+// text directly). Read by the library's own parser, so every wrapper takes the same
+// forms. Takes no numeric triple of its own, so its refusal lists only the text forms.
 inline Result<std::uint32_t> packed(std::string_view colour) {
     std::string text(colour);
     Vec3 out{};
@@ -356,6 +369,63 @@ inline Result<std::uint32_t> packed(std::string_view colour) {
     auto byte = [](double v) { return static_cast<std::uint32_t>(std::lround(v * 255.0)); };
     return (byte(out[0]) << 16) | (byte(out[1]) << 8) | byte(out[2]);
 }
+
+// A colour SvgOptions::stroke / background take (here and in the kernel's own
+// SvgOptions): colour text -- "#rgb", "#rrggbb" or a CSS colour name, any case -- or a
+// packed 0xRRGGBB number, each converted implicitly, so `stroke = "navy"` and
+// `stroke = 0x000080` both compile. Text is read by the library's own parser when the
+// drawing is made (the kernel's parser for a kernel drawing); text it refuses, or a
+// number past 0xFFFFFF, is an Error naming the field.
+class SvgColour {
+public:
+    SvgColour(std::uint32_t packed) : number_(packed) {}
+    SvgColour(int packed) : number_(packed) {}
+    SvgColour(const char* text) : text_(text ? text : ""), is_text_(true) {}
+    SvgColour(std::string text) : text_(std::move(text)), is_text_(true) {}
+    SvgColour(std::string_view text) : text_(text), is_text_(true) {}
+
+    // True when this colour was given as text.
+    bool is_text() const { return is_text_; }
+    // The colour text given; empty for a number.
+    const std::string& text() const { return text_; }
+    // The packed number given; meaningless for text.
+    std::int64_t number() const { return number_; }
+
+    bool operator==(const SvgColour& other) const {
+        return is_text_ == other.is_text_ && (is_text_ ? text_ == other.text_ : number_ == other.number_);
+    }
+    bool operator!=(const SvgColour& other) const { return !(*this == other); }
+
+private:
+    std::string text_;
+    std::int64_t number_ = 0;
+    bool is_text_ = false;
+};
+
+namespace detail {
+// `colour` as 0xRRGGBB: a number range-checked, text through `parse` (the reader's or
+// the kernel's own parser). `what` names the field in a refusal; `origin` says whose.
+template <typename Parse>
+inline Result<std::uint32_t> svg_colour_packed(const SvgColour& colour, const char* what, Parse parse, Origin origin) {
+    if (!colour.is_text()) {
+        if (colour.number() < 0 || colour.number() > 0xFFFFFF) {
+            char hex[32];
+            std::snprintf(hex, sizeof hex, "%llX", static_cast<unsigned long long>(colour.number()));
+            return Error{std::string(what) + ": a packed colour is 0x000000..0xFFFFFF, not 0x" + hex, origin};
+        }
+        return static_cast<std::uint32_t>(colour.number());
+    }
+    Vec3 out{};
+    if (!parse(colour.text().c_str(), out.data()))
+        return Error{std::string(what) + ": a colour is \"#rgb\", \"#rrggbb\", a CSS colour name or 0xRRGGBB, not '" +
+                         colour.text() + "'",
+                     origin};
+    std::uint32_t r = static_cast<std::uint32_t>(std::lround(out[0] * 255.0));
+    std::uint32_t g = static_cast<std::uint32_t>(std::lround(out[1] * 255.0));
+    std::uint32_t b = static_cast<std::uint32_t>(std::lround(out[2] * 255.0));
+    return (r << 16) | (g << 8) | b;
+}
+}  // namespace detail
 
 // ---- values -----------------------------------------------------------------------
 
@@ -1464,15 +1534,15 @@ struct SvgOptions {
     double margin = 0.05;
     // How far a written curve may stray, in page units. Default 0.1.
     double tolerance = 0.1;
-    // 0xRRGGBB -- packed(std::string_view) reads a "#rgb", "#rrggbb" or CSS colour name
-    // string, e.g. `stroke = *packed("navy")`. Default black.
-    std::uint32_t stroke = 0x000000;
+    // The pen colour: "#rgb", "#rrggbb", a CSS colour name or a packed 0xRRGGBB (an
+    // SvgColour) -- `stroke = "navy"` or `stroke = 0x000080`. Default black.
+    SvgColour stroke = 0x000000;
     // The pen's width, page units. Default 1.
     double stroke_width = 1.0;
     // 0xRRGGBB, or nullopt (the default) for no <rect> behind the drawing -- the page
-    // left to whatever the viewer composites it onto. packed(std::string_view) reads a
-    // "#rgb", "#rrggbb" or CSS colour name string, e.g. `background = *packed("navy")`.
-    std::optional<std::uint32_t> background;
+    // left to whatever the viewer composites it onto. "#rgb", "#rrggbb", a CSS colour
+    // name or a packed 0xRRGGBB (an SvgColour), e.g. `background = "navy"`.
+    std::optional<SvgColour> background;
     // Each shape's feature edges -- the exact curves the flattened polylines are drawn
     // from. Default true.
     bool edges = true;
@@ -1499,8 +1569,15 @@ namespace detail {
 // they are set directly, `up` falls back to `default_up` ("y" or "z").
 // cadaclysm_svg_options_init fills the struct first -- size included -- so a field
 // this function never sets still carries the library's own default rather than a
-// zeroed struct's.
-inline CadaclysmSvgOptions build_svg_options(const SvgOptions& options, const std::string& default_up) {
+// zeroed struct's. An Error where stroke or background is colour text the library
+// refuses.
+inline Result<CadaclysmSvgOptions> build_svg_options(const SvgOptions& options, const std::string& default_up) {
+    CADACLYSM_TRY(stroke, svg_colour_packed(options.stroke, "svg: stroke", ::cadaclysm_parse_colour, Origin::reader));
+    std::uint32_t background = CADACLYSM_SVG_TRANSPARENT;
+    if (options.background) {
+        CADACLYSM_TRY(packed_background, svg_colour_packed(*options.background, "svg: background", ::cadaclysm_parse_colour, Origin::reader));
+        background = packed_background;
+    }
     CadaclysmSvgOptions raw;
     ::cadaclysm_svg_options_init(&raw);
     auto [base_azimuth, base_elevation] = svg_view_angles(options.view);
@@ -1514,8 +1591,8 @@ inline CadaclysmSvgOptions build_svg_options(const SvgOptions& options, const st
     raw.margin = options.margin;
     raw.tolerance = options.tolerance;
     raw.stroke_width = options.stroke_width;
-    raw.stroke = options.stroke;
-    raw.background = options.background.value_or(CADACLYSM_SVG_TRANSPARENT);
+    raw.stroke = stroke;
+    raw.background = background;
     raw.flags = (options.edges ? CADACLYSM_SVG_EDGES : 0u) | (options.curves ? CADACLYSM_SVG_CURVES : 0u) |
                 (options.isocurves ? CADACLYSM_SVG_ISOCURVES : 0u) | (options.polylines ? CADACLYSM_SVG_POLYLINES : 0u) |
                 (options.silhouettes ? CADACLYSM_SVG_SILHOUETTES : 0u);
@@ -1554,6 +1631,22 @@ public:
             node = node->parent();
         }
         return true;
+    }
+
+    // Draw the scene with the siblings along this node's path hidden, this node framed,
+    // through the view library in use: on a window library show() blocks until the window
+    // is closed; the terminal prints a still. view() returns the Camera it was left at.
+    // Include <cadaclysm/view.hpp> to call them. Borrows the scene: keep it open -- on a
+    // closed scene they are a bad access (CADACLYSM_BAD_ACCESS), as every Node call is.
+    template <class V = View, class O = ShowOptions>
+    Result<void> show(const O& options = O{}) const {
+        auto drawn = V::draw(*this, options, false);
+        if (!drawn) return drawn.error();
+        return {};
+    }
+    template <class V = View, class O = ShowOptions>
+    auto view(const O& options = O{}) const {
+        return V::draw(*this, options, true);
     }
 
     // The "Locked" attribute, read as Python's bool() reads it; false without one.
@@ -1632,18 +1725,52 @@ public:
     // This node's own wireframe as SVG text, in its own frame -- Scene::svg_text's
     // `options`, read from just this node rather than every placement.
     Result<std::string> svg_text(const SvgOptions& options = SvgOptions()) const {
-        CadaclysmSvgOptions raw = detail::build_svg_options(options, detail::default_up_of(scene_.get("Node").convention));
+        CADACLYSM_TRY(raw, detail::build_svg_options(options, detail::default_up_of(scene_.get("Node").convention)));
         const char* text = ::cadaclysm_node_svg_text(h(), index_, &raw);
         if (!text) return detail::reader_error("svg");
         return std::string(text);
     }
     // svg_text() written to `path` by the library itself.
     Result<void> svg(const std::string& path, const SvgOptions& options = SvgOptions()) const {
-        CadaclysmSvgOptions raw = detail::build_svg_options(options, detail::default_up_of(scene_.get("Node").convention));
+        CADACLYSM_TRY(raw, detail::build_svg_options(options, detail::default_up_of(scene_.get("Node").convention)));
         if (!::cadaclysm_node_svg(h(), index_, path.c_str(), &raw)) {
             return detail::reader_error(("could not write " + path).c_str());
         }
         return {};
+    }
+
+    // This node's silhouette from the camera `options` describes -- where its surfaces turn
+    // away from the eye, which no edge of it lies on. The same camera words as svg_text();
+    // `tolerance` and `width` matter here (the library reads the tolerance as the page
+    // fraction tolerance / width), while the line sets, `margin`, `stroke_width` and
+    // `background` change nothing. BeziersData64 in the layout Beziers64 documents:
+    // points, four control points a curve, three doubles each (count * 12); weights, one a
+    // control point (count * 4), all ones for a polynomial curve.
+    //
+    // **Copied, unlike every other Bezier here.** The library keeps one silhouette slot
+    // per scene and the next silhouette call on that scene, for any node, refills it in
+    // place, so the arrays it hands back are a view that the next call changes under you.
+    // They are copied into vectors of your own before this returns, which is what makes
+    // asking for several nodes' silhouettes in a loop safe. Threads sharing one scene must
+    // serialise their silhouette calls themselves, as the library documents.
+    //
+    // A body with no silhouette (every face planar) is an empty answer, a BeziersData64
+    // with count() == 0, not an Error. An Error, whose message begins "silhouette: ", for
+    // a refused option (a tolerance that is not finite and positive, say) or a body the
+    // library cannot measure.
+    Result<BeziersData64> silhouette_beziers(const SvgOptions& options = SvgOptions()) const {
+        CADACLYSM_TRY(raw, detail::build_svg_options(options, detail::default_up_of(scene_.get("Node").convention)));
+        CadaclysmBeziers64 got = ::cadaclysm_node_silhouette_beziers(h(), index_, &raw);
+        BeziersData64 out;
+        if (!got.points || !got.weights || got.count == 0) {
+            // Both the empty answer and a refusal are all-null with count 0: the thread's
+            // error tells them apart, and the call clears it on entry.
+            if (!detail::text(::cadaclysm_last_error()).empty()) return detail::reader_error("silhouette_beziers");
+            return out;
+        }
+        out.points.assign(got.points, got.points + static_cast<std::size_t>(got.count) * 12);
+        out.weights.assign(got.weights, got.weights + static_cast<std::size_t>(got.count) * 4);
+        return out;
     }
 
     // Its triangles, in its own frame, built now if they have not been.
@@ -1923,7 +2050,10 @@ private:
     friend class Placement;
     friend class Link;
     friend class Scene;
+    friend struct Task;
+    friend struct WorkSchedule;
     friend struct detail::Access;
+    friend struct detail::ViewAccess;
 
     Node(detail::Ref<detail::SceneState> scene, std::uint32_t which) : scene_(std::move(scene)), index_(which) {}
 
@@ -2040,6 +2170,7 @@ public:
 private:
     friend class Scene;
     friend class Joint;
+    friend struct detail::ViewAccess;
     Link(detail::Ref<detail::SceneState> scene, std::uint32_t which) : scene_(std::move(scene)), index_(which) {}
     const CadaclysmScene* h() const { return scene_.get("Link").handle; }
 
@@ -2098,6 +2229,27 @@ inline Freedom freedom_of(const CadaclysmFreedom& raw) {
 }
 }  // namespace detail
 
+namespace detail {
+inline std::string pair_kind_text(PairKind kind) {
+    switch (kind) {
+        case PairKind::revolute: return "revolute";
+        case PairKind::prismatic: return "prismatic";
+        case PairKind::cylindrical: return "cylindrical";
+        case PairKind::spherical: return "spherical";
+        case PairKind::spherical_with_pin: return "spherical_with_pin";
+        case PairKind::planar: return "planar";
+        case PairKind::universal: return "universal";
+        case PairKind::homokinetic: return "homokinetic";
+        case PairKind::screw: return "screw";
+        case PairKind::fully_constrained: return "fully_constrained";
+        case PairKind::unconstrained: return "unconstrained";
+        case PairKind::low_order: return "low_order";
+        case PairKind::other: return "other";
+    }
+    return "other";
+}
+}  // namespace detail
+
 // A kinematic pair: the kind of relative motion a joint allows between its two links --
 // what Joint::pair returns.
 class Pair {
@@ -2117,6 +2269,25 @@ public:
         double raw = ::cadaclysm_joint_pair_pitch(h(), joint_);
         if (std::isnan(raw)) return std::nullopt;
         return raw;
+    }
+
+    // The pair's kind by name ("revolute", "screw", "gear", "rack_and_pinion", ...). Unlike
+    // kind(), which reads PairKind::other for a gear or a rack and pinion, this tells them
+    // apart.
+    std::string kind_name() const {
+        const char* raw = ::cadaclysm_joint_pair_kind_name(h(), joint_);
+        if (raw) return detail::text(raw);
+        return detail::pair_kind_text(kind_);
+    }
+
+    // The pair's own numbers, in the kind's order: empty for most kinds; one for a screw
+    // (pitch) and a rack_and_pinion (pinion radius); five for a gear (radius of the first
+    // link's gear, radius of the second's, ratio, bevel angle, helical angle).
+    std::vector<double> parameters() const {
+        std::size_t count = ::cadaclysm_joint_pair_parameters(h(), joint_, nullptr, 0);
+        std::vector<double> out(count);
+        if (count > 0) ::cadaclysm_joint_pair_parameters(h(), joint_, out.data(), count);
+        return out;
     }
 
     // The pair's contact frame fixed in its joint's start link, in world coordinates
@@ -2307,6 +2478,9 @@ struct Pose {
     Link ground;
     // Joints that close a loop and were not honoured, in file order.
     std::vector<Joint> unsolved;
+    // What the posing had to say, in the kernel's words (e.g. a coupling whose two sides
+    // were both given and disagree), in order. Empty when nothing needs saying.
+    std::vector<std::string> diagnostics;
     // (joint, freedom index, value) for every given value outside its freedom's range.
     std::vector<std::tuple<Joint, std::uint32_t, double>> out_of_range;
     // One entry per scene node, in Node::raw_transform's layout.
@@ -2325,6 +2499,263 @@ struct Pose {
         if (index < transforms.size()) return transforms[index];
         return std::array<double, 16>{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     }
+
+    // Draw this pose's scene, as Scene::show does, with every node at its posed transform
+    // (cadaclysm_view_set_node_transforms): on a window library show() blocks until the
+    // window is closed; the terminal prints a still. view() returns the Camera it was left
+    // at. Include <cadaclysm/view.hpp> to call them. Borrows the scene (through `ground`): keep
+    // it open -- on a closed scene they are a bad access (CADACLYSM_BAD_ACCESS), as a Link's
+    // calls are.
+    template <class V = View, class O = ShowOptions>
+    Result<void> show(const O& options = O{}) const {
+        auto drawn = V::draw(*this, options, false);
+        if (!drawn) return drawn.error();
+        return {};
+    }
+    template <class V = View, class O = ShowOptions>
+    auto view(const O& options = O{}) const {
+        return V::draw(*this, options, true);
+    }
+};
+
+// ---- work schedules -------------------------------------------------------------------
+
+// What one element is doing on a date: WorkSchedule::at's rows.
+struct ElementState {
+    // The element.
+    Node node;
+    // "unbuilt", "building", "built", "demolishing" or "demolished".
+    std::string phase;
+    // 0..1 through the window that governs the phase.
+    double progress = 0;
+    // Seconds late (positive) or early (negative) against the schedule, or nothing where
+    // there is none to give.
+    std::optional<double> variance;
+};
+
+// Every date pair a task gives, each seconds since 1970-01-01T00:00 -- no zone:
+// `std::chrono::sys_seconds{std::chrono::seconds{static_cast<long long>(seconds)}}` -- or
+// nothing where the file gives none. `duration` is in seconds.
+struct TaskTime {
+    std::optional<double> schedule_start;
+    std::optional<double> schedule_finish;
+    std::optional<double> early_start;
+    std::optional<double> early_finish;
+    std::optional<double> late_start;
+    std::optional<double> late_finish;
+    std::optional<double> actual_start;
+    std::optional<double> actual_finish;
+    std::optional<double> duration;
+};
+
+namespace detail {
+inline const char* schedule_kind_word(std::uint32_t code) {
+    static const char* const words[] = {"planned", "actual", "baseline", "notdefined", "other"};
+    return words[code < 5 ? code : 3];  // out of range: "notdefined"
+}
+inline const char* task_kind_word(std::uint32_t code) {
+    static const char* const words[] = {"attendance", "construction", "demolition", "dismantle", "disposal",
+                                        "installation", "logistic", "maintenance", "move", "operation",
+                                        "removal", "renovation", "notdefined", "other"};
+    return words[code < 14 ? code : 12];  // out of range: "notdefined"
+}
+inline const char* link_kind_word(std::uint32_t code) {
+    static const char* const words[] = {"finish_start", "start_start", "finish_finish",
+                                        "start_finish", "notdefined", "other"};
+    return words[code < 6 ? code : 4];  // out of range: "notdefined"
+}
+inline const char* phase_word(std::uint32_t code) {
+    static const char* const words[] = {"unbuilt", "building", "built", "demolishing", "demolished"};
+    return words[code < 5 ? code : 0];  // out of range: "unbuilt"
+}
+inline std::optional<double> given(bool has, double value) {
+    if (has) return value;
+    return std::nullopt;
+}
+}  // namespace detail
+
+// One task of a WorkSchedule, from WorkSchedule::tasks. Borrows from the scene like Node.
+struct Task {
+    // Its index in WorkSchedule::tasks.
+    std::uint32_t index = 0;
+    std::string name;
+    // "" where none.
+    std::string identification;
+    // "attendance", "construction", "demolition", "dismantle", "disposal", "installation",
+    // "logistic", "maintenance", "move", "operation", "removal", "renovation", "notdefined"
+    // or "other".
+    std::string kind;
+    // The text of a user-defined kind (kind == "other"); "" otherwise.
+    std::string kind_name;
+    // Its status as the file writes it, "" where none.
+    std::string status;
+    bool milestone = false;
+    // Every date pair it gives.
+    TaskTime time;
+
+    // The summary task nesting it, nothing at the top.
+    std::optional<Task> parent() const {
+        const CadaclysmScene* handle = scene_.get("Task").handle;
+        std::uint32_t out = 0;
+        if (!::cadaclysm_task_parent(handle, schedule_, index, &out)) return std::nullopt;
+        return read(scene_, schedule_, out);
+    }
+
+    // The nodes it builds or removes.
+    std::vector<Node> nodes() const {
+        const CadaclysmScene* handle = scene_.get("Task").handle;
+        std::uint32_t count = ::cadaclysm_task_node_count(handle, schedule_, index);
+        std::vector<std::uint32_t> raw(count);
+        ::cadaclysm_task_nodes(handle, schedule_, index, raw.data(), count);
+        std::vector<Node> out;
+        out.reserve(count);
+        for (std::uint32_t n : raw) out.push_back(Node(scene_, n));
+        return out;
+    }
+
+    // Same schedule of the same scene, same index.
+    bool operator==(const Task& other) const noexcept {
+        return index == other.index && schedule_ == other.schedule_ && scene_.identity() == other.scene_.identity();
+    }
+    bool operator!=(const Task& other) const noexcept { return !(*this == other); }
+
+private:
+    friend class Scene;
+    friend struct WorkSchedule;
+
+    static Task read(const detail::Ref<detail::SceneState>& scene, std::uint32_t s, std::uint32_t t) {
+        const CadaclysmScene* handle = scene.get("Task").handle;
+        Task task;
+        task.index = t;
+        task.name = detail::text(::cadaclysm_task_name(handle, s, t));
+        task.identification = detail::text(::cadaclysm_task_identification(handle, s, t));
+        task.kind = detail::task_kind_word(::cadaclysm_task_kind(handle, s, t));
+        task.kind_name = detail::text(::cadaclysm_task_kind_name(handle, s, t));
+        task.status = detail::text(::cadaclysm_task_status(handle, s, t));
+        task.milestone = ::cadaclysm_task_milestone(handle, s, t);
+        CadaclysmTaskTime raw{};
+        ::cadaclysm_task_time(handle, s, t, &raw);
+        task.time.schedule_start = detail::given(raw.has_schedule_start, raw.schedule_start);
+        task.time.schedule_finish = detail::given(raw.has_schedule_finish, raw.schedule_finish);
+        task.time.early_start = detail::given(raw.has_early_start, raw.early_start);
+        task.time.early_finish = detail::given(raw.has_early_finish, raw.early_finish);
+        task.time.late_start = detail::given(raw.has_late_start, raw.late_start);
+        task.time.late_finish = detail::given(raw.has_late_finish, raw.late_finish);
+        task.time.actual_start = detail::given(raw.has_actual_start, raw.actual_start);
+        task.time.actual_finish = detail::given(raw.has_actual_finish, raw.actual_finish);
+        task.time.duration = detail::given(raw.has_duration, raw.duration);
+        task.scene_ = scene;
+        task.schedule_ = s;
+        return task;
+    }
+
+    detail::Ref<detail::SceneState> scene_;
+    std::uint32_t schedule_ = 0;
+};
+
+// A sequence between two tasks of one schedule. From WorkSchedule::links.
+struct TaskLink {
+    // The predecessor.
+    Task from;
+    // The successor.
+    Task to;
+    // "finish_start", "start_start", "finish_finish", "start_finish", "notdefined" or "other".
+    std::string kind;
+    // The text of a user-defined kind (kind == "other"); "" otherwise.
+    std::string kind_name;
+    // The time lag in seconds, or nothing where the file gives none.
+    std::optional<double> lag;
+};
+
+// A building's programme: an IfcWorkSchedule and the tasks it controls. From
+// Scene::schedules. Borrows from the scene like Node.
+//
+// at() says what each element it names is doing on a date. Dates are seconds since
+// 1970-01-01T00:00, no zone.
+struct WorkSchedule {
+    // Its index in Scene::schedules.
+    std::uint32_t index = 0;
+    // Its name, else its identification, else "schedule #k" (k from 1, in file order).
+    std::string name;
+    // "" where none.
+    std::string identification;
+    // "planned", "actual", "baseline", "notdefined" or "other".
+    std::string kind;
+    // The text of a user-defined kind (kind == "other"); "" otherwise.
+    std::string kind_name;
+    // The schedule's start and finish, or nothing where the file gives none.
+    std::optional<double> start;
+    std::optional<double> finish;
+
+    // Its tasks, in file order.
+    std::vector<Task> tasks() const {
+        const CadaclysmScene* handle = scene_.get("WorkSchedule").handle;
+        std::uint32_t count = ::cadaclysm_task_count(handle, index);
+        std::vector<Task> out;
+        out.reserve(count);
+        for (std::uint32_t t = 0; t < count; ++t) out.push_back(Task::read(scene_, index, t));
+        return out;
+    }
+
+    // Its task links (IfcRelSequence), in file order.
+    std::vector<TaskLink> links() const {
+        const CadaclysmScene* handle = scene_.get("WorkSchedule").handle;
+        std::vector<Task> all = tasks();
+        std::uint32_t count = ::cadaclysm_task_link_count(handle, index);
+        std::vector<TaskLink> out;
+        out.reserve(count);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            std::uint32_t from = 0;
+            std::uint32_t to = 0;
+            std::uint32_t kind = 0;
+            double lag = 0;
+            bool has_lag = false;
+            if (!::cadaclysm_task_link(handle, index, i, &from, &to, &kind, &lag, &has_lag)) continue;
+            out.push_back(TaskLink{all[from], all[to], detail::link_kind_word(kind),
+                                   detail::text(::cadaclysm_task_link_kind_name(handle, index, i)),
+                                   detail::given(has_lag, lag)});
+        }
+        return out;
+    }
+
+    // What each element this schedule names is doing on `date` (seconds since
+    // 1970-01-01T00:00), in node order; elements no task names are not listed. `dates` is
+    // "scheduled" or "actual" -- which of a task's dates to play. An Error for any other
+    // `dates` ("dates must be 'scheduled' or 'actual'") and for a `date` that is not finite,
+    // carrying cadaclysm_last_error()'s text unchanged.
+    Result<std::vector<ElementState>> at(double date, std::string_view dates = "scheduled") const {
+        std::uint32_t which = 0;
+        if (dates == "actual") {
+            which = 1;
+        } else if (dates != "scheduled") {
+            return Error{"dates must be 'scheduled' or 'actual'", Origin::reader};
+        }
+        const CadaclysmScene* handle = scene_.get("WorkSchedule").handle;
+        std::int64_t count = ::cadaclysm_schedule_at(handle, index, date, which, nullptr, 0);
+        if (count < 0) return detail::reader_error("at");
+        std::vector<CadaclysmElementState> rows(static_cast<std::size_t>(count));
+        std::int64_t filled = ::cadaclysm_schedule_at(handle, index, date, which, rows.data(),
+                                                      static_cast<std::uint32_t>(count));
+        if (filled < 0) return detail::reader_error("at");
+        rows.resize(std::min(static_cast<std::size_t>(filled), rows.size()));
+        std::vector<ElementState> out;
+        out.reserve(rows.size());
+        for (const CadaclysmElementState& row : rows) {
+            out.push_back(ElementState{Node(scene_, row.node), detail::phase_word(row.phase), row.progress,
+                                       detail::given(row.has_variance, row.variance)});
+        }
+        return out;
+    }
+
+    // Same scene, same index.
+    bool operator==(const WorkSchedule& other) const noexcept {
+        return index == other.index && scene_.identity() == other.scene_.identity();
+    }
+    bool operator!=(const WorkSchedule& other) const noexcept { return !(*this == other); }
+
+private:
+    friend class Scene;
+    detail::Ref<detail::SceneState> scene_;
 };
 
 // ---- the scene ----------------------------------------------------------------------
@@ -2382,6 +2813,20 @@ public:
     }
 
     double metres_per_unit() const { return ::cadaclysm_metres_per_unit(h()); }
+
+    // Draw every visible placement through the view library in use: on a window library
+    // show() blocks until the window is closed; the terminal prints a still. view()
+    // returns the Camera it was left at. Include <cadaclysm/view.hpp> to call them.
+    template <class V = View, class O = ShowOptions>
+    Result<void> show(const O& options = O{}) const {
+        auto drawn = V::draw(*this, options, false);
+        if (!drawn) return drawn.error();
+        return {};
+    }
+    template <class V = View, class O = ShowOptions>
+    auto view(const O& options = O{}) const {
+        return V::draw(*this, options, true);
+    }
 
     // The whole scene's bounds. Meshes all of it to find out.
     Bounds bounds() const {
@@ -2544,6 +2989,30 @@ public:
         return out;
     }
 
+    // The file's work schedules -- IfcWorkSchedule, each a programme of tasks. Empty for a
+    // file that records none.
+    std::vector<WorkSchedule> schedules() const {
+        const CadaclysmScene* handle = h();
+        std::uint32_t count = ::cadaclysm_schedule_count(handle);
+        std::vector<WorkSchedule> out;
+        out.reserve(count);
+        detail::Ref<detail::SceneState> r = ref();
+        for (std::uint32_t i = 0; i < count; ++i) {
+            WorkSchedule schedule;
+            schedule.index = i;
+            schedule.name = detail::text(::cadaclysm_schedule_name(handle, i));
+            schedule.identification = detail::text(::cadaclysm_schedule_identification(handle, i));
+            schedule.kind = detail::schedule_kind_word(::cadaclysm_schedule_kind(handle, i));
+            schedule.kind_name = detail::text(::cadaclysm_schedule_kind_name(handle, i));
+            double value = 0;
+            if (::cadaclysm_schedule_start(handle, i, &value)) schedule.start = value;
+            if (::cadaclysm_schedule_finish(handle, i, &value)) schedule.finish = value;
+            schedule.scene_ = r;
+            out.push_back(std::move(schedule));
+        }
+        return out;
+    }
+
     // The link the file declares as the mechanism's base, or nothing when it declares
     // none (the default ground is then the link on the most joints; see pose()).
     std::optional<Link> base() const {
@@ -2646,14 +3115,14 @@ public:
     // Every visible placement's wireframe as SVG text, from the camera `options`
     // describes -- the library's own camera, not a viewer. See SvgOptions.
     Result<std::string> svg_text(const SvgOptions& options = SvgOptions()) const {
-        CadaclysmSvgOptions raw = detail::build_svg_options(options, detail::default_up_of(convention()));
+        CADACLYSM_TRY(raw, detail::build_svg_options(options, detail::default_up_of(convention())));
         const char* text = ::cadaclysm_scene_svg_text(h(), &raw);
         if (!text) return detail::reader_error("svg");
         return std::string(text);
     }
     // svg_text() written to `path` by the library itself.
     Result<void> svg(const std::string& path, const SvgOptions& options = SvgOptions()) const {
-        CadaclysmSvgOptions raw = detail::build_svg_options(options, detail::default_up_of(convention()));
+        CADACLYSM_TRY(raw, detail::build_svg_options(options, detail::default_up_of(convention())));
         if (!::cadaclysm_scene_svg(h(), path.c_str(), &raw)) {
             return detail::reader_error(("could not write " + path).c_str());
         }
@@ -2697,6 +3166,13 @@ private:
             if (joint != NONE) unsolved.push_back(Joint(scene_ref, joint));
         }
 
+        std::vector<std::string> diagnostics;
+        std::uint32_t diagnostic_count = ::cadaclysm_pose_diagnostic_count(pose_ptr);
+        for (std::uint32_t i = 0; i < diagnostic_count; ++i) {
+            const char* text = ::cadaclysm_pose_diagnostic(pose_ptr, i);
+            if (text) diagnostics.push_back(detail::text(text));
+        }
+
         std::vector<std::tuple<Joint, std::uint32_t, double>> out_of_range;
         std::uint32_t out_of_range_count = ::cadaclysm_pose_out_of_range_count(pose_ptr);
         for (std::uint32_t i = 0; i < out_of_range_count; ++i) {
@@ -2708,9 +3184,10 @@ private:
             }
         }
 
-        return Pose{std::move(ground), std::move(unsolved), std::move(out_of_range), std::move(transforms)};
+        return Pose{std::move(ground), std::move(unsolved), std::move(diagnostics), std::move(out_of_range), std::move(transforms)};
     }
 
+    friend struct detail::ViewAccess;
     detail::SceneState& state(const char* what) const {
         if (!state_) detail::bad_access(what, "the scene is empty (moved from)");
         if (!state_->live()) detail::bad_access(what, "the scene is closed");

@@ -6,6 +6,7 @@
 //     cadaclysm_pair_test [cadaclysm.lic]
 #include <cadaclysm/cadaclysm_blacksmith.hpp>
 
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <functional>
@@ -240,7 +241,7 @@ static Result<void> run() {
              CADACLYSM_TRY(f, bs::Frame::xy());
              return arm.pair("back", "orbital", f);
          },
-         "pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, spherical, "
+         "pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, gear, rack_and_pinion, spherical, "
          "spherical_with_pin, planar, universal, homokinetic, fully_constrained, unconstrained)"},
         {[&]() -> Result<void> {
              CADACLYSM_TRY(f, bs::Frame::xy());
@@ -414,6 +415,108 @@ static Result<void> run_one_sided_range() {
     return {};
 }
 
+// Drives plan 4's round trip, at parity with Python's _geared(): a pinion turning on
+// "drive" meshes, by the gear pair "mesh" (radii 10 and 20, ratio -0.5, bevel 0.25, helical
+// 0.125), with a wheel turning on "driven" about (30, 0); the wheel's part sits 5 off its
+// axis, at (35, 0, 2).
+static Result<bs::Assembly> geared(bool mesh) {
+    CADACLYSM_TRY(cuboid, bs::Solid::cuboid(40, 10, 2));
+    CADACLYSM_TRY(plate, cuboid.named("plate"));
+    CADACLYSM_TRY(cylinder, bs::Solid::cylinder(1, 6));
+    CADACLYSM_TRY(pin, cylinder.named("pin"));
+    CADACLYSM_TRY(hub_cylinder, bs::Solid::cylinder(2, 4));
+    CADACLYSM_TRY(hub, hub_cylinder.named("hub"));
+    CADACLYSM_TRY(gears, bs::Assembly::create("gears"));
+    CADACLYSM_TRY(origin, bs::Frame::xy());
+    CADACLYSM_TRY(pinion_at, bs::Frame::xy({0, 0, 2}));
+    CADACLYSM_TRY(wheel_at, bs::Frame::xy({35, 0, 2}));
+    CADACLYSM_TRY(wheel_axis, bs::Frame::xy({30, 0, 2}));
+    CADACLYSM_TRY(frame_placement, gears.place_solid(plate, origin, "frame"));
+    (void)frame_placement;
+    CADACLYSM_TRY(pinion_placement, gears.place_solid(pin, pinion_at, "pinion"));
+    (void)pinion_placement;
+    CADACLYSM_TRY(wheel_placement, gears.place_solid(hub, wheel_at, "wheel"));
+    (void)wheel_placement;
+    CADACLYSM_TRY_VOID(gears.link("base", {"frame"}));
+    CADACLYSM_TRY_VOID(gears.link("driver", {"pinion"}));
+    CADACLYSM_TRY_VOID(gears.link("follower", {"wheel"}));
+    CADACLYSM_TRY_VOID(gears.joint("drive", "base", "driver"));
+    CADACLYSM_TRY_VOID(gears.joint("driven", "base", "follower"));
+    CADACLYSM_TRY_VOID(gears.joint("mesh", "driver", "follower"));
+    CADACLYSM_TRY_VOID(gears.pair("drive", "revolute", pinion_at));
+    CADACLYSM_TRY_VOID(gears.pair("driven", "revolute", wheel_axis));
+    if (mesh) {
+        CADACLYSM_TRY_VOID(gears.pair_with("mesh", "gear", pinion_at, {}, {10, 20, -0.5, 0.25, 0.125}));
+    }
+    return gears;
+}
+
+static Result<void> run_geared() {
+    CADACLYSM_TRY(gears, geared(true));
+    CADACLYSM_TRY(scene, gears.to_scene());
+    std::vector<cadaclysm::Joint> joints = scene.joints();
+    std::optional<cadaclysm::Joint> drive, driven, mesh;
+    for (const cadaclysm::Joint& j : joints) {
+        if (j.name() == "drive") drive = j;
+        if (j.name() == "driven") driven = j;
+        if (j.name() == "mesh") mesh = j;
+    }
+    check(drive && driven && mesh, "the geared scene lacks drive, driven or mesh");
+    if (!(drive && driven && mesh)) return {};
+
+    std::optional<cadaclysm::Pair> mesh_pair = mesh->pair();
+    check(mesh_pair.has_value(), "'mesh' has no pair");
+    if (mesh_pair) {
+        check(mesh_pair->kind() == cadaclysm::PairKind::other, "'mesh''s kind is not other");
+        check(mesh_pair->kind_name() == "gear", "'mesh''s kind_name is " + mesh_pair->kind_name());
+        std::vector<double> parameters = mesh_pair->parameters();
+        check(parameters.size() == 5, "'mesh' does not have 5 parameters");
+        if (parameters.size() == 5) {
+            const double want[5] = {10, 20, -0.5, 0.25, 0.125};
+            for (int i = 0; i < 5; ++i) check_close(parameters[i], want[i], "mesh parameter " + std::to_string(i));
+        }
+    }
+    std::optional<cadaclysm::Pair> drive_pair = drive->pair();
+    check(drive_pair.has_value(), "'drive' has no pair");
+    if (drive_pair) {
+        check(drive_pair->kind_name() == "revolute", "'drive''s kind_name is not revolute");
+        check(drive_pair->parameters().empty(), "'drive' has parameters");
+    }
+
+    // The driver alone turns the wheel by ratio x 0.4 about (30, 0): nothing to report.
+    CADACLYSM_TRY(alone, scene.pose({cadaclysm::StateValue{*drive, {0.4}}}));
+    check(alone.diagnostics.empty() && alone.unsolved.empty(), "driver alone: diagnostics or unsolved are not empty");
+    std::vector<cadaclysm::Node> wheel_nodes = scene.links()[2].nodes();
+    check(!wheel_nodes.empty(), "the follower link has no node");
+    if (!wheel_nodes.empty()) {
+        std::array<double, 16> raw = alone.raw_transform(wheel_nodes[0]);
+        check_close(raw[12], 30 + 5 * std::cos(-0.2), "wheel x");
+        check_close(raw[13], 5 * std::sin(-0.2), "wheel y");
+        check_close(raw[14], 2.0, "wheel z");
+    }
+
+    // Both sides given, against the law: one diagnostic, in the kernel's words.
+    CADACLYSM_TRY(both, scene.pose({cadaclysm::StateValue{*drive, {0.4}}, cadaclysm::StateValue{*driven, {0.4}}}));
+    check(both.diagnostics.size() == 1, "both sides given: not exactly one diagnostic");
+    const std::string prefix = "coupling 'mesh': both 'drive' and 'driven' are given and disagree by";
+    if (!both.diagnostics.empty()) {
+        check(both.diagnostics[0].compare(0, prefix.size(), prefix) == 0, "diagnostic reads: " + both.diagnostics[0]);
+    }
+    scene.close();
+
+    // A wrong parameter count is refused in the kernel's words; the right one is then taken.
+    CADACLYSM_TRY(bare, geared(false));
+    CADACLYSM_TRY(xy, bs::Frame::xy());
+    Result<void> refused = bare.pair_with("mesh", "gear", xy, {}, {10, 20});
+    check(!refused.ok(), "pair_with with 2 gear parameters was accepted");
+    if (!refused) {
+        check(refused.error().message == "pair: a gear takes 3 or 5 parameters, not 2",
+              "pair_with refusal reads: " + refused.error().message);
+    }
+    check(bool(bare.pair_with("mesh", "gear", xy, {}, {10, 20, -0.5})), "pair_with with 3 gear parameters was refused");
+    return {};
+}
+
 int main(int argc, char** argv) {
     if (argc > 1) {
         Result<void> loaded = bs::license(argv[1]);
@@ -435,6 +538,11 @@ int main(int argc, char** argv) {
     Result<void> sequence_outcome = run_sequence();
     if (!sequence_outcome) {
         std::fprintf(stderr, "FAIL: %s\n", sequence_outcome.error().message.c_str());
+        return 1;
+    }
+    Result<void> geared_outcome = run_geared();
+    if (!geared_outcome) {
+        std::fprintf(stderr, "FAIL: %s\n", geared_outcome.error().message.c_str());
         return 1;
     }
     if (failures) {

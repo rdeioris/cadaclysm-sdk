@@ -87,7 +87,7 @@ if not pcall(ffi.typeof, "struct CadaclysmBlacksmithMesh") then
 end
 
 --- This file's own version (the workspace's); `version()` is the loaded library's.
-M.__version__ = "0.10.0"
+M.__version__ = "0.11.0"
 
 --- What the ABI returns for "no such face" and uses for "the whole solid".
 M.NONE = 0xFFFFFFFF
@@ -267,6 +267,7 @@ end
 local ENTRY_POINTS = {
   "cadaclysm_blacksmith_last_error", "cadaclysm_blacksmith_license_set", "cadaclysm_blacksmith_license_info",
   "cadaclysm_blacksmith_license_notice_count", "cadaclysm_blacksmith_build_date", "cadaclysm_blacksmith_version",
+  "cadaclysm_blacksmith_option_set", "cadaclysm_blacksmith_option_get",
   "cadaclysm_blacksmith_solid_free", "cadaclysm_blacksmith_profile_free", "cadaclysm_blacksmith_profile_rect",
   "cadaclysm_blacksmith_profile_circle", "cadaclysm_blacksmith_profile_slot",
   "cadaclysm_blacksmith_profile_regular_polygon", "cadaclysm_blacksmith_profile_star", "cadaclysm_blacksmith_profile_text",
@@ -306,6 +307,7 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_merge_flush",
   "cadaclysm_blacksmith_refillet", "cadaclysm_blacksmith_unfillet", "cadaclysm_blacksmith_rechamfer",
   "cadaclysm_blacksmith_unchamfer", "cadaclysm_blacksmith_split", "cadaclysm_blacksmith_split_by_plane",
+  "cadaclysm_blacksmith_split_by_profile",
   "cadaclysm_blacksmith_lump_count", "cadaclysm_blacksmith_lump", "cadaclysm_blacksmith_face_count",
   "cadaclysm_blacksmith_select_face", "cadaclysm_blacksmith_face_frame", "cadaclysm_blacksmith_face_ref",
   "cadaclysm_blacksmith_mass_properties",
@@ -328,6 +330,7 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_string_free",
   "cadaclysm_blacksmith_from_brep", "cadaclysm_blacksmith_brep_layout_id",
   "cadaclysm_blacksmith_svg_options_init", "cadaclysm_blacksmith_svg_text", "cadaclysm_blacksmith_svg",
+  "cadaclysm_blacksmith_silhouette_beziers", "cadaclysm_blacksmith_silhouette_beziers_free",
   "cadaclysm_blacksmith_fem_options_init", "cadaclysm_blacksmith_fem_mesh",
   "cadaclysm_blacksmith_fem_mesh_view", "cadaclysm_blacksmith_fem_mesh_edge",
   "cadaclysm_blacksmith_fem_mesh_vertex", "cadaclysm_blacksmith_fem_mesh_open_edge",
@@ -340,12 +343,17 @@ local ENTRY_POINTS = {
   "cadaclysm_blacksmith_assembly_new", "cadaclysm_blacksmith_assembly_free", "cadaclysm_blacksmith_assembly_name",
   "cadaclysm_blacksmith_assembly_place_solid", "cadaclysm_blacksmith_assembly_place_assembly",
   "cadaclysm_blacksmith_assembly_step", "cadaclysm_blacksmith_assembly_link", "cadaclysm_blacksmith_assembly_joint",
-  "cadaclysm_blacksmith_assembly_pair", "cadaclysm_blacksmith_assembly_state", "cadaclysm_blacksmith_assembly_sequence",
+  "cadaclysm_blacksmith_assembly_pair", "cadaclysm_blacksmith_assembly_pair_with",
+  "cadaclysm_blacksmith_assembly_state", "cadaclysm_blacksmith_assembly_posed",
+  "cadaclysm_blacksmith_assembly_sequence",
   "cadaclysm_blacksmith_assembly_base",
   "cadaclysm_blacksmith_pair_freedom_count",
   "cadaclysm_blacksmith_solid_bounds_box", "cadaclysm_blacksmith_box_moved", "cadaclysm_blacksmith_box_overlaps",
   "cadaclysm_blacksmith_boxes_apart", "cadaclysm_blacksmith_collider_new", "cadaclysm_blacksmith_collider_free",
   "cadaclysm_blacksmith_collider_group_count", "cadaclysm_blacksmith_collider_stats", "cadaclysm_blacksmith_collider_check",
+  "cadaclysm_blacksmith_subd_cuboid", "cadaclysm_blacksmith_subd_cylinder", "cadaclysm_blacksmith_subd_sphere", "cadaclysm_blacksmith_subd_torus", "cadaclysm_blacksmith_subd_from_parts", "cadaclysm_blacksmith_subd_parts",
+  "cadaclysm_blacksmith_subd_free", "cadaclysm_blacksmith_subd_transform", "cadaclysm_blacksmith_subd_set_crease", "cadaclysm_blacksmith_subd_set_pin", "cadaclysm_blacksmith_subd_extrude", "cadaclysm_blacksmith_subd_inset", "cadaclysm_blacksmith_subd_insert_loop",
+  "cadaclysm_blacksmith_subd_mirror_on", "cadaclysm_blacksmith_subd_mirror_off", "cadaclysm_blacksmith_subd_full", "cadaclysm_blacksmith_subd_edge_loop", "cadaclysm_blacksmith_subd_smooth_mesh", "cadaclysm_blacksmith_subd_pick", "cadaclysm_blacksmith_subd_to_solid",
   "cadaclysm_blacksmith_collisions_free", "cadaclysm_blacksmith_collisions_count", "cadaclysm_blacksmith_collisions_hit",
   "cadaclysm_blacksmith_collisions_solid",
   "cadaclysm_blacksmith_profile_to_arcs", "cadaclysm_blacksmith_profile_offset", "cadaclysm_blacksmith_solid_section",
@@ -474,8 +482,7 @@ local named = {}
 -- A list argument as a uint32_t array, never null -- an empty list is not "none": `list`
 -- must be a list (a table that is not a record -- an Edge or a Solid is refused) and each
 -- item an index (a whole number, 0 to 4294967295) or, where `edges`, an Edge. Refused
--- here, named, before the kernel is asked: one edge is `{ edge }`, never read as none
--- (docs/superpowers/specs/2026-09-25-list-arguments-refused-clearly-design.md).
+-- here, named, before the kernel is asked: one edge is `{ edge }`, never read as none.
 local function uint32s(list, call, param, edges)
   local function described(v)
     if named.Edge and type(v) == "table" and getmetatable(v) == named.Edge then return "an Edge" end
@@ -512,7 +519,7 @@ end
 -- A list argument of names: `list` must be a table that is not a record (an Edge, a Solid,
 -- etc. -- a key that is not a whole number from 1) and each item a string. Refused here,
 -- named, before the kernel is asked: one name is `{ name }`, never walked a character at a
--- time (docs/superpowers/specs/2026-09-25-list-arguments-refused-clearly-design.md).
+-- time.
 local function names(list, call, param)
   local n, is_list = 0, type(list) == "table"
   if is_list then
@@ -658,6 +665,26 @@ function M.license(text_or_path)
   if not lib().cadaclysm_blacksmith_license_set(tostring(text_or_path)) then
     fail("license refused")
   end
+end
+
+--- Set a kernel option, by its name, for the whole process from the next call on:
+--- "boolean.mesh_budget", "boolean.finest_tolerance", "profile_boolean.point_budget" or
+--- "measure.default_accuracy". Raises -- and changes nothing -- for a name that is not
+--- an option or a value it does not take, saying which and what it takes.
+function M.set_option(name, value)
+  if not lib().cadaclysm_blacksmith_option_set(tostring(name), tonumber(value)) then
+    fail("option '" .. tostring(name) .. "' refused")
+  end
+end
+
+--- A kernel option's value, by its name: what set_option last set, else its default.
+--- Raises for a name that is not an option, listing the ones there are.
+function M.option(name)
+  local out = ffi.new("double[1]")
+  if not lib().cadaclysm_blacksmith_option_get(tostring(name), out) then
+    fail("no option '" .. tostring(name) .. "'")
+  end
+  return out[0]
 end
 
 --- One line about the license the library is running under. Never empty: the
@@ -2319,7 +2346,8 @@ end
 --- without their meshes crossing -- can be missed; near-tangent contact is where
 --- this bites.
 ---
---- `progress(phase, done, total)` hears "mesh", "cull", "cross", "snap" and "curve".
+--- `progress(phase, done, total)` hears "meet" on the exact route; "mesh", "cull",
+--- "cross", "snap" and "curve" where it falls back to the mesh route.
 --- Raises for a `tolerance` not positive and finite, a solid with no faces, or one
 --- that meshes to nothing.
 function Solid:intersect(other, tolerance, progress)
@@ -2697,6 +2725,41 @@ function Solid:svg(path, words)
   M.write_svg(path, { self }, words)
 end
 
+--- This solid's silhouette from the camera `words` describes (`svg_text`'s) -- where its
+--- surfaces turn away from the eye, which no edge of it lies on. Returns `{ points, weights,
+--- count }` as the reader's `Node:silhouette_beziers` does: Lua tables of numbers, four
+--- control points a curve, three numbers each (`count * 12`), one weight a control point
+--- (`count * 4`). The library's block is the caller's to free; it is copied out and freed
+--- before this returns, on every path, so there is nothing for the caller to release.
+---
+--- A body with no silhouette (every face planar) is an empty answer, `count == 0` and
+--- empty tables, not an error. Raises `BuildError` on a refused option (a tolerance that
+--- is not finite and positive, say), the message beginning `silhouette: `.
+function Solid:silhouette_beziers(words)
+  local o = svg_options(words)
+  local count = ffi.new("uint32_t[1]")
+  local data = lib().cadaclysm_blacksmith_silhouette_beziers(solid_handle(self, "silhouette_beziers"), o, count)
+  if data == nil then
+    -- All-null with count 0 is both the empty answer and a refusal; the thread's error, cleared
+    -- at entry, tells them apart.
+    if last_error() ~= "" then fail("silhouette_beziers") end
+    return { points = {}, weights = {}, count = 0 }
+  end
+  local n = count[0]
+  -- Each curve is 16 doubles: four control points (x, y, z), then four weights.
+  local ok, out = pcall(function()
+    local points, weights = {}, {}
+    for c = 0, n - 1 do
+      for i = 0, 11 do points[c * 12 + i + 1] = data[c * 16 + i] end
+      for i = 0, 3 do weights[c * 4 + i + 1] = data[c * 16 + 12 + i] end
+    end
+    return { points = points, weights = weights, count = n }
+  end)
+  lib().cadaclysm_blacksmith_silhouette_beziers_free(data, n)
+  if not ok then error(out, 0) end
+  return out
+end
+
 --- This profile's own loops as SVG text, from the camera `words` describes, `view`
 --- defaulting to `"top"` -- see `profile_svg_words`. See `write_svg_text`.
 function Profile:svg_text(words)
@@ -2992,6 +3055,20 @@ function Solid:split_by_plane(plane, tolerance, progress)
   return bodies
 end
 
+--- This solid split by the closed `profile` drawn on `frame`, pushed straight
+--- through it along the frame's z both ways: the bodies outside the profile first,
+--- then those inside (a Lua array). Where the plane lies along z does not matter.
+function Solid:split_by_profile(profile, frame, tolerance, progress)
+  if tolerance == nil then tolerance = 0.05 end
+  local a, p, f = self:_h(), profile_handle(profile, "split_by_profile"), frame_arg(frame)
+  local cb, done = progress_callback(progress)
+  local all = new_solid(done(lib().cadaclysm_blacksmith_split_by_profile(a, p, f, tolerance, cb, nil)))
+  local ok, bodies = pcall(all.lumps, all)
+  all:close()
+  if not ok then error(bodies, 0) end
+  return bodies
+end
+
 --- This solid's connected bodies, each a solid of its own (a Lua array), in the
 --- order of their first faces.
 function Solid:lumps()
@@ -3075,7 +3152,7 @@ end
 
 -- A callback may fire only from a C call made by code the JIT did not compile.
 for _, name in ipairs({ "join", "cut", "common", "trim", "split_sheet", "fillet", "push_pull", "split",
-  "split_by_plane", "shell", "thicken" }) do
+  "split_by_plane", "split_by_profile", "shell", "thicken" }) do
   jit.off(Solid[name])
 end
 
@@ -3710,6 +3787,503 @@ function Collider:check(frames, share)
   return hits
 end
 
+-- ---- the Kiln: the SubD cage ---------------------------------------------------------------
+
+local SUBD_AXES = { x = 0, y = 1, z = 2 }
+local SUBD_KINDS = { vertices = 0, edges = 1, faces = 2 }
+local SUBD_PICKS = { vertex = 0, edge = 1, face = 2 }
+
+local function subd_shown(v)
+  if type(v) == "string" then return ("%q"):format(v) end
+  return tostring(v)
+end
+
+-- A count as the C ABI reads it (a whole number, 0 to 4294967295), refused here, named,
+-- rather than wrapped by the FFI conversion.
+local function subd_count(value, what)
+  if type(value) ~= "number" or value < 0 or value > 4294967295 or value ~= math.floor(value) then
+    raise(("%s must be a whole number from 0 to 4294967295, not %s"):format(what, subd_shown(value)))
+  end
+  return value
+end
+
+local function subd_axis(axis, what)
+  local k = type(axis) == "string" and SUBD_AXES[axis:lower()] or nil
+  if k == nil then raise(("%s: axis must be 'x', 'y' or 'z', not %s"):format(what, subd_shown(axis))) end
+  return k
+end
+
+-- `{a, b}` vertex pairs -- edges -- as the flat uint32_t array the C ABI reads, and how
+-- many pairs.
+local function subd_pairs(list, call, param)
+  if type(list) ~= "table" then
+    raise(("%s: %s must be a list of {a, b} vertex pairs, not %s"):format(call, param, subd_shown(list)))
+  end
+  local flat = {}
+  for i, pair in ipairs(list) do
+    local function whole(v) return type(v) == "number" and v >= 0 and v == math.floor(v) end
+    if type(pair) ~= "table" or #pair ~= 2 or not whole(pair[1]) or not whole(pair[2]) then
+      raise(("%s: %s[%d] is not an {a, b} vertex pair: %s"):format(call, param, i, subd_shown(pair)))
+    end
+    flat[#flat + 1] = pair[1]
+    flat[#flat + 1] = pair[2]
+  end
+  local ids = uint32s(flat, call, param)
+  return ids, #flat / 2
+end
+
+-- Positions as the flat doubles the C ABI reads: a flat run of three a vertex, or
+-- `{x, y, z}` each. Returns the array and the vertex count.
+local function subd_points(positions, call)
+  if type(positions) ~= "table" then
+    raise(("%s: positions must be numbers, three a vertex, not %s"):format(call, subd_shown(positions)))
+  end
+  local flat = positions
+  if type(positions[1]) == "table" then
+    flat = {}
+    for i, p in ipairs(positions) do
+      if type(p) ~= "table" or #p ~= 3 then
+        raise(("%s: positions[%d] must be {x, y, z}, not %s"):format(call, i, subd_shown(p)))
+      end
+      flat[#flat + 1] = p[1]
+      flat[#flat + 1] = p[2]
+      flat[#flat + 1] = p[3]
+    end
+  end
+  if #flat % 3 ~= 0 then
+    raise(("%s: positions must be three numbers a vertex, not %d"):format(call, #flat))
+  end
+  local out = ffi.new("double[?]", math.max(#flat, 1))
+  for i = 1, #flat do out[i - 1] = number(flat[i], call .. " positions") end
+  return out, #flat / 3
+end
+
+-- Sixteen numbers column-major, as the C ABI reads them, or a 4x4 of rows (row-major, as
+-- Python's `transform` takes one).
+local function subd_matrix(matrix)
+  if type(matrix) ~= "table" then
+    raise(("transform matrix: sixteen numbers column-major or a 4x4, not %s"):format(subd_shown(matrix)))
+  end
+  if type(matrix[1]) == "table" then
+    local ok = #matrix == 4
+    for r = 1, 4 do
+      if type(matrix[r]) ~= "table" or #matrix[r] ~= 4 then ok = false end
+    end
+    if not ok then raise("transform matrix: a nested matrix must be 4x4 (four rows of four numbers)") end
+    local columns = {}
+    for c = 1, 4 do
+      for r = 1, 4 do columns[#columns + 1] = matrix[r][c] end
+    end
+    return doubles(columns, 16, "transform matrix")
+  end
+  return doubles(matrix, 16, "transform matrix")
+end
+
+-- `n` uint32_t values copied out of a view into a Lua list (a view may be NULL when n is 0).
+local function subd_ids(ptr, n)
+  local out = {}
+  for i = 1, n do out[i] = tonumber(ptr[i - 1]) end
+  return out
+end
+
+-- Flat ids read back as `{a, b}` pairs.
+local function subd_pairs_of(ids)
+  local out = {}
+  for i = 1, #ids - 1, 2 do out[#out + 1] = { ids[i], ids[i + 1] } end
+  return out
+end
+
+-- `n` triples of doubles copied out of a view as `{x, y, z}` rows.
+local function subd_rows(ptr, n)
+  local out = {}
+  for i = 0, n - 1 do out[i + 1] = { ptr[3 * i], ptr[3 * i + 1], ptr[3 * i + 2] } end
+  return out
+end
+
+--- One level of a cage's smooth surface, as `Subd:smooth_mesh` returns it, copied out of
+--- the cage so it outlives it. `positions` and `normals` are lists of `{x, y, z}` -- limit
+--- positions and unit outward limit normals; `indices` is a flat list, three vertex ids
+--- a triangle (0-based); `triangle_face` the face of the **full** cage each triangle lies
+--- on (on a mirrored half, face `f` of the half is `f` and its reflection `f + #faces`).
+---@class SubdMesh
+---@field positions number[][]
+---@field normals number[][]
+---@field indices integer[]
+---@field triangle_face integer[]
+local SubdMesh = {}
+class(SubdMesh)
+M.SubdMesh = SubdMesh
+
+local function subd_mesh_of(raw)
+  local n, m = tonumber(raw.vertex_count), tonumber(raw.index_count)
+  return setmetatable({
+    positions = subd_rows(raw.positions, n),
+    normals = subd_rows(raw.normals, n),
+    indices = subd_ids(raw.indices, m),
+    triangle_face = subd_ids(raw.triangle_face, m / 3),
+  }, SubdMesh)
+end
+
+--- What `Subd:to_solid` did and how close it came: `regular` patches exact from their own
+--- net and `refined` ones from a refined neighbourhood; the Catmull-Clark `steps` taken
+--- first (1 or 2); `levels`, the deepest local refinement a patch took (0 when none was
+--- refined); the largest `deviation` from the limit surface, as a fraction of the cage's
+--- bounding-box diagonal; the largest tangent break `g1_angle_deg` across a side that is
+--- not creased, in degrees; and the world points they were measured at, `deviation_at` and
+--- `g1_at` (`{x, y, z}` each).
+---@class SubdReport
+---@field regular integer
+---@field refined integer
+---@field steps integer
+---@field levels integer
+---@field deviation number
+---@field g1_angle_deg number
+---@field deviation_at number[]
+---@field g1_at number[]
+local SubdReport = {}
+class(SubdReport)
+M.SubdReport = SubdReport
+
+local function subd_report_of(raw)
+  return setmetatable({
+    regular = tonumber(raw.regular), refined = tonumber(raw.refined),
+    steps = tonumber(raw.steps), levels = tonumber(raw.levels),
+    deviation = raw.deviation, g1_angle_deg = raw.g1_angle_deg,
+    deviation_at = { raw.deviation_at[0], raw.deviation_at[1], raw.deviation_at[2] },
+    g1_at = { raw.g1_at[0], raw.g1_at[1], raw.g1_at[2] },
+  }, SubdReport)
+end
+
+--- A Catmull-Clark control cage: positions, faces, creased edges, pinned vertices, an
+--- optional mirror plane, and the selection of the edit that made it. Immutable: every
+--- edit returns a new `Subd`, with `selection` naming what that edit touched. `to_solid`
+--- turns it into an exact B-rep. `close()` frees this handle; so does the garbage
+--- collector. A refusal raises `BuildError` with the kernel's own words. Ids count from
+--- zero; an edge is `{a, b}`; a selection is `{kind = "vertices" | "edges" | "faces", ids
+--- = {...}}`, an edge selection's ids `{a, b}` pairs.
+---@class Subd
+local Subd = {}
+local Subd_get = {}
+class(Subd, Subd_get)
+M.Subd = Subd
+
+local function free_subd(h)
+  lib().cadaclysm_blacksmith_subd_free(h)
+end
+
+local function new_subd(handle, what)
+  checked(handle, what or "subd")
+  return setmetatable({ _ptr = ffi.gc(handle, free_subd) }, Subd)
+end
+
+--- Free the cage. Idempotent.
+function Subd:close()
+  local h = rawget(self, "_ptr")
+  if h ~= nil then
+    self._ptr = nil
+    ffi.gc(h, nil)
+    lib().cadaclysm_blacksmith_subd_free(h)
+  end
+end
+
+function Subd:_h()
+  local h = rawget(self, "_ptr")
+  if h == nil then raise("subd: closed") end
+  return h
+end
+
+-- -- the primitives
+
+--- A box of `size` (`{x, y, z}`, default 2 each), centred on the origin, with `segments`
+--- (`{nx, ny, nz}`, default 1 each) quads along each axis (1 to 1024).
+function Subd.cuboid(size, segments)
+  local s = doubles(size or { 2, 2, 2 }, 3, "cuboid size")
+  local counts, n = uint32s(segments or { 1, 1, 1 }, "cuboid", "segments")
+  if n ~= 3 then raise(("cuboid segments: expected 3 numbers, got %d"):format(n)) end
+  return new_subd(lib().cadaclysm_blacksmith_subd_cuboid(s[0], s[1], s[2], counts[0], counts[1], counts[2]), "subd_cuboid")
+end
+
+--- A cylinder along +Z: one n-gon cap per end with `sides` sides and `rings` bands of
+--- quads between them; with `creased_rims` the two rim loops are creased, so the caps stay
+--- flat. The rims are creased by default (nil is true), which is what converts: an
+--- uncreased cylinder of 7 or more sides is refused by `to_solid` at the default
+--- tolerances. Defaults: radius 1, height 2, sides 8, rings 1.
+function Subd.cylinder(radius, height, sides, rings, creased_rims)
+  if creased_rims == nil then creased_rims = true end
+  return new_subd(lib().cadaclysm_blacksmith_subd_cylinder(
+    number(radius == nil and 1 or radius, "cylinder radius"), number(height == nil and 2 or height, "cylinder height"),
+    subd_count(sides == nil and 8 or sides, "cylinder sides"), subd_count(rings == nil and 1 or rings, "cylinder rings"),
+    creased_rims and true or false), "subd_cylinder")
+end
+
+--- A quad ball of `radius` (default 1): a cube grid with `segments` (default 2) quads per
+--- edge, each vertex pushed out to the radius.
+function Subd.sphere(radius, segments)
+  return new_subd(lib().cadaclysm_blacksmith_subd_sphere(
+    number(radius == nil and 1 or radius, "sphere radius"), subd_count(segments == nil and 2 or segments, "sphere segments")),
+    "subd_sphere")
+end
+
+--- A torus around +Z: `around` (default 12) steps about the axis at `major` (default 3),
+--- `tube` (default 8) steps round the tube of `minor` (default 1), all quads.
+function Subd.torus(major, minor, around, tube)
+  return new_subd(lib().cadaclysm_blacksmith_subd_torus(
+    number(major == nil and 3 or major, "torus major"), number(minor == nil and 1 or minor, "torus minor"),
+    subd_count(around == nil and 12 or around, "torus around"), subd_count(tube == nil and 8 or tube, "torus tube")),
+    "subd_torus")
+end
+
+--- A cage from its parts, the lossless inverse of reading them back: `positions` (a flat
+--- run of three a vertex, or `{x, y, z}` each), `faces` lists of vertex ids, `creases`
+--- `{a, b}` pairs that are edges, `pins` vertex ids, and `symmetry` nil or `{axis = "x" |
+--- "y" | "z", tolerance = ...}` for a mirrored half, as `symmetry` reports it. The new
+--- cage selects nothing.
+function Subd.from_parts(positions, faces, creases, pins, symmetry)
+  local points, vertex_count = subd_points(positions, "from_parts")
+  if type(faces) ~= "table" then
+    raise(("from_parts: faces must be a list of vertex-id lists, not %s"):format(subd_shown(faces)))
+  end
+  local sizes, loop = {}, {}
+  for i, face in ipairs(faces) do
+    local _, n = uint32s(face, "from_parts", ("faces[%d]"):format(i))
+    sizes[i] = n
+    for k = 1, n do loop[#loop + 1] = face[k] end
+  end
+  local size_arr, face_count = uint32s(sizes, "from_parts", "faces")
+  local loop_arr, index_count = uint32s(loop, "from_parts", "faces")
+  local crease_arr, crease_count = subd_pairs(creases or {}, "from_parts", "creases")
+  local pin_arr, pin_count = uint32s(pins or {}, "from_parts", "pins")
+  local axis, tolerance = -1, 0
+  if symmetry ~= nil then
+    local name, within = symmetry.axis, symmetry.tolerance
+    if name == nil and within == nil then name, within = symmetry[1], symmetry[2] end
+    axis = subd_axis(name, "from_parts symmetry")
+    tolerance = number(within, "from_parts symmetry")
+  end
+  return new_subd(lib().cadaclysm_blacksmith_subd_from_parts(points, vertex_count, size_arr, face_count,
+    loop_arr, index_count, crease_arr, crease_count, pin_arr, pin_count, axis, tolerance), "subd_from_parts")
+end
+
+-- -- the parts, every one a copy
+
+-- Reads the handle's parts view, runs `read` on it, and returns what it copied out.
+function Subd:_parts(read)
+  local out = ffi.new("CadaclysmBlacksmithSubdParts")
+  if not lib().cadaclysm_blacksmith_subd_parts(self:_h(), out) then fail("subd_parts") end
+  return read(out)
+end
+
+--- The cage's vertices, a list of `{x, y, z}` of your own: a copy.
+function Subd_get.positions(self)
+  return self:_parts(function(p) return subd_rows(p.positions, tonumber(p.vertex_count)) end)
+end
+
+--- Each face's vertex ids, in loop order.
+function Subd_get.faces(self)
+  return self:_parts(function(p)
+    local sizes = subd_ids(p.face_sizes, tonumber(p.face_count))
+    local loop = subd_ids(p.face_indices, tonumber(p.index_count))
+    local faces, at = {}, 0
+    for i, size in ipairs(sizes) do
+      local face = {}
+      for k = 1, size do face[k] = loop[at + k] end
+      faces[i] = face
+      at = at + size
+    end
+    return faces
+  end)
+end
+
+--- The creased edges, each `{smaller id, larger id}`, sorted.
+function Subd_get.creases(self)
+  return self:_parts(function(p) return subd_pairs_of(subd_ids(p.creases, 2 * tonumber(p.crease_count))) end)
+end
+
+--- The pinned vertices: they refine as corners and stay put.
+function Subd_get.pins(self)
+  return self:_parts(function(p) return subd_ids(p.pins, tonumber(p.pin_count)) end)
+end
+
+--- nil for an ordinary cage; for a mirrored half, `{axis, tolerance}`: the plane's axis
+--- ("x", "y" or "z") and how far from it a vertex counts as on it.
+function Subd_get.symmetry(self)
+  return self:_parts(function(p)
+    if p.symmetry_axis < 0 then return nil end
+    return { axis = ("xyz"):sub(p.symmetry_axis + 1, p.symmetry_axis + 1), tolerance = p.symmetry_tolerance }
+  end)
+end
+
+--- What the edit that made this cage touched: `{kind = "vertices" | "faces", ids}` or
+--- `{kind = "edges", ids = {{a, b}, ...}}`; nil for a cage no edit selected (a primitive,
+--- `from_parts`, the mirror calls).
+function Subd_get.selection(self)
+  return self:_parts(function(p)
+    local kind, count = tonumber(p.selection_kind), tonumber(p.selection_count)
+    if kind > 2 then return nil end
+    if kind == 1 then return { kind = "edges", ids = subd_pairs_of(subd_ids(p.selection, 2 * count)) } end
+    return { kind = kind == 0 and "vertices" or "faces", ids = subd_ids(p.selection, count) }
+  end)
+end
+
+-- -- the edits, every one a new cage
+
+local function subd_selected(selection, call)
+  if type(selection) ~= "table" then
+    raise(("%s: selection must be {kind = 'vertices' | 'edges' | 'faces', ids = ...}, not %s"):format(call, subd_shown(selection)))
+  end
+  local kind = selection.kind
+  if type(kind) ~= "string" or SUBD_KINDS[kind] == nil then
+    raise(("%s: kind must be 'vertices', 'edges' or 'faces', not %s"):format(call, subd_shown(kind)))
+  end
+  local ids, count
+  if kind == "edges" then
+    ids, count = subd_pairs(selection.ids, call, "selection ids")
+  else
+    ids, count = uint32s(selection.ids, call, "selection ids")
+  end
+  return SUBD_KINDS[kind], ids, count
+end
+
+--- A new cage with the selected elements moved by `matrix`, and the same elements
+--- selected. `selection` is `{kind, ids}`; `matrix` sixteen numbers column-major, or a 4x4
+--- of rows (row-major); a rotation about a point is baked in by the caller.
+function Subd:transform(selection, matrix)
+  local h = self:_h()
+  local kind, ids, count = subd_selected(selection, "transform")
+  local m = subd_matrix(matrix)
+  return new_subd(lib().cadaclysm_blacksmith_subd_transform(h, kind, ids, count, m), "subd_transform")
+end
+
+--- A new cage with `edges` (`{a, b}` pairs) creased, or un-creased when `on` is false
+--- (default true); it selects them.
+function Subd:crease(edges, on)
+  local h = self:_h()
+  local flat, count = subd_pairs(edges, "crease", "edges")
+  if on == nil then on = true end
+  return new_subd(lib().cadaclysm_blacksmith_subd_set_crease(h, flat, count, on and true or false), "subd_set_crease")
+end
+
+--- A new cage with `vertices` pinned (they refine as corners and stay put), or released
+--- when `on` is false (default true); it selects them.
+function Subd:pin(vertices, on)
+  local h = self:_h()
+  local ids, count = uint32s(vertices, "pin", "vertices")
+  if on == nil then on = true end
+  return new_subd(lib().cadaclysm_blacksmith_subd_set_pin(h, ids, count, on and true or false), "subd_set_pin")
+end
+
+--- A new cage with `faces` pushed out by `distance` along each connected region's average
+--- normal, a quad wall on each boundary edge; it selects the moved faces.
+function Subd:extrude(faces, distance)
+  local h = self:_h()
+  local ids, count = uint32s(faces, "extrude", "faces")
+  return new_subd(lib().cadaclysm_blacksmith_subd_extrude(h, ids, count, number(distance, "extrude distance")), "subd_extrude")
+end
+
+--- A new cage with `faces` shrunk by `amount`, in (0, 1), within their surface and a ring
+--- of quads round each region (each face, with `individual`); it selects the inner faces.
+function Subd:inset(faces, amount, individual)
+  local h = self:_h()
+  local ids, count = uint32s(faces, "inset", "faces")
+  return new_subd(lib().cadaclysm_blacksmith_subd_inset(h, ids, count, number(amount, "inset amount"),
+    individual and true or false), "subd_inset")
+end
+
+--- A new cage with a loop of edges cut across the ring of quads through `edge` (`{a, b}`),
+--- at `a + at * (b - a)` with `at` in (0, 1) (default 0.5); it selects the new loop.
+function Subd:insert_loop(edge, at)
+  if type(edge) ~= "table" then
+    raise(("%s: edge[1] is not an {a, b} vertex pair: %s"):format("insert_loop", subd_shown(edge)))
+  end
+  local h = self:_h()
+  local ids = subd_pairs({ edge }, "insert_loop", "edge")
+  return new_subd(lib().cadaclysm_blacksmith_subd_insert_loop(h, ids[0], ids[1],
+    number(at == nil and 0.5 or at, "insert_loop at")), "subd_insert_loop")
+end
+
+--- The loop of edges through `edge`, straight across each valence-four vertex, the picked
+--- edge first, each `{smaller, larger}`; empty when `edge` is not an edge of the cage.
+function Subd:edge_loop(edge)
+  if type(edge) ~= "table" then
+    raise(("%s: edge[1] is not an {a, b} vertex pair: %s"):format("edge_loop", subd_shown(edge)))
+  end
+  local h = self:_h()
+  local ids = subd_pairs({ edge }, "edge_loop", "edge")
+  local looped = new_subd(lib().cadaclysm_blacksmith_subd_edge_loop(h, ids[0], ids[1]), "subd_edge_loop")
+  -- Free the loop's handle now even when reading its selection raises, then raise that.
+  local ok, selection = pcall(function() return looped.selection end)
+  looped:close()
+  if not ok then error(selection, 0) end
+  return selection and selection.ids or {}
+end
+
+--- The positive half of the cage across the plane perpendicular to `axis` ("x", "y" or
+--- "z"), as a mirrored cage: every later edit keeps it symmetric.
+function Subd:mirror_on(axis)
+  local h = self:_h()
+  local k = subd_axis(axis, "mirror_on")
+  return new_subd(lib().cadaclysm_blacksmith_subd_mirror_on(h, k), "subd_mirror_on")
+end
+
+--- The mirror baked: the whole cage as an ordinary one, no longer mirrored.
+function Subd:mirror_off()
+  return new_subd(lib().cadaclysm_blacksmith_subd_mirror_off(self:_h()), "subd_mirror_off")
+end
+
+--- The whole cage of a mirrored half -- the half's vertices first, then their reflections
+--- -- or a copy of an ordinary cage.
+function Subd:full()
+  return new_subd(lib().cadaclysm_blacksmith_subd_full(self:_h()), "subd_full")
+end
+
+-- -- the surface
+
+--- The smooth surface refined `levels` times (1 to 6, default 3), as a `SubdMesh` of copies.
+function Subd:smooth_mesh(levels)
+  local h = self:_h()
+  local n = subd_count(levels == nil and 3 or levels, "smooth_mesh levels")
+  local out = ffi.new("CadaclysmBlacksmithSubdMesh")
+  if not lib().cadaclysm_blacksmith_subd_smooth_mesh(h, n, out) then fail("subd_smooth_mesh") end
+  return subd_mesh_of(out)
+end
+
+--- The cage element of `kind` ("vertex", "edge" or "face") under `point` (`{x, y, z}`), a
+--- point on or near the smooth surface: a vertex or face id, or an edge as `{a, b}` with
+--- the smaller id first. nil when nothing is within 0.05 of the cage's diagonal -- not an
+--- error; a point that is not finite is refused.
+function Subd:pick(point, kind)
+  local h = self:_h()
+  if type(kind) ~= "string" or SUBD_PICKS[kind] == nil then
+    raise(("pick: kind must be 'vertex', 'edge' or 'face', not %s"):format(subd_shown(kind)))
+  end
+  local at = doubles(point, 3, "pick point")
+  local out = ffi.new("uint32_t[2]")
+  if not lib().cadaclysm_blacksmith_subd_pick(h, at, SUBD_PICKS[kind], out) then
+    -- Nothing near leaves an empty `last_error`; a refusal's text is never empty.
+    if last_error() == "" then return nil end
+    fail("subd_pick")
+  end
+  if kind == "edge" then return { tonumber(out[0]), tonumber(out[1]) } end
+  return tonumber(out[0])
+end
+
+--- The cage as an exact solid, one NURBS face per patch, and a `SubdReport` of what the
+--- conversion did: two values, `solid, report`. `tolerance` (default 1e-4) is the largest
+--- deviation from the limit surface as a fraction of the cage's diagonal, `g1_angle`
+--- (default 0.1) the largest tangent break across an uncreased side in degrees,
+--- `max_levels` (default 6) the deepest local refinement (2 to 6). A `tolerance` or
+--- `g1_angle` of 0 or less, or a `max_levels` of 0, takes the default. A cage that cannot
+--- be held within them is refused with the figures it measured.
+function Subd:to_solid(tolerance, g1_angle, max_levels)
+  local h = self:_h()
+  local report = ffi.new("CadaclysmBlacksmithSubdReport")
+  local solid = new_solid(lib().cadaclysm_blacksmith_subd_to_solid(h,
+    number(tolerance == nil and 1e-4 or tolerance, "to_solid tolerance"),
+    number(g1_angle == nil and 0.1 or g1_angle, "to_solid g1_angle"),
+    subd_count(max_levels == nil and 6 or max_levels, "to_solid max_levels"), report), "subd_to_solid")
+  return solid, subd_report_of(report)
+end
+
 ---@class Hit
 ---@field run boolean
 ---@field touch boolean
@@ -4302,6 +4876,69 @@ function Assembly:pair(joint_name, kind, frame, opts)
   end
 end
 
+--- `Assembly:pair` with the kind's own numbers in place of `opts.pitch`, for the coupled
+--- pairs: `kind` any name `pair` takes, or "gear" or "rack_and_pinion". `params` is a plain
+--- list of numbers: `{pitch}` for a screw, `{pinion_radius}` for a rack and pinion,
+--- `{radius_first, radius_second, ratio}` or those plus `{bevel, helical_angle}` (radians)
+--- for a gear -- the ratio the second link's rotation over the first's, signed (two meshing
+--- external gears turn opposite ways, so theirs is negative) -- and none for any other
+--- kind. `frame` and `opts` (`end_frame`, `ranges`) read as in `pair`; `opts.pitch` is not
+--- taken here. Raises `BuildError` with the kernel's own text when a rule refuses it (a
+--- wrong number of parameters among them); the assembly is then unchanged.
+function Assembly:pair_with(joint_name, kind, frame, opts, params)
+  if type(joint_name) ~= "string" then raise("assembly: pair_with's joint must be a string, got " .. repr(joint_name)) end
+  if type(kind) ~= "string" then raise("assembly: pair_with's kind must be a string, got " .. repr(kind)) end
+  if opts ~= nil and type(opts) ~= "table" then raise("assembly: pair_with's opts must be a table, got " .. repr(opts)) end
+  opts = opts or {}
+  local f = frame_arg(frame)
+  local ef = nil
+  if opts.end_frame ~= nil then ef = frame_arg(opts.end_frame) end
+
+  local ranges = opts.ranges
+  local lower, upper, has_lower, has_upper, freedom_count = nil, nil, nil, nil, 0
+  if ranges ~= nil then
+    freedom_count = list_count(ranges)
+    if freedom_count == nil then
+      raise("pair_with: ranges must be a list of {lower, upper} pairs, not " .. repr(ranges))
+    end
+    local size = math.max(freedom_count, 1)
+    lower, upper = ffi.new("double[?]", size), ffi.new("double[?]", size)
+    has_lower, has_upper = ffi.new("bool[?]", size), ffi.new("bool[?]", size)
+    for i = 1, freedom_count do
+      local r = ranges[i]
+      if type(r) ~= "table" then
+        raise(("pair_with: ranges[%d] must be a table {lower, upper}, not %s"):format(i, repr(r)))
+      end
+      local lo, hi = r[1], r[2]
+      if lo == nil then
+        lower[i - 1], has_lower[i - 1] = 0.0, false
+      else
+        lower[i - 1], has_lower[i - 1] = number(lo, ("pair_with: ranges[%d][1]"):format(i)), true
+      end
+      if hi == nil then
+        upper[i - 1], has_upper[i - 1] = 0.0, false
+      else
+        upper[i - 1], has_upper[i - 1] = number(hi, ("pair_with: ranges[%d][2]"):format(i)), true
+      end
+    end
+  end
+
+  local param_count = 0
+  local param_arr = nil
+  if params ~= nil then
+    param_count = list_count(params)
+    if param_count == nil then raise("pair_with: params must be a list of numbers, not " .. repr(params)) end
+    param_arr = ffi.new("double[?]", math.max(param_count, 1))
+    for i = 1, param_count do param_arr[i - 1] = number(params[i], ("pair_with: params[%d]"):format(i)) end
+  end
+
+  if not lib().cadaclysm_blacksmith_assembly_pair_with(
+    self:_h(), joint_name, kind, f, ef, lower, upper, has_lower, has_upper, freedom_count, param_arr, param_count
+  ) then
+    fail("assembly_pair_with")
+  end
+end
+
 --- Add a named state to this assembly: `rows` is an array `{{joint, {values}}, ...}`,
 --- kept in that order, each setting one joint to its values in that joint's pair's
 --- freedom order. Raises `BuildError` with the kernel's own text when a rule refuses
@@ -4343,6 +4980,93 @@ function Assembly:state(name, rows)
   if not lib().cadaclysm_blacksmith_assembly_state(self:_h(), name, joint_ptrs, counts, values_arr, row_count) then
     fail("assembly_state")
   end
+end
+
+--- A joint or state key as the kernel reads it: a string as it is; a list of names
+--- escaped (a backslash before every "/" and backslash in a name) and joined by "/".
+local function joint_path(key, what)
+  if type(key) == "string" then return key end
+  local n = list_count(key)
+  if n == nil or n == 0 then
+    raise(what .. " must be a string or a list of names, not " .. repr(key))
+  end
+  local parts = {}
+  for i = 1, n do
+    if type(key[i]) ~= "string" then raise(("%s[%d] is not a name: %s"):format(what, i, repr(key[i]))) end
+    parts[i] = (key[i]:gsub("[\\/]", "\\%0"))
+  end
+  return table.concat(parts, "/")
+end
+
+--- This assembly with its mechanism posed, as a new `Assembly`. `values` is the joints'
+--- values: an array of rows `{key, value}`, or a table mapping string keys to values;
+--- a key is a path of placement names then the joint's name joined by "/" (a "/" or backslash
+--- inside a name escaped with a backslash), or a list of the names, which this escapes and
+--- joins; a value is a number for a one-freedom joint, else a list in the pair's
+--- freedom order (radians, the assembly's units). `state` is a state's path (a string or
+--- a list of names), applied first and overridden row by row; `ground` is one of this
+--- assembly's own links, held fixed. A sub-assembly no key reaches is shared with this
+--- one. Raises `BuildError` with the kernel's own text; this assembly is unchanged either
+--- way.
+---@param values? table
+---@param state? string|string[]
+---@param ground? string
+---@return Assembly
+function Assembly:posed(values, state, ground)
+  local rows = {}
+  if values ~= nil then
+    local count = list_count(values)
+    if count ~= nil then
+      for i = 1, count do
+        local row = values[i]
+        if type(row) ~= "table" then
+          raise(("posed: values[%d] must be a table {key, value}, not %s"):format(i, repr(row)))
+        end
+        rows[i] = { row[1], row[2] }
+      end
+    elseif type(values) == "table" then
+      local keys = {}
+      for k in pairs(values) do
+        if type(k) ~= "string" then raise("posed: a values map takes string keys, not " .. repr(k)) end
+        keys[#keys + 1] = k
+      end
+      table.sort(keys)
+      for i, k in ipairs(keys) do rows[i] = { k, values[k] } end
+    else
+      raise("posed: values must be a list of {key, value} rows or a map, not " .. repr(values))
+    end
+  end
+  if state ~= nil then state = joint_path(state, "posed: state") end
+  if ground ~= nil and type(ground) ~= "string" then
+    raise("posed: ground must be a string, got " .. repr(ground))
+  end
+  local row_count = #rows
+  local joint_names = {}   -- kept referenced while `joint_ptrs` points into them
+  local joint_ptrs = ffi.new("const char*[?]", math.max(row_count, 1))
+  local counts = ffi.new("uint32_t[?]", math.max(row_count, 1))
+  local flat = {}
+  for i = 1, row_count do
+    local key, value = rows[i][1], rows[i][2]
+    local name = joint_path(key, ("posed: rows[%d][1]"):format(i))
+    local list = value
+    if type(value) == "number" then list = { value } end
+    local value_count = list_count(list)
+    if value_count == nil then
+      raise(("posed: rows[%d][2] must be a number or a list of numbers, not %s"):format(i, repr(value)))
+    end
+    joint_names[i] = name
+    joint_ptrs[i - 1] = name
+    counts[i - 1] = value_count
+    for j = 1, value_count do
+      flat[#flat + 1] = number(list[j], ("posed: rows[%d][2][%d]"):format(i, j))
+    end
+  end
+  local values_arr = ffi.new("double[?]", math.max(#flat, 1))
+  for i = 1, #flat do values_arr[i - 1] = flat[i] end
+  local h = lib().cadaclysm_blacksmith_assembly_posed(
+    self:_h(), joint_ptrs, counts, values_arr, row_count, state, ground)
+  if h == nil then fail("assembly_posed") end
+  return setmetatable({ _handle = ffi.gc(h, free_assembly) }, Assembly)
 end
 
 --- Add a named motion sequence to this assembly: `segments` is an array

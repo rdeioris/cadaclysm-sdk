@@ -332,6 +332,42 @@ pub struct CadaclysmFreedom {
     pub upper: f64,
 }
 
+/// `CadaclysmTaskTime`: every date pair of a task, each `has_*` saying whether its value
+/// is given. Seconds since 1970-01-01T00:00; `duration` is in seconds.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct CadaclysmTaskTime {
+    pub has_schedule_start: bool,
+    pub schedule_start: f64,
+    pub has_schedule_finish: bool,
+    pub schedule_finish: f64,
+    pub has_early_start: bool,
+    pub early_start: f64,
+    pub has_early_finish: bool,
+    pub early_finish: f64,
+    pub has_late_start: bool,
+    pub late_start: f64,
+    pub has_late_finish: bool,
+    pub late_finish: f64,
+    pub has_actual_start: bool,
+    pub actual_start: f64,
+    pub has_actual_finish: bool,
+    pub actual_finish: f64,
+    pub has_duration: bool,
+    pub duration: f64,
+}
+
+/// `CadaclysmElementState`: one element's state on a date, from `cadaclysm_schedule_at`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct CadaclysmElementState {
+    pub node: u32,
+    pub phase: u32,
+    pub progress: f64,
+    pub has_variance: bool,
+    pub variance: f64,
+}
+
 entry_points! {
     Api, ENTRY_POINTS;
     fn cadaclysm_last_error() -> *const c_char;
@@ -431,6 +467,9 @@ entry_points! {
     fn cadaclysm_node_isocurves(scene: *const CadaclysmScene, node: u32) -> CadaclysmPolylines;
     fn cadaclysm_node_edge_beziers(scene: *const CadaclysmScene, node: u32) -> CadaclysmBeziers;
     fn cadaclysm_node_edge_beziers64(scene: *const CadaclysmScene, node: u32) -> CadaclysmBeziers64;
+    // Borrowed into a per-scene slot that the next silhouette call on the scene replaces: see
+    // `Node::silhouette_beziers`, which copies out of it under a lock before returning.
+    fn cadaclysm_node_silhouette_beziers(scene: *const CadaclysmScene, node: u32, options: *const CadaclysmSvgOptions) -> CadaclysmBeziers64;
     fn cadaclysm_node_curve_beziers(scene: *const CadaclysmScene, node: u32) -> CadaclysmBeziers;
     fn cadaclysm_node_curve_beziers64(scene: *const CadaclysmScene, node: u32) -> CadaclysmBeziers64;
     fn cadaclysm_node_isocurve_beziers(scene: *const CadaclysmScene, node: u32) -> CadaclysmBeziers;
@@ -470,6 +509,8 @@ entry_points! {
     fn cadaclysm_joint_end(scene: *const CadaclysmScene, joint: u32) -> u32;
     fn cadaclysm_joint_pair_kind(scene: *const CadaclysmScene, joint: u32) -> i32;
     fn cadaclysm_joint_pair_type(scene: *const CadaclysmScene, joint: u32) -> *const c_char;
+    fn cadaclysm_joint_pair_kind_name(scene: *const CadaclysmScene, joint: u32) -> *const c_char;
+    fn cadaclysm_joint_pair_parameters(scene: *const CadaclysmScene, joint: u32, out: *mut f64, capacity: usize) -> usize;
     fn cadaclysm_joint_pair_pitch(scene: *const CadaclysmScene, joint: u32) -> f64;
     fn cadaclysm_joint_pair_frames(scene: *const CadaclysmScene, joint: u32, out_start: *mut f64, out_end: *mut f64) -> bool;
     fn cadaclysm_joint_freedom_count(scene: *const CadaclysmScene, joint: u32) -> u32;
@@ -498,6 +539,44 @@ entry_points! {
         t: *mut f64,
         interpolation: *mut u32
     ) -> bool;
+    fn cadaclysm_schedule_count(scene: *const CadaclysmScene) -> u32;
+    fn cadaclysm_schedule_name(scene: *const CadaclysmScene, s: u32) -> *const c_char;
+    fn cadaclysm_schedule_identification(scene: *const CadaclysmScene, s: u32) -> *const c_char;
+    fn cadaclysm_schedule_kind(scene: *const CadaclysmScene, s: u32) -> u32;
+    fn cadaclysm_schedule_kind_name(scene: *const CadaclysmScene, s: u32) -> *const c_char;
+    fn cadaclysm_schedule_start(scene: *const CadaclysmScene, s: u32, out: *mut f64) -> bool;
+    fn cadaclysm_schedule_finish(scene: *const CadaclysmScene, s: u32, out: *mut f64) -> bool;
+    fn cadaclysm_task_count(scene: *const CadaclysmScene, s: u32) -> u32;
+    fn cadaclysm_task_name(scene: *const CadaclysmScene, s: u32, t: u32) -> *const c_char;
+    fn cadaclysm_task_identification(scene: *const CadaclysmScene, s: u32, t: u32) -> *const c_char;
+    fn cadaclysm_task_kind(scene: *const CadaclysmScene, s: u32, t: u32) -> u32;
+    fn cadaclysm_task_kind_name(scene: *const CadaclysmScene, s: u32, t: u32) -> *const c_char;
+    fn cadaclysm_task_status(scene: *const CadaclysmScene, s: u32, t: u32) -> *const c_char;
+    fn cadaclysm_task_milestone(scene: *const CadaclysmScene, s: u32, t: u32) -> bool;
+    fn cadaclysm_task_parent(scene: *const CadaclysmScene, s: u32, t: u32, out: *mut u32) -> bool;
+    fn cadaclysm_task_time(scene: *const CadaclysmScene, s: u32, t: u32, out: *mut CadaclysmTaskTime) -> bool;
+    fn cadaclysm_task_node_count(scene: *const CadaclysmScene, s: u32, t: u32) -> u32;
+    fn cadaclysm_task_nodes(scene: *const CadaclysmScene, s: u32, t: u32, out: *mut u32, capacity: u32) -> u32;
+    fn cadaclysm_task_link_count(scene: *const CadaclysmScene, s: u32) -> u32;
+    fn cadaclysm_task_link(
+        scene: *const CadaclysmScene,
+        s: u32,
+        l: u32,
+        from: *mut u32,
+        to: *mut u32,
+        kind: *mut u32,
+        lag: *mut f64,
+        has_lag: *mut bool
+    ) -> bool;
+    fn cadaclysm_task_link_kind_name(scene: *const CadaclysmScene, s: u32, l: u32) -> *const c_char;
+    fn cadaclysm_schedule_at(
+        scene: *const CadaclysmScene,
+        s: u32,
+        date: f64,
+        dates: u32,
+        out: *mut CadaclysmElementState,
+        capacity: u32
+    ) -> i64;
     fn cadaclysm_fem_options_init(options: *mut CadaclysmFemOptions);
     fn cadaclysm_node_fem_mesh(
         scene: *const CadaclysmScene,
@@ -531,6 +610,8 @@ entry_points! {
     fn cadaclysm_pose_node_transform(pose: *const CadaclysmPose, node: u32, out: *mut f64);
     fn cadaclysm_pose_unsolved_count(pose: *const CadaclysmPose) -> u32;
     fn cadaclysm_pose_unsolved(pose: *const CadaclysmPose, index: u32) -> u32;
+    fn cadaclysm_pose_diagnostic_count(pose: *const CadaclysmPose) -> u32;
+    fn cadaclysm_pose_diagnostic(pose: *const CadaclysmPose, index: u32) -> *const c_char;
     fn cadaclysm_pose_out_of_range_count(pose: *const CadaclysmPose) -> u32;
     fn cadaclysm_pose_out_of_range(
         pose: *const CadaclysmPose,

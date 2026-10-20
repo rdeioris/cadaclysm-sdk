@@ -271,6 +271,95 @@ pub struct CadaclysmBlacksmithCollisions {
     _private: [u8; 0],
 }
 
+/// A SubD control cage. Opaque; freed with `cadaclysm_blacksmith_subd_free`.
+#[repr(C)]
+pub struct CadaclysmBlacksmithSubd {
+    _private: [u8; 0],
+}
+
+/// A cage's parts, as views into its handle: valid until the handle is freed.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CadaclysmBlacksmithSubdParts {
+    pub positions: *const f64,
+    pub vertex_count: u32,
+    pub face_sizes: *const u32,
+    pub face_count: u32,
+    pub face_indices: *const u32,
+    pub index_count: u32,
+    pub creases: *const u32,
+    pub crease_count: u32,
+    pub pins: *const u32,
+    pub pin_count: u32,
+    pub symmetry_axis: i32,
+    pub symmetry_tolerance: f64,
+    pub selection_kind: u32,
+    pub selection: *const u32,
+    pub selection_count: u32,
+}
+
+impl Default for CadaclysmBlacksmithSubdParts {
+    fn default() -> Self {
+        let none = std::ptr::null();
+        CadaclysmBlacksmithSubdParts {
+            positions: none as *const f64,
+            vertex_count: 0,
+            face_sizes: none,
+            face_count: 0,
+            face_indices: none,
+            index_count: 0,
+            creases: none,
+            crease_count: 0,
+            pins: none,
+            pin_count: 0,
+            symmetry_axis: -1,
+            symmetry_tolerance: 0.0,
+            selection_kind: 3,
+            selection: none,
+            selection_count: 0,
+        }
+    }
+}
+
+/// A cage's smooth surface at one level, as views valid until the handle is freed.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CadaclysmBlacksmithSubdMesh {
+    pub positions: *const f64,
+    pub vertex_count: u32,
+    pub normals: *const f64,
+    pub indices: *const u32,
+    pub index_count: u32,
+    pub triangle_face: *const u32,
+}
+
+impl Default for CadaclysmBlacksmithSubdMesh {
+    fn default() -> Self {
+        CadaclysmBlacksmithSubdMesh {
+            positions: std::ptr::null(),
+            vertex_count: 0,
+            normals: std::ptr::null(),
+            indices: std::ptr::null(),
+            index_count: 0,
+            triangle_face: std::ptr::null(),
+        }
+    }
+}
+
+/// What `cadaclysm_blacksmith_subd_to_solid` did and how close it came.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CadaclysmBlacksmithSubdReport {
+    pub regular: u32,
+    pub refined: u32,
+    pub steps: u32,
+    pub levels: u32,
+    pub deviation: f64,
+    pub g1_angle_deg: f64,
+    pub deviation_at: [f64; 3],
+    pub g1_at: [f64; 3],
+}
+
 /// An axis-aligned box: `lo` and `hi`, three doubles each.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -516,6 +605,7 @@ type Operations = CadaclysmBlacksmithOperations;
 type Fem = CadaclysmBlacksmithFemMesh;
 type Collider = CadaclysmBlacksmithCollider;
 type Collisions = CadaclysmBlacksmithCollisions;
+type Subd = CadaclysmBlacksmithSubd;
 type BoxShape = CadaclysmBlacksmithBox;
 type Tessellation = CadaclysmBlacksmithTessellation;
 
@@ -722,6 +812,14 @@ entry_points! {
         progress: Progress,
         user: *mut c_void
     ) -> *mut Solid;
+    fn cadaclysm_blacksmith_split_by_profile(
+        solid: *const Solid,
+        profile: *const Profile,
+        frame: *const f64,
+        tolerance: f64,
+        progress: Progress,
+        user: *mut c_void
+    ) -> *mut Solid;
     fn cadaclysm_blacksmith_shell(
         solid: *const Solid,
         thickness: f64,
@@ -748,6 +846,8 @@ entry_points! {
     fn cadaclysm_blacksmith_colour(solid: *const Solid, face: u32, out: *mut f64) -> bool;
     fn cadaclysm_blacksmith_edge_colour(solid: *const Solid, edge: u32, out: *mut f64) -> bool;
     fn cadaclysm_blacksmith_parse_colour(text: *const c_char, out: *mut f64) -> bool;
+    fn cadaclysm_blacksmith_option_set(name: *const c_char, value: f64) -> bool;
+    fn cadaclysm_blacksmith_option_get(name: *const c_char, out: *mut f64) -> bool;
     fn cadaclysm_blacksmith_face_kind(solid: *const Solid, face: u32) -> *const c_char;
     fn cadaclysm_blacksmith_edge_count(solid: *const Solid) -> u32;
     fn cadaclysm_blacksmith_edge(solid: *const Solid, i: u32, out: *mut CadaclysmBlacksmithEdge) -> bool;
@@ -789,6 +889,11 @@ entry_points! {
     fn cadaclysm_blacksmith_svg_options_init(options: *mut CadaclysmBlacksmithSvgOptions);
     fn cadaclysm_blacksmith_svg_text(solids: *const *const Solid, count: usize, options: *const CadaclysmBlacksmithSvgOptions) -> *mut c_char;
     fn cadaclysm_blacksmith_svg(solids: *const *const Solid, count: usize, path: *const c_char, options: *const CadaclysmBlacksmithSvgOptions) -> bool;
+    // A solid's silhouette, an OWNED block of `count * 16` doubles (a segment's four control
+    // points' x, y, z, then its four weights), freed with the `_free` beside it, handing back
+    // the `count` the call wrote. See `Solid::silhouette_beziers`, which does both.
+    fn cadaclysm_blacksmith_silhouette_beziers(solid: *const Solid, options: *const CadaclysmBlacksmithSvgOptions, count: *mut u32) -> *mut f64;
+    fn cadaclysm_blacksmith_silhouette_beziers_free(data: *mut f64, count: u32);
     fn cadaclysm_blacksmith_fem_options_init(options: *mut CadaclysmBlacksmithFemOptions);
     fn cadaclysm_blacksmith_fem_mesh(
         solid: *const Solid,
@@ -850,8 +955,7 @@ entry_points! {
         placement_count: usize
     ) -> bool;
     fn cadaclysm_blacksmith_assembly_joint(assembly: *mut Assembly, name: *const c_char, start: *const c_char, end: *const c_char) -> bool;
-    // Blacksmith pairs (docs/superpowers/plans/2026-09-28-blacksmith-pairs-1.md, 2026-09-29's
-    // plan 2 task 5): a joint's pair, a named mechanism state, and an assembly's base link.
+    // Blacksmith pairs: a joint's pair, a named mechanism state, and an assembly's base link.
     fn cadaclysm_blacksmith_assembly_pair(
         assembly: *mut Assembly,
         joint: *const c_char,
@@ -865,6 +969,20 @@ entry_points! {
         freedom_count: usize,
         pitch: f64
     ) -> bool;
+    fn cadaclysm_blacksmith_assembly_pair_with(
+        assembly: *mut Assembly,
+        joint: *const c_char,
+        kind: *const c_char,
+        frame: *const f64,
+        end_frame: *const f64,
+        lower: *const f64,
+        upper: *const f64,
+        has_lower: *const bool,
+        has_upper: *const bool,
+        freedom_count: usize,
+        params: *const f64,
+        param_count: usize
+    ) -> bool;
     fn cadaclysm_blacksmith_assembly_state(
         assembly: *mut Assembly,
         name: *const c_char,
@@ -873,6 +991,15 @@ entry_points! {
         values: *const f64,
         row_count: usize
     ) -> bool;
+    fn cadaclysm_blacksmith_assembly_posed(
+        assembly: *const Assembly,
+        joints: *const *const c_char,
+        counts: *const u32,
+        values: *const f64,
+        row_count: usize,
+        state: *const c_char,
+        ground: *const c_char
+    ) -> *mut Assembly;
     fn cadaclysm_blacksmith_assembly_sequence(
         assembly: *mut Assembly,
         name: *const c_char,
@@ -911,6 +1038,46 @@ entry_points! {
     fn cadaclysm_blacksmith_collisions_count(collisions: *const Collisions) -> u32;
     fn cadaclysm_blacksmith_collisions_hit(collisions: *const Collisions, i: u32, out: *mut CadaclysmBlacksmithCollisionHit) -> bool;
     fn cadaclysm_blacksmith_collisions_solid(collisions: *const Collisions, i: u32) -> *mut Solid;
+
+    fn cadaclysm_blacksmith_subd_cuboid(sx: f64, sy: f64, sz: f64, nx: u32, ny: u32, nz: u32) -> *mut Subd;
+    fn cadaclysm_blacksmith_subd_cylinder(radius: f64, height: f64, sides: u32, rings: u32, creased_rims: bool) -> *mut Subd;
+    fn cadaclysm_blacksmith_subd_sphere(radius: f64, segments: u32) -> *mut Subd;
+    fn cadaclysm_blacksmith_subd_torus(major: f64, minor: f64, around: u32, tube: u32) -> *mut Subd;
+    fn cadaclysm_blacksmith_subd_from_parts(
+        positions: *const f64,
+        vertex_count: u32,
+        face_sizes: *const u32,
+        face_count: u32,
+        face_indices: *const u32,
+        index_count: u32,
+        creases: *const u32,
+        crease_count: u32,
+        pins: *const u32,
+        pin_count: u32,
+        symmetry_axis: i32,
+        symmetry_tolerance: f64
+    ) -> *mut Subd;
+    fn cadaclysm_blacksmith_subd_parts(subd: *const Subd, out: *mut CadaclysmBlacksmithSubdParts) -> bool;
+    fn cadaclysm_blacksmith_subd_free(subd: *mut Subd);
+    fn cadaclysm_blacksmith_subd_transform(subd: *const Subd, kind: u32, ids: *const u32, id_count: u32, matrix: *const f64) -> *mut Subd;
+    fn cadaclysm_blacksmith_subd_set_crease(subd: *const Subd, edges: *const u32, edge_count: u32, on: bool) -> *mut Subd;
+    fn cadaclysm_blacksmith_subd_set_pin(subd: *const Subd, vertices: *const u32, vertex_count: u32, on: bool) -> *mut Subd;
+    fn cadaclysm_blacksmith_subd_extrude(subd: *const Subd, faces: *const u32, face_count: u32, distance: f64) -> *mut Subd;
+    fn cadaclysm_blacksmith_subd_inset(subd: *const Subd, faces: *const u32, face_count: u32, amount: f64, individual: bool) -> *mut Subd;
+    fn cadaclysm_blacksmith_subd_insert_loop(subd: *const Subd, a: u32, b: u32, at: f64) -> *mut Subd;
+    fn cadaclysm_blacksmith_subd_mirror_on(subd: *const Subd, axis: u32) -> *mut Subd;
+    fn cadaclysm_blacksmith_subd_mirror_off(subd: *const Subd) -> *mut Subd;
+    fn cadaclysm_blacksmith_subd_full(subd: *const Subd) -> *mut Subd;
+    fn cadaclysm_blacksmith_subd_edge_loop(subd: *const Subd, a: u32, b: u32) -> *mut Subd;
+    fn cadaclysm_blacksmith_subd_smooth_mesh(subd: *const Subd, levels: u32, out: *mut CadaclysmBlacksmithSubdMesh) -> bool;
+    fn cadaclysm_blacksmith_subd_pick(subd: *const Subd, point: *const f64, kind: u32, out: *mut u32) -> bool;
+    fn cadaclysm_blacksmith_subd_to_solid(
+        subd: *const Subd,
+        tolerance: f64,
+        g1_angle_deg: f64,
+        max_levels: u32,
+        report: *mut CadaclysmBlacksmithSubdReport
+    ) -> *mut Solid;
 
     fn cadaclysm_blacksmith_tool_flat(number: u32, diameter: f64, flute_length: f64, feed: f64, plunge: f64, rpm: f64) -> *mut Tool;
     fn cadaclysm_blacksmith_tool_ball(number: u32, diameter: f64, flute_length: f64, feed: f64, plunge: f64, rpm: f64) -> *mut Tool;

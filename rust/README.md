@@ -130,31 +130,45 @@ let view = View::offscreen(900, 600)?;         // or View::new(&ViewOptions { ..
 let curve = [[0.0, 0.0, 0.0, 1.0], [1.0, 2.0, 0.0, 1.0], [3.0, -1.0, 0.0, 1.0], [4.0, 1.0, 0.0, 1.0]];
 view.show_curves(&[curve], Some([0.9, 0.3, 0.1]))?;
 let item = view.show_solid(&cube, 0.05, None)?;
-item.colour([0.2, 0.5, 0.9])?;
+item.colour("steelblue")?;                     // or [0.2, 0.5, 0.9]: text or numbers
 view.standard(Standard::Iso)?;
 view.frame()?;
 view.save("view.png")?;                        // or view.image()? for the pixels; view.run()? for a window
 ```
 
 - **Showing.** `show_solid(&solid, tolerance, rgb)`, `show_scene(&scene)`,
-  `show_node(node)` by handle; `show_mesh`, `show_lines`, `show_curves` (rational cubic
+  `show_node(node)` by handle; `show_mesh`, `show_lines`, `show_points` (`&[[f32; 3]]`, a
+  disc of `size_px` pixels a point), `show_curves` (rational cubic
   Béziers, `[[x, y, z, w]; 4]` each), `show_image` by value -- these need no reader or
   kernel loaded. A solid, scene or node shown by handle is borrowed by the view: dropping
   it first does not compile.
-- **`Item`.** `remove`, `colour`, `placement`, `face_colours`, `xray`, `frame`,
+- **Colours.** Every colour takes text -- `"#rgb"`, `"#rrggbb"` or a CSS colour name, read
+  by the view library's own parser -- or numbers in 0..1: `colour` and `background` take
+  `impl Into<Colour>`, the `show_*` calls' `rgb` an `impl Into<view::Rgb>` (`None`,
+  `Some([r, g, b])` or a colour), `node_colour`/`node_highlight`/`face_colours` an
+  `impl Into<view::Rgba>` (text and three numbers mean alpha 1).
+- **`Item`.** `remove`, `colour`, `placement`, `face_colours`, `clear_face_colours`, `xray`, `frame`,
   `node_visible`, `node_colour`, `node_highlight`, `frame_node`, `node_transforms` (pose a
   shown scene, one matrix per node), `id`.
 - **The camera.** `orbit`, `pan`, `zoom`, `look`, `dolly`, `standard`, `frame`,
   `orthographic`, `viewports`.
-- **The rest.** `pick(x, y, viewport)`, `draw`, `needs_draw`, `run` (blocks; the camera and
+- **The rest.** `pick(x, y, viewport)`, `last_pick` (the pick a click or double click
+  landed, read without waiting), `draw`, `needs_draw`, `run` (blocks; the camera and
   the last pick), `pump(timeout_ms)` (for a loop of your own), `image`, `save` (PNG),
-  `input(&Event)`, `resize`, `layer`, `set_surfaces`, `background`, `lod(Some(Lod { .. }))`
+  `input(&Event)`, `resize`, `layer`, `set_surfaces`, `set_lighting`, `background`, `lod(Some(Lod { .. }))`
   (levels of detail) and `wake_ms` (when a resting frame is owed). Dropping the view
   destroys it.
 - **A host's window.** `unsafe { View::in_window(window, &options) }` with a `RawWindow`
   (a kind, a handle and a display); with the `raw-window-handle` feature,
   `RawWindow::of(&winit_window, width, height)`. The host forwards input (`input`), calls
   `resize` on its resize and `draw` when `needs_draw`.
+- **Text.** `view.show_text(&Text { .. })` puts words in the picture: a **label** (screen
+  pixels, anchored to a point, optionally boxed and offset, on top or hidden with its
+  anchor) or **world text** lying in a plane of the model. The `Item` it returns is an
+  ordinary one -- `remove`, `colour`, `placement`, `xray`, picked (the pick's `face` is
+  the line hit) -- and `item.set_text("..")` replaces the string. `view::load_font(bytes)`
+  adds a TTF/OTF font; font 0 is the bundled Liberation Sans. Both view libraries draw
+  it (the terminal's labels are real characters); since view ABI 1.6.
 - **Offscreen** needs no display, only a GPU adapter (SSH, CI); the terminal refuses it.
 
 ### Which library

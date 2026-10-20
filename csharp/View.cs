@@ -10,8 +10,8 @@
 // Compile it with Cad.cs and Blacksmith.cs: each refers to the others (Cad.cs's Scene.Show and
 // Scene.Close call into this file). Solids and scenes are shown by handle; an Item holds the
 // object it shows. The view library is bound under the name "cadaclysm_view" through Cad.cs's
-// resolver, once per process: choose it with ViewLibrary before the first view; a later Use of
-// another library is refused. A view belongs to the thread that made it: every call from another
+// resolver, once per process: choose it with ViewLibrary before the first view (or LoadFont, which
+// binds it too); a later Use of another library is refused. A view belongs to the thread that made it: every call from another
 // thread is refused, and a scene a live view of another thread still shows cannot be closed (it
 // stays open, with the reason). A view nobody disposes is destroyed when the runtime collects it.
 using System.IO.Compression;
@@ -60,12 +60,15 @@ internal unsafe struct RawViewCamera
     public uint Orthographic;
 }
 
-internal struct RawViewPick
+internal unsafe struct RawViewPick
 {
     public uint Size;
     public uint Item;
     public uint Node;
     public uint Face;
+    public uint Clicks;
+    public uint HasPoint;
+    public fixed float Point[3];
 }
 
 internal struct RawViewLod
@@ -99,6 +102,7 @@ internal struct RawViewEvent
     public IntPtr Key;
     public uint KeyDown;
     public double TimeMs;
+    public uint Alt;
 }
 
 internal struct RawViewMesh
@@ -125,6 +129,48 @@ internal unsafe struct RawViewImage
     public uint FlipX;
     public uint FlipY;
 }
+
+internal unsafe struct RawViewText
+{
+    public uint Size;
+    public IntPtr Text;
+    public uint Mode;
+    public fixed float At[3];
+    public fixed float Right[3];
+    public fixed float Up[3];
+    public float Height;
+    public fixed float Rgb[3];
+    public uint Align;
+    public fixed float Offset[2];
+    public fixed float BoxRgba[4];
+    public float BoxPadding;
+    public uint OnTop;
+    public uint Font;
+}
+
+// 1.10, bound only: nothing in this file fills one yet (C#'s viewport-camera API comes later).
+#pragma warning disable CS0649
+internal unsafe struct RawViewViewportCamera
+{
+    public uint Size;
+    public uint Kind;
+    public fixed uint Rect[4];
+    public fixed float View[16];
+    public fixed float Projection[16];
+    public fixed float Eye[3];
+    public fixed float Target[3];
+    public float Distance;
+    public float Yaw;
+    public float Pitch;
+    public uint Orthographic;
+    public float Speed;
+    public float Radius;
+    public float Height;
+    public fixed float AxisView[3];
+    public fixed float AxisRight[3];
+    public fixed float AxisUp[3];
+}
+#pragma warning restore CS0649
 
 internal sealed class ViewHandle : CadaclysmHandle
 {
@@ -156,6 +202,9 @@ internal static unsafe class ViewNative
     [DllImport(Lib)] internal static extern uint cadaclysm_view_abi_version();
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_view_last_error();
     [DllImport(Lib)] internal static extern IntPtr cadaclysm_view_name();
+    // 1.5: colour text as three floats in 0..1; false, with the reason in last_error, for text that is no colour.
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_parse_colour([MarshalAs(UnmanagedType.LPUTF8Str)] string text, float* rgb);
     [DllImport(Lib)] internal static extern ViewHandle cadaclysm_view_create(RawViewWindow* window, RawViewOptions* options);
     [DllImport(Lib)] internal static extern void cadaclysm_view_destroy(IntPtr view);
     [DllImport(Lib)] internal static extern uint cadaclysm_view_pump(ViewHandle view, uint timeoutMs);
@@ -206,6 +255,7 @@ internal static unsafe class ViewNative
     [DllImport(Lib)] internal static extern uint cadaclysm_view_input(ViewHandle view, RawViewEvent* ev);
     [DllImport(Lib)] internal static extern uint cadaclysm_view_show_mesh(ViewHandle view, RawViewMesh* mesh);
     [DllImport(Lib)] internal static extern uint cadaclysm_view_show_lines(ViewHandle view, float* segments, uint segmentCount, float* rgb);
+    [DllImport(Lib)] internal static extern uint cadaclysm_view_show_points(ViewHandle view, float* positions, uint pointCount, float* rgb, float sizePx);
     [DllImport(Lib)] internal static extern uint cadaclysm_view_show_curves(ViewHandle view, float* beziers, uint curveCount, float* rgb);
     [DllImport(Lib)] internal static extern uint cadaclysm_view_show_image(ViewHandle view, RawViewImage* image);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
@@ -223,8 +273,65 @@ internal static unsafe class ViewNative
     internal static extern bool cadaclysm_view_image(ViewHandle view, byte* rgba, nuint capacity);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_size(ViewHandle view, uint* width, uint* height);
+    // 1.6: text.
+    [DllImport(Lib)] internal static extern uint cadaclysm_view_load_font(byte* bytes, nuint length);
+    [DllImport(Lib)] internal static extern uint cadaclysm_view_show_text(ViewHandle view, RawViewText* text);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_text(ViewHandle view, uint item, [MarshalAs(UnmanagedType.LPUTF8Str)] string text);
+    // 1.8: the double-click opt-in, focus, the navigation mode.
+    [DllImport(Lib)] internal static extern void cadaclysm_view_set_double_click_frames(ViewHandle view, [MarshalAs(UnmanagedType.I1)] bool on);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_focus(ViewHandle view, float* point);
+    [DllImport(Lib)] internal static extern uint cadaclysm_view_navigation(ViewHandle view);
+    // 1.9: the lighting.
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_lighting(ViewHandle view, uint lighting);
+    [DllImport(Lib)] internal static extern uint cadaclysm_view_lighting(ViewHandle view);
+    // 1.10: the viewport cameras (bound; C#'s own API for them comes later).
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_viewport_camera(ViewHandle view, uint viewport, RawViewViewportCamera* camera);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_viewport_camera(ViewHandle view, uint viewport, RawViewViewportCamera* camera);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_viewport_rects(ViewHandle view, uint* rects, uint count);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_aim(ViewHandle view, uint viewport, float* direction, float* up);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_pivot(ViewHandle view, uint viewport, float* point);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_tap(ViewHandle view, float px, double ms);
+    [DllImport(Lib)] internal static extern void cadaclysm_view_orbit_in(ViewHandle view, uint viewport, float dx, float dy);
+    [DllImport(Lib)] internal static extern void cadaclysm_view_pan_in(ViewHandle view, uint viewport, float dx, float dy);
+    [DllImport(Lib)] internal static extern void cadaclysm_view_zoom_in(ViewHandle view, uint viewport, float steps);
+    [DllImport(Lib)] internal static extern void cadaclysm_view_look_in(ViewHandle view, uint viewport, float dx, float dy);
+    [DllImport(Lib)] internal static extern void cadaclysm_view_dolly_in(ViewHandle view, uint viewport, float ratio);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_frame_in(ViewHandle view, uint viewport, uint item);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_standard_in(ViewHandle view, uint viewport, uint which);
 
     internal static string LastError() => Marshal.PtrToStringUTF8(cadaclysm_view_last_error()) ?? "";
+
+    /// <summary>A colour's text as r, g, b in 0..1 -- `"#rgb"`, `"#rrggbb"` (the `#` optional) or one of
+    /// the 148 CSS colour names, any case -- read by the view library's own `cadaclysm_view_parse_colour`
+    /// (Python's `_colour`), so every wrapper takes the same forms; null stays null. A ViewException with
+    /// the library's message for text that is no colour.</summary>
+    internal static float[]? Colour(string? text)
+    {
+        if (text is null) return null;
+        var rgb = new float[3];
+        fixed (float* c = rgb) if (cadaclysm_view_parse_colour(text, c)) return rgb;
+        var why = LastError();
+        throw new ViewException(why.Length == 0 ? $"colour '{text}'" : why);
+    }
+
+    /// <summary>Colour text as four floats, alpha 1 (text carries none); null stays null.</summary>
+    internal static float[]? Rgba(string? text) => Colour(text) is { } c ? new[] { c[0], c[1], c[2], 1f } : null;
+
+    /// <summary>The text, or a ViewException for one holding a NUL (the C string would end there).</summary>
+    internal static string TextOf(string text) => text is null ? throw new ViewException("text: a string, not null") : text.Contains('\0')
+        ? throw new ViewException($"text \"{text}\": a NUL character cannot be shown (the C string ends there)")
+        : text;
 
     /// <summary>The library's own reason, bare; Python's fallback when it gave none.</summary>
     internal static ViewException Failure()
@@ -250,20 +357,31 @@ public static unsafe class ViewLibrary
         OperatingSystem.IsWindows() ? $"{b}.dll" : OperatingSystem.IsMacOS() ? $"lib{b}.dylib" : $"lib{b}.so";
 
     /// <summary>The variable (a file or a directory), beside this assembly, then lib/ and target/{release,debug} above it.</summary>
-    internal static string Find(string b, string variable)
+    internal static string Find(string b, string variable) =>
+        Find(b, variable, Environment.GetEnvironmentVariable(variable), System.IO.Path.GetDirectoryName(typeof(ViewLibrary).Assembly.Location));
+
+    /// <summary>Find with the variable's value and this assembly's folder given (tests).</summary>
+    internal static string Find(string b, string variable, string? env, string? here)
     {
         var name = FileName(b);
-        var env = Environment.GetEnvironmentVariable(variable);
+        var terminal = b.EndsWith("_terminal");
         if (!string.IsNullOrEmpty(env))
         {
-            var c = Directory.Exists(env) ? System.IO.Path.Combine(env, name) : env;
+            var directory = Directory.Exists(env);
+            var c = directory ? System.IO.Path.Combine(env, name) : env;
             if (File.Exists(c)) return c;
-            throw new ViewException($"{variable}={env} names nothing that exists");
+            // Python's words: the terminal's variable also says which file a directory lacks.
+            throw new ViewException($"{variable}={env} names nothing that exists"
+                + (terminal && directory ? $" (no {name} in that directory)" : ""));
         }
-        var searched = SearchOrder(System.IO.Path.GetDirectoryName(typeof(ViewLibrary).Assembly.Location), name);
+        var searched = SearchOrder(here, name);
         foreach (var c in searched) if (File.Exists(c)) return c;
-        throw new ViewException($"no view library: {name} not found. Looked in:\n" + string.Join("", searched.Select(s => $"    {s}\n"))
-            + $"Set {variable}, or CADACLYSM_VIEW to a library's path.");
+        var where = string.Join(", ", searched);
+        throw new ViewException(terminal
+            ? $"no view library: the terminal library was not found (searched: {where}) "
+                + "-- reinstall cadaclysm, set CADACLYSM_TERMINAL_LIBRARY to the library, or set CADACLYSM_VIEW"
+            : $"no view library: {name} was not found (searched: {where}) "
+                + $"-- reinstall cadaclysm, set {variable} to it, or ViewLibrary.UseTerminal()");
     }
 
     /// <summary>Where a library named `name` is looked for from `here`: beside it, then every ancestor's
@@ -290,6 +408,45 @@ public static unsafe class ViewLibrary
     /// <summary>Draw with the GPU window library, cadaclysm_view. Before the first view only.</summary>
     public static string UseWgpu() => Use(Find("cadaclysm" + "_view", "CADACLYSM_VIEW_LIBRARY"));
 
+    /// <summary>A TTF/OTF font for every view of the bound library; its id for TextOptions.Font (0 is the bundled Liberation Sans).
+    /// Choose the library first (UseWgpu/UseTerminal/Use): a font id belongs to the library that loaded it. LoadFont
+    /// binds the library, as the first view does, so a UseWgpu or UseTerminal naming another library afterwards is refused.</summary>
+    public static uint LoadFont(byte[] bytes)
+    {
+        if (bytes is null) throw new ViewException("LoadFont: font bytes, not null");
+        Bind();
+        fixed (byte* b = bytes)
+        {
+            uint id = ViewNative.cadaclysm_view_load_font(b, (nuint)bytes.Length);
+            return id != 0 ? id : throw ViewNative.Failure();
+        }
+    }
+
+    /// <summary><see cref="LoadFont(byte[])"/> from a file; a path that cannot be read is a ViewException naming it.</summary>
+    public static uint LoadFont(string path)
+    {
+        if (path is null) throw new ViewException("LoadFont: a font path, not null");
+        byte[] bytes;
+        try { bytes = File.ReadAllBytes(path); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or System.Security.SecurityException)
+        {
+            throw new ViewException($"{path}: the font could not be read: {e.Message}");
+        }
+        return LoadFont(bytes);
+    }
+
+    /// <summary>Why the library at `path`, answering `version` from cadaclysm_view_abi_version, is
+    /// refused -- null when this wrapper takes it (1.11 or a later 1.x).</summary>
+    internal static string? AbiRefusal(string path, uint version)
+    {
+        uint major = version >> 16, minor = version & 0xFFFF;
+        // 1.6: text -- show_text, set_text, load_font and the text layer. 1.7: the machining and
+        // timeline calls (not bound here yet). 1.8: the pick's clicks and point,
+        // set_double_click_frames, focus, navigation. 1.9: set_lighting and lighting. 1.10: the
+        // viewport cameras (bound; C#'s own API for them comes later). 1.11: show_points.
+        return major != 1 || minor < 11 ? $"{path}: view ABI {major}.{minor}, this wrapper needs 1.11 or a later 1.x" : null;
+    }
+
     private static bool SamePath(string a, string? b) =>
         string.Equals(a, b, OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 
@@ -303,7 +460,7 @@ public static unsafe class ViewLibrary
             if (_bound)
             {
                 if (SamePath(full, _path)) return _name;
-                throw new ViewException($"the view library is already bound ({_name}); choose it before the first view");
+                throw new ViewException($"the view library is already bound ({_name}); choose it before the first view or LoadFont");
             }
             if (!NativeLibrary.TryLoad(full, out var h)) throw new ViewException($"{full}: could not load the view library");
             if (!NativeLibrary.TryGetExport(h, "cadaclysm_view_abi_version", out var abi)
@@ -312,12 +469,11 @@ public static unsafe class ViewLibrary
                 NativeLibrary.Free(h);
                 throw new ViewException($"{full}: not a view library (no cadaclysm_view_abi_version or cadaclysm_view_name)");
             }
-            var version = ((delegate* unmanaged<uint>)abi)();
-            uint major = version >> 16, minor = version & 0xFFFF;
-            if (major != 1 || minor < 4)
+            var refusal = AbiRefusal(full, ((delegate* unmanaged<uint>)abi)());
+            if (refusal is not null)
             {
                 NativeLibrary.Free(h);
-                throw new ViewException($"{full}: view ABI {major}.{minor}, this wrapper needs 1.4 or a later 1.x");
+                throw new ViewException(refusal);
             }
             var name = Marshal.PtrToStringUTF8(((delegate* unmanaged<IntPtr>)nameFn)()) ?? "";
             if (_handle != IntPtr.Zero) NativeLibrary.Free(_handle);   // a choice made and changed before any view
@@ -369,9 +525,32 @@ public sealed record ViewOptions(string? Title = null, uint Width = 0, uint Heig
 
 /// <summary>What Show() and View() on a Solid, Scene, Node or Pose take. `Up` null is the scene's own
 /// up axis ("z" for a solid); `Tolerance` null is 0.05 for a solid and refused for a document, which
-/// is drawn at the tolerance it was read with.</summary>
+/// is drawn at the tolerance it was read with. The colour is `Rgb` (three numbers in 0..1) or `RgbText`
+/// (`"#rgb"`, `"#rrggbb"` or a CSS colour name, read by the view library), which wins when both are given.</summary>
 public sealed record ShowOptions(string View = "iso", double? Azimuth = null, double? Elevation = null, double? Zoom = null, string? Up = null,
-    bool Edges = true, uint Width = 0, uint Height = 0, string? Title = null, double? Tolerance = null, float[]? Rgb = null);
+    bool Edges = true, uint Width = 0, uint Height = 0, string? Title = null, double? Tolerance = null, float[]? Rgb = null,
+    string? RgbText = null);
+
+/// <summary>ShowText's options: a white 12 px label, bottom-left on its anchor, by default.</summary>
+public sealed class TextOptions
+{
+    /// <summary>"label" (pixels, facing the camera) or "world" (model units, in the plane of Right and Up).</summary>
+    public string Mode { get; init; } = "label";
+    public float Size { get; init; } = 12f;
+    /// <summary>The glyphs' colour as text ("#rgb", "#rrggbb", a CSS name); it wins over Colour when both are set, as ShowOptions' RgbText does.</summary>
+    public string? ColourText { get; init; }
+    public float[]? Colour { get; init; }
+    public string Align { get; init; } = "bottom-left";
+    public float[]? Offset { get; init; }
+    /// <summary>The label's background box as text (alpha 1); it wins over Box (3 or 4 numbers) when both are set; none by default.</summary>
+    public string? BoxText { get; init; }
+    public float[]? Box { get; init; }
+    public float Padding { get; init; } = 4f;
+    public bool OnTop { get; init; }
+    public uint Font { get; init; }
+    public float[]? Right { get; init; }
+    public float[]? Up { get; init; }
+}
 
 /// <summary>A host's window: kind 1 win32, 2 xlib, 3 xcb, 4 wayland, 5 appkit.</summary>
 public sealed record ViewWindow(uint Kind, IntPtr Window, ulong WindowId, IntPtr Display, uint Width, uint Height);
@@ -383,7 +562,10 @@ public sealed record ViewEvent(string Type, float X = 0, float Y = 0, uint Butto
 /// <summary>Rect is x, y, w, h in physical pixels, the matrices column-major; Grid: none, top, front or right.</summary>
 public sealed record Viewport(uint[] Rect, float[] View, float[] Projection, float[] Eye, string Grid = "none");
 
-public sealed record Pick(uint Item, uint Node, uint Face);
+/// <summary>A pick answer: the item, node and face hit; Clicks 2 for a double click, else 1; Point where
+/// the ray met the model (x, y, z, in the coordinates the items were shown in), or null where the
+/// library read no depth (a machining stock, the terminal library).</summary>
+public sealed record Pick(uint Item, uint Node, uint Face, uint Clicks = 1, float[]? Point = null);
 
 public sealed record Camera(float[] Eye, float[] Target, float[] Up, bool Orthographic, double Azimuth, double Elevation, Pick? Pick);
 
@@ -423,6 +605,13 @@ public sealed unsafe class Item
         fixed (double* m = View.NonNull(flat)) Ok(ViewNative.cadaclysm_view_set_node_transforms(h, Id, m, (uint)transforms.Count));
     }
 
+    /// <summary>Recolours the item: `"#rgb"`, `"#rrggbb"` or a CSS colour name, any case.</summary>
+    public void Colour(string rgb)
+    {
+        if (rgb is null) throw new ViewException("colour: 3 numbers, not none");
+        Colour(ViewNative.Colour(rgb)!);
+    }
+
     public void Colour(float[] rgb)
     {
         if (rgb is null) throw new ViewException("colour: 3 numbers, not none");
@@ -439,6 +628,16 @@ public sealed unsafe class Item
         fixed (double* m = matrix) Ok(ViewNative.cadaclysm_view_set_placement(h, Id, m));
     }
 
+    /// <summary>`faces` (pick numbers) coloured by `colours`, one text a face (alpha 1); null faces clears every one.</summary>
+    public void FaceColours(uint[]? faces, string[] colours)
+    {
+        if (faces is null) { FaceColours(null, (float[]?)null); return; }
+        var rgba = new float[4 * (colours?.Length ?? 0)];
+        for (var k = 0; k < rgba.Length / 4; k++)
+            (ViewNative.Rgba(colours![k]) ?? throw new ViewException($"faceColours: colour {k} is null")).CopyTo(rgba, 4 * k);
+        FaceColours(faces, rgba);
+    }
+
     /// <summary>`faces` (pick numbers) in `rgba`, four floats a face; null faces clears every one.</summary>
     public void FaceColours(uint[]? faces, float[]? rgba)
     {
@@ -451,8 +650,19 @@ public sealed unsafe class Item
     }
 
     public void Frame() => Ok(ViewNative.cadaclysm_view_frame(View.Live("cadaclysm_view_frame"), Id));
+
+    /// <summary>The text item's string replaced, nothing else changed (cadaclysm_view_set_text).</summary>
+    public void SetText(string text)
+    {
+        var h = View.Live("cadaclysm_view_set_text");
+        Ok(ViewNative.cadaclysm_view_set_text(h, Id, ViewNative.TextOf(text)));
+    }
+
     public void Xray(bool on) => Ok(ViewNative.cadaclysm_view_set_xray(View.Live("cadaclysm_view_set_xray"), Id, on));
     public void NodeVisible(uint node, bool on) => Ok(ViewNative.cadaclysm_view_set_node_visible(View.Live("cadaclysm_view_set_node_visible"), Id, node, on));
+
+    /// <summary><see cref="NodeColour(uint, float[])"/> with the colour as text (alpha 1); null clears.</summary>
+    public void NodeColour(uint node, string? rgba) => NodeColour(node, ViewNative.Rgba(rgba));
 
     /// <summary>Three or four numbers (alpha 1 when three); null clears.</summary>
     public void NodeColour(uint node, float[]? rgba)
@@ -461,6 +671,9 @@ public sealed unsafe class Item
         var h = View.Live("cadaclysm_view_set_node_color");
         fixed (float* c = four) Ok(ViewNative.cadaclysm_view_set_node_color(h, Id, node, c));
     }
+
+    /// <summary><see cref="NodeHighlight(uint, float[])"/> with the colour as text: alpha 1, the colour itself; null clears.</summary>
+    public void NodeHighlight(uint node, string? rgba) => NodeHighlight(node, ViewNative.Rgba(rgba));
 
     /// <summary>Tint `node` toward rgba's colour by its alpha (three or four numbers); null clears.</summary>
     public void NodeHighlight(uint node, float[]? rgba)
@@ -476,7 +689,13 @@ public sealed unsafe class Item
 public sealed unsafe class View : IDisposable
 {
     private static readonly Dictionary<string, uint> Standards = new() { ["top"] = 0, ["front"] = 1, ["right"] = 2, ["iso"] = 3 };
-    private static readonly Dictionary<string, uint> Layers = new() { ["surfaces"] = 0, ["edges"] = 1, ["curves"] = 2, ["isocurves"] = 3, ["grid"] = 4 };
+    private static readonly Dictionary<string, uint> Layers = new() { ["surfaces"] = 0, ["edges"] = 1, ["curves"] = 2, ["isocurves"] = 3, ["grid"] = 4, ["text"] = 5 };
+    private static readonly Dictionary<string, uint> Aligns = new()
+    {
+        ["top-left"] = 0, ["top"] = 1, ["top-right"] = 2, ["left"] = 3, ["centre"] = 4, ["center"] = 4,
+        ["right"] = 5, ["bottom-left"] = 6, ["bottom"] = 7, ["bottom-right"] = 8,
+    };
+    private static readonly Dictionary<string, uint> TextModes = new() { ["label"] = 0, ["world"] = 1 };
     private static readonly Dictionary<string, uint> Events = new()
     {
         ["pointer_down"] = 1, ["pointer_move"] = 2, ["pointer_up"] = 3, ["pointer_cancel"] = 4, ["wheel"] = 5, ["key"] = 6,
@@ -484,6 +703,7 @@ public sealed unsafe class View : IDisposable
     private static readonly Dictionary<string, uint> Grids = new() { ["none"] = 0, ["top"] = 1, ["front"] = 2, ["right"] = 3 };
     private static readonly Dictionary<string, uint> LodMotion = new() { ["detailed"] = 0, ["smooth"] = 1 };
     private static readonly Dictionary<string, uint> SurfaceKinds = new() { ["exact"] = 0, ["triangles"] = 1 };
+    private static readonly Dictionary<string, uint> LightingKinds = new() { ["headlight"] = 0, ["studio"] = 1 };
     private static readonly Dictionary<string, uint> Pointers = new() { ["mouse"] = 0, ["touch"] = 1, ["pen"] = 2 };
     private static readonly Dictionary<string, (double Az, double El)> Views = new()
     {
@@ -491,6 +711,7 @@ public sealed unsafe class View : IDisposable
         ["top"] = (-90, 90), ["bottom"] = (-90, -90), ["iso"] = (-50, 28),
     };
     private const uint InputClose = 1, NoneComing = 0xFFFFFFFF;
+    private const uint NavigationFly = 1;   // CADACLYSM_VIEW_NAVIGATION_FLY (ORBIT is 0)
     private const double OrbitPerPixel = 0.01, ZoomPerStep = 0.9;
 
     /// <summary>Every live view, weakly: <see cref="Release"/> walks it when a scene closes.</summary>
@@ -648,6 +869,12 @@ public sealed unsafe class View : IDisposable
         _ => throw new ViewException($"show: a Solid, Scene or Node, not {obj?.GetType().Name ?? "null"}"),
     };
 
+    /// <summary><see cref="Show(object, float[], double)"/> with the colour as text (`"#rgb"`, `"#rrggbb"`, a CSS name).</summary>
+    public Item Show(object obj, string rgb, double tolerance = 0.05) => Show(obj, ViewNative.Colour(rgb), tolerance);
+
+    /// <summary><see cref="ShowSolid(Solid, double, float[])"/> with the colour as text.</summary>
+    public Item ShowSolid(Solid solid, double tolerance, string rgb) => ShowSolid(solid, tolerance, ViewNative.Colour(rgb));
+
     public Item ShowSolid(Solid solid, double tolerance = 0.05, float[]? rgb = null)
     {
         Exact(rgb, 3, "showSolid rgb");
@@ -683,6 +910,10 @@ public sealed unsafe class View : IDisposable
     /// is not NULL, so an empty list stays an empty list here too; the count passed is still 0.</summary>
     internal static T[] NonNull<T>(T[] a) where T : unmanaged => a.Length == 0 ? new T[1] : a;
 
+    /// <summary><see cref="ShowMesh(float[], uint[], float[], float[], float[])"/> with the colour as text.</summary>
+    public Item ShowMesh(float[] positions, uint[] indices, float[]? normals, float[]? edges, string rgb) =>
+        ShowMesh(positions, indices, normals, edges, ViewNative.Colour(rgb));
+
     /// <summary>Three floats a vertex, three indices a triangle; normals (one a position) and edges (six floats a segment) may be null.</summary>
     public Item ShowMesh(float[] positions, uint[] indices, float[]? normals = null, float[]? edges = null, float[]? rgb = null)
     {
@@ -704,6 +935,9 @@ public sealed unsafe class View : IDisposable
         }
     }
 
+    /// <summary><see cref="ShowLines(float[], float[])"/> with the colour as text.</summary>
+    public Item ShowLines(float[] segments, string rgb) => ShowLines(segments, ViewNative.Colour(rgb));
+
     /// <summary>Six floats a segment.</summary>
     public Item ShowLines(float[] segments, float[]? rgb = null)
     {
@@ -713,6 +947,24 @@ public sealed unsafe class View : IDisposable
         fixed (float* s = NonNull(segments)) fixed (float* c = rgb)
             return NewItem(ViewNative.cadaclysm_view_show_lines(h, s, (uint)segments.Length / 6, c), null);
     }
+
+    /// <summary><see cref="ShowPoints(float[], float[], float)"/> with the colour as text.</summary>
+    public Item ShowPoints(float[] positions, string rgb, float sizePx = 8f) => ShowPoints(positions, ViewNative.Colour(rgb), sizePx);
+
+    /// <summary>Points as three floats each: a disc <paramref name="sizePx"/> device pixels across
+    /// (1 to 64) at each, in <paramref name="rgb"/> (null: the edge colour), as one item. A point
+    /// does not pick. The library refuses a number that is not finite and a size outside 1..64.</summary>
+    public Item ShowPoints(float[] positions, float[]? rgb = null, float sizePx = 8f)
+    {
+        if (positions.Length % 3 != 0) throw new ViewException($"showPoints: three numbers a point, not {positions.Length}");
+        Exact(rgb, 3, "showPoints rgb");
+        var h = Live("cadaclysm_view_show_points");
+        fixed (float* p = NonNull(positions)) fixed (float* c = rgb)
+            return NewItem(ViewNative.cadaclysm_view_show_points(h, p, (uint)positions.Length / 3, c, sizePx), null);
+    }
+
+    /// <summary><see cref="ShowCurves(float[], float[])"/> with the colour as text.</summary>
+    public Item ShowCurves(float[] beziers, string rgb) => ShowCurves(beziers, ViewNative.Colour(rgb));
 
     /// <summary>Sixteen floats a rational cubic: four control points as x, y, z, w.</summary>
     public Item ShowCurves(float[] beziers, float[]? rgb = null)
@@ -739,6 +991,37 @@ public sealed unsafe class View : IDisposable
         }
     }
 
+    /// <summary>Text shown as one item (cadaclysm_view_show_text): a label anchored to <paramref name="at"/>, or world text.</summary>
+    public Item ShowText(string text, float[] at, TextOptions? options = null)
+    {
+        var o = options ?? new TextOptions();
+        uint mode = Named(TextModes, o.Mode, "mode"), align = Named(Aligns, o.Align, "align");
+        if (at is null || at.Length != 3) throw new ViewException($"showText at: 3 numbers, not {at?.Length ?? 0}");
+        var rgb = Exact(o.ColourText is not null ? ViewNative.Colour(o.ColourText) : o.Colour ?? ViewNative.Colour("white"), 3, "showText colour")!;
+        var right = Exact(o.Right, 3, "showText right");
+        var up = Exact(o.Up, 3, "showText up");
+        var offset = Exact(o.Offset, 2, "showText offset");
+        var box = o.BoxText is not null ? ViewNative.Rgba(o.BoxText) : Rgba(o.Box, "showText box");
+        var h = Live("cadaclysm_view_show_text");
+        IntPtr utf8 = Marshal.StringToCoTaskMemUTF8(ViewNative.TextOf(text));
+        try
+        {
+            var t = new RawViewText { Size = (uint)sizeof(RawViewText), Text = utf8, Mode = mode, Height = o.Size, Align = align,
+                                      BoxPadding = o.Padding, OnTop = o.OnTop ? 1u : 0u, Font = o.Font };
+            for (int k = 0; k < 3; k++)
+            {
+                t.At[k] = at[k];
+                t.Rgb[k] = rgb[k];
+                if (right is not null) t.Right[k] = right[k];
+                if (up is not null) t.Up[k] = up[k];
+            }
+            if (offset is not null) { t.Offset[0] = offset[0]; t.Offset[1] = offset[1]; }
+            if (box is not null) for (int k = 0; k < 4; k++) t.BoxRgba[k] = box[k];
+            return NewItem(ViewNative.cadaclysm_view_show_text(h, &t), null);
+        }
+        finally { Marshal.FreeCoTaskMem(utf8); }
+    }
+
     // ---- the camera
 
     public void Orbit(float dx, float dy) => Void("cadaclysm_view_orbit", h => ViewNative.cadaclysm_view_orbit(h, dx, dy));
@@ -758,6 +1041,29 @@ public sealed unsafe class View : IDisposable
     public void Frame() => Ok(ViewNative.cadaclysm_view_frame(Live("cadaclysm_view_frame"), 0));
 
     public void Orthographic(bool on) => Void("cadaclysm_view_set_orthographic", h => ViewNative.cadaclysm_view_set_orthographic(h, on));
+
+    /// <summary>Whether a double click frames what it hit (off by default: it is a pick answered with
+    /// Clicks 2 and the camera stays). Applies where the view takes the pick itself (its own window,
+    /// pump, Run); a host reading picks frames if it chooses.</summary>
+    public void SetDoubleClickFrames(bool on) =>
+        Void("cadaclysm_view_set_double_click_frames", h => ViewNative.cadaclysm_view_set_double_click_frames(h, on));
+
+    /// <summary>Moves the orbit point to `point` (x, y, z, as a pick's Point): the eye keeps its direction
+    /// and distance from it, so the camera moves sideways and does not turn. Leaves fly mode. Other than
+    /// three numbers is refused before the call; the library refuses a point that is not finite, or
+    /// while viewports are set, with its own reason.</summary>
+    public void Focus(float[] point)
+    {
+        if (point is null) throw new ViewException("focus: 3 numbers, not null");
+        Exact(point, 3, "focus");
+        var h = Live("cadaclysm_view_focus");
+        fixed (float* p = point) Ok(ViewNative.cadaclysm_view_focus(h, p));
+    }
+
+    /// <summary>How a left drag moves the camera: "orbit" (about the target) or "fly" (the view turns
+    /// about the eye). A fly key (W, A, S, D, E, Q) sent through Input enters fly mode and it stays
+    /// after the key is let go; Tab toggles it; Frame, Standard and Focus leave it.</summary>
+    public string Navigation => ViewNative.cadaclysm_view_navigation(Live("cadaclysm_view_navigation")) == NavigationFly ? "fly" : "orbit";
 
     public void Viewports(IReadOnlyList<Viewport> list)
     {
@@ -793,6 +1099,13 @@ public sealed unsafe class View : IDisposable
         Ok(ViewNative.cadaclysm_view_set_layer(Live("cadaclysm_view_set_layer"), which, on));
     }
 
+    /// <summary>The clear colour as text: `"#rgb"`, `"#rrggbb"` or a CSS colour name.</summary>
+    public void Background(string rgb)
+    {
+        if (rgb is null) throw new ViewException("background: 3 numbers, not none");
+        Background(ViewNative.Colour(rgb)!);
+    }
+
     /// <summary>Three numbers, the clear colour.</summary>
     public void Background(float[] rgb)
     {
@@ -805,6 +1118,15 @@ public sealed unsafe class View : IDisposable
     {
         get => ViewNative.cadaclysm_view_surfaces(Live("cadaclysm_view_surfaces")) == 1 ? "triangles" : "exact";
         set => Ok(ViewNative.cadaclysm_view_set_surfaces(Live("cadaclysm_view_set_surfaces"), Named(SurfaceKinds, value, "surfaces")));
+    }
+
+    /// <summary>How plain parts are lit, as Python's View.lighting: "headlight" (the default) --
+    /// whatever faces the camera is bright -- or "studio", a key light fixed above the scene with
+    /// an ambient and a camera fill. Another name is refused before the library is called.</summary>
+    public string Lighting
+    {
+        get => ViewNative.cadaclysm_view_lighting(Live("cadaclysm_view_lighting")) == 1 ? "studio" : "headlight";
+        set => Ok(ViewNative.cadaclysm_view_set_lighting(Live("cadaclysm_view_set_lighting"), Named(LightingKinds, value, "lighting")));
     }
 
     public bool NeedsDraw => ViewNative.cadaclysm_view_needs_draw(Live("cadaclysm_view_needs_draw"));
@@ -824,12 +1146,32 @@ public sealed unsafe class View : IDisposable
         for (var i = 0; i < 200; i++)
         {
             Draw();
-            if (ViewNative.cadaclysm_view_pick_result(h, &output)) return output.Item == 0 ? null : new Pick(output.Item, output.Node, output.Face);
+            if (ViewNative.cadaclysm_view_pick_result(h, &output)) return PickOf(output);
             waiting = ViewNative.LastError();
             if (waiting.Length > 0 && !waiting.EndsWith("no pick result", StringComparison.Ordinal)) throw new ViewException(waiting);
             Thread.Sleep(10);
         }
         throw new ViewException($"pick: the answer never landed ({(waiting.Length > 0 ? waiting : "no error reported")})");
+    }
+
+    /// <summary>The newest pick answer that has landed, without asking or waiting (Python's
+    /// `last_pick`): a click or tap in the view's own window (`Pump` lands them as it draws), a
+    /// double click's (`Clicks` 2), or one an `Input` asked for, landed by the draws after it.
+    /// False while none has; true with `pick` null for a click on nothing, or the pick for a hit.
+    /// Each answer is read once, and a newer one replaces one not read yet.</summary>
+    /// <remarks>A failure other than "no answer yet" throws the library's own message.</remarks>
+    public bool LastPick(out Pick? pick)
+    {
+        var output = new RawViewPick { Size = (uint)sizeof(RawViewPick) };
+        if (ViewNative.cadaclysm_view_pick_result(Live("cadaclysm_view_pick_result"), &output))
+        {
+            pick = PickOf(output);
+            return true;
+        }
+        var waiting = ViewNative.LastError();
+        if (waiting.Length > 0 && !waiting.EndsWith("no pick result", StringComparison.Ordinal)) throw new ViewException(waiting);
+        pick = null;
+        return false;
     }
 
     public void Draw() { Ok(ViewNative.cadaclysm_view_draw(Live("cadaclysm_view_draw"))); _drawn = true; }
@@ -843,8 +1185,14 @@ public sealed unsafe class View : IDisposable
         Ok(ViewNative.cadaclysm_view_run(h, &cam, &pick));
         MarkClosed();
         float[] eye = { cam.Eye[0], cam.Eye[1], cam.Eye[2] }, target = { cam.Target[0], cam.Target[1], cam.Target[2] }, up = { cam.Up[0], cam.Up[1], cam.Up[2] };
-        return CameraOf(eye, target, up, cam.Orthographic != 0, pick.Item == 0 ? null : new Pick(pick.Item, pick.Node, pick.Face), _yUp);
+        return CameraOf(eye, target, up, cam.Orthographic != 0, PickOf(pick), _yUp);
     }
+
+    /// <summary>A CadaclysmViewPick as the answer: null for no item; Point only where the library set
+    /// has_point (Python's `_pick_dict`).</summary>
+    internal static Pick? PickOf(RawViewPick raw) =>
+        raw.Item == 0 ? null : new Pick(raw.Item, raw.Node, raw.Face, raw.Clicks,
+            raw.HasPoint != 0 ? new[] { raw.Point[0], raw.Point[1], raw.Point[2] } : null);
 
     /// <summary>The buffer a frame of `width` x `height` is read into: a size nobody can allocate is the wrapper's error.</summary>
     internal static byte[] FrameBuffer(ulong width, ulong height)
@@ -1104,7 +1452,7 @@ public sealed unsafe class View : IDisposable
         Console.Out.Flush();
         Console.Error.Flush();
         using var v = OwnView is null ? new View(viewOptions) : OwnView(viewOptions);
-        var item = v.Show(obj, o.Rgb, o.Tolerance ?? 0.05);
+        var item = o.RgbText is not null ? v.Show(obj, o.RgbText, o.Tolerance ?? 0.05) : v.Show(obj, o.Rgb, o.Tolerance ?? 0.05);
         if (transforms is not null) item.NodeTransforms(transforms);
         v.Layer("edges", o.Edges);
         v.Aim(o, obj is Node node ? () => item.FrameNode(node.Index) : () => { });

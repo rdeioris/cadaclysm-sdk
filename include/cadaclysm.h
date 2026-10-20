@@ -1,3 +1,4 @@
+/* Copyright 2026 Blitter S.r.l. */
 /* cadaclysm - one C ABI over the whole project. Generated; do not edit. */
 
 #ifndef CADACLYSM_H
@@ -291,6 +292,71 @@ typedef enum CadaclysmInterpolation {
   CADACLYSM_INTERPOLATION_SYNCHRONOUS = 2,
   CADACLYSM_INTERPOLATION_LINEAR = 3,
 } CadaclysmInterpolation;
+
+/**
+ * A [`cadaclysm::ScheduleKind`] value, for [`cadaclysm_schedule_kind`]. Carried as a
+ * `uint32_t`. `CADACLYSM_SCHEDULE_OTHER`'s text is [`cadaclysm_schedule_kind_name`].
+ */
+typedef enum CadaclysmScheduleKind {
+  CADACLYSM_SCHEDULE_PLANNED = 0,
+  CADACLYSM_SCHEDULE_ACTUAL = 1,
+  CADACLYSM_SCHEDULE_BASELINE = 2,
+  CADACLYSM_SCHEDULE_NOTDEFINED = 3,
+  CADACLYSM_SCHEDULE_OTHER = 4,
+} CadaclysmScheduleKind;
+
+/**
+ * A [`cadaclysm::TaskKind`] value, for [`cadaclysm_task_kind`]. Carried as a `uint32_t`.
+ * `CADACLYSM_TASK_OTHER`'s text is [`cadaclysm_task_kind_name`].
+ */
+typedef enum CadaclysmTaskKind {
+  CADACLYSM_TASK_ATTENDANCE = 0,
+  CADACLYSM_TASK_CONSTRUCTION = 1,
+  CADACLYSM_TASK_DEMOLITION = 2,
+  CADACLYSM_TASK_DISMANTLE = 3,
+  CADACLYSM_TASK_DISPOSAL = 4,
+  CADACLYSM_TASK_INSTALLATION = 5,
+  CADACLYSM_TASK_LOGISTIC = 6,
+  CADACLYSM_TASK_MAINTENANCE = 7,
+  CADACLYSM_TASK_MOVE = 8,
+  CADACLYSM_TASK_OPERATION = 9,
+  CADACLYSM_TASK_REMOVAL = 10,
+  CADACLYSM_TASK_RENOVATION = 11,
+  CADACLYSM_TASK_NOTDEFINED = 12,
+  CADACLYSM_TASK_OTHER = 13,
+} CadaclysmTaskKind;
+
+/**
+ * A [`cadaclysm::LinkKind`] value, for [`cadaclysm_task_link`]. Carried as a `uint32_t`.
+ * `CADACLYSM_LINK_OTHER`'s text is [`cadaclysm_task_link_kind_name`].
+ */
+typedef enum CadaclysmLinkKind {
+  CADACLYSM_LINK_FINISH_START = 0,
+  CADACLYSM_LINK_START_START = 1,
+  CADACLYSM_LINK_FINISH_FINISH = 2,
+  CADACLYSM_LINK_START_FINISH = 3,
+  CADACLYSM_LINK_NOTDEFINED = 4,
+  CADACLYSM_LINK_OTHER = 5,
+} CadaclysmLinkKind;
+
+/**
+ * Which dates [`cadaclysm_schedule_at`] plays. Carried as a `uint32_t`.
+ */
+typedef enum CadaclysmDates {
+  CADACLYSM_DATES_SCHEDULED = 0,
+  CADACLYSM_DATES_ACTUAL = 1,
+} CadaclysmDates;
+
+/**
+ * What an element is doing on a date: [`CadaclysmElementState`]'s `phase`, a `uint32_t`.
+ */
+typedef enum CadaclysmPhase {
+  CADACLYSM_PHASE_UNBUILT = 0,
+  CADACLYSM_PHASE_BUILDING = 1,
+  CADACLYSM_PHASE_BUILT = 2,
+  CADACLYSM_PHASE_DEMOLISHING = 3,
+  CADACLYSM_PHASE_DEMOLISHED = 4,
+} CadaclysmPhase;
 
 /**
  * An imported body's exact B-rep -- the trimmed surfaces its mesh is cut from --
@@ -690,6 +756,44 @@ typedef struct CadaclysmFreedom {
 } CadaclysmFreedom;
 
 /**
+ * Every date pair of a task, in seconds since 1970-01-01T00:00; each `has_*` says
+ * whether its value is given. `duration` is in seconds.
+ */
+typedef struct CadaclysmTaskTime {
+  bool has_schedule_start;
+  double schedule_start;
+  bool has_schedule_finish;
+  double schedule_finish;
+  bool has_early_start;
+  double early_start;
+  bool has_early_finish;
+  double early_finish;
+  bool has_late_start;
+  double late_start;
+  bool has_late_finish;
+  double late_finish;
+  bool has_actual_start;
+  double actual_start;
+  bool has_actual_finish;
+  double actual_finish;
+  bool has_duration;
+  double duration;
+} CadaclysmTaskTime;
+
+/**
+ * One element's state on a date, from [`cadaclysm_schedule_at`]: the node, its `phase` (a
+ * [`CadaclysmPhase`]), `progress` 0..1 through the window that governs the phase, and
+ * `variance` -- seconds late (positive) or early (negative) -- where `has_variance`.
+ */
+typedef struct CadaclysmElementState {
+  uint32_t node;
+  uint32_t phase;
+  double progress;
+  bool has_variance;
+  double variance;
+} CadaclysmElementState;
+
+/**
  * A set of polylines. Both pointers borrow from the scene.
  *
  * `positions` holds `vertex_count * 3` floats, run together end to end;
@@ -794,7 +898,15 @@ typedef struct CadaclysmFace {
    * Flags. Bit 0 (`1`): the face meets itself along a **crease**, not a seam -- it names
    * an edge twice (a closed face's wrap line) and is not smooth across it, like a closed
    * wall whose profile kinks where it starts. A renderer that leaves out the trim spans
-   * along a closed face's seam should draw them on such a face. Every other bit is zero.
+   * along a closed face's seam should draw the line on such a face, once: its spans on
+   * the two sides of the domain are the same line (the D3D12/Vulkan/Metal renderers draw
+   * the low side's). Bits 1-4 (`2`, `4`, `8`,
+   * `16`): the side `u = u_min`, `v = v_min`, `u = u_max`, `v = v_max` of `domain` is an
+   * **apex** -- the surface closes to a point along it and its normal there turns with
+   * the direction it is approached from, as at a cone's tip. A renderer that grids the
+   * face gives the grid corners on such a side a zero normal and normalizes the
+   * interpolated normal per pixel; one normal there bends each cell toward one meridian
+   * and the cone draws in bands. Every other bit is zero.
    */
   uint32_t reserved;
   float origin[4];
@@ -2381,12 +2493,44 @@ int32_t cadaclysm_joint_pair_kind(const struct CadaclysmScene *scene, uint32_t j
 
 /**
  * For [`CadaclysmPairKind::CADACLYSM_PAIR_OTHER`]: the pair's entity type name
- * (`"GEAR_PAIR"`); null otherwise. Borrowed, lives as long as the scene.
+ * (`"CAM_PAIR"`; `"GEAR_PAIR"` and `"RACK_AND_PINION_PAIR"` for a gear and a rack and
+ * pinion, which read as other here -- [`cadaclysm_joint_pair_kind_name`] tells them
+ * apart by name); null otherwise. Borrowed, lives as long as the scene.
  *
  * # Safety
  * `scene` must be null or a handle from [`cadaclysm_open`].
  */
 const char *cadaclysm_joint_pair_type(const struct CadaclysmScene *scene, uint32_t joint);
+
+/**
+ * The pair's kind by name, the kind table's own (`"revolute"`, ..., `"gear"`,
+ * `"rack_and_pinion"`; `"low_order"` and `"other"` for the two kinds with no table
+ * name): finer than [`cadaclysm_joint_pair_kind`], which reads a gear and a rack and
+ * pinion as `CADACLYSM_PAIR_OTHER` and is unchanged. Null when the joint has no pair
+ * or the index is out of range. Borrowed, lives as long as the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+const char *cadaclysm_joint_pair_kind_name(const struct CadaclysmScene *scene, uint32_t joint);
+
+/**
+ * The pair's own parameters, in the order `pair_with` takes them: `screw` its
+ * pitch (1 value), `rack_and_pinion` its pinion radius (1), `gear` its first radius,
+ * second radius, signed ratio (second over first), bevel and helical angle (always
+ * 5, the last two 0 where `pair_with` was given only the first three); no other kind
+ * has any. Returns how many the pair has -- 0 for a joint with no pair
+ * or a bad index -- and writes at most `capacity` of them to `out`, so a capacity of
+ * 0 (with `out` null) just asks the count.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out` null or room for
+ * `capacity` doubles.
+ */
+size_t cadaclysm_joint_pair_parameters(const struct CadaclysmScene *scene,
+                                       uint32_t joint,
+                                       double *out,
+                                       size_t capacity);
 
 /**
  * For [`CadaclysmPairKind::CADACLYSM_PAIR_SCREW`]: its pitch (length per revolution,
@@ -2534,6 +2678,234 @@ bool cadaclysm_sequence_segment(const struct CadaclysmScene *scene,
                                 uint32_t *interpolation);
 
 /**
+ * How many work schedules (`IfcWorkSchedule`) the file records. 0 for a file with none.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_schedule_count(const struct CadaclysmScene *scene);
+
+/**
+ * A schedule's name (else its identification, else `schedule #k`), or null past the end.
+ * Borrowed, lives as long as the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+const char *cadaclysm_schedule_name(const struct CadaclysmScene *scene, uint32_t s);
+
+/**
+ * A schedule's identification ("" where none), or null past the end. Borrowed, lives as
+ * long as the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+const char *cadaclysm_schedule_identification(const struct CadaclysmScene *scene, uint32_t s);
+
+/**
+ * A schedule's kind, a [`CadaclysmScheduleKind`]. `CADACLYSM_SCHEDULE_NOTDEFINED` past the end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_schedule_kind(const struct CadaclysmScene *scene, uint32_t s);
+
+/**
+ * The text of a user-defined schedule kind (`CADACLYSM_SCHEDULE_OTHER`); "" for every
+ * other kind; null past the end. Borrowed, lives as long as the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+const char *cadaclysm_schedule_kind_name(const struct CadaclysmScene *scene, uint32_t s);
+
+/**
+ * The schedule's start, in seconds since 1970-01-01T00:00, written to `out`. False, with
+ * nothing written, where the file gives none or past the end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out`, where not null, must be
+ * writable.
+ */
+bool cadaclysm_schedule_start(const struct CadaclysmScene *scene, uint32_t s, double *out);
+
+/**
+ * The schedule's finish, as [`cadaclysm_schedule_start`].
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out`, where not null, must be
+ * writable.
+ */
+bool cadaclysm_schedule_finish(const struct CadaclysmScene *scene, uint32_t s, double *out);
+
+/**
+ * How many tasks schedule `s` has, in file order. 0 past the end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_task_count(const struct CadaclysmScene *scene, uint32_t s);
+
+/**
+ * A task's name, or null past the end. Borrowed, lives as long as the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+const char *cadaclysm_task_name(const struct CadaclysmScene *scene, uint32_t s, uint32_t t);
+
+/**
+ * A task's identification ("" where none), or null past the end. Borrowed, lives as long
+ * as the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+const char *cadaclysm_task_identification(const struct CadaclysmScene *scene,
+                                          uint32_t s,
+                                          uint32_t t);
+
+/**
+ * A task's kind, a [`CadaclysmTaskKind`]. `CADACLYSM_TASK_NOTDEFINED` past the end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_task_kind(const struct CadaclysmScene *scene, uint32_t s, uint32_t t);
+
+/**
+ * The text of a user-defined task kind (`CADACLYSM_TASK_OTHER`); "" for every other kind;
+ * null past the end. Borrowed, lives as long as the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+const char *cadaclysm_task_kind_name(const struct CadaclysmScene *scene, uint32_t s, uint32_t t);
+
+/**
+ * A task's status as the file writes it ("" where none), or null past the end. Borrowed,
+ * lives as long as the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+const char *cadaclysm_task_status(const struct CadaclysmScene *scene, uint32_t s, uint32_t t);
+
+/**
+ * Whether the task is a milestone. False past the end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+bool cadaclysm_task_milestone(const struct CadaclysmScene *scene, uint32_t s, uint32_t t);
+
+/**
+ * The summary task nesting task `t`, an index into the same schedule's tasks, written to
+ * `out`. False, with nothing written, for a top-level task or past the end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out`, where not null, must be
+ * writable.
+ */
+bool cadaclysm_task_parent(const struct CadaclysmScene *scene,
+                           uint32_t s,
+                           uint32_t t,
+                           uint32_t *out);
+
+/**
+ * Every date of a task. False, with nothing written, past the end; nothing written when
+ * `out` is NULL.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out`, where not null, must be
+ * writable.
+ */
+bool cadaclysm_task_time(const struct CadaclysmScene *scene,
+                         uint32_t s,
+                         uint32_t t,
+                         struct CadaclysmTaskTime *out);
+
+/**
+ * How many nodes task `t` builds or removes. 0 past the end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_task_node_count(const struct CadaclysmScene *scene, uint32_t s, uint32_t t);
+
+/**
+ * The nodes task `t` builds or removes (sorted, no repeats), written to `out`. Returns the
+ * full count; writes `min(count, capacity)` of them, and nothing when `out` is NULL. 0
+ * past the end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out`, where not null, must be
+ * writable for `capacity` values.
+ */
+uint32_t cadaclysm_task_nodes(const struct CadaclysmScene *scene,
+                              uint32_t s,
+                              uint32_t t,
+                              uint32_t *out,
+                              uint32_t capacity);
+
+/**
+ * How many task links (`IfcRelSequence`) schedule `s` has, in file order. 0 past the end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+uint32_t cadaclysm_task_link_count(const struct CadaclysmScene *scene, uint32_t s);
+
+/**
+ * Link `l` of schedule `s`: the predecessor and successor (indices into the schedule's
+ * tasks), its kind (a [`CadaclysmLinkKind`]) and its time lag in seconds, `has_lag` saying
+ * whether the file gives one. Each out pointer may be null. False, with nothing written,
+ * past the end.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; each out pointer, where not
+ * null, must be writable.
+ */
+bool cadaclysm_task_link(const struct CadaclysmScene *scene,
+                         uint32_t s,
+                         uint32_t l,
+                         uint32_t *from,
+                         uint32_t *to,
+                         uint32_t *kind,
+                         double *lag,
+                         bool *has_lag);
+
+/**
+ * The text of a user-defined link kind (`CADACLYSM_LINK_OTHER`); "" for every other kind;
+ * null past the end. Borrowed, lives as long as the scene.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`].
+ */
+const char *cadaclysm_task_link_kind_name(const struct CadaclysmScene *scene,
+                                          uint32_t s,
+                                          uint32_t l);
+
+/**
+ * What each element schedule `s` names is doing on `date` (seconds since
+ * 1970-01-01T00:00) under `dates` (a [`CadaclysmDates`]), in node order. Returns the full
+ * count; writes `min(count, capacity)` states, and nothing when `out` is NULL. Returns -1,
+ * with [`cadaclysm_last_error`] set, for no such schedule, a `date` that is not finite or
+ * any other `dates`.
+ *
+ * # Safety
+ * `scene` must be null or a handle from [`cadaclysm_open`]; `out`, where not null, must be
+ * writable for `capacity` states.
+ */
+int64_t cadaclysm_schedule_at(const struct CadaclysmScene *scene,
+                              uint32_t s,
+                              double date,
+                              uint32_t dates,
+                              struct CadaclysmElementState *out,
+                              uint32_t capacity);
+
+/**
  * The mechanism posed by `row_count` rows: row `i` sets joint `joints[i]` to `counts[i]`
  * values, taken consecutively from `values` (so `values` holds the sum of `counts`).
  * `ground`: a link index, or [`CADACLYSM_NONE`] for the default ground. NULL on error, with
@@ -2632,6 +3004,28 @@ uint32_t cadaclysm_pose_unsolved_count(const struct CadaclysmPose *pose);
  * [`cadaclysm_pose_sequence`].
  */
 uint32_t cadaclysm_pose_unsolved(const struct CadaclysmPose *pose, uint32_t index);
+
+/**
+ * How many things the pose's couplings could not solve, or found disagreeing, in file
+ * order (drives spec §12a); 0 for a null pose. Each reads, word for word:
+ * - `coupling '<name>': both '<a>' and '<b>' are given and disagree by <d>`;
+ * - `coupling '<name>' cannot be solved: <why>`.
+ *
+ * # Safety
+ * `pose` must be null or a handle from [`cadaclysm_pose`], [`cadaclysm_pose_state`] or
+ * [`cadaclysm_pose_sequence`].
+ */
+uint32_t cadaclysm_pose_diagnostic_count(const struct CadaclysmPose *pose);
+
+/**
+ * The `index`-th of them, UTF-8; null for a null pose or out of range. Borrowed, lives as
+ * long as the pose.
+ *
+ * # Safety
+ * `pose` must be null or a handle from [`cadaclysm_pose`], [`cadaclysm_pose_state`] or
+ * [`cadaclysm_pose_sequence`].
+ */
+const char *cadaclysm_pose_diagnostic(const struct CadaclysmPose *pose, uint32_t index);
 
 /**
  * How many given values fell outside their freedom's range; 0 for a null pose.
@@ -3607,16 +4001,24 @@ bool cadaclysm_node_svg(const struct CadaclysmScene *scene,
  * calls (and the reads of what they return) themselves, the same contract
  * `cadaclysm_scene_svg_text` documents for `svg_text`.
  *
- * A body with no silhouette (no exact B-rep, or curved faces that this eye
- * never turns away from -- a cube under any eye, a sphere seen from neither
- * outside nor in) gives all-null and count 0, which is not an error and never
- * touches `last_error`.
+ * A body with no silhouette (no exact B-rep, or no face of it that this eye
+ * turns away from -- every face planar, like a cube's, which no eye does) gives
+ * all-null and count 0, which is not an error and sets no `last_error` of its
+ * own; the call clears the thread's error slot at entry, as the next paragraph
+ * says.
  *
  * A body this call cannot *measure* is a different answer: one with neither
  * sampled space edges nor a declared bounding box gives no box to derive the
  * eye's distance and the world tolerance from, and is **refused** with
  * `last_error` set, rather than answered for. Check `last_error` to tell that
- * apart from the empty answer above, which leaves it alone. A whole-scene
+ * apart from the empty answer above: this call **clears the thread's error at
+ * entry**, so after a call that returned count 0, `last_error` is null for the
+ * empty answer and holds the reason for a refusal, whatever an earlier,
+ * unrelated call left there. (Both answers return the same all-null struct, so
+ * `last_error` is the only thing that tells them apart -- which is why the
+ * clear is needed: it is the same rule `cadaclysm_query` follows at its own
+ * entry. Without it a host following the documented rule would read someone
+ * else's stale failure as why this body has no silhouette.) A whole-scene
  * drawing can still draw such a body's silhouette, because it frames the
  * scene rather than the body.
  *

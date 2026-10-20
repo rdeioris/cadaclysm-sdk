@@ -43,7 +43,7 @@ cadaclysm::Result<Solid> plate_with_pin() {
 }
 
 int main() {
-    auto part = plate_with_pin();
+    cadaclysm::Result<Solid> part = plate_with_pin();
     if (!part) { std::fprintf(stderr, "%s\n", part.error().message.c_str()); return 1; }
     return part->step("part.stp").ok() ? 0 : 1;
 }
@@ -81,6 +81,67 @@ The kernel has its own `cadaclysm::blacksmith::SvgOptions`/`SvgView` (no scene t
 default `up` from, so it is always `"z"`): `Solid::svg_text`/`Solid::svg`, and
 `write_svg_text`/`write_svg` over several solids at once, mirroring
 `write_sat_text`/`write_sat`'s shape.
+
+## Drawing
+
+`cadaclysm/view.hpp` draws through a view library opened at run time -- the terminal by
+default, the GPU window (`cadaclysm_view`, on wgpu) after `cadaclysm::view::use_wgpu()`, any
+other with `cadaclysm::view::use(path)` or `CADACLYSM_VIEW`. Link `cadaclysm::view_loader`
+**and** `cadaclysm::blacksmith` (the view library is not linked: `view_loader` compiles in
+where to look). `cadaclysm::view` is the linked C library itself, for a host that calls
+`cadaclysm_view.h` directly. A missing library is refused with "no view library: ...", naming
+where it looked, and the view library must speak ABI 1.11.
+
+```cpp
+#include <cadaclysm/view.hpp>
+namespace bs = cadaclysm::blacksmith;
+
+cadaclysm::Result<void> draw() {
+    CADACLYSM_TRY(solid, bs::Solid::sphere(10));
+    CADACLYSM_TRY_VOID(cadaclysm::view::use_wgpu());   // else the terminal prints a still
+    CADACLYSM_TRY_VOID(solid.show());                  // blocks until the window is closed
+    CADACLYSM_TRY(camera, solid.view());               // a Camera: where it was left, and the last pick
+
+    CADACLYSM_TRY(view, cadaclysm::View::offscreen(800, 600));   // no display needed
+    CADACLYSM_TRY(item, view.show(solid));                       // keeps the solid alive while shown
+    CADACLYSM_TRY_VOID(item.colour("tomato"));                   // or "#e64d1a", or {0.9f, 0.3f, 0.1f}
+    CADACLYSM_TRY_VOID(view.frame());
+    return view.save("sphere.png");
+}
+```
+
+`show()` and `view()` are member templates of `Solid`, `Scene`, `Node` and `Pose`: include
+`cadaclysm/view.hpp` to call them. Their options are a `cadaclysm::ShowOptions` (`edges` true
+by default; `azimuth`, `elevation` and `up` are `std::optional`; `tolerance` is
+`std::optional<double>`, for solids only). Every colour argument is a `Colour`: three or four
+floats, or text -- `"#rgb"`, `"#rrggbb"` or a CSS colour name, read by the view library's own
+`cadaclysm_view_parse_colour`.
+
+`view.show_text("Bracket", {0, 0, 10}, options)` shows text as one item: a label (the
+default; `size` in pixels, facing the viewer, its `align` corner on the point, moved by
+`offset` pixels, over an optional `box` colour with `padding`, drawn through geometry when
+`on_top`) or `mode = "world"` text lying in the model along `right` and `up` (`size` in model
+units). The options are a `cadaclysm::TextOptions` (white, 12 pixels, `"bottom-left"`, no box,
+by default). `item.set_text("...")` replaces the string; a pick on text answers its item, the
+`face` being the line hit. `cadaclysm::view::load_font(bytes)` (or a path) loads a TTF/OTF font
+and returns its id for `options.font` (0 is the bundled Liberation Sans);
+`view.layer(CADACLYSM_VIEW_LAYER_TEXT, false)` hides every text item. An unknown `mode` or
+`align` and a NUL in the text are refused in Python's words, the rest with the library's
+reason.
+
+`pose.show()` draws a posed mechanism (the scene by handle, every node at its posed
+transform). `view.lod("smooth")` turns levels of detail on (`wake_ms()` says when a resting
+frame is owed), and `item.node_transforms(...)` poses a shown scene by hand.
+
+`View::create` opens a window of its own (`run()` blocks, `cadaclysm::view::pump()` keeps it
+live from your loop); `View::in_window` draws in a host's native window, the host forwarding
+`input` (a `Result<uint32_t>`), `resize` and `draw` (`needs_draw()` is a `Result<bool>`). A
+View belongs to the thread that made it (on macOS the main thread): another thread's call,
+`close()` included, is refused. A shown `Node` or `Pose` borrows from its `Scene`, as
+everything here does: keep the Scene open. `Scene::close()` first removes the items of this
+thread's views that show it, and leaves the scene open when another thread's view still shows
+it. `show()` and `view()` draw in a view of their own that `Scene::close()` does not see while
+they run: do not close the Scene they draw from another thread meanwhile. A View made in a `static` or at namespace scope is leaked at program exit.
 
 ## Lifetimes
 
@@ -161,6 +222,11 @@ mismatches -- but not all: GCC and Clang do not mangle a variable's type, so an
 `Selector::max` and `Selector::min` are declared parenthesised, so windows.h's `max`
 and `min` macros cannot break the header. Where your code includes windows.h without
 `NOMINMAX`, call them as `(Selector::max)(Axis::z)`.
+
+`cadaclysm/view.hpp` includes windows.h itself, through `view_loader.h`, with
+`WIN32_LEAN_AND_MEAN` and `NOMINMAX` defined for the include (and left as it found them).
+windows.h's other macros, wingdi's `ERROR` among them, remain: where one clashes with a
+name of yours, `#undef` it after the include.
 
 ## The smoke
 

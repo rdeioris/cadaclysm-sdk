@@ -172,6 +172,77 @@ using (var sequenceScene = Cadaclysm.Cadaclysm.Open(sequencePath))
     Console.WriteLine("sequences: swing and snap read as the file records them, and swing poses at each keyframe");
 }
 
+// IFC work schedules: samples/schedule.ifc, at parity with the Python reference's
+// test_a_file_reads_its_work_schedule and the two tests after it (plan 2026-10-06-ifc-4d-2).
+const double D = 86400.0;
+const double T0 = 1772438400.0; // 2026-03-02T08:00:00
+var schedulePath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path))!, "schedule.ifc");
+using (var scheduleScene = Cadaclysm.Cadaclysm.Open(schedulePath))
+{
+    if (scheduleScene.Schedules.Count != 1) return Fail("schedules: the file does not carry one schedule");
+    var programme = scheduleScene.Schedules[0];
+    if (programme.Name != "Programme" || programme.Identification != "WS-1" || programme.Kind != "planned"
+        || programme.KindName != "" || programme.Start != T0 || programme.Finish is not null)
+        return Fail("schedules: the programme is not Programme, WS-1, planned, starting at T0");
+    var taskNames = string.Join(",", programme.Tasks.Select(t => t.Name));
+    if (taskNames != "Slab,Structure,Walls north,Walls south,Topping out,Demolish shed,Fit-out")
+        return Fail("schedules: the tasks are " + taskNames);
+    var tasks = programme.Tasks;
+    var (slab, structure, north, south, topping, shed, fitOut) = (tasks[0], tasks[1], tasks[2], tasks[3], tasks[4], tasks[5], tasks[6]);
+    if (!Equals(north.Parent, structure) || !Equals(south.Parent, structure) || slab.Parent is not null)
+        return Fail("schedules: the parents are off");
+    if (slab.Kind != "construction" || shed.Kind != "demolition" || topping.Kind != "notdefined")
+        return Fail("schedules: the task kinds are off");
+    if (!topping.Milestone || slab.Milestone) return Fail("schedules: milestones are off");
+    if (slab.Identification != "T1" || slab.Status != "COMPLETED") return Fail("schedules: Slab's identification or status is off");
+    var slabTime = slab.Time;
+    if (slabTime.ScheduleStart != T0 || slabTime.ScheduleFinish is not null || slabTime.Duration != 10 * D
+        || slabTime.ActualStart != T0 || slabTime.ActualFinish != T0 + 8 * D || slabTime.EarlyStart is not null)
+        return Fail("schedules: Slab's dates are off");
+    if (!south.Nodes.Select(n => n.Name).OrderBy(n => n, StringComparer.Ordinal).SequenceEqual(new[] { "Wall S1", "Wall S2" })
+        || !fitOut.Nodes.Select(n => n.Name).OrderBy(n => n, StringComparer.Ordinal).SequenceEqual(new[] { "Desk", "Room" }))
+        return Fail("schedules: the task nodes are off");
+    var wantLinks = new (string From, string To, string Kind, double? Lag)[]
+    {
+        ("Slab", "Structure", "finish_start", null),
+        ("Walls north", "Walls south", "start_start", 2 * D),
+        ("Walls south", "Topping out", "finish_start", null),
+        ("Topping out", "Fit-out", "finish_start", null),
+    };
+    var gotLinks = programme.Links.Select(l => (l.From.Name, l.To.Name, l.Kind, l.Lag)).ToArray();
+    if (!gotLinks.SequenceEqual(wantLinks)) return Fail("schedules: the links are " + string.Join(", ", gotLinks));
+    if (programme.Links.Any(l => l.KindName != "")) return Fail("schedules: a link kind name is not empty");
+
+    var early = programme.At(T0 + 3 * D).ToDictionary(e => e.Node.Name);
+    var wantNodes = new[] { "Slab", "Wall N1", "Wall N2", "Wall S1", "Wall S2", "Shed", "Room", "Desk" };
+    if (!early.Keys.OrderBy(n => n, StringComparer.Ordinal).SequenceEqual(wantNodes.OrderBy(n => n, StringComparer.Ordinal)))
+        return Fail("schedules: at(T0+3D) names " + string.Join(", ", early.Keys));
+    if (early["Slab"].Phase != "building" || Math.Abs(early["Slab"].Progress - 0.3) > 1e-9)
+        return Fail("schedules: Slab is not 30% built on day 3");
+    if (early["Shed"].Phase != "demolishing" || early["Wall S1"].Phase != "unbuilt")
+        return Fail("schedules: the shed or Wall S1 is off on day 3");
+    var late = programme.At(T0 + 32 * D, "actual").ToDictionary(e => e.Node.Name);
+    if (late["Wall S1"].Phase != "building" || late["Wall S1"].Variance != 5 * D || late["Slab"].Variance != -2 * D)
+        return Fail("schedules: the actual dates' variances are off");
+    try
+    {
+        programme.At(double.NaN);
+        return Fail("schedules: at(NaN) was accepted");
+    }
+    catch (CadaclysmException e) when (e.Message.Contains("the date must be a finite number")) { }
+    try
+    {
+        programme.At(T0, "compare");
+        return Fail("schedules: at(T0, \"compare\") was accepted");
+    }
+    catch (ArgumentException e) when (e.Message.Contains("dates must be 'scheduled' or 'actual'")) { }
+    Console.WriteLine("schedules: Programme reads as the file records it, and at() plays its dates");
+}
+using (var noScheduleScene = Cadaclysm.Cadaclysm.Open(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path))!, "cube.scad")))
+{
+    if (noScheduleScene.Schedules.Count != 0) return Fail("schedules: the cube has schedules");
+}
+
 // pose([]) on the cube sample (no mechanism) fails with a message naming that, as the
 // Python reference's test_a_bad_pose_raises checks on the same file.
 var cubePath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path))!, "cube.scad");
@@ -684,6 +755,252 @@ using var outline = rect.WithHole(hole);
     catch (BuildException e) when (e.Message.Contains("groups must have one entry per solid")) { }
     Console.WriteLine($"collider: {hits.Count} hit(s), depth {hit.Depth}, {stats}");
 }
+// The SubD cage: Python's test_subd_* one for one (The Kiln, Plan 2b).
+{
+    string SdRefused(Action act)
+    {
+        try { act(); return "(no exception)"; }
+        catch (BuildException e) { return e.Message; }
+    }
+    // 1. the primitive's read-backs are copies
+    using (var cube = Subd.Cuboid())
+    {
+        var cubePositions = cube.Positions;
+        if (cubePositions.Length != 24 || cube.Faces.Length != 6 || cube.Faces.Any(f => f.Length != 4)) return Fail("subd: a cuboid is not 8 positions and 6 quads");
+        if (cube.Creases.Length != 0 || cube.Pins.Length != 0 || cube.Symmetry is not null || cube.Selection is not null)
+            return Fail("subd: a fresh cuboid has creases, pins, a symmetry or a selection");
+        cubePositions[0] = 99;
+        if (cube.Positions[0] == 99) return Fail("subd: writing to the returned positions changed the next read");
+        using var again = Subd.FromParts(cube.Positions, cube.Faces);
+        if (!again.Positions.SequenceEqual(cube.Positions) || !again.Faces.Zip(cube.Faces).All(p => p.First.SequenceEqual(p.Second)))
+            return Fail("subd: from_parts did not give equal positions and faces");
+        if (again.Selection is not null) return Fail("subd: from_parts selected something");
+    }
+    // 2. extrude
+    using (var cube = Subd.Cuboid())
+    using (var tall = cube.Extrude(new uint[] { 1 }, 1))
+    {
+        if (tall.Positions.Length != 36 || cube.Positions.Length != 24) return Fail("subd: extrude is not 12 positions with the input left at 8");
+        var sel = tall.Selection;
+        if (sel is null || sel.Kind != SubdElements.Faces || !sel.Ids.SequenceEqual(new uint[] { 1 })) return Fail("subd: extrude does not select faces [1]");
+        if (sel != SubdSelection.OfFaces(1) || sel.GetHashCode() != SubdSelection.OfFaces(1).GetHashCode()) return Fail("subd: a selection read back is not equal to one with the same ids");
+        if (SubdSelection.OfFaces(1) == SubdSelection.OfVertices(1)) return Fail("subd: selections of different kinds compare equal");
+    }
+    // 3. crease and pin
+    using (var cube = Subd.Cuboid())
+    using (var creased = cube.Crease(new[] { new SubdEdge(0, 1) }))
+    using (var both = creased.Pin(new uint[] { 6 }))
+    {
+        var sel = creased.Selection;
+        if (sel is null || sel.Kind != SubdElements.Edges || !sel.Edges.SequenceEqual(new[] { new SubdEdge(0, 1) })) return Fail("subd: crease does not select edges [(0,1)]");
+        if (sel != SubdSelection.OfEdges(new SubdEdge(0, 1))) return Fail("subd: an edge selection read back is not equal to one with the same edges");
+        if (!both.Creases.SequenceEqual(new[] { new SubdEdge(0, 1) }) || !both.Pins.SequenceEqual(new uint[] { 6 })) return Fail("subd: pin lost the crease or the pin");
+        var pinned = both.Selection;
+        if (pinned is null || pinned.Kind != SubdElements.Vertices || !pinned.Ids.SequenceEqual(new uint[] { 6 })) return Fail("subd: pin does not select vertices [6]");
+        using var rebuilt = Subd.FromParts(both.Positions, both.Faces, both.Creases, both.Pins);
+        if (!rebuilt.Creases.SequenceEqual(both.Creases) || !rebuilt.Pins.SequenceEqual(both.Pins)) return Fail("subd: from_parts dropped the creases or pins");
+        using var uncreased = both.Crease(new[] { new SubdEdge(0, 1) }, false);
+        using var released = uncreased.Pin(new uint[] { 6 }, false);
+        if (released.Creases.Length != 0 || released.Pins.Length != 0) return Fail("subd: on=false left a crease or a pin");
+    }
+    // 4. mirror
+    using (var wide = Subd.Cuboid((2, 2, 2), (2, 1, 1)))
+    using (var half = wide.MirrorOn(SubdAxis.X))
+    {
+        var sym = half.Symmetry;
+        if (sym is null || sym.Value.Axis != SubdAxis.X || !(sym.Value.Tolerance > 0)) return Fail("subd: mirror_on(X) has no X symmetry with a tolerance");
+        if (half.Selection is not null) return Fail("subd: mirror_on selected something");
+        if (half.Positions.Length >= wide.Positions.Length) return Fail("subd: the mirrored half is not smaller than the whole");
+        using var loaded = Subd.FromParts(half.Positions, half.Faces, half.Creases, half.Pins, sym);
+        if (!loaded.Positions.SequenceEqual(half.Positions) || loaded.Symmetry != sym) return Fail("subd: from_parts did not keep the half and its symmetry");
+        using var whole = half.Full();
+        if (whole.Positions.Length != wide.Positions.Length) return Fail("subd: full() is not as many positions as the whole");
+        using var baked = half.MirrorOff();
+        if (baked.Symmetry is not null) return Fail("subd: mirror_off left a symmetry");
+    }
+    // 5. edge loops
+    using (var grid = Subd.Cuboid((2, 2, 2), (2, 2, 2)))
+    {
+        var f0 = grid.Faces[0];
+        var loop = grid.EdgeLoop(new SubdEdge(f0[0], f0[1]));
+        if (loop.Length < 4 || loop[0] != new SubdEdge(Math.Min(f0[0], f0[1]), Math.Max(f0[0], f0[1]))) return Fail($"subd: edge_loop gave {loop.Length} edges");
+    }
+    using (var cube = Subd.Cuboid())
+    {
+        var f0 = cube.Faces[0];
+        if (cube.EdgeLoop(new SubdEdge(f0[0], f0[2])).Length != 0 || cube.EdgeLoop(new SubdEdge(0, 99)).Length != 0) return Fail("subd: edge_loop of a non-edge is not empty");
+    }
+    // 6. transform
+    using (var cube = Subd.Cuboid())
+    {
+        var rot = new double[] { 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+        var before = cube.Positions;
+        using (var turned = cube.Transform(SubdSelection.OfVertices(0, 1, 2, 3, 4, 5, 6, 7), rot))
+        {
+            var after = turned.Positions;
+            for (var k = 0; k < 8; k++)
+                if (Math.Abs(after[3 * k] + before[3 * k + 1]) > 1e-12 || Math.Abs(after[3 * k + 1] - before[3 * k]) > 1e-12 || Math.Abs(after[3 * k + 2] - before[3 * k + 2]) > 1e-12)
+                    return Fail($"subd: the rotation did not map vertex {k} to (-y, x, z)");
+        }
+        using (var one = cube.Transform(SubdSelection.OfVertices(0), rot))
+        {
+            var after = one.Positions;
+            for (var k = 1; k < 8; k++)
+                for (var c = 0; c < 3; c++)
+                    if (after[3 * k + c] != before[3 * k + c]) return Fail($"subd: transforming vertex 0 moved vertex {k}");
+            if (Math.Abs(after[0] + before[1]) > 1e-12 || Math.Abs(after[1] - before[0]) > 1e-12) return Fail("subd: transforming vertex 0 did not rotate it");
+        }
+        var shift = new double[] { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 0, 0, 1 };
+        using (var moved = cube.Transform(SubdSelection.OfEdges(new SubdEdge(0, 1)), shift))
+        {
+            if (Math.Abs(moved.Positions[0] - (before[0] + 3)) > 1e-12) return Fail("subd: the edge transform did not add 3 to vertex 0's x");
+            var sel = moved.Selection;
+            if (sel is null || sel.Kind != SubdElements.Edges || !sel.Edges.SequenceEqual(new[] { new SubdEdge(0, 1) })) return Fail("subd: the edge transform does not select edges [(0,1)]");
+        }
+        var badMatrix = SdRefused(() => cube.Transform(SubdSelection.OfVertices(0), new double[3]));
+        if (!badMatrix.Contains("matrix")) return Fail($"subd: a 3-number matrix was refused as: {badMatrix}");
+    }
+    // 7. inset, insert_loop
+    using (var cube = Subd.Cuboid())
+    {
+        using (var inset = cube.Inset(new uint[] { 1 }, 0.25))
+            if (inset.Faces.Length != 10) return Fail("subd: inset([1], 0.25) is not 10 faces");
+        using (var cut = cube.InsertLoop(new SubdEdge(0, 1)))
+            if (cut.Positions.Length != 36 || cut.Selection?.Kind != SubdElements.Edges) return Fail("subd: insert_loop is not 12 positions with an edge selection");
+        var refused = SdRefused(() => cube.InsertLoop(new SubdEdge(0, 1), 1.5));
+        if (!refused.StartsWith("bad selection: ")) return Fail($"subd: insert_loop at 1.5 was refused as: {refused}");
+    }
+    // 8. smooth_mesh
+    SubdMesh keptMesh;
+    using (var cube = Subd.Cuboid())
+    {
+        var mesh = cube.SmoothMesh(2);
+        var n = mesh.Positions.Length / 3;
+        if (n <= 8 || mesh.Normals.Length != 3 * n) return Fail("subd: smooth_mesh(2) is not n > 8 positions with n normals");
+        for (var k = 0; k < n; k++)
+            if (Math.Abs(Math.Sqrt(mesh.Normals[3 * k] * mesh.Normals[3 * k] + mesh.Normals[3 * k + 1] * mesh.Normals[3 * k + 1] + mesh.Normals[3 * k + 2] * mesh.Normals[3 * k + 2]) - 1) > 1e-9)
+                return Fail($"subd: normal {k} is not unit");
+        if (mesh.Indices.Length % 3 != 0 || mesh.Indices.Any(i => i >= n)) return Fail("subd: an index is out of range");
+        if (mesh.TriangleFace.Length != mesh.Indices.Length / 3 || mesh.TriangleFace.Any(f => f >= 6)) return Fail("subd: triangle_face is not one entry a triangle, each < 6");
+        if (cube.SmoothMesh(1).Positions.Length >= mesh.Positions.Length) return Fail("subd: smooth_mesh(1) is not fewer positions");
+        if (!cube.SmoothMesh(2).Positions.SequenceEqual(mesh.Positions)) return Fail("subd: a second smooth_mesh(2) differs");
+        var tooDeep = SdRefused(() => cube.SmoothMesh(7));
+        if (!tooDeep.Contains("levels")) return Fail($"subd: smooth_mesh(7) was refused as: {tooDeep}");
+        keptMesh = mesh;
+    }
+    GC.Collect();
+    GC.WaitForPendingFinalizers();
+    if (keptMesh.Positions.Any(double.IsNaN) || keptMesh.Normals.Length != keptMesh.Positions.Length || keptMesh.Indices.Max() >= keptMesh.Positions.Length / 3)
+        return Fail("subd: a mesh read after its cage is closed is not whole");
+    // 9. pick
+    using (var cube = Subd.Cuboid())
+    {
+        var corner = cube.Positions.Skip(18).Take(3).ToArray();
+        var fine = cube.SmoothMesh(3);
+        var best = 0;
+        var bestD = double.MaxValue;
+        for (var k = 0; k < fine.Positions.Length / 3; k++)
+        {
+            var d = Math.Pow(fine.Positions[3 * k] - corner[0], 2) + Math.Pow(fine.Positions[3 * k + 1] - corner[1], 2) + Math.Pow(fine.Positions[3 * k + 2] - corner[2], 2);
+            if (d < bestD) { bestD = d; best = k; }
+        }
+        var at = fine.Positions.Skip(3 * best).Take(3).ToArray();
+        var vertex = cube.Pick(at, SubdElements.Vertices);
+        if (vertex is null || vertex.Kind != SubdElements.Vertices || !vertex.Ids.SequenceEqual(new uint[] { 6 })) return Fail($"subd: pick for a vertex gave {vertex}");
+        var edge = cube.Pick(at, SubdElements.Edges);
+        if (edge is null || edge.Kind != SubdElements.Edges || edge.Edges.Length != 1 || (edge.Edges[0].A != 6 && edge.Edges[0].B != 6)) return Fail($"subd: pick for an edge gave {edge}");
+        var face = cube.Pick(at, SubdElements.Faces);
+        if (face is null || face.Kind != SubdElements.Faces || face.Ids.Length != 1) return Fail($"subd: pick for a face gave {face}");
+        if (cube.Pick(new[] { 100.0, 100, 100 }, SubdElements.Vertices) is not null) return Fail("subd: a far point picked something");
+        var nan = SdRefused(() => cube.Pick(new[] { double.NaN, 0, 0 }, SubdElements.Vertices));
+        if (nan != "bad selection: pick: point is not finite") return Fail($"subd: a NaN point was refused as: {nan}");
+        if (cube.Pick(new[] { 100.0, 100, 100 }, SubdElements.Vertices) is not null) return Fail("subd: a far point after a refusal picked something");
+    }
+    // 10. to_solid
+    using (var cube = Subd.Cuboid())
+    {
+        var (solid, report) = cube.ToSolid();
+        using (solid)
+        {
+            if (report.Regular != 0 || report.Refined != 24 || report.Levels < 2 || report.Steps < 1 || report.Deviation > 1e-4 || report.G1AngleDeg > 0.1
+                || report.DeviationAt.Length != 3 || report.G1At.Length != 3) return Fail($"subd: the cuboid report reads {report}");
+            if (!solid.Manifold.IsClosed) return Fail("subd: the cuboid's solid is not closed");
+            if (!(solid.Mass().Volume > 0)) return Fail("subd: the cuboid's solid has no volume");
+        }
+        var (again, _) = cube.ToSolid(1e-4, 0.1, 6);
+        again.Dispose();
+    }
+    // 11. 12. cylinders
+    using (var flat = Subd.Cylinder(1, 2, 8, 1, false))
+    {
+        var refused = SdRefused(() => flat.ToSolid().Solid.Dispose());
+        if (!(refused.Contains("subd:") && refused.Contains("tangent break"))) return Fail($"subd: an uncreased cylinder was refused as: {refused}");
+    }
+    using (var cyl = Subd.Cylinder())
+    {
+        var (solid, report) = cyl.ToSolid();
+        solid.Dispose();
+        if (report.Deviation > 1e-4 || report.G1AngleDeg > 0.1) return Fail($"subd: the default cylinder reads {report}");
+    }
+    // 13. primitives and their refusals
+    using (var a = Subd.Cylinder(1, 2, 8, 2, true)) using (var b = Subd.Sphere(1, 2)) using (var c = Subd.Torus(3, 1, 12, 8))
+        if (a.Faces.Length == 0 || b.Faces.Length == 0 || c.Faces.Length == 0) return Fail("subd: a primitive has no faces");
+    var segs = SdRefused(() => Subd.Cuboid((2, 2, 2), (0, 1, 1)).Dispose());
+    if (segs != "bad selection: cuboid: segments >= 1") return Fail($"subd: a cuboid of 0 segments was refused as: {segs}");
+    var big = SdRefused(() => Subd.Sphere(1, 2000).Dispose());
+    if (!big.Contains("1024")) return Fail($"subd: a sphere of 2000 segments was refused as: {big}");
+    // 14. from_parts refusals
+    using (var cube = Subd.Cuboid())
+    {
+        var notEdge = SdRefused(() => Subd.FromParts(cube.Positions, cube.Faces, new[] { new SubdEdge(0, 6) }).Dispose());
+        if (!notEdge.StartsWith("bad selection: ")) return Fail($"subd: a crease that is not an edge was refused as: {notEdge}");
+        var none = SdRefused(() => Subd.FromParts(Array.Empty<double>(), cube.Faces).Dispose());
+        if (!none.Contains("vertex_count")) return Fail($"subd: zero positions were refused as: {none}");
+    }
+    // 15. the pipeline
+    using (var cube = Subd.Cuboid())
+    using (var tall = cube.Extrude(new uint[] { 1 }, 0.5))
+    using (var cut = tall.Inset(new uint[] { 1 }, 0.25))
+    {
+        var (solid, report) = cut.ToSolid();
+        using (solid)
+        {
+            if (!solid.Manifold.IsClosed || report.Deviation > 1e-4) return Fail($"subd: the pipeline is not closed within tolerance: {report}");
+            var stepText = solid.StepText();
+            if (!stepText.StartsWith("ISO-10303-21;") || !stepText.Contains("ADVANCED_FACE")) return Fail("subd: the pipeline's STEP text is not an advanced-face file");
+            var stepPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"subd-pipeline-{Environment.ProcessId}.stp");
+            File.WriteAllText(stepPath, stepText);
+            try
+            {
+                using var read = Cadaclysm.Cadaclysm.Open(stepPath);
+                var meshable = read.Walk().Count(n => n.CanMesh);
+                if (meshable != 1) return Fail($"subd: the pipeline's STEP text reads back as {meshable} meshable nodes");
+            }
+            finally { File.Delete(stepPath); }
+        }
+    }
+    // 16. close and use after close
+    {
+        var closed = Subd.Cuboid();
+        closed.Dispose();
+        closed.Dispose();
+        void Dead(string what, Action act)
+        {
+            try { act(); throw new InvalidOperationException($"subd: {what} after close did not fail"); }
+            catch (ObjectDisposedException) { }
+        }
+        try
+        {
+            Dead("positions", () => _ = closed.Positions);
+            Dead("extrude", () => closed.Extrude(new uint[] { 1 }, 1).Dispose());
+            Dead("smooth_mesh", () => closed.SmoothMesh(2));
+            Dead("pick", () => closed.Pick(new[] { 0.0, 0, 0 }, SubdElements.Vertices));
+            Dead("to_solid", () => closed.ToSolid().Solid.Dispose());
+        }
+        catch (InvalidOperationException e) { return Fail(e.Message); }
+    }
+    Console.WriteLine("subd: the cage, its edits, its mesh, its pick and its solid");
+}
 // Solid x profile hits: a line through a cuboid pierces two faces and is cut into three
 // pieces, outside/inside/outside, the middle one spanning the box and sweeping; a loop no hit
 // cuts is one piece; an open sheet has no pieces; a zero tolerance refused in the kernel's words.
@@ -786,6 +1103,15 @@ if (!shape.IsClosed || shape.Faces != rounded.Faces) return Fail($"the filleted 
     var halves = cube.SplitByPlane([2, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0]);
     if (halves.Count != 2 || halves[0].Faces != 6) return Fail($"split_by_plane: {halves.Count} bodies, not 2");
     foreach (var half in halves) half.Dispose();
+    // A rectangle drawn above a sphere cores it: the ball with a square hole, then the core.
+    using var ball = Solid.Sphere(10);
+    using var coreSquare = Profile.Rect(6, 6);
+    var cored = ball.SplitByProfile(coreSquare, [0, 0, 40, 1, 0, 0, 0, 1, 0, 0, 0, 1]);
+    var whole = ball.Mass().Volume;
+    if (cored.Count != 2 || !(cored[1].Mass().Volume > 0 && cored[1].Mass().Volume < cored[0].Mass().Volume)
+        || Math.Abs(cored[0].Mass().Volume + cored[1].Mass().Volume - whole) > 0.01 * whole)
+        return Fail($"split_by_profile: {cored.Count} bodies, not a hole and a core adding up to the ball");
+    foreach (var piece in cored) piece.Dispose();
     // From loops: a circle given before the square it lies in -- the square is the boundary.
     using var loopHole = Profile.Circle(4);
     using var loopSquare = Profile.Rect(30, 30);
@@ -829,7 +1155,7 @@ if (!shape.IsClosed || shape.Faces != rounded.Faces) return Fail($"the filleted 
     var shortNurbs = Refusal(() => Profile.Path((0, 0)).NurbsTo([(5, 5), (10, 0)], [0, 0, 0, 1, 1, 1], 2, [1, 1]).Dispose());
     if (shortSpline != "spline: 2 weights for 4 points; give one per point") return Fail($"a short weight list: {shortSpline}");
     if (shortNurbs != "nurbs_to: 2 weights for 3 control points (the current point and 2 given); give one per point") return Fail($"a short weight list: {shortNurbs}");
-    Console.WriteLine($"sheet verbs: face, trim ({holed.Faces}+{disc.Faces}), face_sheet, drop_faces, round ({slab.Faces} faces), along, chain, push_pull, coil, pipe, split_by_plane, close_loop, from_loops, revolve_in_plane, regular_polygon, star, text, spline, parabola: ok");
+    Console.WriteLine($"sheet verbs: face, trim ({holed.Faces}+{disc.Faces}), face_sheet, drop_faces, round ({slab.Faces} faces), along, chain, push_pull, coil, pipe, split_by_plane, split_by_profile, close_loop, from_loops, revolve_in_plane, regular_polygon, star, text, spline, parabola: ok");
 }
 // Frames: built, checked, and passed wherever twelve numbers go.
 {
@@ -1498,6 +1824,83 @@ using (var back = Cadaclysm.Cadaclysm.Open(step))
     arm.State("reach", new (string Joint, IReadOnlyList<double> Values)[] { ("shoulder", new double[] { 0.5 }) });
     arm.Base("ground");
 
+    // Assembly.Posed (spec 2026-10-05): a new assembly with joints moved; this one unchanged.
+    {
+        static (string Joint, IReadOnlyList<double> Values) Row(string joint, params double[] values) => (joint, values);
+        var armBefore = NoStamp(arm.StepText());
+        using (var upperScene = arm.ToScene())
+        {
+            var upper = upperScene.Links.Single(l => l.Name == "upper arm");
+            var pinIndex = upper.Nodes.Single(n => Math.Abs(n.Transform[0, 3] - 5.0) <= 1e-9
+                && Math.Abs(n.Transform[1, 3] - 5.0) <= 1e-9 && Math.Abs(n.Transform[2, 3] - 2.0) <= 1e-9).Index;
+            using var posedArm = arm.Posed(new[] { Row("shoulder", 0.5) });
+            using var posedScene = posedArm.ToScene();
+            var pt = posedScene.Nodes[(int)pinIndex].Transform;
+            var wantX = 5 * Math.Cos(0.5) - 5 * Math.Sin(0.5);
+            var wantY = 5 * Math.Sin(0.5) + 5 * Math.Cos(0.5);
+            if (!(NearValue(pt[0, 3], wantX) && NearValue(pt[1, 3], wantY) && NearValue(pt[2, 3], 2.0)))
+                return Fail("posed: the shoulder did not carry the pin to the hand-computed spot");
+            var restBolts = upperScene.Links.Where(l => l.Name == "bolts").SelectMany(l => l.Nodes)
+                .ToDictionary(n => n.Index, n => (X: n.Transform[0, 3], Y: n.Transform[1, 3], Z: n.Transform[2, 3]));
+            using var slid = arm.Posed(new[] { Row("upper/screw", 5.0) });
+            using var slidScene = slid.ToScene();
+            foreach (var l in slidScene.Links.Where(l => l.Name == "bolts"))
+                foreach (var n in l.Nodes)
+                {
+                    var r = restBolts[n.Index];
+                    if (!(NearValue(n.Transform[0, 3], r.X + 2.0) && NearValue(n.Transform[1, 3], r.Y)
+                          && NearValue(n.Transform[2, 3], r.Z)))
+                        return Fail("posed: the screw did not slide the bolts by 2");
+                }
+        }
+        Console.WriteLine("posed: the shoulder carries the pin and the screw slides the bolts, read back through the scene");
+
+        using (var reachPosed = arm.Posed(state: "reach"))
+        using (var rowPosed = arm.Posed(new[] { Row("shoulder", 0.5) }))
+        using (var heldPosed = arm.Posed(new[] { Row("shoulder", 0.5) }, ground: "upper arm"))
+        {
+            if (NoStamp(reachPosed.StepText()) != NoStamp(rowPosed.StepText()))
+                return Fail("posed: state \"reach\" differs from shoulder = [0.5]");
+            if (NoStamp(heldPosed.StepText()) == NoStamp(rowPosed.StepText()))
+                return Fail("posed: ground \"upper arm\" made no difference");
+        }
+        try { arm.Posed(new[] { Row("shoulder", 2.0) }); return Fail("posed: shoulder = 2.0 was accepted"); }
+        catch (BuildException e) when (e.Message == "posed: value 0 of joint 'shoulder' is 2, outside its range") { }
+        catch (BuildException e) { return Fail("posed: wrong range refusal: " + e.Message); }
+        try { arm.Posed(state: "fold"); return Fail("posed: state \"fold\" was accepted"); }
+        catch (BuildException e) when (e.Message == "posed: assembly 'arm' has no state named 'fold'") { }
+        catch (BuildException e) { return Fail("posed: wrong state refusal: " + e.Message); }
+        if (NoStamp(arm.StepText()) != armBefore) return Fail("posed: posing changed the assembly");
+        Console.WriteLine("posed: a state, a ground, and the kernel's own refusals (range, unknown state)");
+
+        // Two copies of a bracket whose bolts turn on 'turn'; one copy is named 'right/rear'.
+        using var turnBolt = Solid.Cuboid(1, 1, 6).Named("bolt");
+        using var turnPlate = Solid.Cuboid(20, 10, 2).Named("plate");
+        using var turnBracket = new Assembly("bracket");
+        turnBracket.Place(turnPlate, Frame.Xy());
+        turnBracket.Place(turnBolt, Frame.Xy((5, 5, 2)));
+        turnBracket.Link("fixed", "plate");
+        turnBracket.Link("bolts", "bolt");
+        turnBracket.Joint("turn", "fixed", "bolts");
+        turnBracket.Pair("turn", "revolute", Frame.Xy((10, 5, 2)));
+        using var turnFrame = new Assembly("frame");
+        turnFrame.Place(turnBracket, Frame.Xy(), "left");
+        turnFrame.Place(turnBracket, Frame.Xy((100, 0, 0)), "right/rear");
+        var frameBefore = NoStamp(turnFrame.StepText());
+        try { turnFrame.Posed(new[] { Row("turn", 0.3) }); return Fail("posed: an ambiguous name was accepted"); }
+        catch (BuildException e) when (e.Message == "posed: 'turn' names 2 joints: left/turn, right\\/rear/turn; give one by its path") { }
+        catch (BuildException e) { return Fail("posed: wrong ambiguity refusal: " + e.Message); }
+        using (var turned = turnFrame.Posed(new[] { Row("right\\/rear/turn", 0.3) }))
+        using (var unturned = turnFrame.Posed(new[] { Row("right\\/rear/turn", 0.0) }))
+        {
+            if (turned.Name != "frame") return Fail("posed: the posed copy is not named frame");
+            if (NoStamp(turned.StepText()) == frameBefore) return Fail("posed: turning right/rear changed nothing");
+            if (NoStamp(unturned.StepText()) != frameBefore) return Fail("posed: turning by 0.0 changed the frame");
+        }
+        if (NoStamp(turnFrame.StepText()) != frameBefore) return Fail("posed: posing changed the frame");
+        Console.WriteLine("posed: a bare ambiguous name is refused naming both paths; a path with an escaped slash poses one");
+    }
+
     // Fact 1: the pair/state entity counts in the default schema.
     var pairedStepText = arm.StepText();
     var mechReprCount = CountOf(pairedStepText, "=MECHANISM_REPRESENTATION(");
@@ -1625,7 +2028,7 @@ using (var back = Cadaclysm.Cadaclysm.Open(step))
     {
         (() => arm.Pair("shoulder", "revolute", Frame.Xy((0, 0, 10))), "pair: joint 'shoulder' already has a pair"),
         (() => arm.Pair("back", "orbital", Frame.Xy()),
-            "pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, spherical, " +
+            "pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, gear, rack_and_pinion, spherical, " +
             "spherical_with_pin, planar, universal, homokinetic, fully_constrained, unconstrained)"),
         (() => arm.Pair("back", "screw", Frame.Xy()), "pair: a screw needs a non-zero pitch"),
         (() => arm.Pair("back", "revolute", Frame.Xy(), ranges: new (double? Lower, double? Upper)[] { (-1, 1), (-1, 1) }),
@@ -1683,6 +2086,93 @@ using (var back = Cadaclysm.Cadaclysm.Open(step))
             return Fail("pairs: hinge joint 'j' is not one freedom with no lower limit and upper exactly 1.0");
         Console.WriteLine("pairs: a one-sided range (no lower, upper 1.0) survives the round trip");
     }
+
+}
+
+// Drives plan 4: a gear pair round-trips and poses from its driver; pair_with refuses a wrong
+// parameter count. Port of the Python _geared() fixture and its two tests.
+{
+    Assembly Geared(bool mesh)
+    {
+        using var gPlate = Solid.Cuboid(40, 10, 2).Named("plate");
+        using var gPin = Solid.Cylinder(1, 6).Named("pin");
+        using var gHub = Solid.Cylinder(2, 4).Named("hub");
+        var gears = new Assembly("gears");
+        gears.Place(gPlate, Frame.Xy(), "frame");
+        gears.Place(gPin, Frame.Xy((0, 0, 2)), "pinion");
+        gears.Place(gHub, Frame.Xy((35, 0, 2)), "wheel");
+        gears.Link("base", "frame");
+        gears.Link("driver", "pinion");
+        gears.Link("follower", "wheel");
+        gears.Joint("drive", "base", "driver");
+        gears.Joint("driven", "base", "follower");
+        gears.Joint("mesh", "driver", "follower");
+        gears.Pair("drive", "revolute", Frame.Xy((0, 0, 2)));
+        gears.Pair("driven", "revolute", Frame.Xy((30, 0, 2)));
+        if (mesh) gears.PairWith("mesh", "gear", Frame.Xy((0, 0, 2)), parameters: new[] { 10, 20, -0.5, 0.25, 0.125 });
+        return gears;
+    }
+
+    using (var gears = Geared(true))
+    using (var gearScene = gears.ToScene())
+    {
+        var gj = gearScene.Joints.ToDictionary(j => j.Name);
+        var meshPair = gj["mesh"].Pair ?? throw new Exception("gears: mesh has no pair");
+        if (meshPair.Kind != PairKind.Other || meshPair.KindName != "gear")
+            return Fail($"gears: mesh pair is {meshPair.Kind}/{meshPair.KindName}, not Other/gear");
+        var want5 = new[] { 10, 20, -0.5, 0.25, 0.125 };
+        if (meshPair.Parameters.Count != 5 || !meshPair.Parameters.Zip(want5, (a, b) => Math.Abs(a - b) <= 1e-9).All(x => x))
+            return Fail("gears: mesh parameters are not [10, 20, -0.5, 0.25, 0.125]");
+        var drivePair = gj["drive"].Pair!;
+        if (drivePair.KindName != "revolute" || drivePair.Parameters.Count != 0)
+            return Fail("gears: drive is not revolute with no parameters");
+
+        var driven0 = gearScene.Pose(new[] { (gj["drive"], (IReadOnlyList<double>)new double[] { 0.4 }) });
+        if (driven0.Diagnostics.Count != 0 || driven0.Unsolved.Count != 0)
+            return Fail("gears: a driver-only pose reported diagnostics or unsolved joints");
+        var wheelNode = gearScene.Links[2].Nodes[0];
+        var wt = driven0.Transform(wheelNode);
+        if (!(Math.Abs(wt[0, 3] - (30 + 5 * Math.Cos(-0.2))) <= 1e-9 && Math.Abs(wt[1, 3] - 5 * Math.Sin(-0.2)) <= 1e-9
+              && Math.Abs(wt[2, 3] - 2.0) <= 1e-9))
+            return Fail("gears: the wheel is not where the ratio puts it");
+
+        var both = gearScene.Pose(new[] {
+            (gj["drive"], (IReadOnlyList<double>)new double[] { 0.4 }),
+            (gj["driven"], (IReadOnlyList<double>)new double[] { 0.4 }) });
+        if (both.Diagnostics.Count != 1
+            || !both.Diagnostics[0].StartsWith("coupling 'mesh': both 'drive' and 'driven' are given and disagree by"))
+            return Fail("gears: disagreeing driver and driven did not give the one coupling diagnostic: "
+                + string.Join(" | ", both.Diagnostics));
+        Console.WriteLine("gears: a gear pair round-trips (other/gear, 5 params) and poses from its driver, one diagnostic when over-given");
+    }
+
+    using (var noMesh = Geared(false))
+    {
+        try { noMesh.PairWith("mesh", "gear", Frame.Xy(), parameters: new double[] { 10, 20 }); return Fail("gears: PairWith accepted two parameters"); }
+        catch (BuildException e) when (e.Message == "pair: a gear takes 3 or 5 parameters, not 2") { }
+        catch (BuildException e) { return Fail("gears: wrong refusal text: " + e.Message); }
+        noMesh.PairWith("mesh", "gear", Frame.Xy(), parameters: new double[] { 10, 20, -0.5 });
+        Console.WriteLine("gears: PairWith refuses a wrong parameter count in the kernel's words, and takes three");
+    }
+
+    using (var posedGears = Geared(true))
+    {
+        static (string Joint, IReadOnlyList<double> Values) GRow(string joint, double v) => (joint, new[] { v });
+        static string Bare(string text) => string.Join("\n", text.Split('\n').Where(l => !l.StartsWith("FILE_NAME(")));
+        var gearsBefore = Bare(posedGears.StepText());
+        using (var driven = posedGears.Posed(new[] { GRow("drive", 0.4) }))
+            if (driven.Name != "gears") return Fail("gears: Posed from the driver alone is not named gears");
+        try
+        {
+            posedGears.Posed(new[] { GRow("drive", 0.4), GRow("driven", 0.4) });
+            return Fail("gears: Posed accepted a disagreeing driver and driven");
+        }
+        catch (BuildException e) when (e.Message.StartsWith(
+            "posed: assembly 'gears': coupling 'mesh': both 'drive' and 'driven' are given and disagree by")) { }
+        catch (BuildException e) { return Fail("gears: wrong Posed refusal: " + e.Message); }
+        if (Bare(posedGears.StepText()) != gearsBefore) return Fail("gears: Posed changed the assembly");
+        Console.WriteLine("gears: Posed from the driver alone succeeds; a disagreeing driver and driven is refused in the kernel's words");
+    }
 }
 
 // SVG: the library's own camera, no viewer -- the reader (a scene, a node) and the kernel
@@ -1699,6 +2189,12 @@ catch (CadaclysmException) { }
 var namedSvgText = scene.SvgText(new Cadaclysm.SvgOptions { Stroke = "Red" });
 if (!namedSvgText.Contains("stroke=\"#ff0000\"")) return Fail("scene svg: Stroke = \"Red\" did not come back #ff0000");
 if (Cadaclysm.Cadaclysm.Packed("navy") != 0x000080u) return Fail("Cadaclysm.Packed(\"navy\") is not 0x000080");
+// Background takes colour text directly, and Stroke a packed number, each through SvgColour.
+var textBackground = scene.SvgText(new Cadaclysm.SvgOptions { Stroke = 0x00FF00, Background = "Navy" });
+if (!textBackground.Contains("#000080")) return Fail("scene svg: Background = \"Navy\" did not come back #000080");
+if (!textBackground.Contains("stroke=\"#00ff00\"")) return Fail("scene svg: Stroke = 0x00FF00 did not come back #00ff00");
+try { scene.SvgText(new Cadaclysm.SvgOptions { Background = "bogus" }); return Fail("scene svg: Background = \"bogus\" was accepted"); }
+catch (CadaclysmException e) when (e.Message.StartsWith("svg: background:")) { }
 Console.WriteLine("svg: scene and node text, file written, fov=200 refused, a CSS colour name stroke");
 
 var solidSvgText = rounded.SvgText();
@@ -1711,6 +2207,11 @@ catch (BuildException) { }
 var paintedSvgText = rounded.SvgText(new Cadaclysm.Blacksmith.SvgOptions { Stroke = "red", Background = Blacksmith.Packed("navy") });
 if (!paintedSvgText.ToLowerInvariant().Contains("#ff0000")) return Fail("blacksmith svg: Stroke = \"red\" did not come back #ff0000");
 if (!paintedSvgText.Contains("#000080")) return Fail("blacksmith svg: Background = Packed(\"navy\") did not come back #000080");
+var textPaintedSvg = rounded.SvgText(new Cadaclysm.Blacksmith.SvgOptions { Stroke = 0x00FF00, Background = "Navy" });
+if (!textPaintedSvg.Contains("#000080")) return Fail("blacksmith svg: Background = \"Navy\" did not come back #000080");
+if (!textPaintedSvg.ToLowerInvariant().Contains("#00ff00")) return Fail("blacksmith svg: Stroke = 0x00FF00 did not come back #00ff00");
+try { rounded.SvgText(new Cadaclysm.Blacksmith.SvgOptions { Background = "bogus" }); return Fail("blacksmith svg: Background = \"bogus\" was accepted"); }
+catch (BuildException e) when (e.Message.StartsWith("svg: background:")) { }
 Console.WriteLine("blacksmith svg: solid text, file written, fov=200 refused, a CSS colour name stroke and Packed background");
 
 // A profile draws its own plane, top by default -- unlike a solid, a sketch has no camera-
@@ -1735,6 +2236,189 @@ var mixedSvgPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cadacly
 Blacksmith.WriteSvg(mixedSvgPath, new[] { rounded }, new[] { rect });
 if (new FileInfo(mixedSvgPath).Length == 0) return Fail("WriteSvg (solids and profiles) wrote an empty file");
 Console.WriteLine("blacksmith svg: solid and profile drawn together, both group ids present");
+
+// ---- silhouette_beziers, both libraries ------------------------------------------------------
+// The curves where a body's surfaces turn away from the eye. The kernel assertions below are on
+// values that pin the layout, not on shapes: a stride-16 unpack with the weights read as a
+// coordinate, or the points shifted a slice, still gives arrays of the right length.
+{
+    // Kernel. A radius-2 sphere's rim: the end points of every arc lie ON the sphere to 1e-9
+    // (radius 2), and the end weights are exactly 1 with the two interior ones in (0, 1). The
+    // interior control points are not checked, and the interior weights only to lie in (0, 1):
+    // both move with how the rim is subdivided.
+    using var silSphere = Solid.Sphere(2.0);
+    var silRim = silSphere.SilhouetteBeziers();
+    if (silRim.Count == 0) return Fail("silhouette: a sphere gave no rim");
+    if (silRim.Points.Length != silRim.Count * 12 || silRim.Weights.Length != silRim.Count * 4)
+        return Fail($"silhouette: {silRim.Count} curves but {silRim.Points.Length} point doubles and {silRim.Weights.Length} weights");
+    for (var c = 0; c < silRim.Count; c++)
+    {
+        double R(int k) => Norm(new[] { silRim.Points[c * 12 + k * 3], silRim.Points[c * 12 + k * 3 + 1], silRim.Points[c * 12 + k * 3 + 2] });
+        double W(int k) => silRim.Weights[c * 4 + k];
+        if (Math.Abs(R(0) - 2.0) > 1e-9 || Math.Abs(R(3) - 2.0) > 1e-9)
+            return Fail($"silhouette: arc {c} end points are at radius {R(0)} and {R(3)}, not 2");
+        if (W(0) != 1.0 || W(3) != 1.0 || !(W(1) > 0 && W(1) < 1) || !(W(2) > 0 && W(2) < 1))
+            return Fail($"silhouette: arc {c} weights are [{W(0)}, {W(1)}, {W(2)}, {W(3)}], not 1, then two weights in (0, 1), then 1");
+    }
+    Console.WriteLine($"silhouette: a radius-2 sphere gives {silRim.Count} arcs, ends at radius 2, end weights 1, interior weights in (0, 1)");
+
+    // A cylinder seen from the side is straight rulings: polynomial, every weight exactly 1.
+    using var silCylinder = Solid.Cylinder(1.0, 3.0);
+    var silRulings = silCylinder.SilhouetteBeziers(new Cadaclysm.Blacksmith.SvgOptions { View = Cadaclysm.Blacksmith.SvgView.Front });
+    if (silRulings.Count == 0 || silRulings.Weights.Any(w => w != 1.0)) return Fail("silhouette: a cylinder's rulings are not all weight 1");
+    // The axis. hypot(x, y) and the z extent are both symmetric in x and y, so an unpack that
+    // returned [y, x, z] passes both; |x| at the radius and |y| at zero tell the two apart (seen
+    // from the front a ruling sits at x = +-radius, y = 0). Only the magnitude of x is asserted,
+    // not its sign, and the number of rulings is not asserted.
+    for (var k = 0; k < silRulings.Count * 4; k++)
+    {
+        var x = silRulings.Points[k * 3]; var y = silRulings.Points[k * 3 + 1];
+        if (Math.Abs(Math.Sqrt(x * x + y * y) - 1.0) > 1e-6) return Fail("silhouette: a ruling's control point is off the cylinder's wall");
+        if (Math.Abs(Math.Abs(x) - 1.0) > 1e-6) return Fail($"silhouette: a ruling's control point has |x| = {Math.Abs(x)}, not the radius 1");
+        if (Math.Abs(y) > 1e-6) return Fail($"silhouette: a ruling's control point has |y| = {Math.Abs(y)}, not 0");
+    }
+    var silHeights = Enumerable.Range(0, 4).Select(k => silRulings.Points[k * 3 + 2]).Order().ToArray();
+    if (!Near(silHeights, new[] { 0.0, 1.0, 2.0, 3.0 }, 1e-6)) return Fail($"silhouette: a ruling's heights are {string.Join(",", silHeights)}, not 0..3 evenly");
+
+    // An infinite tolerance is refused in the library's words; and a refusal left in the error slot
+    // must not turn a later empty answer into an exception. The cuboid is built BEFORE the refusal,
+    // not between it and the ask: every call that builds, reads or writes geometry in the library
+    // runs under its `guard`, whose first act is `clear_error` (blacksmith-capi lib.rs:117), so
+    // building one in between would wipe the refusal's message. The order is build, refuse, ask.
+    // What this pins is narrower than it looks, though: the slot is already clear when the
+    // silhouette's native call begins, because the wrapper first packs its options and packing the
+    // default stroke "#000000" goes through `cadaclysm_blacksmith_parse_colour`, itself a `guard`
+    // (lib.rs:200) that clears it (C# `BuildSvgOptions` -> `Packed` -> `TryParse` ->
+    // `cadaclysm_blacksmith_parse_colour`). `cadaclysm_blacksmith_svg_options_init` is a bare
+    // struct fill and does not clear. So the test pins that the wrapper must not read the slot
+    // BEFORE packing its options: a read there fails it, while a read placed after packing and
+    // before the native call would pass. The library's own clearing at the silhouette's entry is a
+    // library property, pinned for the reader's entry point by
+    // `an_empty_answer_after_a_refusal_carries_no_stale_error`
+    // (crates/cadaclysm-capi/tests/silhouette_abi.rs:401); this test covers the wrapper's half.
+    // Only calls under `guard` clear: `cadaclysm_blacksmith_solid_free` and
+    // `cadaclysm_blacksmith_silhouette_beziers_free` just drop a box and the error getter does not
+    // clear either, so a free running between the refusal and the ask cannot wipe the slot.
+    using var silBox = Solid.Cuboid(10, 10, 10);
+    try { silSphere.SilhouetteBeziers(new Cadaclysm.Blacksmith.SvgOptions { Tolerance = double.PositiveInfinity }); return Fail("silhouette: an infinite tolerance was accepted"); }
+    catch (BuildException e) when (e.Message.Contains("silhouette: ")) { }
+    BeziersData64 silNone;
+    try { silNone = silBox.SilhouetteBeziers(); }
+    catch (BuildException e) { return Fail($"silhouette: the empty answer after a refusal was an error: {e.Message}"); }
+    if (silNone.Count != 0 || silNone.Points.Length != 0 || silNone.Weights.Length != 0) return Fail("silhouette: an all-planar body gave a silhouette");
+    Console.WriteLine("silhouette: cylinder rulings polynomial, infinite tolerance refused, a planar body is the empty answer");
+
+    // Reader. The fixtures are the repository's, not an SDK checkout's, so this runs where found.
+    var silFixtures = sampleRoot is null ? null : System.IO.Path.Combine(sampleRoot, "crates", "cadaclysm-acis", "tests", "fixtures", "rhino");
+    var silSpherePath = silFixtures is null ? null : System.IO.Path.Combine(silFixtures, "sphere.sat");
+    var silBoxPath = silFixtures is null ? null : System.IO.Path.Combine(silFixtures, "box-chamfer-all.blacksmith.stp");
+    if (silSpherePath is not null && silBoxPath is not null && File.Exists(silSpherePath) && File.Exists(silBoxPath))
+    {
+        using var silScene = Cadaclysm.Cadaclysm.Open(silSpherePath);
+        // The body node above the lump holds no shape of its own; the first node with extent is the part.
+        var silNode = silScene.Walk().First(n => !n.Bounds.Min.SequenceEqual(n.Bounds.Max));
+        // Asked the LARGER answer first: iso gives 236 curves against front's 174, so the second call
+        // below refills the scene's one slot in place and overwrites the head of what was kept, which is
+        // what makes a non-copying implementation fail loudly. The reverse order can pass with a view.
+        // It was front first until the lattice's spacing became a length in space (44efabc88): front
+        // gave 1248 against iso's 1210 then.
+        var silOptions = new Cadaclysm.SvgOptions { View = Cadaclysm.SvgView.Iso };
+        var silFirst = silNode.SilhouetteBeziers(silOptions);
+        if (silFirst.Count == 0) return Fail("silhouette (reader): a sphere gave no rim");
+        if (silFirst.Points.Length != silFirst.Count * 12 || silFirst.Weights.Length != silFirst.Count * 4)
+            return Fail("silhouette (reader): the arrays are not count*4*3 and count*4");
+        if (silFirst.Weights.Any(w => !double.IsFinite(w) || !(w > 0.0)))
+            return Fail("silhouette (reader): a weight is not finite and strictly positive");
+        // Every control point lies within the library's fit budget of the sphere, at the bounds
+        // radius from the bounds centre. That is NOT because control points lie on the sphere: the
+        // silhouette curve does, but a cubic's interior control points do not. It holds because the
+        // arcs are short (half a unit on a radius of 10), and the budget is the tolerance the library
+        // fits the CURVE to, not its control polygon. The margin is narrow: the curve itself uses
+        // nearly the whole budget (3.42e-3 against 3.46e-3) since the lattice's spacing became a
+        // length in space (44efabc88); before, a lattice ten times too fine left it at 1e-4. So this
+        // catches a displaced or scaled result and a wildly mis-strided
+        // unpack. What it does with a slip of the unpack was measured here as the worst radius
+        // DEVIATION of any control point from the sphere's radius 10 (budget about 3.5e-3): a
+        // correct read deviates by 3.04e-3 on iso and 2.97e-3 on front; a one-double wrap slip by
+        // 0.87 on iso and 8.8 on front, over the budget at either view; a one-CONTROL-POINT slip
+        // by exactly the correct read's figure at either view, because it only moves whole points.
+        // So this catches a one-double slip but can never catch a one-control-point slip, which is
+        // why the chaining assertion below is the only one that does. This test asks iso, because
+        // the ownership order below forces it. It also does NOT pin the eye or `up` (a silhouette
+        // point is a point of the surface, so it is on the sphere from any view), the node choice
+        // (a wrong node fails earlier, as a refusal or an empty answer), or the weights (all 1.0 on
+        // this fixture: degree-1 chords). The bound is the library's own budget: it fits the
+        // silhouette to within `extent * tolerance / width` (`world_tolerance`, capi svg.rs), the
+        // extent being the bounds' diagonal. Measured on the iso view this test asks, the radius
+        // deviation is 3.04e-3 on a radius of 10 (front: 2.97e-3).
+        var silB = silNode.Bounds;
+        var silC = new[] { (silB.Min[0] + silB.Max[0]) / 2.0, (silB.Min[1] + silB.Max[1]) / 2.0, (silB.Min[2] + silB.Max[2]) / 2.0 };
+        var silR = Enumerable.Range(0, silFirst.Points.Length / 3)
+            .Select(k => Math.Sqrt(Enumerable.Range(0, 3).Sum(d => Math.Pow(silFirst.Points[k * 3 + d] - silC[d], 2)))).ToArray();
+        var silRadius = (silB.Max[0] - silB.Min[0]) / 2.0;
+        var silDiagonal = Math.Sqrt(Enumerable.Range(0, 3).Sum(d => Math.Pow(silB.Max[d] - silB.Min[d], 2)));
+        var silBudget = silDiagonal * (silOptions.Tolerance / silOptions.Width); // read off the options the call was given
+        if (silRadius <= 0 || silR.Any(r => Math.Abs(r - silRadius) > silBudget))
+            return Fail($"silhouette (reader): control points are at radii {silR.Min()}..{silR.Max()} from the bounds centre, not the sphere's {silRadius}");
+        var silKeepPoints = (double[])silFirst.Points.Clone();
+        var silKeepWeights = (double[])silFirst.Weights.Clone();
+        // The next silhouette call on this scene refills the library's one slot in place.
+        var silSecond = silNode.SilhouetteBeziers(new Cadaclysm.SvgOptions { View = Cadaclysm.SvgView.Front });
+        if (silSecond.Count == 0) return Fail("silhouette (reader): the second view gave no rim");
+        if (silSecond.Count > silFirst.Count)
+            return Fail($"silhouette (reader): the larger answer must come first (iso {silFirst.Count}, front {silSecond.Count})");
+        if (silSecond.Count == silKeepPoints.Length / 12 && silSecond.Points.SequenceEqual(silKeepPoints))
+            return Fail("silhouette (reader): the two views gave the same silhouette, so this cannot tell a copy from a view");
+        if (!silFirst.Points.SequenceEqual(silKeepPoints))
+            return Fail("silhouette (reader): the first answer's points changed when the second was asked");
+        if (!silFirst.Weights.SequenceEqual(silKeepWeights))
+            return Fail("silhouette (reader): the first answer's weights changed when the second was asked");
+        // Chaining, the assertion that sees an offset slip; asked of the iso answer, whose figures are
+        // quoted here (the front view chains much less). Count the consecutive pairs whose last control
+        // point equals the next curve's first, to 1e-9 per coordinate (x, y and z each, so a passing
+        // pair can be up to 1.73e-9 apart). The arcs come back in RUNS, not as one ordered traversal,
+        // so "every arc ends where the next begins" is false and this is a count with a margin, not an
+        // identity: measured on iso, 232 of the 235 consecutive pairs chain (98.7%, four runs); the
+        // front view chains 96 of 173 (55%), which is why the eye matters and the bound is 80, not near
+        // 230. A read shifted by one double or by one control point leaves none (0 of 235 each). Those are
+        // wrap-around slips, which preserve the length and the count, so each denominator is the
+        // unshifted pair count (a truncating slip loses a curve and drops it by one). The count varies
+        // with how the sphere is tessellated; what makes a lower bound of 80 safe is not that it cannot
+        // drift but that it sits about three times below the count measured here. It has drifted once:
+        // the bound was 400 against 1206 of 1209 until the lattice's spacing became a length in space
+        // (44efabc88) and the same four runs came back in arcs five times longer.
+        // Its limit: a shift by a whole CURVE (12 doubles) is NOT caught, because it preserves the
+        // chaining: 231 of 235 pairs still chain on iso, since every arc is replaced by its
+        // neighbour's and the neighbours still join.
+        if (silSecond.Points.Length != silSecond.Count * 12 || silSecond.Weights.Length != silSecond.Count * 4)
+            return Fail("silhouette (reader): the front arrays are not count*4*3 and count*4");
+        if (silSecond.Weights.Any(w => !double.IsFinite(w) || !(w > 0.0)))
+            return Fail("silhouette (reader): a front weight is not finite and strictly positive");
+        var silChained = 0;
+        for (var ci = 0; ci + 1 < silFirst.Count; ci++)
+        {
+            var last = ci * 12 + 9;
+            var next = (ci + 1) * 12;
+            if (Math.Abs(silFirst.Points[last] - silFirst.Points[next]) <= 1e-9
+                && Math.Abs(silFirst.Points[last + 1] - silFirst.Points[next + 1]) <= 1e-9
+                && Math.Abs(silFirst.Points[last + 2] - silFirst.Points[next + 2]) <= 1e-9) silChained++;
+        }
+        if (silChained < 80)
+            return Fail($"silhouette (reader): only {silChained} of {silFirst.Count - 1} consecutive arcs chain (last control point = the next one's first), want at least 80");
+        // A refusal: an infinite tolerance, in the library's words.
+        try { silNode.SilhouetteBeziers(new Cadaclysm.SvgOptions { Tolerance = double.PositiveInfinity }); return Fail("silhouette (reader): an infinite tolerance was accepted"); }
+        catch (CadaclysmException e) when (e.Message.Contains("silhouette: ")) { }
+
+        // A planar body: the empty answer, after a refusal has left its reason in the slot.
+        using var silBoxScene = Cadaclysm.Cadaclysm.Open(silBoxPath);
+        var silBoxNode = silBoxScene.Walk().First(n => !n.Bounds.Min.SequenceEqual(n.Bounds.Max));
+        try { silBoxNode.SilhouetteBeziers(new Cadaclysm.SvgOptions { Tolerance = double.PositiveInfinity }); return Fail("silhouette (reader): an infinite tolerance was accepted on the box"); }
+        catch (CadaclysmException) { }
+        var silBoxAnswer = silBoxNode.SilhouetteBeziers();
+        if (silBoxAnswer.Count != 0 || silBoxAnswer.Points.Length != 0) return Fail("silhouette (reader): an all-planar body gave a silhouette");
+        Console.WriteLine($"silhouette (reader): sphere {silFirst.Count} then {silSecond.Count} curves, first answer kept; infinite tolerance refused; planar box empty");
+    }
+}
 return 0;
 
 static int Fail(string why) { Console.Error.WriteLine(why); return 1; }

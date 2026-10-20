@@ -14,6 +14,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <memory>
 
 namespace cadaclysm {
 inline namespace CADACLYSM_ABI {
@@ -128,15 +129,15 @@ struct SvgOptions {
     double margin = 0.05;
     // How far a written curve may stray, in page units. Default 0.1.
     double tolerance = 0.1;
-    // 0xRRGGBB -- packed(std::string_view) reads a "#rgb", "#rrggbb" or CSS colour name
-    // string, e.g. `stroke = *packed("navy")`. Default black.
-    std::uint32_t stroke = 0x000000;
+    // The pen colour: "#rgb", "#rrggbb", a CSS colour name or a packed 0xRRGGBB (an
+    // SvgColour) -- `stroke = "navy"` or `stroke = 0x000080`. Default black.
+    SvgColour stroke = 0x000000;
     // The pen's width, page units. Default 1.
     double stroke_width = 1.0;
     // 0xRRGGBB, or nullopt (the default) for no <rect> behind the drawing -- the page
-    // left to whatever the viewer composites it onto. packed(std::string_view) reads a
-    // "#rgb", "#rrggbb" or CSS colour name string, e.g. `background = *packed("navy")`.
-    std::optional<std::uint32_t> background;
+    // left to whatever the viewer composites it onto. "#rgb", "#rrggbb", a CSS colour
+    // name or a packed 0xRRGGBB (an SvgColour), e.g. `background = "navy"`.
+    std::optional<SvgColour> background;
     // Each solid's feature edges. Default true.
     bool edges = true;
     // A solid has no free curves of its own; ignored. Default false.
@@ -164,6 +165,7 @@ class Assembly;
 class Workplane;
 class CollisionHit;
 class Collider;
+class Subd;
 class Tool;
 class Stock;
 class Job;
@@ -198,6 +200,22 @@ inline Error tessellation_error(const char* name) {
 
 inline Error refuse(std::string message) { return Error{std::move(message), Origin::kernel}; }
 
+// A silhouette block the kernel handed over, released when this goes out of scope -- on
+// every path out of the call that took it, the early returns included. The block carries no
+// length of its own, so the guard holds the count the call wrote and gives the same one back.
+class SilhouetteBlock {
+public:
+    SilhouetteBlock(double* data, std::uint32_t count) noexcept : data_(data), count_(count) {}
+    SilhouetteBlock(const SilhouetteBlock&) = delete;
+    SilhouetteBlock& operator=(const SilhouetteBlock&) = delete;
+    ~SilhouetteBlock() { ::cadaclysm_blacksmith_silhouette_beziers_free(data_, count_); }
+    const double* data() const noexcept { return data_; }
+
+private:
+    double* data_;
+    std::uint32_t count_;
+};
+
 // Colour text -- "#rgb", "#rrggbb" or a CSS colour name -- as r, g, b in 0..1, through the
 // library's own parser. Shared by rgb() and packed() so neither duplicates the parsing.
 inline bool try_parse_colour(std::string_view colour, Vec3& out) {
@@ -209,8 +227,17 @@ inline bool try_parse_colour(std::string_view colour, Vec3& out) {
 // azimuth/elevation unless they are set directly, `up` falls back to "z" -- a solid
 // carries no convention of its own. cadaclysm_blacksmith_svg_options_init fills the
 // struct first -- size included -- so a field this function never sets still carries
-// the library's own default rather than a zeroed struct's.
-inline CadaclysmBlacksmithSvgOptions build_svg_options(const SvgOptions& options) {
+// the library's own default rather than a zeroed struct's. An Error where stroke or
+// background is colour text the kernel's parser refuses.
+inline Result<CadaclysmBlacksmithSvgOptions> build_svg_options(const SvgOptions& options) {
+    CADACLYSM_TRY(stroke, cadaclysm::detail::svg_colour_packed(options.stroke, "svg: stroke",
+                                                               ::cadaclysm_blacksmith_parse_colour, Origin::kernel));
+    std::uint32_t background = CADACLYSM_BLACKSMITH_SVG_TRANSPARENT;
+    if (options.background) {
+        CADACLYSM_TRY(packed_background, cadaclysm::detail::svg_colour_packed(*options.background, "svg: background",
+                                                                              ::cadaclysm_blacksmith_parse_colour, Origin::kernel));
+        background = packed_background;
+    }
     CadaclysmBlacksmithSvgOptions raw;
     ::cadaclysm_blacksmith_svg_options_init(&raw);
     auto [base_azimuth, base_elevation] = svg_view_angles(options.view);
@@ -224,8 +251,8 @@ inline CadaclysmBlacksmithSvgOptions build_svg_options(const SvgOptions& options
     raw.margin = options.margin;
     raw.tolerance = options.tolerance;
     raw.stroke_width = options.stroke_width;
-    raw.stroke = options.stroke;
-    raw.background = options.background.value_or(CADACLYSM_BLACKSMITH_SVG_TRANSPARENT);
+    raw.stroke = stroke;
+    raw.background = background;
     raw.flags = (options.edges ? CADACLYSM_BLACKSMITH_SVG_EDGES : 0u) | (options.curves ? CADACLYSM_BLACKSMITH_SVG_CURVES : 0u) |
                 (options.isocurves ? CADACLYSM_BLACKSMITH_SVG_ISOCURVES : 0u) |
                 (options.polylines ? CADACLYSM_BLACKSMITH_SVG_POLYLINES : 0u) |
@@ -281,6 +308,21 @@ inline Result<void> license(const std::string& text_or_path) {
     if (!::cadaclysm_blacksmith_license_set(text_or_path.c_str())) return detail::kernel_error("license refused");
     return {};
 }
+// A kernel option, by its name, for the whole process from the next call on:
+// "boolean.mesh_budget", "boolean.finest_tolerance", "profile_boolean.point_budget" or
+// "measure.default_accuracy". An Error -- and nothing changed -- for a name that is not an
+// option or a value it does not take, saying which and what it takes.
+inline Result<void> set_option(const std::string& name, double value) {
+    if (!::cadaclysm_blacksmith_option_set(name.c_str(), value)) return detail::kernel_error("option refused");
+    return {};
+}
+// A kernel option's value, by its name: what set_option last set, else its default. An
+// Error for a name that is not an option, listing the ones there are.
+inline Result<double> option(const std::string& name) {
+    double out = 0.0;
+    if (!::cadaclysm_blacksmith_option_get(name.c_str(), &out)) return detail::kernel_error("no such option");
+    return out;
+}
 inline std::string license_info() { return detail::text(::cadaclysm_blacksmith_license_info()); }
 inline std::uint64_t license_notice_count() { return ::cadaclysm_blacksmith_license_notice_count(); }
 // Solid::from_node works only where this equals cadaclysm::Brep::layout_id().
@@ -317,8 +359,8 @@ inline Result<Vec3> rgb(std::string_view colour) {
 }
 
 // A colour as the ABI's packed 0xRRGGBB, from "#rgb", "#rrggbb" or a CSS colour name --
-// for SvgOptions::stroke / background, which take the packed number. Takes no numeric
-// triple of its own, so its refusal lists only the text forms.
+// for a host that wants the number itself (SvgOptions::stroke / background take the text
+// directly). Takes no numeric triple of its own, so its refusal lists only the text forms.
 inline Result<std::uint32_t> packed(std::string_view colour) {
     Vec3 out{};
     if (!detail::try_parse_colour(colour, out))
@@ -1985,6 +2027,21 @@ public:
     }
     bool closed() const noexcept { return !state_ || !state_->live(); }
 
+    // Draw this solid through the view library in use, Z up: on a window library show()
+    // blocks until the window is closed; the terminal prints a still. view() returns the
+    // Camera it was left at. `options.tolerance` (0.05 unset) meshes where exact surfaces do
+    // not draw. Include <cadaclysm/view.hpp> to call them.
+    template <class V = View, class O = ShowOptions>
+    Result<void> show(const O& options = O{}) const {
+        auto drawn = V::draw(*this, options, false);
+        if (!drawn) return drawn.error();
+        return {};
+    }
+    template <class V = View, class O = ShowOptions>
+    auto view(const O& options = O{}) const {
+        return V::draw(*this, options, true);
+    }
+
     // -- naming
     // This solid, named `name`. The name rides through an operation with exactly one
     // source solid (place, translate, coloured, fillet, ...) and is dropped by one with
@@ -2201,7 +2258,8 @@ public:
     // surfaces passing within it without their meshes crossing -- can be missed;
     // near-tangent contact is where this bites.
     //
-    // `progress(phase, done, total)` hears "mesh", "cull", "cross", "snap" and "curve".
+    // `progress(phase, done, total)` hears "meet" on the exact route; "mesh", "cull",
+    // "cross", "snap" and "curve" where it falls back to the mesh route.
     // Fails for a `tolerance` not positive and finite, a solid with no faces, or one that
     // meshes to nothing.
     Result<Intersection> intersect(const Solid& other, double tolerance = DEFAULT_TOLERANCE, const Progress& progress = {}) const {
@@ -2525,6 +2583,39 @@ public:
     // svg_text() written to `path` by the library itself.
     Result<void> svg(const std::string& path, const SvgOptions& options = SvgOptions()) const;
 
+    // This solid's silhouette from the camera `options` describes -- where its surfaces turn
+    // away from the eye, which no edge of it lies on. BeziersData64 as the reader's
+    // Node::silhouette_beziers returns: points, four control points a curve, three doubles
+    // each (count * 12); weights, one a control point (count * 4). The library's block is
+    // the caller's to free; it is copied out and freed before this returns, so there is
+    // nothing for the caller to release.
+    //
+    // A body with no silhouette (every face planar) is an empty answer, a BeziersData64
+    // with count() == 0, not an Error. An Error, whose message begins "silhouette: ", for a
+    // refused option (a tolerance that is not finite and positive, say).
+    Result<BeziersData64> silhouette_beziers(const SvgOptions& options = SvgOptions()) const {
+        CADACLYSM_TRY(raw, detail::build_svg_options(options));
+        std::uint32_t count = 0;
+        double* data = ::cadaclysm_blacksmith_silhouette_beziers(raw_handle("silhouette_beziers"), &raw, &count);
+        BeziersData64 out;
+        if (!data) {
+            // All-null with count 0 is both the empty answer and a refusal; the thread's
+            // error, cleared on entry, tells them apart.
+            if (!detail::text(::cadaclysm_blacksmith_last_error()).empty()) return detail::kernel_error("silhouette_beziers");
+            return out;
+        }
+        detail::SilhouetteBlock block(data, count);
+        out.points.reserve(static_cast<std::size_t>(count) * 12);
+        out.weights.reserve(static_cast<std::size_t>(count) * 4);
+        // Each curve is 16 doubles: four control points (x, y, z), then four weights.
+        for (std::uint32_t c = 0; c < count; ++c) {
+            const double* curve = block.data() + static_cast<std::size_t>(c) * 16;
+            out.points.insert(out.points.end(), curve, curve + 12);
+            out.weights.insert(out.weights.end(), curve + 12, curve + 16);
+        }
+        return out;
+    }
+
     // -- selecting and edges
     Result<std::uint32_t> select_face(const Selector& selector) const {
         std::uint32_t i = ::cadaclysm_blacksmith_select_face(raw_handle("select_face"), selector.kind_,
@@ -2684,6 +2775,17 @@ public:
                                                                         detail::progress_user(progress))));
         return whole.lumps();
     }
+    // The bodies either side of the closed `profile` drawn on `frame`, pushed straight
+    // through along the frame's z both ways: those outside it first, then those inside.
+    Result<std::vector<Solid>> split_by_profile(const Profile& profile, const Frame& frame,
+                                                double tolerance = DEFAULT_TOLERANCE,
+                                                const Progress& progress = {}) const {
+        CADACLYSM_TRY(whole, wrap(::cadaclysm_blacksmith_split_by_profile(raw_handle("split_by_profile"), profile.ptr(),
+                                                                          frame.raw().data(), tolerance,
+                                                                          detail::progress_fn(progress),
+                                                                          detail::progress_user(progress))));
+        return whole.lumps();
+    }
     // Each connected body on its own, in the order of their first faces.
     Result<std::vector<Solid>> lumps() const {
         const CadaclysmBlacksmithSolid* s = raw_handle("lumps");
@@ -2731,10 +2833,12 @@ public:
 
 private:
     friend class Workplane;
+    friend struct ::cadaclysm::detail::ViewAccess;
     friend class Assembly;
     friend class CollisionHit;
     friend class Stock;
     friend class Job;
+    friend class Subd;
     friend Result<std::string> write_step_text(const Solids&, const std::optional<std::string>&, Unit);
     friend Result<std::string> write_sat_text(const Solids&, Unit);
     friend Result<void> write_sat(const std::string&, const Solids&, Unit);
@@ -3494,6 +3598,369 @@ private:
     CadaclysmBlacksmithCollider* handle_ = nullptr;
 };
 
+// ---- SubD cage ------------------------------------------------------------------------
+
+// An edge of a cage, as its two vertex ids.
+struct SubdEdge {
+    std::uint32_t a = 0;
+    std::uint32_t b = 0;
+};
+inline bool operator==(const SubdEdge& l, const SubdEdge& r) { return l.a == r.a && l.b == r.b; }
+inline bool operator!=(const SubdEdge& l, const SubdEdge& r) { return !(l == r); }
+
+// A mirror plane's normal.
+enum class SubdAxis : std::uint32_t { x = 0, y = 1, z = 2 };
+// What a selection, or a pick, is of.
+enum class SubdElements : std::uint32_t { vertices = 0, edges = 1, faces = 2 };
+
+// A cage's mirror: the axis and the on-plane distance of a mirrored half.
+struct SubdSymmetry {
+    SubdAxis axis = SubdAxis::x;
+    double tolerance = 0.0;
+};
+inline bool operator==(const SubdSymmetry& l, const SubdSymmetry& r) {
+    return l.axis == r.axis && l.tolerance == r.tolerance;
+}
+inline bool operator!=(const SubdSymmetry& l, const SubdSymmetry& r) { return !(l == r); }
+
+// Some elements of a cage: vertex or face ids in `ids` (`edges` empty), or edges in
+// `edges` (`ids` empty). What an edit leaves selected, what transform moves, and what
+// pick answers (one element).
+struct SubdSelection {
+    SubdElements kind = SubdElements::vertices;
+    std::vector<std::uint32_t> ids;
+    std::vector<SubdEdge> edges;
+
+    static SubdSelection of_vertices(std::vector<std::uint32_t> vertices) {
+        return SubdSelection{SubdElements::vertices, std::move(vertices), {}};
+    }
+    static SubdSelection of_edges(std::vector<SubdEdge> edges) {
+        return SubdSelection{SubdElements::edges, {}, std::move(edges)};
+    }
+    static SubdSelection of_faces(std::vector<std::uint32_t> faces) {
+        return SubdSelection{SubdElements::faces, std::move(faces), {}};
+    }
+};
+inline bool operator==(const SubdSelection& l, const SubdSelection& r) {
+    return l.kind == r.kind && l.ids == r.ids && l.edges == r.edges;
+}
+inline bool operator!=(const SubdSelection& l, const SubdSelection& r) { return !(l == r); }
+
+// A cage's smooth surface at one level, copied out of the cage: it outlives it.
+// `indices` is three vertex ids a triangle, `triangle_face` the face of the full cage
+// each triangle lies on.
+struct SubdMesh {
+    std::vector<Vec3> positions;
+    std::vector<Vec3> normals;
+    std::vector<std::uint32_t> indices;
+    std::vector<std::uint32_t> triangle_face;
+};
+
+// What Subd::to_solid did and how close it came: `regular` patches exact from their own
+// net and `refined` ones from a refined neighbourhood, the Catmull-Clark `steps` taken
+// first, `levels` the deepest local refinement. The largest `deviation` from the limit
+// surface (a fraction of the cage's diagonal) and the largest tangent break
+// `g1_angle_deg` across an uncreased side, with the world points they were measured at.
+struct SubdReport {
+    std::uint32_t regular = 0;
+    std::uint32_t refined = 0;
+    std::uint32_t steps = 0;
+    std::uint32_t levels = 0;
+    double deviation = 0.0;
+    double g1_angle_deg = 0.0;
+    Vec3 deviation_at = {};
+    Vec3 g1_at = {};
+};
+
+// What Subd::to_solid returns: the exact solid and its report.
+struct SubdSolid {
+    Solid solid;
+    SubdReport report;
+};
+
+// A subdivision-surface cage: control vertices and faces, with creases, pins and a
+// mirror. Immutable: every edit returns a new cage, and the input is untouched. Move-
+// only; the destructor frees the handle, as close() does early. Every read-back is a
+// copy. A call on a closed cage is a bad access, as on a closed Collider.
+class Subd {
+public:
+    // Hand-written, not `= default`: see Collider.
+    Subd(Subd&& other) noexcept : handle_(other.handle_) { other.handle_ = nullptr; }
+    Subd& operator=(Subd&& other) noexcept {
+        if (this != &other) {
+            close();
+            handle_ = other.handle_;
+            other.handle_ = nullptr;
+        }
+        return *this;
+    }
+    Subd(const Subd&) = delete;
+    Subd& operator=(const Subd&) = delete;
+
+    ~Subd() { close(); }
+
+    void close() noexcept {
+        if (handle_) {
+            ::cadaclysm_blacksmith_subd_free(handle_);
+            handle_ = nullptr;
+        }
+    }
+    bool closed() const noexcept { return handle_ == nullptr; }
+
+    // -- primitives
+
+    static Result<Subd> cuboid(const std::array<double, 3>& size = {2.0, 2.0, 2.0},
+                               const std::array<std::uint32_t, 3>& segments = {1, 1, 1}) {
+        return wrap(::cadaclysm_blacksmith_subd_cuboid(size[0], size[1], size[2], segments[0], segments[1], segments[2]),
+                    "subd_cuboid");
+    }
+    // The rims are creased by default: the C call has no default of its own.
+    static Result<Subd> cylinder(double radius = 1.0, double height = 2.0, std::uint32_t sides = 8,
+                                 std::uint32_t rings = 1, bool creased_rims = true) {
+        return wrap(::cadaclysm_blacksmith_subd_cylinder(radius, height, sides, rings, creased_rims), "subd_cylinder");
+    }
+    static Result<Subd> sphere(double radius = 1.0, std::uint32_t segments = 2) {
+        return wrap(::cadaclysm_blacksmith_subd_sphere(radius, segments), "subd_sphere");
+    }
+    static Result<Subd> torus(double major = 3.0, double minor = 1.0, std::uint32_t around = 12, std::uint32_t tube = 8) {
+        return wrap(::cadaclysm_blacksmith_subd_torus(major, minor, around, tube), "subd_torus");
+    }
+    // A cage from its parts, the inverse of the read-backs: a saved cage, a mirrored
+    // half included, loads back equal. The new cage selects nothing.
+    static Result<Subd> from_parts(const std::vector<Vec3>& positions, const std::vector<std::vector<std::uint32_t>>& faces,
+                                   const std::vector<SubdEdge>& creases = {}, const std::vector<std::uint32_t>& pins = {},
+                                   const std::optional<SubdSymmetry>& symmetry = std::nullopt) {
+        std::vector<double> flat;
+        flat.reserve(positions.size() * 3);
+        for (const Vec3& p : positions) flat.insert(flat.end(), p.begin(), p.end());
+        std::vector<std::uint32_t> sizes;
+        std::vector<std::uint32_t> loops;
+        sizes.reserve(faces.size());
+        for (const std::vector<std::uint32_t>& face : faces) {
+            sizes.push_back(static_cast<std::uint32_t>(face.size()));
+            loops.insert(loops.end(), face.begin(), face.end());
+        }
+        std::vector<std::uint32_t> pairs = flatten(creases);
+        return wrap(::cadaclysm_blacksmith_subd_from_parts(
+                        flat.data(), static_cast<std::uint32_t>(positions.size()), sizes.data(),
+                        static_cast<std::uint32_t>(sizes.size()), loops.data(), static_cast<std::uint32_t>(loops.size()),
+                        pairs.data(), static_cast<std::uint32_t>(creases.size()), pins.data(),
+                        static_cast<std::uint32_t>(pins.size()), symmetry ? static_cast<std::int32_t>(symmetry->axis) : -1,
+                        symmetry ? symmetry->tolerance : 0.0),
+                    "subd_from_parts");
+    }
+
+    // -- read-backs, all copies
+
+    std::vector<Vec3> positions() const {
+        CadaclysmBlacksmithSubdParts p = parts("positions");
+        return cadaclysm::blacksmith::detail::points_at(p.positions, p.vertex_count);
+    }
+    std::vector<std::vector<std::uint32_t>> faces() const {
+        CadaclysmBlacksmithSubdParts p = parts("faces");
+        std::vector<std::vector<std::uint32_t>> out;
+        out.reserve(p.face_count);
+        std::size_t at = 0;
+        for (std::uint32_t f = 0; f < p.face_count; ++f) {
+            out.emplace_back(p.face_indices + at, p.face_indices + at + p.face_sizes[f]);
+            at += p.face_sizes[f];
+        }
+        return out;
+    }
+    std::vector<SubdEdge> creases() const {
+        CadaclysmBlacksmithSubdParts p = parts("creases");
+        return edges_at(p.creases, p.crease_count);
+    }
+    std::vector<std::uint32_t> pins() const {
+        CadaclysmBlacksmithSubdParts p = parts("pins");
+        return p.pin_count ? std::vector<std::uint32_t>(p.pins, p.pins + p.pin_count) : std::vector<std::uint32_t>{};
+    }
+    // nullopt for none.
+    std::optional<SubdSymmetry> symmetry() const {
+        CadaclysmBlacksmithSubdParts p = parts("symmetry");
+        if (p.symmetry_axis < 0) return std::nullopt;
+        return SubdSymmetry{static_cast<SubdAxis>(p.symmetry_axis), p.symmetry_tolerance};
+    }
+    // What the edit that made this cage selected; nullopt for none.
+    std::optional<SubdSelection> selection() const {
+        CadaclysmBlacksmithSubdParts p = parts("selection");
+        return selection_of(p.selection_kind, p.selection, p.selection_count);
+    }
+
+    // -- edits, each a new cage
+
+    // The selected elements moved by `matrix`: sixteen numbers, column-major.
+    Result<Subd> transform(const SubdSelection& selection, const std::vector<double>& matrix) const {
+        const CadaclysmBlacksmithSubd* h = raw_handle("transform");
+        if (matrix.size() != 16) {
+            return detail::refuse("transform: matrix must be sixteen numbers (column-major), not " +
+                                  std::to_string(matrix.size()));
+        }
+        std::vector<std::uint32_t> pairs;
+        const std::uint32_t* ids = selection.ids.data();
+        std::size_t count = selection.ids.size();
+        if (selection.kind == SubdElements::edges) {
+            pairs = flatten(selection.edges);
+            ids = pairs.data();
+            count = selection.edges.size();
+        }
+        return wrap(::cadaclysm_blacksmith_subd_transform(h, static_cast<std::uint32_t>(selection.kind), ids,
+                                                          static_cast<std::uint32_t>(count), matrix.data()),
+                    "subd_transform");
+    }
+    Result<Subd> crease(const std::vector<SubdEdge>& edges, bool on = true) const {
+        const CadaclysmBlacksmithSubd* h = raw_handle("crease");
+        std::vector<std::uint32_t> pairs = flatten(edges);
+        return wrap(::cadaclysm_blacksmith_subd_set_crease(h, pairs.data(), static_cast<std::uint32_t>(edges.size()), on),
+                    "subd_set_crease");
+    }
+    Result<Subd> pin(const std::vector<std::uint32_t>& vertices, bool on = true) const {
+        const CadaclysmBlacksmithSubd* h = raw_handle("pin");
+        return wrap(::cadaclysm_blacksmith_subd_set_pin(h, vertices.data(), static_cast<std::uint32_t>(vertices.size()), on),
+                    "subd_set_pin");
+    }
+    Result<Subd> extrude(const std::vector<std::uint32_t>& faces, double distance) const {
+        const CadaclysmBlacksmithSubd* h = raw_handle("extrude");
+        return wrap(::cadaclysm_blacksmith_subd_extrude(h, faces.data(), static_cast<std::uint32_t>(faces.size()), distance),
+                    "subd_extrude");
+    }
+    Result<Subd> inset(const std::vector<std::uint32_t>& faces, double amount, bool individual = false) const {
+        const CadaclysmBlacksmithSubd* h = raw_handle("inset");
+        return wrap(::cadaclysm_blacksmith_subd_inset(h, faces.data(), static_cast<std::uint32_t>(faces.size()), amount,
+                                                      individual),
+                    "subd_inset");
+    }
+    // A loop of edges cut across `edge`, `at` (0 to 1) of the way along it.
+    Result<Subd> insert_loop(const SubdEdge& edge, double at = 0.5) const {
+        const CadaclysmBlacksmithSubd* h = raw_handle("insert_loop");
+        return wrap(::cadaclysm_blacksmith_subd_insert_loop(h, edge.a, edge.b, at), "subd_insert_loop");
+    }
+    Result<Subd> mirror_on(SubdAxis axis) const {
+        const CadaclysmBlacksmithSubd* h = raw_handle("mirror_on");
+        return wrap(::cadaclysm_blacksmith_subd_mirror_on(h, static_cast<std::uint32_t>(axis)), "subd_mirror_on");
+    }
+    Result<Subd> mirror_off() const {
+        return wrap(::cadaclysm_blacksmith_subd_mirror_off(raw_handle("mirror_off")), "subd_mirror_off");
+    }
+    Result<Subd> full() const { return wrap(::cadaclysm_blacksmith_subd_full(raw_handle("full")), "subd_full"); }
+
+    // -- other calls
+
+    // The loop of edges through `edge`, the picked edge first; empty where `edge` is no
+    // edge of the cage.
+    Result<std::vector<SubdEdge>> edge_loop(const SubdEdge& edge) const {
+        const CadaclysmBlacksmithSubd* h = raw_handle("edge_loop");
+        std::unique_ptr<CadaclysmBlacksmithSubd, decltype(&::cadaclysm_blacksmith_subd_free)> loop(
+            ::cadaclysm_blacksmith_subd_edge_loop(h, edge.a, edge.b), &::cadaclysm_blacksmith_subd_free);
+        if (!loop) return detail::kernel_error("subd_edge_loop");
+        // The loop is the returned handle's selection; read it. The handle is freed on every
+        // path, a throw included.
+        CadaclysmBlacksmithSubdParts p{};
+        bool read = ::cadaclysm_blacksmith_subd_parts(loop.get(), &p);
+        Result<std::vector<SubdEdge>> out = std::vector<SubdEdge>{};
+        if (!read) {
+            out = detail::kernel_error("subd_parts");
+        } else if (p.selection_kind == static_cast<std::uint32_t>(SubdElements::edges)) {
+            out = edges_at(p.selection, p.selection_count);
+        }
+        return out;
+    }
+    // The surface refined `levels` times (1 to 6), copied out of the cage.
+    Result<SubdMesh> smooth_mesh(std::uint32_t levels = 3) const {
+        const CadaclysmBlacksmithSubd* h = raw_handle("smooth_mesh");
+        CadaclysmBlacksmithSubdMesh m{};
+        if (!::cadaclysm_blacksmith_subd_smooth_mesh(h, levels, &m)) return detail::kernel_error("subd_smooth_mesh");
+        SubdMesh out;
+        out.positions = detail::points_at(m.positions, m.vertex_count);
+        out.normals = detail::points_at(m.normals, m.vertex_count);
+        if (m.indices && m.index_count) out.indices.assign(m.indices, m.indices + m.index_count);
+        if (m.triangle_face && m.index_count) out.triangle_face.assign(m.triangle_face, m.triangle_face + m.index_count / 3);
+        return out;
+    }
+    // The cage element of `kind` under `point`, a point on or near the smooth surface;
+    // one element (an edge in `edges`, the smaller id first). nullopt where nothing is
+    // near, which is not an error.
+    Result<std::optional<SubdSelection>> pick(const Vec3& point, SubdElements kind) const {
+        const CadaclysmBlacksmithSubd* h = raw_handle("pick");
+        std::uint32_t out[2] = {0, 0};
+        if (!::cadaclysm_blacksmith_subd_pick(h, point.data(), static_cast<std::uint32_t>(kind), out)) {
+            // A refusal's text is never empty; an empty one means nothing is near.
+            if (detail::text(::cadaclysm_blacksmith_last_error()).empty()) return std::optional<SubdSelection>{};
+            return detail::kernel_error("subd_pick");
+        }
+        if (kind == SubdElements::edges) return std::optional<SubdSelection>{SubdSelection::of_edges({SubdEdge{out[0], out[1]}})};
+        return std::optional<SubdSelection>{SubdSelection{kind, {out[0]}, {}}};
+    }
+    // The cage as an exact solid and a report of how it was held. A `tolerance` or
+    // `g1_angle` of 0 or less, or a `max_levels` of 0, takes the default (1e-4, 0.1, 6).
+    Result<SubdSolid> to_solid(double tolerance = 1e-4, double g1_angle = 0.1, std::uint32_t max_levels = 6) const {
+        const CadaclysmBlacksmithSubd* h = raw_handle("to_solid");
+        CadaclysmBlacksmithSubdReport raw{};
+        CADACLYSM_TRY(solid, Solid::wrap(::cadaclysm_blacksmith_subd_to_solid(h, tolerance, g1_angle, max_levels, &raw),
+                                         "subd_to_solid"));
+        SubdReport report;
+        report.regular = raw.regular;
+        report.refined = raw.refined;
+        report.steps = raw.steps;
+        report.levels = raw.levels;
+        report.deviation = raw.deviation;
+        report.g1_angle_deg = raw.g1_angle_deg;
+        report.deviation_at = Vec3{raw.deviation_at[0], raw.deviation_at[1], raw.deviation_at[2]};
+        report.g1_at = Vec3{raw.g1_at[0], raw.g1_at[1], raw.g1_at[2]};
+        return SubdSolid{std::move(solid), report};
+    }
+
+    // The C handle, for code that calls the C ABI directly. Owned by this Subd.
+    const CadaclysmBlacksmithSubd* handle() const noexcept { return handle_; }
+
+private:
+    explicit Subd(CadaclysmBlacksmithSubd* h) : handle_(h) {}
+
+    static Result<Subd> wrap(CadaclysmBlacksmithSubd* h, const char* what) {
+        if (!h) return detail::kernel_error(what);
+        return Subd(h);
+    }
+
+    // The closed check comes first in every method, before anything with a destructor
+    // exists, so a bad-access hook that does not return unwinds nothing.
+    CadaclysmBlacksmithSubd* raw_handle(const char* /*what*/) const {
+        if (!handle_) cadaclysm::detail::bad_access("subd", "closed");
+        return handle_;
+    }
+
+    CadaclysmBlacksmithSubdParts parts(const char* what) const {
+        CadaclysmBlacksmithSubdParts p{};
+        if (!::cadaclysm_blacksmith_subd_parts(raw_handle(what), &p)) cadaclysm::detail::bad_access("subd", "parts unreadable");
+        return p;
+    }
+
+    static std::vector<std::uint32_t> flatten(const std::vector<SubdEdge>& edges) {
+        std::vector<std::uint32_t> out;
+        out.reserve(edges.size() * 2);
+        for (const SubdEdge& e : edges) {
+            out.push_back(e.a);
+            out.push_back(e.b);
+        }
+        return out;
+    }
+    static std::vector<SubdEdge> edges_at(const std::uint32_t* at, std::uint32_t count) {
+        std::vector<SubdEdge> out;
+        if (!at) return out;
+        out.reserve(count);
+        for (std::uint32_t k = 0; k < count; ++k) out.push_back(SubdEdge{at[2 * k], at[2 * k + 1]});
+        return out;
+    }
+    static std::optional<SubdSelection> selection_of(std::uint32_t kind, const std::uint32_t* at, std::uint32_t count) {
+        if (kind == 1) return SubdSelection::of_edges(edges_at(at, count));
+        if (kind > 2) return std::nullopt;
+        std::vector<std::uint32_t> ids;
+        if (at && count) ids.assign(at, at + count);
+        return SubdSelection{static_cast<SubdElements>(kind), std::move(ids), {}};
+    }
+
+    CadaclysmBlacksmithSubd* handle_ = nullptr;
+};
+
 // One STEP text, each solid its own body.
 inline Result<std::string> write_step_text(const Solids& solids, const std::optional<std::string>& schema = std::nullopt,
                                            Unit unit = Unit::millimetre) {
@@ -3586,7 +4053,7 @@ inline Result<std::string> write_svg_text(const Solids& solids, const Profiles& 
     std::vector<const CadaclysmBlacksmithProfile*> profile_handles;
     profile_handles.reserve(profiles.size());
     for (const Profile& p : profiles) profile_handles.push_back(p.handle());
-    CadaclysmBlacksmithSvgOptions raw = detail::build_svg_options(options);
+    CADACLYSM_TRY(raw, detail::build_svg_options(options));
     char* text = ::cadaclysm_blacksmith_drawing_svg_text(solid_handles.data(), solid_handles.size(),
                                                           profile_handles.data(), profile_handles.size(), &raw);
     if (!text) return detail::kernel_error("svg_text");
@@ -3607,7 +4074,7 @@ inline Result<std::string> write_svg_text(const Solids& solids, const SvgOptions
     std::vector<const CadaclysmBlacksmithSolid*> handles;
     handles.reserve(solids.size());
     for (const Solid& s : solids) handles.push_back(s.raw_handle("write_svg_text"));
-    CadaclysmBlacksmithSvgOptions raw = detail::build_svg_options(options);
+    CADACLYSM_TRY(raw, detail::build_svg_options(options));
     char* text = ::cadaclysm_blacksmith_svg_text(handles.data(), handles.size(), &raw);
     if (!text) return detail::kernel_error("svg_text");
     std::string out(text);
@@ -3637,7 +4104,7 @@ inline Result<void> write_svg(const std::string& path, const Solids& solids, con
     std::vector<const CadaclysmBlacksmithProfile*> profile_handles;
     profile_handles.reserve(profiles.size());
     for (const Profile& p : profiles) profile_handles.push_back(p.handle());
-    CadaclysmBlacksmithSvgOptions raw = detail::build_svg_options(options);
+    CADACLYSM_TRY(raw, detail::build_svg_options(options));
     if (!::cadaclysm_blacksmith_drawing_svg(solid_handles.data(), solid_handles.size(), profile_handles.data(),
                                             profile_handles.size(), path.c_str(), &raw)) {
         return detail::kernel_error("svg");
@@ -3652,7 +4119,7 @@ inline Result<void> write_svg(const std::string& path, const Solids& solids, con
     std::vector<const CadaclysmBlacksmithSolid*> handles;
     handles.reserve(solids.size());
     for (const Solid& s : solids) handles.push_back(s.raw_handle("write_svg"));
-    CadaclysmBlacksmithSvgOptions raw = detail::build_svg_options(options);
+    CADACLYSM_TRY(raw, detail::build_svg_options(options));
     if (!::cadaclysm_blacksmith_svg(handles.data(), handles.size(), path.c_str(), &raw)) {
         return detail::kernel_error("svg");
     }
@@ -3967,6 +4434,42 @@ public:
         return {};
     }
 
+    // Give joint `joint_name` its pair, like pair() but with the kind's numbers in `params`:
+    // screw [pitch]; rack_and_pinion [pinion_radius]; gear [radius_first, radius_second,
+    // ratio] or plus [bevel, helical_angle] in radians (ratio = the second link's rotation
+    // over the first's, signed); none for the other kinds. `end_frame` and `ranges` are
+    // PairOptions' (its pitch is not used). Refused, with the kernel's own message and the
+    // assembly left unchanged, when a rule refuses it (a wrong count among them).
+    Result<void> pair_with(std::string_view joint_name, std::string_view kind, const Frame& frame,
+                           const PairOptions& options = {}, const std::vector<double>& params = {}) const {
+        std::string owned_joint(joint_name), owned_kind(kind);
+        const double* end_frame_ptr = options.end_frame ? options.end_frame->raw().data() : nullptr;
+
+        std::size_t freedom_count = options.ranges ? options.ranges->size() : 0;
+        std::vector<double> lower, upper;
+        std::unique_ptr<bool[]> has_lower, has_upper;
+        if (options.ranges) {
+            lower.resize(freedom_count ? freedom_count : 1);
+            upper.resize(freedom_count ? freedom_count : 1);
+            has_lower = std::make_unique<bool[]>(freedom_count ? freedom_count : 1);
+            has_upper = std::make_unique<bool[]>(freedom_count ? freedom_count : 1);
+            for (std::size_t i = 0; i < freedom_count; ++i) {
+                const Range& r = (*options.ranges)[i];
+                lower[i] = r.lower.value_or(0.0);
+                upper[i] = r.upper.value_or(0.0);
+                has_lower[i] = r.lower.has_value();
+                has_upper[i] = r.upper.has_value();
+            }
+        }
+        bool ok = ::cadaclysm_blacksmith_assembly_pair_with(
+            raw_handle("assembly_pair_with"), owned_joint.c_str(), owned_kind.c_str(), frame.raw().data(),
+            end_frame_ptr, options.ranges ? lower.data() : nullptr, options.ranges ? upper.data() : nullptr,
+            options.ranges ? has_lower.get() : nullptr, options.ranges ? has_upper.get() : nullptr, freedom_count,
+            params.empty() ? nullptr : params.data(), params.size());
+        if (!ok) return detail::kernel_error("assembly_pair_with");
+        return {};
+    }
+
     // Add a named state to this assembly: `rows` gives each joint's values, in its pair's
     // freedom order, in the caller's order. Refused, with the kernel's own message and the
     // assembly left unchanged, when a rule refuses it.
@@ -3990,6 +4493,38 @@ public:
             counts.empty() ? nullptr : counts.data(), flat.empty() ? nullptr : flat.data(), rows.size());
         if (!ok) return detail::kernel_error("assembly_state");
         return {};
+    }
+
+    // This assembly in a pose: a NEW assembly, owned by the caller, with every placement
+    // that follows a posed joint moved; this one is unchanged either way. `rows` are
+    // StateRow's, but a row's joint is a path -- placement names then the joint name,
+    // joined by "/", a "/" or "\" inside a name escaped with "\" -- and may be a bare joint
+    // name when only one joint carries it. `state` starts from a named state of this
+    // assembly (nullopt: none); `ground` names the link held still (nullopt: the base, else
+    // the first). No rows is allowed. Refused, with the kernel's own message, when a rule
+    // refuses it -- an ambiguous name, a value out of range, or two sides of a coupling
+    // that disagree.
+    Result<Assembly> posed(const std::vector<StateRow>& rows,
+                           std::optional<std::string_view> state = std::nullopt,
+                           std::optional<std::string_view> ground = std::nullopt) const {
+        std::vector<const char*> joint_pointers;
+        joint_pointers.reserve(rows.size());
+        for (const StateRow& row : rows) joint_pointers.push_back(row.joint.c_str());
+        std::vector<std::uint32_t> counts;
+        counts.reserve(rows.size());
+        std::vector<double> flat;
+        for (const StateRow& row : rows) {
+            counts.push_back(static_cast<std::uint32_t>(row.values.size()));
+            flat.insert(flat.end(), row.values.begin(), row.values.end());
+        }
+        std::optional<std::string> owned_state = state ? std::optional<std::string>(*state) : std::nullopt;
+        std::optional<std::string> owned_ground = ground ? std::optional<std::string>(*ground) : std::nullopt;
+        CadaclysmBlacksmithAssembly* raw = ::cadaclysm_blacksmith_assembly_posed(
+            raw_handle("assembly_posed"), joint_pointers.empty() ? nullptr : joint_pointers.data(),
+            counts.empty() ? nullptr : counts.data(), flat.empty() ? nullptr : flat.data(), rows.size(),
+            owned_state ? owned_state->c_str() : nullptr, owned_ground ? owned_ground->c_str() : nullptr);
+        if (!raw) return detail::kernel_error("assembly_posed");
+        return Assembly(raw);
     }
 
     // Add a named motion sequence over this assembly's states. It is closed unless the last

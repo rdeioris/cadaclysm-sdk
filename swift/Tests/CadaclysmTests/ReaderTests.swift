@@ -403,8 +403,17 @@ final class ReaderTests: XCTestCase {
         XCTAssertTrue(painted.contains("fill=\"#ff0000\""), painted.prefix(300).description)
 
         // `packed(_:)` reads a CSS colour name into the same packed 0xRRGGBB the stroke takes.
-        let redStroke = try scene.svgText(SvgOptions(stroke: try packed("red")))
+        let redStroke = try scene.svgText(SvgOptions(stroke: SvgColour(try packed("red"))))
         XCTAssertTrue(redStroke.contains("#ff0000"), redStroke.prefix(300).description)
+
+        // stroke and background take colour text directly too, literal or in a variable.
+        let navy = "Navy"
+        let named = try scene.svgText(SvgOptions(stroke: "lime", background: SvgColour(navy)))
+        XCTAssertTrue(named.contains("fill=\"#000080\""), named.prefix(300).description)
+        XCTAssertTrue(named.contains("#00ff00"), named.prefix(300).description)
+        XCTAssertThrowsError(try scene.svgText(SvgOptions(background: "bogus"))) { error in
+            XCTAssertTrue((error as? CadaclysmError)?.message.hasPrefix("svg: background:") ?? false, "\(error)")
+        }
 
         // Refusals surface as the library's own words, thrown as a CadaclysmError.
         XCTAssertThrowsError(try scene.svgText(SvgOptions(fov: 200))) { error in
@@ -711,8 +720,8 @@ final class ReaderTests: XCTestCase {
         defer { scene.close() }
         let bracket = scene.nodes[1], pin = scene.nodes[2]
         XCTAssertFalse(bracket.isMeshed)
-        XCTAssertEqual(bracket.triangleEstimate, 18)
-        XCTAssertEqual(pin.triangleEstimate, 318)  // 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound): 480 -> 468; 2026-10-04, one row along a ruling (the display's filler lays one row along a cylinder's or cone's straight axis, not six): 468 -> 318
+        XCTAssertEqual(bracket.triangleEstimate, 12)  // 2026-10-06, d945a0458 (the estimate calls the mesher's own sampling and stations): bracket 18 -> 12, pin 318 -> 248
+        XCTAssertEqual(pin.triangleEstimate, 248)  // 2026-10-06, d945a0458 (the estimate calls the mesher's own sampling and stations): bracket 18 -> 12, pin 318 -> 248; 2026-09-26, d2f866b6 (filler interior at six rows, 15-degree turn bound): 480 -> 468; 2026-10-04, one row along a ruling (the display's filler lays one row along a cylinder's or cone's straight axis, not six): 468 -> 318
         XCTAssertEqual(bracket.surfaceEdges.polylineCount, 12)
         XCTAssertEqual(bracket.surfaceEdges.vertexCount, 24)
         XCTAssertTrue(bracket.surfaceIsocurves.isEmpty)
@@ -920,6 +929,92 @@ final class ReaderTests: XCTestCase {
         let cube = try Cadaclysm.open(try sample(cube))
         defer { cube.close() }
         XCTAssertTrue(cube.sequences.isEmpty)
+    }
+
+    /// The work-schedule facts, identical in every language: samples/schedule.ifc holds one
+    /// schedule, `Programme`, with seven tasks and four links. `day` is a day in seconds and
+    /// `t0` 2026-03-02T08:00:00.
+    func testAFileReadsItsWorkSchedule() throws {
+        let day = 86400.0
+        let t0 = 1772438400.0
+        let scene = try Cadaclysm.open(try sample("samples/schedule.ifc"))
+        defer { scene.close() }
+        XCTAssertEqual(scene.schedules.count, 1)
+        let s = scene.schedules[0]
+        XCTAssertEqual(s.name, "Programme")
+        XCTAssertEqual(s.identification, "WS-1")
+        XCTAssertEqual(s.kind, "planned")
+        XCTAssertEqual(s.kindName, "")
+        XCTAssertEqual(s.start, t0)
+        XCTAssertNil(s.finish)
+        XCTAssertEqual(s.tasks.map { $0.name },
+                       ["Slab", "Structure", "Walls north", "Walls south", "Topping out", "Demolish shed", "Fit-out"])
+        let slab = s.tasks[0], structure = s.tasks[1], north = s.tasks[2], south = s.tasks[3]
+        let topping = s.tasks[4], shed = s.tasks[5], fit = s.tasks[6]
+        XCTAssertEqual(north.parent, structure)
+        XCTAssertEqual(south.parent, structure)
+        XCTAssertNil(slab.parent)
+        XCTAssertEqual(slab.kind, "construction")
+        XCTAssertEqual(shed.kind, "demolition")
+        XCTAssertEqual(topping.kind, "notdefined")
+        XCTAssertTrue(topping.milestone)
+        XCTAssertFalse(slab.milestone)
+        XCTAssertEqual(slab.identification, "T1")
+        XCTAssertEqual(slab.status, "COMPLETED")
+        XCTAssertEqual(slab.time.scheduleStart, t0)
+        XCTAssertNil(slab.time.scheduleFinish)
+        XCTAssertEqual(slab.time.duration, 10 * day)
+        XCTAssertEqual(slab.time.actualStart, t0)
+        XCTAssertEqual(slab.time.actualFinish, t0 + 8 * day)
+        XCTAssertEqual(south.nodes.map { $0.name }.sorted(), ["Wall S1", "Wall S2"])
+        XCTAssertEqual(fit.nodes.map { $0.name }.sorted(), ["Desk", "Room"])
+        let links = s.links.map { ($0.from.name, $0.to.name, $0.kind, $0.lag) }
+        XCTAssertEqual(links.count, 4)
+        XCTAssertTrue(links[0] == ("Slab", "Structure", "finish_start", nil))
+        XCTAssertTrue(links[1] == ("Walls north", "Walls south", "start_start", 2 * day))
+        XCTAssertTrue(links[2] == ("Walls south", "Topping out", "finish_start", nil))
+        XCTAssertTrue(links[3] == ("Topping out", "Fit-out", "finish_start", nil))
+    }
+
+    func testAScheduleSaysWhatEachElementIsDoing() throws {
+        let day = 86400.0
+        let t0 = 1772438400.0
+        let scene = try Cadaclysm.open(try sample("samples/schedule.ifc"))
+        defer { scene.close() }
+        let s = scene.schedules[0]
+        var states: [String: ElementState] = [:]
+        for row in try s.at(t0 + 3 * day) { states[row.node.name] = row }
+        XCTAssertEqual(Set(states.keys), ["Slab", "Wall N1", "Wall N2", "Wall S1", "Wall S2", "Shed", "Room", "Desk"])
+        XCTAssertEqual(states["Slab"]?.phase, "building")
+        XCTAssertEqual(states["Slab"]?.progress ?? -1, 0.3, accuracy: 1e-9)
+        XCTAssertEqual(states["Shed"]?.phase, "demolishing")
+        XCTAssertEqual(states["Wall S1"]?.phase, "unbuilt")
+        var late: [String: ElementState] = [:]
+        for row in try s.at(t0 + 32 * day, dates: "actual") { late[row.node.name] = row }
+        XCTAssertEqual(late["Wall S1"]?.phase, "building")
+        XCTAssertEqual(late["Wall S1"]?.variance, 5 * day)
+        XCTAssertEqual(late["Slab"]?.variance, -2 * day)
+    }
+
+    func testAScheduleRefusesABadDateAndDatesWord() throws {
+        let t0 = 1772438400.0
+        let scene = try Cadaclysm.open(try sample("samples/schedule.ifc"))
+        defer { scene.close() }
+        let s = scene.schedules[0]
+        XCTAssertThrowsError(try s.at(Double.nan)) { error in
+            guard let error = error as? CadaclysmError else { return XCTFail("\(error)") }
+            XCTAssertTrue(error.message.contains("the date must be a finite number"), error.message)
+        }
+        XCTAssertThrowsError(try s.at(t0, dates: "compare")) { error in
+            guard let error = error as? CadaclysmError else { return XCTFail("\(error)") }
+            XCTAssertTrue(error.message.contains("dates must be 'scheduled' or 'actual'"), error.message)
+        }
+    }
+
+    func testAFileWithoutAScheduleHasNone() throws {
+        let scene = try Cadaclysm.open(try sample(cube))
+        defer { scene.close() }
+        XCTAssertTrue(scene.schedules.isEmpty)
     }
 
     func testCubeHasNoLinksOrJoints() throws {
@@ -1333,5 +1428,123 @@ final class ReaderTests: XCTestCase {
         XCTAssertThrowsError(try node.femMesh(tolerance: 0)) { error in
             XCTAssertTrue("\(error)".contains("tolerance must be finite and > 0"), "\(error)")
         }
+    }
+
+    // ---- Node.silhouetteBeziers -------------------------------------------------------------
+    // The fixtures are the repository's own. The box is our STEP writer's, not a Rhino export: Rhino
+    // writes a planar face as a NURBS patch, so the exact-plane path would never be reached and an empty
+    // answer would prove nothing.
+
+    private static let silhouetteSphere = "crates/cadaclysm-acis/tests/fixtures/rhino/sphere.sat"
+    private static let silhouetteBox = "crates/cadaclysm-acis/tests/fixtures/rhino/box-chamfer-all.blacksmith.stp"
+
+    /// The body node above the lump holds no shape of its own; the first node with extent is the part.
+    private func silhouettePart(_ scene: Scene) throws -> Node {
+        try XCTUnwrap(scene.walk().first { $0.bounds64.size.max() > 0 }, "the fixture has a part with extent")
+    }
+
+    func testASpheresSilhouetteControlPointsStayWithinTheFitBudgetOfItInArraysOfTheDocumentedLengths() throws {
+        let scene = try Cadaclysm.open(try sample(ReaderTests.silhouetteSphere))
+        defer { scene.close() }
+        let node = try silhouettePart(scene)
+        let iso = SvgOptions(view: .iso)
+        let rim = try node.silhouetteBeziers(iso)
+        XCTAssertGreaterThan(rim.count, 0, "a sphere gave no rim")
+        XCTAssertEqual(rim.points.count, rim.count * 4 * 3)
+        XCTAssertEqual(rim.weights.count, rim.count * 4)
+        XCTAssertTrue(rim.weights.allSatisfy { $0.isFinite && $0 > 0 }, "a weight is not finite and positive")
+        // Every control point lies within the library's fit budget of the sphere, at the bounds radius from
+        // the bounds centre. That is NOT because control points lie on the sphere: the silhouette curve
+        // does, but a cubic's interior control points do not (here, on iso, they stray up to 3.0e-3 where
+        // the end points stray under 1e-14). It holds because the arcs are short (half a unit on a radius
+        // of 10), and the budget below is the tolerance the library fits the CURVE to, not its control
+        // polygon. The margin is narrow: the curve itself uses nearly the whole budget (3.42e-3 against
+        // 3.46e-3) since the lattice's spacing became a length in space (44efabc88); before, a lattice ten
+        // times too fine left it at 1e-4. So this catches a displaced
+        // or scaled result and a mis-strided unpack. It does NOT pin the eye or `up` (a silhouette point is
+        // a point of the surface, so it is on the sphere from any view), the node choice (a wrong node
+        // fails earlier, as a refusal or an empty answer), the weights (all 1.0 on this fixture), or the
+        // radius separately from the centre (both come from the same bounds).
+        // The bound is the library's own budget, `world_tolerance`: extent * (tolerance / width), read off
+        // the options this call was given rather than copied from their defaults. The library's extent is
+        // the box of the body's sampled feature edges, falling back to declared bounds only when there are
+        // none; the node's bounds diagonal stands in for it, which can differ from that box.
+        // And it is blind to a one-CONTROL-POINT slip of the unpack. That is a shift of 3 doubles, so every
+        // point is replaced by a DIFFERENT control point, which is within the budget just the same: the
+        // worst deviation is the same before and after (3.0e-3 here on iso either way, against a budget of
+        // about 3.5e-3). A one-DOUBLE slip is another matter: it mixes coordinates across neighbouring
+        // points, leaves the sphere, and is caught (0.87 on iso, 8.8 on front). The chaining assertion
+        // below is what catches the one-control-point slip.
+        let b = node.bounds64
+        let radius = b.size.x / 2
+        let budget = (b.size * b.size).sum().squareRoot() * (iso.tolerance / iso.width)
+        let points = Array(rim.points)
+        var worst = 0.0
+        for k in 0..<rim.count * 4 {
+            let p = SIMD3(points[k * 3], points[k * 3 + 1], points[k * 3 + 2]) - b.centre
+            worst = Swift.max(worst, abs((p * p).sum().squareRoot() - radius))
+        }
+        XCTAssertTrue(radius > 0 && worst <= budget,
+                      "control points stray \(worst) from the bounds centre's radius \(radius), past the budget \(budget)")
+        // Chaining: the last control point of arc c is the first of arc c + 1, to 1e-9 per coordinate
+        // (each of x, y and z is tested, so a passing pair can be up to 1.73e-9 apart). The arcs come
+        // back in RUNS, not as one ordered traversal, so this is a COUNT with a margin and not an
+        // identity: on this iso answer 232 of the 235 consecutive pairs chain (98.7%, four runs). The
+        // count drifts with how the sphere is tessellated; a lower bound of 80 is safe only because it
+        // sits about three times below it. It has drifted once: the bound was 400 against 1206 of 1209
+        // until the lattice's spacing became a length in space (44efabc88) and the same four runs came
+        // back in arcs five times longer. (Front, which this test does not ask, chains much less: 96 of
+        // 173 pairs, 55%, which is why a bound taken from the wrong view is either toothless or red.)
+        // A slip of the unpack by one double or by one control point leaves none of them (0 of 235),
+        // so the count falls from over two hundred to zero. Those figures are for wrap-around slips,
+        // which keep the length and the count, so the denominator stays the unshifted pair count; a
+        // truncating slip would drop it by one.
+        // Its limit: a slip by a whole CURVE (12 doubles) PRESERVES the chaining (231 of 235 on iso,
+        // 95 of 173 on front) and is NOT caught by this or by the radius check above.
+        var chained = 0
+        for c in 0..<Swift.max(rim.count - 1, 0) {
+            let last = c * 12 + 9, first = (c + 1) * 12
+            if abs(points[last] - points[first]) <= 1e-9 && abs(points[last + 1] - points[first + 1]) <= 1e-9
+                && abs(points[last + 2] - points[first + 2]) <= 1e-9 { chained += 1 }
+        }
+        XCTAssertGreaterThanOrEqual(chained, 80,
+                                    "only \(chained) of \(rim.count - 1) consecutive arcs chain (last control point = the next one's first), want at least 80")
+    }
+
+    /// Asked larger first, so the second call refills the same slot in place (`refill` clears and extends
+    /// the Vec: a larger second ask could grow and move the block, and a view would then read freed
+    /// memory that merely still holds the old values). A view would show the second answer through the
+    /// first, so the copy is the only thing this passes on.
+    func testTheSilhouetteIsTheCallersOwnALaterCallOnTheSceneLeavesItAlone() throws {
+        let scene = try Cadaclysm.open(try sample(ReaderTests.silhouetteSphere))
+        defer { scene.close() }
+        let node = try silhouettePart(scene)
+        // Iso is the larger (236 curves against front's 174); front was, 1248 against 1210, until the
+        // lattice's spacing became a length in space (44efabc88).
+        let first = try node.silhouetteBeziers(SvgOptions(view: .iso))
+        let keptPoints = Array(first.points), keptWeights = Array(first.weights)
+        let second = try node.silhouetteBeziers(SvgOptions(view: .front))
+        XCTAssertGreaterThan(second.count, 0, "the second view gave no rim")
+        XCTAssertLessThanOrEqual(second.count, first.count, "the larger answer must come first (iso \(first.count), front \(second.count))")
+        XCTAssertNotEqual(Array(second.points), keptPoints, "the two views gave the same silhouette, so this cannot tell a copy from a view")
+        XCTAssertEqual(Array(first.points), keptPoints, "the first answer's points changed under the second call")
+        XCTAssertEqual(Array(first.weights), keptWeights, "the first answer's weights changed under the second call")
+    }
+
+    func testAnInfiniteToleranceIsRefusedAndAnAllPlanarBodyIsTheEmptyAnswerAfterIt() throws {
+        let scene = try Cadaclysm.open(try sample(ReaderTests.silhouetteBox))
+        defer { scene.close() }
+        let node = try silhouettePart(scene)
+        var infinite = SvgOptions()
+        infinite.tolerance = .infinity
+        XCTAssertThrowsError(try node.silhouetteBeziers(infinite)) { error in
+            XCTAssertTrue(error is CadaclysmError && "\(error)".contains("silhouette: "), "\(error)")
+        }
+        // The refusal above left its reason in the thread's error slot; the empty answer must not read it
+        // as its own.
+        let none = try node.silhouetteBeziers()
+        XCTAssertEqual(none.count, 0)
+        XCTAssertEqual(none.points.count, 0)
+        XCTAssertEqual(none.weights.count, 0)
     }
 }

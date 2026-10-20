@@ -24,6 +24,7 @@ public final class Smoke {
         try {
             run(path, args.length > 1 ? args[1] : null);
             kernel(args.length > 1 ? args[1] : null);
+            silhouette(path);
         } catch (Cad.CadaclysmException | Blacksmith.BuildException e) {
             fail(e.getMessage());
         } catch (IOException e) {
@@ -213,6 +214,87 @@ public final class Smoke {
                         fail("sequences: pose(NaN) was refused with " + e.getMessage());
                 }
                 System.out.println("sequences: swing and snap read as the file records them, and swing poses at each keyframe");
+            }
+
+            // IFC work schedules: samples/schedule.ifc's one schedule, at parity with the Python
+            // reference (plan 2026-10-06-ifc-4d-2).
+            Path schedulePath = Path.of(path).toAbsolutePath().getParent().resolve("schedule.ifc");
+            try (Cad.Scene scheduleScene = Cad.open(schedulePath.toString())) {
+                final double day = 86400.0, t0 = 1772438400.0;
+                List<Cad.WorkSchedule> schedules = scheduleScene.schedules();
+                if (schedules.size() != 1) fail("schedules: the file does not carry one schedule");
+                Cad.WorkSchedule programme = schedules.get(0);
+                if (!programme.name().equals("Programme") || !programme.identification().equals("WS-1")
+                        || !programme.kind().equals("planned") || !programme.kindName().isEmpty()
+                        || programme.start() == null || programme.start().doubleValue() != t0 || programme.finish() != null)
+                    fail("schedules: the schedule's own fields are off");
+                List<Cad.Task> tasks = programme.tasks();
+                String taskNames = tasks.stream().map(Cad.Task::name).collect(java.util.stream.Collectors.joining(", "));
+                if (!taskNames.equals("Slab, Structure, Walls north, Walls south, Topping out, Demolish shed, Fit-out"))
+                    fail("schedules: the tasks are " + taskNames);
+                Map<String, Cad.Task> byName = new java.util.HashMap<>();
+                for (Cad.Task task : tasks) byName.put(task.name(), task);
+                Cad.Task slab = byName.get("Slab");
+                if (slab.parent() != null || byName.get("Walls north").parent() == null
+                        || !byName.get("Walls north").parent().name().equals("Structure")
+                        || !byName.get("Walls south").parent().name().equals("Structure"))
+                    fail("schedules: the parents are off");
+                if (!slab.kind().equals("construction") || !byName.get("Demolish shed").kind().equals("demolition")
+                        || !byName.get("Topping out").kind().equals("notdefined")
+                        || !byName.get("Topping out").milestone() || slab.milestone())
+                    fail("schedules: the task kinds or milestones are off");
+                Cad.TaskTime time = slab.time();
+                if (!slab.identification().equals("T1") || !slab.status().equals("COMPLETED")
+                        || time.scheduleStart() == null || time.scheduleStart().doubleValue() != t0
+                        || time.scheduleFinish() != null
+                        || time.duration() == null || time.duration().doubleValue() != 10 * day
+                        || time.actualStart() == null || time.actualStart().doubleValue() != t0
+                        || time.actualFinish() == null || time.actualFinish().doubleValue() != t0 + 8 * day)
+                    fail("schedules: Slab's identification, status or times are off");
+                Set<String> southNodes = new HashSet<>(), fitNodes = new HashSet<>();
+                for (Cad.Node n : byName.get("Walls south").nodes()) southNodes.add(n.name());
+                for (Cad.Node n : byName.get("Fit-out").nodes()) fitNodes.add(n.name());
+                if (!southNodes.equals(Set.of("Wall S1", "Wall S2")) || !fitNodes.equals(Set.of("Desk", "Room")))
+                    fail("schedules: the task nodes are " + southNodes + " and " + fitNodes);
+                List<String> links = new java.util.ArrayList<>();
+                for (Cad.TaskLink link : programme.links())
+                    links.add(link.from().name() + ">" + link.to().name() + " " + link.kind() + " " + link.lag());
+                if (!links.equals(List.of("Slab>Structure finish_start null",
+                        "Walls north>Walls south start_start " + (2 * day),
+                        "Walls south>Topping out finish_start null",
+                        "Topping out>Fit-out finish_start null")))
+                    fail("schedules: the links are " + links);
+                Map<String, Cad.ElementState> states = new java.util.HashMap<>();
+                for (Cad.ElementState s : programme.at(t0 + 3 * day)) states.put(s.node().name(), s);
+                if (!states.keySet().equals(Set.of("Slab", "Wall N1", "Wall N2", "Wall S1", "Wall S2", "Shed", "Room", "Desk")))
+                    fail("schedules: at(T0+3D) names " + states.keySet());
+                if (!states.get("Slab").phase().equals("building") || Math.abs(states.get("Slab").progress() - 0.3) > 1e-9
+                        || !states.get("Shed").phase().equals("demolishing") || !states.get("Wall S1").phase().equals("unbuilt"))
+                    fail("schedules: at(T0+3D) phases are off");
+                Map<String, Cad.ElementState> actual = new java.util.HashMap<>();
+                for (Cad.ElementState s : programme.at(t0 + 32 * day, "actual")) actual.put(s.node().name(), s);
+                if (!actual.get("Wall S1").phase().equals("building") || actual.get("Wall S1").variance() == null
+                        || actual.get("Wall S1").variance().doubleValue() != 5 * day
+                        || actual.get("Slab").variance() == null || actual.get("Slab").variance().doubleValue() != -2 * day)
+                    fail("schedules: at(T0+32D, actual) variances are off");
+                try {
+                    programme.at(Double.NaN);
+                    fail("schedules: at(NaN) was accepted");
+                } catch (Cad.CadaclysmException e) {
+                    if (!e.getMessage().contains("the date must be a finite number"))
+                        fail("schedules: at(NaN) was refused with " + e.getMessage());
+                }
+                try {
+                    programme.at(t0, "compare");
+                    fail("schedules: at(T0, compare) was accepted");
+                } catch (Cad.CadaclysmException e) {
+                    if (!e.getMessage().equals("dates must be 'scheduled' or 'actual'"))
+                        fail("schedules: at(T0, compare) was refused with " + e.getMessage());
+                }
+                System.out.println("schedules: Programme reads as the file records it, and at() plays both date sets");
+            }
+            try (Cad.Scene noSchedule = Cad.open(Path.of(path).toAbsolutePath().getParent().resolve("cube.scad").toString())) {
+                if (!noSchedule.schedules().isEmpty()) fail("schedules: the cube has schedules");
             }
 
             // pose([]) on the cube sample (no mechanism) fails with a message naming that, as
@@ -439,7 +521,17 @@ public final class Smoke {
             String redStrokeSvg = scene.svgText(new Cad.SvgOptions(null, null, null, null, 0.0, 1000.0, 1000.0, 0.05, 0.1,
                     "Red", 1.0, null, true, false, false, false, true));
             if (!redStrokeSvg.contains("#ff0000")) fail("SvgOptions.stroke(\"Red\") did not draw #ff0000: " + redStrokeSvg);
-            System.out.println("colour: Cad.packed(\"navy\")=0x000080, packed(\"bogus\") refused, stroke(\"Red\") drew #ff0000");
+            // background takes colour text, and stroke a packed number, through the withers.
+            String textBackgroundSvg = scene.svgText(Cad.SvgOptions.defaults().withBackground("Navy").withStroke(0x00FF00));
+            if (!textBackgroundSvg.contains("#000080")) fail("withBackground(\"Navy\") did not draw #000080: " + textBackgroundSvg);
+            if (!textBackgroundSvg.contains("#00ff00")) fail("withStroke(0x00FF00) did not draw #00ff00: " + textBackgroundSvg);
+            try {
+                Cad.SvgOptions.defaults().withBackground("bogus");
+                fail("withBackground(\"bogus\") was accepted");
+            } catch (Cad.CadaclysmException e) {
+                if (!e.getMessage().startsWith("svg: background:")) fail("withBackground(\"bogus\"): " + e.getMessage());
+            }
+            System.out.println("colour: Cad.packed(\"navy\")=0x000080, packed(\"bogus\") refused, stroke(\"Red\") drew #ff0000, withBackground(\"Navy\") drew #000080");
         }
     }
 
@@ -474,6 +566,7 @@ public final class Smoke {
             edgeCurves();
             intersections();
             collider();
+            subd();
             solidHits();
             assemblies();
             mechanism();
@@ -550,7 +643,17 @@ public final class Smoke {
                 String redStrokeSvg = Blacksmith.Solid.cuboid(1, 1, 1).svgText(new Blacksmith.SvgOptions(null, null, null, null,
                         0.0, 1000.0, 1000.0, 0.05, 0.1, "red", 1.0, null, true, false, false, false, true));
                 if (!redStrokeSvg.contains("#ff0000")) fail("SvgOptions.stroke(\"red\") did not draw #ff0000: " + redStrokeSvg);
-                System.out.println("blacksmith colour: CSS colour names accepted on coloured/edgesColoured/stroke, bad names refused, packed(\"navy\")=0x000080");
+                String textBackgroundSvg = Blacksmith.Solid.cuboid(1, 1, 1).svgText(
+                        Blacksmith.SvgOptions.defaults().withBackground("Navy").withStroke(0x00FF00));
+                if (!textBackgroundSvg.contains("#000080")) fail("blacksmith withBackground(\"Navy\") did not draw #000080: " + textBackgroundSvg);
+                if (!textBackgroundSvg.contains("#00ff00")) fail("blacksmith withStroke(0x00FF00) did not draw #00ff00: " + textBackgroundSvg);
+                try {
+                    Blacksmith.SvgOptions.defaults().withBackground("bogus");
+                    fail("blacksmith withBackground(\"bogus\") was accepted");
+                } catch (Blacksmith.BuildException e) {
+                    if (!e.getMessage().startsWith("svg: background:")) fail("blacksmith withBackground(\"bogus\"): " + e.getMessage());
+                }
+                System.out.println("blacksmith colour:CSS colour names accepted on coloured/edgesColoured/stroke, bad names refused, packed(\"navy\")=0x000080");
 
                 // A face: the outline as a sheet, which pushed out is the plate again.
                 try (Blacksmith.Solid sheet = Blacksmith.Solid.face(outline, new double[] {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1});
@@ -1610,6 +1713,291 @@ public final class Smoke {
         }
     }
 
+    // ---- the SubD cage (The Kiln, Plan 2b): Python's test_subd_*, one for one -------------------
+
+    private static void subdRefused(String what, Runnable call, String exact, String contains, String prefix) {
+        try {
+            call.run();
+        } catch (Blacksmith.BuildException e) {
+            String m = e.getMessage();
+            if (exact != null && !exact.equals(m)) fail("subd: " + what + " reads \"" + m + "\", not \"" + exact + "\"");
+            if (contains != null && (m == null || !m.contains(contains))) fail("subd: " + what + " reads \"" + m + "\", without \"" + contains + "\"");
+            if (prefix != null && (m == null || !m.startsWith(prefix))) fail("subd: " + what + " reads \"" + m + "\", not starting \"" + prefix + "\"");
+            return;
+        }
+        fail("subd: " + what + " was accepted");
+    }
+
+    private static void subdClosed(String what, Runnable call) {
+        try {
+            call.run();
+        } catch (IllegalStateException e) {
+            if (!"subd: closed".equals(e.getMessage())) fail("subd: " + what + " after close reads \"" + e.getMessage() + "\"");
+            return;
+        }
+        fail("subd: " + what + " after close was accepted");
+    }
+
+    private static final double[] SUBD_ROT = {0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    private static final double[] SUBD_SHIFT = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 0, 0, 1};
+
+    private static void subd() throws IOException {
+        // 1: the unit cuboid and its parts; the read-back is a copy; from_parts is the inverse.
+        try (Blacksmith.Subd c = Blacksmith.Subd.cuboid()) {
+            double[] p = c.positions();
+            int[][] f = c.faces();
+            if (p.length != 24 || f.length != 6) fail("subd: cuboid has " + p.length / 3 + " positions and " + f.length + " faces");
+            for (int[] face : f) if (face.length != 4) fail("subd: a cuboid face has " + face.length + " vertices");
+            if (!c.creases().isEmpty() || c.pins().length != 0 || c.symmetry().isPresent() || c.selection().isPresent())
+                fail("subd: a fresh cuboid has creases, pins, symmetry or a selection");
+            p[0] = 99;
+            if (c.positions()[0] == 99) fail("subd: writing to the positions changed the cage");
+            try (Blacksmith.Subd again = Blacksmith.Subd.fromParts(c.positions(), f)) {
+                if (!Arrays.equals(again.positions(), c.positions()) || !Arrays.deepEquals(again.faces(), f))
+                    fail("subd: from_parts did not give the cage back");
+            }
+            // 2: extrude returns a new cage; the input is as it was.
+            try (Blacksmith.Subd e = c.extrude(new int[] {1}, 1)) {
+                if (e.positions().length != 36) fail("subd: extrude has " + e.positions().length / 3 + " positions, not 12");
+                SelectionCheck.faces(e, 1);
+                if (c.positions().length != 24) fail("subd: extrude changed its input");
+            }
+            // 3: creases, pins, and both set off again.
+            try (Blacksmith.Subd cr = c.crease(List.of(new Blacksmith.SubdEdge(0, 1)));
+                 Blacksmith.Subd both = cr.pin(new int[] {6});
+                 Blacksmith.Subd kept = Blacksmith.Subd.fromParts(both.positions(), both.faces(), both.creases(), both.pins(), null);
+                 Blacksmith.Subd offCrease = both.crease(List.of(new Blacksmith.SubdEdge(0, 1)), false);
+                 Blacksmith.Subd offPin = both.pin(new int[] {6}, false)) {
+                SelectionCheck.edges(cr, new Blacksmith.SubdEdge(0, 1));
+                if (!cr.creases().equals(List.of(new Blacksmith.SubdEdge(0, 1)))) fail("subd: crease reads " + cr.creases());
+                if (!both.creases().equals(List.of(new Blacksmith.SubdEdge(0, 1))) || !Arrays.equals(both.pins(), new int[] {6}))
+                    fail("subd: crease then pin reads " + both.creases() + " and " + Arrays.toString(both.pins()));
+                SelectionCheck.vertices(both, 6);
+                if (!kept.creases().equals(both.creases()) || !Arrays.equals(kept.pins(), both.pins())) fail("subd: from_parts dropped creases or pins");
+                if (!offCrease.creases().isEmpty()) fail("subd: crease on=false left " + offCrease.creases());
+                if (offPin.pins().length != 0) fail("subd: pin on=false left " + Arrays.toString(offPin.pins()));
+            }
+            // 6: transform.
+            try (Blacksmith.Subd all = c.transform(Blacksmith.SubdSelection.ofVertices(0, 1, 2, 3, 4, 5, 6, 7), SUBD_ROT);
+                 Blacksmith.Subd one = c.transform(Blacksmith.SubdSelection.ofVertices(0), SUBD_ROT);
+                 Blacksmith.Subd edge = c.transform(Blacksmith.SubdSelection.ofEdges(new Blacksmith.SubdEdge(0, 1)), SUBD_SHIFT)) {
+                double[] was = c.positions(), now = all.positions(), moved = one.positions(), slid = edge.positions();
+                for (int v = 0; v < 8; v++) {
+                    double x = was[3 * v], y = was[3 * v + 1], z = was[3 * v + 2];
+                    if (Math.abs(now[3 * v] + y) > 1e-12 || Math.abs(now[3 * v + 1] - x) > 1e-12 || Math.abs(now[3 * v + 2] - z) > 1e-12)
+                        fail("subd: the rotation did not map vertex " + v + " to (-y, x, z)");
+                    boolean same = moved[3 * v] == x && moved[3 * v + 1] == y && moved[3 * v + 2] == z;
+                    if (v == 0 ? same : !same) fail("subd: transforming vertex 0 alone moved vertex " + v + " or not vertex 0");
+                }
+                if (Math.abs(slid[0] - (was[0] + 3)) > 1e-12 || slid[1] != was[1] || slid[2] != was[2]) fail("subd: the edge shift is not exactly 3 in x");
+                SelectionCheck.edges(edge, new Blacksmith.SubdEdge(0, 1));
+            }
+            subdRefused("a 3-number matrix",
+                    () -> c.transform(Blacksmith.SubdSelection.ofVertices(0), new double[] {1, 2, 3}), null, "matrix", null);
+            // 7: inset and insert_loop.
+            try (Blacksmith.Subd inset = c.inset(new int[] {1}, 0.25);
+                 Blacksmith.Subd loop = c.insertLoop(new Blacksmith.SubdEdge(0, 1))) {
+                if (inset.faces().length != 10) fail("subd: inset has " + inset.faces().length + " faces, not 10");
+                if (loop.positions().length != 36) fail("subd: insert_loop has " + loop.positions().length / 3 + " positions, not 12");
+                if (loop.selection().orElseThrow().kind() != Blacksmith.SubdElements.EDGES) fail("subd: insert_loop selects " + loop.selection());
+            }
+            subdRefused("insert_loop at 1.5", () -> c.insertLoop(new Blacksmith.SubdEdge(0, 1), 1.5), null, null, "bad selection: ");
+            // 5: a diagonal is no edge, nor is a stranger.
+            int[] f0 = f[0];
+            if (!c.edgeLoop(new Blacksmith.SubdEdge(f0[0], f0[2])).isEmpty()) fail("subd: a face diagonal has an edge loop");
+            if (!c.edgeLoop(new Blacksmith.SubdEdge(0, 99)).isEmpty()) fail("subd: edge (0, 99) has an edge loop");
+            // 9: pick.
+            {
+                Blacksmith.SubdMesh m = c.smoothMesh(3);
+                double[] pos6 = c.positions();
+                int best = 0;
+                double bestD = Double.MAX_VALUE;
+                for (int v = 0; v < m.positions().length / 3; v++) {
+                    double d = 0;
+                    for (int k = 0; k < 3; k++) d += Math.pow(m.positions()[3 * v + k] - pos6[18 + k], 2);
+                    if (d < bestD) {
+                        bestD = d;
+                        best = v;
+                    }
+                }
+                double[] near = Arrays.copyOfRange(m.positions(), 3 * best, 3 * best + 3);
+                Blacksmith.SubdSelection v = c.pick(near, Blacksmith.SubdElements.VERTICES).orElseThrow();
+                if (v.kind() != Blacksmith.SubdElements.VERTICES || !Arrays.equals(v.ids(), new int[] {6})) fail("subd: pick vertex reads " + v);
+                Blacksmith.SubdSelection e = c.pick(near, Blacksmith.SubdElements.EDGES).orElseThrow();
+                if (e.kind() != Blacksmith.SubdElements.EDGES || e.edges().size() != 1 || (e.edges().get(0).a() != 6 && e.edges().get(0).b() != 6))
+                    fail("subd: pick edge reads " + e);
+                Blacksmith.SubdSelection fa = c.pick(near, Blacksmith.SubdElements.FACES).orElseThrow();
+                if (fa.kind() != Blacksmith.SubdElements.FACES || fa.ids().length != 1 || fa.ids()[0] < 0 || fa.ids()[0] >= 6)
+                    fail("subd: pick face reads " + fa);
+                if (c.pick(new double[] {100, 100, 100}, Blacksmith.SubdElements.VERTICES).isPresent()) fail("subd: a far point picked something");
+                subdRefused("a NaN pick", () -> c.pick(new double[] {Double.NaN, 0, 0}, Blacksmith.SubdElements.VERTICES),
+                        "bad selection: pick: point is not finite", null, null);
+                if (c.pick(new double[] {100, 100, 100}, Blacksmith.SubdElements.VERTICES).isPresent()) fail("subd: a far point after a refusal picked something");
+            }
+        }
+        // 4: mirror.
+        try (Blacksmith.Subd whole = Blacksmith.Subd.cuboid(new double[] {2, 2, 2}, new int[] {2, 1, 1});
+             Blacksmith.Subd half = whole.mirrorOn(Blacksmith.SubdAxis.X);
+             Blacksmith.Subd back = Blacksmith.Subd.fromParts(half.positions(), half.faces(), half.creases(), half.pins(), half.symmetry().orElseThrow());
+             Blacksmith.Subd full = half.full();
+             Blacksmith.Subd off = half.mirrorOff()) {
+            Blacksmith.SubdSymmetry s = half.symmetry().orElseThrow();
+            if (s.axis() != Blacksmith.SubdAxis.X || !(s.tolerance() > 0)) fail("subd: mirror_on symmetry reads " + s);
+            if (half.selection().isPresent()) fail("subd: mirror_on selects " + half.selection());
+            if (half.positions().length >= whole.positions().length) fail("subd: the mirrored half is not smaller than the whole");
+            if (!Arrays.equals(back.positions(), half.positions()) || !back.symmetry().equals(half.symmetry())) fail("subd: from_parts dropped the symmetry");
+            if (full.positions().length != whole.positions().length) fail("subd: full has " + full.positions().length / 3 + " positions");
+            if (off.symmetry().isPresent()) fail("subd: mirror_off left a symmetry");
+        }
+        // 5: an edge loop round a 2x2x2 cuboid.
+        try (Blacksmith.Subd grid = Blacksmith.Subd.cuboid(new double[] {2, 2, 2}, new int[] {2, 2, 2})) {
+            int[] f0 = grid.faces()[0];
+            List<Blacksmith.SubdEdge> loop = grid.edgeLoop(new Blacksmith.SubdEdge(f0[0], f0[1]));
+            if (loop.size() < 4) fail("subd: the edge loop has " + loop.size() + " edges");
+            if (!loop.get(0).equals(new Blacksmith.SubdEdge(Math.min(f0[0], f0[1]), Math.max(f0[0], f0[1]))))
+                fail("subd: the loop's first edge is " + loop.get(0));
+        }
+        // 8: the smooth mesh, and its life past the cage.
+        Blacksmith.SubdMesh kept;
+        try (Blacksmith.Subd c = Blacksmith.Subd.cuboid()) {
+            Blacksmith.SubdMesh two = c.smoothMesh(2);
+            int n = two.positions().length / 3;
+            if (n <= 8 || two.normals().length != 3 * n) fail("subd: smooth_mesh(2) has " + n + " positions and " + two.normals().length / 3 + " normals");
+            for (int v = 0; v < n; v++) {
+                double len = Math.sqrt(Math.pow(two.normals()[3 * v], 2) + Math.pow(two.normals()[3 * v + 1], 2) + Math.pow(two.normals()[3 * v + 2], 2));
+                if (Math.abs(len - 1) > 1e-9) fail("subd: normal " + v + " has length " + len);
+            }
+            for (int i : two.indices()) if (i < 0 || i >= n) fail("subd: an index " + i + " is past the " + n + " positions");
+            if (two.triangleFace().length != two.indices().length / 3) fail("subd: triangle_face has " + two.triangleFace().length + " entries");
+            for (int tf : two.triangleFace()) if (tf < 0 || tf >= 6) fail("subd: a triangle names face " + tf);
+            if (c.smoothMesh(1).positions().length >= two.positions().length) fail("subd: smooth_mesh(1) is not smaller than smooth_mesh(2)");
+            if (!Arrays.equals(c.smoothMesh(2).positions(), two.positions())) fail("subd: a second smooth_mesh(2) differs");
+            subdRefused("smooth_mesh(7)", () -> c.smoothMesh(7), null, "levels", null);
+            kept = c.smoothMesh(2);
+        }
+        System.gc();
+        if (kept.positions().length == 0 || kept.normals().length != kept.positions().length
+                || kept.triangleFace().length != kept.indices().length / 3)
+            fail("subd: a mesh read after its cage closed is not whole");
+        double checkSum = 0;
+        for (double x : kept.positions()) checkSum += Math.abs(x);
+        if (!(checkSum > 0)) fail("subd: a mesh read after its cage closed is all zeros");
+        // 10, 15: to_solid and its report; the pipeline and its STEP.
+        try (Blacksmith.Subd c = Blacksmith.Subd.cuboid()) {
+            Blacksmith.SubdSolid made = c.toSolid();
+            try (Blacksmith.Solid solid = made.solid()) {
+                Blacksmith.SubdReport r = made.report();
+                if (r.regular() != 0 || r.refined() != 24 || r.levels() < 2 || r.steps() < 1 || r.deviation() > 1e-4 || r.g1AngleDeg() > 0.1
+                        || r.deviationAt().length != 3 || r.g1At().length != 3)
+                    fail("subd: the cuboid's report reads " + r);
+                if (!solid.manifold().isClosed()) fail("subd: the solid is not closed");
+                if (!(solid.mass(0).volume() > 0)) fail("subd: the solid has no volume");
+            }
+            try (Blacksmith.Solid again = c.toSolid(1e-4, 0.1, 6).solid()) {
+                if (again.faces() == 0) fail("subd: to_solid(1e-4, 0.1, 6) has no faces");
+            }
+        }
+        try (Blacksmith.Subd base = Blacksmith.Subd.cuboid();
+             Blacksmith.Subd out = base.extrude(new int[] {1}, 0.5);
+             Blacksmith.Subd in = out.inset(new int[] {1}, 0.25)) {
+            Blacksmith.SubdSolid made = in.toSolid();
+            try (Blacksmith.Solid solid = made.solid()) {
+                if (!solid.manifold().isClosed() || made.report().deviation() > 1e-4) fail("subd: the pipeline's solid " + made.report());
+                String step = solid.stepText();
+                if (!step.startsWith("ISO-10303-21;") || !step.contains("ADVANCED_FACE")) fail("subd: the pipeline's STEP text is not STEP");
+                try (Cad.Scene scene = Cad.openMemory(step.getBytes(java.nio.charset.StandardCharsets.UTF_8), "subd.stp", "stp")) {
+                    int meshable = 0;
+                    for (Cad.Node node : scene.nodes()) {
+                        Cad.Mesh mesh = node.mesh();
+                        if (mesh != null && mesh.positions() != null) meshable++;
+                    }
+                    if (meshable != 1) fail("subd: the STEP text reads back as " + meshable + " meshable nodes");
+                }
+            }
+        }
+        // 11, 12: the creased rim is what converts.
+        try (Blacksmith.Subd bare = Blacksmith.Subd.cylinder(1, 2, 8, 1, false)) {
+            try {
+                bare.toSolid();
+                fail("subd: the uncreased cylinder was accepted");
+            } catch (Blacksmith.BuildException e) {
+                if (!e.getMessage().matches("(?s).*subd:.*tangent break.*")) fail("subd: the uncreased cylinder was refused as \"" + e.getMessage() + "\"");
+            }
+        }
+        try (Blacksmith.Subd cyl = Blacksmith.Subd.cylinder()) {
+            Blacksmith.SubdSolid made = null;
+            try {
+                made = cyl.toSolid();
+            } catch (Blacksmith.BuildException e) {
+                fail("subd: the default cylinder (rims creased by default) does not convert: " + e.getMessage());
+            }
+            made.solid().close();
+            if (made.report().deviation() > 1e-4 || made.report().g1AngleDeg() > 0.1) fail("subd: the default cylinder's report " + made.report());
+        }
+        // 13: the other primitives, and their refusals.
+        try (Blacksmith.Subd a = Blacksmith.Subd.cylinder(1, 2, 8, 2, true);
+             Blacksmith.Subd b = Blacksmith.Subd.sphere(1, 2);
+             Blacksmith.Subd t = Blacksmith.Subd.torus(3, 1, 12, 8)) {
+            if (a.faces().length == 0 || b.faces().length == 0 || t.faces().length == 0) fail("subd: a primitive has no faces");
+        }
+        subdRefused("a cuboid of 0 segments", () -> Blacksmith.Subd.cuboid(new double[] {2, 2, 2}, new int[] {0, 1, 1}),
+                "bad selection: cuboid: segments >= 1", null, null);
+        subdRefused("a sphere of 2000 segments", () -> Blacksmith.Subd.sphere(1, 2000), null, "1024", null);
+        subdRefused("a negative segment count", () -> Blacksmith.Subd.sphere(1, -1), null, "segments", null);
+        // 14: from_parts refusals.
+        subdRefused("a crease that is no edge", () -> {
+            try (Blacksmith.Subd c = Blacksmith.Subd.cuboid();
+                 Blacksmith.Subd bad = Blacksmith.Subd.fromParts(c.positions(), c.faces(), List.of(new Blacksmith.SubdEdge(0, 6)), new int[0], null)) {
+                bad.close();
+            }
+        }, null, null, "bad selection: ");
+        subdRefused("no positions", () -> Blacksmith.Subd.fromParts(new double[0], new int[0][]), null, "vertex_count", null);
+        subdRefused("a negative id", () -> {
+            try (Blacksmith.Subd c = Blacksmith.Subd.cuboid(); Blacksmith.Subd bad = c.extrude(new int[] {-1}, 1)) {
+                bad.close();
+            }
+        }, null, "extrude faces", null);
+        // 16: close, twice, and use after close.
+        Blacksmith.Subd closed = Blacksmith.Subd.cuboid();
+        closed.close();
+        closed.close();
+        if (!closed.closed()) fail("subd: a closed cage is not closed");
+        subdClosed("positions", closed::positions);
+        subdClosed("extrude", () -> closed.extrude(new int[] {1}, 1));
+        subdClosed("smooth_mesh", closed::smoothMesh);
+        subdClosed("pick", () -> closed.pick(new double[] {0, 0, 0}, Blacksmith.SubdElements.VERTICES));
+        subdClosed("to_solid", closed::toSolid);
+        System.out.println("subd: the cage, its edits, picks, smooth mesh and conversion all read as Python's");
+    }
+
+    /** What a cage says it selected. */
+    private static final class SelectionCheck {
+        static void faces(Blacksmith.Subd cage, int... want) {
+            Blacksmith.SubdSelection s = cage.selection().orElse(null);
+            if (s == null || s.kind() != Blacksmith.SubdElements.FACES || !Arrays.equals(s.ids(), want))
+                fail("subd: selection reads " + s + ", not faces " + Arrays.toString(want));
+            Blacksmith.SubdSelection same = Blacksmith.SubdSelection.ofFaces(want);
+            if (!s.equals(same) || s.hashCode() != same.hashCode())
+                fail("subd: a selection read back is not equal to " + same);
+            if (s.equals(Blacksmith.SubdSelection.ofVertices(want)))
+                fail("subd: selections of different kinds compare equal");
+        }
+
+        static void vertices(Blacksmith.Subd cage, int... want) {
+            Blacksmith.SubdSelection s = cage.selection().orElse(null);
+            if (s == null || s.kind() != Blacksmith.SubdElements.VERTICES || !Arrays.equals(s.ids(), want))
+                fail("subd: selection reads " + s + ", not vertices " + Arrays.toString(want));
+        }
+
+        static void edges(Blacksmith.Subd cage, Blacksmith.SubdEdge... want) {
+            Blacksmith.SubdSelection s = cage.selection().orElse(null);
+            if (s == null || s.kind() != Blacksmith.SubdElements.EDGES || !s.edges().equals(List.of(want)))
+                fail("subd: selection reads " + s + ", not edges " + Arrays.toString(want));
+            if (!s.equals(Blacksmith.SubdSelection.ofEdges(want)))
+                fail("subd: an edge selection read back is not equal to " + Blacksmith.SubdSelection.ofEdges(want));
+        }
+    }
+
     // Solid x profile hits: a line through a cuboid pierces two faces and is cut into three
     // pieces, outside/inside/outside, the middle one spanning the box and sweeping; a loop no
     // hit cuts is one piece; an open sheet has no pieces; a zero tolerance refused verbatim.
@@ -2034,7 +2422,7 @@ public final class Smoke {
                     new PairRefusal(() -> arm.pair("shoulder", "revolute", Blacksmith.Frame.xy(new double[] {0, 0, 10})),
                             "pair: joint 'shoulder' already has a pair"),
                     new PairRefusal(() -> arm.pair("back", "orbital", Blacksmith.Frame.xy()),
-                            "pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, spherical, "
+                            "pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, gear, rack_and_pinion, spherical, "
                                     + "spherical_with_pin, planar, universal, homokinetic, fully_constrained, unconstrained)"),
                     new PairRefusal(() -> arm.pair("back", "screw", Blacksmith.Frame.xy()), "pair: a screw needs a non-zero pitch"),
                     new PairRefusal(() -> arm.pair("back", "revolute", Blacksmith.Frame.xy(),
@@ -2100,6 +2488,197 @@ public final class Smoke {
                 }
             }
         }
+        gearRoundTrip();
+        posed();
+    }
+
+    // Drives plan 4's round trip, ported from the Python reference's _geared(): a pinion
+    // turning on "drive" meshes, by the gear pair "mesh" (radii 10 and 20, ratio -0.5, bevel
+    // 0.25, helical 0.125), with a wheel turning on "driven" about (30, 0); the wheel's part
+    // sits 5 off its axis, at (35, 0, 2). The two are different parts: AP242 refuses a pair
+    // between two placements of one.
+    private static Blacksmith.Assembly geared(boolean mesh) {
+        Blacksmith.Solid plate = Blacksmith.Solid.cuboid(40, 10, 2).named("plate");
+        Blacksmith.Solid pin = Blacksmith.Solid.cylinder(1, 6).named("pin");
+        Blacksmith.Solid hub = Blacksmith.Solid.cylinder(2, 4).named("hub");
+        Blacksmith.Assembly gears = new Blacksmith.Assembly("gears");
+        gears.place(plate, Blacksmith.Frame.xy().toArray(), "frame");
+        gears.place(pin, Blacksmith.Frame.xy(new double[] {0, 0, 2}).toArray(), "pinion");
+        gears.place(hub, Blacksmith.Frame.xy(new double[] {35, 0, 2}).toArray(), "wheel");
+        gears.link("base", "frame");
+        gears.link("driver", "pinion");
+        gears.link("follower", "wheel");
+        gears.joint("drive", "base", "driver");
+        gears.joint("driven", "base", "follower");
+        gears.joint("mesh", "driver", "follower");
+        gears.pair("drive", "revolute", Blacksmith.Frame.xy(new double[] {0, 0, 2}));
+        gears.pair("driven", "revolute", Blacksmith.Frame.xy(new double[] {30, 0, 2}));
+        if (mesh)
+            gears.pairWith("mesh", "gear", Blacksmith.Frame.xy(new double[] {0, 0, 2}), 10, 20, -0.5, 0.25, 0.125);
+        return gears;
+    }
+
+    private static void gearRoundTrip() {
+        try (Blacksmith.Assembly gears = geared(true); Cad.Scene scene = gears.toScene()) {
+            Cad.Joint mesh = null, drive = null, driven = null;
+            for (Cad.Joint j : scene.joints()) {
+                switch (j.name()) {
+                    case "mesh" -> mesh = j;
+                    case "drive" -> drive = j;
+                    case "driven" -> driven = j;
+                    default -> { }
+                }
+            }
+            Cad.Pair meshPair = mesh.pair();
+            if (meshPair.kind() != Cad.PairKind.OTHER || !meshPair.kindName().equals("gear"))
+                fail("gear: the mesh pair reads as " + meshPair.kind() + "/" + meshPair.kindName() + ", not OTHER/gear");
+            double[] want = {10, 20, -0.5, 0.25, 0.125};
+            if (meshPair.parameters().size() != want.length) fail("gear: the mesh pair has " + meshPair.parameters() + " parameters");
+            for (int i = 0; i < want.length; i++)
+                if (Math.abs(meshPair.parameters().get(i) - want[i]) > 1e-12)
+                    fail("gear: parameter " + i + " is " + meshPair.parameters().get(i) + ", not " + want[i]);
+            Cad.Pair drivePair = drive.pair();
+            if (!drivePair.kindName().equals("revolute") || !drivePair.parameters().isEmpty())
+                fail("gear: drive reads as " + drivePair.kindName() + " " + drivePair.parameters() + ", not revolute with no parameters");
+
+            // the driver alone turns the wheel by ratio x 0.4 about (30, 0): nothing to report
+            Cad.Pose pose = scene.pose(List.of(new Cad.StateValue(drive, new double[] {0.4})));
+            if (!pose.diagnostics().isEmpty() || !pose.unsolved().isEmpty())
+                fail("gear: the driver-only pose reports " + pose.diagnostics() + " / " + pose.unsolved());
+            Cad.Node wheel = scene.links().get(2).nodes().get(0);
+            double[][] at = pose.transform(wheel);
+            double[] origin = {30 + 5 * Math.cos(-0.2), 5 * Math.sin(-0.2), 2.0};
+            for (int i = 0; i < 3; i++)
+                if (Math.abs(at[i][3] - origin[i]) > 1e-9)
+                    fail("gear: the wheel's origin is off on axis " + i + ": " + at[i][3] + ", not " + origin[i]);
+
+            // both sides given, against the law: one diagnostic, in the kernel's words
+            pose = scene.pose(List.of(new Cad.StateValue(drive, new double[] {0.4}),
+                    new Cad.StateValue(driven, new double[] {0.4})));
+            if (pose.diagnostics().size() != 1
+                    || !pose.diagnostics().get(0).startsWith("coupling 'mesh': both 'drive' and 'driven' are given and disagree by"))
+                fail("gear: the disagreeing pose reports " + pose.diagnostics());
+        }
+
+        try (Blacksmith.Assembly gears = geared(false)) {
+            try {
+                gears.pairWith("mesh", "gear", Blacksmith.Frame.xy(), 10, 20);
+                fail("gear: a two-parameter gear was accepted");
+            } catch (Blacksmith.BuildException e) {
+                if (!e.getMessage().equals("pair: a gear takes 3 or 5 parameters, not 2"))
+                    fail("gear: the wrong-count refusal reads \"" + e.getMessage() + "\"");
+            }
+            gears.pairWith("mesh", "gear", Blacksmith.Frame.xy(), 10, 20, -0.5); // unchanged: it takes one now
+        }
+        System.out.println("gear: pairWith round-trips kind_name, parameters and pose diagnostics, and refuses a wrong count");
+    }
+
+    // Assembly.posed, ported from the Python reference's _paired(), _posed_frame() and
+    // test_posed_*, compared by STEP text (stamp stripped), plus the gears' disagreeing drives.
+    private static void expectRefusal(String what, Runnable call, String exact, String prefix) {
+        try {
+            call.run();
+        } catch (Blacksmith.BuildException e) {
+            String m = e.getMessage();
+            if (exact != null && !exact.equals(m)) fail("posed: " + what + " reads \"" + m + "\", not \"" + exact + "\"");
+            if (prefix != null && (m == null || !m.startsWith(prefix))) fail("posed: " + what + " reads \"" + m + "\", not starting \"" + prefix + "\"");
+            return;
+        }
+        fail("posed: " + what + " was accepted");
+    }
+
+    private static void posed() {
+        try (Blacksmith.Solid bolt = Blacksmith.Solid.cylinder(1, 6).named("bolt");
+             Blacksmith.Solid plate = Blacksmith.Solid.cuboid(20, 10, 2).named("plate");
+             Blacksmith.Assembly bracket = new Blacksmith.Assembly("bracket");
+             Blacksmith.Assembly arm = new Blacksmith.Assembly("arm")) {
+            bracket.place(plate, Blacksmith.Frame.xy().toArray());
+            bracket.place(bolt, Blacksmith.Frame.xy(new double[] {5, 5, 2}).toArray());
+            bracket.place(bolt, Blacksmith.Frame.xy(new double[] {15, 5, 2}).toArray());
+            bracket.link("fixed", "plate");
+            bracket.link("bolts", "bolt", "bolt 2");
+            bracket.joint("screw", "fixed", "bolts");
+            arm.place(plate, Blacksmith.Frame.xy().toArray(), "base");
+            arm.place(bracket, Blacksmith.Frame.xy(new double[] {0, 0, 10}).toArray(), "upper");
+            arm.place(bolt, Blacksmith.Frame.xy(new double[] {5, 5, 2}).toArray(), "pin");
+            arm.link("ground", "base");
+            arm.link("upper arm", "upper", "pin");
+            arm.joint("shoulder", "ground", "upper arm");
+            bracket.pair("screw", "prismatic", Blacksmith.Frame.xy(new double[] {1, 2, 3}),
+                    new Blacksmith.PairOptions(Blacksmith.Frame.xy(new double[] {4, 2, 3}), null, null));
+            arm.pair("shoulder", "revolute", Blacksmith.Frame.xy(new double[] {0, 0, 10}),
+                    new Blacksmith.PairOptions(null, List.of(new Blacksmith.Range(-1.5, 1.5)), null));
+            arm.state("reach", List.of(new Blacksmith.StateRow("shoulder", new double[] {0.5})));
+            arm.base("ground");
+
+            String rest = noStamp(arm.stepText());
+            List<Blacksmith.StateRow> shoulderHalf = List.of(new Blacksmith.StateRow("shoulder", new double[] {0.5}));
+            String moved;
+            try (Blacksmith.Assembly p = arm.posed(shoulderHalf)) {
+                if (!p.name().equals("arm")) fail("posed: the posed arm is named " + p.name());
+                moved = noStamp(p.stepText());
+            }
+            if (moved.equals(rest)) fail("posed: the shoulder at 0.5 left the arm's STEP text as at rest");
+            try (Blacksmith.Assembly p = arm.posed(List.of(new Blacksmith.StateRow("upper/screw", new double[] {5.0})))) {
+                if (noStamp(p.stepText()).equals(rest)) fail("posed: the screw at 5 left the arm's STEP text as at rest");
+            }
+            try (Blacksmith.Assembly p = arm.posed(List.of())) {
+                if (!noStamp(p.stepText()).equals(rest)) fail("posed: no rows changed the arm");
+            }
+
+            // a state, and a ground
+            try (Blacksmith.Assembly byState = arm.posed(List.of(), "reach", null)) {
+                if (!noStamp(byState.stepText()).equals(moved)) fail("posed: state 'reach' differs from shoulder = [0.5]");
+            }
+            try (Blacksmith.Assembly held = arm.posed(shoulderHalf, null, "upper arm")) {
+                if (noStamp(held.stepText()).equals(moved)) fail("posed: holding 'upper arm' fixed changed nothing");
+            }
+            expectRefusal("shoulder = 2", () -> arm.posed(List.of(new Blacksmith.StateRow("shoulder", new double[] {2.0}))).close(),
+                    "posed: value 0 of joint 'shoulder' is 2, outside its range", null);
+            expectRefusal("state 'fold'", () -> arm.posed(List.of(), "fold", null).close(),
+                    "posed: assembly 'arm' has no state named 'fold'", null);
+            if (!noStamp(arm.stepText()).equals(rest)) fail("posed: posing changed the original arm");
+        }
+
+        // the ambiguous name, and a path with a slash in a name
+        try (Blacksmith.Solid pbolt = Blacksmith.Solid.cuboid(1, 1, 6).named("bolt");
+             Blacksmith.Solid pplate = Blacksmith.Solid.cuboid(20, 10, 2).named("plate");
+             Blacksmith.Assembly bracket = new Blacksmith.Assembly("bracket");
+             Blacksmith.Assembly frame = new Blacksmith.Assembly("frame")) {
+            bracket.place(pplate, Blacksmith.Frame.xy().toArray());
+            bracket.place(pbolt, Blacksmith.Frame.xy(new double[] {5, 5, 2}).toArray());
+            bracket.link("fixed", "plate");
+            bracket.link("bolts", "bolt");
+            bracket.joint("turn", "fixed", "bolts");
+            bracket.pair("turn", "revolute", Blacksmith.Frame.xy(new double[] {10, 5, 2}));
+            frame.place(bracket, Blacksmith.Frame.xy().toArray(), "left");
+            frame.place(bracket, Blacksmith.Frame.xy(new double[] {100, 0, 0}).toArray(), "right/rear");
+            String before = noStamp(frame.stepText());
+            expectRefusal("bare 'turn'", () -> frame.posed(List.of(new Blacksmith.StateRow("turn", new double[] {0.3}))).close(),
+                    "posed: 'turn' names 2 joints: left/turn, right\\/rear/turn; give one by its path", null);
+            try (Blacksmith.Assembly posed = frame.posed(List.of(new Blacksmith.StateRow("right\\/rear/turn", new double[] {0.3})))) {
+                if (!posed.name().equals("frame")) fail("posed: the posed frame is named " + posed.name());
+                if (noStamp(posed.stepText()).equals(before)) fail("posed: turning right/rear left the frame as it was");
+            }
+            try (Blacksmith.Assembly posed = frame.posed(List.of(new Blacksmith.StateRow("right\\/rear/turn", new double[] {0.0})))) {
+                if (!noStamp(posed.stepText()).equals(before)) fail("posed: turning right/rear by 0 changed the frame");
+            }
+            if (!noStamp(frame.stepText()).equals(before)) fail("posed: posing changed the original frame");
+        }
+
+        // the drives: both sides of a coupling, disagreeing, are refused
+        try (Blacksmith.Assembly gears = geared(true)) {
+            String before = noStamp(gears.stepText());
+            try (Blacksmith.Assembly p = gears.posed(List.of(new Blacksmith.StateRow("drive", new double[] {0.4})))) {
+                if (!p.name().equals("gears")) fail("posed: the posed gears are named " + p.name());
+            }
+            expectRefusal("disagreeing drives", () -> gears.posed(List.of(
+                            new Blacksmith.StateRow("drive", new double[] {0.4}),
+                            new Blacksmith.StateRow("driven", new double[] {0.4}))).close(), null,
+                    "posed: assembly 'gears': coupling 'mesh': both 'drive' and 'driven' are given and disagree by");
+            if (!noStamp(gears.stepText()).equals(before)) fail("posed: posing changed the original gears");
+        }
+        System.out.println("posed: moves, takes a path/state/ground, refuses with the kernel's words, leaves the original alone");
     }
 
     private static String pairedUnpairedMessage(Blacksmith.Assembly arm) {
@@ -2222,6 +2801,16 @@ public final class Smoke {
                     if (halves.size() != 2 || halves.get(0).faces() != 6) fail("split_by_plane: " + halves.size() + " bodies, not 2");
                     for (Blacksmith.Solid half : halves) half.close();
                 }
+                // A rectangle drawn above a sphere cores it: the ball with a square hole, then the core.
+                try (Blacksmith.Solid ball = Blacksmith.Solid.sphere(10); Blacksmith.Profile coreSquare = Blacksmith.Profile.rect(6, 6)) {
+                    List<Blacksmith.Solid> cored = ball.splitByProfile(coreSquare, new double[] {0, 0, 40, 1, 0, 0, 0, 1, 0, 0, 0, 1});
+                    double whole = ball.mass(0).volume();
+                    if (cored.size() != 2) fail("split_by_profile: " + cored.size() + " bodies, not 2");
+                    double outside = cored.get(0).mass(0).volume(), inside = cored.get(1).mass(0).volume();
+                    if (!(inside > 0 && inside < outside) || Math.abs(outside + inside - whole) > 0.01 * whole)
+                        fail("split_by_profile: " + outside + " + " + inside + " is not the ball's " + whole);
+                    for (Blacksmith.Solid piece : cored) piece.close();
+                }
             }
             // From loops: a circle given before the square it lies in -- the square is the boundary.
             try (Blacksmith.Profile loopHole = Blacksmith.Profile.circle(4);
@@ -2284,6 +2873,252 @@ public final class Smoke {
         }
     }
 
+    // silhouette_beziers, both libraries: the curves where a body's surfaces turn away from the
+    // eye. The kernel assertions are on values that pin the layout, not on shapes: a stride-16 unpack
+    // with the weights read as a coordinate, or the points shifted a slice, still gives arrays of
+    // the right length.
+    private static Blacksmith.SvgOptions kernelEye(Blacksmith.SvgView view, double tolerance) {
+        return new Blacksmith.SvgOptions(view, null, null, null, 0.0, 1000.0, 1000.0, 0.05, tolerance,
+                "#000000", 1.0, null, true, false, false, false, true);
+    }
+
+    private static Cad.SvgOptions readerEye(Cad.SvgView view, double tolerance) {
+        return new Cad.SvgOptions(view, null, null, null, 0.0, 1000.0, 1000.0, 0.05, tolerance,
+                "#000000", 1.0, null, true, false, false, false, true);
+    }
+
+    private static void silhouette(String path) {
+        // Kernel. A radius-2 sphere's rim: the end points of every arc lie ON the sphere to 1e-9
+        // (radius 2), and the end weights are exactly 1 with the two interior ones in (0, 1). The
+        // interior control points are not checked, and the interior weights only to lie in (0, 1):
+        // both move with how the rim is subdivided.
+        try (Blacksmith.Solid sphere = Blacksmith.Solid.sphere(2.0)) {
+            Cad.BeziersData64 rim = sphere.silhouetteBeziers();
+            if (rim.count() == 0) fail("silhouette: a sphere gave no rim");
+            if (rim.points().length != rim.count() * 12 || rim.weights().length != rim.count() * 4)
+                fail("silhouette: " + rim.count() + " curves but " + rim.points().length + " point doubles and " + rim.weights().length + " weights");
+            for (int c = 0; c < rim.count(); c++) {
+                double[] r = new double[4];
+                for (int k = 0; k < 4; k++) {
+                    double x = rim.points()[c * 12 + k * 3], y = rim.points()[c * 12 + k * 3 + 1], z = rim.points()[c * 12 + k * 3 + 2];
+                    r[k] = Math.sqrt(x * x + y * y + z * z);
+                }
+                double[] w = java.util.Arrays.copyOfRange(rim.weights(), c * 4, c * 4 + 4);
+                if (Math.abs(r[0] - 2.0) > 1e-9 || Math.abs(r[3] - 2.0) > 1e-9)
+                    fail("silhouette: arc " + c + " end points are at radius " + r[0] + " and " + r[3] + ", not 2");
+                if (w[0] != 1.0 || w[3] != 1.0 || !(w[1] > 0 && w[1] < 1) || !(w[2] > 0 && w[2] < 1))
+                    fail("silhouette: arc " + c + " weights are " + java.util.Arrays.toString(w) + ", not 1, then two weights in (0, 1), then 1");
+            }
+            System.out.println("silhouette: a radius-2 sphere gives " + rim.count() + " arcs, ends at radius 2, end weights 1, interior weights in (0, 1)");
+
+            // An infinite tolerance is refused in the library's words.
+            try {
+                sphere.silhouetteBeziers(kernelEye(Blacksmith.SvgView.ISO, Double.POSITIVE_INFINITY));
+                fail("silhouette: an infinite tolerance was accepted");
+            } catch (Blacksmith.BuildException e) {
+                if (!e.getMessage().contains("silhouette: ")) fail("silhouette: refused, but not in the library's words: " + e.getMessage());
+            }
+        }
+
+        // A cylinder seen from the side is straight rulings: polynomial, every weight exactly 1.
+        try (Blacksmith.Solid cylinder = Blacksmith.Solid.cylinder(1.0, 3.0)) {
+            Cad.BeziersData64 rulings = cylinder.silhouetteBeziers(kernelEye(Blacksmith.SvgView.FRONT, 0.1));
+            if (rulings.count() == 0) fail("silhouette: a cylinder gave no rulings");
+            for (double w : rulings.weights()) if (w != 1.0) fail("silhouette: a cylinder's rulings are not all weight 1");
+            // The axis. hypot(x, y) and the z extent are both symmetric in x and y, so an unpack
+            // that returned [y, x, z] passes both; |x| at the radius and |y| at zero tell the two
+            // apart (seen from the front a ruling sits at x = +-radius, y = 0). Only the magnitude
+            // of x is asserted, not its sign, and the number of rulings is not asserted.
+            for (int k = 0; k < rulings.count() * 4; k++) {
+                double x = rulings.points()[k * 3], y = rulings.points()[k * 3 + 1];
+                if (Math.abs(Math.sqrt(x * x + y * y) - 1.0) > 1e-6) fail("silhouette: a ruling's control point is off the cylinder's wall");
+                if (Math.abs(Math.abs(x) - 1.0) > 1e-6) fail("silhouette: a ruling's control point has |x| = " + Math.abs(x) + ", not the radius 1");
+                if (Math.abs(y) > 1e-6) fail("silhouette: a ruling's control point has |y| = " + Math.abs(y) + ", not 0");
+            }
+            double[] heights = new double[4];
+            for (int k = 0; k < 4; k++) heights[k] = rulings.points()[k * 3 + 2];
+            java.util.Arrays.sort(heights);
+            for (int k = 0; k < 4; k++) if (Math.abs(heights[k] - k) > 1e-6) fail("silhouette: a ruling's heights are " + java.util.Arrays.toString(heights) + ", not 0..3 evenly");
+        }
+
+        // An all-planar body has no tangential silhouette: the empty answer, raising nothing -- and
+        // a refusal left in the error slot by an earlier call must not turn it into one. Both
+        // solids are built in the resource header, BEFORE the refusal, not between it and the ask:
+        // every call that builds, reads or writes geometry in the library runs under its `guard`,
+        // whose first act is `clear_error` (blacksmith-capi lib.rs:117), so building one in between
+        // would wipe the refusal's message. The order is build, refuse, ask. What this pins is
+        // narrower than it looks, though: the slot is already clear when the silhouette's native
+        // call begins, because the wrapper first packs its options and packing the default stroke
+        // "#000000" goes through `cadaclysm_blacksmith_parse_colour`, itself a `guard` (lib.rs:200)
+        // that clears it (Java `buildSvgOptions` -> `packed` -> `tryParseRgb` ->
+        // `cadaclysm_blacksmith_parse_colour`). `cadaclysm_blacksmith_svg_options_init` is a bare
+        // struct fill and does not clear. So the test pins that the wrapper must not read the slot
+        // BEFORE packing its options: a read there fails it, while a read placed after packing and
+        // before the native call would pass. The library's own clearing at the silhouette's entry
+        // is a library property, pinned for the reader's entry point by
+        // `an_empty_answer_after_a_refusal_carries_no_stale_error`
+        // (crates/cadaclysm-capi/tests/silhouette_abi.rs:401); this test covers the wrapper's half.
+        // Only calls under `guard` clear: `cadaclysm_blacksmith_solid_free` and
+        // `cadaclysm_blacksmith_silhouette_beziers_free` just drop a box and the error getter does
+        // not clear either, so a free running between the refusal and the ask cannot wipe the slot.
+        try (Blacksmith.Solid sphere = Blacksmith.Solid.sphere(2.0); Blacksmith.Solid box = Blacksmith.Solid.cuboid(10, 10, 10)) {
+            try {
+                sphere.silhouetteBeziers(kernelEye(Blacksmith.SvgView.ISO, Double.POSITIVE_INFINITY));
+                fail("silhouette: an infinite tolerance was accepted");
+            } catch (Blacksmith.BuildException expected) {
+                // leaves its reason in the slot
+            }
+            Cad.BeziersData64 none;
+            try {
+                none = box.silhouetteBeziers();
+            } catch (Blacksmith.BuildException e) {
+                fail("silhouette: the empty answer after a refusal was an error: " + e.getMessage());
+                return;
+            }
+            if (none.count() != 0 || none.points().length != 0 || none.weights().length != 0) fail("silhouette: an all-planar body gave a silhouette");
+        }
+        System.out.println("silhouette: cylinder rulings polynomial, infinite tolerance refused, a planar body is the empty answer");
+
+        // Reader. The fixtures are the repository's, not an SDK checkout's, so this runs where found.
+        Path sampleRoot = Path.of(path).toAbsolutePath().getParent().getParent();
+        Path spherePath = sampleRoot == null ? null : sampleRoot.resolve("crates/cadaclysm-acis/tests/fixtures/rhino/sphere.sat");
+        Path boxPath = sampleRoot == null ? null : sampleRoot.resolve("crates/cadaclysm-acis/tests/fixtures/rhino/box-chamfer-all.blacksmith.stp");
+        if (spherePath == null || boxPath == null || !Files.exists(spherePath) || !Files.exists(boxPath)) return;
+        try (Cad.Scene scene = Cad.open(spherePath.toString())) {
+            // The body node above the lump holds no shape of its own; the first node with extent is the part.
+            Cad.Node node = null;
+            for (Cad.Node n : scene.walk()) {
+                if (!java.util.Arrays.equals(n.bounds().min(), n.bounds().max())) {
+                    node = n;
+                    break;
+                }
+            }
+            if (node == null) fail("silhouette (reader): sphere.sat has no node with extent");
+            // Asked the LARGER answer first: iso gives 236 curves against front's 174, so the second
+            // call below refills the scene's one slot in place and overwrites the head of what was kept,
+            // which is what makes a non-copying implementation fail loudly. The reverse order can pass
+            // with a view. It was front first until the lattice's spacing became a length in space
+            // (44efabc88): front gave 1248 against iso's 1210 then.
+            Cad.SvgOptions firstOptions = readerEye(Cad.SvgView.ISO, 0.1);
+            Cad.BeziersData64 first = node.silhouetteBeziers(firstOptions);
+            if (first.count() == 0) fail("silhouette (reader): a sphere gave no rim");
+            if (first.points().length != first.count() * 12 || first.weights().length != first.count() * 4)
+                fail("silhouette (reader): the arrays are not count*4*3 and count*4");
+            for (double w : first.weights())
+                if (!Double.isFinite(w) || !(w > 0.0)) fail("silhouette (reader): a weight is " + w + ", not finite and strictly positive");
+            // Every control point lies within the library's fit budget of the sphere, at the bounds
+            // radius from the bounds centre. That is NOT because control points lie on the sphere:
+            // the silhouette curve does, but a cubic's interior control points do not. It holds
+            // because the arcs are short (half a unit on a radius of 10), and the budget is the
+            // tolerance the library fits the CURVE to, not its control polygon. The margin is
+            // narrow: the curve itself uses nearly the whole budget (3.42e-3 against 3.46e-3) since
+            // the lattice's spacing became a length in space (44efabc88); before, a lattice ten times
+            // too fine left it at 1e-4. So this catches a displaced or scaled result and a
+            // wildly mis-strided unpack. What it does with a slip of the unpack was measured here
+            // as the worst radius DEVIATION of any control point from the sphere's radius 10
+            // (budget about 3.5e-3): a correct read deviates by 3.04e-3 on iso and 2.97e-3 on front;
+            // a one-double wrap slip by 0.87 on iso and 8.8 on front, over the budget at either
+            // view; a one-CONTROL-POINT slip by exactly the correct read's figure at either view,
+            // because it only moves whole points. So this catches a one-double slip but can never
+            // catch a one-control-point slip, which is why the chaining assertion below is the only
+            // one that does. This test asks iso, because the ownership order below forces it. It
+            // also does NOT pin the eye or `up` (a silhouette point is a point of the surface, so
+            // it is on the sphere from any view), the node choice (a wrong node fails earlier, as a
+            // refusal or an empty answer), or the weights (all 1.0 on this fixture: degree-1
+            // chords). The bound is the library's own budget: it fits the silhouette to within
+            // `extent * tolerance / width` (`world_tolerance`, capi svg.rs), the extent being the
+            // bounds' diagonal. Measured on the iso view this test asks, the radius deviation is
+            // 3.04e-3 on a radius of 10 (front: 2.97e-3).
+            Cad.Bounds sb = node.bounds();
+            double[] sc = {(sb.min()[0] + sb.max()[0]) / 2.0, (sb.min()[1] + sb.max()[1]) / 2.0, (sb.min()[2] + sb.max()[2]) / 2.0};
+            double sphereRadius = (sb.max()[0] - sb.min()[0]) / 2.0;
+            double dxb = sb.max()[0] - sb.min()[0], dyb = sb.max()[1] - sb.min()[1], dzb = sb.max()[2] - sb.min()[2];
+            // Read off the options the call was given, not copied from the numbers readerEye was built with.
+            double budget = Math.sqrt(dxb * dxb + dyb * dyb + dzb * dzb) * (firstOptions.tolerance() / firstOptions.width());
+            double lo = Double.MAX_VALUE, hi = 0;
+            for (int k = 0; k < first.points().length / 3; k++) {
+                double dx = first.points()[k * 3] - sc[0], dy = first.points()[k * 3 + 1] - sc[1], dz = first.points()[k * 3 + 2] - sc[2];
+                double r = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                lo = Math.min(lo, r);
+                hi = Math.max(hi, r);
+            }
+            if (sphereRadius <= 0 || Math.abs(lo - sphereRadius) > budget || Math.abs(hi - sphereRadius) > budget)
+                fail("silhouette (reader): control points are at radii " + lo + ".." + hi + " from the bounds centre, not the sphere's " + sphereRadius);
+            double[] keepPoints = first.points().clone();
+            double[] keepWeights = first.weights().clone();
+            // The next silhouette call on this scene refills the library's one slot in place.
+            Cad.BeziersData64 second = node.silhouetteBeziers(readerEye(Cad.SvgView.FRONT, 0.1));
+            if (second.count() == 0) fail("silhouette (reader): the second view gave no rim");
+            if (second.count() > first.count())
+                fail("silhouette (reader): the larger answer must come first (iso " + first.count() + ", front " + second.count() + ")");
+            if (second.count() == keepPoints.length / 12 && java.util.Arrays.equals(second.points(), keepPoints))
+                fail("silhouette (reader): the two views gave the same silhouette, so this cannot tell a copy from a view");
+            if (!java.util.Arrays.equals(first.points(), keepPoints))
+                fail("silhouette (reader): the first answer's points changed when the second was asked");
+            if (!java.util.Arrays.equals(first.weights(), keepWeights))
+                fail("silhouette (reader): the first answer's weights changed when the second was asked");
+            // Chaining, the assertion that sees an offset slip; asked of the iso answer, whose figures
+            // are quoted here (the front view chains much less). Count the consecutive pairs whose last
+            // control point equals the next curve's first, to 1e-9 per coordinate (x, y and z each, so
+            // a passing pair can be up to 1.73e-9 apart). The arcs come back in RUNS, not as one
+            // ordered traversal, so "every arc ends where the next begins" is false and this is a count
+            // with a margin, not an identity: measured on iso, 232 of the 235 consecutive pairs chain
+            // (98.7%, four runs); the front view chains 96 of 173 (55%), which is why the eye matters
+            // and the bound is 80, not near 230. A read shifted by one double or by one control point
+            // leaves none (0 of 235 each). Those are wrap-around slips, which preserve the length and the
+            // count, so each denominator is the unshifted pair count (a truncating slip loses a curve
+            // and drops it by one). The count varies with how the sphere is tessellated; what makes a
+            // lower bound of 80 safe is not that it cannot drift but that it sits about three times
+            // below the count measured here. It has drifted once: the bound was 400 against 1206 of
+            // 1209 until the lattice's spacing became a length in space (44efabc88) and the same four
+            // runs came back in arcs five times longer.
+            // Its limit: a shift by a whole CURVE (12 doubles) is NOT caught, because it preserves
+            // the chaining: 231 of 235 pairs still chain on iso, since every arc is replaced by
+            // its neighbour's and the neighbours still join.
+            if (second.points().length != second.count() * 12 || second.weights().length != second.count() * 4)
+                fail("silhouette (reader): the front arrays are not count*4*3 and count*4");
+            for (double w : second.weights())
+                if (!Double.isFinite(w) || !(w > 0.0)) fail("silhouette (reader): a front weight is " + w + ", not finite and strictly positive");
+            int chained = 0;
+            double[] ip = first.points();
+            for (int c = 0; c + 1 < first.count(); c++) {
+                int last = c * 12 + 9, next = (c + 1) * 12;
+                if (Math.abs(ip[last] - ip[next]) <= 1e-9 && Math.abs(ip[last + 1] - ip[next + 1]) <= 1e-9
+                        && Math.abs(ip[last + 2] - ip[next + 2]) <= 1e-9) chained++;
+            }
+            if (chained < 80)
+                fail("silhouette (reader): only " + chained + " of " + (first.count() - 1)
+                        + " consecutive arcs chain (last control point = the next one's first), want at least 80");
+            // A refusal: an infinite tolerance, in the library's words.
+            try {
+                node.silhouetteBeziers(readerEye(Cad.SvgView.ISO, Double.POSITIVE_INFINITY));
+                fail("silhouette (reader): an infinite tolerance was accepted");
+            } catch (Cad.CadaclysmException e) {
+                if (!e.getMessage().contains("silhouette: ")) fail("silhouette (reader): refused, but not in the library's words: " + e.getMessage());
+            }
+            System.out.println("silhouette (reader): sphere " + first.count() + " then " + second.count() + " curves, first answer kept; infinite tolerance refused");
+        }
+        // A planar body: the empty answer, after a refusal has left its reason in the slot.
+        try (Cad.Scene scene = Cad.open(boxPath.toString())) {
+            Cad.Node node = null;
+            for (Cad.Node n : scene.walk()) {
+                if (!java.util.Arrays.equals(n.bounds().min(), n.bounds().max())) {
+                    node = n;
+                    break;
+                }
+            }
+            if (node == null) fail("silhouette (reader): the box has no node with extent");
+            try {
+                node.silhouetteBeziers(readerEye(Cad.SvgView.ISO, Double.POSITIVE_INFINITY));
+                fail("silhouette (reader): an infinite tolerance was accepted on the box");
+            } catch (Cad.CadaclysmException expected) {
+                // leaves its reason in the slot
+            }
+            Cad.BeziersData64 none = node.silhouetteBeziers();
+            if (none.count() != 0 || none.points().length != 0) fail("silhouette (reader): an all-planar body gave a silhouette");
+            System.out.println("silhouette (reader): a planar box is the empty answer");
+        }
+    }
     private static void fail(String why) {
         System.err.println(why);
         System.exit(1);

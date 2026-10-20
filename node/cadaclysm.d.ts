@@ -232,6 +232,10 @@ export class Pair {
   kind: PairKind;
   typeName: string | null;
   pitch: number | null;
+  /** The kind by name, finer than `kind`: `gear` and `rack_and_pinion` where `kind` reads `other`. */
+  kindName: string;
+  /** The pair's own numbers: `screw` `[pitch]`, `rack_and_pinion` `[pinion_radius]`, `gear` five; `[]` otherwise. */
+  parameters: number[];
   frameStart: number[][]; frameEnd: number[][];
   rawFrameStart: Float64Array; rawFrameEnd: Float64Array;
   freedoms(): Freedom[];
@@ -270,12 +274,98 @@ export class Sequence {
   pose(t: number, ground?: Link | null): Pose;
 }
 
+/** What one element is doing on a date: `WorkSchedule.at()`'s rows. */
+export class ElementState {
+  private constructor();
+  node: Node;
+  phase: 'unbuilt' | 'building' | 'built' | 'demolishing' | 'demolished';
+  /** 0..1 through the window that governs the phase. */
+  progress: number;
+  /** Seconds late (positive) or early (negative) against the schedule, or null. */
+  variance: number | null;
+}
+
+/**
+ * Every date pair a task gives: seconds since 1970-01-01T00:00, no zone
+ * (`new Date(seconds * 1000)`, read with `toISOString()` or the `getUTC*` accessors), or null
+ * where the file gives none. `duration` is in seconds.
+ */
+export class TaskTime {
+  private constructor();
+  scheduleStart: number | null; scheduleFinish: number | null;
+  earlyStart: number | null; earlyFinish: number | null;
+  lateStart: number | null; lateFinish: number | null;
+  actualStart: number | null; actualFinish: number | null;
+  duration: number | null;
+}
+
+export type TaskKind = 'attendance' | 'construction' | 'demolition' | 'dismantle' | 'disposal' | 'installation' | 'logistic' | 'maintenance' | 'move' | 'operation' | 'removal' | 'renovation' | 'notdefined' | 'other';
+export type TaskLinkKind = 'finish_start' | 'start_start' | 'finish_finish' | 'start_finish' | 'notdefined' | 'other';
+export type ScheduleKind = 'planned' | 'actual' | 'baseline' | 'notdefined' | 'other';
+
+/** A sequence between two tasks of one schedule. From `WorkSchedule.links`. */
+export class TaskLink {
+  private constructor();
+  /** The predecessor. */ from: Task;
+  /** The successor. */ to: Task;
+  kind: TaskLinkKind;
+  /** The text of a user-defined kind (`kind === 'other'`); `''` otherwise. */
+  readonly kindName: string;
+  /** The time lag in seconds, or null where the file gives none. */
+  lag: number | null;
+}
+
+/** One task of a `WorkSchedule`. From `WorkSchedule.tasks`. */
+export class Task {
+  private constructor();
+  schedule: WorkSchedule; index: number;
+  equals(other: Task): boolean;
+  readonly name: string;
+  /** `''` where none. */
+  readonly identification: string;
+  readonly kind: TaskKind;
+  /** The text of a user-defined kind (`kind === 'other'`); `''` otherwise. */
+  readonly kindName: string;
+  /** Its status as the file writes it, `''` where none. */
+  readonly status: string;
+  readonly milestone: boolean;
+  /** The summary task nesting it, or null at the top. */
+  readonly parent: Task | null;
+  readonly time: TaskTime;
+  /** The nodes it builds or removes. */
+  readonly nodes: Node[];
+}
+
+/** A building's programme: an `IfcWorkSchedule` and the tasks it controls. From `Scene.schedules()`. */
+export class WorkSchedule {
+  private constructor();
+  index: number;
+  equals(other: WorkSchedule): boolean;
+  readonly name: string;
+  readonly identification: string;
+  readonly kind: ScheduleKind;
+  readonly kindName: string;
+  /** Seconds since 1970-01-01T00:00, or null where the file gives none. */
+  readonly start: number | null;
+  readonly finish: number | null;
+  readonly tasks: Task[];
+  readonly links: TaskLink[];
+  /**
+   * What each element the schedule names is doing on `date` (seconds since 1970-01-01T00:00),
+   * in node order. `dates` is `'scheduled'` (default) or `'actual'`. Throws for any other
+   * `dates` and for a `date` that is not finite.
+   */
+  at(date: number, dates?: 'scheduled' | 'actual'): ElementState[];
+}
+
 /** A posed mechanism: `Scene.pose()` or `Scene.poseState()`'s answer. Copied eagerly out of the C handle; holds no C pointer. */
 export class Pose {
   private constructor();
   readonly ground: Link;
   readonly unsolved: Joint[];
   readonly outOfRange: [Joint, number, number][];
+  /** What the couplings could not solve, or found disagreeing, in the kernel's words. */
+  readonly diagnostics: string[];
   transform(node: Node): number[][];
   rawTransform(node: Node): Float64Array;
   /** Draw with the view library in use: the shared window (returns) or a still. */
@@ -326,6 +416,8 @@ export class Node {
   edgeColours(): (number[] | null)[];
   edgeBeziers(): Beziers; curveBeziers(): Beziers; isocurveBeziers(): Beziers;
   edgeBeziers64(): Beziers64; curveBeziers64(): Beziers64; isocurveBeziers64(): Beziers64;
+  /** Where this node's surfaces turn away from the eye (the camera `options` describes), as rational cubic Beziers: `points` is twelve numbers a curve, `weights` four. A copy -- a later silhouette call on the scene leaves it alone. `count` 0 for a body with no silhouette (not an error); throws for a refused option. */
+  silhouetteBeziers(options?: SvgOptions): Beziers64;
   collision(hullBudget?: number): Collision | null;
   collisionHull(hullBudget?: number): CollisionHull;
   boundsPlaced(placement?: ArrayLike<number> | null): Bounds;
@@ -365,6 +457,8 @@ export class Scene {
   links(): Link[]; joints(): Joint[]; states(): State[];
   /** The file's motion sequences, in file order. */
   sequences(): Sequence[];
+  /** The file's IFC work schedules, in file order. Empty for a file that records none. */
+  schedules(): WorkSchedule[];
   /** The link the file declares as the mechanism's base, or null when it declares none. */
   readonly base: Link | null;
   /** The mechanism posed by `values` ([Joint, sequence of numbers] rows, or `StateValue`s), with `ground` held fixed. */

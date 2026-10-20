@@ -2,9 +2,10 @@
 
 The two cadaclysm C ABIs -- the CAD readers (`cadaclysm_capi`) and the blacksmith B-rep
 kernel (`cadaclysm_blacksmith`) -- as a Swift package with two modules, `Cadaclysm` and
-`Blacksmith`, class for class with the Python, C#, Go, Java and Node.js wrappers. The C
-headers are imported as Clang modules exactly as published: no generated bindings and no
-hand-copied structs. Swift 5.9 or later, on macOS 13+, Linux or Windows.
+`Blacksmith` (and a third, `CadaclysmView`, for drawing), class for class with the Python,
+C#, Go, Java and Node.js wrappers. The C headers are imported as Clang modules exactly as
+published: no generated bindings and no hand-copied structs. Swift 5.9 or later, on macOS
+13+, Linux or Windows.
 
 ## Use it
 
@@ -43,6 +44,63 @@ dot, `.faces(.max(.z))`: on Apple platforms Foundation has a `Selector` of its o
 file importing both spells ours `Blacksmith.Selector`.
 
 The API reference is at https://cadaclysm.blitter.studio/docs/swift.html.
+
+## Drawing
+
+The `CadaclysmView` product draws through a view library opened at run time -- the terminal
+by default, the GPU window after `ViewLibrary.useWgpu()`, any other with
+`ViewLibrary.use(path)` or `CADACLYSM_VIEW`. `Cadaclysm` and `Blacksmith` depend on it, so a
+package that imports either already links it; add the product when you use `View` yourself.
+A missing library throws "no view library: ...", and the view library must speak ABI 1.11.
+
+```swift
+import Blacksmith
+import CadaclysmView
+
+let solid = try Solid.sphere(10)
+try ViewLibrary.useWgpu()           // else the terminal prints a still
+try solid.show()                    // blocks until the window is closed
+let camera = try solid.view()       // a Camera: where it was left, and the last pick
+
+let view = try CadaclysmView.View.offscreen(width: 800, height: 600)   // no display needed
+let item = try view.showSolid(solid)                                  // the view keeps the solid alive
+try item.colour("tomato")                                             // or "#e64d1a", or SIMD3<Float>(0.9, 0.3, 0.1)
+try view.frame()
+try view.save("sphere.png")
+```
+
+`show()` and `view()` are on `Solid`, `Scene`, `Node` and `Pose`, and take a
+`ShowOptions(view:azimuth:elevation:zoom:up:edges:width:height:hint:title:tolerance:)`, every
+argument optional (`edges:` is true by default, `tolerance:` is a `Double?` for solids only).
+Every colour argument is a `Colour`: a `String` -- `"#rgb"`, `"#rrggbb"` or a CSS colour name,
+read by the view library's own parser -- or three or four floats (`SIMD3<Float>`,
+`SIMD4<Float>`, `[Float]`).
+
+`view.showText("Bracket", at: SIMD3<Float>(0, 0, 10))` shows text as one item: a label (the
+default; `size:` in pixels, facing the viewer, its `align:` corner on the point, moved by
+`offset:` pixels, over an optional `box:` colour with `padding:`, drawn through geometry when
+`onTop:`) or `mode: "world"` text lying in the model along `right:` and `up:` (`size:` in model
+units). `item.setText("...")` replaces the string; a pick on text answers its item, the face
+being the line hit. `loadFont(bytes)` (or `loadFont(path:)`) loads a TTF/OTF font and returns
+its id for `font:` (0 is the bundled Liberation Sans); `view.layer(CADACLYSM_VIEW_LAYER_TEXT,
+false)` hides every text item. An unknown `mode` or `align` and a NUL in the text are refused
+in Python's words, the rest with the library's reason.
+
+`pose.show()` draws a posed mechanism. `view.lod("smooth")` turns levels of detail on
+(`wakeMs()` says when a resting frame is owed), and `item.nodeTransforms(...)` poses a shown
+scene by hand.
+
+`View(title:width:height:)` opens a window of its own (`run()` blocks, `View.pump(timeout:)`
+keeps it live from your loop); `View.inWindow` draws in a host's window (an `NSView`, an
+HWND), the host forwarding `input(kind:...)`, `resize(width:height:)` and `draw()`
+(`needsDraw()` throws and answers a `Bool`). A View belongs to the thread that made it (on
+macOS the main thread): another thread's call is refused, and it is destroyed in `deinit` or
+by `close()`. A shown `Node` or `Pose` borrows from its `Scene`, as everything in `Cadaclysm`
+does: keep the Scene open. `Scene.close()` first removes the items of this thread's views that
+show it, and leaves the scene open when another thread's view still shows it. `show()` and
+`view()` draw in a view of their own that `Scene.close()` does not see while they run: do not
+close the Scene they draw from another thread meanwhile. Where SwiftUI is imported too, `View`
+is ambiguous: write `CadaclysmView.View`.
 
 ## The libraries
 

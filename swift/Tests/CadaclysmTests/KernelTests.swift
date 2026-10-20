@@ -735,6 +735,19 @@ final class KernelTests: XCTestCase {
             .hasPrefix("split_by_plane: the plane does not cross the solid") ?? false)
     }
 
+    /// A rectangle drawn on a plane above a sphere cores it: the ball with a square hole first,
+    /// then the core, their volumes adding up to the ball's.
+    func testASolidIsSplitByAProfilePushedThroughIt() throws {
+        let ball = try Solid.sphere(10)
+        let pieces = try ball.splitByProfile(try Profile.rect(6, 6), try Frame.xy([0, 0, 40]))
+        XCTAssertEqual(pieces.count, 2)
+        let (outside, inside) = (try volume(pieces[0]), try volume(pieces[1]))
+        XCTAssertTrue(inside > 0 && inside < outside)
+        XCTAssertEqual(outside + inside, try volume(ball), accuracy: 0.01 * (try volume(ball)))
+        XCTAssertTrue(refusal { _ = try ball.splitByProfile(try Profile.circle(4), try Frame.xy([30, 0, 0])) }?
+            .hasPrefix("split_by_profile: ") ?? false)
+    }
+
     /// A rectangle's open box thickened out is the box a thickness bigger all round less the
     /// box, thickened in the box less the box a thickness smaller; a tube thickens to a pipe
     /// that writes. Python's test_a_sheet_is_thickened_either_side.
@@ -940,6 +953,12 @@ final class KernelTests: XCTestCase {
 
         XCTAssertTrue(refusal { _ = try plate.svgText(SvgOptions(fov: 200)) }?.contains("fov") ?? false)
         XCTAssertNotNil(refusal { _ = try plate.svg(path, options: SvgOptions(margin: -1)) })
+
+        // stroke and background take colour text, read by the kernel's own parser.
+        let named = try plate.svgText(SvgOptions(stroke: "Lime", background: "Navy"))
+        XCTAssertTrue(named.contains("#000080"), named.prefix(300).description)
+        XCTAssertTrue(named.lowercased().contains("#00ff00"), named.prefix(300).description)
+        XCTAssertTrue(refusal { _ = try plate.svgText(SvgOptions(background: "bogus")) }?.hasPrefix("svg: background:") ?? false)
 
         // A profile draws its own plane, top by default -- a sketch lies in z = 0, so its own
         // plane already is the page, unlike a solid's default (`.iso`), which has no plane of
@@ -1596,7 +1615,7 @@ final class KernelTests: XCTestCase {
             ({ try arm.pair("shoulder", "revolute", try Frame.xy([0, 0, 10])) },
              "pair: joint 'shoulder' already has a pair"),
             ({ try arm.pair("back", "orbital", try Frame.xy()) },
-             "pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, spherical, "
+             "pair: 'orbital' is not a pair kind (revolute, prismatic, cylindrical, screw, gear, rack_and_pinion, spherical, "
              + "spherical_with_pin, planar, universal, homokinetic, fully_constrained, unconstrained)"),
             ({ try arm.pair("back", "screw", try Frame.xy()) }, "pair: a screw needs a non-zero pitch"),
             ({ try arm.pair("back", "revolute", try Frame.xy(), ranges: [(-1, 1), (-1, 1)]) },
@@ -1630,6 +1649,158 @@ final class KernelTests: XCTestCase {
         XCTAssertEqual(Assembly.pairFreedomCount("revolute"), 1)
         XCTAssertEqual(Assembly.pairFreedomCount("fully_constrained"), 0)
         XCTAssertEqual(Assembly.pairFreedomCount("not_a_kind"), 0)
+    }
+
+    /// Drives plan 4's `_geared()` in Python: a pinion turning on `drive` meshes, by the gear
+    /// pair `mesh` (radii 10 and 20, ratio -0.5, bevel 0.25, helical 0.125), with a wheel
+    /// turning on `driven` about (30, 0).
+    private func geared(mesh: Bool = true) throws -> Assembly {
+        let plate = try Solid.cuboid(40, 10, 2).named("plate")
+        let pin = try Solid.cylinder(1, 6).named("pin")
+        let hub = try Solid.cylinder(2, 4).named("hub")
+        let gears = try Assembly("gears")
+        _ = try gears.place(plate, try Frame.xy(), name: "frame")
+        _ = try gears.place(pin, try Frame.xy([0, 0, 2]), name: "pinion")
+        _ = try gears.place(hub, try Frame.xy([35, 0, 2]), name: "wheel")
+        try gears.link("base", ["frame"])
+        try gears.link("driver", ["pinion"])
+        try gears.link("follower", ["wheel"])
+        try gears.joint("drive", "base", "driver")
+        try gears.joint("driven", "base", "follower")
+        try gears.joint("mesh", "driver", "follower")
+        try gears.pair("drive", "revolute", try Frame.xy([0, 0, 2]))
+        try gears.pair("driven", "revolute", try Frame.xy([30, 0, 2]))
+        if mesh {
+            try gears.pairWith("mesh", "gear", try Frame.xy([0, 0, 2]), params: [10, 20, -0.5, 0.25, 0.125])
+        }
+        return gears
+    }
+
+    func testAGearPairRoundTripsAndPosesFromItsDriver() throws {
+        let scene = try geared().toScene()
+        let joints = Dictionary(uniqueKeysWithValues: scene.joints.map { ($0.name, $0) })
+        let mesh = try XCTUnwrap(joints["mesh"]?.pair)
+        XCTAssertEqual(mesh.kind, .other)
+        XCTAssertEqual(mesh.kindName, "gear")
+        let want = [10.0, 20, -0.5, 0.25, 0.125]
+        XCTAssertEqual(mesh.parameters.count, want.count)
+        for (got, expected) in zip(mesh.parameters, want) { XCTAssertEqual(got, expected, accuracy: 1e-9) }
+        let drivePair = try XCTUnwrap(joints["drive"]?.pair)
+        XCTAssertEqual(drivePair.kindName, "revolute")
+        XCTAssertEqual(drivePair.parameters, [])
+
+        // the driver alone turns the wheel by ratio x 0.4 about (30, 0): nothing to report
+        let drive = try XCTUnwrap(joints["drive"])
+        let driven = try XCTUnwrap(joints["driven"])
+        var pose = try scene.pose([StateValue(joint: drive, values: [0.4])])
+        XCTAssertEqual(pose.diagnostics, [])
+        XCTAssertTrue(pose.unsolved.isEmpty)
+        let wheel = try XCTUnwrap(scene.links[2].nodes.first)
+        let origin = pose.transform(wheel)
+        let expected = [30 + 5 * cos(-0.2), 5 * sin(-0.2), 2.0]
+        for axis in 0..<3 { XCTAssertEqual(origin[axis][3], expected[axis], accuracy: 1e-9) }
+
+        // both sides given, against the law: one diagnostic, in the kernel's words
+        pose = try scene.pose([StateValue(joint: drive, values: [0.4]), StateValue(joint: driven, values: [0.4])])
+        XCTAssertEqual(pose.diagnostics.count, 1)
+        XCTAssertTrue(
+            pose.diagnostics.first?.hasPrefix("coupling 'mesh': both 'drive' and 'driven' are given and disagree by") ?? false,
+            "\(pose.diagnostics)"
+        )
+    }
+
+    private func armForPosing() throws -> Assembly {
+        let bolt = try Solid.cylinder(1, 6).named("bolt")
+        let plate = try Solid.cuboid(20, 10, 2).named("plate")
+        let arm = try Assembly("arm")
+        _ = try arm.place(plate, try Frame.xy(), name: "base")
+        _ = try arm.place(bolt, try Frame.xy([5, 5, 2]), name: "pin")
+        try arm.link("ground", ["base"])
+        try arm.link("upper arm", ["pin"])
+        try arm.joint("shoulder", "ground", "upper arm")
+        try arm.pair("shoulder", "revolute", try Frame.xy([0, 0, 10]), ranges: [(-1.5, 1.5)])
+        try arm.state("reach", [("shoulder", [0.5])])
+        try arm.base("ground")
+        return arm
+    }
+
+    func testPosedMovesTheShoulder() throws {
+        let arm = try armForPosing()
+        let before = noStamp(try arm.stepText())
+        let moved = try arm.posed([("shoulder", [0.5])])
+        XCTAssertEqual(try moved.name, "arm")
+        XCTAssertNotEqual(noStamp(try moved.stepText()), before)
+        XCTAssertEqual(noStamp(try arm.stepText()), before)
+    }
+
+    func testPosedRefusesAnAmbiguousNameAndTakesAPathWithASlash() throws {
+        let bolt = try Solid.cylinder(1, 6).named("bolt")
+        let plate = try Solid.cuboid(20, 10, 2).named("plate")
+        let bracket = try Assembly("bracket")
+        _ = try bracket.place(plate, try Frame.xy(), name: "base")
+        _ = try bracket.place(bolt, try Frame.xy([5, 5, 2]), name: "pin")
+        try bracket.link("ground", ["base"])
+        try bracket.link("arm", ["pin"])
+        try bracket.joint("turn", "ground", "arm")
+        try bracket.pair("turn", "revolute", try Frame.xy([0, 0, 10]))
+        try bracket.base("ground")
+        let frame = try Assembly("frame")
+        _ = try frame.place(bracket, try Frame.xy(), name: "left")
+        _ = try frame.place(bracket, try Frame.xy([50, 0, 0]), name: "right/rear")
+        let before = noStamp(try frame.stepText())
+
+        XCTAssertEqual(
+            refusal { _ = try frame.posed([("turn", [0.3])]) },
+            "posed: 'turn' names 2 joints: left/turn, right\\/rear/turn; give one by its path"
+        )
+        let turned = try frame.posed([("right\\/rear/turn", [0.3])])
+        XCTAssertEqual(try turned.name, "frame")
+        XCTAssertNotEqual(noStamp(try turned.stepText()), before)
+        let rest = try frame.posed([("right\\/rear/turn", [0.0])])
+        XCTAssertEqual(noStamp(try rest.stepText()), before)
+        XCTAssertEqual(noStamp(try frame.stepText()), before)
+    }
+
+    func testPosedTakesAStateAndAGroundAndRefusesWithTheKernelsWords() throws {
+        let arm = try armForPosing()
+        let before = noStamp(try arm.stepText())
+        let viaState = noStamp(try arm.posed(state: "reach").stepText())
+        let viaRow = noStamp(try arm.posed([("shoulder", [0.5])]).stepText())
+        XCTAssertEqual(viaState, viaRow)
+        XCTAssertNotEqual(viaState, before)
+        let grounded = noStamp(try arm.posed([("shoulder", [0.5])], ground: "upper arm").stepText())
+        XCTAssertNotEqual(grounded, viaRow)
+        XCTAssertEqual(
+            refusal { _ = try arm.posed([("shoulder", [2.0])]) },
+            "posed: value 0 of joint 'shoulder' is 2, outside its range"
+        )
+        XCTAssertEqual(
+            refusal { _ = try arm.posed(state: "fold") },
+            "posed: assembly 'arm' has no state named 'fold'"
+        )
+        XCTAssertEqual(noStamp(try arm.stepText()), before)
+    }
+
+    func testPosedRefusesAGearCouplingThatDisagrees() throws {
+        let gears = try geared()
+        let before = noStamp(try gears.stepText())
+        let one = try gears.posed([("drive", [0.4])])
+        XCTAssertEqual(try one.name, "gears")
+        let message = try XCTUnwrap(refusal { _ = try gears.posed([("drive", [0.4]), ("driven", [0.4])]) })
+        XCTAssertTrue(
+            message.hasPrefix("posed: assembly 'gears': coupling 'mesh': both 'drive' and 'driven' are given and disagree by"),
+            message
+        )
+        XCTAssertEqual(noStamp(try gears.stepText()), before)
+    }
+
+    func testPairWithRefusesAWrongParameterCount() throws {
+        let gears = try geared(mesh: false)
+        XCTAssertEqual(
+            refusal { try gears.pairWith("mesh", "gear", try Frame.xy(), params: [10, 20]) },
+            "pair: a gear takes 3 or 5 parameters, not 2"
+        )
+        try gears.pairWith("mesh", "gear", try Frame.xy(), params: [10, 20, -0.5])  // unchanged: it takes one now
     }
 
     /// `Assembly.sequence`, read back through `toScene`: the paired arm, a state `rest`, and a
@@ -1691,6 +1862,107 @@ final class KernelTests: XCTestCase {
         XCTAssertEqual(freedoms[0].upper, 1.0)
         scene.close()
     }
+
+    // ---- Solid.silhouetteBeziers ------------------------------------------------------------
+    // The curves where a body's surfaces turn away from the eye. The assertions are on values that pin
+    // the layout, not only on lengths: a stride-16 unpack that reads a weight as a coordinate, or points
+    // shifted by one slice, still gives arrays of the right length.
+
+    func testASpheresRimHasItsEndPointsOnItTo1e9AndItsEndWeightsExactlyOne() throws {
+        let rim = try Solid.sphere(2).silhouetteBeziers()
+        XCTAssertGreaterThan(rim.count, 0, "a sphere gave no rim")
+        XCTAssertEqual(rim.points.count, rim.count * 4 * 3)
+        XCTAssertEqual(rim.weights.count, rim.count * 4)
+        let points = Array(rim.points), weights = Array(rim.weights)
+        func radius(_ curve: Int, _ k: Int) -> Double {
+            let o = curve * 12 + k * 3
+            return (points[o] * points[o] + points[o + 1] * points[o + 1] + points[o + 2] * points[o + 2]).squareRoot()
+        }
+        for c in 0..<rim.count {
+            // Control points 0 and 3 are the arc's ends: on the sphere to 1e-9, with the end
+            // weights exactly 1. The interior control points are not checked at all, and the interior
+            // weights only to lie in (0, 1): both move with how the rim is subdivided.
+            XCTAssertLessThanOrEqual(abs(radius(c, 0) - 2), 1e-9, "arc \(c): first control point at radius \(radius(c, 0))")
+            XCTAssertLessThanOrEqual(abs(radius(c, 3) - 2), 1e-9, "arc \(c): last control point at radius \(radius(c, 3))")
+            let w = Array(weights[c * 4 ..< c * 4 + 4])
+            XCTAssertTrue(w[0] == 1 && w[3] == 1 && w[1] > 0 && w[1] < 1 && w[2] > 0 && w[2] < 1,
+                          "arc \(c): weights \(w), not 1, then two weights in (0, 1), then 1")
+        }
+    }
+
+    func testACylindersRulingsArePolynomialAndSpanItsHeight() throws {
+        let radius = 1.0, height = 3.0
+        let rulings = try Solid.cylinder(radius, height).silhouetteBeziers(SvgOptions(view: .front))
+        XCTAssertGreaterThan(rulings.count, 0, "a cylinder gave no rulings")
+        XCTAssertEqual(rulings.points.count, rulings.count * 4 * 3)
+        XCTAssertEqual(rulings.weights.count, rulings.count * 4)
+        XCTAssertTrue(rulings.weights.allSatisfy { $0 == 1 }, "a ruling carries a weight other than 1")
+        let points = Array(rulings.points)
+        for k in 0..<rulings.count * 4 {
+            let off = (points[k * 3] * points[k * 3] + points[k * 3 + 1] * points[k * 3 + 1]).squareRoot() - radius
+            XCTAssertLessThanOrEqual(abs(off), 1e-6, "control point \(k) is off the cylinder's wall")
+            // `hypot(x, y)` is symmetric in x and y, so it cannot tell them apart. The front view looks
+            // along y and the silhouette of the cylinder sits on the x axis, at y = 0: that is what pins
+            // x against y. Only |x| and |y| are asserted, not the sign of x and not how many rulings
+            // there are.
+            XCTAssertLessThanOrEqual(abs(abs(points[k * 3]) - radius), 1e-6, "control point \(k) is not at |x| = \(radius)")
+            XCTAssertLessThanOrEqual(abs(points[k * 3 + 1]), 1e-6, "control point \(k) is not at y = 0")
+        }
+        // The rulings run cap to cap, so their z extent is the height: that pins z against x and y.
+        let zs = (0..<rulings.count * 4).map { points[$0 * 3 + 2] }
+        let low = try XCTUnwrap(zs.min()), high = try XCTUnwrap(zs.max())
+        XCTAssertLessThanOrEqual(abs(high - low - height), 1e-6, "the rulings span z \(low)...\(high), not a height of \(height)")
+    }
+
+    func testAnInfiniteToleranceIsRefusedAndAnAllPlanarBodyIsTheEmptyAnswerAfterIt() throws {
+        let sphere = try Solid.sphere(2)
+        // Built BEFORE the refusal, not between it and the ask: every call that builds, reads or
+        // writes geometry in the library runs under its `guard`, whose first act is `clear_error`
+        // (blacksmith-capi lib.rs:117), so building the cuboid in between would wipe the refusal's
+        // message. The order is build, refuse, ask. Nothing this wrapper does between the refusal
+        // and the native call clears the slot, though: it packs the stroke as a number
+        // (`SvgOptions.stroke` is a packed UInt32), so there is no
+        // `cadaclysm_blacksmith_parse_colour` call (a `guard`, lib.rs:200) to wipe it as there is
+        // in a wrapper that parses the text "#000000", and `buildSvgOptions` calls only
+        // `cadaclysm_blacksmith_svg_options_init`, a bare struct fill (output.rs:699) that does not
+        // clear. So the refusal's message is still in the slot when
+        // `cadaclysm_blacksmith_silhouette_beziers` begins, and this test pins two things. First,
+        // that the wrapper must not read the slot anywhere before the native call: a read before
+        // packing and a read after packing both fail it. Second, that the library's own entry
+        // clears the slot (the entry is a `guard`, output.rs:908): that one is read from the
+        // source, not mutation-witnessed, since proving it would take a rebuilt library. The
+        // reader's entry point has its own library-side pin,
+        // `an_empty_answer_after_a_refusal_carries_no_stale_error`
+        // (crates/cadaclysm-capi/tests/silhouette_abi.rs:401); there is no kernel-side equivalent.
+        // Only calls under `guard` clear: `cadaclysm_blacksmith_solid_free` and
+        // `cadaclysm_blacksmith_silhouette_beziers_free` just drop a box and the error getter does
+        // not clear either, so a `deinit` running between the refusal and the ask cannot wipe the
+        // slot.
+        let cuboid = try Solid.cuboid(10, 10, 10)
+        var infinite = SvgOptions()
+        infinite.tolerance = .infinity
+        let message = refusal { _ = try sphere.silhouetteBeziers(infinite) }
+        XCTAssertTrue(message?.contains("silhouette: ") == true, "\(String(describing: message))")
+        let none = try cuboid.silhouetteBeziers()
+        XCTAssertEqual(none.count, 0)
+        XCTAssertEqual(none.points.count, 0)
+        XCTAssertEqual(none.weights.count, 0)
+    }
+
+    /// The block the kernel hands over is owned and freed inside the call, and the answer is copied
+    /// into memory of its own, so a second ask for another eye leaves the first as it was.
+    func testASilhouetteOutlivesTheNextOneAsked() throws {
+        let sphere = try Solid.sphere(2)
+        let first = try sphere.silhouetteBeziers(SvgOptions(view: .front))
+        let keptPoints = Array(first.points), keptWeights = Array(first.weights)
+        let second = try sphere.silhouetteBeziers(SvgOptions(view: .iso))
+        XCTAssertGreaterThan(second.count, 0)
+        XCTAssertNotEqual(Array(second.points), keptPoints, "the two views gave the same silhouette, so this cannot tell much")
+        XCTAssertEqual(Array(first.points), keptPoints)
+        XCTAssertEqual(Array(first.weights), keptWeights)
+        XCTAssertEqual(Array(try sphere.silhouetteBeziers(SvgOptions(view: .front)).points), keptPoints,
+                       "asking again for the same eye gives the same curves")
+    }
 }
 
 /// `text` with every `FILE_NAME(` line removed -- what fact 3 compares before and after
@@ -1709,4 +1981,283 @@ private func countOf(_ haystack: String, _ needle: String) -> Int {
         from = range.upperBound
     }
     return count
+}
+
+// MARK: - The Kiln: the SubD cage (Python's test_subd_*)
+
+private let subdQuarterTurn: [Double] = [0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+
+private func subdDistance(_ a: SIMD3<Double>, _ b: SIMD3<Double>) -> Double {
+    let d = a - b
+    return (d * d).sum().squareRoot()
+}
+
+extension KernelTests {
+    func testSubdRoundTripsThroughParts() throws {
+        let cube = try Subd.cuboid()
+        defer { cube.close() }
+        var positions = try cube.positions
+        XCTAssertEqual(positions.count, 8)
+        XCTAssertEqual(try cube.faces.map { $0.count }, [4, 4, 4, 4, 4, 4])
+        XCTAssertEqual(try cube.creases, [])
+        XCTAssertEqual(try cube.pins, [])
+        XCTAssertNil(try cube.symmetry)
+        XCTAssertNil(try cube.selection)
+        let was = positions[0].x
+        positions[0].x = 99.0   // a copy: writing to it changes nothing
+        XCTAssertEqual(try cube.positions[0].x, was)
+        let again = try Subd.fromParts(try cube.positions, try cube.faces)
+        defer { again.close() }
+        XCTAssertEqual(try again.positions, try cube.positions)
+        XCTAssertEqual(try again.faces, try cube.faces)
+    }
+
+    func testSubdEditsReturnNewCagesWithTheirSelection() throws {
+        let cube = try Subd.cuboid()
+        defer { cube.close() }
+        let out = try cube.extrude([1], 1.0)
+        defer { out.close() }
+        XCTAssertEqual(try out.positions.count, 12)
+        XCTAssertEqual(try out.selection, .faces([1]))
+        XCTAssertEqual(try cube.positions.count, 8, "the input is untouched")
+    }
+
+    func testSubdCreaseAndPinRoundTrip() throws {
+        let cube = try Subd.cuboid()
+        let creased = try cube.crease([SubdEdge(0, 1)])
+        let pinned = try creased.pin([6])
+        defer { [cube, creased, pinned].forEach { $0.close() } }
+        XCTAssertEqual(try creased.selection, .edges([SubdEdge(0, 1)]))
+        XCTAssertEqual(try pinned.creases, [SubdEdge(0, 1)])
+        XCTAssertEqual(try pinned.pins, [6])
+        XCTAssertEqual(try pinned.selection, .vertices([6]))
+        let again = try Subd.fromParts(try pinned.positions, try pinned.faces, creases: try pinned.creases,
+                                       pins: try pinned.pins)
+        defer { again.close() }
+        XCTAssertEqual(try again.creases, [SubdEdge(0, 1)])
+        XCTAssertEqual(try again.pins, [6])
+        let plain = try pinned.crease([SubdEdge(0, 1)], on: false)
+        let free = try pinned.pin([6], on: false)
+        defer { plain.close(); free.close() }
+        XCTAssertEqual(try plain.creases, [])
+        XCTAssertEqual(try free.pins, [])
+    }
+
+    func testSubdMirrorRoundTrip() throws {
+        let whole = try Subd.cuboid(size: SIMD3(2, 2, 2), segments: (2, 1, 1))
+        let half = try whole.mirrorOn(.x)
+        defer { whole.close(); half.close() }
+        let symmetry = try XCTUnwrap(try half.symmetry)
+        XCTAssertEqual(symmetry.axis, .x)
+        XCTAssertGreaterThan(symmetry.tolerance, 0)
+        XCTAssertNil(try half.selection)
+        XCTAssertLessThan(try half.positions.count, try whole.positions.count)
+        let again = try Subd.fromParts(try half.positions, try half.faces, creases: try half.creases,
+                                       pins: try half.pins, symmetry: symmetry)
+        defer { again.close() }
+        XCTAssertEqual(try again.positions, try half.positions)
+        XCTAssertEqual(try again.symmetry, symmetry)
+        let full = try half.full()
+        let off = try half.mirrorOff()
+        defer { full.close(); off.close() }
+        XCTAssertEqual(try full.positions.count, try whole.positions.count)
+        XCTAssertNil(try off.symmetry)
+    }
+
+    func testSubdEdgeLoopListsTheLoop() throws {
+        let cube = try Subd.cuboid(size: SIMD3(2, 2, 2), segments: (2, 2, 2))
+        defer { cube.close() }
+        let face = try cube.faces[0]
+        let (a, b) = (face[0], face[1])
+        let loop = try cube.edgeLoop(SubdEdge(a, b))
+        XCTAssertGreaterThanOrEqual(loop.count, 4)
+        XCTAssertEqual(loop.first, SubdEdge(Swift.min(a, b), Swift.max(a, b)), "the picked edge first")
+    }
+
+    func testSubdEdgeLoopOfANonEdgeIsEmpty() throws {
+        // The C call hands back a handle selecting no edges (kind 1, count 0), not a refusal.
+        let cube = try Subd.cuboid()
+        defer { cube.close() }
+        let face = try cube.faces[0]
+        XCTAssertEqual(try cube.edgeLoop(SubdEdge(face[0], face[2])), [], "a face diagonal is no edge")
+        XCTAssertEqual(try cube.edgeLoop(SubdEdge(0, 99)), [], "nor is a pair naming no vertex")
+    }
+
+    func testSubdTransformRotates() throws {
+        // 90 degrees about Z: (x, y, z) -> (-y, x, z), every corner of the cube.
+        let cube = try Subd.cuboid()
+        defer { cube.close() }
+        let before = try cube.positions
+        let everything = SubdSelection.vertices((0..<UInt32(before.count)).map { $0 })
+        let turned = try cube.transform(everything, subdQuarterTurn)
+        defer { turned.close() }
+        for (p, q) in zip(try turned.positions, before) {
+            assertClose(p, SIMD3(-q.y, q.x, q.z), 1e-12)
+        }
+        let one = try cube.transform(.vertices([0]), subdQuarterTurn)
+        defer { one.close() }
+        let moved = try one.positions
+        assertClose(moved[0], SIMD3(-before[0].y, before[0].x, before[0].z), 1e-12)
+        XCTAssertEqual(Array(moved[1...]), Array(before[1...]))
+    }
+
+    func testSubdTransformInsetAndInsertLoop() throws {
+        let cube = try Subd.cuboid()
+        defer { cube.close() }
+        let translate: [Double] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 0, 0, 1]
+        let moved = try cube.transform(.edges([SubdEdge(0, 1)]), translate)
+        defer { moved.close() }
+        XCTAssertEqual(try moved.positions[0].x, try cube.positions[0].x + 3.0)
+        XCTAssertEqual(try moved.selection, .edges([SubdEdge(0, 1)]))
+        let inset = try cube.inset([1], 0.25)
+        defer { inset.close() }
+        XCTAssertEqual(try inset.faces.count, 6 + 4)
+        let looped = try cube.insertLoop(SubdEdge(0, 1))
+        defer { looped.close() }
+        XCTAssertEqual(try looped.positions.count, 8 + 4)
+        XCTAssertEqual(try looped.selection?.kind, .edges)
+        let bad = refusal { _ = try cube.insertLoop(SubdEdge(0, 1), at: 1.5) }
+        XCTAssertTrue(bad?.hasPrefix("bad selection: ") ?? false, "\(String(describing: bad))")
+        let short = refusal { _ = try cube.transform(.vertices([0]), [1, 2, 3]) }
+        XCTAssertTrue(short?.contains("matrix") ?? false, "\(String(describing: short))")
+    }
+
+    func testSubdSmoothMeshIsConsistentAndKept() throws {
+        let cube = try Subd.cuboid()
+        let mesh = try cube.smoothMesh(2)
+        let n = mesh.positions.count
+        XCTAssertGreaterThan(n, 8)
+        XCTAssertEqual(mesh.normals.count, n)
+        XCTAssertEqual(mesh.indices.count % 3, 0)
+        XCTAssertLessThan(try XCTUnwrap(mesh.indices.max()), UInt32(n))
+        XCTAssertEqual(mesh.triangleFace.count, mesh.indices.count / 3)
+        XCTAssertLessThan(try XCTUnwrap(mesh.triangleFace.max()), 6)
+        for normal in mesh.normals {
+            XCTAssertEqual((normal * normal).sum().squareRoot(), 1.0, accuracy: 1e-9)
+        }
+        XCTAssertLessThan(try cube.smoothMesh(1).positions.count, n)
+        XCTAssertEqual(try cube.smoothMesh(2).positions, mesh.positions)
+        let bad = refusal { _ = try cube.smoothMesh(7) }
+        XCTAssertTrue(bad?.contains("levels") ?? false, "\(String(describing: bad))")
+        let positions = mesh.positions, normals = mesh.normals, indices = mesh.indices, faces = mesh.triangleFace
+        cube.close()
+        // A mesh is a copy: it outlives its cage, and the freed views are not read.
+        XCTAssertEqual(mesh.positions.count, n)
+        XCTAssertEqual(mesh.positions, positions)
+        XCTAssertEqual(mesh.normals, normals)
+        XCTAssertEqual(mesh.indices, indices)
+        XCTAssertEqual(mesh.triangleFace, faces)
+    }
+
+    func testSubdPickFindsTheElementOrNil() throws {
+        let cube = try Subd.cuboid()
+        defer { cube.close() }
+        let corner = try cube.positions[6]
+        let mesh = try cube.smoothMesh(3)
+        let point = try XCTUnwrap(mesh.positions.min { subdDistance($0, corner) < subdDistance($1, corner) })
+        XCTAssertEqual(try cube.pick(point, .vertices), .vertices([6]))
+        guard case .edges(let edges)? = try cube.pick(point, .edges) else { return XCTFail("an edge is expected") }
+        XCTAssertEqual(edges.count, 1)
+        XCTAssertTrue(edges[0].a == 6 || edges[0].b == 6)
+        guard case .faces(let faces)? = try cube.pick(point, .faces) else { return XCTFail("a face is expected") }
+        XCTAssertEqual(faces.count, 1)
+        // The refusal comes first: a stale last_error would make the far point look refused.
+        XCTAssertEqual(refusal { _ = try cube.pick(SIMD3(Double.nan, 0, 0), .faces) },
+                       "bad selection: pick: point is not finite")
+        XCTAssertNil(try cube.pick(SIMD3(100, 100, 100), .vertices), "nothing near is nil, not an error")
+    }
+
+    func testSubdToSolidConvertsACube() throws {
+        let cube = try Subd.cuboid()
+        defer { cube.close() }
+        let (solid, report) = try cube.toSolid()
+        defer { solid.close() }
+        XCTAssertEqual(report.regular, 0)
+        XCTAssertEqual(report.refined, 24)
+        XCTAssertGreaterThanOrEqual(report.levels, 2)
+        XCTAssertGreaterThanOrEqual(report.steps, 1)
+        XCTAssertLessThanOrEqual(report.deviation, 1e-4)
+        XCTAssertLessThanOrEqual(report.g1AngleDeg, 0.1)
+        XCTAssertTrue(report.deviationAt.x.isFinite && report.deviationAt.y.isFinite && report.deviationAt.z.isFinite)
+        XCTAssertTrue(report.g1At.x.isFinite && report.g1At.y.isFinite && report.g1At.z.isFinite)
+        XCTAssertTrue(try solid.manifold.isClosed)
+        let mass: Mass = try solid.mass()   // Solid has two `mass` overloads: ask for the plain-data one
+        XCTAssertGreaterThan(mass.volume, 0.0)
+        let (again, _) = try cube.toSolid(tolerance: 1e-4, g1Angle: 0.1, maxLevels: 6)
+        again.close()
+    }
+
+    func testSubdToSolidRefusesWithFigures() throws {
+        let cylinder = try Subd.cylinder(radius: 1.0, height: 2.0, sides: 8, rings: 1, creasedRims: false)
+        defer { cylinder.close() }
+        let message = try XCTUnwrap(refusal { _ = try cylinder.toSolid() }, "an uncreased cylinder must be refused")
+        XCTAssertNotNil(message.range(of: "subd:.*tangent break", options: .regularExpression), message)
+    }
+
+    func testSubdDefaultCylinderConverts() throws {
+        let cylinder = try Subd.cylinder()
+        defer { cylinder.close() }
+        let (solid, report) = try cylinder.toSolid()
+        defer { solid.close() }
+        XCTAssertLessThanOrEqual(report.deviation, 1e-4)
+        XCTAssertLessThanOrEqual(report.g1AngleDeg, 0.1)
+        XCTAssertTrue(try solid.manifold.isClosed)
+        let mass: Mass = try solid.mass()   // Solid has two `mass` overloads: ask for the plain-data one
+        XCTAssertGreaterThan(mass.volume, 0.0)
+    }
+
+    func testSubdOtherPrimitivesBuildAndBadOnesAreRefused() throws {
+        for cage in [try Subd.cylinder(radius: 1.0, height: 2.0, sides: 8, rings: 2, creasedRims: true),
+                     try Subd.sphere(radius: 1.0, segments: 2),
+                     try Subd.torus(major: 3.0, minor: 1.0, around: 12, tube: 8)] {
+            XCTAssertGreaterThan(try cage.faces.count, 0)
+            cage.close()
+        }
+        XCTAssertEqual(refusal { _ = try Subd.cuboid(size: SIMD3(2, 2, 2), segments: (0, 1, 1)) },
+                       "bad selection: cuboid: segments >= 1")
+        let big = refusal { _ = try Subd.sphere(radius: 1.0, segments: 2000) }
+        XCTAssertTrue(big?.contains("1024") ?? false, "\(String(describing: big))")
+    }
+
+    func testSubdBadPartsAreRefused() throws {
+        let cube = try Subd.cuboid()
+        let positions = try cube.positions, faces = try cube.faces
+        cube.close()
+        let crease = refusal { _ = try Subd.fromParts(positions, faces, creases: [SubdEdge(0, 6)]) }
+        XCTAssertTrue(crease?.hasPrefix("bad selection: ") ?? false, "\(String(describing: crease))")
+        let empty = refusal { _ = try Subd.fromParts([], faces) }
+        XCTAssertTrue(empty?.contains("vertex_count") ?? false, "\(String(describing: empty))")
+    }
+
+    func testSubdPipelineWritesStep() throws {
+        let cube = try Subd.cuboid()
+        let raised = try cube.extrude([1], 0.5)
+        let inset = try raised.inset([1], 0.25)
+        defer { [cube, raised, inset].forEach { $0.close() } }
+        let (solid, report) = try inset.toSolid()
+        defer { solid.close() }
+        XCTAssertTrue(try solid.manifold.isClosed)
+        XCTAssertLessThanOrEqual(report.deviation, 1e-4)
+        let text = try solid.stepText()
+        XCTAssertTrue(text.hasPrefix("ISO-10303-21;"))
+        XCTAssertTrue(text.contains("ADVANCED_FACE"))
+        let scene = try Cadaclysm.openMemory(Array(text.utf8), format: "stp")
+        defer { scene.close() }
+        XCTAssertEqual(scene.nodes.filter { $0.canMesh }.count, 1, "the STEP the SubD cage wrote is one body")
+    }
+
+    func testSubdHandlesClose() throws {
+        let cube = try Subd.cuboid()
+        cube.close()
+        cube.close()   // closing twice is fine
+        XCTAssertTrue(cube.isClosed)
+        let calls: [() throws -> Void] = [
+            { _ = try cube.positions }, { _ = try cube.extrude([1], 1.0) }, { _ = try cube.smoothMesh(1) },
+            { _ = try cube.pick(SIMD3(0, 0, 0), .faces) }, { _ = try cube.toSolid() },
+        ]
+        for call in calls { XCTAssertEqual(refusal(call), "subd: closed") }
+        let other = try Subd.cuboid()
+        other.close()
+        XCTAssertEqual(refusal { _ = try other.faces }, "subd: closed")
+    }
 }

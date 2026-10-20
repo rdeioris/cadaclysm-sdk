@@ -4,6 +4,9 @@ import type { Node, Scene } from './cadaclysm';
 import type { ShowOptions, Camera } from './cadaclysm_view';
 
 export class BuildError extends Error {}
+
+/** What `Solid.silhouetteBeziers` answers: `points` twelve numbers a curve, `weights` four. */
+export interface SilhouetteCurves { points: Float64Array; weights: Float64Array; count: number }
 export const NONE: number;
 export const UNITS: { readonly m: 0; readonly mm: 1; readonly in: 2 };
 export type Unit = keyof typeof UNITS;
@@ -81,6 +84,15 @@ export function buildDate(): string;
 export function license(textOrPath: string): void;
 export function licenseInfo(): string;
 export function licenseNoticeCount(): number;
+/**
+ * Set a kernel option, by its name, for the whole process from the next call on:
+ * `boolean.mesh_budget`, `boolean.finest_tolerance`, `profile_boolean.point_budget` or
+ * `measure.default_accuracy`. Throws `BuildError` -- and changes nothing -- for a name that
+ * is not an option or a value it does not take.
+ */
+export function setOption(name: string, value: number): void;
+/** A kernel option's value, by its name: what `setOption` last set, else its default. Throws `BuildError` for a name that is not an option. */
+export function option(name: string): number;
 
 export class Profile {
   private constructor();
@@ -383,6 +395,14 @@ export class Solid {
   svgAsync(options?: SvgOptions): Promise<string>;
   /** `svgText` written to `path` by the library itself. */
   svg(path: string, options?: SvgOptions): void;
+  /**
+   * Where this solid's surfaces turn away from the eye (the camera `options` describes), as rational
+   * cubic Beziers in `double`: `points` is twelve numbers a curve (four control points, x y z),
+   * `weights` four. Copied out of the library's own block, which is released before this returns.
+   * `count` 0 with empty arrays for a body with no silhouette (not an error); `BuildError` for a
+   * refused option or a body with no measurable geometry.
+   */
+  silhouetteBeziers(options?: SvgOptions): SilhouetteCurves;
   selectFace(selector: Selector): number;
   faceFrame(face: number): number[];
   /** Face `face` by what it is, eight numbers (kind, point x y z, normal x y z, extent): what a feature made on the face keeps, to find the face again with `findFace` on a rebuilt solid. */
@@ -415,6 +435,7 @@ export class Solid {
   unchamfer(face: number): Solid;
   split(tool: Solid, tolerance?: number, progress?: Progress | null): Solid[];
   splitByPlane(plane: FrameLike, tolerance?: number, progress?: Progress | null): Solid[];
+  splitByProfile(profile: Profile, frame: FrameLike, tolerance?: number, progress?: Progress | null): Solid[];
   lumps(): Solid[];
   shell(thickness: number, open?: Iterable<number>, tolerance?: number, progress?: Progress | null): Solid;
   thicken(thickness: number, tolerance?: number, progress?: Progress | null): Solid;
@@ -441,6 +462,22 @@ export interface PairOptions {
   endFrame?: FrameLike | null;
   ranges?: Iterable<PairRange> | null;
   pitch?: number | null;
+}
+
+/** A joint (or state) key: a path string, or an array of names that `posed` escapes and joins. */
+export type JointKey = string | Iterable<string>;
+export type PosedValues = Map<JointKey, number | Iterable<number>> | Iterable<[JointKey, number | Iterable<number>]> | { [joint: string]: number | Iterable<number> };
+export interface PosedOptions {
+  /** A state's path, applied first and overridden row by row. */
+  state?: JointKey | null;
+  /** One of the assembly's own links, held fixed. */
+  ground?: string | null;
+}
+
+export interface PairWithOptions {
+  endFrame?: FrameLike | null;
+  ranges?: Iterable<PairRange> | null;
+  params?: Iterable<number>;
 }
 
 /**
@@ -482,11 +519,29 @@ export class Assembly {
    */
   pair(joint: string, kind: string, frame: FrameLike, options?: PairOptions): void;
   /**
+   * `pair` with the kind's own numbers in place of the pitch, for the coupled pairs: `kind` any
+   * name `pair` takes, or `gear` or `rack_and_pinion`; `params` `[pitch]` for a screw,
+   * `[pinionRadius]` for a rack and pinion, `[radiusFirst, radiusSecond, ratio]` or those plus
+   * `[bevel, helicalAngle]` (radians) for a gear -- the ratio the second link's rotation over the
+   * first's, signed -- and none for any other kind. Throws the kernel's own text when a rule
+   * refuses it (a wrong number of parameters among them); the assembly is then unchanged.
+   */
+  pairWith(joint: string, kind: string, frame: FrameLike, options?: PairWithOptions): void;
+  /**
    * Add a named state to this assembly: `rows` is a `Map` or an iterable of `[joint, values]`
    * pairs, each joint's values in its pair's freedom order. Throws the kernel's own text when
    * a rule refuses it; the assembly is then unchanged.
    */
   state(name: string, rows: Map<string, Iterable<number>> | Iterable<[string, Iterable<number>]>): void;
+  /**
+   * This assembly with its mechanism posed, as a NEW `Assembly` the caller owns (`close()` it);
+   * this one is unchanged either way. `values` maps joint keys to values: a key a path of
+   * placement names then the joint's name joined by "/" (a "/" or backslash inside a name escaped
+   * with a backslash), or an array of the names, which this escapes and joins; a value one number
+   * for a one-freedom joint, else a list in the pair's freedom order. Throws the kernel's own text
+   * when it refuses (an ambiguous name, a value out of range, an unknown state).
+   */
+  posed(values?: PosedValues | null, options?: PosedOptions): Assembly;
   /**
    * Add a named motion sequence over this assembly's states: `segments` are `[state, t,
    * interpolation]` rows, the interpolation `'undefined'`, `'discontinuous'`, `'synchronous'` or
@@ -666,6 +721,82 @@ export class Spot {
   private constructor();
   loopIndex: number; segment: number; t: number; face: number; u: number; v: number;
 }
+/** A cage edge: two vertex ids. */
+export type SubdEdge = [number, number];
+/** A mirror plane's axis. */
+export type SubdAxis = 'x' | 'y' | 'z';
+/** What an edit touched, or what `transform` moves: vertex or face ids, or edges as `[a, b]` pairs. */
+export type SubdSelection = { kind: 'vertices' | 'faces'; ids: number[] } | { kind: 'edges'; ids: SubdEdge[] };
+/** A mirrored half's plane: its axis and how far from it a vertex counts as on it. */
+export interface SubdSymmetry { axis: SubdAxis; tolerance: number; }
+/** Cage positions in: a flat run of three numbers a vertex, or `[x, y, z]` each. */
+export type SubdPoints = ArrayLike<number> | ArrayLike<number>[];
+/**
+ * One level of a cage's smooth surface, copied out of the cage so it outlives it: `positions` and
+ * `normals` 3n doubles, `indices` three vertex ids a triangle, `triangleFace` the full cage's face
+ * each triangle lies on.
+ */
+export class SubdMesh {
+  private constructor();
+  positions: Float64Array;
+  normals: Float64Array;
+  indices: Uint32Array;
+  triangleFace: Uint32Array;
+}
+/** What `Subd.toSolid` did and how close it came, with the world points it measured at. */
+export class SubdReport {
+  private constructor();
+  regular: number;
+  refined: number;
+  steps: number;
+  levels: number;
+  deviation: number;
+  g1AngleDeg: number;
+  deviationAt: [number, number, number];
+  g1At: [number, number, number];
+}
+/**
+ * A Catmull-Clark control cage, immutable: every edit returns a new `Subd` whose `selection`
+ * names what the edit touched. `close()` frees this handle; so does leaving a `using` block or
+ * the garbage collector.
+ */
+export class Subd {
+  private constructor();
+  static cuboid(size?: Point3, segments?: ArrayLike<number>): Subd;
+  /** `creasedRims` is true by default, which is what converts. */
+  static cylinder(radius?: number, height?: number, sides?: number, rings?: number, creasedRims?: boolean): Subd;
+  static sphere(radius?: number, segments?: number): Subd;
+  static torus(major?: number, minor?: number, around?: number, tube?: number): Subd;
+  static fromParts(positions: SubdPoints, faces: ArrayLike<number>[], creases?: SubdEdge[], pins?: ArrayLike<number>, symmetry?: SubdSymmetry | null): Subd;
+  close(): void;
+  readonly closed: boolean;
+  [Symbol.dispose](): void;
+  /** Copies, every one. */
+  readonly positions: Float64Array;
+  readonly faces: number[][];
+  readonly creases: SubdEdge[];
+  readonly pins: number[];
+  readonly symmetry: SubdSymmetry | null;
+  readonly selection: SubdSelection | null;
+  /** `matrix`: sixteen numbers column-major, or a 4x4 of rows (row-major). */
+  transform(selection: SubdSelection, matrix: ArrayLike<number> | ArrayLike<number>[]): Subd;
+  crease(edges: SubdEdge[], on?: boolean): Subd;
+  pin(vertices: ArrayLike<number>, on?: boolean): Subd;
+  extrude(faces: ArrayLike<number>, distance: number): Subd;
+  inset(faces: ArrayLike<number>, amount: number, individual?: boolean): Subd;
+  insertLoop(edge: SubdEdge, at?: number): Subd;
+  /** Empty when `edge` is not an edge of the cage. */
+  edgeLoop(edge: SubdEdge): SubdEdge[];
+  mirrorOn(axis: SubdAxis): Subd;
+  mirrorOff(): Subd;
+  full(): Subd;
+  /** `levels` 1 to 6, 3 by default. */
+  smoothMesh(levels?: number): SubdMesh;
+  /** Null when nothing is near (not an error); a point that is not finite throws. */
+  pick(point: Point3, kind: 'vertex' | 'face'): number | null;
+  pick(point: Point3, kind: 'edge'): SubdEdge | null;
+  toSolid(tolerance?: number, g1Angle?: number, maxLevels?: number): { solid: Solid; report: SubdReport };
+}
 /** One place two curves meet: a point (start equals end; touch where tangent) or a run from start to end. */
 export class Hit {
   private constructor();
@@ -705,6 +836,18 @@ export class Tool {
   /** A drill, plunging at `feed`. A job takes it for `Job.drill` or `Job.machine`'s own
    * holes. */
   static drill(number: number, diameter: number, fluteLength: number, feed: number, rpm: number): Tool;
+  /** The Grbl tool number, 1 to 255 (the `T` word). */
+  readonly number: number;
+  /** The cutting end. */
+  readonly shape: 'flat' | 'ball' | 'drill' | 'vbit' | 'bullnose';
+  /** The cutting diameter, in mm. */
+  readonly diameter: number;
+  /** How far up the cutting edge reaches from the tip, in mm. */
+  readonly fluteLength: number;
+  /** A V-bit's included angle, in degrees; `null` for every other shape. */
+  readonly angle: number | null;
+  /** A bull-nose's corner radius, in mm; `null` for every other shape. */
+  readonly cornerRadius: number | null;
 }
 
 /** The block of material a job cuts, an axis-aligned box. Immutable; a job keeps its own
@@ -770,6 +913,12 @@ export class Job {
   readonly closed: boolean;
   close(): void;
   [Symbol.dispose](): void;
+  /** The stock's box as the job holds it, `[[minX, minY, minZ], [maxX, maxY, maxZ]]`. */
+  readonly stock: [[number, number, number], [number, number, number]];
+  /** The tools this job was given -- by `face`, `contour`, `pocket`, `drill` and `machine`
+   * (its end mill and each drill it used) -- by Grbl number. A refused call adds none; the
+   * later of two tools with one number wins. A new `Map` each time. */
+  readonly tools: Map<number, Tool>;
   /** Face the stock's top down to `z`, in zigzag rows along X `stepover` apart and passes
    * at most `stepdown` deep, with `tool`. Added to the job in place. */
   face(tool: Tool, z: number, stepover: number, stepdown: number): void;

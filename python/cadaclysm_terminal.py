@@ -5,9 +5,15 @@ selected, call `cadaclysm_terminal.select()` to switch back.
 The library is cadaclysm-terminal, free to use (no license check).
 """
 
+from __future__ import annotations
+
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING, Iterable
+
+if TYPE_CHECKING:
+    from cadaclysm_view import Library
 
 __all__ = ["NotFound", "library_path", "select"]
 
@@ -21,7 +27,9 @@ def _name() -> str:
 class NotFound(FileNotFoundError):
     """The default search found no library; `searched` is every place it looked."""
 
-    def __init__(self, searched):
+    searched: list[Path]
+
+    def __init__(self, searched: Iterable[Path]):
         self.searched = list(searched)
         super().__init__(f"{_name()} not found in: " + ", ".join(str(c) for c in self.searched))
 
@@ -57,7 +65,7 @@ def library_path() -> Path:
     raise NotFound(candidates)
 
 
-def select() -> "Library":  # noqa: F821 -- the loader's Library, not imported at module scope
+def select() -> Library:
     """Make the terminal library the one in use, and return it. Called once when this
     module is imported; call it again after another view library was selected, to switch
     back (a second `import cadaclysm_terminal` is a no-op once it is cached)."""

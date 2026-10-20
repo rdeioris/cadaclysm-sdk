@@ -30,6 +30,7 @@
 // `cadaclysm_last_error` is thread-local; every failing call and the read of its reason
 // happen together on the calling thread.
 import CCadaclysm
+import CadaclysmView
 import Foundation
 
 /// The ABI's "no such node" (`CADACLYSM_NONE`). Swift hands back nil instead.
@@ -914,6 +915,22 @@ public struct Beziers64: CustomStringConvertible {
     public var description: String { "Beziers64(count: \(count))" }
 }
 
+// In an extension so the struct keeps its memberwise initialiser, which the node's own views use.
+extension Beziers64 {
+    /// Curves from `count * 12` coordinates (four control points a curve, x y z each) and `count * 4`
+    /// weights, copied into memory of Swift's own -- how a result the library lent or handed over
+    /// in a buffer of its own (`Blacksmith.Solid.silhouetteBeziers`) becomes one a caller keeps.
+    public init(points: [Double], weights: [Double]) {
+        precondition(points.count == weights.count * 3 && weights.count % 4 == 0,
+                     "Beziers64: \(points.count) coordinates and \(weights.count) weights are not four points and four weights a curve")
+        let ownedPoints = points.withUnsafeBufferPointer { OwnedBuffer(copying: $0) }
+        let ownedWeights = weights.withUnsafeBufferPointer { OwnedBuffer(copying: $0) }
+        self.points = NativeArray(owner: ownedPoints, base: UnsafePointer(ownedPoints.pointer), count: points.count)
+        self.weights = NativeArray(owner: ownedWeights, base: UnsafePointer(ownedWeights.pointer), count: weights.count)
+        count = weights.count / 4
+    }
+}
+
 /// What a node turned out to be for a physics engine: a box, sphere, capsule or cylinder where
 /// one fits within `error`, else a convex hull. `frame` (16 numbers, column-major) and
 /// `halfExtent` are always the true oriented box. Plain data, copied out of the scene.
@@ -1253,6 +1270,42 @@ public struct Pair {
         return String(cString: raw)
     }
 
+    /// The kind by name, finer than `kind`: the same thirteen names, and `"gear"` and
+    /// `"rack_and_pinion"` for the two coupled pairs `kind` reads as `.other`.
+    public var kindName: String {
+        if let raw = cadaclysm_joint_pair_kind_name(scene.live("Pair"), joint) {
+            return String(cString: raw)
+        }
+        switch kind {
+        case .revolute: return "revolute"
+        case .prismatic: return "prismatic"
+        case .cylindrical: return "cylindrical"
+        case .spherical: return "spherical"
+        case .sphericalWithPin: return "spherical_with_pin"
+        case .planar: return "planar"
+        case .universal: return "universal"
+        case .homokinetic: return "homokinetic"
+        case .screw: return "screw"
+        case .fullyConstrained: return "fully_constrained"
+        case .unconstrained: return "unconstrained"
+        case .lowOrder: return "low_order"
+        case .other: return "other"
+        }
+    }
+
+    /// The pair's own numbers, in the order `Assembly.pairWith` takes them: `"screw"`
+    /// `[pitch]`, `"rack_and_pinion"` `[pinionRadius]`, `"gear"` `[radiusFirst, radiusSecond,
+    /// ratio, bevel, helicalAngle]` (always five, the ratio the second link's rotation over
+    /// the first's); `[]` for every other kind.
+    public var parameters: [Double] {
+        let handle = scene.live("Pair")
+        let count = cadaclysm_joint_pair_parameters(handle, joint, nil, 0)
+        if count == 0 { return [] }
+        var out = [Double](repeating: 0, count: Int(count))
+        let written = cadaclysm_joint_pair_parameters(handle, joint, &out, count)
+        return Array(out.prefix(Int(min(written, count))))
+    }
+
     /// Its pitch -- length per revolution, in the scene's units -- for `.screw`; nil otherwise.
     public var pitch: Double? {
         let raw = cadaclysm_joint_pair_pitch(scene.live("Pair"), joint)
@@ -1416,6 +1469,249 @@ private func readSequence(_ scene: Scene, _ index: UInt32) -> MotionSequence {
                     secondsPerUnit: perUnit > 0 ? perUnit : nil, segments: segments)
 }
 
+// ---- work schedules ------------------------------------------------------------------------------
+
+/// The words of the C enums, indexed by their values.
+private let scheduleKindWords = ["planned", "actual", "baseline", "notdefined", "other"]
+private let taskKindWords = [
+    "attendance", "construction", "demolition", "dismantle", "disposal", "installation",
+    "logistic", "maintenance", "move", "operation", "removal", "renovation", "notdefined", "other",
+]
+private let linkKindWords = ["finish_start", "start_start", "finish_finish", "start_finish", "notdefined", "other"]
+private let phaseWords = ["unbuilt", "building", "built", "demolishing", "demolished"]
+
+private func word(_ words: [String], _ code: UInt32, fallback: Int) -> String {
+    Int(code) < words.count ? words[Int(code)] : words[fallback]
+}
+
+/// What one element is doing on a date: `WorkSchedule.at`'s rows.
+public struct ElementState {
+    /// The element.
+    public let node: Node
+    /// `"unbuilt"`, `"building"`, `"built"`, `"demolishing"` or `"demolished"`.
+    public let phase: String
+    /// 0...1 through the window that governs the phase.
+    public let progress: Double
+    /// Seconds late (positive) or early (negative) against the schedule, or nil where there is
+    /// none to give.
+    public let variance: Double?
+}
+
+/// Every date pair a task gives, each seconds since 1970-01-01T00:00 (`Date(timeIntervalSince1970:)`
+/// reads them) or nil where the file gives none; `duration` is in seconds.
+public struct TaskTime {
+    public let scheduleStart: Double?
+    public let scheduleFinish: Double?
+    public let earlyStart: Double?
+    public let earlyFinish: Double?
+    public let lateStart: Double?
+    public let lateFinish: Double?
+    public let actualStart: Double?
+    public let actualFinish: Double?
+    public let duration: Double?
+}
+
+/// A sequence between two tasks of one schedule. From `WorkSchedule.links`.
+public struct TaskLink {
+    /// The predecessor.
+    public let from: ScheduleTask
+    /// The successor.
+    public let to: ScheduleTask
+    /// `"finish_start"`, `"start_start"`, `"finish_finish"`, `"start_finish"`, `"notdefined"` or `"other"`.
+    public let kind: String
+    /// The text of a user-defined kind (`kind == "other"`); `""` otherwise.
+    public let kindName: String
+    /// The time lag in seconds, or nil where the file gives none.
+    public let lag: Double?
+}
+
+/// One task of a `WorkSchedule`, from `WorkSchedule.tasks`. (`Task` is the concurrency type in
+/// Swift, so this is `ScheduleTask`.) Borrows from the scene like `Node`.
+public struct ScheduleTask: Hashable, CustomStringConvertible {
+    /// The schedule it belongs to.
+    public let schedule: WorkSchedule
+    /// Its index in `WorkSchedule.tasks`.
+    public let index: Int
+
+    fileprivate init(_ schedule: WorkSchedule, _ index: Int) {
+        self.schedule = schedule
+        self.index = index
+    }
+
+    private var raw: UInt32 { UInt32(index) }
+    private var scheduleRaw: UInt32 { UInt32(schedule.index) }
+    private func live(_ member: String = #function) -> OpaquePointer { schedule.scene.live("ScheduleTask", member) }
+
+    /// Its name.
+    public var name: String { borrowed(cadaclysm_task_name(live(), scheduleRaw, raw)) }
+
+    /// Its identification, `""` where none.
+    public var identification: String { borrowed(cadaclysm_task_identification(live(), scheduleRaw, raw)) }
+
+    /// `"attendance"`, `"construction"`, `"demolition"`, `"dismantle"`, `"disposal"`,
+    /// `"installation"`, `"logistic"`, `"maintenance"`, `"move"`, `"operation"`, `"removal"`,
+    /// `"renovation"`, `"notdefined"` or `"other"`.
+    public var kind: String { word(taskKindWords, cadaclysm_task_kind(live(), scheduleRaw, raw), fallback: 12) }
+
+    /// The text of a user-defined kind (`kind == "other"`); `""` otherwise.
+    public var kindName: String { borrowed(cadaclysm_task_kind_name(live(), scheduleRaw, raw)) }
+
+    /// Its status as the file writes it, `""` where none.
+    public var status: String { borrowed(cadaclysm_task_status(live(), scheduleRaw, raw)) }
+
+    /// Whether it is a milestone.
+    public var milestone: Bool { cadaclysm_task_milestone(live(), scheduleRaw, raw) }
+
+    /// The summary task nesting it, nil at the top.
+    public var parent: ScheduleTask? {
+        var out: UInt32 = 0
+        return cadaclysm_task_parent(live(), scheduleRaw, raw, &out) ? ScheduleTask(schedule, Int(out)) : nil
+    }
+
+    /// Every date pair it gives.
+    public var time: TaskTime {
+        var t = CadaclysmTaskTime()
+        _ = cadaclysm_task_time(live(), scheduleRaw, raw, &t)
+        return TaskTime(
+            scheduleStart: t.has_schedule_start ? t.schedule_start : nil,
+            scheduleFinish: t.has_schedule_finish ? t.schedule_finish : nil,
+            earlyStart: t.has_early_start ? t.early_start : nil,
+            earlyFinish: t.has_early_finish ? t.early_finish : nil,
+            lateStart: t.has_late_start ? t.late_start : nil,
+            lateFinish: t.has_late_finish ? t.late_finish : nil,
+            actualStart: t.has_actual_start ? t.actual_start : nil,
+            actualFinish: t.has_actual_finish ? t.actual_finish : nil,
+            duration: t.has_duration ? t.duration : nil)
+    }
+
+    /// The nodes it builds or removes.
+    public var nodes: [Node] {
+        let handle = live()
+        let count = cadaclysm_task_node_count(handle, scheduleRaw, raw)
+        var out = [UInt32](repeating: 0, count: Int(count))
+        _ = cadaclysm_task_nodes(handle, scheduleRaw, raw, &out, count)
+        return out.map { Node(schedule.scene, Int($0)) }
+    }
+
+    /// Same schedule, same index.
+    public static func == (lhs: ScheduleTask, rhs: ScheduleTask) -> Bool {
+        lhs.schedule == rhs.schedule && lhs.index == rhs.index
+    }
+
+    /// Hashes the schedule and the index.
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(schedule)
+        hasher.combine(index)
+    }
+
+    /// `ScheduleTask(index: …)`.
+    public var description: String { "ScheduleTask(index: \(index))" }
+}
+
+/// A building's programme: an `IfcWorkSchedule` and the tasks it controls. From
+/// `Scene.schedules`. Borrows from the scene like `Node`.
+///
+/// `at` says what each element it names is doing on a date. Dates are seconds since
+/// 1970-01-01T00:00, no zone: `Date(timeIntervalSince1970: seconds)`, formatted in UTC.
+public struct WorkSchedule: Hashable, CustomStringConvertible {
+    /// The scene it belongs to.
+    public let scene: Scene
+    /// Its index in `Scene.schedules`.
+    public let index: Int
+
+    fileprivate init(_ scene: Scene, _ index: Int) {
+        self.scene = scene
+        self.index = index
+    }
+
+    private var raw: UInt32 { UInt32(index) }
+
+    /// Its name, else its identification, else `schedule #k` (k from 1, in file order).
+    public var name: String { borrowed(cadaclysm_schedule_name(scene.live("WorkSchedule"), raw)) }
+
+    /// Its identification, `""` where none.
+    public var identification: String { borrowed(cadaclysm_schedule_identification(scene.live("WorkSchedule"), raw)) }
+
+    /// `"planned"`, `"actual"`, `"baseline"`, `"notdefined"` or `"other"`.
+    public var kind: String { word(scheduleKindWords, cadaclysm_schedule_kind(scene.live("WorkSchedule"), raw), fallback: 3) }
+
+    /// The text of a user-defined kind (`kind == "other"`); `""` otherwise.
+    public var kindName: String { borrowed(cadaclysm_schedule_kind_name(scene.live("WorkSchedule"), raw)) }
+
+    /// The schedule's start, or nil where the file gives none.
+    public var start: Double? {
+        var out = 0.0
+        return cadaclysm_schedule_start(scene.live("WorkSchedule"), raw, &out) ? out : nil
+    }
+
+    /// The schedule's finish, or nil where the file gives none.
+    public var finish: Double? {
+        var out = 0.0
+        return cadaclysm_schedule_finish(scene.live("WorkSchedule"), raw, &out) ? out : nil
+    }
+
+    /// Its tasks, in file order.
+    public var tasks: [ScheduleTask] {
+        let handle = scene.live("WorkSchedule")
+        return (0..<Int(cadaclysm_task_count(handle, raw))).map { ScheduleTask(self, $0) }
+    }
+
+    /// Its task links (`IfcRelSequence`), in file order.
+    public var links: [TaskLink] {
+        let handle = scene.live("WorkSchedule")
+        let tasks = self.tasks
+        var out: [TaskLink] = []
+        for i in 0..<cadaclysm_task_link_count(handle, raw) {
+            var from: UInt32 = 0, to: UInt32 = 0, kind: UInt32 = 0
+            var lag = 0.0
+            var hasLag = false
+            guard cadaclysm_task_link(handle, raw, i, &from, &to, &kind, &lag, &hasLag) else { continue }
+            out.append(TaskLink(
+                from: tasks[Int(from)], to: tasks[Int(to)], kind: word(linkKindWords, kind, fallback: 4),
+                kindName: borrowed(cadaclysm_task_link_kind_name(handle, raw, i)),
+                lag: hasLag ? lag : nil))
+        }
+        return out
+    }
+
+    /// What each element this schedule names is doing on `date` (seconds since
+    /// 1970-01-01T00:00), in node order; elements no task names are not listed. `dates` is
+    /// `"scheduled"` or `"actual"` -- which of a task's dates to play. Throws `CadaclysmError`
+    /// for any other `dates` and for a `date` that is not finite.
+    public func at(_ date: Double, dates: String = "scheduled") throws -> [ElementState] {
+        let which: UInt32
+        switch dates {
+        case "scheduled": which = 0
+        case "actual": which = 1
+        default: throw CadaclysmError("dates must be 'scheduled' or 'actual'")
+        }
+        let handle = try scene.liveOrThrow()
+        let count = cadaclysm_schedule_at(handle, raw, date, which, nil, 0)
+        if count < 0 { throw CadaclysmError(lastErrorOr("at")) }
+        var rows = [CadaclysmElementState](repeating: CadaclysmElementState(), count: Int(count))
+        let filled = cadaclysm_schedule_at(handle, raw, date, which, &rows, UInt32(count))
+        if filled < 0 { throw CadaclysmError(lastErrorOr("at")) }
+        return rows.prefix(Int(filled)).map {
+            ElementState(node: Node(scene, Int($0.node)), phase: word(phaseWords, $0.phase, fallback: 0),
+                         progress: $0.progress, variance: $0.has_variance ? $0.variance : nil)
+        }
+    }
+
+    /// Same scene, same index.
+    public static func == (lhs: WorkSchedule, rhs: WorkSchedule) -> Bool {
+        lhs.scene === rhs.scene && lhs.index == rhs.index
+    }
+
+    /// Hashes the scene's identity and the index.
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(ObjectIdentifier(scene))
+        hasher.combine(index)
+    }
+
+    /// `WorkSchedule(index: …)`.
+    public var description: String { "WorkSchedule(index: \(index))" }
+}
+
 /// A posed mechanism: `Scene.pose` or `Scene.poseState`'s answer. The document itself is
 /// unchanged.
 ///
@@ -1429,13 +1725,19 @@ public struct Pose {
     public let unsolved: [Joint]
     /// `(joint, freedom index, value)` for every given value outside its freedom's range.
     public let outOfRange: [(joint: Joint, freedom: Int, value: Double)]
+    /// What the couplings (gear, rack and pinion, a loop-closing screw) could not solve, or
+    /// found disagreeing, in file order, in the kernel's words:
+    /// `coupling 'mesh': both 'a' and 'b' are given and disagree by 0.1`.
+    public let diagnostics: [String]
     private let transforms: [[Double]]
 
     fileprivate init(ground: Link, unsolved: [Joint],
-                     outOfRange: [(joint: Joint, freedom: Int, value: Double)], transforms: [[Double]]) {
+                     outOfRange: [(joint: Joint, freedom: Int, value: Double)], transforms: [[Double]],
+                     diagnostics: [String] = []) {
         self.ground = ground
         self.unsolved = unsolved
         self.outOfRange = outOfRange
+        self.diagnostics = diagnostics
         self.transforms = transforms
     }
 
@@ -1446,6 +1748,19 @@ public struct Pose {
     /// The same matrix in the ABI's own column-major order, as sixteen doubles, exactly as
     /// `Node.rawTransform` lays them out.
     public func rawTransform(_ node: Node) -> [Double] { transforms[node.index] }
+
+    /// Draw this pose's scene, as `Scene.show` does, with every node at its posed transform
+    /// (`cadaclysm_view_set_node_transforms`), as Python's `Pose.show`. The wgpu library's
+    /// window blocks until it is closed; any other library prints a still.
+    public func show(_ options: ShowOptions = ShowOptions()) throws {
+        _ = try ground.scene.draw(options, interactive: false, transforms: transforms.flatMap { $0 }, kind: "Pose")
+    }
+
+    /// Orbit the posed scene until its window is closed: where the camera was left, the last pick.
+    @discardableResult
+    public func view(_ options: ShowOptions = ShowOptions()) throws -> Camera {
+        try ground.scene.draw(options, interactive: true, transforms: transforms.flatMap { $0 }, kind: "Pose")
+    }
 }
 
 /// Reads everything out of a `CadaclysmPose*` into a `Pose`, then frees it (ruling 2 of the
@@ -1478,7 +1793,13 @@ private func copyPose(_ scene: Scene, _ posePtr: OpaquePointer) -> Pose {
             outOfRange.append((Joint(scene, Int(joint)), Int(freedom), value))
         }
     }
-    return Pose(ground: ground, unsolved: unsolved, outOfRange: outOfRange, transforms: transforms)
+    var diagnostics: [String] = []
+    let diagnosticCount = cadaclysm_pose_diagnostic_count(posePtr)
+    for i in 0..<diagnosticCount {
+        if let raw = cadaclysm_pose_diagnostic(posePtr, i) { diagnostics.append(String(cString: raw)) }
+    }
+    return Pose(ground: ground, unsolved: unsolved, outOfRange: outOfRange, transforms: transforms,
+                diagnostics: diagnostics)
 }
 
 // ---- breps ------------------------------------------------------------------------------------
@@ -2150,6 +2471,35 @@ public struct Node: Hashable, CustomStringConvertible {
     /// structure and answer false.
     public var canMesh: Bool { cadaclysm_node_can_mesh(live(), raw) }
 
+    /// Draw the scene with every node outside this one hidden, this one framed (Python's
+    /// `Node.show`). The wgpu library's window blocks until it is closed; any other library
+    /// prints a still.
+    public func show(_ options: ShowOptions = ShowOptions()) throws {
+        _ = try scene.liveOrThrow()  // a closed scene throws here, before the path is read
+        _ = try scene.draw(options, interactive: false, focus: (UInt32(index), siblingsAlongPath), kind: "Node")
+    }
+
+    /// Orbit this node until its window is closed: where the camera was left, the last pick.
+    @discardableResult
+    public func view(_ options: ShowOptions = ShowOptions()) throws -> Camera {
+        _ = try scene.liveOrThrow()
+        return try scene.draw(options, interactive: true, focus: (UInt32(index), siblingsAlongPath), kind: "Node")
+    }
+
+    /// Node focus, as every wrapper does it: every root but this node's own, then at each
+    /// level down to this node every child but the next one on the path. Nothing on the path
+    /// is hidden, so nothing has to be shown again.
+    var siblingsAlongPath: [UInt32] {
+        var path = [self]  // this node .. its root
+        while let up = path.last?.parent { path.append(up) }
+        var hide = scene.roots.filter { $0.index != path.last!.index }.map { UInt32($0.index) }
+        for level in stride(from: path.count - 1, to: 0, by: -1) {
+            let keep = path[level - 1].index
+            hide += path[level].children.filter { $0.index != keep }.map { UInt32($0.index) }
+        }
+        return hide
+    }
+
     /// Write this node's own mesh -- where it is defined, without its placement -- in one of
     /// `meshFormats()`. Throws for a node that draws nothing or an unknown format; ask
     /// `canMesh` first to grey out a menu entry. For the whole model see `Scene.save`.
@@ -2397,6 +2747,35 @@ public struct Node: Hashable, CustomStringConvertible {
     /// `edgeBeziers` in `double`: the same segments, unnarrowed.
     public var edgeBeziers64: Beziers64 { beziers64(cadaclysm_node_edge_beziers64(live(), raw)) }
 
+    /// This node's silhouette -- where its surfaces turn away from the eye, which no edge of it lies
+    /// on -- as rational cubic Béziers in `double`, from the camera `options` describes. The same
+    /// `SvgOptions` that draw a picture: `view`, `azimuth`, `elevation`, `up` and `fov`, and `width`
+    /// with `tolerance`, which the library reads together as the page fraction `tolerance / width`.
+    /// Nothing else in them changes the curves.
+    ///
+    /// Unlike `edgeBeziers64` this is a copy. The library keeps one silhouette slot per scene and the
+    /// next silhouette call on that scene, for any node, replaces it, so the views `edgeBeziers64`
+    /// would give change under a caller who asked twice; this copies out of the slot before it
+    /// returns. Calls sharing a scene across threads must serialise their silhouette calls, as the
+    /// library documents.
+    ///
+    /// A body with no silhouette (every face planar) is an empty answer (`count == 0`), not an error;
+    /// a refused option, a body with no measurable geometry or a node holding no shape of its own
+    /// throws.
+    public func silhouetteBeziers(_ options: SvgOptions = SvgOptions()) throws -> Beziers64 {
+        let handle = try scene.liveOrThrow()
+        var cOptions = try buildSvgOptions(options, defaultUp: scene.defaultUp)
+        let got = withUnsafePointer(to: &cOptions) { cadaclysm_node_silhouette_beziers(handle, raw, $0) }
+        if got.count == 0 || got.points == nil {
+            // The library clears the thread's error at entry and the empty answer sets none: a
+            // reason here is this call's own refusal, none is the empty answer.
+            let reason = lastError()
+            if !reason.isEmpty { throw CadaclysmError(reason) }
+            return Beziers64(points: [], weights: [])
+        }
+        return beziers64(got).copy()
+    }
+
     /// `curveBeziers` in `double`; see `edgeBeziers64`.
     public var curveBeziers64: Beziers64 { beziers64(cadaclysm_node_curve_beziers64(live(), raw)) }
 
@@ -2524,7 +2903,7 @@ public struct Node: Hashable, CustomStringConvertible {
     /// next `svgText` or `svg` call.
     public func svgText(_ options: SvgOptions = SvgOptions()) throws -> String {
         let handle = try scene.liveOrThrow()
-        var cOptions = buildSvgOptions(options, defaultUp: scene.defaultUp)
+        var cOptions = try buildSvgOptions(options, defaultUp: scene.defaultUp)
         guard let ptr = withUnsafePointer(to: &cOptions, { cadaclysm_node_svg_text(handle, raw, $0) }) else {
             throw CadaclysmError(lastErrorOr("svg"))
         }
@@ -2534,7 +2913,7 @@ public struct Node: Hashable, CustomStringConvertible {
     /// `svgText` written to `path` by the library itself.
     public func svg(_ path: String, options: SvgOptions = SvgOptions()) throws {
         let handle = try scene.liveOrThrow()
-        var cOptions = buildSvgOptions(options, defaultUp: scene.defaultUp)
+        var cOptions = try buildSvgOptions(options, defaultUp: scene.defaultUp)
         guard withUnsafePointer(to: &cOptions, { cadaclysm_node_svg(handle, raw, path, $0) }) else {
             throw CadaclysmError(lastErrorOr("could not write \(path)"))
         }
@@ -2597,15 +2976,58 @@ private let svgPolylinesFlag: UInt32 = 8
 private let svgSilhouettesFlag: UInt32 = 16
 
 /// A colour as the ABI's packed `0xRRGGBB`, from `"#rgb"`, `"#rrggbb"` or a CSS colour name --
-/// for `SvgOptions.stroke`/`SvgOptions.background`, which take the packed number. Read by the
-/// library's own parser, so every wrapper takes the same forms. Takes no numeric triple of its
-/// own, so its refusal lists only the text forms.
+/// for a host that wants the number itself (`SvgOptions.stroke`/`SvgOptions.background` take
+/// the text directly). Read by the library's own parser, so every wrapper takes the same forms.
+/// Takes no numeric triple of its own, so its refusal lists only the text forms.
 public func packed(_ colour: String) throws -> UInt32 {
     var out = [Double](repeating: 0, count: 3)
     guard cadaclysm_parse_colour(colour, &out) else {
         throw CadaclysmError("colour: a colour is \"#rgb\", \"#rrggbb\" or a CSS colour name, not '\(colour)'")
     }
     return (UInt32((out[0] * 255).rounded()) << 16) | (UInt32((out[1] * 255).rounded()) << 8) | UInt32((out[2] * 255).rounded())
+}
+
+/// A colour `SvgOptions.stroke`/`SvgOptions.background` take: colour text -- `"#rgb"`,
+/// `"#rrggbb"` or a CSS colour name, any case -- or a packed `0xRRGGBB`. A literal of either
+/// kind is one already (`stroke: "navy"`, `background: 0x000080`); a value in a variable is
+/// `SvgColour(text)` or `SvgColour(packed)`. Text is read when the drawing is made, by the
+/// library whose drawing it is -- the reader's parser for a scene, the kernel's for a solid --
+/// and text it refuses, or a number past `0xFFFFFF`, throws naming the field.
+public struct SvgColour: Sendable, Equatable, ExpressibleByIntegerLiteral, ExpressibleByStringLiteral {
+    /// The colour text given, or `nil` for a number.
+    public let text: String?
+    /// The packed number given; `0` for text.
+    public let number: UInt32
+
+    /// A packed `0xRRGGBB`.
+    public init(_ packed: UInt32) { text = nil; number = packed }
+    /// Colour text: `"#rgb"`, `"#rrggbb"` or a CSS colour name.
+    public init(_ text: String) { self.text = text; number = 0 }
+    public init(integerLiteral value: UInt32) { self.init(value) }
+    public init(stringLiteral value: String) { self.init(value) }
+
+    /// `0xRRGGBB`: a number range-checked, text through `parse` (`nil` where it refuses);
+    /// `fail` builds the error naming `what`.
+    package func packed(_ what: String, parse: (String) -> SIMD3<Double>?, fail: (String) -> Error) throws -> UInt32 {
+        guard let text else {
+            guard number <= 0xFF_FFFF else {
+                throw fail("\(what): a packed colour is 0x000000..0xFFFFFF, not 0x\(String(number, radix: 16, uppercase: true))")
+            }
+            return number
+        }
+        guard let c = parse(text) else {
+            throw fail("\(what): a colour is \"#rgb\", \"#rrggbb\", a CSS colour name or 0xRRGGBB, not '\(text)'")
+        }
+        return (UInt32((c.x * 255).rounded()) << 16) | (UInt32((c.y * 255).rounded()) << 8) | UInt32((c.z * 255).rounded())
+    }
+}
+
+/// `colour` packed through the reader's own parser.
+func readerPacked(_ colour: SvgColour, _ what: String) throws -> UInt32 {
+    try colour.packed(what, parse: { text in
+        var out = [Double](repeating: 0, count: 3)
+        return cadaclysm_parse_colour(text, &out) ? SIMD3(out[0], out[1], out[2]) : nil
+    }, fail: { CadaclysmError($0) })
 }
 
 /// How an SVG drawing is made -- the camera in the viewer's words, the page, the pen and which
@@ -2638,15 +3060,15 @@ public struct SvgOptions: Sendable {
     public var margin: Double
     /// How far a written curve may stray, in page units. Default 0.1.
     public var tolerance: Double
-    /// The pen colour, `0xRRGGBB` -- `packed(_:)` reads a `"#rgb"`, `"#rrggbb"` or CSS colour
-    /// name string, e.g. `stroke: try packed("navy")`. Default black.
-    public var stroke: UInt32
+    /// The pen colour: `"#rgb"`, `"#rrggbb"`, a CSS colour name or a packed `0xRRGGBB` (an
+    /// `SvgColour`), e.g. `stroke: "navy"`. Default black.
+    public var stroke: SvgColour
     /// The pen's width, page units. Default 1.
     public var strokeWidth: Double
-    /// `0xRRGGBB`, or `nil` (the default) for no `<rect>` behind the drawing -- the page left to
-    /// whatever the viewer composites it onto. `packed(_:)` reads a `"#rgb"`, `"#rrggbb"` or CSS
-    /// colour name string, e.g. `background: try packed("navy")`.
-    public var background: UInt32?
+    /// `"#rgb"`, `"#rrggbb"`, a CSS colour name or a packed `0xRRGGBB` (an `SvgColour`), e.g.
+    /// `background: "navy"`, or `nil` (the default) for no `<rect>` behind the drawing -- the
+    /// page left to whatever the viewer composites it onto.
+    public var background: SvgColour?
     /// Each shape's feature edges -- the exact curves the flattened polylines are drawn from.
     /// Default `true`.
     public var edges: Bool
@@ -2674,8 +3096,8 @@ public struct SvgOptions: Sendable {
     /// them.
     public init(view: SvgView = .iso, azimuth: Double? = nil, elevation: Double? = nil, up: Up? = nil,
                 fov: Double = 0, width: Double = 1000, height: Double = 1000, margin: Double = 0.05,
-                tolerance: Double = 0.1, stroke: UInt32 = 0x00_0000, strokeWidth: Double = 1,
-                background: UInt32? = nil, edges: Bool = true, curves: Bool = false,
+                tolerance: Double = 0.1, stroke: SvgColour = 0x00_0000, strokeWidth: Double = 1,
+                background: SvgColour? = nil, edges: Bool = true, curves: Bool = false,
                 isocurves: Bool = false, polylines: Bool = false, silhouettes: Bool = true) {
         self.view = view
         self.azimuth = azimuth
@@ -2700,8 +3122,11 @@ public struct SvgOptions: Sendable {
 /// `options` packed into a `CadaclysmSvgOptions`: `view` fills `azimuth`/`elevation` unless
 /// they are set directly, `up` falls back to `defaultUp`. `cadaclysm_svg_options_init` fills
 /// the struct first -- `size` included -- so a field this wrapper never sets still carries the
-/// library's own default rather than a zeroed struct's.
-func buildSvgOptions(_ options: SvgOptions, defaultUp: Up) -> CadaclysmSvgOptions {
+/// library's own default rather than a zeroed struct's. Throws where `stroke` or `background`
+/// is colour text the library refuses.
+func buildSvgOptions(_ options: SvgOptions, defaultUp: Up) throws -> CadaclysmSvgOptions {
+    let stroke = try readerPacked(options.stroke, "svg: stroke")
+    let background = try options.background.map { try readerPacked($0, "svg: background") } ?? svgTransparent
     var raw = CadaclysmSvgOptions()
     cadaclysm_svg_options_init(&raw)
     let (baseAzimuth, baseElevation) = options.view.angles
@@ -2714,8 +3139,8 @@ func buildSvgOptions(_ options: SvgOptions, defaultUp: Up) -> CadaclysmSvgOption
     raw.margin = options.margin
     raw.tolerance = options.tolerance
     raw.stroke_width = options.strokeWidth
-    raw.stroke = options.stroke
-    raw.background = options.background ?? svgTransparent
+    raw.stroke = stroke
+    raw.background = background
     raw.flags = (options.edges ? svgEdgesFlag : 0) | (options.curves ? svgCurvesFlag : 0)
         | (options.isocurves ? svgIsocurvesFlag : 0) | (options.polylines ? svgPolylinesFlag : 0)
         | (options.silhouettes ? svgSilhouettesFlag : 0)
@@ -2769,8 +3194,12 @@ public final class Scene: NativeMemoryOwner, CustomStringConvertible {
     public var unsafeHandle: OpaquePointer? { handle }
 
     /// Give the document back. Idempotent. Every view still held traps when read afterwards.
+    /// The items of this thread's CadaclysmView views that show it are removed first; while a
+    /// view of another thread still shows it, it stays open (that view cannot be called from
+    /// here) -- close it again once that thread has closed its view.
     public func close() {
         guard let handle = handle else { return }
+        guard releaseShown(self) else { return }
         self.handle = nil
         cadaclysm_close(handle)
     }
@@ -2848,6 +3277,13 @@ public final class Scene: NativeMemoryOwner, CustomStringConvertible {
     public var sequences: [MotionSequence] {
         let handle = live()
         return (0..<cadaclysm_sequence_count(handle)).map { readSequence(self, $0) }
+    }
+
+    /// The file's work schedules -- `IfcWorkSchedule`, each a programme of tasks. Empty for a
+    /// file that records none.
+    public var schedules: [WorkSchedule] {
+        let handle = live()
+        return (0..<Int(cadaclysm_schedule_count(handle))).map { WorkSchedule(self, $0) }
     }
 
     /// The link the file declares as the mechanism's base, or nil when it declares none
@@ -3002,13 +3438,35 @@ public final class Scene: NativeMemoryOwner, CustomStringConvertible {
         return base == .unity || base == .yUp ? .y : .z
     }
 
+    /// Draw every visible placement with the view library in use (`ViewLibrary.useWgpu()` /
+    /// `useTerminal()`, else CADACLYSM_VIEW, else the terminal): the wgpu library's window
+    /// blocks until it is closed; any other library prints a still. Up defaults from the
+    /// convention; the title is the file's name.
+    public func show(_ options: ShowOptions = ShowOptions()) throws { _ = try draw(options, interactive: false) }
+
+    /// Orbit the scene until its window is closed: where the camera was left, the last pick.
+    @discardableResult
+    public func view(_ options: ShowOptions = ShowOptions()) throws -> Camera { try draw(options, interactive: true) }
+
+    /// Scene, Node and Pose show()/view(): this scene by handle, posed by `transforms` or
+    /// narrowed to `focus`. A document is drawn at the tolerance it was read with.
+    func draw(_ options: ShowOptions, interactive: Bool, focus: (node: UInt32, hide: [UInt32])? = nil,
+              transforms: [Double]? = nil, kind: String = "Scene") throws -> Camera {
+        let handle = try liveOrThrow()
+        try refuseTolerance(kind, options, interactive: interactive)
+        defer { withExtendedLifetime(self) {} }
+        return try drawObject(solid: nil, scene: handle, tolerance: 0, label: baseName(path),
+                              defaultUp: defaultUp == .y ? .y : .z, focus: focus, options: options,
+                              interactive: interactive, transforms: transforms)
+    }
+
     /// Every visible placement's wireframe as SVG text, from the camera `options` describes --
     /// the library's own camera, not a viewer. See `SvgOptions`. Borrowed by the library:
     /// copied out before this returns, and replaced by this scene's next `svgText` or `svg`
     /// call.
     public func svgText(_ options: SvgOptions = SvgOptions()) throws -> String {
         let handle = try liveOrThrow()
-        var cOptions = buildSvgOptions(options, defaultUp: defaultUp)
+        var cOptions = try buildSvgOptions(options, defaultUp: defaultUp)
         guard let ptr = withUnsafePointer(to: &cOptions, { cadaclysm_scene_svg_text(handle, $0) }) else {
             throw CadaclysmError(lastErrorOr("svg"))
         }
@@ -3018,7 +3476,7 @@ public final class Scene: NativeMemoryOwner, CustomStringConvertible {
     /// `svgText` written to `path` by the library itself.
     public func svg(_ path: String, options: SvgOptions = SvgOptions()) throws {
         let handle = try liveOrThrow()
-        var cOptions = buildSvgOptions(options, defaultUp: defaultUp)
+        var cOptions = try buildSvgOptions(options, defaultUp: defaultUp)
         guard withUnsafePointer(to: &cOptions, { cadaclysm_scene_svg(handle, path, $0) }) else {
             throw CadaclysmError(lastErrorOr("could not write \(path)"))
         }

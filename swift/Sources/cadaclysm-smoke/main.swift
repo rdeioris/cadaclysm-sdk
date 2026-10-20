@@ -509,6 +509,13 @@ func sheetVerbs(_ plate: Solid) {
     check(count(pipe) == 6, "pipe: the tube has \(count(pipe)) faces, not 6")
     let halves = must("split_by_plane") { try cube.splitByPlane(Frame(SIMD3(2, 0, 0), SIMD3(0, 1, 0), SIMD3(0, 0, 1), SIMD3(1, 0, 0))) }
     check(halves.count == 2 && count(halves[0]) == 6, "split_by_plane: \(halves.count) bodies, not 2")
+    // A rectangle drawn above a sphere cores it: the ball with a square hole, then the core.
+    let ball = must("sphere") { try Solid.sphere(10) }
+    let cored = must("split_by_profile") { try ball.splitByProfile(Profile.rect(6, 6), Frame.xy(SIMD3(0, 0, 40))) }
+    let whole = must("mass") { () throws -> Double in let m: Mass = try ball.mass(); return m.volume }
+    let pieces = cored.map { piece in must("mass") { () throws -> Double in let m: Mass = try piece.mass(); return m.volume } }
+    check(pieces.count == 2 && pieces[1] > 0 && pieces[1] < pieces[0] && abs(pieces[0] + pieces[1] - whole) < 0.01 * whole,
+          "split_by_profile: \(pieces) do not add up to the ball's \(whole)")
     // From loops: a circle given before the square it lies in -- the square is the boundary.
     let holedSquare = must("from_loops") { try Solid.extrude(Profile.fromLoops([Profile.circle(4), Profile.rect(30, 30)]), xy, 2) }
     check(count(holedSquare) == 8, "from_loops: the holed square has \(count(holedSquare)) faces, not 8")

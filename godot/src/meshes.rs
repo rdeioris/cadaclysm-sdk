@@ -168,6 +168,23 @@ pub(crate) fn unshaded(colour: Color) -> Gd<Material> {
 
 // ---- a scene as nodes --------------------------------------------------------------
 
+/// A `Color`, or colour text -- `"#rgb"`, `"#rrggbb"` or a CSS colour name, any case --
+/// read by the library's own parser; `None`, with the error recorded naming `what`, for
+/// anything else.
+pub(crate) fn colour_or_text(v: &Variant, what: &str) -> Option<Color> {
+    match v.get_type() {
+        VariantType::COLOR => Some(v.to::<Color>()),
+        VariantType::STRING | VariantType::STRING_NAME => {
+            let text = v.to_string();
+            match sdk::packed(&text) {
+                Ok(p) => Some(Color::from_rgba8((p >> 16) as u8, (p >> 8) as u8, p as u8, 255)),
+                Err(_) => fail(format!("{what}: a colour is \"#rgb\", \"#rrggbb\" or a CSS colour name, not '{text}'")),
+            }
+        }
+        _ => fail(format!("{what}: a colour is a Color, \"#rgb\", \"#rrggbb\" or a CSS colour name")),
+    }
+}
+
 /// `CadaclysmScene.instantiate`'s options.
 pub(crate) struct BuildOptions {
     pub edges: bool,
@@ -194,9 +211,13 @@ impl BuildOptions {
             },
             _ => None,
         };
+        let edge_colour = match d.get("edge_color") {
+            Some(v) if !v.is_nil() => colour_or_text(&v, "instantiate's edge_color")?,
+            _ => Color::from_rgb(0.07, 0.07, 0.08),
+        };
         Some(BuildOptions {
             edges: flag("edges"),
-            edge_colour: d.get("edge_color").and_then(|v| v.try_to::<Color>().ok()).unwrap_or(Color::from_rgb(0.07, 0.07, 0.08)),
+            edge_colour,
             material,
             tree: flag("tree"),
             double_sided: flag("double_sided"),

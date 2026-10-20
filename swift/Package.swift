@@ -8,6 +8,8 @@
 //   swift run cadaclysm-smoke [model] [license]
 //   swift test
 //
+// Drawing: import CadaclysmView (README, "Drawing").
+//
 // The libraries are linked when the package is built, so this manifest has to find them:
 //
 //   1. CADACLYSM_LIB_DIR, when set;
@@ -39,6 +41,14 @@ let inRepository = FileManager.default.fileExists(atPath: here.appendingPathComp
 let libDir = environment
     ?? (inRepository ? here.appendingPathComponent("../../../../target/release") : here.appendingPathComponent("../lib"))
         .standardized.path
+// The view library's search names this directory too (CCadaclysmView compiles it in as a C
+// string, so forward slashes only). A directory with a space or a quote in it is left out:
+// Xcode passes a define through GCC_PREPROCESSOR_DEFINITIONS, which splits on spaces and
+// mangles quotes -- the view library is then found beside the reader or the executable, by
+// CADACLYSM_VIEW_LIBRARY / CADACLYSM_TERMINAL_LIBRARY, or on the loader's path instead.
+let viewDir = libDir.replacingOccurrences(of: "\\", with: "/")
+let viewDirSettings: [CSetting] = viewDir.contains(where: { $0 == " " || $0 == "\"" || $0 == "'" })
+    ? [] : [.define("CVL_SWIFT_LIBRARY_DIR", to: "\"\(viewDir)\"")]
 
 // Windows: a cargo target/ holds cadaclysm_capi.dll.lib (the import library) beside
 // cadaclysm_capi.lib, which there is the STATIC library; an SDK's lib/ holds only the
@@ -70,18 +80,28 @@ let package = Package(
     products: [
         .library(name: "Cadaclysm", targets: ["Cadaclysm"]),
         .library(name: "Blacksmith", targets: ["Blacksmith"]),
+        .library(name: "CadaclysmView", targets: ["CadaclysmView"]),
         .executable(name: "cadaclysm-smoke", targets: ["cadaclysm-smoke"]),
     ],
     targets: [
         .systemLibrary(name: "CCadaclysm", path: "Sources/CCadaclysm"),
         .systemLibrary(name: "CCadaclysmBlacksmith", path: "Sources/CCadaclysmBlacksmith"),
+        // The view library is opened at run time (the library choice demands it): a C
+        // target holds the table (view_loader.h, a copy kept by bindings.rs), and links
+        // nothing of the view -- only libdl and libm on Linux (dlopen; the camera's atan2,
+        // asin, hypot, log).
+        .target(name: "CCadaclysmView", path: "Sources/CCadaclysmView",
+                cSettings: viewDirSettings,
+                linkerSettings: [.linkedLibrary("dl", .when(platforms: [.linux])),
+                                 .linkedLibrary("m", .when(platforms: [.linux]))]),
+        .target(name: "CadaclysmView", dependencies: ["CCadaclysmView"]),
         .target(name: "Cadaclysm",
-                dependencies: ["CCadaclysm"]
+                dependencies: ["CCadaclysm", "CadaclysmView"]
                     + (haveReaderFramework ? [.target(name: "CadaclysmCapi", condition: .when(platforms: [.iOS]))] : []),
                 linkerSettings: readerLinks),
-        .target(name: "Blacksmith", dependencies: ["CCadaclysmBlacksmith", "Cadaclysm"],
+        .target(name: "Blacksmith", dependencies: ["CCadaclysmBlacksmith", "Cadaclysm", "CadaclysmView"],
                 linkerSettings: kernelLinks),
         .executableTarget(name: "cadaclysm-smoke", dependencies: ["Cadaclysm", "Blacksmith"]),
-        .testTarget(name: "CadaclysmTests", dependencies: ["Cadaclysm", "Blacksmith"]),
+        .testTarget(name: "CadaclysmTests", dependencies: ["Cadaclysm", "Blacksmith", "CadaclysmView"]),
     ] + (haveReaderFramework ? [.binaryTarget(name: "CadaclysmCapi", path: readerFramework)] : [])
 )

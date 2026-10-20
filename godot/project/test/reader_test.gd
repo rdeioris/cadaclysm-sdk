@@ -410,6 +410,14 @@ func test_instantiate_builds_mesh_instances():
 	tree.free()
 	eq(scene.instantiate_with({"edge": true}), null)
 	ok(Cadaclysm.last_error().contains("no instantiate option called"), Cadaclysm.last_error())
+	# edge_color takes colour text, read by the library's own parser, as well as a Color.
+	var named := scene.instantiate_with({"edges": true, "edge_color": "Navy"})
+	var named_edges := (named.get_child(0).get_child(0) as MeshInstance3D).mesh.surface_get_material(0) as ShaderMaterial
+	var navy: Color = named_edges.get_shader_parameter("colour")
+	ok(navy.is_equal_approx(Color(0, 0, 128.0 / 255.0)), "edge_color \"Navy\" is #000080, not %s" % navy)
+	named.free()
+	eq(scene.instantiate_with({"edges": true, "edge_color": "bogus"}), null)
+	ok(Cadaclysm.last_error().contains("edge_color"), Cadaclysm.last_error())
 	var packed := PackedScene.new()
 	var again := scene.instantiate()
 	eq(packed.pack(again), OK)
@@ -553,6 +561,121 @@ func test_a_file_reads_its_motion_sequences():
 	# A non-finite parameter is refused.
 	eq(swing.pose(NAN, null), null)
 	eq(Cadaclysm.last_error(), "the sequence parameter must be a finite number")
+	scene.close()
+
+# Work schedules (IFC 4D plan 2): `samples/schedule.ifc`, one programme of seven tasks.
+const DAY := 86400.0
+const T0 := 1772438400.0
+
+func schedule_scene() -> CadaclysmScene:
+	var path := fixture("samples/schedule.ifc")
+	if path == "":
+		return null
+	var scene := CadaclysmScene.open(path)
+	ok(scene != null, Cadaclysm.last_error())
+	return scene
+
+func test_a_file_reads_its_work_schedule():
+	var scene := schedule_scene()
+	if scene == null:
+		return
+	var schedules: Array = scene.schedules
+	eq(schedules.size(), 1)
+	var s: CadaclysmWorkSchedule = schedules[0]
+	eq(s.index, 0)
+	eq(s.name, "Programme")
+	eq(s.identification, "WS-1")
+	eq(s.kind, "planned")
+	eq(s.kind_name, "")
+	eq(s.start, T0)
+	ok(is_nan(s.finish), "the programme has no finish")
+	var tasks: Array = s.tasks
+	eq(tasks.map(func(t): return t.name), ["Slab", "Structure", "Walls north", "Walls south", "Topping out", "Demolish shed", "Fit-out"])
+	var slab: CadaclysmTask = tasks[0]
+	var structure: CadaclysmTask = tasks[1]
+	var north: CadaclysmTask = tasks[2]
+	var south: CadaclysmTask = tasks[3]
+	var topping: CadaclysmTask = tasks[4]
+	var shed: CadaclysmTask = tasks[5]
+	var fit: CadaclysmTask = tasks[6]
+	eq(north.parent.index, structure.index)
+	eq(south.parent.index, structure.index)
+	eq(slab.parent, null)
+	eq(slab.kind, "construction")
+	eq(shed.kind, "demolition")
+	eq(topping.kind, "notdefined")
+	eq(slab.kind_name, "")
+	eq(topping.milestone, true)
+	eq(slab.milestone, false)
+	eq(slab.identification, "T1")
+	eq(slab.status, "COMPLETED")
+	var time: CadaclysmTaskTime = slab.time
+	eq(time.schedule_start, T0)
+	ok(is_nan(time.schedule_finish), "no scheduled finish")
+	eq(time.duration, 10.0 * DAY)
+	eq(time.actual_start, T0)
+	eq(time.actual_finish, T0 + 8.0 * DAY)
+	ok(is_nan(time.early_start) and is_nan(time.late_finish), "no early or late dates")
+	var south_names := south.nodes.map(func(n): return n.name)
+	south_names.sort()
+	eq(south_names, ["Wall S1", "Wall S2"])
+	var fit_names := fit.nodes.map(func(n): return n.name)
+	fit_names.sort()
+	eq(fit_names, ["Desk", "Room"])
+	var links: Array = s.links
+	var rows := links.map(func(l): return [l.from.name, l.to.name, l.kind, l.lag])
+	eq(rows.size(), 4)
+	eq(rows[0].slice(0, 3), ["Slab", "Structure", "finish_start"])
+	ok(is_nan(rows[0][3]), "no lag")
+	eq(rows[1], ["Walls north", "Walls south", "start_start", 2.0 * DAY])
+	eq(rows[2].slice(0, 3), ["Walls south", "Topping out", "finish_start"])
+	eq(rows[3].slice(0, 3), ["Topping out", "Fit-out", "finish_start"])
+	eq(links[0].kind_name, "")
+	scene.close()
+
+func test_a_schedule_says_what_each_element_is_doing():
+	var scene := schedule_scene()
+	if scene == null:
+		return
+	var s: CadaclysmWorkSchedule = scene.schedules[0]
+	var states := {}
+	for e: CadaclysmElementState in s.at(T0 + 3.0 * DAY):
+		states[e.node.name] = e
+	var names := states.keys()
+	names.sort()
+	eq(names, ["Desk", "Room", "Shed", "Slab", "Wall N1", "Wall N2", "Wall S1", "Wall S2"])
+	eq(states["Slab"].phase, "building")
+	near(states["Slab"].progress, 0.3, 1e-9, "Slab progress")
+	eq(states["Shed"].phase, "demolishing")
+	eq(states["Wall S1"].phase, "unbuilt")
+	var late := {}
+	for e: CadaclysmElementState in s.at(T0 + 32.0 * DAY, "actual"):
+		late[e.node.name] = e
+	eq(late["Wall S1"].phase, "building")
+	eq(late["Wall S1"].variance, 5.0 * DAY)
+	eq(late["Slab"].variance, -2.0 * DAY)
+	scene.close()
+
+func test_a_schedule_refuses_a_bad_date_and_dates_word():
+	var scene := schedule_scene()
+	if scene == null:
+		return
+	var s: CadaclysmWorkSchedule = scene.schedules[0]
+	eq(s.at(NAN), null)
+	eq(Cadaclysm.last_error(), "the date must be a finite number")
+	eq(s.at(T0, "compare"), null)
+	eq(Cadaclysm.last_error(), "dates must be 'scheduled' or 'actual'")
+	scene.close()
+
+func test_a_file_without_a_schedule_has_none():
+	var path := fixture("samples/cube.scad")
+	if path == "":
+		return
+	var scene := CadaclysmScene.open(path)
+	ok(scene != null, Cadaclysm.last_error())
+	if scene == null:
+		return
+	eq(scene.schedules.size(), 0)
 	scene.close()
 
 # The pose facts (posing plan 2, wrapper brief facts 1-6), on the same file and the same

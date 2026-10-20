@@ -255,7 +255,7 @@ local ENTRY_POINTS = {
   "cadaclysm_fem_mesh_msh_text",
   "cadaclysm_fem_mesh_save_msh", "cadaclysm_fem_mesh_free",
   "cadaclysm_svg_options_init", "cadaclysm_scene_svg_text", "cadaclysm_scene_svg",
-  "cadaclysm_node_svg_text", "cadaclysm_node_svg",
+  "cadaclysm_node_svg_text", "cadaclysm_node_svg", "cadaclysm_node_silhouette_beziers",
   "cadaclysm_link_count", "cadaclysm_link_name", "cadaclysm_link_node_count", "cadaclysm_link_node",
   "cadaclysm_joint_count", "cadaclysm_joint_name", "cadaclysm_joint_start", "cadaclysm_joint_end",
 }
@@ -1898,6 +1898,41 @@ function Node:svg(path, words)
   end
 end
 
+--- This node's silhouette from the camera the words describe -- where its surfaces turn away
+--- from the eye, which no edge of it lies on. `Scene:svg_text`'s camera words: `view`, `az`,
+--- `el`, `up`, `fov`, and `size` and `tolerance`, which matter here (the library reads the
+--- tolerance as a fraction of the page, `tolerance / size[1]`); the line-set words, `margin`,
+--- `stroke`, `width` and `background` change nothing. Returns `{ points, weights, count }`
+--- as `Beziers64:copy()` does: Lua tables of numbers, four control points a curve, three
+--- numbers each (`count * 12`), one weight a control point (`count * 4`), all ones for a
+--- polynomial curve.
+---
+--- **Copied, unlike every other `Beziers64`.** The library keeps one silhouette slot per scene
+--- and the next silhouette call on that scene, for any node, refills it in place, so the
+--- pointers it hands back are a view that the next call changes under you. Copied here before
+--- this returns, so `first` below keeps its own numbers, and so does a loop over a scene's
+--- nodes collecting each one's silhouette:
+---
+---     local first = node:silhouette_beziers({ view = "front" })
+---     local second = node:silhouette_beziers({ view = "iso" })
+---
+--- A body with no silhouette (every face planar) is an empty answer, `count == 0` and empty
+--- tables, not an error. Raises `CadaclysmError` on a refused option (a tolerance that is not
+--- finite and positive, say) or a body the library cannot measure; the message begins
+--- `silhouette: `.
+function Node:silhouette_beziers(words)
+  local o = svg_options(self.scene:_default_up(), words)
+  local raw = lib().cadaclysm_node_silhouette_beziers(h(self), self.index, o)
+  if raw.points == nil or raw.weights == nil or raw.count == 0 then
+    -- Both the empty answer and a refusal are all-null with count 0: the thread's error is
+    -- what tells them apart, and the call clears it at entry.
+    local reason = last_error()
+    if reason ~= "" then fail(reason, 2) end
+    return { points = {}, weights = {}, count = 0 }
+  end
+  return beziers64(self.scene, raw):copy()
+end
+
 --- This node and every node under it, parents before children: `for n in node:walk()`.
 function Node:walk()
   local stack = { self }
@@ -2005,6 +2040,8 @@ local Pair_get = {}
 ---@class Pair
 ---@field kind string  one of the thirteen pair kinds
 ---@field type_name string|nil  for "other": the pair's entity type name ("GEAR_PAIR")
+---@field kind_name string  the kind by name, finer than `kind`: "gear" and "rack_and_pinion" where `kind` reads "other"
+---@field parameters number[]  the pair's own numbers: screw {pitch}, rack_and_pinion {pinion_radius}, gear {radius_first, radius_second, ratio, bevel, helical_angle}; {} otherwise
 ---@field pitch number|nil  for "screw": length per revolution, in the scene's units
 ---@field frame_start number[][]  m[row][col], like Node.transform
 ---@field frame_end number[][]
@@ -2014,12 +2051,13 @@ local Pair_get = {}
 local Pair = class(Pair_get)
 M.Pair = Pair
 
-local function pair(kind, type_name, pitch, frame_start, frame_end, raw_frame_start, raw_frame_end, freedoms)
+local function pair(kind, type_name, pitch, frame_start, frame_end, raw_frame_start, raw_frame_end, freedoms,
+                    kind_name, parameters)
   return setmetatable({
     kind = kind, type_name = type_name, pitch = pitch,
     frame_start = frame_start, frame_end = frame_end,
     raw_frame_start = raw_frame_start, raw_frame_end = raw_frame_end,
-    freedoms = freedoms,
+    freedoms = freedoms, kind_name = kind_name or kind, parameters = parameters or {},
   }, Pair)
 end
 Pair.__tostring = function(self) return ("<Pair %s>"):format(self.kind) end
@@ -2067,8 +2105,18 @@ function Joint_get.pair(self)
         MOTION_NAMES[tonumber(raw.motion) + 1], AXIS_NAMES[tonumber(raw.axis) + 1], lower, upper)
     end
   end
+  local kind_name_raw = L.cadaclysm_joint_pair_kind_name(handle, self.index)
+  local kind_name = nil
+  if kind_name_raw ~= nil then kind_name = ffi.string(kind_name_raw) end
+  local parameters = {}
+  local parameter_count = tonumber(L.cadaclysm_joint_pair_parameters(handle, self.index, nil, 0))
+  if parameter_count > 0 then
+    local buffer = ffi.new("double[?]", parameter_count)
+    L.cadaclysm_joint_pair_parameters(handle, self.index, buffer, parameter_count)
+    for i = 1, parameter_count do parameters[i] = tonumber(buffer[i - 1]) end
+  end
   return pair(PAIR_KIND_NAMES[kind_index + 1], type_name, pitch,
-              rows(raw_start), rows(raw_end), raw_start, raw_end, freedoms)
+              rows(raw_start), rows(raw_end), raw_start, raw_end, freedoms, kind_name, parameters)
 end
 Joint.__eq = function(a, b) return a.scene == b.scene and a.index == b.index end
 Joint.__tostring = function(self) return ("<Joint %d %s>"):format(self.index, self.name) end
@@ -2206,6 +2254,230 @@ function Sequence:pose(t, ground)
   return copy_pose(self._scene, ptr)
 end
 
+-- ---- work schedules --------------------------------------------------------------
+
+-- The words of the C enums, indexed by their values.
+local SCHEDULE_KINDS = { [0] = "planned", "actual", "baseline", "notdefined", "other" }
+local TASK_KINDS = {
+  [0] = "attendance", "construction", "demolition", "dismantle", "disposal", "installation",
+  "logistic", "maintenance", "move", "operation", "removal", "renovation", "notdefined", "other",
+}
+local LINK_KINDS = { [0] = "finish_start", "start_start", "finish_finish", "start_finish", "notdefined", "other" }
+local DATES = { scheduled = 0, actual = 1 }
+local PHASES = { [0] = "unbuilt", "building", "built", "demolishing", "demolished" }
+local TIME_FIELDS = {
+  "schedule_start", "schedule_finish", "early_start", "early_finish", "late_start",
+  "late_finish", "actual_start", "actual_finish", "duration",
+}
+
+--- What one element is doing on a date: `WorkSchedule:at`'s rows. `node` is the `Node`;
+--- `phase` is `"unbuilt"`, `"building"`, `"built"`, `"demolishing"` or `"demolished"`;
+--- `progress` is 0..1 through the window that governs the phase; `variance` is the seconds
+--- late (positive) or early (negative) against the schedule, or nil where there is none.
+---@class ElementState
+---@field node Node
+---@field phase string
+---@field progress number
+---@field variance number|nil
+local ElementState = {}
+ElementState.__index = ElementState
+M.ElementState = ElementState
+ElementState.__tostring = function(self)
+  return ("<ElementState %s %s %.2f>"):format(self.node.name, self.phase, self.progress)
+end
+
+--- Every date pair a task gives, each seconds since 1970-01-01T00:00 (no zone;
+--- `os.date('!%Y-%m-%dT%H:%M:%S', seconds)` reads one) or nil where the file gives none.
+---@class TaskTime
+---@field schedule_start number|nil
+---@field schedule_finish number|nil
+---@field early_start number|nil
+---@field early_finish number|nil
+---@field late_start number|nil
+---@field late_finish number|nil
+---@field actual_start number|nil
+---@field actual_finish number|nil
+---@field duration number|nil  seconds
+local TaskTime = {}
+TaskTime.__index = TaskTime
+M.TaskTime = TaskTime
+
+--- A building's programme: an `IfcWorkSchedule` and the tasks it controls. From
+--- `Scene.schedules`.
+---
+--- `at(date)` says what each element it names is doing on a date. Dates are numbers,
+--- seconds since 1970-01-01T00:00.
+local WorkSchedule_get = {}
+---@class WorkSchedule
+---@field index integer  its position in the scene's schedules
+---@field name string  its name, else its identification, else `schedule #k`
+---@field identification string  `""` where none
+---@field kind string  `"planned"`, `"actual"`, `"baseline"`, `"notdefined"` or `"other"`
+---@field kind_name string  the text of a user-defined kind (`kind == "other"`); `""` otherwise
+---@field start number|nil  the schedule's start, or nil where the file gives none
+---@field finish number|nil  the schedule's finish, or nil where the file gives none
+---@field tasks Task[]  in file order
+---@field links TaskLink[]  its task links (`IfcRelSequence`), in file order
+local WorkSchedule = class(WorkSchedule_get)
+M.WorkSchedule = WorkSchedule
+
+local function read_schedule(scene, index)
+  return setmetatable({ index = index, _scene = scene }, WorkSchedule)
+end
+WorkSchedule.__tostring = function(self) return ("<WorkSchedule %d %s>"):format(self.index, self.name) end
+function WorkSchedule_get.name(self)
+  return text(lib().cadaclysm_schedule_name(self._scene:handle(), self.index))
+end
+function WorkSchedule_get.identification(self)
+  return text(lib().cadaclysm_schedule_identification(self._scene:handle(), self.index))
+end
+function WorkSchedule_get.kind(self)
+  return SCHEDULE_KINDS[lib().cadaclysm_schedule_kind(self._scene:handle(), self.index)] or "notdefined"
+end
+function WorkSchedule_get.kind_name(self)
+  return text(lib().cadaclysm_schedule_kind_name(self._scene:handle(), self.index))
+end
+function WorkSchedule_get.start(self)
+  local out = ffi.new("double[1]")
+  if not lib().cadaclysm_schedule_start(self._scene:handle(), self.index, out) then return nil end
+  return out[0]
+end
+function WorkSchedule_get.finish(self)
+  local out = ffi.new("double[1]")
+  if not lib().cadaclysm_schedule_finish(self._scene:handle(), self.index, out) then return nil end
+  return out[0]
+end
+
+--- One task of a `WorkSchedule`. From `WorkSchedule.tasks`.
+---
+--- `kind` is `"attendance"`, `"construction"`, `"demolition"`, `"dismantle"`, `"disposal"`,
+--- `"installation"`, `"logistic"`, `"maintenance"`, `"move"`, `"operation"`, `"removal"`,
+--- `"renovation"`, `"notdefined"` or `"other"`; `kind_name` is the text of a user-defined
+--- one. `parent` is the summary task nesting it, nil at the top. `nodes` are the nodes it
+--- builds or removes.
+local Task_get = {}
+---@class Task
+---@field index integer  its position in the schedule's tasks
+---@field schedule WorkSchedule
+---@field name string
+---@field identification string  `""` where none
+---@field kind string
+---@field kind_name string  the text of a user-defined kind (`kind == "other"`); `""` otherwise
+---@field status string  as the file writes it, `""` where none
+---@field milestone boolean
+---@field parent Task|nil
+---@field time TaskTime
+---@field nodes Node[]
+local Task = class(Task_get)
+M.Task = Task
+
+local function read_task(schedule, index)
+  return setmetatable({ index = index, schedule = schedule }, Task)
+end
+Task.__tostring = function(self) return ("<Task %d %s>"):format(self.index, self.name) end
+local function task_args(self) return self.schedule._scene:handle(), self.schedule.index, self.index end
+function Task_get.name(self) return text(lib().cadaclysm_task_name(task_args(self))) end
+function Task_get.identification(self) return text(lib().cadaclysm_task_identification(task_args(self))) end
+function Task_get.kind(self) return TASK_KINDS[lib().cadaclysm_task_kind(task_args(self))] or "notdefined" end
+function Task_get.kind_name(self) return text(lib().cadaclysm_task_kind_name(task_args(self))) end
+function Task_get.status(self) return text(lib().cadaclysm_task_status(task_args(self))) end
+function Task_get.milestone(self) return lib().cadaclysm_task_milestone(task_args(self)) end
+function Task_get.parent(self)
+  local out = ffi.new("uint32_t[1]")
+  local handle, s, t = task_args(self)
+  if not lib().cadaclysm_task_parent(handle, s, t, out) then return nil end
+  return read_task(self.schedule, out[0])
+end
+function Task_get.time(self)
+  local raw = ffi.new("CadaclysmTaskTime[1]")
+  local handle, s, t = task_args(self)
+  lib().cadaclysm_task_time(handle, s, t, raw)
+  local out = setmetatable({}, TaskTime)
+  for _, name in ipairs(TIME_FIELDS) do
+    if raw[0]["has_" .. name] then out[name] = raw[0][name] end
+  end
+  return out
+end
+function Task_get.nodes(self)
+  local L = lib()
+  local handle, s, t = task_args(self)
+  local count = L.cadaclysm_task_node_count(handle, s, t)
+  local out = {}
+  if count == 0 then return out end
+  local ids = ffi.new("uint32_t[?]", count)
+  L.cadaclysm_task_nodes(handle, s, t, ids, count)
+  for i = 0, count - 1 do out[i + 1] = node(self.schedule._scene, ids[i]) end
+  return out
+end
+
+--- A sequence between two tasks of one schedule. From `WorkSchedule.links`.
+---
+--- `from` is the predecessor, `to` the successor; `kind` is `"finish_start"`,
+--- `"start_start"`, `"finish_finish"`, `"start_finish"`, `"notdefined"` or `"other"`
+--- (`kind_name` is the text of a user-defined one, `""` otherwise); `lag` is the time lag in
+--- seconds, or nil where the file gives none.
+---@class TaskLink
+---@field from Task
+---@field to Task
+---@field kind string
+---@field kind_name string
+---@field lag number|nil
+local TaskLink = {}
+TaskLink.__index = TaskLink
+M.TaskLink = TaskLink
+TaskLink.__tostring = function(self) return ("<TaskLink %s -> %s %s>"):format(self.from.name, self.to.name, self.kind) end
+
+function WorkSchedule_get.tasks(self)
+  local handle, out = self._scene:handle(), {}
+  for i = 0, lib().cadaclysm_task_count(handle, self.index) - 1 do out[i + 1] = read_task(self, i) end
+  return out
+end
+function WorkSchedule_get.links(self)
+  local L, handle, out = lib(), self._scene:handle(), {}
+  local tasks = self.tasks
+  for i = 0, L.cadaclysm_task_link_count(handle, self.index) - 1 do
+    local from, to, kind = ffi.new("uint32_t[1]"), ffi.new("uint32_t[1]"), ffi.new("uint32_t[1]")
+    local lag, has_lag = ffi.new("double[1]"), ffi.new("bool[1]")
+    L.cadaclysm_task_link(handle, self.index, i, from, to, kind, lag, has_lag)
+    out[i + 1] = setmetatable({
+      from = tasks[from[0] + 1],
+      to = tasks[to[0] + 1],
+      kind = LINK_KINDS[kind[0]] or "notdefined",
+      kind_name = text(L.cadaclysm_task_link_kind_name(handle, self.index, i)),
+      lag = has_lag[0] and lag[0] or nil,
+    }, TaskLink)
+  end
+  return out
+end
+
+--- What each element this schedule names is doing on `date` (seconds since
+--- 1970-01-01T00:00), in node order; elements no task names are not listed. `dates` is
+--- `"scheduled"` (the default) or `"actual"` -- which of a task's dates to play. Raises
+--- `CadaclysmError` for any other `dates` and for a `date` that is not finite.
+function WorkSchedule:at(date, dates)
+  if dates == nil then dates = "scheduled" end
+  local which = DATES[dates]
+  if which == nil then fail("dates must be 'scheduled' or 'actual'", 2) end
+  local L, handle = lib(), self._scene:handle()
+  local count = L.cadaclysm_schedule_at(handle, self.index, date, which, nil, 0)
+  if count < 0 then fail(last_error(), 2) end
+  count = tonumber(count)
+  local out = {}
+  if count == 0 then return out end
+  local rows = ffi.new("CadaclysmElementState[?]", count)
+  L.cadaclysm_schedule_at(handle, self.index, date, which, rows, count)
+  for i = 0, count - 1 do
+    local r = rows[i]
+    out[i + 1] = setmetatable({
+      node = node(self._scene, r.node),
+      phase = PHASES[r.phase] or "unbuilt",
+      progress = r.progress,
+      variance = r.has_variance and r.variance or nil,
+    }, ElementState)
+  end
+  return out
+end
+
 -- ---- posing ----------------------------------------------------------------------
 
 --- A posed mechanism: `Scene.pose` or `Scene.pose_state`'s answer. The document itself
@@ -2220,12 +2492,14 @@ local Pose_get = {}
 ---@field unsolved Joint[]  loop-closing joints not honoured, in file order
 ---@field out_of_range table[]  {joint=Joint, freedom=integer, value=number}, one per given
 ---  value outside its freedom's range
+---@field diagnostics string[]  what the couplings (gear, rack and pinion, a loop-closing screw)
+---  could not solve, or found disagreeing, in file order, in the kernel's words
 local Pose = class(Pose_get)
 M.Pose = Pose
 
-local function pose_obj(scene, ground, unsolved, out_of_range, transforms)
+local function pose_obj(scene, ground, unsolved, out_of_range, transforms, diagnostics)
   return setmetatable({
-    scene = scene, ground = ground, unsolved = unsolved, out_of_range = out_of_range,
+    scene = scene, ground = ground, unsolved = unsolved, out_of_range = out_of_range, diagnostics = diagnostics or {},
     _transforms = transforms,
   }, Pose)
 end
@@ -2278,7 +2552,12 @@ function copy_pose(scene, ptr)
           freedom = tonumber(freedom_out[0]), value = value_out[0] }
       end
     end
-    return pose_obj(scene, ground, unsolved, out_of_range, transforms)
+    local diagnostics = {}
+    for i = 0, tonumber(L.cadaclysm_pose_diagnostic_count(ptr)) - 1 do
+      local raw = L.cadaclysm_pose_diagnostic(ptr, i)
+      if raw ~= nil then diagnostics[#diagnostics + 1] = ffi.string(raw) end
+    end
+    return pose_obj(scene, ground, unsolved, out_of_range, transforms, diagnostics)
   end)
   L.cadaclysm_pose_free(ptr)
   if not ok then error(result, 0) end
@@ -2398,6 +2677,12 @@ end
 function Scene_get.sequences(self)
   local L, handle, out = lib(), self:handle(), {}
   for i = 0, L.cadaclysm_sequence_count(handle) - 1 do out[#out + 1] = read_sequence(self, i) end
+  return out
+end
+--- The file's IFC work schedules (`IfcWorkSchedule`). Empty for a file that records none.
+function Scene_get.schedules(self)
+  local L, handle, out = lib(), self:handle(), {}
+  for i = 0, L.cadaclysm_schedule_count(handle) - 1 do out[#out + 1] = read_schedule(self, i) end
   return out
 end
 --- The link the file declares as the mechanism's base, or nil when it declares none

@@ -11,6 +11,16 @@
 //!   baked in (`CADACLYSM_SDK_DOWNLOAD_ERROR`) so a missing library says why.
 //! - Off with `default-features = false`, or `CADACLYSM_NO_DOWNLOAD=1` in the build's
 //!   environment (for a crate that depends on this one); never on docs.rs.
+//! - From the cadaclysm source instead: when the crate is the one in the repository
+//!   (a `path` dependency on a checkout, or a `git` dependency on the repository) and is
+//!   built for a project outside that tree, the libraries are built from the same tree
+//!   (`cargo build --release` into `<target>/cadaclysm-source`) rather than downloaded --
+//!   so `cargo update` brings libraries that match the wrapper. `CADACLYSM_SDK_SOURCE=0`
+//!   downloads the release instead. That directory is emptied whenever it was built from
+//!   another checkout (see `claim`). A failed build from a `git` dependency fails the
+//!   build, since cargo hides a git dependency's warnings; from a `path` dependency it is
+//!   a warning, as a failed download is, and the libraries an earlier build copied beside
+//!   the binaries are removed so that none of them is loaded in its place.
 //!
 //! `curl` and `tar` do the network and the unpacking -- both ship with Windows 10 and
 //! later, macOS and every Linux distribution -- so the build pulls in no HTTP or archive
@@ -33,13 +43,55 @@ fn main() {
     if env::var("CADACLYSM_NO_DOWNLOAD").is_ok_and(|v| !v.is_empty() && v != "0") {
         return;
     }
-    // In the cadaclysm repository itself (crates/cadaclysm-capi/examples/rust, or the
-    // copy `cargo package` verifies under its target/package/) the libraries to use are
-    // the ones being built beside it, which the loader finds in target/; a released
-    // download would be found first and be older than the crate.
+    // In the cadaclysm repository's source tree -- crates/cadaclysm-capi/examples/rust of a
+    // checkout, or of the git checkout cargo makes for a `git = ...` dependency -- a
+    // released download would be older than the crate. Two cases:
+    // - built into a target directory inside that tree (the repository's own tests, the
+    //   copy `cargo package` verifies under target/package/): the libraries to use are the
+    //   ones built beside it, which the loader finds in target/;
+    // - built for a project outside it (a `path` or `git` dependency on the source): build
+    //   the libraries from that same tree, so `cargo update` brings matching ones along.
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    if manifest.ancestors().any(|dir| dir.join("crates/cadaclysm-capi/Cargo.toml").is_file()) {
-        return;
+    if let Some(repo) = manifest.ancestors().find(|dir| dir.join("crates/cadaclysm-capi/Cargo.toml").is_file()) {
+        let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+        let source_wanted = env::var("CADACLYSM_SDK_SOURCE").map_or(true, |v| v != "0");
+        println!("cargo:rerun-if-env-changed=CADACLYSM_SDK_SOURCE");
+        println!("cargo:rerun-if-env-changed=CADACLYSM_LIBRARY");
+        // Built inside the tree, or with the libraries already named (a developer's own
+        // build, which the loader reads first): nothing to build.
+        if out.starts_with(repo) || env::var_os("CADACLYSM_LIBRARY").is_some_and(|v| !v.is_empty()) {
+            return;
+        }
+        if source_wanted {
+            match from_source(repo, &out) {
+                Ok(lib) => {
+                    println!("cargo:rustc-env=CADACLYSM_SDK_BUNDLED={}", lib.display());
+                    beside_the_binaries(&lib);
+                }
+                Err(reason) => {
+                    let reason = reason.replace(['\n', '\r'], " ");
+                    // Cargo shows a git dependency's warnings to nobody, so a build that went
+                    // on would "succeed" and run the libraries an older revision left beside
+                    // the binaries: fail it, saying why.
+                    if is_git_checkout(repo) {
+                        panic!(
+                            "cadaclysm-sdk: the libraries could not be built from {}: {reason}\n\
+                             (CADACLYSM_SDK_SOURCE=0 downloads the released libraries instead)",
+                            repo.display()
+                        );
+                    }
+                    println!("cargo:warning=cadaclysm-sdk: the libraries were not built from {}: {reason}", repo.display());
+                    println!("cargo:warning=cadaclysm-sdk: they will be searched for at run time instead (CADACLYSM_LIBRARY, beside the executable, lib/)");
+                    println!("cargo:rustc-env=CADACLYSM_SDK_DOWNLOAD_ERROR=they were not built from {}: {reason}", repo.display());
+                    // Whatever an earlier build copied beside the binaries is from another
+                    // state of the tree; gone, the loader's error says why instead.
+                    if let Some(profile_dir) = profile_dir() {
+                        remove_beside(&profile_dir, &shipped());
+                    }
+                }
+            }
+            return;
+        }
     }
     match fetch() {
         Ok(lib) => {
@@ -50,9 +102,15 @@ fn main() {
             let reason = reason.replace(['\n', '\r'], " ");
             println!("cargo:warning=cadaclysm-sdk: the libraries were not downloaded: {reason}");
             println!("cargo:warning=cadaclysm-sdk: they will be searched for at run time instead (CADACLYSM_LIBRARY, beside the executable, lib/)");
-            println!("cargo:rustc-env=CADACLYSM_SDK_DOWNLOAD_ERROR={reason}");
+            println!("cargo:rustc-env=CADACLYSM_SDK_DOWNLOAD_ERROR=they were not downloaded: {reason}");
         }
     }
+}
+
+/// Whether `repo` is a checkout cargo made for a `git = ...` dependency (it marks each one
+/// with `.cargo-ok`), rather than a `path` dependency's working tree.
+pub(crate) fn is_git_checkout(repo: &Path) -> bool {
+    repo.join(".cargo-ok").is_file()
 }
 
 /// The unpacked `lib/` directory for this target, downloading it on the first build.
@@ -101,6 +159,90 @@ fn fetch() -> Result<PathBuf, String> {
         return Err(format!("unpacking {archive_name} did not give {}", lib.display()));
     }
     Ok(lib)
+}
+
+/// The four libraries built from the cadaclysm source tree at `repo` -- release profile,
+/// `--locked` (a git checkout is not to be written to) -- into `<target>/cadaclysm-source`:
+/// a target directory of its own, since the outer build holds the lock on its own, kept
+/// beside it so it outlives `cargo update` and a newer revision builds incrementally.
+fn from_source(repo: &Path, out: &Path) -> Result<PathBuf, String> {
+    // Rebuild when the tree moves: a git dependency's new revision is a new checkout (and
+    // so a rerun anyway); a path dependency's edits are these files.
+    for watched in ["crates", "Cargo.toml", "Cargo.lock"] {
+        println!("cargo:rerun-if-changed={}", repo.join(watched).display());
+    }
+    // OUT_DIR is <target>/[<triple>/]<profile>/build/<package>-<hash>/out; cargo marks
+    // the target directory's root with CACHEDIR.TAG.
+    let target_root = out
+        .ancestors()
+        .find(|dir| dir.join("CACHEDIR.TAG").is_file())
+        .ok_or_else(|| format!("no target directory above {}", out.display()))?;
+    let dir = target_root.join("cadaclysm-source");
+    let target = env::var("TARGET").unwrap_or_default();
+    let cross = !target.is_empty() && env::var("HOST").is_ok_and(|host| host != target);
+    let lib = if cross { dir.join(&target).join("release") } else { dir.join("release") };
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    claim(&dir, repo)?;
+
+    for packages in [&["cadaclysm-capi", "cadaclysm-blacksmith-capi", "cadaclysm-view-capi"][..], &["cadaclysm-terminal"][..]] {
+        let mut command = Command::new(&cargo);
+        command.current_dir(repo).args(["build", "--release", "--locked"]).arg("--target-dir").arg(&dir);
+        for package in packages {
+            command.args(["-p", package]);
+        }
+        if cross {
+            command.args(["--target", &target]);
+        }
+        // The outer build's own variables would steer the inner one (its target directory,
+        // its flags, its package): keep only what cargo needs to reach the network and to
+        // share the outer build's job slots.
+        for (key, _) in env::vars_os() {
+            let key = key.to_string_lossy().into_owned();
+            let keep = key == "CARGO_HOME" || key == "CARGO_MAKEFLAGS" || ["CARGO_NET_", "CARGO_HTTP_", "CARGO_REGISTRIES_"].iter().any(|p| key.starts_with(p));
+            if (key.starts_with("CARGO_") && !keep) || ["OUT_DIR", "TARGET", "HOST", "PROFILE", "OPT_LEVEL", "DEBUG", "NUM_JOBS", "RUSTC_WORKSPACE_WRAPPER"].contains(&key.as_str()) {
+                command.env_remove(&key);
+            }
+        }
+        let output = command.output().map_err(|e| format!("cargo: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let tail: Vec<&str> = stderr.lines().rev().take(8).collect();
+            return Err(format!("cargo build -p {} failed: {}", packages.join(" -p "), tail.into_iter().rev().collect::<Vec<_>>().join(" | ")));
+        }
+    }
+    if !has_both(&lib) {
+        return Err(format!("the build gave no libraries in {}", lib.display()));
+    }
+    Ok(lib)
+}
+
+/// The file in `<target>/cadaclysm-source` naming the checkout it was built from.
+pub(crate) const CHECKOUT_STAMP: &str = "cadaclysm-checkout";
+
+/// Make `dir` the build directory of the checkout at `repo`, emptying it first when it was
+/// another checkout's (or nobody knows whose).
+///
+/// Cargo hashes a workspace member by its path *within* the workspace, so the `cadaclysm`
+/// crate of every checkout -- each revision of a git dependency is a checkout of its own,
+/// under `~/.cargo/git/checkouts` -- lands on the same file here, and whether it is fresh
+/// is judged by file times alone: a checkout made before the last build of another one
+/// looks older than that build's output, and that output is reused as this checkout's.
+/// Emptying the directory whenever the checkout changes is the one way to rule that out
+/// that does not lean on cargo's internal layout (picking out the members' fingerprints
+/// would, and would only spare the registry crates a rebuild); a `path` dependency keeps
+/// its one checkout, and so keeps building incrementally. Nothing in the checkout is
+/// touched: a git checkout is cargo's, not to be written to.
+pub(crate) fn claim(dir: &Path, repo: &Path) -> Result<(), String> {
+    let checkout = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf()).display().to_string();
+    let stamp = dir.join(CHECKOUT_STAMP);
+    if fs::read_to_string(&stamp).is_ok_and(|recorded| recorded == checkout) {
+        return Ok(());
+    }
+    if dir.exists() {
+        fs::remove_dir_all(dir).map_err(|e| format!("could not empty {} (built from another checkout): {e}", dir.display()))?;
+    }
+    fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    fs::write(&stamp, checkout).map_err(|e| format!("{}: {e}", stamp.display()))
 }
 
 /// The release archive this target runs: its leg name and extension.
@@ -173,11 +315,11 @@ fn download(url: &str, to: &Path) -> Result<(), String> {
 
 /// Copy the libraries to `target/<profile>/`, beside the binaries this build makes --
 /// where a program finds them first, and what to ship with it. OUT_DIR is
-/// `target/<profile>/build/<package>-<hash>/out`, three levels below. A copy that fails
-/// (a library still loaded by a running program) is left to the baked-in path.
+/// `target/<profile>/build/<package>-<hash>/out`, three levels below. A library already
+/// there is replaced unless it is byte for byte the same: two builds of a library can
+/// share a size, and the program loads the one beside it before the baked-in path.
 fn beside_the_binaries(lib: &Path) {
-    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let Some(profile_dir) = out.ancestors().nth(3) else { return };
+    let Some(profile_dir) = profile_dir() else { return };
     for name in shipped() {
         if !lib.join(&name).is_file() {
             let variable = if name.contains("cadaclysm_view") { "CADACLYSM_VIEW_LIBRARY" } else { "CADACLYSM_TERMINAL_LIBRARY" };
@@ -185,11 +327,39 @@ fn beside_the_binaries(lib: &Path) {
             continue;
         }
         let (from, to) = (lib.join(&name), profile_dir.join(&name));
-        let same = fs::metadata(&to).ok().zip(fs::metadata(&from).ok()).is_some_and(|(a, b)| a.len() == b.len());
-        if !same {
+        if !same_contents(&from, &to) {
             if let Err(e) = fs::copy(&from, &to) {
-                println!("cargo:warning=cadaclysm-sdk: could not copy {name} to {}: {e}", profile_dir.display());
+                println!(
+                    "cargo:warning=cadaclysm-sdk: could not copy {name} to {} ({e}); a program there loads the copy already beside it",
+                    profile_dir.display()
+                );
             }
+        }
+    }
+}
+
+/// `target/<profile>/`, where the build's binaries go: three levels above OUT_DIR.
+fn profile_dir() -> Option<PathBuf> {
+    PathBuf::from(env::var_os("OUT_DIR")?).ancestors().nth(3).map(Path::to_path_buf)
+}
+
+/// Whether the files `a` and `b` both exist and hold the same bytes.
+pub(crate) fn same_contents(a: &Path, b: &Path) -> bool {
+    let sizes = fs::metadata(a).ok().zip(fs::metadata(b).ok());
+    sizes.is_some_and(|(x, y)| x.len() == y.len()) && fs::read(a).ok().zip(fs::read(b).ok()).is_some_and(|(x, y)| x == y)
+}
+
+/// Remove the libraries `names` from `profile_dir`, so that a program built there finds
+/// none rather than ones from an earlier build. One that cannot go (loaded by a running
+/// program) is said so.
+pub(crate) fn remove_beside(profile_dir: &Path, names: &[String]) {
+    for name in names {
+        let path = profile_dir.join(name);
+        match fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                println!("cargo:warning=cadaclysm-sdk: could not remove the earlier build's {}: {e}", path.display());
+            }
+            _ => {}
         }
     }
 }
