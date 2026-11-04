@@ -1,7 +1,9 @@
 package view_test
 
 import (
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"image"
 	"image/png"
 	"math"
@@ -817,18 +819,18 @@ func TestPumpWithNoWindowWaits(t *testing.T) {
 	}
 }
 
-// The loader binds 70 calls of cadaclysm_view.h 1.11 (all but 1.7's machining and timeline calls): a
-// 1.10 library (no show_points) is refused before any call is bound, in Python's words; 1.11
-// and later 1.x are taken.
-func TestTheLoaderNeedsViewABI111(t *testing.T) {
-	for _, ok := range []uint32{0x1000B, 0x1000C} {
+// The loader binds 86 calls of cadaclysm_view.h 1.18 (all but 1.14's analysis calls and 1.12's
+// texture targets): a 1.17 library (no set_finish) is refused before any call is bound, in
+// Python's words; 1.18 and later 1.x are taken.
+func TestTheLoaderNeedsViewABI118(t *testing.T) {
+	for _, ok := range []uint32{0x10012, 0x10013} {
 		if err := view.CheckABIForTest(ok, "lib"); err != nil {
 			t.Fatalf("%#x refused: %v", ok, err)
 		}
 	}
 	for version, want := range map[uint32]string{
-		0x1000A: "lib: view ABI 1.10, this SDK needs 1.11 or a later 1.x",
-		0x2000B: "lib: view ABI 2.11, this SDK needs 1.11 or a later 1.x",
+		0x10011: "lib: view ABI 1.17, this SDK needs 1.18 or a later 1.x",
+		0x20012: "lib: view ABI 2.18, this SDK needs 1.18 or a later 1.x",
 	} {
 		if got := message(view.CheckABIForTest(version, "lib")); got != want {
 			t.Fatalf("%#x: %s, want %s", version, got, want)
@@ -1556,5 +1558,554 @@ func TestFocusMovesTheOrbitPoint(t *testing.T) {
 	}
 	if err := v.Focus([3]float32{float32(math.Inf(1)), 0, 0}); err == nil || !strings.HasPrefix(err.Error(), "cadaclysm_view_focus") {
 		t.Fatalf("a point not finite: %s", message(err))
+	}
+}
+
+// ---- view ABI 1.7: the machining view and the timeline ----
+
+var machiningCalls = []string{"last_error", "create", "destroy", "show_machining", "remove", "machining_seek",
+	"machining_colour_by", "machining_overlays", "machining_info", "machining_heights", "timeline_play",
+	"timeline_pause", "timeline_seek", "timeline_set_loop", "timeline_time", "timeline_duration",
+	"timeline_playing", "timeline_status"}
+
+func ptr(x float64) *float64 { return &x }
+
+var (
+	flatTool   = view.MachiningTool{Number: 3, Shape: "flat", Diameter: 6, FluteLength: 20}
+	boxStock   = view.MachiningStock{Min: [3]float64{-42, -27, 0}, Max: [3]float64{42, 27, 14}}
+	oneProgram = []view.MachiningProgram{{Tool: flatTool, Gcode: "G0 X1"}}
+)
+
+func machiningRig(t *testing.T) (*view.View, *view.Machining) {
+	t.Helper()
+	rig(t, machiningCalls...)
+	v, err := view.Offscreen(8, 8, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { v.Close() })
+	m, err := v.ShowMachining(oneProgram, boxStock, nil, nil)
+	if err != nil || m == nil || m.ID() != 21 {
+		t.Fatalf("show_machining: %v", err)
+	}
+	return v, m
+}
+
+// F1: programs, stock, part and options reach the library as given (every array C memory
+// the library could read), with the struct sizes, and no part and no options are NULL and
+// zeros -- a skin of 0 is given (skin_set 1), no skin is not.
+func TestShowMachiningReachesTheContractAndReturnsAMachining(t *testing.T) {
+	rig(t, machiningCalls...)
+	v, err := view.Offscreen(8, 8, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	programs := []view.MachiningProgram{
+		{Tool: view.MachiningTool{Number: 1, Shape: "flat", Diameter: 6, FluteLength: 20}, Gcode: "G0 X1\nG1 Z-1 F100"},
+		{Tool: view.MachiningTool{Number: 2, Shape: "vbit", Diameter: 8, Angle: 90}, Gcode: "M30"},
+		{Tool: view.MachiningTool{Number: 3, Shape: "bullnose", Diameter: 10, CornerRadius: 1.5}, Gcode: ""},
+	}
+	part := &view.MachiningPart{Positions: []float32{0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0}, Indices: []uint32{0, 1, 2, 2, 1, 3}}
+	m, err := v.ShowMachining(programs, boxStock, part, &view.MachiningOptions{Cell: ptr(0.5), Tolerance: ptr(0.02), Skin: ptr(0), RapidRate: ptr(4000)})
+	if err != nil || m == nil || m.ID() != 21 || m.Item == nil {
+		t.Fatalf("show_machining: %v", err)
+	}
+	s := viewrig.Machining()
+	if s.Calls != 1 || s.ProgramCount != 3 || len(s.Programs) != 3 {
+		t.Fatalf("the library saw %d calls, %d programs", s.Calls, s.ProgramCount)
+	}
+	if s.Size == 0 || s.ProgramSize == 0 || s.Programs[1].Size != s.ProgramSize || s.Programs[2].Size != s.ProgramSize {
+		t.Fatalf("sizes: struct %d, programs %d, %d, %d", s.Size, s.ProgramSize, s.Programs[1].Size, s.Programs[2].Size)
+	}
+	want := []viewrig.ProgramSeen{
+		{Size: s.ProgramSize, Number: 1, Shape: 0, Diameter: 6, FluteLength: 20, Gcode: "G0 X1\nG1 Z-1 F100"},
+		{Size: s.ProgramSize, Number: 2, Shape: 3, Diameter: 8, Angle: 90, Gcode: "M30"},
+		{Size: s.ProgramSize, Number: 3, Shape: 4, Diameter: 10, CornerRadius: 1.5, Gcode: ""},
+	}
+	for i := range want {
+		if s.Programs[i] != want[i] {
+			t.Errorf("program %d: %+v, wanted %+v", i, s.Programs[i], want[i])
+		}
+	}
+	if s.StockMin != boxStock.Min || s.StockMax != boxStock.Max {
+		t.Errorf("stock %v %v", s.StockMin, s.StockMax)
+	}
+	if s.PartNull || s.PartVertices != 4 || s.PartIndices != 6 || !sameFloats(s.PartPositions, part.Positions) || len(s.PartTriangles) != 6 || s.PartTriangles[5] != 3 {
+		t.Errorf("part: %+v", s)
+	}
+	if s.Cell != 0.5 || s.Tolerance != 0.02 || s.Skin != 0 || s.SkinSet != 1 || s.RapidRate != 4000 {
+		t.Errorf("options: %+v", s)
+	}
+
+	if _, err := v.ShowMachining(oneProgram, boxStock, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	s = viewrig.Machining()
+	if !s.PartNull || s.PartVertices != 0 || s.PartIndices != 0 || s.Cell != 0 || s.Tolerance != 0 || s.RapidRate != 0 || s.SkinSet != 0 {
+		t.Errorf("no part, no options: %+v", s)
+	}
+	if _, err := v.ShowMachining(oneProgram, boxStock, nil, &view.MachiningOptions{}); err != nil || viewrig.Machining().SkinSet != 0 {
+		t.Errorf("empty options: %v, skin_set %d", err, viewrig.Machining().SkinSet)
+	}
+	// An empty part is a part of nothing: counts 0, the arrays not NULL.
+	if _, err := v.ShowMachining(oneProgram, boxStock, &view.MachiningPart{}, nil); err != nil || viewrig.Machining().PartNull || viewrig.Machining().PartVertices != 0 {
+		t.Errorf("an empty part: %v, %+v", err, viewrig.Machining())
+	}
+	// No programs reach the library, which refuses them in its own words, as Python's.
+	viewrig.Say("cadaclysm_view_show_machining: at least one program")
+	before := viewrig.Machining().Calls
+	if _, err := v.ShowMachining(nil, boxStock, nil, nil); message(err) != "cadaclysm_view_show_machining: at least one program" || viewrig.Machining().Calls != before+1 {
+		t.Errorf("no programs: %s", message(err))
+	}
+}
+
+// F2: what is wrong is refused before the library, in Python's words.
+func TestShowMachiningRefusalsNeverReachTheLibrary(t *testing.T) {
+	rig(t, machiningCalls...)
+	v, err := view.Offscreen(8, 8, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	nan, inf := math.NaN(), math.Inf(1)
+	withTool := func(f func(*view.MachiningTool)) []view.MachiningProgram {
+		tool := flatTool
+		f(&tool)
+		return []view.MachiningProgram{{Tool: tool, Gcode: "G0"}}
+	}
+	triangle := []float32{0, 0, 0, 1, 0, 0, 0, 1, 0}
+	cases := []struct {
+		name     string
+		programs []view.MachiningProgram
+		stock    view.MachiningStock
+		part     *view.MachiningPart
+		options  *view.MachiningOptions
+		want     string
+	}{
+		{"shape", withTool(func(x *view.MachiningTool) { x.Shape = "laser" }), boxStock, nil, nil, "shape 'laser': one of flat, ball, drill, vbit, bullnose"},
+		{"no shape", withTool(func(x *view.MachiningTool) { x.Shape = "" }), boxStock, nil, nil, "shape '': one of flat, ball, drill, vbit, bullnose"},
+		{"diameter", withTool(func(x *view.MachiningTool) { x.Diameter = nan }), boxStock, nil, nil, "tool: diameter, flute_length, angle and corner_radius are finite numbers"},
+		{"flute", withTool(func(x *view.MachiningTool) { x.FluteLength = inf }), boxStock, nil, nil, "tool: diameter, flute_length, angle and corner_radius are finite numbers"},
+		{"angle", withTool(func(x *view.MachiningTool) { x.Angle = inf }), boxStock, nil, nil, "tool: diameter, flute_length, angle and corner_radius are finite numbers"},
+		{"corner", withTool(func(x *view.MachiningTool) { x.CornerRadius = nan }), boxStock, nil, nil, "tool: diameter, flute_length, angle and corner_radius are finite numbers"},
+		{"nul", []view.MachiningProgram{{Tool: flatTool, Gcode: "G0\x00X1"}}, boxStock, nil, nil, "gcode: a NUL character cannot be sent (the C string ends there)"},
+		{"stock", oneProgram, view.MachiningStock{Min: [3]float64{0, 0, nan}, Max: boxStock.Max}, nil, nil, "stock: min and max are finite numbers"},
+		{"stock max", oneProgram, view.MachiningStock{Min: boxStock.Min, Max: [3]float64{0, inf, 0}}, nil, nil, "stock: min and max are finite numbers"},
+		{"positions", oneProgram, boxStock, &view.MachiningPart{Positions: []float32{0, 0, 0, 1, 0}, Indices: nil}, nil, "part positions: 5 numbers is not a whole number of x y z triples"},
+		{"nan position", oneProgram, boxStock, &view.MachiningPart{Positions: []float32{0, 0, float32(nan)}, Indices: nil}, nil, "part positions: finite numbers"},
+		{"indices", oneProgram, boxStock, &view.MachiningPart{Positions: triangle, Indices: []uint32{0, 1}}, nil, "part indices: 2 is not a whole number of triangles"},
+		{"past", oneProgram, boxStock, &view.MachiningPart{Positions: triangle, Indices: []uint32{0, 1, 3}}, nil, "part indices: 3 is past the last of 3 vertices"},
+		{"past a lot", oneProgram, boxStock, &view.MachiningPart{Positions: triangle, Indices: []uint32{0, 1, math.MaxUint32}}, nil, "part indices: 4294967295 is past the last of 3 vertices"},
+		{"cell", oneProgram, boxStock, nil, &view.MachiningOptions{Cell: ptr(nan)}, "show_machining options: cell, tolerance, skin and rapid_rate are finite numbers"},
+		{"rapid", oneProgram, boxStock, nil, &view.MachiningOptions{RapidRate: ptr(inf)}, "show_machining options: cell, tolerance, skin and rapid_rate are finite numbers"},
+	}
+	for _, c := range cases {
+		m, err := v.ShowMachining(c.programs, c.stock, c.part, c.options)
+		if message(err) != c.want || m != nil {
+			t.Errorf("%s: %s", c.name, message(err))
+		}
+	}
+	if _, _, calls := viewrig.Seen(); calls != 0 {
+		t.Fatalf("a refused show_machining reached the library (%d calls)", calls)
+	}
+	// A closed view is refused with the call's name.
+	w, err := view.Offscreen(8, 8, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	if _, err := w.ShowMachining(oneProgram, boxStock, nil, nil); !errors.Is(err, view.ErrClosed) || !strings.HasPrefix(err.Error(), "cadaclysm_view_show_machining") {
+		t.Errorf("a closed view: %s", message(err))
+	}
+}
+
+// F3: every Machining method reaches its call with the item's id and its arguments; Info
+// hands the library a struct of its size; Heights asks for exactly nx * ny floats, row y then x.
+func TestMachiningMethodsReachTheirCalls(t *testing.T) {
+	_, m := machiningRig(t)
+	for _, err := range []error{m.SeekMove(7), m.ColourBy("height"), m.ColourBy("tool"), m.ColourBy("deviation"),
+		m.Overlays(true, false), m.Overlays(false, true)} {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	viewrig.SetInfo(638, 370, 3, 2, 0.5, [2]float32{-1.5, 2.5}, 893.25)
+	info, err := m.Info()
+	if err != nil || info != (view.MachiningInfo{Moves: 638, Move: 370, Nx: 3, Ny: 2, Cell: 0.5, Min: [2]float32{-1.5, 2.5}, CycleTime: 893.25}) {
+		t.Fatalf("info %+v: %v", info, err)
+	}
+	if viewrig.InfoSize() < 40 {
+		t.Errorf("info was handed a struct of %d bytes", viewrig.InfoSize())
+	}
+	z, err := m.Heights()
+	if err != nil || !sameFloats(z, []float32{0, 0.5, 1, 1.5, 2, 2.5}) || viewrig.HeightsCapacity() != 6 {
+		t.Fatalf("heights %v (capacity %d): %v", z, viewrig.HeightsCapacity(), err)
+	}
+	want := "seek 21 7; colour_by 21 0; colour_by 21 1; colour_by 21 2; overlays 21 1 0; overlays 21 0 1; info 21; info 21; heights 21 6"
+	if got := viewrig.Log(); got != want {
+		t.Fatalf("the library saw\n %s\nwanted\n %s", got, want)
+	}
+	// An empty grid is an empty slice, with a buffer the library may point at.
+	viewrig.SetInfo(0, 0, 0, 0, 0.5, [2]float32{}, 0)
+	if z, err := m.Heights(); err != nil || len(z) != 0 {
+		t.Errorf("an empty grid: %v %v", z, err)
+	}
+}
+
+// F4: a mode that is none of the three is refused before the library; the library's
+// refusals are its own words; a machining of a closed view says so.
+func TestMachiningRefusals(t *testing.T) {
+	v, m := machiningRig(t)
+	if err := m.ColourBy("rainbow"); message(err) != "mode 'rainbow': one of height, tool, deviation" {
+		t.Errorf("a mode: %s", message(err))
+	}
+	if viewrig.Log() != "" {
+		t.Errorf("a refused mode reached the library: %s", viewrig.Log())
+	}
+	viewrig.Say("cadaclysm_view_machining_colour_by: no machining 21 is shown")
+	viewrig.Refusing(true)
+	words := "refused by the rig"
+	for name, err := range map[string]error{"seek": m.SeekMove(1), "colour_by": m.ColourBy("tool"), "overlays": m.Overlays(true, true)} {
+		if message(err) != words {
+			t.Errorf("%s: %s", name, message(err))
+		}
+	}
+	if _, err := m.Info(); message(err) != words {
+		t.Errorf("info: %s", message(err))
+	}
+	if _, err := m.Heights(); message(err) != words {
+		t.Errorf("heights: %s", message(err))
+	}
+	viewrig.Refusing(false)
+	v.Close()
+	for name, err := range map[string]error{"seek": m.SeekMove(1), "colour_by": m.ColourBy("tool"), "overlays": m.Overlays(true, true)} {
+		if !errors.Is(err, view.ErrClosed) {
+			t.Errorf("%s on a closed view: %s", name, message(err))
+		}
+	}
+	if _, err := m.Info(); !errors.Is(err, view.ErrClosed) || !strings.HasPrefix(err.Error(), "cadaclysm_view_machining_info") {
+		t.Errorf("info on a closed view: %s", message(err))
+	}
+	if _, err := m.Heights(); !errors.Is(err, view.ErrClosed) {
+		t.Errorf("heights on a closed view: %s", message(err))
+	}
+}
+
+// F5: the transport reaches its calls with its arguments, and the answers come back.
+func TestTimelineTransportReachesItsCallsAndAnswers(t *testing.T) {
+	v, _ := machiningRig(t)
+	for _, err := range []error{v.Play(2.5), v.Pause(), v.Seek(12.25), v.Loop(true), v.Loop(false)} {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, want := viewrig.Log(), "play 2.5; pause; timeline_seek 12.25; loop on; loop off"; got != want {
+		t.Fatalf("the library saw\n %s\nwanted\n %s", got, want)
+	}
+	viewrig.SetTimeline(12.25, 893.5, true)
+	if x, err := v.Time(); err != nil || x != 12.25 {
+		t.Errorf("time %v: %v", x, err)
+	}
+	if x, err := v.Duration(); err != nil || x != 893.5 {
+		t.Errorf("duration %v: %v", x, err)
+	}
+	if x, err := v.Playing(); err != nil || !x {
+		t.Errorf("playing %v: %v", x, err)
+	}
+	viewrig.SetTimeline(0, 0, false)
+	if x, err := v.Playing(); err != nil || x {
+		t.Errorf("not playing %v: %v", x, err)
+	}
+	// Not finite: refused before the library.
+	viewrig.Reset()
+	nan := math.NaN()
+	if err := v.Play(nan); message(err) != "play speed: a finite number" {
+		t.Errorf("play nan: %s", message(err))
+	}
+	if err := v.Seek(math.Inf(-1)); message(err) != "seek seconds: a finite number" {
+		t.Errorf("seek inf: %s", message(err))
+	}
+	if viewrig.Log() != "" {
+		t.Errorf("a refusal reached the library: %s", viewrig.Log())
+	}
+	// The library's refusal.
+	viewrig.Refusing(true)
+	for name, err := range map[string]error{"play": v.Play(1), "pause": v.Pause(), "seek": v.Seek(1), "loop": v.Loop(true)} {
+		if message(err) != "refused by the rig" {
+			t.Errorf("%s: %s", name, message(err))
+		}
+	}
+	viewrig.Refusing(false)
+	// A closed view, with each call's name.
+	v.Close()
+	calls := map[string]error{
+		"cadaclysm_view_timeline_play":     v.Play(1),
+		"cadaclysm_view_timeline_pause":    v.Pause(),
+		"cadaclysm_view_timeline_seek":     v.Seek(1),
+		"cadaclysm_view_timeline_set_loop": v.Loop(true),
+	}
+	_, calls["cadaclysm_view_timeline_time"] = v.Time()
+	_, calls["cadaclysm_view_timeline_duration"] = v.Duration()
+	_, calls["cadaclysm_view_timeline_playing"] = v.Playing()
+	_, calls["cadaclysm_view_timeline_status"] = v.Status()
+	for name, err := range calls {
+		if !errors.Is(err, view.ErrClosed) || !strings.HasPrefix(err.Error(), name+":") {
+			t.Errorf("%s on a closed view: %s", name, message(err))
+		}
+	}
+}
+
+// F6: Status is the two-call idiom -- measure, fill -- and asks again with room when the line
+// grew between the two calls; lines are split at newlines; none is an empty slice.
+func TestTimelineStatusMeasuresFillsAndRetries(t *testing.T) {
+	v, _ := machiningRig(t)
+	if lines, err := v.Status(); err != nil || lines == nil || len(lines) != 0 {
+		t.Fatalf("no tracks: %#v %v", lines, err)
+	}
+	viewrig.StatusAnswers("move 3 of 9 - T1 flat 6 mm\nmove 1 of 2 - T2 drill 3 mm")
+	lines, err := v.Status()
+	if err != nil || len(lines) != 2 || lines[0] != "move 3 of 9 - T1 flat 6 mm" || lines[1] != "move 1 of 2 - T2 drill 3 mm" || viewrig.StatusCalls() != 2 {
+		t.Fatalf("two tracks: %q (%d calls) %v", lines, viewrig.StatusCalls(), err)
+	}
+	// The line grew between the measure and the fill: ask again, the way Python does.
+	viewrig.Reset()
+	viewrig.StatusAnswers("a", "a longer line than measured", "a longer line than measured")
+	lines, err = v.Status()
+	if err != nil || len(lines) != 1 || lines[0] != "a longer line than measured" || viewrig.StatusCalls() != 3 {
+		t.Fatalf("a grown line: %q (%d calls) %v", lines, viewrig.StatusCalls(), err)
+	}
+	// An empty answer is no line.
+	viewrig.Reset()
+	viewrig.StatusAnswers("")
+	if lines, err := v.Status(); err != nil || len(lines) != 0 || viewrig.StatusCalls() != 1 {
+		t.Fatalf("an empty status: %q (%d calls) %v", lines, viewrig.StatusCalls(), err)
+	}
+	// The line emptied between the measure and the fill: no line, not one empty line.
+	viewrig.Reset()
+	viewrig.StatusAnswers("move 9 of 9", "")
+	if lines, err := v.Status(); err != nil || lines == nil || len(lines) != 0 || viewrig.StatusCalls() != 2 {
+		t.Fatalf("an emptied status: %q (%d calls) %v", lines, viewrig.StatusCalls(), err)
+	}
+}
+
+// The plate of web/test/fixtures/machining-plate/job.json, from the repository tree: the
+// fixture's directory found by walking up from the test's.
+type plateJob struct {
+	dir      string
+	programs []view.MachiningProgram
+	options  *view.MachiningOptions
+}
+
+func plate(t *testing.T) plateJob {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for at := dir; ; at = filepath.Dir(at) {
+		fixture := filepath.Join(at, "web", "test", "fixtures", "machining-plate")
+		if _, err := os.Stat(filepath.Join(fixture, "job.json")); err == nil {
+			read := func(name string) string {
+				text, err := os.ReadFile(filepath.Join(fixture, name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(text)
+			}
+			return plateJob{dir: fixture, options: &view.MachiningOptions{Cell: ptr(0.5), RapidRate: ptr(5000)},
+				programs: []view.MachiningProgram{
+					{Tool: view.MachiningTool{Number: 1, Shape: "flat", Diameter: 6, FluteLength: 20}, Gcode: read("program-0.gcode")},
+					{Tool: view.MachiningTool{Number: 2, Shape: "drill", Diameter: 6, FluteLength: 30}, Gcode: read("program-1.gcode")},
+				}}
+		}
+		if filepath.Dir(at) == at {
+			break
+		}
+	}
+	if os.Getenv("CADACLYSM_SAMPLES_OPTIONAL") != "" {
+		t.Skip("web/test/fixtures/machining-plate is missing")
+	}
+	t.Fatalf("web/test/fixtures/machining-plate is missing above %s", dir)
+	return plateJob{}
+}
+
+// compareAtWalls is web/test/machining-selftest.js's rule, as Python's _compare_at_walls
+// and Java's: a cell off the oracle's by more than 2e-3 fails, unless it is a wall (the
+// oracle's 3x3 neighbourhood spans more than 0.5 mm) and one of the neighbours is within
+// 2e-3 of it -- excused. Returns failed, excused and walls.
+func compareAtWalls(gpu, oracle []float32, nx, ny int) (failed, excused, walls int) {
+	for j := 0; j < ny; j++ {
+		for i := 0; i < nx; i++ {
+			lo, hi := float32(math.Inf(1)), float32(math.Inf(-1))
+			for b := max(0, j-1); b < min(ny, j+2); b++ {
+				for a := max(0, i-1); a < min(nx, i+2); a++ {
+					lo, hi = min(lo, oracle[b*nx+a]), max(hi, oracle[b*nx+a])
+				}
+			}
+			wall := hi-lo > 0.5
+			if wall {
+				walls++
+			}
+			g := gpu[j*nx+i]
+			if math.Abs(float64(g-oracle[j*nx+i])) <= 2e-3 {
+				continue
+			}
+			near := false
+			if wall {
+				for b := max(0, j-1); b < min(ny, j+2); b++ {
+					for a := max(0, i-1); a < min(nx, i+2); a++ {
+						near = near || math.Abs(float64(oracle[b*nx+a]-g)) <= 2e-3
+					}
+				}
+			}
+			if near {
+				excused++
+			} else {
+				failed++
+			}
+		}
+	}
+	return
+}
+
+func machiningOffscreen(t *testing.T) *view.View {
+	t.Helper()
+	if _, err := view.UseWgpu(); err != nil {
+		skipOrFail(t, err)
+	}
+	v, err := view.Offscreen(64, 48, nil)
+	if err != nil {
+		skipOrFail(t, err)
+	}
+	t.Cleanup(func() { v.Close() })
+	return v
+}
+
+// must is a call's answer, or a panic that fails the running test with the error.
+func must[T any](x T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return x
+}
+
+// F7: the plate, seeked to its end, is the fixture's heights on the real library -- by the
+// wall rule -- and the status line says so.
+func TestMachiningPlatePlaysToTheFixturesHeightsOffscreen(t *testing.T) {
+	job := plate(t)
+	v := machiningOffscreen(t)
+	m := must(v.ShowMachining(job.programs, boxStock, nil, job.options))
+	if d := must(v.Duration()); math.Abs(d-893.247024) > 1e-3 {
+		t.Errorf("duration %v", d)
+	}
+	info := must(m.Info())
+	if info.Moves == 0 {
+		t.Fatal("no moves")
+	}
+	if err := m.SeekMove(info.Moves); err != nil {
+		t.Fatal(err)
+	}
+	gpu := must(m.Heights())
+	raw, err := os.ReadFile(filepath.Join(job.dir, "heights.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	nx, ny := int(binary.LittleEndian.Uint32(raw[8:])), int(binary.LittleEndian.Uint32(raw[12:]))
+	if int(info.Nx) != nx || int(info.Ny) != ny || len(gpu) != nx*ny {
+		t.Fatalf("the grid %dx%d with %d floats, wanted %dx%d", info.Nx, info.Ny, len(gpu), nx, ny)
+	}
+	oracle := make([]float32, nx*ny)
+	for k := range oracle {
+		oracle[k] = math.Float32frombits(binary.LittleEndian.Uint32(raw[28+4*k:]))
+	}
+	failed, excused, walls := compareAtWalls(gpu, oracle, nx, ny)
+	if failed != 0 || excused > max(4, walls/100) {
+		t.Errorf("heights against heights.bin: failed %d, excused %d, walls %d", failed, excused, walls)
+	}
+	if err := v.Draw(); err != nil {
+		t.Fatal(err)
+	}
+	lines := must(v.Status())
+	if len(lines) == 0 || !strings.HasPrefix(lines[0], fmt.Sprintf("move %d of %d", info.Moves, info.Moves)) {
+		t.Errorf("status %q", lines)
+	}
+	if err := m.Remove(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// F7b: every one of the fourteen calls on the real library, not only the plate's own.
+func TestMachiningAndTimelineCallsOnTheRealLibrary(t *testing.T) {
+	job := plate(t)
+	v := machiningOffscreen(t)
+	m := must(v.ShowMachining(job.programs, boxStock, nil, job.options))
+	duration := must(v.Duration())
+	if must(v.Playing()) {
+		t.Error("a fresh machining is paused")
+	}
+	if err := v.Play(2); err != nil || !must(v.Playing()) {
+		t.Errorf("play(2) did not play: %v", err)
+	}
+	if err := v.Pause(); err != nil || must(v.Playing()) {
+		t.Errorf("pause did not pause: %v", err)
+	}
+	if err := v.Seek(10); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Draw(); err != nil {
+		t.Fatal(err)
+	}
+	if x := must(v.Time()); math.Abs(x-10) > 1e-6 {
+		t.Errorf("time after seek(10): %v", x)
+	}
+	if err := v.Seek(duration + 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Draw(); err != nil {
+		t.Fatal(err)
+	}
+	if x := must(v.Time()); math.Abs(x-duration) > 1e-6 {
+		t.Errorf("seek past the end clamps: %v", x)
+	}
+	for _, on := range []bool{true, false} {
+		if err := v.Loop(on); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if lines := must(v.Status()); len(lines) == 0 {
+		t.Error("no status line")
+	}
+	for _, mode := range []string{"tool", "height"} {
+		if err := m.ColourBy(mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.ColourBy("deviation"); err == nil || !strings.Contains(err.Error(), "cadaclysm_view_machining_colour_by") {
+		t.Errorf("deviation with no part: %s", message(err))
+	}
+	if err := m.Overlays(false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Overlays(true, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Draw(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Remove(); err != nil {
+		t.Fatal(err)
+	}
+	// With a part, colouring by deviation works.
+	part := &view.MachiningPart{Positions: []float32{-42, -27, 14, 42, -27, 14, 0, 27, 14}, Indices: []uint32{0, 1, 2}}
+	withPart := must(v.ShowMachining(job.programs, boxStock, part, job.options))
+	if err := withPart.ColourBy("deviation"); err != nil {
+		t.Errorf("deviation with a part: %v", err)
+	}
+	if err := v.Draw(); err != nil {
+		t.Fatal(err)
+	}
+	if err := withPart.Remove(); err != nil {
+		t.Fatal(err)
 	}
 }

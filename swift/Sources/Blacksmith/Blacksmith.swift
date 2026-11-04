@@ -72,9 +72,13 @@ import Foundation
 public struct BuildError: Error, CustomStringConvertible, LocalizedError {
     /// The library's reason, or this module's where the refusal is its own.
     public let message: String
+    /// The ids a sketch refusal names: the constraints a new constraint, value or reference
+    /// conflicts with, or the entities still using a point; empty for every other refusal.
+    public let ids: [UInt32]
 
-    public init(_ message: String) {
+    public init(_ message: String, ids: [UInt32] = []) {
         self.message = message
+        self.ids = ids
     }
 
     public var description: String { message }
@@ -566,6 +570,36 @@ public final class Profile {
 
     deinit { cadaclysm_blacksmith_profile_free(handle) }
 
+    /// The perimeter of the outer loop (holes are not counted), to a relative `accuracy`; 0 or
+    /// less asks for the library's default.
+    public func length(_ accuracy: Double = 0) throws -> Length {
+        var raw = CadaclysmBlacksmithLength()
+        if !cadaclysm_blacksmith_profile_length(handle, accuracy, &raw) { throw failure("profile_length") }
+        return Length(raw)
+    }
+
+    /// The point `s` along the outer loop from its start, its unit tangent, the side it lies on
+    /// (`segment`) and that side's own `parameter`, to a relative `accuracy` (0 or less asks for
+    /// the library's default).
+    public func pointAtLength(_ s: Double, _ accuracy: Double = 0) throws -> At {
+        var raw = CadaclysmBlacksmithAt()
+        if !cadaclysm_blacksmith_profile_point_at_length(handle, s, accuracy, &raw) {
+            throw failure("profile_point_at_length")
+        }
+        return At(raw)
+    }
+
+    /// The outer loop in `n` pieces of equal arc length: `n` samples from its start, the loop's
+    /// start not repeated. `n` is 1 to 1,000,000.
+    public func divideByCount(_ n: UInt32, _ accuracy: Double = 0) throws -> [At] {
+        try samplesOf(cadaclysm_blacksmith_profile_divide_by_count(handle, n, accuracy), "profile_divide_by_count")
+    }
+
+    /// The outer loop in steps of arc length `step` from its start, keeping the short last piece.
+    public func divideByLength(_ step: Double, _ accuracy: Double = 0) throws -> [At] {
+        try samplesOf(cadaclysm_blacksmith_profile_divide_by_length(handle, step, accuracy), "profile_divide_by_length")
+    }
+
     /// A `w` x `h` rectangle centred on the origin.
     public static func rect(_ w: Double, _ h: Double) throws -> Profile {
         try Profile(cadaclysm_blacksmith_profile_rect(w, h))
@@ -594,8 +628,25 @@ public final class Profile {
     /// counter-clockwise.
     public static func regularPolygon(_ centre: SIMD2<Double>, _ radius: Double, _ sides: Int,
                                       angle: Double = 0.0) throws -> Profile {
-        try Profile(cadaclysm_blacksmith_profile_regular_polygon(centre.x, centre.y, radius,
-                                                                 UInt32(clamping: sides), angle))
+        guard let n = UInt32(exactly: sides) else {
+            throw BuildError("profile_regular_polygon: sides is out of range: \(sides)")
+        }
+        return try Profile(cadaclysm_blacksmith_profile_regular_polygon(centre.x, centre.y, radius, n, angle))
+    }
+
+    /// A regular polygon of `sides` sides (at least 3) whose sides touch the circle of `radius`
+    /// about `centre` -- the polygon across flats, a nut's hex: its corners on the circle of
+    /// `radius / cos(pi / sides)`, the first at `angle` radians from the sketch's x axis, the rest
+    /// counter-clockwise, on the same rays as `regularPolygon`'s corners with the same `angle`;
+    /// each side's midpoint on the circle of `radius`. A `sides` a `UInt32` cannot hold is
+    /// refused before the call.
+    public static func circumscribedPolygon(_ centre: SIMD2<Double>, _ radius: Double, _ sides: Int,
+                                            angle: Double = 0.0) throws -> Profile {
+        guard let n = UInt32(exactly: sides) else {
+            throw BuildError("profile_circumscribed_polygon: sides is out of range: \(sides)")
+        }
+        return try Profile(cadaclysm_blacksmith_profile_circumscribed_polygon(centre.x, centre.y, radius, n, angle),
+                           "profile_circumscribed_polygon")
     }
 
     /// A star of `points` tips (at least 3) on the circle of `outer` about `centre`, its
@@ -603,8 +654,10 @@ public final class Profile {
     /// first tip at `angle` radians from the sketch's x axis, the rest counter-clockwise.
     public static func star(_ centre: SIMD2<Double>, _ outer: Double, _ inner: Double, _ points: Int,
                             angle: Double = 0.0) throws -> Profile {
-        try Profile(cadaclysm_blacksmith_profile_star(centre.x, centre.y, outer, inner,
-                                                      UInt32(clamping: points), angle))
+        guard let n = UInt32(exactly: points) else {
+            throw BuildError("profile_star: points is out of range: \(points)")
+        }
+        return try Profile(cadaclysm_blacksmith_profile_star(centre.x, centre.y, outer, inner, n, angle))
     }
 
     /// A spline of `degree` through the control polygon `points` (`weights` one per point, or
@@ -710,6 +763,30 @@ public final class Profile {
     /// This outline moved by (`dx`, `dy`).
     public func translate(_ dx: Double, _ dy: Double) throws -> Profile {
         try Profile(cadaclysm_blacksmith_translate_profile(handle, dx, dy))
+    }
+
+    /// This outline turned `radians` (counter-clockwise) about `centre`.
+    public func rotate(_ centre: SIMD2<Double>, _ radians: Double) throws -> Profile {
+        try Profile(cadaclysm_blacksmith_profile_rotate(handle, centre.x, centre.y, radians))
+    }
+
+    /// This outline scaled by `sx`, `sy` about `centre`. An arc stays an arc where the two are
+    /// equal in size, and becomes exact conics otherwise; a negative factor mirrors across that
+    /// axis, and a zero one throws.
+    public func scale(_ centre: SIMD2<Double>, _ sx: Double, _ sy: Double) throws -> Profile {
+        try Profile(cadaclysm_blacksmith_profile_scale(handle, centre.x, centre.y, sx, sy))
+    }
+
+    /// This outline reflected across the line through `point` along `direction`; each arc's
+    /// sense turns. A zero `direction` throws.
+    public func mirror(_ point: SIMD2<Double>, _ direction: SIMD2<Double>) throws -> Profile {
+        try Profile(cadaclysm_blacksmith_profile_mirror(handle, point.x, point.y, direction.x, direction.y))
+    }
+
+    /// This outline under the 2D affine map `m`, six numbers row-major (2×3):
+    /// `x' = m0·x + m1·y + m2`, `y' = m3·x + m4·y + m5`. A singular map throws.
+    public func transform2d(_ m: [Double]) throws -> Profile {
+        try Profile(cadaclysm_blacksmith_profile_transform2d(handle, try countedValues(m, 6, "profile_transform2d")))
     }
 
     /// This outline coloured (r, g, b), each in 0..1: how it is drawn. The verbs that make a
@@ -1453,6 +1530,12 @@ extension FemMesh: CustomStringConvertible {
 public final class Solid {
     private var handle: OpaquePointer?
 
+    /// The trims lost by the `transform` or `convertToNurbs` call that made this solid: face
+    /// boundaries kept only as a polyline lifted through the old surface, where no exact edge
+    /// curve was left. Per call -- not this solid's history -- and 0 for a rigid map or a
+    /// similarity, and on every solid neither call made.
+    public private(set) var inexactTrims = 0
+
     init(_ raw: OpaquePointer?, _ what: String = "solid") throws {
         handle = try checked(raw, what)
     }
@@ -1516,6 +1599,54 @@ public final class Solid {
     public var name: String? {
         get throws {
             guard let raw = cadaclysm_blacksmith_solid_name(try h()) else { return nil }
+            return String(cString: raw)
+        }
+    }
+
+    // MARK: Material and look defined outside the file
+
+    /// This solid made of `material` -- a name, written to STEP as the product's
+    /// `MATERIAL_DESIGNATION`. Kept by every operation as the solid's colour is: a move
+    /// keeps it, a boolean's result is made of its first solid's. Writing it moves
+    /// `step`'s default schema to AP242; a named schema without the entity drops it, as
+    /// it drops a colour. Refused when blank.
+    public func withMaterial(_ material: String) throws -> Solid {
+        try Solid(cadaclysm_blacksmith_with_material(try h(), material))
+    }
+
+    /// What this solid is made of, or nil -- see `withMaterial`. Read as `name` is.
+    public var material: String? {
+        get throws {
+            guard let raw = cadaclysm_blacksmith_solid_material(try h()) else { return nil }
+            return String(cString: raw)
+        }
+    }
+
+    /// This solid drawn in a style defined outside the file: `identification` the style's
+    /// name in the library at `location` -- a MaterialX or MDL file and a material in it,
+    /// say. Either may be nil, not both. Written to STEP as an `EXTERNALLY_DEFINED_STYLE`
+    /// beside the solid's colour, which a reader without the library draws instead (AP242
+    /// or AP214: the default schema moves to AP242). Kept as `withMaterial`'s material is.
+    public func styled(location: String? = nil, identification: String? = nil) throws -> Solid {
+        let handle = try h()
+        let raw = try withOptionalCString(location) { l in
+            try withOptionalCString(identification) { i in cadaclysm_blacksmith_styled(handle, l, i) }
+        }
+        return try Solid(raw)
+    }
+
+    /// Where this solid's outside style lives (`styled`'s `location`), or nil.
+    public var styleLocation: String? {
+        get throws {
+            guard let raw = cadaclysm_blacksmith_solid_style_location(try h()) else { return nil }
+            return String(cString: raw)
+        }
+    }
+
+    /// This solid's outside style's name in its library (`styled`'s `identification`), or nil.
+    public var styleIdentification: String? {
+        get throws {
+            guard let raw = cadaclysm_blacksmith_solid_style_identification(try h()) else { return nil }
             return String(cString: raw)
         }
     }
@@ -1764,6 +1895,41 @@ public final class Solid {
         try Solid(cadaclysm_blacksmith_mirror(try h(), plane.values))
     }
 
+    /// Through the affine map `t`, exactly, colours and name kept. A rigid map or a similarity
+    /// keeps every surface's kind; a map within 1e-6 of a similarity (a rotation written in
+    /// float32 among them) is applied as the exact similarity nearest it. Any other map -- a
+    /// non-uniform scale, a shear -- turns the curved surfaces into their exact NURBS and maps
+    /// those. The result's `inexactTrims` counts the trims this call lost. A singular map (it
+    /// flattens the solid) throws.
+    public func transform(_ t: Transform) throws -> Solid { try transform(t.rows) }
+
+    /// `transform(_:)` with the map as 16 numbers, row-major.
+    public func transform(_ matrix: [Double]) throws -> Solid {
+        let matrix = try countedValues(matrix, 16, "solid_transform")
+        var lost: UInt32 = 0
+        let out = try Solid(cadaclysm_blacksmith_solid_transform(try h(), matrix, &lost), "solid_transform")
+        out.inexactTrims = Int(lost)
+        return out
+    }
+
+    /// Every surface `level` selects rewritten as its exact NURBS: `"procedural"` the
+    /// revolutions, extrusions and sums; `"analytic"` those and the cylinders, cones, spheres
+    /// and tori; `"all"` everything, planes and edge curves too. Colours and name kept;
+    /// `inexactTrims` counts the trims this call lost. Any other level throws.
+    public func convertToNurbs(_ level: String = "all") throws -> Solid {
+        let code: UInt32
+        switch level {
+        case "procedural": code = UInt32(CADACLYSM_BLACKSMITH_NURBS_PROCEDURAL)
+        case "analytic": code = UInt32(CADACLYSM_BLACKSMITH_NURBS_ANALYTIC)
+        case "all": code = UInt32(CADACLYSM_BLACKSMITH_NURBS_ALL)
+        default: throw BuildError("convert_to_nurbs: level '\(level)' is not \"procedural\", \"analytic\" or \"all\"")
+        }
+        var lost: UInt32 = 0
+        let out = try Solid(cadaclysm_blacksmith_solid_convert_to_nurbs(try h(), code, &lost), "solid_convert_to_nurbs")
+        out.inexactTrims = Int(lost)
+        return out
+    }
+
     // MARK: Booleans
 
     /// `f` over this solid's handle and `other`'s, its flush faces merged when `merge` (the
@@ -1838,7 +2004,7 @@ public final class Solid {
     /// not settle (the points are then the best estimate) -- a closed chain that does not go
     /// once round its own curve (a sliver where two surfaces barely cross) has no curve,
     /// `tangent` still true. An `Overlap` is a coincident face pair with the shared region's
-    /// rings (outer first, holes after), which may be empty for a partial overlap whose
+    /// rings (outer first, holes after), which may be empty for a partial overlap of curved faces whose
     /// outlines cross. Known limit: a crossing narrower than `tolerance` -- two surfaces
     /// passing within it without their meshes crossing -- can be missed; near-tangent contact
     /// is where this bites.
@@ -1850,26 +2016,7 @@ public final class Solid {
             guard let found = cadaclysm_blacksmith_intersect(try h(), try other.h(), tolerance, nil, nil) else {
                 throw failure("intersect")
             }
-            defer { cadaclysm_blacksmith_intersection_free(found) }
-            var chains: [Chain] = []
-            for i in 0..<cadaclysm_blacksmith_intersection_chain_count(found) {
-                var raw = CadaclysmBlacksmithChain()
-                if !cadaclysm_blacksmith_intersection_chain(found, i, &raw) { throw failure("intersection_chain") }
-                var curve: Curve? = nil
-                if raw.has_curve {
-                    var rawCurve = CadaclysmBlacksmithCurve()
-                    if !cadaclysm_blacksmith_intersection_curve(found, i, &rawCurve) { throw failure("intersection_curve") }
-                    curve = Curve(rawCurve)
-                }
-                chains.append(Chain(raw, curve))
-            }
-            var overlaps: [Overlap] = []
-            for i in 0..<cadaclysm_blacksmith_intersection_overlap_count(found) {
-                var raw = CadaclysmBlacksmithOverlap()
-                if !cadaclysm_blacksmith_intersection_overlap(found, i, &raw) { throw failure("intersection_overlap") }
-                overlaps.append(Overlap(raw))
-            }
-            return Intersection(chains: chains, overlaps: overlaps)
+            return try intersectionOf(found)
         }
     }
 
@@ -2025,6 +2172,71 @@ public final class Solid {
             if !cadaclysm_blacksmith_manifold(try h(), &row) { throw failure("manifold") }
             return Manifold(row)
         }
+    }
+
+    /// What is wrong with this solid, as a `HealthReport`: the free edges (the sides one face
+    /// bounds) and the wires they chain into, with each edge's nearest partner and the gap to it;
+    /// the features below `tolerance`; the loose edges; and what sewing would join and leave.
+    /// `tolerance` is the length below which a feature is small and a gap closes -- nil, or a
+    /// value that is not finite and positive, takes the default (the report shows what was
+    /// used). `mesh: true` also meshes the solid and reports where the mesh cracks (`cracks`);
+    /// without it `cracks` is nil. Nothing moves.
+    public func health(tolerance: Double? = nil, mesh: Bool = false) throws -> HealthReport {
+        let h = try checked(cadaclysm_blacksmith_health(try self.h(), tolerance ?? .nan, mesh), "health")
+        defer { cadaclysm_blacksmith_health_free(h) }
+        var counts = [UInt32](repeating: 0, count: 18)
+        var sizes = [Double](repeating: 0, count: 8)
+        if !cadaclysm_blacksmith_health_summary(h, &counts, &sizes) { throw failure("health") }
+        var n = Int(cadaclysm_blacksmith_health_free_edges(h, nil, nil))
+        var freeIds = [UInt32](repeating: 0, count: 6 * n), freeSizes = [Double](repeating: 0, count: 2 * n)
+        if n > 0 { _ = cadaclysm_blacksmith_health_free_edges(h, &freeIds, &freeSizes) }
+        n = Int(cadaclysm_blacksmith_health_wires(h, nil, nil))
+        var wireRuns = [UInt32](repeating: 0, count: 3 * n), wireSizes = [Double](repeating: 0, count: 2 * n)
+        if n > 0 { _ = cadaclysm_blacksmith_health_wires(h, &wireRuns, &wireSizes) }
+        n = Int(cadaclysm_blacksmith_health_small(h, nil, nil))
+        var smallItems = [UInt32](repeating: 0, count: 2 * n), smallSizes = [Double](repeating: 0, count: n)
+        if n > 0 { _ = cadaclysm_blacksmith_health_small(h, &smallItems, &smallSizes) }
+        n = Int(cadaclysm_blacksmith_health_crack_edges(h, nil))
+        var crackEdges = [UInt32](repeating: 0, count: n)
+        if n > 0 { _ = cadaclysm_blacksmith_health_crack_edges(h, &crackEdges) }
+        return HealthReport(counts: counts, sizes: sizes, freeIds: freeIds, freeSizes: freeSizes, wireRuns: wireRuns,
+                            wireSizes: wireSizes, smallItems: smallItems, smallSizes: smallSizes, crackEdges: crackEdges)
+    }
+
+    /// This solid with its small features removed, and what was done, as a new `Solid` and a
+    /// `HealReport`; this one is left as it was. The features are the ones `health` lists as
+    /// small at `tolerance`: short and collapsed edges, sliver and tiny faces, small holes. Every
+    /// fix is a vertex merge, and an edge it moves records how far as its `edgeTolerance`. A
+    /// guard compares the result's health with this one's and refuses fixes that made it worse
+    /// (`guarded`). `edges`, `faces` and `holes` switch each kind of fix; a kind switched off is
+    /// refused as `"toggled"`. `tolerance` nil, or a value that is not finite and positive, takes
+    /// the default (the report shows what was used).
+    public func healed(tolerance: Double? = nil, edges: Bool = true, faces: Bool = true,
+                       holes: Bool = true) throws -> (Solid, HealReport) {
+        let flags = healFlags(edges: edges, faces: faces, holes: holes)
+        let h = try checked(cadaclysm_blacksmith_healed(try self.h(), tolerance ?? .nan, flags), "healed")
+        defer { cadaclysm_blacksmith_heal_free(h) }
+        var counts = [UInt32](repeating: 0, count: 11)
+        var sizes = [Double](repeating: 0, count: 2)
+        if !cadaclysm_blacksmith_heal_summary(h, &counts, &sizes) { throw failure("healed") }
+        var n = Int(cadaclysm_blacksmith_heal_fixes(h, nil, nil))
+        var fixItems = [UInt32](repeating: 0, count: 2 * n), fixSizes = [Double](repeating: 0, count: 2 * n)
+        if n > 0 { _ = cadaclysm_blacksmith_heal_fixes(h, &fixItems, &fixSizes) }
+        n = Int(cadaclysm_blacksmith_heal_refused(h, nil, nil))
+        var refusedItems = [UInt32](repeating: 0, count: 3 * n), refusedSizes = [Double](repeating: 0, count: n)
+        if n > 0 { _ = cadaclysm_blacksmith_heal_refused(h, &refusedItems, &refusedSizes) }
+        let report = HealReport(counts: counts, sizes: sizes, fixItems: fixItems, fixSizes: fixSizes,
+                                refusedItems: refusedItems, refusedSizes: refusedSizes)
+        return (try Solid(cadaclysm_blacksmith_heal_body(h), "healed"), report)
+    }
+
+    /// How far brep edge `edge` (as a `HealFix` names one) may lie off its curve: 0 for an exact
+    /// edge, the distance healing (or sewing) moved it where that is recorded, nil when no trim
+    /// names the id (an edge healing removed).
+    public func edgeTolerance(_ edge: Int) throws -> Double? {
+        let t = cadaclysm_blacksmith_edge_tolerance(try h(), try index32(edge, "edge_tolerance"))
+        if t.isNaN && !lastError().isEmpty { throw failure("edge_tolerance") }
+        return t.isNaN ? nil : t
     }
 
     /// What this solid measures, per unit density, each figure beside a bound on its own error.
@@ -2273,6 +2485,78 @@ public final class Solid {
         return out
     }
 
+    /// The box on this solid's principal axes: its centre, three unit axes (row `i` the direction of
+    /// `half[i]`) and the half extent along each. Not minimal, and a free choice where two moments
+    /// are equal (a sphere, a cube); the half extents are grown by about the tolerance the
+    /// measurement settled on. `accuracy` 0 or less asks for the box's own default, `1e-5`.
+    public func orientedBox(_ accuracy: Double = 0) throws -> OrientedBox {
+        var raw = CadaclysmBlacksmithOrientedBox()
+        if !cadaclysm_blacksmith_oriented_box(try h(), accuracy, &raw) { throw failure("oriented_box") }
+        return OrientedBox(raw)
+    }
+
+    /// The length of edge `edge` (the index `edges` and `fillet` use) over its own range, to a
+    /// relative `accuracy`; 0 or less asks for the library's default.
+    public func edgeLength(_ edge: Int, _ accuracy: Double = 0) throws -> Length {
+        var raw = CadaclysmBlacksmithLength()
+        if !cadaclysm_blacksmith_edge_length(try h(), try index32(edge, "edge_length"), accuracy, &raw) {
+            throw failure("edge_length")
+        }
+        return Length(raw)
+    }
+
+    /// The point `s` along edge `edge` from the start of its own range, its unit tangent there and
+    /// the parameter it lies at, to a relative `accuracy` (0 or less asks for the library's
+    /// default). `s` is within 0...the edge's length.
+    public func edgePointAtLength(_ edge: Int, _ s: Double, _ accuracy: Double = 0) throws -> At {
+        var raw = CadaclysmBlacksmithAt()
+        if !cadaclysm_blacksmith_edge_point_at_length(try h(), try index32(edge, "edge_point_at_length"), s, accuracy, &raw) {
+            throw failure("edge_point_at_length")
+        }
+        return At(raw)
+    }
+
+    /// Edge `edge` in `n` pieces of equal arc length: `n + 1` samples from its start to its end,
+    /// or `n` from its start round to just short of it when it closes on itself. `n` is 1 to
+    /// 1,000,000.
+    public func edgeDivideByCount(_ edge: Int, _ n: UInt32, _ accuracy: Double = 0) throws -> [At] {
+        let list = cadaclysm_blacksmith_edge_divide_by_count(try h(), try index32(edge, "edge_divide_by_count"), n, accuracy)
+        return try samplesOf(list, "edge_divide_by_count")
+    }
+
+    /// Edge `edge` in steps of arc length `step`, starting at its start and keeping the short last
+    /// piece; a closed edge never repeats its start.
+    public func edgeDivideByLength(_ edge: Int, _ step: Double, _ accuracy: Double = 0) throws -> [At] {
+        let list = cadaclysm_blacksmith_edge_divide_by_length(try h(), try index32(edge, "edge_divide_by_length"), step, accuracy)
+        return try samplesOf(list, "edge_divide_by_length")
+    }
+
+    /// Where `point` is relative to this closed solid: `"inside"`, `"outside"` or `"on"` (within
+    /// `tolerance` of the boundary, absolute, in model units). The body is meshed on every call;
+    /// for more than a few points build a `classifier` once.
+    public func contains(_ point: SIMD3<Double>, tolerance: Double = 0.05) throws -> String {
+        let xyz = [point.x, point.y, point.z]
+        var code: UInt32 = 0
+        if !cadaclysm_blacksmith_contains(try h(), xyz, tolerance, &code) { throw failure("contains") }
+        return try containment(code, "contains")
+    }
+
+    /// A reusable classifier of points against this closed solid, meshed once at `tolerance`. It
+    /// keeps its own reference to the body, so it answers on after this `Solid` is closed.
+    public func classifier(tolerance: Double = 0.05) throws -> Classifier {
+        try Classifier(try h(), tolerance)
+    }
+
+    /// The closest points between this solid's boundary and `other`'s, to the absolute `tolerance`
+    /// (positive and finite; 0.05 by default), and what each lies on.
+    public func closest(_ other: Solid, tolerance: Double = 0.05) throws -> Closest {
+        var raw = CadaclysmBlacksmithClosest()
+        if !cadaclysm_blacksmith_closest(try h(), try other.h(), tolerance, nil, nil, &raw) {
+            throw failure("closest")
+        }
+        return Closest(raw)
+    }
+
     /// Twelve numbers: origin, x, y, z of the workplane on `face` -- its centre, world X laid
     /// onto it (world Y on a face facing close to X) and its outward normal, as `Frame.at`
     /// lays them. `Frame.of` reads them as a `Frame`.
@@ -2282,6 +2566,14 @@ public final class Solid {
             throw failure("face_frame")
         }
         return out
+    }
+
+    /// An `RTree` over this solid's faces: one entry per face, its id the face index the other
+    /// face calls take, its box holding the face (the box the boolean's broad phase pairs faces
+    /// by, grown by a thousandth of the solid's extent). No faces give an empty tree. The tree is
+    /// its own and outlives the solid.
+    public func faceTree() throws -> RTree {
+        try RTree.adopting(cadaclysm_blacksmith_solid_face_tree(try h()), "solid_face_tree")
     }
 
     /// Face `face` by what it is, eight numbers: the surface's kind (plane 0, cylinder 1, cone 2,
@@ -2562,6 +2854,56 @@ public final class Solid {
         return try (0..<n).map { try Solid(cadaclysm_blacksmith_lump(h, $0)) }
     }
 
+    /// This solid and `other` as one body that keeps every piece -- a union that keeps the
+    /// inside pieces: its regions are this solid less `other`, the two together, and `other`
+    /// less this one (those that are not empty), and the walls between them are faces of both.
+    /// The body is non-manifold where a wall meets the outside (edges of three or four faces),
+    /// so the verbs that need a manifold solid -- the booleans, fillet, chamfer, shell, thicken,
+    /// the mass -- refuse it; take its cells with `regions` and `regionSolid`.
+    ///
+    /// Built exactly: both solids closed, every face a plane, cylinder, cone, sphere or torus.
+    /// Walls of the two lying on one another in part are a case it refuses, in words.
+    public func merge(_ other: Solid, tolerance: Double = 0.05) throws -> Solid {
+        try withExtendedLifetime(other) {
+            try Solid(cadaclysm_blacksmith_merge(try h(), try other.h(), tolerance, nil, nil), "merge")
+        }
+    }
+
+    /// The regions of space this solid's faces bound, region 0 the infinite one: two for an
+    /// ordinary solid (outside, inside), one per cell for a merge's body, one more per cavity.
+    /// Each lists its `sides` -- a face and `sense` +1 where the region is the side the face's
+    /// normal points to, -1 the other -- and its `shells`, 1 plus one per void inside it.
+    public func regions() throws -> [Region] {
+        guard let list = cadaclysm_blacksmith_regions(try h()) else { throw failure("regions") }
+        defer { cadaclysm_blacksmith_regions_free(list) }
+        let count = cadaclysm_blacksmith_regions_count(list)
+        var out: [Region] = []
+        out.reserveCapacity(Int(count))
+        for i in 0..<count {
+            var raw = CadaclysmBlacksmithRegion()
+            if !cadaclysm_blacksmith_regions_at(list, i, &raw) { throw failure("regions_at") }
+            var sides: [FaceSide] = []
+            sides.reserveCapacity(Int(raw.sides))
+            for k in 0..<raw.sides {
+                var side = CadaclysmBlacksmithFaceSide()
+                if !cadaclysm_blacksmith_regions_side_at(list, i, k, &side) { throw failure("regions_side_at") }
+                sides.append(FaceSide(face: Int(side.face), sense: Int(side.sense)))
+            }
+            let box = Box(SIMD3(raw.min.0, raw.min.1, raw.min.2), SIMD3(raw.max.0, raw.max.1, raw.max.2))
+            out.append(Region(index: Int(i), finite: raw.finite != 0, box: box, sides: sides, shells: Int(raw.shells)))
+        }
+        return out
+    }
+
+    /// Finite region `region` (an index into `regions()`) as a closed solid of its own: the
+    /// faces bounding it, each turned to point out of it, each keeping its colour. Region 0, the
+    /// infinite one, and a region past the count are refused; so is one a `UInt32` cannot hold,
+    /// before the call.
+    public func regionSolid(_ region: Int) throws -> Solid {
+        guard let r = UInt32(exactly: region) else { throw BuildError("region_solid: region is out of range: \(region)") }
+        return try Solid(cadaclysm_blacksmith_region_solid(try h(), r), "region_solid")
+    }
+
     /// This solid with its flush faces merged: flat faces on one plane, facing one way and
     /// meeting, made one face, and the vertices left mid-way along a straight edge taken out
     /// -- the seams a `join` leaves where two parts are flush.
@@ -2683,7 +3025,12 @@ public final class Solid {
     }
 
     private static func isIdentity(_ m: [[Double]]) -> Bool {
-        (0..<4).allSatisfy { i in (0..<4).allSatisfy { j in m[i][j] == (i == j ? 1.0 : 0.0) } }
+        (0..<4).allSatisfy { (i: Int) -> Bool in
+            (0..<4).allSatisfy { (j: Int) -> Bool in
+                let want: Double = i == j ? 1.0 : 0.0
+                return m[i][j] == want
+            }
+        }
     }
 
     /// This solid moved by a 4x4 row-major placement: itself at the identity, a moved copy for
@@ -2959,6 +3306,86 @@ public final class Assembly {
         }
         guard let made else { throw failure("assembly_posed") }
         return Assembly(adopting: made)
+    }
+
+    /// The placement path of every solid under this assembly, at any depth: depth first,
+    /// placements in order, names joined by "/" with a "/" or "\" inside a name escaped with
+    /// "\" (as `posed`'s keys). The index `sweptClash`'s rows use.
+    public func parts() throws -> [String] {
+        let handle = try h()
+        let count = cadaclysm_blacksmith_assembly_part_count(handle)
+        var names: [String] = []
+        names.reserveCapacity(Int(count))
+        for i in 0..<count {
+            guard let raw = cadaclysm_blacksmith_assembly_part_path(handle, i) else { throw failure("assembly_part_path") }
+            defer { cadaclysm_blacksmith_string_free(raw) }
+            names.append(String(cString: raw))
+        }
+        return names
+    }
+
+    /// Every pair of this assembly's solids (indexed as `parts()` lists them) that penetrates,
+    /// touches or comes within `clearance` of the other anywhere while this assembly's own
+    /// mechanism moves through `keyframes`, as `SweptClash` rows in pair order. Each keyframe is
+    /// rows of a joint key and its values, as `posed`'s rows are, and every keyframe names the
+    /// same joints with the same number of values each (the first fixes their order); time runs
+    /// in keyframe units, keyframe `k` at time `k`. Between two keyframes each joint value moves
+    /// linearly and each link is posed from those values, so a link swinging about a joint goes
+    /// round its arc, not along its chord. Only this assembly's own joints move: a sub-assembly
+    /// rides the link its placement is in. `ground` is one of this assembly's links held fixed
+    /// (nil for its default); solids in no link stay still. Pairs on two links a joint joins are
+    /// not tested unless `joined`; `allowed` pairs of part indices, flat as `(a0, b0, a1, b1,
+    /// ...)`, are never tested. `tolerance` meshes the parts; `resolution` and `maxSteps` as
+    /// `Collider.sweptClash`. Throws in the kernel's `swept_clash:` words: here, before the
+    /// library is called, for keyframes naming different joints, a joint given twice, a joint
+    /// with a different number of values than in keyframe 0, or an `allowed` of odd length.
+    public func sweptClash(
+        _ keyframes: [[(String, [Double])]], clearance: Double = 0, tolerance: Double = 0.05,
+        resolution: Double = 1e-3, maxSteps: UInt32 = 100000, allowed: [UInt32] = [],
+        ground: String? = nil, joined: Bool = false
+    ) throws -> [SweptClash] {
+        let handle = try h()
+        let first = keyframes.first ?? []
+        let keys = first.map { $0.0 }
+        let counts = first.map { UInt32($0.1.count) }
+        var flat = first.flatMap { $0.1 }
+        for (k, row) in keyframes.enumerated().dropFirst() {
+            // C takes one joint set for every keyframe: a later keyframe naming other joints is
+            // refused here, in the kernel's words, before C is called
+            let named = row.map { $0.0 }
+            for j in keys + named {
+                if !named.contains(j) { throw BuildError("swept_clash: joint '\(j)' is in keyframe 0 and not in keyframe \(k)") }
+                if !keys.contains(j) { throw BuildError("swept_clash: joint '\(j)' is in keyframe \(k) and not in keyframe 0") }
+            }
+            for (i, j) in named.enumerated() where named.firstIndex(of: j) != i {
+                throw BuildError("swept_clash: joint '\(j)' is given twice")
+            }
+            for (j, n) in zip(keys, counts) {
+                let values = row.first(where: { $0.0 == j })?.1 ?? []   // there: the check above
+                if values.count != Int(n) {
+                    throw BuildError("swept_clash: joint '\(j)' has \(n) values in keyframe 0 and \(values.count) in keyframe \(k)")
+                }
+                flat += values
+            }
+        }
+        if allowed.count % 2 != 0 { throw BuildError("swept_clash: allowed is \(allowed.count) numbers, not pairs") }
+        let found: OpaquePointer? = withCStrings(keys) { pointers in
+            pointers.withUnsafeBufferPointer { keysBuf in
+                withOptionalArray(counts) { countsPtr in
+                    withOptionalArray(flat) { flatPtr in
+                        withOptionalArray(allowed) { allowedPtr in
+                            cadaclysm_blacksmith_assembly_swept_clash(
+                                handle, keysBuf.baseAddress, countsPtr, keys.count, flatPtr, UInt32(keyframes.count),
+                                ground, tolerance, clearance, resolution, maxSteps, allowedPtr,
+                                UInt32(allowed.count / 2), joined
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        guard let found else { throw failure("assembly_swept_clash") }
+        return try sweptClashesOf(found)
     }
 
     /// Add a named motion sequence over this assembly's states: each segment is
@@ -3308,6 +3735,248 @@ public struct Manifold: Equatable, CustomStringConvertible {
     }
 }
 
+/// One free edge (a side only one face bounds) with its nearest partner: its `trim` (the face's
+/// side), the `edge` it lies on (nil for a side with no edge), the `face` and free `wire` (a row
+/// of `HealthReport.wires`) it is on, its nearest `partner` across the gap as a row of
+/// `HealthReport.freeEdges` (nil if there is none), how many of its two ends it `sharedEnds`
+/// with that partner (2 is what sewing joins), its `length` and the `gap` to the partner
+/// (infinite without one).
+public struct FreeEdge: Equatable {
+    public let trim: Int
+    public let edge: Int?
+    public let face: Int
+    public let wire: Int
+    public let partner: Int?
+    public let sharedEnds: Int
+    public let length: Double
+    public let gap: Double
+
+    public init(trim: Int, edge: Int?, face: Int, wire: Int, partner: Int?, sharedEnds: Int, length: Double, gap: Double) {
+        self.trim = trim
+        self.edge = edge
+        self.face = face
+        self.wire = wire
+        self.partner = partner
+        self.sharedEnds = sharedEnds
+        self.length = length
+        self.gap = gap
+    }
+}
+
+/// A chain of free edges end to end: the rows `first ..< first + count` of
+/// `HealthReport.freeEdges`, whether it `closed` on itself, its total `length` and the
+/// `widestGap` from any of its edges to a partner.
+public struct FreeWire: Equatable {
+    public let first: Int
+    public let count: Int
+    public let closed: Bool
+    public let length: Double
+    public let widestGap: Double
+
+    public init(first: Int, count: Int, closed: Bool, length: Double, widestGap: Double) {
+        self.first = first
+        self.count = count
+        self.closed = closed
+        self.length = length
+        self.widestGap = widestGap
+    }
+}
+
+/// Something below the tolerance: `kind` is `"short_edge"`, `"collapsed_edge"`,
+/// `"sliver_face"`, `"tiny_face"`, `"tiny_body"` or `"small_hole"`; `index` its edge, face or
+/// body number (a small hole's is its loop number); `size` how small.
+public struct SmallFeature: Equatable {
+    public let kind: String
+    public let index: Int
+    public let size: Double
+
+    public init(kind: String, index: Int, size: Double) {
+        self.kind = kind
+        self.index = index
+        self.size = size
+    }
+}
+
+/// What a mesh of the body shows (`Solid.health(mesh: true)`): whether it is `watertight`, how
+/// many mesh edges are `open` (one triangle) or `folded` (more than two), how many pairs of
+/// triangles cross (`crossings`), and the brep `edges` the cracks lie along. Only a closed body
+/// is counted: an open one's census is empty by design.
+public struct Cracks: Equatable {
+    public let watertight: Bool
+    public let open: Int
+    public let folded: Int
+    public let crossings: Int
+    public let edges: [Int]
+
+    public init(watertight: Bool, open: Int, folded: Int, crossings: Int, edges: [Int]) {
+        self.watertight = watertight
+        self.open = open
+        self.folded = folded
+        self.crossings = crossings
+        self.edges = edges
+    }
+}
+
+/// What is wrong with a body, as plain data (`Solid.health`): the `tolerance` and `rounding` it
+/// judged at and the body's `extent` (its diagonal); the free edges, their wires, the features
+/// below the tolerance; the loose edges (`worstLoose` the widest such gap); what sewing would do
+/// (`sewPairs` joined, `sewRefused`, `sewWorstGap`); `worstGap`, the widest gap between a free
+/// edge and its partner; and, if asked for with `mesh: true`, the mesh's `cracks`.
+public struct HealthReport: Equatable {
+    public let tolerance: Double
+    public let rounding: Double
+    public let extent: Double
+    public let freeEdges: [FreeEdge]
+    public let wires: [FreeWire]
+    public let small: [SmallFeature]
+    public let looseEdges: Int
+    public let worstLoose: Double
+    public let sewPairs: Int
+    public let sewRefused: Int
+    public let sewWorstGap: Double
+    public let cracks: Cracks?
+    public let worstGap: Double
+
+    /// The free edges of wire number `wire`, in order.
+    public func wireEdges(_ wire: Int) -> [FreeEdge] {
+        let w = wires[wire]
+        return Array(freeEdges[w.first ..< w.first + w.count])
+    }
+
+    /// The flat rows of the health C ABI, decoded index for index as cadaclysm_blacksmith.py's
+    /// `_health_report`.
+    init(counts: [UInt32], sizes: [Double], freeIds: [UInt32], freeSizes: [Double], wireRuns: [UInt32],
+         wireSizes: [Double], smallItems: [UInt32], smallSizes: [Double], crackEdges: [UInt32]) {
+        // UInt32.max is "none"; typed closures and sub-expressions keep the type checker fast.
+        let index: (UInt32) -> Int? = { $0 == UInt32.max ? nil : Int($0) }
+        freeEdges = (0 ..< freeIds.count / 6).map { (i: Int) -> FreeEdge in
+            let ids: ArraySlice<UInt32> = freeIds[6 * i ..< 6 * i + 6]
+            let at: Int = ids.startIndex
+            return FreeEdge(trim: Int(ids[at]), edge: index(ids[at + 1]), face: Int(ids[at + 2]),
+                            wire: Int(ids[at + 3]), partner: index(ids[at + 4]), sharedEnds: Int(ids[at + 5]),
+                            length: freeSizes[2 * i], gap: freeSizes[2 * i + 1])
+        }
+        wires = (0 ..< wireRuns.count / 3).map { (i: Int) -> FreeWire in
+            let closed: Bool = wireRuns[3 * i + 2] != 0
+            return FreeWire(first: Int(wireRuns[3 * i]), count: Int(wireRuns[3 * i + 1]), closed: closed,
+                            length: wireSizes[2 * i], widestGap: wireSizes[2 * i + 1])
+        }
+        small = (0 ..< smallSizes.count).map { i in
+            SmallFeature(kind: healthKind(smallItems[2 * i]), index: Int(smallItems[2 * i + 1]), size: smallSizes[i])
+        }
+        cracks = counts[12] == 1
+            ? Cracks(watertight: counts[13] != 0, open: Int(counts[14]), folded: Int(counts[15]),
+                     crossings: Int(counts[16]), edges: crackEdges.map { Int($0) })
+            : nil
+        tolerance = sizes[0]
+        rounding = sizes[1]
+        extent = sizes[2]
+        worstGap = sizes[3]
+        looseEdges = Int(counts[9])
+        worstLoose = sizes[4]
+        sewPairs = Int(counts[10])
+        sewRefused = Int(counts[11])
+        sewWorstGap = sizes[5]
+    }
+}
+
+/// One small feature `Solid.healed` removed: its `kind` (as `SmallFeature.kind`), its `index` in
+/// the input (as `health` gave it), its `size`, and how far the vertices it merged `moved`.
+public struct HealFix: Equatable {
+    public let kind: String
+    public let index: Int
+    public let size: Double
+    public let moved: Double
+
+    public init(kind: String, index: Int, size: Double, moved: Double) {
+        self.kind = kind
+        self.index = index
+        self.size = size
+        self.moved = moved
+    }
+}
+
+/// One small feature `Solid.healed` left, and why: `kind` and `index` as in `HealFix`; `why` is
+/// `"would_empty_loop"`, `"closed"`, `"seam"`, `"chain"`, `"neighbours_part"`, `"uneven"`,
+/// `"non_manifold"`, `"has_holes"`, `"body_guard"`, `"toggled"` or `"unsupported"`; `figure`
+/// the chain's width or the neighbours' gap, else 0.
+public struct HealRefusal: Equatable {
+    public let kind: String
+    public let index: Int
+    public let why: String
+    public let figure: Double
+
+    public init(kind: String, index: Int, why: String, figure: Double) {
+        self.kind = kind
+        self.index = index
+        self.why = why
+        self.figure = figure
+    }
+}
+
+/// What `Solid.healed` did, as plain data: the `tolerance` it healed at, the furthest any trim
+/// the result keeps `moved`, whether the body guard refused fixes (`guarded`), the `fixes` made
+/// and the features `refused`; and the body's health before and after at that tolerance -- its
+/// small features, free edges, whether it is closed, and its non-manifold edges.
+public struct HealReport: Equatable {
+    public let tolerance: Double
+    public let moved: Double
+    public let guarded: Bool
+    public let fixes: [HealFix]
+    public let refused: [HealRefusal]
+    public let smallBefore: Int
+    public let smallAfter: Int
+    public let freeBefore: Int
+    public let freeAfter: Int
+    public let closedBefore: Bool
+    public let closedAfter: Bool
+    public let nonmanifoldBefore: Int
+    public let nonmanifoldAfter: Int
+
+    /// The flat rows of the heal C ABI, decoded index for index as cadaclysm_blacksmith.py's `_heal_report`.
+    init(counts: [UInt32], sizes: [Double], fixItems: [UInt32], fixSizes: [Double], refusedItems: [UInt32],
+         refusedSizes: [Double]) {
+        fixes = (0 ..< fixItems.count / 2).map { i in
+            HealFix(kind: healthKind(fixItems[2 * i]), index: Int(fixItems[2 * i + 1]), size: fixSizes[2 * i],
+                    moved: fixSizes[2 * i + 1])
+        }
+        refused = (0 ..< refusedSizes.count).map { i in
+            HealRefusal(kind: healthKind(refusedItems[3 * i]), index: Int(refusedItems[3 * i + 1]),
+                        why: healWhy(refusedItems[3 * i + 2]), figure: refusedSizes[i])
+        }
+        tolerance = sizes[0]
+        moved = sizes[1]
+        guarded = counts[2] != 0
+        smallBefore = Int(counts[3])
+        smallAfter = Int(counts[4])
+        freeBefore = Int(counts[5])
+        freeAfter = Int(counts[6])
+        closedBefore = counts[7] != 0
+        closedAfter = counts[8] != 0
+        nonmanifoldBefore = Int(counts[9])
+        nonmanifoldAfter = Int(counts[10])
+    }
+}
+
+/// The small-feature kinds, by the C ABI's code.
+let healthKinds = ["short_edge", "collapsed_edge", "sliver_face", "tiny_face", "tiny_body", "small_hole"]
+/// Why healing left a feature, by the C ABI's code.
+let healWhys = ["would_empty_loop", "closed", "seam", "chain", "neighbours_part", "uneven", "non_manifold",
+                "has_holes", "body_guard", "toggled", "unsupported"]
+
+private func healthKind(_ code: UInt32) -> String {
+    Int(code) < healthKinds.count ? healthKinds[Int(code)] : "unknown"
+}
+
+private func healWhy(_ code: UInt32) -> String {
+    Int(code) < healWhys.count ? healWhys[Int(code)] : "unknown"
+}
+
+/// `healed`'s switches as the C ABI's flag bits: 1 edges, 2 faces, 4 holes.
+func healFlags(edges: Bool, faces: Bool, holes: Bool) -> UInt32 {
+    (edges ? 1 : 0) | (faces ? 2 : 0) | (holes ? 4 : 0)
+}
+
 /// Where a hit lands on one side: a profile's `loopIndex` (0 the boundary or the open chain,
 /// then the holes in the order they were added), `segment`, and `t` from 0 to 1 along it,
 /// with `face` NONE (`UInt32.max`) -- or a solid's `face` at (`u`, `v`), with the loop and
@@ -3381,6 +4050,31 @@ public struct Intersection: Equatable, CustomStringConvertible {
     public var description: String { "Intersection(chains=\(chains.count), overlaps=\(overlaps.count))" }
 }
 
+/// An intersection handle read out and freed, on every path: what `Solid.intersect` and
+/// `Clash.intersect` return.
+func intersectionOf(_ found: OpaquePointer) throws -> Intersection {
+    defer { cadaclysm_blacksmith_intersection_free(found) }
+    var chains: [Chain] = []
+    for i in 0..<cadaclysm_blacksmith_intersection_chain_count(found) {
+        var raw = CadaclysmBlacksmithChain()
+        if !cadaclysm_blacksmith_intersection_chain(found, i, &raw) { throw failure("intersection_chain") }
+        var curve: Curve? = nil
+        if raw.has_curve {
+            var rawCurve = CadaclysmBlacksmithCurve()
+            if !cadaclysm_blacksmith_intersection_curve(found, i, &rawCurve) { throw failure("intersection_curve") }
+            curve = Curve(rawCurve)
+        }
+        chains.append(Chain(raw, curve))
+    }
+    var overlaps: [Overlap] = []
+    for i in 0..<cadaclysm_blacksmith_intersection_overlap_count(found) {
+        var raw = CadaclysmBlacksmithOverlap()
+        if !cadaclysm_blacksmith_intersection_overlap(found, i, &raw) { throw failure("intersection_overlap") }
+        overlaps.append(Overlap(raw))
+    }
+    return Intersection(chains: chains, overlaps: overlaps)
+}
+
 /// One branch of one face pair's crossing (`Intersection.chains`): `points` in walk order
 /// (a closed chain does not repeat its first point), `closed`, the faces (`faceA` in the
 /// first solid, `faceB` in the second), `tangent` (the surfaces near-tangent along it, or
@@ -3412,7 +4106,7 @@ public struct Chain: Equatable, CustomStringConvertible {
 /// A face of the first solid and a face of the second that coincide
 /// (`Intersection.overlaps`): the faces (`faceA`, `faceB`) and `loops`, the shared region's
 /// rings (outer first, holes after; each ring closed without repeating its first point) --
-/// empty for a partial overlap whose outlines cross.
+/// empty for a partial overlap of curved faces whose outlines cross.
 public struct Overlap: Equatable, CustomStringConvertible {
     public let faceA: Int
     public let faceB: Int
@@ -3432,6 +4126,167 @@ public struct Overlap: Equatable, CustomStringConvertible {
     }
 
     public var description: String { "Overlap(faces=(\(faceA), \(faceB)), loops=\(loops.count))" }
+}
+
+// MARK: - Measure
+
+/// A solid's box on its principal axes (`Solid.orientedBox`): `centre`, three unit `axes` (row `i`
+/// the direction of `half[i]`) and the `half` extent along each.
+public struct OrientedBox: Equatable, CustomStringConvertible {
+    public let centre: SIMD3<Double>
+    public let axes: [SIMD3<Double>]
+    public let half: SIMD3<Double>
+
+    init(_ raw: CadaclysmBlacksmithOrientedBox) {
+        centre = SIMD3(raw.centre.0, raw.centre.1, raw.centre.2)
+        let a = raw.axes
+        axes = [SIMD3(a.0, a.1, a.2), SIMD3(a.3, a.4, a.5), SIMD3(a.6, a.7, a.8)]
+        half = SIMD3(raw.half.0, raw.half.1, raw.half.2)
+    }
+
+    public var description: String { "OrientedBox(centre=\(centre), axes=\(axes), half=\(half))" }
+}
+
+/// A measured length beside the error it carries (`Solid.edgeLength`, `Profile.length`). `error`
+/// is an estimate of the difference from the true length; `accuracyMet` false means the refinement
+/// stopped at its depth limit, and `fromPolyline` that the curve was sampled points.
+public struct Length: Equatable, CustomStringConvertible {
+    public let length: Double
+    public let error: Double
+    public let accuracyMet: Bool
+    public let fromPolyline: Bool
+
+    init(_ raw: CadaclysmBlacksmithLength) {
+        length = raw.length
+        error = raw.error
+        accuracyMet = raw.accuracy_met != 0
+        fromPolyline = raw.from_polyline != 0
+    }
+
+    public var description: String {
+        "Length(\(length), error=\(error), accuracyMet=\(accuracyMet), fromPolyline=\(fromPolyline))"
+    }
+}
+
+/// A point `s` along an edge or a profile's outer loop (`Solid.edgePointAtLength`,
+/// `Profile.pointAtLength`, the divides): where it is, the unit `tangent` there and the curve's
+/// `parameter`. `segment` is nil on a solid's edge; on a profile it is the side the point lies on
+/// (the segment count for the implicit closing side) and `parameter` that side's own. `error`
+/// estimates the arc length's difference from the true one; `fromPolyline` says the curve was
+/// sampled points.
+public struct At: Equatable, CustomStringConvertible {
+    public let point: SIMD3<Double>
+    public let tangent: SIMD3<Double>
+    public let parameter: Double
+    public let segment: UInt32?
+    public let error: Double
+    public let fromPolyline: Bool
+
+    init(_ raw: CadaclysmBlacksmithAt) {
+        point = SIMD3(raw.point.0, raw.point.1, raw.point.2)
+        tangent = SIMD3(raw.tangent.0, raw.tangent.1, raw.tangent.2)
+        parameter = raw.parameter
+        segment = raw.segment == none ? nil : raw.segment
+        error = raw.error
+        fromPolyline = raw.from_polyline != 0
+    }
+
+    public var description: String {
+        "At(point=\(point), tangent=\(tangent), parameter=\(parameter), segment=\(segment.map { String($0) } ?? "nil"), error=\(error), fromPolyline=\(fromPolyline))"
+    }
+}
+
+/// Reads and frees a divide's sample list; a failing call or read throws the library's own text.
+private func samplesOf(_ list: OpaquePointer?, _ what: String) throws -> [At] {
+    guard let list else { throw failure(what) }
+    defer { cadaclysm_blacksmith_samples_free(list) }
+    let count = cadaclysm_blacksmith_samples_count(list)
+    var out: [At] = []
+    out.reserveCapacity(Int(count))
+    for i in 0..<count {
+        var raw = CadaclysmBlacksmithAt()
+        if !cadaclysm_blacksmith_samples_at(list, i, &raw) { throw failure("samples_at") }
+        out.append(At(raw))
+    }
+    return out
+}
+
+/// The closest points between two solids' boundaries (`Solid.closest`) and what each lies on: a
+/// `kind` of `"face"`, `"edge"` or `"vertex"`, its `index`, and for an edge the `Solid.edges`
+/// index `fillet` takes (nil when it has none). `refined` is false for the mesh's own answer.
+public struct Closest: Equatable, CustomStringConvertible {
+    public let distance: Double
+    public let onA: SIMD3<Double>
+    public let onB: SIMD3<Double>
+    public let kindA: String
+    public let indexA: UInt32
+    public let edgeA: UInt32?
+    public let kindB: String
+    public let indexB: UInt32
+    public let edgeB: UInt32?
+    public let refined: Bool
+
+    init(_ raw: CadaclysmBlacksmithClosest) {
+        distance = raw.distance
+        onA = SIMD3(raw.on_a.0, raw.on_a.1, raw.on_a.2)
+        onB = SIMD3(raw.on_b.0, raw.on_b.1, raw.on_b.2)
+        kindA = text(raw.kind_a)
+        indexA = raw.index_a
+        edgeA = raw.edge_a == none ? nil : raw.edge_a
+        kindB = text(raw.kind_b)
+        indexB = raw.index_b
+        edgeB = raw.edge_b == none ? nil : raw.edge_b
+        refined = raw.refined != 0
+    }
+
+    public var description: String {
+        "Closest(distance=\(distance), a=\(kindA) \(indexA), b=\(kindB) \(indexB), refined=\(refined))"
+    }
+}
+
+/// The containment code the library answered, as the word.
+func containment(_ code: UInt32, _ call: String) throws -> String {
+    switch code {
+    case UInt32(CADACLYSM_BLACKSMITH_OUTSIDE): return "outside"
+    case UInt32(CADACLYSM_BLACKSMITH_INSIDE): return "inside"
+    case UInt32(CADACLYSM_BLACKSMITH_ON): return "on"
+    default: throw BuildError("\(call): the library answered \(code), not a containment code")
+    }
+}
+
+/// Points classified against one closed solid, meshed once (`Solid.classifier`). It keeps its own
+/// reference to the body, so it answers on after its `Solid` is closed. `close()` frees it; so
+/// does `deinit`.
+public final class Classifier {
+    private var handle: OpaquePointer?
+
+    init(_ solid: OpaquePointer, _ tolerance: Double) throws {
+        handle = try checked(cadaclysm_blacksmith_classifier_new(solid, tolerance), "classifier_new")
+    }
+
+    deinit { close() }
+
+    /// Free the classifier now. Idempotent.
+    public func close() {
+        if let handle { cadaclysm_blacksmith_classifier_free(handle) }
+        handle = nil
+    }
+
+    /// Whether `close()` has run.
+    public var isClosed: Bool { handle == nil }
+
+    func h() throws -> OpaquePointer {
+        guard let handle else { throw BuildError("classifier: closed") }
+        return handle
+    }
+
+    /// `"inside"`, `"outside"` or `"on"`.
+    public func contains(_ point: SIMD3<Double>) throws -> String {
+        let xyz = [point.x, point.y, point.z]
+        var code: UInt32 = 0
+        if !cadaclysm_blacksmith_classifier_contains(try h(), xyz, &code) { throw failure("classifier_contains") }
+        return try containment(code, "classifier_contains")
+    }
 }
 
 // MARK: - Collider
@@ -3478,6 +4333,44 @@ public struct Box: Equatable, CustomStringConvertible {
     }
 
     public var description: String { "Box(lo=\(lo), hi=\(hi))" }
+}
+
+/// One side of one face (`Solid.regions`): `face` the face's index in the solid, `sense` +1 for
+/// the side its normal points to, -1 for the other. A solid's inside is behind its faces, at -1.
+public struct FaceSide: Hashable, CustomStringConvertible {
+    public let face: Int
+    public let sense: Int
+
+    public init(face: Int, sense: Int) {
+        self.face = face
+        self.sense = sense
+    }
+
+    public var description: String { "FaceSide(face=\(face), sense=\(sense))" }
+}
+
+/// One region of space a solid's faces bound (`Solid.regions`): its `index` (0 the infinite
+/// region, whose `finite` is false), the `box` round the faces bounding it, its `sides`
+/// ascending by face then sense, and its `shells` -- 1, plus one per void inside it.
+/// `Solid.regionSolid` takes a finite one as a solid of its own.
+public struct Region: Equatable, CustomStringConvertible {
+    public let index: Int
+    public let finite: Bool
+    public let box: Box
+    public let sides: [FaceSide]
+    public let shells: Int
+
+    public init(index: Int, finite: Bool, box: Box, sides: [FaceSide], shells: Int) {
+        self.index = index
+        self.finite = finite
+        self.box = box
+        self.sides = sides
+        self.shells = shells
+    }
+
+    public var description: String {
+        "Region(index=\(index), finite=\(finite), box=\(box), \(sides.count) sides, shells=\(shells))"
+    }
 }
 
 /// True only if box `a` at `frameA` and box `b` at `frameB` cannot touch -- a separating
@@ -3600,6 +4493,178 @@ public final class CollisionHit: CustomStringConvertible {
     public var description: String { "CollisionHit(a=\(a), b=\(b), overlap=\(overlap), depth=\(depth))" }
 }
 
+/// Keeps one clash call's answer alive for as long as any `Clash` of it is: each row holds a
+/// reference to this, and ARC frees it only once the last one lets go -- as `Collisions` does
+/// for `CollisionHit`, because `solid()` and `intersect()` need the handle itself back.
+final class Clashes {
+    let handle: OpaquePointer
+
+    init(_ handle: OpaquePointer) {
+        self.handle = handle
+    }
+
+    deinit { cadaclysm_blacksmith_clashes_free(handle) }
+}
+
+/// One pair a clash call (`Collider.clash`, `clash`) found: `a`, `b` the part indices (for one
+/// set or a collider `a < b`; for two sets `a` indexes the first and `b` the second), `kind` one
+/// of `"penetrating"`, `"touching"` (the boundaries within the tolerance of each other),
+/// `"too_close"` (apart by more than the tolerance but less than the clearance) or `"refused"`
+/// (the pair could not be decided; `text` says why).
+///
+/// `distance` is the gap between the two boundaries (0 for a penetrating or refused pair);
+/// `onA` and `onB` are world points -- the closest pair, or for a penetrating pair the centre of
+/// the overlap's world box (the origin for a refused one). `kindA`, `indexA`, `edgeA` (and `B`)
+/// say what each point lies on exactly as `Closest` does -- `"face"`, `"edge"` or `"vertex"`,
+/// the kernel's id, and the `Solid.edges` index (nil for a face, a vertex or an edge the table
+/// does not hold) -- and for a penetrating or refused pair `kindA`/`kindB` are `"none"` with
+/// `index*` and `edge*` nil. `refined` is true where the distance is measured on the exact
+/// surfaces. `depth` is the thinnest side of a penetrating pair's overlap box (0 otherwise).
+///
+/// `solid()` rebuilds a penetrating pair's shared volume now; `intersect()` where the two parts
+/// cross or coincide (any pair but a refused one). Both use the placement the pair was found
+/// at. Every row of one call keeps the clashes handle behind it alive, and the last one
+/// released frees it.
+public struct Clash: CustomStringConvertible {
+    public let a: Int
+    public let b: Int
+    public let kind: String
+    public let distance: Double
+    public let onA: SIMD3<Double>
+    public let onB: SIMD3<Double>
+    public let kindA: String
+    public let indexA: UInt32?
+    public let edgeA: UInt32?
+    public let kindB: String
+    public let indexB: UInt32?
+    public let edgeB: UInt32?
+    public let refined: Bool
+    public let depth: Double
+    public let text: String
+
+    private let clashes: Clashes
+    private let index: UInt32
+
+    init(_ raw: CadaclysmBlacksmithClash, _ clashes: Clashes, _ index: UInt32) {
+        a = Int(raw.a)
+        b = Int(raw.b)
+        kind = Blacksmith.text(raw.kind)
+        distance = raw.distance
+        onA = SIMD3(raw.on_a.0, raw.on_a.1, raw.on_a.2)
+        onB = SIMD3(raw.on_b.0, raw.on_b.1, raw.on_b.2)
+        kindA = Blacksmith.text(raw.kind_a)
+        kindB = Blacksmith.text(raw.kind_b)
+        let noneA = kindA == "none", noneB = kindB == "none"
+        indexA = noneA ? nil : raw.index_a
+        edgeA = noneA || raw.edge_a == none ? nil : raw.edge_a
+        indexB = noneB ? nil : raw.index_b
+        edgeB = noneB || raw.edge_b == none ? nil : raw.edge_b
+        refined = raw.refined != 0
+        depth = raw.depth
+        text = Blacksmith.text(raw.text)
+        self.clashes = clashes
+        self.index = index
+    }
+
+    /// The exact shared volume of this penetrating pair at the placement it was found at, as a
+    /// new solid. Throws for a pair that is not penetrating.
+    public func solid() throws -> Solid {
+        try withExtendedLifetime(clashes) {
+            try Solid(cadaclysm_blacksmith_clashes_solid(clashes.handle, index), "clashes_solid")
+        }
+    }
+
+    /// Where this pair's two parts cross or coincide at the placement it was found at, as
+    /// `Solid.intersect` reports it (a touching pair's shared face is an `Overlap`). Throws for a
+    /// refused pair.
+    public func intersect() throws -> Intersection {
+        try withExtendedLifetime(clashes) {
+            guard let found = cadaclysm_blacksmith_clashes_intersect(clashes.handle, index) else {
+                throw failure("clashes_intersect")
+            }
+            return try intersectionOf(found)
+        }
+    }
+
+    public var description: String { "Clash(a=\(a), b=\(b), kind=\(kind), distance=\(distance))" }
+}
+
+/// A clashes handle read out into rows, each keeping the handle alive; freed at once if empty,
+/// and by the owner if reading a row fails.
+func clashesOf(_ found: OpaquePointer) throws -> [Clash] {
+    let count = cadaclysm_blacksmith_clashes_count(found)
+    if count == 0 {
+        cadaclysm_blacksmith_clashes_free(found)
+        return []
+    }
+    let clashes = Clashes(found)
+    var rows: [Clash] = []
+    rows.reserveCapacity(Int(count))
+    for i in 0..<count {
+        var raw = CadaclysmBlacksmithClash()
+        if !cadaclysm_blacksmith_clashes_at(found, i, &raw) { throw failure("clashes_at") }
+        rows.append(Clash(raw, clashes, i))
+    }
+    return rows
+}
+
+/// One pair a swept clash call (`Collider.sweptClash`, `sweptClash`) found: `a`, `b` the part
+/// indices (for one set or a collider `a < b`; for two sets `a` indexes the first and `b` the
+/// second). `firstTime` is the first time the pair came within the clearance, in pose units
+/// (pose `k` at time `k`; for a refused pair the time it was refused at), and `first` the `Clash`
+/// there -- its kind, distance, points, features and depth, at the frames the motion places the
+/// parts at that time, so `first.solid()` and `first.intersect()` rebuild the contact there.
+/// `intervals` are the time ranges the pair stays in clash, ascending and disjoint (none for a
+/// refused pair).
+public struct SweptClash: CustomStringConvertible {
+    public let a: Int
+    public let b: Int
+    public let firstTime: Double
+    public let first: Clash
+    public let intervals: [(start: Double, end: Double)]
+
+    public var description: String {
+        let spans = intervals.map { "(\($0.start), \($0.end))" }.joined(separator: ", ")
+        return "SweptClash(a=\(a), b=\(b), first_time=\(firstTime), kind=\(first.kind), intervals=[\(spans)])"
+    }
+}
+
+/// A swept clashes handle read out into rows and freed; each row's `first` a `Clash` of the
+/// handle's first rows (`clashesOf`), which keep their own clashes handle alive.
+func sweptClashesOf(_ swept: OpaquePointer) throws -> [SweptClash] {
+    defer { cadaclysm_blacksmith_swept_clashes_free(swept) }
+    let count = cadaclysm_blacksmith_swept_clashes_count(swept)
+    if count == 0 { return [] }
+    guard let found = cadaclysm_blacksmith_swept_clashes_firsts(swept) else { throw failure("swept_clashes_firsts") }
+    let firsts = try clashesOf(found)
+    var rows: [SweptClash] = []
+    rows.reserveCapacity(Int(count))
+    for i in 0..<count {
+        var raw = CadaclysmBlacksmithSweptClash()
+        if !cadaclysm_blacksmith_swept_clashes_at(swept, i, &raw) { throw failure("swept_clashes_at") }
+        var intervals: [(start: Double, end: Double)] = []
+        intervals.reserveCapacity(Int(raw.interval_count))
+        var span = [0.0, 0.0]
+        for k in 0..<raw.interval_count {
+            if !cadaclysm_blacksmith_swept_clashes_interval(swept, i, k, &span) { throw failure("swept_clashes_interval") }
+            intervals.append((start: span[0], end: span[1]))
+        }
+        rows.append(SweptClash(a: Int(raw.a), b: Int(raw.b), firstTime: raw.first_time, first: firsts[Int(i)],
+                               intervals: intervals))
+    }
+    return rows
+}
+
+/// Poses flattened pose by pose, 12 numbers a frame, as the swept clash calls read them.
+func poseFrames(_ poses: [[Frame]]) -> [Double] {
+    var flat: [Double] = []
+    flat.reserveCapacity(poses.reduce(0) { $0 + $1.count } * 12)
+    for pose in poses {
+        for f in pose { flat.append(contentsOf: f.values) }
+    }
+    return flat
+}
+
 /// Parts meshed once, asked pose after pose which of them interfere: `solids` at rest,
 /// meshed at `tolerance`; `groups` one group index per solid (nil: each solid its own group
 /// -- `check` then takes one frame per solid), `allowed` pairs of part indices never tested
@@ -3681,6 +4746,872 @@ public final class Collider {
             hits.append(CollisionHit(raw, collisions, i))
         }
         return hits
+    }
+
+    /// Every pair of parts that penetrates, touches or lies within `clearance` of the other, as
+    /// `Clash` rows in pair order, with each group placed at its matching frame in `frames` (as
+    /// for `check`). `clearance` is zero or more, in model units: a pair apart by more than the
+    /// collider's tolerance but less than it is `"too_close"`. `share` as for `check`. The
+    /// collider keeps each part's closest mesh (at a third of its tolerance) for its lifetime
+    /// once a pair needed one. Throws for a negative or non-finite `clearance`, the wrong number
+    /// of frames or a bad `share`.
+    public func clash(_ frames: [Frame], clearance: Double = 0, share: (k: UInt32, n: UInt32)? = nil) throws -> [Clash] {
+        var flat: [Double] = []
+        flat.reserveCapacity(frames.count * 12)
+        for f in frames { flat.append(contentsOf: f.values) }
+        let (shareK, shareN) = share ?? (0, 0)
+        guard let found = cadaclysm_blacksmith_collider_clash(try h(), flat, UInt32(frames.count), clearance, shareK, shareN) else {
+            throw failure("collider_clash")
+        }
+        return try clashesOf(found)
+    }
+
+    /// Every pair of parts that penetrates, touches or comes within `clearance` of the other
+    /// anywhere on the path through `poses` -- not only at the poses -- as `SweptClash` rows in
+    /// pair order. `poses` is two or more poses, each the `frames` `clash` takes (one frame per
+    /// group). Between two poses each group moves rigidly about the centre of its rest box: that
+    /// point on the straight line between its two places, the rotation turning at a steady rate
+    /// the shorter way round. Time runs in pose units, pose `k` at time `k`.
+    ///
+    /// No moment where the true gap is below `clearance` less the collider's tolerance (for
+    /// clearance 0: no penetration deeper than the tolerance) falls between two steps.
+    /// `resolution` (in (0, 1], a fraction of a segment) is how closely an interval's end is
+    /// found; `maxSteps` the pose-wise tests one pair may take -- a pair that needs more is a
+    /// `"refused"` row. `share` as for `check`, over the pairs whose swept boxes meet. The pose
+    /// caches `check` and `clash` keep are neither read nor filled. Throws for fewer than two
+    /// poses, the wrong number of frames in a pose, a bad frame, `clearance`, `resolution` or
+    /// `share`, or `maxSteps` 0.
+    public func sweptClash(_ poses: [[Frame]], clearance: Double = 0, resolution: Double = 1e-3, maxSteps: UInt32 = 100000,
+                           share: (k: UInt32, n: UInt32)? = nil) throws -> [SweptClash] {
+        let frameCount = poses.first?.count ?? 0
+        if poses.contains(where: { $0.count != frameCount }) {
+            // C reads every pose at one frame count: say the first pose that is off, in the
+            // kernel's words
+            let groups = try groupCount
+            let n = poses.first(where: { $0.count != groups })?.count ?? frameCount
+            throw BuildError("collider_swept_clash: \(n) frames for \(groups) groups")
+        }
+        let flat = poseFrames(poses)
+        let (shareK, shareN) = share ?? (0, 0)
+        guard let found = cadaclysm_blacksmith_collider_swept_clash(try h(), flat, UInt32(poses.count), UInt32(frameCount),
+                                                                    clearance, resolution, maxSteps, shareK, shareN) else {
+            throw failure("collider_swept_clash")
+        }
+        return try sweptClashesOf(found)
+    }
+}
+
+// MARK: - RTree
+
+/// One entry `RTree.within` or `RTree.nearest` found: its `id` and the `distance` from the point
+/// to its box (0 inside it). Python's `(id, distance)`.
+public struct RTreeHit: Equatable, CustomStringConvertible {
+    public let id: UInt32
+    public let distance: Double
+
+    public init(id: UInt32, distance: Double) {
+        self.id = id
+        self.distance = distance
+    }
+
+    public var description: String { "RTreeHit(id=\(id), distance=\(distance))" }
+}
+
+/// Two entries whose boxes meet: `a` of the tree asked and `b` of the other (`RTree.overlaps`),
+/// or `a <= b` (`RTree.selfOverlaps`). Python's `(a, b)`.
+public struct RTreePair: Hashable, CustomStringConvertible {
+    public let a: UInt32
+    public let b: UInt32
+
+    public init(a: UInt32, b: UInt32) {
+        self.a = a
+        self.b = b
+    }
+
+    public var description: String { "RTreePair(a=\(a), b=\(b))" }
+}
+
+/// A box as the C ABI's 6 doubles, `[minx, miny, minz, maxx, maxy, maxz]`.
+private func rtreeWords(_ box: Box) -> [Double] {
+    [box.lo.x, box.lo.y, box.lo.z, box.hi.x, box.hi.y, box.hi.z]
+}
+
+/// Reads and frees a query's hit list; a failing call or read throws the library's own text.
+private func rtreeHits(_ list: OpaquePointer?, _ what: String) throws -> [RTreeHit] {
+    guard let list else { throw failure(what) }
+    defer { cadaclysm_blacksmith_rtree_hits_free(list) }
+    let count = cadaclysm_blacksmith_rtree_hits_count(list)
+    var out: [RTreeHit] = []
+    out.reserveCapacity(Int(count))
+    for i in 0..<count {
+        var raw = CadaclysmBlacksmithRTreeHit()
+        if !cadaclysm_blacksmith_rtree_hits_at(list, i, &raw) { throw failure("rtree_hits_at") }
+        out.append(RTreeHit(id: raw.id, distance: raw.distance))
+    }
+    return out
+}
+
+/// Reads and frees a query's pair list, as `rtreeHits` reads hits.
+private func rtreePairs(_ list: OpaquePointer?, _ what: String) throws -> [RTreePair] {
+    guard let list else { throw failure(what) }
+    defer { cadaclysm_blacksmith_rtree_pairs_free(list) }
+    let count = cadaclysm_blacksmith_rtree_pairs_count(list)
+    var out: [RTreePair] = []
+    out.reserveCapacity(Int(count))
+    for i in 0..<count {
+        var raw = CadaclysmBlacksmithRTreePair()
+        if !cadaclysm_blacksmith_rtree_pairs_at(list, i, &raw) { throw failure("rtree_pairs_at") }
+        out.append(RTreePair(a: raw.a, b: raw.b))
+    }
+    return out
+}
+
+/// A count at the C boundary, refused by `what` past what a `uint32_t` holds.
+private func rtreeCount(_ n: Int, _ what: String, _ items: String) throws -> UInt32 {
+    guard let n32 = UInt32(exactly: n) else { throw BuildError("\(what): \(n) \(items) is more than 4294967295") }
+    return n32
+}
+
+/// A spatial index over boxes with ids (an R*-tree): `search` a box for the entries it meets,
+/// `within` / `nearest` a point for the closest, `overlaps` / `selfOverlaps` for every pair of
+/// boxes that meet. Ids are the caller's own and may repeat; an entry is an id and its `Box`, and
+/// the same `(id, box)` twice is two entries. Touching boxes meet. A point stands for a zero box
+/// (`insert` and `remove` take either). Answers come in a fixed order: search ids ascending,
+/// within / nearest by distance then id, pairs ascending. The tree changes in place; calls on one
+/// tree must not overlap from two threads. `close()` frees it; so does `deinit`. Python's `RTree`.
+public final class RTree: CustomStringConvertible {
+    private var handle: OpaquePointer?
+
+    /// An empty tree.
+    public init() throws {
+        handle = try checked(cadaclysm_blacksmith_rtree_new(), "rtree_new")
+    }
+
+    private init(adopting raw: OpaquePointer?, _ what: String) throws {
+        handle = try checked(raw, what)
+    }
+
+    /// A tree over `(id, box)` entries at once, packed (sort-tile-recursive): fuller and faster
+    /// to query than the same entries inserted one by one. The first entry whose box is not a box
+    /// (a NaN, an infinity, `lo` above `hi`) is refused, by index.
+    public static func fromBoxes(_ entries: [(UInt32, Box)]) throws -> RTree {
+        let n = try rtreeCount(entries.count, "rtree_from_boxes", "entries")
+        if entries.isEmpty {
+            return try RTree(adopting: cadaclysm_blacksmith_rtree_from_boxes(nil, nil, 0), "rtree_from_boxes")
+        }
+        let ids = entries.map { $0.0 }
+        let boxes = entries.flatMap { rtreeWords($0.1) }
+        return try RTree(adopting: cadaclysm_blacksmith_rtree_from_boxes(ids, boxes, n), "rtree_from_boxes")
+    }
+
+    /// A tree over `points`, each a zero box whose id is its index. The first point with a NaN or
+    /// infinite coordinate is refused, by index.
+    public static func fromPoints(_ points: [SIMD3<Double>]) throws -> RTree {
+        let n = try rtreeCount(points.count, "rtree_from_points", "points")
+        if points.isEmpty {
+            return try RTree(adopting: cadaclysm_blacksmith_rtree_from_points(nil, 0), "rtree_from_points")
+        }
+        let xyz = points.flatMap { [$0.x, $0.y, $0.z] }
+        return try RTree(adopting: cadaclysm_blacksmith_rtree_from_points(xyz, n), "rtree_from_points")
+    }
+
+    /// A tree over a mesh's triangles -- RhinoCommon's `RTree.CreateMeshFaceTree`: one entry per
+    /// triangle of `triangles` (three indices into `positions`), its id the triangle's index, its
+    /// box its three corners' box. The first corner past the points or at a point with a NaN or
+    /// infinite coordinate is refused, by triangle and point; points no triangle uses are not
+    /// checked.
+    public static func fromTriangles(_ positions: [SIMD3<Double>],
+                                     _ triangles: [(UInt32, UInt32, UInt32)]) throws -> RTree {
+        let np = try rtreeCount(positions.count, "rtree_from_triangles", "points")
+        let nt = try rtreeCount(triangles.count, "rtree_from_triangles", "triangles")
+        let xyz = positions.flatMap { [$0.x, $0.y, $0.z] }
+        let indices = triangles.flatMap { [$0.0, $0.1, $0.2] }
+        let raw = xyz.withUnsafeBufferPointer { at in
+            indices.withUnsafeBufferPointer { idx in
+                cadaclysm_blacksmith_rtree_from_triangles(np == 0 ? nil : at.baseAddress, np,
+                                                          nt == 0 ? nil : idx.baseAddress, nt)
+            }
+        }
+        return try RTree(adopting: raw, "rtree_from_triangles")
+    }
+
+    /// The tree `Solid.faceTree` builds, adopted.
+    static func adopting(_ raw: OpaquePointer?, _ what: String) throws -> RTree {
+        try RTree(adopting: raw, what)
+    }
+
+    deinit { close() }
+
+    /// Free the tree now. Idempotent.
+    public func close() {
+        if let handle { cadaclysm_blacksmith_rtree_free(handle) }
+        handle = nil
+    }
+
+    /// Whether `close()` has run.
+    public var isClosed: Bool { handle == nil }
+
+    func h() throws -> OpaquePointer {
+        guard let handle else { throw BuildError("rtree: closed") }
+        return handle
+    }
+
+    /// How many entries the tree holds.
+    public var count: Int {
+        get throws { Int(cadaclysm_blacksmith_rtree_count(try h())) }
+    }
+
+    /// The union of every entry's box, or nil for an empty tree.
+    public var bounds: Box? {
+        get throws {
+            let tree = try h()
+            if cadaclysm_blacksmith_rtree_count(tree) == 0 { return nil }
+            var out = [Double](repeating: 0, count: 6)
+            if !cadaclysm_blacksmith_rtree_bounds(tree, &out) { throw failure("rtree_bounds") }
+            return Box(SIMD3(out[0], out[1], out[2]), SIMD3(out[3], out[4], out[5]))
+        }
+    }
+
+    /// Add the entry `(id, box)`. A box that is not a box is refused and leaves the tree as it was.
+    public func insert(_ id: UInt32, _ box: Box) throws {
+        if !cadaclysm_blacksmith_rtree_insert(try h(), id, rtreeWords(box)) { throw failure("rtree_insert") }
+    }
+
+    /// Add the entry `(id, point)`, the point a zero box. A point not finite is refused and leaves
+    /// the tree as it was.
+    public func insert(_ id: UInt32, _ point: SIMD3<Double>) throws {
+        if !cadaclysm_blacksmith_rtree_insert_point(try h(), id, [point.x, point.y, point.z]) {
+            throw failure("rtree_insert_point")
+        }
+    }
+
+    /// Take out one entry equal to `(id, box)` -- the box it was inserted with, compared
+    /// coordinate by coordinate -- and say whether there was one: `false`, not an error, when
+    /// there is none. With duplicates, one goes per call. A box that is not a box is refused.
+    public func remove(_ id: UInt32, _ box: Box) throws -> Bool {
+        try removeWords(id, rtreeWords(box))
+    }
+
+    /// `remove` for an entry inserted as a point (its zero box).
+    public func remove(_ id: UInt32, _ point: SIMD3<Double>) throws -> Bool {
+        try removeWords(id, [point.x, point.y, point.z, point.x, point.y, point.z])
+    }
+
+    private func removeWords(_ id: UInt32, _ words: [Double]) throws -> Bool {
+        if cadaclysm_blacksmith_rtree_remove(try h(), id, words) { return true }
+        if !lastError().isEmpty { throw failure("rtree_remove") }
+        return false
+    }
+
+    /// The ids of every entry whose box meets `box` (touching counts), ascending, one per entry.
+    /// A box that is not a box is refused.
+    public func search(_ box: Box) throws -> [UInt32] {
+        try rtreeHits(cadaclysm_blacksmith_rtree_search(try h(), rtreeWords(box)), "rtree_search").map(\.id)
+    }
+
+    /// Every entry whose box is within `r` of `point` (Euclidean, 0 inside the box; exactly `r`
+    /// counts), by distance then id. A point not finite or an `r` negative or NaN is refused.
+    public func within(_ point: SIMD3<Double>, _ r: Double) throws -> [RTreeHit] {
+        try rtreeHits(cadaclysm_blacksmith_rtree_within(try h(), [point.x, point.y, point.z], r), "rtree_within")
+    }
+
+    /// The `k` entries whose boxes are nearest `point`, by distance then id (the smaller ids win a
+    /// tie); all of them when `k` is over the count. A point not finite or a `k` above 1,000,000
+    /// is refused.
+    public func nearest(_ point: SIMD3<Double>, _ k: UInt32) throws -> [RTreeHit] {
+        try rtreeHits(cadaclysm_blacksmith_rtree_nearest(try h(), [point.x, point.y, point.z], k), "rtree_nearest")
+    }
+
+    /// Every entry whose box the ray `origin + t * direction`, `0 <= t <= maxT`, meets, as hits
+    /// whose `distance` is the `t` where the ray enters the box (0 when `origin` is inside it), by
+    /// `t` then id. Touching counts. `t` is in units of `direction`'s length, which is not
+    /// normalised; `maxT` defaults to infinity. An origin or direction not finite, a zero
+    /// direction, or a `maxT` negative or NaN is refused.
+    public func ray(_ origin: SIMD3<Double>, _ direction: SIMD3<Double>,
+                    maxT: Double = .infinity) throws -> [RTreeHit] {
+        try rtreeHits(cadaclysm_blacksmith_rtree_ray(try h(), [origin.x, origin.y, origin.z],
+                                                     [direction.x, direction.y, direction.z], maxT), "rtree_ray")
+    }
+
+    /// Every pair `(a, b)`, `a` an entry of this tree and `b` one of `other` (which may be this
+    /// tree), whose boxes are at most `slack` apart on every axis (0: touching), ascending. A
+    /// `slack` negative or NaN is refused.
+    public func overlaps(_ other: RTree, slack: Double = 0) throws -> [RTreePair] {
+        let (a, b) = (try h(), try other.h())
+        return try withExtendedLifetime(other) {
+            try rtreePairs(cadaclysm_blacksmith_rtree_overlaps(a, b, slack), "rtree_overlaps")
+        }
+    }
+
+    /// Every unordered pair of distinct entries at most `slack` apart, once each as `(smaller id,
+    /// larger id)`, ascending -- an id paired with itself only where two entries share it. A
+    /// `slack` negative or NaN is refused.
+    public func selfOverlaps(slack: Double = 0) throws -> [RTreePair] {
+        try rtreePairs(cadaclysm_blacksmith_rtree_self_overlaps(try h(), slack), "rtree_self_overlaps")
+    }
+
+    public var description: String {
+        guard let handle else { return "RTree(closed)" }
+        return "RTree(\(cadaclysm_blacksmith_rtree_count(handle)) entries)"
+    }
+}
+
+/// `x` as Rust's `{}` prints an f64 -- the kernel's refusals quote numbers that way.
+func rustNumber(_ x: Double) -> String {
+    if x.isNaN { return "NaN" }
+    if x.isInfinite { return x > 0 ? "inf" : "-inf" }
+    // `description` is the shortest round-trip digits, as Rust's are; Rust lays them out without
+    // an exponent.
+    let sign = x.sign == .minus ? "-" : ""
+    let body = abs(x).description
+    let parts = body.split(separator: "e", maxSplits: 1, omittingEmptySubsequences: false)
+    var shift = parts.count > 1 ? Int(parts[1])! : 0
+    let mantissa = parts[0].split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
+    let fraction = mantissa.count > 1 ? String(mantissa[1]) : ""
+    var digits = String((String(mantissa[0]) + fraction).drop(while: { $0 == "0" }))
+    shift -= fraction.count
+    while digits.last == "0" {
+        digits.removeLast()
+        shift += 1
+    }
+    if digits.isEmpty { return sign + "0" }
+    if shift >= 0 { return sign + digits + String(repeating: "0", count: shift) }
+    let point = digits.count + shift
+    if point > 0 { return sign + String(digits.prefix(point)) + "." + String(digits.dropFirst(point)) }
+    return sign + "0." + String(repeating: "0", count: -point) + digits
+}
+
+/// Refuses, as the kernel's `closest_points` / `k_neighbors` do, the first hay point and then
+/// the first needle that is not finite, by index.
+private func finitePoints(_ call: String, _ hay: [SIMD3<Double>], _ needles: [SIMD3<Double>]) throws {
+    for (name, points) in [("hay", hay), ("needle", needles)] {
+        if let i = points.firstIndex(where: { !($0.x.isFinite && $0.y.isFinite && $0.z.isFinite) }) {
+            throw BuildError("\(call): \(name) point \(i) is not finite")
+        }
+    }
+}
+
+/// For each of `needles`, the indices of the `hay` points within `limit` of it, by distance then
+/// index -- one `RTree` over the hay answers every needle. A `limit` negative or NaN, then the
+/// first hay point and the first needle not finite, by index, are refused.
+public func closestPoints(_ hay: [SIMD3<Double>], _ needles: [SIMD3<Double>], _ limit: Double) throws -> [[Int]] {
+    guard limit >= 0 else { throw BuildError("closest_points: limit \(rustNumber(limit)) is not a distance") }
+    try finitePoints("closest_points", hay, needles)
+    let tree = try RTree.fromPoints(hay)
+    defer { tree.close() }
+    return try needles.map { try tree.within($0, limit).map { Int($0.id) } }
+}
+
+/// For each of `needles`, the indices of the `k` nearest `hay` points, by distance then index
+/// (all of them when `k` is over the hay count). The first hay point and the first needle not
+/// finite, by index, then a `k` above 1,000,000, are refused.
+public func kNeighbors(_ hay: [SIMD3<Double>], _ needles: [SIMD3<Double>], _ k: UInt32) throws -> [[Int]] {
+    try finitePoints("k_neighbors", hay, needles)
+    guard k <= 1_000_000 else { throw BuildError("k_neighbors: k \(k) is not at most 1000000") }
+    let tree = try RTree.fromPoints(hay)
+    defer { tree.close() }
+    return try needles.map { try tree.nearest($0, k).map { Int($0.id) } }
+}
+
+/// Every pair of `parts` -- or, with `others`, every part of `parts` against every part of
+/// `others` -- that penetrates, touches or lies within `clearance` of the other, as `Clash` rows,
+/// the solids as they stand. `tolerance` is the meshing tolerance, absolute (default 0.05).
+/// `allowed` pairs of part indices never tested (designed contacts), flat as `Collider` takes
+/// them: `(a0, b0, a1, b1, ...)`; with `others` a pair is (index in `parts`, index in `others`).
+/// In a row `a` indexes `parts` and `b` indexes `others` (or `parts` again). Throws for an empty
+/// `others`, an `allowed` of odd length, a negative or non-finite `clearance`, a `tolerance` not
+/// positive and finite, an `allowed` index out of range or a part that is not a closed solid.
+public func clash(_ parts: [Solid], _ others: [Solid]? = nil, clearance: Double = 0, tolerance: Double = 0.05,
+                  allowed: [UInt32] = []) throws -> [Clash] {
+    let first: [OpaquePointer?] = try parts.map { try $0.h() }
+    let second: [OpaquePointer?]? = try others.map { try $0.map { try $0.h() } }
+    if let second, second.isEmpty { throw BuildError("clash: an empty set") }
+    if allowed.count % 2 != 0 { throw BuildError("clash: allowed is \(allowed.count) numbers, not pairs") }
+    let found: OpaquePointer? = withExtendedLifetime((parts, others)) {
+        if let second {
+            return cadaclysm_blacksmith_clash(first, UInt32(first.count), second, UInt32(second.count),
+                                              tolerance, clearance, allowed, UInt32(allowed.count / 2))
+        }
+        return cadaclysm_blacksmith_clash(first, UInt32(first.count), nil, 0,
+                                          tolerance, clearance, allowed, UInt32(allowed.count / 2))
+    }
+    guard let found else { throw failure("clash") }
+    return try clashesOf(found)
+}
+
+/// Every pair of `parts` -- or, with `others`, every part of `parts` against every part of
+/// `others` -- that penetrates, touches or comes within `clearance` of the other anywhere on a
+/// path, as `SweptClash` rows. Each part is its own group: pose `k` of `poses` is one frame per
+/// part of `parts`, and pose `k` of `otherPoses` one per part of `others` (the two go together,
+/// and have as many poses). The motion between poses, the guarantee, `resolution` and
+/// `maxSteps` are `Collider.sweptClash`'s. `tolerance` is the meshing tolerance, absolute
+/// (default 0.05). `allowed` pairs of part indices never tested, flat as `clash` takes them:
+/// `(a0, b0, a1, b1, ...)`; with `others` a pair is (index in `parts`, index in `others`). In a
+/// row `a` indexes `parts` and `b` indexes `others` (or `parts` again). Throws as
+/// `Collider.sweptClash` does, and for `others` without `otherPoses` or the other way round,
+/// pose counts that differ between the sets, a pose with the wrong number of frames, an empty
+/// `others`, an `allowed` of odd length, an `allowed` index out of range or a part that is not
+/// a closed solid.
+public func sweptClash(_ parts: [Solid], _ poses: [[Frame]], others: [Solid]? = nil, otherPoses: [[Frame]]? = nil,
+                       clearance: Double = 0, tolerance: Double = 0.05, resolution: Double = 1e-3,
+                       maxSteps: UInt32 = 100000, allowed: [UInt32] = []) throws -> [SweptClash] {
+    if (others == nil) != (otherPoses == nil) { throw BuildError("swept_clash: others and other_poses go together") }
+    let first: [OpaquePointer?] = try parts.map { try $0.h() }
+    let second: [OpaquePointer?]? = try others.map { try $0.map { try $0.h() } }
+    // C reads each set's poses at its part count: the kernel's own checks, in its order
+    if let otherPoses, otherPoses.count != poses.count {
+        throw BuildError("swept_clash: \(poses.count) poses for set a, \(otherPoses.count) for set b")
+    }
+    for (name, frames, n) in [("a", poses, first.count), ("b", otherPoses ?? [], second?.count ?? 0)] {
+        for (k, pose) in frames.enumerated() where pose.count != n {
+            throw BuildError("swept_clash: pose \(k) of set \(name) has \(pose.count) frames for \(n) parts")
+        }
+    }
+    if let second, second.isEmpty { throw BuildError("swept_clash: an empty set") }
+    if allowed.count % 2 != 0 { throw BuildError("swept_clash: allowed is \(allowed.count) numbers, not pairs") }
+    let posesA = poseFrames(poses)
+    let found: OpaquePointer? = withExtendedLifetime((parts, others)) {
+        if let second, let otherPoses {
+            return cadaclysm_blacksmith_swept_clash(first, UInt32(first.count), posesA, second, UInt32(second.count),
+                                                    poseFrames(otherPoses), UInt32(poses.count), tolerance, clearance,
+                                                    resolution, maxSteps, allowed, UInt32(allowed.count / 2))
+        }
+        return cadaclysm_blacksmith_swept_clash(first, UInt32(first.count), posesA, nil, 0, nil, UInt32(poses.count),
+                                                tolerance, clearance, resolution, maxSteps, allowed,
+                                                UInt32(allowed.count / 2))
+    }
+    guard let found else { throw failure("swept_clash") }
+    return try sweptClashesOf(found)
+}
+
+// MARK: - Wall thickness
+
+/// One wall-thickness reading on a solid (`ThicknessGauge.thickness`, `.thicknessAt`, the free
+/// `thickness`). `point` lies on face `face` of body `body` (the body's index in the gauge): at
+/// vertex `vertex` of that body's measuring mesh (`ThicknessGauge.mesh`), or `vertex` nil for a
+/// reading at a point. `thickness` is the nearest-opposing-wall rule (the nearest triangle that
+/// faces against one of the vertex's own faces, with the vertex behind it) on the measuring
+/// mesh, to `opposite` on face `oppositeFace` of body `oppositeBody`; `knife` marks a knife edge
+/// (thickness 0, `opposite` == `point`). `exactOpposite` is `opposite` moved onto its exact face
+/// where its foot lies within the tolerance and inside the face's trims, `exactThickness` the
+/// distance to it. `sphere` is the diameter of the largest ball tangent at `point` that holds
+/// none of the surfaces, nil where none under the maximum does (0 on a knife edge). Python's
+/// `Thickness`.
+public struct Thickness: CustomStringConvertible {
+    public let body: UInt32
+    public let vertex: UInt32?
+    public let face: UInt32
+    public let point: SIMD3<Double>
+    public let thickness: Double
+    public let opposite: SIMD3<Double>
+    public let oppositeBody: UInt32
+    public let oppositeFace: UInt32
+    public let knife: Bool
+    public let exactThickness: Double
+    public let exactOpposite: SIMD3<Double>
+    public let sphere: Double?
+
+    init(_ raw: CadaclysmBlacksmithThickness) {
+        body = raw.body
+        vertex = raw.vertex == none ? nil : raw.vertex
+        face = raw.face
+        point = SIMD3(raw.point.0, raw.point.1, raw.point.2)
+        thickness = raw.thickness
+        opposite = SIMD3(raw.opposite.0, raw.opposite.1, raw.opposite.2)
+        oppositeBody = raw.opposite_body
+        oppositeFace = raw.opposite_face
+        knife = raw.knife
+        exactThickness = raw.exact_thickness
+        exactOpposite = SIMD3(raw.exact_opposite.0, raw.exact_opposite.1, raw.exact_opposite.2)
+        sphere = raw.sphere.isNaN ? nil : raw.sphere
+    }
+
+    public var description: String {
+        "Thickness(body=\(body), vertex=\(vertex.map { String($0) } ?? "nil"), face=\(face), "
+            + "thickness=\(thickness), oppositeBody=\(oppositeBody), knife=\(knife))"
+    }
+}
+
+/// A face's thickness, found (`ThicknessGauge.thicknessAtFace`, `Solid.thicknessAtFace`; where
+/// nothing is found those answer nil): `thickness` the median of the face's vertex readings (or
+/// the reading at `at`), `min` and `max` their extremes, `uniform` whether `max - min` is within
+/// the gauge's tolerance. Python's `FaceThickness`.
+public struct FaceThickness: CustomStringConvertible {
+    public let thickness: Double
+    public let min: Double
+    public let max: Double
+    public let uniform: Bool
+
+    init(_ raw: CadaclysmBlacksmithFaceThickness) {
+        thickness = raw.thickness
+        min = raw.min
+        max = raw.max
+        uniform = raw.uniform
+    }
+
+    public var description: String {
+        "FaceThickness(thickness=\(thickness), min=\(min), max=\(max), uniform=\(uniform))"
+    }
+}
+
+/// A body's measuring mesh (`ThicknessGauge.mesh`), copied out of the gauge: `positions` and
+/// `normals` (unit, outward) one point per vertex -- a reading's `vertex` indexes them; no vertex
+/// is shared between two faces -- `triangles` three vertex indices each, and `faces` the B-rep
+/// face of each triangle. Python's `ThicknessMesh`.
+public struct ThicknessMesh: CustomStringConvertible {
+    public let positions: [SIMD3<Double>]
+    public let normals: [SIMD3<Double>]
+    public let triangles: [SIMD3<UInt32>]
+    public let faces: [UInt32]
+
+    public var description: String { "ThicknessMesh(vertices=\(positions.count), triangles=\(triangles.count))" }
+}
+
+/// One reading on a plain mesh (`meshThickness`): vertex `vertex` of mesh `mesh`, at `point`,
+/// reads `thickness` to `opposite` on triangle `oppositeTriangle` of mesh `oppositeMesh` (both
+/// indices within that mesh). `knife`: a knife edge, thickness 0 and `opposite` == `point`.
+/// Python's `MeshThickness`.
+public struct MeshThickness: CustomStringConvertible {
+    public let mesh: UInt32
+    public let vertex: UInt32
+    public let thickness: Double
+    public let point: SIMD3<Double>
+    public let opposite: SIMD3<Double>
+    public let oppositeMesh: UInt32
+    public let oppositeTriangle: UInt32
+    public let knife: Bool
+
+    init(_ raw: CadaclysmBlacksmithMeshThickness) {
+        mesh = raw.mesh
+        vertex = raw.vertex
+        thickness = raw.thickness
+        point = SIMD3(raw.point.0, raw.point.1, raw.point.2)
+        opposite = SIMD3(raw.opposite.0, raw.opposite.1, raw.opposite.2)
+        oppositeMesh = raw.opposite_mesh
+        oppositeTriangle = raw.opposite_triangle
+        knife = raw.knife
+    }
+
+    public var description: String {
+        "MeshThickness(mesh=\(mesh), vertex=\(vertex), thickness=\(thickness), "
+            + "oppositeMesh=\(oppositeMesh), knife=\(knife))"
+    }
+}
+
+/// A thicknesses handle (nil: throws `what`'s refusal) read out into rows and freed on every path.
+func thicknessesOf(_ found: OpaquePointer?, _ what: String) throws -> [Thickness] {
+    guard let found else { throw failure(what) }
+    defer { cadaclysm_blacksmith_thicknesses_free(found) }
+    let count = cadaclysm_blacksmith_thicknesses_count(found)
+    var rows: [Thickness] = []
+    rows.reserveCapacity(Int(count))
+    for i in 0..<count {
+        var raw = CadaclysmBlacksmithThickness()
+        if !cadaclysm_blacksmith_thicknesses_at(found, i, &raw) { throw failure("thicknesses_at") }
+        rows.append(Thickness(raw))
+    }
+    return rows
+}
+
+/// Wall thickness (the nearest-opposing-wall rule: each vertex reads to the nearest triangle that
+/// faces against one of its own faces, with the vertex behind it) over `solids`, measured against
+/// each other: each solid meshed once at `tolerance` -- absolute, in model units (default 0.01)
+/// -- then asked as often as needed. A reading's `body` is the solid's index in `solids`. The
+/// gauge keeps its own reference to the bodies, so it answers on after the `Solid`s are closed.
+/// `close()` frees it; so does `deinit`. Throws for a `tolerance` not positive and finite.
+/// Python's `ThicknessGauge`.
+public final class ThicknessGauge: CustomStringConvertible {
+    private var handle: OpaquePointer?
+
+    public init(_ solids: [Solid], tolerance: Double = 0.01) throws {
+        let handles: [OpaquePointer?] = try solids.map { try $0.h() }
+        // The library wants a non-null array even for no bodies.
+        let parts: [OpaquePointer?] = handles.isEmpty ? [nil] : handles
+        let raw: OpaquePointer? = withExtendedLifetime(solids) {
+            cadaclysm_blacksmith_thickness_gauge_new(parts, UInt32(handles.count), tolerance)
+        }
+        handle = try checked(raw, "thickness_gauge_new")
+    }
+
+    deinit { close() }
+
+    /// Free the gauge now. Idempotent.
+    public func close() {
+        if let handle { cadaclysm_blacksmith_thickness_gauge_free(handle) }
+        handle = nil
+    }
+
+    /// Whether `close()` has run.
+    public var isClosed: Bool { handle == nil }
+
+    func h() throws -> OpaquePointer {
+        guard let handle else { throw BuildError("thickness_gauge: closed") }
+        return handle
+    }
+
+    /// How many bodies the gauge measures.
+    public var count: Int {
+        get throws { Int(cadaclysm_blacksmith_thickness_gauge_body_count(try h())) }
+    }
+
+    /// The tolerance the gauge meshed its bodies at.
+    public var tolerance: Double {
+        get throws {
+            let value = cadaclysm_blacksmith_thickness_gauge_tolerance(try h())
+            if value.isNaN { throw failure("thickness_gauge_tolerance") }
+            return value
+        }
+    }
+
+    public var description: String {
+        guard handle != nil, let n = try? count, let t = try? tolerance else { return "ThicknessGauge(closed)" }
+        return "ThicknessGauge(bodies=\(n), tolerance=\(t))"
+    }
+
+    /// One reading per measuring-mesh vertex that has one within `maximum` (positive and finite),
+    /// by body then vertex; vertices whose interior angle is under `sharpAngle` radians (zero or
+    /// more) are knife edges. Throws for a bad limit.
+    public func thickness(maximum: Double, sharpAngle: Double = 0) throws -> [Thickness] {
+        try thicknessesOf(cadaclysm_blacksmith_thickness_gauge_measure(try h(), maximum, sharpAngle),
+                          "thickness_gauge_measure")
+    }
+
+    /// The reading at `point`'s foot on face `face` of body `body` (its `vertex` nil), or nil
+    /// where the foot lies off the face or the wall is thicker than `maximum`. Throws for a body
+    /// or face past the end, a point not finite or a bad limit.
+    public func thicknessAt(body: Int, face: Int, point: SIMD3<Double>, maximum: Double,
+                            sharpAngle: Double = 0) throws -> Thickness? {
+        let b = try index32(body, "thickness_gauge_at"), f = try index32(face, "thickness_gauge_at")
+        let xyz = [point.x, point.y, point.z]
+        let rows = try thicknessesOf(
+            cadaclysm_blacksmith_thickness_gauge_at(try h(), b, f, xyz, maximum, sharpAngle), "thickness_gauge_at")
+        return rows.first
+    }
+
+    /// One thickness for face `face` of body `body`: measured at `at`'s foot on the face or, with
+    /// `at` nil, over the face's vertices; the other bodies are measured with it. nil where
+    /// nothing is found (nothing reads under `maximum`, or `at`'s foot lies off the face).
+    /// `maximum` has no default. Throws for a body or face past the end, an `at` not finite or a
+    /// bad maximum.
+    public func thicknessAtFace(body: Int, face: Int, at: SIMD3<Double>? = nil,
+                                maximum: Double) throws -> FaceThickness? {
+        let b = try index32(body, "thickness_gauge_face"), f = try index32(face, "thickness_gauge_face")
+        var raw = CadaclysmBlacksmithFaceThickness()
+        let gauge = try h()
+        let ok: Bool
+        if let at {
+            ok = cadaclysm_blacksmith_thickness_gauge_face(gauge, b, f, [at.x, at.y, at.z], maximum, &raw)
+        } else {
+            ok = cadaclysm_blacksmith_thickness_gauge_face(gauge, b, f, nil, maximum, &raw)
+        }
+        if !ok { throw failure("thickness_gauge_face") }
+        return raw.found ? FaceThickness(raw) : nil
+    }
+
+    /// Body `body`'s measuring mesh, copied out (it outlives the gauge). Throws for a body past
+    /// the end.
+    public func mesh(body: Int) throws -> ThicknessMesh {
+        let b = try index32(body, "thickness_gauge_mesh")
+        var raw = CadaclysmBlacksmithThicknessMesh()
+        if !cadaclysm_blacksmith_thickness_gauge_mesh(try h(), b, &raw) { throw failure("thickness_gauge_mesh") }
+        let t = Int(raw.triangle_count)
+        var triangles: [SIMD3<UInt32>] = []
+        var faces: [UInt32] = []
+        if t > 0, let indices = raw.indices, let faceIds = raw.faces {
+            let flat = UnsafeBufferPointer(start: indices, count: 3 * t)
+            triangles = stride(from: 0, to: flat.count, by: 3).map { SIMD3(flat[$0], flat[$0 + 1], flat[$0 + 2]) }
+            faces = Array(UnsafeBufferPointer(start: faceIds, count: t))
+        }
+        return ThicknessMesh(positions: pointsAt(raw.positions, raw.vertex_count),
+                             normals: pointsAt(raw.normals, raw.vertex_count),
+                             triangles: triangles, faces: faces)
+    }
+}
+
+/// `ThicknessGauge(solids, tolerance:).thickness(maximum:sharpAngle:)` on a gauge used once and
+/// freed: every reading within `maximum` on the solids, measured against each other.
+public func thickness(_ solids: [Solid], maximum: Double, sharpAngle: Double = 0,
+                      tolerance: Double = 0.01) throws -> [Thickness] {
+    let gauge = try ThicknessGauge(solids, tolerance: tolerance)
+    defer { gauge.close() }
+    return try gauge.thickness(maximum: maximum, sharpAngle: sharpAngle)
+}
+
+/// The nearest-opposing-wall rule on plain meshes measured against each other: each mesh a
+/// `(positions, triangles)` pair -- points and triples of indices into its own points. One
+/// reading per vertex that has one within `maximum` (positive and finite), by mesh then vertex;
+/// `sharpAngle` as for `ThicknessGauge.thickness`. Throws for a triangle past its mesh, a
+/// position not finite or a bad limit. Python's `mesh_thickness`.
+public func meshThickness(_ meshes: [(positions: [SIMD3<Double>], triangles: [SIMD3<UInt32>])],
+                          maximum: Double, sharpAngle: Double = 0) throws -> [MeshThickness] {
+    var positions: [Double] = []
+    var indices: [UInt32] = []
+    var vertexCounts: [UInt32] = []
+    var triangleCounts: [UInt32] = []
+    for (m, mesh) in meshes.enumerated() {
+        for p in mesh.positions { positions.append(contentsOf: [p.x, p.y, p.z]) }
+        for t in mesh.triangles { indices.append(contentsOf: [t.x, t.y, t.z]) }
+        vertexCounts.append(try rtreeCount(mesh.positions.count, "mesh_thickness", "mesh \(m) positions"))
+        triangleCounts.append(try rtreeCount(mesh.triangles.count, "mesh_thickness", "mesh \(m) triangles"))
+    }
+    let meshCount = try rtreeCount(meshes.count, "mesh_thickness", "meshes")
+    guard let found = cadaclysm_blacksmith_mesh_thickness(positions, vertexCounts, indices, triangleCounts,
+                                                          meshCount, maximum, sharpAngle) else {
+        throw failure("mesh_thickness")
+    }
+    defer { cadaclysm_blacksmith_mesh_thicknesses_free(found) }
+    let count = cadaclysm_blacksmith_mesh_thicknesses_count(found)
+    var rows: [MeshThickness] = []
+    rows.reserveCapacity(Int(count))
+    for i in 0..<count {
+        var raw = CadaclysmBlacksmithMeshThickness()
+        if !cadaclysm_blacksmith_mesh_thicknesses_at(found, i, &raw) { throw failure("mesh_thicknesses_at") }
+        rows.append(MeshThickness(raw))
+    }
+    return rows
+}
+
+extension Solid {
+    /// One thickness for face `face` of this solid alone, on a `ThicknessGauge` meshed at
+    /// `tolerance` (default 0.01), used once and freed -- build the gauge yourself to ask more
+    /// than once. nil where nothing is found; see `ThicknessGauge.thicknessAtFace`.
+    public func thicknessAtFace(_ face: Int, at: SIMD3<Double>? = nil, maximum: Double,
+                                tolerance: Double = 0.01) throws -> FaceThickness? {
+        let gauge = try ThicknessGauge([self], tolerance: tolerance)
+        defer { gauge.close() }
+        return try gauge.thicknessAtFace(body: 0, face: face, at: at, maximum: maximum)
+    }
+}
+
+// MARK: - Interpolator
+
+/// How an `Interpolator` reads between samples, valued as the C constants
+/// (`CADACLYSM_BLACKSMITH_INTERPOLATE_*`). Python's mode names.
+public enum InterpolatorMode: UInt32, CaseIterable {
+    /// The sample at `floor(t + 1/2)` (a half rounds up), after the clamp or wrap.
+    case nearest = 0
+    /// Straight between the two samples either side of `t`.
+    case linear = 1
+    /// Between the two samples either side of `t` on a cosine ease, flat at every sample.
+    case cosine = 2
+    /// Bourke's cubic over the four samples about `t`, through every sample.
+    case cubic = 3
+    /// The Catmull-Rom spline over the four samples about `t`: through every sample, C1.
+    case catmullRom = 4
+}
+
+/// A list of samples read at a fractional index, as Rhino's `Interpolator`: `t = 2` is sample 2,
+/// `t = 2.5` halfway between samples 2 and 3. Animation keys, a value along a pattern, a smoothed
+/// profile of measurements.
+///
+/// Samples are numbers (`init(_:cyclic:)`, dimension 1) or equal-length rows (`init(rows:cyclic:)`
+/// -- 2D, 3D or any dimension), each component read on its own; every answer is a `[Double]` of
+/// `dimension` numbers. An open list clamps `t` to `[0, count - 1]` and stops on its end samples;
+/// a `cyclic` one wraps `t` with period `count`. An interpolator never changes after it is made.
+/// `close()` frees it; so does `deinit`. Python's `Interpolator`.
+public final class Interpolator: CustomStringConvertible {
+    private var handle: OpaquePointer?
+    private let width: Int
+
+    /// An interpolator over numbers: dimension 1. No samples, or one that is NaN or infinite, is
+    /// refused (by index).
+    public convenience init(_ samples: [Double], cyclic: Bool = false) throws {
+        try self.init(flat: samples, count: samples.count, dimension: 1, cyclic: cyclic)
+    }
+
+    /// An interpolator over rows of equal length, the dimension. Rows of unequal length are
+    /// refused before the call; no rows, a row of no numbers, or a number that is NaN or infinite
+    /// (by index) are refused by the library.
+    public convenience init(rows: [[Double]], cyclic: Bool = false) throws {
+        let dimension = rows.first?.count ?? 1
+        if rows.contains(where: { $0.count != dimension }) {
+            let lengths = Set(rows.map(\.count)).sorted().map(String.init).joined(separator: ", ")
+            throw BuildError("interpolator: samples differ in length ([\(lengths)])")
+        }
+        try self.init(flat: rows.flatMap { $0 }, count: rows.count, dimension: dimension, cyclic: cyclic)
+    }
+
+    private init(flat: [Double], count: Int, dimension: Int, cyclic: Bool) throws {
+        let n = try rtreeCount(count, "interpolator_new", "samples")
+        let d = try rtreeCount(dimension, "interpolator_new", "numbers a sample")
+        width = dimension
+        handle = try checked(cadaclysm_blacksmith_interpolator_new(flat, n, d, cyclic), "interpolator_new")
+    }
+
+    deinit { close() }
+
+    /// Free the interpolator now. Idempotent; every call on it throws after.
+    public func close() {
+        if let handle { cadaclysm_blacksmith_interpolator_free(handle) }
+        handle = nil
+    }
+
+    /// Whether `close()` has run.
+    public var isClosed: Bool { handle == nil }
+
+    func h() throws -> OpaquePointer {
+        guard let handle else { throw BuildError("interpolator: closed") }
+        return handle
+    }
+
+    /// How many samples.
+    public var count: Int {
+        get throws { Int(cadaclysm_blacksmith_interpolator_count(try h())) }
+    }
+
+    /// How many numbers a sample holds, and so every answer.
+    public var dimension: Int {
+        get throws { Int(cadaclysm_blacksmith_interpolator_dimension(try h())) }
+    }
+
+    /// Whether `t` wraps round the list (else it is clamped to the ends).
+    public var cyclic: Bool {
+        get throws { cadaclysm_blacksmith_interpolator_cyclic(try h()) }
+    }
+
+    /// The value at the fractional index `t` by `mode`, `dimension` numbers. A `t` that is NaN or
+    /// infinite is refused.
+    public func at(_ t: Double, _ mode: InterpolatorMode = .linear) throws -> [Double] {
+        let handle = try h()
+        var out = [Double](repeating: 0, count: width)
+        if !cadaclysm_blacksmith_interpolator_at(handle, t, mode.rawValue, &out, UInt32(width)) {
+            throw failure("interpolator_at")
+        }
+        return out
+    }
+
+    /// The values at every `t` of `ts` by `mode`, as `at` reads each, in one call. A value of `t`
+    /// that is NaN or infinite (by its index) and more than 1,000,000 values are refused.
+    public func sample(_ ts: [Double], _ mode: InterpolatorMode = .linear) throws -> [[Double]] {
+        let handle = try h()
+        if ts.isEmpty { return [] }
+        let n = try rtreeCount(ts.count, "interpolator_sample", "values")
+        var out = [Double](repeating: 0, count: ts.count * width)
+        if !cadaclysm_blacksmith_interpolator_sample(handle, ts, n, mode.rawValue, &out, UInt32(clamping: out.count)) {
+            throw failure("interpolator_sample")
+        }
+        return stride(from: 0, to: out.count, by: width).map { Array(out[$0..<$0 + width]) }
+    }
+
+    /// `at(t, .nearest)`: the sample at `floor(t + 1/2)` (a half rounds up), after the clamp or wrap.
+    public func nearest(_ t: Double) throws -> [Double] { try at(t, .nearest) }
+
+    /// `at(t, .linear)`: straight between the two samples either side of `t`.
+    public func linear(_ t: Double) throws -> [Double] { try at(t, .linear) }
+
+    /// `at(t, .cosine)`: between the two samples either side of `t` on a cosine ease.
+    public func cosine(_ t: Double) throws -> [Double] { try at(t, .cosine) }
+
+    /// `at(t, .cubic)`: Bourke's cubic over the four samples about `t`.
+    public func cubic(_ t: Double) throws -> [Double] { try at(t, .cubic) }
+
+    /// `at(t, .catmullRom)`: the Catmull-Rom spline over the four samples about `t`.
+    public func catmullRom(_ t: Double) throws -> [Double] { try at(t, .catmullRom) }
+
+    public var description: String {
+        guard let handle else { return "Interpolator(closed)" }
+        let cyclic = cadaclysm_blacksmith_interpolator_cyclic(handle) ? ", cyclic" : ""
+        return "Interpolator(\(cadaclysm_blacksmith_interpolator_count(handle)) samples of \(width)\(cyclic))"
     }
 }
 
@@ -4023,6 +5954,14 @@ public final class Subd {
         }
     }
 
+    /// A new cage with `faces` subdivided once by the Catmull-Clark rules (the whole cage when
+    /// none are given): each face becomes quads round a new point, and an unpicked face beside
+    /// them takes the new edge points as corners. The whole cage keeps its smooth surface
+    /// exactly. The new cage selects the new faces.
+    public func subdivide(_ faces: [UInt32] = []) throws -> Subd {
+        try edit("subd_subdivide") { cadaclysm_blacksmith_subd_subdivide($0, faces, UInt32(faces.count)) }
+    }
+
     /// A new cage with a loop of edges cut across the ring of quads through `edge`, at
     /// `a + at * (b - a)` with `at` in (0, 1); it selects the new loop.
     public func insertLoop(_ edge: SubdEdge, at: Double = 0.5) throws -> Subd {
@@ -4103,6 +6042,770 @@ public final class Subd {
             cadaclysm_blacksmith_subd_to_solid(handle, tolerance, g1Angle, maxLevels, &report)
         }
         return (try Solid(raw, "subd_to_solid"), SubdReport(report))
+    }
+}
+
+// MARK: - Sketch
+
+// The C ABI's codes, by position; Swift speaks the names, as Python does.
+fileprivate let sketchEntityKinds = ["point", "line", "circle", "arc", "free_curve"]
+let sketchConstraintKinds = [
+    "coincident", "point_on_line", "point_on_circle", "horizontal", "vertical", "parallel", "perpendicular",
+    "collinear", "tangent", "tangent_at_end", "concentric", "equal_length", "equal_radius", "midpoint",
+    "symmetric", "fix", "distance", "point_line_distance", "line_distance", "circle_line_distance",
+    "circle_distance", "horizontal_distance", "vertical_distance", "length", "angle", "radius", "diameter",
+]
+fileprivate let sketchSenses = ["auto", "positive", "negative"]
+fileprivate let sketchEnds = ["start", "end"]
+fileprivate let sketchStatuses = ["converged", "conflicting", "diverged"]
+fileprivate let sketchStates = ["under", "full", "over"]
+
+// sketch_dof_list's and sketch_dof_part_list's `which`.
+fileprivate let sketchDofRedundant: UInt32 = 0
+fileprivate let sketchDofConflicting: UInt32 = 1
+fileprivate let sketchDofFreeEntities: UInt32 = 2
+fileprivate let sketchPartConstraints: UInt32 = 0
+fileprivate let sketchPartRedundant: UInt32 = 1
+fileprivate let sketchPartConflicting: UInt32 = 2
+fileprivate let sketchPartFreeEntities: UInt32 = 3
+
+/// What a `Sketch.solve`, `drag`, `setValue`, `setDriving` or `updateReference` did: `status`
+/// ("converged", "conflicting" or "diverged"), how many `iterations`, the largest constraint
+/// residual left (`maxResidual`), and `ids`: the constraints a conflict ran into, or the worst
+/// ones of a diverged solve (empty when it converged). Plain data.
+public struct SolveReport: Equatable {
+    public let status: String
+    public let iterations: Int
+    public let maxResidual: Double
+    public let ids: [UInt32]
+
+    /// Whether `status` is "converged".
+    public var converged: Bool { status == "converged" }
+}
+
+/// One independent part of a diagnosed sketch: its `params` (unknowns), how many stay `free`,
+/// its `state` ("under", "full" or "over"), its `constraints`, the `redundant` and `conflicting`
+/// ones among them, and its `freeEntities`. Plain data.
+public struct PartDof: Equatable {
+    public let params: Int
+    public let free: Int
+    public let state: String
+    public let constraints: [UInt32]
+    public let redundant: [UInt32]
+    public let conflicting: [UInt32]
+    public let freeEntities: [UInt32]
+}
+
+/// A sketch's degrees of freedom (`Sketch.diagnose`): how many are `free`, its `state` ("under",
+/// "full" or "over"), the `redundant` and `conflicting` constraint ids, the `freeEntities`
+/// (entities that can still move), and the independent `parts` it splits into. Plain data.
+public struct Dof: Equatable {
+    public let free: Int
+    public let state: String
+    public let redundant: [UInt32]
+    public let conflicting: [UInt32]
+    public let freeEntities: [UInt32]
+    public let parts: [PartDof]
+}
+
+/// A whole count the library sent as a double (a report's status and iterations, a diagnosis's
+/// free, state, part count, params): the whole number it holds, or a `BuildError` naming the
+/// call when it holds a fraction, NaN or anything outside 0...Int32.max -- never truncated.
+func sketchWhole(_ v: Double, _ what: String) throws -> Int {
+    guard v == v.rounded(.towardZero), v >= 0, v <= Double(Int32.max) else {
+        throw BuildError("\(what): the library answered \(v), not a whole number in range")
+    }
+    return Int(v)
+}
+
+/// The point ids of a drag's `moves` in ascending order: a `Dictionary` walks its keys in no
+/// order the solve may depend on.
+func sketchDragIDs(_ moves: [UInt32: SIMD2<Double>]) -> [UInt32] { moves.keys.sorted() }
+
+/// `name`'s code in `table`, or a `BuildError` naming the call and the parameter.
+fileprivate func sketchCode(_ table: [String], _ name: String, _ call: String, _ param: String) throws -> UInt32 {
+    if let i = table.firstIndex(of: name) { return UInt32(i) }
+    let quoted = table.map { "'\($0)'" }.joined(separator: ", ")
+    throw BuildError("\(call): \(param) must be one of \(quoted), not '\(name)'")
+}
+
+/// The name of `code` in `table` (NONE or out of range: the library's reason).
+fileprivate func sketchNamed(_ table: [String], _ code: UInt32, _ what: String) throws -> String {
+    if code == none || Int(code) >= table.count { throw failure(what) }
+    return table[Int(code)]
+}
+
+/// `ids` as a pointer that is never null: an empty list goes as a valid pointer and a count of
+/// 0, as Python passes one, never as the null the library reads as a refusal of its own.
+fileprivate func withSketchIDs<R>(_ ids: [UInt32], _ body: (UnsafePointer<UInt32>) -> R) -> R {
+    let padded = ids.isEmpty ? [0] : ids
+    return padded.withUnsafeBufferPointer { body($0.baseAddress!) }
+}
+
+/// `values` as a pointer that is never null, as `withSketchIDs`.
+fileprivate func withSketchDoubles<R>(_ values: [Double], _ body: (UnsafePointer<Double>) -> R) -> R {
+    let padded = values.isEmpty ? [0] : values
+    return padded.withUnsafeBufferPointer { body($0.baseAddress!) }
+}
+
+/// A 2D sketch of points, lines, circles, arcs and free curves held by geometric constraints
+/// and dimensions, solved on request. Entities and constraints are named by `UInt32` ids.
+/// Entity kinds are "point", "line", "circle", "arc" and "free_curve"; constraint kinds the
+/// names of the methods that add them ("point_line_distance", ...) -- but for `radiusOf`, whose
+/// kind is "radius". Senses are "auto", "positive" or "negative"; ends "start" or "end".
+///
+/// A refused call throws a `BuildError` with the library's text and, as its `ids`, the ids the
+/// refusal names: the constraints a new constraint, value or reference conflicts with, the
+/// entities still using a point (empty when it names none). The `SolveReport`s of `solve`,
+/// `drag`, `setValue`, `setDriving` and `updateReference` carry a report's ids the same way.
+/// `close()` frees the handle; so does `deinit`. Not safe for concurrent use.
+public final class Sketch {
+    private var handle: OpaquePointer?
+
+    private init(_ raw: OpaquePointer?, _ what: String) throws {
+        handle = try checked(raw, what)
+    }
+
+    /// A new, empty sketch.
+    public convenience init() throws {
+        try self.init(cadaclysm_blacksmith_sketch_new(), "sketch_new")
+    }
+
+    /// A sketch of `profile`'s lines, arcs and curves joined end to end, holes included; with
+    /// `infer` the obvious constraints (horizontal, vertical, tangent joints, ...) too. Ends
+    /// within `tolerance` count as joined.
+    public static func fromProfile(_ profile: Profile, infer: Bool = true,
+                                   tolerance: Double = 1e-6) throws -> Sketch {
+        let raw = withExtendedLifetime(profile) {
+            cadaclysm_blacksmith_sketch_from_profile(profile.handle, infer, tolerance)
+        }
+        return try Sketch(raw, "sketch_from_profile")
+    }
+
+    deinit { close() }
+
+    /// Free the sketch now. Idempotent; every call on it throws after.
+    public func close() {
+        if let handle { cadaclysm_blacksmith_sketch_free(handle) }
+        handle = nil
+    }
+
+    /// Whether `close()` has run.
+    public var isClosed: Bool { handle == nil }
+
+    func h() throws -> OpaquePointer {
+        guard let handle else { throw BuildError("sketch: closed") }
+        return handle
+    }
+
+    // MARK: Failures and borrowed lists
+
+    /// A borrowed list copied out (nil: the library's reason, no ids).
+    private func lent(_ p: UnsafePointer<UInt32>?, _ n: Int, _ what: String) throws -> [UInt32] {
+        guard let p else { throw failure(what) }
+        return Array(UnsafeBufferPointer(start: p, count: n))
+    }
+
+    /// The ids the last call named, copied (the sketch's `report_ids`).
+    private func reportIDs(_ handle: OpaquePointer) -> [UInt32] {
+        var n = 0
+        guard let p = cadaclysm_blacksmith_sketch_report_ids(handle, &n) else { return [] }
+        return Array(UnsafeBufferPointer(start: p, count: n))
+    }
+
+    /// A refusal that may name ids (constrain, removeEntity, setValue, setDriving,
+    /// updateReference, drag): the library's reason first, then `report_ids`.
+    private func refused(_ what: String) -> BuildError {
+        let reason = lastError()
+        let ids = handle.map { reportIDs($0) } ?? []
+        return BuildError(reason.isEmpty ? what : reason, ids: ids)
+    }
+
+    /// An id the library handed back (NONE: the library's reason, no ids).
+    private func id(_ got: UInt32, _ what: String) throws -> UInt32 {
+        if got == none { throw failure(what) }
+        return got
+    }
+
+    /// The `SolveReport` a re-solving call filled in (`done` false: refused, with ids).
+    private func solved(_ handle: OpaquePointer, _ done: Bool, _ report: [Double], _ what: String) throws -> SolveReport {
+        if !done { throw refused(what) }
+        let ids = reportIDs(handle)
+        let status = try sketchNamed(sketchStatuses, UInt32(try sketchWhole(report[0], what)), what)
+        let iterations = try sketchWhole(report[1], what)
+        return SolveReport(status: status, iterations: iterations, maxResidual: report[2], ids: ids)
+    }
+
+    // MARK: Entities
+
+    /// A free point at (`x`, `y`); a coordinate that is not finite is refused.
+    @discardableResult
+    public func addPoint(_ x: Double, _ y: Double) throws -> UInt32 {
+        let handle = try h()
+        return try id(cadaclysm_blacksmith_sketch_add_point(handle, x, y), "sketch_add_point")
+    }
+
+    /// A line between the points `a` and `b`.
+    @discardableResult
+    public func addLine(_ a: UInt32, _ b: UInt32) throws -> UInt32 {
+        let handle = try h()
+        return try id(cadaclysm_blacksmith_sketch_add_line(handle, a, b), "sketch_add_line")
+    }
+
+    /// A circle of radius `r` about the point `centre`.
+    @discardableResult
+    public func addCircle(_ centre: UInt32, _ r: Double) throws -> UInt32 {
+        let handle = try h()
+        return try id(cadaclysm_blacksmith_sketch_add_circle(handle, centre, r), "sketch_add_circle")
+    }
+
+    /// A counter-clockwise arc about the point `centre` from the point `start` to the point `end`.
+    @discardableResult
+    public func addArc(_ centre: UInt32, _ start: UInt32, _ end: UInt32) throws -> UInt32 {
+        let handle = try h()
+        return try id(cadaclysm_blacksmith_sketch_add_arc(handle, centre, start, end), "sketch_add_arc")
+    }
+
+    /// A cubic Bezier free curve from the point `start` through the controls `c1` and `c2` to a
+    /// new end point at `to`; the curve owns its control points.
+    @discardableResult
+    public func addBezier(_ start: UInt32, _ c1: SIMD2<Double>, _ c2: SIMD2<Double>,
+                          _ to: SIMD2<Double>) throws -> UInt32 {
+        let handle = try h()
+        return try id(cadaclysm_blacksmith_sketch_add_bezier(handle, start, c1.x, c1.y, c2.x, c2.y, to.x, to.y),
+                      "sketch_add_bezier")
+    }
+
+    /// A rational quadratic (conic) free curve from the point `start` with the `control` of
+    /// `weight` to a new end point at `to`.
+    @discardableResult
+    public func addConic(_ start: UInt32, _ control: SIMD2<Double>, _ to: SIMD2<Double>,
+                         weight: Double) throws -> UInt32 {
+        let handle = try h()
+        return try id(cadaclysm_blacksmith_sketch_add_conic(handle, start, control.x, control.y, to.x, to.y, weight),
+                      "sketch_add_conic")
+    }
+
+    /// A NURBS free curve of `degree` from the point `start` through the control `points` after
+    /// it, on `knots`; `weights` nil for a plain B-spline, or one per control point counting the
+    /// start (`points.count + 1`) -- any other count is refused before the call.
+    @discardableResult
+    public func addNurbs(_ start: UInt32, points: [SIMD2<Double>], knots: [Double], degree: UInt32 = 3,
+                         weights: [Double]? = nil) throws -> UInt32 {
+        let handle = try h()
+        let n = points.count
+        // The library reads exactly n + 1 weights whatever the array holds: check here.
+        if let weights, weights.count != n + 1 {
+            throw BuildError("sketch_add_nurbs: \(weights.count) weights for \(n + 1) control points "
+                + "(the start and \(n) given); give one per point")
+        }
+        var flat: [Double] = []
+        flat.reserveCapacity(2 * n)
+        for p in points {
+            flat.append(p.x)
+            flat.append(p.y)
+        }
+        let got = withSketchDoubles(flat) { xy in
+            withSketchDoubles(knots) { k in
+                if let weights {
+                    return weights.withUnsafeBufferPointer { w in
+                        cadaclysm_blacksmith_sketch_add_nurbs(handle, start, degree, xy, n, w.baseAddress, k, knots.count)
+                    }
+                }
+                return cadaclysm_blacksmith_sketch_add_nurbs(handle, start, degree, xy, n, nil, k, knots.count)
+            }
+        }
+        return try id(got, "sketch_add_nurbs")
+    }
+
+    /// The rectangle with opposite corners `a` and `b`: its four corner points, counter-clockwise
+    /// from `a`, and its four sides (side `i` from corner `i`).
+    @discardableResult
+    public func addRect(_ a: SIMD2<Double>, _ b: SIMD2<Double>) throws -> (corners: [UInt32], sides: [UInt32]) {
+        let handle = try h()
+        var n = 0
+        let ids = try lent(cadaclysm_blacksmith_sketch_add_rect(handle, a.x, a.y, b.x, b.y, &n), n, "sketch_add_rect")
+        guard ids.count == 8 else {
+            throw BuildError("sketch_add_rect: the library answered \(ids.count) ids, not 8")
+        }
+        return (Array(ids[0..<4]), Array(ids[4..<8]))
+    }
+
+    /// The kind of entity `id`: "point", "line", "circle", "arc" or "free_curve".
+    public func kind(_ id: UInt32) throws -> String {
+        let handle = try h()
+        return try sketchNamed(sketchEntityKinds, cadaclysm_blacksmith_sketch_kind(handle, id), "sketch_kind")
+    }
+
+    /// The live entity ids, ascending.
+    public func entities() throws -> [UInt32] {
+        let handle = try h()
+        var n = 0
+        return try lent(cadaclysm_blacksmith_sketch_entities(handle, &n), n, "sketch_entities")
+    }
+
+    /// The position of the point `id`.
+    public func point(_ id: UInt32) throws -> SIMD2<Double> {
+        let handle = try h()
+        var out = [Double](repeating: 0, count: 2)
+        if !cadaclysm_blacksmith_sketch_point(handle, id, &out) { throw failure("sketch_point") }
+        return SIMD2(out[0], out[1])
+    }
+
+    /// Move the point `id` to (`x`, `y`) without solving.
+    public func setPoint(_ id: UInt32, _ x: Double, _ y: Double) throws {
+        let handle = try h()
+        if !cadaclysm_blacksmith_sketch_set_point(handle, id, x, y) { throw failure("sketch_set_point") }
+    }
+
+    /// The radius of the circle or arc `id` (the RADIUS constraint is `radiusOf`).
+    public func radius(_ id: UInt32) throws -> Double {
+        let handle = try h()
+        let r = cadaclysm_blacksmith_sketch_radius(handle, id)
+        if r.isNaN { throw failure("sketch_radius") }
+        return r
+    }
+
+    /// Set the circle `id`'s radius to `r` without solving.
+    public func setRadius(_ id: UInt32, _ r: Double) throws {
+        let handle = try h()
+        if !cadaclysm_blacksmith_sketch_set_radius(handle, id, r) { throw failure("sketch_set_radius") }
+    }
+
+    /// The centre point of the circle or arc `id`.
+    public func centre(_ id: UInt32) throws -> UInt32 {
+        let handle = try h()
+        return try self.id(cadaclysm_blacksmith_sketch_centre(handle, id), "sketch_centre")
+    }
+
+    /// The points entity `id` runs between: a line's [a, b], an arc's [start, end], a free
+    /// curve's [start, controls..., end].
+    public func ends(_ id: UInt32) throws -> [UInt32] {
+        let handle = try h()
+        var n = 0
+        return try lent(cadaclysm_blacksmith_sketch_ends(handle, id, &n), n, "sketch_ends")
+    }
+
+    /// Mark entity `id` as construction geometry (kept out of profiles) when `on`, or back.
+    public func setConstruction(_ id: UInt32, on: Bool = true) throws {
+        let handle = try h()
+        if !cadaclysm_blacksmith_sketch_set_construction(handle, id, on) { throw failure("sketch_set_construction") }
+    }
+
+    /// Whether entity `id` is construction geometry (false for an unknown id, and when closed).
+    public func isConstruction(_ id: UInt32) -> Bool {
+        guard let handle else { return false }
+        return cadaclysm_blacksmith_sketch_is_construction(handle, id)
+    }
+
+    /// Whether entity `id` is a reference copy of another sketch's (false for an unknown id,
+    /// and when closed).
+    public func isReference(_ id: UInt32) -> Bool {
+        guard let handle else { return false }
+        return cadaclysm_blacksmith_sketch_is_reference(handle, id)
+    }
+
+    /// Remove entity `id` and the constraints on it, and return the removed constraint ids.
+    /// Refused for a point that lines or circles still use, with the entities holding it as the
+    /// error's `ids`.
+    @discardableResult
+    public func removeEntity(_ id: UInt32) throws -> [UInt32] {
+        let handle = try h()
+        var n = 0
+        guard let p = cadaclysm_blacksmith_sketch_remove_entity(handle, id, &n) else {
+            throw refused("sketch_remove_entity")
+        }
+        return Array(UnsafeBufferPointer(start: p, count: n))
+    }
+
+    /// A fixed construction copy of `other`'s entity `entity`, kept in step by `updateReference`.
+    /// `other` must be another sketch.
+    @discardableResult
+    public func reference(_ other: Sketch, _ entity: UInt32) throws -> UInt32 {
+        let handle = try h()
+        let otherHandle = try other.h()
+        let got = withExtendedLifetime(other) {
+            cadaclysm_blacksmith_sketch_reference(handle, otherHandle, entity)
+        }
+        return try id(got, "sketch_reference")
+    }
+
+    /// Refresh the reference `id` from `other` and re-solve.
+    @discardableResult
+    public func updateReference(_ id: UInt32, _ other: Sketch) throws -> SolveReport {
+        let handle = try h()
+        let otherHandle = try other.h()
+        var report = [Double](repeating: 0, count: 3)
+        let done = withExtendedLifetime(other) {
+            cadaclysm_blacksmith_sketch_update_reference(handle, id, otherHandle, &report)
+        }
+        return try solved(handle, done, report, "sketch_update_reference")
+    }
+
+    // MARK: Constraints: each returns the new constraint's id
+
+    /// Add a constraint of `kind`; geometric kinds pass Python's fillers (value 0, driving true,
+    /// sense "auto", end "start").
+    private func constrain(_ kind: String, _ refs: [UInt32], value: Double = 0, driving: Bool = true,
+                           sense: String = "auto", end: String = "start") throws -> UInt32 {
+        let handle = try h()
+        let senseCode = try sketchCode(sketchSenses, sense, kind, "sense")
+        let endCode = try sketchCode(sketchEnds, end, kind, "end")
+        let kindCode = try sketchCode(sketchConstraintKinds, kind, "sketch_constrain", "kind")
+        let got = withSketchIDs(refs) {
+            cadaclysm_blacksmith_sketch_constrain(handle, kindCode, $0, refs.count, value, driving, senseCode, endCode)
+        }
+        if got == none { throw refused("sketch_constrain") }
+        return got
+    }
+
+    /// Put the points `a` and `b` on each other.
+    @discardableResult
+    public func coincident(_ a: UInt32, _ b: UInt32) throws -> UInt32 {
+        try constrain("coincident", [a, b])
+    }
+
+    /// Put `point` on `line`.
+    @discardableResult
+    public func pointOnLine(_ point: UInt32, _ line: UInt32) throws -> UInt32 {
+        try constrain("point_on_line", [point, line])
+    }
+
+    /// Put `point` on `circle`, a circle or an arc.
+    @discardableResult
+    public func pointOnCircle(_ point: UInt32, _ circle: UInt32) throws -> UInt32 {
+        try constrain("point_on_circle", [point, circle])
+    }
+
+    /// Hold the points `a` and `b` level with each other.
+    @discardableResult
+    public func horizontal(_ a: UInt32, _ b: UInt32) throws -> UInt32 {
+        try constrain("horizontal", [a, b])
+    }
+
+    /// Hold the points `a` and `b` one above the other.
+    @discardableResult
+    public func vertical(_ a: UInt32, _ b: UInt32) throws -> UInt32 {
+        try constrain("vertical", [a, b])
+    }
+
+    /// Hold the lines `a` and `b` parallel.
+    @discardableResult
+    public func parallel(_ a: UInt32, _ b: UInt32) throws -> UInt32 {
+        try constrain("parallel", [a, b])
+    }
+
+    /// Hold the lines `a` and `b` square to each other.
+    @discardableResult
+    public func perpendicular(_ a: UInt32, _ b: UInt32) throws -> UInt32 {
+        try constrain("perpendicular", [a, b])
+    }
+
+    /// Hold the lines `a` and `b` on one line.
+    @discardableResult
+    public func collinear(_ a: UInt32, _ b: UInt32) throws -> UInt32 {
+        try constrain("collinear", [a, b])
+    }
+
+    /// Hold the curves `a` and `b` tangent; `sense` is "auto", "positive" or "negative".
+    @discardableResult
+    public func tangent(_ a: UInt32, _ b: UInt32, sense: String = "auto") throws -> UInt32 {
+        try constrain("tangent", [a, b], sense: sense)
+    }
+
+    /// Hold the free curve `curve` tangent to `other` at its `end` ("start" or "end").
+    @discardableResult
+    public func tangentAtEnd(_ curve: UInt32, _ other: UInt32, end: String = "start") throws -> UInt32 {
+        try constrain("tangent_at_end", [curve, other], end: end)
+    }
+
+    /// Hold the circles or arcs `a` and `b` on one centre.
+    @discardableResult
+    public func concentric(_ a: UInt32, _ b: UInt32) throws -> UInt32 {
+        try constrain("concentric", [a, b])
+    }
+
+    /// Hold the lines `a` and `b` the same length.
+    @discardableResult
+    public func equalLength(_ a: UInt32, _ b: UInt32) throws -> UInt32 {
+        try constrain("equal_length", [a, b])
+    }
+
+    /// Hold the circles or arcs `a` and `b` the same radius.
+    @discardableResult
+    public func equalRadius(_ a: UInt32, _ b: UInt32) throws -> UInt32 {
+        try constrain("equal_radius", [a, b])
+    }
+
+    /// Hold `point` at the middle of `line`.
+    @discardableResult
+    public func midpoint(_ point: UInt32, _ line: UInt32) throws -> UInt32 {
+        try constrain("midpoint", [point, line])
+    }
+
+    /// Hold the points `a` and `b` mirror images across the line `about`.
+    @discardableResult
+    public func symmetric(_ a: UInt32, _ b: UInt32, _ about: UInt32) throws -> UInt32 {
+        try constrain("symmetric", [a, b, about])
+    }
+
+    /// Hold `entity` where it is.
+    @discardableResult
+    public func fix(_ entity: UInt32) throws -> UInt32 {
+        try constrain("fix", [entity])
+    }
+
+    /// Dimension the points `a` and `b` `value` apart; a dimension not `driving` only reports.
+    @discardableResult
+    public func distance(_ a: UInt32, _ b: UInt32, _ value: Double, driving: Bool = true) throws -> UInt32 {
+        try constrain("distance", [a, b], value: value, driving: driving)
+    }
+
+    /// Dimension `point` `value` from `line`, on the side `sense` names.
+    @discardableResult
+    public func pointLineDistance(_ point: UInt32, _ line: UInt32, _ value: Double, driving: Bool = true,
+                                  sense: String = "auto") throws -> UInt32 {
+        try constrain("point_line_distance", [point, line], value: value, driving: driving, sense: sense)
+    }
+
+    /// Dimension the parallel lines `a` and `b` `value` apart.
+    @discardableResult
+    public func lineDistance(_ a: UInt32, _ b: UInt32, _ value: Double, driving: Bool = true,
+                             sense: String = "auto") throws -> UInt32 {
+        try constrain("line_distance", [a, b], value: value, driving: driving, sense: sense)
+    }
+
+    /// Dimension `circle` `value` from `line`.
+    @discardableResult
+    public func circleLineDistance(_ circle: UInt32, _ line: UInt32, _ value: Double, driving: Bool = true,
+                                   sense: String = "auto") throws -> UInt32 {
+        try constrain("circle_line_distance", [circle, line], value: value, driving: driving, sense: sense)
+    }
+
+    /// Dimension the circles `a` and `b` `value` apart.
+    @discardableResult
+    public func circleDistance(_ a: UInt32, _ b: UInt32, _ value: Double, driving: Bool = true) throws -> UInt32 {
+        try constrain("circle_distance", [a, b], value: value, driving: driving)
+    }
+
+    /// Dimension the points `a` and `b` `value` apart along x.
+    @discardableResult
+    public func horizontalDistance(_ a: UInt32, _ b: UInt32, _ value: Double, driving: Bool = true) throws -> UInt32 {
+        try constrain("horizontal_distance", [a, b], value: value, driving: driving)
+    }
+
+    /// Dimension the points `a` and `b` `value` apart along y.
+    @discardableResult
+    public func verticalDistance(_ a: UInt32, _ b: UInt32, _ value: Double, driving: Bool = true) throws -> UInt32 {
+        try constrain("vertical_distance", [a, b], value: value, driving: driving)
+    }
+
+    /// Dimension `line` `value` long.
+    @discardableResult
+    public func length(_ line: UInt32, _ value: Double, driving: Bool = true) throws -> UInt32 {
+        try constrain("length", [line], value: value, driving: driving)
+    }
+
+    /// Dimension the angle from line `a` to line `b`, in radians.
+    @discardableResult
+    public func angle(_ a: UInt32, _ b: UInt32, _ value: Double, driving: Bool = true) throws -> UInt32 {
+        try constrain("angle", [a, b], value: value, driving: driving)
+    }
+
+    /// The RADIUS dimension (kind "radius") -- `radius(_:)` reads a radius instead.
+    @discardableResult
+    public func radiusOf(_ circle: UInt32, _ value: Double, driving: Bool = true) throws -> UInt32 {
+        try constrain("radius", [circle], value: value, driving: driving)
+    }
+
+    /// Dimension the circle or arc `circle`'s diameter.
+    @discardableResult
+    public func diameter(_ circle: UInt32, _ value: Double, driving: Bool = true) throws -> UInt32 {
+        try constrain("diameter", [circle], value: value, driving: driving)
+    }
+
+    // MARK: Constraint readers
+
+    /// The live constraint ids, ascending.
+    public func constraints() throws -> [UInt32] {
+        let handle = try h()
+        var n = 0
+        return try lent(cadaclysm_blacksmith_sketch_constraints(handle, &n), n, "sketch_constraints")
+    }
+
+    /// The kind of constraint `id`, e.g. "point_line_distance".
+    public func constraintKind(_ id: UInt32) throws -> String {
+        let handle = try h()
+        return try sketchNamed(sketchConstraintKinds, cadaclysm_blacksmith_sketch_constraint_kind(handle, id),
+                               "sketch_constraint_kind")
+    }
+
+    /// The entity ids constraint `id` was made on, in the order given.
+    public func constraintRefs(_ id: UInt32) throws -> [UInt32] {
+        let handle = try h()
+        var n = 0
+        return try lent(cadaclysm_blacksmith_sketch_constraint_refs(handle, id, &n), n, "sketch_constraint_refs")
+    }
+
+    /// The value of the dimension `id`; nil for a constraint that is not a dimension. An
+    /// unknown id is refused.
+    public func constraintValue(_ id: UInt32) throws -> Double? {
+        let handle = try h()
+        let v = cadaclysm_blacksmith_sketch_constraint_value(handle, id)
+        if v.isNaN {
+            // NaN is both "not a dimension" (no error set) and "no such constraint" (one set).
+            if !lastError().isEmpty { throw failure("sketch_constraint_value") }
+            return nil
+        }
+        return v
+    }
+
+    /// Whether the dimension `id` drives the geometry (false for a constraint that is not a
+    /// dimension). An unknown id is refused.
+    public func constraintDriving(_ id: UInt32) throws -> Bool {
+        let handle = try h()
+        let driving = cadaclysm_blacksmith_sketch_constraint_driving(handle, id)
+        // false is both "not driving" (no error set) and "no such constraint" (one set).
+        if !driving && !lastError().isEmpty { throw failure("sketch_constraint_driving") }
+        return driving
+    }
+
+    /// The sense of constraint `id`; "auto" for a kind without one.
+    public func constraintSense(_ id: UInt32) throws -> String {
+        let handle = try h()
+        return try sketchNamed(sketchSenses, cadaclysm_blacksmith_sketch_constraint_sense(handle, id),
+                               "sketch_constraint_sense")
+    }
+
+    /// The end ("start" or "end") of the free curve a `tangentAtEnd` constraint `id` holds;
+    /// "start" for a kind without one.
+    public func constraintEnd(_ id: UInt32) throws -> String {
+        let handle = try h()
+        return try sketchNamed(sketchEnds, cadaclysm_blacksmith_sketch_constraint_end(handle, id),
+                               "sketch_constraint_end")
+    }
+
+    /// Whether the tangent constraint `id` joins two curves end to end (false otherwise, and
+    /// when closed).
+    public func isJointTangent(_ id: UInt32) -> Bool {
+        guard let handle else { return false }
+        return cadaclysm_blacksmith_sketch_is_joint_tangent(handle, id)
+    }
+
+    /// Remove the constraint `id`.
+    public func remove(_ id: UInt32) throws {
+        let handle = try h()
+        if !cadaclysm_blacksmith_sketch_remove(handle, id) { throw failure("sketch_remove") }
+    }
+
+    /// Set the dimension `id` to `value` and re-solve.
+    @discardableResult
+    public func setValue(_ id: UInt32, _ value: Double) throws -> SolveReport {
+        let handle = try h()
+        var report = [Double](repeating: 0, count: 3)
+        let done = cadaclysm_blacksmith_sketch_set_value(handle, id, value, &report)
+        return try solved(handle, done, report, "sketch_set_value")
+    }
+
+    /// Make the dimension `id` drive the geometry (true) or only report it, and re-solve.
+    @discardableResult
+    public func setDriving(_ id: UInt32, _ driving: Bool) throws -> SolveReport {
+        let handle = try h()
+        var report = [Double](repeating: 0, count: 3)
+        let done = cadaclysm_blacksmith_sketch_set_driving(handle, id, driving, &report)
+        return try solved(handle, done, report, "sketch_set_driving")
+    }
+
+    /// What the geometry measures for the dimension `id` right now.
+    public func measure(_ id: UInt32) throws -> Double {
+        let handle = try h()
+        let v = cadaclysm_blacksmith_sketch_measure(handle, id)
+        if v.isNaN { throw failure("sketch_measure") }
+        return v
+    }
+
+    // MARK: Solving and diagnosis
+
+    /// Solve the sketch. A conflicting or diverged solve is reported, not thrown.
+    @discardableResult
+    public func solve() throws -> SolveReport {
+        let handle = try h()
+        var report = [Double](repeating: 0, count: 3)
+        if !cadaclysm_blacksmith_sketch_solve(handle, &report) {
+            throw failure("sketch_solve") // only a null sketch: no ids to name
+        }
+        return try solved(handle, true, report, "sketch_solve")
+    }
+
+    /// Drag each point in `moves` towards its target while the constraints hold, as a live
+    /// gesture would. Refused for an id that is not a point.
+    @discardableResult
+    public func drag(_ moves: [UInt32: SIMD2<Double>]) throws -> SolveReport {
+        let handle = try h()
+        let points = sketchDragIDs(moves)
+        var flat: [Double] = []
+        for p in points {
+            flat.append(moves[p]!.x)
+            flat.append(moves[p]!.y)
+        }
+        var report = [Double](repeating: 0, count: 3)
+        let done = withSketchIDs(points) { ids in
+            withSketchDoubles(flat) { xy in
+                cadaclysm_blacksmith_sketch_drag(handle, ids, xy, points.count, &report)
+            }
+        }
+        return try solved(handle, done, report, "sketch_drag")
+    }
+
+    /// The sketch's degrees of freedom, whole and per independent part.
+    public func diagnose() throws -> Dof {
+        let handle = try h()
+        var out = [Double](repeating: 0, count: 3)
+        if !cadaclysm_blacksmith_sketch_diagnose(handle, &out) { throw failure("sketch_diagnose") }
+        let free = try sketchWhole(out[0], "sketch_diagnose")
+        let state = try sketchNamed(sketchStates, UInt32(try sketchWhole(out[1], "sketch_diagnose")), "sketch_diagnose")
+        let partCount = try sketchWhole(out[2], "sketch_diagnose")
+        func dofList(_ which: UInt32) throws -> [UInt32] {
+            var n = 0
+            return try lent(cadaclysm_blacksmith_sketch_dof_list(handle, which, &n), n, "sketch_dof_list")
+        }
+        let redundant = try dofList(sketchDofRedundant)
+        let conflicting = try dofList(sketchDofConflicting)
+        let freeEntities = try dofList(sketchDofFreeEntities)
+        var parts: [PartDof] = []
+        for i in 0..<partCount {
+            var raw = [Double](repeating: 0, count: 3)
+            if !cadaclysm_blacksmith_sketch_dof_part(handle, UInt32(i), &raw) { throw failure("sketch_dof_part") }
+            let params = try sketchWhole(raw[0], "sketch_dof_part")
+            let partFree = try sketchWhole(raw[1], "sketch_dof_part")
+            let partState = try sketchNamed(sketchStates, UInt32(try sketchWhole(raw[2], "sketch_dof_part")),
+                                            "sketch_dof_part")
+            func partList(_ which: UInt32) throws -> [UInt32] {
+                var n = 0
+                return try lent(cadaclysm_blacksmith_sketch_dof_part_list(handle, UInt32(i), which, &n), n,
+                                "sketch_dof_part_list")
+            }
+            parts.append(PartDof(params: params, free: partFree, state: partState,
+                                 constraints: try partList(sketchPartConstraints),
+                                 redundant: try partList(sketchPartRedundant),
+                                 conflicting: try partList(sketchPartConflicting),
+                                 freeEntities: try partList(sketchPartFreeEntities)))
+        }
+        return Dof(free: free, state: state, redundant: redundant, conflicting: conflicting,
+                   freeEntities: freeEntities, parts: parts)
+    }
+
+    /// The closed loops as profiles (nested loops become holes; construction geometry left
+    /// out); ends within `tolerance` join.
+    public func profiles(tolerance: Double = 1e-6) throws -> [Profile] {
+        let handle = try h()
+        return try Profile.list(cadaclysm_blacksmith_sketch_profiles(handle, tolerance), "sketch_profiles")
+    }
+
+    /// The paths that do not close, as profiles; ends within `tolerance` join.
+    public func openChains(tolerance: Double = 1e-6) throws -> [Profile] {
+        let handle = try h()
+        return try Profile.list(cadaclysm_blacksmith_sketch_open_chains(handle, tolerance), "sketch_open_chains")
     }
 }
 
@@ -4266,6 +6969,10 @@ public struct ReportItem: CustomStringConvertible {
     /// An area in mm^2 for `corner`/`undercut`, a diameter in mm for `hole`, and a height in
     /// mm (its Z range) for `slope` and `too_deep`.
     public let size: Double
+    /// The highest Z the item stands up to.
+    public let top: Double
+    /// The lowest Z the item stands down to.
+    public let bottom: Double
     /// One sentence naming the cause and the tool involved.
     public let reason: String
     /// The XY area the item covers.
@@ -4273,7 +6980,7 @@ public struct ReportItem: CustomStringConvertible {
 
     public var description: String {
         "ReportItem(kind=\(kind), at=(\(at.x), \(at.y), \(at.z)), size=\(size), reason=\(reason), "
-            + "region=\(region.count) profile(s))"
+            + "top=\(top), bottom=\(bottom), region=\(region.count) profile(s))"
     }
 }
 
@@ -4332,6 +7039,8 @@ private func readReport(_ raw: OpaquePointer?) throws -> Report {
         items.append(ReportItem(kind: text(cadaclysm_blacksmith_report_kind(raw, i)),
                                  at: SIMD3(at[0], at[1], at[2]),
                                  size: cadaclysm_blacksmith_report_size(raw, i),
+                                 top: cadaclysm_blacksmith_report_top(raw, i),
+                                 bottom: cadaclysm_blacksmith_report_bottom(raw, i),
                                  reason: text(cadaclysm_blacksmith_report_reason(raw, i)),
                                  region: region))
     }
@@ -4474,6 +7183,24 @@ public final class Job {
         let raw = withExtendedLifetime(drills) {
             cadaclysm_blacksmith_job_machine(jh, ph, endMill.handle, handles, handles.count, stepover ?? .nan,
                                              stepdown ?? .nan, skin, peck ?? .nan)
+        }
+        return try readReport(raw)
+    }
+
+    /// `machine` with a list of end mills, for rest machining: `endMills` run biggest first,
+    /// each cutting what the one before left, and the `Report` lists what none could cut.
+    /// Every other argument is `machine`'s. Throws for what the kernel refuses (an empty
+    /// list, a tool not smaller than the one before, two sharing a number, a drill, ...); the
+    /// job changes only on success.
+    public func machine(_ part: Solid, endMills: [Tool], drills: [Tool?] = [], stepover: Double? = nil,
+                        stepdown: Double? = nil, skin: Double = 0.3, peck: Double? = nil) throws -> Report {
+        let jh = try h()
+        let ph = try part.h()
+        let ends: [OpaquePointer?] = endMills.map { $0.handle }
+        let handles: [OpaquePointer?] = drills.map { $0?.handle }
+        let raw = withExtendedLifetime((endMills, drills)) {
+            cadaclysm_blacksmith_job_machine_with(jh, ph, ends, ends.count, handles, handles.count,
+                                                  stepover ?? .nan, stepdown ?? .nan, skin, peck ?? .nan)
         }
         return try readReport(raw)
     }
@@ -4661,6 +7388,1086 @@ public struct Frame: Hashable, CustomStringConvertible {
     public var description: String {
         func t(_ v: SIMD3<Double>) -> String { "(\(v.x), \(v.y), \(v.z))" }
         return "Frame(origin=\(t(origin)), x=\(t(x)), y=\(t(y)), z=\(t(z)))"
+    }
+}
+
+// MARK: - Transform
+
+private func xyz(_ p: SIMD3<Double>) -> [Double] { [p.x, p.y, p.z] }
+
+/// `count` numbers for `what`, refused in its name otherwise.
+func countedValues(_ values: [Double], _ count: Int, _ what: String) throws -> [Double] {
+    guard values.count == count else { throw BuildError("\(what): expected \(count) numbers, got \(values.count)") }
+    return values
+}
+
+/// `Transform.decomposeRigid`'s split: the map is `p -> orthogonal(p) + translation`.
+public struct RigidParts: Equatable {
+    public let translation: SIMD3<Double>
+    /// The linear part: a rotation, or a rotation and a mirror.
+    public let orthogonal: Transform
+}
+
+/// `Transform.decomposeSimilarity`'s split: the map is `p -> k · orthogonal(p) + translation`.
+public struct SimilarityParts: Equatable {
+    public let translation: SIMD3<Double>
+    /// The linear part over `k`: a rotation, or a rotation and a mirror.
+    public let orthogonal: Transform
+    /// The scale, positive.
+    public let k: Double
+}
+
+/// `Transform.decomposeAffine`'s polar split: the linear part is
+/// `rotation · axes · diag(stretch) · axesᵀ`.
+public struct AffineParts: Equatable {
+    public let translation: SIMD3<Double>
+    /// Orthogonal, and the one carrying the mirror if the map has one.
+    public let rotation: Transform
+    /// A proper rotation whose columns are the stretch directions.
+    public let axes: Transform
+    /// The stretches, largest first.
+    public let stretch: SIMD3<Double>
+}
+
+/// An affine map of space: a 4×4 matrix, row-major, its bottom row `0 0 0 1`. A value with
+/// nothing to free; `a * b` (and `compose`) is `a` after `b`. The constructors and the
+/// decompositions are the library's own, so every wrapper computes them alike; `point` is local
+/// arithmetic. Equality is by the 16 numbers. A frame argument is a `Frame`: one within 1e-6 of
+/// right-handed and orthonormal is squared up by the library.
+public struct Transform: Hashable, CustomStringConvertible {
+    /// How far from rigid, or from a similarity, a map may be and still be told one, by default.
+    public static let mapTolerance = 1e-9
+
+    /// The 16 numbers, row-major.
+    public let rows: [Double]
+
+    /// The map that moves nothing.
+    public init() {
+        rows = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+    }
+
+    /// The map 16 numbers state, row-major. Throws `BuildError` for another count, a number not
+    /// finite, or a bottom row other than `0 0 0 1`.
+    public init(_ rows: [Double]) throws {
+        guard rows.count == 16 else { throw BuildError("Transform: a matrix is 16 numbers, got \(rows.count)") }
+        guard rows.allSatisfy({ $0.isFinite }) else { throw BuildError("Transform: not finite") }
+        let r = rows.map { $0 + 0.0 } // no -0.0 to print or compare
+        guard r[12] == 0, r[13] == 0, r[14] == 0, r[15] == 1 else {
+            throw BuildError("Transform: the bottom row must be 0 0 0 1 (a projective map is not affine)")
+        }
+        self.rows = r
+    }
+
+    /// The map 16 numbers state, row-major.
+    public static func fromRows(_ rows: [Double]) throws -> Transform { try Transform(rows) }
+
+    /// The map four rows of four state, checked as `fromRows` checks.
+    public static func fromRows(_ rows: [[Double]]) throws -> Transform {
+        guard rows.count == 4, rows.allSatisfy({ $0.count == 4 }) else {
+            throw BuildError("Transform: a matrix is 16 numbers, got \(rows.reduce(0) { $0 + $1.count })")
+        }
+        return try Transform(rows.flatMap { $0 })
+    }
+
+    /// The map that moves nothing.
+    public static var identity: Transform { Transform() }
+
+    private static func made(_ what: String, _ call: (UnsafeMutablePointer<Double>) -> Bool) throws -> Transform {
+        var out = [Double](repeating: 0, count: 16)
+        guard out.withUnsafeMutableBufferPointer({ call($0.baseAddress!) }) else { throw failure(what) }
+        return try Transform(out)
+    }
+
+    /// `p + v`.
+    public static func translation(_ v: SIMD3<Double>) throws -> Transform {
+        try made("transform_translation") { cadaclysm_blacksmith_transform_translation(xyz(v), $0) }
+    }
+
+    /// A turn of `radians` about `axis` (a point and a direction), right-handed.
+    public static func rotation(_ axis: (origin: SIMD3<Double>, direction: SIMD3<Double>), _ radians: Double) throws -> Transform {
+        try made("transform_rotation") { cadaclysm_blacksmith_transform_rotation(axisValues(axis), radians, $0) }
+    }
+
+    /// The reflection across `plane`, its z the normal.
+    public static func mirror(_ plane: Frame) throws -> Transform { try mirror(raw: plane.values) }
+
+    static func mirror(raw plane: [Double]) throws -> Transform {
+        let plane = try frameValues(plane)
+        return try made("transform_mirror") { cadaclysm_blacksmith_transform_mirror(plane, $0) }
+    }
+
+    /// A uniform scale by `k` about `centre`.
+    public static func scale(_ centre: SIMD3<Double>, _ k: Double) throws -> Transform {
+        try made("transform_scale") { cadaclysm_blacksmith_transform_scale(xyz(centre), k, $0) }
+    }
+
+    /// A scale by `sx`, `sy`, `sz` along `frame`'s axes, about its origin.
+    public static func scaleXyz(_ frame: Frame, _ sx: Double, _ sy: Double, _ sz: Double) throws -> Transform {
+        try made("transform_scale_xyz") { cadaclysm_blacksmith_transform_scale_xyz(frame.values, sx, sy, sz, $0) }
+    }
+
+    /// Every point slid along `direction` by `factor` times its height above `plane`.
+    /// `direction` is normalised -- `factor` alone sets the slide -- and must lie in the plane.
+    public static func shear(_ plane: Frame, _ direction: SIMD3<Double>, _ factor: Double) throws -> Transform {
+        try made("transform_shear") { cadaclysm_blacksmith_transform_shear(plane.values, xyz(direction), factor, $0) }
+    }
+
+    /// The rigid map sending frame `a` onto frame `b`.
+    public static func planeToPlane(_ a: Frame, _ b: Frame) throws -> Transform {
+        try made("transform_plane_to_plane") { cadaclysm_blacksmith_transform_plane_to_plane(a.values, b.values, $0) }
+    }
+
+    /// Coordinates in frame `from` to coordinates in frame `to`: a change of basis.
+    public static func changeBasis(_ from: Frame, _ to: Frame) throws -> Transform {
+        try made("transform_change_basis") { cadaclysm_blacksmith_transform_change_basis(from.values, to.values, $0) }
+    }
+
+    /// The orthogonal projection onto `plane` -- singular by design.
+    public static func planarProjection(_ plane: Frame) throws -> Transform {
+        try made("transform_planar_projection") { cadaclysm_blacksmith_transform_planar_projection(plane.values, $0) }
+    }
+
+    /// The parallel projection onto `plane` along `direction`, which must not lie in it.
+    public static func projectAlong(_ plane: Frame, _ direction: SIMD3<Double>) throws -> Transform {
+        try made("transform_project_along") { cadaclysm_blacksmith_transform_project_along(plane.values, xyz(direction), $0) }
+    }
+
+    /// Where the map takes the point `p`.
+    public func point(_ p: SIMD3<Double>) -> SIMD3<Double> {
+        let r = rows
+        return SIMD3(r[0] * p.x + r[1] * p.y + r[2] * p.z + r[3],
+                     r[4] * p.x + r[5] * p.y + r[6] * p.z + r[7],
+                     r[8] * p.x + r[9] * p.y + r[10] * p.z + r[11])
+    }
+
+    /// This map after `other`: `a.compose(b).point(p) == a.point(b.point(p))`.
+    public func compose(_ other: Transform) throws -> Transform {
+        try Transform.made("transform_compose") { cadaclysm_blacksmith_transform_compose(rows, other.rows, $0) }
+    }
+
+    /// `a` after `b`, as `compose`.
+    public static func * (a: Transform, b: Transform) throws -> Transform { try a.compose(b) }
+
+    /// The map undoing this one; throws `BuildError` for a singular map.
+    public func inverse() throws -> Transform {
+        try Transform.made("transform_inverse") { cadaclysm_blacksmith_transform_inverse(rows, $0) }
+    }
+
+    /// Whether the linear part is orthogonal (`AᵀA = I` to `tolerance`): a rotation or a mirror.
+    /// `Solid.transform` is looser: it applies a map within 1e-6 of a similarity as that
+    /// similarity.
+    public func isRigid(tolerance: Double = Transform.mapTolerance) throws -> Bool {
+        let r = cadaclysm_blacksmith_transform_is_rigid(rows, tolerance)
+        if r == none { throw failure("transform_is_rigid") }
+        return r == 1
+    }
+
+    /// The scale `k` where the linear part is `k` times an orthogonal one (`AᵀA = k²I` to
+    /// `tolerance`, relative to `k²`), else nil.
+    public func isSimilarity(tolerance: Double = Transform.mapTolerance) throws -> Double? {
+        let k = cadaclysm_blacksmith_transform_is_similarity(rows, tolerance)
+        if k.isNaN { throw failure("transform_is_similarity") }
+        return k > 0 ? k : nil
+    }
+
+    private static func triple(_ v: [Double], _ at: Int) -> SIMD3<Double> { SIMD3(v[at], v[at + 1], v[at + 2]) }
+
+    private static func block(_ v: [Double], _ at: Int) throws -> Transform { try Transform(Array(v[at..<(at + 16)])) }
+
+    /// The translation and orthogonal part of a rigid map, else nil.
+    public func decomposeRigid(tolerance: Double = Transform.mapTolerance) throws -> RigidParts? {
+        guard try isRigid(tolerance: tolerance) else { return nil }
+        var out = [Double](repeating: 0, count: 19)
+        if !cadaclysm_blacksmith_transform_decompose_rigid(rows, tolerance, &out) { throw failure("transform_decompose_rigid") }
+        return RigidParts(translation: Transform.triple(out, 0), orthogonal: try Transform.block(out, 3))
+    }
+
+    /// The translation, orthogonal part and scale `k` of a similarity, else nil.
+    public func decomposeSimilarity(tolerance: Double = Transform.mapTolerance) throws -> SimilarityParts? {
+        guard try isSimilarity(tolerance: tolerance) != nil else { return nil }
+        var out = [Double](repeating: 0, count: 20)
+        if !cadaclysm_blacksmith_transform_decompose_similarity(rows, tolerance, &out) {
+            throw failure("transform_decompose_similarity")
+        }
+        return SimilarityParts(translation: Transform.triple(out, 0), orthogonal: try Transform.block(out, 3), k: out[19])
+    }
+
+    /// The polar split of the map (see `AffineParts`): `rotation` carries the mirror, `axes` is a
+    /// proper rotation whose columns are the stretch directions, the stretches come largest
+    /// first. Nil for a singular map, or one stretched past 1e7:1, which has no unique split.
+    public func decomposeAffine() throws -> AffineParts? {
+        var out = [Double](repeating: 0, count: 38)
+        if !cadaclysm_blacksmith_transform_decompose_affine(rows, &out) { return nil }
+        return AffineParts(translation: Transform.triple(out, 0), rotation: try Transform.block(out, 3),
+                           axes: try Transform.block(out, 19), stretch: Transform.triple(out, 35))
+    }
+
+    public var description: String { "Transform(\(rows))" }
+}
+
+// MARK: - Quaternion
+
+/// The largest magnitude among `vs`.
+private func maxAbs(_ vs: ArraySlice<Double>) -> Double { vs.reduce(0) { Swift.max($0, abs($1)) } }
+
+/// The length of `vs`, scaled by its largest component first, as the ABI's `quaternion_from`
+/// does: squaring 1e200 overflows and 1e-170 underflows.
+private func scaledNorm(_ vs: ArraySlice<Double>) -> Double {
+    let big = maxAbs(vs)
+    if big == 0 { return 0 }
+    return big * vs.reduce(0) { $0 + ($1 / big) * ($1 / big) }.squareRoot()
+}
+
+/// A rotation as `w + xi + yj + zk`. Immutable. `q` and `-q` are the same rotation; a non-unit
+/// one is normalised wherever it becomes a rotation, and a zero one throws `BuildError` there.
+/// `a * b` turns by `b`, then `a`. Equality is by components, so `q != -q` although the two
+/// turn alike: compare their `toTransform()` rows to a tolerance to ask that.
+public struct Quaternion: Hashable, CustomStringConvertible {
+    public let w: Double
+    public let x: Double
+    public let y: Double
+    public let z: Double
+
+    /// The identity.
+    public init() { (w, x, y, z) = (1, 0, 0, 0) }
+
+    /// `w + xi + yj + zk`; throws `BuildError` for a value not finite.
+    public init(_ w: Double, _ x: Double, _ y: Double, _ z: Double) throws {
+        guard w.isFinite, x.isFinite, y.isFinite, z.isFinite else { throw BuildError("Quaternion: not finite") }
+        (self.w, self.x, self.y, self.z) = (w + 0.0, x + 0.0, y + 0.0, z + 0.0) // no -0.0 to print or compare
+    }
+
+    private static func made(_ what: String, _ call: (UnsafeMutablePointer<Double>) -> Bool) throws -> Quaternion {
+        var out = [Double](repeating: 0, count: 4)
+        guard out.withUnsafeMutableBufferPointer({ call($0.baseAddress!) }) else { throw failure(what) }
+        return try Quaternion(out[0], out[1], out[2], out[3])
+    }
+
+    /// A turn of `radians` about `direction`, right-handed.
+    public static func fromAxisAngle(_ direction: SIMD3<Double>, _ radians: Double) throws -> Quaternion {
+        try made("quaternion_from_axis_angle") { cadaclysm_blacksmith_quaternion_from_axis_angle(xyz(direction), radians, $0) }
+    }
+
+    /// The rotation in `t`'s linear part (its translation ignored); throws `BuildError` unless
+    /// that is a proper rotation, orthogonal to 1e-9. Take `t.decomposeAffine()`'s rotation
+    /// first for a map rounded to float32.
+    public static func fromTransform(_ t: Transform) throws -> Quaternion {
+        try made("quaternion_from_transform") { cadaclysm_blacksmith_quaternion_from_transform(t.rows, $0) }
+    }
+
+    /// From `a` (`s = 0`) to `b` (`s = 1`) the shorter way.
+    public static func slerp(_ a: Quaternion, _ b: Quaternion, _ s: Double) throws -> Quaternion {
+        try made("quaternion_slerp") { cadaclysm_blacksmith_quaternion_slerp(a.values, b.values, s, $0) }
+    }
+
+    /// This rotation as a `Transform` fixing `centre`.
+    public func toTransform(_ centre: SIMD3<Double> = .zero) throws -> Transform {
+        var out = [Double](repeating: 0, count: 16)
+        if !cadaclysm_blacksmith_quaternion_to_transform(values, xyz(centre), &out) { throw failure("quaternion_to_transform") }
+        return try Transform(out)
+    }
+
+    /// `w, x, y, z`.
+    public var values: [Double] { [w, x, y, z] }
+
+    /// Its length; 1 for a rotation as made here.
+    public var length: Double { scaledNorm(values[...]) }
+
+    /// The turn, in `[0, 2π]`.
+    public var angle: Double { 2.0 * atan2(scaledNorm(values[1...]), w) }
+
+    /// The turn's axis; nil for the identity.
+    public var axis: SIMD3<Double>? {
+        let big = maxAbs(values[1...])
+        if big == 0 { return nil }
+        let v = SIMD3(x, y, z) / big
+        return v / (v * v).sum().squareRoot()
+    }
+
+    private init(finite w: Double, _ x: Double, _ y: Double, _ z: Double) {
+        (self.w, self.x, self.y, self.z) = (w + 0.0, x + 0.0, y + 0.0, z + 0.0)
+    }
+
+    /// The opposite turn: `(w, -x, -y, -z)`.
+    public func conjugate() -> Quaternion { Quaternion(finite: w, -x, -y, -z) }
+
+    /// The same rotation at unit length, scaled by its largest component before the square root
+    /// (as the ABI's `quaternion_from` does), so 1e200 and 1e-170 normalise.
+    public func normalized() throws -> Quaternion {
+        let big = maxAbs(values[...])
+        if big == 0 { throw BuildError("Quaternion.normalized: the quaternion is zero") }
+        let v = values.map { $0 / big }
+        let n = v.reduce(0) { $0 + $1 * $1 }.squareRoot()
+        return try Quaternion(v[0] / n, v[1] / n, v[2] / n, v[3] / n)
+    }
+
+    /// The Hamilton product: turns by `b`, then `a`.
+    public static func * (a: Quaternion, b: Quaternion) throws -> Quaternion {
+        try Quaternion(a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+                       a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+                       a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+                       a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w)
+    }
+
+    public var description: String { "Quaternion(\(w), \(x), \(y), \(z))" }
+}
+
+// MARK: - Value geometry
+
+/// A parameter range `t0..t1`, in either order: `length` and `swapped` keep the order, the set
+/// operations (`grown`, `union`, `intersect`) answer increasing. Immutable and hashable; plain
+/// arithmetic here, checked against the same records as the kernel's own interval.
+public struct Interval: Hashable, CustomStringConvertible {
+    /// The two ends, as given.
+    public let t0: Double
+    public let t1: Double
+
+    /// The range `t0..t1`; throws `BuildError` for an end that is not finite.
+    public init(_ t0: Double, _ t1: Double) throws {
+        guard t0.isFinite, t1.isFinite else { throw BuildError("Interval: not finite") }
+        self.init(finite: t0, t1)
+    }
+
+    /// Two numbers the library or this module already holds finite.
+    init(finite t0: Double, _ t1: Double) {
+        self.t0 = t0 + 0.0 // no -0.0 to print or compare
+        self.t1 = t1 + 0.0
+    }
+
+    /// Two numbers as an `Interval`; any other count throws.
+    public static func of(_ values: [Double]) throws -> Interval {
+        guard values.count == 2 else { throw BuildError("Interval: an interval is 2 numbers, got \(values.count)") }
+        return try Interval(values[0], values[1])
+    }
+
+    /// `t1 - t0`: negative for a decreasing interval.
+    public var length: Double { t1 - t0 }
+    /// The middle, `(t0 + t1) / 2`.
+    public var mid: Double { 0.5 * (t0 + t1) }
+    /// The smaller end.
+    public var min: Double { Swift.min(t0, t1) }
+    /// The larger end.
+    public var max: Double { Swift.max(t0, t1) }
+    /// Whether `t0 < t1`.
+    public var isIncreasing: Bool { t0 < t1 }
+    /// Whether `t0 == t1`.
+    public var isSingleton: Bool { t0 == t1 }
+
+    /// The interval `t1..t0`.
+    public func swapped() -> Interval { Interval(finite: t1, t0) }
+
+    /// The increasing interval holding this one and `t`; throws for a `t` not finite.
+    public func grown(_ t: Double) throws -> Interval { try Interval(Swift.min(min, t), Swift.max(max, t)) }
+
+    /// The increasing interval holding this one and `o`.
+    public func union(_ o: Interval) -> Interval { Interval(finite: Swift.min(min, o.min), Swift.max(max, o.max)) }
+
+    /// The increasing overlap with `o`, nil where the two are apart; two that touch give a singleton.
+    public func intersect(_ o: Interval) -> Interval? {
+        let a = Swift.max(min, o.min), b = Swift.min(max, o.max)
+        return a <= b ? Interval(finite: a, b) : nil
+    }
+
+    /// Whether `t` lies in the closed range, in either order.
+    public func contains(_ t: Double) -> Bool { min <= t && t <= max }
+
+    /// `t0 + s (t1 - t0)`: the fraction `s` of the way from `t0` (outside 0..1 extrapolates).
+    public func parameterAt(_ s: Double) -> Double { t0 + s * (t1 - t0) }
+
+    /// The fraction of the way `t` lies from `t0` toward `t1`; nil for a singleton.
+    public func normalizedParameterAt(_ t: Double) -> Double? {
+        let length = self.length
+        return length != 0 ? (t - t0) / length : nil
+    }
+
+    public var description: String { "Interval(\(t0), \(t1))" }
+}
+
+/// The closest point of a curve value: its parameter `t`, the `point`, and `unique` -- false
+/// where the answer is a fixed pick among equals (a point on a circle's axis, one equidistant
+/// from an arc's two ends).
+public struct CurveFoot: Hashable {
+    public let t: Double
+    public let point: SIMD3<Double>
+    public let unique: Bool
+
+    public init(_ t: Double, _ point: SIMD3<Double>, _ unique: Bool) {
+        self.t = t
+        self.point = point
+        self.unique = unique
+    }
+}
+
+/// The closest point of a surface value: its parameters `u`, `v`, the `point`, and `unique`
+/// (false where the answer is a pick among equals, a sphere's centre).
+public struct SurfaceFoot: Hashable {
+    public let u: Double
+    public let v: Double
+    public let point: SIMD3<Double>
+    public let unique: Bool
+
+    public init(_ u: Double, _ v: Double, _ point: SIMD3<Double>, _ unique: Bool) {
+        self.u = u
+        self.v = v
+        self.point = point
+        self.unique = unique
+    }
+}
+
+private func vdot(_ a: SIMD3<Double>, _ b: SIMD3<Double>) -> Double { a.x * b.x + a.y * b.y + a.z * b.z }
+
+private func pointDistance(_ a: SIMD3<Double>, _ b: SIMD3<Double>) -> Double {
+    let d = a - b
+    return vdot(d, d).squareRoot()
+}
+
+extension Frame {
+    /// Twelve numbers the library handed back, already square: kept as they are.
+    init(canonical values: [Double]) {
+        self.values = values.map { $0 + 0.0 }
+    }
+
+    /// The same plane facing the other way: x and y swapped, z reversed.
+    public func flipped() throws -> Frame { try Frame(origin, y, x, -z) }
+
+    /// This frame turned `radians` about `axis` through its origin, right-handed
+    /// (`Transform.rotation`).
+    public func rotated(_ radians: Double, _ axis: SIMD3<Double>) throws -> Frame {
+        let r = try Transform.rotation((origin, axis), radians).rows
+        func turn(_ d: SIMD3<Double>) -> SIMD3<Double> {
+            SIMD3(r[0] * d.x + r[1] * d.y + r[2] * d.z,
+                  r[4] * d.x + r[5] * d.y + r[6] * d.z,
+                  r[8] * d.x + r[9] * d.y + r[10] * d.z)
+        }
+        return try Frame(origin, turn(x), turn(y), turn(z))
+    }
+
+    /// The point `p` in this frame's coordinates.
+    public func toLocal(_ p: SIMD3<Double>) -> SIMD3<Double> {
+        let d = p - origin
+        return SIMD3(vdot(d, x), vdot(d, y), vdot(d, z))
+    }
+
+    /// How far `p` lies above the frame's plane, along its z: negative below.
+    public func distanceTo(_ p: SIMD3<Double>) -> Double { vdot(p - origin, z) }
+
+    /// The point `p` dropped onto the frame's plane along its z.
+    public func closestPoint(_ p: SIMD3<Double>) -> SIMD3<Double> { p - distanceTo(p) * z }
+
+    /// The least-squares plane through `points` (three or more, not all on one line) as a frame,
+    /// and the largest distance any point lies off it. Fewer points, or points on one line, throw.
+    public static func fit(_ points: [SIMD3<Double>]) throws -> (frame: Frame, deviation: Double) {
+        let xyz = points.flatMap { [$0.x, $0.y, $0.z] }
+        var out = [Double](repeating: 0, count: 12)
+        var deviation = 0.0
+        if !cadaclysm_blacksmith_frame_fit(xyz, points.count, &out, &deviation) { throw failure("frame_fit") }
+        return (try Frame(values: out), deviation)
+    }
+}
+
+/// The kinds the value arrays are tagged with (`CADACLYSM_BLACKSMITH_VALUE_*`).
+private let valueLine = UInt32(CADACLYSM_BLACKSMITH_VALUE_LINE)
+private let valueCircle = UInt32(CADACLYSM_BLACKSMITH_VALUE_CIRCLE)
+private let valueArc = UInt32(CADACLYSM_BLACKSMITH_VALUE_ARC)
+private let valueEllipse = UInt32(CADACLYSM_BLACKSMITH_VALUE_ELLIPSE)
+private let valueSphere = UInt32(CADACLYSM_BLACKSMITH_VALUE_SPHERE)
+private let valueCylinder = UInt32(CADACLYSM_BLACKSMITH_VALUE_CYLINDER)
+private let valueCone = UInt32(CADACLYSM_BLACKSMITH_VALUE_CONE)
+private let valueTorus = UInt32(CADACLYSM_BLACKSMITH_VALUE_TORUS)
+private let valueCuboid = UInt32(CADACLYSM_BLACKSMITH_VALUE_CUBOID)
+
+/// What every value type shares, for this file's helpers: its kind, its canonical array, and a
+/// way back from an array the library handed over.
+protocol ValueArray {
+    static var kind: UInt32 { get }
+    static var noun: String { get }
+    var values: [Double] { get }
+    init(canonical: [Double])
+}
+
+/// `values` checked and squared up by the library's `value_check`, after a count check in the
+/// library's own words (`value_check: a circle is 13 numbers, got 12`).
+private func checkedValues(_ kind: UInt32, _ noun: String, _ values: [Double]) throws -> [Double] {
+    let n = Int(cadaclysm_blacksmith_value_size(kind))
+    guard values.count == n else { throw BuildError("value_check: a \(noun) is \(n) numbers, got \(values.count)") }
+    var out = [Double](repeating: 0, count: n)
+    if !cadaclysm_blacksmith_value_check(kind, values, &out) { throw failure("value_check") }
+    return out
+}
+
+/// `count` doubles written by `call`, or the library's refusal in `what`'s name.
+private func valueOut(_ count: Int, _ what: String, _ call: (UnsafeMutablePointer<Double>) -> Bool) throws -> [Double] {
+    var out = [Double](repeating: 0, count: count)
+    guard out.withUnsafeMutableBufferPointer({ call($0.baseAddress!) }) else { throw failure(what) }
+    return out
+}
+
+private func valueTriple(_ v: [Double], _ at: Int = 0) -> SIMD3<Double> { SIMD3(v[at], v[at + 1], v[at + 2]) }
+
+private func valueDescription(_ name: String, _ fields: [(String, Any)]) -> String {
+    "\(name)(" + fields.map { "\($0.0)=\($0.1)" }.joined(separator: ", ") + ")"
+}
+
+extension ValueArray {
+    static func made(_ values: [Double]) throws -> Self { Self(canonical: try checkedValues(kind, noun, values)) }
+
+    func valueBounds() throws -> (min: SIMD3<Double>, max: SIMD3<Double>) {
+        let b = try valueOut(6, "value_bounds") { cadaclysm_blacksmith_value_bounds(Self.kind, values, $0) }
+        return (valueTriple(b, 0), valueTriple(b, 3))
+    }
+
+    func valueTransform(_ t: Transform) throws -> Self {
+        Self(canonical: try valueOut(values.count, "value_transform") {
+            cadaclysm_blacksmith_value_transform(Self.kind, values, t.rows, $0)
+        })
+    }
+
+    var valueFrame: Frame { Frame(canonical: Array(values[0..<12])) }
+
+    // Curves.
+    func curvePointAt(_ t: Double) throws -> SIMD3<Double> {
+        valueTriple(try valueOut(3, "curve_value_point_at") { cadaclysm_blacksmith_curve_value_point_at(Self.kind, values, t, $0) })
+    }
+
+    func curveTangentAt(_ t: Double) throws -> SIMD3<Double> {
+        valueTriple(try valueOut(3, "curve_value_tangent_at") { cadaclysm_blacksmith_curve_value_tangent_at(Self.kind, values, t, $0) })
+    }
+
+    func curveLength() throws -> Double {
+        try valueOut(1, "curve_value_length") { cadaclysm_blacksmith_curve_value_length(Self.kind, values, $0) }[0]
+    }
+
+    func curveClosestPoint(_ p: SIMD3<Double>) throws -> CurveFoot {
+        let f = try valueOut(5, "curve_value_closest_point") {
+            cadaclysm_blacksmith_curve_value_closest_point(Self.kind, values, xyz(p), $0)
+        }
+        return CurveFoot(f[0], valueTriple(f, 1), f[4] != 0)
+    }
+
+    // Surfaces.
+    func surfacePointAt(_ u: Double, _ v: Double) throws -> SIMD3<Double> {
+        valueTriple(try valueOut(3, "surface_value_point_at") { cadaclysm_blacksmith_surface_value_point_at(Self.kind, values, u, v, $0) })
+    }
+
+    func surfaceNormalAt(_ u: Double, _ v: Double) throws -> SIMD3<Double> {
+        valueTriple(try valueOut(3, "surface_value_normal_at") { cadaclysm_blacksmith_surface_value_normal_at(Self.kind, values, u, v, $0) })
+    }
+
+    func surfaceClosestPoint(_ p: SIMD3<Double>) throws -> SurfaceFoot {
+        let f = try valueOut(6, "surface_value_closest_point") {
+            cadaclysm_blacksmith_surface_value_closest_point(Self.kind, values, xyz(p), $0)
+        }
+        return SurfaceFoot(f[0], f[1], valueTriple(f, 2), f[5] != 0)
+    }
+
+    func surfaceDomain() throws -> (u: Interval, v: Interval) {
+        let d = try valueOut(4, "surface_value_domain") { cadaclysm_blacksmith_surface_value_domain(Self.kind, values, $0) }
+        return (Interval(finite: d[0], d[1]), Interval(finite: d[2], d[3]))
+    }
+
+    func surfaceNurbsSheet() throws -> Solid {
+        try Solid(cadaclysm_blacksmith_surface_value_nurbs_sheet(Self.kind, values), "surface_value_nurbs_sheet")
+    }
+
+    // Shapes with a volume.
+    func solidContains(_ p: SIMD3<Double>, _ tolerance: Double) throws -> Bool {
+        let r = cadaclysm_blacksmith_solid_value_contains(Self.kind, values, xyz(p), tolerance)
+        if r == none { throw failure("solid_value_contains") }
+        return r == 1
+    }
+
+    func solidArea() throws -> Double {
+        try valueOut(1, "solid_value_area") { cadaclysm_blacksmith_solid_value_area(Self.kind, values, $0) }[0]
+    }
+
+    func solidVolume() throws -> Double {
+        try valueOut(1, "solid_value_volume") { cadaclysm_blacksmith_solid_value_volume(Self.kind, values, $0) }[0]
+    }
+
+    func solidToSolid() throws -> Solid {
+        try Solid(cadaclysm_blacksmith_solid_value_to_solid(Self.kind, values), "solid_value_to_solid")
+    }
+}
+
+/// An edge's curve as a value (`Curve.value`): a line, a circle, an arc or an ellipse.
+public enum CurveValue: Hashable {
+    case line(Line)
+    case circle(Circle)
+    case arc(Arc)
+    case ellipse(Ellipse)
+}
+
+/// The segment from `start` to `end`, as a value; its parameter runs 0..1. Immutable, with
+/// nothing to free, equal and hashed by its numbers; the maths is the library's own.
+public struct Line: Hashable, CustomStringConvertible, ValueArray {
+    static let kind = valueLine
+    static let noun = "line"
+    /// The 6 numbers: `start`, then `end`.
+    public let values: [Double]
+    init(canonical: [Double]) { values = canonical }
+
+    /// The segment from `start` to `end`; ends that coincide throw.
+    public init(_ start: SIMD3<Double>, _ end: SIMD3<Double>) throws { self = try .made(xyz(start) + xyz(end)) }
+    /// The value 6 numbers state, checked by the library.
+    public init(values: [Double]) throws { self = try .made(values) }
+
+    /// The two ends.
+    public var start: SIMD3<Double> { valueTriple(values, 0) }
+    public var end: SIMD3<Double> { valueTriple(values, 3) }
+
+    /// The point the fraction `t` of the way from `start` to `end`.
+    public func pointAt(_ t: Double) throws -> SIMD3<Double> { try curvePointAt(t) }
+    /// The unit tangent at `t`.
+    public func tangentAt(_ t: Double) throws -> SIMD3<Double> { try curveTangentAt(t) }
+    /// The length.
+    public func length() throws -> Double { try curveLength() }
+    /// The `CurveFoot` nearest `p`.
+    public func closestPoint(_ p: SIMD3<Double>) throws -> CurveFoot { try curveClosestPoint(p) }
+    /// How far `p` lies from the curve.
+    public func distanceTo(_ p: SIMD3<Double>) throws -> Double { pointDistance(try closestPoint(p).point, p) }
+    /// The exact world box, `(min, max)`.
+    public func bounds() throws -> (min: SIMD3<Double>, max: SIMD3<Double>) { try valueBounds() }
+    /// This line under `t`: any map that keeps its ends apart.
+    public func transform(_ t: Transform) throws -> Line { try valueTransform(t) }
+
+    public var description: String { valueDescription("Line", [("start", start), ("end", end)]) }
+}
+
+/// The circle of `radius` about the frame's origin in its x-y plane, counter-clockwise about its
+/// z from its x, as a value.
+public struct Circle: Hashable, CustomStringConvertible, ValueArray {
+    static let kind = valueCircle
+    static let noun = "circle"
+    /// The 13 numbers: the frame's 12, then the radius.
+    public let values: [Double]
+    init(canonical: [Double]) { values = canonical }
+
+    /// The circle of `radius` on `frame`; a radius not positive throws.
+    public init(_ frame: Frame, _ radius: Double) throws { self = try .made(frame.values + [radius]) }
+    /// The value 13 numbers state, checked by the library.
+    public init(values: [Double]) throws { self = try .made(values) }
+
+    /// The circle through `a`, `b` and `c`: its x toward `a`, turning `a`, `b`, `c`
+    /// counter-clockwise. Three points on one line throw.
+    public static func through(_ a: SIMD3<Double>, _ b: SIMD3<Double>, _ c: SIMD3<Double>) throws -> Circle {
+        Circle(canonical: try valueOut(13, "circle_through") { cadaclysm_blacksmith_circle_through(xyz(a), xyz(b), xyz(c), $0) })
+    }
+
+    /// The frame the circle lies on.
+    public var frame: Frame { valueFrame }
+    /// The radius.
+    public var radius: Double { values[12] }
+
+    /// The point at the angle `t` from the frame's x toward its y.
+    public func pointAt(_ t: Double) throws -> SIMD3<Double> { try curvePointAt(t) }
+    /// The unit tangent at `t`.
+    public func tangentAt(_ t: Double) throws -> SIMD3<Double> { try curveTangentAt(t) }
+    /// The length.
+    public func length() throws -> Double { try curveLength() }
+    /// The `CurveFoot` nearest `p`; not `unique` on the axis.
+    public func closestPoint(_ p: SIMD3<Double>) throws -> CurveFoot { try curveClosestPoint(p) }
+    /// How far `p` lies from the curve.
+    public func distanceTo(_ p: SIMD3<Double>) throws -> Double { pointDistance(try closestPoint(p).point, p) }
+    /// The exact world box, `(min, max)`.
+    public func bounds() throws -> (min: SIMD3<Double>, max: SIMD3<Double>) { try valueBounds() }
+    /// This circle under a similarity `t` (`Ellipse.fromCircle` first for any other map).
+    public func transform(_ t: Transform) throws -> Circle { try valueTransform(t) }
+
+    public var description: String { valueDescription("Circle", [("frame", frame), ("radius", radius)]) }
+}
+
+/// The part of a circle over `angle` (increasing, by at most a full turn), as a value.
+public struct Arc: Hashable, CustomStringConvertible, ValueArray {
+    static let kind = valueArc
+    static let noun = "arc"
+    /// The 15 numbers: the frame's 12, the radius, then the angle's two ends.
+    public let values: [Double]
+    init(canonical: [Double]) { values = canonical }
+
+    /// The arc of `radius` on `frame` over `angle`.
+    public init(_ frame: Frame, _ radius: Double, _ angle: Interval) throws {
+        self = try .made(frame.values + [radius, angle.t0, angle.t1])
+    }
+    /// The arc of `radius` on `frame` over the angles `angle.0` to `angle.1`.
+    public init(_ frame: Frame, _ radius: Double, _ angle: (Double, Double)) throws {
+        try self.init(frame, radius, try Interval(angle.0, angle.1))
+    }
+    /// The value 15 numbers state, checked by the library.
+    public init(values: [Double]) throws { self = try .made(values) }
+
+    /// The arc from `a` through `b` to `c`. Three points on one line throw.
+    public static func through(_ a: SIMD3<Double>, _ b: SIMD3<Double>, _ c: SIMD3<Double>) throws -> Arc {
+        Arc(canonical: try valueOut(15, "arc_through") { cadaclysm_blacksmith_arc_through(xyz(a), xyz(b), xyz(c), $0) })
+    }
+
+    /// The arc leaving `a` along `tangent` and ending at `c`. A zero tangent, or a `c` on the
+    /// tangent's line, throws.
+    public static func fromStartTangentEnd(_ a: SIMD3<Double>, _ tangent: SIMD3<Double>, _ c: SIMD3<Double>) throws -> Arc {
+        Arc(canonical: try valueOut(15, "arc_from_start_tangent_end") {
+            cadaclysm_blacksmith_arc_from_start_tangent_end(xyz(a), xyz(tangent), xyz(c), $0)
+        })
+    }
+
+    /// The frame the arc's circle lies on.
+    public var frame: Frame { valueFrame }
+    /// The radius.
+    public var radius: Double { values[12] }
+    /// The angle range.
+    public var angle: Interval { Interval(finite: values[13], values[14]) }
+    /// The points at the start, the end and halfway along.
+    public var start: SIMD3<Double> { get throws { try pointAt(values[13]) } }
+    public var end: SIMD3<Double> { get throws { try pointAt(values[14]) } }
+    public var mid: SIMD3<Double> { get throws { try pointAt(0.5 * (values[13] + values[14])) } }
+
+    /// The point at the angle `t` from the frame's x toward its y.
+    public func pointAt(_ t: Double) throws -> SIMD3<Double> { try curvePointAt(t) }
+    /// The unit tangent at `t`.
+    public func tangentAt(_ t: Double) throws -> SIMD3<Double> { try curveTangentAt(t) }
+    /// The length.
+    public func length() throws -> Double { try curveLength() }
+    /// The `CurveFoot` nearest `p`; not `unique` where the arc's two ends are equally near.
+    public func closestPoint(_ p: SIMD3<Double>) throws -> CurveFoot { try curveClosestPoint(p) }
+    /// How far `p` lies from the curve.
+    public func distanceTo(_ p: SIMD3<Double>) throws -> Double { pointDistance(try closestPoint(p).point, p) }
+    /// The exact world box, `(min, max)`.
+    public func bounds() throws -> (min: SIMD3<Double>, max: SIMD3<Double>) { try valueBounds() }
+    /// This arc under a similarity `t`.
+    public func transform(_ t: Transform) throws -> Arc { try valueTransform(t) }
+
+    public var description: String { valueDescription("Arc", [("frame", frame), ("radius", radius), ("angle", angle)]) }
+}
+
+/// The ellipse of radius `r1` along the frame's x and `r2` along its y, as a value.
+public struct Ellipse: Hashable, CustomStringConvertible, ValueArray {
+    static let kind = valueEllipse
+    static let noun = "ellipse"
+    /// The 14 numbers: the frame's 12, then `r1` and `r2`.
+    public let values: [Double]
+    init(canonical: [Double]) { values = canonical }
+
+    /// The ellipse of radii `r1` and `r2` on `frame`.
+    public init(_ frame: Frame, _ r1: Double, _ r2: Double) throws { self = try .made(frame.values + [r1, r2]) }
+    /// The value 14 numbers state, checked by the library.
+    public init(values: [Double]) throws { self = try .made(values) }
+
+    /// `circle` as an ellipse of two equal radii, to map by a non-uniform scale or a shear.
+    public static func fromCircle(_ circle: Circle) throws -> Ellipse {
+        Ellipse(canonical: try valueOut(14, "ellipse_from_circle") { cadaclysm_blacksmith_ellipse_from_circle(circle.values, $0) })
+    }
+
+    /// The frame the ellipse lies on.
+    public var frame: Frame { valueFrame }
+    /// The radii along the frame's x and y.
+    public var r1: Double { values[12] }
+    public var r2: Double { values[13] }
+
+    /// The point at the eccentric angle `t`.
+    public func pointAt(_ t: Double) throws -> SIMD3<Double> { try curvePointAt(t) }
+    /// The unit tangent at `t`.
+    public func tangentAt(_ t: Double) throws -> SIMD3<Double> { try curveTangentAt(t) }
+    /// The perimeter, in closed form.
+    public func length() throws -> Double { try curveLength() }
+    /// The `CurveFoot` nearest `p`.
+    public func closestPoint(_ p: SIMD3<Double>) throws -> CurveFoot { try curveClosestPoint(p) }
+    /// How far `p` lies from the curve.
+    public func distanceTo(_ p: SIMD3<Double>) throws -> Double { pointDistance(try closestPoint(p).point, p) }
+    /// The exact world box, `(min, max)`.
+    public func bounds() throws -> (min: SIMD3<Double>, max: SIMD3<Double>) { try valueBounds() }
+    /// This ellipse under any map that keeps it an ellipse.
+    public func transform(_ t: Transform) throws -> Ellipse { try valueTransform(t) }
+
+    public var description: String { valueDescription("Ellipse", [("frame", frame), ("r1", r1), ("r2", r2)]) }
+}
+
+/// The sphere of `radius` about the frame's origin, as a value: `u` the longitude from the
+/// frame's x, `v` the latitude toward its z.
+public struct Sphere: Hashable, CustomStringConvertible, ValueArray {
+    static let kind = valueSphere
+    static let noun = "sphere"
+    /// The 13 numbers: the frame's 12, then the radius.
+    public let values: [Double]
+    init(canonical: [Double]) { values = canonical }
+
+    /// The sphere of `radius` about `frame`'s origin.
+    public init(_ frame: Frame, _ radius: Double) throws { self = try .made(frame.values + [radius]) }
+    /// The value 13 numbers state, checked by the library.
+    public init(values: [Double]) throws { self = try .made(values) }
+
+    /// The frame the sphere is placed on.
+    public var frame: Frame { valueFrame }
+    /// The radius.
+    public var radius: Double { values[12] }
+
+    /// The point at `(u, v)`.
+    public func pointAt(_ u: Double, _ v: Double) throws -> SIMD3<Double> { try surfacePointAt(u, v) }
+    /// The outward unit normal at `(u, v)`.
+    public func normalAt(_ u: Double, _ v: Double) throws -> SIMD3<Double> { try surfaceNormalAt(u, v) }
+    /// The `SurfaceFoot` nearest `p`; not `unique` at the centre.
+    public func closestPoint(_ p: SIMD3<Double>) throws -> SurfaceFoot { try surfaceClosestPoint(p) }
+    /// How far `p` lies from the surface.
+    public func distanceTo(_ p: SIMD3<Double>) throws -> Double { pointDistance(try closestPoint(p).point, p) }
+    /// The `u` and `v` ranges.
+    public func domain() throws -> (u: Interval, v: Interval) { try surfaceDomain() }
+    /// The surface alone, as an open sheet on its exact NURBS form.
+    public func toNurbsSheet() throws -> Solid { try surfaceNurbsSheet() }
+    /// Whether `p` lies inside the closed shape or within `tolerance` of it.
+    public func contains(_ p: SIMD3<Double>, tolerance: Double = 1e-9) throws -> Bool { try solidContains(p, tolerance) }
+    /// The boundary's area.
+    public func area() throws -> Double { try solidArea() }
+    /// The volume enclosed.
+    public func volume() throws -> Double { try solidVolume() }
+    /// The shape as a closed exact B-rep solid.
+    public func toSolid() throws -> Solid { try solidToSolid() }
+    /// The exact world box, `(min, max)`.
+    public func bounds() throws -> (min: SIMD3<Double>, max: SIMD3<Double>) { try valueBounds() }
+    /// This sphere under a similarity `t`.
+    public func transform(_ t: Transform) throws -> Sphere { try valueTransform(t) }
+
+    public var description: String { valueDescription("Sphere", [("frame", frame), ("radius", radius)]) }
+}
+
+/// The capped cylinder of `radius` about the frame's z over `height` (increasing, along z), as
+/// a value: `u` the angle from the frame's x, `v` the height.
+public struct Cylinder: Hashable, CustomStringConvertible, ValueArray {
+    static let kind = valueCylinder
+    static let noun = "cylinder"
+    /// The 15 numbers: the frame's 12, the radius, then the height's two ends.
+    public let values: [Double]
+    init(canonical: [Double]) { values = canonical }
+
+    /// The cylinder of `radius` about `frame`'s z over `height`.
+    public init(_ frame: Frame, _ radius: Double, _ height: Interval) throws {
+        self = try .made(frame.values + [radius, height.t0, height.t1])
+    }
+    /// The cylinder of `radius` about `frame`'s z from `height.0` to `height.1`.
+    public init(_ frame: Frame, _ radius: Double, _ height: (Double, Double)) throws {
+        try self.init(frame, radius, try Interval(height.0, height.1))
+    }
+    /// The value 15 numbers state, checked by the library.
+    public init(values: [Double]) throws { self = try .made(values) }
+
+    /// The frame the cylinder is placed on.
+    public var frame: Frame { valueFrame }
+    /// The radius.
+    public var radius: Double { values[12] }
+    /// The range along the frame's z.
+    public var height: Interval { Interval(finite: values[13], values[14]) }
+
+    /// The point at `(u, v)`.
+    public func pointAt(_ u: Double, _ v: Double) throws -> SIMD3<Double> { try surfacePointAt(u, v) }
+    /// The outward unit normal at `(u, v)`.
+    public func normalAt(_ u: Double, _ v: Double) throws -> SIMD3<Double> { try surfaceNormalAt(u, v) }
+    /// The `SurfaceFoot` nearest `p` on the side.
+    public func closestPoint(_ p: SIMD3<Double>) throws -> SurfaceFoot { try surfaceClosestPoint(p) }
+    /// How far `p` lies from the surface.
+    public func distanceTo(_ p: SIMD3<Double>) throws -> Double { pointDistance(try closestPoint(p).point, p) }
+    /// The `u` and `v` ranges.
+    public func domain() throws -> (u: Interval, v: Interval) { try surfaceDomain() }
+    /// The surface alone, as an open sheet on its exact NURBS form.
+    public func toNurbsSheet() throws -> Solid { try surfaceNurbsSheet() }
+    /// Whether `p` lies inside the closed shape or within `tolerance` of it.
+    public func contains(_ p: SIMD3<Double>, tolerance: Double = 1e-9) throws -> Bool { try solidContains(p, tolerance) }
+    /// The boundary's area, the caps included.
+    public func area() throws -> Double { try solidArea() }
+    /// The volume enclosed.
+    public func volume() throws -> Double { try solidVolume() }
+    /// The shape as a closed exact B-rep solid.
+    public func toSolid() throws -> Solid { try solidToSolid() }
+    /// The exact world box, `(min, max)`.
+    public func bounds() throws -> (min: SIMD3<Double>, max: SIMD3<Double>) { try valueBounds() }
+    /// This cylinder under a similarity `t`.
+    public func transform(_ t: Transform) throws -> Cylinder { try valueTransform(t) }
+
+    public var description: String { valueDescription("Cylinder", [("frame", frame), ("radius", radius), ("height", height)]) }
+}
+
+/// The capped cone of base `radius` on the frame's x-y plane, its apex `height` up its z, as a
+/// value: `u` the angle from the frame's x, `v` the height.
+public struct Cone: Hashable, CustomStringConvertible, ValueArray {
+    static let kind = valueCone
+    static let noun = "cone"
+    /// The 14 numbers: the frame's 12, the radius, then the height.
+    public let values: [Double]
+    init(canonical: [Double]) { values = canonical }
+
+    /// The cone of base `radius` on `frame`, its apex `height` up its z.
+    public init(_ frame: Frame, _ radius: Double, _ height: Double) throws { self = try .made(frame.values + [radius, height]) }
+    /// The value 14 numbers state, checked by the library.
+    public init(values: [Double]) throws { self = try .made(values) }
+
+    /// The frame the cone is placed on.
+    public var frame: Frame { valueFrame }
+    /// The base radius.
+    public var radius: Double { values[12] }
+    /// How far up the frame's z the apex lies.
+    public var height: Double { values[13] }
+
+    /// The point at `(u, v)`.
+    public func pointAt(_ u: Double, _ v: Double) throws -> SIMD3<Double> { try surfacePointAt(u, v) }
+    /// The outward unit normal at `(u, v)`.
+    public func normalAt(_ u: Double, _ v: Double) throws -> SIMD3<Double> { try surfaceNormalAt(u, v) }
+    /// The `SurfaceFoot` nearest `p` on the side.
+    public func closestPoint(_ p: SIMD3<Double>) throws -> SurfaceFoot { try surfaceClosestPoint(p) }
+    /// How far `p` lies from the surface.
+    public func distanceTo(_ p: SIMD3<Double>) throws -> Double { pointDistance(try closestPoint(p).point, p) }
+    /// The `u` and `v` ranges.
+    public func domain() throws -> (u: Interval, v: Interval) { try surfaceDomain() }
+    /// The surface alone, as an open sheet on its exact NURBS form.
+    public func toNurbsSheet() throws -> Solid { try surfaceNurbsSheet() }
+    /// Whether `p` lies inside the closed shape or within `tolerance` of it.
+    public func contains(_ p: SIMD3<Double>, tolerance: Double = 1e-9) throws -> Bool { try solidContains(p, tolerance) }
+    /// The boundary's area, the base included.
+    public func area() throws -> Double { try solidArea() }
+    /// The volume enclosed.
+    public func volume() throws -> Double { try solidVolume() }
+    /// The shape as a closed exact B-rep solid.
+    public func toSolid() throws -> Solid { try solidToSolid() }
+    /// The exact world box, `(min, max)`.
+    public func bounds() throws -> (min: SIMD3<Double>, max: SIMD3<Double>) { try valueBounds() }
+    /// This cone under a similarity `t`.
+    public func transform(_ t: Transform) throws -> Cone { try valueTransform(t) }
+
+    public var description: String { valueDescription("Cone", [("frame", frame), ("radius", radius), ("height", height)]) }
+}
+
+/// The torus of `major` radius about the frame's z and `minor` radius about that circle, as a
+/// value: `u` the angle about the z from the frame's x, `v` the angle about the tube.
+public struct Torus: Hashable, CustomStringConvertible, ValueArray {
+    static let kind = valueTorus
+    static let noun = "torus"
+    /// The 14 numbers: the frame's 12, then `major` and `minor`.
+    public let values: [Double]
+    init(canonical: [Double]) { values = canonical }
+
+    /// The torus of `major` and `minor` radii on `frame`.
+    public init(_ frame: Frame, _ major: Double, _ minor: Double) throws { self = try .made(frame.values + [major, minor]) }
+    /// The value 14 numbers state, checked by the library.
+    public init(values: [Double]) throws { self = try .made(values) }
+
+    /// The frame the torus is placed on.
+    public var frame: Frame { valueFrame }
+    /// The radius of the tube's centre circle, and the tube's own.
+    public var major: Double { values[12] }
+    public var minor: Double { values[13] }
+
+    /// The point at `(u, v)`.
+    public func pointAt(_ u: Double, _ v: Double) throws -> SIMD3<Double> { try surfacePointAt(u, v) }
+    /// The outward unit normal at `(u, v)`.
+    public func normalAt(_ u: Double, _ v: Double) throws -> SIMD3<Double> { try surfaceNormalAt(u, v) }
+    /// The `SurfaceFoot` nearest `p`.
+    public func closestPoint(_ p: SIMD3<Double>) throws -> SurfaceFoot { try surfaceClosestPoint(p) }
+    /// How far `p` lies from the surface.
+    public func distanceTo(_ p: SIMD3<Double>) throws -> Double { pointDistance(try closestPoint(p).point, p) }
+    /// The `u` and `v` ranges.
+    public func domain() throws -> (u: Interval, v: Interval) { try surfaceDomain() }
+    /// The surface alone, as an open sheet on its exact NURBS form.
+    public func toNurbsSheet() throws -> Solid { try surfaceNurbsSheet() }
+    /// Whether `p` lies inside the closed shape or within `tolerance` of it.
+    public func contains(_ p: SIMD3<Double>, tolerance: Double = 1e-9) throws -> Bool { try solidContains(p, tolerance) }
+    /// The boundary's area.
+    public func area() throws -> Double { try solidArea() }
+    /// The volume enclosed.
+    public func volume() throws -> Double { try solidVolume() }
+    /// The shape as a closed exact B-rep solid.
+    public func toSolid() throws -> Solid { try solidToSolid() }
+    /// The exact world box, `(min, max)`.
+    public func bounds() throws -> (min: SIMD3<Double>, max: SIMD3<Double>) { try valueBounds() }
+    /// This torus under a similarity `t`.
+    public func transform(_ t: Transform) throws -> Torus { try valueTransform(t) }
+
+    public var description: String { valueDescription("Torus", [("frame", frame), ("major", major), ("minor", minor)]) }
+}
+
+/// The box over `x`, `y`, `z` (increasing) along its frame's axes, as a value: an oriented
+/// bounding box, a region to test points against, a block to make a solid of.
+public struct Cuboid: Hashable, CustomStringConvertible, ValueArray {
+    static let kind = valueCuboid
+    static let noun = "cuboid"
+    /// The 18 numbers: the frame's 12, then `x`, `y` and `z`'s ends.
+    public let values: [Double]
+    init(canonical: [Double]) { values = canonical }
+
+    /// The box over `x`, `y`, `z` along `frame`'s axes.
+    public init(_ frame: Frame, _ x: Interval, _ y: Interval, _ z: Interval) throws {
+        self = try .made(frame.values + [x.t0, x.t1, y.t0, y.t1, z.t0, z.t1])
+    }
+    /// The box over the pairs `x`, `y`, `z` along `frame`'s axes.
+    public init(_ frame: Frame, _ x: (Double, Double), _ y: (Double, Double), _ z: (Double, Double)) throws {
+        try self.init(frame, try Interval(x.0, x.1), try Interval(y.0, y.1), try Interval(z.0, z.1))
+    }
+    /// The value 18 numbers state, checked by the library.
+    public init(values: [Double]) throws { self = try .made(values) }
+
+    /// The world-aligned box from `min` to `max`; an empty or flat one throws.
+    public static func fromBounds(_ min: SIMD3<Double>, _ max: SIMD3<Double>) throws -> Cuboid {
+        Cuboid(canonical: try valueOut(18, "cuboid_from_bounds") { cadaclysm_blacksmith_cuboid_from_bounds(xyz(min), xyz(max), $0) })
+    }
+
+    /// The tightest box holding `points`, aligned to `frame`. No points, or points flat along
+    /// one of the frame's axes, throw.
+    public static func around(_ frame: Frame, _ points: [SIMD3<Double>]) throws -> Cuboid {
+        let flat = points.flatMap { [$0.x, $0.y, $0.z] }
+        return Cuboid(canonical: try valueOut(18, "cuboid_around") {
+            cadaclysm_blacksmith_cuboid_around(frame.values, flat, points.count, $0)
+        })
+    }
+
+    /// The frame the box is placed on.
+    public var frame: Frame { valueFrame }
+    /// The three ranges along the frame's axes.
+    public var x: Interval { Interval(finite: values[12], values[13]) }
+    public var y: Interval { Interval(finite: values[14], values[15]) }
+    public var z: Interval { Interval(finite: values[16], values[17]) }
+
+    /// The eight corners: the `z0` face counter-clockwise about the frame's z from `(x0, y0)`,
+    /// then the `z1` face in the same order.
+    public func corners() throws -> [SIMD3<Double>] {
+        let c = try valueOut(24, "cuboid_corners") { cadaclysm_blacksmith_cuboid_corners(values, $0) }
+        return stride(from: 0, to: 24, by: 3).map { valueTriple(c, $0) }
+    }
+
+    /// The point the fractions `sx`, `sy`, `sz` of the way along each range.
+    public func pointAt(_ sx: Double, _ sy: Double, _ sz: Double) throws -> SIMD3<Double> {
+        valueTriple(try valueOut(3, "cuboid_point_at") { cadaclysm_blacksmith_cuboid_point_at(values, sx, sy, sz, $0) })
+    }
+
+    /// The closest point of the solid box to `p`: `p` itself where it lies inside.
+    public func closestPoint(_ p: SIMD3<Double>) throws -> SIMD3<Double> {
+        valueTriple(try valueOut(3, "cuboid_closest_point") { cadaclysm_blacksmith_cuboid_closest_point(values, xyz(p), $0) })
+    }
+
+    /// Whether `p` lies inside the box or within `tolerance` of it.
+    public func contains(_ p: SIMD3<Double>, tolerance: Double = 1e-9) throws -> Bool { try solidContains(p, tolerance) }
+    /// The boundary's area.
+    public func area() throws -> Double { try solidArea() }
+    /// The volume enclosed.
+    public func volume() throws -> Double { try solidVolume() }
+    /// The box as a closed exact B-rep solid.
+    public func toSolid() throws -> Solid { try solidToSolid() }
+    /// The exact world box, `(min, max)`.
+    public func bounds() throws -> (min: SIMD3<Double>, max: SIMD3<Double>) { try valueBounds() }
+    /// This box under a similarity `t`.
+    public func transform(_ t: Transform) throws -> Cuboid { try valueTransform(t) }
+
+    public var description: String { valueDescription("Cuboid", [("frame", frame), ("x", x), ("y", y), ("z", z)]) }
+}
+
+extension Curve {
+    /// This curve as a value: a line a `Line` from `origin` to `origin + x`; a circle a `Circle`
+    /// over a full turn, else the `Arc` over `t0..t1`; an ellipse its whole `Ellipse` (the range
+    /// stays here); any other kind nil.
+    public var value: CurveValue? {
+        get throws {
+            let frame = Frame(canonical: xyz(origin) + xyz(x) + xyz(y) + xyz(z))
+            switch kind {
+            case "line": return .line(try Line(origin, origin + x))
+            case "circle":
+                if t1 - t0 >= 2 * Double.pi - 1e-12 { return .circle(try Circle(frame, radius)) }
+                return .arc(try Arc(frame, radius, try Interval(t0, t1)))
+            case "ellipse": return .ellipse(try Ellipse(frame, radius, radius2))
+            default: return nil
+            }
+        }
     }
 }
 

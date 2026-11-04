@@ -53,7 +53,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::ptr::NonNull;
+use std::ptr::{self, NonNull};
 use std::sync::Mutex;
 
 mod loader;
@@ -91,11 +91,18 @@ pub const UV_WORLD: u32 = 0x200;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
     message: String,
+    ids: Vec<u32>,
 }
 
 impl Error {
     fn new(message: impl Into<String>) -> Error {
-        Error { message: message.into() }
+        Error { message: message.into(), ids: Vec::new() }
+    }
+
+    /// This error with the ids a [`blacksmith::Sketch`] refusal names.
+    pub(crate) fn with_ids(mut self, ids: Vec<u32>) -> Error {
+        self.ids = ids;
+        self
     }
 
     /// The library's own reason, as it gave it.
@@ -1099,6 +1106,66 @@ impl Brep {
         }
     }
 
+    /// What is wrong with this brep, as a [`HealthReport`]: the free edges (the sides one face
+    /// bounds) and the wires they chain into, each with its nearest partner and the gap to it;
+    /// the features below `tolerance`; the loose edges; and what [`Brep::sewed`] would join and
+    /// leave. Nothing moves. `tolerance` is an absolute length, by default (`None`, or a value
+    /// that is not finite and positive) `1e-4` times the body's diagonal; the report says what
+    /// was used. `mesh` also meshes the brep and reports where the mesh cracks
+    /// ([`HealthReport::cracks`]); without it `cracks` is `None`.
+    pub fn health(&self, tolerance: Option<f64>, mesh: bool) -> Result<HealthReport> {
+        let api = self.api;
+        let handle = unsafe { (api.cadaclysm_brep_health)(self.pointer(), tolerance.unwrap_or(f64::NAN), mesh) };
+        let fail = || reader_error(api, "health");
+        unsafe {
+            health_from(
+                handle,
+                api.cadaclysm_brep_health_free,
+                api.cadaclysm_brep_health_summary,
+                [api.cadaclysm_brep_health_free_edges, api.cadaclysm_brep_health_wires, api.cadaclysm_brep_health_small],
+                api.cadaclysm_brep_health_crack_edges,
+                &fail,
+            )
+        }
+    }
+
+    /// This brep with its small features removed, and what was done, as a new `Brep` and a
+    /// [`HealReport`]; this one is left as it was. It heals what [`Brep::health`] lists as
+    /// small at the same `tolerance`: short and collapsed edges, sliver and tiny faces, small
+    /// holes. Every fix is a vertex merge, and an edge it moves records how far as its
+    /// [`Brep::edge_tolerance`]. A guard compares the result's health with this one's and
+    /// refuses fixes that made it worse ([`HealReport::guarded`]). `kinds` switches each kind
+    /// of fix ([`HealKinds::default`] heals all three); a kind switched off is refused as
+    /// `"toggled"`. `tolerance` as [`Brep::health`]'s.
+    pub fn healed(&self, tolerance: Option<f64>, kinds: HealKinds) -> Result<(Brep, HealReport)> {
+        let api = self.api;
+        let handle = unsafe { (api.cadaclysm_brep_healed)(self.pointer(), tolerance.unwrap_or(f64::NAN), kinds.flags()) };
+        let fail = || reader_error(api, "healed");
+        unsafe {
+            heal_from(
+                handle,
+                api.cadaclysm_brep_heal_free,
+                api.cadaclysm_brep_heal_summary,
+                api.cadaclysm_brep_heal_fixes,
+                api.cadaclysm_brep_heal_refused,
+                &fail,
+                |h| NonNull::new((api.cadaclysm_brep_heal_body)(h).cast_mut()).map(|pointer| Brep { pointer, api }),
+            )
+        }
+    }
+
+    /// How far brep edge `edge` (as a [`HealFix`] or [`FreeEdge`] names one) may lie off its
+    /// curve: 0 for an exact edge, the distance healing (or sewing) moved it where that is
+    /// recorded, `None` when no trim names the id (an edge healing removed).
+    pub fn edge_tolerance(&self, edge: u32) -> Option<f64> {
+        let t = unsafe { (self.api.cadaclysm_brep_edge_tolerance)(self.pointer(), edge) };
+        if t.is_nan() {
+            None
+        } else {
+            Some(t)
+        }
+    }
+
     /// Give the reference back now rather than at the end of scope.
     pub fn release(self) {}
 }
@@ -1775,6 +1842,403 @@ pub struct SewReport {
     pub worst_gap: f64,
     pub tolerance: f64,
     pub vertex: f64,
+}
+
+// ---- health and healing -----------------------------------------------------------
+//
+// One set of report types for both libraries: [`Brep::health`] / [`Brep::healed`] here and
+// [`blacksmith::Solid::health`] / [`blacksmith::Solid::healed`] return the same ones, as
+// [`Manifold`] is shared.
+
+/// What is wrong with a body, as plain data ([`Brep::health`], [`blacksmith::Solid::health`]):
+/// the `tolerance` and `rounding` it judged at and the body's `extent` (its diagonal); the free
+/// edges, their wires and the features below the tolerance; the loose edges (`worst_loose` the
+/// widest); what sewing would do (`sew_pairs` joined, `sew_refused` groups left,
+/// `sew_worst_gap`); `cracks` where the mesh cracks, `None` unless the call asked for the mesh;
+/// and `worst_gap`, the widest gap between a free edge and its partner (0 if none).
+#[derive(Clone, Debug, PartialEq)]
+pub struct HealthReport {
+    pub tolerance: f64,
+    pub rounding: f64,
+    pub extent: f64,
+    pub free_edges: Vec<FreeEdge>,
+    pub wires: Vec<FreeWire>,
+    pub small: Vec<SmallFeature>,
+    pub loose_edges: u32,
+    pub worst_loose: f64,
+    pub sew_pairs: u32,
+    pub sew_refused: u32,
+    pub sew_worst_gap: f64,
+    pub cracks: Option<Cracks>,
+    pub worst_gap: f64,
+}
+
+impl HealthReport {
+    /// The free edges of wire number `wire` (a row of `wires`), in order; empty for no such wire.
+    pub fn wire_edges(&self, wire: usize) -> &[FreeEdge] {
+        match self.wires.get(wire) {
+            Some(w) => window(&self.free_edges, w.first, w.count),
+            None => &[],
+        }
+    }
+}
+
+/// One free edge: a side only one face bounds. `trim` is the face's side, `edge` the brep
+/// edge it lies on (`None` for a side with no edge), `face` the face it bounds, `wire` its row
+/// of [`HealthReport::wires`]; `partner` the nearest free edge across the gap, as a row of
+/// [`HealthReport::free_edges`] (`None` if there is none); `shared_ends` how many of its two
+/// ends it shares with the partner (2 is what sewing joins); its `length` and the `gap` to the
+/// partner (infinite without one).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FreeEdge {
+    pub trim: u32,
+    pub edge: Option<u32>,
+    pub face: u32,
+    pub wire: u32,
+    pub partner: Option<u32>,
+    pub shared_ends: u32,
+    pub length: f64,
+    pub gap: f64,
+}
+
+/// A chain of free edges end to end: the rows `first .. first + count` of
+/// [`HealthReport::free_edges`], whether it `closed` on itself, its total `length` and the
+/// `widest_gap` from any of its edges to a partner.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FreeWire {
+    pub first: u32,
+    pub count: u32,
+    pub closed: bool,
+    pub length: f64,
+    pub widest_gap: f64,
+}
+
+/// Something below the tolerance: `kind` is `"short_edge"`, `"collapsed_edge"`,
+/// `"sliver_face"`, `"tiny_face"`, `"tiny_body"` or `"small_hole"`; `index` its edge, face or
+/// body number (a small hole's is its loop number); `size` how small it is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SmallFeature {
+    pub kind: String,
+    pub index: u32,
+    pub size: f64,
+}
+
+/// What a mesh of the body shows, asked for with `mesh`: whether it is `watertight`, how many
+/// mesh edges are `open` (one triangle) or `folded` (more than two), how many pairs of
+/// triangles pass through each other (`crossings`), and the body's `edges` the cracks lie
+/// along. Only a closed body is counted: an open one's census is empty by design.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Cracks {
+    pub watertight: bool,
+    pub open: u32,
+    pub folded: u32,
+    pub crossings: u32,
+    pub edges: Vec<u32>,
+}
+
+/// What [`Brep::healed`] (or [`blacksmith::Solid::healed`]) did, as plain data: the
+/// `tolerance` it healed at, the furthest any trim the result keeps `moved`, whether the body
+/// guard refused fixes (`guarded`), the `fixes` made and the small features `refused`; and the
+/// body's health before and after at that tolerance -- its small features, free edges, whether
+/// it is closed, and its non-manifold edges. Indices are the input body's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HealReport {
+    pub tolerance: f64,
+    pub moved: f64,
+    pub guarded: bool,
+    pub fixes: Vec<HealFix>,
+    pub refused: Vec<HealRefusal>,
+    pub small_before: u32,
+    pub small_after: u32,
+    pub free_before: u32,
+    pub free_after: u32,
+    pub closed_before: bool,
+    pub closed_after: bool,
+    pub nonmanifold_before: u32,
+    pub nonmanifold_after: u32,
+}
+
+/// One small feature removed: its `kind` (as [`SmallFeature::kind`]), its `index` in the input
+/// (as `health` gave it), its `size`, and how far the vertices this fix merged `moved`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HealFix {
+    pub kind: String,
+    pub index: u32,
+    pub size: f64,
+    pub moved: f64,
+}
+
+/// One small feature left, and why: `kind` and `index` as in [`HealFix`]; `why` is
+/// `"would_empty_loop"`, `"closed"`, `"seam"`, `"chain"` (a chain wider than the tolerance),
+/// `"neighbours_part"` (a sliver's neighbours part), `"uneven"` (uneven sliver sides),
+/// `"non_manifold"`, `"has_holes"`, `"body_guard"` (the guard refused the fix), `"toggled"`
+/// (its kind switched off) or `"unsupported"` (a tiny body); `figure` the chain's width or the
+/// neighbours' gap, else 0.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HealRefusal {
+    pub kind: String,
+    pub index: u32,
+    pub why: String,
+    pub figure: f64,
+}
+
+/// Which kinds of fix [`Brep::healed`] (and [`blacksmith::Solid::healed`]) makes -- Rust's
+/// spelling of Python's `edges=`, `faces=`, `holes=` keywords. `Default` switches all three
+/// on; a kind switched off is refused as `"toggled"`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct HealKinds {
+    /// Short and collapsed edges.
+    pub edges: bool,
+    /// Sliver and tiny faces.
+    pub faces: bool,
+    /// Small holes.
+    pub holes: bool,
+}
+
+impl Default for HealKinds {
+    fn default() -> HealKinds {
+        HealKinds { edges: true, faces: true, holes: true }
+    }
+}
+
+impl HealKinds {
+    /// The C ABI's flag bits: 1 edges, 2 faces, 4 holes.
+    pub(crate) fn flags(self) -> u32 {
+        (if self.edges { 1 } else { 0 }) | (if self.faces { 2 } else { 0 }) | (if self.holes { 4 } else { 0 })
+    }
+}
+
+/// The health ABI's small-feature kinds, by code.
+const HEALTH_KINDS: [&str; 6] = ["short_edge", "collapsed_edge", "sliver_face", "tiny_face", "tiny_body", "small_hole"];
+
+/// The heal ABI's refusal reasons, by code.
+const HEAL_WHYS: [&str; 11] = [
+    "would_empty_loop",
+    "closed",
+    "seam",
+    "chain",
+    "neighbours_part",
+    "uneven",
+    "non_manifold",
+    "has_holes",
+    "body_guard",
+    "toggled",
+    "unsupported",
+];
+
+fn coded(table: &[&str], code: u32, what: &str) -> Result<String> {
+    table
+        .get(code as usize)
+        .map(|name| name.to_string())
+        .ok_or_else(|| Error::new(format!("the library answered {code}, not a {what}")))
+}
+
+fn optional_id(id: u32) -> Option<u32> {
+    if id == NONE {
+        None
+    } else {
+        Some(id)
+    }
+}
+
+/// The flat rows of the health C ABI as a [`HealthReport`], index for index as Python's
+/// `_health_report`: `counts` eighteen, `sizes` eight, free edges six ids and two sizes a row,
+/// wires three and two, small features two and one, the crack edge ids.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn health_report(
+    counts: &[u32; 18],
+    sizes: &[f64; 8],
+    free_ids: &[u32],
+    free_sizes: &[f64],
+    wire_runs: &[u32],
+    wire_sizes: &[f64],
+    small_items: &[u32],
+    small_sizes: &[f64],
+    crack_edges: &[u32],
+) -> Result<HealthReport> {
+    let free_edges = free_ids
+        .chunks_exact(6)
+        .zip(free_sizes.chunks_exact(2))
+        .map(|(id, size)| FreeEdge {
+            trim: id[0],
+            edge: optional_id(id[1]),
+            face: id[2],
+            wire: id[3],
+            partner: optional_id(id[4]),
+            shared_ends: id[5],
+            length: size[0],
+            gap: size[1],
+        })
+        .collect();
+    let wires = wire_runs
+        .chunks_exact(3)
+        .zip(wire_sizes.chunks_exact(2))
+        .map(|(run, size)| FreeWire { first: run[0], count: run[1], closed: run[2] != 0, length: size[0], widest_gap: size[1] })
+        .collect();
+    let small = small_items
+        .chunks_exact(2)
+        .zip(small_sizes)
+        .map(|(item, &size)| Ok(SmallFeature { kind: coded(&HEALTH_KINDS, item[0], "feature kind")?, index: item[1], size }))
+        .collect::<Result<Vec<_>>>()?;
+    let cracks = (counts[12] == 1).then(|| Cracks {
+        watertight: counts[13] != 0,
+        open: counts[14],
+        folded: counts[15],
+        crossings: counts[16],
+        edges: crack_edges.to_vec(),
+    });
+    Ok(HealthReport {
+        tolerance: sizes[0],
+        rounding: sizes[1],
+        extent: sizes[2],
+        free_edges,
+        wires,
+        small,
+        loose_edges: counts[9],
+        worst_loose: sizes[4],
+        sew_pairs: counts[10],
+        sew_refused: counts[11],
+        sew_worst_gap: sizes[5],
+        cracks,
+        worst_gap: sizes[3],
+    })
+}
+
+/// The flat rows of the heal C ABI as a [`HealReport`], index for index as Python's
+/// `_heal_report`: `counts` eleven, `sizes` two, fixes two ids and two sizes a row, refusals
+/// three and one.
+pub(crate) fn heal_report(
+    counts: &[u32; 11],
+    sizes: &[f64; 2],
+    fix_items: &[u32],
+    fix_sizes: &[f64],
+    refused_items: &[u32],
+    refused_sizes: &[f64],
+) -> Result<HealReport> {
+    let fixes = fix_items
+        .chunks_exact(2)
+        .zip(fix_sizes.chunks_exact(2))
+        .map(|(item, size)| {
+            Ok(HealFix { kind: coded(&HEALTH_KINDS, item[0], "feature kind")?, index: item[1], size: size[0], moved: size[1] })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let refused = refused_items
+        .chunks_exact(3)
+        .zip(refused_sizes)
+        .map(|(item, &figure)| {
+            Ok(HealRefusal {
+                kind: coded(&HEALTH_KINDS, item[0], "feature kind")?,
+                index: item[1],
+                why: coded(&HEAL_WHYS, item[2], "heal refusal")?,
+                figure,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(HealReport {
+        tolerance: sizes[0],
+        moved: sizes[1],
+        guarded: counts[2] != 0,
+        fixes,
+        refused,
+        small_before: counts[3],
+        small_after: counts[4],
+        free_before: counts[5],
+        free_after: counts[6],
+        closed_before: counts[7] != 0,
+        closed_after: counts[8] != 0,
+        nonmanifold_before: counts[9],
+        nonmanifold_after: counts[10],
+    })
+}
+
+/// A row reader of the two-call convention: both buffers null for the count, then filled.
+pub(crate) type RowsFn<H> = unsafe extern "C" fn(*const H, *mut u32, *mut f64) -> u32;
+
+/// Frees a report handle on every path out of the function that holds it.
+struct Freed<H>(*mut H, unsafe extern "C" fn(*mut H));
+
+impl<H> Drop for Freed<H> {
+    fn drop(&mut self) {
+        unsafe { (self.1)(self.0) }
+    }
+}
+
+/// One two-call row reader's rows, `ids` and `sizes` values a row.
+unsafe fn report_rows<H>(handle: *const H, read: RowsFn<H>, ids: usize, sizes: usize) -> (Vec<u32>, Vec<f64>) {
+    let n = read(handle, ptr::null_mut(), ptr::null_mut()) as usize;
+    let (mut a, mut b) = (vec![0u32; ids * n], vec![0f64; sizes * n]);
+    if n > 0 {
+        read(handle, a.as_mut_ptr(), b.as_mut_ptr());
+    }
+    (a, b)
+}
+
+/// A health handle's report, for either library: `readers` are the free-edge, wire and
+/// small-feature row readers; the handle is freed on every path; null is `fail()`.
+///
+/// # Safety
+/// `handle` null or a live health handle the five functions belong to, not used after.
+pub(crate) unsafe fn health_from<H>(
+    handle: *mut H,
+    free: unsafe extern "C" fn(*mut H),
+    summary: unsafe extern "C" fn(*const H, *mut u32, *mut f64) -> bool,
+    readers: [RowsFn<H>; 3],
+    crack_edges: unsafe extern "C" fn(*const H, *mut u32) -> u32,
+    fail: &dyn Fn() -> Error,
+) -> Result<HealthReport> {
+    if handle.is_null() {
+        return Err(fail());
+    }
+    let _freed = Freed(handle, free);
+    let (mut counts, mut sizes) = ([0u32; 18], [0f64; 8]);
+    if !summary(handle, counts.as_mut_ptr(), sizes.as_mut_ptr()) {
+        return Err(fail());
+    }
+    let (free_ids, free_sizes) = report_rows(handle, readers[0], 6, 2);
+    let (wire_runs, wire_sizes) = report_rows(handle, readers[1], 3, 2);
+    let (small_items, small_sizes) = report_rows(handle, readers[2], 2, 1);
+    let n = crack_edges(handle, ptr::null_mut()) as usize;
+    let mut cracks = vec![0u32; n];
+    if n > 0 {
+        crack_edges(handle, cracks.as_mut_ptr());
+    }
+    health_report(&counts, &sizes, &free_ids, &free_sizes, &wire_runs, &wire_sizes, &small_items, &small_sizes, &cracks)
+}
+
+/// A heal handle's report and its body (`take`, `None` where the library gave none), for
+/// either library; the handle is freed on every path, after the body is taken; null is
+/// `fail()`.
+///
+/// # Safety
+/// `handle` null or a live heal handle the four functions belong to, not used after.
+pub(crate) unsafe fn heal_from<H, T>(
+    handle: *mut H,
+    free: unsafe extern "C" fn(*mut H),
+    summary: unsafe extern "C" fn(*const H, *mut u32, *mut f64) -> bool,
+    fixes: RowsFn<H>,
+    refused: RowsFn<H>,
+    fail: &dyn Fn() -> Error,
+    take: impl FnOnce(*const H) -> Option<T>,
+) -> Result<(T, HealReport)> {
+    if handle.is_null() {
+        return Err(fail());
+    }
+    let _freed = Freed(handle, free);
+    let (mut counts, mut sizes) = ([0u32; 11], [0f64; 2]);
+    if !summary(handle, counts.as_mut_ptr(), sizes.as_mut_ptr()) {
+        return Err(fail());
+    }
+    let (fix_items, fix_sizes) = report_rows(handle, fixes, 2, 2);
+    let (refused_items, refused_sizes) = report_rows(handle, refused, 3, 1);
+    let report = heal_report(&counts, &sizes, &fix_items, &fix_sizes, &refused_items, &refused_sizes)?;
+    let body = take(handle).ok_or_else(fail)?;
+    Ok((body, report))
+}
+
+/// The reader's own reason for the last failure on this thread, or `what`.
+fn reader_error(api: &Api, what: &str) -> Error {
+    let reason = last_error(api);
+    Error::new(if reason.is_empty() { what.to_string() } else { reason })
 }
 
 // ---- placements -------------------------------------------------------------------
@@ -5272,5 +5736,191 @@ mod tests {
         let none = node.silhouette_beziers(None).expect("an empty silhouette is an answer");
         assert_eq!(none.count(), 0);
         assert!(none.points.is_empty() && none.weights.is_empty());
+    }
+
+    // ---- the health report and healing (healing in the other wrappers, 2026-10-29) ------
+
+    fn rel(a: f64, b: f64, tol: f64) -> bool {
+        (a - b).abs() <= tol * b.abs().max(f64::MIN_POSITIVE)
+    }
+
+    /// `st203-bapl.stp` at the repository root (or `SAMPLE_DIR`), as Python's tests find it,
+    /// and its breps in node order. Skips quietly without the sample or the library.
+    fn st203() -> Option<(Scene, Vec<Brep>)> {
+        let dir = std::env::var("SAMPLE_DIR")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../../..").to_string());
+        let path = Path::new(&dir).join("st203-bapl.stp");
+        if !path.exists() {
+            eprintln!("skipped: {} not to hand", path.display());
+            return None;
+        }
+        match open(&path) {
+            Ok(scene) => {
+                let breps = scene.nodes().iter().filter_map(|n| n.brep()).collect();
+                Some((scene, breps))
+            }
+            Err(err) => {
+                eprintln!("skipped: {err} (no library to open st203-bapl.stp with)");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn brep_health_reports_the_free_edges_of_st203_bapl() {
+        let Some((_scene, breps)) = st203() else { return };
+        let body = &breps[1]; // the 188-free-edge body; body 0 takes minutes to diagnose
+        assert_eq!(body.manifold().unwrap().boundary_edges, 188);
+        let report = body.health(None, false).unwrap();
+        assert_eq!((report.free_edges.len(), report.wires.len()), (188, 45));
+        assert_eq!(report.wires.iter().map(|w| w.count).sum::<u32>(), 188);
+        assert_eq!(report.wire_edges(0), &report.free_edges[..report.wires[0].count as usize]);
+        assert!(report.wire_edges(0).iter().all(|e| e.wire == 0));
+        assert!(report.wire_edges(45).is_empty());
+        let (_sewn, sew) = body.sewed(None, None).unwrap();
+        assert_eq!(report.sew_pairs, sew.pairs);
+        assert!(report.tolerance > 0.0 && report.cracks.is_none());
+        assert_eq!(body.health(Some(f64::NAN), false).unwrap().tolerance, report.tolerance);
+        let first = &report.free_edges[0];
+        assert_eq!(
+            (first.trim, first.edge, first.face, first.wire, first.partner, first.shared_ends),
+            (0, Some(41363), 0, 0, Some(67), 0)
+        );
+        assert!(rel(first.gap, 95.01496054, 1e-6), "{}", first.gap);
+        assert!(report.free_edges.iter().all(|e| e.partner.is_some() || e.gap == f64::INFINITY));
+        assert!(rel(report.extent, 253.66439715552204, 1e-12), "{}", report.extent);
+        assert!(rel(report.rounding, 1e-7 * report.extent, 1e-12));
+        assert!(rel(report.tolerance, 1e-4 * report.extent, 1e-12));
+        assert_eq!((report.loose_edges, report.worst_loose), (0, 0.0));
+        assert_eq!((report.sew_refused, sew.refused), (4, 4));
+        assert!(rel(report.sew_worst_gap, sew.worst_gap, 1e-12) && report.sew_worst_gap > 0.0);
+        let cracks = body.health(None, true).unwrap().cracks.expect("cracks were asked for");
+        assert_eq!(cracks, Cracks { watertight: false, open: 0, folded: 0, crossings: 166, edges: vec![] });
+        let wide = body.health(Some(5.0), false).unwrap();
+        assert_eq!(wide.small.len(), 96);
+        let kinds: std::collections::BTreeSet<&str> = wide.small.iter().map(|s| s.kind.as_str()).collect();
+        assert_eq!(kinds, ["short_edge", "sliver_face", "tiny_face"].into_iter().collect());
+        let edge = wide.small.iter().find(|s| s.kind == "short_edge").unwrap();
+        assert_eq!(edge.index, 41550);
+        assert!(rel(edge.size, 3.1622776616321775, 1e-9), "{}", edge.size);
+    }
+
+    #[test]
+    fn brep_healed_heals_st203_bapl_and_leaves_the_original() {
+        let Some((_scene, breps)) = st203() else { return };
+        let body = &breps[1];
+        let (same, report) = body.healed(None, HealKinds::default()).unwrap();
+        assert_ne!(same.pointer(), body.pointer());
+        assert_eq!((report.small_before, report.free_before), (0, 188));
+        assert!(rel(report.tolerance, 1e-4 * body.health(None, false).unwrap().extent, 1e-12));
+        let (healed, report) = body.healed(Some(5.0), HealKinds::default()).unwrap();
+        assert_eq!(report.tolerance, 5.0);
+        assert_eq!((report.small_before, report.fixes.len(), report.small_after), (96, 28, 8));
+        assert_eq!((report.free_before, report.free_after), (188, 88));
+        assert!(!report.guarded || report.refused.iter().all(|r| r.why == "body_guard"));
+        let refused: Vec<_> = report.refused.iter().map(|r| (r.kind.as_str(), r.why.as_str())).collect();
+        assert_eq!(refused, vec![("sliver_face", "uneven"); 8]);
+        assert_eq!(
+            (report.closed_before, report.closed_after, report.nonmanifold_before, report.nonmanifold_after),
+            (false, false, 0, 0)
+        );
+        assert_eq!(report.small_after as usize, healed.health(Some(5.0), false).unwrap().small.len());
+        assert_eq!(body.health(Some(5.0), false).unwrap().small.len(), 96, "the input is left as it was");
+        assert!(report.fixes.iter().all(|f| f.size >= 0.0 && f.moved >= 0.0));
+        let furthest = report.fixes.iter().map(|f| f.moved).fold(0.0, f64::max);
+        assert!(rel(furthest, 1.8248105306211464, 1e-9), "{furthest}");
+        assert!(rel(report.moved, 1.581138831332503, 1e-9), "{}", report.moved);
+        let edge = report.fixes.iter().find(|f| f.kind == "short_edge").unwrap();
+        assert_eq!(edge.index, 41550);
+        assert!(rel(edge.size, 3.1622776616321775, 1e-9));
+        assert_eq!(body.edge_tolerance(41550), Some(0.0));
+        assert_eq!(healed.edge_tolerance(41550), None);
+        assert_eq!(healed.edge_tolerance(41363), Some(0.0));
+        assert_eq!(healed.edge_tolerance(0xFFFF_FFF0), None);
+        let off = HealKinds { edges: false, faces: false, holes: false };
+        let (_, off) = body.healed(Some(5.0), off).unwrap();
+        assert!(off.fixes.is_empty() && off.refused.len() == 96 && off.free_after == off.free_before);
+        assert!(off.refused.iter().all(|r| r.why == "toggled" && r.figure == 0.0));
+        let per_kind: Vec<usize> = ["short_edge", "sliver_face", "tiny_face"]
+            .iter()
+            .map(|k| off.refused.iter().filter(|r| r.kind == *k).count())
+            .collect();
+        assert_eq!(per_kind, [64, 26, 6]);
+        // edges alone: only edge fixes, every other kind refused as toggled
+        let (_, edges_only) = body.healed(Some(5.0), HealKinds { edges: true, faces: false, holes: false }).unwrap();
+        assert!(edges_only.refused.iter().filter(|r| r.kind != "short_edge").all(|r| r.why == "toggled"));
+        assert!(edges_only.fixes.iter().all(|f| f.kind == "short_edge" || f.kind == "collapsed_edge"));
+        assert!(!edges_only.fixes.is_empty());
+    }
+
+    #[test]
+    fn the_health_decoder_reads_every_column_of_distinct_rows() {
+        let none = 0xFFFF_FFFF;
+        let counts = [2, 1, 1, 2, 1, 0, 0, 1, 0, 3, 4, 5, 1, 0, 11, 12, 13, 2];
+        let sizes = [0.5, 0.25, 9.0, 7.5, 6.5, 5.5, 4.5, 3.5];
+        let free_ids = [10, 20, 30, 40, 1, 2, 11, none, 31, 41, none, 0];
+        let free_sizes = [1.5, 2.5, 3.5, f64::INFINITY];
+        let r = health_report(&counts, &sizes, &free_ids, &free_sizes, &[0, 2, 1], &[8.5, 2.5], &[1, 77, 4, 99], &[0.125, 0.0625], &[5, 6])
+            .unwrap();
+        assert_eq!((r.tolerance, r.rounding, r.extent, r.worst_gap), (0.5, 0.25, 9.0, 7.5));
+        assert_eq!((r.loose_edges, r.worst_loose, r.sew_pairs, r.sew_refused, r.sew_worst_gap), (3, 6.5, 4, 5, 5.5));
+        assert_eq!(
+            r.free_edges,
+            vec![
+                FreeEdge { trim: 10, edge: Some(20), face: 30, wire: 40, partner: Some(1), shared_ends: 2, length: 1.5, gap: 2.5 },
+                FreeEdge { trim: 11, edge: None, face: 31, wire: 41, partner: None, shared_ends: 0, length: 3.5, gap: f64::INFINITY },
+            ]
+        );
+        assert_eq!(r.wires, vec![FreeWire { first: 0, count: 2, closed: true, length: 8.5, widest_gap: 2.5 }]);
+        assert_eq!(
+            r.small,
+            vec![
+                SmallFeature { kind: "collapsed_edge".into(), index: 77, size: 0.125 },
+                SmallFeature { kind: "tiny_body".into(), index: 99, size: 0.0625 },
+            ]
+        );
+        assert_eq!(r.cracks, Some(Cracks { watertight: false, open: 11, folded: 12, crossings: 13, edges: vec![5, 6] }));
+        // not meshed: no cracks, whatever the other five counts hold
+        let mut unmeshed = counts;
+        unmeshed[12] = 0;
+        let r = health_report(&unmeshed, &sizes, &[], &[], &[], &[], &[], &[], &[5, 6]).unwrap();
+        assert_eq!(r.cracks, None);
+        assert!(health_report(&counts, &sizes, &[], &[], &[], &[], &[6, 0], &[0.0], &[]).is_err(), "kind 6 is no kind");
+    }
+
+    #[test]
+    fn the_heal_decoder_reads_every_column_of_distinct_rows() {
+        let counts = [2, 3, 1, 9, 8, 7, 6, 1, 0, 5, 4];
+        let sizes = [0.5, 0.25];
+        let r = heal_report(&counts, &sizes, &[5, 11, 0, 12], &[1.5, 0.125, 2.5, 0.0625], &[3, 21, 9, 4, 22, 3, 2, 23, 10], &[0.0, 7.5, 0.0])
+            .unwrap();
+        assert_eq!((r.tolerance, r.moved, r.guarded), (0.5, 0.25, true));
+        assert_eq!((r.small_before, r.small_after, r.free_before, r.free_after), (9, 8, 7, 6));
+        assert_eq!((r.closed_before, r.closed_after, r.nonmanifold_before, r.nonmanifold_after), (true, false, 5, 4));
+        assert_eq!(
+            r.fixes,
+            vec![
+                HealFix { kind: "small_hole".into(), index: 11, size: 1.5, moved: 0.125 },
+                HealFix { kind: "short_edge".into(), index: 12, size: 2.5, moved: 0.0625 },
+            ]
+        );
+        assert_eq!(
+            r.refused,
+            vec![
+                HealRefusal { kind: "tiny_face".into(), index: 21, why: "toggled".into(), figure: 0.0 },
+                HealRefusal { kind: "tiny_body".into(), index: 22, why: "chain".into(), figure: 7.5 },
+                HealRefusal { kind: "sliver_face".into(), index: 23, why: "unsupported".into(), figure: 0.0 },
+            ]
+        );
+        assert!(heal_report(&counts, &sizes, &[], &[], &[0, 1, 11], &[0.0]).is_err(), "why 11 is no why");
+    }
+
+    #[test]
+    fn heal_kinds_are_the_c_flag_bits() {
+        assert_eq!(HealKinds::default().flags(), 7);
+        assert_eq!(HealKinds { edges: true, faces: false, holes: false }.flags(), 1);
+        assert_eq!(HealKinds { edges: false, faces: true, holes: false }.flags(), 2);
+        assert_eq!(HealKinds { edges: false, faces: false, holes: true }.flags(), 4);
+        assert_eq!(HealKinds { edges: false, faces: false, holes: false }.flags(), 0);
     }
 }

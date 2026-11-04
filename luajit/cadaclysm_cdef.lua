@@ -161,6 +161,10 @@ typedef struct CadaclysmBrep CadaclysmBrep;
 
 typedef struct CadaclysmFemMesh CadaclysmFemMesh;
 
+typedef struct CadaclysmHeal CadaclysmHeal;
+
+typedef struct CadaclysmHealth CadaclysmHealth;
+
 typedef struct CadaclysmMeshlets CadaclysmMeshlets;
 
 typedef struct CadaclysmPose CadaclysmPose;
@@ -965,7 +969,9 @@ uint32_t cadaclysm_realize_total(const struct CadaclysmScene *scene);
 
 void cadaclysm_cancel(const struct CadaclysmScene *scene);
 
-bool cadaclysm_scene_save(const struct CadaclysmScene *scene, const char *path, const char *format);
+bool cadaclysm_scene_save(const struct CadaclysmScene *scene,
+                          const char *path,
+                          const char *format);
 
 uint32_t cadaclysm_mesh_format_count(void);
 
@@ -1011,6 +1017,46 @@ const struct CadaclysmBrep *cadaclysm_brep_sew(const struct CadaclysmBrep *brep,
                                                double vertex,
                                                uint32_t *out,
                                                double *gaps);
+
+struct CadaclysmHealth *cadaclysm_brep_health(const struct CadaclysmBrep *brep,
+                                              double tolerance,
+                                              bool mesh);
+
+void cadaclysm_brep_health_free(struct CadaclysmHealth *health);
+
+bool cadaclysm_brep_health_summary(const struct CadaclysmHealth *health,
+                                   uint32_t *counts,
+                                   double *sizes);
+
+uint32_t cadaclysm_brep_health_free_edges(const struct CadaclysmHealth *health,
+                                          uint32_t *ids,
+                                          double *sizes);
+
+uint32_t cadaclysm_brep_health_wires(const struct CadaclysmHealth *health,
+                                     uint32_t *runs,
+                                     double *sizes);
+
+uint32_t cadaclysm_brep_health_small(const struct CadaclysmHealth *health,
+                                     uint32_t *items,
+                                     double *sizes);
+
+uint32_t cadaclysm_brep_health_crack_edges(const struct CadaclysmHealth *health, uint32_t *ids);
+
+struct CadaclysmHeal *cadaclysm_brep_healed(const struct CadaclysmBrep *brep,
+                                            double tolerance,
+                                            uint32_t flags);
+
+const struct CadaclysmBrep *cadaclysm_brep_heal_body(const struct CadaclysmHeal *h);
+
+void cadaclysm_brep_heal_free(struct CadaclysmHeal *h);
+
+bool cadaclysm_brep_heal_summary(const struct CadaclysmHeal *h, uint32_t *counts, double *sizes);
+
+uint32_t cadaclysm_brep_heal_fixes(const struct CadaclysmHeal *h, uint32_t *items, double *sizes);
+
+uint32_t cadaclysm_brep_heal_refused(const struct CadaclysmHeal *h, uint32_t *items, double *sizes);
+
+double cadaclysm_brep_edge_tolerance(const struct CadaclysmBrep *brep, uint32_t edge);
 
 void cadaclysm_svg_options_init(struct CadaclysmSvgOptions *options);
 
@@ -1114,4 +1160,10 @@ bool cadaclysm_fem_mesh_save_msh(const struct CadaclysmFemMesh *m, const char *p
 const char *cadaclysm_fem_mesh_msh_text(const struct CadaclysmFemMesh *m);
 
 void cadaclysm_fem_mesh_free(struct CadaclysmFemMesh *m);
+
+const uint32_t *cadaclysm_node_mesh_faces(const struct CadaclysmScene *scene,
+                                          uint32_t node,
+                                          uint32_t *count);
+
+double cadaclysm_node_mesh_deviation(const struct CadaclysmScene *scene, uint32_t node);
 ]]

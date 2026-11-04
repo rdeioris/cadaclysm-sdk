@@ -847,6 +847,26 @@ return function(t)
     v:close()
   end)
 
+  t.test("occluded takes the three names on the real library; no mode and another name are refused", function()
+    local v = offscreen(64, 48)
+    if not v then return end
+    local item = v:show_mesh({ positions = { -1, -1, 0, 1, -1, 0, 1, 1, 0 }, indices = { 0, 1, 2 } })
+    for _, name in ipairs({ "off", "solid", "dashed" }) do item:occluded(name) end
+    t.raises(function() item:occluded() end, "occluded: 'nil' is not 'off', 'solid' or 'dashed'")
+    t.raises(function() item:occluded("_list") end, "occluded: '_list' is not 'off', 'solid' or 'dashed'")
+    v:close()
+  end)
+
+  t.test("finish takes the three names on the real library; no finish and another name are refused", function()
+    local v = offscreen(64, 48)
+    if not v then return end
+    local item = v:show_mesh({ positions = { -1, -1, 0, 1, -1, 0, 1, 1, 0 }, indices = { 0, 1, 2 } })
+    for _, name in ipairs({ "gloss", "satin", "matte" }) do item:finish(name) end
+    t.raises(function() item:finish() end, "finish: 'nil' is not 'gloss', 'satin' or 'matte'")
+    t.raises(function() item:finish("_list") end, "finish: '_list' is not 'gloss', 'satin' or 'matte'")
+    v:close()
+  end)
+
   t.test("pick uses request_pick for viewport 0 and request_pick_in for another, and a refusal raises", function()
     local state = {}
     view.use(fake(state))
@@ -974,19 +994,19 @@ return function(t)
     view._reset()
   end)
 
-  t.test("a library answering view ABI 1.8 (1.10 or 2.11) is refused with its version", function()
+  t.test("a library answering view ABI 1.8 (1.17 or 2.18) is refused with its version", function()
     local function answering(version)
       return { cadaclysm_view_abi_version = function() return version end }
     end
     local e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 8)) end, "view ABI 1.8")
-    t.eq(tostring(e), "stand-in: view ABI 1.8, this wrapper needs 1.11 or a later 1.x")
-    e = t.raises(function() view._bound("stand-in", answering(2 * 65536 + 11)) end, "view ABI 2.11")
-    t.eq(tostring(e), "stand-in: view ABI 2.11, this wrapper needs 1.11 or a later 1.x")
-    e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 10)) end, "view ABI 1.10")
-    t.eq(tostring(e), "stand-in: view ABI 1.10, this wrapper needs 1.11 or a later 1.x")
-    -- 1.11 passes the gate (this stand-in then fails a later check, never the version's).
-    local taken, why = pcall(view._bound, "stand-in", answering(1 * 65536 + 11))
-    t.ok(not taken and not tostring(why):find("view ABI", 1, true), "1.11 passes the version gate: " .. tostring(why))
+    t.eq(tostring(e), "stand-in: view ABI 1.8, this wrapper needs 1.18 or a later 1.x")
+    e = t.raises(function() view._bound("stand-in", answering(2 * 65536 + 18)) end, "view ABI 2.18")
+    t.eq(tostring(e), "stand-in: view ABI 2.18, this wrapper needs 1.18 or a later 1.x")
+    e = t.raises(function() view._bound("stand-in", answering(1 * 65536 + 17)) end, "view ABI 1.17")
+    t.eq(tostring(e), "stand-in: view ABI 1.17, this wrapper needs 1.18 or a later 1.x")
+    -- 1.18 passes the gate (this stand-in then fails a later check, never the version's).
+    local taken, why = pcall(view._bound, "stand-in", answering(1 * 65536 + 18))
+    t.ok(not taken and not tostring(why):find("view ABI", 1, true), "1.18 passes the version gate: " .. tostring(why))
   end)
 
   -- ---- view ABI 1.9: the lighting ----
@@ -1170,6 +1190,330 @@ return function(t)
     v:focus({ 0, 0, 0 })
     t.eq(changed(before, v:image()), 0, "focus back restores it")
     t.raises(function() v:focus({ 0 / 0, 0, 0 }) end, "cadaclysm_view_focus")
+    v:close()
+  end)
+
+  -- ---- the machining view and the timeline (1.7) ---------------------------------------------
+
+  -- A fake that answers the fourteen machining and timeline calls and notes what it was handed.
+  -- `state`: machining_id (default 7), ok (default true), error, status_lines (default one line).
+  local function machining_fake(state)
+    local lib = fake(state)
+    local C = lib.C
+    local seen = { calls = {}, shows = 0, asked = 0, heights_capacity = nil }
+    state.seen = seen
+    local function ok_(name, f)
+      C[name] = function(...)
+        seen.calls[#seen.calls + 1] = name
+        if f then f(...) end
+        return state.ok ~= false
+      end
+    end
+    C.cadaclysm_view_show_machining = function(_, m)
+      seen.shows = seen.shows + 1
+      seen.size, seen.program_count = m.size, m.program_count
+      seen.programs = {}
+      for k = 0, tonumber(m.program_count) - 1 do
+        local p = m.programs[k]
+        seen.programs[k + 1] = { p.size, p.tool_number, p.tool_shape, p.tool_diameter, p.tool_flute_length,
+          p.tool_angle, p.tool_corner_radius, ffi.string(p.gcode) }
+      end
+      seen.stock = { m.stock_min[0], m.stock_min[1], m.stock_min[2], m.stock_max[0], m.stock_max[1], m.stock_max[2] }
+      seen.part = { tonumber(m.part_vertex_count), tonumber(m.part_index_count) }
+      seen.cell, seen.tolerance, seen.skin, seen.skin_set, seen.rapid_rate = m.cell, m.tolerance, m.skin, m.skin_set, m.rapid_rate
+      if state.machining_id == 0 then return 0 end
+      return state.machining_id or 7
+    end
+    ok_("cadaclysm_view_machining_seek", function(_, id, to) seen.seek = { id, to } end)
+    ok_("cadaclysm_view_machining_colour_by", function(_, id, mode) seen.colour_by = { id, mode } end)
+    ok_("cadaclysm_view_machining_overlays", function(_, id, path, tool) seen.overlays = { id, path, tool } end)
+    ok_("cadaclysm_view_machining_info", function(_, id, out)
+      seen.info_size = out.size
+      out.moves, out.move, out.nx, out.ny, out.cell = 9, 3, 4, 2, 0.5
+      out.min[0], out.min[1], out.cycle_time = -1, -2, 12.5
+    end)
+    ok_("cadaclysm_view_machining_heights", function(_, id, z, capacity)
+      seen.heights_capacity = tonumber(capacity)
+      for k = 0, tonumber(capacity) - 1 do z[k] = k end
+    end)
+    ok_("cadaclysm_view_timeline_play", function(_, speed) seen.play = speed end)
+    ok_("cadaclysm_view_timeline_pause")
+    ok_("cadaclysm_view_timeline_seek", function(_, s) seen.seek_time = s end)
+    ok_("cadaclysm_view_timeline_set_loop", function(_, on) seen.loop = on end)
+    ok_("cadaclysm_view_remove")
+    ok_("cadaclysm_view_set_colour", function(_, id, c) seen.colour = { id, c[0], c[1], c[2] } end)
+    C.cadaclysm_view_timeline_time = function() return 1.5 end
+    C.cadaclysm_view_timeline_duration = function() return 12.5 end
+    C.cadaclysm_view_timeline_playing = function() return true end
+    C.cadaclysm_view_timeline_status = function(_, buf, capacity)
+      local lines = state.status_lines or { "move 3 of 9 \xC2\xB7 T1 flat 6 mm" }
+      seen.asked = seen.asked + 1
+      local line = lines[math.min(seen.asked, #lines)]
+      capacity = tonumber(capacity)
+      if buf ~= nil and capacity > 0 then
+        local room = math.min(#line, capacity - 1)
+        ffi.copy(buf, line, room)
+        buf[room] = 0
+      end
+      return #line
+    end
+    return lib
+  end
+
+  local function machining_view(state)
+    local lib = machining_fake(state or {})
+    view.use(lib)
+    local v = view.View.new({ width = 8, height = 8 })
+    return v, lib
+  end
+
+  local FLAT = { number = 1, shape = "flat", diameter = 6, flute_length = 20 }
+  local VBIT = { number = 3, shape = "vbit", diameter = 6, angle = 60 }
+  local BOX = { { -1, -2, 0 }, { 1, 2, 3 } }
+
+  t.test("show_machining hands the library the programs, the stock, the part and the options (F1)", function()
+    local state = {}
+    local v = machining_view(state)
+    local m = v:show_machining({ { FLAT, "G0 X0\n" }, { VBIT, "G0 X1\n" } }, BOX,
+      { positions = { 0, 0, 0, 1, 0, 0, 0, 1, 0 }, indices = { 0, 1, 2 } }, { cell = 0.25, skin = 0 })
+    local s = state.seen
+    t.eq(s.program_count, 2)
+    t.eq(s.size, 128)
+    local want = { { 56, 1, 0, 6, 20, 0, 0, "G0 X0\n" }, { 56, 3, 3, 6, 0, 60, 0, "G0 X1\n" } }
+    for k = 1, 2 do for f = 1, 8 do t.eq(s.programs[k][f], want[k][f], ("program %d field %d"):format(k, f)) end end
+    for k, x in ipairs({ -1, -2, 0, 1, 2, 3 }) do t.eq(s.stock[k], x) end
+    t.eq(s.part[1], 3); t.eq(s.part[2], 3)
+    t.eq(s.cell, 0.25); t.eq(s.tolerance, 0); t.eq(s.skin_set, 1); t.eq(s.skin, 0); t.eq(s.rapid_rate, 0)
+    t.eq(m.id, 7)
+    t.eq(v._items[7], m, "the view's item table holds the Machining")
+    t.eq(getmetatable(m), view.Machining)
+    m:remove()
+    t.eq(v._items[7], nil)
+    v:close()
+  end)
+
+  t.test("show_machining with no part and no options leaves every default to the library (F2)", function()
+    local state = {}
+    local v = machining_view(state)
+    v:show_machining({ { FLAT, "G0 X0\n" } }, BOX)
+    local s = state.seen
+    t.eq(s.skin_set, 0); t.eq(s.part[1], 0); t.eq(s.part[2], 0)
+    t.eq(s.cell, 0); t.eq(s.tolerance, 0); t.eq(s.rapid_rate, 0)
+    v:close()
+  end)
+
+  t.test("show_machining and colour_by refuse what Python refuses, before the library (F3)", function()
+    local state = {}
+    local v = machining_view(state)
+    local function bad(what, fn, message)
+      local err = t.raises(fn, message)
+      t.ok(is_view_error(err), what .. ": not a ViewError: " .. tostring(err))
+    end
+    local function show(tool, part, options, gcode, box)
+      return function() v:show_machining({ { tool, gcode or "G0" } }, box or BOX, part, options) end
+    end
+    bad("missing fields", show({ number = 1, shape = "flat" }), "tool needs number, shape and diameter")
+    bad("negative", show({ number = -1, shape = "flat", diameter = 6 }), "tool number %-1 is negative")
+    bad("fractional", show({ number = 1.5, shape = "flat", diameter = 6 }), "whole number")
+    bad("shape", show({ number = 1, shape = "spade", diameter = 6 }), "shape 'spade': one of flat, ball, drill, vbit, bullnose")
+    bad("shape _list", show({ number = 1, shape = "_list", diameter = 6 }), "one of flat, ball")
+    bad("nan diameter", show({ number = 1, shape = "flat", diameter = 0 / 0 }), "finite")
+    bad("positions", show(FLAT, { positions = { 0, 0, 0, 1 }, indices = {} }), "part positions: 4 numbers is not a whole number of x y z triples")
+    bad("indices", show(FLAT, { positions = { 0, 0, 0 }, indices = { 0, 0 } }), "part indices: 2 is not a whole number of triangles")
+    bad("negative index", show(FLAT, { positions = { 0, 0, 0 }, indices = { 0, 0, -1 } }), "part indices must not be negative")
+    bad("fractional index", show(FLAT, { positions = { 0, 0, 0 }, indices = { 0, 0, 0.5 } }), "part indices must be whole numbers")
+    bad("past", show(FLAT, { positions = { 0, 0, 0, 1, 0, 0, 0, 1, 0 }, indices = { 0, 1, 3 } }), "part indices: 3 is past the last of 3 vertices")
+    bad("nan position", show(FLAT, { positions = { 0, 0, 0 / 0 }, indices = {} }), "finite")
+    bad("nan cell", show(FLAT, nil, { cell = 0 / 0 }), "finite")
+    bad("nan stock", show(FLAT, nil, nil, "G0", { { 0, 0, 0 / 0 }, { 1, 1, 1 } }), "finite")
+    bad("stock", show(FLAT, nil, nil, "G0", { { 0, 0 }, { 1, 1, 1 } }), "three numbers")
+    t.eq(state.seen.shows, 0, "the library was never asked")
+    local m = v:show_machining({ { FLAT, "G0" } }, BOX)
+    bad("mode", function() m:colour_by("rainbow") end, "mode 'rainbow': one of height, tool, deviation")
+    bad("mode _list", function() m:colour_by("_list") end, "one of height, tool, deviation")
+    bad("seek_move negative", function() m:seek_move(-1) end, "seek_move")
+    bad("seek_move fractional", function() m:seek_move(1.5) end, "seek_move")
+    bad("seek nan", function() v:seek(0 / 0) end, "finite")
+    bad("play inf", function() v:play(math.huge) end, "finite")
+    v:close()
+    bad("closed", function() m:colour_by("tool") end, "the view is closed")
+  end)
+
+  t.test("the transport and the machining's own calls reach the library as typed (F4)", function()
+    local state = {}
+    local v = machining_view(state)
+    local s = state.seen
+    local m = v:show_machining({ { FLAT, "G0" } }, BOX)
+    v:play(4); t.eq(s.play, 4)
+    v:play(); t.eq(s.play, 1)
+    v:pause(); t.eq(s.calls[#s.calls], "cadaclysm_view_timeline_pause")
+    v:seek(2.0); t.eq(s.seek_time, 2.0)
+    v:loop(); t.eq(s.loop, true)
+    v:loop(false); t.eq(s.loop, false)
+    m:seek_move(3); t.eq(s.seek[1], 7); t.eq(s.seek[2], 3)
+    m:colour_by("tool"); t.eq(s.colour_by[2], 1)
+    m:colour_by("height"); t.eq(s.colour_by[2], 0)
+    m:colour_by("deviation"); t.eq(s.colour_by[2], 2)
+    m:overlays(false); t.eq(s.overlays[1], 7); t.eq(s.overlays[2], false); t.eq(s.overlays[3], true)
+    m:overlays(); t.eq(s.overlays[2], true); t.eq(s.overlays[3], true)
+    t.eq(v:time(), 1.5); t.eq(v:duration(), 12.5); t.eq(v:playing(), true)
+    local lines = v:status()
+    t.eq(#lines, 1); t.eq(lines[1], "move 3 of 9 \xC2\xB7 T1 flat 6 mm")
+    local info = m:info()
+    t.eq(s.info_size, ffi.sizeof("CadaclysmViewMachiningInfo"))
+    t.eq(info.moves, 9); t.eq(info.move, 3); t.eq(info.nx, 4); t.eq(info.ny, 2); t.eq(info.cell, 0.5)
+    t.eq(info.min[1], -1); t.eq(info.min[2], -2); t.eq(info.cycle_time, 12.5)
+    local z = m:heights()
+    t.eq(s.heights_capacity, 8); t.eq(#z, 8); t.eq(z[1 * 4 + 0 + 1], 4)
+    -- Item members still work on a Machining
+    m:colour({ 1, 0, 0 }); t.eq(s.colour[1], 7); t.eq(s.colour[2], 1)
+    m:remove()
+    v:close()
+  end)
+
+  t.test("status asks again when the line grew, and is empty with no tracks (F5)", function()
+    local state = { status_lines = { "move 9 of 9", "move 10 of 10 \xC2\xB7 longer" } }
+    local v = machining_view(state)
+    local lines = v:status()
+    t.eq(#lines, 1); t.eq(lines[1], "move 10 of 10 \xC2\xB7 longer")
+    t.eq(state.seen.asked, 3)
+    v:close()
+    local empty = {}
+    empty.status_lines = { "" }
+    local w = machining_view(empty)
+    t.eq(#w:status(), 0)
+    w:close()
+    local emptied = { status_lines = { "move 9 of 9", "" } }   -- the line emptied between the two calls
+    local e = machining_view(emptied)
+    t.eq(#e:status(), 0); t.eq(emptied.seen.asked, 2)
+    e:close()
+  end)
+
+  t.test("a library refusal is the library's words (F6)", function()
+    local state = { machining_id = 0, error = "cadaclysm_view_show_machining: a machining needs at least one program (program_count is 0)" }
+    local v = machining_view(state)
+    local err = t.raises(function() v:show_machining({ { FLAT, "G0" } }, BOX) end, "a machining needs at least one program %(program_count is 0%)")
+    t.eq(err.message, state.error)
+    v:close()
+    local state2 = {}
+    local w = machining_view(state2)
+    local m = w:show_machining({ { FLAT, "G0" } }, BOX)
+    state2.ok, state2.error = false, "cadaclysm_view_machining_seek: no machining 9 is shown"
+    local err2 = t.raises(function() m:seek_move(3) end, "no machining 9 is shown")
+    t.eq(err2.message, state2.error)
+    w:close()
+  end)
+
+  -- web/test/machining-selftest.js's rule, as Python's _compare_at_walls: failed, excused, walls.
+  local function compare_at_walls(gpu, oracle, nx, ny)   -- gpu: 1-based table; oracle: 0-based float*
+    local failed, excused, walls = 0, 0, 0
+    for j = 0, ny - 1 do
+      for i = 0, nx - 1 do
+        local lo, hi = math.huge, -math.huge
+        for b = math.max(0, j - 1), math.min(ny - 1, j + 1) do
+          for a = math.max(0, i - 1), math.min(nx - 1, i + 1) do
+            local o = oracle[b * nx + a]
+            if o < lo then lo = o end
+            if o > hi then hi = o end
+          end
+        end
+        local wall = hi - lo > 0.5
+        if wall then walls = walls + 1 end
+        local g = gpu[j * nx + i + 1]
+        if math.abs(g - oracle[j * nx + i]) > 2e-3 then
+          local near = false
+          if wall then
+            for b = math.max(0, j - 1), math.min(ny - 1, j + 1) do
+              for a = math.max(0, i - 1), math.min(nx - 1, i + 1) do
+                if math.abs(oracle[b * nx + a] - g) <= 2e-3 then near = true end
+              end
+            end
+          end
+          if near then excused = excused + 1 else failed = failed + 1 end
+        end
+      end
+    end
+    return failed, excused, walls
+  end
+
+  local function read_all(path)
+    local f = assert(io.open(path, "rb"))
+    local data = f:read("*a")
+    f:close()
+    return data
+  end
+
+  -- The plate job of web/test/fixtures/machining-plate/job.json: programs program-0.gcode (T1 flat 6 mm,
+  -- flute 20) and program-1.gcode (T2 drill 6 mm, flute 30), stock (-42, -27, 0)-(42, 27, 14), cell 0.5,
+  -- rapid_rate 5000. Nil in an SDK checkout without the fixture (a case then says "skip").
+  local function plate()
+    local first = t.fixture("web/test/fixtures/machining-plate/program-0.gcode")
+    if first == nil then
+      print("  skip: no machining-plate fixture")
+      return nil
+    end
+    local dir = first:match("^(.*)/[^/]+$")
+    return {
+      dir = dir,
+      programs = {
+        { { number = 1, shape = "flat", diameter = 6, flute_length = 20 }, read_all(first) },
+        { { number = 2, shape = "drill", diameter = 6, flute_length = 30 }, read_all(dir .. "/program-1.gcode") },
+      },
+      box = { { -42, -27, 0 }, { 42, 27, 14 } },
+      options = { cell = 0.5, rapid_rate = 5000 },
+    }
+  end
+
+  t.test("the plate plays to the fixture's heights offscreen (F7, real library)", function()
+    local job = plate()
+    if not job then return end
+    local v = offscreen(64, 48)
+    if not v then return end
+    local m = v:show_machining(job.programs, job.box, nil, job.options)
+    t.ok(math.abs(v:duration() - 893.247024) < 1e-3, "duration " .. v:duration())
+    local info = m:info()
+    t.ok(info.moves > 0)
+    m:seek_move(info.moves)
+    local gpu = m:heights()
+    local data = read_all(job.dir .. "/heights.bin")
+    local header = ffi.cast("const uint32_t *", data)
+    local nx, ny = tonumber(header[2]), tonumber(header[3])
+    t.eq(info.nx, nx); t.eq(info.ny, ny); t.eq(#gpu, nx * ny)
+    local oracle = ffi.cast("const float *", ffi.cast("const char *", data) + 28)
+    local failed, excused, walls = compare_at_walls(gpu, oracle, nx, ny)
+    t.ok(failed == 0 and excused <= math.max(4, math.floor(walls / 100)),
+      ("failed %d, excused %d, walls %d"):format(failed, excused, walls))
+    v:draw()
+    t.ok(v:status()[1]:find("^move " .. info.moves .. " of " .. info.moves) ~= nil, v:status()[1])
+    m:remove()
+    v:close()
+  end)
+
+  t.test("every transport and machining call runs on the real library (F7b)", function()
+    local job = plate()
+    if not job then return end
+    local v = offscreen(64, 48)
+    if not v then return end
+    local m = v:show_machining(job.programs, job.box, nil, job.options)
+    local duration = v:duration()
+    t.eq(v:playing(), false)
+    v:play(2); t.eq(v:playing(), true)
+    v:pause(); t.eq(v:playing(), false)
+    v:seek(10); v:draw(); t.ok(math.abs(v:time() - 10) < 1e-6, "time " .. v:time())
+    v:seek(duration + 100); v:draw(); t.ok(math.abs(v:time() - duration) < 1e-6, "clamped " .. v:time())
+    v:loop(); v:loop(false)
+    t.eq(#v:status() > 0, true)
+    m:colour_by("tool"); m:colour_by("height")
+    local err = t.raises(function() m:colour_by("deviation") end, "cadaclysm_view_machining_colour_by")
+    t.ok(is_view_error(err), "deviation needs a part")
+    m:overlays(false, false); m:overlays()
+    v:draw()
+    m:remove()
+    local part = { positions = { -42, -27, 14, 42, -27, 14, 0, 27, 14 }, indices = { 0, 1, 2 } }
+    local with_part = v:show_machining(job.programs, job.box, part, job.options)
+    with_part:colour_by("deviation")
+    v:draw()
+    with_part:remove()
     v:close()
   end)
 end

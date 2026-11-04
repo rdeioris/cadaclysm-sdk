@@ -30,8 +30,21 @@ typedef struct CadaclysmBlacksmithSolid CadaclysmBlacksmithSolid;
  * `_texture` and `_release` -- and `CadaclysmViewDevice`, `CadaclysmViewShared` and
  * `CadaclysmViewTexture`: a view drawing into a texture the host samples, on the host's own
  * device or shared across devices on one GPU.
+ * 1.13 appended `cadaclysm_view_set_occluded`: an item's lines and points where a surface
+ * hides them -- not drawn, drawn, or dashed and dimmed.
+ * 1.14 appended `cadaclysm_view_set_analysis` and `_analysis`, and `CadaclysmViewAnalysis`:
+ * zebra stripes, isophotes or curvature colour over every surface, for judging it.
+ * 1.15 added `CADACLYSM_VIEW_LIGHTING_SHOWROOM` to `cadaclysm_view_set_lighting`: a showroom
+ * fixed in the world mirrored in a clear coat over the parts' colours.
+ * 1.16 appended `CadaclysmViewViewport::layer_mask`, `cadaclysm_view_set_item_layer` and `cadaclysm_view_set_user_layer`.
+ * 1.17 added `CADACLYSM_VIEW_WINDOW_KMS`: the view drawn straight onto a Linux display through
+ * the kernel's mode setting, with no window system.
+ * 1.18 appended `cadaclysm_view_set_finish`: an item's finish -- gloss, satin or matte -- so
+ * rubber and trim draw under the showroom's lights without its clear coat.
+ * 1.19 appended `cadaclysm_view_kms_info` and `cadaclysm_view_kms_probe`, and
+ * `CadaclysmViewKmsInfo`: how a KMS view draws onto its display, and how one would.
  */
-#define CADACLYSM_VIEW_ABI_MINOR 12
+#define CADACLYSM_VIEW_ABI_MINOR 19
 
 #define CADACLYSM_VIEW_WINDOW_WIN32 1
 
@@ -43,6 +56,36 @@ typedef struct CadaclysmBlacksmithSolid CadaclysmBlacksmithSolid;
 
 #define CADACLYSM_VIEW_WINDOW_APPKIT 5
 
+/**
+ * A display driven through KMS, with no X11 or Wayland (1.17): a Linux console, a Raspberry Pi,
+ * a kiosk. The view takes the display over at the first draw and puts its previous picture
+ * back at `cadaclysm_view_destroy`; the host feeds input (`cadaclysm_view_input`) from evdev or
+ * libinput. Any Vulkan device draws it: one that imports DMA-BUFs (`VK_EXT_external_memory_dma_buf`
+ * and `VK_EXT_image_drm_format_modifier`) into the display's own buffers -- GBM's
+ * (`libgbm.so.1`, loaded at run time) or its own where it is the display's device -- and any
+ * other, a software Vulkan included, offscreen with a copy into the display's buffers each frame
+ * (`CADACLYSM_KMS_COPY=1` forces the copy). Linux only.
+ */
+#define CADACLYSM_VIEW_WINDOW_KMS 6
+
+/**
+ * `CadaclysmViewKmsInfo.path` (1.19): the display's buffers allocated by GBM on the display's
+ * device and drawn into by the GPU, a second device -- a Raspberry Pi, most ARM boards. No copy.
+ */
+#define CADACLYSM_VIEW_KMS_GBM 1
+
+/**
+ * The GPU's own buffers, exported to the display, which is the same device -- a PC's AMD or
+ * Intel GPU, virtio-gpu under Venus. No copy.
+ */
+#define CADACLYSM_VIEW_KMS_GPU 2
+
+/**
+ * Drawn offscreen and copied by the CPU into the display's buffers each frame: no Vulkan
+ * device here imports them (a software Vulkan such as lavapipe), or `CADACLYSM_KMS_COPY=1`.
+ */
+#define CADACLYSM_VIEW_KMS_COPY 3
+
 #define CADACLYSM_VIEW_SURFACES_EXACT 0
 
 #define CADACLYSM_VIEW_SURFACES_TRIANGLES 1
@@ -50,6 +93,62 @@ typedef struct CadaclysmBlacksmithSolid CadaclysmBlacksmithSolid;
 #define CADACLYSM_VIEW_LIGHTING_HEADLIGHT 0
 
 #define CADACLYSM_VIEW_LIGHTING_STUDIO 1
+
+/**
+ * A showroom mirrored in a clear coat (1.15): the View's; the other renderers refuse it.
+ */
+#define CADACLYSM_VIEW_LIGHTING_SHOWROOM 2
+
+/**
+ * An item's finish (`cadaclysm_view_set_finish`, 1.18): gloss, the default -- under showroom
+ * lighting a clear coat mirroring the room, sharp and silver at a grazing angle.
+ */
+#define CADACLYSM_VIEW_FINISH_GLOSS 0
+
+/**
+ * Satin: a weaker, blurred coat -- the room's lights as soft glows, not their outlines.
+ */
+#define CADACLYSM_VIEW_FINISH_SATIN 1
+
+/**
+ * Matte: no mirror at all, a faint grey sheen at a grazing angle -- rubber, cloth, primer.
+ */
+#define CADACLYSM_VIEW_FINISH_MATTE 2
+
+/**
+ * `CadaclysmViewAnalysis.mode` (1.14): surfaces drawn as lit, the default.
+ */
+#define CADACLYSM_VIEW_ANALYSIS_NONE 0
+
+/**
+ * Zebra stripes: the surface as a mirror in a cylinder of light bands fixed to the camera.
+ */
+#define CADACLYSM_VIEW_ANALYSIS_ZEBRA 1
+
+/**
+ * Isophotes: dark lines of equal angle between the normal and one light.
+ */
+#define CADACLYSM_VIEW_ANALYSIS_ISOPHOTES 2
+
+/**
+ * Curvature as false colour, blue at `-range`, green at 0, red at `+range`: Gaussian.
+ */
+#define CADACLYSM_VIEW_ANALYSIS_GAUSSIAN 3
+
+/**
+ * Mean curvature.
+ */
+#define CADACLYSM_VIEW_ANALYSIS_MEAN 4
+
+/**
+ * The smaller principal curvature.
+ */
+#define CADACLYSM_VIEW_ANALYSIS_MIN 5
+
+/**
+ * The larger principal curvature.
+ */
+#define CADACLYSM_VIEW_ANALYSIS_MAX 6
 
 #define CADACLYSM_VIEW_BACKEND_ANY 0
 
@@ -85,6 +184,22 @@ typedef struct CadaclysmBlacksmithSolid CadaclysmBlacksmithSolid;
 #define CADACLYSM_VIEW_TEXT_LABEL 0
 
 #define CADACLYSM_VIEW_TEXT_WORLD 1
+
+/**
+ * What an item's lines and points draw where a surface is in front of them
+ * (`cadaclysm_view_set_occluded`, 1.13): not drawn (the default).
+ */
+#define CADACLYSM_VIEW_OCCLUDED_OFF 0
+
+/**
+ * Drawn through, as where they are visible.
+ */
+#define CADACLYSM_VIEW_OCCLUDED_SOLID 1
+
+/**
+ * Drawn through, dashed and dimmed; a point as a dimmed ring.
+ */
+#define CADACLYSM_VIEW_OCCLUDED_DASHED 2
 
 /**
  * Text alignment: which point of the text's box sits at `at` (labels: at the anchor plus
@@ -243,6 +358,11 @@ typedef struct CadaclysmBlacksmithSolid CadaclysmBlacksmithSolid;
 #define CADACLYSM_VIEW_COLOUR_BY_DEVIATION 2
 
 /**
+ * How many user layers an item can be put on (1.16): 0 to 31.
+ */
+#define CADACLYSM_VIEW_USER_LAYERS 32
+
+/**
  * `CadaclysmViewDevice.api`, `CadaclysmViewShared.api` (1.12): the host's graphics API.
  */
 #define CADACLYSM_VIEW_API_D3D12 1
@@ -327,15 +447,19 @@ typedef struct CadaclysmViewWindow {
    */
   uint32_t kind;
   /**
-   * HWND, `wl_surface*`, `NSView*`; unused for Xlib and XCB.
+   * HWND, `wl_surface*`, `NSView*`; unused for Xlib, XCB and KMS.
    */
   void *window;
   /**
-   * Xlib `Window`, `xcb_window_t`; unused otherwise.
+   * Xlib `Window`, `xcb_window_t`; KMS: the connector's object id, 0 for the first
+   * connected one; unused otherwise.
    */
   uint64_t window_id;
   /**
-   * HINSTANCE, `Display*`, `xcb_connection_t*`, `wl_display*`; NULL on AppKit.
+   * HINSTANCE, `Display*`, `xcb_connection_t*`, `wl_display*`; NULL on AppKit. KMS: an
+   * `int*` naming an open DRM primary node (`/dev/dri/cardN`) the host keeps -- DRM master,
+   * typically from its seat manager; the view duplicates it -- or NULL for the view to open
+   * the first card with a connected display itself (master while nothing else is).
    */
   void *display;
   /**
@@ -343,7 +467,9 @@ typedef struct CadaclysmViewWindow {
    * logical size by `devicePixelRatio`). Pass the size the native window actually has
    * once it is mapped: on Qt, that is the first `paintEvent`, not `showEvent` -- at
    * `showEvent` the native window can still lag Qt's own layout, and a swapchain made
-   * at a stale size is invalid on Vulkan.
+   * at a stale size is invalid on Vulkan. KMS: the display mode's size, 0 x 0 for the
+   * connector's preferred mode; `cadaclysm_view_size` gives the size taken, and the view
+   * keeps it (`cadaclysm_view_resize` to any other size is refused).
    */
   uint32_t width;
   uint32_t height;
@@ -447,6 +573,45 @@ typedef struct CadaclysmViewPick {
 } CadaclysmViewPick;
 
 /**
+ * How every surface is drawn for judging it (`cadaclysm_view_set_analysis`, 1.14). Curvature
+ * is signed against the outward normal (a ball's outside is positive) and estimated from the
+ * drawn normals for now.
+ */
+typedef struct CadaclysmViewAnalysis {
+  /**
+   * `sizeof` the struct as the caller built it; at least the 1.14 struct's.
+   */
+  uint32_t size;
+  /**
+   * `CADACLYSM_VIEW_ANALYSIS_*`.
+   */
+  uint32_t mode;
+  /**
+   * Zebra: black stripes round the turn (default 16); isophotes: lines over 90 degrees
+   * (default 9, a line every 10). 0 the default; at most 256.
+   */
+  uint32_t count;
+  /**
+   * Zebra: the stripes' direction on screen, degrees: 0 upright, 90 lying.
+   */
+  float angle;
+  /**
+   * Zebra: the black share of a period, inside 0..1; 0 the default, 0.5.
+   */
+  float width;
+  /**
+   * Isophotes: towards the light in the camera's frame (x right, y up, z towards the
+   * viewer); all zero the default, a headlight `(0, 0, 1)`.
+   */
+  float light[3];
+  /**
+   * Curvature: the value drawn full red (and, negative, full blue), in 1/length (1/length^2
+   * for Gaussian); 0 automatic, `2 / radius` of the scene (squared for Gaussian).
+   */
+  double range;
+} CadaclysmViewAnalysis;
+
+/**
  * Levels of detail, as `cadaclysm_view_set_lod` takes them (1.4).
  */
 typedef struct CadaclysmViewLod {
@@ -491,6 +656,17 @@ typedef struct CadaclysmViewViewport {
    * `CADACLYSM_VIEW_GRID_*`.
    */
   uint32_t grid;
+  /**
+   * Which user layers draw in this viewport (1.16): bit n shows layer n
+   * (`cadaclysm_view_set_item_layer`). 0 shows every layer, as does a caller whose `size`
+   * ends before it: a zero-filled struct draws as it did before 1.16. A mask therefore
+   * cannot hide every user layer; `cadaclysm_view_set_user_layer` switches layers off.
+   * Surfaces, edges, curves, lines, text and picking follow it; points and images follow
+   * it only when this is the one viewport set, and otherwise draw in every viewport.
+   * Machining stocks ignore user layers, and an image on a layer not drawn still counts
+   * in bounds and framing.
+   */
+  uint32_t layer_mask;
 } CadaclysmViewViewport;
 
 /**
@@ -1091,6 +1267,52 @@ typedef struct CadaclysmViewTexture {
   uint64_t release_value;
 } CadaclysmViewTexture;
 
+/**
+ * How a KMS view draws onto its display (`cadaclysm_view_kms_info`, `cadaclysm_view_kms_probe`,
+ * 1.19). The text fields are UTF-8, NUL-terminated, cut short at a character to fit.
+ */
+typedef struct CadaclysmViewKmsInfo {
+  /**
+   * `sizeof` the struct as the caller built it; at least the 1.19 struct's.
+   */
+  uint32_t size;
+  /**
+   * `CADACLYSM_VIEW_KMS_GBM`, `_GPU` or `_COPY`.
+   */
+  uint32_t path;
+  /**
+   * The scanout buffers' DRM format modifier (`DRM_FORMAT_MOD_LINEAR`, 0, for the GPU's own
+   * buffers and the copy mode's).
+   */
+  uint64_t modifier;
+  /**
+   * The connector's KMS object id.
+   */
+  uint32_t connector;
+  /**
+   * The mode, in pixels, and its refresh in Hz.
+   */
+  uint32_t width;
+  uint32_t height;
+  uint32_t refresh;
+  /**
+   * The scanout buffers' DRM fourcc (`XB24` or `XR24`), little-endian as `drm_fourcc.h` packs it.
+   */
+  uint32_t fourcc;
+  /**
+   * The connector's name: "HDMI-A-1", "Virtual-1".
+   */
+  char connector_name[32];
+  /**
+   * The display's device: "/dev/dri/card1", or "fd 5" for one the host passed.
+   */
+  char card[64];
+  /**
+   * The Vulkan device that draws, and its driver: "V3D 7.1.7.0 (V3DV Mesa 26.2.2)".
+   */
+  char adapter[128];
+} CadaclysmViewKmsInfo;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -1137,9 +1359,17 @@ bool cadaclysm_view_parse_colour(const char *text, float *out);
  *
  * `window` NULL: the library opens a window of its own (1.2), titled and sized by
  * `options`, and `cadaclysm_view_pump` keeps it answering. Refused with "no display for a
- * window of the view's own" where none is reachable (no `DISPLAY` or `WAYLAND_DISPLAY` on
- * Linux), and with "own windows belong to the thread that made the first one" on any
- * thread but the one whose windowless create came first; on macOS, that is the main thread.
+ * window of the view's own" where none is reachable. On Linux with no `DISPLAY` or
+ * `WAYLAND_DISPLAY` (a console) the window is the whole display instead, through KMS (1.17):
+ * the first connected output at its preferred mode, `title`, `width` and `height` unused, the
+ * keyboards and mice read from `/dev/input` (the user in the `input` group) and grabbed --
+ * the console under it gets none of their keys -- and an arrow on the display's cursor plane.
+ * Escape or Ctrl+C closes it and gives the console back. It is refused, with that phrase and
+ * the console's reason, where the display has another master (a compositor) or no keyboard
+ * or mouse can be read, and while another such view is open; `CADACLYSM_VIEW_CONSOLE=0`
+ * keeps to the plain refusal. Refused with "own windows belong to the thread that made the
+ * first one" on any thread but the one whose windowless create came first; on macOS, that is
+ * the main thread.
  * Refused with "another event loop already exists in this process" where the host or
  * another library has already made the process's one window event loop.
  * The terminal library (`cadaclysm_terminal`) draws only to the process's own terminal: a
@@ -1264,6 +1494,11 @@ bool cadaclysm_view_needs_draw(const struct CadaclysmView *view);
  * An offscreen view (1.4): renders without presenting -- nothing is shown anywhere -- and
  * lands a pick in flight, as a window's draw does; read the frame with `cadaclysm_view_image`.
  *
+ * The items shown since the last draw are merged and uploaded here, all at once (a show
+ * only keeps its item, so filling a view costs each item's own work): false with the reason
+ * where the GPU rejects that upload. The items stay shown and draw nothing new until a later
+ * show, remove or change uploads them again.
+ *
  * The terminal library: prints one still -- the picture and a caption -- into the
  * scrollback (as sixel where stdout is not a terminal).
  *
@@ -1282,7 +1517,10 @@ bool cadaclysm_view_size(struct CadaclysmView *view, uint32_t *width, uint32_t *
 /**
  * Draws one frame at the view's size (`cadaclysm_view_size`) and writes it to `rgba`:
  * `width * height * 4` bytes, RGBA8, rows from the top (1.4). Synchronous: it waits for the
- * GPU. Every view: an offscreen one, the own window, a host's window (the frame is drawn
+ * GPU. As `cadaclysm_view_draw`, it uploads the items shown since the last frame first, and
+ * fails with the reason where the GPU rejects them.
+ *
+ * Every view: an offscreen one, the own window, a host's window (the frame is drawn
  * apart from what the window presents). False where `capacity` is too small (the reason says
  * how many bytes are needed) or `rgba` is NULL. The terminal library reads its picture from
  * its CPU raster.
@@ -1292,7 +1530,11 @@ bool cadaclysm_view_size(struct CadaclysmView *view, uint32_t *width, uint32_t *
 bool cadaclysm_view_image(struct CadaclysmView *view, uint8_t *rgba, size_t capacity);
 
 /**
- * Shows `scene` (from `cadaclysm_open`). The item's id, 0 on failure. The scene must stay
+ * Shows `scene` (from `cadaclysm_open`). The item's id, 0 on failure. Every show keeps its
+ * item and leaves the upload to the next frame (`cadaclysm_view_draw`, `cadaclysm_view_image`),
+ * which uploads every item shown since in one go; a show fails at once only where the items
+ * with it would not fit the device's buffers, and a GPU rejecting the upload itself fails that
+ * frame instead. The scene must stay
  * open until the item is removed or the view destroyed: exact parts are built from it when
  * the surfaces mode changes. Fails, with the reason, where `cadaclysm_capi` is not loaded in
  * the process or is a reader too old for this library (it lacks a call the view reads
@@ -1393,6 +1635,25 @@ void cadaclysm_view_set_orthographic(struct CadaclysmView *view, bool on);
 bool cadaclysm_view_set_layer(struct CadaclysmView *view, uint32_t layer, bool on);
 
 /**
+ * Puts item `item` on user layer `layer`, 0..31 (1.16); every item starts on 0. It draws
+ * where the layer is on (`cadaclysm_view_set_user_layer`) and, with viewports set, in
+ * those whose `layer_mask` has bit `layer`. False for an item not shown or a layer past 31.
+ * The terminal library accepts it too: with its one viewport, a mask lacking the item's
+ * layer hides it.
+ *
+ * `view` must be NULL or a live view.
+ */
+bool cadaclysm_view_set_item_layer(struct CadaclysmView *view, uint32_t item, uint32_t layer);
+
+/**
+ * Switches user layer `layer`, 0..31, on or off in every viewport (1.16); all start on.
+ * False past 31.
+ *
+ * `view` must be NULL or a live view.
+ */
+bool cadaclysm_view_set_user_layer(struct CadaclysmView *view, uint32_t layer, bool on);
+
+/**
  * The colour the view is cleared to: `rgb`, three linear floats in 0..1 (clamped). A NULL
  * or non-finite colour is refused and changes nothing.
  *
@@ -1402,9 +1663,11 @@ void cadaclysm_view_set_background(struct CadaclysmView *view, const float *rgb)
 
 /**
  * How plain parts are lit (1.9): `CADACLYSM_VIEW_LIGHTING_HEADLIGHT`, the default -- whatever
- * faces the camera is bright -- or `CADACLYSM_VIEW_LIGHTING_STUDIO`, a key light fixed above
+ * faces the camera is bright -- `CADACLYSM_VIEW_LIGHTING_STUDIO`, a key light fixed above
  * the model, ambient and a fill from the camera, so a top reads brighter than its sides from
- * anywhere. False, changing nothing, with `cadaclysm_view_last_error` naming
+ * anywhere, or (1.15) `CADACLYSM_VIEW_LIGHTING_SHOWROOM`, a showroom fixed in the world
+ * mirrored in a clear coat over the colours (a terminal view draws it as studio). False,
+ * changing nothing, with `cadaclysm_view_last_error` naming
  * `cadaclysm_view_set_lighting`, for another value or a NULL or closed view.
  *
  * `view` must be NULL or a live view.
@@ -1417,6 +1680,32 @@ bool cadaclysm_view_set_lighting(struct CadaclysmView *view, uint32_t lighting);
  * `view` must be NULL or a live view.
  */
 uint32_t cadaclysm_view_lighting(const struct CadaclysmView *view);
+
+/**
+ * Draw every surface for judging it (1.14), in place of the lighting: `analysis->mode`
+ * `CADACLYSM_VIEW_ANALYSIS_ZEBRA` (zebra stripes, fixed to the camera),
+ * `_ISOPHOTES` (lines of equal angle to one light), `_GAUSSIAN`, `_MEAN`, `_MIN` or `_MAX`
+ * (curvature as false colour, blue negative, green zero, red positive), or `_NONE`; NULL is
+ * NONE. Zeros take the defaults (see `CadaclysmViewAnalysis`). Edges, curves, the grid, text,
+ * images, points and stocks are drawn as before. The terminal library accepts NONE only.
+ * False, changing nothing, with `cadaclysm_view_last_error` naming the call, for a `size`
+ * below the 1.14 struct's, an unknown mode or a value out of range.
+ *
+ * `view` must be NULL or a live view; `analysis` NULL or a `CadaclysmViewAnalysis` of
+ * `analysis->size` bytes.
+ */
+bool cadaclysm_view_set_analysis(struct CadaclysmView *view,
+                                 const struct CadaclysmViewAnalysis *analysis);
+
+/**
+ * The analysis in use (1.14), into `out` with every default filled in: only `out->size`
+ * bytes are written, and `out->size` must be at least the 1.14 struct's. False for a NULL view
+ * or `out`.
+ *
+ * `view` must be NULL or a live view; `out` NULL or a `CadaclysmViewAnalysis` of `out->size`
+ * bytes.
+ */
+bool cadaclysm_view_analysis(const struct CadaclysmView *view, struct CadaclysmViewAnalysis *out);
 
 /**
  * The view's level-of-detail policy, for the device the host runs on (1.4). NULL -- the
@@ -1740,6 +2029,37 @@ bool cadaclysm_view_set_colour(struct CadaclysmView *view, uint32_t item, const 
  * `view` must be NULL or a live view.
  */
 bool cadaclysm_view_set_xray(struct CadaclysmView *view, uint32_t item, bool on);
+
+/**
+ * How the item's lines and points draw where a surface is in front of them (1.13): its
+ * edges and isocurves, a curves item's curves, a lines item's segments, a points item's
+ * points -- never its triangles (`cadaclysm_view_set_xray`). `CADACLYSM_VIEW_OCCLUDED_OFF`
+ * (not drawn, the default), `_SOLID` (drawn through) or `_DASHED` (drawn through, dashed
+ * and dimmed; a point as a dimmed ring). Kept across uploads, removes of other items and
+ * surface switches. An x-ray item's points draw through, solid, whatever this says. The
+ * terminal accepts every mode and draws it as OFF. The render view library accepts OFF and
+ * refuses SOLID and DASHED: it draws no occluded lines yet. False where the item is not
+ * shown, `mode` is not one of the three, or the render view library refuses it.
+ *
+ * `view` must be NULL or a live view.
+ */
+bool cadaclysm_view_set_occluded(struct CadaclysmView *view, uint32_t item, uint32_t mode);
+
+/**
+ * The item's finish (1.18): `CADACLYSM_VIEW_FINISH_GLOSS` (the default), `_SATIN` or
+ * `_MATTE`, for its triangles and its exact faces. Under `CADACLYSM_VIEW_LIGHTING_SHOWROOM`
+ * gloss is the clear coat mirroring the room, sharp and silver at a grazing angle; satin a
+ * weaker, blurred coat; matte no mirror, a faint grey sheen -- a black tyre stays black.
+ * Under the headlight and studio lighting satin and matte draw a soft and a faint highlight
+ * riding the camera. Kept across uploads, removes of other items and surface switches.
+ * Uploads the scene again, as a show does: set it on each item as it is shown, not over a
+ * finished scene item by item. The terminal accepts every finish and draws it as gloss; the
+ * render view library accepts GLOSS and refuses SATIN and MATTE. False where the item is
+ * not shown, `finish` is not one of the three, or the render view library refuses it.
+ *
+ * `view` must be NULL or a live view.
+ */
+bool cadaclysm_view_set_finish(struct CadaclysmView *view, uint32_t item, uint32_t finish);
 
 /**
  * Colours faces of an item: `faces[i]` in `rgba[4 * i ..]` (alpha unused), `count` of
@@ -2226,6 +2546,43 @@ bool cadaclysm_view_texture(struct CadaclysmView *view, struct CadaclysmViewText
  * `view` must be NULL or a live view.
  */
 bool cadaclysm_view_release(struct CadaclysmView *view, uint64_t release_value);
+
+/**
+ * Fills `out` with how the KMS `view` draws onto its display (1.19): its buffers' `path`
+ * (`CADACLYSM_VIEW_KMS_GBM`, `_GPU` or `_COPY`), their format and modifier, the connector,
+ * the mode, the display's device and the Vulkan device that draws. `out->size` is left as the
+ * caller set it. A view of `CADACLYSM_VIEW_WINDOW_KMS` and a window of the view's own at a
+ * console answer; false, with "draws onto no KMS display", for any other view, and for a NULL
+ * or undersized `out`.
+ *
+ * The terminal library refuses it: "KMS displays need the wgpu view library".
+ *
+ * `view` must be NULL or a live view; `out` NULL or a `CadaclysmViewKmsInfo` of at least
+ * `out->size` bytes.
+ */
+bool cadaclysm_view_kms_info(const struct CadaclysmView *view, struct CadaclysmViewKmsInfo *out);
+
+/**
+ * Fills `out` with how `cadaclysm_view_create` would draw onto the display `window` names
+ * (1.19), without taking the display or drawing: a window of `CADACLYSM_VIEW_WINDOW_KMS`, read
+ * as `create` reads it, or NULL for the display a window of the view's own takes at a console
+ * (the first connected output at its preferred mode). The same output and Vulkan device are
+ * chosen as `create` would choose; for `CADACLYSM_VIEW_KMS_GBM` one buffer is made and taken by
+ * the display, then freed, so its modifier is the one `create` would get. False, with the
+ * reason `create` would give, where it would be refused -- the display has another master (a
+ * compositor), no connected output, no Vulkan device, the host's mode is not the connector's
+ * -- and for a NULL or undersized `out`. Slow: it enumerates the Vulkan devices. While a KMS
+ * view of this process is open, a probe that opens the display itself finds that view its
+ * master and says so; `cadaclysm_view_kms_info` answers for it.
+ *
+ * The terminal library refuses it: "KMS displays need the wgpu view library".
+ *
+ * `window` must be NULL or point at a `CadaclysmViewWindow` of at least its `size` bytes,
+ * `window->display` NULL or an `int`, an open DRM fd; `out` NULL or a `CadaclysmViewKmsInfo`
+ * of at least `out->size` bytes.
+ */
+bool cadaclysm_view_kms_probe(const struct CadaclysmViewWindow *window,
+                              struct CadaclysmViewKmsInfo *out);
 
 #ifdef __cplusplus
 }  // extern "C"

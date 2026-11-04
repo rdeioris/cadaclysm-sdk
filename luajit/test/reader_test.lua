@@ -259,7 +259,7 @@ return function(t)
         t.ok(type(a.text) == "string")
       end
     end
-    t.eq(total, 8)
+    t.eq(total, 14)
     scene:close()
   end)
 
@@ -318,6 +318,229 @@ return function(t)
     brep:release()
     t.raises(function() return brep.pointer end, "released")
   end)
+
+  -- ---- health and healing (Python's test_brep_health_* / test_brep_healed_* and its two decoder tests)
+  do
+    -- `st203-bapl.stp` (from the STEP AP203 sample set) is not in the repository: it is
+    -- looked for in SAMPLE_DIR, else at the repository root, and skipped when absent, as
+    -- Python's test does.
+    local function st203()
+      local dir = os.getenv("SAMPLE_DIR")
+      local path
+      if dir then
+        path = dir .. "/st203-bapl.stp"
+        local f = io.open(path, "rb")
+        if not f then path = nil else f:close() end
+      else
+        local ok, found = pcall(t.fixture, "st203-bapl.stp")
+        path = ok and found or nil
+      end
+      if not path then print("      skip: st203-bapl.stp not to hand") end
+      return path
+    end
+    local function breps_of(scene)
+      local out = {}
+      for _, n in ipairs(scene.nodes) do
+        local b = n.brep
+        if b ~= nil then out[#out + 1] = b end
+      end
+      return out
+    end
+    local function rel(actual, expected, r, message)
+      t.ok(math.abs(actual - expected) <= r * math.abs(expected),
+        ("%sexpected %.17g (rel %g), got %.17g"):format(message and (message .. ": ") or "", expected, r, actual))
+    end
+
+    t.test("brep health reports the free edges of st203-bapl", function()
+      local path = st203()
+      if not path then return end
+      local scene = cadaclysm.open(path)
+      local breps = breps_of(scene)
+      local body
+      for _, b in ipairs(breps) do
+        if b.manifold.boundary_edges == 188 then body = b break end
+      end
+      t.ok(body ~= nil, "the 188-free-edge body")
+      local report = body:health()
+      t.eq(getmetatable(report), cadaclysm.HealthReport)
+      t.eq(#report.free_edges, 188)
+      t.eq(#report.wires, 45)
+      local sum = 0
+      for _, w in ipairs(report.wires) do sum = sum + w.count end
+      t.eq(sum, 188)
+      local first_wire = report:wire_edges(0)
+      t.eq(#first_wire, report.wires[1].count)
+      for i, e in ipairs(first_wire) do
+        t.eq(e, report.free_edges[i])
+        t.eq(e.wire, 0)
+      end
+      local _, sew = body:sewed()
+      t.eq(report.sew_pairs, sew.pairs)
+      t.ok(report.tolerance > 0)
+      t.eq(report.cracks, nil)
+      t.eq(body:health(0 / 0).tolerance, report.tolerance)
+      -- the first free edge, read off the C rows: its partner is row 67, 95.015 away, sharing no end
+      local first = report.free_edges[1]
+      t.eq(getmetatable(first), cadaclysm.FreeEdge)
+      t.eq(("%s %s %s %s %s %s"):format(first.trim, first.edge, first.face, first.wire, first.partner, first.shared_ends),
+        "0 41363 0 0 67 0")
+      rel(first.gap, 95.01496054, 1e-6, "first gap")
+      for _, e in ipairs(report.free_edges) do
+        if e.partner == nil then t.eq(e.gap, math.huge) else t.ok(e.partner ~= e.trim) end
+      end
+      rel(report.extent, 253.66439715552204, 1e-12, "extent")
+      rel(report.rounding, 1e-7 * report.extent, 1e-12, "rounding")
+      rel(report.tolerance, 1e-4 * report.extent, 1e-12, "tolerance")
+      t.eq(report.loose_edges, 0)
+      t.eq(report.worst_loose, 0)
+      t.eq(report.sew_refused, 4)
+      t.eq(sew.refused, 4)
+      rel(report.sew_worst_gap, sew.worst_gap, 1e-12, "sew worst gap")
+      t.ok(report.sew_worst_gap > 0)
+      local c = body:health(nil, true).cracks
+      t.eq(getmetatable(c), cadaclysm.Cracks)
+      t.eq(("%s %d %d %d %d"):format(tostring(c.watertight), c.open, c.folded, c.crossings, #c.edges), "false 0 0 166 0")
+      local wide = body:health(5)
+      t.eq(#wide.small, 96)
+      local edge
+      for _, s in ipairs(wide.small) do
+        t.ok(s.kind == "short_edge" or s.kind == "sliver_face" or s.kind == "tiny_face", s.kind)
+        t.ok(s.size >= 0)
+        if s.kind == "short_edge" then
+          t.ok(s.size < 5)
+          edge = edge or s
+        end
+      end
+      t.eq(edge.index, 41550)
+      rel(edge.size, 3.1622776616321775, 1e-9, "the first short edge")
+      for _, b in ipairs(breps) do b:release() end
+      scene:close()
+    end)
+
+    t.test("brep healed heals st203-bapl and leaves the original", function()
+      local path = st203()
+      if not path then return end
+      local scene = cadaclysm.open(path)
+      local breps = breps_of(scene)
+      local body = breps[2]   -- the 188-free-edge body; the first takes minutes to diagnose
+      local same, report = body:healed()
+      t.eq(getmetatable(same), cadaclysm.Brep)
+      t.eq(getmetatable(report), cadaclysm.HealReport)
+      t.ok(same.pointer ~= body.pointer, "a new brep")
+      t.eq(report.small_before, 0)
+      t.eq(report.free_before, 188)
+      t.ok(report.free_after <= 188)
+      rel(report.tolerance, 1e-4 * body:health().extent, 1e-12, "default tolerance")
+      same:release()
+      -- at a tolerance of 5: 96 small features, 28 healed, the rest refused as uneven slivers
+      local healed, r = body:healed(5)
+      t.eq(r.tolerance, 5)
+      t.eq(("%d %d %d %d %d"):format(r.small_before, #r.fixes, r.small_after, r.free_before, r.free_after),
+        "96 28 8 188 88")
+      t.eq(#r.refused, 8)
+      for _, x in ipairs(r.refused) do
+        t.eq(getmetatable(x), cadaclysm.HealRefusal)
+        t.eq(x.kind .. " " .. x.why, "sliver_face uneven")
+      end
+      t.eq(("%s %s %d %d"):format(tostring(r.closed_before), tostring(r.closed_after), r.nonmanifold_before,
+        r.nonmanifold_after), "false false 0 0")
+      t.eq(r.small_after, #healed:health(5).small)
+      t.eq(#body:health(5).small, 96, "the input is left as it was")
+      local most, short = 0, nil
+      for _, f in ipairs(r.fixes) do
+        t.eq(getmetatable(f), cadaclysm.HealFix)
+        t.ok(f.size >= 0 and f.moved >= 0)
+        most = math.max(most, f.moved)
+        if f.kind == "short_edge" then short = short or f end
+      end
+      rel(most, 1.8248105306211464, 1e-9, "the largest fix moved")
+      rel(r.moved, 1.581138831332503, 1e-9, "the report moved")
+      t.eq(short.index, 41550)
+      rel(short.size, 3.1622776616321775, 1e-9, "the first short edge fixed")
+      t.eq(body:edge_tolerance(41550), 0)
+      t.eq(healed:edge_tolerance(41550), nil)
+      t.eq(healed:edge_tolerance(41363), 0)
+      t.eq(healed:edge_tolerance(0xFFFFFFF0), nil)
+      healed:release()
+      -- every kind switched off: nothing healed, every small feature refused as toggled
+      local _, off = body:healed(5, false, false, false)
+      t.eq(#off.fixes, 0)
+      t.eq(#off.refused, 96)
+      t.eq(off.free_after, off.free_before)
+      local per = { short_edge = 0, sliver_face = 0, tiny_face = 0 }
+      for _, x in ipairs(off.refused) do
+        t.eq(x.why, "toggled")
+        t.eq(x.figure, 0)
+        per[x.kind] = per[x.kind] + 1
+      end
+      t.eq(("%d %d %d"):format(per.short_edge, per.sliver_face, per.tiny_face), "64 26 6")
+      -- one kind on: the others are refused as toggled, and only it heals
+      local _, edges_only = body:healed(5, true, false, false)
+      for _, x in ipairs(edges_only.refused) do
+        if x.kind ~= "short_edge" then t.eq(x.why, "toggled") end
+      end
+      for _, f in ipairs(edges_only.fixes) do t.ok(f.kind == "short_edge" or f.kind == "collapsed_edge", f.kind) end
+      for _, b in ipairs(breps) do b:release() end
+      scene:close()
+      t.raises(function() body:healed() end, "released")
+      t.raises(function() body:health() end, "released")
+      t.raises(function() body:edge_tolerance(0) end, "released")
+    end)
+
+    t.test("the health decoder reads every column of distinct rows", function()
+      local none = 0xFFFFFFFF
+      local counts = { 2, 1, 1, 2, 1, 0, 0, 1, 0, 3, 4, 5, 1, 0, 11, 12, 13, 2 }
+      local sizes = { 0.5, 0.25, 9.0, 7.5, 6.5, 5.5, 4.5, 3.5 }
+      local r = cadaclysm._health_report(counts, sizes, { 10, 20, 30, 40, 1, 2, 11, none, 31, 41, none, 0 },
+        { 1.5, 2.5, 3.5, math.huge }, { 0, 2, 1 }, { 8.5, 2.5 }, { 1, 77, 4, 99 }, { 0.125, 0.0625 }, { 5, 6 })
+      t.eq(("%g %g %g %g"):format(r.tolerance, r.rounding, r.extent, r.worst_gap), "0.5 0.25 9 7.5")
+      t.eq(("%d %g %d %d %g"):format(r.loose_edges, r.worst_loose, r.sew_pairs, r.sew_refused, r.sew_worst_gap),
+        "3 6.5 4 5 5.5")
+      local rows = {}
+      for i, e in ipairs(r.free_edges) do
+        rows[i] = ("%s,%s,%s,%s,%s,%s,%g,%g"):format(e.trim, tostring(e.edge), e.face, e.wire, tostring(e.partner),
+          e.shared_ends, e.length, e.gap)
+      end
+      t.eq(table.concat(rows, " "), "10,20,30,40,1,2,1.5,2.5 11,nil,31,41,nil,0,3.5,inf")
+      t.eq(#r.wires, 1)
+      local w = r.wires[1]
+      t.eq(getmetatable(w), cadaclysm.FreeWire)
+      t.eq(("%d %d %s %g %g"):format(w.first, w.count, tostring(w.closed), w.length, w.widest_gap), "0 2 true 8.5 2.5")
+      t.eq(#r.small, 2)
+      t.eq(getmetatable(r.small[1]), cadaclysm.SmallFeature)
+      t.eq(("%s %d %g"):format(r.small[1].kind, r.small[1].index, r.small[1].size), "collapsed_edge 77 0.125")
+      t.eq(("%s %d %g"):format(r.small[2].kind, r.small[2].index, r.small[2].size), "tiny_body 99 0.0625")
+      local c = r.cracks
+      t.eq(("%s %d %d %d %s"):format(tostring(c.watertight), c.open, c.folded, c.crossings, table.concat(c.edges, " ")),
+        "false 11 12 13 5 6")
+      counts[13] = 0   -- counts[12], not meshed: no cracks however the other counts read
+      local unmeshed = cadaclysm._health_report(counts, sizes, {}, {}, {}, {}, { 5, 1 }, { 1 }, {})
+      t.eq(unmeshed.cracks, nil)
+      t.eq(unmeshed.small[1].kind, "small_hole")
+    end)
+
+    t.test("the heal decoder reads every column of distinct rows", function()
+      local r = cadaclysm._heal_report({ 2, 3, 1, 9, 8, 7, 6, 1, 0, 5, 4 }, { 0.5, 0.25 }, { 5, 11, 0, 12 },
+        { 1.5, 0.125, 2.5, 0.0625 }, { 3, 21, 9, 4, 22, 3, 2, 23, 10 }, { 0.0, 7.5, 0.0 })
+      t.eq(("%g %g %s"):format(r.tolerance, r.moved, tostring(r.guarded)), "0.5 0.25 true")
+      t.eq(("%d %d %d %d"):format(r.small_before, r.small_after, r.free_before, r.free_after), "9 8 7 6")
+      t.eq(("%s %s %d %d"):format(tostring(r.closed_before), tostring(r.closed_after), r.nonmanifold_before,
+        r.nonmanifold_after), "true false 5 4")
+      local fixes = {}
+      for i, f in ipairs(r.fixes) do fixes[i] = ("%s %d %g %g"):format(f.kind, f.index, f.size, f.moved) end
+      t.eq(table.concat(fixes, ", "), "small_hole 11 1.5 0.125, short_edge 12 2.5 0.0625")
+      local refusals = {}
+      for i, x in ipairs(r.refused) do refusals[i] = ("%s %d %s %g"):format(x.kind, x.index, x.why, x.figure) end
+      t.eq(table.concat(refusals, ", "), "tiny_face 21 toggled 0, tiny_body 22 chain 7.5, sliver_face 23 unsupported 0")
+      local whys = {}
+      for why = 0, 10 do
+        local one = cadaclysm._heal_report({ 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, { 0, 0 }, {}, {}, { 0, 0, why }, { 0 })
+        whys[#whys + 1] = one.refused[1].why
+      end
+      t.eq(table.concat(whys, " "), "would_empty_loop closed seam chain neighbours_part uneven non_manifold "
+        .. "has_holes body_guard toggled unsupported")
+    end)
+  end
 
   t.test("query", function()
     local path = assembly()

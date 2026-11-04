@@ -3,7 +3,7 @@
 // by its item), image() inside its silhouette, pick, save, a real pose and the rest pose, a
 // nested node and a root drawing less than their scene, Scene.close() releasing its items,
 // another thread's calls refused, colour text drawing its numbers' pixels and refused text
-// refused in the library's words, the loader's ABI 1.11, text (labels shown, changed, picked
+// refused in the library's words, the loader's ABI 1.18, text (labels shown, changed, picked
 // by line, coloured on their box; fonts loaded; refusals) -- and the wgpu library's table
 // rigged: show()/view()'s title and up axis, run()'s camera, pump's waits and count, input,
 // void-call refusals; ABI 1.8's pick (clicks, point), set_double_click_frames, focus and
@@ -155,6 +155,168 @@ private func rig17(_ t: UnsafeMutablePointer<CvlTable>) {
         spyCalls.append("navigation")
         return spyNavigation
     }
+}
+
+// ---- view ABI 1.7, rigged: the machining and timeline calls ----------------------------------
+
+/// What show_machining was handed, copied while the pointers were live.
+private struct SpyProgram: Equatable {
+    var size: UInt32, number: UInt32, shape: UInt32
+    var diameter: Double, flute: Double, angle: Double, corner: Double
+    var gcode: String
+}
+private var spyShows = 0
+private var spyMachiningSize: UInt32 = 0
+private var spyPrograms: [SpyProgram] = []
+private var spyStockMin: [Double] = []
+private var spyStockMax: [Double] = []
+private var spyPartPositions: [Float]? = nil
+private var spyPartIndices: [UInt32]? = nil
+private var spyPartCounts: [UInt32] = []
+private var spyOptions: [Double] = []  // cell, tolerance, skin, rapid_rate
+private var spySkinSet: UInt32 = 9
+// Every other call logs one line here.
+private var spyMachLog: [String] = []
+private var spyInfoAnswer = CadaclysmViewMachiningInfo()
+private var spyInfoSize: UInt32 = 0
+private var spyHeightsCapacity = 0
+private var spyHeightsNull = true
+private var spyHeightsAnswer: [Float] = []
+private var spyTime = 0.0
+private var spyDuration = 0.0
+private var spyPlaying = false
+private var spyStatusAnswers: [String] = []
+private var spyStatusCalls = 0
+private let spyNoDeviation = cstr("cadaclysm_view_machining_colour_by: deviation needs a part")
+private var spyColourRefused = false
+
+private func rigMachining(_ t: UnsafeMutablePointer<CvlTable>) {
+    t.pointee.last_error = { spySaid }
+    t.pointee.show_machining = { _, m in
+        spyShows += 1
+        let m = m!.pointee
+        spyMachiningSize = m.size
+        spyPrograms = (0..<Int(m.program_count)).map { k in
+            let p = m.programs![k]
+            return SpyProgram(size: p.size, number: p.tool_number, shape: p.tool_shape, diameter: p.tool_diameter,
+                              flute: p.tool_flute_length, angle: p.tool_angle, corner: p.tool_corner_radius,
+                              gcode: String(cString: p.gcode!))
+        }
+        spyStockMin = [m.stock_min.0, m.stock_min.1, m.stock_min.2]
+        spyStockMax = [m.stock_max.0, m.stock_max.1, m.stock_max.2]
+        spyPartPositions = m.part_positions.map { p in (0..<Int(m.part_vertex_count) * 3).map { p[$0] } }
+        spyPartIndices = m.part_indices.map { p in (0..<Int(m.part_index_count)).map { p[$0] } }
+        spyPartCounts = [m.part_vertex_count, m.part_index_count]
+        spyOptions = [m.cell, m.tolerance, m.skin, m.rapid_rate]
+        spySkinSet = m.skin_set
+        return 17
+    }
+    t.pointee.machining_seek = { _, item, to in spyMachLog.append("seek \(item) \(to)"); return true }
+    t.pointee.machining_colour_by = { _, item, mode in
+        spyMachLog.append("colour \(item) \(mode)")
+        if spyColourRefused {
+            spySaid = spyNoDeviation
+            return false
+        }
+        return true
+    }
+    t.pointee.machining_overlays = { _, item, path, tool in spyMachLog.append("overlays \(item) \(path) \(tool)"); return true }
+    t.pointee.machining_info = { _, item, out in
+        spyMachLog.append("info \(item)")
+        spyInfoSize = out!.pointee.size
+        var answer = spyInfoAnswer
+        answer.size = out!.pointee.size
+        out!.pointee = answer
+        return true
+    }
+    t.pointee.machining_heights = { _, item, heights, capacity in
+        spyMachLog.append("heights \(item)")
+        spyHeightsCapacity = capacity
+        spyHeightsNull = heights == nil
+        if let heights { for (k, z) in spyHeightsAnswer.prefix(capacity).enumerated() { heights[k] = z } }
+        return true
+    }
+    t.pointee.timeline_play = { _, speed in spyMachLog.append("play \(speed)"); return true }
+    t.pointee.timeline_pause = { _ in spyMachLog.append("pause"); return true }
+    t.pointee.timeline_seek = { _, seconds in spyMachLog.append("seekTime \(seconds)"); return true }
+    t.pointee.timeline_set_loop = { _, on in spyMachLog.append("loop \(on)"); return true }
+    t.pointee.timeline_time = { _ in spyTime }
+    t.pointee.timeline_duration = { _ in spyDuration }
+    t.pointee.timeline_playing = { _ in spyPlaying }
+    // The current answer's length always; its bytes (cut to the room, NUL-ended) when there is
+    // room to put them. The next call answers the next text (the last one repeats).
+    t.pointee.timeline_status = { _, text, capacity in
+        let answer = Array(spyStatusAnswers[min(spyStatusCalls, spyStatusAnswers.count - 1)].utf8)
+        spyStatusCalls += 1
+        if let text, capacity > 0 {
+            let n = min(answer.count, capacity - 1)
+            for k in 0..<n { text[k] = CChar(bitPattern: answer[k]) }
+            text[n] = 0
+        }
+        return answer.count
+    }
+}
+
+private func resetMachiningSpies() {
+    spyShows = 0
+    spyMachLog = []
+    spyStatusAnswers = [""]
+    spyStatusCalls = 0
+    spyColourRefused = false
+    spySaid = nil
+    spyHeightsAnswer = []
+    spyHeightsCapacity = -1
+    spyHeightsNull = true
+    spyInfoSize = 0
+    spyInfoAnswer = CadaclysmViewMachiningInfo()
+}
+
+/// The plate of web/test/fixtures/machining-plate/job.json: found by walking up from this file.
+private struct PlateJob {
+    var directory: URL
+    var programs: [MachiningProgram]
+    var options: MachiningOptions
+}
+private let boxStock = MachiningStock(min: SIMD3(-42, -27, 0), max: SIMD3(42, 27, 14))
+
+private func plateFixture() -> URL? {
+    var dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    for _ in 0..<10 {
+        let candidate = dir.appendingPathComponent("web/test/fixtures/machining-plate")
+        if FileManager.default.fileExists(atPath: candidate.appendingPathComponent("job.json").path) { return candidate }
+        dir = dir.deletingLastPathComponent()
+    }
+    return nil
+}
+
+/// web/test/machining-selftest.js's rule, as Python's `_compare_at_walls` and Java's: a cell off
+/// the oracle's by more than 2e-3 fails, unless it is a wall (the oracle's 3x3 neighbourhood
+/// spans more than 0.5 mm) and one of the neighbours is within 2e-3 of it -- excused.
+private func compareAtWalls(_ gpu: [Float], _ oracle: [Float], nx: Int, ny: Int) -> (failed: Int, excused: Int, walls: Int) {
+    var failed = 0, excused = 0, walls = 0
+    for j in 0..<ny {
+        for i in 0..<nx {
+            var lo = Float.infinity, hi = -Float.infinity
+            for b in max(0, j - 1)..<min(ny, j + 2) {
+                for a in max(0, i - 1)..<min(nx, i + 2) {
+                    lo = min(lo, oracle[b * nx + a])
+                    hi = max(hi, oracle[b * nx + a])
+                }
+            }
+            let wall = hi - lo > 0.5
+            if wall { walls += 1 }
+            let g = gpu[j * nx + i]
+            if abs(Double(g - oracle[j * nx + i])) <= 2e-3 { continue }
+            var near = false
+            if wall {
+                for b in max(0, j - 1)..<min(ny, j + 2) {
+                    for a in max(0, i - 1)..<min(nx, i + 2) where abs(Double(oracle[b * nx + a] - g)) <= 2e-3 { near = true }
+                }
+            }
+            if near { excused += 1 } else { failed += 1 }
+        }
+    }
+    return (failed, excused, walls)
 }
 
 // ---- helpers ---------------------------------------------------------------------------------
@@ -787,16 +949,16 @@ final class ViewTests: XCTestCase {
         XCTAssertTrue(try ViewLibrary.current() === first, "a later CADACLYSM_VIEW changed the remembered library")
     }
 
-    /// The loader binds 70 calls of cadaclysm_view.h 1.11 (all but 1.7's machining and timeline
-    /// calls): a 1.10 library (no show_points) is refused before any call is bound, in Python's
-    /// words; 1.11 and later 1.x are taken.
-    func testTheLoaderNeedsViewABI111() throws {
-        try checkABIForTest(version: 0x1000B, path: "lib")
-        try checkABIForTest(version: 0x1000C, path: "lib")
-        XCTAssertEqual(message { try checkABIForTest(version: 0x1000A, path: "lib") },
-                       "lib: view ABI 1.10, this SDK needs 1.11 or a later 1.x")
-        XCTAssertEqual(message { try checkABIForTest(version: 0x2000B, path: "lib") },
-                       "lib: view ABI 2.11, this SDK needs 1.11 or a later 1.x")
+    /// The loader binds 86 calls of cadaclysm_view.h 1.18 (all but 1.14's analysis calls and
+    /// 1.12's texture targets): a 1.17 library (no set_finish) is refused before any call is
+    /// bound, in Python's words; 1.18 and later 1.x are taken.
+    func testTheLoaderNeedsViewABI118() throws {
+        try checkABIForTest(version: 0x10012, path: "lib")
+        try checkABIForTest(version: 0x10013, path: "lib")
+        XCTAssertEqual(message { try checkABIForTest(version: 0x10011, path: "lib") },
+                       "lib: view ABI 1.17, this SDK needs 1.18 or a later 1.x")
+        XCTAssertEqual(message { try checkABIForTest(version: 0x20012, path: "lib") },
+                       "lib: view ABI 2.18, this SDK needs 1.18 or a later 1.x")
     }
 
     /// show_points (view ABI 1.11), through the table rigged: the points, their count, the colour
@@ -1211,5 +1373,320 @@ final class ViewTests: XCTestCase {
         let infinite = Float.infinity
         XCTAssertTrue(message { try view.focus(SIMD3<Float>(infinite, 0, 0)) }.hasPrefix("cadaclysm_view_focus"),
                       message { try view.focus(SIMD3<Float>(infinite, 0, 0)) })
+    }
+
+    // ---- machining and the timeline (view ABI 1.7) ------------------------------------------
+
+    private func plate() throws -> PlateJob {
+        guard let dir = plateFixture() else {
+            if !(ProcessInfo.processInfo.environment["CADACLYSM_SAMPLES_OPTIONAL"] ?? "").isEmpty {
+                throw XCTSkip("web/test/fixtures/machining-plate is missing")
+            }
+            XCTFail("web/test/fixtures/machining-plate is missing above \(#filePath)")
+            throw XCTSkip("no plate")
+        }
+        func read(_ name: String) throws -> String { try String(contentsOf: dir.appendingPathComponent(name), encoding: .utf8) }
+        return PlateJob(directory: dir, programs: [
+            MachiningProgram(tool: MachiningTool(number: 1, shape: "flat", diameter: 6, fluteLength: 20), gcode: try read("program-0.gcode")),
+            MachiningProgram(tool: MachiningTool(number: 2, shape: "drill", diameter: 6, fluteLength: 30), gcode: try read("program-1.gcode")),
+        ], options: MachiningOptions(cell: 0.5, rapidRate: 5000))
+    }
+
+    /// A rigged offscreen view (`rigMachining`), its table put back by the caller's defer.
+    private func machiningRig() throws -> (View, Machining, CvlTable, UnsafeMutablePointer<CvlTable>) {
+        let view = try offscreen(32, 32)
+        let t = view.library.table
+        let saved = t.pointee
+        rigMachining(t)
+        resetMachiningSpies()
+        let item = try view.showMachining([MachiningProgram(tool: MachiningTool(number: 1, shape: "flat", diameter: 6), gcode: "G1 X1")],
+                                          stock: boxStock)
+        return (view, item, saved, t)
+    }
+
+    /// F1: what show_machining hands the library, field for field, and the item that comes back.
+    func testShowMachiningReachesTheContract() throws {
+        let (view, first, saved, t) = try machiningRig()
+        defer { t.pointee = saved; resetMachiningSpies(); try? view.close() }
+        XCTAssertEqual(first.id, 17)
+        XCTAssertEqual(spyMachiningSize, UInt32(MemoryLayout<CadaclysmViewMachining>.size))
+        XCTAssertEqual(spyPartPositions == nil, true, "no part is NULL positions")
+        XCTAssertEqual(spyPartCounts, [0, 0])
+        XCTAssertEqual(spyOptions, [0, 0, 0, 0], "no options: the library's defaults")
+        XCTAssertEqual(spySkinSet, 0)
+
+        let programs = [
+            MachiningProgram(tool: MachiningTool(number: 3, shape: "vbit", diameter: 8, fluteLength: 12, angle: 90), gcode: "G0 X1\nG1 Z-1"),
+            MachiningProgram(tool: MachiningTool(number: 4, shape: "bullnose", diameter: 10, cornerRadius: 2), gcode: "G1 X2 \u{e9}"),
+            MachiningProgram(tool: MachiningTool(number: 5, shape: "ball", diameter: 4), gcode: ""),
+            MachiningProgram(tool: MachiningTool(number: 6, shape: "drill", diameter: 3), gcode: "G81"),
+            MachiningProgram(tool: MachiningTool(number: 7, shape: "flat", diameter: 6), gcode: "G1"),
+        ]
+        let part = MachiningPart(positions: [0, 0, 0, 1, 0, 0, 0, 1, 0], indices: [0, 1, 2, 2, 1, 0])
+        let item = try view.showMachining(programs, stock: MachiningStock(min: SIMD3(-1, -2, -3), max: SIMD3(4, 5, 6)), part: part,
+                                          options: MachiningOptions(cell: 0.25, tolerance: 0.01, skin: 0, rapidRate: 1234))
+        XCTAssertTrue(type(of: item) == Machining.self)
+        XCTAssertEqual(spyShows, 2)
+        let size = UInt32(MemoryLayout<CadaclysmViewProgram>.size)
+        XCTAssertEqual(spyPrograms, [
+            SpyProgram(size: size, number: 3, shape: UInt32(CADACLYSM_VIEW_TOOL_VBIT), diameter: 8, flute: 12, angle: 90, corner: 0, gcode: "G0 X1\nG1 Z-1"),
+            SpyProgram(size: size, number: 4, shape: UInt32(CADACLYSM_VIEW_TOOL_BULLNOSE), diameter: 10, flute: 0, angle: 0, corner: 2, gcode: "G1 X2 \u{e9}"),
+            SpyProgram(size: size, number: 5, shape: UInt32(CADACLYSM_VIEW_TOOL_BALL), diameter: 4, flute: 0, angle: 0, corner: 0, gcode: ""),
+            SpyProgram(size: size, number: 6, shape: UInt32(CADACLYSM_VIEW_TOOL_DRILL), diameter: 3, flute: 0, angle: 0, corner: 0, gcode: "G81"),
+            SpyProgram(size: size, number: 7, shape: UInt32(CADACLYSM_VIEW_TOOL_FLAT), diameter: 6, flute: 0, angle: 0, corner: 0, gcode: "G1"),
+        ])
+        XCTAssertEqual(spyStockMin, [-1, -2, -3])
+        XCTAssertEqual(spyStockMax, [4, 5, 6])
+        XCTAssertEqual(spyPartPositions, part.positions)
+        XCTAssertEqual(spyPartIndices, part.indices)
+        XCTAssertEqual(spyPartCounts, [3, 6])
+        XCTAssertEqual(spyOptions, [0.25, 0.01, 0, 1234])
+        XCTAssertEqual(spySkinSet, 1, "a skin of 0 is given")
+        // An empty part still reaches the library as arrays that are not NULL.
+        _ = try view.showMachining(programs, stock: boxStock, part: MachiningPart(positions: [], indices: []))
+        XCTAssertNotNil(spyPartPositions)
+        XCTAssertEqual(spyPartCounts, [0, 0])
+        _ = try view.showMachining(programs, stock: boxStock, options: MachiningOptions(skin: 0.4))
+        XCTAssertEqual(spyOptions, [0, 0, 0.4, 0])
+        // A Machining keeps every Item member: it is one.
+        let asItem: Item = item
+        XCTAssertEqual(asItem.id, 17)
+    }
+
+    /// F2: every refusal before the library, in Python's words; a closed view says so for a
+    /// job that is fine.
+    func testShowMachiningRefusesBeforeTheLibrary() throws {
+        let (view, _, saved, t) = try machiningRig()
+        defer { t.pointee = saved; resetMachiningSpies(); try? view.close() }
+        let tool = MachiningTool(number: 1, shape: "flat", diameter: 6)
+        let ok = [MachiningProgram(tool: tool, gcode: "G1")]
+        spyShows = 0
+        func show(_ programs: [MachiningProgram]? = nil, stock: MachiningStock = boxStock, part: MachiningPart? = nil,
+                  options: MachiningOptions = MachiningOptions()) -> String {
+            message { _ = try view.showMachining(programs ?? ok, stock: stock, part: part, options: options) }
+        }
+        var spade = tool
+        spade.shape = "spade"
+        XCTAssertEqual(show([MachiningProgram(tool: spade, gcode: "")]), "shape 'spade': one of flat, ball, drill, vbit, bullnose")
+        var wide = tool
+        wide.diameter = .nan
+        XCTAssertEqual(show([MachiningProgram(tool: wide, gcode: "")]), "tool: diameter, flute_length, angle and corner_radius are finite numbers")
+        var long = tool
+        long.angle = .infinity
+        XCTAssertEqual(show([MachiningProgram(tool: long, gcode: "")]), "tool: diameter, flute_length, angle and corner_radius are finite numbers")
+        XCTAssertEqual(show([MachiningProgram(tool: tool, gcode: "G1\0X1")]), "gcode: a NUL character cannot be sent (the C string ends there)")
+        XCTAssertEqual(show(stock: MachiningStock(min: SIMD3(0, .nan, 0), max: SIMD3(1, 1, 1))), "stock: min and max are finite numbers")
+        XCTAssertEqual(show(stock: MachiningStock(min: SIMD3(0, 0, 0), max: SIMD3(1, 1, .infinity))), "stock: min and max are finite numbers")
+        XCTAssertEqual(show(part: MachiningPart(positions: [0, 0, .nan], indices: [])), "part positions: finite numbers")
+        XCTAssertEqual(show(part: MachiningPart(positions: [0, 0, 0, 1], indices: [])),
+                       "part positions: 4 numbers is not a whole number of x y z triples")
+        XCTAssertEqual(show(part: MachiningPart(positions: [0, 0, 0, 1, 0, 0, 0, 1, 0], indices: [0, 1])),
+                       "part indices: 2 is not a whole number of triangles")
+        XCTAssertEqual(show(part: MachiningPart(positions: [0, 0, 0, 1, 0, 0, 0, 1, 0], indices: [0, 1, 3])),
+                       "part indices: 3 is past the last of 3 vertices")
+        XCTAssertEqual(show(options: MachiningOptions(skin: .nan)),
+                       "show_machining options: cell, tolerance, skin and rapid_rate are finite numbers")
+        XCTAssertEqual(show(options: MachiningOptions(rapidRate: .infinity)),
+                       "show_machining options: cell, tolerance, skin and rapid_rate are finite numbers")
+        XCTAssertEqual(spyShows, 0, "a refused show_machining reached the library")
+        // The library's own refusal (no programs) comes back in its words.
+        t.pointee.show_machining = { _, _ in spySaid = cstr("machining: programs: at least one"); return 0 }
+        XCTAssertEqual(show([]), "machining: programs: at least one")
+        rigMachining(t)
+        try view.close()
+        XCTAssertEqual(show(), "cadaclysm_view_show_machining: the view is closed")
+        XCTAssertEqual(show([MachiningProgram(tool: spade, gcode: "")]), "shape 'spade': one of flat, ball, drill, vbit, bullnose",
+                       "the shape is refused before the view is looked at")
+    }
+
+    /// F3: the Machining members reach the library as given -- ids, modes, flags, the info
+    /// struct's size and fields, the heights' capacity (nx * ny, never NULL) and order.
+    func testMachiningMembersReachTheLibrary() throws {
+        let (view, item, saved, t) = try machiningRig()
+        defer { t.pointee = saved; resetMachiningSpies(); try? view.close() }
+        spyMachLog = []
+        try item.seekMove(7)
+        try item.colourBy("height")
+        try item.colourBy("tool")
+        try item.colourBy("deviation")
+        try item.overlays()
+        try item.overlays(path: false, tool: true)
+        try item.overlays(path: true, tool: false)
+        XCTAssertEqual(spyMachLog, [
+            "seek 17 7",
+            "colour 17 \(CADACLYSM_VIEW_COLOUR_BY_HEIGHT)", "colour 17 \(CADACLYSM_VIEW_COLOUR_BY_TOOL)",
+            "colour 17 \(CADACLYSM_VIEW_COLOUR_BY_DEVIATION)",
+            "overlays 17 true true", "overlays 17 false true", "overlays 17 true false",
+        ])
+        spyInfoAnswer.moves = 638
+        spyInfoAnswer.move = 12
+        spyInfoAnswer.nx = 3
+        spyInfoAnswer.ny = 2
+        spyInfoAnswer.cell = 0.5
+        spyInfoAnswer.min = (-41.5, -26.5)
+        spyInfoAnswer.cycle_time = 893.25
+        let info = try item.info()
+        XCTAssertEqual(spyInfoSize, UInt32(MemoryLayout<CadaclysmViewMachiningInfo>.size))
+        XCTAssertEqual([info.moves, info.move, info.nx, info.ny], [638, 12, 3, 2])
+        XCTAssertEqual(info.cell, 0.5)
+        XCTAssertEqual([info.min.0, info.min.1], [-41.5, -26.5])
+        XCTAssertEqual(info.cycleTime, 893.25)
+        spyHeightsAnswer = [1, 2, 3, 4, 5, 6, 7, 8]
+        XCTAssertEqual(try item.heights(), [1, 2, 3, 4, 5, 6], "nx * ny floats, row y then x")
+        XCTAssertEqual(spyHeightsCapacity, 6)
+        spyInfoAnswer.nx = 0
+        XCTAssertEqual(try item.heights(), [])
+        XCTAssertEqual(spyHeightsCapacity, 0)
+        XCTAssertFalse(spyHeightsNull, "an empty grid still hands the library a buffer")
+    }
+
+    /// F4: a mode that is none of the three is refused before the library; the library's
+    /// refusals come back in its words; a closed view says so.
+    func testMachiningModesAndLibraryRefusals() throws {
+        let (view, item, saved, t) = try machiningRig()
+        defer { t.pointee = saved; resetMachiningSpies(); try? view.close() }
+        spyMachLog = []
+        XCTAssertEqual(message { try item.colourBy("rainbow") }, "mode 'rainbow': one of height, tool, deviation")
+        XCTAssertEqual(spyMachLog, [], "a refused mode reached the library")
+        spyColourRefused = true
+        XCTAssertEqual(message { try item.colourBy("deviation") }, "cadaclysm_view_machining_colour_by: deviation needs a part")
+        try view.close()
+        XCTAssertEqual(message { try item.seekMove(1) }, "cadaclysm_view_machining_seek: the view is closed")
+        XCTAssertEqual(message { try item.colourBy("tool") }, "cadaclysm_view_machining_colour_by: the view is closed")
+        XCTAssertEqual(message { try item.overlays() }, "cadaclysm_view_machining_overlays: the view is closed")
+        XCTAssertEqual(message { _ = try item.info() }, "cadaclysm_view_machining_info: the view is closed")
+        XCTAssertEqual(message { _ = try item.heights() }, "cadaclysm_view_machining_info: the view is closed")
+        XCTAssertEqual(message { try item.remove() }, "cadaclysm_view_remove: the view is closed")
+        XCTAssertEqual(message { try item.colourBy("rainbow") }, "mode 'rainbow': one of height, tool, deviation")
+    }
+
+    /// F5: the transport reaches the library with its arguments and answers its numbers; a
+    /// speed or time that is not finite is refused first; a closed view says so.
+    func testTheTimelineTransport() throws {
+        let (view, _, saved, t) = try machiningRig()
+        defer { t.pointee = saved; resetMachiningSpies(); try? view.close() }
+        spyMachLog = []
+        try view.play()
+        try view.play(speed: 2.5)
+        try view.pause()
+        try view.seek(10.25)
+        try view.loop()
+        try view.loop(false)
+        XCTAssertEqual(spyMachLog, ["play 1.0", "play 2.5", "pause", "seekTime 10.25", "loop true", "loop false"])
+        spyTime = 3.5
+        spyDuration = 893.25
+        spyPlaying = true
+        XCTAssertEqual(try view.time, 3.5)
+        XCTAssertEqual(try view.duration, 893.25)
+        XCTAssertTrue(try view.playing)
+        spyPlaying = false
+        XCTAssertFalse(try view.playing)
+        spyMachLog = []
+        XCTAssertEqual(message { try view.play(speed: .nan) }, "play speed: a finite number")
+        XCTAssertEqual(message { try view.play(speed: .infinity) }, "play speed: a finite number")
+        XCTAssertEqual(message { try view.seek(.nan) }, "seek seconds: a finite number")
+        XCTAssertEqual(spyMachLog, [], "a refused play or seek reached the library")
+        try view.close()
+        XCTAssertEqual(message { try view.play() }, "cadaclysm_view_timeline_play: the view is closed")
+        XCTAssertEqual(message { try view.pause() }, "cadaclysm_view_timeline_pause: the view is closed")
+        XCTAssertEqual(message { try view.seek(1) }, "cadaclysm_view_timeline_seek: the view is closed")
+        XCTAssertEqual(message { try view.loop() }, "cadaclysm_view_timeline_set_loop: the view is closed")
+        XCTAssertEqual(message { _ = try view.time }, "cadaclysm_view_timeline_time: the view is closed")
+        XCTAssertEqual(message { _ = try view.duration }, "cadaclysm_view_timeline_duration: the view is closed")
+        XCTAssertEqual(message { _ = try view.playing }, "cadaclysm_view_timeline_playing: the view is closed")
+        XCTAssertEqual(message { _ = try view.status() }, "cadaclysm_view_timeline_status: the view is closed")
+    }
+
+    /// F6: status asks the length with (NULL, 0), then fills a buffer of n + 1; asks again when
+    /// the line grew between the calls; splits at newlines; none is an empty list.
+    func testTheTimelineStatusMeasuresFillsAndRetries() throws {
+        let (view, _, saved, t) = try machiningRig()
+        defer { t.pointee = saved; resetMachiningSpies(); try? view.close() }
+        spyStatusAnswers = [""]
+        spyStatusCalls = 0
+        XCTAssertEqual(try view.status(), [])
+        XCTAssertEqual(spyStatusCalls, 1, "nothing on the timeline: one call")
+        let two = "move 3 of 9 - T1 flat 6 mm\nmove 1 of 2 - T2 drill 3 mm"
+        spyStatusAnswers = [two]
+        spyStatusCalls = 0
+        XCTAssertEqual(try view.status(), ["move 3 of 9 - T1 flat 6 mm", "move 1 of 2 - T2 drill 3 mm"])
+        XCTAssertEqual(spyStatusCalls, 2, "measure, then fill")
+        spyStatusAnswers = ["a", "a longer line than measured", "a longer line than measured"]
+        spyStatusCalls = 0
+        XCTAssertEqual(try view.status(), ["a longer line than measured"])
+        XCTAssertEqual(spyStatusCalls, 3, "the line grew: asked again")
+        spyStatusAnswers = ["a", ""]
+        spyStatusCalls = 0
+        XCTAssertEqual(try view.status(), [], "a second answer of 0 bytes is no line")
+        XCTAssertEqual(spyStatusCalls, 2)
+        spyStatusAnswers = ["caf\u{e9} \u{2014} T1"]
+        spyStatusCalls = 0
+        XCTAssertEqual(try view.status(), ["caf\u{e9} \u{2014} T1"], "UTF-8 survives")
+    }
+
+    /// F7: the plate, seeked to its end, is the fixture's heights on the real library -- by the
+    /// wall rule -- and the status line says so.
+    func testMachiningPlatePlaysToTheFixturesHeightsOffscreen() throws {
+        let job = try plate()
+        let view = try offscreen(64, 48)
+        defer { try? view.close() }
+        let item = try view.showMachining(job.programs, stock: boxStock, options: job.options)
+        XCTAssertEqual(try view.duration, 893.247024, accuracy: 1e-3)
+        let info = try item.info()
+        XCTAssertGreaterThan(info.moves, 0)
+        try item.seekMove(info.moves)
+        let gpu = try item.heights()
+        let raw = try Data(contentsOf: job.directory.appendingPathComponent("heights.bin"))
+        let word = { (at: Int) -> UInt32 in raw.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: at, as: UInt32.self) } }
+        let nx = Int(word(8)), ny = Int(word(12))
+        XCTAssertEqual([Int(info.nx), Int(info.ny), gpu.count], [nx, ny, nx * ny], "the grid")
+        let oracle = (0..<nx * ny).map { Float(bitPattern: word(28 + 4 * $0)) }
+        let (failed, excused, walls) = compareAtWalls(gpu, oracle, nx: nx, ny: ny)
+        print("machining plate vs heights.bin: failed \(failed), excused \(excused), walls \(walls) of \(nx * ny) cells")
+        XCTAssertEqual(failed, 0, "heights against heights.bin: failed \(failed), excused \(excused), walls \(walls)")
+        XCTAssertLessThanOrEqual(excused, max(4, walls / 100), "excused \(excused) of walls \(walls)")
+        try view.draw()
+        let lines = try view.status()
+        XCTAssertTrue(lines.first?.hasPrefix("move \(info.moves) of \(info.moves)") ?? false, "status \(lines)")
+        try item.remove()
+    }
+
+    /// F7b: every one of the fourteen calls on the real library, not only the plate's own.
+    func testMachiningAndTimelineCallsOnTheRealLibrary() throws {
+        let job = try plate()
+        let view = try offscreen(64, 48)
+        defer { try? view.close() }
+        let item = try view.showMachining(job.programs, stock: boxStock, options: job.options)
+        let duration = try view.duration
+        XCTAssertFalse(try view.playing, "a fresh machining is paused")
+        try view.play(speed: 2)
+        XCTAssertTrue(try view.playing, "play(2) did not play")
+        try view.pause()
+        XCTAssertFalse(try view.playing, "pause did not pause")
+        try view.seek(10)
+        try view.draw()
+        XCTAssertEqual(try view.time, 10, accuracy: 1e-6, "time after seek(10)")
+        try view.seek(duration + 100)
+        try view.draw()
+        XCTAssertEqual(try view.time, duration, accuracy: 1e-6, "seek past the end clamps")
+        try view.loop(true)
+        try view.loop(false)
+        XCTAssertFalse(try view.status().isEmpty, "a status line")
+        try item.colourBy("tool")
+        try item.colourBy("height")
+        let refused = message { try item.colourBy("deviation") }
+        XCTAssertTrue(refused.contains("cadaclysm_view_machining_colour_by"), "deviation with no part: \(refused)")
+        try item.overlays(path: false, tool: false)
+        try item.overlays()
+        try view.draw()
+        try item.seekMove(0)
+        XCTAssertEqual(try item.info().moves > 0, true)
+        try item.remove()
+        // With a part, colouring by deviation works.
+        let part = MachiningPart(positions: [-42, -27, 14, 42, -27, 14, 0, 27, 14], indices: [0, 1, 2])
+        let withPart = try view.showMachining(job.programs, stock: boxStock, part: part, options: job.options)
+        try withPart.colourBy("deviation")
+        try view.draw()
+        try withPart.remove()
     }
 }

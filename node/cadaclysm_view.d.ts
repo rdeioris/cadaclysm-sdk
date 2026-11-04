@@ -56,10 +56,31 @@ export class Item {
   faceColours(faces: ArrayLike<number> | null, rgba?: ArrayLike<number> | ReadonlyArray<ColourAlpha>): void;
   frame(): void;
   xray(on: boolean): void;
+  /** How its lines and points draw where a surface hides them: 'off' (an item shows with it until set), 'solid' or 'dashed'. */
+  occluded(mode: 'off' | 'solid' | 'dashed'): void;
+  /** Its finish under the lighting: 'gloss' (an item shows with it until set; under the showroom lighting a clear coat), 'satin' (a weaker, blurred coat) or 'matte' (no mirror). */
+  finish(finish: 'gloss' | 'satin' | 'matte'): void;
   nodeVisible(node: number, on: boolean): void;
   nodeColour(node: number, rgba: ColourAlpha | null): void;
   nodeHighlight(node: number, rgba: ColourAlpha | null): void;
   frameNode(node: number): void;
+}
+
+export interface MachiningTool { number: number; shape: 'flat' | 'ball' | 'drill' | 'vbit' | 'bullnose'; diameter: number; flute_length?: number; angle?: number; corner_radius?: number; }
+export type MachiningProgram = [MachiningTool, string] | { tool: MachiningTool; gcode: string };
+export interface MachiningInfo { moves: number; move: number; nx: number; ny: number; cell: number; min: [number, number]; cycleTime: number; }
+
+/** A CAM job shown in a View (`View.showMachining`): the stock is this item; the view's timeline plays it. */
+export class Machining extends Item {
+  /** Jump the timeline to the end of move `move` (0: the untouched stock). */
+  seekMove(move: number): void;
+  /** 'deviation' needs a part. */
+  colourBy(mode: 'height' | 'tool' | 'deviation'): void;
+  /** The toolpath and the tool, on or off. */
+  overlays(path?: boolean, tool?: boolean): void;
+  info(): MachiningInfo;
+  /** The stock's heights now, `nx * ny` floats, row y then x; waits for the GPU. */
+  heights(): Float32Array;
 }
 
 export class View {
@@ -83,6 +104,19 @@ export class View {
   showLines(segments: ArrayLike<number>, rgb?: Colour | null): Item;
   /** Points, three numbers each (a flat run, or `[x, y, z]` a point): a disc `sizePx` device pixels across (1 to 64, 8 by default) at each, in `colour` (null: the edge colour), as one item. */
   showPoints(positions: ArrayLike<number> | ArrayLike<number>[], colour?: Colour | null, sizePx?: number): Item;
+  /** A CAM job on a stock, paused at its start; play it with `play()`. `stock` is `[[minX, minY, minZ], [maxX, maxY, maxZ]]`. */
+  showMachining(programs: MachiningProgram[], stock: [ArrayLike<number>, ArrayLike<number>], part?: { positions: ArrayLike<number>; indices: ArrayLike<number> } | null, options?: { cell?: number; tolerance?: number; skin?: number; rapidRate?: number }): Machining;
+  /** Play the timeline at `speed` times real time. */
+  play(speed?: number): void;
+  pause(): void;
+  /** Set the clock, clamped to [0, duration]. */
+  seek(seconds: number): void;
+  loop(on?: boolean): void;
+  readonly time: number;
+  readonly duration: number;
+  readonly playing: boolean;
+  /** One line per track at the clock's time. */
+  status(): string[];
   showCurves(beziers: ArrayLike<number>, rgb?: Colour | null): Item;
   showImage(corners: ArrayLike<number>, rgba: Uint8Array, width: number, height: number, opacity?: number): Item;
   orbit(dx: number, dy: number): void;

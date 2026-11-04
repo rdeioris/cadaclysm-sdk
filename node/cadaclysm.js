@@ -22,6 +22,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const koffi = require('koffi');
+// `using x = ...` looks up Symbol.dispose: Node 22 aliases it to Symbol.for('nodejs.dispose'),
+// a V8 with its own Symbol.dispose does not, so name the one this runtime uses.
+const DISPOSE = typeof Symbol.dispose === 'symbol' ? Symbol.dispose : Symbol.for('nodejs.dispose');
 
 // ---- errors & enums --------------------------------------------------------
 
@@ -127,6 +130,8 @@ koffi.opaque('CadaclysmBrep');
 koffi.opaque('CadaclysmMeshlets');
 koffi.opaque('CadaclysmFemMesh');
 koffi.opaque('CadaclysmPose');
+koffi.opaque('CadaclysmHealth');
+koffi.opaque('CadaclysmHeal');
 const CadaclysmWindow = koffi.struct('CadaclysmWindow', {
   kind: 'uint32_t',
   handle: 'void *',
@@ -400,6 +405,20 @@ function _lib() {
     brep_layout_id: f('const char *cadaclysm_brep_layout_id(void)'),
     brep_manifold: f('bool cadaclysm_brep_manifold(const CadaclysmBrep *brep, _Out_ uint32_t *out)'),
     brep_sew: f('CadaclysmBrep *cadaclysm_brep_sew(const CadaclysmBrep *brep, double tolerance, double vertex, _Out_ uint32_t *out, _Out_ double *gaps)'),
+    brep_health: f('CadaclysmHealth *cadaclysm_brep_health(const CadaclysmBrep *brep, double tolerance, bool mesh)'),
+    brep_health_free: f('void cadaclysm_brep_health_free(CadaclysmHealth *health)'),
+    brep_health_summary: f('bool cadaclysm_brep_health_summary(const CadaclysmHealth *health, _Out_ uint32_t *counts, _Out_ double *sizes)'),
+    brep_health_free_edges: f('uint32_t cadaclysm_brep_health_free_edges(const CadaclysmHealth *health, _Out_ uint32_t *ids, _Out_ double *sizes)'),
+    brep_health_wires: f('uint32_t cadaclysm_brep_health_wires(const CadaclysmHealth *health, _Out_ uint32_t *runs, _Out_ double *sizes)'),
+    brep_health_small: f('uint32_t cadaclysm_brep_health_small(const CadaclysmHealth *health, _Out_ uint32_t *items, _Out_ double *sizes)'),
+    brep_health_crack_edges: f('uint32_t cadaclysm_brep_health_crack_edges(const CadaclysmHealth *health, _Out_ uint32_t *ids)'),
+    brep_healed: f('CadaclysmHeal *cadaclysm_brep_healed(const CadaclysmBrep *brep, double tolerance, uint32_t flags)'),
+    brep_heal_body: f('const CadaclysmBrep *cadaclysm_brep_heal_body(const CadaclysmHeal *h)'),
+    brep_heal_free: f('void cadaclysm_brep_heal_free(CadaclysmHeal *h)'),
+    brep_heal_summary: f('bool cadaclysm_brep_heal_summary(const CadaclysmHeal *h, _Out_ uint32_t *counts, _Out_ double *sizes)'),
+    brep_heal_fixes: f('uint32_t cadaclysm_brep_heal_fixes(const CadaclysmHeal *h, _Out_ uint32_t *items, _Out_ double *sizes)'),
+    brep_heal_refused: f('uint32_t cadaclysm_brep_heal_refused(const CadaclysmHeal *h, _Out_ uint32_t *items, _Out_ double *sizes)'),
+    brep_edge_tolerance: f('double cadaclysm_brep_edge_tolerance(const CadaclysmBrep *brep, uint32_t edge)'),
     node_count: f('uint32_t cadaclysm_node_count(const CadaclysmScene *scene)'),
     root_count: f('uint32_t cadaclysm_root_count(const CadaclysmScene *scene)'),
     root: f('uint32_t cadaclysm_root(const CadaclysmScene *scene, uint32_t index)'),
@@ -1100,13 +1119,230 @@ class Brep {
       },
     };
   }
+  /**
+   * What is wrong with this brep, as a `HealthReport`: the free edges (the sides one face
+   * bounds) and the wires they chain into, each with its nearest partner and the gap to it;
+   * the features below `tolerance`; the loose edges; and what `sewed` would join and leave.
+   * Nothing moves. `tolerance` is an absolute length, by default `1e-4` times the diagonal;
+   * omitted, NaN, infinite, zero or negative takes the default, and the report shows what was
+   * used. `mesh: true` also meshes the brep and reports where the mesh cracks (`cracks`);
+   * without it `cracks` is null.
+   */
+  health({ tolerance, mesh = false } = {}) {
+    const l = _lib();
+    const h = l.brep_health(this.pointer, tolerance ?? NaN, Boolean(mesh));
+    if (h === null) throw new CadaclysmError(_lastError() || 'health');
+    try {
+      const counts = new Uint32Array(18), sizes = new Float64Array(8);
+      if (!l.brep_health_summary(h, counts, sizes)) throw new CadaclysmError(_lastError() || 'health');
+      const rows = (read, a, b) => {
+        const n = read(h, null, null);
+        const x = new Uint32Array(a * n), y = new Float64Array(b * n);
+        if (n) read(h, x, y);
+        return [x, y];
+      };
+      const [freeIds, freeSizes] = rows(l.brep_health_free_edges, 6, 2);
+      const [wireRuns, wireSizes] = rows(l.brep_health_wires, 3, 2);
+      const [smallItems, smallSizes] = rows(l.brep_health_small, 2, 1);
+      const n = l.brep_health_crack_edges(h, null);
+      const cracks = new Uint32Array(n);
+      if (n) l.brep_health_crack_edges(h, cracks);
+      return _healthReport(counts, sizes, freeIds, freeSizes, wireRuns, wireSizes, smallItems, smallSizes, cracks);
+    } finally {
+      l.brep_health_free(h);
+    }
+  }
+  /**
+   * This brep with its small features removed, and what was done: `{ brep, report }`, the
+   * brep a new one (release it), the report a `HealReport`; this one is left as it was. It
+   * heals what `health` lists as small at the same `tolerance` (omitted or `undefined` takes
+   * the default, as `health`'s). `edges`, `faces` and `holes` (each true by default) switch
+   * each kind of fix; a kind switched off is refused as `toggled`.
+   */
+  healed({ tolerance, edges = true, faces = true, holes = true } = {}) {
+    const l = _lib();
+    const h = l.brep_healed(this.pointer, tolerance ?? NaN, _healFlags({ edges, faces, holes }));
+    if (h === null) throw new CadaclysmError(_lastError() || 'healed');
+    try {
+      const counts = new Uint32Array(11), sizes = new Float64Array(2);
+      if (!l.brep_heal_summary(h, counts, sizes)) throw new CadaclysmError(_lastError() || 'healed');
+      let n = l.brep_heal_fixes(h, null, null);
+      const fixItems = new Uint32Array(2 * n), fixSizes = new Float64Array(2 * n);
+      if (n) l.brep_heal_fixes(h, fixItems, fixSizes);
+      n = l.brep_heal_refused(h, null, null);
+      const refusedItems = new Uint32Array(3 * n), refusedSizes = new Float64Array(n);
+      if (n) l.brep_heal_refused(h, refusedItems, refusedSizes);
+      const report = _healReport(counts, sizes, fixItems, fixSizes, refusedItems, refusedSizes);
+      const body = l.brep_heal_body(h);
+      if (body === null) throw new CadaclysmError(_lastError() || 'healed');
+      return { brep: new Brep(body), report };
+    } finally {
+      l.brep_heal_free(h);
+    }
+  }
+  /**
+   * How far brep edge `edge` (as a `HealFix` or `FreeEdge` names one) may lie off its curve:
+   * 0 for an exact edge, the distance healing or sewing moved it where that is recorded, null
+   * when no trim names the id (an edge healing removed).
+   */
+  edgeTolerance(edge) {
+    const t = _lib().brep_edge_tolerance(this.pointer, edge >>> 0);
+    return Number.isNaN(t) ? null : t;
+  }
   release() {
     if (this._pointer === null) return;
     const p = this._pointer; this._pointer = null;
     if (_brepFinalizer) _brepFinalizer.unregister(this);
     _lib().brep_release(p);
   }
-  [Symbol.for('nodejs.dispose')]() { this.release(); }
+  [DISPOSE]() { this.release(); }
+}
+
+// ---- health and healing -------------------------------------------------------
+
+/**
+ * One free edge: a side only one face bounds (`trim`), the `edge` it lies on (null for a side
+ * with no edge), the `face` it bounds and the free `wire` it is on, its nearest `partner` across
+ * the gap (a row of `freeEdges`; null if there is none), how many of its two ends it
+ * `sharedEnds` with that partner, its `length` and the `gap` to the partner (`Infinity` without one).
+ */
+class FreeEdge {
+  constructor(trim, edge, face, wire, partner, sharedEnds, length, gap) {
+    this.trim = trim; this.edge = edge; this.face = face; this.wire = wire;
+    this.partner = partner; this.sharedEnds = sharedEnds; this.length = length; this.gap = gap;
+  }
+}
+
+/** A chain of free edges end to end: the rows `first` to `first + count` of `freeEdges`, whether it `closed` on itself, its total `length` and the `widestGap` to any partner. */
+class FreeWire {
+  constructor(first, count, closed, length, widestGap) {
+    this.first = first; this.count = count; this.closed = closed; this.length = length; this.widestGap = widestGap;
+  }
+}
+
+/** Something below the tolerance: its `kind` ('short_edge', 'collapsed_edge', 'sliver_face', 'tiny_face', 'tiny_body' or 'small_hole'), its edge, face, body or loop `index`, and how small (`size`). */
+class SmallFeature {
+  constructor(kind, index, size) { this.kind = kind; this.index = index; this.size = size; }
+}
+
+/** What a mesh of the body shows (`health({ mesh: true })`): whether it is `watertight`, how many mesh edges are `open` or `folded`, how many `crossings`, and the body's `edges` the cracks lie along. */
+class Cracks {
+  constructor(watertight, open, folded, crossings, edges) {
+    this.watertight = watertight; this.open = open; this.folded = folded; this.crossings = crossings; this.edges = edges;
+  }
+}
+
+/**
+ * What is wrong with a body, as plain data (`health`): the `tolerance` and `rounding` it judged
+ * at and the body's `extent`; the `freeEdges`, their `wires`, the `small` features; the
+ * `looseEdges` (`worstLoose` the widest); what sewing would do (`sewPairs` joined, `sewRefused`,
+ * `sewWorstGap`); the mesh's `cracks` when asked for, else null; and the `worstGap` between a free
+ * edge and its partner.
+ */
+class HealthReport {
+  constructor(tolerance, rounding, extent, freeEdges, wires, small, looseEdges, worstLoose, sewPairs, sewRefused, sewWorstGap, cracks, worstGap) {
+    this.tolerance = tolerance; this.rounding = rounding; this.extent = extent;
+    this.freeEdges = freeEdges; this.wires = wires; this.small = small;
+    this.looseEdges = looseEdges; this.worstLoose = worstLoose;
+    this.sewPairs = sewPairs; this.sewRefused = sewRefused; this.sewWorstGap = sewWorstGap;
+    this.cracks = cracks; this.worstGap = worstGap;
+  }
+  /** The free edges of wire number `wire` (an index into `wires`), in order. */
+  wireEdges(wire) {
+    const w = this.wires[wire];
+    if (w === undefined) throw new RangeError(`wireEdges: wire ${wire} of ${this.wires.length}`);
+    return this.freeEdges.slice(w.first, w.first + w.count);
+  }
+}
+
+/** One small feature `healed` removed: its `kind` (as `SmallFeature.kind`), its `index` in the input, its `size`, and how far the vertices it merged `moved`. */
+class HealFix {
+  constructor(kind, index, size, moved) { this.kind = kind; this.index = index; this.size = size; this.moved = moved; }
+}
+
+/**
+ * One small feature `healed` left, and why: `kind` and `index` as `HealFix`'s; `why` is
+ * 'would_empty_loop', 'closed', 'seam', 'chain', 'neighbours_part', 'uneven', 'non_manifold',
+ * 'has_holes', 'body_guard', 'toggled' or 'unsupported'; `figure` the chain's width or the
+ * neighbours' gap, else 0.
+ */
+class HealRefusal {
+  constructor(kind, index, why, figure) { this.kind = kind; this.index = index; this.why = why; this.figure = figure; }
+}
+
+/**
+ * What `healed` did, as plain data: the `tolerance` it healed at, the furthest any trim `moved`,
+ * whether the body guard refused fixes (`guarded`), the `fixes` made and the features `refused`;
+ * and the body's health before and after -- its small features, free edges, whether it is
+ * closed, and its non-manifold edges.
+ */
+class HealReport {
+  constructor(tolerance, moved, guarded, fixes, refused, smallBefore, smallAfter, freeBefore, freeAfter,
+    closedBefore, closedAfter, nonmanifoldBefore, nonmanifoldAfter) {
+    this.tolerance = tolerance; this.moved = moved; this.guarded = guarded;
+    this.fixes = fixes; this.refused = refused;
+    this.smallBefore = smallBefore; this.smallAfter = smallAfter;
+    this.freeBefore = freeBefore; this.freeAfter = freeAfter;
+    this.closedBefore = closedBefore; this.closedAfter = closedAfter;
+    this.nonmanifoldBefore = nonmanifoldBefore; this.nonmanifoldAfter = nonmanifoldAfter;
+  }
+}
+
+const _HEALTH_KINDS = ['short_edge', 'collapsed_edge', 'sliver_face', 'tiny_face', 'tiny_body', 'small_hole'];
+const _HEAL_WHYS = ['would_empty_loop', 'closed', 'seam', 'chain', 'neighbours_part', 'uneven', 'non_manifold',
+  'has_holes', 'body_guard', 'toggled', 'unsupported'];
+
+/** A code of the library's as its name in `names`, or a `RangeError` for a code this module does not know. */
+function _named(names, code, what) {
+  const name = names[code];
+  if (name === undefined) throw new RangeError(`${what}: the library answered ${code}, which this module does not know`);
+  return name;
+}
+
+/** The flat rows of the health C ABI (or the wasm object) as a `HealthReport`; any array-likes. */
+function _healthReport(counts, sizes, freeIds, freeSizes, wireRuns, wireSizes, smallItems, smallSizes, crackEdges) {
+  const id = (v) => (v === NONE ? null : Number(v));
+  const freeEdges = [];
+  for (let i = 0; i < freeIds.length / 6; i++) {
+    freeEdges.push(new FreeEdge(Number(freeIds[6 * i]), id(freeIds[6 * i + 1]), Number(freeIds[6 * i + 2]), Number(freeIds[6 * i + 3]),
+      id(freeIds[6 * i + 4]), Number(freeIds[6 * i + 5]), Number(freeSizes[2 * i]), Number(freeSizes[2 * i + 1])));
+  }
+  const wires = [];
+  for (let i = 0; i < wireRuns.length / 3; i++) {
+    wires.push(new FreeWire(Number(wireRuns[3 * i]), Number(wireRuns[3 * i + 1]), wireRuns[3 * i + 2] !== 0,
+      Number(wireSizes[2 * i]), Number(wireSizes[2 * i + 1])));
+  }
+  const small = [];
+  for (let i = 0; i < smallSizes.length; i++) {
+    small.push(new SmallFeature(_named(_HEALTH_KINDS, smallItems[2 * i], 'health'), Number(smallItems[2 * i + 1]), Number(smallSizes[i])));
+  }
+  const cracks = counts[12] === 1
+    ? new Cracks(counts[13] !== 0, Number(counts[14]), Number(counts[15]), Number(counts[16]), Array.from(crackEdges, Number))
+    : null;
+  return new HealthReport(Number(sizes[0]), Number(sizes[1]), Number(sizes[2]), freeEdges, wires, small,
+    Number(counts[9]), Number(sizes[4]), Number(counts[10]), Number(counts[11]), Number(sizes[5]), cracks, Number(sizes[3]));
+}
+
+/** The flat rows of the heal C ABI (or the wasm object) as a `HealReport`; any array-likes. */
+function _healReport(counts, sizes, fixItems, fixSizes, refusedItems, refusedSizes) {
+  const fixes = [];
+  for (let i = 0; i < fixItems.length / 2; i++) {
+    fixes.push(new HealFix(_named(_HEALTH_KINDS, fixItems[2 * i], 'healed'), Number(fixItems[2 * i + 1]),
+      Number(fixSizes[2 * i]), Number(fixSizes[2 * i + 1])));
+  }
+  const refused = [];
+  for (let i = 0; i < refusedSizes.length; i++) {
+    refused.push(new HealRefusal(_named(_HEALTH_KINDS, refusedItems[3 * i], 'healed'), Number(refusedItems[3 * i + 1]),
+      _named(_HEAL_WHYS, refusedItems[3 * i + 2], 'healed'), Number(refusedSizes[i])));
+  }
+  return new HealReport(Number(sizes[0]), Number(sizes[1]), counts[2] !== 0, fixes, refused,
+    Number(counts[3]), Number(counts[4]), Number(counts[5]), Number(counts[6]),
+    counts[7] !== 0, counts[8] !== 0, Number(counts[9]), Number(counts[10]));
+}
+
+/** `healed`'s switches as the C ABI's flag bits: 1 edges, 2 faces, 4 holes; each on unless `false`. */
+function _healFlags({ edges = true, faces = true, holes = true } = {}) {
+  return (edges ? 1 : 0) | (faces ? 2 : 0) | (holes ? 4 : 0);
 }
 
 // ---- placements -------------------------------------------------------------
@@ -1868,7 +2104,7 @@ class Scene {
     if (_finalizer) _finalizer.unregister(this);
     _lib().close(pointer);
   }
-  [Symbol.for('nodejs.dispose')]() { this.close(); }
+  [DISPOSE]() { this.close(); }
   /** Draw it with the view library in use: on the wgpu library, in the one shared window (returns at once); elsewhere, a still. Options as `ShowOptions`. */
   show(options = {}) { return require('./cadaclysm_view')._present(this, { ...options, up: options.up ?? this._defaultUp() }, 'show'); }
   /** Orbit it until the window is closed; the camera it was left at, and the last pick. */
@@ -2143,7 +2379,7 @@ class Meshlets {
     if (_meshletsFinalizer) _meshletsFinalizer.unregister(this);
     _lib().meshlets_free(p);
   }
-  [Symbol.for('nodejs.dispose')]() { this.free(); }
+  [DISPOSE]() { this.free(); }
 }
 
 // ---- the FEM surface mesh ---------------------------------------------------
@@ -2309,7 +2545,7 @@ class FemMesh {
     if (_femFinalizer) _femFinalizer.unregister(this);
     _lib().fem_mesh_free(p);
   }
-  [Symbol.for('nodejs.dispose')]() { this.free(); }
+  [DISPOSE]() { this.free(); }
   // -- the flat arrays, copied
   /** Every node's position, three doubles each -- placed, and in the space `Node.femMesh` and `fromMesh` describe. */
   nodes() { const raw = this._live; return _doubles(raw.nodes, raw.node_count * 3) ?? new Float64Array(0); }
@@ -2643,7 +2879,8 @@ module.exports = {
   libraryPath, version, buildDate, license, licenseInfo, licenseNoticeCount, meshFormats, formats, lodLevels,
   svgOptionsDefaults,
   _lib, _text, _lastError, _floats, _uint32s, _doubles, _searchedPaths, _notFoundMessage,
-  Bounds, Bounds64, Attribute, Brep, Placement, Node, Link, Joint, Pair, Freedom, State, StateValue, Segment, Sequence, ElementState, TaskTime, TaskLink, Task, WorkSchedule, Pose, Scene, open, openMemory, _openRaw, openAsync, openMemoryAsync, declaredSchema, resolveSchema, _options, _rows, _attribute,
+  Bounds, Bounds64, Attribute, Brep, HealthReport, FreeEdge, FreeWire, SmallFeature, Cracks, HealReport, HealFix, HealRefusal,
+  _healthReport, _healReport, _healFlags, Placement, Node, Link, Joint, Pair, Freedom, State, StateValue, Segment, Sequence, ElementState, TaskTime, TaskLink, Task, WorkSchedule, Pose, Scene, open, openMemory, _openRaw, openAsync, openMemoryAsync, declaredSchema, resolveSchema, _options, _rows, _attribute,
   Mesh, Mesh64, Polylines, Beziers, Beziers64, Face, Surfaces, Collision, CollisionHull, Meshlets, pickFile, pickSave,
   FemMesh, FemEdge, FemVertex,
   _meshOf, _mesh64Of, _polylinesOf, _beziersOf, _beziers64Of, _surfacesOf, _svgOptions,

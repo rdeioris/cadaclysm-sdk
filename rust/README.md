@@ -90,6 +90,10 @@ wrappers document that; here the compiler enforces it.
 - `Scene` is `Send + Sync`: run `realize_all` on one thread and read `realized`
   or call `cancel` from another. A `Solid` is `Send` but not `Sync` -- the kernel
   caches its tessellation, and a solid is not for two threads at once.
+- A `Sketch` (the 2D constraint sketcher) is `Send` but not `Sync`, and every method
+  takes `&self`: the library keeps the state. A refusal's `Error::ids()` names the
+  constraints or entities it ran into (empty for any other error); kinds, senses and
+  ends are `&'static str`s, and dropping the sketch frees it.
 
 ## Drawing
 
@@ -142,6 +146,14 @@ view.save("view.png")?;                        // or view.image()? for the pixel
   Béziers, `[[x, y, z, w]; 4]` each), `show_image` by value -- these need no reader or
   kernel loaded. A solid, scene or node shown by handle is borrowed by the view: dropping
   it first does not compile.
+- **Machining.** `show_machining(&programs, [min, max], part, &options)` plays a CAM job on a
+  stock: `MachiningProgram { tool: MachiningTool { number, shape: ToolShape, diameter,
+  flute_length, angle, corner_radius }, gcode }` in run order, an optional
+  `MachiningPart { positions, triangles }` for colouring by deviation, `MachiningOptions { cell,
+  tolerance, skin, rapid_rate }` (`Option<f64>`, absent is the library's). It returns a
+  `Machining`, an `Item` (through `Deref`) with `seek_move`, `colour_by(ColourBy)`, `overlays`,
+  `info` and `heights`. The view's timeline: `play(speed)`, `pause`, `seek`, `set_loop`
+  (`loop` is a Rust keyword), `time`, `duration`, `playing`, `status`.
 - **Colours.** Every colour takes text -- `"#rgb"`, `"#rrggbb"` or a CSS colour name, read
   by the view library's own parser -- or numbers in 0..1: `colour` and `background` take
   `impl Into<Colour>`, the `show_*` calls' `rgb` an `impl Into<view::Rgb>` (`None`,

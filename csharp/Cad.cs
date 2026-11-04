@@ -719,6 +719,36 @@ internal sealed class BrepHandle : CadaclysmHandle
     }
 }
 
+/// <summary>`CadaclysmHealth *`, freed by `cadaclysm_brep_health_free`: owned report data,
+/// independent of the brep it was made from.</summary>
+internal sealed class HealthHandle : CadaclysmHandle
+{
+    public HealthHandle()
+    {
+    }
+
+    protected override bool ReleaseHandle()
+    {
+        Native.cadaclysm_brep_health_free(handle);
+        return true;
+    }
+}
+
+/// <summary>`CadaclysmHeal *`, freed by `cadaclysm_brep_heal_free`; the body taken from it with
+/// `cadaclysm_brep_heal_body` is a reference of its own and outlives it.</summary>
+internal sealed class HealHandle : CadaclysmHandle
+{
+    public HealHandle()
+    {
+    }
+
+    protected override bool ReleaseHandle()
+    {
+        Native.cadaclysm_brep_heal_free(handle);
+        return true;
+    }
+}
+
 /// <summary>`CadaclysmMeshlets *`, freed by `cadaclysm_meshlets_free`.</summary>
 internal sealed class MeshletsHandle : CadaclysmHandle
 {
@@ -964,6 +994,22 @@ internal static class Native
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_brep_manifold(BrepHandle brep, [Out] uint[] outRow);
     [DllImport(Lib)] internal static extern BrepHandle cadaclysm_brep_sew(BrepHandle brep, double tolerance, double vertex, [Out] uint[] counts, [Out] double[] gaps);
+    [DllImport(Lib)] internal static extern HealthHandle cadaclysm_brep_health(BrepHandle brep, double tolerance, [MarshalAs(UnmanagedType.I1)] bool mesh);
+    [DllImport(Lib)] internal static extern void cadaclysm_brep_health_free(IntPtr health);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_brep_health_summary(HealthHandle health, [Out] uint[] counts, [Out] double[] sizes);
+    [DllImport(Lib)] internal static extern uint cadaclysm_brep_health_free_edges(HealthHandle health, [Out] uint[]? ids, [Out] double[]? sizes);
+    [DllImport(Lib)] internal static extern uint cadaclysm_brep_health_wires(HealthHandle health, [Out] uint[]? runs, [Out] double[]? sizes);
+    [DllImport(Lib)] internal static extern uint cadaclysm_brep_health_small(HealthHandle health, [Out] uint[]? items, [Out] double[]? sizes);
+    [DllImport(Lib)] internal static extern uint cadaclysm_brep_health_crack_edges(HealthHandle health, [Out] uint[]? ids);
+    [DllImport(Lib)] internal static extern HealHandle cadaclysm_brep_healed(BrepHandle brep, double tolerance, uint flags);
+    [DllImport(Lib)] internal static extern BrepHandle cadaclysm_brep_heal_body(HealHandle heal);
+    [DllImport(Lib)] internal static extern void cadaclysm_brep_heal_free(IntPtr heal);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_brep_heal_summary(HealHandle heal, [Out] uint[] counts, [Out] double[] sizes);
+    [DllImport(Lib)] internal static extern uint cadaclysm_brep_heal_fixes(HealHandle heal, [Out] uint[]? items, [Out] double[]? sizes);
+    [DllImport(Lib)] internal static extern uint cadaclysm_brep_heal_refused(HealHandle heal, [Out] uint[]? items, [Out] double[]? sizes);
+    [DllImport(Lib)] internal static extern double cadaclysm_brep_edge_tolerance(BrepHandle brep, uint edge);
     [DllImport(Lib)] internal static extern void cadaclysm_surface_matrix(SceneHandle scene, [Out] float[] outMatrix);
     [DllImport(Lib)] internal static extern RawBounds cadaclysm_node_bounds(SceneHandle scene, uint node);
     [DllImport(Lib)] internal static extern RawBounds64 cadaclysm_node_bounds64(SceneHandle scene, uint node);
@@ -2486,6 +2532,93 @@ public sealed class Brep : IDisposable
         return (new Brep(sewn), new SewReport(counts[0], counts[1], counts[2], counts[3], gaps[0], gaps[1], gaps[2]));
     }
 
+    /// <summary>What is wrong with this brep, as a <see cref="HealthReport"/>: the free edges (the
+    /// sides one face bounds) and the wires they chain into, with each edge's nearest partner and
+    /// the gap to it; the features below <c>tolerance</c>; the loose edges; and what
+    /// <see cref="Sewed"/> would join and leave. <c>tolerance</c> is the length below which a
+    /// feature is small and a gap closes -- null, or a value that is not finite and positive,
+    /// takes the default, <c>1e-4</c> times the diagonal (the report shows what was used).
+    /// <c>mesh</c> also meshes the brep and reports where the mesh cracks
+    /// (<see cref="HealthReport.Cracks"/>); without it that is null. Nothing moves.</summary>
+    public HealthReport Health(double? tolerance = null, bool mesh = false)
+    {
+        if (Handle.IsClosed) throw new CadaclysmException("brep: released");
+        using var health = Native.cadaclysm_brep_health(Handle, tolerance ?? double.NaN, mesh);
+        if (health.IsInvalid) throw new CadaclysmException(Cadaclysm.LastErrorOr("health"));
+        var counts = new uint[18];
+        var sizes = new double[8];
+        if (!Native.cadaclysm_brep_health_summary(health, counts, sizes))
+            throw new CadaclysmException(Cadaclysm.LastErrorOr("health"));
+        var n = Native.cadaclysm_brep_health_free_edges(health, null, null);
+        var freeIds = new uint[6 * n];
+        var freeSizes = new double[2 * n];
+        if (n > 0) Native.cadaclysm_brep_health_free_edges(health, freeIds, freeSizes);
+        n = Native.cadaclysm_brep_health_wires(health, null, null);
+        var wireRuns = new uint[3 * n];
+        var wireSizes = new double[2 * n];
+        if (n > 0) Native.cadaclysm_brep_health_wires(health, wireRuns, wireSizes);
+        n = Native.cadaclysm_brep_health_small(health, null, null);
+        var smallItems = new uint[2 * n];
+        var smallSizes = new double[n];
+        if (n > 0) Native.cadaclysm_brep_health_small(health, smallItems, smallSizes);
+        n = Native.cadaclysm_brep_health_crack_edges(health, null);
+        var cracks = new uint[n];
+        if (n > 0) Native.cadaclysm_brep_health_crack_edges(health, cracks);
+        return HealthReport.FromRows(counts, sizes, freeIds, freeSizes, wireRuns, wireSizes, smallItems, smallSizes, cracks);
+    }
+
+    /// <summary>This brep with its small features removed, and what was done, as a new
+    /// <see cref="Brep"/> and a <see cref="HealReport"/>; this one is left as it was. The features
+    /// are the ones <see cref="Health"/> lists as small at <c>tolerance</c>: short and collapsed
+    /// edges, sliver and tiny faces, small holes. Every fix is a vertex merge, and an edge it
+    /// moves records how far as its <see cref="EdgeTolerance"/>. A guard compares the result's
+    /// health with this one's and refuses fixes that made it worse
+    /// (<see cref="HealReport.Guarded"/>). <c>edges</c>, <c>faces</c> and <c>holes</c> switch each
+    /// kind of fix; a kind switched off is refused as <c>toggled</c>. <c>tolerance</c> null, or a
+    /// value that is not finite and positive, takes the default (the report shows what was
+    /// used). The new brep is the caller's to dispose.</summary>
+    public (Brep Brep, HealReport Report) Healed(double? tolerance = null, bool edges = true, bool faces = true, bool holes = true)
+    {
+        if (Handle.IsClosed) throw new CadaclysmException("brep: released");
+        using var heal = Native.cadaclysm_brep_healed(Handle, tolerance ?? double.NaN, HealFlags(edges, faces, holes));
+        if (heal.IsInvalid) throw new CadaclysmException(Cadaclysm.LastErrorOr("healed"));
+        var counts = new uint[11];
+        var sizes = new double[2];
+        if (!Native.cadaclysm_brep_heal_summary(heal, counts, sizes))
+            throw new CadaclysmException(Cadaclysm.LastErrorOr("healed"));
+        var n = Native.cadaclysm_brep_heal_fixes(heal, null, null);
+        var fixItems = new uint[2 * n];
+        var fixSizes = new double[2 * n];
+        if (n > 0) Native.cadaclysm_brep_heal_fixes(heal, fixItems, fixSizes);
+        n = Native.cadaclysm_brep_heal_refused(heal, null, null);
+        var refusedItems = new uint[3 * n];
+        var refusedSizes = new double[n];
+        if (n > 0) Native.cadaclysm_brep_heal_refused(heal, refusedItems, refusedSizes);
+        var report = HealReport.FromRows(counts, sizes, fixItems, fixSizes, refusedItems, refusedSizes);
+        var body = Native.cadaclysm_brep_heal_body(heal);
+        if (body.IsInvalid)
+        {
+            body.Dispose();
+            throw new CadaclysmException(Cadaclysm.LastErrorOr("healed"));
+        }
+        return (new Brep(body), report);
+    }
+
+    /// <summary>How far brep edge <c>edge</c> (as a <see cref="HealFix"/> or
+    /// <see cref="FreeEdge"/> names one) may lie off its curve: 0 for an exact edge, the distance
+    /// healing (or sewing) moved it where that is recorded, null when no trim names the id (an
+    /// edge healing removed).</summary>
+    public double? EdgeTolerance(uint edge)
+    {
+        if (Handle.IsClosed) throw new CadaclysmException("brep: released");
+        var t = Native.cadaclysm_brep_edge_tolerance(Handle, edge);
+        return double.IsNaN(t) ? null : t;
+    }
+
+    /// <summary><see cref="Healed"/>'s switches as the C ABI's flag bits: 1 edges, 2 faces, 4 holes.</summary>
+    internal static uint HealFlags(bool edges, bool faces, bool holes) =>
+        (edges ? 1u : 0u) | (faces ? 2u : 0u) | (holes ? 4u : 0u);
+
     public void Dispose() => Handle.Dispose();
 }
 
@@ -2535,6 +2668,122 @@ public readonly struct Manifold
 /// than two), the widest gap it sewed, and the two tolerances it used.</summary>
 public sealed record SewReport(uint Pairs, uint FreeBefore, uint FreeAfter, uint Refused, double WorstGap,
                                double Tolerance, double Vertex);
+
+/// <summary>One free edge, as plain data (<see cref="HealthReport.FreeEdges"/>): a side only one
+/// face bounds -- its <c>Trim</c> (the face's side), the <c>Edge</c> it lies on (null for a side
+/// with no edge), the <c>Face</c> and free <c>Wire</c> it is on, its nearest <c>Partner</c>
+/// across the gap as an index into <see cref="HealthReport.FreeEdges"/> (null if there is none),
+/// how many of its two ends it shares with that partner (<c>SharedEnds</c>: 2 is what sewing
+/// joins), its <c>Length</c> and the <c>Gap</c> to the partner (infinite without one).</summary>
+public sealed record FreeEdge(uint Trim, uint? Edge, uint Face, uint Wire, uint? Partner, uint SharedEnds, double Length, double Gap);
+
+/// <summary>A chain of free edges end to end (<see cref="HealthReport.Wires"/>): the rows
+/// <c>First</c> to <c>First + Count</c> of <see cref="HealthReport.FreeEdges"/>, whether it
+/// <c>Closed</c> on itself, its total <c>Length</c> and the <c>WidestGap</c> to any partner.</summary>
+public sealed record FreeWire(uint First, uint Count, bool Closed, double Length, double WidestGap);
+
+/// <summary>Something below the tolerance (<see cref="HealthReport.Small"/>): <c>Kind</c> is
+/// "short_edge", "collapsed_edge", "sliver_face", "tiny_face", "tiny_body" or "small_hole";
+/// <c>Index</c> its edge, face or body number (a small hole's is its loop number); <c>Size</c>
+/// how small.</summary>
+public sealed record SmallFeature(string Kind, uint Index, double Size);
+
+/// <summary>What a mesh of the body shows (<see cref="HealthReport.Cracks"/>, asked for with
+/// <c>mesh</c>): whether it is <c>Watertight</c>, how many mesh edges are <c>Open</c> or
+/// <c>Folded</c>, how many <c>Crossings</c>, and the body's <c>Edges</c> the cracks lie along.
+/// Only a closed body is counted: an open one's census is empty by design.</summary>
+public sealed record Cracks(bool Watertight, uint Open, uint Folded, uint Crossings, IReadOnlyList<uint> Edges);
+
+/// <summary>What is wrong with a body, as plain data (<see cref="Brep.Health"/>): the
+/// <c>Tolerance</c> and <c>Rounding</c> it judged at and the body's <c>Extent</c>; the free
+/// edges, their wires, the features below the tolerance; the loose edges (<c>WorstLoose</c> the
+/// widest gap); what sewing would do (<c>SewPairs</c> joined, <c>SewRefused</c>,
+/// <c>SewWorstGap</c>); the mesh's <c>Cracks</c> if asked for, else null; and
+/// <c>WorstGap</c>, the widest gap between a free edge and its partner.</summary>
+public sealed record HealthReport(double Tolerance, double Rounding, double Extent, IReadOnlyList<FreeEdge> FreeEdges,
+                                  IReadOnlyList<FreeWire> Wires, IReadOnlyList<SmallFeature> Small, uint LooseEdges,
+                                  double WorstLoose, uint SewPairs, uint SewRefused, double SewWorstGap, Cracks? Cracks,
+                                  double WorstGap)
+{
+    /// <summary>The free edges of wire number <c>wire</c> (an index into <see cref="Wires"/>), in order.</summary>
+    public IReadOnlyList<FreeEdge> WireEdges(int wire)
+    {
+        var w = Wires[wire];
+        return FreeEdges.Skip((int)w.First).Take((int)w.Count).ToArray();
+    }
+
+    internal static readonly string[] Kinds = { "short_edge", "collapsed_edge", "sliver_face", "tiny_face", "tiny_body", "small_hole" };
+
+    /// <summary>The flat rows of the health C ABI as a report: counts 18, sizes 8, free edges
+    /// 6 ids + 2 sizes a row, wires 3 + 2, small features 2 + 1, the crack edge ids.</summary>
+    internal static HealthReport FromRows(uint[] counts, double[] sizes, uint[] freeIds, double[] freeSizes, uint[] wireRuns,
+                                          double[] wireSizes, uint[] smallItems, double[] smallSizes, uint[] crackEdges)
+    {
+        const uint none = 0xFFFFFFFF;
+        var free = new FreeEdge[freeIds.Length / 6];
+        for (var i = 0; i < free.Length; i++)
+        {
+            var edge = freeIds[6 * i + 1];
+            var partner = freeIds[6 * i + 4];
+            free[i] = new FreeEdge(freeIds[6 * i], edge == none ? null : edge, freeIds[6 * i + 2], freeIds[6 * i + 3],
+                                   partner == none ? null : partner, freeIds[6 * i + 5], freeSizes[2 * i], freeSizes[2 * i + 1]);
+        }
+        var wires = new FreeWire[wireRuns.Length / 3];
+        for (var i = 0; i < wires.Length; i++)
+            wires[i] = new FreeWire(wireRuns[3 * i], wireRuns[3 * i + 1], wireRuns[3 * i + 2] != 0, wireSizes[2 * i], wireSizes[2 * i + 1]);
+        var small = new SmallFeature[smallSizes.Length];
+        for (var i = 0; i < small.Length; i++)
+            small[i] = new SmallFeature(Kinds[smallItems[2 * i]], smallItems[2 * i + 1], smallSizes[i]);
+        var cracks = counts[12] == 1 ? new Cracks(counts[13] != 0, counts[14], counts[15], counts[16], (uint[])crackEdges.Clone()) : null;
+        return new HealthReport(sizes[0], sizes[1], sizes[2], free, wires, small, counts[9], sizes[4], counts[10], counts[11],
+                                sizes[5], cracks, sizes[3]);
+    }
+}
+
+/// <summary>One small feature <see cref="Brep.Healed"/> removed (<see cref="HealReport.Fixes"/>):
+/// its <c>Kind</c> (as <see cref="SmallFeature.Kind"/>), its <c>Index</c> in the input (the edge,
+/// face or loop number <see cref="Brep.Health"/> gave it), its <c>Size</c>, and how far the
+/// vertices it merged <c>Moved</c>.</summary>
+public sealed record HealFix(string Kind, uint Index, double Size, double Moved);
+
+/// <summary>One small feature <see cref="Brep.Healed"/> left, and why
+/// (<see cref="HealReport.Refused"/>): <c>Kind</c> and <c>Index</c> as in <see cref="HealFix"/>;
+/// <c>Why</c> is "would_empty_loop", "closed", "seam", "chain" (a chain wider than the
+/// tolerance), "neighbours_part" (a sliver's neighbours part), "uneven" (uneven sliver sides),
+/// "non_manifold", "has_holes", "body_guard" (the fix made the body's health worse), "toggled"
+/// (its kind switched off) or "unsupported"; <c>Figure</c> the chain's width or the neighbours'
+/// gap, else 0.</summary>
+public sealed record HealRefusal(string Kind, uint Index, string Why, double Figure);
+
+/// <summary>What <see cref="Brep.Healed"/> did, as plain data: the <c>Tolerance</c> it healed
+/// at, the furthest any trim <c>Moved</c>, whether the body guard refused fixes
+/// (<c>Guarded</c>), the <c>Fixes</c> made and the features <c>Refused</c>; and the body's
+/// health before and after at that tolerance -- its small features, free edges, whether it is
+/// closed, and its non-manifold edges.</summary>
+public sealed record HealReport(double Tolerance, double Moved, bool Guarded, IReadOnlyList<HealFix> Fixes,
+                                IReadOnlyList<HealRefusal> Refused, uint SmallBefore, uint SmallAfter, uint FreeBefore,
+                                uint FreeAfter, bool ClosedBefore, bool ClosedAfter, uint NonmanifoldBefore,
+                                uint NonmanifoldAfter)
+{
+    internal static readonly string[] Whys = { "would_empty_loop", "closed", "seam", "chain", "neighbours_part", "uneven",
+                                               "non_manifold", "has_holes", "body_guard", "toggled", "unsupported" };
+
+    /// <summary>The flat rows of the heal C ABI as a report: counts 11, sizes 2, fixes 2 items +
+    /// 2 sizes a row, refusals 3 items + 1 size.</summary>
+    internal static HealReport FromRows(uint[] counts, double[] sizes, uint[] fixItems, double[] fixSizes, uint[] refusedItems,
+                                        double[] refusedSizes)
+    {
+        var fixes = new HealFix[fixItems.Length / 2];
+        for (var i = 0; i < fixes.Length; i++)
+            fixes[i] = new HealFix(HealthReport.Kinds[fixItems[2 * i]], fixItems[2 * i + 1], fixSizes[2 * i], fixSizes[2 * i + 1]);
+        var refused = new HealRefusal[refusedSizes.Length];
+        for (var i = 0; i < refused.Length; i++)
+            refused[i] = new HealRefusal(HealthReport.Kinds[refusedItems[3 * i]], refusedItems[3 * i + 1], Whys[refusedItems[3 * i + 2]],
+                                         refusedSizes[i]);
+        return new HealReport(sizes[0], sizes[1], counts[2] != 0, fixes, refused, counts[3], counts[4], counts[5], counts[6],
+                              counts[7] != 0, counts[8] != 0, counts[9], counts[10]);
+    }
+}
 
 /// <summary>One meshlet, copied out: the arrays are yours.</summary>
 public sealed record Meshlet(uint Index, uint Level, uint Group, float Error, uint VertexCount, uint TriangleCount,

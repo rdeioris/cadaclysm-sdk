@@ -107,6 +107,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalDouble;
 
 /**
  * The kernel's module-level entry points -- the library's version and licensing, the default
@@ -286,6 +287,77 @@ public final class Blacksmith {
             ValueLayout.JAVA_INT.withName("refused"),
             ValueLayout.JAVA_INT.withName("confirmed"));
 
+    /** {@code CadaclysmBlacksmithOrientedBox}: centre, three axes (row-major), three half
+     *  extents. Named {@code ORIENTED_BOX_LAYOUT}, not {@code ORIENTED_BOX}: that is the
+     *  {@link MethodHandle} for {@code cadaclysm_blacksmith_oriented_box}, on this same class. */
+    private static final MemoryLayout ORIENTED_BOX_LAYOUT = MemoryLayout.structLayout(
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("centre"),
+            MemoryLayout.sequenceLayout(9, ValueLayout.JAVA_DOUBLE).withName("axes"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("half"));
+
+    /** {@code CadaclysmBlacksmithLength}: a length, a bound on its error, two flags (ints). */
+    private static final MemoryLayout LENGTH = MemoryLayout.structLayout(
+            ValueLayout.JAVA_DOUBLE.withName("length"),
+            ValueLayout.JAVA_DOUBLE.withName("error"),
+            ValueLayout.JAVA_INT.withName("accuracy_met"),
+            ValueLayout.JAVA_INT.withName("from_polyline"));
+
+    /** {@code CadaclysmBlacksmithClosest}: the two {@code kind} pointers are static strings the
+     *  library owns -- copied, never freed. Named {@code CLOSEST_LAYOUT}: {@code CLOSEST} is the
+     *  {@link MethodHandle} for {@code cadaclysm_blacksmith_closest}. */
+    private static final MemoryLayout CLOSEST_LAYOUT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_DOUBLE.withName("distance"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("on_a"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("on_b"),
+            ValueLayout.ADDRESS.withName("kind_a"),
+            ValueLayout.JAVA_INT.withName("index_a"),
+            ValueLayout.JAVA_INT.withName("edge_a"),
+            ValueLayout.ADDRESS.withName("kind_b"),
+            ValueLayout.JAVA_INT.withName("index_b"),
+            ValueLayout.JAVA_INT.withName("edge_b"),
+            ValueLayout.JAVA_INT.withName("refined"),
+            MemoryLayout.paddingLayout(4));
+
+    /** {@code CadaclysmBlacksmithAt}: a point and its tangent, the curve's parameter, the segment
+     *  ({@code NONE} on a solid's edge), an error bound, a flag (80 bytes). */
+    private static final MemoryLayout AT_LAYOUT = MemoryLayout.structLayout(
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("point"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("tangent"),
+            ValueLayout.JAVA_DOUBLE.withName("parameter"),
+            ValueLayout.JAVA_INT.withName("segment"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.JAVA_DOUBLE.withName("error"),
+            ValueLayout.JAVA_INT.withName("from_polyline"),
+            MemoryLayout.paddingLayout(4));
+
+    /** {@code CadaclysmBlacksmithRTreeHit}: an entry's id, 4 bytes of padding, its distance (16
+     *  bytes). */
+    private static final MemoryLayout RTREE_HIT_LAYOUT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("id"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.JAVA_DOUBLE.withName("distance"));
+
+    /** {@code CadaclysmBlacksmithRTreePair}: two entry ids (8 bytes). */
+    private static final MemoryLayout RTREE_PAIR_LAYOUT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("a"),
+            ValueLayout.JAVA_INT.withName("b"));
+
+    /** {@code CadaclysmBlacksmithRegion}: {@code finite} (an int), 4 bytes of padding, the box's
+     *  {@code min} and {@code max} (three doubles each), then the {@code sides} and {@code shells}
+     *  counts (64 bytes). */
+    private static final MemoryLayout REGION_LAYOUT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("finite"),
+            MemoryLayout.paddingLayout(4),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("min"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("max"),
+            ValueLayout.JAVA_INT.withName("sides"),
+            ValueLayout.JAVA_INT.withName("shells"));
+
+    /** {@code CadaclysmBlacksmithFaceSide}: a face index and its sense, +1 or -1 (8 bytes). */
+    private static final MemoryLayout FACE_SIDE_LAYOUT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("face"),
+            ValueLayout.JAVA_INT.withName("sense"));
+
     /** {@code CadaclysmBlacksmithSubdParts}: a cage's parts, as views into its handle, valid
      *  until the handle is freed. */
     private static final MemoryLayout SUBD_PARTS = MemoryLayout.structLayout(
@@ -350,6 +422,91 @@ public final class Blacksmith {
             ValueLayout.JAVA_INT.withName("vertex_count"),
             ValueLayout.JAVA_INT.withName("index_count"),
             ValueLayout.ADDRESS.withName("text"));
+
+    /** {@code CadaclysmBlacksmithClash}: one row of a clash call (128 bytes). The four string
+     *  pointers borrow from the clashes handle -- copied out at once, never freed; four bytes
+     *  of padding after {@code refined} land {@code depth} on an eight-byte boundary. Named
+     *  {@code CLASH_LAYOUT}: {@code CLASH} is the {@link MethodHandle} for {@code
+     *  cadaclysm_blacksmith_clash}. */
+    private static final MemoryLayout CLASH_LAYOUT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("a"),
+            ValueLayout.JAVA_INT.withName("b"),
+            ValueLayout.ADDRESS.withName("kind"),
+            ValueLayout.JAVA_DOUBLE.withName("distance"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("on_a"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("on_b"),
+            ValueLayout.ADDRESS.withName("kind_a"),
+            ValueLayout.JAVA_INT.withName("index_a"),
+            ValueLayout.JAVA_INT.withName("edge_a"),
+            ValueLayout.ADDRESS.withName("kind_b"),
+            ValueLayout.JAVA_INT.withName("index_b"),
+            ValueLayout.JAVA_INT.withName("edge_b"),
+            ValueLayout.JAVA_INT.withName("refined"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.JAVA_DOUBLE.withName("depth"),
+            ValueLayout.ADDRESS.withName("text"));
+
+    /** {@code CadaclysmBlacksmithSweptClash}: one row of a swept clash call (24 bytes). Four
+     *  bytes of padding after {@code interval_count} round it to an eight-byte multiple. */
+    private static final MemoryLayout SWEPT_CLASH_LAYOUT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("a"),
+            ValueLayout.JAVA_INT.withName("b"),
+            ValueLayout.JAVA_DOUBLE.withName("first_time"),
+            ValueLayout.JAVA_INT.withName("interval_count"),
+            MemoryLayout.paddingLayout(4));
+
+    /** {@code CadaclysmBlacksmithThickness}: one wall-thickness reading (128 bytes). Four bytes
+     *  of padding after {@code face} land {@code point} on an eight-byte boundary; seven after
+     *  {@code knife} do the same for {@code exact_thickness}. */
+    private static final MemoryLayout THICKNESS_LAYOUT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("body"),
+            ValueLayout.JAVA_INT.withName("vertex"),
+            ValueLayout.JAVA_INT.withName("face"),
+            MemoryLayout.paddingLayout(4),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("point"),
+            ValueLayout.JAVA_DOUBLE.withName("thickness"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("opposite"),
+            ValueLayout.JAVA_INT.withName("opposite_body"),
+            ValueLayout.JAVA_INT.withName("opposite_face"),
+            ValueLayout.JAVA_BOOLEAN.withName("knife"),
+            MemoryLayout.paddingLayout(7),
+            ValueLayout.JAVA_DOUBLE.withName("exact_thickness"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("exact_opposite"),
+            ValueLayout.JAVA_DOUBLE.withName("sphere"));
+
+    /** {@code CadaclysmBlacksmithMeshThickness}: one reading on a plain mesh (80 bytes); seven
+     *  bytes of padding after {@code knife} bring it to a multiple of eight. */
+    private static final MemoryLayout MESH_THICKNESS_LAYOUT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("mesh"),
+            ValueLayout.JAVA_INT.withName("vertex"),
+            ValueLayout.JAVA_DOUBLE.withName("thickness"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("point"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("opposite"),
+            ValueLayout.JAVA_INT.withName("opposite_mesh"),
+            ValueLayout.JAVA_INT.withName("opposite_triangle"),
+            ValueLayout.JAVA_BOOLEAN.withName("knife"),
+            MemoryLayout.paddingLayout(7));
+
+    /** {@code CadaclysmBlacksmithFaceThickness}: one thickness for a face (40 bytes); seven
+     *  bytes of padding after {@code found} and after {@code uniform}. */
+    private static final MemoryLayout FACE_THICKNESS_LAYOUT = MemoryLayout.structLayout(
+            ValueLayout.JAVA_BOOLEAN.withName("found"),
+            MemoryLayout.paddingLayout(7),
+            ValueLayout.JAVA_DOUBLE.withName("thickness"),
+            ValueLayout.JAVA_DOUBLE.withName("min"),
+            ValueLayout.JAVA_DOUBLE.withName("max"),
+            ValueLayout.JAVA_BOOLEAN.withName("uniform"),
+            MemoryLayout.paddingLayout(7));
+
+    /** {@code CadaclysmBlacksmithThicknessMesh}: a gauge body's measuring mesh (40 bytes). The
+     *  four pointers borrow from the gauge: copied out at once, never freed. */
+    private static final MemoryLayout THICKNESS_MESH_LAYOUT = MemoryLayout.structLayout(
+            ValueLayout.ADDRESS.withName("positions"),
+            ValueLayout.ADDRESS.withName("normals"),
+            ValueLayout.ADDRESS.withName("indices"),
+            ValueLayout.ADDRESS.withName("faces"),
+            ValueLayout.JAVA_INT.withName("vertex_count"),
+            ValueLayout.JAVA_INT.withName("triangle_count"));
 
     /**
      * {@code CadaclysmBlacksmithSvgOptions}. {@code cadaclysm_blacksmith_svg_options_init}
@@ -468,29 +625,69 @@ public final class Blacksmith {
             SHELL, THICKEN, PUSH_PULL, PUSH_PULL_FACES, MERGE_FLUSH, REFILLET, UNFILLET, RECHAMFER, UNCHAMFER, COIL, PIPE, SPLIT, SPLIT_BY_PLANE, SPLIT_BY_PROFILE, LUMP_COUNT, LUMP, FACE_COUNT, SELECT_FACE, FACE_FRAME, FACE_REF, FIND_FACE, FACE_KIND, MASS_PROPERTIES, COLOURED, COLOUR,
             PROFILE_COLOURED, PROFILE_COLOUR, EDGES_COLOURED, EDGE_COLOUR, EDGE_POLYLINE_COLOURS,
             EDGE_COUNT, EDGE_AT, EDGE_CURVE, INTERSECT, INTERSECTION_FREE, INTERSECTION_CHAIN_COUNT, INTERSECTION_CHAIN, INTERSECTION_CURVE, INTERSECTION_OVERLAP_COUNT, INTERSECTION_OVERLAP, MESH_AT, MESH_FACE_TRIANGLES,
+            HEALTH, HEALTH_FREE, HEALTH_SUMMARY, HEALTH_FREE_EDGES, HEALTH_WIRES, HEALTH_SMALL, HEALTH_CRACK_EDGES,
+            HEALED, HEAL_BODY, HEAL_FREE, HEAL_SUMMARY, HEAL_FIXES, HEAL_REFUSED, EDGE_TOLERANCE,
             EDGE_POLYLINES, BOUNDS, LEAKED_EDGES, UNPAIRED_EDGES, MANIFOLD, STEP, SAT_TEXT, SAT, BREP_TEXT, BREP, STRING_FREE, FROM_BREP,
             BREP_LAYOUT_ID, SVG_OPTIONS_INIT, SVG_TEXT, SVG, DRAWING_SVG_TEXT, DRAWING_SVG, SILHOUETTE_BEZIERS, SILHOUETTE_BEZIERS_FREE,
             MESH_AT64, BOUNDS64, BOX_AT,
             TESSELLATION, TESSELLATION_FREE, TESSELLATION_MESH, TESSELLATION_MESH64, TESSELLATION_FACE_TRIANGLES, TESSELLATION_EDGE_POLYLINES,
             FEM_OPTIONS_INIT, SOLID_FEM_MESH, FEM_VIEW, FEM_EDGE_AT, FEM_VERTEX_AT,
             FEM_OPEN_EDGE, FEM_FOLDED_EDGE, FEM_CROSSING_COUNT, FEM_CROSSING, FEM_MSH_TEXT, FEM_SAVE_MSH, FEM_FREE,
-            NAMED, SOLID_NAME, ASSEMBLY_NEW, ASSEMBLY_FREE, ASSEMBLY_NAME, ASSEMBLY_PLACE_SOLID, ASSEMBLY_PLACE_ASSEMBLY, ASSEMBLY_STEP,
+            NAMED, SOLID_NAME, WITH_MATERIAL, SOLID_MATERIAL, STYLED, SOLID_STYLE_LOCATION, SOLID_STYLE_IDENTIFICATION, ASSEMBLY_NEW, ASSEMBLY_FREE, ASSEMBLY_NAME, ASSEMBLY_PLACE_SOLID, ASSEMBLY_PLACE_ASSEMBLY, ASSEMBLY_STEP,
             ASSEMBLY_LINK, ASSEMBLY_JOINT, ASSEMBLY_PAIR, ASSEMBLY_PAIR_WITH, ASSEMBLY_STATE, ASSEMBLY_POSED, ASSEMBLY_SEQUENCE, ASSEMBLY_BASE, PAIR_FREEDOM_COUNT,
+            ASSEMBLY_PART_COUNT, ASSEMBLY_PART_PATH, ASSEMBLY_SWEPT_CLASH,
             SOLID_BOUNDS_BOX, BOX_MOVED, BOX_OVERLAPS, BOXES_APART, COLLIDER_NEW, COLLIDER_FREE, COLLIDER_GROUP_COUNT,
             COLLIDER_STATS_CALL, COLLIDER_CHECK, COLLISIONS_FREE, COLLISIONS_COUNT, COLLISIONS_HIT, COLLISIONS_SOLID,
+            COLLIDER_CLASH, CLASH, CLASHES_COUNT, CLASHES_AT, CLASHES_SOLID, CLASHES_INTERSECT, CLASHES_FREE,
+            COLLIDER_SWEPT_CLASH, SWEPT_CLASH, SWEPT_CLASHES_COUNT, SWEPT_CLASHES_AT, SWEPT_CLASHES_INTERVAL,
+            SWEPT_CLASHES_FIRSTS, SWEPT_CLASHES_FREE,
+            THICKNESS_GAUGE_NEW, THICKNESS_GAUGE_FREE, THICKNESS_GAUGE_BODY_COUNT, THICKNESS_GAUGE_TOLERANCE,
+            THICKNESS_GAUGE_MESH, THICKNESS_GAUGE_MEASURE, THICKNESS_GAUGE_AT, THICKNESS_GAUGE_FACE,
+            THICKNESSES_COUNT, THICKNESSES_AT, THICKNESSES_FREE, MESH_THICKNESS, MESH_THICKNESSES_COUNT,
+            MESH_THICKNESSES_AT, MESH_THICKNESSES_FREE,
             PROFILE_TO_ARCS, PROFILE_OFFSET, SOLID_SECTION,
             TOOL_FLAT, TOOL_BALL, TOOL_DRILL, TOOL_WITH_RAMP_ANGLE, TOOL_FREE,
             STOCK_BOX, STOCK_AROUND, STOCK_FREE,
             JOB_NEW, JOB_SET_CLEARANCE, JOB_SET_TOLERANCE, JOB_SET_SPINDLE_DWELL, JOB_SET_NAME, JOB_SET_RESOLUTION,
             JOB_FACE, JOB_CONTOUR, JOB_POCKET, JOB_DRILL, JOB_GCODE, JOB_CAMOTICS, JOB_FREE,
             PROGRAMS_COUNT, PROGRAMS_TOOL, PROGRAMS_NAME, PROGRAMS_TEXT, PROGRAMS_FREE,
-            JOB_MACHINE, REPORT_COUNT, REPORT_KIND, REPORT_AT, REPORT_SIZE, REPORT_REASON, REPORT_REGION, REPORT_TEXT, REPORT_FREE,
+            JOB_MACHINE, JOB_MACHINE_WITH, REPORT_COUNT, REPORT_KIND, REPORT_AT, REPORT_SIZE, REPORT_TOP, REPORT_BOTTOM, REPORT_REASON, REPORT_REGION, REPORT_TEXT, REPORT_FREE,
             JOB_OPERATIONS, OPERATIONS_COUNT, OPERATIONS_KIND, OPERATIONS_TOOL, OPERATIONS_PARAM_COUNT,
             OPERATIONS_PARAM_NAME, OPERATIONS_PARAM_VALUE, OPERATIONS_FREE,
             SUBD_CUBOID, SUBD_CYLINDER, SUBD_SPHERE, SUBD_TORUS, SUBD_FROM_PARTS, SUBD_PARTS_CALL, SUBD_FREE, SUBD_TRANSFORM,
-            SUBD_SET_CREASE, SUBD_SET_PIN, SUBD_EXTRUDE, SUBD_INSET, SUBD_INSERT_LOOP, SUBD_MIRROR_ON, SUBD_MIRROR_OFF, SUBD_FULL,
+            SUBD_SET_CREASE, SUBD_SET_PIN, SUBD_EXTRUDE, SUBD_INSET, SUBD_SUBDIVIDE, SUBD_INSERT_LOOP, SUBD_MIRROR_ON, SUBD_MIRROR_OFF, SUBD_FULL,
             SUBD_EDGE_LOOP, SUBD_SMOOTH_MESH, SUBD_PICK, SUBD_TO_SOLID,
-            PARSE_COLOUR, OPTION_SET, OPTION_GET;
+            ORIENTED_BOX, EDGE_LENGTH, PROFILE_LENGTH, EDGE_POINT_AT_LENGTH, EDGE_DIVIDE_BY_COUNT, EDGE_DIVIDE_BY_LENGTH,
+            PROFILE_POINT_AT_LENGTH, PROFILE_DIVIDE_BY_COUNT, PROFILE_DIVIDE_BY_LENGTH, SAMPLES_COUNT, SAMPLES_AT, SAMPLES_FREE, CONTAINS, CLASSIFIER_NEW, CLASSIFIER_CONTAINS, CLASSIFIER_FREE, CLOSEST,
+            RTREE_NEW, RTREE_FROM_BOXES, RTREE_FROM_POINTS, RTREE_FROM_TRIANGLES, SOLID_FACE_TREE, RTREE_INSERT, RTREE_INSERT_POINT, RTREE_REMOVE, RTREE_COUNT, RTREE_BOUNDS,
+            RTREE_FREE, RTREE_SEARCH, RTREE_WITHIN, RTREE_NEAREST, RTREE_RAY, RTREE_HITS_COUNT, RTREE_HITS_AT, RTREE_HITS_FREE,
+            RTREE_OVERLAPS, RTREE_SELF_OVERLAPS, RTREE_PAIRS_COUNT, RTREE_PAIRS_AT, RTREE_PAIRS_FREE,
+            INTERPOLATOR_NEW, INTERPOLATOR_COUNT, INTERPOLATOR_DIMENSION, INTERPOLATOR_CYCLIC, INTERPOLATOR_AT,
+            INTERPOLATOR_SAMPLE, INTERPOLATOR_FREE, PROFILE_CIRCUMSCRIBED_POLYGON,
+            MERGE, REGIONS, REGIONS_COUNT, REGIONS_AT, REGIONS_SIDE_AT, REGIONS_FREE, REGION_SOLID,
+            PARSE_COLOUR, OPTION_SET, OPTION_GET,
+            SKETCH_NEW, SKETCH_FREE, SKETCH_FROM_PROFILE, SKETCH_ADD_POINT, SKETCH_ADD_LINE,
+            SKETCH_ADD_CIRCLE, SKETCH_ADD_ARC, SKETCH_ADD_BEZIER, SKETCH_ADD_CONIC, SKETCH_ADD_NURBS,
+            SKETCH_ADD_RECT, SKETCH_KIND, SKETCH_ENTITIES, SKETCH_POINT, SKETCH_SET_POINT,
+            SKETCH_RADIUS, SKETCH_SET_RADIUS, SKETCH_CENTRE, SKETCH_ENDS, SKETCH_SET_CONSTRUCTION,
+            SKETCH_IS_CONSTRUCTION, SKETCH_IS_REFERENCE, SKETCH_REMOVE_ENTITY, SKETCH_REFERENCE, SKETCH_UPDATE_REFERENCE,
+            SKETCH_CONSTRAIN, SKETCH_CONSTRAINTS, SKETCH_CONSTRAINT_KIND, SKETCH_CONSTRAINT_REFS, SKETCH_CONSTRAINT_VALUE,
+            SKETCH_CONSTRAINT_DRIVING, SKETCH_CONSTRAINT_SENSE, SKETCH_CONSTRAINT_END, SKETCH_IS_JOINT_TANGENT, SKETCH_REMOVE,
+            SKETCH_SET_VALUE, SKETCH_SET_DRIVING, SKETCH_MEASURE, SKETCH_SOLVE, SKETCH_DRAG,
+            SKETCH_REPORT_IDS, SKETCH_DIAGNOSE, SKETCH_DOF_LIST, SKETCH_DOF_PART, SKETCH_DOF_PART_LIST,
+            SKETCH_PROFILES, SKETCH_OPEN_CHAINS,
+            TRANSFORM_TRANSLATION, TRANSFORM_ROTATION, TRANSFORM_MIRROR, TRANSFORM_SCALE, TRANSFORM_SCALE_XYZ, TRANSFORM_SHEAR,
+            TRANSFORM_PLANE_TO_PLANE, TRANSFORM_CHANGE_BASIS, TRANSFORM_PLANAR_PROJECTION, TRANSFORM_PROJECT_ALONG,
+            TRANSFORM_COMPOSE, TRANSFORM_INVERSE, TRANSFORM_IS_RIGID, TRANSFORM_IS_SIMILARITY,
+            TRANSFORM_DECOMPOSE_RIGID, TRANSFORM_DECOMPOSE_SIMILARITY, TRANSFORM_DECOMPOSE_AFFINE,
+            QUATERNION_FROM_AXIS_ANGLE, QUATERNION_FROM_TRANSFORM, QUATERNION_TO_TRANSFORM, QUATERNION_SLERP,
+            SOLID_TRANSFORM, SOLID_CONVERT_TO_NURBS, PROFILE_ROTATE, PROFILE_SCALE, PROFILE_MIRROR, PROFILE_TRANSFORM2D,
+            VALUE_SIZE, VALUE_CHECK, VALUE_BOUNDS, VALUE_TRANSFORM, CURVE_VALUE_POINT_AT, CURVE_VALUE_TANGENT_AT,
+            CURVE_VALUE_LENGTH, CURVE_VALUE_CLOSEST_POINT, CIRCLE_THROUGH, ARC_THROUGH, ARC_FROM_START_TANGENT_END,
+            ELLIPSE_FROM_CIRCLE, SURFACE_VALUE_POINT_AT, SURFACE_VALUE_NORMAL_AT, SURFACE_VALUE_CLOSEST_POINT,
+            SURFACE_VALUE_DOMAIN, SURFACE_VALUE_NURBS_SHEET, SOLID_VALUE_CONTAINS, SOLID_VALUE_AREA, SOLID_VALUE_VOLUME,
+            SOLID_VALUE_TO_SOLID, CUBOID_FROM_BOUNDS, CUBOID_AROUND, CUBOID_CORNERS, CUBOID_POINT_AT, CUBOID_CLOSEST_POINT,
+            FRAME_FIT;
 
     static {
         SymbolLookup lib = library();
@@ -623,6 +820,61 @@ public final class Blacksmith {
         SELECT_FACE = bind(linker, lib, "cadaclysm_blacksmith_select_face", FunctionDescriptor.of(I, A, I, A, I));
         FACE_FRAME = bind(linker, lib, "cadaclysm_blacksmith_face_frame", FunctionDescriptor.of(B, A, I, A));
         MASS_PROPERTIES = bind(linker, lib, "cadaclysm_blacksmith_mass_properties", FunctionDescriptor.of(B, A, D, A));
+        ORIENTED_BOX = bind(linker, lib, "cadaclysm_blacksmith_oriented_box", FunctionDescriptor.of(B, A, D, A));
+        EDGE_LENGTH = bind(linker, lib, "cadaclysm_blacksmith_edge_length", FunctionDescriptor.of(B, A, I, D, A));
+        PROFILE_LENGTH = bind(linker, lib, "cadaclysm_blacksmith_profile_length", FunctionDescriptor.of(B, A, D, A));
+        EDGE_POINT_AT_LENGTH = bind(linker, lib, "cadaclysm_blacksmith_edge_point_at_length", FunctionDescriptor.of(B, A, I, D, D, A));
+        EDGE_DIVIDE_BY_COUNT = bind(linker, lib, "cadaclysm_blacksmith_edge_divide_by_count", FunctionDescriptor.of(A, A, I, I, D));
+        EDGE_DIVIDE_BY_LENGTH = bind(linker, lib, "cadaclysm_blacksmith_edge_divide_by_length", FunctionDescriptor.of(A, A, I, D, D));
+        PROFILE_POINT_AT_LENGTH = bind(linker, lib, "cadaclysm_blacksmith_profile_point_at_length", FunctionDescriptor.of(B, A, D, D, A));
+        PROFILE_DIVIDE_BY_COUNT = bind(linker, lib, "cadaclysm_blacksmith_profile_divide_by_count", FunctionDescriptor.of(A, A, I, D));
+        PROFILE_DIVIDE_BY_LENGTH = bind(linker, lib, "cadaclysm_blacksmith_profile_divide_by_length", FunctionDescriptor.of(A, A, D, D));
+        SAMPLES_COUNT = bind(linker, lib, "cadaclysm_blacksmith_samples_count", FunctionDescriptor.of(I, A));
+        SAMPLES_AT = bind(linker, lib, "cadaclysm_blacksmith_samples_at", FunctionDescriptor.of(B, A, I, A));
+        SAMPLES_FREE = bind(linker, lib, "cadaclysm_blacksmith_samples_free", FunctionDescriptor.ofVoid(A));
+        CONTAINS = bind(linker, lib, "cadaclysm_blacksmith_contains", FunctionDescriptor.of(B, A, A, D, A));
+        CLASSIFIER_NEW = bind(linker, lib, "cadaclysm_blacksmith_classifier_new", FunctionDescriptor.of(A, A, D));
+        CLASSIFIER_CONTAINS = bind(linker, lib, "cadaclysm_blacksmith_classifier_contains", FunctionDescriptor.of(B, A, A, A));
+        CLASSIFIER_FREE = bind(linker, lib, "cadaclysm_blacksmith_classifier_free", FunctionDescriptor.ofVoid(A));
+        CLOSEST = bind(linker, lib, "cadaclysm_blacksmith_closest", FunctionDescriptor.of(B, A, A, D, A, A, A));
+        RTREE_NEW = bind(linker, lib, "cadaclysm_blacksmith_rtree_new", FunctionDescriptor.of(A));
+        RTREE_FROM_BOXES = bind(linker, lib, "cadaclysm_blacksmith_rtree_from_boxes", FunctionDescriptor.of(A, A, A, I));
+        RTREE_FROM_POINTS = bind(linker, lib, "cadaclysm_blacksmith_rtree_from_points", FunctionDescriptor.of(A, A, I));
+        RTREE_FROM_TRIANGLES = bind(linker, lib, "cadaclysm_blacksmith_rtree_from_triangles", FunctionDescriptor.of(A, A, I, A, I));
+        SOLID_FACE_TREE = bind(linker, lib, "cadaclysm_blacksmith_solid_face_tree", FunctionDescriptor.of(A, A));
+        RTREE_INSERT = bind(linker, lib, "cadaclysm_blacksmith_rtree_insert", FunctionDescriptor.of(B, A, I, A));
+        RTREE_INSERT_POINT = bind(linker, lib, "cadaclysm_blacksmith_rtree_insert_point", FunctionDescriptor.of(B, A, I, A));
+        RTREE_REMOVE = bind(linker, lib, "cadaclysm_blacksmith_rtree_remove", FunctionDescriptor.of(B, A, I, A));
+        RTREE_COUNT = bind(linker, lib, "cadaclysm_blacksmith_rtree_count", FunctionDescriptor.of(I, A));
+        RTREE_BOUNDS = bind(linker, lib, "cadaclysm_blacksmith_rtree_bounds", FunctionDescriptor.of(B, A, A));
+        RTREE_FREE = bind(linker, lib, "cadaclysm_blacksmith_rtree_free", FunctionDescriptor.ofVoid(A));
+        RTREE_SEARCH = bind(linker, lib, "cadaclysm_blacksmith_rtree_search", FunctionDescriptor.of(A, A, A));
+        RTREE_WITHIN = bind(linker, lib, "cadaclysm_blacksmith_rtree_within", FunctionDescriptor.of(A, A, A, D));
+        RTREE_NEAREST = bind(linker, lib, "cadaclysm_blacksmith_rtree_nearest", FunctionDescriptor.of(A, A, A, I));
+        RTREE_RAY = bind(linker, lib, "cadaclysm_blacksmith_rtree_ray", FunctionDescriptor.of(A, A, A, A, D));
+        RTREE_HITS_COUNT = bind(linker, lib, "cadaclysm_blacksmith_rtree_hits_count", FunctionDescriptor.of(I, A));
+        RTREE_HITS_AT = bind(linker, lib, "cadaclysm_blacksmith_rtree_hits_at", FunctionDescriptor.of(B, A, I, A));
+        RTREE_HITS_FREE = bind(linker, lib, "cadaclysm_blacksmith_rtree_hits_free", FunctionDescriptor.ofVoid(A));
+        RTREE_OVERLAPS = bind(linker, lib, "cadaclysm_blacksmith_rtree_overlaps", FunctionDescriptor.of(A, A, A, D));
+        RTREE_SELF_OVERLAPS = bind(linker, lib, "cadaclysm_blacksmith_rtree_self_overlaps", FunctionDescriptor.of(A, A, D));
+        RTREE_PAIRS_COUNT = bind(linker, lib, "cadaclysm_blacksmith_rtree_pairs_count", FunctionDescriptor.of(I, A));
+        RTREE_PAIRS_AT = bind(linker, lib, "cadaclysm_blacksmith_rtree_pairs_at", FunctionDescriptor.of(B, A, I, A));
+        RTREE_PAIRS_FREE = bind(linker, lib, "cadaclysm_blacksmith_rtree_pairs_free", FunctionDescriptor.ofVoid(A));
+        INTERPOLATOR_NEW = bind(linker, lib, "cadaclysm_blacksmith_interpolator_new", FunctionDescriptor.of(A, A, I, I, B));
+        INTERPOLATOR_COUNT = bind(linker, lib, "cadaclysm_blacksmith_interpolator_count", FunctionDescriptor.of(I, A));
+        INTERPOLATOR_DIMENSION = bind(linker, lib, "cadaclysm_blacksmith_interpolator_dimension", FunctionDescriptor.of(I, A));
+        INTERPOLATOR_CYCLIC = bind(linker, lib, "cadaclysm_blacksmith_interpolator_cyclic", FunctionDescriptor.of(B, A));
+        INTERPOLATOR_AT = bind(linker, lib, "cadaclysm_blacksmith_interpolator_at", FunctionDescriptor.of(B, A, D, I, A, I));
+        INTERPOLATOR_SAMPLE = bind(linker, lib, "cadaclysm_blacksmith_interpolator_sample", FunctionDescriptor.of(B, A, A, I, I, A, I));
+        INTERPOLATOR_FREE = bind(linker, lib, "cadaclysm_blacksmith_interpolator_free", FunctionDescriptor.ofVoid(A));
+        PROFILE_CIRCUMSCRIBED_POLYGON = bind(linker, lib, "cadaclysm_blacksmith_profile_circumscribed_polygon", FunctionDescriptor.of(A, D, D, D, I, D));
+        MERGE = bind(linker, lib, "cadaclysm_blacksmith_merge", FunctionDescriptor.of(A, A, A, D, A, A));
+        REGIONS = bind(linker, lib, "cadaclysm_blacksmith_regions", FunctionDescriptor.of(A, A));
+        REGIONS_COUNT = bind(linker, lib, "cadaclysm_blacksmith_regions_count", FunctionDescriptor.of(I, A));
+        REGIONS_AT = bind(linker, lib, "cadaclysm_blacksmith_regions_at", FunctionDescriptor.of(B, A, I, A));
+        REGIONS_SIDE_AT = bind(linker, lib, "cadaclysm_blacksmith_regions_side_at", FunctionDescriptor.of(B, A, I, I, A));
+        REGIONS_FREE = bind(linker, lib, "cadaclysm_blacksmith_regions_free", FunctionDescriptor.ofVoid(A));
+        REGION_SOLID = bind(linker, lib, "cadaclysm_blacksmith_region_solid", FunctionDescriptor.of(A, A, I));
         FACE_REF = bind(linker, lib, "cadaclysm_blacksmith_face_ref", FunctionDescriptor.of(B, A, I, A));
         FIND_FACE = bind(linker, lib, "cadaclysm_blacksmith_find_face", FunctionDescriptor.of(I, A, A, I, D));
         FACE_KIND = bind(linker, lib, "cadaclysm_blacksmith_face_kind", FunctionDescriptor.of(A, A, I));
@@ -650,6 +902,20 @@ public final class Blacksmith {
         LEAKED_EDGES = bind(linker, lib, "cadaclysm_blacksmith_leaked_edges", FunctionDescriptor.of(I, A, D));
         UNPAIRED_EDGES = bind(linker, lib, "cadaclysm_blacksmith_unpaired_edges", FunctionDescriptor.of(I, A, D));
         MANIFOLD = bind(linker, lib, "cadaclysm_blacksmith_manifold", FunctionDescriptor.of(B, A, A));
+        HEALTH = bind(linker, lib, "cadaclysm_blacksmith_health", FunctionDescriptor.of(A, A, D, B));
+        HEALTH_FREE = bind(linker, lib, "cadaclysm_blacksmith_health_free", FunctionDescriptor.ofVoid(A));
+        HEALTH_SUMMARY = bind(linker, lib, "cadaclysm_blacksmith_health_summary", FunctionDescriptor.of(B, A, A, A));
+        HEALTH_FREE_EDGES = bind(linker, lib, "cadaclysm_blacksmith_health_free_edges", FunctionDescriptor.of(I, A, A, A));
+        HEALTH_WIRES = bind(linker, lib, "cadaclysm_blacksmith_health_wires", FunctionDescriptor.of(I, A, A, A));
+        HEALTH_SMALL = bind(linker, lib, "cadaclysm_blacksmith_health_small", FunctionDescriptor.of(I, A, A, A));
+        HEALTH_CRACK_EDGES = bind(linker, lib, "cadaclysm_blacksmith_health_crack_edges", FunctionDescriptor.of(I, A, A));
+        HEALED = bind(linker, lib, "cadaclysm_blacksmith_healed", FunctionDescriptor.of(A, A, D, I));
+        HEAL_BODY = bind(linker, lib, "cadaclysm_blacksmith_heal_body", FunctionDescriptor.of(A, A));
+        HEAL_FREE = bind(linker, lib, "cadaclysm_blacksmith_heal_free", FunctionDescriptor.ofVoid(A));
+        HEAL_SUMMARY = bind(linker, lib, "cadaclysm_blacksmith_heal_summary", FunctionDescriptor.of(B, A, A, A));
+        HEAL_FIXES = bind(linker, lib, "cadaclysm_blacksmith_heal_fixes", FunctionDescriptor.of(I, A, A, A));
+        HEAL_REFUSED = bind(linker, lib, "cadaclysm_blacksmith_heal_refused", FunctionDescriptor.of(I, A, A, A));
+        EDGE_TOLERANCE = bind(linker, lib, "cadaclysm_blacksmith_edge_tolerance", FunctionDescriptor.of(D, A, I));
         STEP = bind(linker, lib, "cadaclysm_blacksmith_step", FunctionDescriptor.of(A, A, L, A, I));
         SAT_TEXT = bind(linker, lib, "cadaclysm_blacksmith_sat_text", FunctionDescriptor.of(A, A, L, I));
         SAT = bind(linker, lib, "cadaclysm_blacksmith_sat", FunctionDescriptor.of(B, A, L, A, I));
@@ -659,6 +925,111 @@ public final class Blacksmith {
         PARSE_COLOUR = bind(linker, lib, "cadaclysm_blacksmith_parse_colour", FunctionDescriptor.of(B, A, A));
         OPTION_SET = bind(linker, lib, "cadaclysm_blacksmith_option_set", FunctionDescriptor.of(B, A, D));
         OPTION_GET = bind(linker, lib, "cadaclysm_blacksmith_option_get", FunctionDescriptor.of(B, A, A));
+        // The 2D constraint sketcher. Ids are uint32 (read back as int: NONE is -1); the lists it lends
+        // are borrowed until the next call on the same sketch.
+        SKETCH_NEW = bind(linker, lib, "cadaclysm_blacksmith_sketch_new", FunctionDescriptor.of(A));
+        SKETCH_FREE = bind(linker, lib, "cadaclysm_blacksmith_sketch_free", FunctionDescriptor.ofVoid(A));
+        SKETCH_FROM_PROFILE = bind(linker, lib, "cadaclysm_blacksmith_sketch_from_profile", FunctionDescriptor.of(A, A, B, D));
+        SKETCH_ADD_POINT = bind(linker, lib, "cadaclysm_blacksmith_sketch_add_point", FunctionDescriptor.of(I, A, D, D));
+        SKETCH_ADD_LINE = bind(linker, lib, "cadaclysm_blacksmith_sketch_add_line", FunctionDescriptor.of(I, A, I, I));
+        SKETCH_ADD_CIRCLE = bind(linker, lib, "cadaclysm_blacksmith_sketch_add_circle", FunctionDescriptor.of(I, A, I, D));
+        SKETCH_ADD_ARC = bind(linker, lib, "cadaclysm_blacksmith_sketch_add_arc", FunctionDescriptor.of(I, A, I, I, I));
+        SKETCH_ADD_BEZIER = bind(linker, lib, "cadaclysm_blacksmith_sketch_add_bezier", FunctionDescriptor.of(I, A, I, D, D, D, D, D, D));
+        SKETCH_ADD_CONIC = bind(linker, lib, "cadaclysm_blacksmith_sketch_add_conic", FunctionDescriptor.of(I, A, I, D, D, D, D, D));
+        SKETCH_ADD_NURBS = bind(linker, lib, "cadaclysm_blacksmith_sketch_add_nurbs", FunctionDescriptor.of(I, A, I, I, A, L, A, A, L));
+        SKETCH_ADD_RECT = bind(linker, lib, "cadaclysm_blacksmith_sketch_add_rect", FunctionDescriptor.of(A, A, D, D, D, D, A));
+        SKETCH_KIND = bind(linker, lib, "cadaclysm_blacksmith_sketch_kind", FunctionDescriptor.of(I, A, I));
+        SKETCH_ENTITIES = bind(linker, lib, "cadaclysm_blacksmith_sketch_entities", FunctionDescriptor.of(A, A, A));
+        SKETCH_POINT = bind(linker, lib, "cadaclysm_blacksmith_sketch_point", FunctionDescriptor.of(B, A, I, A));
+        SKETCH_SET_POINT = bind(linker, lib, "cadaclysm_blacksmith_sketch_set_point", FunctionDescriptor.of(B, A, I, D, D));
+        SKETCH_RADIUS = bind(linker, lib, "cadaclysm_blacksmith_sketch_radius", FunctionDescriptor.of(D, A, I));
+        SKETCH_SET_RADIUS = bind(linker, lib, "cadaclysm_blacksmith_sketch_set_radius", FunctionDescriptor.of(B, A, I, D));
+        SKETCH_CENTRE = bind(linker, lib, "cadaclysm_blacksmith_sketch_centre", FunctionDescriptor.of(I, A, I));
+        SKETCH_ENDS = bind(linker, lib, "cadaclysm_blacksmith_sketch_ends", FunctionDescriptor.of(A, A, I, A));
+        SKETCH_SET_CONSTRUCTION = bind(linker, lib, "cadaclysm_blacksmith_sketch_set_construction", FunctionDescriptor.of(B, A, I, B));
+        SKETCH_IS_CONSTRUCTION = bind(linker, lib, "cadaclysm_blacksmith_sketch_is_construction", FunctionDescriptor.of(B, A, I));
+        SKETCH_IS_REFERENCE = bind(linker, lib, "cadaclysm_blacksmith_sketch_is_reference", FunctionDescriptor.of(B, A, I));
+        SKETCH_REMOVE_ENTITY = bind(linker, lib, "cadaclysm_blacksmith_sketch_remove_entity", FunctionDescriptor.of(A, A, I, A));
+        SKETCH_REFERENCE = bind(linker, lib, "cadaclysm_blacksmith_sketch_reference", FunctionDescriptor.of(I, A, A, I));
+        SKETCH_UPDATE_REFERENCE = bind(linker, lib, "cadaclysm_blacksmith_sketch_update_reference", FunctionDescriptor.of(B, A, I, A, A));
+        SKETCH_CONSTRAIN = bind(linker, lib, "cadaclysm_blacksmith_sketch_constrain", FunctionDescriptor.of(I, A, I, A, L, D, B, I, I));
+        SKETCH_CONSTRAINTS = bind(linker, lib, "cadaclysm_blacksmith_sketch_constraints", FunctionDescriptor.of(A, A, A));
+        SKETCH_CONSTRAINT_KIND = bind(linker, lib, "cadaclysm_blacksmith_sketch_constraint_kind", FunctionDescriptor.of(I, A, I));
+        SKETCH_CONSTRAINT_REFS = bind(linker, lib, "cadaclysm_blacksmith_sketch_constraint_refs", FunctionDescriptor.of(A, A, I, A));
+        SKETCH_CONSTRAINT_VALUE = bind(linker, lib, "cadaclysm_blacksmith_sketch_constraint_value", FunctionDescriptor.of(D, A, I));
+        SKETCH_CONSTRAINT_DRIVING = bind(linker, lib, "cadaclysm_blacksmith_sketch_constraint_driving", FunctionDescriptor.of(B, A, I));
+        SKETCH_CONSTRAINT_SENSE = bind(linker, lib, "cadaclysm_blacksmith_sketch_constraint_sense", FunctionDescriptor.of(I, A, I));
+        SKETCH_CONSTRAINT_END = bind(linker, lib, "cadaclysm_blacksmith_sketch_constraint_end", FunctionDescriptor.of(I, A, I));
+        SKETCH_IS_JOINT_TANGENT = bind(linker, lib, "cadaclysm_blacksmith_sketch_is_joint_tangent", FunctionDescriptor.of(B, A, I));
+        SKETCH_REMOVE = bind(linker, lib, "cadaclysm_blacksmith_sketch_remove", FunctionDescriptor.of(B, A, I));
+        SKETCH_SET_VALUE = bind(linker, lib, "cadaclysm_blacksmith_sketch_set_value", FunctionDescriptor.of(B, A, I, D, A));
+        SKETCH_SET_DRIVING = bind(linker, lib, "cadaclysm_blacksmith_sketch_set_driving", FunctionDescriptor.of(B, A, I, B, A));
+        SKETCH_MEASURE = bind(linker, lib, "cadaclysm_blacksmith_sketch_measure", FunctionDescriptor.of(D, A, I));
+        SKETCH_SOLVE = bind(linker, lib, "cadaclysm_blacksmith_sketch_solve", FunctionDescriptor.of(B, A, A));
+        SKETCH_DRAG = bind(linker, lib, "cadaclysm_blacksmith_sketch_drag", FunctionDescriptor.of(B, A, A, A, L, A));
+        SKETCH_REPORT_IDS = bind(linker, lib, "cadaclysm_blacksmith_sketch_report_ids", FunctionDescriptor.of(A, A, A));
+        SKETCH_DIAGNOSE = bind(linker, lib, "cadaclysm_blacksmith_sketch_diagnose", FunctionDescriptor.of(B, A, A));
+        SKETCH_DOF_LIST = bind(linker, lib, "cadaclysm_blacksmith_sketch_dof_list", FunctionDescriptor.of(A, A, I, A));
+        SKETCH_DOF_PART = bind(linker, lib, "cadaclysm_blacksmith_sketch_dof_part", FunctionDescriptor.of(B, A, I, A));
+        SKETCH_DOF_PART_LIST = bind(linker, lib, "cadaclysm_blacksmith_sketch_dof_part_list", FunctionDescriptor.of(A, A, I, I, A));
+        SKETCH_PROFILES = bind(linker, lib, "cadaclysm_blacksmith_sketch_profiles", FunctionDescriptor.of(A, A, D));
+        SKETCH_OPEN_CHAINS = bind(linker, lib, "cadaclysm_blacksmith_sketch_open_chains", FunctionDescriptor.of(A, A, D));
+        // Transforms: 16-double matrices, 12-double frames, 4-double quaternions; no structs.
+        TRANSFORM_TRANSLATION = bind(linker, lib, "cadaclysm_blacksmith_transform_translation", FunctionDescriptor.of(B, A, A));
+        TRANSFORM_ROTATION = bind(linker, lib, "cadaclysm_blacksmith_transform_rotation", FunctionDescriptor.of(B, A, D, A));
+        TRANSFORM_MIRROR = bind(linker, lib, "cadaclysm_blacksmith_transform_mirror", FunctionDescriptor.of(B, A, A));
+        TRANSFORM_SCALE = bind(linker, lib, "cadaclysm_blacksmith_transform_scale", FunctionDescriptor.of(B, A, D, A));
+        TRANSFORM_SCALE_XYZ = bind(linker, lib, "cadaclysm_blacksmith_transform_scale_xyz", FunctionDescriptor.of(B, A, D, D, D, A));
+        TRANSFORM_SHEAR = bind(linker, lib, "cadaclysm_blacksmith_transform_shear", FunctionDescriptor.of(B, A, A, D, A));
+        TRANSFORM_PLANE_TO_PLANE = bind(linker, lib, "cadaclysm_blacksmith_transform_plane_to_plane", FunctionDescriptor.of(B, A, A, A));
+        TRANSFORM_CHANGE_BASIS = bind(linker, lib, "cadaclysm_blacksmith_transform_change_basis", FunctionDescriptor.of(B, A, A, A));
+        TRANSFORM_PLANAR_PROJECTION = bind(linker, lib, "cadaclysm_blacksmith_transform_planar_projection", FunctionDescriptor.of(B, A, A));
+        TRANSFORM_PROJECT_ALONG = bind(linker, lib, "cadaclysm_blacksmith_transform_project_along", FunctionDescriptor.of(B, A, A, A));
+        TRANSFORM_COMPOSE = bind(linker, lib, "cadaclysm_blacksmith_transform_compose", FunctionDescriptor.of(B, A, A, A));
+        TRANSFORM_INVERSE = bind(linker, lib, "cadaclysm_blacksmith_transform_inverse", FunctionDescriptor.of(B, A, A));
+        TRANSFORM_IS_RIGID = bind(linker, lib, "cadaclysm_blacksmith_transform_is_rigid", FunctionDescriptor.of(I, A, D));
+        TRANSFORM_IS_SIMILARITY = bind(linker, lib, "cadaclysm_blacksmith_transform_is_similarity", FunctionDescriptor.of(D, A, D));
+        TRANSFORM_DECOMPOSE_RIGID = bind(linker, lib, "cadaclysm_blacksmith_transform_decompose_rigid", FunctionDescriptor.of(B, A, D, A));
+        TRANSFORM_DECOMPOSE_SIMILARITY = bind(linker, lib, "cadaclysm_blacksmith_transform_decompose_similarity", FunctionDescriptor.of(B, A, D, A));
+        TRANSFORM_DECOMPOSE_AFFINE = bind(linker, lib, "cadaclysm_blacksmith_transform_decompose_affine", FunctionDescriptor.of(B, A, A));
+        QUATERNION_FROM_AXIS_ANGLE = bind(linker, lib, "cadaclysm_blacksmith_quaternion_from_axis_angle", FunctionDescriptor.of(B, A, D, A));
+        QUATERNION_FROM_TRANSFORM = bind(linker, lib, "cadaclysm_blacksmith_quaternion_from_transform", FunctionDescriptor.of(B, A, A));
+        QUATERNION_TO_TRANSFORM = bind(linker, lib, "cadaclysm_blacksmith_quaternion_to_transform", FunctionDescriptor.of(B, A, A, A));
+        QUATERNION_SLERP = bind(linker, lib, "cadaclysm_blacksmith_quaternion_slerp", FunctionDescriptor.of(B, A, A, D, A));
+        SOLID_TRANSFORM = bind(linker, lib, "cadaclysm_blacksmith_solid_transform", FunctionDescriptor.of(A, A, A, A));
+        SOLID_CONVERT_TO_NURBS = bind(linker, lib, "cadaclysm_blacksmith_solid_convert_to_nurbs", FunctionDescriptor.of(A, A, I, A));
+        PROFILE_ROTATE = bind(linker, lib, "cadaclysm_blacksmith_profile_rotate", FunctionDescriptor.of(A, A, D, D, D));
+        PROFILE_SCALE = bind(linker, lib, "cadaclysm_blacksmith_profile_scale", FunctionDescriptor.of(A, A, D, D, D, D));
+        PROFILE_MIRROR = bind(linker, lib, "cadaclysm_blacksmith_profile_mirror", FunctionDescriptor.of(A, A, D, D, D, D));
+        PROFILE_TRANSFORM2D = bind(linker, lib, "cadaclysm_blacksmith_profile_transform2d", FunctionDescriptor.of(A, A, A));
+        // Value geometry: flat double arrays tagged with a kind (CADACLYSM_BLACKSMITH_VALUE_*); no structs.
+        VALUE_SIZE = bind(linker, lib, "cadaclysm_blacksmith_value_size", FunctionDescriptor.of(I, I));
+        VALUE_CHECK = bind(linker, lib, "cadaclysm_blacksmith_value_check", FunctionDescriptor.of(B, I, A, A));
+        VALUE_BOUNDS = bind(linker, lib, "cadaclysm_blacksmith_value_bounds", FunctionDescriptor.of(B, I, A, A));
+        VALUE_TRANSFORM = bind(linker, lib, "cadaclysm_blacksmith_value_transform", FunctionDescriptor.of(B, I, A, A, A));
+        CURVE_VALUE_POINT_AT = bind(linker, lib, "cadaclysm_blacksmith_curve_value_point_at", FunctionDescriptor.of(B, I, A, D, A));
+        CURVE_VALUE_TANGENT_AT = bind(linker, lib, "cadaclysm_blacksmith_curve_value_tangent_at", FunctionDescriptor.of(B, I, A, D, A));
+        CURVE_VALUE_LENGTH = bind(linker, lib, "cadaclysm_blacksmith_curve_value_length", FunctionDescriptor.of(B, I, A, A));
+        CURVE_VALUE_CLOSEST_POINT = bind(linker, lib, "cadaclysm_blacksmith_curve_value_closest_point", FunctionDescriptor.of(B, I, A, A, A));
+        CIRCLE_THROUGH = bind(linker, lib, "cadaclysm_blacksmith_circle_through", FunctionDescriptor.of(B, A, A, A, A));
+        ARC_THROUGH = bind(linker, lib, "cadaclysm_blacksmith_arc_through", FunctionDescriptor.of(B, A, A, A, A));
+        ARC_FROM_START_TANGENT_END = bind(linker, lib, "cadaclysm_blacksmith_arc_from_start_tangent_end", FunctionDescriptor.of(B, A, A, A, A));
+        ELLIPSE_FROM_CIRCLE = bind(linker, lib, "cadaclysm_blacksmith_ellipse_from_circle", FunctionDescriptor.of(B, A, A));
+        SURFACE_VALUE_POINT_AT = bind(linker, lib, "cadaclysm_blacksmith_surface_value_point_at", FunctionDescriptor.of(B, I, A, D, D, A));
+        SURFACE_VALUE_NORMAL_AT = bind(linker, lib, "cadaclysm_blacksmith_surface_value_normal_at", FunctionDescriptor.of(B, I, A, D, D, A));
+        SURFACE_VALUE_CLOSEST_POINT = bind(linker, lib, "cadaclysm_blacksmith_surface_value_closest_point", FunctionDescriptor.of(B, I, A, A, A));
+        SURFACE_VALUE_DOMAIN = bind(linker, lib, "cadaclysm_blacksmith_surface_value_domain", FunctionDescriptor.of(B, I, A, A));
+        SURFACE_VALUE_NURBS_SHEET = bind(linker, lib, "cadaclysm_blacksmith_surface_value_nurbs_sheet", FunctionDescriptor.of(A, I, A));
+        SOLID_VALUE_CONTAINS = bind(linker, lib, "cadaclysm_blacksmith_solid_value_contains", FunctionDescriptor.of(I, I, A, A, D));
+        SOLID_VALUE_AREA = bind(linker, lib, "cadaclysm_blacksmith_solid_value_area", FunctionDescriptor.of(B, I, A, A));
+        SOLID_VALUE_VOLUME = bind(linker, lib, "cadaclysm_blacksmith_solid_value_volume", FunctionDescriptor.of(B, I, A, A));
+        SOLID_VALUE_TO_SOLID = bind(linker, lib, "cadaclysm_blacksmith_solid_value_to_solid", FunctionDescriptor.of(A, I, A));
+        CUBOID_FROM_BOUNDS = bind(linker, lib, "cadaclysm_blacksmith_cuboid_from_bounds", FunctionDescriptor.of(B, A, A, A));
+        CUBOID_AROUND = bind(linker, lib, "cadaclysm_blacksmith_cuboid_around", FunctionDescriptor.of(B, A, A, L, A));
+        CUBOID_CORNERS = bind(linker, lib, "cadaclysm_blacksmith_cuboid_corners", FunctionDescriptor.of(B, A, A));
+        CUBOID_POINT_AT = bind(linker, lib, "cadaclysm_blacksmith_cuboid_point_at", FunctionDescriptor.of(B, A, D, D, D, A));
+        CUBOID_CLOSEST_POINT = bind(linker, lib, "cadaclysm_blacksmith_cuboid_closest_point", FunctionDescriptor.of(B, A, A, A));
+        FRAME_FIT = bind(linker, lib, "cadaclysm_blacksmith_frame_fit", FunctionDescriptor.of(B, A, L, A, A));
         SVG_OPTIONS_INIT = bind(linker, lib, "cadaclysm_blacksmith_svg_options_init", FunctionDescriptor.ofVoid(A));
         SVG_TEXT = bind(linker, lib, "cadaclysm_blacksmith_svg_text", FunctionDescriptor.of(A, A, L, A));
         SVG = bind(linker, lib, "cadaclysm_blacksmith_svg", FunctionDescriptor.of(B, A, L, A, A));
@@ -702,6 +1073,11 @@ public final class Blacksmith {
         FEM_FREE = bind(linker, lib, "cadaclysm_blacksmith_fem_mesh_free", FunctionDescriptor.ofVoid(A));
         NAMED = bind(linker, lib, "cadaclysm_blacksmith_named", FunctionDescriptor.of(A, A, A));
         SOLID_NAME = bind(linker, lib, "cadaclysm_blacksmith_solid_name", FunctionDescriptor.of(A, A));
+        WITH_MATERIAL = bind(linker, lib, "cadaclysm_blacksmith_with_material", FunctionDescriptor.of(A, A, A));
+        SOLID_MATERIAL = bind(linker, lib, "cadaclysm_blacksmith_solid_material", FunctionDescriptor.of(A, A));
+        STYLED = bind(linker, lib, "cadaclysm_blacksmith_styled", FunctionDescriptor.of(A, A, A, A));
+        SOLID_STYLE_LOCATION = bind(linker, lib, "cadaclysm_blacksmith_solid_style_location", FunctionDescriptor.of(A, A));
+        SOLID_STYLE_IDENTIFICATION = bind(linker, lib, "cadaclysm_blacksmith_solid_style_identification", FunctionDescriptor.of(A, A));
         ASSEMBLY_NEW = bind(linker, lib, "cadaclysm_blacksmith_assembly_new", FunctionDescriptor.of(A, A));
         ASSEMBLY_FREE = bind(linker, lib, "cadaclysm_blacksmith_assembly_free", FunctionDescriptor.ofVoid(A));
         ASSEMBLY_NAME = bind(linker, lib, "cadaclysm_blacksmith_assembly_name", FunctionDescriptor.of(A, A));
@@ -730,6 +1106,16 @@ public final class Blacksmith {
         // and interpolation words, their count and whether the parameter is in seconds.
         ASSEMBLY_SEQUENCE = bind(linker, lib, "cadaclysm_blacksmith_assembly_sequence", FunctionDescriptor.of(B, A, A, A, A, A, L, B));
         ASSEMBLY_BASE = bind(linker, lib, "cadaclysm_blacksmith_assembly_base", FunctionDescriptor.of(B, A, A));
+        // An assembly's swept clash (swept clash plan 3b): part_count and part_path list the
+        // solids under it (each path an owned string, freed with string_free; null past the
+        // count); assembly_swept_clash takes the joints, their per-joint value counts and their
+        // count (size_t), the values key-major, the keyframe count, the ground (null for none),
+        // tolerance, clearance, resolution, max_steps, the allowed pairs and their pair count,
+        // and joined, and returns an owned swept clashes list read as the other two calls'.
+        ASSEMBLY_PART_COUNT = bind(linker, lib, "cadaclysm_blacksmith_assembly_part_count", FunctionDescriptor.of(I, A));
+        ASSEMBLY_PART_PATH = bind(linker, lib, "cadaclysm_blacksmith_assembly_part_path", FunctionDescriptor.of(A, A, I));
+        ASSEMBLY_SWEPT_CLASH = bind(linker, lib, "cadaclysm_blacksmith_assembly_swept_clash",
+                                    FunctionDescriptor.of(A, A, A, A, L, A, I, A, D, D, D, I, A, I, B));
         PAIR_FREEDOM_COUNT = bind(linker, lib, "cadaclysm_blacksmith_pair_freedom_count", FunctionDescriptor.of(I, A));
         SOLID_BOUNDS_BOX = bind(linker, lib, "cadaclysm_blacksmith_solid_bounds_box", FunctionDescriptor.of(B, A, D, A));
         BOX_MOVED = bind(linker, lib, "cadaclysm_blacksmith_box_moved", FunctionDescriptor.of(B, A, A, A));
@@ -744,6 +1130,47 @@ public final class Blacksmith {
         COLLISIONS_COUNT = bind(linker, lib, "cadaclysm_blacksmith_collisions_count", FunctionDescriptor.of(I, A));
         COLLISIONS_HIT = bind(linker, lib, "cadaclysm_blacksmith_collisions_hit", FunctionDescriptor.of(B, A, I, A));
         COLLISIONS_SOLID = bind(linker, lib, "cadaclysm_blacksmith_collisions_solid", FunctionDescriptor.of(A, A, I));
+        // Clash detection: both calls return an owned list (null with last_error set), read
+        // with _count/_at and freed with _clashes_free; _intersect's answer is an Intersection
+        // read as Solid.intersect's and freed with intersection_free.
+        COLLIDER_CLASH = bind(linker, lib, "cadaclysm_blacksmith_collider_clash", FunctionDescriptor.of(A, A, A, I, D, I, I));
+        CLASH = bind(linker, lib, "cadaclysm_blacksmith_clash", FunctionDescriptor.of(A, A, I, A, I, D, D, A, I));
+        CLASHES_COUNT = bind(linker, lib, "cadaclysm_blacksmith_clashes_count", FunctionDescriptor.of(I, A));
+        CLASHES_AT = bind(linker, lib, "cadaclysm_blacksmith_clashes_at", FunctionDescriptor.of(B, A, I, A));
+        CLASHES_SOLID = bind(linker, lib, "cadaclysm_blacksmith_clashes_solid", FunctionDescriptor.of(A, A, I));
+        CLASHES_INTERSECT = bind(linker, lib, "cadaclysm_blacksmith_clashes_intersect", FunctionDescriptor.of(A, A, I));
+        CLASHES_FREE = bind(linker, lib, "cadaclysm_blacksmith_clashes_free", FunctionDescriptor.ofVoid(A));
+        // Swept clash: both calls return an owned swept list (null with last_error set), read
+        // out at once with _count/_at/_interval and freed; _firsts is an owned clashes list,
+        // one row per swept row, read and kept as clash's.
+        COLLIDER_SWEPT_CLASH = bind(linker, lib, "cadaclysm_blacksmith_collider_swept_clash",
+                                    FunctionDescriptor.of(A, A, A, I, I, D, D, I, I, I));
+        SWEPT_CLASH = bind(linker, lib, "cadaclysm_blacksmith_swept_clash",
+                           FunctionDescriptor.of(A, A, I, A, A, I, A, I, D, D, D, I, A, I));
+        SWEPT_CLASHES_COUNT = bind(linker, lib, "cadaclysm_blacksmith_swept_clashes_count", FunctionDescriptor.of(I, A));
+        SWEPT_CLASHES_AT = bind(linker, lib, "cadaclysm_blacksmith_swept_clashes_at", FunctionDescriptor.of(B, A, I, A));
+        SWEPT_CLASHES_INTERVAL = bind(linker, lib, "cadaclysm_blacksmith_swept_clashes_interval", FunctionDescriptor.of(B, A, I, I, A));
+        SWEPT_CLASHES_FIRSTS = bind(linker, lib, "cadaclysm_blacksmith_swept_clashes_firsts", FunctionDescriptor.of(A, A));
+        SWEPT_CLASHES_FREE = bind(linker, lib, "cadaclysm_blacksmith_swept_clashes_free", FunctionDescriptor.ofVoid(A));
+        // Wall thickness. A gauge is a handle of its own; _measure and _at return an owned
+        // thicknesses list and mesh_thickness an owned mesh-thicknesses list (null with
+        // last_error set), each read with _count/_at and freed on every path. _mesh lends the
+        // gauge's measuring mesh: copied out before the gauge can go.
+        THICKNESS_GAUGE_NEW = bind(linker, lib, "cadaclysm_blacksmith_thickness_gauge_new", FunctionDescriptor.of(A, A, I, D));
+        THICKNESS_GAUGE_FREE = bind(linker, lib, "cadaclysm_blacksmith_thickness_gauge_free", FunctionDescriptor.ofVoid(A));
+        THICKNESS_GAUGE_BODY_COUNT = bind(linker, lib, "cadaclysm_blacksmith_thickness_gauge_body_count", FunctionDescriptor.of(I, A));
+        THICKNESS_GAUGE_TOLERANCE = bind(linker, lib, "cadaclysm_blacksmith_thickness_gauge_tolerance", FunctionDescriptor.of(D, A));
+        THICKNESS_GAUGE_MESH = bind(linker, lib, "cadaclysm_blacksmith_thickness_gauge_mesh", FunctionDescriptor.of(B, A, I, A));
+        THICKNESS_GAUGE_MEASURE = bind(linker, lib, "cadaclysm_blacksmith_thickness_gauge_measure", FunctionDescriptor.of(A, A, D, D));
+        THICKNESS_GAUGE_AT = bind(linker, lib, "cadaclysm_blacksmith_thickness_gauge_at", FunctionDescriptor.of(A, A, I, I, A, D, D));
+        THICKNESS_GAUGE_FACE = bind(linker, lib, "cadaclysm_blacksmith_thickness_gauge_face", FunctionDescriptor.of(B, A, I, I, A, D, A));
+        THICKNESSES_COUNT = bind(linker, lib, "cadaclysm_blacksmith_thicknesses_count", FunctionDescriptor.of(I, A));
+        THICKNESSES_AT = bind(linker, lib, "cadaclysm_blacksmith_thicknesses_at", FunctionDescriptor.of(B, A, I, A));
+        THICKNESSES_FREE = bind(linker, lib, "cadaclysm_blacksmith_thicknesses_free", FunctionDescriptor.ofVoid(A));
+        MESH_THICKNESS = bind(linker, lib, "cadaclysm_blacksmith_mesh_thickness", FunctionDescriptor.of(A, A, A, A, A, I, D, D));
+        MESH_THICKNESSES_COUNT = bind(linker, lib, "cadaclysm_blacksmith_mesh_thicknesses_count", FunctionDescriptor.of(I, A));
+        MESH_THICKNESSES_AT = bind(linker, lib, "cadaclysm_blacksmith_mesh_thicknesses_at", FunctionDescriptor.of(B, A, I, A));
+        MESH_THICKNESSES_FREE = bind(linker, lib, "cadaclysm_blacksmith_mesh_thicknesses_free", FunctionDescriptor.ofVoid(A));
         // The SubD cage. Every edit returns a new owned cage (null with last_error set); the
         // input is untouched. subd_pick answers false with an empty last_error for nothing near.
         SUBD_CUBOID = bind(linker, lib, "cadaclysm_blacksmith_subd_cuboid", FunctionDescriptor.of(A, D, D, D, I, I, I));
@@ -758,6 +1185,7 @@ public final class Blacksmith {
         SUBD_SET_PIN = bind(linker, lib, "cadaclysm_blacksmith_subd_set_pin", FunctionDescriptor.of(A, A, A, I, B));
         SUBD_EXTRUDE = bind(linker, lib, "cadaclysm_blacksmith_subd_extrude", FunctionDescriptor.of(A, A, A, I, D));
         SUBD_INSET = bind(linker, lib, "cadaclysm_blacksmith_subd_inset", FunctionDescriptor.of(A, A, A, I, D, B));
+        SUBD_SUBDIVIDE = bind(linker, lib, "cadaclysm_blacksmith_subd_subdivide", FunctionDescriptor.of(A, A, A, I));
         SUBD_INSERT_LOOP = bind(linker, lib, "cadaclysm_blacksmith_subd_insert_loop", FunctionDescriptor.of(A, A, I, I, D));
         SUBD_MIRROR_ON = bind(linker, lib, "cadaclysm_blacksmith_subd_mirror_on", FunctionDescriptor.of(A, A, I));
         SUBD_MIRROR_OFF = bind(linker, lib, "cadaclysm_blacksmith_subd_mirror_off", FunctionDescriptor.of(A, A));
@@ -800,10 +1228,13 @@ public final class Blacksmith {
         PROGRAMS_TEXT = bind(linker, lib, "cadaclysm_blacksmith_programs_text", FunctionDescriptor.of(A, A, I));
         PROGRAMS_FREE = bind(linker, lib, "cadaclysm_blacksmith_programs_free", FunctionDescriptor.ofVoid(A));
         JOB_MACHINE = bind(linker, lib, "cadaclysm_blacksmith_job_machine", FunctionDescriptor.of(A, A, A, A, A, L, D, D, D, D));
+        JOB_MACHINE_WITH = bind(linker, lib, "cadaclysm_blacksmith_job_machine_with", FunctionDescriptor.of(A, A, A, A, L, A, L, D, D, D, D));
         REPORT_COUNT = bind(linker, lib, "cadaclysm_blacksmith_report_count", FunctionDescriptor.of(I, A));
         REPORT_KIND = bind(linker, lib, "cadaclysm_blacksmith_report_kind", FunctionDescriptor.of(A, A, I));
         REPORT_AT = bind(linker, lib, "cadaclysm_blacksmith_report_at", FunctionDescriptor.of(B, A, I, A));
         REPORT_SIZE = bind(linker, lib, "cadaclysm_blacksmith_report_size", FunctionDescriptor.of(D, A, I));
+        REPORT_TOP = bind(linker, lib, "cadaclysm_blacksmith_report_top", FunctionDescriptor.of(D, A, I));
+        REPORT_BOTTOM = bind(linker, lib, "cadaclysm_blacksmith_report_bottom", FunctionDescriptor.of(D, A, I));
         REPORT_REASON = bind(linker, lib, "cadaclysm_blacksmith_report_reason", FunctionDescriptor.of(A, A, I));
         REPORT_REGION = bind(linker, lib, "cadaclysm_blacksmith_report_region", FunctionDescriptor.of(A, A, I));
         REPORT_TEXT = bind(linker, lib, "cadaclysm_blacksmith_report_text", FunctionDescriptor.of(A, A));
@@ -890,6 +1321,36 @@ public final class Blacksmith {
         return new BuildException(reason.isEmpty() ? what : reason);
     }
 
+    /** The count a divide asks for, as the C ABI's {@code uint32_t}: a value no {@code uint32_t}
+     *  holds is refused before any call, as Python's {@code ValueError} does. */
+    private static int count(long n, String call) {
+        if (n < 0 || n > 0xFFFFFFFFL) throw new BuildException(call + ": n is out of range: " + n);
+        return (int) n;
+    }
+
+    /** The list a divide returned, read through {@code samples_count}/{@code samples_at} and
+     *  freed on every path; a null list is the divide's refusal, named {@code what}. */
+    private static List<At> samples(MemorySegment list, String what) {
+        if (list.address() == 0) throw failure(what);
+        try (Arena arena = Arena.ofConfined()) {
+            int n = call(() -> (int) SAMPLES_COUNT.invokeExact(list));
+            List<At> found = new ArrayList<>(Math.min(n < 0 ? Integer.MAX_VALUE : n, 1024));
+            MemorySegment raw = arena.allocate(AT_LAYOUT);
+            for (int i = 0; i < n; i++) {
+                int at = i;
+                boolean ok = call(() -> (boolean) SAMPLES_AT.invokeExact(list, at, raw));
+                if (!ok) throw failure("samples_at");
+                found.add(At.of(raw));
+            }
+            return found;
+        } finally {
+            call(() -> {
+                SAMPLES_FREE.invokeExact(list);
+                return null;
+            });
+        }
+    }
+
     private static MemorySegment checked(MemorySegment handle, String what) {
         if (handle.address() == 0) throw failure(what);
         return handle;
@@ -936,6 +1397,17 @@ public final class Blacksmith {
 
     private static double[] point3(double[] p, String what) {
         return doubles(p, 3, what);
+    }
+
+    /** The word for a containment code the library answered: 0 "outside", 1 "inside", 2 "on". */
+    private static String containment(int code, String call) {
+        return switch (code) {
+            case 0 -> "outside";
+            case 1 -> "inside";
+            case 2 -> "on";
+            default -> throw new BuildException(call + ": the library answered " + Integer.toUnsignedString(code)
+                    + ", not a containment code");
+        };
     }
 
     /** {@code points} flattened to x, y pairs. */
@@ -1093,9 +1565,22 @@ public final class Blacksmith {
     /** What the library refused, in its own words ({@code cadaclysm_blacksmith_last_error}). */
     public static final class BuildException extends RuntimeException {
         private static final long serialVersionUID = 1L;
+        private final int[] ids;
 
         public BuildException(String message) {
+            this(message, new int[0]);
+        }
+
+        /** A refusal that names ids: the constraints a new constraint, value or reference conflicts with,
+         *  or the entities still using a point ({@link Sketch}). */
+        public BuildException(String message, int[] ids) {
             super(message);
+            this.ids = ids.clone();
+        }
+
+        /** The ids the refusal names, as a copy; empty for every refusal that names none. */
+        public int[] ids() {
+            return ids.clone();
         }
     }
 
@@ -1794,6 +2279,81 @@ public final class Blacksmith {
             cleanable.clean();
         }
 
+        /** The perimeter of the outer loop (holes are not counted) as a {@link Length}, to the
+         *  relative {@code accuracy} (0 asks for the default). */
+        public Length length(double accuracy) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(LENGTH);
+                MemorySegment h = handle();
+                boolean ok = call(() -> (boolean) PROFILE_LENGTH.invokeExact(h, accuracy, out));
+                if (!ok) throw failure("profile_length");
+                return Length.of(out);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #length(double)} at the default accuracy. */
+        public Length length() {
+            return length(0);
+        }
+
+        /** The point {@code s} of arc length along the outer loop from its start, to the relative
+         *  {@code accuracy} (0 or less asks for the default). {@link At#segment} is the side it
+         *  lies on. A length outside the loop, or an accuracy NaN or infinite, throws. */
+        public At pointAtLength(double s, double accuracy) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(AT_LAYOUT);
+                MemorySegment h = handle();
+                boolean ok = call(() -> (boolean) PROFILE_POINT_AT_LENGTH.invokeExact(h, s, accuracy, out));
+                if (!ok) throw failure("profile_point_at_length");
+                return At.of(out);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #pointAtLength(double, double)} at the default accuracy. */
+        public At pointAtLength(double s) {
+            return pointAtLength(s, 0);
+        }
+
+        /** {@code n} points equally spaced in arc length round the outer loop from its start (the
+         *  loop is closed, so the first is not repeated); 1 to 1,000,000. An {@code n} no {@code
+         *  uint32_t} holds throws before the call. */
+        public List<At> divideByCount(long n, double accuracy) {
+            int count = count(n, "profile_divide_by_count");
+            try {
+                MemorySegment h = handle();
+                return samples(call(() -> (MemorySegment) PROFILE_DIVIDE_BY_COUNT.invokeExact(h, count, accuracy)),
+                        "profile_divide_by_count");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #divideByCount(long, double)} at the default accuracy. */
+        public List<At> divideByCount(long n) {
+            return divideByCount(n, 0);
+        }
+
+        /** A point every {@code step} of arc length from the start of the outer loop, the short
+         *  last piece kept and the start never repeated. */
+        public List<At> divideByLength(double step, double accuracy) {
+            try {
+                MemorySegment h = handle();
+                return samples(call(() -> (MemorySegment) PROFILE_DIVIDE_BY_LENGTH.invokeExact(h, step, accuracy)),
+                        "profile_divide_by_length");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #divideByLength(double, double)} at the default accuracy. */
+        public List<At> divideByLength(double step) {
+            return divideByLength(step, 0);
+        }
+
         /** A rectangle {@code w} by {@code h} centred on the origin. */
         public static Profile rect(double w, double h) {
             return new Profile(call(() -> (MemorySegment) PROFILE_RECT.invokeExact(w, h)));
@@ -1834,6 +2394,24 @@ public final class Blacksmith {
             double[] c = point2(centre, "centre");
             int n = Math.max(0, sides);
             return new Profile(call(() -> (MemorySegment) PROFILE_REGULAR_POLYGON.invokeExact(c[0], c[1], radius, n, angle)));
+        }
+
+        /** {@link #circumscribedPolygon(double[], double, int, double)} with its first corner on the
+         *  x axis. */
+        public static Profile circumscribedPolygon(double[] centre, double radius, int sides) {
+            return circumscribedPolygon(centre, radius, sides, 0);
+        }
+
+        /** A regular polygon of {@code sides} sides (at least 3) whose sides touch the circle of
+         *  {@code radius} about {@code centre} -- the polygon across flats, a nut's hex: its corners
+         *  on the circle of {@code radius / cos(pi / sides)}, the first at {@code angle} radians
+         *  from the sketch's x axis, the rest counter-clockwise, on the same rays as {@link
+         *  #regularPolygon}'s corners with the same {@code angle}; each side's midpoint on the
+         *  circle of {@code radius}. */
+        public static Profile circumscribedPolygon(double[] centre, double radius, int sides, double angle) {
+            double[] c = point2(centre, "centre");
+            int n = Math.max(0, sides);
+            return new Profile(call(() -> (MemorySegment) PROFILE_CIRCUMSCRIBED_POLYGON.invokeExact(c[0], c[1], radius, n, angle)));
         }
 
         /** {@link #star(double[], double, double, int, double)} with its first tip on the x axis. */
@@ -2079,6 +2657,56 @@ public final class Blacksmith {
             try {
                 MemorySegment h = handle();
                 return new Profile(call(() -> (MemorySegment) TRANSLATE_PROFILE.invokeExact(h, dx, dy)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** This outline turned {@code radians} (counter-clockwise) about {@code centre}. */
+        public Profile rotate(double[] centre, double radians) {
+            double[] c = point2(centre, "profile_rotate");
+            try {
+                MemorySegment h = handle();
+                return new Profile(call(() -> (MemorySegment) PROFILE_ROTATE.invokeExact(h, c[0], c[1], radians)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** This outline scaled by {@code sx}, {@code sy} about {@code centre}: an arc stays an
+         *  arc where the two are equal in size, and becomes exact conics otherwise. A negative
+         *  factor mirrors; a zero one is singular and throws {@link BuildException}. */
+        public Profile scale(double[] centre, double sx, double sy) {
+            double[] c = point2(centre, "profile_scale");
+            try {
+                MemorySegment h = handle();
+                return new Profile(call(() -> (MemorySegment) PROFILE_SCALE.invokeExact(h, c[0], c[1], sx, sy)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** This outline reflected across the line through {@code point} along {@code direction}.
+         *  A zero {@code direction} throws {@link BuildException}. */
+        public Profile mirror(double[] point, double[] direction) {
+            double[] p = point2(point, "profile_mirror"), d = point2(direction, "profile_mirror");
+            try {
+                MemorySegment h = handle();
+                return new Profile(call(() -> (MemorySegment) PROFILE_MIRROR.invokeExact(h, p[0], p[1], d[0], d[1])));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** This outline under the 2D affine map {@code m}, six numbers row-major (2×3):
+         *  {@code x' = m0·x + m1·y + m2}, {@code y' = m3·x + m4·y + m5}. A singular map throws
+         *  {@link BuildException}. */
+        public Profile transform2d(double[] m) {
+            double[] v = doubles(m, 6, "profile_transform2d");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment ms = doublesIn(arena, v);
+                MemorySegment h = handle();
+                return new Profile(call(() -> (MemorySegment) PROFILE_TRANSFORM2D.invokeExact(h, ms)));
             } finally {
                 keep(this);
             }
@@ -2682,6 +3310,92 @@ public final class Blacksmith {
         /** {@code density * volume}, in whatever units the model and the density agree on. */
         public double mass(double density) {
             return density * volume;
+        }
+    }
+
+    /** A closed solid's box on its principal axes: {@link Solid#orientedBox}. Not the minimal box
+     *  in general; where two moments are equal (a cube, a cylinder about its axis) any axes in
+     *  that plane are as principal as the others. The half extents are grown by
+     *  diag * max(accuracy, tau/16), about 3.1e-5 of the diagonal on a body that settles at once
+     *  (planes, cylinders, cones), so they hold the body. {@code axes} is three rows of three: row
+     *  {@code i} is the box's axis {@code i} (unit, orthogonal); {@code half} is the half extent
+     *  along each. */
+    public record OrientedBox(double[] centre, double[][] axes, double[] half) {
+        static OrientedBox of(MemorySegment s) {
+            long centreAt = offset(ORIENTED_BOX_LAYOUT, "centre"), axesAt = offset(ORIENTED_BOX_LAYOUT, "axes");
+            long halfAt = offset(ORIENTED_BOX_LAYOUT, "half");
+            double[] centre = new double[3], half = new double[3];
+            double[][] axes = new double[3][3];
+            for (int i = 0; i < 3; i++) {
+                centre[i] = s.get(ValueLayout.JAVA_DOUBLE, centreAt + 8L * i);
+                half[i] = s.get(ValueLayout.JAVA_DOUBLE, halfAt + 8L * i);
+                for (int j = 0; j < 3; j++) axes[i][j] = s.get(ValueLayout.JAVA_DOUBLE, axesAt + 8L * (3 * i + j));
+            }
+            return new OrientedBox(centre, axes, half);
+        }
+    }
+
+    /** A measured length beside an estimate of its own error (not a proof): {@link
+     *  Solid#edgeLength} and {@link Profile#length}. {@code accuracyMet}: the error came under the
+     *  accuracy asked for. {@code fromPolyline}: the curve was a sampled polyline, exact for its
+     *  points and not for whatever they were sampled from. */
+    public record Length(double length, double error, boolean accuracyMet, boolean fromPolyline) {
+        static Length of(MemorySegment s) {
+            return new Length(s.get(ValueLayout.JAVA_DOUBLE, offset(LENGTH, "length")),
+                              s.get(ValueLayout.JAVA_DOUBLE, offset(LENGTH, "error")),
+                              s.get(ValueLayout.JAVA_INT, offset(LENGTH, "accuracy_met")) != 0,
+                              s.get(ValueLayout.JAVA_INT, offset(LENGTH, "from_polyline")) != 0);
+        }
+    }
+
+    /** A point at some arc length along an edge or a profile's outer loop: {@link
+     *  Solid#edgePointAtLength}, {@link Profile#pointAtLength} and the divides. {@code point} and
+     *  {@code tangent} (unit) are three doubles; {@code parameter} is the curve's own (on a
+     *  profile the side's own: a line's 0..1, an arc's angle, a spline's parameter); {@code
+     *  segment} is the profile side the point lies on (the segment count for the implicit closing
+     *  side), null on a solid's edge; {@code error} an estimate of the arc-length error, not a
+     *  proof; {@code fromPolyline}: the curve was a sampled polyline. */
+    public record At(double[] point, double[] tangent, double parameter, Integer segment, double error,
+                     boolean fromPolyline) {
+        static At of(MemorySegment s) {
+            long pointAt = offset(AT_LAYOUT, "point"), tangentAt = offset(AT_LAYOUT, "tangent");
+            double[] point = new double[3], tangent = new double[3];
+            for (int k = 0; k < 3; k++) {
+                point[k] = s.get(ValueLayout.JAVA_DOUBLE, pointAt + 8L * k);
+                tangent[k] = s.get(ValueLayout.JAVA_DOUBLE, tangentAt + 8L * k);
+            }
+            int segment = s.get(ValueLayout.JAVA_INT, offset(AT_LAYOUT, "segment"));
+            return new At(point, tangent, s.get(ValueLayout.JAVA_DOUBLE, offset(AT_LAYOUT, "parameter")),
+                          segment == NONE ? null : segment,
+                          s.get(ValueLayout.JAVA_DOUBLE, offset(AT_LAYOUT, "error")),
+                          s.get(ValueLayout.JAVA_INT, offset(AT_LAYOUT, "from_polyline")) != 0);
+        }
+    }
+
+    /** The closest points between two solids' boundaries: {@link Solid#closest}. Side {@code a}
+     *  is the solid asked, side {@code b} the other. {@code kindA}/{@code kindB} say what the
+     *  point lies on ("face", "edge" or "vertex") and {@code indexA}/{@code indexB} which one;
+     *  {@code edgeA}/{@code edgeB} are the fillet-table edge ({@link Solid#fillet} takes it), or
+     *  null where there is none. {@code refined}: the answer was refined to the tolerance. */
+    public record Closest(double distance, double[] onA, double[] onB, String kindA, int indexA, Integer edgeA,
+                          String kindB, int indexB, Integer edgeB, boolean refined) {
+        static Closest of(MemorySegment s) {
+            double[] onA = new double[3], onB = new double[3];
+            long onAAt = offset(CLOSEST_LAYOUT, "on_a"), onBAt = offset(CLOSEST_LAYOUT, "on_b");
+            for (int i = 0; i < 3; i++) {
+                onA[i] = s.get(ValueLayout.JAVA_DOUBLE, onAAt + 8L * i);
+                onB[i] = s.get(ValueLayout.JAVA_DOUBLE, onBAt + 8L * i);
+            }
+            int edgeA = s.get(ValueLayout.JAVA_INT, offset(CLOSEST_LAYOUT, "edge_a"));
+            int edgeB = s.get(ValueLayout.JAVA_INT, offset(CLOSEST_LAYOUT, "edge_b"));
+            return new Closest(s.get(ValueLayout.JAVA_DOUBLE, offset(CLOSEST_LAYOUT, "distance")), onA, onB,
+                               string(s.get(ValueLayout.ADDRESS, offset(CLOSEST_LAYOUT, "kind_a"))),
+                               s.get(ValueLayout.JAVA_INT, offset(CLOSEST_LAYOUT, "index_a")),
+                               edgeA == NONE ? null : edgeA,
+                               string(s.get(ValueLayout.ADDRESS, offset(CLOSEST_LAYOUT, "kind_b"))),
+                               s.get(ValueLayout.JAVA_INT, offset(CLOSEST_LAYOUT, "index_b")),
+                               edgeB == NONE ? null : edgeB,
+                               s.get(ValueLayout.JAVA_INT, offset(CLOSEST_LAYOUT, "refined")) != 0);
         }
     }
 
@@ -3438,6 +4152,174 @@ public final class Blacksmith {
         }
     }
 
+    // -- health and healing: the reader's report types, one set of this library's own (as
+    // Python has one in each module), built from the same flat rows.
+
+    /** One free edge (a side only one face bounds), from {@link HealthReport#freeEdges()}: its
+     *  {@code trim} (the face's side), the {@code edge} it lies on (null for a side with no
+     *  edge), the {@code face} and free {@code wire} it is on, its nearest {@code partner} --
+     *  a row of {@code freeEdges}, null if there is none -- how many of its two ends it
+     *  {@code sharedEnds} with that partner, its {@code length} and the {@code gap} to the
+     *  partner (infinite without one). */
+    public record FreeEdge(int trim, Integer edge, int face, int wire, Integer partner, int sharedEnds,
+                           double length, double gap) {
+    }
+
+    /** A chain of free edges end to end: the rows {@code first .. first + count} of {@link
+     *  HealthReport#freeEdges()}, whether it {@code closed} on itself, its total {@code length}
+     *  and the {@code widestGap} to any partner. */
+    public record FreeWire(int first, int count, boolean closed, double length, double widestGap) {
+    }
+
+    /** Something below the tolerance: {@code kind} is "short_edge", "collapsed_edge",
+     *  "sliver_face", "tiny_face", "tiny_body" or "small_hole"; {@code index} its edge, face,
+     *  body or loop number; {@code size} how small. */
+    public record SmallFeature(String kind, int index, double size) {
+    }
+
+    /** What a mesh of the solid shows ({@code health(tolerance, true)}): whether it is {@code
+     *  watertight}, how many mesh edges are {@code open} or {@code folded}, how many {@code
+     *  crossings}, and the brep {@code edges} it cracks along. */
+    public record Cracks(boolean watertight, int open, int folded, int crossings, List<Integer> edges) {
+        public Cracks {
+            edges = List.copyOf(edges);
+        }
+    }
+
+    /** The kinds a {@link SmallFeature}, {@link HealFix} or {@link HealRefusal} names, by the C
+     *  ABI's number. */
+    private static final String[] HEALTH_KINDS = {"short_edge", "collapsed_edge", "sliver_face", "tiny_face", "tiny_body", "small_hole"};
+
+    /** The reasons a {@link HealRefusal} gives, by the C ABI's number. */
+    private static final String[] HEAL_WHYS = {"would_empty_loop", "closed", "seam", "chain", "neighbours_part", "uneven",
+            "non_manifold", "has_holes", "body_guard", "toggled", "unsupported"};
+
+    /** The C ABI's "no such id" in a free-edge row. */
+    private static final int HEALTH_NONE = 0xFFFFFFFF;
+
+    /**
+     * What is wrong with a solid, as plain data ({@link Solid#health}): the {@code tolerance}
+     * and {@code rounding} it judged at and the solid's {@code extent}; the free edges, their
+     * wires, the features below the tolerance; the loose edges ({@code worstLoose} the farthest
+     * from any face); what sewing would do ({@code sewPairs} joined, {@code sewRefused}, {@code
+     * sewWorstGap}); and, if asked for with {@code mesh}, the mesh's {@code cracks} (else
+     * null). {@code worstGap} is the widest gap between a free edge and its partner.
+     */
+    public record HealthReport(double tolerance, double rounding, double extent, List<FreeEdge> freeEdges,
+                               List<FreeWire> wires, List<SmallFeature> small, int looseEdges, double worstLoose,
+                               int sewPairs, int sewRefused, double sewWorstGap, Cracks cracks, double worstGap) {
+        public HealthReport {
+            freeEdges = List.copyOf(freeEdges);
+            wires = List.copyOf(wires);
+            small = List.copyOf(small);
+        }
+
+        /** The free edges of wire number {@code wire}, in order. */
+        public List<FreeEdge> wireEdges(int wire) {
+            FreeWire w = wires.get(wire);
+            return freeEdges.subList(w.first(), w.first() + w.count());
+        }
+
+        /** From the flat rows {@code cadaclysm_blacksmith_health_summary} and the row readers
+         *  write, in their order: counts (18) and sizes (8); free edges 6 ids and 2 sizes a row;
+         *  wires 3 and 2; small features 2 and 1; the crack edges. */
+        public static HealthReport of(int[] counts, double[] sizes, int[] freeIds, double[] freeSizes, int[] wireRuns,
+                                      double[] wireSizes, int[] smallItems, double[] smallSizes, int[] crackEdges) {
+            List<FreeEdge> free = new ArrayList<>(freeIds.length / 6);
+            for (int i = 0; i < freeIds.length / 6; i++) {
+                int edge = freeIds[6 * i + 1], partner = freeIds[6 * i + 4];
+                free.add(new FreeEdge(freeIds[6 * i], edge == HEALTH_NONE ? null : edge, freeIds[6 * i + 2], freeIds[6 * i + 3],
+                        partner == HEALTH_NONE ? null : partner, freeIds[6 * i + 5], freeSizes[2 * i], freeSizes[2 * i + 1]));
+            }
+            List<FreeWire> wires = new ArrayList<>(wireRuns.length / 3);
+            for (int i = 0; i < wireRuns.length / 3; i++)
+                wires.add(new FreeWire(wireRuns[3 * i], wireRuns[3 * i + 1], wireRuns[3 * i + 2] != 0, wireSizes[2 * i], wireSizes[2 * i + 1]));
+            List<SmallFeature> small = new ArrayList<>(smallSizes.length);
+            for (int i = 0; i < smallSizes.length; i++)
+                small.add(new SmallFeature(HEALTH_KINDS[smallItems[2 * i]], smallItems[2 * i + 1], smallSizes[i]));
+            Cracks cracks = null;
+            if (counts[12] == 1) {
+                List<Integer> edges = new ArrayList<>(crackEdges.length);
+                for (int e : crackEdges) edges.add(e);
+                cracks = new Cracks(counts[13] != 0, counts[14], counts[15], counts[16], edges);
+            }
+            return new HealthReport(sizes[0], sizes[1], sizes[2], free, wires, small, counts[9], sizes[4], counts[10], counts[11],
+                    sizes[5], cracks, sizes[3]);
+        }
+    }
+
+    /** One small feature {@link Solid#healed} removed: its {@code kind} (as {@link
+     *  SmallFeature#kind()}), its {@code index} in the input (the edge, face or loop number
+     *  {@code health} gave it), its {@code size}, and how far the vertex it merged {@code
+     *  moved}. */
+    public record HealFix(String kind, int index, double size, double moved) {
+    }
+
+    /** One small feature {@link Solid#healed} left, and why: {@code kind} and {@code index} as
+     *  in {@link HealFix}; {@code why} is "would_empty_loop", "closed", "seam", "chain",
+     *  "neighbours_part", "uneven", "non_manifold", "has_holes", "body_guard", "toggled" or
+     *  "unsupported"; {@code figure} the chain's width or the neighbours' gap, else 0. */
+    public record HealRefusal(String kind, int index, String why, double figure) {
+    }
+
+    /**
+     * What {@link Solid#healed} did, as plain data: the {@code tolerance} it healed at, the
+     * furthest any trim {@code moved}, whether the body guard refused fixes ({@code guarded}),
+     * the {@code fixes} made and the features {@code refused}; and the solid's health before
+     * and after at that tolerance -- its small features, free edges, whether it is closed, and
+     * its non-manifold edges.
+     */
+    public record HealReport(double tolerance, double moved, boolean guarded, List<HealFix> fixes, List<HealRefusal> refused,
+                             int smallBefore, int smallAfter, int freeBefore, int freeAfter, boolean closedBefore,
+                             boolean closedAfter, int nonmanifoldBefore, int nonmanifoldAfter) {
+        public HealReport {
+            fixes = List.copyOf(fixes);
+            refused = List.copyOf(refused);
+        }
+
+        /** From the flat rows {@code cadaclysm_blacksmith_heal_summary} and the row readers
+         *  write, in their order: counts (11) and sizes (2); fixes 2 items and 2 sizes a row;
+         *  refusals 3 items and 1 size. */
+        public static HealReport of(int[] counts, double[] sizes, int[] fixItems, double[] fixSizes, int[] refusedItems,
+                                    double[] refusedSizes) {
+            List<HealFix> fixes = new ArrayList<>(fixItems.length / 2);
+            for (int i = 0; i < fixItems.length / 2; i++)
+                fixes.add(new HealFix(HEALTH_KINDS[fixItems[2 * i]], fixItems[2 * i + 1], fixSizes[2 * i], fixSizes[2 * i + 1]));
+            List<HealRefusal> refused = new ArrayList<>(refusedSizes.length);
+            for (int i = 0; i < refusedSizes.length; i++)
+                refused.add(new HealRefusal(HEALTH_KINDS[refusedItems[3 * i]], refusedItems[3 * i + 1], HEAL_WHYS[refusedItems[3 * i + 2]],
+                        refusedSizes[i]));
+            return new HealReport(sizes[0], sizes[1], counts[2] != 0, fixes, refused, counts[3], counts[4], counts[5], counts[6],
+                    counts[7] != 0, counts[8] != 0, counts[9], counts[10]);
+        }
+    }
+
+    /** A healed solid and its {@link HealReport}, from {@link Solid#healed}. The solid is the
+     *  caller's to close. */
+    public record Healed(Solid solid, HealReport report) {
+    }
+
+    /** {@code healed}'s switches as the C ABI's flag bits: 1 edges, 2 faces, 4 holes. */
+    static int healFlags(boolean edges, boolean faces, boolean holes) {
+        return (edges ? 1 : 0) | (faces ? 2 : 0) | (holes ? 4 : 0);
+    }
+
+    /** One two-call row reader's rows: the count with null buffers, then the rows into buffers
+     *  of {@code idsPer} {@code uint32_t} and {@code sizesPer} doubles a row. */
+    private record HealthRows(int[] ids, double[] sizes) {
+        static HealthRows read(MethodHandle reader, MemorySegment handle, int idsPer, int sizesPer, String what) {
+            int n = call(() -> (int) reader.invokeExact(handle, MemorySegment.NULL, MemorySegment.NULL));
+            if (n == 0) return new HealthRows(new int[0], new double[0]);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment ids = arena.allocate(ValueLayout.JAVA_INT, (long) idsPer * n);
+                MemorySegment sizes = arena.allocate(ValueLayout.JAVA_DOUBLE, (long) sizesPer * n);
+                int written = call(() -> (int) reader.invokeExact(handle, ids, sizes));
+                if (written != n) throw new BuildException(what + ": a row reader wrote " + written + " rows, not " + n);
+                return new HealthRows(ids.toArray(ValueLayout.JAVA_INT), sizes.toArray(ValueLayout.JAVA_DOUBLE));
+            }
+        }
+    }
+
     /**
      * An exact B-rep solid (or open sheet). Immutable; every operation returns a new one.
      * Close it to free it; the cleaner does so otherwise.
@@ -3445,6 +4327,8 @@ public final class Blacksmith {
     public static final class Solid implements AutoCloseable {
         private final Handle handle;
         private final Cleaner.Cleanable cleanable;
+        /** What {@link #inexactTrims()} reads: set by the two calls that count it. */
+        private int inexactTrims;
 
         private Solid(MemorySegment raw) {
             handle = new Handle(SOLID_FREE, "solid: closed", checked(raw, "solid"));
@@ -3897,6 +4781,67 @@ public final class Blacksmith {
             }
         }
 
+        /** This solid through the affine map {@code t}, exact, its colours and name kept. A
+         *  rigid map or a similarity keeps every surface's kind; a map within 1e-6 of a
+         *  similarity is applied as the exact similarity nearest it. Any other map (a
+         *  non-uniform scale, a shear) turns the curved surfaces into their exact NURBS and
+         *  maps those. The result's {@link #inexactTrims()} counts the trims this call lost.
+         *  A singular map throws {@link BuildException}. */
+        public Solid transform(Transform t) {
+            return transform(t.rows());
+        }
+
+        /** {@link #transform(Transform)} for 16 numbers, row-major. */
+        public Solid transform(double[] matrix) {
+            double[] m = doubles(matrix, 16, "solid_transform");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment ms = doublesIn(arena, m);
+                MemorySegment lost = arena.allocate(ValueLayout.JAVA_INT);
+                MemorySegment h = handle();
+                Solid out = new Solid(call(() -> (MemorySegment) SOLID_TRANSFORM.invokeExact(h, ms, lost)));
+                out.inexactTrims = lost.get(ValueLayout.JAVA_INT, 0);
+                return out;
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #convertToNurbs(String)} at {@code "all"}: a body made only of NURBS. */
+        public Solid convertToNurbs() {
+            return convertToNurbs("all");
+        }
+
+        /** This solid with its surfaces rewritten as their exact NURBS: {@code "procedural"}
+         *  the revolutions, extrusions and sums; {@code "analytic"} those and the cylinders,
+         *  cones, spheres and tori; {@code "all"} everything, planes and edge curves too.
+         *  Colours and name kept; {@link #inexactTrims()} counts the trims this call lost. Any
+         *  other level throws {@link BuildException}. */
+        public Solid convertToNurbs(String level) {
+            int code = switch (level == null ? "" : level) {
+                case "procedural" -> 0; // CADACLYSM_BLACKSMITH_NURBS_PROCEDURAL
+                case "analytic" -> 1;   // CADACLYSM_BLACKSMITH_NURBS_ANALYTIC
+                case "all" -> 2;        // CADACLYSM_BLACKSMITH_NURBS_ALL
+                default -> throw new BuildException("convert_to_nurbs: level " + (level == null ? "null" : "'" + level + "'")
+                        + " is not \"procedural\", \"analytic\" or \"all\"");
+            };
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment lost = arena.allocate(ValueLayout.JAVA_INT);
+                MemorySegment h = handle();
+                Solid out = new Solid(call(() -> (MemorySegment) SOLID_CONVERT_TO_NURBS.invokeExact(h, code, lost)));
+                out.inexactTrims = lost.get(ValueLayout.JAVA_INT, 0);
+                return out;
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** On a solid from {@link #transform} or {@link #convertToNurbs}, the trims that call
+         *  lost: face boundaries kept only as a polyline lifted through the old surface. Per
+         *  call, not the solid's history; 0 on every other solid. */
+        public int inexactTrims() {
+            return inexactTrims;
+        }
+
         // -- combining
 
         /** One of the four booleans; the progress callback and its user pointer are null. */
@@ -3927,6 +4872,51 @@ public final class Blacksmith {
             if (!merge) return out;
             try (out) {
                 return out.mergeFlush();
+            }
+        }
+
+        /** {@link #merge(Solid, double)} at 0.05. */
+        public Solid merge(Solid other) {
+            return merge(other, 0.05);
+        }
+
+        /** This solid and {@code other} as one body that keeps every piece -- a union that keeps
+         *  the inside pieces: its regions are this solid less {@code other}, the two together, and
+         *  {@code other} less this one (those that are not empty), and the walls between them are
+         *  faces of both. The body is non-manifold where a wall meets the outside (edges of three
+         *  or four faces), so the verbs that need a manifold solid -- the booleans, fillet, chamfer,
+         *  shell, thicken, the mass -- refuse it; take its cells with {@link #regions} and {@link
+         *  #regionSolid}. Built exactly: both solids closed, every face a plane, cylinder, cone,
+         *  sphere or torus. Walls of the two lying on one another in part are a case it refuses,
+         *  in words. Both inputs stay valid. */
+        public Solid merge(Solid other, double tolerance) {
+            return combine(MERGE, other, tolerance);
+        }
+
+        /** The regions of space this solid's faces bound, region 0 the infinite one: two for an
+         *  ordinary solid (outside, inside), one per cell for a {@link #merge}'s body, one more per
+         *  cavity. Each lists its {@code sides} -- a face and {@code sense} +1 where the region is
+         *  the side the face's normal points to, -1 the other -- and its {@code shells}, 1 plus one
+         *  per void inside it. */
+        public List<Region> regions() {
+            MemorySegment h = handle();
+            try {
+                return Region.read(call(() -> (MemorySegment) REGIONS.invokeExact(h)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Finite region {@code region} (an index into {@link #regions}) as a closed solid of its
+         *  own: the faces bounding it, each turned to point out of it, each keeping its colour.
+         *  Region 0, the infinite one, is refused; so is a negative index, before any call. */
+        public Solid regionSolid(int region) {
+            MemorySegment h = handle();
+            if (region < 0) throw new BuildException("region_solid: region is out of range: " + region);
+            try {
+                return new Solid(call(() -> (MemorySegment) REGION_SOLID.invokeExact(h, region)));
+            } finally {
+                keep(this);
             }
         }
 
@@ -4032,7 +5022,7 @@ public final class Blacksmith {
          *  estimate) -- a closed chain that does not go once round its own curve (a sliver where
          *  two surfaces barely cross) has no curve, {@code tangent} still true. An
          *  {@link Overlap} is a coincident face pair with the shared region's rings (outer
-         *  first, holes after), which may be empty for a partial overlap whose outlines cross.
+         *  first, holes after), which may be empty for a partial overlap of curved faces whose outlines cross.
          *  Known limit: a crossing narrower than {@code tolerance} -- two surfaces passing within
          *  it without their meshes crossing -- can be missed; near-tangent contact is where this
          *  bites.
@@ -4040,12 +5030,22 @@ public final class Blacksmith {
          *  <p>Throws {@link BuildException} for a {@code tolerance} not positive and finite, a
          *  solid with no faces, or one that meshes to nothing. */
         public Intersection intersect(Solid other, double tolerance) {
-            try (Arena arena = Arena.ofConfined()) {
+            try {
                 MemorySegment a = handle();
                 MemorySegment b = other.handle();
                 MemorySegment h = checked(
                         call(() -> (MemorySegment) INTERSECT.invokeExact(a, b, tolerance, MemorySegment.NULL, MemorySegment.NULL)),
                         "intersect");
+                return intersectionOf(h);
+            } finally {
+                keep(this, other);
+            }
+        }
+
+        /** An intersection handle read out into an {@link Intersection} and freed on every
+         *  path -- {@link #intersect}'s reader, and {@link Clash#intersect}'s. */
+        static Intersection intersectionOf(MemorySegment h) {
+            try (Arena arena = Arena.ofConfined()) {
                 try {
                     int n = call(() -> (int) INTERSECTION_CHAIN_COUNT.invokeExact(h));
                     List<Chain> chains = new ArrayList<>(n);
@@ -4098,8 +5098,6 @@ public final class Blacksmith {
                         return null;
                     });
                 }
-            } finally {
-                keep(this, other);
             }
         }
 
@@ -4313,6 +5311,19 @@ public final class Blacksmith {
             }
         }
 
+        /** An {@link RTree} over this solid's faces: one entry per face, its id the face index the
+         *  other face calls take, its box holding the face (the box the boolean's broad phase
+         *  pairs faces by, grown by a thousandth of the solid's extent). No faces give an empty
+         *  tree. */
+        public RTree faceTree() {
+            try {
+                MemorySegment h = handle();
+                return new RTree(call(() -> (MemorySegment) SOLID_FACE_TREE.invokeExact(h)), "solid_face_tree");
+            } finally {
+                keep(this);
+            }
+        }
+
         /** {@link #leakedEdges(double)} at 0.05. */
         public int leakedEdges() {
             return leakedEdges(0.05);
@@ -4376,6 +5387,107 @@ public final class Blacksmith {
                 boolean ok = call(() -> (boolean) MANIFOLD.invokeExact(h, out));
                 if (!ok) throw failure("manifold");
                 return Cad.Manifold.of(out.toArray(ValueLayout.JAVA_INT));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #health(Double, boolean)} at the default tolerance, without the mesh. */
+        public HealthReport health() {
+            return health(null, false);
+        }
+
+        /** What is wrong with this solid, as a {@link HealthReport}: the free edges (the sides
+         *  one face bounds) and the wires they chain into, with each edge's nearest partner and
+         *  the gap to it; the features below {@code tolerance}; the loose edges; and what sewing
+         *  would join and leave. {@code tolerance} is the length below which a feature is small
+         *  and a gap closes -- null, or a value that is not finite and positive, takes the
+         *  default (the report shows what was used). {@code mesh} also meshes the solid and
+         *  reports where the mesh cracks ({@code cracks}); without it {@code cracks} is null.
+         *  Nothing moves. */
+        public HealthReport health(Double tolerance, boolean mesh) {
+            double tol = tolerance == null ? Double.NaN : tolerance;
+            MemorySegment s = handle();
+            MemorySegment h = checked(call(() -> (MemorySegment) HEALTH.invokeExact(s, tol, mesh)), "health");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment counts = arena.allocate(ValueLayout.JAVA_INT, 18);
+                MemorySegment sizes = arena.allocate(ValueLayout.JAVA_DOUBLE, 8);
+                if (!call(() -> (boolean) HEALTH_SUMMARY.invokeExact(h, counts, sizes))) throw failure("health");
+                HealthRows free = HealthRows.read(HEALTH_FREE_EDGES, h, 6, 2, "health");
+                HealthRows wires = HealthRows.read(HEALTH_WIRES, h, 3, 2, "health");
+                HealthRows small = HealthRows.read(HEALTH_SMALL, h, 2, 1, "health");
+                int n = call(() -> (int) HEALTH_CRACK_EDGES.invokeExact(h, MemorySegment.NULL));
+                int[] cracks = new int[0];
+                if (n > 0) {
+                    MemorySegment ids = arena.allocate(ValueLayout.JAVA_INT, n);
+                    int written = call(() -> (int) HEALTH_CRACK_EDGES.invokeExact(h, ids));
+                    if (written != n) throw new BuildException("health: the crack edges wrote " + written + " ids, not " + n);
+                    cracks = ids.toArray(ValueLayout.JAVA_INT);
+                }
+                return HealthReport.of(counts.toArray(ValueLayout.JAVA_INT), sizes.toArray(ValueLayout.JAVA_DOUBLE), free.ids(),
+                        free.sizes(), wires.ids(), wires.sizes(), small.ids(), small.sizes(), cracks);
+            } finally {
+                call(() -> {
+                    HEALTH_FREE.invokeExact(h);
+                    return null;
+                });
+                keep(this);
+            }
+        }
+
+        /** {@link #healed(Double, boolean, boolean, boolean)} at the default tolerance, every
+         *  kind of fix on. */
+        public Healed healed() {
+            return healed(null, true, true, true);
+        }
+
+        /** {@link #healed(Double, boolean, boolean, boolean)} with every kind of fix on. */
+        public Healed healed(Double tolerance) {
+            return healed(tolerance, true, true, true);
+        }
+
+        /** This solid with its small features removed, and what was done, as a new {@link
+         *  Solid} and a {@link HealReport}; this one is left as it was. The features are the
+         *  ones {@link #health} lists as small at {@code tolerance}: short and collapsed edges,
+         *  sliver and tiny faces, small holes. Every fix is a vertex merge, and an edge it moves
+         *  records how far as its {@link #edgeTolerance}. A guard compares the result's health
+         *  with this one's and refuses fixes that made it worse ({@code guarded}). {@code
+         *  edges}, {@code faces} and {@code holes} switch each kind of fix; a kind switched off
+         *  is refused as "toggled". {@code tolerance} null, or a value that is not finite and
+         *  positive, takes the default (the report shows what was used). The solid is the
+         *  caller's to close. */
+        public Healed healed(Double tolerance, boolean edges, boolean faces, boolean holes) {
+            double tol = tolerance == null ? Double.NaN : tolerance;
+            int flags = healFlags(edges, faces, holes);
+            MemorySegment s = handle();
+            MemorySegment h = checked(call(() -> (MemorySegment) HEALED.invokeExact(s, tol, flags)), "healed");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment counts = arena.allocate(ValueLayout.JAVA_INT, 11);
+                MemorySegment sizes = arena.allocate(ValueLayout.JAVA_DOUBLE, 2);
+                if (!call(() -> (boolean) HEAL_SUMMARY.invokeExact(h, counts, sizes))) throw failure("healed");
+                HealthRows fixes = HealthRows.read(HEAL_FIXES, h, 2, 2, "healed");
+                HealthRows refused = HealthRows.read(HEAL_REFUSED, h, 3, 1, "healed");
+                HealReport report = HealReport.of(counts.toArray(ValueLayout.JAVA_INT), sizes.toArray(ValueLayout.JAVA_DOUBLE),
+                        fixes.ids(), fixes.sizes(), refused.ids(), refused.sizes());
+                return new Healed(new Solid(checked(call(() -> (MemorySegment) HEAL_BODY.invokeExact(h)), "healed")), report);
+            } finally {
+                call(() -> {
+                    HEAL_FREE.invokeExact(h);
+                    return null;
+                });
+                keep(this);
+            }
+        }
+
+        /** How far brep edge {@code edge} (as a {@link HealFix} names one) may lie off its curve:
+         *  0 for an exact edge, the distance healing (or sewing) moved it where that is
+         *  recorded, null when no trim names the id (an edge healing removed). */
+        public Double edgeTolerance(int edge) {
+            try {
+                MemorySegment s = handle();
+                double t = call(() -> (double) EDGE_TOLERANCE.invokeExact(s, edge));
+                if (Double.isNaN(t) && !lastError().isEmpty()) throw failure("edge_tolerance");
+                return Double.isNaN(t) ? null : t;
             } finally {
                 keep(this);
             }
@@ -4673,6 +5785,184 @@ public final class Blacksmith {
                 return Mass.of(out);
             } finally {
                 keep(this);
+            }
+        }
+
+        /** This closed solid's box on its principal axes (see {@link OrientedBox}): tight along a
+         * clear long direction, not the minimal box in general. To the relative {@code accuracy} (0, or below, asks for the default, 1e-5). An open body
+         * has no oriented box, and an accuracy that is NaN or infinite throws. */
+        public OrientedBox orientedBox(double accuracy) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(ORIENTED_BOX_LAYOUT);
+                MemorySegment h = handle();
+                boolean ok = call(() -> (boolean) ORIENTED_BOX.invokeExact(h, accuracy, out));
+                if (!ok) throw failure("oriented_box");
+                return OrientedBox.of(out);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #orientedBox(double)} at the default accuracy. */
+        public OrientedBox orientedBox() {
+            return orientedBox(0);
+        }
+
+        /** The length of edge {@code edge} (an index into {@link #edges}, as {@link #fillet}
+         * takes) over its own range, to the relative {@code accuracy} (0 asks for the default).
+         * An edge past the end, or one with no curve to measure, throws. */
+        public Length edgeLength(int edge, double accuracy) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(LENGTH);
+                MemorySegment h = handle();
+                boolean ok = call(() -> (boolean) EDGE_LENGTH.invokeExact(h, edge, accuracy, out));
+                if (!ok) throw failure("edge_length");
+                return Length.of(out);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #edgeLength(int, double)} at the default accuracy. */
+        public Length edgeLength(int edge) {
+            return edgeLength(edge, 0);
+        }
+
+        /** The point {@code s} of arc length along edge {@code edge} (an index into {@link #edges},
+         * as {@link #edgeLength} takes) from the start of its range, to the relative {@code
+         * accuracy} (0 or less asks for the default). {@link At#parameter} is the curve's own;
+         * {@link At#segment} is null. A length outside the edge, an edge past the end or with no
+         * curve, or an accuracy NaN or infinite, throws. */
+        public At edgePointAtLength(int edge, double s, double accuracy) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(AT_LAYOUT);
+                MemorySegment h = handle();
+                boolean ok = call(() -> (boolean) EDGE_POINT_AT_LENGTH.invokeExact(h, edge, s, accuracy, out));
+                if (!ok) throw failure("edge_point_at_length");
+                return At.of(out);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #edgePointAtLength(int, double, double)} at the default accuracy. */
+        public At edgePointAtLength(int edge, double s) {
+            return edgePointAtLength(edge, s, 0);
+        }
+
+        /** {@code n} points equally spaced in arc length along edge {@code edge}: n + 1 on an open
+         * edge (both ends), n on a closed one (the start not repeated). 1 to 1,000,000. An {@code
+         * n} no {@code uint32_t} holds throws before the call. */
+        public List<At> edgeDivideByCount(int edge, long n, double accuracy) {
+            int count = count(n, "edge_divide_by_count");
+            try {
+                MemorySegment h = handle();
+                return samples(call(() -> (MemorySegment) EDGE_DIVIDE_BY_COUNT.invokeExact(h, edge, count, accuracy)),
+                        "edge_divide_by_count");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #edgeDivideByCount(int, long, double)} at the default accuracy. */
+        public List<At> edgeDivideByCount(int edge, long n) {
+            return edgeDivideByCount(edge, n, 0);
+        }
+
+        /** A point every {@code step} of arc length along edge {@code edge}, the short last piece
+         * kept and a closed edge's start never repeated. */
+        public List<At> edgeDivideByLength(int edge, double step, double accuracy) {
+            try {
+                MemorySegment h = handle();
+                return samples(call(() -> (MemorySegment) EDGE_DIVIDE_BY_LENGTH.invokeExact(h, edge, step, accuracy)),
+                        "edge_divide_by_length");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #edgeDivideByLength(int, double, double)} at the default accuracy. */
+        public List<At> edgeDivideByLength(int edge, double step) {
+            return edgeDivideByLength(edge, step, 0);
+        }
+
+        /** Where {@code point} is relative to this closed solid: "inside", "outside", or "on"
+         * within {@code tolerance} (absolute, model units) of its boundary. The body is meshed on
+         * every call; for more than a few points build a {@link Classifier} once. */
+        public String contains(double[] point, double tolerance) {
+            double[] p = point3(point, "point");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment ps = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, p);
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_INT);
+                MemorySegment h = handle();
+                boolean ok = call(() -> (boolean) CONTAINS.invokeExact(h, ps, tolerance, out));
+                if (!ok) throw failure("contains");
+                return containment(out.get(ValueLayout.JAVA_INT, 0), "contains");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #contains(double[], double)} at tolerance 0.05. */
+        public String contains(double[] point) {
+            return contains(point, 0.05);
+        }
+
+        /** A {@link Classifier} for this closed solid at {@code tolerance}: the body meshed
+         * once, then asked point after point. It keeps its own reference to the body, so it goes
+         * on answering after this solid is closed. */
+        public Classifier classifier(double tolerance) {
+            try {
+                MemorySegment h = handle();
+                return new Classifier(call(() -> (MemorySegment) CLASSIFIER_NEW.invokeExact(h, tolerance)));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #classifier(double)} at tolerance 0.05. */
+        public Classifier classifier() {
+            return classifier(0.05);
+        }
+
+        /** The closest points between this solid's boundary and {@code other}'s, to {@code
+         * tolerance} (absolute, model units); this solid is side {@code a}. Boundaries are
+         * measured, not volumes. No progress callback is offered here. */
+        public Closest closest(Solid other, double tolerance) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(CLOSEST_LAYOUT);
+                MemorySegment ha = handle(), hb = other.handle();
+                boolean ok = call(() -> (boolean) CLOSEST.invokeExact(ha, hb, tolerance, MemorySegment.NULL, MemorySegment.NULL, out));
+                if (!ok) throw failure("closest");
+                return Closest.of(out);
+            } finally {
+                keep(this, other);
+            }
+        }
+
+        /** {@link #closest(Solid, double)} at tolerance 0.05. */
+        public Closest closest(Solid other) {
+            return closest(other, 0.05);
+        }
+
+        /** {@link #thicknessAtFace(int, double[], double, double)} over the face's vertices, at
+         *  tolerance 0.01. */
+        public FaceThickness thicknessAtFace(int face, double maximum) {
+            return thicknessAtFace(face, null, maximum, 0.01);
+        }
+
+        /** {@link #thicknessAtFace(int, double[], double, double)} at tolerance 0.01. */
+        public FaceThickness thicknessAtFace(int face, double[] at, double maximum) {
+            return thicknessAtFace(face, at, maximum, 0.01);
+        }
+
+        /** One thickness for face {@code face} of this solid alone, on a {@link ThicknessGauge}
+         *  meshed at {@code tolerance}, used once and freed -- build the gauge yourself to ask
+         *  more than once. {@code at} null: over the face's vertices. Null where nothing is
+         *  found; see {@link ThicknessGauge#thicknessAtFace(int, int, double[], double)}. */
+        public FaceThickness thicknessAtFace(int face, double[] at, double maximum, double tolerance) {
+            try (ThicknessGauge gauge = new ThicknessGauge(List.of(this), tolerance)) {
+                return gauge.thicknessAtFace(0, face, at, maximum);
             }
         }
 
@@ -5317,6 +6607,78 @@ public final class Blacksmith {
             }
         }
 
+        // -- material and look defined outside the file
+
+        /** This solid made of {@code material} -- a name, written to STEP as the product's
+         *  MATERIAL_DESIGNATION. Kept by every operation as the solid's colour is: a move keeps
+         *  it, a boolean's result is made of its first solid's. Writing it moves {@link
+         *  #step(String)}'s default schema to AP242; a named schema without the entity drops it,
+         *  as it drops a colour. Refused when blank. */
+        public Solid withMaterial(String material) {
+            try {
+                MemorySegment h = handle();
+                try (Arena arena = Arena.ofConfined()) {
+                    MemorySegment m = arena.allocateFrom(material);
+                    return new Solid(call(() -> (MemorySegment) WITH_MATERIAL.invokeExact(h, m)));
+                }
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** What this solid is made of, or null -- see {@link #withMaterial}. */
+        public String material() {
+            try {
+                MemorySegment h = handle();
+                MemorySegment raw = call(() -> (MemorySegment) SOLID_MATERIAL.invokeExact(h));
+                return raw.address() == 0 ? null : string(raw);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** This solid drawn in a style defined outside the file: {@code identification} the
+         *  style's name in the library at {@code location} -- a MaterialX or MDL file and a
+         *  material in it, say. Either may be null, not both. Written to STEP as an
+         *  EXTERNALLY_DEFINED_STYLE beside the solid's colour, which a reader without the library
+         *  draws instead (AP242 or AP214: the default schema moves to AP242). Kept as {@link
+         *  #withMaterial}'s material is. */
+        public Solid styled(String location, String identification) {
+            try {
+                MemorySegment h = handle();
+                try (Arena arena = Arena.ofConfined()) {
+                    MemorySegment l = location == null ? MemorySegment.NULL : arena.allocateFrom(location);
+                    MemorySegment i = identification == null ? MemorySegment.NULL : arena.allocateFrom(identification);
+                    return new Solid(call(() -> (MemorySegment) STYLED.invokeExact(h, l, i)));
+                }
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Where this solid's outside style lives ({@link #styled}'s {@code location}), or null. */
+        public String styleLocation() {
+            try {
+                MemorySegment h = handle();
+                MemorySegment raw = call(() -> (MemorySegment) SOLID_STYLE_LOCATION.invokeExact(h));
+                return raw.address() == 0 ? null : string(raw);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** This solid's outside style's name in its library ({@link #styled}'s {@code
+         *  identification}), or null. */
+        public String styleIdentification() {
+            try {
+                MemorySegment h = handle();
+                MemorySegment raw = call(() -> (MemorySegment) SOLID_STYLE_IDENTIFICATION.invokeExact(h));
+                return raw.address() == 0 ? null : string(raw);
+            } finally {
+                keep(this);
+            }
+        }
+
         // -- from files
 
         /** {@link #fromNode(Cad.Scene, Cad.Node, boolean)}, placed. */
@@ -5846,6 +7208,136 @@ public final class Blacksmith {
             return posed(rows, null, null);
         }
 
+        /** The placement path of every solid under this assembly, at any depth: depth first,
+         *  placements in order, the placement names joined by "/", a "/" or "\\" inside a name
+         *  escaped with "\\" (as {@link #posed}'s keys are). The index {@link #sweptClash}'s rows
+         *  use. Empty for an assembly that places no solid. */
+        public List<String> parts() {
+            try {
+                MemorySegment h = handle();
+                int count = call(() -> (int) ASSEMBLY_PART_COUNT.invokeExact(h));
+                List<String> out = new ArrayList<>(count);
+                for (int i = 0; i < count; i++) {
+                    int at = i;
+                    MemorySegment raw = call(() -> (MemorySegment) ASSEMBLY_PART_PATH.invokeExact(h, at));
+                    if (raw.address() == 0) throw failure("assembly_part_path");
+                    try {
+                        out.add(string(raw));
+                    } finally {
+                        call(() -> {
+                            STRING_FREE.invokeExact(raw);
+                            return null;
+                        });
+                    }
+                }
+                return out;
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #sweptClash(List, double, double, double, int, int[], String, boolean)} at
+         *  clearance 0, tolerance 0.05, resolution 1e-3, 100,000 steps, nothing allowed, the
+         *  default ground, joined links not tested. */
+        public List<SweptClash> sweptClash(List<List<StateRow>> keyframes) {
+            return sweptClash(keyframes, 0.0, 0.05, 1e-3, 100000, null, null, false);
+        }
+
+        /** {@link #sweptClash(List, double, double, double, int, int[], String, boolean)} at
+         *  tolerance 0.05, resolution 1e-3, 100,000 steps, nothing allowed, the default ground,
+         *  joined links not tested. */
+        public List<SweptClash> sweptClash(List<List<StateRow>> keyframes, double clearance) {
+            return sweptClash(keyframes, clearance, 0.05, 1e-3, 100000, null, null, false);
+        }
+
+        /**
+         * Every pair of this assembly's solids (indexed as {@link #parts()} lists them) that
+         * penetrates, touches or comes within {@code clearance} of the other anywhere while this
+         * assembly's own mechanism moves through {@code keyframes}, as {@link SweptClash} rows in
+         * pair order. Each keyframe is a list of {@link StateRow}s, as {@link #posed}'s rows, and
+         * every keyframe names the same joints with the same number of values each (the first
+         * fixes their order); time runs in keyframe units, keyframe {@code k} at time {@code k}.
+         * Between two keyframes each joint value moves linearly and each link is posed from those
+         * values, so a link swinging about a joint goes round its arc, not along its chord. Only
+         * this assembly's own joints move: a sub-assembly rides the link its placement is in.
+         * {@code ground} is one of this assembly's links held fixed (null for the default); solids
+         * in no link stay still. Pairs on two links a joint joins are not tested unless {@code
+         * joined}; {@code allowed} pairs of part indices (flat, null for none) are never tested.
+         * {@code tolerance} meshes the parts; {@code resolution} and {@code maxSteps} are {@link
+         * Collider#sweptClash}'s. Throws {@link BuildException} for keyframes naming different
+         * joints or a different number of values for one, a joint given twice, an {@code allowed}
+         * of odd length or with a negative entry, and, in the kernel's {@code swept_clash:} words,
+         * for anything else it refuses.
+         */
+        public List<SweptClash> sweptClash(List<List<StateRow>> keyframes, double clearance, double tolerance,
+                                           double resolution, int maxSteps, int[] allowed, String ground, boolean joined) {
+            List<StateRow> first = keyframes.isEmpty() ? List.of() : keyframes.get(0);
+            int jointCount = first.size();
+            String[] keys = new String[jointCount];
+            int[] counts = new int[jointCount];
+            int perKey = 0;
+            for (int i = 0; i < jointCount; i++) {
+                keys[i] = first.get(i).joint();
+                counts[i] = first.get(i).values().length;
+                perKey += counts[i];
+            }
+            List<String> keyList = Arrays.asList(keys);
+            double[] flat = new double[perKey * keyframes.size()];
+            int p = 0;
+            for (StateRow row : first) for (double v : row.values()) flat[p++] = v;
+            for (int k = 1; k < keyframes.size(); k++) {
+                // C takes one joint set for every keyframe: a later keyframe naming other joints
+                // is refused here, in the kernel's words, before C is called
+                List<StateRow> frame = keyframes.get(k);
+                List<String> named = new ArrayList<>(frame.size());
+                for (StateRow row : frame) named.add(row.joint());
+                List<String> both = new ArrayList<>(keyList);
+                both.addAll(named);
+                for (String j : both) {
+                    if (!named.contains(j))
+                        throw new BuildException("swept_clash: joint '" + j + "' is in keyframe 0 and not in keyframe " + k);
+                    if (!keyList.contains(j))
+                        throw new BuildException("swept_clash: joint '" + j + "' is in keyframe " + k + " and not in keyframe 0");
+                }
+                Map<String, double[]> values = new LinkedHashMap<>();
+                for (StateRow row : frame) {
+                    if (values.put(row.joint(), row.values()) != null)
+                        throw new BuildException("swept_clash: joint '" + row.joint() + "' is given twice");
+                }
+                for (int i = 0; i < jointCount; i++) {
+                    double[] v = values.get(keys[i]);
+                    if (v.length != counts[i])
+                        throw new BuildException("swept_clash: joint '" + keys[i] + "' has " + counts[i] + " values in keyframe 0 and "
+                                                 + v.length + " in keyframe " + k);
+                    for (double x : v) flat[p++] = x;
+                }
+            }
+            int[] pairs = allowed == null ? new int[0] : allowed.clone();
+            if (pairs.length % 2 != 0) throw new BuildException("swept_clash: allowed is " + pairs.length + " numbers, not pairs");
+            for (int i = 0; i < pairs.length; i += 2) {
+                if (pairs[i] < 0 || pairs[i + 1] < 0)
+                    throw new BuildException("swept_clash: allowed pair (" + pairs[i] + ", " + pairs[i + 1] + ") is not two indices");
+            }
+            MemorySegment raw;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment joints = jointCount == 0 ? MemorySegment.NULL : arena.allocate(ValueLayout.ADDRESS, jointCount);
+                for (int i = 0; i < jointCount; i++) joints.setAtIndex(ValueLayout.ADDRESS, i, arena.allocateFrom(keys[i]));
+                MemorySegment countsSeg = jointCount == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_INT, counts);
+                MemorySegment valuesSeg = flat.length == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_DOUBLE, flat);
+                MemorySegment g = ground == null ? MemorySegment.NULL : arena.allocateFrom(ground);
+                MemorySegment allowedSeg = pairs.length == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_INT, pairs);
+                MemorySegment h = handle();
+                long size = jointCount;
+                int keyCount = keyframes.size(), pairCount = pairs.length / 2;
+                raw = call(() -> (MemorySegment) ASSEMBLY_SWEPT_CLASH.invokeExact(h, joints, countsSeg, size, valuesSeg, keyCount, g,
+                                                                                   tolerance, clearance, resolution, maxSteps,
+                                                                                   allowedSeg, pairCount, joined));
+            } finally {
+                keep(this);
+            }
+            return SweptClash.rows(raw, "assembly_swept_clash");
+        }
+
         /** Add a motion sequence {@code name} over this assembly's named states: one {@link
          *  SequenceSegment} per keyframe, {@code seconds} saying the parameter is in seconds.
          *  The sequence is closed unless its last segment is {@code "discontinuous"}. Throws
@@ -6027,6 +7519,20 @@ public final class Blacksmith {
     public record Curve(String kind, double[] origin, double[] x, double[] y, double[] z,
                         double radius, double radius2, double t0, double t1, int degree,
                         double[] knots, double[] poles, double[] weights) {
+        /** This curve as a value: a line a {@link Line} from {@code origin} to {@code origin + x};
+         *  a circle a {@link Circle} over a full turn, else the {@link Arc} over {@code t0..t1};
+         *  an ellipse its whole {@link Ellipse} (the range stays here); any other kind empty. */
+        public Optional<CurveValue> value() {
+            double[] frame = {origin[0], origin[1], origin[2], x[0], x[1], x[2], y[0], y[1], y[2], z[0], z[1], z[2]};
+            return switch (kind) {
+                case "line" -> Optional.of(new Line(origin, new double[]{origin[0] + x[0], origin[1] + x[1], origin[2] + x[2]}));
+                case "circle" -> Optional.of(t1 - t0 >= 2 * Math.PI - 1e-12
+                    ? (CurveValue) new Circle(frame, radius) : new Arc(frame, radius, new Interval(t0, t1)));
+                case "ellipse" -> Optional.of(new Ellipse(frame, radius, radius2));
+                default -> Optional.empty();
+            };
+        }
+
         @Override
         public String toString() {
             return kind.equals("nurbs")
@@ -6148,7 +7654,7 @@ public final class Blacksmith {
      * A face of the first solid and a face of the second that coincide
      * ({@link Intersection#overlaps}): the faces ({@code faceA}, {@code faceB}) and
      * {@code loops}, the shared region's rings as arrays of points (outer first, holes after;
-     * each ring closed without repeating its first point) -- empty for a partial overlap whose
+     * each ring closed without repeating its first point) -- empty for a partial overlap of curved faces whose
      * outlines cross.
      *
      * @param loops each ring an array of points, three doubles each
@@ -6245,6 +7751,342 @@ public final class Blacksmith {
             if (!ok) throw failure("boxes_apart");
             return apart.get(ValueLayout.JAVA_BOOLEAN, 0);
         }
+    }
+
+    /**
+     * For each of {@code needles}, the indices of the {@code hay} points within {@code limit} of
+     * it, by distance then index -- one {@link RTree} over the hay answers every needle. A {@code
+     * limit} negative or NaN, then the first hay point and the first needle not finite, by index,
+     * throw.
+     */
+    public static List<List<Long>> closestPoints(List<double[]> hay, List<double[]> needles, double limit) {
+        if (!(limit >= 0.0)) throw new BuildException("closest_points: limit " + rustNumber(limit) + " is not a distance");
+        List<double[]> hayPoints = finitePoints(hay, "closest_points", "hay");
+        List<double[]> points = finitePoints(needles, "closest_points", "needle");
+        List<List<Long>> out = new ArrayList<>(points.size());
+        try (RTree tree = RTree.fromPoints(hayPoints)) {
+            for (double[] p : points) out.add(indices(tree.within(p, limit)));
+        }
+        return out;
+    }
+
+    /** {@link #clash(Collection, Collection, double, double, int[])}: every pair of {@code
+     *  parts}, clearance 0, tolerance 0.05, nothing allowed. */
+    public static List<Clash> clash(Collection<Solid> parts) {
+        return clash(parts, null, 0.0, 0.05, null);
+    }
+
+    /** {@link #clash(Collection, Collection, double, double, int[])}: every pair of {@code
+     *  parts}, tolerance 0.05, nothing allowed. */
+    public static List<Clash> clash(Collection<Solid> parts, double clearance) {
+        return clash(parts, null, clearance, 0.05, null);
+    }
+
+    /** {@link #clash(Collection, Collection, double, double, int[])}: {@code parts} against
+     *  {@code others} (null: every pair of {@code parts}), tolerance 0.05, nothing allowed. */
+    public static List<Clash> clash(Collection<Solid> parts, Collection<Solid> others, double clearance) {
+        return clash(parts, others, clearance, 0.05, null);
+    }
+
+    /**
+     * Every pair of {@code parts} -- or, with {@code others}, every part of {@code parts} against
+     * every part of {@code others} -- that penetrates, touches or lies within {@code clearance} of
+     * the other, as {@link Clash} rows, the solids as they stand. {@code others} null: one set.
+     * {@code tolerance} is the meshing tolerance, absolute. {@code allowed} pairs of part indices
+     * never tested (designed contacts), flat as {@link Collider}'s: {@code (a0, b0, a1, b1, ...)};
+     * with {@code others} a pair is (index in {@code parts}, index in {@code others}); null is
+     * none. In a row {@code a} indexes {@code parts} and {@code b} indexes {@code others} (or
+     * {@code parts} again). Throws {@link BuildException} for an empty {@code others}, an {@code
+     * allowed} of odd length or with a negative entry, a negative or non-finite {@code
+     * clearance}, a {@code tolerance} not positive and finite, an {@code allowed} index out of
+     * range or a part that is not a closed solid.
+     */
+    public static List<Clash> clash(Collection<Solid> parts, Collection<Solid> others, double clearance, double tolerance,
+                                    int[] allowed) {
+        Solid[] first = parts.toArray(new Solid[0]);
+        Solid[] second = others == null ? null : others.toArray(new Solid[0]);
+        if (second != null && second.length == 0) throw new BuildException("clash: an empty set");
+        int[] pairs = allowed == null ? new int[0] : allowed.clone();
+        if (pairs.length % 2 != 0) throw new BuildException("clash: allowed is " + pairs.length + " numbers, not pairs");
+        for (int i = 0; i < pairs.length; i += 2) {
+            if (pairs[i] < 0 || pairs[i + 1] < 0)
+                throw new BuildException("clash: allowed pair (" + pairs[i] + ", " + pairs[i + 1] + ") is not two indices");
+        }
+        MemorySegment raw;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment a = handlesOf(arena, first);
+            MemorySegment b = second == null ? MemorySegment.NULL : handlesOf(arena, second);
+            MemorySegment allowedSeg = pairs.length == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_INT, pairs);
+            int aCount = first.length, bCount = second == null ? 0 : second.length, pairCount = pairs.length / 2;
+            raw = call(() -> (MemorySegment) CLASH.invokeExact(a, aCount, b, bCount, tolerance, clearance, allowedSeg, pairCount));
+        } finally {
+            keep((Object[]) first);
+            if (second != null) keep((Object[]) second);
+        }
+        return Clashes.rows(raw, "clash");
+    }
+
+    /** {@link #sweptClash(Collection, List, Collection, List, double, double, double, int, int[])}:
+     *  every pair of {@code parts}, clearance 0, tolerance 0.05, resolution 1e-3, 100,000 steps,
+     *  nothing allowed. */
+    public static List<SweptClash> sweptClash(Collection<Solid> parts, List<List<double[]>> poses) {
+        return sweptClash(parts, poses, null, null, 0.0, 0.05, 1e-3, 100000, null);
+    }
+
+    /** {@link #sweptClash(Collection, List, Collection, List, double, double, double, int, int[])}:
+     *  every pair of {@code parts}, tolerance 0.05, resolution 1e-3, 100,000 steps, nothing
+     *  allowed. */
+    public static List<SweptClash> sweptClash(Collection<Solid> parts, List<List<double[]>> poses, double clearance) {
+        return sweptClash(parts, poses, null, null, clearance, 0.05, 1e-3, 100000, null);
+    }
+
+    /** {@link #sweptClash(Collection, List, Collection, List, double, double, double, int, int[])}:
+     *  {@code parts} against {@code others} (both null: every pair of {@code parts}), clearance
+     *  0, tolerance 0.05, resolution 1e-3, 100,000 steps, nothing allowed. */
+    public static List<SweptClash> sweptClash(Collection<Solid> parts, List<List<double[]>> poses, Collection<Solid> others,
+                                              List<List<double[]>> otherPoses) {
+        return sweptClash(parts, poses, others, otherPoses, 0.0, 0.05, 1e-3, 100000, null);
+    }
+
+    /**
+     * Every pair of {@code parts} -- or, with {@code others}, every part of {@code parts} against
+     * every part of {@code others} -- that penetrates, touches or comes within {@code clearance}
+     * of the other anywhere on a path, as {@link SweptClash} rows. Each part is its own group:
+     * pose {@code k} of {@code poses} is one twelve-number frame per part of {@code parts}, and
+     * pose {@code k} of {@code otherPoses} one per part of {@code others}; {@code others} and
+     * {@code otherPoses} go together (both null: one set) and have as many poses. The motion,
+     * {@code resolution} and {@code maxSteps} are {@link Collider#sweptClash}'s; {@code
+     * clearance}, {@code tolerance} and {@code allowed} (flat, null for none) are {@link
+     * #clash}'s. In a row {@code a} indexes {@code parts} and {@code b} indexes {@code others}
+     * (or {@code parts} again). Throws {@link BuildException} for {@code others} without {@code
+     * otherPoses} or the other way round, a different number of poses in the two, a pose with
+     * the wrong number of frames, an empty {@code others}, fewer than two poses, an {@code
+     * allowed} of odd length, with a negative entry or an index out of range, a part that is not
+     * a closed solid, or a bad frame, tolerance, clearance, resolution or {@code maxSteps}.
+     */
+    public static List<SweptClash> sweptClash(Collection<Solid> parts, List<List<double[]>> poses, Collection<Solid> others,
+                                              List<List<double[]>> otherPoses, double clearance, double tolerance,
+                                              double resolution, int maxSteps, int[] allowed) {
+        if ((others == null) != (otherPoses == null))
+            throw new BuildException("swept_clash: others and other_poses go together");
+        Solid[] first = parts.toArray(new Solid[0]);
+        Solid[] second = others == null ? null : others.toArray(new Solid[0]);
+        // C reads each set's poses at its part count: the kernel's own checks, in its order
+        if (otherPoses != null && otherPoses.size() != poses.size())
+            throw new BuildException("swept_clash: " + poses.size() + " poses for set a, " + otherPoses.size() + " for set b");
+        sweptPoseCounts(poses, "a", first.length);
+        if (otherPoses != null) sweptPoseCounts(otherPoses, "b", second.length);
+        if (second != null && second.length == 0) throw new BuildException("swept_clash: an empty set");
+        int[] pairs = allowed == null ? new int[0] : allowed.clone();
+        if (pairs.length % 2 != 0) throw new BuildException("swept_clash: allowed is " + pairs.length + " numbers, not pairs");
+        for (int i = 0; i < pairs.length; i += 2) {
+            if (pairs[i] < 0 || pairs[i + 1] < 0)
+                throw new BuildException("swept_clash: allowed pair (" + pairs[i] + ", " + pairs[i + 1] + ") is not two indices");
+        }
+        double[] flatA = flatPoses(poses);
+        double[] flatB = otherPoses == null ? null : flatPoses(otherPoses);
+        MemorySegment raw;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment a = handlesOf(arena, first);
+            MemorySegment posesA = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, flatA);
+            MemorySegment b = second == null ? MemorySegment.NULL : handlesOf(arena, second);
+            MemorySegment posesB = flatB == null ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_DOUBLE, flatB);
+            MemorySegment allowedSeg = pairs.length == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_INT, pairs);
+            int aCount = first.length, bCount = second == null ? 0 : second.length, poseCount = poses.size();
+            int pairCount = pairs.length / 2;
+            raw = call(() -> (MemorySegment) SWEPT_CLASH.invokeExact(a, aCount, posesA, b, bCount, posesB, poseCount, tolerance,
+                                                                       clearance, resolution, maxSteps, allowedSeg, pairCount));
+        } finally {
+            keep((Object[]) first);
+            if (second != null) keep((Object[]) second);
+        }
+        return SweptClash.rows(raw, "swept_clash");
+    }
+
+    /** Each pose of one set of a one-shot swept clash holds one frame per part, refused in the
+     *  kernel's words otherwise. */
+    private static void sweptPoseCounts(List<List<double[]>> poses, String set, int parts) {
+        for (int k = 0; k < poses.size(); k++) {
+            int n = poses.get(k).size();
+            if (n != parts)
+                throw new BuildException("swept_clash: pose " + k + " of set " + set + " has " + n + " frames for " + parts + " parts");
+        }
+    }
+
+    /** Poses flattened pose by pose, each frame twelve numbers, as the swept calls read them. */
+    private static double[] flatPoses(List<List<double[]>> poses) {
+        int frames = 0;
+        for (List<double[]> pose : poses) frames += pose.size();
+        double[] flat = new double[frames * 12];
+        int at = 0;
+        for (List<double[]> pose : poses) {
+            for (double[] f : pose) {
+                System.arraycopy(frame(f), 0, flat, at, 12);
+                at += 12;
+            }
+        }
+        return flat;
+    }
+
+    /** {@link #thickness(Collection, double, double, double)} at sharp angle 0 and tolerance 0.01. */
+    public static List<Thickness> thickness(Collection<Solid> solids, double maximum) {
+        return thickness(solids, maximum, 0.0, 0.01);
+    }
+
+    /** {@link #thickness(Collection, double, double, double)} at tolerance 0.01. */
+    public static List<Thickness> thickness(Collection<Solid> solids, double maximum, double sharpAngle) {
+        return thickness(solids, maximum, sharpAngle, 0.01);
+    }
+
+    /** {@code new ThicknessGauge(solids, tolerance).thickness(maximum, sharpAngle)} on a gauge used
+     *  once and freed: every reading within {@code maximum} on the solids, measured against each
+     *  other. Refuses with the gauge call's own prefix ({@code thickness_gauge_new:}, {@code
+     *  thickness_gauge_measure:}). */
+    public static List<Thickness> thickness(Collection<Solid> solids, double maximum, double sharpAngle, double tolerance) {
+        try (ThicknessGauge gauge = new ThicknessGauge(solids, tolerance)) {
+            return gauge.thickness(maximum, sharpAngle);
+        }
+    }
+
+    /** {@link #meshThickness(List, double, double)} at sharp angle 0. */
+    public static List<MeshThickness> meshThickness(List<MeshInput> meshes, double maximum) {
+        return meshThickness(meshes, maximum, 0.0);
+    }
+
+    /**
+     * The nearest-opposing-wall rule on plain meshes measured against each other: each of {@code
+     * meshes} its positions ({@code [x, y, z]} each) and triangles (three indices into its own
+     * positions each). One reading per vertex that has one within {@code maximum} (positive and
+     * finite), by mesh then vertex; {@code sharpAngle} as for {@link ThicknessGauge#thickness}.
+     * Throws {@link BuildException} for a mesh that is not such a pair, a triangle past its mesh,
+     * a position not finite or a bad limit.
+     */
+    public static List<MeshThickness> meshThickness(List<MeshInput> meshes, double maximum, double sharpAngle) {
+        int meshCount = meshes.size();
+        int vertexTotal = 0, triangleTotal = 0;
+        for (int m = 0; m < meshCount; m++) {
+            MeshInput mesh = meshes.get(m);
+            if (mesh == null || mesh.positions() == null || mesh.triangles() == null)
+                throw new BuildException("mesh_thickness: mesh " + m + " is not a (positions, triangles) pair");
+            vertexTotal += mesh.positions().length;
+            triangleTotal += mesh.triangles().length;
+        }
+        double[] positions = new double[3 * vertexTotal];
+        int[] indices = new int[3 * triangleTotal];
+        int[] vertexCounts = new int[meshCount], triangleCounts = new int[meshCount];
+        int p = 0, t = 0;
+        for (int m = 0; m < meshCount; m++) {
+            MeshInput mesh = meshes.get(m);
+            double[][] points = mesh.positions();
+            for (int i = 0; i < points.length; i++) {
+                if (points[i] == null || points[i].length != 3)
+                    throw new BuildException("mesh_thickness: mesh " + m + " position " + i + " is not three numbers");
+                for (int k = 0; k < 3; k++) positions[p++] = points[i][k];
+            }
+            vertexCounts[m] = points.length;
+            int[][] triangles = mesh.triangles();
+            for (int i = 0; i < triangles.length; i++) {
+                int[] tri = triangles[i];
+                if (tri == null || tri.length != 3 || tri[0] < 0 || tri[1] < 0 || tri[2] < 0)
+                    throw new BuildException("mesh_thickness: mesh " + m + " triangle " + i + " is not three indices");
+                for (int k = 0; k < 3; k++) indices[t++] = tri[k];
+            }
+            triangleCounts[m] = triangles.length;
+        }
+        MemorySegment list;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment positionsSeg = positions.length == 0 ? arena.allocate(ValueLayout.JAVA_DOUBLE, 1)
+                    : arena.allocateFrom(ValueLayout.JAVA_DOUBLE, positions);
+            MemorySegment indicesSeg = indices.length == 0 ? arena.allocate(ValueLayout.JAVA_INT, 1)
+                    : arena.allocateFrom(ValueLayout.JAVA_INT, indices);
+            MemorySegment vertexCountsSeg = meshCount == 0 ? arena.allocate(ValueLayout.JAVA_INT, 1)
+                    : arena.allocateFrom(ValueLayout.JAVA_INT, vertexCounts);
+            MemorySegment triangleCountsSeg = meshCount == 0 ? arena.allocate(ValueLayout.JAVA_INT, 1)
+                    : arena.allocateFrom(ValueLayout.JAVA_INT, triangleCounts);
+            list = call(() -> (MemorySegment) MESH_THICKNESS.invokeExact(
+                    positionsSeg, vertexCountsSeg, indicesSeg, triangleCountsSeg, meshCount, maximum, sharpAngle));
+        }
+        return meshThicknessRows(list, "mesh_thickness");
+    }
+
+    /**
+     * For each of {@code needles}, the indices of the {@code k} nearest {@code hay} points, by
+     * distance then index (all of them when {@code k} is over the hay count). The first hay point
+     * and the first needle not finite, by index, then a {@code k} no {@code uint32_t} holds or above
+     * 1,000,000, throw.
+     */
+    public static List<List<Long>> kNeighbors(List<double[]> hay, List<double[]> needles, long k) {
+        List<double[]> hayPoints = finitePoints(hay, "k_neighbors", "hay");
+        List<double[]> points = finitePoints(needles, "k_neighbors", "needle");
+        if (k < 0 || k > 0xFFFFFFFFL) throw new BuildException("k_neighbors: k is out of range: " + k);
+        if (k > 1_000_000) throw new BuildException("k_neighbors: k " + k + " is not at most 1000000");
+        List<List<Long>> out = new ArrayList<>(points.size());
+        try (RTree tree = RTree.fromPoints(hayPoints)) {
+            for (double[] p : points) out.add(indices(tree.nearest(p, k)));
+        }
+        return out;
+    }
+
+    /** {@code points} as triples, refused as the kernel's {@code closest_points} / {@code
+     *  k_neighbors} refuse: the first not finite, by index. */
+    private static List<double[]> finitePoints(List<double[]> points, String call, String name) {
+        List<double[]> out = new ArrayList<>(points.size());
+        for (int i = 0; i < points.size(); i++) {
+            double[] p = point3(points.get(i), call + ": " + name + " point " + i);
+            for (double v : p)
+                if (!Double.isFinite(v)) throw new BuildException(call + ": " + name + " point " + i + " is not finite");
+            out.add(p);
+        }
+        return out;
+    }
+
+    private static List<Long> indices(List<RTree.Hit> hits) {
+        List<Long> out = new ArrayList<>(hits.size());
+        for (RTree.Hit h : hits) out.add(h.id());
+        return out;
+    }
+
+    /** {@code x} as Rust's {@code {}} prints an f64 -- the kernel's refusals quote numbers that way. */
+    private static String rustNumber(double x) {
+        if (Double.isNaN(x)) return "NaN";
+        if (Double.isInfinite(x)) return x > 0 ? "inf" : "-inf";
+        // Double.toString is the shortest round-trip digits (JDK 19+), as Rust's are, except that
+        // it never prints one digit: 5e-324 comes out 4.9E-324, so a one-digit decimal that
+        // round-trips wins. Rust lays the digits out without an exponent.
+        String sign = (Double.doubleToRawLongBits(x) < 0) ? "-" : "";
+        double a = Math.abs(x);
+        String body = Double.toString(a);
+        int e = body.indexOf('E');
+        int shift = e < 0 ? 0 : Integer.parseInt(body.substring(e + 1));
+        String mantissa = e < 0 ? body : body.substring(0, e);
+        int dot = mantissa.indexOf('.');
+        String fraction = dot < 0 ? "" : mantissa.substring(dot + 1);
+        String digits = ((dot < 0 ? mantissa : mantissa.substring(0, dot)) + fraction).replaceFirst("^0+", "");
+        shift -= fraction.length();
+        String stripped = digits.replaceFirst("0+$", "");
+        shift += digits.length() - stripped.length();
+        digits = stripped;
+        if (digits.length() == 2) {
+            java.math.BigDecimal exact = new java.math.BigDecimal(a);
+            int best = -1;
+            java.math.BigDecimal bestGap = null;
+            for (int d = digits.charAt(0) - '0'; d <= digits.charAt(0) - '0' + 1; ++d) {
+                String one = d + "E" + (shift + 1);
+                if (Double.parseDouble(one) != a) continue;
+                java.math.BigDecimal gap = new java.math.BigDecimal(one).subtract(exact).abs();
+                if (best < 0 || gap.compareTo(bestGap) < 0) { best = d; bestGap = gap; }
+            }
+            if (best >= 0) {
+                digits = best == 10 ? "1" : Integer.toString(best);
+                shift += best == 10 ? 2 : 1;
+            }
+        }
+        if (digits.isEmpty()) return sign + "0";
+        if (shift >= 0) return sign + digits + "0".repeat(shift);
+        int point = digits.length() + shift;
+        return point > 0
+            ? sign + digits.substring(0, point) + "." + digits.substring(point)
+            : sign + "0." + "0".repeat(-point) + digits;
     }
 
     /**
@@ -6385,6 +8227,269 @@ public final class Blacksmith {
         }
     }
 
+    /** Keeps one clash call's answer alive for as long as any {@link Clash} of it is: each row
+     *  holds a reference to this, which the garbage collector keeps reachable until the last one
+     *  lets go, freeing it only then -- as {@link Collisions} does for {@link CollisionHit},
+     *  because {@link Clash#solid} and {@link Clash#intersect} need the handle itself back. */
+    private static final class Clashes {
+        private final Handle handle;
+
+        Clashes(MemorySegment raw) {
+            handle = new Handle(CLASHES_FREE, "clash: the clashes handle is closed", raw);
+            // No manual close, as Collisions: registered only so the Cleaner runs once no
+            // row references this any more.
+            CLEANER.register(this, handle);
+        }
+
+        MemorySegment handle() {
+            return handle.live();
+        }
+
+        /** A clashes handle (null: the call's refusal, named {@code what}) read out into rows,
+         *  each keeping it alive; freed at once when there are none. */
+        static List<Clash> rows(MemorySegment raw, String what) {
+            checked(raw, what);
+            int count = call(() -> (int) CLASHES_COUNT.invokeExact(raw));
+            if (count == 0) {
+                call(() -> {
+                    CLASHES_FREE.invokeExact(raw);
+                    return null;
+                });
+                return new ArrayList<>();
+            }
+            Clashes clashes = new Clashes(raw);
+            List<Clash> rows = new ArrayList<>(count);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment rawRow = arena.allocate(CLASH_LAYOUT);
+                for (int i = 0; i < count; i++) {
+                    int at = i;
+                    boolean ok = call(() -> (boolean) CLASHES_AT.invokeExact(raw, at, rawRow));
+                    if (!ok) throw failure("clashes_at");
+                    rows.add(Clash.of(rawRow, clashes, i));
+                }
+            } catch (RuntimeException e) {
+                clashes.handle.run();
+                throw e;
+            } finally {
+                keep(clashes);
+            }
+            return rows;
+        }
+    }
+
+    /**
+     * One pair {@link Collider#clash} or {@link Blacksmith#clash} found: {@code a}, {@code b} the
+     * part indices (for one set or a collider {@code a < b}; for two sets {@code a} indexes the
+     * first and {@code b} the second), {@code kind} one of {@code "penetrating"}, {@code
+     * "touching"} (the boundaries within the tolerance of each other), {@code "too_close"} (apart
+     * by more than the tolerance but less than the clearance) or {@code "refused"} (the pair could
+     * not be decided; {@code text} says why).
+     *
+     * <p>{@code distance} is the gap between the two boundaries (0 for a penetrating or refused
+     * pair); {@code onA}/{@code onB} are world points -- the closest pair, or for a penetrating
+     * pair the centre of the overlap's world box (the origin for a refused one). {@code kindA},
+     * {@code indexA}, {@code edgeA} (and {@code B}) say what each point lies on exactly as {@link
+     * Closest} does, and for a penetrating or refused pair {@code kindA}/{@code kindB} are {@code
+     * "none"} with {@code indexA}/{@code edgeA} (and {@code B}) null. {@code refined}: the distance
+     * was measured on the exact surfaces. {@code depth} is the thinnest side of a penetrating
+     * pair's overlap box (0 otherwise).
+     *
+     * <p>{@link #solid} and {@link #intersect} are built on demand, at the placement the pair was
+     * found at; this keeps the clashes handle behind every row of one call alive until the last
+     * of them is collected, freeing it only then.
+     */
+    public static final class Clash {
+        public final int a;
+        public final int b;
+        public final String kind;
+        public final double distance;
+        public final double[] onA;
+        public final double[] onB;
+        public final String kindA;
+        public final Integer indexA;
+        public final Integer edgeA;
+        public final String kindB;
+        public final Integer indexB;
+        public final Integer edgeB;
+        public final boolean refined;
+        public final double depth;
+        public final String text;
+
+        // Accessors beside the fields, named the same, as CollisionHit's.
+        public int a() { return a; }
+        public int b() { return b; }
+        public String kind() { return kind; }
+        public double distance() { return distance; }
+        public double[] onA() { return onA.clone(); }
+        public double[] onB() { return onB.clone(); }
+        public String kindA() { return kindA; }
+        public Integer indexA() { return indexA; }
+        public Integer edgeA() { return edgeA; }
+        public String kindB() { return kindB; }
+        public Integer indexB() { return indexB; }
+        public Integer edgeB() { return edgeB; }
+        public boolean refined() { return refined; }
+        public double depth() { return depth; }
+        public String text() { return text; }
+
+        private final Clashes clashes;
+        private final int index;
+
+        private Clash(MemorySegment raw, Clashes clashes, int index) {
+            a = raw.get(ValueLayout.JAVA_INT, offset(CLASH_LAYOUT, "a"));
+            b = raw.get(ValueLayout.JAVA_INT, offset(CLASH_LAYOUT, "b"));
+            kind = string(raw.get(ValueLayout.ADDRESS, offset(CLASH_LAYOUT, "kind")));
+            distance = raw.get(ValueLayout.JAVA_DOUBLE, offset(CLASH_LAYOUT, "distance"));
+            onA = new double[3];
+            onB = new double[3];
+            long onAAt = offset(CLASH_LAYOUT, "on_a"), onBAt = offset(CLASH_LAYOUT, "on_b");
+            for (int k = 0; k < 3; k++) {
+                onA[k] = raw.get(ValueLayout.JAVA_DOUBLE, onAAt + 8L * k);
+                onB[k] = raw.get(ValueLayout.JAVA_DOUBLE, onBAt + 8L * k);
+            }
+            kindA = string(raw.get(ValueLayout.ADDRESS, offset(CLASH_LAYOUT, "kind_a")));
+            kindB = string(raw.get(ValueLayout.ADDRESS, offset(CLASH_LAYOUT, "kind_b")));
+            boolean noneA = kindA.equals("none"), noneB = kindB.equals("none");
+            int rawEdgeA = raw.get(ValueLayout.JAVA_INT, offset(CLASH_LAYOUT, "edge_a"));
+            int rawEdgeB = raw.get(ValueLayout.JAVA_INT, offset(CLASH_LAYOUT, "edge_b"));
+            indexA = noneA ? null : raw.get(ValueLayout.JAVA_INT, offset(CLASH_LAYOUT, "index_a"));
+            edgeA = noneA || rawEdgeA == NONE ? null : rawEdgeA;
+            indexB = noneB ? null : raw.get(ValueLayout.JAVA_INT, offset(CLASH_LAYOUT, "index_b"));
+            edgeB = noneB || rawEdgeB == NONE ? null : rawEdgeB;
+            refined = raw.get(ValueLayout.JAVA_INT, offset(CLASH_LAYOUT, "refined")) != 0;
+            depth = raw.get(ValueLayout.JAVA_DOUBLE, offset(CLASH_LAYOUT, "depth"));
+            text = string(raw.get(ValueLayout.ADDRESS, offset(CLASH_LAYOUT, "text")));
+            this.clashes = clashes;
+            this.index = index;
+        }
+
+        static Clash of(MemorySegment raw, Clashes clashes, int index) {
+            return new Clash(raw, clashes, index);
+        }
+
+        /** The exact shared volume of this penetrating pair at the placement it was found at,
+         *  as a new solid. Throws {@link BuildException} for a pair that is not penetrating. */
+        public Solid solid() {
+            MemorySegment h = clashes.handle();
+            MemorySegment raw = call(() -> (MemorySegment) CLASHES_SOLID.invokeExact(h, index));
+            try {
+                return new Solid(checked(raw, "clashes_solid"));
+            } finally {
+                keep(clashes);
+            }
+        }
+
+        /** Where this pair's two parts cross or coincide at the placement it was found at, as
+         *  {@link Solid#intersect} reports it (a touching pair's shared face is an {@link
+         *  Overlap}). Throws {@link BuildException} for a refused pair. */
+        public Intersection intersect() {
+            MemorySegment h = clashes.handle();
+            MemorySegment raw = call(() -> (MemorySegment) CLASHES_INTERSECT.invokeExact(h, index));
+            try {
+                return Solid.intersectionOf(checked(raw, "clashes_intersect"));
+            } finally {
+                keep(clashes);
+            }
+        }
+
+        @Override
+        public String toString() {
+            return "Clash(a=" + a + ", b=" + b + ", kind=" + kind + ", distance=" + distance + ")";
+        }
+    }
+
+    /**
+     * One pair {@link Collider#sweptClash} or {@link Blacksmith#sweptClash} found to clash
+     * somewhere on the path, as plain data: {@code a}, {@code b} the part indices (for one set or
+     * a collider {@code a < b}; for two sets {@code a} indexes the first and {@code b} the
+     * second). {@code firstTime} is the first time the pair came within the clearance, in pose
+     * units (pose {@code k} at time {@code k}; for a refused pair the time it was refused at),
+     * and {@code first} the {@link Clash} there, at the frames the motion places the parts at
+     * that time, so its {@link Clash#solid} and {@link Clash#intersect} rebuild the contact
+     * there. {@code intervals} are the time ranges the pair stays in clash, each {@code {start,
+     * end}}, ascending and disjoint (none for a refused pair).
+     */
+    public static final class SweptClash {
+        public final int a;
+        public final int b;
+        public final double firstTime;
+        public final Clash first;
+        public final List<double[]> intervals;
+
+        // Accessors beside the fields, named the same, as Clash's.
+        public int a() { return a; }
+        public int b() { return b; }
+        public double firstTime() { return firstTime; }
+        public Clash first() { return first; }
+        public List<double[]> intervals() {
+            List<double[]> copy = new ArrayList<>(intervals.size());
+            for (double[] span : intervals) copy.add(span.clone());
+            return copy;
+        }
+
+        private SweptClash(int a, int b, double firstTime, Clash first, List<double[]> intervals) {
+            this.a = a;
+            this.b = b;
+            this.firstTime = firstTime;
+            this.first = first;
+            this.intervals = Collections.unmodifiableList(intervals);
+        }
+
+        /** A swept clashes handle (null: the call's refusal, named {@code what}) read out into
+         *  rows and freed on every path. Each row's {@code first} is a {@link Clash} of the
+         *  handle's first rows, read last, which keep their own clashes handle alive. */
+        static List<SweptClash> rows(MemorySegment raw, String what) {
+            checked(raw, what);
+            try (Arena arena = Arena.ofConfined()) {
+                int count = call(() -> (int) SWEPT_CLASHES_COUNT.invokeExact(raw));
+                if (count == 0) return new ArrayList<>();
+                int[] as = new int[count], bs = new int[count];
+                double[] times = new double[count];
+                List<List<double[]>> spans = new ArrayList<>(count);
+                MemorySegment rawRow = arena.allocate(SWEPT_CLASH_LAYOUT);
+                MemorySegment span = arena.allocate(ValueLayout.JAVA_DOUBLE, 2);
+                for (int i = 0; i < count; i++) {
+                    int at = i;
+                    boolean ok = call(() -> (boolean) SWEPT_CLASHES_AT.invokeExact(raw, at, rawRow));
+                    if (!ok) throw failure("swept_clashes_at");
+                    as[i] = rawRow.get(ValueLayout.JAVA_INT, offset(SWEPT_CLASH_LAYOUT, "a"));
+                    bs[i] = rawRow.get(ValueLayout.JAVA_INT, offset(SWEPT_CLASH_LAYOUT, "b"));
+                    times[i] = rawRow.get(ValueLayout.JAVA_DOUBLE, offset(SWEPT_CLASH_LAYOUT, "first_time"));
+                    int intervalCount = rawRow.get(ValueLayout.JAVA_INT, offset(SWEPT_CLASH_LAYOUT, "interval_count"));
+                    List<double[]> mine = new ArrayList<>(intervalCount);
+                    for (int k = 0; k < intervalCount; k++) {
+                        int which = k;
+                        boolean got = call(() -> (boolean) SWEPT_CLASHES_INTERVAL.invokeExact(raw, at, which, span));
+                        if (!got) throw failure("swept_clashes_interval");
+                        mine.add(new double[] {span.getAtIndex(ValueLayout.JAVA_DOUBLE, 0), span.getAtIndex(ValueLayout.JAVA_DOUBLE, 1)});
+                    }
+                    spans.add(mine);
+                }
+                MemorySegment firstsRaw = call(() -> (MemorySegment) SWEPT_CLASHES_FIRSTS.invokeExact(raw));
+                List<Clash> firsts = Clashes.rows(firstsRaw, "swept_clashes_firsts");
+                List<SweptClash> rows = new ArrayList<>(count);
+                for (int i = 0; i < count; i++) rows.add(new SweptClash(as[i], bs[i], times[i], firsts.get(i), spans.get(i)));
+                return rows;
+            } finally {
+                call(() -> {
+                    SWEPT_CLASHES_FREE.invokeExact(raw);
+                    return null;
+                });
+            }
+        }
+
+        @Override
+        public String toString() {
+            StringBuilder s = new StringBuilder("SweptClash(a=" + a + ", b=" + b + ", firstTime=" + firstTime + ", kind=" + first.kind
+                                                + ", intervals=[");
+            for (int k = 0; k < intervals.size(); k++) {
+                if (k > 0) s.append(", ");
+                s.append('(').append(intervals.get(k)[0]).append(", ").append(intervals.get(k)[1]).append(')');
+            }
+            return s.append("])").toString();
+        }
+    }
+
     /**
      * Parts meshed once, asked pose after pose which of them interfere: {@code solids} at
      * rest, meshed at {@code tolerance}; {@code groups} one group index per solid (null: each
@@ -6496,6 +8601,1104 @@ public final class Blacksmith {
                 }
             }
             return hits;
+        }
+
+        /** {@link #clash(double[][], double, Integer, Integer)} at clearance 0, every pair
+         *  decided now. */
+        public List<Clash> clash(double[][] frames) {
+            return clash(frames, 0.0, null, null);
+        }
+
+        /** {@link #clash(double[][], double, Integer, Integer)} with every pair decided now. */
+        public List<Clash> clash(double[][] frames, double clearance) {
+            return clash(frames, clearance, null, null);
+        }
+
+        /** Every pair of parts that penetrates, touches or lies within {@code clearance} of the
+         *  other, as {@link Clash} rows in pair order, with each group placed at its matching
+         *  frame in {@code frames} (as for {@link #check}). {@code clearance} is zero or more, in
+         *  model units: a pair apart by more than the collider's tolerance but less than it is
+         *  {@code "too_close"}. {@code shareK}/{@code shareN} as for {@link #check}. The collider
+         *  keeps each part's closest mesh (at a third of its tolerance) for its lifetime once a
+         *  pair needed one. Throws {@link BuildException} for a negative or non-finite {@code
+         *  clearance}, the wrong number of frames or a bad share. */
+        public List<Clash> clash(double[][] frames, double clearance, Integer shareK, Integer shareN) {
+            double[] flat = new double[frames.length * 12];
+            for (int i = 0; i < frames.length; i++) System.arraycopy(frame(frames[i]), 0, flat, i * 12, 12);
+            int sk = shareK == null ? 0 : shareK;
+            int sn = shareN == null ? 0 : shareN;
+            int frameCount = frames.length;
+            MemorySegment raw;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment h = handle();
+                MemorySegment framesSeg = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, flat);
+                raw = call(() -> (MemorySegment) COLLIDER_CLASH.invokeExact(h, framesSeg, frameCount, clearance, sk, sn));
+            } finally {
+                keep(this);
+            }
+            return Clashes.rows(raw, "collider_clash");
+        }
+
+        /** {@link #sweptClash(List, double, double, int, Integer, Integer)} at clearance 0,
+         *  resolution 1e-3 and 100,000 steps, every pair decided now. */
+        public List<SweptClash> sweptClash(List<List<double[]>> poses) {
+            return sweptClash(poses, 0.0, 1e-3, 100000, null, null);
+        }
+
+        /** {@link #sweptClash(List, double, double, int, Integer, Integer)} at resolution 1e-3
+         *  and 100,000 steps, every pair decided now. */
+        public List<SweptClash> sweptClash(List<List<double[]>> poses, double clearance) {
+            return sweptClash(poses, clearance, 1e-3, 100000, null, null);
+        }
+
+        /** Every pair of parts that penetrates, touches or comes within {@code clearance} of
+         *  the other anywhere on the path through {@code poses} -- not only at the poses -- as
+         *  {@link SweptClash} rows in pair order. {@code poses} is two or more poses, each the
+         *  frames {@link #clash} takes (one twelve-number frame per group). Between two poses
+         *  each group moves rigidly about the centre of its rest box: that point on the
+         *  straight line between its two places, the rotation turning at a steady rate the
+         *  shorter way round; time runs in pose units, pose {@code k} at time {@code k}. No
+         *  moment where the true gap is below {@code clearance} less the collider's tolerance
+         *  falls between two steps. {@code resolution} (in (0, 1], a fraction of a segment) is
+         *  how closely an interval's end is found; {@code maxSteps} the tests one pair may take
+         *  -- a pair that needs more is a {@code "refused"} row. {@code shareK}/{@code shareN}
+         *  as for {@link #check}, over the pairs whose swept boxes meet. Throws {@link
+         *  BuildException} for fewer than two poses, the wrong number of frames in a pose, a
+         *  bad frame, clearance, resolution or share, or {@code maxSteps} 0. */
+        public List<SweptClash> sweptClash(List<List<double[]>> poses, double clearance, double resolution, int maxSteps,
+                                           Integer shareK, Integer shareN) {
+            int frameCount = poses.isEmpty() ? 0 : poses.get(0).size();
+            for (List<double[]> pose : poses) {
+                if (pose.size() != frameCount) {
+                    // C reads every pose at one frame count: say the first pose that is off, in
+                    // the kernel's words
+                    int groups = groupCount();
+                    int n = poses.stream().mapToInt(List::size).filter(m -> m != groups).findFirst().orElse(frameCount);
+                    throw new BuildException("collider_swept_clash: " + n + " frames for " + groups + " groups");
+                }
+            }
+            double[] flat = flatPoses(poses);
+            int sk = shareK == null ? 0 : shareK;
+            int sn = shareN == null ? 0 : shareN;
+            int poseCount = poses.size();
+            MemorySegment raw;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment h = handle();
+                MemorySegment posesSeg = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, flat);
+                raw = call(() -> (MemorySegment) COLLIDER_SWEPT_CLASH.invokeExact(h, posesSeg, poseCount, frameCount, clearance,
+                                                                                   resolution, maxSteps, sk, sn));
+            } finally {
+                keep(this);
+            }
+            return SweptClash.rows(raw, "collider_swept_clash");
+        }
+    }
+
+    // ---- wall thickness -------------------------------------------------------------------
+
+    private static double[] xyz(MemorySegment s, long at) {
+        return new double[] {s.get(ValueLayout.JAVA_DOUBLE, at), s.get(ValueLayout.JAVA_DOUBLE, at + 8),
+                             s.get(ValueLayout.JAVA_DOUBLE, at + 16)};
+    }
+
+    /** A point as the three doubles a thickness call takes, refused as Python's is. */
+    private static double[] thicknessPoint(double[] p, String call) {
+        int got = p == null ? 0 : p.length;
+        if (got != 3) throw new BuildException(call + ": a point is 3 numbers, got " + got);
+        return p;
+    }
+
+    /**
+     * One wall-thickness reading on a solid ({@link ThicknessGauge#thickness}, {@link
+     * ThicknessGauge#thicknessAt}, {@link Blacksmith#thickness}). {@code point} lies on face
+     * {@code face} of body {@code body} (the body's index in the gauge): at vertex {@code
+     * vertex} of that body's measuring mesh ({@link ThicknessGauge#mesh}), or {@code vertex}
+     * null for a reading at a point. {@code thickness} is the nearest-opposing-wall rule (the
+     * nearest triangle that faces against one of the vertex's own faces, with the vertex behind
+     * it) on the measuring mesh, to {@code opposite} on face {@code oppositeFace} of body {@code
+     * oppositeBody}; {@code knife} marks a knife edge (thickness 0, {@code opposite} equal to
+     * {@code point}). {@code exactOpposite} is {@code opposite} moved onto its exact face where
+     * its foot lies within the tolerance and inside the face's trims, {@code exactThickness} the
+     * distance to it. {@code sphere} is the diameter of the largest ball tangent at {@code point}
+     * that holds none of the surfaces, null where none under the maximum does (0 on a knife
+     * edge). Points are three doubles.
+     */
+    public record Thickness(int body, Integer vertex, int face, double[] point, double thickness, double[] opposite,
+                            int oppositeBody, int oppositeFace, boolean knife, double exactThickness,
+                            double[] exactOpposite, Double sphere) {
+        static Thickness of(MemorySegment s) {
+            int vertex = s.get(ValueLayout.JAVA_INT, offset(THICKNESS_LAYOUT, "vertex"));
+            double sphere = s.get(ValueLayout.JAVA_DOUBLE, offset(THICKNESS_LAYOUT, "sphere"));
+            return new Thickness(
+                    s.get(ValueLayout.JAVA_INT, offset(THICKNESS_LAYOUT, "body")),
+                    vertex == NONE ? null : vertex,
+                    s.get(ValueLayout.JAVA_INT, offset(THICKNESS_LAYOUT, "face")),
+                    xyz(s, offset(THICKNESS_LAYOUT, "point")),
+                    s.get(ValueLayout.JAVA_DOUBLE, offset(THICKNESS_LAYOUT, "thickness")),
+                    xyz(s, offset(THICKNESS_LAYOUT, "opposite")),
+                    s.get(ValueLayout.JAVA_INT, offset(THICKNESS_LAYOUT, "opposite_body")),
+                    s.get(ValueLayout.JAVA_INT, offset(THICKNESS_LAYOUT, "opposite_face")),
+                    s.get(ValueLayout.JAVA_BOOLEAN, offset(THICKNESS_LAYOUT, "knife")),
+                    s.get(ValueLayout.JAVA_DOUBLE, offset(THICKNESS_LAYOUT, "exact_thickness")),
+                    xyz(s, offset(THICKNESS_LAYOUT, "exact_opposite")),
+                    Double.isNaN(sphere) ? null : sphere);
+        }
+    }
+
+    /** A face's thickness, found ({@link ThicknessGauge#thicknessAtFace}, {@link
+     *  Solid#thicknessAtFace}; where nothing is found those answer null): {@code thickness} the
+     *  median of the face's vertex readings (or the reading at {@code at}), {@code min} and
+     *  {@code max} their extremes, {@code uniform} whether {@code max - min} is within the
+     *  gauge's tolerance. */
+    public record FaceThickness(double thickness, double min, double max, boolean uniform) {
+    }
+
+    /** A body's measuring mesh ({@link ThicknessGauge#mesh}), copied out of the gauge: {@code
+     *  positions} and {@code normals} (unit, outward) one {@code [x, y, z]} per vertex -- a
+     *  reading's {@code vertex} indexes them; no vertex is shared between two faces -- {@code
+     *  triangles} three vertex indices each, and {@code faces} the B-rep face of each triangle. */
+    public record ThicknessMesh(double[][] positions, double[][] normals, int[][] triangles, int[] faces) {
+    }
+
+    /** One reading on a plain mesh ({@link Blacksmith#meshThickness}): vertex {@code vertex} of
+     *  mesh {@code mesh}, at {@code point}, reads {@code thickness} to {@code opposite} on
+     *  triangle {@code oppositeTriangle} of mesh {@code oppositeMesh} (both indices within that
+     *  mesh). {@code knife}: a knife edge, thickness 0 and {@code opposite} equal to {@code
+     *  point}. */
+    public record MeshThickness(int mesh, int vertex, double thickness, double[] point, double[] opposite,
+                                int oppositeMesh, int oppositeTriangle, boolean knife) {
+        static MeshThickness of(MemorySegment s) {
+            return new MeshThickness(
+                    s.get(ValueLayout.JAVA_INT, offset(MESH_THICKNESS_LAYOUT, "mesh")),
+                    s.get(ValueLayout.JAVA_INT, offset(MESH_THICKNESS_LAYOUT, "vertex")),
+                    s.get(ValueLayout.JAVA_DOUBLE, offset(MESH_THICKNESS_LAYOUT, "thickness")),
+                    xyz(s, offset(MESH_THICKNESS_LAYOUT, "point")),
+                    xyz(s, offset(MESH_THICKNESS_LAYOUT, "opposite")),
+                    s.get(ValueLayout.JAVA_INT, offset(MESH_THICKNESS_LAYOUT, "opposite_mesh")),
+                    s.get(ValueLayout.JAVA_INT, offset(MESH_THICKNESS_LAYOUT, "opposite_triangle")),
+                    s.get(ValueLayout.JAVA_BOOLEAN, offset(MESH_THICKNESS_LAYOUT, "knife")));
+        }
+    }
+
+    /** One mesh for {@link Blacksmith#meshThickness}: its {@code positions} ({@code [x, y, z]}
+     *  each) and its {@code triangles} (three indices into its own positions each). */
+    public record MeshInput(double[][] positions, int[][] triangles) {
+    }
+
+    /** A thicknesses handle (null: the call's refusal, named {@code what}) read out into rows
+     *  and freed on every path. */
+    private static List<Thickness> thicknessRows(MemorySegment list, String what) {
+        if (list.address() == 0) throw failure(what);
+        try (Arena arena = Arena.ofConfined()) {
+            int count = call(() -> (int) THICKNESSES_COUNT.invokeExact(list));
+            List<Thickness> rows = new ArrayList<>(Math.min(Math.max(count, 0), 1024));
+            MemorySegment raw = arena.allocate(THICKNESS_LAYOUT);
+            for (int i = 0; i < count; i++) {
+                int at = i;
+                boolean ok = call(() -> (boolean) THICKNESSES_AT.invokeExact(list, at, raw));
+                if (!ok) throw failure("thicknesses_at");
+                rows.add(Thickness.of(raw));
+            }
+            return rows;
+        } finally {
+            call(() -> {
+                THICKNESSES_FREE.invokeExact(list);
+                return null;
+            });
+        }
+    }
+
+    /** A mesh-thicknesses handle read out into rows and freed on every path. */
+    private static List<MeshThickness> meshThicknessRows(MemorySegment list, String what) {
+        if (list.address() == 0) throw failure(what);
+        try (Arena arena = Arena.ofConfined()) {
+            int count = call(() -> (int) MESH_THICKNESSES_COUNT.invokeExact(list));
+            List<MeshThickness> rows = new ArrayList<>(Math.min(Math.max(count, 0), 1024));
+            MemorySegment raw = arena.allocate(MESH_THICKNESS_LAYOUT);
+            for (int i = 0; i < count; i++) {
+                int at = i;
+                boolean ok = call(() -> (boolean) MESH_THICKNESSES_AT.invokeExact(list, at, raw));
+                if (!ok) throw failure("mesh_thicknesses_at");
+                rows.add(MeshThickness.of(raw));
+            }
+            return rows;
+        } finally {
+            call(() -> {
+                MESH_THICKNESSES_FREE.invokeExact(list);
+                return null;
+            });
+        }
+    }
+
+    /**
+     * Wall thickness (the nearest-opposing-wall rule: each vertex reads to the nearest triangle
+     * that faces against one of its own faces, with the vertex behind it) over {@code solids},
+     * measured against each other: each solid meshed once at {@code tolerance} -- absolute, in
+     * model units (0.01 by default) -- then asked as often as needed. A reading's {@code body} is
+     * the solid's index in {@code solids}. The gauge keeps its own reference to the bodies, so
+     * it answers on after they are closed. {@link #close} frees this handle; so does the garbage
+     * collector. A call after {@link #close} throws {@code thickness_gauge: closed}. Throws
+     * {@link BuildException} for a {@code tolerance} not positive and finite.
+     */
+    public static final class ThicknessGauge implements AutoCloseable {
+        private final Handle handle;
+        private final Cleaner.Cleanable cleanable;
+
+        public ThicknessGauge(Collection<Solid> solids, double tolerance) {
+            Solid[] all = solids.toArray(new Solid[0]);
+            MemorySegment raw;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment handles = handlesOf(arena, all);
+                int count = all.length;
+                raw = call(() -> (MemorySegment) THICKNESS_GAUGE_NEW.invokeExact(handles, count, tolerance));
+            } finally {
+                keep((Object[]) all);
+            }
+            handle = new Handle(THICKNESS_GAUGE_FREE, "thickness_gauge: closed", checked(raw, "thickness_gauge_new"));
+            cleanable = CLEANER.register(this, handle);
+        }
+
+        /** {@link #ThicknessGauge(Collection, double)} at tolerance 0.01. */
+        public ThicknessGauge(Collection<Solid> solids) {
+            this(solids, 0.01);
+        }
+
+        MemorySegment handle() {
+            return handle.live();
+        }
+
+        public boolean closed() {
+            return handle.closed();
+        }
+
+        /** Give the gauge back. Idempotent. */
+        @Override
+        public void close() {
+            cleanable.clean();
+        }
+
+        /** How many bodies the gauge measures. */
+        public int bodyCount() {
+            MemorySegment h = handle();
+            return call(() -> (int) THICKNESS_GAUGE_BODY_COUNT.invokeExact(h));
+        }
+
+        /** The tolerance the gauge meshed its bodies at. */
+        public double tolerance() {
+            MemorySegment h = handle();
+            double value = call(() -> (double) THICKNESS_GAUGE_TOLERANCE.invokeExact(h));
+            if (Double.isNaN(value)) throw failure("thickness_gauge_tolerance");
+            return value;
+        }
+
+        /** {@link #thickness(double, double)} with the sharp angle 0. */
+        public List<Thickness> thickness(double maximum) {
+            return thickness(maximum, 0.0);
+        }
+
+        /** One reading per measuring-mesh vertex that has one within {@code maximum} (positive and
+         *  finite), by body then vertex; vertices whose interior angle is under {@code sharpAngle}
+         *  radians (zero or more) are knife edges. Throws {@link BuildException} for a bad limit. */
+        public List<Thickness> thickness(double maximum, double sharpAngle) {
+            MemorySegment h = handle();
+            MemorySegment list;
+            try {
+                list = call(() -> (MemorySegment) THICKNESS_GAUGE_MEASURE.invokeExact(h, maximum, sharpAngle));
+            } finally {
+                keep(this);
+            }
+            return thicknessRows(list, "thickness_gauge_measure");
+        }
+
+        /** {@link #thicknessAt(int, int, double[], double, double)} with the sharp angle 0. */
+        public Thickness thicknessAt(int body, int face, double[] point, double maximum) {
+            return thicknessAt(body, face, point, maximum, 0.0);
+        }
+
+        /** The reading at {@code point}'s foot on face {@code face} of body {@code body} (its
+         *  {@code vertex} null), or null where the foot lies off the face or the wall is thicker
+         *  than {@code maximum}. Throws {@link BuildException} for a body or face past the end, a
+         *  point that is not three finite numbers or a bad limit. */
+        public Thickness thicknessAt(int body, int face, double[] point, double maximum, double sharpAngle) {
+            double[] p = thicknessPoint(point, "thickness_gauge_at");
+            MemorySegment list;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment h = handle();
+                MemorySegment pointSeg = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, p);
+                list = call(() -> (MemorySegment) THICKNESS_GAUGE_AT.invokeExact(h, body, face, pointSeg, maximum, sharpAngle));
+            } finally {
+                keep(this);
+            }
+            List<Thickness> rows = thicknessRows(list, "thickness_gauge_at");
+            return rows.isEmpty() ? null : rows.get(0);
+        }
+
+        /** {@link #thicknessAtFace(int, int, double[], double)} over the face's vertices. */
+        public FaceThickness thicknessAtFace(int body, int face, double maximum) {
+            return thicknessAtFace(body, face, null, maximum);
+        }
+
+        /** One thickness for face {@code face} of body {@code body}: measured at {@code at}'s foot
+         *  on the face or, with {@code at} null, over the face's vertices; the other bodies are
+         *  measured with it. {@code maximum} has no default. Null where nothing is found (nothing
+         *  reads under {@code maximum}, or {@code at}'s foot lies off the face). Throws {@link
+         *  BuildException} for a body or face past the end, an {@code at} that is not three finite
+         *  numbers or a bad maximum. */
+        public FaceThickness thicknessAtFace(int body, int face, double[] at, double maximum) {
+            double[] p = at == null ? null : thicknessPoint(at, "thickness_gauge_face");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(FACE_THICKNESS_LAYOUT);
+                MemorySegment h = handle();
+                MemorySegment atSeg = p == null ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_DOUBLE, p);
+                boolean ok = call(() -> (boolean) THICKNESS_GAUGE_FACE.invokeExact(h, body, face, atSeg, maximum, out));
+                if (!ok) throw failure("thickness_gauge_face");
+                if (!out.get(ValueLayout.JAVA_BOOLEAN, offset(FACE_THICKNESS_LAYOUT, "found"))) return null;
+                return new FaceThickness(
+                        out.get(ValueLayout.JAVA_DOUBLE, offset(FACE_THICKNESS_LAYOUT, "thickness")),
+                        out.get(ValueLayout.JAVA_DOUBLE, offset(FACE_THICKNESS_LAYOUT, "min")),
+                        out.get(ValueLayout.JAVA_DOUBLE, offset(FACE_THICKNESS_LAYOUT, "max")),
+                        out.get(ValueLayout.JAVA_BOOLEAN, offset(FACE_THICKNESS_LAYOUT, "uniform")));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Body {@code body}'s measuring mesh, copied out (it outlives the gauge). Throws {@link
+         *  BuildException} for a body past the end. */
+        @SuppressWarnings("restricted") // reinterpret: the lengths are the struct's own counts.
+        public ThicknessMesh mesh(int body) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(THICKNESS_MESH_LAYOUT);
+                MemorySegment h = handle();
+                boolean ok = call(() -> (boolean) THICKNESS_GAUGE_MESH.invokeExact(h, body, out));
+                if (!ok) throw failure("thickness_gauge_mesh");
+                int n = out.get(ValueLayout.JAVA_INT, offset(THICKNESS_MESH_LAYOUT, "vertex_count"));
+                int t = out.get(ValueLayout.JAVA_INT, offset(THICKNESS_MESH_LAYOUT, "triangle_count"));
+                double[][] positions = new double[n][], normals = new double[n][];
+                if (n > 0) {
+                    MemorySegment p = out.get(ValueLayout.ADDRESS, offset(THICKNESS_MESH_LAYOUT, "positions")).reinterpret(24L * n);
+                    MemorySegment q = out.get(ValueLayout.ADDRESS, offset(THICKNESS_MESH_LAYOUT, "normals")).reinterpret(24L * n);
+                    for (int i = 0; i < n; i++) {
+                        positions[i] = xyz(p, 24L * i);
+                        normals[i] = xyz(q, 24L * i);
+                    }
+                }
+                int[][] triangles = new int[t][];
+                int[] faces = new int[t];
+                if (t > 0) {
+                    MemorySegment ix = out.get(ValueLayout.ADDRESS, offset(THICKNESS_MESH_LAYOUT, "indices")).reinterpret(12L * t);
+                    MemorySegment fs = out.get(ValueLayout.ADDRESS, offset(THICKNESS_MESH_LAYOUT, "faces")).reinterpret(4L * t);
+                    for (int i = 0; i < t; i++) {
+                        triangles[i] = new int[] {ix.getAtIndex(ValueLayout.JAVA_INT, 3L * i),
+                                                  ix.getAtIndex(ValueLayout.JAVA_INT, 3L * i + 1),
+                                                  ix.getAtIndex(ValueLayout.JAVA_INT, 3L * i + 2)};
+                        faces[i] = fs.getAtIndex(ValueLayout.JAVA_INT, i);
+                    }
+                }
+                return new ThicknessMesh(positions, normals, triangles, faces);
+            } finally {
+                keep(this);
+            }
+        }
+
+        @Override
+        public String toString() {
+            return handle.closed() ? "ThicknessGauge(closed)"
+                    : "ThicknessGauge(bodies=" + bodyCount() + ", tolerance=" + tolerance() + ")";
+        }
+    }
+
+    /**
+     * The reusable answer to "where is this point?": a closed solid meshed once, then asked point
+     * after point ({@link Solid#classifier}). It keeps its own reference to the body, so it goes on
+     * answering after its solid is closed. {@link #close} frees this handle; so does the garbage
+     * collector. A call after {@link #close} throws {@code classifier: closed}.
+     */
+    public static final class Classifier implements AutoCloseable {
+        private final Handle handle;
+        private final Cleaner.Cleanable cleanable;
+
+        private Classifier(MemorySegment raw) {
+            handle = new Handle(CLASSIFIER_FREE, "classifier: closed", checked(raw, "classifier_new"));
+            cleanable = CLEANER.register(this, handle);
+        }
+
+        MemorySegment handle() {
+            return handle.live();
+        }
+
+        public boolean closed() {
+            return handle.closed();
+        }
+
+        /** Give the classifier back. Idempotent. */
+        @Override
+        public void close() {
+            cleanable.clean();
+        }
+
+        /** "inside", "outside" or "on" for {@code point}. */
+        public String contains(double[] point) {
+            double[] p = point3(point, "point");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment ps = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, p);
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_INT);
+                MemorySegment h = handle();
+                boolean ok = call(() -> (boolean) CLASSIFIER_CONTAINS.invokeExact(h, ps, out));
+                if (!ok) throw failure("classifier_contains");
+                return containment(out.get(ValueLayout.JAVA_INT, 0), "classifier_contains");
+            } finally {
+                keep(this);
+            }
+        }
+    }
+
+    // ---- The R-tree -------------------------------------------------------------------------
+
+    /**
+     * A spatial index over boxes with ids (an R*-tree): {@link #search} a box for the entries it
+     * meets, {@link #within} / {@link #nearest} a point for the closest, {@link #overlaps} / {@link
+     * #selfOverlaps} for every pair of boxes that meet. Ids are the caller's own (0 to 4294967295)
+     * and may repeat; an entry is an id and its box, and the same {@code (id, box)} twice is two
+     * entries. Touching boxes meet. A box is a {@link Box}; a point (three numbers) stands for a zero
+     * box. Answers come in a fixed order: search ids ascending, within / nearest by distance then
+     * id, pairs ascending. The tree changes in place ({@link #insert(long, Box)}, {@link
+     * #remove(long, Box)}); calls on one tree must not overlap from two threads. {@link #close}
+     * frees it; so does the garbage collector. A call after {@link #close} throws {@code rtree:
+     * closed}. An id or a {@code k} no {@code uint32_t} holds is refused before any call.
+     */
+    public static final class RTree implements AutoCloseable {
+        /** One entry for {@link #fromBoxes}: an id and its box. */
+        public record Entry(long id, Box box) {
+        }
+
+        /** One answer of {@link #within} or {@link #nearest}: the entry's id and the distance from
+         *  the query point to its box (0 inside it). */
+        public record Hit(long id, double distance) {
+        }
+
+        /** One pair of {@link #overlaps} ({@code a} from this tree) or {@link #selfOverlaps}
+         *  ({@code a} the smaller id). */
+        public record Pair(long a, long b) {
+        }
+
+        private final Handle handle;
+        private final Cleaner.Cleanable cleanable;
+
+        /** An empty tree. */
+        public RTree() {
+            this(call(() -> (MemorySegment) RTREE_NEW.invokeExact()), "rtree_new");
+        }
+
+        private RTree(MemorySegment raw, String what) {
+            handle = new Handle(RTREE_FREE, "rtree: closed", checked(raw, what));
+            cleanable = CLEANER.register(this, handle);
+        }
+
+        /** A tree over {@code entries} at once, packed (sort-tile-recursive): fuller and faster to
+         *  query than the same entries inserted one by one. The first entry whose box is not a box
+         *  (a NaN, an infinity, min above max) throws, by index. */
+        public static RTree fromBoxes(List<Entry> entries) {
+            int n = entries.size();
+            int[] ids = new int[n];
+            double[] flat = new double[6 * n];
+            for (int i = 0; i < n; i++) {
+                Entry e = entries.get(i);
+                if (e == null || e.box() == null) throw new BuildException("rtree_from_boxes: entry " + i + " has no box");
+                ids[i] = u32(e.id(), "rtree_from_boxes", "entry " + i + "'s id");
+                System.arraycopy(words(e.box()), 0, flat, 6 * i, 6);
+            }
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment idSeg = n == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_INT, ids);
+                MemorySegment boxSeg = n == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_DOUBLE, flat);
+                return new RTree(call(() -> (MemorySegment) RTREE_FROM_BOXES.invokeExact(idSeg, boxSeg, n)), "rtree_from_boxes");
+            }
+        }
+
+        /** A tree over {@code points} (three numbers each), each a zero box whose id is its index.
+         *  The first point with a NaN or infinite coordinate throws, by index. */
+        public static RTree fromPoints(List<double[]> points) {
+            int n = points.size();
+            double[] flat = new double[3 * n];
+            for (int i = 0; i < n; i++) System.arraycopy(point3(points.get(i), "rtree_from_points: point " + i), 0, flat, 3 * i, 3);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment xyz = n == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_DOUBLE, flat);
+                return new RTree(call(() -> (MemorySegment) RTREE_FROM_POINTS.invokeExact(xyz, n)), "rtree_from_points");
+            }
+        }
+
+        /** A tree over a mesh's triangles -- RhinoCommon's {@code RTree.CreateMeshFaceTree}: one
+         *  entry per triangle of {@code triangles} (three indices each into {@code positions}, three
+         *  numbers each), its id the triangle's index, its box its three corners' box. The first
+         *  corner past the points or at a point with a NaN or infinite coordinate throws, by
+         *  triangle and point; points no triangle uses are not checked. An index no {@code
+         *  uint32_t} holds is refused before the call. */
+        public static RTree fromTriangles(List<double[]> positions, List<long[]> triangles) {
+            int np = positions.size();
+            double[] flat = new double[3 * np];
+            for (int i = 0; i < np; i++) System.arraycopy(point3(positions.get(i), "rtree_from_triangles: point " + i), 0, flat, 3 * i, 3);
+            int nt = triangles.size();
+            int[] indices = new int[3 * nt];
+            for (int i = 0; i < nt; i++) {
+                long[] t = triangles.get(i);
+                if (t == null || t.length != 3) {
+                    throw new BuildException("rtree_from_triangles: triangle " + i + " is not 3 indices: " + (t == null ? "null" : java.util.Arrays.toString(t)));
+                }
+                for (int c = 0; c < 3; c++) indices[3 * i + c] = u32(t[c], "rtree_from_triangles", "triangle " + i + "'s index");
+            }
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment xyz = np == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_DOUBLE, flat);
+                MemorySegment idx = nt == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_INT, indices);
+                return new RTree(call(() -> (MemorySegment) RTREE_FROM_TRIANGLES.invokeExact(xyz, np, idx, nt)), "rtree_from_triangles");
+            }
+        }
+
+        MemorySegment handle() {
+            return handle.live();
+        }
+
+        public boolean closed() {
+            return handle.closed();
+        }
+
+        /** Give the tree back. Idempotent. */
+        @Override
+        public void close() {
+            cleanable.clean();
+        }
+
+        /** How many entries the tree holds. */
+        public int size() {
+            try {
+                MemorySegment h = handle();
+                return call(() -> (int) RTREE_COUNT.invokeExact(h));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The union of every entry's box, or empty for an empty tree. */
+        public Optional<Box> bounds() {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment h = handle();
+                if (call(() -> (int) RTREE_COUNT.invokeExact(h)) == 0) return Optional.empty();
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 6);
+                boolean ok = call(() -> (boolean) RTREE_BOUNDS.invokeExact(h, out));
+                if (!ok) throw failure("rtree_bounds");
+                double[] o = out.toArray(ValueLayout.JAVA_DOUBLE);
+                return Optional.of(new Box(new double[] {o[0], o[1], o[2]}, new double[] {o[3], o[4], o[5]}));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Add the entry {@code (id, box)}. A box that is not a box throws and leaves the tree as it
+         *  was. */
+        public void insert(long id, Box box) {
+            MemorySegment h = handle();
+            int i = u32(id, "rtree_insert", "id");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment b = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, words(box));
+                boolean ok = call(() -> (boolean) RTREE_INSERT.invokeExact(h, i, b));
+                if (!ok) throw failure("rtree_insert");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Add the entry {@code (id, point)}, the point a zero box. A point that is not finite
+         *  throws and leaves the tree as it was. */
+        public void insert(long id, double[] point) {
+            MemorySegment h = handle();
+            int i = u32(id, "rtree_insert", "id");
+            double[] p = point3(point, "rtree_insert_point");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment ps = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, p);
+                boolean ok = call(() -> (boolean) RTREE_INSERT_POINT.invokeExact(h, i, ps));
+                if (!ok) throw failure("rtree_insert_point");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Take out one entry equal to {@code (id, box)} -- the box it was inserted with, compared
+         *  coordinate by coordinate -- and say whether there was one: false, not an error, when
+         *  there is none. With duplicates, one goes per call. A box that is not a box throws. */
+        public boolean remove(long id, Box box) {
+            MemorySegment h = handle();
+            return removeWords(h, id, words(box));
+        }
+
+        /** {@link #remove(long, Box)} for an entry inserted as a point (its zero box). */
+        public boolean remove(long id, double[] point) {
+            MemorySegment h = handle();
+            double[] p = point3(point, "rtree_remove");
+            return removeWords(h, id, new double[] {p[0], p[1], p[2], p[0], p[1], p[2]});
+        }
+
+        /** The removal, {@code h} this tree's live handle (taken first: a closed tree refuses
+         *  before its arguments are read). */
+        private boolean removeWords(MemorySegment h, long id, double[] words) {
+            int i = u32(id, "rtree_remove", "id");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment b = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, words);
+                if (call(() -> (boolean) RTREE_REMOVE.invokeExact(h, i, b))) return true;
+                if (!lastError().isEmpty()) throw failure("rtree_remove");
+                return false;
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The ids of every entry whose box meets {@code box} (touching counts), ascending. A box
+         *  that is not a box throws. */
+        public List<Long> search(Box box) {
+            MemorySegment h = handle();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment b = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, words(box));
+                List<Hit> hits = hits(call(() -> (MemorySegment) RTREE_SEARCH.invokeExact(h, b)), "rtree_search");
+                List<Long> ids = new ArrayList<>(hits.size());
+                for (Hit hit : hits) ids.add(hit.id());
+                return ids;
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Every entry whose box is within {@code r} of {@code point} (Euclidean, 0 inside the box),
+         *  by distance then id. A point not finite, or an {@code r} negative or NaN, throws. */
+        public List<Hit> within(double[] point, double r) {
+            MemorySegment h = handle();
+            double[] p = point3(point, "rtree_within");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment ps = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, p);
+                return hits(call(() -> (MemorySegment) RTREE_WITHIN.invokeExact(h, ps, r)), "rtree_within");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The {@code k} entries whose boxes are nearest {@code point}, by distance then id (the
+         *  smaller ids win a tie); all of them when {@code k} is over the count. A point not finite,
+         *  or a {@code k} above 1,000,000, throws. */
+        public List<Hit> nearest(double[] point, long k) {
+            MemorySegment h = handle();
+            int kk = u32(k, "rtree_nearest", "k");
+            double[] p = point3(point, "rtree_nearest");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment ps = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, p);
+                return hits(call(() -> (MemorySegment) RTREE_NEAREST.invokeExact(h, ps, kk)), "rtree_nearest");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #ray(double[], double[], double)} with no {@code maxT}: the whole ray. */
+        public List<Hit> ray(double[] origin, double[] direction) {
+            return ray(origin, direction, Double.POSITIVE_INFINITY);
+        }
+
+        /** Every entry whose box the ray {@code origin + t * direction}, {@code 0 <= t <= maxT},
+         *  meets, as hits whose {@code distance} is the {@code t} where the ray enters the box (0
+         *  when {@code origin} is inside it), by {@code t} then id. Touching counts. {@code t} is in
+         *  units of {@code direction}'s length, which is not normalised. An origin or direction not
+         *  finite, a zero direction, or a {@code maxT} negative or NaN throws. */
+        public List<Hit> ray(double[] origin, double[] direction, double maxT) {
+            MemorySegment h = handle();
+            double[] o = point3(origin, "rtree_ray: origin");
+            double[] d = point3(direction, "rtree_ray: direction");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment os = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, o);
+                MemorySegment ds = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, d);
+                return hits(call(() -> (MemorySegment) RTREE_RAY.invokeExact(h, os, ds, maxT)), "rtree_ray");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Every pair {@code (a, b)}, {@code a} an entry of this tree and {@code b} one of {@code
+         *  other} (which may be this tree), whose boxes are at most {@code slack} apart on every
+         *  axis, ascending. A {@code slack} negative or NaN throws. */
+        public List<Pair> overlaps(RTree other, double slack) {
+            try {
+                MemorySegment h = handle();
+                MemorySegment o = other.handle();
+                return pairs(call(() -> (MemorySegment) RTREE_OVERLAPS.invokeExact(h, o, slack)), "rtree_overlaps");
+            } finally {
+                keep(this, other);
+            }
+        }
+
+        /** {@link #overlaps(RTree, double)} touching: slack 0. */
+        public List<Pair> overlaps(RTree other) {
+            return overlaps(other, 0);
+        }
+
+        /** Every unordered pair of distinct entries at most {@code slack} apart, once each as
+         *  {@code (smaller id, larger id)}, ascending. A {@code slack} negative or NaN throws. */
+        public List<Pair> selfOverlaps(double slack) {
+            try {
+                MemorySegment h = handle();
+                return pairs(call(() -> (MemorySegment) RTREE_SELF_OVERLAPS.invokeExact(h, slack)), "rtree_self_overlaps");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #selfOverlaps(double)} touching: slack 0. */
+        public List<Pair> selfOverlaps() {
+            return selfOverlaps(0);
+        }
+
+        @Override
+        public String toString() {
+            return closed() ? "RTree(closed)" : "RTree(" + size() + " entries)";
+        }
+
+        private static double[] words(Box box) {
+            return new double[] {box.lo()[0], box.lo()[1], box.lo()[2], box.hi()[0], box.hi()[1], box.hi()[2]};
+        }
+
+        /** An id or a {@code k} as the C ABI's {@code uint32_t}, refused by the call's name before
+         *  any call when no {@code uint32_t} holds it. */
+        private static int u32(long v, String call, String name) {
+            if (v < 0 || v > 0xFFFFFFFFL) throw new BuildException(call + ": " + name + " is out of range: " + v);
+            return (int) v;
+        }
+
+        /** The hits list a query returned, read and freed on every path; null is the query's
+         *  refusal, named {@code what}. */
+        private static List<Hit> hits(MemorySegment list, String what) {
+            if (list.address() == 0) throw failure(what);
+            try (Arena arena = Arena.ofConfined()) {
+                int n = call(() -> (int) RTREE_HITS_COUNT.invokeExact(list));
+                List<Hit> found = new ArrayList<>(Math.min(n < 0 ? Integer.MAX_VALUE : n, 1024));
+                MemorySegment raw = arena.allocate(RTREE_HIT_LAYOUT);
+                long idAt = offset(RTREE_HIT_LAYOUT, "id"), distanceAt = offset(RTREE_HIT_LAYOUT, "distance");
+                for (int i = 0; i < n; i++) {
+                    int at = i;
+                    boolean ok = call(() -> (boolean) RTREE_HITS_AT.invokeExact(list, at, raw));
+                    if (!ok) throw failure("rtree_hits_at");
+                    found.add(new Hit(Integer.toUnsignedLong(raw.get(ValueLayout.JAVA_INT, idAt)), raw.get(ValueLayout.JAVA_DOUBLE, distanceAt)));
+                }
+                return found;
+            } finally {
+                call(() -> {
+                    RTREE_HITS_FREE.invokeExact(list);
+                    return null;
+                });
+            }
+        }
+
+        /** The pairs list a query returned, read and freed on every path. */
+        private static List<Pair> pairs(MemorySegment list, String what) {
+            if (list.address() == 0) throw failure(what);
+            try (Arena arena = Arena.ofConfined()) {
+                int n = call(() -> (int) RTREE_PAIRS_COUNT.invokeExact(list));
+                List<Pair> found = new ArrayList<>(Math.min(n < 0 ? Integer.MAX_VALUE : n, 1024));
+                MemorySegment raw = arena.allocate(RTREE_PAIR_LAYOUT);
+                long aAt = offset(RTREE_PAIR_LAYOUT, "a"), bAt = offset(RTREE_PAIR_LAYOUT, "b");
+                for (int i = 0; i < n; i++) {
+                    int at = i;
+                    boolean ok = call(() -> (boolean) RTREE_PAIRS_AT.invokeExact(list, at, raw));
+                    if (!ok) throw failure("rtree_pairs_at");
+                    found.add(new Pair(Integer.toUnsignedLong(raw.get(ValueLayout.JAVA_INT, aAt)), Integer.toUnsignedLong(raw.get(ValueLayout.JAVA_INT, bAt))));
+                }
+                return found;
+            } finally {
+                call(() -> {
+                    RTREE_PAIRS_FREE.invokeExact(list);
+                    return null;
+                });
+            }
+        }
+    }
+
+    // ---- Regions ------------------------------------------------------------------------------
+
+    /** One side of one face ({@link Solid#regions}): {@code face} the face's index in the solid,
+     *  {@code sense} +1 for the side its normal points to, -1 for the other. A solid's inside is
+     *  behind its faces, at -1. */
+    public record FaceSide(int face, int sense) {
+    }
+
+    /**
+     * One region of space a solid's faces bound ({@link Solid#regions}): its {@code index} (0 the
+     * infinite region, whose {@code finite} is false), the {@code box} round the faces bounding it,
+     * its {@code sides} ascending by face then sense (an unmodifiable list), and its {@code shells}
+     * -- 1, plus one per void inside it. {@link Solid#regionSolid} takes a finite one as a solid of
+     * its own. Equal by value, the box's corners compared number by number.
+     */
+    public record Region(int index, boolean finite, Box box, List<FaceSide> sides, int shells) {
+        public Region {
+            java.util.Objects.requireNonNull(box, "box");
+            sides = List.copyOf(sides);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof Region r && index == r.index && finite == r.finite && shells == r.shells
+                    && Arrays.equals(box.lo(), r.box.lo()) && Arrays.equals(box.hi(), r.box.hi()) && sides.equals(r.sides);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(index, finite, shells, Arrays.hashCode(box.lo()), Arrays.hashCode(box.hi()), sides);
+        }
+
+        /** The regions list {@code cadaclysm_blacksmith_regions} returned, read and freed on every
+         *  path; null is its refusal. */
+        static List<Region> read(MemorySegment list) {
+            if (list.address() == 0) throw failure("regions");
+            try (Arena arena = Arena.ofConfined()) {
+                int n = call(() -> (int) REGIONS_COUNT.invokeExact(list));
+                List<Region> found = new ArrayList<>(Math.min(n < 0 ? Integer.MAX_VALUE : n, 1024));
+                MemorySegment raw = arena.allocate(REGION_LAYOUT), side = arena.allocate(FACE_SIDE_LAYOUT);
+                long finiteAt = offset(REGION_LAYOUT, "finite"), minAt = offset(REGION_LAYOUT, "min"), maxAt = offset(REGION_LAYOUT, "max");
+                long sidesAt = offset(REGION_LAYOUT, "sides"), shellsAt = offset(REGION_LAYOUT, "shells");
+                long faceAt = offset(FACE_SIDE_LAYOUT, "face"), senseAt = offset(FACE_SIDE_LAYOUT, "sense");
+                for (int i = 0; i < n; i++) {
+                    int at = i;
+                    boolean ok = call(() -> (boolean) REGIONS_AT.invokeExact(list, at, raw));
+                    if (!ok) throw failure("regions_at");
+                    int count = raw.get(ValueLayout.JAVA_INT, sidesAt);
+                    List<FaceSide> sides = new ArrayList<>(Math.min(count < 0 ? Integer.MAX_VALUE : count, 1024));
+                    for (int k = 0; k < count; k++) {
+                        int kk = k;
+                        boolean sideOk = call(() -> (boolean) REGIONS_SIDE_AT.invokeExact(list, at, kk, side));
+                        if (!sideOk) throw failure("regions_side_at");
+                        sides.add(new FaceSide(side.get(ValueLayout.JAVA_INT, faceAt), side.get(ValueLayout.JAVA_INT, senseAt)));
+                    }
+                    double[] lo = new double[3], hi = new double[3];
+                    for (int c = 0; c < 3; c++) {
+                        lo[c] = raw.get(ValueLayout.JAVA_DOUBLE, minAt + 8L * c);
+                        hi[c] = raw.get(ValueLayout.JAVA_DOUBLE, maxAt + 8L * c);
+                    }
+                    found.add(new Region(i, raw.get(ValueLayout.JAVA_INT, finiteAt) != 0, new Box(lo, hi), sides,
+                                         raw.get(ValueLayout.JAVA_INT, shellsAt)));
+                }
+                return List.copyOf(found);
+            } finally {
+                call(() -> {
+                    REGIONS_FREE.invokeExact(list);
+                    return null;
+                });
+            }
+        }
+    }
+
+    // ---- The interpolator -------------------------------------------------------------------
+
+    /** How {@link Interpolator#at} reads between two samples (Paul Bourke's formulas, {@code mu}
+     *  the fraction past sample {@code i}); {@link #code} is the C ABI's {@code
+     *  CADACLYSM_BLACKSMITH_INTERPOLATE_*}. */
+    public enum InterpolatorMode {
+        /** The sample at {@code floor(t + 1/2)} (a half rounds up), after the clamp or wrap. */
+        NEAREST(0),
+        /** Straight between the two samples either side of {@code t}. */
+        LINEAR(1),
+        /** Between the two samples either side of {@code t} on a cosine ease, flat at every sample. */
+        COSINE(2),
+        /** Bourke's cubic over the four samples about {@code t}, through every sample (it does not
+         *  reproduce a ramp). */
+        CUBIC(3),
+        /** The Catmull-Rom spline over the four samples about {@code t}: through every sample, C1. */
+        CATMULL_ROM(4);
+
+        /** The mode's {@code uint32_t} in the C ABI. */
+        public final int code;
+
+        InterpolatorMode(int code) {
+            this.code = code;
+        }
+    }
+
+    /**
+     * A list of samples read at a fractional index, as Rhino's {@code Interpolator}: {@code t = 2}
+     * is sample 2, {@code t = 2.5} halfway between samples 2 and 3. Animation keys, a value along a
+     * pattern, a smoothed profile of measurements. Samples are numbers ({@link
+     * #Interpolator(double[], boolean)}, dimension 1) or rows of equal length ({@link
+     * #Interpolator(double[][], boolean)}: 2D, 3D or any dimension, each component read on its
+     * own); every answer is a {@code double[]} of {@link #dimension} numbers. An open list clamps
+     * {@code t} to {@code [0, size - 1]} and stops on its end samples; a {@code cyclic} one wraps
+     * {@code t} with period {@code size}. Every mode ({@link InterpolatorMode}) returns the sample
+     * itself at a whole {@code t}. An interpolator never changes after it is made. {@link #close}
+     * frees it; so does the garbage collector. A call after {@link #close} throws {@code
+     * interpolator: closed}.
+     */
+    public static final class Interpolator implements AutoCloseable {
+        private final Handle handle;
+        private final Cleaner.Cleanable cleanable;
+        private final int dimension;
+
+        /** {@link #Interpolator(double[], boolean)}, open. */
+        public Interpolator(double[] samples) {
+            this(samples, false);
+        }
+
+        /** An interpolator over the numbers {@code samples} (dimension 1). None, or one NaN or
+         *  infinite (by index), throws. */
+        public Interpolator(double[] samples, boolean cyclic) {
+            this(samples.clone(), samples.length, 1, cyclic);
+        }
+
+        /** {@link #Interpolator(double[][], boolean)}, open. */
+        public Interpolator(double[][] rows) {
+            this(rows, false);
+        }
+
+        /** An interpolator over {@code rows}, each a sample of the same length (the dimension).
+         *  Rows of unequal length throw before any call; none, or a number NaN or infinite (by
+         *  sample), throws. */
+        public Interpolator(double[][] rows, boolean cyclic) {
+            this(flat(rows), rows.length, rows.length == 0 ? 1 : rows[0].length, cyclic);
+        }
+
+        private Interpolator(double[] flat, int count, int dimension, boolean cyclic) {
+            MemorySegment raw;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment s = flat.length == 0 ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_DOUBLE, flat);
+                raw = call(() -> (MemorySegment) INTERPOLATOR_NEW.invokeExact(s, count, dimension, cyclic));
+            }
+            handle = new Handle(INTERPOLATOR_FREE, "interpolator: closed", checked(raw, "interpolator_new"));
+            cleanable = CLEANER.register(this, handle);
+            this.dimension = dimension;
+        }
+
+        /** {@code rows} end to end, refused when they differ in length. */
+        private static double[] flat(double[][] rows) {
+            java.util.TreeSet<Integer> lengths = new java.util.TreeSet<>();
+            for (double[] row : rows) lengths.add(row == null ? 0 : row.length);
+            if (lengths.size() > 1) throw new BuildException("interpolator: samples differ in length (" + lengths + ")");
+            int d = lengths.isEmpty() ? 0 : lengths.first();
+            double[] out = new double[rows.length * d];
+            for (int k = 0; k < rows.length; k++) if (d > 0) System.arraycopy(rows[k], 0, out, k * d, d);
+            return out;
+        }
+
+        MemorySegment handle() {
+            return handle.live();
+        }
+
+        public boolean closed() {
+            return handle.closed();
+        }
+
+        /** Give the interpolator back. Idempotent. */
+        @Override
+        public void close() {
+            cleanable.clean();
+        }
+
+        /** How many samples. */
+        public int size() {
+            MemorySegment h = handle();
+            try {
+                return call(() -> (int) INTERPOLATOR_COUNT.invokeExact(h));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** How many numbers per sample, and per answer. */
+        public int dimension() {
+            MemorySegment h = handle();
+            try {
+                return call(() -> (int) INTERPOLATOR_DIMENSION.invokeExact(h));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Whether {@code t} wraps round the list (else it is clamped to the ends). */
+        public boolean cyclic() {
+            MemorySegment h = handle();
+            try {
+                return call(() -> (boolean) INTERPOLATOR_CYCLIC.invokeExact(h));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The value at the fractional index {@code t} by {@code mode}: {@link #dimension}
+         *  numbers. A {@code t} NaN or infinite throws. */
+        public double[] at(double t, InterpolatorMode mode) {
+            MemorySegment h = handle();
+            int m = mode.code, d = dimension;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, d);
+                boolean ok = call(() -> (boolean) INTERPOLATOR_AT.invokeExact(h, t, m, out, d));
+                if (!ok) throw failure("interpolator_at");
+                return out.toArray(ValueLayout.JAVA_DOUBLE);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #at(double, InterpolatorMode)}, {@link InterpolatorMode#LINEAR}. */
+        public double[] at(double t) {
+            return at(t, InterpolatorMode.LINEAR);
+        }
+
+        /** The values at every {@code t} of {@code ts} by {@code mode}, as {@link #at} reads each,
+         *  in one call; none for none. A value of {@code t} NaN or infinite (by its index), and
+         *  more than 1,000,000 values, throw. */
+        public double[][] sample(double[] ts, InterpolatorMode mode) {
+            MemorySegment h = handle();
+            int m = mode.code, n = ts.length, d = dimension;
+            if (n == 0) return new double[0][];
+            if (n > 1_000_000) throw new BuildException("interpolator_sample: " + n + " values of t are more than 1000000");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment tsSeg = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, ts);
+                long len = (long) n * d;
+                int outLen = (int) Math.min(len, 0xFFFFFFFFL);
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, len);
+                boolean ok = call(() -> (boolean) INTERPOLATOR_SAMPLE.invokeExact(h, tsSeg, n, m, out, outLen));
+                if (!ok) throw failure("interpolator_sample");
+                double[] flat = out.toArray(ValueLayout.JAVA_DOUBLE);
+                double[][] values = new double[n][];
+                for (int k = 0; k < n; k++) values[k] = Arrays.copyOfRange(flat, k * d, (k + 1) * d);
+                return values;
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #sample(double[], InterpolatorMode)}, {@link InterpolatorMode#LINEAR}. */
+        public double[][] sample(double[] ts) {
+            return sample(ts, InterpolatorMode.LINEAR);
+        }
+
+        /** The sample at {@code floor(t + 1/2)} (a half rounds up), after the clamp or wrap. */
+        public double[] nearest(double t) {
+            return at(t, InterpolatorMode.NEAREST);
+        }
+
+        /** Straight between the two samples either side of {@code t}. */
+        public double[] linear(double t) {
+            return at(t, InterpolatorMode.LINEAR);
+        }
+
+        /** Between the two samples either side of {@code t} on a cosine ease, flat at every
+         *  sample. */
+        public double[] cosine(double t) {
+            return at(t, InterpolatorMode.COSINE);
+        }
+
+        /** Bourke's cubic over the four samples about {@code t}, through every sample. */
+        public double[] cubic(double t) {
+            return at(t, InterpolatorMode.CUBIC);
+        }
+
+        /** The Catmull-Rom spline over the four samples about {@code t}: through every sample,
+         *  C1. */
+        public double[] catmullRom(double t) {
+            return at(t, InterpolatorMode.CATMULL_ROM);
+        }
+
+        @Override
+        public String toString() {
+            return closed() ? "Interpolator(closed)" : "Interpolator(" + size() + " samples of " + dimension + (cyclic() ? ", cyclic)" : ")");
         }
     }
 
@@ -6987,6 +10190,29 @@ public final class Blacksmith {
             return new Subd(raw, "subd_inset");
         }
 
+        /** {@link #subdivide(int[])} of the whole cage. */
+        public Subd subdivide() {
+            return subdivide(new int[0]);
+        }
+
+        /** A new cage with {@code faces} subdivided once by the Catmull-Clark rules (the whole
+         *  cage when no faces are given): each face becomes quads round a new point, and an
+         *  unpicked face beside them takes the new edge points as corners. The whole cage keeps
+         *  its smooth surface exactly. The new cage selects the new faces. */
+        public Subd subdivide(int[] faces) {
+            subdIds(faces, "subdivide faces");
+            int count = faces.length;
+            MemorySegment h = handle();
+            MemorySegment raw;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment seg = subdInts(arena, faces);
+                raw = call(() -> (MemorySegment) SUBD_SUBDIVIDE.invokeExact(h, seg, count));
+            } finally {
+                keep(this);
+            }
+            return new Subd(raw, "subd_subdivide");
+        }
+
         /** {@link #insertLoop(SubdEdge, double)} at 0.5. */
         public Subd insertLoop(SubdEdge edge) {
             return insertLoop(edge, 0.5);
@@ -7118,6 +10344,1060 @@ public final class Blacksmith {
                 MemorySegment raw = call(() -> (MemorySegment) SUBD_TO_SOLID.invokeExact(h, tolerance, g1Angle, maxLevels, report));
                 Solid solid = new Solid(checked(raw, "subd_to_solid"));
                 return new SubdSolid(solid, SubdReport.of(report));
+            } finally {
+                keep(this);
+            }
+        }
+    }
+
+    // ---- the 2D constraint sketcher -------------------------------------------------------
+
+    /** The ids a call can name, as a copy; the C ABI's {@code CADACLYSM_BLACKSMITH_NONE}. */
+    private static final int SKETCH_NONE = -1;
+
+    /** {@code id}, refused when negative (the C ABI takes it unsigned), naming the call and argument. */
+    private static int sketchId(int id, String call, String param) {
+        if (id < 0) throw new BuildException(call + ": " + param + " must not be negative, got " + id);
+        return id;
+    }
+
+    private static int[] sketchIds(int[] ids, String call, String param) {
+        for (int id : ids) sketchId(id, call, param);
+        return ids;
+    }
+
+    /** A list the library lends until the next call on its sketch: copied out at once. */
+    @SuppressWarnings("restricted") // reinterpret: the count beside the pointer says how far it reaches.
+    private static int[] sketchLent(MemorySegment at, MemorySegment count, String what) {
+        if (at.address() == 0) throw failure(what);
+        long n = count.get(ValueLayout.JAVA_LONG, 0);
+        return n == 0 ? new int[0] : at.reinterpret(n * Integer.BYTES).toArray(ValueLayout.JAVA_INT);
+    }
+
+    /**
+     * What a sketch solve, drag, value change or reference update reported: the {@code status}
+     * ("converged", "conflicting" or "diverged"), the {@code iterations} taken, the largest
+     * residual left and, when it did not converge, the {@code ids} of the constraints it names.
+     */
+    public record SolveReport(String status, int iterations, double maxResidual, int[] ids) {
+        public SolveReport {
+            ids = ids.clone();
+        }
+
+        /** A copy of the ids. */
+        @Override
+        public int[] ids() {
+            return ids.clone();
+        }
+
+        public boolean converged() {
+            return status.equals("converged");
+        }
+
+        @Override
+        public String toString() {
+            return "SolveReport(status=" + status + ", iterations=" + iterations + ", maxResidual=" + maxResidual
+                    + ", ids=" + Arrays.toString(ids) + ")";
+        }
+    }
+
+    /** One independent part of a diagnosed sketch ({@link Dof#parts}). */
+    public record PartDof(int params, int free, String state, int[] constraints, int[] redundant, int[] conflicting,
+                          int[] freeEntities) {
+        public PartDof {
+            constraints = constraints.clone();
+            redundant = redundant.clone();
+            conflicting = conflicting.clone();
+            freeEntities = freeEntities.clone();
+        }
+
+        @Override
+        public int[] constraints() {
+            return constraints.clone();
+        }
+
+        @Override
+        public int[] redundant() {
+            return redundant.clone();
+        }
+
+        @Override
+        public int[] conflicting() {
+            return conflicting.clone();
+        }
+
+        @Override
+        public int[] freeEntities() {
+            return freeEntities.clone();
+        }
+
+        @Override
+        public String toString() {
+            return "PartDof(params=" + params + ", free=" + free + ", state=" + state + ")";
+        }
+    }
+
+    /** A sketch's degrees of freedom: how many are {@code free}, its {@code state} ("under", "full" or "over"),
+     *  the {@code redundant} and {@code conflicting} constraint ids, the {@code freeEntities} that can still
+     *  move, and the independent {@code parts} it splits into. */
+    public record Dof(int free, String state, int[] redundant, int[] conflicting, int[] freeEntities, List<PartDof> parts) {
+        public Dof {
+            redundant = redundant.clone();
+            conflicting = conflicting.clone();
+            freeEntities = freeEntities.clone();
+            parts = List.copyOf(parts);
+        }
+
+        @Override
+        public int[] redundant() {
+            return redundant.clone();
+        }
+
+        @Override
+        public int[] conflicting() {
+            return conflicting.clone();
+        }
+
+        @Override
+        public int[] freeEntities() {
+            return freeEntities.clone();
+        }
+
+        @Override
+        public String toString() {
+            return "Dof(free=" + free + ", state=" + state + ", parts=" + parts.size() + ")";
+        }
+    }
+
+    /** {@link Sketch#addRect}: the four corner points, counter-clockwise from the first corner, and the four
+     *  sides (side {@code i} from corner {@code i}). */
+    public record SketchRect(int[] corners, int[] sides) {
+        public SketchRect {
+            corners = corners.clone();
+            sides = sides.clone();
+        }
+
+        @Override
+        public int[] corners() {
+            return corners.clone();
+        }
+
+        @Override
+        public int[] sides() {
+            return sides.clone();
+        }
+    }
+
+    /**
+     * A 2D sketch of points, lines, circles, arcs and free curves held by geometric constraints and
+     * dimensions, solved on request:
+     * <pre>{@code
+     * try (Blacksmith.Sketch s = new Blacksmith.Sketch()) {
+     *     Blacksmith.SketchRect r = s.addRect(new double[] {0, 0}, new double[] {40, 30});
+     *     s.fix(r.corners()[0]);
+     *     s.length(r.sides()[0], 60);
+     *     s.solve();
+     * }
+     * }</pre>
+     * Entities and constraints are named by {@code int} ids (a negative id is refused before the call).
+     * Entity kinds are "point", "line", "circle", "arc" and "free_curve"; constraint kinds the snake_case
+     * names of the methods that add them ("point_line_distance", ...), but for {@link #radiusOf}, whose
+     * kind is "radius", as in Python. Senses are "auto", "positive" or "negative"; ends "start" or "end";
+     * a name outside those is refused with a {@link BuildException} naming the call and the parameter. A
+     * refused call throws {@link BuildException} with the library's text and, as its {@link
+     * BuildException#ids}, the ids the refusal names (empty when it names none); the {@link SolveReport}s
+     * of {@link #solve}, {@link #drag}, {@link #setValue}, {@link #setDriving} and {@link #updateReference}
+     * carry a returned report's ids the same way. {@link #close} frees the handle; so does the garbage
+     * collector. A use after {@link #close} throws {@link IllegalStateException}.
+     */
+    public static final class Sketch implements AutoCloseable {
+        private static final String[] ENTITY_KINDS = {"point", "line", "circle", "arc", "free_curve"};
+        private static final String[] CONSTRAINT_KINDS = {
+            "coincident", "point_on_line", "point_on_circle", "horizontal", "vertical", "parallel", "perpendicular",
+            "collinear", "tangent", "tangent_at_end", "concentric", "equal_length", "equal_radius", "midpoint",
+            "symmetric", "fix", "distance", "point_line_distance", "line_distance", "circle_line_distance",
+            "circle_distance", "horizontal_distance", "vertical_distance", "length", "angle", "radius", "diameter"};
+        private static final String[] SENSES = {"auto", "positive", "negative"};
+        private static final String[] ENDS = {"start", "end"};
+        private static final String[] STATUSES = {"converged", "conflicting", "diverged"};
+        private static final String[] STATES = {"under", "full", "over"};
+        // sketch_dof_list's and sketch_dof_part_list's `which`
+        private static final int DOF_REDUNDANT = 0, DOF_CONFLICTING = 1, DOF_FREE_ENTITIES = 2;
+        private static final int PART_CONSTRAINTS = 0, PART_REDUNDANT = 1, PART_CONFLICTING = 2, PART_FREE_ENTITIES = 3;
+
+        private final Handle handle;
+        private final Cleaner.Cleanable cleanable;
+
+        private Sketch(MemorySegment raw, String what) {
+            handle = new Handle(SKETCH_FREE, "sketch: closed", checked(raw, what));
+            cleanable = CLEANER.register(this, handle);
+        }
+
+        /** A new, empty sketch. */
+        public Sketch() {
+            this(call(() -> (MemorySegment) SKETCH_NEW.invokeExact()), "sketch_new");
+        }
+
+        MemorySegment handle() {
+            return handle.live();
+        }
+
+        public boolean closed() {
+            return handle.closed();
+        }
+
+        /** Give the sketch back. Idempotent. */
+        @Override
+        public void close() {
+            cleanable.clean();
+        }
+
+        /** {@link #fromProfile(Profile, boolean, double)} with the obvious constraints and a tolerance of 1e-6. */
+        public static Sketch fromProfile(Profile profile) {
+            return fromProfile(profile, true, 1e-6);
+        }
+
+        /** A sketch of {@code profile}'s lines, arcs and curves joined end to end, holes included; with
+         *  {@code infer} the obvious constraints (horizontal, vertical, tangent joints, ...) too. Ends within
+         *  {@code tolerance} count as joined. */
+        public static Sketch fromProfile(Profile profile, boolean infer, double tolerance) {
+            try {
+                MemorySegment p = profile.handle();
+                return new Sketch(call(() -> (MemorySegment) SKETCH_FROM_PROFILE.invokeExact(p, infer, tolerance)), "sketch_from_profile");
+            } finally {
+                keep(profile);
+            }
+        }
+
+        // -- helpers
+
+        @FunctionalInterface
+        private interface Lend {
+            MemorySegment get(MemorySegment h, MemorySegment count) throws Throwable;
+        }
+
+        /** A borrowed list, copied before any other call on this sketch; null is a refusal. */
+        private int[] lend(String what, Lend body) {
+            MemorySegment h = handle();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment count = arena.allocate(ValueLayout.JAVA_LONG);
+                MemorySegment at = call(() -> body.get(h, count));
+                return sketchLent(at, count, what);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The ids {@code sketch_report_ids} holds, copied (empty for a null answer). */
+        private static int[] reportIds(MemorySegment h, Arena arena) {
+            MemorySegment count = arena.allocate(ValueLayout.JAVA_LONG);
+            MemorySegment at = call(() -> (MemorySegment) SKETCH_REPORT_IDS.invokeExact(h, count));
+            return at.address() == 0 ? new int[0] : sketchLent(at, count, "sketch_report_ids");
+        }
+
+        /** The refusal of a call that can name ids: the library's reason first (read before any other call),
+         *  then the ids {@code sketch_report_ids} holds. */
+        private BuildException refused(String what) {
+            String reason = lastError();
+            MemorySegment h = handle();
+            try (Arena arena = Arena.ofConfined()) {
+                return new BuildException(reason.isEmpty() ? what : reason, reportIds(h, arena));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #sketchId} after the closed check, so a closed sketch is reported as closed whatever the arguments. */
+        private int liveId(int id, String call, String param) {
+            handle();
+            return sketchId(id, call, param);
+        }
+
+        private int[] liveIds(int[] ids, String call, String param) {
+            handle();
+            return sketchIds(ids, call, param);
+        }
+
+        /** A count or code the library reports as a double, converted exactly: a whole number that fits an
+         *  int, else an error naming the call (a NaN or a fraction never reads as a code). */
+        static int exact(double value, String what) {
+            if (Double.isNaN(value) || value != Math.floor(value) || value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
+                throw new BuildException(what + ": the library reported " + value + ", which is not a whole number that fits an int");
+            }
+            return (int) value;
+        }
+
+        /** The point ids of a drag in ascending order, the order the moves go to the library. */
+        static int[] dragOrder(Map<Integer, double[]> moves) {
+            int[] ids = new int[moves.size()];
+            int at = 0;
+            for (Integer id : moves.keySet()) ids[at++] = id;
+            Arrays.sort(ids);
+            return ids;
+        }
+
+        private static int idOrFail(int got, String what) {
+            if (got == SKETCH_NONE) throw failure(what);
+            return got;
+        }
+
+        private static String named(String[] table, int code, String what) {
+            if (code == SKETCH_NONE || code < 0 || code >= table.length) throw failure(what);
+            return table[code];
+        }
+
+        private static int code(String[] table, String name, String call, String param) {
+            int at = Arrays.asList(table).indexOf(name);
+            if (at < 0) {
+                StringBuilder all = new StringBuilder();
+                for (String t : table) all.append(all.length() == 0 ? "" : ", ").append('\'').append(t).append('\'');
+                throw new BuildException(call + ": " + param + " must be one of " + all + ", not '" + name + "'");
+            }
+            return at;
+        }
+
+        private static void ok(boolean done, String what) {
+            if (!done) throw failure(what);
+        }
+
+        @FunctionalInterface
+        private interface Reporter {
+            boolean run(MemorySegment h, MemorySegment report) throws Throwable;
+        }
+
+        /** A call that fills {@code {status, iterations, max_residual}}: the report with the ids
+         *  {@code sketch_report_ids} holds; a refusal carries its ids when the call can name them. */
+        private SolveReport reported(String what, boolean namesIds, Reporter body) {
+            MemorySegment h = handle();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment report = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
+                boolean done = call(() -> body.run(h, report));
+                if (!done) throw namesIds ? refused(what) : failure(what);
+                int[] ids = reportIds(h, arena);
+                return new SolveReport(named(STATUSES, exact(report.getAtIndex(ValueLayout.JAVA_DOUBLE, 0), what), what),
+                        exact(report.getAtIndex(ValueLayout.JAVA_DOUBLE, 1), what), report.getAtIndex(ValueLayout.JAVA_DOUBLE, 2), ids);
+            } finally {
+                keep(this);
+            }
+        }
+
+        // -- entities
+
+        /** A free point at ({@code x}, {@code y}); a coordinate that is not finite is refused. */
+        public int addPoint(double x, double y) {
+            MemorySegment h = handle();
+            try {
+                return idOrFail(call(() -> (int) SKETCH_ADD_POINT.invokeExact(h, x, y)), "sketch_add_point");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** A line between the points {@code a} and {@code b}. */
+        public int addLine(int a, int b) {
+            liveId(a, "sketch_add_line", "a");
+            liveId(b, "sketch_add_line", "b");
+            MemorySegment h = handle();
+            try {
+                return idOrFail(call(() -> (int) SKETCH_ADD_LINE.invokeExact(h, a, b)), "sketch_add_line");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** A circle of radius {@code r} about the point {@code centre}. */
+        public int addCircle(int centre, double r) {
+            liveId(centre, "sketch_add_circle", "centre");
+            MemorySegment h = handle();
+            try {
+                return idOrFail(call(() -> (int) SKETCH_ADD_CIRCLE.invokeExact(h, centre, r)), "sketch_add_circle");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** A counter-clockwise arc about the point {@code centre} from the point {@code start} to the point {@code end}. */
+        public int addArc(int centre, int start, int end) {
+            liveId(centre, "sketch_add_arc", "centre");
+            liveId(start, "sketch_add_arc", "start");
+            liveId(end, "sketch_add_arc", "end");
+            MemorySegment h = handle();
+            try {
+                return idOrFail(call(() -> (int) SKETCH_ADD_ARC.invokeExact(h, centre, start, end)), "sketch_add_arc");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** A cubic Bezier free curve from the point {@code start} through the controls {@code c1} and {@code c2}
+         *  to a new end point at {@code to} (each two numbers); the curve owns its control points. */
+        public int addBezier(int start, double[] c1, double[] c2, double[] to) {
+            liveId(start, "sketch_add_bezier", "start");
+            double[] p = doubles(c1, 2, "sketch_add_bezier c1"), q = doubles(c2, 2, "sketch_add_bezier c2"),
+                    e = doubles(to, 2, "sketch_add_bezier to");
+            MemorySegment h = handle();
+            try {
+                return idOrFail(call(() -> (int) SKETCH_ADD_BEZIER.invokeExact(h, start, p[0], p[1], q[0], q[1], e[0], e[1])), "sketch_add_bezier");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** A rational quadratic (conic) free curve from the point {@code start} with the control {@code control}
+         *  of {@code weight} to a new end point at {@code to} (each two numbers). */
+        public int addConic(int start, double[] control, double[] to, double weight) {
+            liveId(start, "sketch_add_conic", "start");
+            double[] c = doubles(control, 2, "sketch_add_conic control"), e = doubles(to, 2, "sketch_add_conic to");
+            MemorySegment h = handle();
+            try {
+                return idOrFail(call(() -> (int) SKETCH_ADD_CONIC.invokeExact(h, start, c[0], c[1], e[0], e[1], weight)), "sketch_add_conic");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #addNurbs(int, double[][], double[], int, double[])} of degree 3 and no weights. */
+        public int addNurbs(int start, double[][] points, double[] knots) {
+            return addNurbs(start, points, knots, 3, null);
+        }
+
+        /** {@link #addNurbs(int, double[][], double[], int, double[])} of the given {@code degree} and no weights. */
+        public int addNurbs(int start, double[][] points, double[] knots, int degree) {
+            return addNurbs(start, points, knots, degree, null);
+        }
+
+        /** A NURBS free curve of {@code degree} from the point {@code start} through the control {@code points}
+         *  after it (each two numbers), on {@code knots}; {@code weights} null for a plain B-spline, or one per
+         *  control point counting the start ({@code points.length + 1}). */
+        public int addNurbs(int start, double[][] points, double[] knots, int degree, double[] weights) {
+            liveId(start, "sketch_add_nurbs", "start");
+            liveId(degree, "sketch_add_nurbs", "degree");
+            double[] flat = new double[points.length * 2];
+            for (int k = 0; k < points.length; k++) {
+                double[] p = doubles(points[k], 2, "sketch_add_nurbs point " + k);
+                flat[2 * k] = p[0];
+                flat[2 * k + 1] = p[1];
+            }
+            long n = points.length;
+            // The library reads exactly `n + 1` weights whatever the list holds: check here.
+            if (weights != null && weights.length != n + 1) {
+                throw new BuildException("sketch_add_nurbs: " + weights.length + " weights for " + (n + 1)
+                        + " control points (the start and " + n + " given); give one per point");
+            }
+            MemorySegment h = handle();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment xy = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, flat);
+                MemorySegment w = weights == null ? MemorySegment.NULL : arena.allocateFrom(ValueLayout.JAVA_DOUBLE, weights);
+                MemorySegment k = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, knots);
+                long knotCount = knots.length;
+                return idOrFail(call(() -> (int) SKETCH_ADD_NURBS.invokeExact(h, start, degree, xy, n, w, k, knotCount)), "sketch_add_nurbs");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The rectangle with opposite corners {@code a} and {@code b} (each two numbers): its four corner points,
+         *  counter-clockwise from {@code a}, and its four sides (side {@code i} from corner {@code i}). */
+        public SketchRect addRect(double[] a, double[] b) {
+            handle();
+            double[] p = doubles(a, 2, "sketch_add_rect a"), q = doubles(b, 2, "sketch_add_rect b");
+            int[] ids = lend("sketch_add_rect", (h, n) -> (MemorySegment) SKETCH_ADD_RECT.invokeExact(h, p[0], p[1], q[0], q[1], n));
+            if (ids.length != 8) throw new BuildException("sketch_add_rect: expected 8 ids, got " + ids.length);
+            return new SketchRect(Arrays.copyOfRange(ids, 0, 4), Arrays.copyOfRange(ids, 4, 8));
+        }
+
+        /** The kind of entity {@code id}: "point", "line", "circle", "arc" or "free_curve". */
+        public String kind(int id) {
+            liveId(id, "sketch_kind", "id");
+            MemorySegment h = handle();
+            try {
+                return named(ENTITY_KINDS, call(() -> (int) SKETCH_KIND.invokeExact(h, id)), "sketch_kind");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The live entity ids, ascending. */
+        public int[] entities() {
+            return lend("sketch_entities", (h, n) -> (MemorySegment) SKETCH_ENTITIES.invokeExact(h, n));
+        }
+
+        /** The point {@code id}'s position (two numbers). */
+        public double[] point(int id) {
+            liveId(id, "sketch_point", "id");
+            MemorySegment h = handle();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 2);
+                ok(call(() -> (boolean) SKETCH_POINT.invokeExact(h, id, out)), "sketch_point");
+                return out.toArray(ValueLayout.JAVA_DOUBLE);
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Moves the point {@code id} to ({@code x}, {@code y}) without solving. */
+        public void setPoint(int id, double x, double y) {
+            liveId(id, "sketch_set_point", "id");
+            MemorySegment h = handle();
+            try {
+                ok(call(() -> (boolean) SKETCH_SET_POINT.invokeExact(h, id, x, y)), "sketch_set_point");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The radius of the circle or arc {@code id} (the RADIUS constraint is {@link #radiusOf}). */
+        public double radius(int id) {
+            liveId(id, "sketch_radius", "id");
+            MemorySegment h = handle();
+            try {
+                double r = call(() -> (double) SKETCH_RADIUS.invokeExact(h, id));
+                if (Double.isNaN(r)) throw failure("sketch_radius");
+                return r;
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Sets the circle {@code id}'s radius to {@code r} without solving. */
+        public void setRadius(int id, double r) {
+            liveId(id, "sketch_set_radius", "id");
+            MemorySegment h = handle();
+            try {
+                ok(call(() -> (boolean) SKETCH_SET_RADIUS.invokeExact(h, id, r)), "sketch_set_radius");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The centre point of the circle or arc {@code id}. */
+        public int centre(int id) {
+            liveId(id, "sketch_centre", "id");
+            MemorySegment h = handle();
+            try {
+                return idOrFail(call(() -> (int) SKETCH_CENTRE.invokeExact(h, id)), "sketch_centre");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The points entity {@code id} runs between: a line's {@code [a, b]}, an arc's {@code [start, end]}, a
+         *  free curve's {@code [start, controls..., end]}. */
+        public int[] ends(int id) {
+            liveId(id, "sketch_ends", "id");
+            return lend("sketch_ends", (h, n) -> (MemorySegment) SKETCH_ENDS.invokeExact(h, id, n));
+        }
+
+        /** {@link #setConstruction(int, boolean)} on. */
+        public void setConstruction(int id) {
+            setConstruction(id, true);
+        }
+
+        /** Marks entity {@code id} as construction geometry (kept out of profiles), or back. */
+        public void setConstruction(int id, boolean on) {
+            liveId(id, "sketch_set_construction", "id");
+            MemorySegment h = handle();
+            try {
+                ok(call(() -> (boolean) SKETCH_SET_CONSTRUCTION.invokeExact(h, id, on)), "sketch_set_construction");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Whether entity {@code id} is construction geometry (false for an unknown id). */
+        public boolean isConstruction(int id) {
+            liveId(id, "sketch_is_construction", "id");
+            MemorySegment h = handle();
+            try {
+                return call(() -> (boolean) SKETCH_IS_CONSTRUCTION.invokeExact(h, id));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Whether entity {@code id} is a reference copy of another sketch's (false for an unknown id). */
+        public boolean isReference(int id) {
+            liveId(id, "sketch_is_reference", "id");
+            MemorySegment h = handle();
+            try {
+                return call(() -> (boolean) SKETCH_IS_REFERENCE.invokeExact(h, id));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Removes entity {@code id} and the constraints on it: the removed constraint ids. Refused for a
+         *  point that lines or circles still use, the {@link BuildException#ids} naming them. */
+        public int[] removeEntity(int id) {
+            liveId(id, "sketch_remove_entity", "id");
+            MemorySegment h = handle();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment count = arena.allocate(ValueLayout.JAVA_LONG);
+                MemorySegment at = call(() -> (MemorySegment) SKETCH_REMOVE_ENTITY.invokeExact(h, id, count));
+                if (at.address() == 0) throw refused("sketch_remove_entity");
+                return sketchLent(at, count, "sketch_remove_entity");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** A fixed construction copy of {@code other}'s entity {@code entity}, kept in step by {@link
+         *  #updateReference}. {@code other} must be another sketch. */
+        public int reference(Sketch other, int entity) {
+            liveId(entity, "sketch_reference", "entity");
+            MemorySegment h = handle();
+            MemorySegment o = other.handle();
+            try {
+                return idOrFail(call(() -> (int) SKETCH_REFERENCE.invokeExact(h, o, entity)), "sketch_reference");
+            } finally {
+                keep(this, other);
+            }
+        }
+
+        /** Refreshes the reference {@code id} from {@code other} and re-solves. */
+        public SolveReport updateReference(int id, Sketch other) {
+            liveId(id, "sketch_update_reference", "id");
+            MemorySegment o = other.handle();
+            try {
+                return reported("sketch_update_reference", true,
+                        (h, report) -> (boolean) SKETCH_UPDATE_REFERENCE.invokeExact(h, id, o, report));
+            } finally {
+                keep(other);
+            }
+        }
+
+        // -- constraints: each returns the new constraint's id
+
+        private int constrain(String kind, int[] refs, double value, boolean driving, String sense, String end) {
+            liveIds(refs, "sketch_constrain", "entity id");
+            int senseCode = code(SENSES, sense, kind, "sense");
+            int endCode = code(ENDS, end, kind, "end");
+            int kindCode = Arrays.asList(CONSTRAINT_KINDS).indexOf(kind);
+            long count = refs.length;
+            MemorySegment h = handle();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment r = arena.allocateFrom(ValueLayout.JAVA_INT, refs);
+                int got = call(() -> (int) SKETCH_CONSTRAIN.invokeExact(h, kindCode, r, count, value, driving, senseCode, endCode));
+                if (got == SKETCH_NONE) throw refused("sketch_constrain");
+                return got;
+            } finally {
+                keep(this);
+            }
+        }
+
+        private int geometric(String kind, int... refs) {
+            return constrain(kind, refs, 0.0, true, "auto", "start");
+        }
+
+        private int dimension(String kind, int[] refs, double value, boolean driving, String sense) {
+            return constrain(kind, refs, value, driving, sense, "start");
+        }
+
+        public int coincident(int a, int b) {
+            return geometric("coincident", a, b);
+        }
+
+        public int pointOnLine(int point, int line) {
+            return geometric("point_on_line", point, line);
+        }
+
+        /** {@code circle} a circle or an arc. */
+        public int pointOnCircle(int point, int circle) {
+            return geometric("point_on_circle", point, circle);
+        }
+
+        /** The points {@code a} and {@code b} level with each other. */
+        public int horizontal(int a, int b) {
+            return geometric("horizontal", a, b);
+        }
+
+        /** The points {@code a} and {@code b} one above the other. */
+        public int vertical(int a, int b) {
+            return geometric("vertical", a, b);
+        }
+
+        public int parallel(int a, int b) {
+            return geometric("parallel", a, b);
+        }
+
+        public int perpendicular(int a, int b) {
+            return geometric("perpendicular", a, b);
+        }
+
+        public int collinear(int a, int b) {
+            return geometric("collinear", a, b);
+        }
+
+        public int tangent(int a, int b) {
+            return tangent(a, b, "auto");
+        }
+
+        public int tangent(int a, int b, String sense) {
+            return constrain("tangent", new int[] {a, b}, 0.0, true, sense, "start");
+        }
+
+        public int tangentAtEnd(int curve, int other) {
+            return tangentAtEnd(curve, other, "start");
+        }
+
+        /** The free curve {@code curve} tangent to {@code other} at its {@code end} ("start" or "end"). */
+        public int tangentAtEnd(int curve, int other, String end) {
+            return constrain("tangent_at_end", new int[] {curve, other}, 0.0, true, "auto", end);
+        }
+
+        public int concentric(int a, int b) {
+            return geometric("concentric", a, b);
+        }
+
+        public int equalLength(int a, int b) {
+            return geometric("equal_length", a, b);
+        }
+
+        public int equalRadius(int a, int b) {
+            return geometric("equal_radius", a, b);
+        }
+
+        public int midpoint(int point, int line) {
+            return geometric("midpoint", point, line);
+        }
+
+        /** The points {@code a} and {@code b} mirror images across the line {@code about}. */
+        public int symmetric(int a, int b, int about) {
+            return geometric("symmetric", a, b, about);
+        }
+
+        public int fix(int entity) {
+            return geometric("fix", entity);
+        }
+
+        public int distance(int a, int b, double value) {
+            return distance(a, b, value, true);
+        }
+
+        public int distance(int a, int b, double value, boolean driving) {
+            return dimension("distance", new int[] {a, b}, value, driving, "auto");
+        }
+
+        public int pointLineDistance(int point, int line, double value) {
+            return pointLineDistance(point, line, value, true, "auto");
+        }
+
+        public int pointLineDistance(int point, int line, double value, boolean driving) {
+            return pointLineDistance(point, line, value, driving, "auto");
+        }
+
+        public int pointLineDistance(int point, int line, double value, boolean driving, String sense) {
+            return dimension("point_line_distance", new int[] {point, line}, value, driving, sense);
+        }
+
+        public int lineDistance(int a, int b, double value) {
+            return lineDistance(a, b, value, true, "auto");
+        }
+
+        public int lineDistance(int a, int b, double value, boolean driving) {
+            return lineDistance(a, b, value, driving, "auto");
+        }
+
+        public int lineDistance(int a, int b, double value, boolean driving, String sense) {
+            return dimension("line_distance", new int[] {a, b}, value, driving, sense);
+        }
+
+        public int circleLineDistance(int circle, int line, double value) {
+            return circleLineDistance(circle, line, value, true, "auto");
+        }
+
+        public int circleLineDistance(int circle, int line, double value, boolean driving) {
+            return circleLineDistance(circle, line, value, driving, "auto");
+        }
+
+        public int circleLineDistance(int circle, int line, double value, boolean driving, String sense) {
+            return dimension("circle_line_distance", new int[] {circle, line}, value, driving, sense);
+        }
+
+        public int circleDistance(int a, int b, double value) {
+            return circleDistance(a, b, value, true);
+        }
+
+        public int circleDistance(int a, int b, double value, boolean driving) {
+            return dimension("circle_distance", new int[] {a, b}, value, driving, "auto");
+        }
+
+        public int horizontalDistance(int a, int b, double value) {
+            return horizontalDistance(a, b, value, true);
+        }
+
+        public int horizontalDistance(int a, int b, double value, boolean driving) {
+            return dimension("horizontal_distance", new int[] {a, b}, value, driving, "auto");
+        }
+
+        public int verticalDistance(int a, int b, double value) {
+            return verticalDistance(a, b, value, true);
+        }
+
+        public int verticalDistance(int a, int b, double value, boolean driving) {
+            return dimension("vertical_distance", new int[] {a, b}, value, driving, "auto");
+        }
+
+        public int length(int line, double value) {
+            return length(line, value, true);
+        }
+
+        public int length(int line, double value, boolean driving) {
+            return dimension("length", new int[] {line}, value, driving, "auto");
+        }
+
+        /** The angle from line {@code a} to line {@code b}, in radians. */
+        public int angle(int a, int b, double value) {
+            return angle(a, b, value, true);
+        }
+
+        public int angle(int a, int b, double value, boolean driving) {
+            return dimension("angle", new int[] {a, b}, value, driving, "auto");
+        }
+
+        /** The RADIUS dimension (kind "radius") -- {@link #radius} reads a radius instead. */
+        public int radiusOf(int circle, double value) {
+            return radiusOf(circle, value, true);
+        }
+
+        public int radiusOf(int circle, double value, boolean driving) {
+            return dimension("radius", new int[] {circle}, value, driving, "auto");
+        }
+
+        public int diameter(int circle, double value) {
+            return diameter(circle, value, true);
+        }
+
+        public int diameter(int circle, double value, boolean driving) {
+            return dimension("diameter", new int[] {circle}, value, driving, "auto");
+        }
+
+        /** The live constraint ids, ascending. */
+        public int[] constraints() {
+            return lend("sketch_constraints", (h, n) -> (MemorySegment) SKETCH_CONSTRAINTS.invokeExact(h, n));
+        }
+
+        /** The kind of constraint {@code id}, e.g. "point_line_distance". */
+        public String constraintKind(int id) {
+            liveId(id, "sketch_constraint_kind", "id");
+            MemorySegment h = handle();
+            try {
+                return named(CONSTRAINT_KINDS, call(() -> (int) SKETCH_CONSTRAINT_KIND.invokeExact(h, id)), "sketch_constraint_kind");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The entity ids constraint {@code id} was made on, in the order given. */
+        public int[] constraintRefs(int id) {
+            liveId(id, "sketch_constraint_refs", "id");
+            return lend("sketch_constraint_refs", (h, n) -> (MemorySegment) SKETCH_CONSTRAINT_REFS.invokeExact(h, id, n));
+        }
+
+        /** The value of the dimension {@code id}; empty for a constraint that is not a dimension. An unknown id
+         *  is refused. */
+        public OptionalDouble constraintValue(int id) {
+            liveId(id, "sketch_constraint_value", "id");
+            MemorySegment h = handle();
+            try {
+                double v = call(() -> (double) SKETCH_CONSTRAINT_VALUE.invokeExact(h, id));
+                if (!Double.isNaN(v)) return OptionalDouble.of(v);
+                if (!lastError().isEmpty()) throw failure("sketch_constraint_value");
+                return OptionalDouble.empty();
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Whether the dimension {@code id} drives the geometry (false for a constraint that is not a
+         *  dimension). An unknown id is refused. */
+        public boolean constraintDriving(int id) {
+            liveId(id, "sketch_constraint_driving", "id");
+            MemorySegment h = handle();
+            try {
+                boolean driving = call(() -> (boolean) SKETCH_CONSTRAINT_DRIVING.invokeExact(h, id));
+                if (!driving && !lastError().isEmpty()) throw failure("sketch_constraint_driving");
+                return driving;
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The sense of constraint {@code id}; "auto" for a kind without one. */
+        public String constraintSense(int id) {
+            liveId(id, "sketch_constraint_sense", "id");
+            MemorySegment h = handle();
+            try {
+                return named(SENSES, call(() -> (int) SKETCH_CONSTRAINT_SENSE.invokeExact(h, id)), "sketch_constraint_sense");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** The end ("start" or "end") of the free curve a {@code tangent_at_end} constraint {@code id} holds;
+         *  "start" for a kind without one. */
+        public String constraintEnd(int id) {
+            liveId(id, "sketch_constraint_end", "id");
+            MemorySegment h = handle();
+            try {
+                return named(ENDS, call(() -> (int) SKETCH_CONSTRAINT_END.invokeExact(h, id)), "sketch_constraint_end");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Whether the tangent constraint {@code id} joins two curves end to end. */
+        public boolean isJointTangent(int id) {
+            liveId(id, "sketch_is_joint_tangent", "id");
+            MemorySegment h = handle();
+            try {
+                return call(() -> (boolean) SKETCH_IS_JOINT_TANGENT.invokeExact(h, id));
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Removes the constraint {@code id}. */
+        public void remove(int id) {
+            liveId(id, "sketch_remove", "id");
+            MemorySegment h = handle();
+            try {
+                ok(call(() -> (boolean) SKETCH_REMOVE.invokeExact(h, id)), "sketch_remove");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** Sets the dimension {@code id} to {@code value} and re-solves. */
+        public SolveReport setValue(int id, double value) {
+            liveId(id, "sketch_set_value", "id");
+            return reported("sketch_set_value", true, (h, report) -> (boolean) SKETCH_SET_VALUE.invokeExact(h, id, value, report));
+        }
+
+        /** Makes the dimension {@code id} drive the geometry (true) or only report it, and re-solves. */
+        public SolveReport setDriving(int id, boolean driving) {
+            liveId(id, "sketch_set_driving", "id");
+            return reported("sketch_set_driving", true, (h, report) -> (boolean) SKETCH_SET_DRIVING.invokeExact(h, id, driving, report));
+        }
+
+        /** What the geometry measures for the dimension {@code id} right now. */
+        public double measure(int id) {
+            liveId(id, "sketch_measure", "id");
+            MemorySegment h = handle();
+            try {
+                double v = call(() -> (double) SKETCH_MEASURE.invokeExact(h, id));
+                if (Double.isNaN(v)) throw failure("sketch_measure");
+                return v;
+            } finally {
+                keep(this);
+            }
+        }
+
+        // -- solving and diagnosis
+
+        /** Solves the sketch. A conflicting or diverged solve is reported, not thrown. */
+        public SolveReport solve() {
+            return reported("sketch_solve", false, (h, report) -> (boolean) SKETCH_SOLVE.invokeExact(h, report));
+        }
+
+        /** Drags each point id in {@code moves} towards its (x, y) (two numbers) while the constraints hold, as a
+         *  live gesture would, in ascending id order (a map holds each id once). Refused for an id that is not a
+         *  point. */
+        public SolveReport drag(Map<Integer, double[]> moves) {
+            int count = moves.size();
+            int[] points = dragOrder(moves);
+            double[] xy = new double[2 * count];
+            int at = 0;
+            for (int id : points) {
+                liveId(id, "sketch_drag", "point id");
+                double[] target = moves.get(id);
+                if (target == null || target.length != 2) {
+                    throw new BuildException("sketch_drag: a target is two numbers (x, y), got " + (target == null ? 0 : target.length)
+                            + " for point " + id);
+                }
+                xy[2 * at] = target[0];
+                xy[2 * at + 1] = target[1];
+                at++;
+            }
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment p = arena.allocateFrom(ValueLayout.JAVA_INT, points);
+                MemorySegment t = arena.allocateFrom(ValueLayout.JAVA_DOUBLE, xy);
+                long n = count;
+                return reported("sketch_drag", true, (h, report) -> (boolean) SKETCH_DRAG.invokeExact(h, p, t, n, report));
+            }
+        }
+
+        /** The sketch's degrees of freedom, whole and per independent part. */
+        public Dof diagnose() {
+            MemorySegment h = handle();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
+                ok(call(() -> (boolean) SKETCH_DIAGNOSE.invokeExact(h, out)), "sketch_diagnose");
+                int free = exact(out.getAtIndex(ValueLayout.JAVA_DOUBLE, 0), "sketch_diagnose");
+                String state = named(STATES, exact(out.getAtIndex(ValueLayout.JAVA_DOUBLE, 1), "sketch_diagnose"), "sketch_diagnose");
+                int partCount = exact(out.getAtIndex(ValueLayout.JAVA_DOUBLE, 2), "sketch_diagnose");
+                int[] redundant = dofList(h, DOF_REDUNDANT);
+                int[] conflicting = dofList(h, DOF_CONFLICTING);
+                int[] freeEntities = dofList(h, DOF_FREE_ENTITIES);
+                List<PartDof> parts = new ArrayList<>(partCount);
+                MemorySegment part = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
+                for (int i = 0; i < partCount; i++) {
+                    int at = i;
+                    ok(call(() -> (boolean) SKETCH_DOF_PART.invokeExact(h, at, part)), "sketch_dof_part");
+                    int params = exact(part.getAtIndex(ValueLayout.JAVA_DOUBLE, 0), "sketch_dof_part");
+                    int partFree = exact(part.getAtIndex(ValueLayout.JAVA_DOUBLE, 1), "sketch_dof_part");
+                    String partState = named(STATES, exact(part.getAtIndex(ValueLayout.JAVA_DOUBLE, 2), "sketch_dof_part"), "sketch_dof_part");
+                    parts.add(new PartDof(params, partFree, partState, dofPartList(h, i, PART_CONSTRAINTS), dofPartList(h, i, PART_REDUNDANT),
+                            dofPartList(h, i, PART_CONFLICTING), dofPartList(h, i, PART_FREE_ENTITIES)));
+                }
+                return new Dof(free, state, redundant, conflicting, freeEntities, parts);
+            } finally {
+                keep(this);
+            }
+        }
+
+        private static int[] dofList(MemorySegment h, int which) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment count = arena.allocate(ValueLayout.JAVA_LONG);
+                MemorySegment at = call(() -> (MemorySegment) SKETCH_DOF_LIST.invokeExact(h, which, count));
+                return sketchLent(at, count, "sketch_dof_list");
+            }
+        }
+
+        private static int[] dofPartList(MemorySegment h, int part, int which) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment count = arena.allocate(ValueLayout.JAVA_LONG);
+                MemorySegment at = call(() -> (MemorySegment) SKETCH_DOF_PART_LIST.invokeExact(h, part, which, count));
+                return sketchLent(at, count, "sketch_dof_part_list");
+            }
+        }
+
+        /** {@link #profiles(double)} at a tolerance of 1e-6. */
+        public List<Profile> profiles() {
+            return profiles(1e-6);
+        }
+
+        /** The closed loops as profiles (nested loops become holes; construction geometry left out); ends within
+         *  {@code tolerance} join. */
+        public List<Profile> profiles(double tolerance) {
+            MemorySegment h = handle();
+            try {
+                return Profile.profileList(call(() -> (MemorySegment) SKETCH_PROFILES.invokeExact(h, tolerance)), "sketch_profiles");
+            } finally {
+                keep(this);
+            }
+        }
+
+        /** {@link #openChains(double)} at a tolerance of 1e-6. */
+        public List<Profile> openChains() {
+            return openChains(1e-6);
+        }
+
+        /** The paths that do not close, as profiles; ends within {@code tolerance} join. */
+        public List<Profile> openChains(double tolerance) {
+            MemorySegment h = handle();
+            try {
+                return Profile.profileList(call(() -> (MemorySegment) SKETCH_OPEN_CHAINS.invokeExact(h, tolerance)), "sketch_open_chains");
             } finally {
                 keep(this);
             }
@@ -7317,6 +11597,67 @@ public final class Blacksmith {
             return translate(distance * v[9], distance * v[10], distance * v[11]);
         }
 
+        /** The same plane facing the other way: x and y swapped, z reversed. */
+        public Frame flipped() {
+            return new Frame(origin(), y(), x(), new double[]{-v[9], -v[10], -v[11]});
+        }
+
+        /** This frame turned {@code radians} about {@code axis} through its origin ({@link
+         *  Transform#rotation}), right-handed. */
+        public Frame rotated(double radians, double[] axis) {
+            double[] r = Transform.rotation(origin(), axis, radians).rows();
+            return new Frame(origin(), turn(r, x()), turn(r, y()), turn(r, z()));
+        }
+
+        private static double[] turn(double[] r, double[] d) {
+            double[] out = new double[3];
+            for (int i = 0; i < 3; i++) out[i] = r[4 * i] * d[0] + r[4 * i + 1] * d[1] + r[4 * i + 2] * d[2];
+            return out;
+        }
+
+        /** {@code p} less the origin, refused by {@code call}'s name unless three numbers. */
+        private double[] fromOrigin(double[] p, String call) {
+            double[] q = valuePoint(p, call);
+            return new double[]{q[0] - v[0], q[1] - v[1], q[2] - v[2]};
+        }
+
+        /** The point {@code p} in this frame's coordinates. */
+        public double[] toLocal(double[] p) {
+            double[] d = fromOrigin(p, "to_local");
+            return new double[]{dot(d, x()), dot(d, y()), dot(d, z())};
+        }
+
+        /** How far {@code p} lies above the frame's plane, along its z: negative below. */
+        public double distanceTo(double[] p) {
+            return dot(fromOrigin(p, "distance_to"), z());
+        }
+
+        /** The point {@code p} dropped onto the frame's plane along its z. */
+        public double[] closestPoint(double[] p) {
+            double[] q = valuePoint(p, "closest_point");
+            double d = distanceTo(q);
+            return new double[]{q[0] - d * v[9], q[1] - d * v[10], q[2] - d * v[11]};
+        }
+
+        /** A least-squares plane and the largest distance any point lies off it. */
+        public record Fit(Frame frame, double deviation) {
+        }
+
+        /** The least-squares plane through {@code points} (three or more, not all on one line)
+         *  as a frame, and the largest distance any point lies off it. */
+        public static Fit fit(double[][] points) {
+            double[] xyz = flatPoints(points, "frame_fit");
+            long n = xyz.length / 3;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment in = doublesIn(arena, xyz);
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 12);
+                MemorySegment deviation = arena.allocate(ValueLayout.JAVA_DOUBLE);
+                boolean ok = call(() -> (boolean) FRAME_FIT.invokeExact(in, n, out, deviation));
+                if (!ok) throw failure("frame_fit");
+                return new Fit(of(out.toArray(ValueLayout.JAVA_DOUBLE)), deviation.get(ValueLayout.JAVA_DOUBLE, 0));
+            }
+        }
+
         /** The twelve numbers: origin, x, y, z -- a copy, to pass wherever a frame goes. */
         public double[] toArray() {
             return v.clone();
@@ -7351,6 +11692,1466 @@ public final class Blacksmith {
             double n = Math.sqrt(dot(p, p));
             if (!(n > 1e-12 && Double.isFinite(n))) throw new BuildException(what + " has no direction");
             return new double[]{p[0] / n, p[1] / n, p[2] / n};
+        }
+    }
+
+    // ---- Transform and Quaternion ---------------------------------------------------------
+
+    /** A {@code bool f(..., double *out)} downcall, handed the {@code out} it writes. */
+    @FunctionalInterface
+    private interface OutCall {
+        boolean call(MemorySegment out) throws Throwable;
+    }
+
+    /** {@code n} doubles a {@code bool} call writes; its false is a refusal named {@code what}. */
+    private static double[] written(String what, Arena arena, int n, OutCall body) {
+        double[] out = writtenOrNull(arena, n, body);
+        if (out == null) throw failure(what);
+        return out;
+    }
+
+    /** {@code n} doubles a {@code bool} call writes, or null where it answered false. */
+    private static double[] writtenOrNull(Arena arena, int n, OutCall body) {
+        MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, n);
+        boolean ok = call(() -> body.call(out));
+        return ok ? out.toArray(ValueLayout.JAVA_DOUBLE) : null;
+    }
+
+    private static MemorySegment doublesIn(Arena arena, double[] values) {
+        return arena.allocateFrom(ValueLayout.JAVA_DOUBLE, values);
+    }
+
+    /**
+     * An affine map of space: a 4×4 matrix, row-major, its bottom row {@code 0 0 0 1}.
+     * Immutable, with nothing to free. {@code a.compose(b)} is {@code a} after {@code b}
+     * (Python's {@code a @ b}; Java has no operators).
+     *
+     * <p>The constructors and the decompositions are the library's own, so every wrapper
+     * computes them alike. A frame argument is a {@link Frame} or twelve numbers; one within
+     * 1e-6 of right-handed and orthonormal is squared up, any other throws {@link
+     * BuildException}. {@link #point} and {@link #rows} are local.
+     */
+    public static final class Transform {
+        /** How far from rigid, or from a similarity, a map may be and still be told one, by default. */
+        private static final double TOLERANCE = 1e-9;
+        private static final double[] IDENTITY = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+
+        private final double[] r;
+
+        /** The identity. */
+        public Transform() {
+            this(IDENTITY);
+        }
+
+        /** The map 16 numbers state, row-major. Throws {@link BuildException} for a count other
+         *  than 16, a value not finite, or a bottom row other than {@code 0 0 0 1}. */
+        public Transform(double... rows) {
+            int got = rows == null ? 0 : rows.length;
+            if (got != 16) throw new BuildException("Transform: a matrix is 16 numbers, got " + got);
+            double[] v = new double[16];
+            for (int i = 0; i < 16; i++) {
+                if (!Double.isFinite(rows[i])) throw new BuildException("Transform: not finite");
+                v[i] = rows[i] + 0.0; // no -0.0 to print or compare
+            }
+            if (v[12] != 0 || v[13] != 0 || v[14] != 0 || v[15] != 1) {
+                throw new BuildException("Transform: the bottom row must be 0 0 0 1 (a projective map is not affine)");
+            }
+            r = v;
+        }
+
+        /** The map four rows of four state -- any other shape falls to the count check. */
+        public Transform(double[][] rows) {
+            this(flat(rows));
+        }
+
+        private static double[] flat(double[][] rows) {
+            if (rows == null) return new double[0];
+            int n = 0;
+            for (double[] row : rows) n += row == null ? 0 : row.length;
+            double[] out = new double[n];
+            int at = 0;
+            for (double[] row : rows) {
+                if (row == null) continue;
+                System.arraycopy(row, 0, out, at, row.length);
+                at += row.length;
+            }
+            return out;
+        }
+
+        /** The map 16 numbers state, row-major. */
+        public static Transform fromRows(double... rows) {
+            return new Transform(rows);
+        }
+
+        /** The map four rows of four state. */
+        public static Transform fromRows(double[][] rows) {
+            return new Transform(rows);
+        }
+
+        public static Transform identity() {
+            return new Transform();
+        }
+
+        private static Transform made(String what, OutCall body) {
+            try (Arena arena = Arena.ofConfined()) {
+                return new Transform(written(what, arena, 16, body));
+            }
+        }
+
+        /** {@code p + v}. */
+        public static Transform translation(double[] v) {
+            double[] d = point3(v, "transform_translation");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment vs = doublesIn(arena, d);
+                return made("transform_translation", out -> (boolean) TRANSFORM_TRANSLATION.invokeExact(vs, out));
+            }
+        }
+
+        /** A turn of {@code radians} about the line through {@code point} along {@code direction}, right-handed. */
+        public static Transform rotation(double[] point, double[] direction, double radians) {
+            double[] p = point3(point, "transform_rotation"), d = point3(direction, "transform_rotation");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment axis = doublesIn(arena, new double[]{p[0], p[1], p[2], d[0], d[1], d[2]});
+                return made("transform_rotation", out -> (boolean) TRANSFORM_ROTATION.invokeExact(axis, radians, out));
+            }
+        }
+
+        /** The reflection across {@code plane} (twelve numbers; its z the normal). */
+        public static Transform mirror(double[] plane) {
+            double[] f = frame(plane);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment fs = doublesIn(arena, f);
+                return made("transform_mirror", out -> (boolean) TRANSFORM_MIRROR.invokeExact(fs, out));
+            }
+        }
+
+        public static Transform mirror(Frame plane) {
+            return mirror(plane.toArray());
+        }
+
+        /** A uniform scale by {@code k} about {@code centre}. */
+        public static Transform scale(double[] centre, double k) {
+            double[] c = point3(centre, "transform_scale");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment cs = doublesIn(arena, c);
+                return made("transform_scale", out -> (boolean) TRANSFORM_SCALE.invokeExact(cs, k, out));
+            }
+        }
+
+        /** A scale by {@code sx}, {@code sy}, {@code sz} along {@code frame}'s axes, about its origin. */
+        public static Transform scaleXyz(double[] frame, double sx, double sy, double sz) {
+            double[] f = frame(frame);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment fs = doublesIn(arena, f);
+                return made("transform_scale_xyz", out -> (boolean) TRANSFORM_SCALE_XYZ.invokeExact(fs, sx, sy, sz, out));
+            }
+        }
+
+        public static Transform scaleXyz(Frame frame, double sx, double sy, double sz) {
+            return scaleXyz(frame.toArray(), sx, sy, sz);
+        }
+
+        /** Every point slid along {@code direction} by {@code factor} times its height above
+         *  {@code plane}. {@code direction} is normalised -- {@code factor} alone sets the
+         *  slide -- and must lie in the plane. */
+        public static Transform shear(double[] plane, double[] direction, double factor) {
+            double[] f = frame(plane), d = point3(direction, "transform_shear");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment fs = doublesIn(arena, f), ds = doublesIn(arena, d);
+                return made("transform_shear", out -> (boolean) TRANSFORM_SHEAR.invokeExact(fs, ds, factor, out));
+            }
+        }
+
+        public static Transform shear(Frame plane, double[] direction, double factor) {
+            return shear(plane.toArray(), direction, factor);
+        }
+
+        /** The rigid map sending frame {@code a} onto frame {@code b}. */
+        public static Transform planeToPlane(double[] a, double[] b) {
+            double[] fa = frame(a), fb = frame(b);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment sa = doublesIn(arena, fa), sb = doublesIn(arena, fb);
+                return made("transform_plane_to_plane", out -> (boolean) TRANSFORM_PLANE_TO_PLANE.invokeExact(sa, sb, out));
+            }
+        }
+
+        public static Transform planeToPlane(Frame a, Frame b) {
+            return planeToPlane(a.toArray(), b.toArray());
+        }
+
+        /** Coordinates in frame {@code from} to coordinates in frame {@code to}: a change of basis. */
+        public static Transform changeBasis(double[] from, double[] to) {
+            double[] ff = frame(from), ft = frame(to);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment sf = doublesIn(arena, ff), st = doublesIn(arena, ft);
+                return made("transform_change_basis", out -> (boolean) TRANSFORM_CHANGE_BASIS.invokeExact(sf, st, out));
+            }
+        }
+
+        public static Transform changeBasis(Frame from, Frame to) {
+            return changeBasis(from.toArray(), to.toArray());
+        }
+
+        /** The orthogonal projection onto {@code plane} -- singular by design. */
+        public static Transform planarProjection(double[] plane) {
+            double[] f = frame(plane);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment fs = doublesIn(arena, f);
+                return made("transform_planar_projection", out -> (boolean) TRANSFORM_PLANAR_PROJECTION.invokeExact(fs, out));
+            }
+        }
+
+        public static Transform planarProjection(Frame plane) {
+            return planarProjection(plane.toArray());
+        }
+
+        /** The parallel projection onto {@code plane} along {@code direction}, which must not lie in it. */
+        public static Transform projectAlong(double[] plane, double[] direction) {
+            double[] f = frame(plane), d = point3(direction, "transform_project_along");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment fs = doublesIn(arena, f), ds = doublesIn(arena, d);
+                return made("transform_project_along", out -> (boolean) TRANSFORM_PROJECT_ALONG.invokeExact(fs, ds, out));
+            }
+        }
+
+        public static Transform projectAlong(Frame plane, double[] direction) {
+            return projectAlong(plane.toArray(), direction);
+        }
+
+        /** The 16 numbers, row-major: a copy. */
+        public double[] rows() {
+            return r.clone();
+        }
+
+        /** Where the map takes the point {@code p}. */
+        public double[] point(double[] p) {
+            double[] q = point3(p, "point");
+            double x = q[0], y = q[1], z = q[2];
+            return new double[]{r[0] * x + r[1] * y + r[2] * z + r[3], r[4] * x + r[5] * y + r[6] * z + r[7],
+                r[8] * x + r[9] * y + r[10] * z + r[11]};
+        }
+
+        /** This map after {@code other} (Python's {@code this @ other}). */
+        public Transform compose(Transform other) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment a = doublesIn(arena, r), b = doublesIn(arena, other.r);
+                return made("transform_compose", out -> (boolean) TRANSFORM_COMPOSE.invokeExact(a, b, out));
+            }
+        }
+
+        /** The map undoing this one; throws {@link BuildException} for a singular map. */
+        public Transform inverse() {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment m = doublesIn(arena, r);
+                return made("transform_inverse", out -> (boolean) TRANSFORM_INVERSE.invokeExact(m, out));
+            }
+        }
+
+        /** Whether the linear part is orthogonal ({@code AᵀA = I} to 1e-9): a rotation or a mirror. */
+        public boolean isRigid() {
+            return isRigid(TOLERANCE);
+        }
+
+        /** Whether the linear part is orthogonal to {@code tolerance}. A tolerance negative
+         *  or not finite throws {@link BuildException}. {@link Solid#transform} is looser: it
+         *  applies a map within 1e-6 of a similarity as that similarity. */
+        public boolean isRigid(double tolerance) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment m = doublesIn(arena, r);
+                int said = call(() -> (int) TRANSFORM_IS_RIGID.invokeExact(m, tolerance));
+                if (said == NONE) throw failure("transform_is_rigid");
+                return said == 1;
+            }
+        }
+
+        /** The scale {@code k} where the linear part is {@code k} times an orthogonal one (to
+         *  1e-9, relative to {@code k²}), else empty. */
+        public OptionalDouble isSimilarity() {
+            return isSimilarity(TOLERANCE);
+        }
+
+        public OptionalDouble isSimilarity(double tolerance) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment m = doublesIn(arena, r);
+                double k = call(() -> (double) TRANSFORM_IS_SIMILARITY.invokeExact(m, tolerance));
+                if (Double.isNaN(k)) throw failure("transform_is_similarity");
+                return k > 0 ? OptionalDouble.of(k) : OptionalDouble.empty();
+            }
+        }
+
+        /** A rigid map split: {@code translation} then the orthogonal part. */
+        public record Rigid(double[] translation, Transform orthogonal) {
+            @Override
+            public double[] translation() {
+                return translation.clone();
+            }
+        }
+
+        /** A similarity split: {@code translation}, the orthogonal part, and the scale {@code k}. */
+        public record Similarity(double[] translation, Transform orthogonal, double k) {
+            @Override
+            public double[] translation() {
+                return translation.clone();
+            }
+        }
+
+        /** The polar split: the linear part is {@code rotation · axes · diag(stretch) · axesᵀ}. */
+        public record Affine(double[] translation, Transform rotation, Transform axes, double[] stretch) {
+            @Override
+            public double[] translation() {
+                return translation.clone();
+            }
+
+            @Override
+            public double[] stretch() {
+                return stretch.clone();
+            }
+        }
+
+        /** {@code (translation, orthogonal part)} for a rigid map (to 1e-9), else empty. */
+        public Optional<Rigid> decomposeRigid() {
+            return decomposeRigid(TOLERANCE);
+        }
+
+        public Optional<Rigid> decomposeRigid(double tolerance) {
+            if (!isRigid(tolerance)) return Optional.empty();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment m = doublesIn(arena, r);
+                double[] o = written("transform_decompose_rigid", arena, 19,
+                    out -> (boolean) TRANSFORM_DECOMPOSE_RIGID.invokeExact(m, tolerance, out));
+                return Optional.of(new Rigid(Arrays.copyOfRange(o, 0, 3), new Transform(Arrays.copyOfRange(o, 3, 19))));
+            }
+        }
+
+        /** {@code (translation, orthogonal part, k)} for a similarity (to 1e-9), else empty. */
+        public Optional<Similarity> decomposeSimilarity() {
+            return decomposeSimilarity(TOLERANCE);
+        }
+
+        public Optional<Similarity> decomposeSimilarity(double tolerance) {
+            if (isSimilarity(tolerance).isEmpty()) return Optional.empty();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment m = doublesIn(arena, r);
+                double[] o = written("transform_decompose_similarity", arena, 20,
+                    out -> (boolean) TRANSFORM_DECOMPOSE_SIMILARITY.invokeExact(m, tolerance, out));
+                return Optional.of(new Similarity(Arrays.copyOfRange(o, 0, 3), new Transform(Arrays.copyOfRange(o, 3, 19)), o[19]));
+            }
+        }
+
+        /** The polar split of the map: {@code (translation, rotation, axes, stretch)} with the
+         *  linear part {@code rotation · axes · diag(stretch) · axesᵀ} -- {@code rotation}
+         *  carrying the mirror, {@code axes} a proper rotation whose columns are the stretch
+         *  directions, the stretches largest first. Empty for a singular map or one stretched
+         *  past 1e7:1, which has no unique split. */
+        public Optional<Affine> decomposeAffine() {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment m = doublesIn(arena, r);
+                double[] o = writtenOrNull(arena, 38, out -> (boolean) TRANSFORM_DECOMPOSE_AFFINE.invokeExact(m, out));
+                if (o == null) return Optional.empty();
+                return Optional.of(new Affine(Arrays.copyOfRange(o, 0, 3), new Transform(Arrays.copyOfRange(o, 3, 19)),
+                    new Transform(Arrays.copyOfRange(o, 19, 35)), Arrays.copyOfRange(o, 35, 38)));
+            }
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof Transform t && Arrays.equals(r, t.r);
+        }
+
+        @Override
+        public int hashCode() {
+            return Arrays.hashCode(r);
+        }
+
+        @Override
+        public String toString() {
+            return "Transform(" + Arrays.toString(r) + ")";
+        }
+    }
+
+    /**
+     * A rotation as {@code w + xi + yj + zk}. Immutable. {@code q} and {@code -q} are the same
+     * rotation; a non-unit one is normalised wherever it becomes a rotation, a zero one throws
+     * {@link BuildException} there. {@code a.multiply(b)} turns by {@code b}, then {@code a}
+     * (Python's {@code a * b}). Equality is by components, so {@code q} is not equal to
+     * {@code -q} although the two turn alike.
+     */
+    public static final class Quaternion {
+        private final double w, x, y, z;
+
+        /** The identity, {@code (1, 0, 0, 0)}. */
+        public Quaternion() {
+            this(1, 0, 0, 0);
+        }
+
+        /** Throws {@link BuildException} for a component not finite. */
+        public Quaternion(double w, double x, double y, double z) {
+            if (!(Double.isFinite(w) && Double.isFinite(x) && Double.isFinite(y) && Double.isFinite(z))) {
+                throw new BuildException("Quaternion: not finite");
+            }
+            this.w = w + 0.0;
+            this.x = x + 0.0;
+            this.y = y + 0.0;
+            this.z = z + 0.0;
+        }
+
+        private static Quaternion made(String what, OutCall body) {
+            try (Arena arena = Arena.ofConfined()) {
+                double[] q = written(what, arena, 4, body);
+                return new Quaternion(q[0], q[1], q[2], q[3]);
+            }
+        }
+
+        /** The turn of {@code radians} about {@code direction}, right-handed. */
+        public static Quaternion fromAxisAngle(double[] direction, double radians) {
+            double[] d = point3(direction, "quaternion_from_axis_angle");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment ds = doublesIn(arena, d);
+                return made("quaternion_from_axis_angle", out -> (boolean) QUATERNION_FROM_AXIS_ANGLE.invokeExact(ds, radians, out));
+            }
+        }
+
+        /** The rotation in {@code t}'s linear part (its translation ignored); throws {@link
+         *  BuildException} unless that is a proper rotation, orthogonal to 1e-9. */
+        public static Quaternion fromTransform(Transform t) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment m = doublesIn(arena, t.rows());
+                return made("quaternion_from_transform", out -> (boolean) QUATERNION_FROM_TRANSFORM.invokeExact(m, out));
+            }
+        }
+
+        /** From {@code a} ({@code s = 0}) to {@code b} ({@code s = 1}) the shorter way. */
+        public static Quaternion slerp(Quaternion a, Quaternion b, double s) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment qa = doublesIn(arena, a.toArray()), qb = doublesIn(arena, b.toArray());
+                return made("quaternion_slerp", out -> (boolean) QUATERNION_SLERP.invokeExact(qa, qb, s, out));
+            }
+        }
+
+        /** This rotation as a {@link Transform} fixing the origin. */
+        public Transform toTransform() {
+            return toTransform(new double[3]);
+        }
+
+        /** This rotation as a {@link Transform} fixing {@code centre}. */
+        public Transform toTransform(double[] centre) {
+            double[] c = point3(centre, "quaternion_to_transform");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment q = doublesIn(arena, toArray()), cs = doublesIn(arena, c);
+                return Transform.made("quaternion_to_transform", out -> (boolean) QUATERNION_TO_TRANSFORM.invokeExact(q, cs, out));
+            }
+        }
+
+        public double w() {
+            return w;
+        }
+
+        public double x() {
+            return x;
+        }
+
+        public double y() {
+            return y;
+        }
+
+        public double z() {
+            return z;
+        }
+
+        /** {@code w, x, y, z}: a copy. */
+        public double[] toArray() {
+            return new double[]{w, x, y, z};
+        }
+
+        /** The length of {@code vs}, scaled by its largest component first, as the ABI's
+         *  {@code quaternion_from} does: squaring 1e200 overflows and 1e-170 underflows. */
+        private static double norm(double... vs) {
+            double big = 0;
+            for (double v : vs) big = Math.max(big, Math.abs(v));
+            if (big == 0) return 0;
+            double sum = 0;
+            for (double v : vs) sum += (v / big) * (v / big);
+            return big * Math.sqrt(sum);
+        }
+
+        public double length() {
+            return norm(w, x, y, z);
+        }
+
+        /** The turn, in {@code [0, 2π]}. */
+        public double angle() {
+            return 2.0 * Math.atan2(norm(x, y, z), w);
+        }
+
+        /** The turn's axis, empty for the identity. */
+        public Optional<double[]> axis() {
+            double big = Math.max(Math.abs(x), Math.max(Math.abs(y), Math.abs(z)));
+            if (big == 0) return Optional.empty();
+            double vx = x / big, vy = y / big, vz = z / big;
+            double n = Math.sqrt(vx * vx + vy * vy + vz * vz);
+            return Optional.of(new double[]{vx / n, vy / n, vz / n});
+        }
+
+        public Quaternion conjugate() {
+            return new Quaternion(w, -x, -y, -z);
+        }
+
+        /** The same rotation at unit length, scaled by its largest component before the square
+         *  root, so 1e200 and 1e-170 normalise. A zero quaternion throws {@link BuildException}. */
+        public Quaternion normalized() {
+            double big = Math.max(Math.max(Math.abs(w), Math.abs(x)), Math.max(Math.abs(y), Math.abs(z)));
+            if (big == 0) throw new BuildException("Quaternion.normalized: the quaternion is zero");
+            double vw = w / big, vx = x / big, vy = y / big, vz = z / big;
+            double n = Math.sqrt(vw * vw + vx * vx + vy * vy + vz * vz);
+            return new Quaternion(vw / n, vx / n, vy / n, vz / n);
+        }
+
+        /** The product: turn by {@code o}, then by this (Python's {@code this * o}). */
+        public Quaternion multiply(Quaternion o) {
+            return new Quaternion(w * o.w - x * o.x - y * o.y - z * o.z,
+                                  w * o.x + x * o.w + y * o.z - z * o.y,
+                                  w * o.y - x * o.z + y * o.w + z * o.x,
+                                  w * o.z + x * o.y - y * o.x + z * o.w);
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof Quaternion q && Arrays.equals(toArray(), q.toArray());
+        }
+
+        @Override
+        public int hashCode() {
+            return Arrays.hashCode(toArray());
+        }
+
+        @Override
+        public String toString() {
+            return "Quaternion(" + w + ", " + x + ", " + y + ", " + z + ")";
+        }
+    }
+
+    // ---- value geometry ------------------------------------------------------------------------
+
+    /** {@code CADACLYSM_BLACKSMITH_VALUE_*}: the kind each value array is tagged with. */
+    static final int VALUE_LINE = 0, VALUE_CIRCLE = 1, VALUE_ARC = 2, VALUE_ELLIPSE = 3, VALUE_SPHERE = 4,
+            VALUE_CYLINDER = 5, VALUE_CONE = 6, VALUE_TORUS = 7, VALUE_CUBOID = 8;
+    /** Each kind's lower-case name, for the wrapper's count refusal. */
+    private static final String[] VALUE_NAMES = {"line", "circle", "arc", "ellipse", "sphere", "cylinder", "cone", "torus", "cuboid"};
+
+    /** A value call handed an arena for its inputs and the {@code out} it writes. */
+    @FunctionalInterface
+    private interface ValueCall {
+        boolean call(Arena arena, MemorySegment out) throws Throwable;
+    }
+
+    /** {@code n} doubles the value call {@code name} writes; its false is the library's refusal. */
+    private static double[] valueCall(String name, int n, ValueCall body) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, Math.max(n, 1));
+            boolean ok = call(() -> body.call(arena, out));
+            if (!ok) throw failure(name);
+            return out.asSlice(0, 8L * n).toArray(ValueLayout.JAVA_DOUBLE);
+        }
+    }
+
+    /** A point as the value calls take it: three numbers, or {@code "<call>: a point is 3 numbers, got N"}. */
+    private static double[] valuePoint(double[] p, String call) {
+        int got = p == null ? 0 : p.length;
+        if (got != 3) throw new BuildException(call + ": a point is 3 numbers, got " + got);
+        return p.clone();
+    }
+
+    /** Points laid end to end, three numbers each, each checked under {@code call}'s name. */
+    private static double[] flatPoints(double[][] points, String call) {
+        if (points == null) points = new double[0][];
+        double[] flat = new double[3 * points.length];
+        for (int i = 0; i < points.length; i++) System.arraycopy(valuePoint(points[i], call), 0, flat, 3 * i, 3);
+        return flat;
+    }
+
+    private static double[] cat(double[] head, double... tail) {
+        double[] out = Arrays.copyOf(head, head.length + tail.length);
+        System.arraycopy(tail, 0, out, head.length, tail.length);
+        return out;
+    }
+
+    /** {@code values} as the canonical array of {@code kind}: the count checked against {@code
+     *  value_size} here, the rest (and the squaring up of the frame) by {@code value_check}. */
+    private static double[] checkedValue(int kind, double[] values) {
+        int size = call(() -> (int) VALUE_SIZE.invokeExact(kind));
+        int got = values == null ? 0 : values.length;
+        if (values == null || got != size) {
+            throw new BuildException("value_check: a " + VALUE_NAMES[kind] + " is " + size + " numbers, got " + got);
+        }
+        return valueCall("value_check", size, (a, out) -> (boolean) VALUE_CHECK.invokeExact(kind, doublesIn(a, values), out));
+    }
+
+    /** Python's {@code min(a, b)}: the first unless the second is smaller. */
+    private static double pyMin(double a, double b) {
+        return b < a ? b : a;
+    }
+
+    /** Python's {@code max(a, b)}: the first unless the second is larger. */
+    private static double pyMax(double a, double b) {
+        return b > a ? b : a;
+    }
+
+    /**
+     * A parameter range {@code t0..t1}, in either order: {@link #length} and {@link #swapped}
+     * keep the order, the set operations ({@link #grown}, {@link #union}, {@link #intersect})
+     * answer increasing. Immutable, equal and hashed by value. A value not finite throws
+     * {@link BuildException} ({@code Interval: not finite}).
+     */
+    public record Interval(double t0, double t1) {
+        public Interval {
+            if (!Double.isFinite(t0) || !Double.isFinite(t1)) throw new BuildException("Interval: not finite");
+            t0 += 0.0; // no -0.0 to print or compare
+            t1 += 0.0;
+        }
+
+        /** Two numbers as an {@code Interval}; any other count throws {@link BuildException}. */
+        public static Interval of(double[] pair) {
+            int got = pair == null ? 0 : pair.length;
+            if (got != 2) throw new BuildException("Interval: an interval is 2 numbers, got " + got);
+            return new Interval(pair[0], pair[1]);
+        }
+
+        /** {@code t1 - t0}: negative for a decreasing interval. */
+        public double length() {
+            return t1 - t0;
+        }
+
+        /** The middle, {@code (t0 + t1) / 2}. */
+        public double mid() {
+            return 0.5 * (t0 + t1);
+        }
+
+        /** The smaller end. */
+        public double min() {
+            return pyMin(t0, t1);
+        }
+
+        /** The larger end. */
+        public double max() {
+            return pyMax(t0, t1);
+        }
+
+        /** Whether {@code t0 < t1}. */
+        public boolean isIncreasing() {
+            return t0 < t1;
+        }
+
+        /** Whether {@code t0 == t1}. */
+        public boolean isSingleton() {
+            return t0 == t1;
+        }
+
+        /** The interval {@code t1..t0}. */
+        public Interval swapped() {
+            return new Interval(t1, t0);
+        }
+
+        /** The increasing interval holding this one and {@code t}. */
+        public Interval grown(double t) {
+            return new Interval(pyMin(min(), t), pyMax(max(), t));
+        }
+
+        /** The increasing interval holding this one and {@code o}. */
+        public Interval union(Interval o) {
+            return new Interval(pyMin(min(), o.min()), pyMax(max(), o.max()));
+        }
+
+        /** The increasing overlap with {@code o}; empty where the two are apart. Two that touch
+         *  give a singleton. */
+        public Optional<Interval> intersect(Interval o) {
+            double a = pyMax(min(), o.min()), b = pyMin(max(), o.max());
+            return a <= b ? Optional.of(new Interval(a, b)) : Optional.empty();
+        }
+
+        /** Whether {@code t} lies in the closed range, in either order. */
+        public boolean contains(double t) {
+            return min() <= t && t <= max();
+        }
+
+        /** {@code t0 + s (t1 - t0)}: the fraction {@code s} of the way from {@code t0}; outside
+         *  0..1 extrapolates. */
+        public double parameterAt(double s) {
+            return t0 + s * (t1 - t0);
+        }
+
+        /** The fraction of the way {@code t} lies from {@code t0} toward {@code t1}; empty for a
+         *  singleton. */
+        public OptionalDouble normalizedParameterAt(double t) {
+            double length = length();
+            return length != 0.0 ? OptionalDouble.of((t - t0) / length) : OptionalDouble.empty();
+        }
+
+        /** {@code t0, t1}: a new array. */
+        public double[] toArray() {
+            return new double[]{t0, t1};
+        }
+
+        @Override
+        public String toString() {
+            return "Interval(" + t0 + ", " + t1 + ")";
+        }
+    }
+
+    /**
+     * The closest point of a curve value: its parameter {@code t}, the {@code point}, and {@code
+     * unique} -- false where several points lie equally near and {@code point} is a fixed pick
+     * among them (a point on a circle's axis, one equidistant from an arc's ends).
+     */
+    public record CurveFoot(double t, double[] point, boolean unique) {
+        public CurveFoot {
+            point = point.clone();
+        }
+
+        @Override
+        public double[] point() {
+            return point.clone();
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof CurveFoot f && Double.compare(t, f.t) == 0 && Arrays.equals(point, f.point) && unique == f.unique;
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * (31 * Double.hashCode(t) + Arrays.hashCode(point)) + Boolean.hashCode(unique);
+        }
+
+        @Override
+        public String toString() {
+            return "CurveFoot(t=" + t + ", point=" + Arrays.toString(point) + ", unique=" + unique + ")";
+        }
+    }
+
+    /**
+     * The closest point of a surface value: its parameters {@code u}, {@code v}, the {@code
+     * point}, and {@code unique} -- false where several points lie equally near and {@code
+     * point} is a fixed pick among them (a sphere's centre, a point on an axis).
+     */
+    public record SurfaceFoot(double u, double v, double[] point, boolean unique) {
+        public SurfaceFoot {
+            point = point.clone();
+        }
+
+        @Override
+        public double[] point() {
+            return point.clone();
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof SurfaceFoot f && Double.compare(u, f.u) == 0 && Double.compare(v, f.v) == 0
+                && Arrays.equals(point, f.point) && unique == f.unique;
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * (31 * (31 * Double.hashCode(u) + Double.hashCode(v)) + Arrays.hashCode(point)) + Boolean.hashCode(unique);
+        }
+
+        @Override
+        public String toString() {
+            return "SurfaceFoot(u=" + u + ", v=" + v + ", point=" + Arrays.toString(point) + ", unique=" + unique + ")";
+        }
+    }
+
+    /**
+     * What every value shares: its canonical array (squared up by the library's {@code
+     * value_check} at construction, so a refusal is the library's), immutability, equality and
+     * hashing by kind and array, {@link #bounds} and the transform the subclasses expose. Values
+     * are immutable, with nothing to free, and the maths is the library's own, so every
+     * language answers alike.
+     */
+    public abstract static sealed class Value permits Line, Circle, Arc, Ellipse, SolidValue {
+        final int kind;
+        final double[] v;
+
+        Value(int kind, double[] v) {
+            this.kind = kind;
+            this.v = v;
+        }
+
+        /** The value's numbers, as {@code value_check} squared them up: a copy. */
+        public double[] values() {
+            return v.clone();
+        }
+
+        /** The exact world box, from the closed form rather than from samples. */
+        public Bounds bounds() {
+            double[] b = valueCall("value_bounds", 6, (a, out) -> (boolean) VALUE_BOUNDS.invokeExact(kind, doublesIn(a, v), out));
+            return new Bounds(Arrays.copyOfRange(b, 0, 3), Arrays.copyOfRange(b, 3, 6));
+        }
+
+        /** The array of this value under {@code t}, from {@code value_transform}. */
+        double[] transformed(Transform t) {
+            double[] m = t.rows();
+            return valueCall("value_transform", v.length,
+                (a, out) -> (boolean) VALUE_TRANSFORM.invokeExact(kind, doublesIn(a, v), doublesIn(a, m), out));
+        }
+
+        Frame frameOf() {
+            return Frame.of(Arrays.copyOf(v, 12));
+        }
+
+        abstract String fields();
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof Value o && o.kind == kind && Arrays.equals(v, o.v);
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * kind + Arrays.hashCode(v);
+        }
+
+        @Override
+        public String toString() {
+            return getClass().getSimpleName() + "(" + fields() + ")";
+        }
+    }
+
+    /**
+     * A curve value: a {@link Line}, {@link Circle}, {@link Arc} or {@link Ellipse}. What
+     * {@link Curve#value()} answers; switch over it to tell the four apart.
+     */
+    public sealed interface CurveValue permits Line, Circle, Arc, Ellipse {
+        /** The point at {@code t}: a line's {@code t} runs 0..1, a circle's and an arc's is the
+         *  angle from the frame's x toward its y, an ellipse's the eccentric angle. */
+        public default double[] pointAt(double t) {
+            Value s = (Value) this;
+            return valueCall("curve_value_point_at", 3,
+                (a, out) -> (boolean) CURVE_VALUE_POINT_AT.invokeExact(s.kind, doublesIn(a, s.v), t, out));
+        }
+
+        /** The unit tangent at {@code t}, the way {@code t} grows. */
+        public default double[] tangentAt(double t) {
+            Value s = (Value) this;
+            return valueCall("curve_value_tangent_at", 3,
+                (a, out) -> (boolean) CURVE_VALUE_TANGENT_AT.invokeExact(s.kind, doublesIn(a, s.v), t, out));
+        }
+
+        /** The length (an ellipse's perimeter, in closed form). */
+        public default double length() {
+            Value s = (Value) this;
+            return valueCall("curve_value_length", 1,
+                (a, out) -> (boolean) CURVE_VALUE_LENGTH.invokeExact(s.kind, doublesIn(a, s.v), out))[0];
+        }
+
+        /** The {@link CurveFoot} nearest {@code p}, in closed form. */
+        public default CurveFoot closestPoint(double[] p) {
+            Value s = (Value) this;
+            double[] q = valuePoint(p, "curve_value_closest_point");
+            double[] f = valueCall("curve_value_closest_point", 5,
+                (a, out) -> (boolean) CURVE_VALUE_CLOSEST_POINT.invokeExact(s.kind, doublesIn(a, s.v), doublesIn(a, q), out));
+            return new CurveFoot(f[0], Arrays.copyOfRange(f, 1, 4), f[4] != 0.0);
+        }
+
+        /** How far {@code p} lies from the curve: the distance to its {@link #closestPoint}. */
+        public default double distanceTo(double[] p) {
+            double[] q = valuePoint(p, "curve_value_closest_point");
+            return dist(closestPoint(q).point(), q);
+        }
+
+        /** The value's numbers: a copy. */
+        double[] values();
+
+        /** The exact world box. */
+        Bounds bounds();
+
+        /** This curve under {@code t}, a curve of the same type. */
+        CurveValue transform(Transform t);
+    }
+
+    private static double dist(double[] a, double[] b) {
+        double dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
+        return Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    /** The segment from {@code start} to {@code end}; its parameter runs 0..1. */
+    public static final class Line extends Value implements CurveValue {
+        public Line(double[] start, double[] end) {
+            super(VALUE_LINE, checkedValue(VALUE_LINE, cat(valuePoint(start, "Line"), valuePoint(end, "Line"))));
+        }
+
+        private Line(double[] canonical) {
+            super(VALUE_LINE, canonical);
+        }
+
+        /** A line from its six numbers, {@code start} then {@code end}. */
+        public static Line fromArray(double... values) {
+            return new Line(checkedValue(VALUE_LINE, values));
+        }
+
+        public double[] start() {
+            return Arrays.copyOfRange(v, 0, 3);
+        }
+
+        public double[] end() {
+            return Arrays.copyOfRange(v, 3, 6);
+        }
+
+        /** This line under {@code t}: any map keeping its ends apart. */
+        @Override
+        public Line transform(Transform t) {
+            return new Line(transformed(t));
+        }
+
+        public Line transform(double[] rows) {
+            return transform(new Transform(rows));
+        }
+
+        @Override
+        String fields() {
+            return "start=" + Arrays.toString(start()) + ", end=" + Arrays.toString(end());
+        }
+    }
+
+    /** The circle of {@code radius} about the frame's origin in its x-y plane, counter-clockwise
+     *  about its z, from its x. */
+    public static final class Circle extends Value implements CurveValue {
+        public Circle(Frame frame, double radius) {
+            this(frame.toArray(), radius);
+        }
+
+        public Circle(double[] frame, double radius) {
+            super(VALUE_CIRCLE, checkedValue(VALUE_CIRCLE, cat(Blacksmith.frame(frame), radius)));
+        }
+
+        private Circle(double[] canonical) {
+            super(VALUE_CIRCLE, canonical);
+        }
+
+        /** A circle from its 13 numbers: the frame, then the radius. */
+        public static Circle fromArray(double... values) {
+            return new Circle(checkedValue(VALUE_CIRCLE, values));
+        }
+
+        /** The circle through three points, x toward {@code a}, turning {@code a}, {@code b},
+         *  {@code c} counter-clockwise. */
+        public static Circle through(double[] a, double[] b, double[] c) {
+            String what = "circle_through";
+            double[] pa = valuePoint(a, what), pb = valuePoint(b, what), pc = valuePoint(c, what);
+            return new Circle(valueCall(what, 13,
+                (ar, out) -> (boolean) CIRCLE_THROUGH.invokeExact(doublesIn(ar, pa), doublesIn(ar, pb), doublesIn(ar, pc), out)));
+        }
+
+        /** The frame the circle lies on: its centre, the x its angles start from, its normal. */
+        public Frame frame() {
+            return frameOf();
+        }
+
+        public double radius() {
+            return v[12];
+        }
+
+        /** This circle under a similarity; for any other map, {@link Ellipse#fromCircle} first. */
+        @Override
+        public Circle transform(Transform t) {
+            return new Circle(transformed(t));
+        }
+
+        public Circle transform(double[] rows) {
+            return transform(new Transform(rows));
+        }
+
+        @Override
+        String fields() {
+            return "frame=" + frame() + ", radius=" + radius();
+        }
+    }
+
+    /** The part of a circle over {@code angle} (increasing, by at most a full turn). */
+    public static final class Arc extends Value implements CurveValue {
+        public Arc(Frame frame, double radius, Interval angle) {
+            this(frame.toArray(), radius, angle);
+        }
+
+        public Arc(double[] frame, double radius, Interval angle) {
+            super(VALUE_ARC, checkedValue(VALUE_ARC, cat(Blacksmith.frame(frame), radius, angle.t0(), angle.t1())));
+        }
+
+        private Arc(double[] canonical) {
+            super(VALUE_ARC, canonical);
+        }
+
+        /** An arc from its 15 numbers: the frame, the radius, then the angle range. */
+        public static Arc fromArray(double... values) {
+            return new Arc(checkedValue(VALUE_ARC, values));
+        }
+
+        /** The arc from {@code a} through {@code b} to {@code c}. */
+        public static Arc through(double[] a, double[] b, double[] c) {
+            String what = "arc_through";
+            double[] pa = valuePoint(a, what), pb = valuePoint(b, what), pc = valuePoint(c, what);
+            return new Arc(valueCall(what, 15,
+                (ar, out) -> (boolean) ARC_THROUGH.invokeExact(doublesIn(ar, pa), doublesIn(ar, pb), doublesIn(ar, pc), out)));
+        }
+
+        /** The arc leaving {@code a} along {@code tangent} and ending at {@code c}. */
+        public static Arc fromStartTangentEnd(double[] a, double[] tangent, double[] c) {
+            String what = "arc_from_start_tangent_end";
+            double[] pa = valuePoint(a, what), pt = valuePoint(tangent, what), pc = valuePoint(c, what);
+            return new Arc(valueCall(what, 15,
+                (ar, out) -> (boolean) ARC_FROM_START_TANGENT_END.invokeExact(doublesIn(ar, pa), doublesIn(ar, pt), doublesIn(ar, pc), out)));
+        }
+
+        /** The frame of the arc's circle. */
+        public Frame frame() {
+            return frameOf();
+        }
+
+        public double radius() {
+            return v[12];
+        }
+
+        /** The angle range. */
+        public Interval angle() {
+            return new Interval(v[13], v[14]);
+        }
+
+        public double[] start() {
+            return pointAt(v[13]);
+        }
+
+        public double[] end() {
+            return pointAt(v[14]);
+        }
+
+        /** The point halfway along. */
+        public double[] mid() {
+            return pointAt(0.5 * (v[13] + v[14]));
+        }
+
+        /** This arc under a similarity. */
+        @Override
+        public Arc transform(Transform t) {
+            return new Arc(transformed(t));
+        }
+
+        public Arc transform(double[] rows) {
+            return transform(new Transform(rows));
+        }
+
+        @Override
+        String fields() {
+            return "frame=" + frame() + ", radius=" + radius() + ", angle=" + angle();
+        }
+    }
+
+    /** The ellipse of radius {@code r1} along the frame's x and {@code r2} along its y. */
+    public static final class Ellipse extends Value implements CurveValue {
+        public Ellipse(Frame frame, double r1, double r2) {
+            this(frame.toArray(), r1, r2);
+        }
+
+        public Ellipse(double[] frame, double r1, double r2) {
+            super(VALUE_ELLIPSE, checkedValue(VALUE_ELLIPSE, cat(Blacksmith.frame(frame), r1, r2)));
+        }
+
+        private Ellipse(double[] canonical) {
+            super(VALUE_ELLIPSE, canonical);
+        }
+
+        /** An ellipse from its 14 numbers: the frame, then the two radii. */
+        public static Ellipse fromArray(double... values) {
+            return new Ellipse(checkedValue(VALUE_ELLIPSE, values));
+        }
+
+        /** {@code circle} as an ellipse of two equal radii, which takes any map that keeps it one. */
+        public static Ellipse fromCircle(Circle circle) {
+            double[] c = circle.v;
+            return new Ellipse(valueCall("ellipse_from_circle", 14,
+                (a, out) -> (boolean) ELLIPSE_FROM_CIRCLE.invokeExact(doublesIn(a, c), out)));
+        }
+
+        public Frame frame() {
+            return frameOf();
+        }
+
+        public double r1() {
+            return v[12];
+        }
+
+        public double r2() {
+            return v[13];
+        }
+
+        /** This ellipse under any map that keeps it an ellipse. */
+        @Override
+        public Ellipse transform(Transform t) {
+            return new Ellipse(transformed(t));
+        }
+
+        public Ellipse transform(double[] rows) {
+            return transform(new Transform(rows));
+        }
+
+        @Override
+        String fields() {
+            return "frame=" + frame() + ", r1=" + r1() + ", r2=" + r2();
+        }
+    }
+
+    /** A closed shape: containment, area, volume and the B-rep solid. */
+    public abstract static sealed class SolidValue extends Value permits SurfaceValue, Cuboid {
+        SolidValue(int kind, double[] v) {
+            super(kind, v);
+        }
+
+        /** The frame the shape is placed on: its origin and axes. */
+        public Frame frame() {
+            return frameOf();
+        }
+
+        /** Whether {@code p} lies inside the closed shape or within 1e-9 of it. */
+        public boolean contains(double[] p) {
+            return contains(p, 1e-9);
+        }
+
+        /** Whether {@code p} lies inside the closed shape or within {@code tolerance} of it. */
+        public boolean contains(double[] p, double tolerance) {
+            double[] q = valuePoint(p, "solid_value_contains");
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment vs = doublesIn(arena, v), ps = doublesIn(arena, q);
+                int said = call(() -> (int) SOLID_VALUE_CONTAINS.invokeExact(kind, vs, ps, tolerance));
+                if (said == NONE) throw failure("solid_value_contains");
+                return said != 0;
+            }
+        }
+
+        /** The boundary's area, a cylinder's and a cone's caps included. */
+        public double area() {
+            return valueCall("solid_value_area", 1, (a, out) -> (boolean) SOLID_VALUE_AREA.invokeExact(kind, doublesIn(a, v), out))[0];
+        }
+
+        public double volume() {
+            return valueCall("solid_value_volume", 1, (a, out) -> (boolean) SOLID_VALUE_VOLUME.invokeExact(kind, doublesIn(a, v), out))[0];
+        }
+
+        /** The closed B-rep solid: the caller's to close. */
+        public Solid toSolid() {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment vs = doublesIn(arena, v);
+                MemorySegment raw = call(() -> (MemorySegment) SOLID_VALUE_TO_SOLID.invokeExact(kind, vs));
+                return new Solid(checked(raw, "solid_value_to_solid"));
+            }
+        }
+    }
+
+    /** A surface value: a {@link Sphere}, {@link Cylinder}, {@link Cone} or {@link Torus}. */
+    public abstract static sealed class SurfaceValue extends SolidValue permits Sphere, Cylinder, Cone, Torus {
+        SurfaceValue(int kind, double[] v) {
+            super(kind, v);
+        }
+
+        /** The {@code u} and {@code v} ranges of a surface. */
+        public record Domain(Interval u, Interval v) {
+        }
+
+        /** The point at {@code (u, v)}, in the ranges {@link #domain} gives. */
+        public double[] pointAt(double u, double w) {
+            return valueCall("surface_value_point_at", 3,
+                (a, out) -> (boolean) SURFACE_VALUE_POINT_AT.invokeExact(kind, doublesIn(a, v), u, w, out));
+        }
+
+        /** The outward unit normal at {@code (u, v)}. */
+        public double[] normalAt(double u, double w) {
+            return valueCall("surface_value_normal_at", 3,
+                (a, out) -> (boolean) SURFACE_VALUE_NORMAL_AT.invokeExact(kind, doublesIn(a, v), u, w, out));
+        }
+
+        /** The {@link SurfaceFoot} nearest {@code p} on the surface, in closed form. */
+        public SurfaceFoot closestPoint(double[] p) {
+            double[] q = valuePoint(p, "surface_value_closest_point");
+            double[] f = valueCall("surface_value_closest_point", 6,
+                (a, out) -> (boolean) SURFACE_VALUE_CLOSEST_POINT.invokeExact(kind, doublesIn(a, v), doublesIn(a, q), out));
+            return new SurfaceFoot(f[0], f[1], Arrays.copyOfRange(f, 2, 5), f[5] != 0.0);
+        }
+
+        /** How far {@code p} lies from the surface: the distance to its {@link #closestPoint}. */
+        public double distanceTo(double[] p) {
+            double[] q = valuePoint(p, "surface_value_closest_point");
+            return dist(closestPoint(q).point(), q);
+        }
+
+        /** The {@code u} and {@code v} ranges. */
+        public Domain domain() {
+            double[] d = valueCall("surface_value_domain", 4, (a, out) -> (boolean) SURFACE_VALUE_DOMAIN.invokeExact(kind, doublesIn(a, v), out));
+            return new Domain(new Interval(d[0], d[1]), new Interval(d[2], d[3]));
+        }
+
+        /** The surface alone, as an open sheet on its exact NURBS form: the caller's to close. */
+        public Solid toNurbsSheet() {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment vs = doublesIn(arena, v);
+                MemorySegment raw = call(() -> (MemorySegment) SURFACE_VALUE_NURBS_SHEET.invokeExact(kind, vs));
+                return new Solid(checked(raw, "surface_value_nurbs_sheet"));
+            }
+        }
+    }
+
+    /** The sphere of {@code radius} about the frame's origin; {@code u} the longitude from its x,
+     *  {@code v} the latitude toward its z. */
+    public static final class Sphere extends SurfaceValue {
+        public Sphere(Frame frame, double radius) {
+            this(frame.toArray(), radius);
+        }
+
+        public Sphere(double[] frame, double radius) {
+            super(VALUE_SPHERE, checkedValue(VALUE_SPHERE, cat(Blacksmith.frame(frame), radius)));
+        }
+
+        private Sphere(double[] canonical) {
+            super(VALUE_SPHERE, canonical);
+        }
+
+        /** A sphere from its 13 numbers: the frame, then the radius. */
+        public static Sphere fromArray(double... values) {
+            return new Sphere(checkedValue(VALUE_SPHERE, values));
+        }
+
+        public double radius() {
+            return v[12];
+        }
+
+        /** This sphere under a similarity. */
+        public Sphere transform(Transform t) {
+            return new Sphere(transformed(t));
+        }
+
+        public Sphere transform(double[] rows) {
+            return transform(new Transform(rows));
+        }
+
+        @Override
+        String fields() {
+            return "frame=" + frame() + ", radius=" + radius();
+        }
+    }
+
+    /** The cylinder of {@code radius} about the frame's z over {@code height} (an increasing
+     *  range along z), capped. */
+    public static final class Cylinder extends SurfaceValue {
+        public Cylinder(Frame frame, double radius, Interval height) {
+            this(frame.toArray(), radius, height);
+        }
+
+        public Cylinder(double[] frame, double radius, Interval height) {
+            super(VALUE_CYLINDER, checkedValue(VALUE_CYLINDER, cat(Blacksmith.frame(frame), radius, height.t0(), height.t1())));
+        }
+
+        private Cylinder(double[] canonical) {
+            super(VALUE_CYLINDER, canonical);
+        }
+
+        /** A cylinder from its 15 numbers: the frame, the radius, then the height range. */
+        public static Cylinder fromArray(double... values) {
+            return new Cylinder(checkedValue(VALUE_CYLINDER, values));
+        }
+
+        public double radius() {
+            return v[12];
+        }
+
+        /** The range along the frame's z. */
+        public Interval height() {
+            return new Interval(v[13], v[14]);
+        }
+
+        /** This cylinder under a similarity. */
+        public Cylinder transform(Transform t) {
+            return new Cylinder(transformed(t));
+        }
+
+        public Cylinder transform(double[] rows) {
+            return transform(new Transform(rows));
+        }
+
+        @Override
+        String fields() {
+            return "frame=" + frame() + ", radius=" + radius() + ", height=" + height();
+        }
+    }
+
+    /** The cone of base {@code radius} on the frame's x-y plane, its apex {@code height} up its
+     *  z, capped. */
+    public static final class Cone extends SurfaceValue {
+        public Cone(Frame frame, double radius, double height) {
+            this(frame.toArray(), radius, height);
+        }
+
+        public Cone(double[] frame, double radius, double height) {
+            super(VALUE_CONE, checkedValue(VALUE_CONE, cat(Blacksmith.frame(frame), radius, height)));
+        }
+
+        private Cone(double[] canonical) {
+            super(VALUE_CONE, canonical);
+        }
+
+        /** A cone from its 14 numbers: the frame, the radius, then the height. */
+        public static Cone fromArray(double... values) {
+            return new Cone(checkedValue(VALUE_CONE, values));
+        }
+
+        public double radius() {
+            return v[12];
+        }
+
+        /** How far up the frame's z the apex lies. */
+        public double height() {
+            return v[13];
+        }
+
+        /** This cone under a similarity. */
+        public Cone transform(Transform t) {
+            return new Cone(transformed(t));
+        }
+
+        public Cone transform(double[] rows) {
+            return transform(new Transform(rows));
+        }
+
+        @Override
+        String fields() {
+            return "frame=" + frame() + ", radius=" + radius() + ", height=" + height();
+        }
+    }
+
+    /** The torus of {@code major} radius about the frame's z and {@code minor} radius about
+     *  that circle. */
+    public static final class Torus extends SurfaceValue {
+        public Torus(Frame frame, double major, double minor) {
+            this(frame.toArray(), major, minor);
+        }
+
+        public Torus(double[] frame, double major, double minor) {
+            super(VALUE_TORUS, checkedValue(VALUE_TORUS, cat(Blacksmith.frame(frame), major, minor)));
+        }
+
+        private Torus(double[] canonical) {
+            super(VALUE_TORUS, canonical);
+        }
+
+        /** A torus from its 14 numbers: the frame, then the major and minor radii. */
+        public static Torus fromArray(double... values) {
+            return new Torus(checkedValue(VALUE_TORUS, values));
+        }
+
+        public double major() {
+            return v[12];
+        }
+
+        public double minor() {
+            return v[13];
+        }
+
+        /** This torus under a similarity. */
+        public Torus transform(Transform t) {
+            return new Torus(transformed(t));
+        }
+
+        public Torus transform(double[] rows) {
+            return transform(new Transform(rows));
+        }
+
+        @Override
+        String fields() {
+            return "frame=" + frame() + ", major=" + major() + ", minor=" + minor();
+        }
+    }
+
+    /** The box over {@code x}, {@code y}, {@code z} (increasing ranges) along its frame's axes. */
+    public static final class Cuboid extends SolidValue {
+        public Cuboid(Frame frame, Interval x, Interval y, Interval z) {
+            this(frame.toArray(), x, y, z);
+        }
+
+        public Cuboid(double[] frame, Interval x, Interval y, Interval z) {
+            super(VALUE_CUBOID, checkedValue(VALUE_CUBOID, cat(Blacksmith.frame(frame), x.t0(), x.t1(), y.t0(), y.t1(), z.t0(), z.t1())));
+        }
+
+        private Cuboid(double[] canonical) {
+            super(VALUE_CUBOID, canonical);
+        }
+
+        /** A box from its 18 numbers: the frame, then the x, y and z ranges. */
+        public static Cuboid fromArray(double... values) {
+            return new Cuboid(checkedValue(VALUE_CUBOID, values));
+        }
+
+        /** The world-aligned box from {@code min} to {@code max}. */
+        public static Cuboid fromBounds(double[] min, double[] max) {
+            String what = "cuboid_from_bounds";
+            double[] lo = valuePoint(min, what), hi = valuePoint(max, what);
+            return new Cuboid(valueCall(what, 18,
+                (a, out) -> (boolean) CUBOID_FROM_BOUNDS.invokeExact(doublesIn(a, lo), doublesIn(a, hi), out)));
+        }
+
+        /** The tightest box holding {@code points}, aligned to {@code frame}. */
+        public static Cuboid around(Frame frame, double[][] points) {
+            return around(frame.toArray(), points);
+        }
+
+        public static Cuboid around(double[] frame, double[][] points) {
+            String what = "cuboid_around";
+            double[] f = Blacksmith.frame(frame), xyz = flatPoints(points, what);
+            long n = xyz.length / 3;
+            return new Cuboid(valueCall(what, 18,
+                (a, out) -> (boolean) CUBOID_AROUND.invokeExact(doublesIn(a, f), doublesIn(a, xyz), n, out)));
+        }
+
+        public Interval x() {
+            return new Interval(v[12], v[13]);
+        }
+
+        public Interval y() {
+            return new Interval(v[14], v[15]);
+        }
+
+        public Interval z() {
+            return new Interval(v[16], v[17]);
+        }
+
+        /** The eight corners: the {@code z0} face counter-clockwise about +z from {@code (x0,
+         *  y0)}, then the {@code z1} face in the same order. */
+        public double[][] corners() {
+            double[] c = valueCall("cuboid_corners", 24, (a, out) -> (boolean) CUBOID_CORNERS.invokeExact(doublesIn(a, v), out));
+            double[][] out = new double[8][];
+            for (int k = 0; k < 8; k++) out[k] = Arrays.copyOfRange(c, 3 * k, 3 * k + 3);
+            return out;
+        }
+
+        /** The point the fractions {@code sx}, {@code sy}, {@code sz} of the way along each range. */
+        public double[] pointAt(double sx, double sy, double sz) {
+            return valueCall("cuboid_point_at", 3,
+                (a, out) -> (boolean) CUBOID_POINT_AT.invokeExact(doublesIn(a, v), sx, sy, sz, out));
+        }
+
+        /** The closest point of the solid box: {@code p} itself inside. */
+        public double[] closestPoint(double[] p) {
+            double[] q = valuePoint(p, "cuboid_closest_point");
+            return valueCall("cuboid_closest_point", 3,
+                (a, out) -> (boolean) CUBOID_CLOSEST_POINT.invokeExact(doublesIn(a, v), doublesIn(a, q), out));
+        }
+
+        /** This box under a similarity. */
+        public Cuboid transform(Transform t) {
+            return new Cuboid(transformed(t));
+        }
+
+        public Cuboid transform(double[] rows) {
+            return transform(new Transform(rows));
+        }
+
+        @Override
+        String fields() {
+            return "frame=" + frame() + ", x=" + x() + ", y=" + y() + ", z=" + z();
         }
     }
 
@@ -7655,8 +13456,11 @@ public final class Blacksmith {
      *  kind}), {@code reason} (one sentence naming the tool involved), and {@code region} (its
      *  XY area, as profiles of their own). Read-only: {@code at} is copied in and out, so
      *  changing an array you were handed leaves the item as it was, and {@code region} is an
-     *  unmodifiable list (its profiles are yours to close). */
-    public record ReportItem(String kind, double[] at, double size, String reason, List<Profile> region) {
+     *  unmodifiable list (its profiles are yours to close). {@code top} and {@code bottom} are
+     *  the Z range the item stands over: the highest and the lowest Z of what is left uncut
+     *  (a corner reading "from z 10.000 down to z 2.000" has top 10 and bottom 2). */
+    public record ReportItem(String kind, double[] at, double size, String reason, List<Profile> region,
+                             double top, double bottom) {
         public ReportItem {
             at = at.clone();
             region = List.copyOf(region);
@@ -7671,7 +13475,7 @@ public final class Blacksmith {
         @Override
         public String toString() {
             return "ReportItem(kind=" + kind + ", at=(" + at[0] + ", " + at[1] + ", " + at[2] + "), size=" + size
-                    + ", reason=" + reason + ", region=" + region.size() + " profile(s))";
+                    + ", reason=" + reason + ", top=" + top + ", bottom=" + bottom + ", region=" + region.size() + " profile(s))";
         }
     }
 
@@ -7935,30 +13739,85 @@ public final class Blacksmith {
                 MemorySegment made = call(() -> (MemorySegment) JOB_MACHINE.invokeExact(j, p, e, handles, count, so, sd, skin, pk));
                 keep((Object[]) owners);
                 keep(this, part, endMill);
-                MemorySegment report = checked(made, "job_machine");
-                try {
-                    int n = call(() -> (int) REPORT_COUNT.invokeExact(report));
-                    List<ReportItem> items = new ArrayList<>(n);
-                    MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
-                    for (int i = 0; i < n; i++) {
-                        int at = i;
-                        boolean ok = call(() -> (boolean) REPORT_AT.invokeExact(report, at, out));
-                        if (!ok) throw failure("report_at");
-                        items.add(new ReportItem(
-                                string(call(() -> (MemorySegment) REPORT_KIND.invokeExact(report, at))),
-                                out.toArray(ValueLayout.JAVA_DOUBLE),
-                                call(() -> (double) REPORT_SIZE.invokeExact(report, at)),
-                                string(call(() -> (MemorySegment) REPORT_REASON.invokeExact(report, at))),
-                                Profile.profileList(call(() -> (MemorySegment) REPORT_REGION.invokeExact(report, at)), "report_region")));
-                    }
-                    String text = string(call(() -> (MemorySegment) REPORT_TEXT.invokeExact(report)));
-                    return new Report(items, text);
-                } finally {
-                    call(() -> {
-                        REPORT_FREE.invokeExact(report);
-                        return null;
-                    });
+                return readReport(checked(made, "job_machine"), arena);
+            }
+        }
+
+        /** {@link #machineWith(Solid, Tool[], Tool[], Double, Double, double, Double)} with no
+         *  drills, the kernel's own stepover/stepdown, a 0.3 skin and no peck. */
+        public Report machineWith(Solid part, Tool[] endMills) {
+            return machineWith(part, endMills, null, null, null, 0.3, null);
+        }
+
+        /** {@link #machineWith(Solid, Tool[], Tool[], Double, Double, double, Double)} with
+         *  {@code drills}, the kernel's own stepover/stepdown, a 0.3 skin and no peck. */
+        public Report machineWith(Solid part, Tool[] endMills, Tool[] drills) {
+            return machineWith(part, endMills, drills, null, null, 0.3, null);
+        }
+
+        /** As {@link #machine(Solid, Tool, Tool[], Double, Double, double, Double)}, but with
+         *  a list of end mills, largest first: each cleans what the one before could not reach
+         *  (rest machining), and the report names only what the last one left, each item with
+         *  the Z range it stands over. Throws {@link BuildException} for what the kernel
+         *  refuses (an empty list, a null in it, one not smaller than the one before, two
+         *  sharing a number, a drill among them, ...); the job changes only on success. */
+        public Report machineWith(Solid part, Tool[] endMills, Tool[] drills, Double stepover, Double stepdown,
+                                  double skin, Double peck) {
+            // Raw addresses, as in machine(): the owners are kept reachable until the call has
+            // returned, and a null element goes over as a null pointer for the library's own
+            // "null end mill <i>" / "null drill <i>".
+            Tool[] mills = endMills == null ? new Tool[0] : endMills;
+            Tool[] owners = drills == null ? new Tool[0] : drills;
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment millHandles = arena.allocate(ValueLayout.ADDRESS, Math.max(mills.length, 1));
+                for (int i = 0; i < mills.length; i++) {
+                    millHandles.setAtIndex(ValueLayout.ADDRESS, i, mills[i] == null ? MemorySegment.NULL : mills[i].handle());
                 }
+                MemorySegment handles = arena.allocate(ValueLayout.ADDRESS, Math.max(owners.length, 1));
+                for (int i = 0; i < owners.length; i++) {
+                    handles.setAtIndex(ValueLayout.ADDRESS, i, owners[i] == null ? MemorySegment.NULL : owners[i].handle());
+                }
+                MemorySegment j = handle();
+                MemorySegment p = part.handle();
+                long millCount = mills.length;
+                long count = owners.length;
+                double so = stepover == null ? Double.NaN : stepover;
+                double sd = stepdown == null ? Double.NaN : stepdown;
+                double pk = peck == null ? Double.NaN : peck;
+                MemorySegment made = call(() -> (MemorySegment) JOB_MACHINE_WITH.invokeExact(j, p, millHandles, millCount, handles, count, so, sd, skin, pk));
+                keep((Object[]) mills);
+                keep((Object[]) owners);
+                keep(this, part);
+                return readReport(checked(made, "job_machine_with"), arena);
+            }
+        }
+
+        /** Read, then free, a report the kernel returned. */
+        private static Report readReport(MemorySegment report, Arena arena) {
+            try {
+                int n = call(() -> (int) REPORT_COUNT.invokeExact(report));
+                List<ReportItem> items = new ArrayList<>(n);
+                MemorySegment out = arena.allocate(ValueLayout.JAVA_DOUBLE, 3);
+                for (int i = 0; i < n; i++) {
+                    int at = i;
+                    boolean ok = call(() -> (boolean) REPORT_AT.invokeExact(report, at, out));
+                    if (!ok) throw failure("report_at");
+                    items.add(new ReportItem(
+                            string(call(() -> (MemorySegment) REPORT_KIND.invokeExact(report, at))),
+                            out.toArray(ValueLayout.JAVA_DOUBLE),
+                            call(() -> (double) REPORT_SIZE.invokeExact(report, at)),
+                            string(call(() -> (MemorySegment) REPORT_REASON.invokeExact(report, at))),
+                            Profile.profileList(call(() -> (MemorySegment) REPORT_REGION.invokeExact(report, at)), "report_region"),
+                            call(() -> (double) REPORT_TOP.invokeExact(report, at)),
+                            call(() -> (double) REPORT_BOTTOM.invokeExact(report, at))));
+                }
+                String text = string(call(() -> (MemorySegment) REPORT_TEXT.invokeExact(report)));
+                return new Report(items, text);
+            } finally {
+                call(() -> {
+                    REPORT_FREE.invokeExact(report);
+                    return null;
+                });
             }
         }
 

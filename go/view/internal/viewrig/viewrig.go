@@ -200,6 +200,206 @@ static bool rig_set_viewports(CadaclysmView *v, const CadaclysmViewViewport *p, 
     return true;
 }
 
+// ---- view ABI 1.7: the machining and timeline calls ----
+// What the last show_machining was handed, copied (the library keeps nothing of the caller's
+// memory): the struct's and the first program's size, up to four programs, the stock, the
+// part's counts and first twelve numbers, and the options.
+typedef struct {
+    uint32_t number, shape, size;
+    double diameter, flute, angle, corner;
+    char gcode[256];
+} RigProgram;
+typedef struct {
+    int calls;
+    uint32_t size, program_count, program_size, part_vertices, part_indices, skin_set;
+    int part_null;
+    RigProgram programs[4];
+    double stock_min[3], stock_max[3], cell, tolerance, skin, rapid_rate;
+    float part_positions[12];
+    uint32_t part_triangles[12];
+} RigMachining;
+static RigMachining rig_machining_seen;
+static const RigMachining *rig_seen_machining(void) { return &rig_machining_seen; }
+// What the transport answers, and whether the machining calls refuse (with `rig_said`).
+static CadaclysmViewMachiningInfo rig_info_answer;
+static double rig_time_answer, rig_duration_answer;
+static bool rig_playing_answer, rig_calls_ok = true;
+static char rig_status_lines[8][128];
+static int rig_status_count, rig_status_calls;
+static uint32_t rig_info_size_seen, rig_heights_capacity;
+
+static uint32_t rig_show_machining(CadaclysmView *v, const CadaclysmViewMachining *m) {
+    uint32_t i, k;
+    (void)v;
+    memset(&rig_machining_seen, 0, sizeof rig_machining_seen);
+    rig_machining_seen.calls = ++rig_calls;
+    rig_machining_seen.size = m->size;
+    rig_machining_seen.program_count = m->program_count;
+    rig_machining_seen.program_size = m->program_count ? m->programs[0].size : 0;
+    for (i = 0; i < m->program_count && i < 4; ++i) {
+        const CadaclysmViewProgram *p = &m->programs[i];
+        RigProgram *r = &rig_machining_seen.programs[i];
+        r->number = p->tool_number;
+        r->shape = p->tool_shape;
+        r->size = p->size;
+        r->diameter = p->tool_diameter;
+        r->flute = p->tool_flute_length;
+        r->angle = p->tool_angle;
+        r->corner = p->tool_corner_radius;
+        strncpy(r->gcode, p->gcode, sizeof r->gcode - 1);
+    }
+    for (k = 0; k < 3; ++k) {
+        rig_machining_seen.stock_min[k] = m->stock_min[k];
+        rig_machining_seen.stock_max[k] = m->stock_max[k];
+    }
+    rig_machining_seen.part_null = m->part_positions == NULL || m->part_indices == NULL;
+    rig_machining_seen.part_vertices = m->part_vertex_count;
+    rig_machining_seen.part_indices = m->part_index_count;
+    for (i = 0; i < 3 * m->part_vertex_count && i < 12 && m->part_positions; ++i)
+        rig_machining_seen.part_positions[i] = m->part_positions[i];
+    for (i = 0; i < m->part_index_count && i < 12 && m->part_indices; ++i)
+        rig_machining_seen.part_triangles[i] = m->part_indices[i];
+    rig_machining_seen.cell = m->cell;
+    rig_machining_seen.tolerance = m->tolerance;
+    rig_machining_seen.skin = m->skin;
+    rig_machining_seen.skin_set = m->skin_set;
+    rig_machining_seen.rapid_rate = m->rapid_rate;
+    return m->program_count == 0 ? 0 : 21; // at least one program, as the library
+}
+static bool rig_refusal(void) {
+    if (!rig_calls_ok) strcpy(rig_said, "refused by the rig");
+    return rig_calls_ok;
+}
+static bool rig_machining_seek(CadaclysmView *v, uint32_t item, uint32_t to) {
+    char text[64];
+    (void)v;
+    snprintf(text, sizeof text, "seek %u %u", item, to);
+    rig_note(text);
+    return rig_refusal();
+}
+static bool rig_machining_colour_by(CadaclysmView *v, uint32_t item, uint32_t mode) {
+    char text[64];
+    (void)v;
+    snprintf(text, sizeof text, "colour_by %u %u", item, mode);
+    rig_note(text);
+    return rig_refusal();
+}
+static bool rig_machining_overlays(CadaclysmView *v, uint32_t item, bool path, bool tool) {
+    char text[64];
+    (void)v;
+    snprintf(text, sizeof text, "overlays %u %d %d", item, (int)path, (int)tool);
+    rig_note(text);
+    return rig_refusal();
+}
+static bool rig_machining_info(CadaclysmView *v, uint32_t item, CadaclysmViewMachiningInfo *out) {
+    char text[64];
+    (void)v;
+    snprintf(text, sizeof text, "info %u", item);
+    rig_note(text);
+    rig_info_size_seen = out->size;
+    *out = rig_info_answer;
+    out->size = rig_info_size_seen;
+    return rig_refusal();
+}
+// Heights are 0.5 * the cell's number, so an order mix-up shows.
+static bool rig_machining_heights(CadaclysmView *v, uint32_t item, float *z, size_t n) {
+    char text[64];
+    size_t i;
+    (void)v;
+    snprintf(text, sizeof text, "heights %u %u", item, (unsigned)n);
+    rig_note(text);
+    rig_heights_capacity = (uint32_t)n;
+    for (i = 0; i < n; ++i) z[i] = 0.5f * (float)i;
+    return rig_refusal();
+}
+static bool rig_timeline_play(CadaclysmView *v, double speed) {
+    char text[64];
+    (void)v;
+    snprintf(text, sizeof text, "play %g", speed);
+    rig_note(text);
+    return rig_refusal();
+}
+static bool rig_timeline_pause(CadaclysmView *v) {
+    (void)v;
+    rig_note("pause");
+    return rig_refusal();
+}
+static bool rig_timeline_seek(CadaclysmView *v, double seconds) {
+    char text[64];
+    (void)v;
+    snprintf(text, sizeof text, "timeline_seek %g", seconds);
+    rig_note(text);
+    return rig_refusal();
+}
+static bool rig_timeline_set_loop(CadaclysmView *v, bool on) {
+    (void)v;
+    rig_note(on ? "loop on" : "loop off");
+    return rig_refusal();
+}
+static double rig_timeline_time(const CadaclysmView *v) {
+    (void)v;
+    return rig_time_answer;
+}
+static double rig_timeline_duration(const CadaclysmView *v) {
+    (void)v;
+    return rig_duration_answer;
+}
+static bool rig_timeline_playing(const CadaclysmView *v) {
+    (void)v;
+    return rig_playing_answer;
+}
+// The status line of this call: the nth answer set (the last again after them); a lone
+// answer of "" is no tracks. As the library: the full length, the text cut to what fits.
+static size_t rig_timeline_status(const CadaclysmView *v, char *s, size_t n) {
+    const char *text;
+    size_t length, copy;
+    (void)v;
+    if (rig_status_count == 0) return 0;
+    text = rig_status_lines[rig_status_calls < rig_status_count ? rig_status_calls : rig_status_count - 1];
+    ++rig_status_calls;
+    length = strlen(text);
+    if (s != NULL && n > 0) {
+        copy = length < n - 1 ? length : n - 1;
+        memcpy(s, text, copy);
+        s[copy] = 0;
+    }
+    return length;
+}
+static void rig_machining_reset(void) {
+    memset(&rig_machining_seen, 0, sizeof rig_machining_seen);
+    memset(&rig_info_answer, 0, sizeof rig_info_answer);
+    rig_time_answer = rig_duration_answer = 0.0;
+    rig_playing_answer = false;
+    rig_calls_ok = true;
+    rig_status_count = rig_status_calls = 0;
+    rig_info_size_seen = rig_heights_capacity = 0;
+}
+static void rig_set_info(uint32_t moves, uint32_t move, uint32_t nx, uint32_t ny, float cell, float x, float y, double cycle) {
+    rig_info_answer.moves = moves;
+    rig_info_answer.move = move;
+    rig_info_answer.nx = nx;
+    rig_info_answer.ny = ny;
+    rig_info_answer.cell = cell;
+    rig_info_answer.min[0] = x;
+    rig_info_answer.min[1] = y;
+    rig_info_answer.cycle_time = cycle;
+}
+static void rig_set_timeline(double time, double duration, int playing) {
+    rig_time_answer = time;
+    rig_duration_answer = duration;
+    rig_playing_answer = playing != 0;
+}
+static void rig_set_calls_ok(int ok) { rig_calls_ok = ok != 0; }
+static void rig_add_status(const char *text) {
+    if (rig_status_count >= 8) return;
+    strncpy(rig_status_lines[rig_status_count], text, 127);
+    rig_status_lines[rig_status_count][127] = 0;
+    ++rig_status_count;
+}
+static uint32_t rig_seen_info_size(void) { return rig_info_size_seen; }
+static uint32_t rig_seen_heights_capacity(void) { return rig_heights_capacity; }
+static int rig_status_calls_made(void) { return rig_status_calls; }
+
 static void *rig_fn(const char *name) {
     static const struct {
         const char *name;
@@ -230,6 +430,20 @@ static void *rig_fn(const char *name) {
         {"set_double_click_frames", (void *)rig_set_double_click_frames},
         {"focus", (void *)rig_focus},
         {"navigation", (void *)rig_navigation_of},
+        {"show_machining", (void *)rig_show_machining},
+        {"machining_seek", (void *)rig_machining_seek},
+        {"machining_colour_by", (void *)rig_machining_colour_by},
+        {"machining_overlays", (void *)rig_machining_overlays},
+        {"machining_info", (void *)rig_machining_info},
+        {"machining_heights", (void *)rig_machining_heights},
+        {"timeline_play", (void *)rig_timeline_play},
+        {"timeline_pause", (void *)rig_timeline_pause},
+        {"timeline_seek", (void *)rig_timeline_seek},
+        {"timeline_set_loop", (void *)rig_timeline_set_loop},
+        {"timeline_time", (void *)rig_timeline_time},
+        {"timeline_duration", (void *)rig_timeline_duration},
+        {"timeline_playing", (void *)rig_timeline_playing},
+        {"timeline_status", (void *)rig_timeline_status},
     };
     size_t i;
     for (i = 0; i < sizeof calls / sizeof calls[0]; ++i)
@@ -250,6 +464,7 @@ static void rig_reset(void) {
     rig_points_size = 0.0f;
     rig_points_count = 0;
     rig_points_rgb_null = rig_points_calls = 0;
+    rig_machining_reset();
 }
 static void rig_set_pick(uint32_t item, uint32_t node, uint32_t face, uint32_t clicks, uint32_t has_point, float x,
                          float y, float z) {
@@ -372,3 +587,94 @@ func Points() (positions []float32, rgb []float32, sizePx float32, calls int) {
 	}
 	return positions, rgb, float32(C.rig_point_size()), int(C.rig_point_calls())
 }
+
+// ---- view ABI 1.7: the machining and timeline calls ----
+
+// ProgramSeen is one program as show_machining was handed it.
+type ProgramSeen struct {
+	Size, Number, Shape                        uint32
+	Diameter, FluteLength, Angle, CornerRadius float64
+	Gcode                                      string
+}
+
+// MachiningSeen is what the last show_machining was handed (Calls: how many since Reset).
+type MachiningSeen struct {
+	Calls                            int
+	Size, ProgramCount, ProgramSize  uint32        // the struct's, the count, the programs' stride
+	Programs                         []ProgramSeen // up to four
+	StockMin, StockMax               [3]float64
+	PartNull                         bool
+	PartVertices, PartIndices        uint32
+	PartPositions                    []float32 // up to 12
+	PartTriangles                    []uint32  // up to 12
+	Cell, Tolerance, Skin, RapidRate float64
+	SkinSet                          uint32
+}
+
+// Machining is what the last show_machining was handed, copied.
+func Machining() MachiningSeen {
+	m := C.rig_seen_machining()
+	out := MachiningSeen{Calls: int(m.calls), Size: uint32(m.size), ProgramCount: uint32(m.program_count),
+		ProgramSize: uint32(m.program_size), PartNull: m.part_null != 0, PartVertices: uint32(m.part_vertices),
+		PartIndices: uint32(m.part_indices), Cell: float64(m.cell), Tolerance: float64(m.tolerance),
+		Skin: float64(m.skin), RapidRate: float64(m.rapid_rate), SkinSet: uint32(m.skin_set)}
+	for i := 0; i < 4 && i < int(m.program_count); i++ {
+		p := &m.programs[i]
+		out.Programs = append(out.Programs, ProgramSeen{Size: uint32(p.size), Number: uint32(p.number), Shape: uint32(p.shape),
+			Diameter: float64(p.diameter), FluteLength: float64(p.flute), Angle: float64(p.angle), CornerRadius: float64(p.corner),
+			Gcode: C.GoString(&p.gcode[0])})
+	}
+	for a := 0; a < 3; a++ {
+		out.StockMin[a], out.StockMax[a] = float64(m.stock_min[a]), float64(m.stock_max[a])
+	}
+	for i := 0; i < 12 && i < 3*int(m.part_vertices); i++ {
+		out.PartPositions = append(out.PartPositions, float32(m.part_positions[i]))
+	}
+	for i := 0; i < 12 && i < int(m.part_indices); i++ {
+		out.PartTriangles = append(out.PartTriangles, uint32(m.part_triangles[i]))
+	}
+	return out
+}
+
+// SetInfo is what machining_info answers from now on.
+func SetInfo(moves, move, nx, ny uint32, cell float32, min [2]float32, cycleTime float64) {
+	C.rig_set_info(C.uint32_t(moves), C.uint32_t(move), C.uint32_t(nx), C.uint32_t(ny), C.float(cell),
+		C.float(min[0]), C.float(min[1]), C.double(cycleTime))
+}
+
+// SetTimeline is what timeline_time, timeline_duration and timeline_playing answer.
+func SetTimeline(time, duration float64, playing bool) {
+	p := C.int(0)
+	if playing {
+		p = 1
+	}
+	C.rig_set_timeline(C.double(time), C.double(duration), p)
+}
+
+// Refusing makes the machining and transport calls that return a bool answer false (with
+// last_error "refused by the rig" when `say` is set by the test), or true again.
+func Refusing(on bool) {
+	ok := C.int(1)
+	if on {
+		ok = 0
+	}
+	C.rig_set_calls_ok(ok)
+}
+
+// StatusAnswers are the texts timeline_status answers with, call after call (the last again
+// after them): the library's two-call idiom measures with the first and fills from the next.
+func StatusAnswers(texts ...string) {
+	for _, t := range texts {
+		c := C.CString(t)
+		C.rig_add_status(c)
+		C.free(unsafe.Pointer(c))
+	}
+}
+
+// StatusCalls is how many timeline_status calls were made since Reset.
+func StatusCalls() int { return int(C.rig_status_calls_made()) }
+
+// InfoSize is the `size` machining_info was handed; HeightsCapacity the capacity
+// machining_heights was handed.
+func InfoSize() uint32        { return uint32(C.rig_seen_info_size()) }
+func HeightsCapacity() uint32 { return uint32(C.rig_seen_heights_capacity()) }

@@ -10,11 +10,16 @@
 
 #include "cadaclysm.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
+#include <variant>
 
 namespace cadaclysm {
 inline namespace CADACLYSM_ABI {
@@ -23,6 +28,8 @@ namespace blacksmith {
 inline constexpr std::uint32_t NONE = CADACLYSM_BLACKSMITH_NONE;
 // The tessellation tolerance every tolerance-taking call defaults to.
 inline constexpr double DEFAULT_TOLERANCE = 0.05;
+// ThicknessGauge, thickness() and Solid::thickness_at_face mesh at this tolerance unless told otherwise.
+inline constexpr double THICKNESS_TOLERANCE = 0.01;
 // fillet, chamfer, refillet and shell's default: a geometric tolerance, not a mesh one.
 inline constexpr double FILLET_TOLERANCE = 1e-6;
 // Profile::hits' default: how close two curves must come to meet, or to merge two points.
@@ -71,6 +78,56 @@ using MeshData = cadaclysm::MeshData;
 using MeshData64 = cadaclysm::MeshData64;
 // Called with a phase name and progress through it; for the long operations.
 using Progress = std::function<void(std::string_view phase, std::size_t done, std::size_t total)>;
+
+/// The tightest box aligned with a solid's principal axes of inertia (not a minimal box: where two
+/// moments are equal the axes are a free choice). `axes` is three rows of three, row `i` the
+/// direction of the extent `half[i]`; `centre` is the middle of the box, not the centroid.
+struct OrientedBox {
+    Vec3 centre = {};
+    std::array<Vec3, 3> axes = {};
+    Vec3 half = {};
+};
+
+/// A measured length beside an estimate of its error. Where `accuracy_met` is false the refinement
+/// stopped before the accuracy asked for; `from_polyline` marks a sampled polyline, exact for its
+/// points and not for what they were sampled from.
+struct Length {
+    double length = 0.0;
+    double error = 0.0;
+    bool accuracy_met = false;
+    bool from_polyline = false;
+};
+
+/// The closest points between two solids' boundaries and what each lies on. `kind_a` and `kind_b`
+/// are "face", "edge" or "vertex"; `index_*` is the kernel id of that face, edge or vertex; `edge_*`
+/// is the index Solid::edges() and fillet use, present only for an edge that has a row there.
+/// `refined` is true when the points were refined onto the exact geometry.
+struct Closest {
+    double distance = 0.0;
+    Vec3 on_a = {};
+    Vec3 on_b = {};
+    std::string kind_a;
+    std::uint32_t index_a = 0;
+    std::optional<std::uint32_t> edge_a;
+    std::string kind_b;
+    std::uint32_t index_b = 0;
+    std::optional<std::uint32_t> edge_b;
+    bool refined = false;
+};
+
+/// A point a length of arc along an edge or a profile's outer loop, beside the unit tangent there.
+/// `parameter` is the curve's own parameter on an edge; on a profile it is the side's own (a line's
+/// 0..1, an arc's angle, a spline's parameter). `segment` is empty on a solid's edge; on a profile
+/// it is the side the point lies on (the segment count for the implicit closing side). `error` is
+/// an estimate of the arc length's error; `from_polyline` marks a sampled polyline.
+struct At {
+    Vec3 point = {};
+    Vec3 tangent = {};
+    double parameter = 0.0;
+    std::optional<std::uint32_t> segment;
+    double error = 0.0;
+    bool from_polyline = false;
+};
 
 enum class Axis : std::uint32_t { x = 0, y = 1, z = 2 };
 // Which side of the tool Solid::trim keeps.
@@ -161,11 +218,15 @@ class Path;
 class SweepPath;
 class Frame;
 class Solid;
+class RTree;
 class Assembly;
 class Workplane;
 class CollisionHit;
 class Collider;
+class ThicknessGauge;
+struct FaceThickness;
 class Subd;
+class Sketch;
 class Tool;
 class Stock;
 class Job;
@@ -174,6 +235,9 @@ using Solids = std::vector<std::reference_wrapper<const Solid>>;
 // A profile on its frame: one section of Solid::loft_through, borrowed for the call.
 using Section = std::pair<std::reference_wrapper<const Profile>, std::reference_wrapper<const Frame>>;
 using Sections = std::vector<Section>;
+// A path of poses for Collider::swept_clash and swept_clash(): each pose the frames clash()
+// takes there, borrowed for the call.
+using Poses = std::vector<std::vector<std::reference_wrapper<const Frame>>>;
 
 namespace detail {
 using cadaclysm::detail::text;
@@ -182,6 +246,18 @@ inline Error kernel_error(const char* fallback) {
     std::string message = text(::cadaclysm_blacksmith_last_error());
     if (message.empty()) message = fallback;
     return Error{std::move(message), Origin::kernel};
+}
+
+// A refusal that may name ids (a constraint, remove_entity, set_value, set_driving,
+// update_reference, drag): the library's reason first -- under the wasm shims the next
+// call clears it -- then a copy of report_ids. Every other refusal carries no ids: use
+// kernel_error.
+inline Error sketch_refusal(const CadaclysmBlacksmithSketch* handle, const char* what) {
+    Error refusal = kernel_error(what);
+    std::size_t n = 0;
+    const std::uint32_t* p = ::cadaclysm_blacksmith_sketch_report_ids(handle, &n);
+    if (p && n) refusal.ids.assign(p, p + n);
+    return refusal;
 }
 
 // kernel_error for a call routed through cadaclysm_blacksmith_tessellation: that entry
@@ -199,6 +275,52 @@ inline Error tessellation_error(const char* name) {
 }
 
 inline Error refuse(std::string message) { return Error{std::move(message), Origin::kernel}; }
+
+inline Length length_of(const CadaclysmBlacksmithLength& raw) {
+    return Length{raw.length, raw.error, raw.accuracy_met != 0, raw.from_polyline != 0};
+}
+
+inline At at_of(const CadaclysmBlacksmithAt& raw) {
+    At a;
+    a.point = {raw.point[0], raw.point[1], raw.point[2]};
+    a.tangent = {raw.tangent[0], raw.tangent[1], raw.tangent[2]};
+    a.parameter = raw.parameter;
+    if (raw.segment != CADACLYSM_BLACKSMITH_NONE) a.segment = raw.segment;
+    a.error = raw.error;
+    a.from_polyline = raw.from_polyline != 0;
+    return a;
+}
+
+// The samples of a divide, read into a vector. A null list is the call's failure, read from
+// last_error under `call`; the list is freed on every path out, a failing read included, and
+// the error is built before the free.
+inline Result<std::vector<At>> samples_of(CadaclysmBlacksmithSamples* list, const char* call) {
+    if (!list) return kernel_error(call);
+    struct Free {
+        void operator()(CadaclysmBlacksmithSamples* p) const noexcept { ::cadaclysm_blacksmith_samples_free(p); }
+    };
+    std::unique_ptr<CadaclysmBlacksmithSamples, Free> owned(list);
+    std::uint32_t count = ::cadaclysm_blacksmith_samples_count(owned.get());
+    std::vector<At> out;
+    out.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        CadaclysmBlacksmithAt raw{};
+        if (!::cadaclysm_blacksmith_samples_at(owned.get(), i, &raw)) return kernel_error("samples_at");
+        out.push_back(at_of(raw));
+    }
+    return out;
+}
+
+// The name of a containment code; any other answer is the library breaking its contract.
+inline Result<std::string> containment_of(std::uint32_t code, const char* call) {
+    switch (code) {
+        case CADACLYSM_BLACKSMITH_OUTSIDE: return std::string("outside");
+        case CADACLYSM_BLACKSMITH_INSIDE: return std::string("inside");
+        case CADACLYSM_BLACKSMITH_ON: return std::string("on");
+        default: break;
+    }
+    return refuse(std::string(call) + ": the library answered " + std::to_string(code) + ", not a containment code");
+}
 
 // A silhouette block the kernel handed over, released when this goes out of scope -- on
 // every path out of the call that took it, the early returns included. The block carries no
@@ -452,6 +574,50 @@ public:
         return translate(distance * n[0], distance * n[1], distance * n[2]);
     }
 
+    // The same plane facing the other way: x and y swapped, z reversed.
+    Frame flipped() const noexcept {
+        Vec3 n = z();
+        return Frame(origin(), y(), x(), {-n[0], -n[1], -n[2]});
+    }
+    // This frame turned `radians` about `axis` through its origin, right-handed
+    // (Transform::rotation). A zero axis is refused.
+    Result<Frame> rotated(double radians, const Vec3& axis) const;
+    // The point `p` in this frame's coordinates.
+    Vec3 to_local(const Vec3& p) const noexcept {
+        Vec3 o = origin();
+        Vec3 d{p[0] - o[0], p[1] - o[1], p[2] - o[2]};
+        return {detail::dot(d, x()), detail::dot(d, y()), detail::dot(d, z())};
+    }
+    // How far `p` lies above the frame's plane, along its z: negative below.
+    double distance_to(const Vec3& p) const noexcept {
+        Vec3 o = origin();
+        return detail::dot({p[0] - o[0], p[1] - o[1], p[2] - o[2]}, z());
+    }
+    // The point `p` dropped onto the frame's plane along its z.
+    Vec3 closest_point(const Vec3& p) const noexcept {
+        double d = distance_to(p);
+        Vec3 n = z();
+        return {p[0] - d * n[0], p[1] - d * n[1], p[2] - d * n[2]};
+    }
+    // The least-squares plane through `points` (three or more, not all on one line) as a
+    // frame, and the largest distance any point lies off it. Fewer points, or points on one
+    // line, are refused.
+    static Result<std::pair<Frame, double>> fit(const std::vector<Vec3>& points) {
+        std::vector<double> xyz;
+        xyz.reserve(3 * points.size());
+        for (const Vec3& p : points) xyz.insert(xyz.end(), p.begin(), p.end());
+        std::array<double, 12> out{};
+        double deviation = 0.0;
+        // Never a null pointer, so no points are the library's "needs three points".
+        const double none[1] = {0.0};
+        if (!::cadaclysm_blacksmith_frame_fit(xyz.empty() ? none : xyz.data(), points.size(), out.data(), &deviation)) {
+            return detail::kernel_error("frame_fit");
+        }
+        Result<Frame> frame = of(out);
+        if (!frame) return frame.error();
+        return std::pair<Frame, double>(std::move(frame).value(), deviation);
+    }
+
     // The twelve numbers every call taking a frame reads.
     const std::array<double, 12>& raw() const noexcept { return v_; }
 
@@ -461,6 +627,7 @@ public:
 private:
     friend class Solid;
     friend class Workplane;
+    friend class GeometryValue;
     // The world planes through the origin: nothing to check.
     static Frame world_xy() { return Frame({0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}); }
     static Frame world_xz() { return Frame({0, 0, 0}, {1, 0, 0}, {0, 0, 1}, {0, -1, 0}); }
@@ -477,6 +644,364 @@ private:
         for (double& c : v_) c += 0.0;  // no -0.0 to print or compare
     }
     std::array<double, 12> v_;
+};
+
+// ---- transforms ---------------------------------------------------------------------
+
+// How far from rigid, or from a similarity, a map may be and still be told one, by default.
+inline constexpr double MAP_TOLERANCE = 1e-9;
+
+// Which surfaces Solid::convert_to_nurbs rewrites as their exact NURBS.
+enum class NurbsLevel : std::uint32_t {
+    // The revolutions, extrusions and sums.
+    procedural = CADACLYSM_BLACKSMITH_NURBS_PROCEDURAL,
+    // Those and the cylinders, cones, spheres and tori: every curved face.
+    analytic = CADACLYSM_BLACKSMITH_NURBS_ANALYTIC,
+    // Everything, planes and edge curves too: a body made only of NURBS.
+    all = CADACLYSM_BLACKSMITH_NURBS_ALL,
+};
+
+struct RigidParts;
+struct SimilarityParts;
+struct AffineParts;
+
+// An affine map of space: a 4x4 matrix, row-major, its bottom row 0 0 0 1. An immutable
+// value with nothing to free. `a * b` (and a.compose(b)) is `a` after `b`.
+//
+// The constructors and the decompositions are the library's own, so every wrapper computes
+// them alike. A frame argument is a Frame or its twelve raw numbers (origin, x, y, z); the
+// library squares up one within 1e-6 of right-handed and orthonormal and refuses any other.
+class Transform {
+public:
+    // The identity.
+    Transform() noexcept : m_{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1} {}
+    static Transform identity() noexcept { return Transform(); }
+
+    // The map 16 numbers state, row-major. Refuses a count other than 16, a number that is
+    // not finite, and a bottom row other than 0 0 0 1.
+    static Result<Transform> from_rows(std::initializer_list<double> rows) { return checked(rows.begin(), rows.size()); }
+    static Result<Transform> from_rows(const std::vector<double>& rows) { return checked(rows.data(), rows.size()); }
+    static Result<Transform> from_rows(const std::array<double, 16>& rows) { return checked(rows.data(), rows.size()); }
+    // Four rows of four -- the reader's Matrix4 (Node::transform) among them.
+    static Result<Transform> from_rows(const Matrix4& rows) {
+        std::array<double, 16> flat{};
+        for (std::size_t r = 0; r < 4; ++r) {
+            for (std::size_t c = 0; c < 4; ++c) flat[4 * r + c] = rows[r][c];
+        }
+        return checked(flat.data(), flat.size());
+    }
+
+    // p + v.
+    static Result<Transform> translation(const Vec3& v) {
+        return made("transform_translation", [&](double* out) -> bool { return ::cadaclysm_blacksmith_transform_translation(v.data(), out); });
+    }
+    // A turn of `radians` about the line through `point` along `direction`, right-handed.
+    static Result<Transform> rotation(const Vec3& point, const Vec3& direction, double radians) {
+        const double axis[6] = {point[0], point[1], point[2], direction[0], direction[1], direction[2]};
+        return made("transform_rotation", [&](double* out) -> bool { return ::cadaclysm_blacksmith_transform_rotation(axis, radians, out); });
+    }
+    // rotation about an AxisLine, as Solid::rotate takes it.
+    static Result<Transform> rotation(const AxisLine& axis, double radians) { return rotation(axis[0], axis[1], radians); }
+    // The reflection across `plane`, its z the normal.
+    static Result<Transform> mirror(const Frame& plane) { return mirror(plane.raw()); }
+    static Result<Transform> mirror(const std::array<double, 12>& plane) {
+        return made("transform_mirror", [&](double* out) -> bool { return ::cadaclysm_blacksmith_transform_mirror(plane.data(), out); });
+    }
+    // A uniform scale by `k` about `centre`.
+    static Result<Transform> scale(const Vec3& centre, double k) {
+        return made("transform_scale", [&](double* out) -> bool { return ::cadaclysm_blacksmith_transform_scale(centre.data(), k, out); });
+    }
+    // A scale by `sx`, `sy`, `sz` along `frame`'s axes, about its origin.
+    static Result<Transform> scale_xyz(const Frame& frame, double sx, double sy, double sz) {
+        return scale_xyz(frame.raw(), sx, sy, sz);
+    }
+    static Result<Transform> scale_xyz(const std::array<double, 12>& frame, double sx, double sy, double sz) {
+        return made("transform_scale_xyz",
+                    [&](double* out) -> bool { return ::cadaclysm_blacksmith_transform_scale_xyz(frame.data(), sx, sy, sz, out); });
+    }
+    // Every point slid along `direction` by `factor` times its height above `plane`.
+    // `direction` is normalised -- `factor` alone sets the slide -- and must lie in the plane.
+    static Result<Transform> shear(const Frame& plane, const Vec3& direction, double factor) {
+        return shear(plane.raw(), direction, factor);
+    }
+    static Result<Transform> shear(const std::array<double, 12>& plane, const Vec3& direction, double factor) {
+        return made("transform_shear", [&](double* out) -> bool {
+            return ::cadaclysm_blacksmith_transform_shear(plane.data(), direction.data(), factor, out);
+        });
+    }
+    // The rigid map sending frame `a` onto frame `b`.
+    static Result<Transform> plane_to_plane(const Frame& a, const Frame& b) { return plane_to_plane(a.raw(), b.raw()); }
+    static Result<Transform> plane_to_plane(const std::array<double, 12>& a, const std::array<double, 12>& b) {
+        return made("transform_plane_to_plane",
+                    [&](double* out) -> bool { return ::cadaclysm_blacksmith_transform_plane_to_plane(a.data(), b.data(), out); });
+    }
+    // Coordinates in frame `from` to coordinates in frame `to`: a change of basis.
+    static Result<Transform> change_basis(const Frame& from, const Frame& to) { return change_basis(from.raw(), to.raw()); }
+    static Result<Transform> change_basis(const std::array<double, 12>& from, const std::array<double, 12>& to) {
+        return made("transform_change_basis",
+                    [&](double* out) -> bool { return ::cadaclysm_blacksmith_transform_change_basis(from.data(), to.data(), out); });
+    }
+    // The orthogonal projection onto `plane` -- singular by design.
+    static Result<Transform> planar_projection(const Frame& plane) { return planar_projection(plane.raw()); }
+    static Result<Transform> planar_projection(const std::array<double, 12>& plane) {
+        return made("transform_planar_projection",
+                    [&](double* out) -> bool { return ::cadaclysm_blacksmith_transform_planar_projection(plane.data(), out); });
+    }
+    // The parallel projection onto `plane` along `direction`, which must not lie in it.
+    static Result<Transform> project_along(const Frame& plane, const Vec3& direction) { return project_along(plane.raw(), direction); }
+    static Result<Transform> project_along(const std::array<double, 12>& plane, const Vec3& direction) {
+        return made("transform_project_along", [&](double* out) -> bool {
+            return ::cadaclysm_blacksmith_transform_project_along(plane.data(), direction.data(), out);
+        });
+    }
+
+    // The 16 numbers, row-major.
+    const std::array<double, 16>& rows() const noexcept { return m_; }
+
+    // Where the map takes the point `p`.
+    Vec3 point(const Vec3& p) const noexcept {
+        const std::array<double, 16>& r = m_;
+        return {r[0] * p[0] + r[1] * p[1] + r[2] * p[2] + r[3], r[4] * p[0] + r[5] * p[1] + r[6] * p[2] + r[7],
+                r[8] * p[0] + r[9] * p[1] + r[10] * p[2] + r[11]};
+    }
+
+    // This map after `other`: other first, then this.
+    Result<Transform> compose(const Transform& other) const {
+        return made("transform_compose",
+                    [&](double* out) -> bool { return ::cadaclysm_blacksmith_transform_compose(m_.data(), other.m_.data(), out); });
+    }
+    // compose: `a * b` is `a` after `b`, through the library, so a Result.
+    Result<Transform> operator*(const Transform& other) const { return compose(other); }
+
+    // The map undoing this one; refused for a singular map.
+    Result<Transform> inverse() const {
+        return made("transform_inverse", [&](double* out) -> bool { return ::cadaclysm_blacksmith_transform_inverse(m_.data(), out); });
+    }
+
+    // Whether the linear part is orthogonal (A^T A = I to `tolerance`): a rotation or a mirror.
+    // Solid::transform is looser: it applies a map within 1e-6 of a similarity as that
+    // similarity. Refused for a tolerance not finite or negative.
+    Result<bool> is_rigid(double tolerance = MAP_TOLERANCE) const {
+        std::uint32_t r = ::cadaclysm_blacksmith_transform_is_rigid(m_.data(), tolerance);
+        if (r == NONE) return detail::kernel_error("transform_is_rigid");
+        return r == 1;
+    }
+    // The scale k where the linear part is k times an orthogonal one (A^T A = k^2I to
+    // `tolerance`, relative to k^2), else nullopt. Refused for a tolerance not finite or
+    // negative.
+    Result<std::optional<double>> is_similarity(double tolerance = MAP_TOLERANCE) const {
+        double k = ::cadaclysm_blacksmith_transform_is_similarity(m_.data(), tolerance);
+        if (std::isnan(k)) return detail::kernel_error("transform_is_similarity");
+        if (k > 0) return std::optional<double>(k);
+        return std::optional<double>();
+    }
+    // The translation and the orthogonal part of a rigid map, else nullopt.
+    Result<std::optional<RigidParts>> decompose_rigid(double tolerance = MAP_TOLERANCE) const;
+    // The translation, the orthogonal part and k of a similarity, else nullopt.
+    Result<std::optional<SimilarityParts>> decompose_similarity(double tolerance = MAP_TOLERANCE) const;
+    // The polar split: the linear part is rotation * axes * diag(stretch) * axes^T, `rotation`
+    // carrying the mirror, `axes` a proper rotation whose columns are the stretch directions,
+    // the stretches largest first. nullopt for a singular map or one stretched past 1e7:1,
+    // which has no unique split.
+    std::optional<AffineParts> decompose_affine() const;
+
+    bool operator==(const Transform& other) const noexcept { return m_ == other.m_; }
+    bool operator!=(const Transform& other) const noexcept { return m_ != other.m_; }
+
+private:
+    friend class Quaternion;
+    // Sixteen numbers the library wrote: affine by construction.
+    explicit Transform(const double* rows) noexcept {
+        for (std::size_t i = 0; i < 16; ++i) m_[i] = rows[i] + 0.0;  // no -0.0 to print or compare
+    }
+
+    static Result<Transform> checked(const double* rows, std::size_t count) {
+        if (count != 16) return detail::refuse("Transform: a matrix is 16 numbers, got " + std::to_string(count));
+        for (std::size_t i = 0; i < 16; ++i) {
+            if (!std::isfinite(rows[i])) return detail::refuse("Transform: not finite");
+        }
+        if (rows[12] != 0.0 || rows[13] != 0.0 || rows[14] != 0.0 || rows[15] != 1.0) {
+            return detail::refuse("Transform: the bottom row must be 0 0 0 1 (a projective map is not affine)");
+        }
+        return Transform(rows);
+    }
+
+    template <class F>
+    static Result<Transform> made(const char* what, F call) {
+        std::array<double, 16> out{};
+        if (!call(out.data())) return detail::kernel_error(what);
+        return Transform(out.data());
+    }
+
+    std::array<double, 16> m_;
+};
+
+// Transform::decompose_rigid's answer.
+struct RigidParts {
+    Vec3 translation;
+    Transform orthogonal;
+};
+// Transform::decompose_similarity's answer: the linear part is k times `orthogonal`.
+struct SimilarityParts {
+    Vec3 translation;
+    Transform orthogonal;
+    double k;
+};
+// Transform::decompose_affine's answer.
+struct AffineParts {
+    Vec3 translation;
+    Transform rotation;
+    Transform axes;
+    Vec3 stretch;
+};
+
+inline Result<std::optional<RigidParts>> Transform::decompose_rigid(double tolerance) const {
+    Result<bool> rigid = is_rigid(tolerance);
+    if (!rigid) return rigid.error();
+    if (!*rigid) return std::optional<RigidParts>();
+    double out[19] = {};
+    if (!::cadaclysm_blacksmith_transform_decompose_rigid(m_.data(), tolerance, out)) {
+        return detail::kernel_error("transform_decompose_rigid");
+    }
+    return std::optional<RigidParts>(RigidParts{{out[0], out[1], out[2]}, Transform(out + 3)});
+}
+
+inline Result<std::optional<SimilarityParts>> Transform::decompose_similarity(double tolerance) const {
+    Result<std::optional<double>> k = is_similarity(tolerance);
+    if (!k) return k.error();
+    if (!*k) return std::optional<SimilarityParts>();
+    double out[20] = {};
+    if (!::cadaclysm_blacksmith_transform_decompose_similarity(m_.data(), tolerance, out)) {
+        return detail::kernel_error("transform_decompose_similarity");
+    }
+    return std::optional<SimilarityParts>(SimilarityParts{{out[0], out[1], out[2]}, Transform(out + 3), out[19]});
+}
+
+inline std::optional<AffineParts> Transform::decompose_affine() const {
+    double out[38] = {};
+    if (!::cadaclysm_blacksmith_transform_decompose_affine(m_.data(), out)) return std::nullopt;
+    return AffineParts{{out[0], out[1], out[2]}, Transform(out + 3), Transform(out + 19), {out[35], out[36], out[37]}};
+}
+
+inline Result<Frame> Frame::rotated(double radians, const Vec3& axis) const {
+    Result<Transform> turn = Transform::rotation(origin(), axis, radians);
+    if (!turn) return turn.error();
+    const std::array<double, 16>& r = turn->rows();
+    std::function<Vec3(const Vec3&)> apply = [&r](const Vec3& d) -> Vec3 {
+        return {r[0] * d[0] + r[1] * d[1] + r[2] * d[2], r[4] * d[0] + r[5] * d[1] + r[6] * d[2], r[8] * d[0] + r[9] * d[1] + r[10] * d[2]};
+    };
+    return make(origin(), apply(x()), apply(y()), apply(z()));
+}
+
+// A rotation as w + xi + yj + zk: an immutable value. q and -q are the same rotation; a
+// non-unit one is normalised wherever it becomes a rotation, and a zero one is refused there.
+// `a * b` turns by `b`, then `a`. Equality is by components, so q != -q although the two turn
+// alike: to ask whether two do, compare their to_transform() rows to a tolerance.
+class Quaternion {
+public:
+    // The identity, (1, 0, 0, 0).
+    Quaternion() noexcept : q_{1, 0, 0, 0} {}
+    // w + xi + yj + zk; refused unless all four are finite.
+    static Result<Quaternion> make(double w, double x, double y, double z) {
+        if (!std::isfinite(w) || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+            return detail::refuse("Quaternion: not finite");
+        }
+        const double q[4] = {w, x, y, z};
+        return Quaternion(q);
+    }
+
+    // A turn of `radians` about `direction`.
+    static Result<Quaternion> from_axis_angle(const Vec3& direction, double radians) {
+        return made("quaternion_from_axis_angle", [&](double* out) -> bool {
+            return ::cadaclysm_blacksmith_quaternion_from_axis_angle(direction.data(), radians, out);
+        });
+    }
+    // The rotation in `t`'s linear part (its translation ignored); refused unless that is a
+    // proper rotation, orthogonal to 1e-9. Take t.decompose_affine()->rotation first for a
+    // rotation rounded to float32.
+    static Result<Quaternion> from_transform(const Transform& t) {
+        return made("quaternion_from_transform",
+                    [&](double* out) -> bool { return ::cadaclysm_blacksmith_quaternion_from_transform(t.rows().data(), out); });
+    }
+    // From `a` (s = 0) to `b` (s = 1) the shorter way.
+    static Result<Quaternion> slerp(const Quaternion& a, const Quaternion& b, double s) {
+        return made("quaternion_slerp",
+                    [&](double* out) -> bool { return ::cadaclysm_blacksmith_quaternion_slerp(a.q_.data(), b.q_.data(), s, out); });
+    }
+
+    // This rotation as a Transform fixing `centre`; refused for a zero quaternion.
+    Result<Transform> to_transform(const Vec3& centre = {0, 0, 0}) const {
+        return Transform::made("quaternion_to_transform", [&](double* out) -> bool {
+            return ::cadaclysm_blacksmith_quaternion_to_transform(q_.data(), centre.data(), out);
+        });
+    }
+
+    double w() const noexcept { return q_[0]; }
+    double x() const noexcept { return q_[1]; }
+    double y() const noexcept { return q_[2]; }
+    double z() const noexcept { return q_[3]; }
+    // w, x, y, z.
+    const std::array<double, 4>& components() const noexcept { return q_; }
+
+    // The length, scaled by the largest component first: squaring 1e200 overflows and 1e-170
+    // underflows.
+    double length() const noexcept { return norm(q_.data(), 4); }
+    // The turn, in [0, 2pi].
+    double angle() const noexcept { return 2.0 * std::atan2(norm(q_.data() + 1, 3), q_[0]); }
+    // The turn's axis, nullopt for the identity.
+    std::optional<Vec3> axis() const {
+        double big = (std::max)({std::fabs(q_[1]), std::fabs(q_[2]), std::fabs(q_[3])});
+        if (big == 0) return std::nullopt;
+        Vec3 v = {q_[1] / big, q_[2] / big, q_[3] / big};
+        double n = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        return Vec3{v[0] / n, v[1] / n, v[2] / n};
+    }
+    Quaternion conjugate() const noexcept {
+        const double q[4] = {q_[0], -q_[1], -q_[2], -q_[3]};
+        return Quaternion(q);
+    }
+    // The same rotation at unit length, scaled by its largest component before the square
+    // root, so 1e200 and 1e-170 normalise. Refused for a zero quaternion.
+    Result<Quaternion> normalized() const {
+        double big = (std::max)({std::fabs(q_[0]), std::fabs(q_[1]), std::fabs(q_[2]), std::fabs(q_[3])});
+        if (big == 0) return detail::refuse("Quaternion.normalized: the quaternion is zero");
+        double v[4] = {q_[0] / big, q_[1] / big, q_[2] / big, q_[3] / big};
+        double n = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3]);
+        const double q[4] = {v[0] / n, v[1] / n, v[2] / n, v[3] / n};
+        return Quaternion(q);
+    }
+    // The Hamilton product: `a * b` turns by `b`, then `a`. A Result because a product of
+    // huge components can overflow, which make refuses.
+    Result<Quaternion> operator*(const Quaternion& o) const {
+        const std::array<double, 4>& a = q_;
+        const std::array<double, 4>& b = o.q_;
+        return make(a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3], a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+                    a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1], a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0]);
+    }
+
+    bool operator==(const Quaternion& other) const noexcept { return q_ == other.q_; }
+    bool operator!=(const Quaternion& other) const noexcept { return q_ != other.q_; }
+
+private:
+    explicit Quaternion(const double* q) noexcept : q_{q[0] + 0.0, q[1] + 0.0, q[2] + 0.0, q[3] + 0.0} {}
+
+    static double norm(const double* v, std::size_t n) noexcept {
+        double big = 0;
+        for (std::size_t i = 0; i < n; ++i) big = (std::max)(big, std::fabs(v[i]));
+        if (big == 0) return 0.0;
+        double sum = 0;
+        for (std::size_t i = 0; i < n; ++i) sum += (v[i] / big) * (v[i] / big);
+        return big * std::sqrt(sum);
+    }
+
+    template <class F>
+    static Result<Quaternion> made(const char* what, F call) {
+        double out[4] = {};
+        if (!call(out)) return detail::kernel_error(what);
+        return Quaternion(out);
+    }
+
+    std::array<double, 4> q_;
 };
 
 // An axis-aligned box: `lo` and `hi`, three numbers each. The broad phase's own shape
@@ -600,6 +1125,648 @@ private:
     std::uint32_t index_;
 };
 
+// ---- value geometry -----------------------------------------------------------------
+
+// A parameter range t0..t1, in either order: length() and swapped() keep the order, the set
+// operations (grown, union_with, intersect) answer increasing. An immutable value, equal by
+// its two numbers and hashable (std::hash). The values' angle and height ranges and the
+// surfaces' domains are intervals.
+class Interval {
+public:
+    // The range t0..t1; refused unless both are finite.
+    static Result<Interval> make(double t0, double t1) {
+        if (!std::isfinite(t0) || !std::isfinite(t1)) return detail::refuse("Interval: not finite");
+        return Interval(Raw{}, t0, t1);
+    }
+    // An Interval, or two numbers, as an Interval; any other count is refused.
+    static Result<Interval> of(const Interval& value) { return value; }
+    static Result<Interval> of(const std::vector<double>& values) {
+        if (values.size() != 2) return detail::refuse("Interval: an interval is 2 numbers, got " + std::to_string(values.size()));
+        return make(values[0], values[1]);
+    }
+
+    // The two ends, as given.
+    double t0() const noexcept { return t_[0]; }
+    double t1() const noexcept { return t_[1]; }
+    // t1 - t0: negative for a decreasing interval.
+    double length() const noexcept { return t_[1] - t_[0]; }
+    // The middle, (t0 + t1) / 2.
+    double mid() const noexcept { return 0.5 * (t_[0] + t_[1]); }
+    // The smaller and the larger end.
+    double (min)() const noexcept { return t_[1] < t_[0] ? t_[1] : t_[0]; }
+    double (max)() const noexcept { return t_[0] < t_[1] ? t_[1] : t_[0]; }
+    // Whether t0 < t1.
+    bool is_increasing() const noexcept { return t_[0] < t_[1]; }
+    // Whether t0 == t1.
+    bool is_singleton() const noexcept { return t_[0] == t_[1]; }
+    // The interval t1..t0.
+    Interval swapped() const noexcept { return Interval(Raw{}, t_[1], t_[0]); }
+    // The increasing interval holding this one and `t`; refused for a `t` not finite.
+    Result<Interval> grown(double t) const { return make(t < (min)() ? t : (min)(), (max)() < t ? t : (max)()); }
+    // The increasing interval holding this one and `o` (Python's `union`, a C++ keyword).
+    Interval union_with(const Interval& o) const noexcept {
+        return Interval(Raw{}, o.min() < (min)() ? o.min() : (min)(), (max)() < o.max() ? o.max() : (max)());
+    }
+    // The increasing overlap with `o`; nothing where the two are apart. Two that touch give a
+    // singleton.
+    std::optional<Interval> intersect(const Interval& o) const noexcept {
+        double a = (min)() < o.min() ? o.min() : (min)();
+        double b = o.max() < (max)() ? o.max() : (max)();
+        if (a <= b) return Interval(Raw{}, a, b);
+        return std::nullopt;
+    }
+    // Whether `t` lies in the closed range, in either order.
+    bool contains(double t) const noexcept { return (min)() <= t && t <= (max)(); }
+    // t0 + s (t1 - t0): the fraction `s` of the way from t0; outside 0..1 extrapolates.
+    double parameter_at(double s) const noexcept { return t_[0] + s * (t_[1] - t_[0]); }
+    // The fraction of the way `t` lies from t0 toward t1; nothing for a singleton.
+    std::optional<double> normalized_parameter_at(double t) const noexcept {
+        double span = length();
+        if (span != 0.0) return (t - t_[0]) / span;
+        return std::nullopt;
+    }
+
+    // The hash std::hash<Interval> answers: equal intervals hash alike.
+    std::size_t hash() const noexcept {
+        std::size_t h = std::hash<double>()(t_[0]);
+        return h ^ (std::hash<double>()(t_[1]) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
+    }
+
+    bool operator==(const Interval& other) const noexcept { return t_ == other.t_; }
+    bool operator!=(const Interval& other) const noexcept { return t_ != other.t_; }
+
+private:
+    friend class GeometryValue;
+    // Two numbers known finite: no check.
+    struct Raw {};
+    Interval(Raw, double t0, double t1) noexcept : t_{t0 + 0.0, t1 + 0.0} {}  // + 0.0: no -0.0 to print or compare
+    std::array<double, 2> t_;
+};
+
+// What a value's frame argument takes: a Frame, or its twelve raw numbers (origin, x, y, z),
+// which the library squares up within 1e-6 of right-handed and orthonormal, or refuses.
+struct FrameLike {
+    FrameLike(const Frame& frame) : raw(frame.raw()) {}
+    FrameLike(const std::array<double, 12>& numbers) : raw(numbers) {}
+    std::array<double, 12> raw;
+};
+
+// What a value's range argument takes: an Interval, or two numbers -- `{0, 1}`.
+struct IntervalLike {
+    IntervalLike(const Interval& range) : t0(range.t0()), t1(range.t1()) {}
+    IntervalLike(double start, double end) : t0(start), t1(end) {}
+    double t0;
+    double t1;
+};
+
+// The closest point of a curve value: its parameter `t`, the `point`, and `unique` -- false
+// where several points lie equally near and `point` is a fixed pick among them (a point on
+// a circle's axis, one equidistant from an arc's ends).
+struct CurveFoot {
+    double t = 0.0;
+    Vec3 point{};
+    bool unique = true;
+};
+inline bool operator==(const CurveFoot& l, const CurveFoot& r) { return l.t == r.t && l.point == r.point && l.unique == r.unique; }
+inline bool operator!=(const CurveFoot& l, const CurveFoot& r) { return !(l == r); }
+
+// The closest point of a surface value: its parameters `u`, `v`, the `point`, and `unique`
+// -- false where several points lie equally near and `point` is a fixed pick among them (a
+// sphere's centre, a point on an axis).
+struct SurfaceFoot {
+    double u = 0.0;
+    double v = 0.0;
+    Vec3 point{};
+    bool unique = true;
+};
+inline bool operator==(const SurfaceFoot& l, const SurfaceFoot& r) {
+    return l.u == r.u && l.v == r.v && l.point == r.point && l.unique == r.unique;
+}
+inline bool operator!=(const SurfaceFoot& l, const SurfaceFoot& r) { return !(l == r); }
+
+// CADACLYSM_BLACKSMITH_VALUE_*: the kind each value's array is tagged with.
+inline constexpr std::uint32_t VALUE_LINE = CADACLYSM_BLACKSMITH_VALUE_LINE;
+inline constexpr std::uint32_t VALUE_CIRCLE = CADACLYSM_BLACKSMITH_VALUE_CIRCLE;
+inline constexpr std::uint32_t VALUE_ARC = CADACLYSM_BLACKSMITH_VALUE_ARC;
+inline constexpr std::uint32_t VALUE_ELLIPSE = CADACLYSM_BLACKSMITH_VALUE_ELLIPSE;
+inline constexpr std::uint32_t VALUE_SPHERE = CADACLYSM_BLACKSMITH_VALUE_SPHERE;
+inline constexpr std::uint32_t VALUE_CYLINDER = CADACLYSM_BLACKSMITH_VALUE_CYLINDER;
+inline constexpr std::uint32_t VALUE_CONE = CADACLYSM_BLACKSMITH_VALUE_CONE;
+inline constexpr std::uint32_t VALUE_TORUS = CADACLYSM_BLACKSMITH_VALUE_TORUS;
+inline constexpr std::uint32_t VALUE_CUBOID = CADACLYSM_BLACKSMITH_VALUE_CUBOID;
+
+namespace detail {
+// The lower-case name of a value kind, for the wrapper's count refusal.
+inline const char* value_name(std::uint32_t kind) {
+    static const char* const names[9] = {"line", "circle", "arc", "ellipse", "sphere", "cylinder", "cone", "torus", "cuboid"};
+    return kind < 9 ? names[kind] : "value";
+}
+// `values` checked and canonical (the frame squared up) by the library's value_check, a
+// count other than value_size(kind) refused first in the library's own sentence.
+inline Result<std::vector<double>> value_checked(std::uint32_t kind, const std::vector<double>& values) {
+    std::uint32_t size = ::cadaclysm_blacksmith_value_size(kind);
+    if (values.size() != size) {
+        return refuse(std::string("value_check: a ") + value_name(kind) + " is " + std::to_string(size) + " numbers, got " +
+                      std::to_string(values.size()));
+    }
+    std::vector<double> out(size);
+    if (!::cadaclysm_blacksmith_value_check(kind, values.data(), out.data())) return kernel_error("value_check");
+    return out;
+}
+// A frame's twelve numbers then `rest`.
+inline std::vector<double> value_array(const FrameLike& frame, std::initializer_list<double> rest) {
+    std::vector<double> v(frame.raw.begin(), frame.raw.end());
+    v.insert(v.end(), rest.begin(), rest.end());
+    return v;
+}
+// `points` as one flat xyz array.
+inline std::vector<double> flat_points(const std::vector<Vec3>& points) {
+    std::vector<double> xyz;
+    xyz.reserve(3 * points.size());
+    for (const Vec3& p : points) xyz.insert(xyz.end(), p.begin(), p.end());
+    return xyz;
+}
+inline double distance(const Vec3& a, const Vec3& b) {
+    Vec3 d{a[0] - b[0], a[1] - b[1], a[2] - b[2]};
+    return std::sqrt(dot(d, d));
+}
+}  // namespace detail
+
+// What every value shares: its kind, its canonical array (squared up by the library's
+// value_check when it was made), its world box, and equality by kind and array -- a circle
+// never equals a sphere with the same numbers. Immutable, with nothing to free.
+class GeometryValue {
+public:
+    // The CADACLYSM_BLACKSMITH_VALUE_* kind.
+    std::uint32_t kind() const noexcept { return kind_; }
+    // The canonical numbers, in the C ABI's layout for the kind.
+    const std::vector<double>& values() const noexcept { return v_; }
+    // The exact world box, (min, max), from the closed form rather than from samples.
+    Result<std::pair<Vec3, Vec3>> bounds() const {
+        std::array<double, 6> out{};
+        if (!::cadaclysm_blacksmith_value_bounds(kind_, v_.data(), out.data())) return detail::kernel_error("value_bounds");
+        return std::pair<Vec3, Vec3>(Vec3{out[0], out[1], out[2]}, Vec3{out[3], out[4], out[5]});
+    }
+    // The hash std::hash answers for every value class: equal values hash alike.
+    std::size_t hash() const noexcept {
+        std::size_t h = std::hash<std::uint32_t>()(kind_);
+        for (double c : v_) h ^= std::hash<double>()(c) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        return h;
+    }
+
+    friend bool operator==(const GeometryValue& a, const GeometryValue& b) noexcept { return a.kind_ == b.kind_ && a.v_ == b.v_; }
+    friend bool operator!=(const GeometryValue& a, const GeometryValue& b) noexcept { return !(a == b); }
+
+protected:
+    GeometryValue(std::uint32_t kind, std::vector<double> values) : kind_(kind), v_(std::move(values)) {}
+
+    // A T from `values`, checked by the library.
+    template <class T>
+    static Result<T> checked(const std::vector<double>& values) {
+        Result<std::vector<double>> v = detail::value_checked(T::KIND, values);
+        if (!v) return v.error();
+        return T(std::move(v).value());
+    }
+    // A T from an array the library wrote: canonical already.
+    template <class T>
+    static Result<T> written(const char* what, bool ok, std::vector<double> out) {
+        if (!ok) return detail::kernel_error(what);
+        return T(std::move(out));
+    }
+    // This value under `t`, the same type.
+    template <class T>
+    Result<T> transformed(const Transform& t) const {
+        std::vector<double> out(v_.size());
+        bool ok = ::cadaclysm_blacksmith_value_transform(kind_, v_.data(), t.rows().data(), out.data());
+        return written<T>("value_transform", ok, std::move(out));
+    }
+    // `n` numbers a call writes, or its refusal.
+    template <std::size_t N, class F>
+    static Result<std::array<double, N>> out(const char* what, F call) {
+        std::array<double, N> o{};
+        if (!call(o.data())) return detail::kernel_error(what);
+        return o;
+    }
+    template <class F>
+    static Result<Vec3> point_out(const char* what, F call) {
+        Result<std::array<double, 3>> o = out<3>(what, call);
+        if (!o) return o.error();
+        return Vec3{(*o)[0], (*o)[1], (*o)[2]};
+    }
+    template <class F>
+    static Result<double> number_out(const char* what, F call) {
+        Result<std::array<double, 1>> o = out<1>(what, call);
+        if (!o) return o.error();
+        return (*o)[0];
+    }
+    // The frame in the first twelve numbers, exact as stored.
+    Frame frame_of() const noexcept {
+        return Frame({v_[0], v_[1], v_[2]}, {v_[3], v_[4], v_[5]}, {v_[6], v_[7], v_[8]}, {v_[9], v_[10], v_[11]});
+    }
+    // The interval in numbers `i` and `i + 1`, finite as checked.
+    Interval interval_of(std::size_t i) const noexcept { return Interval(Interval::Raw{}, v_[i], v_[i + 1]); }
+
+    std::uint32_t kind_;
+    std::vector<double> v_;
+};
+
+// What every curve value (Line, Circle, Arc, Ellipse) shares.
+class CurveValueBase : public GeometryValue {
+public:
+    // The point at `t`: a line's fraction of the way from start to end, a circle's and an
+    // arc's angle from the frame's x toward its y, an ellipse's eccentric angle.
+    Result<Vec3> point_at(double t) const {
+        return point_out("curve_value_point_at",
+                         [&](double* o) -> bool { return ::cadaclysm_blacksmith_curve_value_point_at(kind_, v_.data(), t, o); });
+    }
+    // The unit tangent at `t`, the way `t` grows.
+    Result<Vec3> tangent_at(double t) const {
+        return point_out("curve_value_tangent_at",
+                         [&](double* o) -> bool { return ::cadaclysm_blacksmith_curve_value_tangent_at(kind_, v_.data(), t, o); });
+    }
+    // The length (an ellipse's perimeter, in closed form).
+    Result<double> length() const {
+        return number_out("curve_value_length",
+                          [&](double* o) -> bool { return ::cadaclysm_blacksmith_curve_value_length(kind_, v_.data(), o); });
+    }
+    // The CurveFoot nearest `p`, exact for every kind, in closed form.
+    Result<CurveFoot> closest_point(const Vec3& p) const {
+        Result<std::array<double, 5>> f = out<5>("curve_value_closest_point", [&](double* o) -> bool {
+            return ::cadaclysm_blacksmith_curve_value_closest_point(kind_, v_.data(), p.data(), o);
+        });
+        if (!f) return f.error();
+        const std::array<double, 5>& a = *f;
+        return CurveFoot{a[0], {a[1], a[2], a[3]}, a[4] != 0.0};
+    }
+    // How far `p` lies from the curve: the distance to its closest_point.
+    Result<double> distance_to(const Vec3& p) const {
+        Result<CurveFoot> foot = closest_point(p);
+        if (!foot) return foot.error();
+        return detail::distance(foot->point, p);
+    }
+
+protected:
+    using GeometryValue::GeometryValue;
+};
+
+// What every shape with a volume (Sphere, Cylinder, Cone, Torus, Cuboid) shares.
+class SolidValue : public GeometryValue {
+public:
+    // The Frame the value is placed on.
+    Frame frame() const noexcept { return frame_of(); }
+    // Whether `p` lies inside the closed shape or within `tolerance` of it. A tolerance not
+    // finite or negative is refused.
+    Result<bool> contains(const Vec3& p, double tolerance = 1e-9) const {
+        std::uint32_t r = ::cadaclysm_blacksmith_solid_value_contains(kind_, v_.data(), p.data(), tolerance);
+        if (r == NONE) return detail::kernel_error("solid_value_contains");
+        return r == 1;
+    }
+    // The boundary's area, in closed form: a cylinder's and a cone's caps included.
+    Result<double> area() const {
+        return number_out("solid_value_area", [&](double* o) -> bool { return ::cadaclysm_blacksmith_solid_value_area(kind_, v_.data(), o); });
+    }
+    // The volume enclosed, in closed form.
+    Result<double> volume() const {
+        return number_out("solid_value_volume",
+                          [&](double* o) -> bool { return ::cadaclysm_blacksmith_solid_value_volume(kind_, v_.data(), o); });
+    }
+    // The shape as a closed exact B-rep Solid, to join, cut and write.
+    Result<Solid> to_solid() const;
+
+protected:
+    using GeometryValue::GeometryValue;
+};
+
+// What every surface value (Sphere, Cylinder, Cone, Torus) shares.
+class SurfaceValue : public SolidValue {
+public:
+    // The point at (u, v), in the ranges domain() gives.
+    Result<Vec3> point_at(double u, double v) const {
+        return point_out("surface_value_point_at",
+                         [&](double* o) -> bool { return ::cadaclysm_blacksmith_surface_value_point_at(kind_, v_.data(), u, v, o); });
+    }
+    // The outward unit normal at (u, v).
+    Result<Vec3> normal_at(double u, double v) const {
+        return point_out("surface_value_normal_at",
+                         [&](double* o) -> bool { return ::cadaclysm_blacksmith_surface_value_normal_at(kind_, v_.data(), u, v, o); });
+    }
+    // The SurfaceFoot nearest `p` on the surface (a cylinder's and a cone's side, not their
+    // caps), exact for every kind, in closed form.
+    Result<SurfaceFoot> closest_point(const Vec3& p) const {
+        Result<std::array<double, 6>> f = out<6>("surface_value_closest_point", [&](double* o) -> bool {
+            return ::cadaclysm_blacksmith_surface_value_closest_point(kind_, v_.data(), p.data(), o);
+        });
+        if (!f) return f.error();
+        const std::array<double, 6>& a = *f;
+        return SurfaceFoot{a[0], a[1], {a[2], a[3], a[4]}, a[5] != 0.0};
+    }
+    // How far `p` lies from the surface: the distance to its closest_point.
+    Result<double> distance_to(const Vec3& p) const {
+        Result<SurfaceFoot> foot = closest_point(p);
+        if (!foot) return foot.error();
+        return detail::distance(foot->point, p);
+    }
+    // The u and v ranges, as two Intervals.
+    Result<std::pair<Interval, Interval>> domain() const {
+        Result<std::array<double, 4>> d = out<4>(
+            "surface_value_domain", [&](double* o) -> bool { return ::cadaclysm_blacksmith_surface_value_domain(kind_, v_.data(), o); });
+        if (!d) return d.error();
+        Result<Interval> u = Interval::make((*d)[0], (*d)[1]);
+        if (!u) return u.error();
+        Result<Interval> w = Interval::make((*d)[2], (*d)[3]);
+        if (!w) return w.error();
+        return std::pair<Interval, Interval>(*u, *w);
+    }
+    // The surface alone, as an open sheet on its exact NURBS form.
+    Result<Solid> to_nurbs_sheet() const;
+
+protected:
+    using SolidValue::SolidValue;
+};
+
+// The segment from `start` to `end`, as a value: construction geometry to measure, to project
+// onto and to map, without building a solid. Its parameter runs 0..1.
+class Line final : public CurveValueBase {
+public:
+    static constexpr std::uint32_t KIND = VALUE_LINE;
+    // The segment from `start` to `end`; ends that coincide are refused.
+    static Result<Line> make(const Vec3& start, const Vec3& end) {
+        return checked<Line>({start[0], start[1], start[2], end[0], end[1], end[2]});
+    }
+    // The value from its 6 raw numbers, checked.
+    static Result<Line> from_array(const std::vector<double>& values) { return checked<Line>(values); }
+
+    // The two ends.
+    Vec3 start() const noexcept { return {v_[0], v_[1], v_[2]}; }
+    Vec3 end() const noexcept { return {v_[3], v_[4], v_[5]}; }
+    // This line under `t`: any map that keeps its ends apart.
+    Result<Line> transform(const Transform& t) const { return transformed<Line>(t); }
+
+private:
+    friend class GeometryValue;
+    explicit Line(std::vector<double> values) : CurveValueBase(KIND, std::move(values)) {}
+};
+
+// The circle of `radius` about the frame's origin in its x-y plane, running counter-clockwise
+// about its z from its x, as a value. Curve::value gives an edge's circle.
+class Circle final : public CurveValueBase {
+public:
+    static constexpr std::uint32_t KIND = VALUE_CIRCLE;
+    static Result<Circle> make(const FrameLike& frame, double radius) { return checked<Circle>(detail::value_array(frame, {radius})); }
+    // The value from its 13 raw numbers, checked.
+    static Result<Circle> from_array(const std::vector<double>& values) { return checked<Circle>(values); }
+    // The circle through the points `a`, `b` and `c`: its x toward `a`, turning `a`, `b`, `c`
+    // counter-clockwise. Three points on one line are refused.
+    static Result<Circle> through(const Vec3& a, const Vec3& b, const Vec3& c) {
+        std::vector<double> out(13);
+        bool ok = ::cadaclysm_blacksmith_circle_through(a.data(), b.data(), c.data(), out.data());
+        return written<Circle>("circle_through", ok, std::move(out));
+    }
+
+    // The Frame the circle lies on: its centre, the x its angles start from, its normal.
+    Frame frame() const noexcept { return frame_of(); }
+    // The radius.
+    double radius() const noexcept { return v_[12]; }
+    // This circle under `t`: a similarity only (Ellipse::from_circle first for any other map).
+    Result<Circle> transform(const Transform& t) const { return transformed<Circle>(t); }
+
+private:
+    friend class GeometryValue;
+    explicit Circle(std::vector<double> values) : CurveValueBase(KIND, std::move(values)) {}
+};
+
+// The part of a circle over `angle` (an Interval or two numbers, increasing, by at most a
+// full turn), as a value: the circle's frame and radius, its angles measured from the frame's
+// x toward its y. Curve::value gives an edge's arc.
+class Arc final : public CurveValueBase {
+public:
+    static constexpr std::uint32_t KIND = VALUE_ARC;
+    static Result<Arc> make(const FrameLike& frame, double radius, const IntervalLike& angle) {
+        Result<Interval> a = Interval::make(angle.t0, angle.t1);
+        if (!a) return a.error();
+        return checked<Arc>(detail::value_array(frame, {radius, a->t0(), a->t1()}));
+    }
+    // The value from its 15 raw numbers, checked.
+    static Result<Arc> from_array(const std::vector<double>& values) { return checked<Arc>(values); }
+    // The arc from `a` through `b` to `c`. Three points on one line are refused.
+    static Result<Arc> through(const Vec3& a, const Vec3& b, const Vec3& c) {
+        std::vector<double> out(15);
+        bool ok = ::cadaclysm_blacksmith_arc_through(a.data(), b.data(), c.data(), out.data());
+        return written<Arc>("arc_through", ok, std::move(out));
+    }
+    // The arc leaving `a` along `tangent` and ending at `c`. A zero tangent, or a `c` on the
+    // tangent's line, is refused.
+    static Result<Arc> from_start_tangent_end(const Vec3& a, const Vec3& tangent, const Vec3& c) {
+        std::vector<double> out(15);
+        bool ok = ::cadaclysm_blacksmith_arc_from_start_tangent_end(a.data(), tangent.data(), c.data(), out.data());
+        return written<Arc>("arc_from_start_tangent_end", ok, std::move(out));
+    }
+
+    // The Frame the arc's circle lies on.
+    Frame frame() const noexcept { return frame_of(); }
+    // The radius.
+    double radius() const noexcept { return v_[12]; }
+    // The angle range, an Interval.
+    Interval angle() const noexcept { return interval_of(13); }
+    // The points at the start, the end and halfway along.
+    Result<Vec3> start() const { return point_at(v_[13]); }
+    Result<Vec3> end() const { return point_at(v_[14]); }
+    Result<Vec3> mid() const { return point_at(0.5 * (v_[13] + v_[14])); }
+    // This arc under `t`: a similarity only.
+    Result<Arc> transform(const Transform& t) const { return transformed<Arc>(t); }
+
+private:
+    friend class GeometryValue;
+    explicit Arc(std::vector<double> values) : CurveValueBase(KIND, std::move(values)) {}
+};
+
+// The ellipse of radius `r1` along the frame's x and `r2` along its y, as a value. Unlike a
+// circle it takes any affine map that keeps it an ellipse. Curve::value gives an edge's whole
+// ellipse (an elliptical arc's range stays on the Curve).
+class Ellipse final : public CurveValueBase {
+public:
+    static constexpr std::uint32_t KIND = VALUE_ELLIPSE;
+    static Result<Ellipse> make(const FrameLike& frame, double r1, double r2) {
+        return checked<Ellipse>(detail::value_array(frame, {r1, r2}));
+    }
+    // The value from its 14 raw numbers, checked.
+    static Result<Ellipse> from_array(const std::vector<double>& values) { return checked<Ellipse>(values); }
+    // `circle` as an ellipse of two equal radii, to map by a non-uniform scale or a shear.
+    static Result<Ellipse> from_circle(const Circle& circle) {
+        std::vector<double> out(14);
+        bool ok = ::cadaclysm_blacksmith_ellipse_from_circle(circle.values().data(), out.data());
+        return written<Ellipse>("ellipse_from_circle", ok, std::move(out));
+    }
+
+    // The Frame the ellipse lies on.
+    Frame frame() const noexcept { return frame_of(); }
+    // The radii along the frame's x and y.
+    double r1() const noexcept { return v_[12]; }
+    double r2() const noexcept { return v_[13]; }
+    // This ellipse under `t`: any map that keeps it an ellipse.
+    Result<Ellipse> transform(const Transform& t) const { return transformed<Ellipse>(t); }
+
+private:
+    friend class GeometryValue;
+    explicit Ellipse(std::vector<double> values) : CurveValueBase(KIND, std::move(values)) {}
+};
+
+// A curve value, as Curve::value gives one.
+using CurveValue = std::variant<Line, Circle, Arc, Ellipse>;
+
+// The sphere of `radius` about the frame's origin, as a value: `u` the longitude from the
+// frame's x, `v` the latitude toward its z.
+class Sphere final : public SurfaceValue {
+public:
+    static constexpr std::uint32_t KIND = VALUE_SPHERE;
+    static Result<Sphere> make(const FrameLike& frame, double radius) { return checked<Sphere>(detail::value_array(frame, {radius})); }
+    // The value from its 13 raw numbers, checked.
+    static Result<Sphere> from_array(const std::vector<double>& values) { return checked<Sphere>(values); }
+
+    // The radius.
+    double radius() const noexcept { return v_[12]; }
+    // This sphere under `t`: a similarity only.
+    Result<Sphere> transform(const Transform& t) const { return transformed<Sphere>(t); }
+
+private:
+    friend class GeometryValue;
+    explicit Sphere(std::vector<double> values) : SurfaceValue(KIND, std::move(values)) {}
+};
+
+// The capped cylinder of `radius` about the frame's z over `height` (an increasing Interval
+// along z, or two numbers), as a value: `u` the angle from the frame's x, `v` the height.
+class Cylinder final : public SurfaceValue {
+public:
+    static constexpr std::uint32_t KIND = VALUE_CYLINDER;
+    static Result<Cylinder> make(const FrameLike& frame, double radius, const IntervalLike& height) {
+        Result<Interval> h = Interval::make(height.t0, height.t1);
+        if (!h) return h.error();
+        return checked<Cylinder>(detail::value_array(frame, {radius, h->t0(), h->t1()}));
+    }
+    // The value from its 15 raw numbers, checked.
+    static Result<Cylinder> from_array(const std::vector<double>& values) { return checked<Cylinder>(values); }
+
+    // The radius.
+    double radius() const noexcept { return v_[12]; }
+    // The range along the frame's z, an Interval.
+    Interval height() const noexcept { return interval_of(13); }
+    // This cylinder under `t`: a similarity only.
+    Result<Cylinder> transform(const Transform& t) const { return transformed<Cylinder>(t); }
+
+private:
+    friend class GeometryValue;
+    explicit Cylinder(std::vector<double> values) : SurfaceValue(KIND, std::move(values)) {}
+};
+
+// The capped cone of base `radius` on the frame's x-y plane, its apex `height` up its z, as a
+// value: `u` the angle from the frame's x, `v` the height.
+class Cone final : public SurfaceValue {
+public:
+    static constexpr std::uint32_t KIND = VALUE_CONE;
+    static Result<Cone> make(const FrameLike& frame, double radius, double height) {
+        return checked<Cone>(detail::value_array(frame, {radius, height}));
+    }
+    // The value from its 14 raw numbers, checked.
+    static Result<Cone> from_array(const std::vector<double>& values) { return checked<Cone>(values); }
+
+    // The base radius.
+    double radius() const noexcept { return v_[12]; }
+    // How far up the frame's z the apex lies.
+    double height() const noexcept { return v_[13]; }
+    // This cone under `t`: a similarity only.
+    Result<Cone> transform(const Transform& t) const { return transformed<Cone>(t); }
+
+private:
+    friend class GeometryValue;
+    explicit Cone(std::vector<double> values) : SurfaceValue(KIND, std::move(values)) {}
+};
+
+// The torus of `major` radius about the frame's z and `minor` radius about that circle, as a
+// value: `u` the angle about the z from the frame's x, `v` the angle about the tube.
+class Torus final : public SurfaceValue {
+public:
+    static constexpr std::uint32_t KIND = VALUE_TORUS;
+    static Result<Torus> make(const FrameLike& frame, double major, double minor) {
+        return checked<Torus>(detail::value_array(frame, {major, minor}));
+    }
+    // The value from its 14 raw numbers, checked.
+    static Result<Torus> from_array(const std::vector<double>& values) { return checked<Torus>(values); }
+
+    // The radius of the tube's centre circle, and the tube's own.
+    double major() const noexcept { return v_[12]; }
+    double minor() const noexcept { return v_[13]; }
+    // This torus under `t`: a similarity only.
+    Result<Torus> transform(const Transform& t) const { return transformed<Torus>(t); }
+
+private:
+    friend class GeometryValue;
+    explicit Torus(std::vector<double> values) : SurfaceValue(KIND, std::move(values)) {}
+};
+
+// The box over `x`, `y`, `z` (increasing Intervals, or pairs) along its frame's axes, as a
+// value: an oriented bounding box, a region to test points against, a block to make a solid of.
+class Cuboid final : public SolidValue {
+public:
+    static constexpr std::uint32_t KIND = VALUE_CUBOID;
+    static Result<Cuboid> make(const FrameLike& frame, const IntervalLike& x, const IntervalLike& y, const IntervalLike& z) {
+        Result<Interval> rx = Interval::make(x.t0, x.t1);
+        if (!rx) return rx.error();
+        Result<Interval> ry = Interval::make(y.t0, y.t1);
+        if (!ry) return ry.error();
+        Result<Interval> rz = Interval::make(z.t0, z.t1);
+        if (!rz) return rz.error();
+        return checked<Cuboid>(detail::value_array(frame, {rx->t0(), rx->t1(), ry->t0(), ry->t1(), rz->t0(), rz->t1()}));
+    }
+    // The value from its 18 raw numbers, checked.
+    static Result<Cuboid> from_array(const std::vector<double>& values) { return checked<Cuboid>(values); }
+    // The world-aligned box from `min` to `max`; an empty or flat one is refused.
+    static Result<Cuboid> from_bounds(const Vec3& lo, const Vec3& hi) {
+        std::vector<double> out(18);
+        bool ok = ::cadaclysm_blacksmith_cuboid_from_bounds(lo.data(), hi.data(), out.data());
+        return written<Cuboid>("cuboid_from_bounds", ok, std::move(out));
+    }
+    // The tightest box holding `points`, aligned to `frame`. No points, or points flat along
+    // one of the frame's axes (a sheet, not a box), are refused.
+    static Result<Cuboid> around(const FrameLike& frame, const std::vector<Vec3>& points) {
+        std::vector<double> xyz = detail::flat_points(points);
+        std::vector<double> out(18);
+        const double none[1] = {0.0};  // never a null pointer: no points are the library's "no points"
+        bool ok = ::cadaclysm_blacksmith_cuboid_around(frame.raw.data(), xyz.empty() ? none : xyz.data(), points.size(), out.data());
+        return written<Cuboid>("cuboid_around", ok, std::move(out));
+    }
+
+    // The three ranges along the frame's axes, as Intervals.
+    Interval x() const noexcept { return interval_of(12); }
+    Interval y() const noexcept { return interval_of(14); }
+    Interval z() const noexcept { return interval_of(16); }
+    // The eight corners: the z0 face counter-clockwise about the frame's z from (x0, y0),
+    // then the z1 face in the same order.
+    Result<std::array<Vec3, 8>> corners() const {
+        Result<std::array<double, 24>> c =
+            out<24>("cuboid_corners", [&](double* o) -> bool { return ::cadaclysm_blacksmith_cuboid_corners(v_.data(), o); });
+        if (!c) return c.error();
+        std::array<Vec3, 8> points{};
+        for (std::size_t k = 0; k < 8; ++k) points[k] = Vec3{(*c)[3 * k], (*c)[3 * k + 1], (*c)[3 * k + 2]};
+        return points;
+    }
+    // The point the fractions `sx`, `sy`, `sz` of the way along each range.
+    Result<Vec3> point_at(double sx, double sy, double sz) const {
+        return point_out("cuboid_point_at",
+                         [&](double* o) -> bool { return ::cadaclysm_blacksmith_cuboid_point_at(v_.data(), sx, sy, sz, o); });
+    }
+    // The closest point of the solid box: `p` itself inside.
+    Result<Vec3> closest_point(const Vec3& p) const {
+        return point_out("cuboid_closest_point",
+                         [&](double* o) -> bool { return ::cadaclysm_blacksmith_cuboid_closest_point(v_.data(), p.data(), o); });
+    }
+    // This box under `t`: a similarity only.
+    Result<Cuboid> transform(const Transform& t) const { return transformed<Cuboid>(t); }
+
+private:
+    friend class GeometryValue;
+    explicit Cuboid(std::vector<double> values) : SolidValue(KIND, std::move(values)) {}
+};
+
 // One edge's, or one intersection chain's, exact curve as plain data copied out
 // (Edge::curve, Chain::curve): `kind` is "line", "circle", "ellipse", "parabola", "hyperbola" or "nurbs".
 //
@@ -628,7 +1795,31 @@ struct Curve {
     std::vector<double> knots;
     std::vector<Vec3> poles;
     std::optional<std::vector<double>> weights;
+
+    // This curve as a value: a line Line(origin, origin + x); a circle a Circle over a full
+    // turn, else the Arc over t0..t1; an ellipse its whole Ellipse (the range stays here: there
+    // is no elliptical-arc value); any other kind nothing.
+    Result<std::optional<CurveValue>> value() const;
 };
+
+namespace detail {
+template <class T>
+inline Result<std::optional<CurveValue>> curve_value_of(Result<T> made) {
+    if (!made) return made.error();
+    return std::optional<CurveValue>(CurveValue(std::move(made).value()));
+}
+}  // namespace detail
+
+inline Result<std::optional<CurveValue>> Curve::value() const {
+    const std::array<double, 12> frame = {origin[0], origin[1], origin[2], x[0], x[1], x[2], y[0], y[1], y[2], z[0], z[1], z[2]};
+    if (kind == "line") return detail::curve_value_of(Line::make(origin, {origin[0] + x[0], origin[1] + x[1], origin[2] + x[2]}));
+    if (kind == "circle") {
+        if (t1 - t0 >= 2 * 3.14159265358979323846 - 1e-12) return detail::curve_value_of(Circle::make(frame, radius));
+        return detail::curve_value_of(Arc::make(frame, radius, {t0, t1}));
+    }
+    if (kind == "ellipse") return detail::curve_value_of(Ellipse::make(frame, radius, radius2));
+    return std::optional<CurveValue>();
+}
 
 namespace detail {
 
@@ -678,7 +1869,7 @@ struct Chain {
 // A face of the first solid and a face of the second that coincide
 // (Intersection::overlaps): the faces (`face_a`, `face_b`) and `loops`, the shared
 // region's rings (outer first, holes after; each ring closed without repeating its first
-// point) -- empty for a partial overlap whose outlines cross.
+// point) -- empty for a partial overlap of curved faces whose outlines cross.
 struct Overlap {
     std::uint32_t face_a = 0;
     std::uint32_t face_b = 0;
@@ -729,6 +1920,39 @@ inline Overlap overlap_of(const CadaclysmBlacksmithOverlap& raw) {
         }
     }
     return o;
+}
+
+// An intersection handle read out into an Intersection and freed on every path out, a failing
+// read included -- Solid::intersect's reader, and Clash::intersect's. Null is `call`'s failure,
+// read from last_error.
+inline Result<Intersection> intersection_of(CadaclysmBlacksmithIntersection* found, const char* call) {
+    if (!found) return kernel_error(call);
+    struct Free {
+        CadaclysmBlacksmithIntersection* p;
+        ~Free() { ::cadaclysm_blacksmith_intersection_free(p); }
+    } release{found};
+    Intersection out;
+    std::uint32_t n = ::cadaclysm_blacksmith_intersection_chain_count(found);
+    out.chains.reserve(n);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        CadaclysmBlacksmithChain raw{};
+        if (!::cadaclysm_blacksmith_intersection_chain(found, i, &raw)) return kernel_error("intersection_chain");
+        std::optional<Curve> curve;
+        if (raw.has_curve) {
+            CadaclysmBlacksmithCurve raw_curve{};
+            if (!::cadaclysm_blacksmith_intersection_curve(found, i, &raw_curve)) return kernel_error("intersection_curve");
+            curve = curve_of(raw_curve);
+        }
+        out.chains.push_back(chain_of(raw, std::move(curve)));
+    }
+    n = ::cadaclysm_blacksmith_intersection_overlap_count(found);
+    out.overlaps.reserve(n);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        CadaclysmBlacksmithOverlap raw{};
+        if (!::cadaclysm_blacksmith_intersection_overlap(found, i, &raw)) return kernel_error("intersection_overlap");
+        out.overlaps.push_back(overlap_of(raw));
+    }
+    return out;
 }
 
 }  // namespace detail
@@ -905,6 +2129,15 @@ public:
     static Result<Profile> regular_polygon(const Vec2& centre, double radius, std::uint32_t sides, double angle = 0.0) {
         return wrap(::cadaclysm_blacksmith_profile_regular_polygon(centre[0], centre[1], radius, sides, angle));
     }
+    // A regular polygon of `sides` sides (at least 3) whose sides touch the circle of `radius`
+    // about `centre` -- the polygon across flats, a nut's hex: its corners on the circle of
+    // `radius / cos(pi / sides)`, the first at `angle` radians from the sketch's x axis, the rest
+    // counter-clockwise, on the same rays as regular_polygon's corners with the same `angle`; each
+    // side's midpoint on the circle of `radius`.
+    static Result<Profile> circumscribed_polygon(const Vec2& centre, double radius, std::uint32_t sides, double angle = 0.0) {
+        return wrap(::cadaclysm_blacksmith_profile_circumscribed_polygon(centre[0], centre[1], radius, sides, angle),
+                    "profile_circumscribed_polygon");
+    }
     // A star of `points` tips on the circle of `outer` about `centre`, its inner corners on the circle
     // of `inner` (under `outer`), the first tip at `angle` radians from the sketch's x axis.
     static Result<Profile> star(const Vec2& centre, double outer, double inner, std::uint32_t points, double angle = 0.0) {
@@ -976,6 +2209,26 @@ public:
     }
     Result<Profile> translate(double dx, double dy) const {
         return wrap(::cadaclysm_blacksmith_translate_profile(ptr(), dx, dy));
+    }
+    // This outline turned `radians` (counter-clockwise) about `centre`.
+    Result<Profile> rotate(const Vec2& centre, double radians) const {
+        return wrap(::cadaclysm_blacksmith_profile_rotate(ptr(), centre[0], centre[1], radians), "profile_rotate");
+    }
+    // This outline scaled by `sx`, `sy` about `centre`: an arc stays an arc where the two are
+    // equal in size, and becomes exact conics otherwise. A negative factor mirrors; a zero one
+    // is singular and refused.
+    Result<Profile> scale(const Vec2& centre, double sx, double sy) const {
+        return wrap(::cadaclysm_blacksmith_profile_scale(ptr(), centre[0], centre[1], sx, sy), "profile_scale");
+    }
+    // This outline reflected across the line through `point` along `direction`; a zero
+    // direction is refused.
+    Result<Profile> mirror(const Vec2& point, const Vec2& direction) const {
+        return wrap(::cadaclysm_blacksmith_profile_mirror(ptr(), point[0], point[1], direction[0], direction[1]), "profile_mirror");
+    }
+    // This outline under the 2D affine map `m`, six numbers row-major (2x3):
+    // x' = m0 x + m1 y + m2, y' = m3 x + m4 y + m5. A singular map is refused.
+    Result<Profile> transform2d(const std::array<double, 6>& m) const {
+        return wrap(::cadaclysm_blacksmith_profile_transform2d(ptr(), m.data()), "profile_transform2d");
     }
     // This outline coloured `rgb_value` in 0..1 (rgb("#rrggbb") reads hex): how it is
     // drawn. The verbs that make a profile from one carry it; a solid made from it takes nothing.
@@ -1120,6 +2373,36 @@ public:
         if (!data.offsets) return detail::kernel_error("profile_polylines");
         state_->filled(tolerance);
         return ProfilePolylines(detail::ProfileRef(state_), data);
+    }
+
+    // The perimeter of the outer loop -- holes are not counted -- beside an estimate of its
+    // error. `accuracy` 0 or less takes the default.
+    Result<Length> length(double accuracy = 0.0) const {
+        CadaclysmBlacksmithLength out{};
+        if (!::cadaclysm_blacksmith_profile_length(ptr(), accuracy, &out)) return detail::kernel_error("profile_length");
+        return detail::length_of(out);
+    }
+
+    // The point `s` of arc length along the outer loop from its start, with its unit tangent.
+    // `accuracy` 0 or less takes the default.
+    Result<At> point_at_length(double s, double accuracy = 0.0) const {
+        CadaclysmBlacksmithAt out{};
+        if (!::cadaclysm_blacksmith_profile_point_at_length(ptr(), s, accuracy, &out)) {
+            return detail::kernel_error("profile_point_at_length");
+        }
+        return detail::at_of(out);
+    }
+    // `n` points evenly spaced by arc length round the outer loop from its start (a closed loop
+    // gives `n`, an open one `n + 1`); `n` is 1 to 1000000.
+    Result<std::vector<At>> divide_by_count(std::uint32_t n, double accuracy = 0.0) const {
+        return detail::samples_of(::cadaclysm_blacksmith_profile_divide_by_count(ptr(), n, accuracy),
+                                  "profile_divide_by_count");
+    }
+    // Points every `step` of arc length from the start of the outer loop; the last piece is kept
+    // short and a closed start is not repeated.
+    Result<std::vector<At>> divide_by_length(double step, double accuracy = 0.0) const {
+        return detail::samples_of(::cadaclysm_blacksmith_profile_divide_by_length(ptr(), step, accuracy),
+                                  "profile_divide_by_length");
     }
 
     // The C handle, for code that calls the C ABI directly. Owned by this Profile.
@@ -2012,6 +3295,377 @@ inline Result<std::string> write_svg_text(const Solids& solids, const Profiles& 
 inline Result<void> write_svg(const std::string& path, const Solids& solids, const Profiles& profiles,
                               const SvgOptions& options);
 
+// A solid's point-containment test, built once and asked many times (Solid::classifier). It
+// keeps its own reference to the body, so it goes on answering after its Solid is closed.
+// Move-only; the destructor frees it, as close() does early.
+class Classifier {
+public:
+    Classifier(Classifier&&) noexcept = default;
+    Classifier& operator=(Classifier&&) noexcept = default;
+    Classifier(const Classifier&) = delete;
+    Classifier& operator=(const Classifier&) = delete;
+
+    void close() noexcept { ptr_.reset(); }
+    bool closed() const noexcept { return !ptr_; }
+
+    // "outside", "inside" or "on": which side of the solid's boundary `point` lies, "on" being
+    // within the tolerance the classifier was built with.
+    Result<std::string> contains(const Vec3& point) const {
+        if (!ptr_) return detail::refuse("classifier: closed");
+        std::uint32_t code = 0;
+        if (!::cadaclysm_blacksmith_classifier_contains(ptr_.get(), point.data(), &code)) {
+            return detail::kernel_error("classifier_contains");
+        }
+        return detail::containment_of(code, "classifier_contains");
+    }
+
+    // The C handle, for code that calls the C ABI directly. Owned by this Classifier.
+    const CadaclysmBlacksmithClassifier* handle() const noexcept { return ptr_.get(); }
+
+private:
+    friend class Solid;
+    struct Free {
+        void operator()(CadaclysmBlacksmithClassifier* p) const noexcept { ::cadaclysm_blacksmith_classifier_free(p); }
+    };
+    explicit Classifier(CadaclysmBlacksmithClassifier* raw) : ptr_(raw) {}
+
+    std::unique_ptr<CadaclysmBlacksmithClassifier, Free> ptr_;
+};
+
+// One side of one face (Solid::regions): `face` the face's index in the solid, `sense` +1 for the
+// side its normal points to, -1 for the other. A solid's inside is behind its faces, at -1.
+// Python's FaceSide.
+struct FaceSide {
+    std::uint32_t face = 0;
+    std::int32_t sense = 0;
+};
+inline bool operator==(const FaceSide& l, const FaceSide& r) { return l.face == r.face && l.sense == r.sense; }
+inline bool operator!=(const FaceSide& l, const FaceSide& r) { return !(l == r); }
+
+// One region of space a solid's faces bound (Solid::regions): its `index` (0 the infinite region,
+// whose `finite` is false), the `box` round the faces bounding it, its `sides` ascending by face
+// then sense, and its `shells` -- 1, plus one per void inside it. Solid::region_solid takes a
+// finite one as a solid of its own. A value, equal by value. Python's Region.
+struct Region {
+    std::uint32_t index = 0;
+    bool finite = false;
+    Box box{};
+    std::vector<FaceSide> sides;
+    std::uint32_t shells = 0;
+};
+inline bool operator==(const Region& l, const Region& r) {
+    return l.index == r.index && l.finite == r.finite && l.box == r.box && l.sides == r.sides && l.shells == r.shells;
+}
+inline bool operator!=(const Region& l, const Region& r) { return !(l == r); }
+
+namespace detail {
+// A solid's regions, read into a vector. A null list is regions' failure, read from last_error;
+// the list is freed on every path out, a failing read included, and the error is built before
+// the free.
+inline Result<std::vector<Region>> regions_of(CadaclysmBlacksmithRegions* list) {
+    if (!list) return kernel_error("regions");
+    struct Free {
+        void operator()(CadaclysmBlacksmithRegions* p) const noexcept { ::cadaclysm_blacksmith_regions_free(p); }
+    };
+    std::unique_ptr<CadaclysmBlacksmithRegions, Free> owned(list);
+    std::uint32_t count = ::cadaclysm_blacksmith_regions_count(owned.get());
+    std::vector<Region> out;
+    out.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        CadaclysmBlacksmithRegion raw{};
+        if (!::cadaclysm_blacksmith_regions_at(owned.get(), i, &raw)) return kernel_error("regions_at");
+        Region region;
+        region.index = i;
+        region.finite = raw.finite != 0;
+        region.box = Box({raw.min[0], raw.min[1], raw.min[2]}, {raw.max[0], raw.max[1], raw.max[2]});
+        region.shells = raw.shells;
+        region.sides.reserve(raw.sides);
+        for (std::uint32_t k = 0; k < raw.sides; ++k) {
+            CadaclysmBlacksmithFaceSide side{};
+            if (!::cadaclysm_blacksmith_regions_side_at(owned.get(), i, k, &side)) return kernel_error("regions_side_at");
+            region.sides.push_back(FaceSide{side.face, side.sense});
+        }
+        out.push_back(std::move(region));
+    }
+    return out;
+}
+}  // namespace detail
+
+
+// ---- health and healing: Solid::health and Solid::healed's reports, plain data, the kernel's own
+// set (the reader's cadaclysm::HealthReport and friends are the same shapes).
+// One free edge (a side only one face bounds), a row of HealthReport::free_edges: its
+// `trim` (the face's side), the `edge` it lies on (nullopt for a side with no edge), the
+// `face` and free `wire` it is on, its nearest `partner` -- a row of free_edges, nullopt if
+// there is none -- how many of its two ends it `shared_ends` with that partner (2 is what
+// Solid::join_sheets joins), its `length` and the `gap` to the partner (infinite without one).
+struct FreeEdge {
+    std::uint32_t trim = 0;
+    std::optional<std::uint32_t> edge;
+    std::uint32_t face = 0;
+    std::uint32_t wire = 0;
+    std::optional<std::uint32_t> partner;
+    std::uint32_t shared_ends = 0;
+    double length = 0.0;
+    double gap = 0.0;
+};
+
+// A chain of free edges end to end: the rows `first` to `first + count` of
+// HealthReport::free_edges, whether it `closed` on itself, its total `length` and the
+// `widest_gap` from any of its edges to a partner.
+struct FreeWire {
+    std::uint32_t first = 0;
+    std::uint32_t count = 0;
+    bool closed = false;
+    double length = 0.0;
+    double widest_gap = 0.0;
+};
+
+// Something below the tolerance: `kind` is "short_edge", "collapsed_edge", "sliver_face",
+// "tiny_face", "tiny_body" or "small_hole"; `index` its edge, face, body or loop number;
+// `size` how small.
+struct SmallFeature {
+    std::string kind;
+    std::uint32_t index = 0;
+    double size = 0.0;
+};
+
+// What a mesh of the body shows (Solid::health with `mesh`): whether it is `watertight`,
+// how many mesh edges are `open` or `folded`, how many `crossings`, and the brep `edges`
+// it cracks along. Only a closed body is counted: an open one's census is empty by design.
+struct Cracks {
+    bool watertight = false;
+    std::uint32_t open = 0;
+    std::uint32_t folded = 0;
+    std::uint32_t crossings = 0;
+    std::vector<std::uint32_t> edges;
+};
+
+// What is wrong with a body, as plain data (Solid::health): the `tolerance` and `rounding`
+// it judged at and the body's `extent`; the free edges, their wires, the features below
+// the tolerance; the loose edges (`worst_loose` the widest gap); what sewing would do
+// (`sew_pairs` joined, `sew_refused`, `sew_worst_gap`); and, if asked for with `mesh`, the
+// mesh's `cracks` (nullopt otherwise). `worst_gap` is the widest gap between a free edge
+// and its partner.
+struct HealthReport {
+    double tolerance = 0.0;
+    double rounding = 0.0;
+    double extent = 0.0;
+    std::vector<FreeEdge> free_edges;
+    std::vector<FreeWire> wires;
+    std::vector<SmallFeature> small;
+    std::uint32_t loose_edges = 0;
+    double worst_loose = 0.0;
+    std::uint32_t sew_pairs = 0;
+    std::uint32_t sew_refused = 0;
+    double sew_worst_gap = 0.0;
+    std::optional<Cracks> cracks;
+    double worst_gap = 0.0;
+
+    // The free edges of wire number `wire`, in order; refused for a wire there is not.
+    Result<std::vector<FreeEdge>> wire_edges(std::uint32_t wire) const {
+        if (wire >= wires.size()) {
+            return Error{"wire_edges: wire " + std::to_string(wire) + " is not one of the " + std::to_string(wires.size()),
+                         Origin::kernel};
+        }
+        const FreeWire& w = wires[wire];
+        std::size_t first = std::min<std::size_t>(w.first, free_edges.size());
+        std::size_t last = std::min<std::size_t>(first + w.count, free_edges.size());
+        return std::vector<FreeEdge>(free_edges.begin() + static_cast<std::ptrdiff_t>(first),
+                                     free_edges.begin() + static_cast<std::ptrdiff_t>(last));
+    }
+};
+
+// One small feature Solid::healed removed: its `kind` (as SmallFeature::kind), its `index`
+// in the input (the edge, face or loop number health() gave it), its `size`, and how far
+// the vertices it merged `moved`.
+struct HealFix {
+    std::string kind;
+    std::uint32_t index = 0;
+    double size = 0.0;
+    double moved = 0.0;
+};
+
+// One small feature Solid::healed left, and why: `kind` and `index` as in HealFix; `why` is
+// "would_empty_loop", "closed", "seam", "chain", "neighbours_part", "uneven",
+// "non_manifold", "has_holes", "body_guard", "toggled" or "unsupported"; `figure` the
+// chain's width or the neighbours' gap, else 0.
+struct HealRefusal {
+    std::string kind;
+    std::uint32_t index = 0;
+    std::string why;
+    double figure = 0.0;
+};
+
+// What Solid::healed did, as plain data: the `tolerance` it healed at, the furthest any
+// trim `moved`, whether the body guard refused fixes (`guarded`), the `fixes` made and
+// the features `refused`; and the body's health before and after at that tolerance -- its
+// small features, free edges, whether it is closed, and its non-manifold edges.
+struct HealReport {
+    double tolerance = 0.0;
+    double moved = 0.0;
+    bool guarded = false;
+    std::vector<HealFix> fixes;
+    std::vector<HealRefusal> refused;
+    std::uint32_t small_before = 0;
+    std::uint32_t small_after = 0;
+    std::uint32_t free_before = 0;
+    std::uint32_t free_after = 0;
+    bool closed_before = false;
+    bool closed_after = false;
+    std::uint32_t nonmanifold_before = 0;
+    std::uint32_t nonmanifold_after = 0;
+};
+
+namespace detail {
+// The kinds a SmallFeature, HealFix or HealRefusal names, by the C ABI's number; the
+// reasons a HealRefusal gives, likewise.
+inline constexpr const char* HEALTH_KINDS[6] = {"short_edge", "collapsed_edge", "sliver_face", "tiny_face", "tiny_body", "small_hole"};
+inline constexpr const char* HEAL_WHYS[11] = {"would_empty_loop", "closed",       "seam",       "chain",   "neighbours_part", "uneven",
+                                              "non_manifold",     "has_holes",    "body_guard", "toggled", "unsupported"};
+
+// Solid::healed's switches as the C ABI's flag bits: 1 edges, 2 faces, 4 holes.
+inline std::uint32_t heal_flags(bool edges, bool faces, bool holes) {
+    return (edges ? 1u : 0u) | (faces ? 2u : 0u) | (holes ? 4u : 0u);
+}
+
+inline Result<std::string> health_kind(std::uint32_t kind, const char* call) {
+    if (kind >= 6) return Error{std::string(call) + ": kind " + std::to_string(kind) + " is not one of the six", Origin::kernel};
+    return std::string(HEALTH_KINDS[kind]);
+}
+
+// The flat rows of cadaclysm_blacksmith_health_summary and the row readers, in their order:
+// counts (18) and sizes (8); free edges 6 ids and 2 sizes a row; wires 3 and 2; small
+// features 2 and 1; the crack edges. cracks is read only where counts[12] says meshed.
+inline Result<HealthReport> health_report(const std::uint32_t (&counts)[18], const double (&sizes)[8],
+                                          const std::vector<std::uint32_t>& free_ids, const std::vector<double>& free_sizes,
+                                          const std::vector<std::uint32_t>& wire_runs, const std::vector<double>& wire_sizes,
+                                          const std::vector<std::uint32_t>& small_items, const std::vector<double>& small_sizes,
+                                          const std::vector<std::uint32_t>& crack_edges) {
+    HealthReport r;
+    r.tolerance = sizes[0];
+    r.rounding = sizes[1];
+    r.extent = sizes[2];
+    r.worst_gap = sizes[3];
+    r.worst_loose = sizes[4];
+    r.sew_worst_gap = sizes[5];
+    r.loose_edges = counts[9];
+    r.sew_pairs = counts[10];
+    r.sew_refused = counts[11];
+    std::size_t free_count = std::min(free_ids.size() / 6, free_sizes.size() / 2);
+    r.free_edges.reserve(free_count);
+    for (std::size_t i = 0; i < free_count; ++i) {
+        FreeEdge e;
+        e.trim = free_ids[6 * i];
+        if (free_ids[6 * i + 1] != NONE) e.edge = free_ids[6 * i + 1];
+        e.face = free_ids[6 * i + 2];
+        e.wire = free_ids[6 * i + 3];
+        if (free_ids[6 * i + 4] != NONE) e.partner = free_ids[6 * i + 4];
+        e.shared_ends = free_ids[6 * i + 5];
+        e.length = free_sizes[2 * i];
+        e.gap = free_sizes[2 * i + 1];
+        r.free_edges.push_back(e);
+    }
+    std::size_t wire_count = std::min(wire_runs.size() / 3, wire_sizes.size() / 2);
+    r.wires.reserve(wire_count);
+    for (std::size_t i = 0; i < wire_count; ++i) {
+        FreeWire w;
+        w.first = wire_runs[3 * i];
+        w.count = wire_runs[3 * i + 1];
+        w.closed = wire_runs[3 * i + 2] != 0;
+        w.length = wire_sizes[2 * i];
+        w.widest_gap = wire_sizes[2 * i + 1];
+        r.wires.push_back(w);
+    }
+    std::size_t small_count = std::min(small_items.size() / 2, small_sizes.size());
+    r.small.reserve(small_count);
+    for (std::size_t i = 0; i < small_count; ++i) {
+        Result<std::string> kind = health_kind(small_items[2 * i], "health");
+        if (!kind) return kind.error();
+        SmallFeature s;
+        s.kind = std::move(kind).value();
+        s.index = small_items[2 * i + 1];
+        s.size = small_sizes[i];
+        r.small.push_back(std::move(s));
+    }
+    if (counts[12] == 1) {
+        Cracks c;
+        c.watertight = counts[13] != 0;
+        c.open = counts[14];
+        c.folded = counts[15];
+        c.crossings = counts[16];
+        c.edges = crack_edges;
+        r.cracks = std::move(c);
+    }
+    return r;
+}
+
+// The flat rows of cadaclysm_blacksmith_heal_summary and the row readers, in their order:
+// counts (11) and sizes (2); fixes 2 items and 2 sizes a row; refusals 3 items and 1 size.
+inline Result<HealReport> heal_report(const std::uint32_t (&counts)[11], const double (&sizes)[2],
+                                      const std::vector<std::uint32_t>& fix_items, const std::vector<double>& fix_sizes,
+                                      const std::vector<std::uint32_t>& refused_items, const std::vector<double>& refused_sizes) {
+    HealReport r;
+    r.tolerance = sizes[0];
+    r.moved = sizes[1];
+    r.guarded = counts[2] != 0;
+    r.small_before = counts[3];
+    r.small_after = counts[4];
+    r.free_before = counts[5];
+    r.free_after = counts[6];
+    r.closed_before = counts[7] != 0;
+    r.closed_after = counts[8] != 0;
+    r.nonmanifold_before = counts[9];
+    r.nonmanifold_after = counts[10];
+    std::size_t fix_count = std::min(fix_items.size() / 2, fix_sizes.size() / 2);
+    r.fixes.reserve(fix_count);
+    for (std::size_t i = 0; i < fix_count; ++i) {
+        Result<std::string> kind = health_kind(fix_items[2 * i], "healed");
+        if (!kind) return kind.error();
+        HealFix f;
+        f.kind = std::move(kind).value();
+        f.index = fix_items[2 * i + 1];
+        f.size = fix_sizes[2 * i];
+        f.moved = fix_sizes[2 * i + 1];
+        r.fixes.push_back(std::move(f));
+    }
+    std::size_t refused_count = std::min(refused_items.size() / 3, refused_sizes.size());
+    r.refused.reserve(refused_count);
+    for (std::size_t i = 0; i < refused_count; ++i) {
+        Result<std::string> kind = health_kind(refused_items[3 * i], "healed");
+        if (!kind) return kind.error();
+        std::uint32_t why = refused_items[3 * i + 2];
+        if (why >= 11) return Error{"healed: why " + std::to_string(why) + " is not one of the eleven", Origin::kernel};
+        HealRefusal f;
+        f.kind = std::move(kind).value();
+        f.index = refused_items[3 * i + 1];
+        f.why = HEAL_WHYS[why];
+        f.figure = refused_sizes[i];
+        r.refused.push_back(std::move(f));
+    }
+    return r;
+}
+
+// One two-call row reader's rows: the count with null buffers, then `ids_per` ids and
+// `sizes_per` sizes a row. A second count that differs is refused.
+template <class Handle, class Reader>
+inline Result<std::pair<std::vector<std::uint32_t>, std::vector<double>>> health_rows(Reader reader, const Handle* h,
+                                                                                    std::size_t ids_per, std::size_t sizes_per,
+                                                                                    const char* call) {
+    std::uint32_t n = reader(h, nullptr, nullptr);
+    std::vector<std::uint32_t> ids(ids_per * n);
+    std::vector<double> sizes(sizes_per * n);
+    if (n) {
+        std::uint32_t written = reader(h, ids.data(), sizes.data());
+        if (written != n) {
+            return Error{std::string(call) + ": a row reader wrote " + std::to_string(written) + " rows, not " + std::to_string(n),
+                         Origin::kernel};
+        }
+    }
+    return std::pair<std::vector<std::uint32_t>, std::vector<double>>(std::move(ids), std::move(sizes));
+}
+}  // namespace detail
+
 // An exact B-rep solid (or open sheet). Immutable and move-only: every operation
 // returns a new one. Freed when destroyed or on close(); a call on a closed or
 // moved-from solid is a bad access.
@@ -2059,6 +3713,49 @@ public:
     // last_error.
     std::optional<std::string> name() const {
         const char* raw = ::cadaclysm_blacksmith_solid_name(raw_handle("name"));
+        if (!raw) return std::nullopt;
+        return std::string(raw);
+    }
+
+    // -- material and look defined outside the file
+
+    // This solid made of `material` -- a name, written to STEP as the product's
+    // MATERIAL_DESIGNATION. Kept by every operation as the solid's colour is: a move
+    // keeps it, a boolean's result is made of its first solid's. Writing it moves
+    // step()'s default schema to AP242; a named schema without the entity drops it, as
+    // it drops a colour. Refused when blank.
+    Result<Solid> with_material(std::string_view material) const {
+        std::string owned(material);
+        return wrap(::cadaclysm_blacksmith_with_material(raw_handle("with_material"), owned.c_str()));
+    }
+    // What this solid is made of, or nullopt -- see with_material(). Borrowed, read as
+    // name() reads its own.
+    std::optional<std::string> material() const {
+        const char* raw = ::cadaclysm_blacksmith_solid_material(raw_handle("material"));
+        if (!raw) return std::nullopt;
+        return std::string(raw);
+    }
+    // This solid drawn in a style defined outside the file: `identification` the style's
+    // name in the library at `location` -- a MaterialX or MDL file and a material in it,
+    // say. Either may be nullopt, not both. Written to STEP as an EXTERNALLY_DEFINED_STYLE
+    // beside the solid's colour, which a reader without the library draws instead (AP242
+    // or AP214: the default schema moves to AP242). Kept as with_material()'s material is.
+    Result<Solid> styled(std::optional<std::string_view> location, std::optional<std::string_view> identification) const {
+        std::optional<std::string> l, i;
+        if (location) l.emplace(*location);
+        if (identification) i.emplace(*identification);
+        return wrap(::cadaclysm_blacksmith_styled(raw_handle("styled"), l ? l->c_str() : nullptr, i ? i->c_str() : nullptr));
+    }
+    // Where this solid's outside style lives (styled()'s `location`), or nullopt.
+    std::optional<std::string> style_location() const {
+        const char* raw = ::cadaclysm_blacksmith_solid_style_location(raw_handle("style_location"));
+        if (!raw) return std::nullopt;
+        return std::string(raw);
+    }
+    // This solid's outside style's name in its library (styled()'s `identification`), or
+    // nullopt.
+    std::optional<std::string> style_identification() const {
+        const char* raw = ::cadaclysm_blacksmith_solid_style_identification(raw_handle("style_identification"));
         if (!raw) return std::nullopt;
         return std::string(raw);
     }
@@ -2199,6 +3896,41 @@ public:
     Result<Solid> mirror(const Frame& plane) const {
         return wrap(::cadaclysm_blacksmith_mirror(raw_handle("mirror"), plane.raw().data()));
     }
+    // This solid through the affine map `t`, exact, its colours and name kept. A rigid map or a
+    // similarity keeps every surface's kind, and so does a map within 1e-6 of a similarity (a
+    // rotation written in float32 among them), applied as the exact similarity nearest it. Any
+    // other map (a non-uniform scale, a shear) turns the curved surfaces into their exact NURBS
+    // and maps those. The result's inexact_trims() counts the trims this call lost. Refused for
+    // a singular map (it flattens the solid), a non-finite one or a non-affine one.
+    Result<Solid> transform(const Transform& t) const { return transform(t.rows()); }
+    // transform by 16 numbers, row-major.
+    Result<Solid> transform(const std::array<double, 16>& matrix) const {
+        std::uint32_t lost = 0;
+        Result<Solid> out = wrap(::cadaclysm_blacksmith_solid_transform(raw_handle("solid_transform"), matrix.data(), &lost),
+                                 "solid_transform");
+        if (out) out->inexact_trims_ = lost;
+        return out;
+    }
+    // This solid with its surfaces rewritten as their exact NURBS, to `level`: colours and
+    // name kept; inexact_trims() counts the trims this call lost, as transform's does.
+    Result<Solid> convert_to_nurbs(NurbsLevel level = NurbsLevel::all) const {
+        std::uint32_t code = CADACLYSM_BLACKSMITH_NURBS_ALL;
+        switch (level) {
+            case NurbsLevel::procedural: code = CADACLYSM_BLACKSMITH_NURBS_PROCEDURAL; break;
+            case NurbsLevel::analytic: code = CADACLYSM_BLACKSMITH_NURBS_ANALYTIC; break;
+            case NurbsLevel::all: code = CADACLYSM_BLACKSMITH_NURBS_ALL; break;
+        }
+        std::uint32_t lost = 0;
+        Result<Solid> out = wrap(::cadaclysm_blacksmith_solid_convert_to_nurbs(raw_handle("solid_convert_to_nurbs"), code, &lost),
+                                 "solid_convert_to_nurbs");
+        if (out) out->inexact_trims_ = lost;
+        return out;
+    }
+    // The trims lost by the transform or convert_to_nurbs call that made this solid: face
+    // boundaries that survive only as a polyline lifted through the old surface, where no
+    // exact edge curve was left. Per call, not this solid's history; 0 for a solid neither
+    // call made.
+    std::uint32_t inexact_trims() const noexcept { return inexact_trims_; }
 
     // -- combining. `merge` merges the flush faces a join leaves (merge_flush).
     Result<Solid> join(const Solid& other, double tolerance = DEFAULT_TOLERANCE, const Progress& progress = {},
@@ -2218,6 +3950,30 @@ public:
         return merged(wrap(::cadaclysm_blacksmith_common(raw_handle("common"), other.raw_handle("common"), tolerance,
                                                          detail::progress_fn(progress), detail::progress_user(progress))),
                       merge);
+    }
+    // This solid and `other` as one body that keeps every piece -- a union that keeps the inside
+    // pieces: its regions are this solid less `other`, the two together, and `other` less this
+    // one (those that are not empty), and the walls between them are faces of both. The body is
+    // non-manifold where a wall meets the outside (edges of three or four faces), so the verbs
+    // that need a manifold solid -- the booleans, fillet, chamfer, shell, thicken, mass -- refuse
+    // it; take its cells with regions() and region_solid(). Built exactly: both solids closed,
+    // every face a plane, cylinder, cone, sphere or torus. Walls of the two lying on one another
+    // in part are a case it refuses, in words.
+    Result<Solid> merge(const Solid& other, double tolerance = DEFAULT_TOLERANCE, const Progress& progress = {}) const {
+        return wrap(::cadaclysm_blacksmith_merge(raw_handle("merge"), other.raw_handle("merge"), tolerance,
+                                                 detail::progress_fn(progress), detail::progress_user(progress)),
+                    "merge");
+    }
+    // The regions of space this solid's faces bound, region 0 the infinite one: two for an
+    // ordinary solid (outside, inside), one per cell for a merge's body, one more per cavity.
+    Result<std::vector<Region>> regions() const {
+        return detail::regions_of(::cadaclysm_blacksmith_regions(raw_handle("regions")));
+    }
+    // Finite region `region` (an index into regions()) as a closed solid of its own: the faces
+    // bounding it, each turned to point out of it, each keeping its colour. Region 0, the
+    // infinite one, is refused.
+    Result<Solid> region_solid(std::uint32_t region) const {
+        return wrap(::cadaclysm_blacksmith_region_solid(raw_handle("region_solid"), region), "region_solid");
     }
     // This solid cut by the plane Z = `z`: its closed outlines there, in XY, nested into
     // profiles with holes (boundaries counter-clockwise, holes clockwise), a line or a
@@ -2253,7 +4009,7 @@ public:
     // snap did not settle (the points are then the best estimate) -- a closed chain that
     // does not go once round its own curve (a sliver where two surfaces barely cross) has
     // no curve, `tangent` still true. An Overlap is a coincident face pair with the shared
-    // region's rings (outer first, holes after), which may be empty for a partial overlap
+    // region's rings (outer first, holes after), which may be empty for a partial overlap of curved faces
     // whose outlines cross. Known limit: a crossing narrower than `tolerance` -- two
     // surfaces passing within it without their meshes crossing -- can be missed;
     // near-tangent contact is where this bites.
@@ -2266,33 +4022,7 @@ public:
         CadaclysmBlacksmithIntersection* found =
             ::cadaclysm_blacksmith_intersect(raw_handle("intersect"), other.raw_handle("intersect"), tolerance,
                                              detail::progress_fn(progress), detail::progress_user(progress));
-        if (!found) return detail::kernel_error("intersect");
-        struct Free {
-            CadaclysmBlacksmithIntersection* p;
-            ~Free() { ::cadaclysm_blacksmith_intersection_free(p); }
-        } release{found};
-        Intersection out;
-        std::uint32_t n = ::cadaclysm_blacksmith_intersection_chain_count(found);
-        out.chains.reserve(n);
-        for (std::uint32_t i = 0; i < n; ++i) {
-            CadaclysmBlacksmithChain raw{};
-            if (!::cadaclysm_blacksmith_intersection_chain(found, i, &raw)) return detail::kernel_error("intersection_chain");
-            std::optional<Curve> curve;
-            if (raw.has_curve) {
-                CadaclysmBlacksmithCurve raw_curve{};
-                if (!::cadaclysm_blacksmith_intersection_curve(found, i, &raw_curve)) return detail::kernel_error("intersection_curve");
-                curve = detail::curve_of(raw_curve);
-            }
-            out.chains.push_back(detail::chain_of(raw, std::move(curve)));
-        }
-        n = ::cadaclysm_blacksmith_intersection_overlap_count(found);
-        out.overlaps.reserve(n);
-        for (std::uint32_t i = 0; i < n; ++i) {
-            CadaclysmBlacksmithOverlap raw{};
-            if (!::cadaclysm_blacksmith_intersection_overlap(found, i, &raw)) return detail::kernel_error("intersection_overlap");
-            out.overlaps.push_back(detail::overlap_of(raw));
-        }
-        return out;
+        return detail::intersection_of(found, "intersect");
     }
 
     // Where `profile`, placed on `frame`, pierces this solid's faces, and the pieces its
@@ -2413,6 +4143,102 @@ public:
         std::uint32_t row[8] = {};
         if (!::cadaclysm_blacksmith_manifold(raw_handle("manifold"), row)) return detail::kernel_error("manifold");
         return cadaclysm::detail::manifold_of(row);
+    }
+
+    // -- health and healing
+    // What is wrong with this solid, as a HealthReport: the free edges (the sides one face
+    // bounds) and the wires they chain into, with each edge's nearest partner and the gap
+    // to it; the features below `tolerance`; the loose edges; and what sewing would join and
+    // leave. `tolerance` is the length below which a feature is small and a gap closes --
+    // nullopt, or a value that is not finite and positive, takes the default, 1e-4 times the
+    // diagonal (the report shows what was used). `mesh` also meshes the solid and reports
+    // where the mesh cracks (`cracks`); without it `cracks` is nullopt. Nothing moves.
+    Result<HealthReport> health(std::optional<double> tolerance = std::nullopt, bool mesh = false) const {
+        const CadaclysmBlacksmithSolid* solid = raw_handle("health");
+        struct Free {
+            void operator()(CadaclysmBlacksmithHealth* h) const noexcept { ::cadaclysm_blacksmith_health_free(h); }
+        };
+        std::unique_ptr<CadaclysmBlacksmithHealth, Free> h(
+            ::cadaclysm_blacksmith_health(solid, tolerance.value_or(std::nan("")), mesh));
+        if (!h) return detail::kernel_error("health");
+        std::uint32_t counts[18] = {};
+        double sizes[8] = {};
+        if (!::cadaclysm_blacksmith_health_summary(h.get(), counts, sizes)) return detail::kernel_error("health");
+        Result<std::pair<std::vector<std::uint32_t>, std::vector<double>>> free = detail::health_rows(
+            [](const CadaclysmBlacksmithHealth* p, std::uint32_t* ids, double* s) {
+                return ::cadaclysm_blacksmith_health_free_edges(p, ids, s);
+            },
+            h.get(), 6, 2, "health");
+        if (!free) return free.error();
+        Result<std::pair<std::vector<std::uint32_t>, std::vector<double>>> wires = detail::health_rows(
+            [](const CadaclysmBlacksmithHealth* p, std::uint32_t* ids, double* s) {
+                return ::cadaclysm_blacksmith_health_wires(p, ids, s);
+            },
+            h.get(), 3, 2, "health");
+        if (!wires) return wires.error();
+        Result<std::pair<std::vector<std::uint32_t>, std::vector<double>>> small = detail::health_rows(
+            [](const CadaclysmBlacksmithHealth* p, std::uint32_t* ids, double* s) {
+                return ::cadaclysm_blacksmith_health_small(p, ids, s);
+            },
+            h.get(), 2, 1, "health");
+        if (!small) return small.error();
+        std::uint32_t n = ::cadaclysm_blacksmith_health_crack_edges(h.get(), nullptr);
+        std::vector<std::uint32_t> cracks(n);
+        if (n && ::cadaclysm_blacksmith_health_crack_edges(h.get(), cracks.data()) != n) {
+            return detail::refuse("health: the crack edges changed count between reads");
+        }
+        return detail::health_report(counts, sizes, free->first, free->second, wires->first, wires->second, small->first,
+                                     small->second, cracks);
+    }
+
+    // This solid with its small features removed, and what was done, as a new Solid and a
+    // HealReport; this one is left as it was. The features are the ones health() lists as
+    // small at `tolerance`: short and collapsed edges, sliver and tiny faces, small holes.
+    // Every fix is a vertex merge, and an edge it moves records how far as its
+    // edge_tolerance(). A guard compares the result's health with this one's and refuses
+    // fixes that made it worse (`guarded`). `edges`, `faces` and `holes` switch each kind of
+    // fix; a kind switched off is refused as "toggled". `tolerance` nullopt, or a value that
+    // is not finite and positive, takes the default (the report shows what was used).
+    Result<std::pair<Solid, HealReport>> healed(std::optional<double> tolerance = std::nullopt, bool edges = true,
+                                                bool faces = true, bool holes = true) const {
+        const CadaclysmBlacksmithSolid* solid = raw_handle("healed");
+        struct Free {
+            void operator()(CadaclysmBlacksmithHeal* h) const noexcept { ::cadaclysm_blacksmith_heal_free(h); }
+        };
+        std::unique_ptr<CadaclysmBlacksmithHeal, Free> h(
+            ::cadaclysm_blacksmith_healed(solid, tolerance.value_or(std::nan("")), detail::heal_flags(edges, faces, holes)));
+        if (!h) return detail::kernel_error("healed");
+        std::uint32_t counts[11] = {};
+        double sizes[2] = {};
+        if (!::cadaclysm_blacksmith_heal_summary(h.get(), counts, sizes)) return detail::kernel_error("healed");
+        Result<std::pair<std::vector<std::uint32_t>, std::vector<double>>> fixes = detail::health_rows(
+            [](const CadaclysmBlacksmithHeal* p, std::uint32_t* items, double* s) {
+                return ::cadaclysm_blacksmith_heal_fixes(p, items, s);
+            },
+            h.get(), 2, 2, "healed");
+        if (!fixes) return fixes.error();
+        Result<std::pair<std::vector<std::uint32_t>, std::vector<double>>> refused = detail::health_rows(
+            [](const CadaclysmBlacksmithHeal* p, std::uint32_t* items, double* s) {
+                return ::cadaclysm_blacksmith_heal_refused(p, items, s);
+            },
+            h.get(), 3, 1, "healed");
+        if (!refused) return refused.error();
+        Result<HealReport> report =
+            detail::heal_report(counts, sizes, fixes->first, fixes->second, refused->first, refused->second);
+        if (!report) return report.error();
+        Result<Solid> body = wrap(::cadaclysm_blacksmith_heal_body(h.get()), "healed");
+        if (!body) return body.error();
+        return std::pair<Solid, HealReport>(std::move(body).value(), std::move(report).value());
+    }
+
+    // How far brep edge `edge` (as a HealFix or FreeEdge names one) may lie off its curve: 0
+    // for an exact edge, the distance healing (or sewing) moved it where that is recorded,
+    // nullopt when no trim names the id (an edge healing removed).
+    Result<std::optional<double>> edge_tolerance(std::uint32_t edge) const {
+        double t = ::cadaclysm_blacksmith_edge_tolerance(raw_handle("edge_tolerance"), edge);
+        if (!std::isnan(t)) return std::optional<double>(t);
+        if (!detail::text(::cadaclysm_blacksmith_last_error()).empty()) return detail::kernel_error("edge_tolerance");
+        return std::optional<double>();
     }
     Result<Mass> mass(double accuracy = 0.0) const {
         CadaclysmBlacksmithMassProperties out = {};
@@ -2631,6 +4457,20 @@ public:
         }
         return Frame({out[0], out[1], out[2]}, {out[3], out[4], out[5]}, {out[6], out[7], out[8]}, {out[9], out[10], out[11]});
     }
+    // An RTree over this solid's faces: one entry per face, its id the face index the other face
+    // calls take, its box holding the face (the box the boolean's broad phase pairs faces by,
+    // grown by a thousandth of the solid's extent). No faces give an empty tree. The tree is its
+    // own and outlives the solid.
+    Result<RTree> face_tree() const;
+    // One thickness for face `face` of this solid alone, on a ThicknessGauge meshed at `tolerance`
+    // (default 0.01), used once and freed -- build the gauge yourself to ask more than once.
+    // nullopt where nothing is found; see ThicknessGauge::thickness_at_face. Refused with the
+    // gauge call's prefix (`thickness_gauge_face: ...`).
+    Result<std::optional<FaceThickness>> thickness_at_face(std::uint32_t face, double maximum,
+                                                           double tolerance = THICKNESS_TOLERANCE) const;
+    // The same measured at `at`'s foot on the face (nullopt: over the face's vertices).
+    Result<std::optional<FaceThickness>> thickness_at_face(std::uint32_t face, const std::optional<Vec3>& at, double maximum,
+                                                           double tolerance = THICKNESS_TOLERANCE) const;
     // Face f by what it is, eight doubles: the surface's kind (plane 0, cylinder 1, cone 2,
     // sphere 3, torus 4, NURBS 5, revolution 6, extrusion 7, sum 8), a point on the surface at
     // the face's middle (x y z), the outward normal there (x y z), and the face's extent --
@@ -2828,6 +4668,86 @@ public:
                                                     detail::progress_fn(progress), detail::progress_user(progress)));
     }
 
+    // -- measuring
+    // The box aligned with the principal axes of inertia. `accuracy` 0 or less takes the default.
+    Result<OrientedBox> oriented_box(double accuracy = 0.0) const {
+        CadaclysmBlacksmithOrientedBox out{};
+        if (!::cadaclysm_blacksmith_oriented_box(raw_handle("oriented_box"), accuracy, &out)) {
+            return detail::kernel_error("oriented_box");
+        }
+        OrientedBox box;
+        box.centre = {out.centre[0], out.centre[1], out.centre[2]};
+        for (std::size_t r = 0; r < 3; ++r) box.axes[r] = {out.axes[r * 3], out.axes[r * 3 + 1], out.axes[r * 3 + 2]};
+        box.half = {out.half[0], out.half[1], out.half[2]};
+        return box;
+    }
+    // The length of edge `edge`, the index edges() and fillet use.
+    Result<Length> edge_length(std::uint32_t edge, double accuracy = 0.0) const {
+        CadaclysmBlacksmithLength out{};
+        if (!::cadaclysm_blacksmith_edge_length(raw_handle("edge_length"), edge, accuracy, &out)) {
+            return detail::kernel_error("edge_length");
+        }
+        return detail::length_of(out);
+    }
+    // The point `s` of arc length along edge `edge` from the start of its curve, with its unit
+    // tangent. `accuracy` 0 or less takes the default.
+    Result<At> edge_point_at_length(std::uint32_t edge, double s, double accuracy = 0.0) const {
+        CadaclysmBlacksmithAt out{};
+        if (!::cadaclysm_blacksmith_edge_point_at_length(raw_handle("edge_point_at_length"), edge, s, accuracy, &out)) {
+            return detail::kernel_error("edge_point_at_length");
+        }
+        return detail::at_of(out);
+    }
+    // `n` points evenly spaced by arc length along edge `edge` (a closed edge gives `n`, an open
+    // one `n + 1`); `n` is 1 to 1000000.
+    Result<std::vector<At>> edge_divide_by_count(std::uint32_t edge, std::uint32_t n, double accuracy = 0.0) const {
+        return detail::samples_of(
+            ::cadaclysm_blacksmith_edge_divide_by_count(raw_handle("edge_divide_by_count"), edge, n, accuracy),
+            "edge_divide_by_count");
+    }
+    // Points every `step` of arc length along edge `edge`; the last piece is kept short and a
+    // closed start is not repeated.
+    Result<std::vector<At>> edge_divide_by_length(std::uint32_t edge, double step, double accuracy = 0.0) const {
+        return detail::samples_of(
+            ::cadaclysm_blacksmith_edge_divide_by_length(raw_handle("edge_divide_by_length"), edge, step, accuracy),
+            "edge_divide_by_length");
+    }
+    // "outside", "inside" or "on": where `point` lies against the boundary, "on" being within
+    // `tolerance` of it. Many points: build a classifier() once.
+    Result<std::string> contains(const Vec3& point, double tolerance = DEFAULT_TOLERANCE) const {
+        std::uint32_t code = 0;
+        if (!::cadaclysm_blacksmith_contains(raw_handle("contains"), point.data(), tolerance, &code)) {
+            return detail::kernel_error("contains");
+        }
+        return detail::containment_of(code, "contains");
+    }
+    // A reusable containment test; it outlives this solid.
+    Result<Classifier> classifier(double tolerance = DEFAULT_TOLERANCE) const {
+        CadaclysmBlacksmithClassifier* raw = ::cadaclysm_blacksmith_classifier_new(raw_handle("classifier"), tolerance);
+        if (!raw) return detail::kernel_error("classifier_new");
+        return Classifier(raw);
+    }
+    // The closest points between this solid's boundary and `other`'s.
+    Result<Closest> closest(const Solid& other, double tolerance = DEFAULT_TOLERANCE, const Progress& progress = {}) const {
+        CadaclysmBlacksmithClosest out{};
+        if (!::cadaclysm_blacksmith_closest(raw_handle("closest"), other.raw_handle("closest"), tolerance,
+                                            detail::progress_fn(progress), detail::progress_user(progress), &out)) {
+            return detail::kernel_error("closest");
+        }
+        Closest c;
+        c.distance = out.distance;
+        c.on_a = {out.on_a[0], out.on_a[1], out.on_a[2]};
+        c.on_b = {out.on_b[0], out.on_b[1], out.on_b[2]};
+        c.kind_a = detail::text(out.kind_a);
+        c.index_a = out.index_a;
+        if (out.edge_a != NONE) c.edge_a = out.edge_a;
+        c.kind_b = detail::text(out.kind_b);
+        c.index_b = out.index_b;
+        if (out.edge_b != NONE) c.edge_b = out.edge_b;
+        c.refined = out.refined != 0;
+        return c;
+    }
+
     // The C handle, for code that calls the C ABI directly. Owned by this Solid.
     const CadaclysmBlacksmithSolid* handle() const noexcept { return state_ ? state_->handle : nullptr; }
 
@@ -2836,9 +4756,12 @@ private:
     friend struct ::cadaclysm::detail::ViewAccess;
     friend class Assembly;
     friend class CollisionHit;
+    friend class Clash;
     friend class Stock;
     friend class Job;
     friend class Subd;
+    friend class SolidValue;
+    friend class SurfaceValue;
     friend Result<std::string> write_step_text(const Solids&, const std::optional<std::string>&, Unit);
     friend Result<std::string> write_sat_text(const Solids&, Unit);
     friend Result<void> write_sat(const std::string&, const Solids&, Unit);
@@ -2918,7 +4841,16 @@ private:
     }
 
     std::shared_ptr<detail::SolidState> state_;
+    // What inexact_trims() reads: written by transform and convert_to_nurbs.
+    std::uint32_t inexact_trims_ = 0;
 };
+
+inline Result<Solid> SolidValue::to_solid() const {
+    return Solid::wrap(::cadaclysm_blacksmith_solid_value_to_solid(kind_, v_.data()), "solid_value_to_solid");
+}
+inline Result<Solid> SurfaceValue::to_nurbs_sheet() const {
+    return Solid::wrap(::cadaclysm_blacksmith_surface_value_nurbs_sheet(kind_, v_.data()), "surface_value_nurbs_sheet");
+}
 
 // ---- machining ----------------------------------------------------------------------
 
@@ -3074,6 +5006,11 @@ struct ReportItem {
     // An area in mm^2 for corner/undercut, a diameter in mm for hole, and a height in
     // mm (its Z range) for slope and too_deep.
     double size = 0.0;
+    // The Z range the item covers, in mm: where it starts (`top`) and where it ends
+    // (`bottom`). For a corner this is the pocket wall the end mill missed, as in
+    // "from z 10 down to z 2".
+    double top = 0.0;
+    double bottom = 0.0;
     // One sentence naming the cause and the tool involved.
     std::string reason;
     // The XY area the item covers.
@@ -3145,6 +5082,8 @@ inline Result<Report> report_of(CadaclysmBlacksmithReport* raw) {
         item.kind = detail::text(::cadaclysm_blacksmith_report_kind(raw, i));
         item.at = Vec3{at[0], at[1], at[2]};
         item.size = ::cadaclysm_blacksmith_report_size(raw, i);
+        item.top = ::cadaclysm_blacksmith_report_top(raw, i);
+        item.bottom = ::cadaclysm_blacksmith_report_bottom(raw, i);
         item.reason = detail::text(::cadaclysm_blacksmith_report_reason(raw, i));
         item.region = std::move(region).value();
         items.push_back(std::move(item));
@@ -3304,6 +5243,30 @@ public:
             handle, part.raw_handle("job_machine"), end_mill.raw_handle("job_machine"),
             handles.empty() ? nullptr : handles.data(), handles.size(), stepover.value_or(nan), stepdown.value_or(nan),
             skin, peck.value_or(nan));
+        return detail::report_of(raw);
+    }
+    // Rest machining: machine() with a list of end mills, tried in order -- what the
+    // first leaves uncut the next one cuts, and the Report names what none reached.
+    // The list goes largest first, each tool strictly smaller than the one before, or the
+    // kernel refuses it. It must hold at least one tool and no null (the refusal names the
+    // index of the first null); `drills`, `stepover`, `stepdown`, `skin` and `peck` are as in
+    // machine(). The job changes only on success.
+    Result<Report> machine_with(const Solid& part, const std::vector<const Tool*>& end_mills,
+                                const std::vector<const Tool*>& drills = {}, std::optional<double> stepover = std::nullopt,
+                                std::optional<double> stepdown = std::nullopt, double skin = 0.3,
+                                std::optional<double> peck = std::nullopt) {
+        CADACLYSM_TRY(handle, live());
+        std::vector<const CadaclysmBlacksmithTool*> end_mill_handles;
+        end_mill_handles.reserve(end_mills.size());
+        for (const Tool* e : end_mills) end_mill_handles.push_back(e ? e->raw_handle("job_machine_with") : nullptr);
+        std::vector<const CadaclysmBlacksmithTool*> drill_handles;
+        drill_handles.reserve(drills.size());
+        for (const Tool* d : drills) drill_handles.push_back(d ? d->raw_handle("job_machine_with") : nullptr);
+        double nan = std::numeric_limits<double>::quiet_NaN();
+        CadaclysmBlacksmithReport* raw = ::cadaclysm_blacksmith_job_machine_with(
+            handle, part.raw_handle("job_machine_with"), end_mill_handles.empty() ? nullptr : end_mill_handles.data(),
+            end_mill_handles.size(), drill_handles.empty() ? nullptr : drill_handles.data(), drill_handles.size(),
+            stepover.value_or(nan), stepdown.value_or(nan), skin, peck.value_or(nan));
         return detail::report_of(raw);
     }
 
@@ -3479,6 +5442,203 @@ private:
     std::uint32_t index_ = 0;
 };
 
+namespace detail {
+struct ClashRows;
+
+// Frees one Collider::clash or clash() answer: the deleter of the std::shared_ptr every Clash
+// row of that call holds, so the last row let go frees the handle.
+struct ClashesFree {
+    void operator()(CadaclysmBlacksmithClashes* p) const noexcept { ::cadaclysm_blacksmith_clashes_free(p); }
+};
+}  // namespace detail
+
+// One pair Collider::clash or clash() found, as plain data. `a`, `b` are the part indices: for
+// one set or a collider `a < b`; for two sets `a` indexes `parts` and `b` indexes `others`.
+// `kind` is "penetrating" (the volumes overlap), "touching" (the boundaries within the
+// tolerance of each other), "too_close" (apart by more than the tolerance but less than the
+// clearance) or "refused" (the pair could not be decided; `text` says why, empty otherwise).
+// `distance` is the gap between the two boundaries (0 for a penetrating or refused pair);
+// `on_a`/`on_b` the closest world points, for a penetrating pair the centre of the overlap's
+// world box, the origin for a refused one.
+//
+// The feature fields are Closest's, flat: what each point lies on ("face", "edge" or "vertex"),
+// the kernel's id, and the Solid::edges() index (empty for a face, a vertex, or an edge with no
+// row there). For a penetrating or refused pair there is no closest point: `kind_a` and `kind_b`
+// are "none" and `index_*` and `edge_*` empty. `refined` is true where the distance was measured
+// on the exact surfaces; `depth` the thinnest side of a penetrating pair's overlap box, 0
+// otherwise.
+//
+// solid() and intersect() are built on demand from the placement the pair was found at: every
+// row of one call holds the call's answer alive -- past the collider and the solids -- and the
+// last one destroyed frees it.
+class Clash {
+public:
+    std::uint32_t a = 0;
+    std::uint32_t b = 0;
+    std::string kind;
+    double distance = 0.0;
+    Vec3 on_a = {};
+    Vec3 on_b = {};
+    std::string kind_a;
+    std::optional<std::uint32_t> index_a;
+    std::optional<std::uint32_t> edge_a;
+    std::string kind_b;
+    std::optional<std::uint32_t> index_b;
+    std::optional<std::uint32_t> edge_b;
+    bool refined = false;
+    double depth = 0.0;
+    std::string text;
+
+    Clash() = default;
+
+    // The exact shared volume of this penetrating pair, at the placement it was found at, as a
+    // new solid. Refused (`clashes_solid: ...`) for a pair that is not penetrating.
+    Result<Solid> solid() const {
+        if (!keeper_) return detail::refuse("Clash.solid: the clashes handle is closed");
+        return Solid::wrap(::cadaclysm_blacksmith_clashes_solid(keeper_.get(), index_), "clashes_solid");
+    }
+
+    // Where this pair's two parts cross or coincide at the placement it was found at, as
+    // Solid::intersect reports it: a touching pair's shared face is an Overlap. Refused
+    // (`clashes_intersect: ...`) for a refused pair.
+    Result<Intersection> intersect() const {
+        if (!keeper_) return detail::refuse("Clash.intersect: the clashes handle is closed");
+        return detail::intersection_of(::cadaclysm_blacksmith_clashes_intersect(keeper_.get(), index_), "clashes_intersect");
+    }
+
+private:
+    friend struct detail::ClashRows;
+
+    // Copied out of the C struct: the strings borrow from the handle and are copied here.
+    static Clash from_raw(const CadaclysmBlacksmithClash& raw, std::shared_ptr<CadaclysmBlacksmithClashes> keeper,
+                          std::uint32_t index) {
+        Clash row;
+        row.a = raw.a;
+        row.b = raw.b;
+        row.kind = detail::text(raw.kind);
+        row.distance = raw.distance;
+        row.on_a = {raw.on_a[0], raw.on_a[1], raw.on_a[2]};
+        row.on_b = {raw.on_b[0], raw.on_b[1], raw.on_b[2]};
+        row.kind_a = detail::text(raw.kind_a);
+        row.kind_b = detail::text(raw.kind_b);
+        // A "none" feature (penetrating, refused) has no index and no edge; otherwise the edge
+        // is decoded as Closest's is.
+        if (row.kind_a != "none") {
+            row.index_a = raw.index_a;
+            if (raw.edge_a != NONE) row.edge_a = raw.edge_a;
+        }
+        if (row.kind_b != "none") {
+            row.index_b = raw.index_b;
+            if (raw.edge_b != NONE) row.edge_b = raw.edge_b;
+        }
+        row.refined = raw.refined != 0;
+        row.depth = raw.depth;
+        row.text = detail::text(raw.text);
+        row.keeper_ = std::move(keeper);
+        row.index_ = index;
+        return row;
+    }
+
+    std::shared_ptr<CadaclysmBlacksmithClashes> keeper_;
+    std::uint32_t index_ = 0;
+};
+
+namespace detail {
+// A clash call's handle read out into rows, each holding the handle; with no rows it is freed
+// at once. Null is `call`'s failure, read from last_error; a failing read frees the handle
+// (the rows read so far let it go) and reports `clashes_at: ...`.
+struct ClashRows {
+    static Result<std::vector<Clash>> read(CadaclysmBlacksmithClashes* h, const char* call) {
+        if (!h) return kernel_error(call);
+        std::uint32_t count = ::cadaclysm_blacksmith_clashes_count(h);
+        if (count == 0) {
+            ::cadaclysm_blacksmith_clashes_free(h);
+            return std::vector<Clash>{};
+        }
+        std::shared_ptr<CadaclysmBlacksmithClashes> keeper(h, ClashesFree{});
+        std::vector<Clash> rows;
+        rows.reserve(count);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            CadaclysmBlacksmithClash raw{};
+            if (!::cadaclysm_blacksmith_clashes_at(h, i, &raw)) return kernel_error("clashes_at");
+            rows.push_back(Clash::from_raw(raw, keeper, i));
+        }
+        return rows;
+    }
+};
+}  // namespace detail
+
+// One pair Collider::swept_clash or swept_clash() found to clash somewhere on the path, as plain
+// data. `a`, `b` are the part indices (for one set or a collider `a < b`; for two sets `a`
+// indexes `parts` and `b` indexes `others`). `first_time` is the first time the pair came within
+// the clearance, in pose units (pose `k` at time `k`; for a refused pair the time it was refused
+// at), and `first` the Clash there -- its kind, distance, points, features and depth, at the
+// frames the motion places the parts at that time, so first.solid() and first.intersect()
+// rebuild the contact there, past the collider and the solids. `intervals` are the time ranges
+// the pair stays in clash, (start, end), ascending and disjoint (none for a refused pair).
+struct SweptClash {
+    std::uint32_t a = 0;
+    std::uint32_t b = 0;
+    double first_time = 0.0;
+    Clash first;
+    std::vector<std::pair<double, double>> intervals;
+};
+
+namespace detail {
+// Frees a swept clash call's handle, which is read out and freed at once.
+struct SweptClashesFree {
+    void operator()(CadaclysmBlacksmithSweptClashes* p) const noexcept { ::cadaclysm_blacksmith_swept_clashes_free(p); }
+};
+
+// A swept clash call's handle read out into rows and freed; each row's `first` a Clash of the
+// handle's first rows (read by ClashRows, so they hold their own clashes handle). Null is
+// `call`'s failure, read from last_error; a failing read reports `swept_clashes_*: ...`, the
+// error built before the handles are freed.
+inline Result<std::vector<SweptClash>> swept_clashes_of(CadaclysmBlacksmithSweptClashes* h, const char* call) {
+    if (!h) return kernel_error(call);
+    std::unique_ptr<CadaclysmBlacksmithSweptClashes, SweptClashesFree> owned(h);
+    std::uint32_t count = ::cadaclysm_blacksmith_swept_clashes_count(h);
+    if (count == 0) return std::vector<SweptClash>{};
+    Result<std::vector<Clash>> read = ClashRows::read(::cadaclysm_blacksmith_swept_clashes_firsts(h), "swept_clashes_firsts");
+    if (!read) return read.error();
+    std::vector<Clash> firsts = std::move(read).value();
+    if (firsts.size() != count) {
+        return refuse("swept_clashes_firsts: " + std::to_string(firsts.size()) + " rows for " + std::to_string(count) + " pairs");
+    }
+    std::vector<SweptClash> rows;
+    rows.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        CadaclysmBlacksmithSweptClash raw{};
+        if (!::cadaclysm_blacksmith_swept_clashes_at(h, i, &raw)) return kernel_error("swept_clashes_at");
+        SweptClash row;
+        row.a = raw.a;
+        row.b = raw.b;
+        row.first_time = raw.first_time;
+        row.first = std::move(firsts[i]);
+        row.intervals.reserve(raw.interval_count);
+        for (std::uint32_t k = 0; k < raw.interval_count; ++k) {
+            double span[2] = {0.0, 0.0};
+            if (!::cadaclysm_blacksmith_swept_clashes_interval(h, i, k, span)) return kernel_error("swept_clashes_interval");
+            row.intervals.emplace_back(span[0], span[1]);
+        }
+        rows.push_back(std::move(row));
+    }
+    return rows;
+}
+
+// The poses flattened pose by pose, 12 doubles a frame.
+inline std::vector<double> flat_poses(const Poses& poses) {
+    std::vector<double> flat;
+    for (const std::vector<std::reference_wrapper<const Frame>>& pose : poses) {
+        for (const Frame& f : pose) {
+            const std::array<double, 12>& v = f.raw();
+            flat.insert(flat.end(), v.begin(), v.end());
+        }
+    }
+    return flat;
+}
+}  // namespace detail
+
 // Parts meshed once, asked pose after pose which of them interfere: `solids` at rest,
 // meshed at `tolerance`; `groups` one group index per solid (nullopt: each solid its
 // own group -- check() then takes one frame per solid), `allowed` pairs of part indices
@@ -3584,6 +5744,72 @@ public:
         return hits;
     }
 
+    // Every pair of parts that penetrates, touches or lies within `clearance` of the other, as
+    // Clash rows in pair order, with each group placed at its matching frame in `frames` (as
+    // check() takes them; check() answers overlap alone). `clearance` is zero or more, in model
+    // units: a pair apart by more than the collider's tolerance but less than it is "too_close",
+    // within the tolerance "touching". `share` as for check(): the rows of the shares of one
+    // pose are disjoint and cover it. Once a pair needed one, the collider keeps each part's
+    // closest mesh (at a third of its tolerance) for its lifetime. Refused
+    // (`collider_clash: ...`) for a negative or non-finite `clearance`, the wrong number of
+    // frames or a `share` with `k >= n`.
+    Result<std::vector<Clash>> clash(const std::vector<std::reference_wrapper<const Frame>>& frames, double clearance = 0.0,
+                                     const std::optional<std::pair<std::uint32_t, std::uint32_t>>& share = std::nullopt) const {
+        std::vector<double> flat;
+        flat.reserve(frames.size() * 12);
+        for (const Frame& f : frames) {
+            const std::array<double, 12>& v = f.raw();
+            flat.insert(flat.end(), v.begin(), v.end());
+        }
+        std::uint32_t share_k = share ? share->first : 0;
+        std::uint32_t share_n = share ? share->second : 0;
+        CadaclysmBlacksmithClashes* h = ::cadaclysm_blacksmith_collider_clash(
+            raw_handle("clash"), flat.data(), static_cast<std::uint32_t>(frames.size()), clearance, share_k, share_n);
+        return detail::ClashRows::read(h, "collider_clash");
+    }
+
+    // Every pair of parts that penetrates, touches or comes within `clearance` of the other
+    // anywhere on the path through `poses` -- not only at the poses -- as SweptClash rows in pair
+    // order. `poses` is two or more poses, each the frames clash() takes (one frame per group).
+    // Between two poses each group moves rigidly about the centre of its rest box: that point on
+    // the straight line between its two places, the rotation turning at a steady rate the shorter
+    // way round. Time runs in pose units, pose `k` at time `k`.
+    //
+    // No moment where the true gap is below `clearance` less the collider's tolerance (for
+    // clearance 0: no penetration deeper than the tolerance) falls between two steps.
+    // `resolution` (in (0, 1], a fraction of a segment) is how closely an interval's end is
+    // found; `max_steps` the pose-wise tests one pair may take -- a pair that needs more is a
+    // "refused" row. `share` as for check(), over the pairs whose swept boxes meet. The pose
+    // caches check() and clash() keep are neither read nor filled. Refused
+    // (`collider_swept_clash: ...`) for fewer than two poses, the wrong number of frames in a
+    // pose, a bad frame, `clearance`, `resolution` or `share`, or `max_steps` 0.
+    Result<std::vector<SweptClash>> swept_clash(const Poses& poses, double clearance = 0.0, double resolution = 1e-3,
+                                                std::uint32_t max_steps = 100000,
+                                                const std::optional<std::pair<std::uint32_t, std::uint32_t>>& share =
+                                                    std::nullopt) const {
+        // C reads every pose at one frame count: say the first pose that is off, in the kernel's
+        // words
+        std::size_t frame_count = poses.empty() ? 0 : poses[0].size();
+        for (const std::vector<std::reference_wrapper<const Frame>>& pose : poses) {
+            if (pose.size() != frame_count) {
+                std::uint32_t groups = group_count();
+                for (const std::vector<std::reference_wrapper<const Frame>>& off : poses) {
+                    if (off.size() != groups) {
+                        return detail::refuse("collider_swept_clash: " + std::to_string(off.size()) + " frames for " +
+                                              std::to_string(groups) + " groups");
+                    }
+                }
+            }
+        }
+        std::vector<double> flat = detail::flat_poses(poses);
+        std::uint32_t share_k = share ? share->first : 0;
+        std::uint32_t share_n = share ? share->second : 0;
+        CadaclysmBlacksmithSweptClashes* h = ::cadaclysm_blacksmith_collider_swept_clash(
+            raw_handle("swept_clash"), flat.data(), static_cast<std::uint32_t>(poses.size()), static_cast<std::uint32_t>(frame_count),
+            clearance, resolution, max_steps, share_k, share_n);
+        return detail::swept_clashes_of(h, "collider_swept_clash");
+    }
+
     // The C handle, for code that calls the C ABI directly. Owned by this Collider.
     const CadaclysmBlacksmithCollider* handle() const noexcept { return handle_; }
 
@@ -3596,6 +5822,928 @@ private:
     }
 
     CadaclysmBlacksmithCollider* handle_ = nullptr;
+};
+
+// ---- R-tree ---------------------------------------------------------------------------
+
+// One entry RTree::within or RTree::nearest found: its `id` and the `distance` from the point to
+// its box (0 inside it). Python's `(id, distance)`.
+struct RTreeHit {
+    std::uint32_t id = 0;
+    double distance = 0.0;
+};
+inline bool operator==(const RTreeHit& l, const RTreeHit& r) { return l.id == r.id && l.distance == r.distance; }
+inline bool operator!=(const RTreeHit& l, const RTreeHit& r) { return !(l == r); }
+
+// Two entries whose boxes meet: `a` of the tree asked and `b` of the other (RTree::overlaps), or
+// `a <= b` (RTree::self_overlaps). Python's `(a, b)`.
+struct RTreePair {
+    std::uint32_t a = 0;
+    std::uint32_t b = 0;
+};
+inline bool operator==(const RTreePair& l, const RTreePair& r) { return l.a == r.a && l.b == r.b; }
+inline bool operator!=(const RTreePair& l, const RTreePair& r) { return !(l == r); }
+inline bool operator<(const RTreePair& l, const RTreePair& r) { return l.a != r.a ? l.a < r.a : l.b < r.b; }
+
+namespace detail {
+// A box as the C ABI's 6 doubles, [minx, miny, minz, maxx, maxy, maxz].
+inline std::array<double, 6> rtree_words(const Box& box) {
+    return {box.lo[0], box.lo[1], box.lo[2], box.hi[0], box.hi[1], box.hi[2]};
+}
+
+// The hits of a query, read into a vector. A null list is the call's failure, read from
+// last_error under `call`; the list is freed on every path out, a failing read included, and the
+// error is built before the free.
+inline Result<std::vector<RTreeHit>> rtree_hits(CadaclysmBlacksmithRTreeHits* list, const char* call) {
+    if (!list) return kernel_error(call);
+    struct Free {
+        void operator()(CadaclysmBlacksmithRTreeHits* p) const noexcept { ::cadaclysm_blacksmith_rtree_hits_free(p); }
+    };
+    std::unique_ptr<CadaclysmBlacksmithRTreeHits, Free> owned(list);
+    std::uint32_t count = ::cadaclysm_blacksmith_rtree_hits_count(owned.get());
+    std::vector<RTreeHit> out;
+    out.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        CadaclysmBlacksmithRTreeHit raw{};
+        if (!::cadaclysm_blacksmith_rtree_hits_at(owned.get(), i, &raw)) return kernel_error("rtree_hits_at");
+        out.push_back(RTreeHit{raw.id, raw.distance});
+    }
+    return out;
+}
+
+// The pairs of a query, as rtree_hits reads hits.
+inline Result<std::vector<RTreePair>> rtree_pairs(CadaclysmBlacksmithRTreePairs* list, const char* call) {
+    if (!list) return kernel_error(call);
+    struct Free {
+        void operator()(CadaclysmBlacksmithRTreePairs* p) const noexcept { ::cadaclysm_blacksmith_rtree_pairs_free(p); }
+    };
+    std::unique_ptr<CadaclysmBlacksmithRTreePairs, Free> owned(list);
+    std::uint32_t count = ::cadaclysm_blacksmith_rtree_pairs_count(owned.get());
+    std::vector<RTreePair> out;
+    out.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        CadaclysmBlacksmithRTreePair raw{};
+        if (!::cadaclysm_blacksmith_rtree_pairs_at(owned.get(), i, &raw)) return kernel_error("rtree_pairs_at");
+        out.push_back(RTreePair{raw.a, raw.b});
+    }
+    return out;
+}
+
+// `x` as Rust's `{}` prints an f64 -- the kernel's refusals quote numbers that way.
+inline std::string rust_number(double x) {
+    if (std::isnan(x)) return "NaN";
+    if (std::isinf(x)) return x > 0 ? "inf" : "-inf";
+    // The shortest round-trip digits, as Rust's are (the first precision that reads back), laid
+    // out as Rust lays them out: without an exponent.
+    const std::string sign = std::signbit(x) ? "-" : "";
+    const double a = std::fabs(x);
+    char buffer[40];
+    for (int precision = 0; precision <= 16; ++precision) {
+        std::snprintf(buffer, sizeof buffer, "%.*e", precision, a);
+        if (std::strtod(buffer, nullptr) == a) break;
+    }
+    std::string digits;
+    const char* e = buffer;
+    for (; *e != '\0' && *e != 'e'; ++e) {
+        if (*e >= '0' && *e <= '9') digits += *e;
+    }
+    long shift = (*e == 'e' ? std::strtol(e + 1, nullptr, 10) : 0) - static_cast<long>(digits.size()) + 1;
+    while (!digits.empty() && digits.back() == '0') {
+        digits.pop_back();
+        ++shift;
+    }
+    const std::size_t lead = digits.find_first_not_of('0');
+    if (lead == std::string::npos) return sign + "0";
+    digits.erase(0, lead);
+    if (shift >= 0) return sign + digits + std::string(static_cast<std::size_t>(shift), '0');
+    const long point = static_cast<long>(digits.size()) + shift;
+    if (point > 0) {
+        return sign + digits.substr(0, static_cast<std::size_t>(point)) + "." + digits.substr(static_cast<std::size_t>(point));
+    }
+    return sign + "0." + std::string(static_cast<std::size_t>(-point), '0') + digits;
+}
+
+// Refuses, as the kernel's closest_points / k_neighbors do, the first hay point and then the first
+// needle that is not finite, by index.
+inline Result<void> finite_points(const char* call, const std::vector<Vec3>& hay, const std::vector<Vec3>& needles) {
+    const std::pair<const char*, const std::vector<Vec3>*> sets[] = {{"hay", &hay}, {"needle", &needles}};
+    for (const std::pair<const char*, const std::vector<Vec3>*>& set : sets) {
+        for (std::size_t i = 0; i < set.second->size(); ++i) {
+            const Vec3& p = (*set.second)[i];
+            if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || !std::isfinite(p[2])) {
+                return refuse(std::string(call) + ": " + set.first + " point " + std::to_string(i) + " is not finite");
+            }
+        }
+    }
+    return {};
+}
+}  // namespace detail
+
+// A spatial index over boxes with ids (an R*-tree): search() a box for the entries it meets,
+// within() / nearest() a point for the closest, overlaps() / self_overlaps() for every pair of
+// boxes that meet. Ids are the caller's own and may repeat; an entry is an id and its Box, and
+// the same (id, box) twice is two entries. Touching boxes meet. A point stands for a zero box
+// (insert() and remove() take either). Answers come in a fixed order: search ids ascending,
+// within / nearest by distance then id, pairs ascending. The tree changes in place; calls on one
+// tree must not overlap from two threads. Move-only; the destructor frees it, as close() does
+// early. A call on a closed or moved-from tree is refused, "rtree: closed". Python's RTree.
+class RTree {
+public:
+    RTree(RTree&&) noexcept = default;
+    RTree& operator=(RTree&&) noexcept = default;
+    RTree(const RTree&) = delete;
+    RTree& operator=(const RTree&) = delete;
+
+    // An empty tree.
+    static Result<RTree> make() { return adopt(::cadaclysm_blacksmith_rtree_new(), "rtree_new"); }
+
+    // A tree over (id, box) entries at once, packed (sort-tile-recursive): fuller and faster to
+    // query than the same entries inserted one by one. The first entry whose box is not a box (a
+    // NaN, an infinity, `lo` above `hi`) is refused, by index.
+    static Result<RTree> from_boxes(const std::vector<std::pair<std::uint32_t, Box>>& entries) {
+        if (entries.size() > std::numeric_limits<std::uint32_t>::max()) {
+            return detail::refuse("rtree_from_boxes: " + std::to_string(entries.size()) + " entries is more than 4294967295");
+        }
+        std::vector<std::uint32_t> ids;
+        std::vector<double> boxes;
+        ids.reserve(entries.size());
+        boxes.reserve(entries.size() * 6);
+        for (const std::pair<std::uint32_t, Box>& e : entries) {
+            ids.push_back(e.first);
+            const std::array<double, 6> words = detail::rtree_words(e.second);
+            boxes.insert(boxes.end(), words.begin(), words.end());
+        }
+        return adopt(::cadaclysm_blacksmith_rtree_from_boxes(ids.empty() ? nullptr : ids.data(),
+                                                             boxes.empty() ? nullptr : boxes.data(),
+                                                             static_cast<std::uint32_t>(ids.size())),
+                     "rtree_from_boxes");
+    }
+
+    // A tree over `points`, each a zero box whose id is its index. The first point with a NaN or
+    // infinite coordinate is refused, by index.
+    static Result<RTree> from_points(const std::vector<Vec3>& points) {
+        if (points.size() > std::numeric_limits<std::uint32_t>::max()) {
+            return detail::refuse("rtree_from_points: " + std::to_string(points.size()) + " points is more than 4294967295");
+        }
+        std::vector<double> xyz;
+        xyz.reserve(points.size() * 3);
+        for (const Vec3& p : points) xyz.insert(xyz.end(), p.begin(), p.end());
+        return adopt(::cadaclysm_blacksmith_rtree_from_points(xyz.empty() ? nullptr : xyz.data(),
+                                                              static_cast<std::uint32_t>(points.size())),
+                     "rtree_from_points");
+    }
+
+    // A tree over a mesh's triangles -- RhinoCommon's RTree.CreateMeshFaceTree: one entry per
+    // triangle of `triangles` (three indices into `positions`), its id the triangle's index, its
+    // box its three corners' box. The first corner past the points or at a point with a NaN or
+    // infinite coordinate is refused, by triangle and point; points no triangle uses are not
+    // checked.
+    static Result<RTree> from_triangles(const std::vector<Vec3>& positions,
+                                        const std::vector<std::array<std::uint32_t, 3>>& triangles) {
+        if (positions.size() > std::numeric_limits<std::uint32_t>::max()) {
+            return detail::refuse("rtree_from_triangles: " + std::to_string(positions.size()) + " points is more than 4294967295");
+        }
+        if (triangles.size() > std::numeric_limits<std::uint32_t>::max()) {
+            return detail::refuse("rtree_from_triangles: " + std::to_string(triangles.size()) +
+                                  " triangles is more than 4294967295");
+        }
+        std::vector<double> xyz;
+        xyz.reserve(positions.size() * 3);
+        for (const Vec3& p : positions) xyz.insert(xyz.end(), p.begin(), p.end());
+        std::vector<std::uint32_t> indices;
+        indices.reserve(triangles.size() * 3);
+        for (const std::array<std::uint32_t, 3>& t : triangles) indices.insert(indices.end(), t.begin(), t.end());
+        return adopt(::cadaclysm_blacksmith_rtree_from_triangles(xyz.empty() ? nullptr : xyz.data(),
+                                                                 static_cast<std::uint32_t>(positions.size()),
+                                                                 indices.empty() ? nullptr : indices.data(),
+                                                                 static_cast<std::uint32_t>(triangles.size())),
+                     "rtree_from_triangles");
+    }
+
+    void close() noexcept { ptr_.reset(); }
+    bool closed() const noexcept { return !ptr_; }
+
+    // How many entries the tree holds. On a closed tree, a bad access.
+    std::size_t size() const {
+        if (!ptr_) cadaclysm::detail::bad_access("rtree", "closed");
+        return ::cadaclysm_blacksmith_rtree_count(ptr_.get());
+    }
+    // Whether the tree holds no entry.
+    bool empty() const { return size() == 0; }
+
+    // The union of every entry's box, or nullopt for an empty tree.
+    Result<std::optional<Box>> bounds() const {
+        if (!ptr_) return closed_error();
+        if (::cadaclysm_blacksmith_rtree_count(ptr_.get()) == 0) return std::optional<Box>{};
+        std::array<double, 6> out{};
+        if (!::cadaclysm_blacksmith_rtree_bounds(ptr_.get(), out.data())) return detail::kernel_error("rtree_bounds");
+        return std::optional<Box>(Box({out[0], out[1], out[2]}, {out[3], out[4], out[5]}));
+    }
+
+    // Add the entry (id, box). A box that is not a box is refused and leaves the tree as it was.
+    Result<void> insert(std::uint32_t id, const Box& box) {
+        if (!ptr_) return closed_error();
+        const std::array<double, 6> words = detail::rtree_words(box);
+        if (!::cadaclysm_blacksmith_rtree_insert(ptr_.get(), id, words.data())) return detail::kernel_error("rtree_insert");
+        return {};
+    }
+    // Add the entry (id, point), the point a zero box. A point not finite is refused and leaves the
+    // tree as it was.
+    Result<void> insert(std::uint32_t id, const Vec3& point) {
+        if (!ptr_) return closed_error();
+        if (!::cadaclysm_blacksmith_rtree_insert_point(ptr_.get(), id, point.data())) {
+            return detail::kernel_error("rtree_insert_point");
+        }
+        return {};
+    }
+
+    // Take out one entry equal to (id, box) -- the box it was inserted with, compared coordinate
+    // by coordinate -- and say whether there was one: false, not an error, when there is none.
+    // With duplicates, one goes per call. A box that is not a box is refused.
+    Result<bool> remove(std::uint32_t id, const Box& box) { return remove_words(id, detail::rtree_words(box)); }
+    // remove() for an entry inserted as a point (its zero box).
+    Result<bool> remove(std::uint32_t id, const Vec3& point) {
+        return remove_words(id, {point[0], point[1], point[2], point[0], point[1], point[2]});
+    }
+
+    // The ids of every entry whose box meets `box` (touching counts), ascending, one per entry. A
+    // box that is not a box is refused.
+    Result<std::vector<std::uint32_t>> search(const Box& box) const {
+        if (!ptr_) return closed_error();
+        const std::array<double, 6> words = detail::rtree_words(box);
+        CADACLYSM_TRY(hits, detail::rtree_hits(::cadaclysm_blacksmith_rtree_search(ptr_.get(), words.data()), "rtree_search"));
+        std::vector<std::uint32_t> ids;
+        ids.reserve(hits.size());
+        for (const RTreeHit& h : hits) ids.push_back(h.id);
+        return ids;
+    }
+
+    // Every entry whose box is within `r` of `point` (Euclidean, 0 inside the box; exactly `r`
+    // counts), by distance then id. A point not finite or an `r` negative or NaN is refused.
+    Result<std::vector<RTreeHit>> within(const Vec3& point, double r) const {
+        if (!ptr_) return closed_error();
+        return detail::rtree_hits(::cadaclysm_blacksmith_rtree_within(ptr_.get(), point.data(), r), "rtree_within");
+    }
+
+    // The `k` entries whose boxes are nearest `point`, by distance then id (the smaller ids win a
+    // tie); all of them when `k` is over the count. A point not finite or a `k` above 1000000 is
+    // refused.
+    Result<std::vector<RTreeHit>> nearest(const Vec3& point, std::uint32_t k) const {
+        if (!ptr_) return closed_error();
+        return detail::rtree_hits(::cadaclysm_blacksmith_rtree_nearest(ptr_.get(), point.data(), k), "rtree_nearest");
+    }
+
+    // Every entry whose box the ray `origin + t * direction`, 0 <= t <= max_t, meets, as hits
+    // whose `distance` is the t where the ray enters the box (0 when `origin` is inside it), by t
+    // then id. Touching counts. t is in units of `direction`'s length, which is not normalised;
+    // `max_t` defaults to infinity. An origin or direction not finite, a zero direction, or a
+    // `max_t` negative or NaN is refused.
+    Result<std::vector<RTreeHit>> ray(const Vec3& origin, const Vec3& direction,
+                                      double max_t = std::numeric_limits<double>::infinity()) const {
+        if (!ptr_) return closed_error();
+        return detail::rtree_hits(::cadaclysm_blacksmith_rtree_ray(ptr_.get(), origin.data(), direction.data(), max_t),
+                                  "rtree_ray");
+    }
+
+    // Every pair (a, b), `a` an entry of this tree and `b` one of `other` (which may be this
+    // tree), whose boxes are at most `slack` apart on every axis (0: touching), ascending. A
+    // `slack` negative or NaN is refused.
+    Result<std::vector<RTreePair>> overlaps(const RTree& other, double slack = 0.0) const {
+        if (!ptr_ || !other.ptr_) return closed_error();
+        return detail::rtree_pairs(::cadaclysm_blacksmith_rtree_overlaps(ptr_.get(), other.ptr_.get(), slack),
+                                   "rtree_overlaps");
+    }
+
+    // Every unordered pair of distinct entries at most `slack` apart, once each as (smaller id,
+    // larger id), ascending -- an id paired with itself only where two entries share it. A
+    // `slack` negative or NaN is refused.
+    Result<std::vector<RTreePair>> self_overlaps(double slack = 0.0) const {
+        if (!ptr_) return closed_error();
+        return detail::rtree_pairs(::cadaclysm_blacksmith_rtree_self_overlaps(ptr_.get(), slack), "rtree_self_overlaps");
+    }
+
+    // The C handle, for code that calls the C ABI directly. Owned by this RTree.
+    const CadaclysmBlacksmithRTree* handle() const noexcept { return ptr_.get(); }
+
+private:
+    friend class Solid;
+    struct Free {
+        void operator()(CadaclysmBlacksmithRTree* p) const noexcept { ::cadaclysm_blacksmith_rtree_free(p); }
+    };
+    explicit RTree(CadaclysmBlacksmithRTree* raw) : ptr_(raw) {}
+
+    static Result<RTree> adopt(CadaclysmBlacksmithRTree* raw, const char* call) {
+        if (!raw) return detail::kernel_error(call);
+        return RTree(raw);
+    }
+    static Error closed_error() { return detail::refuse("rtree: closed"); }
+
+    Result<bool> remove_words(std::uint32_t id, const std::array<double, 6>& words) {
+        if (!ptr_) return closed_error();
+        if (::cadaclysm_blacksmith_rtree_remove(ptr_.get(), id, words.data())) return true;
+        if (!detail::text(::cadaclysm_blacksmith_last_error()).empty()) return detail::kernel_error("rtree_remove");
+        return false;
+    }
+
+    std::unique_ptr<CadaclysmBlacksmithRTree, Free> ptr_;
+};
+
+// For each of `needles`, the indices of the `hay` points within `limit` of it, by distance then
+// index -- one RTree over the hay answers every needle. A `limit` negative or NaN, then the first
+// hay point and the first needle not finite, by index, are refused.
+inline Result<std::vector<std::vector<std::size_t>>> closest_points(const std::vector<Vec3>& hay,
+                                                                    const std::vector<Vec3>& needles, double limit) {
+    if (!(limit >= 0.0)) return detail::refuse("closest_points: limit " + detail::rust_number(limit) + " is not a distance");
+    CADACLYSM_TRY_VOID(detail::finite_points("closest_points", hay, needles));
+    CADACLYSM_TRY(tree, RTree::from_points(hay));
+    std::vector<std::vector<std::size_t>> out;
+    out.reserve(needles.size());
+    for (const Vec3& p : needles) {
+        CADACLYSM_TRY(hits, tree.within(p, limit));
+        std::vector<std::size_t> ids;
+        ids.reserve(hits.size());
+        for (const RTreeHit& h : hits) ids.push_back(h.id);
+        out.push_back(std::move(ids));
+    }
+    return out;
+}
+
+// For each of `needles`, the indices of the `k` nearest `hay` points, by distance then index (all
+// of them when `k` is over the hay count). The first hay point and the first needle not finite,
+// by index, then a `k` above 1000000, are refused.
+inline Result<std::vector<std::vector<std::size_t>>> k_neighbors(const std::vector<Vec3>& hay,
+                                                                 const std::vector<Vec3>& needles, std::uint32_t k) {
+    CADACLYSM_TRY_VOID(detail::finite_points("k_neighbors", hay, needles));
+    if (k > 1000000) return detail::refuse("k_neighbors: k " + std::to_string(k) + " is not at most 1000000");
+    CADACLYSM_TRY(tree, RTree::from_points(hay));
+    std::vector<std::vector<std::size_t>> out;
+    out.reserve(needles.size());
+    for (const Vec3& p : needles) {
+        CADACLYSM_TRY(hits, tree.nearest(p, k));
+        std::vector<std::size_t> ids;
+        ids.reserve(hits.size());
+        for (const RTreeHit& h : hits) ids.push_back(h.id);
+        out.push_back(std::move(ids));
+    }
+    return out;
+}
+
+// Every pair of `parts` -- or, with `others`, every part of `parts` against every part of
+// `others` -- that penetrates, touches or lies within `clearance` of the other, as Clash rows in
+// pair order, the solids as they stand, meshed at `tolerance` (absolute). `allowed` pairs of
+// part indices are never tested (designed contacts); with `others` a pair is (index in `parts`,
+// index in `others`). In a row `a` indexes `parts` and `b` indexes `others` (or `parts` again,
+// then `a < b`). For the same parts moved pose after pose, build a Collider and ask
+// Collider::clash.
+//
+// Refused for an empty `others` (`clash: an empty set`; pass nothing for one set), and with the
+// kernel's words (`clash: ...`) for a negative or non-finite `clearance`, a `tolerance` not
+// positive and finite, an `allowed` index out of range or a part that is not a closed solid.
+inline Result<std::vector<Clash>> clash(const Solids& parts, const std::optional<Solids>& others = std::nullopt,
+                                        double clearance = 0.0, double tolerance = DEFAULT_TOLERANCE,
+                                        const std::vector<std::pair<std::uint32_t, std::uint32_t>>& allowed = {}) {
+    if (others && others->empty()) return detail::refuse("clash: an empty set");
+    std::vector<const CadaclysmBlacksmithSolid*> first;
+    first.reserve(parts.size());
+    for (const Solid& s : parts) first.push_back(s.handle());
+    std::vector<const CadaclysmBlacksmithSolid*> second;
+    if (others) {
+        second.reserve(others->size());
+        for (const Solid& s : *others) second.push_back(s.handle());
+    }
+    std::vector<std::uint32_t> allowed_flat;
+    allowed_flat.reserve(allowed.size() * 2);
+    for (const std::pair<std::uint32_t, std::uint32_t>& pair : allowed) {
+        allowed_flat.push_back(pair.first);
+        allowed_flat.push_back(pair.second);
+    }
+    CadaclysmBlacksmithClashes* h = ::cadaclysm_blacksmith_clash(
+        first.data(), static_cast<std::uint32_t>(first.size()), others ? second.data() : nullptr,
+        static_cast<std::uint32_t>(second.size()), tolerance, clearance, allowed_flat.empty() ? nullptr : allowed_flat.data(),
+        static_cast<std::uint32_t>(allowed.size()));
+    return detail::ClashRows::read(h, "clash");
+}
+
+// Every pair of `parts` -- or, with `others`, every part of `parts` against every part of
+// `others` -- that penetrates, touches or comes within `clearance` of the other anywhere on a
+// path, as SweptClash rows in pair order. Each part is its own group: pose `k` of `poses` is one
+// frame per part of `parts`, and pose `k` of `other_poses` one per part of `others` (the two go
+// together, and have as many poses). The motion between poses, the guarantee, `resolution` and
+// `max_steps` are Collider::swept_clash's. `tolerance` is the meshing tolerance, absolute.
+// `allowed` pairs of part indices are never tested; with `others` a pair is (index in `parts`,
+// index in `others`). In a row `a` indexes `parts` and `b` indexes `others` (or `parts` again).
+//
+// Refused for `others` without `other_poses` or the other way round (`swept_clash: others and
+// other_poses go together`), a different number of poses in the two, a pose with the wrong
+// number of frames, an empty `others` (`swept_clash: an empty set`; pass nothing for one set),
+// and with the kernel's words (`swept_clash: ...`) for fewer than two poses, an `allowed` index
+// out of range, a part that is not a closed solid, or a bad frame, tolerance, `clearance`,
+// `resolution` or `max_steps`.
+inline Result<std::vector<SweptClash>> swept_clash(const Solids& parts, const Poses& poses,
+                                                   const std::optional<Solids>& others = std::nullopt,
+                                                   const std::optional<Poses>& other_poses = std::nullopt, double clearance = 0.0,
+                                                   double tolerance = DEFAULT_TOLERANCE, double resolution = 1e-3,
+                                                   std::uint32_t max_steps = 100000,
+                                                   const std::vector<std::pair<std::uint32_t, std::uint32_t>>& allowed = {}) {
+    if (others.has_value() != other_poses.has_value()) return detail::refuse("swept_clash: others and other_poses go together");
+    // C reads each set's poses at its part count: the kernel's own checks, in its order
+    if (other_poses && other_poses->size() != poses.size()) {
+        return detail::refuse("swept_clash: " + std::to_string(poses.size()) + " poses for set a, " +
+                              std::to_string(other_poses->size()) + " for set b");
+    }
+    const std::pair<const char*, std::pair<const Poses*, std::size_t>> sets[] = {
+        {"a", {&poses, parts.size()}},
+        {"b", {other_poses ? &*other_poses : nullptr, others ? others->size() : 0}},
+    };
+    for (const std::pair<const char*, std::pair<const Poses*, std::size_t>>& set : sets) {
+        if (!set.second.first) continue;
+        const Poses& frames = *set.second.first;
+        for (std::size_t k = 0; k < frames.size(); ++k) {
+            if (frames[k].size() != set.second.second) {
+                return detail::refuse("swept_clash: pose " + std::to_string(k) + " of set " + set.first + " has " +
+                                      std::to_string(frames[k].size()) + " frames for " + std::to_string(set.second.second) +
+                                      " parts");
+            }
+        }
+    }
+    if (others && others->empty()) return detail::refuse("swept_clash: an empty set");
+    std::vector<const CadaclysmBlacksmithSolid*> first;
+    first.reserve(parts.size());
+    for (const Solid& s : parts) first.push_back(s.handle());
+    std::vector<const CadaclysmBlacksmithSolid*> second;
+    if (others) {
+        second.reserve(others->size());
+        for (const Solid& s : *others) second.push_back(s.handle());
+    }
+    std::vector<double> flat_a = detail::flat_poses(poses);
+    std::vector<double> flat_b = other_poses ? detail::flat_poses(*other_poses) : std::vector<double>{};
+    std::vector<std::uint32_t> allowed_flat;
+    allowed_flat.reserve(allowed.size() * 2);
+    for (const std::pair<std::uint32_t, std::uint32_t>& pair : allowed) {
+        allowed_flat.push_back(pair.first);
+        allowed_flat.push_back(pair.second);
+    }
+    CadaclysmBlacksmithSweptClashes* h = ::cadaclysm_blacksmith_swept_clash(
+        first.data(), static_cast<std::uint32_t>(first.size()), flat_a.data(), others ? second.data() : nullptr,
+        static_cast<std::uint32_t>(second.size()), others ? flat_b.data() : nullptr, static_cast<std::uint32_t>(poses.size()), tolerance,
+        clearance, resolution, max_steps, allowed_flat.empty() ? nullptr : allowed_flat.data(), static_cast<std::uint32_t>(allowed.size()));
+    return detail::swept_clashes_of(h, "swept_clash");
+}
+
+// ---- wall thickness ---------------------------------------------------------------------
+
+// One wall-thickness reading on a solid (ThicknessGauge::thickness / thickness_at, thickness()).
+// `point` lies on face `face` of body `body` (the body's index in the gauge): at vertex `vertex`
+// of that body's measuring mesh (ThicknessGauge::mesh), or `vertex` nullopt for a reading at a
+// point. `thickness` is the nearest-opposing-wall rule (the nearest triangle that faces against
+// one of the vertex's own faces, with the vertex behind it) on the measuring mesh, to `opposite`
+// on face `opposite_face` of body `opposite_body`; `knife` marks a knife edge (thickness 0,
+// `opposite` == `point`). `exact_opposite` is `opposite` moved onto its exact face where its foot
+// lies within the tolerance and inside the face's trims, `exact_thickness` the distance to it.
+// `sphere` is the diameter of the largest ball tangent at `point` that holds none of the
+// surfaces, nullopt where none under the maximum does (0 on a knife edge).
+struct Thickness {
+    std::uint32_t body = 0;
+    std::optional<std::uint32_t> vertex;
+    std::uint32_t face = 0;
+    Vec3 point = {};
+    double thickness = 0.0;
+    Vec3 opposite = {};
+    std::uint32_t opposite_body = 0;
+    std::uint32_t opposite_face = 0;
+    bool knife = false;
+    double exact_thickness = 0.0;
+    Vec3 exact_opposite = {};
+    std::optional<double> sphere;
+};
+
+// A face's thickness, found (ThicknessGauge::thickness_at_face, Solid::thickness_at_face; where
+// nothing is found those answer nullopt): `thickness` the median of the face's vertex readings
+// (or the reading at `at`), `min` and `max` their extremes, `uniform` whether `max - min` is
+// within the gauge's tolerance.
+struct FaceThickness {
+    double thickness = 0.0;
+    double min = 0.0;
+    double max = 0.0;
+    bool uniform = false;
+};
+
+// A body's measuring mesh (ThicknessGauge::mesh), copied out of the gauge: `positions` and
+// `normals` (unit, outward) one point per vertex -- a reading's `vertex` indexes them; no vertex
+// is shared between two faces -- `triangles` three vertex indices each, and `faces` the B-rep
+// face of each triangle.
+struct ThicknessMesh {
+    std::vector<Vec3> positions;
+    std::vector<Vec3> normals;
+    std::vector<std::array<std::uint32_t, 3>> triangles;
+    std::vector<std::uint32_t> faces;
+};
+
+// One reading on a plain mesh (mesh_thickness): vertex `vertex` of mesh `mesh`, at `point`,
+// reads `thickness` to `opposite` on triangle `opposite_triangle` of mesh `opposite_mesh` (both
+// indices within that mesh). `knife`: a knife edge, thickness 0 and `opposite` == `point`.
+struct MeshThickness {
+    std::uint32_t mesh = 0;
+    std::uint32_t vertex = 0;
+    double thickness = 0.0;
+    Vec3 point = {};
+    Vec3 opposite = {};
+    std::uint32_t opposite_mesh = 0;
+    std::uint32_t opposite_triangle = 0;
+    bool knife = false;
+};
+
+// One mesh for mesh_thickness: its points and its triangles, each three indices into the points.
+struct ThicknessInputMesh {
+    std::vector<Vec3> positions;
+    std::vector<std::array<std::uint32_t, 3>> triangles;
+};
+
+namespace detail {
+inline Vec3 vec3_of(const double (&p)[3]) { return Vec3{p[0], p[1], p[2]}; }
+
+// A thicknesses handle (null: `call`'s refusal from last_error) read out into rows and freed on
+// every path; a failing read frees it and reports `thicknesses_at: ...`.
+inline Result<std::vector<Thickness>> thicknesses_of(CadaclysmBlacksmithThicknesses* h, const char* call) {
+    if (!h) return kernel_error(call);
+    std::vector<Thickness> rows;
+    std::uint32_t count = ::cadaclysm_blacksmith_thicknesses_count(h);
+    rows.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        CadaclysmBlacksmithThickness raw{};
+        if (!::cadaclysm_blacksmith_thicknesses_at(h, i, &raw)) {
+            Error refusal = kernel_error("thicknesses_at");
+            ::cadaclysm_blacksmith_thicknesses_free(h);
+            return refusal;
+        }
+        Thickness row;
+        row.body = raw.body;
+        if (raw.vertex != NONE) row.vertex = raw.vertex;
+        row.face = raw.face;
+        row.point = vec3_of(raw.point);
+        row.thickness = raw.thickness;
+        row.opposite = vec3_of(raw.opposite);
+        row.opposite_body = raw.opposite_body;
+        row.opposite_face = raw.opposite_face;
+        row.knife = raw.knife;
+        row.exact_thickness = raw.exact_thickness;
+        row.exact_opposite = vec3_of(raw.exact_opposite);
+        if (!std::isnan(raw.sphere)) row.sphere = raw.sphere;
+        rows.push_back(row);
+    }
+    ::cadaclysm_blacksmith_thicknesses_free(h);
+    return rows;
+}
+}  // namespace detail
+
+// Wall thickness (the nearest-opposing-wall rule: each vertex reads to the nearest triangle that
+// faces against one of its own faces, with the vertex behind it) over `solids`, measured
+// against each other: each solid meshed once at `tolerance` -- absolute, in model units (default
+// 0.01) -- then asked as often as needed. A reading's `body` is the solid's index in `solids`.
+// The gauge holds its own reference to the bodies, so it answers on after the Solids are closed.
+// Move-only; the destructor frees the handle, as close() does early. A Result-returning call on
+// a closed gauge is refused, "thickness_gauge: closed".
+class ThicknessGauge {
+public:
+    // Hand-written for the reason Collider's are: a raw handle's default move frees twice.
+    ThicknessGauge(ThicknessGauge&& other) noexcept : handle_(other.handle_) { other.handle_ = nullptr; }
+    ThicknessGauge& operator=(ThicknessGauge&& other) noexcept {
+        if (this != &other) {
+            close();
+            handle_ = other.handle_;
+            other.handle_ = nullptr;
+        }
+        return *this;
+    }
+    ThicknessGauge(const ThicknessGauge&) = delete;
+    ThicknessGauge& operator=(const ThicknessGauge&) = delete;
+
+    ~ThicknessGauge() { close(); }
+
+    void close() noexcept {
+        if (handle_) {
+            ::cadaclysm_blacksmith_thickness_gauge_free(handle_);
+            handle_ = nullptr;
+        }
+    }
+    bool closed() const noexcept { return handle_ == nullptr; }
+
+    // Refused (`thickness_gauge_new: ...`) for a `tolerance` not positive and finite.
+    static Result<ThicknessGauge> make(const Solids& solids, double tolerance = THICKNESS_TOLERANCE) {
+        std::vector<const CadaclysmBlacksmithSolid*> handles;
+        handles.reserve(solids.size());
+        for (const Solid& s : solids) handles.push_back(s.handle());
+        // The array is never null, even for an empty gauge.
+        const CadaclysmBlacksmithSolid* empty = nullptr;
+        CadaclysmBlacksmithThicknessGauge* h = ::cadaclysm_blacksmith_thickness_gauge_new(
+            handles.empty() ? &empty : handles.data(), static_cast<std::uint32_t>(handles.size()), tolerance);
+        if (!h) return detail::kernel_error("thickness_gauge_new");
+        return ThicknessGauge(h);
+    }
+
+    // How many bodies the gauge measures.
+    std::uint32_t body_count() const { return ::cadaclysm_blacksmith_thickness_gauge_body_count(raw_handle("body_count")); }
+
+    // The tolerance the gauge meshed its bodies at.
+    double tolerance() const { return ::cadaclysm_blacksmith_thickness_gauge_tolerance(raw_handle("tolerance")); }
+
+    // One reading per measuring-mesh vertex that has one within `maximum` (positive and finite),
+    // by body then vertex; vertices whose interior angle is under `sharp_angle` radians (zero or
+    // more) are knife edges. Refused (`thickness_gauge_measure: ...`) for a bad limit.
+    Result<std::vector<Thickness>> thickness(double maximum, double sharp_angle = 0.0) const {
+        if (!handle_) return closed_refusal();
+        return detail::thicknesses_of(::cadaclysm_blacksmith_thickness_gauge_measure(handle_, maximum, sharp_angle),
+                                      "thickness_gauge_measure");
+    }
+
+    // The reading at `point`'s foot on face `face` of body `body` (its `vertex` nullopt), or
+    // nullopt where the foot lies off the face or the wall is thicker than `maximum`. Refused
+    // (`thickness_gauge_at: ...`) for a body or face past the end, a point not finite or a bad
+    // limit.
+    Result<std::optional<Thickness>> thickness_at(std::uint32_t body, std::uint32_t face, const Vec3& point, double maximum,
+                                                  double sharp_angle = 0.0) const {
+        if (!handle_) return closed_refusal();
+        Result<std::vector<Thickness>> rows = detail::thicknesses_of(
+            ::cadaclysm_blacksmith_thickness_gauge_at(handle_, body, face, point.data(), maximum, sharp_angle),
+            "thickness_gauge_at");
+        if (!rows) return rows.error();
+        if (rows.value().empty()) return std::optional<Thickness>();
+        return std::optional<Thickness>(rows.value().front());
+    }
+
+    // One thickness for face `face` of body `body`: measured over the face's vertices; the other
+    // bodies are measured with it. nullopt where nothing is found (nothing reads under
+    // `maximum`). `maximum` has no default. Refused (`thickness_gauge_face: ...`) for a body or
+    // face past the end or a bad maximum.
+    Result<std::optional<FaceThickness>> thickness_at_face(std::uint32_t body, std::uint32_t face, double maximum) const {
+        return thickness_at_face(body, face, std::optional<Vec3>(), maximum);
+    }
+
+    // The same measured at `at`'s foot on the face (nullopt: over the face's vertices, as above);
+    // nullopt also where `at`'s foot lies off the face. Refused (`thickness_gauge_face: ...`) for
+    // an `at` not finite too.
+    Result<std::optional<FaceThickness>> thickness_at_face(std::uint32_t body, std::uint32_t face, const std::optional<Vec3>& at,
+                                                           double maximum) const {
+        if (!handle_) return closed_refusal();
+        CadaclysmBlacksmithFaceThickness raw{};
+        if (!::cadaclysm_blacksmith_thickness_gauge_face(handle_, body, face, at ? at->data() : nullptr, maximum, &raw)) {
+            return detail::kernel_error("thickness_gauge_face");
+        }
+        if (!raw.found) return std::optional<FaceThickness>();
+        return std::optional<FaceThickness>(FaceThickness{raw.thickness, raw.min, raw.max, raw.uniform});
+    }
+
+    // Body `body`'s measuring mesh, copied out (it outlives the gauge). Refused
+    // (`thickness_gauge_mesh: ...`) for a body past the end.
+    Result<ThicknessMesh> mesh(std::uint32_t body) const {
+        if (!handle_) return closed_refusal();
+        CadaclysmBlacksmithThicknessMesh raw{};
+        if (!::cadaclysm_blacksmith_thickness_gauge_mesh(handle_, body, &raw)) return detail::kernel_error("thickness_gauge_mesh");
+        ThicknessMesh out;
+        out.positions.reserve(raw.vertex_count);
+        out.normals.reserve(raw.vertex_count);
+        for (std::uint32_t i = 0; i < raw.vertex_count; ++i) {
+            out.positions.push_back(Vec3{raw.positions[3 * i], raw.positions[3 * i + 1], raw.positions[3 * i + 2]});
+            out.normals.push_back(Vec3{raw.normals[3 * i], raw.normals[3 * i + 1], raw.normals[3 * i + 2]});
+        }
+        out.triangles.reserve(raw.triangle_count);
+        out.faces.reserve(raw.triangle_count);
+        for (std::uint32_t i = 0; i < raw.triangle_count; ++i) {
+            out.triangles.push_back(std::array<std::uint32_t, 3>{raw.indices[3 * i], raw.indices[3 * i + 1], raw.indices[3 * i + 2]});
+            out.faces.push_back(raw.faces[i]);
+        }
+        return out;
+    }
+
+    // The C handle, for code that calls the C ABI directly. Owned by this gauge.
+    const CadaclysmBlacksmithThicknessGauge* handle() const noexcept { return handle_; }
+
+private:
+    explicit ThicknessGauge(CadaclysmBlacksmithThicknessGauge* h) : handle_(h) {}
+
+    static Error closed_refusal() { return detail::refuse("thickness_gauge: closed"); }
+
+    const CadaclysmBlacksmithThicknessGauge* raw_handle(const char* what) const {
+        if (!handle_) cadaclysm::detail::bad_access(what, "the thickness gauge is closed");
+        return handle_;
+    }
+
+    CadaclysmBlacksmithThicknessGauge* handle_ = nullptr;
+};
+
+// ThicknessGauge::make(solids, tolerance)->thickness(maximum, sharp_angle) on a gauge used once
+// and freed: every reading within `maximum` on the solids, measured against each other. Refused
+// with the gauge call's own prefix (`thickness_gauge_new: ...`, `thickness_gauge_measure: ...`).
+inline Result<std::vector<Thickness>> thickness(const Solids& solids, double maximum, double sharp_angle = 0.0,
+                                                double tolerance = THICKNESS_TOLERANCE) {
+    Result<ThicknessGauge> gauge = ThicknessGauge::make(solids, tolerance);
+    if (!gauge) return gauge.error();
+    return gauge.value().thickness(maximum, sharp_angle);
+}
+
+// The nearest-opposing-wall rule on plain meshes measured against each other: one reading per
+// vertex that has one within `maximum` (positive and finite), by mesh then vertex; `sharp_angle`
+// as for ThicknessGauge::thickness. Refused (`mesh_thickness: ...`) for a triangle past its mesh,
+// a position not finite or a bad limit.
+inline Result<std::vector<MeshThickness>> mesh_thickness(const std::vector<ThicknessInputMesh>& meshes, double maximum,
+                                                         double sharp_angle = 0.0) {
+    std::vector<double> positions;
+    std::vector<std::uint32_t> indices;
+    std::vector<std::uint32_t> vertex_counts;
+    std::vector<std::uint32_t> triangle_counts;
+    for (const ThicknessInputMesh& mesh : meshes) {
+        for (const Vec3& p : mesh.positions) positions.insert(positions.end(), p.begin(), p.end());
+        for (const std::array<std::uint32_t, 3>& t : mesh.triangles) indices.insert(indices.end(), t.begin(), t.end());
+        vertex_counts.push_back(static_cast<std::uint32_t>(mesh.positions.size()));
+        triangle_counts.push_back(static_cast<std::uint32_t>(mesh.triangles.size()));
+    }
+    // The count arrays are never null, even with no meshes.
+    std::uint32_t none = 0;
+    CadaclysmBlacksmithMeshThicknesses* h = ::cadaclysm_blacksmith_mesh_thickness(
+        positions.data(), vertex_counts.empty() ? &none : vertex_counts.data(), indices.data(),
+        triangle_counts.empty() ? &none : triangle_counts.data(), static_cast<std::uint32_t>(meshes.size()), maximum, sharp_angle);
+    if (!h) return detail::kernel_error("mesh_thickness");
+    std::vector<MeshThickness> rows;
+    std::uint32_t count = ::cadaclysm_blacksmith_mesh_thicknesses_count(h);
+    rows.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        CadaclysmBlacksmithMeshThickness raw{};
+        if (!::cadaclysm_blacksmith_mesh_thicknesses_at(h, i, &raw)) {
+            Error refusal = detail::kernel_error("mesh_thicknesses_at");
+            ::cadaclysm_blacksmith_mesh_thicknesses_free(h);
+            return refusal;
+        }
+        MeshThickness row;
+        row.mesh = raw.mesh;
+        row.vertex = raw.vertex;
+        row.thickness = raw.thickness;
+        row.point = detail::vec3_of(raw.point);
+        row.opposite = detail::vec3_of(raw.opposite);
+        row.opposite_mesh = raw.opposite_mesh;
+        row.opposite_triangle = raw.opposite_triangle;
+        row.knife = raw.knife;
+        rows.push_back(row);
+    }
+    ::cadaclysm_blacksmith_mesh_thicknesses_free(h);
+    return rows;
+}
+
+inline Result<std::optional<FaceThickness>> Solid::thickness_at_face(std::uint32_t face, double maximum, double tolerance) const {
+    return thickness_at_face(face, std::optional<Vec3>(), maximum, tolerance);
+}
+
+inline Result<std::optional<FaceThickness>> Solid::thickness_at_face(std::uint32_t face, const std::optional<Vec3>& at, double maximum,
+                                                                     double tolerance) const {
+    Result<ThicknessGauge> gauge = ThicknessGauge::make(Solids{*this}, tolerance);
+    if (!gauge) return gauge.error();
+    return gauge.value().thickness_at_face(0, face, at, maximum);
+}
+
+// ---- interpolator -----------------------------------------------------------------------
+
+// How Interpolator::at and Interpolator::sample read between samples (Paul Bourke's formulas):
+// the C constants CADACLYSM_BLACKSMITH_INTERPOLATE_*, in their order.
+enum class InterpolatorMode : std::uint32_t {
+    nearest = CADACLYSM_BLACKSMITH_INTERPOLATE_NEAREST,
+    linear = CADACLYSM_BLACKSMITH_INTERPOLATE_LINEAR,
+    cosine = CADACLYSM_BLACKSMITH_INTERPOLATE_COSINE,
+    cubic = CADACLYSM_BLACKSMITH_INTERPOLATE_CUBIC,
+    catmull_rom = CADACLYSM_BLACKSMITH_INTERPOLATE_CATMULL_ROM,
+};
+
+// A list of samples read at a fractional index, as Rhino's Interpolator: `t = 2` is sample 2,
+// `t = 2.5` halfway between samples 2 and 3. Animation keys, a value along a pattern, a smoothed
+// profile of measurements. make() takes numbers (dimension 1), from_rows() equal-length rows of
+// any dimension; every answer is a std::vector of `dimension` numbers, each component read on its
+// own. An open list clamps `t` to [0, size() - 1]; a cyclic one wraps `t` with period size().
+// The five modes: `nearest` the sample at floor(t + 1/2); `linear`; `cosine` linear on a cosine
+// ease, flat at every sample; `cubic` Bourke's cubic through every sample; `catmull_rom` through
+// every sample, C1. Every mode returns the sample itself at a whole `t`. Immutable; move-only; the
+// destructor frees it, as close() does early. A call on a closed or moved-from interpolator is
+// refused, "interpolator: closed". Python's Interpolator.
+class Interpolator {
+public:
+    Interpolator(Interpolator&&) noexcept = default;
+    Interpolator& operator=(Interpolator&&) noexcept = default;
+    Interpolator(const Interpolator&) = delete;
+    Interpolator& operator=(const Interpolator&) = delete;
+
+    // An interpolator over numbers, dimension 1. No samples, or one NaN or infinite (by its
+    // index), is refused.
+    static Result<Interpolator> make(const std::vector<double>& samples, bool cyclic = false) {
+        if (samples.size() > std::numeric_limits<std::uint32_t>::max()) {
+            return detail::refuse("interpolator_new: " + std::to_string(samples.size()) + " samples is more than 4294967295");
+        }
+        return adopt(::cadaclysm_blacksmith_interpolator_new(samples.empty() ? nullptr : samples.data(),
+                                                             static_cast<std::uint32_t>(samples.size()), 1, cyclic));
+    }
+
+    // An interpolator over rows of numbers -- 2D or 3D points, or vectors of any dimension, the
+    // dimension the rows' length. Rows of unequal length are refused before the call; no rows,
+    // rows of no numbers or a number NaN or infinite (by its sample's index) are the kernel's.
+    static Result<Interpolator> from_rows(const std::vector<std::vector<double>>& rows, bool cyclic = false) {
+        std::size_t dimension = rows.empty() ? 1 : rows[0].size();
+        for (const std::vector<double>& row : rows) {
+            if (row.size() != dimension) {
+                return detail::refuse("interpolator: samples differ in length (" + std::to_string(dimension) + " and " +
+                                      std::to_string(row.size()) + ")");
+            }
+        }
+        if (rows.size() > std::numeric_limits<std::uint32_t>::max() || dimension > std::numeric_limits<std::uint32_t>::max() ||
+            (dimension > 0 && rows.size() > std::numeric_limits<std::uint32_t>::max() / dimension)) {
+            return detail::refuse("interpolator_new: " + std::to_string(rows.size()) + " samples of " +
+                                  std::to_string(dimension) + " is too many");
+        }
+        std::vector<double> flat;
+        flat.reserve(rows.size() * dimension);
+        for (const std::vector<double>& row : rows) flat.insert(flat.end(), row.begin(), row.end());
+        return adopt(::cadaclysm_blacksmith_interpolator_new(flat.empty() ? nullptr : flat.data(),
+                                                             static_cast<std::uint32_t>(rows.size()),
+                                                             static_cast<std::uint32_t>(dimension), cyclic));
+    }
+
+    void close() noexcept { ptr_.reset(); }
+    bool closed() const noexcept { return !ptr_; }
+
+    // How many samples. On a closed interpolator, a bad access.
+    std::size_t size() const { return ::cadaclysm_blacksmith_interpolator_count(live()); }
+    // How many numbers a sample holds, and so every answer. On a closed interpolator, a bad access.
+    std::uint32_t dimension() const { return ::cadaclysm_blacksmith_interpolator_dimension(live()); }
+    // Whether `t` wraps round the list (else it is clamped to the ends). On a closed
+    // interpolator, a bad access.
+    bool cyclic() const { return ::cadaclysm_blacksmith_interpolator_cyclic(live()); }
+
+    // The value at the fractional index `t` by `mode`: `dimension()` numbers. A `t` NaN or
+    // infinite is refused.
+    Result<std::vector<double>> at(double t, InterpolatorMode mode = InterpolatorMode::linear) const {
+        if (!ptr_) return closed_error();
+        std::uint32_t d = ::cadaclysm_blacksmith_interpolator_dimension(ptr_.get());
+        std::vector<double> out(d);
+        if (!::cadaclysm_blacksmith_interpolator_at(ptr_.get(), t, static_cast<std::uint32_t>(mode), out.data(), d)) {
+            return detail::kernel_error("interpolator_at");
+        }
+        return out;
+    }
+
+    // The values at every `t` of `ts` by `mode`, as at() reads each, in one call. A value of `t`
+    // NaN or infinite (by its index), or more than 1000000 of them, is refused; no `ts` answers
+    // an empty vector without a call.
+    Result<std::vector<std::vector<double>>> sample(const std::vector<double>& ts,
+                                                    InterpolatorMode mode = InterpolatorMode::linear) const {
+        if (!ptr_) return closed_error();
+        if (ts.empty()) return std::vector<std::vector<double>>{};
+        if (ts.size() > std::numeric_limits<std::uint32_t>::max()) {
+            return detail::refuse("interpolator_sample: " + std::to_string(ts.size()) + " values is more than 4294967295");
+        }
+        std::size_t d = ::cadaclysm_blacksmith_interpolator_dimension(ptr_.get());
+        std::size_t total = ts.size() * d;
+        std::vector<double> flat(total);
+        std::uint32_t out_len = total > std::numeric_limits<std::uint32_t>::max() ? std::numeric_limits<std::uint32_t>::max()
+                                                                                  : static_cast<std::uint32_t>(total);
+        if (!::cadaclysm_blacksmith_interpolator_sample(ptr_.get(), ts.data(), static_cast<std::uint32_t>(ts.size()),
+                                                        static_cast<std::uint32_t>(mode), flat.data(), out_len)) {
+            return detail::kernel_error("interpolator_sample");
+        }
+        std::vector<std::vector<double>> out;
+        out.reserve(ts.size());
+        for (std::size_t k = 0; k < ts.size(); ++k) {
+            out.emplace_back(flat.begin() + static_cast<std::ptrdiff_t>(k * d),
+                             flat.begin() + static_cast<std::ptrdiff_t>((k + 1) * d));
+        }
+        return out;
+    }
+
+    // The sample at floor(t + 1/2) -- a half rounds up -- after the clamp or wrap.
+    Result<std::vector<double>> nearest(double t) const { return at(t, InterpolatorMode::nearest); }
+    // Straight between the two samples either side of `t`.
+    Result<std::vector<double>> linear(double t) const { return at(t, InterpolatorMode::linear); }
+    // Between the two samples either side of `t` on a cosine ease, flat at every sample.
+    Result<std::vector<double>> cosine(double t) const { return at(t, InterpolatorMode::cosine); }
+    // Bourke's cubic over the four samples about `t`, through every sample.
+    Result<std::vector<double>> cubic(double t) const { return at(t, InterpolatorMode::cubic); }
+    // The Catmull-Rom spline over the four samples about `t`: through every sample, C1.
+    Result<std::vector<double>> catmull_rom(double t) const { return at(t, InterpolatorMode::catmull_rom); }
+
+    // The C handle, for code that calls the C ABI directly. Owned by this Interpolator.
+    const CadaclysmBlacksmithInterpolator* handle() const noexcept { return ptr_.get(); }
+
+private:
+    struct Free {
+        void operator()(CadaclysmBlacksmithInterpolator* p) const noexcept { ::cadaclysm_blacksmith_interpolator_free(p); }
+    };
+    explicit Interpolator(CadaclysmBlacksmithInterpolator* raw) : ptr_(raw) {}
+
+    static Result<Interpolator> adopt(CadaclysmBlacksmithInterpolator* raw) {
+        if (!raw) return detail::kernel_error("interpolator_new");
+        return Interpolator(raw);
+    }
+    static Error closed_error() { return detail::refuse("interpolator: closed"); }
+    const CadaclysmBlacksmithInterpolator* live() const {
+        if (!ptr_) cadaclysm::detail::bad_access("interpolator", "closed");
+        return ptr_.get();
+    }
+
+    std::unique_ptr<CadaclysmBlacksmithInterpolator, Free> ptr_;
 };
 
 // ---- SubD cage ------------------------------------------------------------------------
@@ -3830,6 +6978,15 @@ public:
                                                       individual),
                     "subd_inset");
     }
+    // `faces` subdivided once by the Catmull-Clark rules (the whole cage when empty): each
+    // face becomes quads round a new point, and an unpicked face beside them takes the new
+    // edge points as corners. The whole cage keeps its smooth surface exactly. The new cage
+    // selects the new faces.
+    Result<Subd> subdivide(const std::vector<std::uint32_t>& faces = {}) const {
+        const CadaclysmBlacksmithSubd* h = raw_handle("subdivide");
+        return wrap(::cadaclysm_blacksmith_subd_subdivide(h, faces.data(), static_cast<std::uint32_t>(faces.size())),
+                    "subd_subdivide");
+    }
     // A loop of edges cut across `edge`, `at` (0 to 1) of the way along it.
     Result<Subd> insert_loop(const SubdEdge& edge, double at = 0.5) const {
         const CadaclysmBlacksmithSubd* h = raw_handle("insert_loop");
@@ -3960,6 +7117,680 @@ private:
 
     CadaclysmBlacksmithSubd* handle_ = nullptr;
 };
+
+// ---- the 2D constraint sketcher ------------------------------------------------------
+
+namespace detail {
+
+// The C ABI's codes, by position; the wrapper speaks the names (Python's _SKETCH_* tables).
+inline constexpr std::array<const char*, 5> SKETCH_ENTITY_KINDS = {"point", "line", "circle", "arc", "free_curve"};
+inline constexpr std::array<const char*, 27> SKETCH_CONSTRAINT_KINDS = {
+    "coincident", "point_on_line", "point_on_circle", "horizontal", "vertical", "parallel", "perpendicular",
+    "collinear", "tangent", "tangent_at_end", "concentric", "equal_length", "equal_radius", "midpoint",
+    "symmetric", "fix", "distance", "point_line_distance", "line_distance", "circle_line_distance",
+    "circle_distance", "horizontal_distance", "vertical_distance", "length", "angle", "radius", "diameter"};
+inline constexpr std::array<const char*, 3> SKETCH_SENSES = {"auto", "positive", "negative"};
+inline constexpr std::array<const char*, 2> SKETCH_ENDS = {"start", "end"};
+inline constexpr std::array<const char*, 3> SKETCH_STATUSES = {"converged", "conflicting", "diverged"};
+inline constexpr std::array<const char*, 3> SKETCH_STATES = {"under", "full", "over"};
+// sketch_dof_list's and sketch_dof_part_list's `which`.
+inline constexpr std::uint32_t DOF_REDUNDANT = 0, DOF_CONFLICTING = 1, DOF_FREE_ENTITIES = 2;
+inline constexpr std::uint32_t PART_CONSTRAINTS = 0, PART_REDUNDANT = 1, PART_CONFLICTING = 2, PART_FREE_ENTITIES = 3;
+
+// The name of `code` in `table`; NONE or out of range is the library's reason.
+template <std::size_t N>
+inline Result<std::string> sketch_named(const std::array<const char*, N>& table, std::uint32_t code, const char* what) {
+    if (code == NONE || code >= N) return kernel_error(what);
+    return std::string(table[code]);
+}
+
+// The code of `name` in `table`, or a refusal naming the call and the parameter.
+template <std::size_t N>
+inline Result<std::uint32_t> sketch_code(const std::array<const char*, N>& table, const std::string& name,
+                                         const char* call, const char* param) {
+    for (std::size_t i = 0; i < N; ++i) {
+        if (name == table[i]) return static_cast<std::uint32_t>(i);
+    }
+    std::string message = std::string(call) + ": " + param + " must be one of ";
+    for (std::size_t i = 0; i < N; ++i) {
+        if (i) message += ", ";
+        message += std::string("'") + table[i] + "'";
+    }
+    return refuse(message + ", not '" + name + "'");
+}
+
+// A count or code the library sent as a double: whole, in range, or the library broke its
+// contract (a NaN would otherwise read as "converged" or "under").
+inline Result<std::uint32_t> sketch_whole(double value, const char* what) {
+    if (!(value >= 0.0 && value <= 2147483647.0 && value == std::trunc(value))) {
+        return refuse(std::string(what) + ": the library answered " + std::to_string(value) +
+                      ", not a whole number in range");
+    }
+    return static_cast<std::uint32_t>(value);
+}
+
+// A drag's moves in ascending id order -- the solve must not depend on the order the caller
+// listed them in -- or a refusal naming the first id given twice.
+inline Result<std::vector<std::pair<std::uint32_t, Vec2>>> sketch_drag_order(
+    const std::vector<std::pair<std::uint32_t, Vec2>>& moves) {
+    std::vector<std::pair<std::uint32_t, Vec2>> sorted = moves;
+    std::stable_sort(sorted.begin(), sorted.end(),
+                     [](const std::pair<std::uint32_t, Vec2>& x, const std::pair<std::uint32_t, Vec2>& y) {
+                         return x.first < y.first;
+                     });
+    for (std::size_t i = 1; i < sorted.size(); ++i) {
+        if (sorted[i].first == sorted[i - 1].first) {
+            return refuse("sketch_drag: point " + std::to_string(sorted[i].first) + " given twice");
+        }
+    }
+    return sorted;
+}
+
+// A list the library lends until the next call on the same sketch, copied out. Null is a
+// refusal: the library's reason, no ids.
+inline Result<std::vector<std::uint32_t>> sketch_lent(const std::uint32_t* p, std::size_t n, const char* what) {
+    if (p == nullptr) return kernel_error(what);
+    return std::vector<std::uint32_t>(p, p + n);
+}
+
+// `v` as a pointer that is never null: an empty list goes as a valid pointer and a count of
+// 0, never as the null the library reads as a refusal of its own.
+template <class T>
+inline const T* sketch_nonnull(const std::vector<T>& v) {
+    static const T zero = T();
+    return v.empty() ? &zero : v.data();
+}
+
+inline Result<void> sketch_done(bool done, const char* what) {
+    if (!done) return kernel_error(what);
+    return Result<void>();
+}
+
+}  // namespace detail
+
+// The first line of every Sketch call: the handle, or the closed error.
+#define CADACLYSM_SKETCH_LIVE_(h) CadaclysmBlacksmithSketch* h = handle_; if (!h) return closed_error()
+
+// What a Sketch::solve, drag, set_value, set_driving or update_reference did: `status`
+// ("converged", "conflicting" or "diverged"), how many `iterations`, the largest constraint
+// residual left (`max_residual`), and `ids`: the constraints a conflict ran into, or the
+// worst ones of a diverged solve (empty when it converged). Plain data.
+struct SolveReport {
+    std::string status;
+    int iterations = 0;
+    double max_residual = 0.0;
+    std::vector<std::uint32_t> ids;
+
+    bool converged() const { return status == "converged"; }
+};
+
+// One independent part of a diagnosed sketch: its `params` (unknowns), how many stay `free`,
+// its `state` ("under", "full" or "over"), its `constraints`, the `redundant` and
+// `conflicting` ones among them, and its `free_entities`. Plain data.
+struct PartDof {
+    int params = 0;
+    int free = 0;
+    std::string state;
+    std::vector<std::uint32_t> constraints;
+    std::vector<std::uint32_t> redundant;
+    std::vector<std::uint32_t> conflicting;
+    std::vector<std::uint32_t> free_entities;
+};
+
+// A sketch's degrees of freedom (Sketch::diagnose): how many are `free`, its `state`
+// ("under", "full" or "over"), the `redundant` and `conflicting` constraint ids, the
+// `free_entities` (entities that can still move), and the independent `parts` it splits
+// into. Plain data.
+struct Dof {
+    int free = 0;
+    std::string state;
+    std::vector<std::uint32_t> redundant;
+    std::vector<std::uint32_t> conflicting;
+    std::vector<std::uint32_t> free_entities;
+    std::vector<PartDof> parts;
+};
+
+// What Sketch::add_rect made: the four corner points, counter-clockwise from the first
+// corner, and the four sides (side `i` from corner `i`).
+struct SketchRect {
+    std::array<std::uint32_t, 4> corners;
+    std::array<std::uint32_t, 4> sides;
+};
+
+// A 2D sketch of points, lines, circles, arcs and free curves held by geometric constraints
+// and dimensions, solved on request. Entities and constraints are named by integer ids.
+// Entity kinds are "point", "line", "circle", "arc" and "free_curve"; a constraint's kind is
+// the name of the method that adds it ("point_line_distance", ...) but for radius_of, whose
+// kind is "radius": radius(id) reads a circle's radius. Senses are "auto", "positive" or
+// "negative"; ends "start" or "end". Move-only; the destructor frees the handle, as close()
+// does early.
+//
+// A refused call returns the library's text and, as `Error::ids`, the ids the refusal names:
+// the constraints a new constraint, value or reference clashes with, the entities still
+// using a point (empty when it names none). The SolveReports of solve, drag, set_value,
+// set_driving and update_reference carry a returned report's ids the same way. A call on a
+// closed sketch is the error "sketch: closed".
+class Sketch {
+public:
+    // Hand-written, not `= default`: see Collider.
+    Sketch(Sketch&& other) noexcept : handle_(other.handle_) { other.handle_ = nullptr; }
+    Sketch& operator=(Sketch&& other) noexcept {
+        if (this != &other) {
+            close();
+            handle_ = other.handle_;
+            other.handle_ = nullptr;
+        }
+        return *this;
+    }
+    Sketch(const Sketch&) = delete;
+    Sketch& operator=(const Sketch&) = delete;
+
+    ~Sketch() { close(); }
+
+    void close() noexcept {
+        if (handle_) {
+            ::cadaclysm_blacksmith_sketch_free(handle_);
+            handle_ = nullptr;
+        }
+    }
+    bool closed() const noexcept { return handle_ == nullptr; }
+
+    // A new, empty sketch.
+    static Result<Sketch> create() {
+        CadaclysmBlacksmithSketch* raw = ::cadaclysm_blacksmith_sketch_new();
+        if (!raw) return detail::kernel_error("sketch_new");
+        return Sketch(raw);
+    }
+    // A sketch of `profile`'s lines, arcs and curves joined end to end, holes included; with
+    // `infer` the obvious constraints (horizontal, vertical, tangent joints, ...) too. Ends
+    // within `tolerance` count as joined.
+    static Result<Sketch> from_profile(const Profile& profile, bool infer = true, double tolerance = 1e-6) {
+        CadaclysmBlacksmithSketch* raw = ::cadaclysm_blacksmith_sketch_from_profile(profile.handle(), infer, tolerance);
+        if (!raw) return detail::kernel_error("sketch_from_profile");
+        return Sketch(raw);
+    }
+
+    // -- entities
+
+    // A free point at (x, y); a coordinate that is not finite is refused.
+    Result<std::uint32_t> add_point(double x, double y) {
+        CADACLYSM_SKETCH_LIVE_(h);
+        return got_id(::cadaclysm_blacksmith_sketch_add_point(h, x, y), "sketch_add_point");
+    }
+    // A line between the points `a` and `b`.
+    Result<std::uint32_t> add_line(std::uint32_t a, std::uint32_t b) {
+        CADACLYSM_SKETCH_LIVE_(h);
+        return got_id(::cadaclysm_blacksmith_sketch_add_line(h, a, b), "sketch_add_line");
+    }
+    // A circle of radius `r` about the point `centre`.
+    Result<std::uint32_t> add_circle(std::uint32_t centre, double r) {
+        CADACLYSM_SKETCH_LIVE_(h);
+        return got_id(::cadaclysm_blacksmith_sketch_add_circle(h, centre, r), "sketch_add_circle");
+    }
+    // A counter-clockwise arc about the point `centre` from the point `start` to the point `end`.
+    Result<std::uint32_t> add_arc(std::uint32_t centre, std::uint32_t start, std::uint32_t end) {
+        CADACLYSM_SKETCH_LIVE_(h);
+        return got_id(::cadaclysm_blacksmith_sketch_add_arc(h, centre, start, end), "sketch_add_arc");
+    }
+    // A cubic Bezier free curve from the point `start` through the controls `c1` and `c2` to
+    // a new end point at `to`; the curve owns its control points.
+    Result<std::uint32_t> add_bezier(std::uint32_t start, const Vec2& c1, const Vec2& c2, const Vec2& to) {
+        CADACLYSM_SKETCH_LIVE_(h);
+        return got_id(::cadaclysm_blacksmith_sketch_add_bezier(h, start, c1[0], c1[1], c2[0], c2[1], to[0], to[1]),
+                  "sketch_add_bezier");
+    }
+    // A rational quadratic (conic) free curve from the point `start` with the control
+    // `control` of `weight` to a new end point at `to`.
+    Result<std::uint32_t> add_conic(std::uint32_t start, const Vec2& control, const Vec2& to, double weight) {
+        CADACLYSM_SKETCH_LIVE_(h);
+        return got_id(::cadaclysm_blacksmith_sketch_add_conic(h, start, control[0], control[1], to[0], to[1], weight),
+                  "sketch_add_conic");
+    }
+    // A NURBS free curve of `degree` from the point `start` through the control `points`
+    // after it, on `knots`; `weights` none for a plain B-spline, or one per control point
+    // counting the start (`points.size() + 1`).
+    Result<std::uint32_t> add_nurbs(std::uint32_t start, const std::vector<Vec2>& points, const std::vector<double>& knots,
+                                    std::uint32_t degree = 3,
+                                    const std::optional<std::vector<double>>& weights = std::nullopt) {
+        CADACLYSM_SKETCH_LIVE_(h);
+        // The library reads exactly points + 1 weights, whatever the vector holds.
+        if (weights && weights->size() != points.size() + 1) {
+            return detail::refuse("sketch_add_nurbs: " + std::to_string(weights->size()) + " weights for " +
+                                  std::to_string(points.size() + 1) + " control points (the start and " +
+                                  std::to_string(points.size()) + " given); give one per point");
+        }
+        std::vector<double> flat;
+        flat.reserve(points.size() * 2);
+        for (const Vec2& p : points) {
+            flat.push_back(p[0]);
+            flat.push_back(p[1]);
+        }
+        return got_id(::cadaclysm_blacksmith_sketch_add_nurbs(h, start, degree, detail::sketch_nonnull(flat), points.size(),
+                                                          weights ? weights->data() : nullptr,
+                                                          detail::sketch_nonnull(knots), knots.size()),
+                  "sketch_add_nurbs");
+    }
+    // The rectangle with opposite corners `a` and `b`.
+    Result<SketchRect> add_rect(const Vec2& a, const Vec2& b) {
+        CADACLYSM_SKETCH_LIVE_(h);
+        std::size_t n = 0;
+        const std::uint32_t* p = ::cadaclysm_blacksmith_sketch_add_rect(h, a[0], a[1], b[0], b[1], &n);
+        Result<std::vector<std::uint32_t>> ids = detail::sketch_lent(p, n, "sketch_add_rect");
+        if (!ids) return ids.error();
+        if (ids->size() != 8) return detail::refuse("sketch_add_rect: the library answered " + std::to_string(ids->size()) + " ids, not 8");
+        SketchRect rect;
+        std::copy(ids->begin(), ids->begin() + 4, rect.corners.begin());
+        std::copy(ids->begin() + 4, ids->end(), rect.sides.begin());
+        return rect;
+    }
+    // The kind of entity `id`: "point", "line", "circle", "arc" or "free_curve".
+    Result<std::string> kind(std::uint32_t id) const {
+        CADACLYSM_SKETCH_LIVE_(h);
+        return detail::sketch_named(detail::SKETCH_ENTITY_KINDS, ::cadaclysm_blacksmith_sketch_kind(h, id), "sketch_kind");
+    }
+    // The live entity ids, ascending.
+    Result<std::vector<std::uint32_t>> entities() const {
+        CADACLYSM_SKETCH_LIVE_(h);
+        std::size_t n = 0;
+        const std::uint32_t* p = ::cadaclysm_blacksmith_sketch_entities(h, &n);
+        return detail::sketch_lent(p, n, "sketch_entities");
+    }
+    // The point `id`'s position.
+    Result<Vec2> point(std::uint32_t id) const {
+        CADACLYSM_SKETCH_LIVE_(h);
+        Vec2 out = {0.0, 0.0};
+        if (!::cadaclysm_blacksmith_sketch_point(h, id, out.data())) return detail::kernel_error("sketch_point");
+        return out;
+    }
+    // Moves the point `id` to (x, y) without solving.
+    Result<void> set_point(std::uint32_t id, double x, double y) {
+        CADACLYSM_SKETCH_LIVE_(h);
+        return detail::sketch_done(::cadaclysm_blacksmith_sketch_set_point(h, id, x, y), "sketch_set_point");
+    }
+    // The radius of the circle or arc `id` (the RADIUS constraint is radius_of).
+    Result<double> radius(std::uint32_t id) const {
+        CADACLYSM_SKETCH_LIVE_(h);
+        double r = ::cadaclysm_blacksmith_sketch_radius(h, id);
+        if (std::isnan(r)) return detail::kernel_error("sketch_radius");
+        return r;
+    }
+    // Sets the circle `id`'s radius to `r` without solving.
+    Result<void> set_radius(std::uint32_t id, double r) {
+        CADACLYSM_SKETCH_LIVE_(h);
+        return detail::sketch_done(::cadaclysm_blacksmith_sketch_set_radius(h, id, r), "sketch_set_radius");
+    }
+    // The centre point of the circle or arc `id`.
+    Result<std::uint32_t> centre(std::uint32_t id) const {
+        CADACLYSM_SKETCH_LIVE_(h);
+        return got_id(::cadaclysm_blacksmith_sketch_centre(h, id), "sketch_centre");
+    }
+    // The points entity `id` runs between: a line's {a, b}, an arc's {start, end}, a free
+    // curve's {start, controls..., end}.
+    Result<std::vector<std::uint32_t>> ends(std::uint32_t id) const {
+        CADACLYSM_SKETCH_LIVE_(h);
+        std::size_t n = 0;
+        const std::uint32_t* p = ::cadaclysm_blacksmith_sketch_ends(h, id, &n);
+        return detail::sketch_lent(p, n, "sketch_ends");
+    }
+    // Marks entity `id` as construction geometry (kept out of profiles), or back.
+    Result<void> set_construction(std::uint32_t id, bool on = true) {
+        CADACLYSM_SKETCH_LIVE_(h);
+        return detail::sketch_done(::cadaclysm_blacksmith_sketch_set_construction(h, id, on), "sketch_set_construction");
+    }
+    // Whether entity `id` is construction geometry (false for an unknown id).
+    Result<bool> is_construction(std::uint32_t id) const {
+        CADACLYSM_SKETCH_LIVE_(h);
+        return ::cadaclysm_blacksmith_sketch_is_construction(h, id);
+    }
+    // Whether entity `id` is a reference copy of another sketch's (false for an unknown id).
+    Result<bool> is_reference(std::uint32_t id) const {
+        CADACLYSM_SKETCH_LIVE_(h);
+        return ::cadaclysm_blacksmith_sketch_is_reference(h, id);
+    }
+    // Removes entity `id` and the constraints on it: the removed constraint ids. Refused for a
+    // point that lines or circles still use, the refusal naming them in `Error::ids`.
+    Result<std::vector<std::uint32_t>> remove_entity(std::uint32_t id) {
+        CADACLYSM_SKETCH_LIVE_(h);
+        std::size_t n = 0;
+        const std::uint32_t* p = ::cadaclysm_blacksmith_sketch_remove_entity(h, id, &n);
+        if (p == nullptr) return detail::sketch_refusal(h, "sketch_remove_entity");
+        return detail::sketch_lent(p, n, "sketch_remove_entity");
+    }
+    // A fixed construction copy of `other`'s entity `entity`, kept in step by
+    // update_reference. `other` must be another sketch.
+    Result<std::uint32_t> reference(const Sketch& other, std::uint32_t entity) {
+        CADACLYSM_SKETCH_LIVE_(h);
+        CadaclysmBlacksmithSketch* o = other.handle_;
+        if (!o) return closed_error();
+        return got_id(::cadaclysm_blacksmith_sketch_reference(h, o, entity), "sketch_reference");
+    }
+    // Refreshes the reference `id` from `other` and re-solves.
+    Result<SolveReport> update_reference(std::uint32_t id, const Sketch& other) {
+        CADACLYSM_SKETCH_LIVE_(h);
+        CadaclysmBlacksmithSketch* o = other.handle_;
+        if (!o) return closed_error();
+        double report[3] = {0.0, 0.0, 0.0};
+        bool done = ::cadaclysm_blacksmith_sketch_update_reference(h, id, o, report);
+        return solved(h, done, report, "sketch_update_reference");
+    }
+
+    // -- constraints: each returns the new constraint's id
+
+    Result<std::uint32_t> coincident(std::uint32_t a, std::uint32_t b) { return constrain("coincident", {a, b}); }
+    Result<std::uint32_t> point_on_line(std::uint32_t point, std::uint32_t line) {
+        return constrain("point_on_line", {point, line});
+    }
+    // `circle` a circle or an arc.
+    Result<std::uint32_t> point_on_circle(std::uint32_t point, std::uint32_t circle) {
+        return constrain("point_on_circle", {point, circle});
+    }
+    // The points `a` and `b` level with each other.
+    Result<std::uint32_t> horizontal(std::uint32_t a, std::uint32_t b) { return constrain("horizontal", {a, b}); }
+    // The points `a` and `b` one above the other.
+    Result<std::uint32_t> vertical(std::uint32_t a, std::uint32_t b) { return constrain("vertical", {a, b}); }
+    Result<std::uint32_t> parallel(std::uint32_t a, std::uint32_t b) { return constrain("parallel", {a, b}); }
+    Result<std::uint32_t> perpendicular(std::uint32_t a, std::uint32_t b) { return constrain("perpendicular", {a, b}); }
+    Result<std::uint32_t> collinear(std::uint32_t a, std::uint32_t b) { return constrain("collinear", {a, b}); }
+    Result<std::uint32_t> tangent(std::uint32_t a, std::uint32_t b, const std::string& sense = "auto") {
+        return constrain("tangent", {a, b}, 0.0, true, sense);
+    }
+    // The free curve `curve` tangent to `other` at its `end` ("start" or "end").
+    Result<std::uint32_t> tangent_at_end(std::uint32_t curve, std::uint32_t other, const std::string& end = "start") {
+        return constrain("tangent_at_end", {curve, other}, 0.0, true, "auto", end);
+    }
+    Result<std::uint32_t> concentric(std::uint32_t a, std::uint32_t b) { return constrain("concentric", {a, b}); }
+    Result<std::uint32_t> equal_length(std::uint32_t a, std::uint32_t b) { return constrain("equal_length", {a, b}); }
+    Result<std::uint32_t> equal_radius(std::uint32_t a, std::uint32_t b) { return constrain("equal_radius", {a, b}); }
+    Result<std::uint32_t> midpoint(std::uint32_t point, std::uint32_t line) { return constrain("midpoint", {point, line}); }
+    // The points `a` and `b` mirror images across the line `about`.
+    Result<std::uint32_t> symmetric(std::uint32_t a, std::uint32_t b, std::uint32_t about) {
+        return constrain("symmetric", {a, b, about});
+    }
+    Result<std::uint32_t> fix(std::uint32_t entity) { return constrain("fix", {entity}); }
+    Result<std::uint32_t> distance(std::uint32_t a, std::uint32_t b, double value, bool driving = true) {
+        return constrain("distance", {a, b}, value, driving);
+    }
+    Result<std::uint32_t> point_line_distance(std::uint32_t point, std::uint32_t line, double value, bool driving = true,
+                                              const std::string& sense = "auto") {
+        return constrain("point_line_distance", {point, line}, value, driving, sense);
+    }
+    Result<std::uint32_t> line_distance(std::uint32_t a, std::uint32_t b, double value, bool driving = true,
+                                        const std::string& sense = "auto") {
+        return constrain("line_distance", {a, b}, value, driving, sense);
+    }
+    Result<std::uint32_t> circle_line_distance(std::uint32_t circle, std::uint32_t line, double value, bool driving = true,
+                                               const std::string& sense = "auto") {
+        return constrain("circle_line_distance", {circle, line}, value, driving, sense);
+    }
+    Result<std::uint32_t> circle_distance(std::uint32_t a, std::uint32_t b, double value, bool driving = true) {
+        return constrain("circle_distance", {a, b}, value, driving);
+    }
+    Result<std::uint32_t> horizontal_distance(std::uint32_t a, std::uint32_t b, double value, bool driving = true) {
+        return constrain("horizontal_distance", {a, b}, value, driving);
+    }
+    Result<std::uint32_t> vertical_distance(std::uint32_t a, std::uint32_t b, double value, bool driving = true) {
+        return constrain("vertical_distance", {a, b}, value, driving);
+    }
+    Result<std::uint32_t> length(std::uint32_t line, double value, bool driving = true) {
+        return constrain("length", {line}, value, driving);
+    }
+    // The angle from line `a` to line `b`, in radians.
+    Result<std::uint32_t> angle(std::uint32_t a, std::uint32_t b, double value, bool driving = true) {
+        return constrain("angle", {a, b}, value, driving);
+    }
+    // The RADIUS dimension (kind "radius") -- radius(id) reads a radius instead.
+    Result<std::uint32_t> radius_of(std::uint32_t circle, double value, bool driving = true) {
+        return constrain("radius", {circle}, value, driving);
+    }
+    Result<std::uint32_t> diameter(std::uint32_t circle, double value, bool driving = true) {
+        return constrain("diameter", {circle}, value, driving);
+    }
+
+    // The live constraint ids, ascending.
+    Result<std::vector<std::uint32_t>> constraints() const {
+        CADACLYSM_SKETCH_LIVE_(h);
+        std::size_t n = 0;
+        const std::uint32_t* p = ::cadaclysm_blacksmith_sketch_constraints(h, &n);
+        return detail::sketch_lent(p, n, "sketch_constraints");
+    }
+    // The kind of constraint `id`, e.g. "point_line_distance".
+    Result<std::string> constraint_kind(std::uint32_t id) const {
+        CADACLYSM_SKETCH_LIVE_(h);
+        return detail::sketch_named(detail::SKETCH_CONSTRAINT_KINDS, ::cadaclysm_blacksmith_sketch_constraint_kind(h, id),
+                                    "sketch_constraint_kind");
+    }
+    // The entity ids constraint `id` was made on, in the order given.
+    Result<std::vector<std::uint32_t>> constraint_refs(std::uint32_t id) const {
+        CADACLYSM_SKETCH_LIVE_(h);
+        std::size_t n = 0;
+        const std::uint32_t* p = ::cadaclysm_blacksmith_sketch_constraint_refs(h, id, &n);
+        return detail::sketch_lent(p, n, "sketch_constraint_refs");
+    }
+    // The value of the dimension `id`; none for a constraint that is not a dimension. An
+    // unknown id is a refusal: the reader answers NaN for both, and only the second leaves a reason.
+    Result<std::optional<double>> constraint_value(std::uint32_t id) const {
+        CADACLYSM_SKETCH_LIVE_(h);
+        double v = ::cadaclysm_blacksmith_sketch_constraint_value(h, id);
+        if (std::isnan(v)) {
+            if (!detail::text(::cadaclysm_blacksmith_last_error()).empty()) return detail::kernel_error("sketch_constraint_value");
+            return std::optional<double>();
+        }
+        return std::optional<double>(v);
+    }
+    // Whether the dimension `id` drives the geometry (false for a constraint that is not a
+    // dimension; an unknown id is a refusal).
+    Result<bool> constraint_driving(std::uint32_t id) const {
+        CADACLYSM_SKETCH_LIVE_(h);
+        bool driving = ::cadaclysm_blacksmith_sketch_constraint_driving(h, id);
+        if (!driving && !detail::text(::cadaclysm_blacksmith_last_error()).empty()) {
+            return detail::kernel_error("sketch_constraint_driving");
+        }
+        return driving;
+    }
+    // The sense of constraint `id`; "auto" for a kind without one.
+    Result<std::string> constraint_sense(std::uint32_t id) const {
+        CADACLYSM_SKETCH_LIVE_(h);
+        return detail::sketch_named(detail::SKETCH_SENSES, ::cadaclysm_blacksmith_sketch_constraint_sense(h, id),
+                                    "sketch_constraint_sense");
+    }
+    // The end ("start" or "end") of the free curve a tangent_at_end constraint `id` holds;
+    // "start" for a kind without one.
+    Result<std::string> constraint_end(std::uint32_t id) const {
+        CADACLYSM_SKETCH_LIVE_(h);
+        return detail::sketch_named(detail::SKETCH_ENDS, ::cadaclysm_blacksmith_sketch_constraint_end(h, id),
+                                    "sketch_constraint_end");
+    }
+    // Whether the tangent constraint `id` joins two curves end to end.
+    Result<bool> is_joint_tangent(std::uint32_t id) const {
+        CADACLYSM_SKETCH_LIVE_(h);
+        return ::cadaclysm_blacksmith_sketch_is_joint_tangent(h, id);
+    }
+    // Removes the constraint `id`.
+    Result<void> remove(std::uint32_t id) {
+        CADACLYSM_SKETCH_LIVE_(h);
+        return detail::sketch_done(::cadaclysm_blacksmith_sketch_remove(h, id), "sketch_remove");
+    }
+    // Sets the dimension `id` to `value` and re-solves.
+    Result<SolveReport> set_value(std::uint32_t id, double value) {
+        CADACLYSM_SKETCH_LIVE_(h);
+        double report[3] = {0.0, 0.0, 0.0};
+        bool done = ::cadaclysm_blacksmith_sketch_set_value(h, id, value, report);
+        return solved(h, done, report, "sketch_set_value");
+    }
+    // Makes the dimension `id` drive the geometry (true) or only report it, and re-solves.
+    Result<SolveReport> set_driving(std::uint32_t id, bool driving) {
+        CADACLYSM_SKETCH_LIVE_(h);
+        double report[3] = {0.0, 0.0, 0.0};
+        bool done = ::cadaclysm_blacksmith_sketch_set_driving(h, id, driving, report);
+        return solved(h, done, report, "sketch_set_driving");
+    }
+    // What the geometry measures for the dimension `id` right now.
+    Result<double> measure(std::uint32_t id) const {
+        CADACLYSM_SKETCH_LIVE_(h);
+        double v = ::cadaclysm_blacksmith_sketch_measure(h, id);
+        if (std::isnan(v)) return detail::kernel_error("sketch_measure");
+        return v;
+    }
+
+    // -- solving and diagnosis
+
+    // Solves the sketch. A conflicting or diverged solve is reported, not refused.
+    Result<SolveReport> solve() {
+        CADACLYSM_SKETCH_LIVE_(h);
+        double report[3] = {0.0, 0.0, 0.0};
+        bool done = ::cadaclysm_blacksmith_sketch_solve(h, report);
+        return solved(h, done, report, "sketch_solve");
+    }
+    // Drags each point in `moves` (an id and its target) towards its target while the
+    // constraints hold, as a live gesture would. The moves are sent in ascending id order; an id
+    // given twice is refused ("sketch_drag: point <id> given twice"), as is one that is not a point.
+    Result<SolveReport> drag(const std::vector<std::pair<std::uint32_t, Vec2>>& moves) {
+        CADACLYSM_SKETCH_LIVE_(h);
+        Result<std::vector<std::pair<std::uint32_t, Vec2>>> ordered = detail::sketch_drag_order(moves);
+        if (!ordered) return ordered.error();
+        std::vector<std::uint32_t> points;
+        std::vector<double> xy;
+        points.reserve(moves.size());
+        xy.reserve(moves.size() * 2);
+        for (const std::pair<std::uint32_t, Vec2>& move : *ordered) {
+            points.push_back(move.first);
+            xy.push_back(move.second[0]);
+            xy.push_back(move.second[1]);
+        }
+        double report[3] = {0.0, 0.0, 0.0};
+        bool done = ::cadaclysm_blacksmith_sketch_drag(h, detail::sketch_nonnull(points), detail::sketch_nonnull(xy),
+                                                       points.size(), report);
+        return solved(h, done, report, "sketch_drag");
+    }
+    // The sketch's degrees of freedom, whole and per independent part.
+    Result<Dof> diagnose() {
+        CADACLYSM_SKETCH_LIVE_(h);
+        double out[3] = {0.0, 0.0, 0.0};
+        if (!::cadaclysm_blacksmith_sketch_diagnose(h, out)) return detail::kernel_error("sketch_diagnose");
+        Dof dof;
+        Result<std::uint32_t> free_count = detail::sketch_whole(out[0], "sketch_diagnose");
+        if (!free_count) return free_count.error();
+        Result<std::uint32_t> state_code = detail::sketch_whole(out[1], "sketch_diagnose");
+        if (!state_code) return state_code.error();
+        Result<std::uint32_t> part_count = detail::sketch_whole(out[2], "sketch_diagnose");
+        if (!part_count) return part_count.error();
+        Result<std::string> state = detail::sketch_named(detail::SKETCH_STATES, *state_code, "sketch_diagnose");
+        if (!state) return state.error();
+        dof.free = static_cast<int>(*free_count);
+        dof.state = *state;
+        Result<std::vector<std::uint32_t>> redundant = dof_list(h, detail::DOF_REDUNDANT);
+        if (!redundant) return redundant.error();
+        Result<std::vector<std::uint32_t>> conflicting = dof_list(h, detail::DOF_CONFLICTING);
+        if (!conflicting) return conflicting.error();
+        Result<std::vector<std::uint32_t>> free_entities = dof_list(h, detail::DOF_FREE_ENTITIES);
+        if (!free_entities) return free_entities.error();
+        dof.redundant = std::move(redundant).value();
+        dof.conflicting = std::move(conflicting).value();
+        dof.free_entities = std::move(free_entities).value();
+        for (std::uint32_t i = 0; i < *part_count; ++i) {
+            double raw[3] = {0.0, 0.0, 0.0};
+            if (!::cadaclysm_blacksmith_sketch_dof_part(h, i, raw)) return detail::kernel_error("sketch_dof_part");
+            PartDof part;
+            Result<std::uint32_t> params = detail::sketch_whole(raw[0], "sketch_dof_part");
+            if (!params) return params.error();
+            Result<std::uint32_t> part_free = detail::sketch_whole(raw[1], "sketch_dof_part");
+            if (!part_free) return part_free.error();
+            Result<std::uint32_t> part_state_code = detail::sketch_whole(raw[2], "sketch_dof_part");
+            if (!part_state_code) return part_state_code.error();
+            Result<std::string> part_state = detail::sketch_named(detail::SKETCH_STATES, *part_state_code, "sketch_dof_part");
+            if (!part_state) return part_state.error();
+            part.params = static_cast<int>(*params);
+            part.free = static_cast<int>(*part_free);
+            part.state = *part_state;
+            std::vector<std::uint32_t>* targets[4] = {&part.constraints, &part.redundant, &part.conflicting, &part.free_entities};
+            const std::uint32_t which[4] = {detail::PART_CONSTRAINTS, detail::PART_REDUNDANT, detail::PART_CONFLICTING,
+                                            detail::PART_FREE_ENTITIES};
+            for (int k = 0; k < 4; ++k) {
+                std::size_t n = 0;
+                const std::uint32_t* p = ::cadaclysm_blacksmith_sketch_dof_part_list(h, i, which[k], &n);
+                Result<std::vector<std::uint32_t>> list = detail::sketch_lent(p, n, "sketch_dof_part_list");
+                if (!list) return list.error();
+                *targets[k] = std::move(list).value();
+            }
+            dof.parts.push_back(std::move(part));
+        }
+        return dof;
+    }
+
+    // The closed loops as profiles (nested loops become holes; construction geometry left
+    // out); ends within `tolerance` join.
+    Result<std::vector<Profile>> profiles(double tolerance = 1e-6) const {
+        CADACLYSM_SKETCH_LIVE_(h);
+        return Profile::list(::cadaclysm_blacksmith_sketch_profiles(h, tolerance), "sketch_profiles");
+    }
+    // The chains of curves that do not close, as open profiles -- sweep paths; ends within
+    // `tolerance` join.
+    Result<std::vector<Profile>> open_chains(double tolerance = 1e-6) const {
+        CADACLYSM_SKETCH_LIVE_(h);
+        return Profile::list(::cadaclysm_blacksmith_sketch_open_chains(h, tolerance), "sketch_open_chains");
+    }
+
+private:
+    explicit Sketch(CadaclysmBlacksmithSketch* raw) noexcept : handle_(raw) {}
+
+    static Error closed_error() { return detail::refuse("sketch: closed"); }
+
+    // An id the library handed back (NONE: its reason, no ids).
+    static Result<std::uint32_t> got_id(std::uint32_t got, const char* what) {
+        if (got == NONE) return detail::kernel_error(what);
+        return got;
+    }
+
+    // The report a re-solving call filled in (`done` false: refused, with ids).
+    static Result<SolveReport> solved(CadaclysmBlacksmithSketch* h, bool done, const double (&report)[3], const char* what) {
+        if (!done) return detail::sketch_refusal(h, what);
+        std::size_t n = 0;
+        const std::uint32_t* p = ::cadaclysm_blacksmith_sketch_report_ids(h, &n);
+        Result<std::vector<std::uint32_t>> ids = detail::sketch_lent(p, n, "sketch_report_ids");
+        if (!ids) return ids.error();
+        Result<std::uint32_t> status_code = detail::sketch_whole(report[0], what);
+        if (!status_code) return status_code.error();
+        Result<std::string> status = detail::sketch_named(detail::SKETCH_STATUSES, *status_code, what);
+        if (!status) return status.error();
+        Result<std::uint32_t> iterations = detail::sketch_whole(report[1], what);
+        if (!iterations) return iterations.error();
+        SolveReport out;
+        out.status = *status;
+        out.iterations = static_cast<int>(*iterations);
+        out.max_residual = report[2];
+        out.ids = std::move(ids).value();
+        return out;
+    }
+
+    static Result<std::vector<std::uint32_t>> dof_list(CadaclysmBlacksmithSketch* h, std::uint32_t which) {
+        std::size_t n = 0;
+        const std::uint32_t* p = ::cadaclysm_blacksmith_sketch_dof_list(h, which, &n);
+        return detail::sketch_lent(p, n, "sketch_dof_list");
+    }
+
+    // One constraint of `kind`: the geometric kinds take the fillers (value 0, driving, sense
+    // "auto", end "start"), as Python's do. A refusal names the clashing constraints.
+    Result<std::uint32_t> constrain(const char* kind, std::initializer_list<std::uint32_t> refs, double value = 0.0,
+                                    bool driving = true, const std::string& sense = "auto",
+                                    const std::string& end = "start") {
+        CADACLYSM_SKETCH_LIVE_(h);
+        Result<std::uint32_t> sense_code = detail::sketch_code(detail::SKETCH_SENSES, sense, kind, "sense");
+        if (!sense_code) return sense_code.error();
+        Result<std::uint32_t> end_code = detail::sketch_code(detail::SKETCH_ENDS, end, kind, "end");
+        if (!end_code) return end_code.error();
+        Result<std::uint32_t> kind_code = detail::sketch_code(detail::SKETCH_CONSTRAINT_KINDS, kind, kind, "kind");
+        if (!kind_code) return kind_code.error();
+        std::vector<std::uint32_t> ids(refs);
+        std::uint32_t got = ::cadaclysm_blacksmith_sketch_constrain(h, *kind_code, detail::sketch_nonnull(ids), ids.size(),
+                                                                    value, driving, *sense_code, *end_code);
+        if (got == NONE) return detail::sketch_refusal(h, "sketch_constrain");
+        return got;
+    }
+
+    CadaclysmBlacksmithSketch* handle_ = nullptr;
+};
+
+#undef CADACLYSM_SKETCH_LIVE_
 
 // One STEP text, each solid its own body.
 inline Result<std::string> write_step_text(const Solids& solids, const std::optional<std::string>& schema = std::nullopt,
@@ -4155,6 +7986,10 @@ inline std::optional<std::string> schema_file(const std::optional<std::string>& 
     return std::nullopt;
 }
 }  // namespace detail
+
+inline Result<RTree> Solid::face_tree() const {
+    return RTree::adopt(::cadaclysm_blacksmith_solid_face_tree(raw_handle("solid_face_tree")), "solid_face_tree");
+}
 
 // The brep as a solid, shared: the reader's reference handed across and given
 // straight back, the solid holding one of its own (the Brep can then be released).
@@ -4527,6 +8362,102 @@ public:
         return Assembly(raw);
     }
 
+    // The placement path of every solid under this assembly, at any depth: depth first,
+    // placements in order, names joined by "/" with a "/" or "\" inside a name escaped with
+    // "\" (as posed()'s keys are). The index swept_clash()'s rows use. Empty for an assembly
+    // that places no solid.
+    Result<std::vector<std::string>> parts() const {
+        const CadaclysmBlacksmithAssembly* h = raw_handle("assembly_parts");
+        std::uint32_t count = ::cadaclysm_blacksmith_assembly_part_count(h);
+        std::vector<std::string> out;
+        out.reserve(count);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            char* raw = ::cadaclysm_blacksmith_assembly_part_path(h, i);
+            if (!raw) return detail::kernel_error("assembly_part_path");
+            out.emplace_back(raw);
+            ::cadaclysm_blacksmith_string_free(raw);
+        }
+        return out;
+    }
+
+    // Every pair of this assembly's solids (indexed as parts() lists them) that penetrates,
+    // touches or comes within `clearance` of the other anywhere while this assembly's own
+    // mechanism moves through `keyframes`, as SweptClash rows in pair order. Each keyframe is
+    // rows as posed() takes them, and every keyframe names the same joints with the same number
+    // of values each (the first fixes their order); time runs in keyframe units, keyframe `k`
+    // at time `k`. Between two keyframes each joint value moves linearly and each link is posed
+    // from those values, so a link swinging about a joint goes round its arc, not along its
+    // chord. Only this assembly's own joints move: a sub-assembly rides the link its placement
+    // is in. `ground` names one of this assembly's links held fixed (nullopt: its default);
+    // solids in no link stay still. Pairs on two links a joint joins are not tested unless
+    // `joined`; `allowed` pairs of part indices are never tested. `tolerance` meshes the parts;
+    // `resolution` and `max_steps` as Collider::swept_clash. Refused, before C is called, for
+    // keyframes naming different joints, a joint given twice or a different number of values
+    // for one; and with the kernel's own words (`swept_clash: ...`) for everything else.
+    Result<std::vector<SweptClash>> swept_clash(const std::vector<std::vector<StateRow>>& keyframes, double clearance = 0.0,
+                                                double tolerance = DEFAULT_TOLERANCE, double resolution = 1e-3,
+                                                std::uint32_t max_steps = 100000,
+                                                const std::vector<std::pair<std::uint32_t, std::uint32_t>>& allowed = {},
+                                                std::optional<std::string_view> ground = std::nullopt, bool joined = false) const {
+        static const std::vector<StateRow> none;
+        const std::vector<StateRow>& first = keyframes.empty() ? none : keyframes[0];
+        std::vector<const char*> joint_pointers;
+        joint_pointers.reserve(first.size());
+        std::vector<std::uint32_t> counts;
+        counts.reserve(first.size());
+        std::vector<double> flat;
+        for (const StateRow& row : first) {
+            joint_pointers.push_back(row.joint.c_str());
+            counts.push_back(static_cast<std::uint32_t>(row.values.size()));
+            flat.insert(flat.end(), row.values.begin(), row.values.end());
+        }
+        // C takes one joint set for every keyframe: a later keyframe naming other joints is
+        // refused here, in the kernel's words, before C is called
+        for (std::size_t k = 1; k < keyframes.size(); ++k) {
+            const std::vector<StateRow>& frame = keyframes[k];
+            std::string at = std::to_string(k);
+            for (const StateRow& j : first) {
+                bool named = false;
+                for (const StateRow& r : frame) named = named || r.joint == j.joint;
+                if (!named) return detail::refuse("swept_clash: joint '" + j.joint + "' is in keyframe 0 and not in keyframe " + at);
+            }
+            for (const StateRow& j : frame) {
+                bool known = false;
+                for (const StateRow& r : first) known = known || r.joint == j.joint;
+                if (!known) return detail::refuse("swept_clash: joint '" + j.joint + "' is in keyframe " + at + " and not in keyframe 0");
+            }
+            for (std::size_t i = 0; i < frame.size(); ++i) {
+                for (std::size_t e = 0; e < i; ++e) {
+                    if (frame[e].joint == frame[i].joint) return detail::refuse("swept_clash: joint '" + frame[i].joint + "' is given twice");
+                }
+            }
+            for (const StateRow& j : first) {
+                for (const StateRow& r : frame) {
+                    if (r.joint != j.joint) continue;
+                    if (r.values.size() != j.values.size()) {
+                        return detail::refuse("swept_clash: joint '" + j.joint + "' has " + std::to_string(j.values.size()) +
+                                              " values in keyframe 0 and " + std::to_string(r.values.size()) + " in keyframe " + at);
+                    }
+                    flat.insert(flat.end(), r.values.begin(), r.values.end());
+                }
+            }
+        }
+        std::vector<std::uint32_t> allowed_flat;
+        allowed_flat.reserve(allowed.size() * 2);
+        for (const std::pair<std::uint32_t, std::uint32_t>& pair : allowed) {
+            allowed_flat.push_back(pair.first);
+            allowed_flat.push_back(pair.second);
+        }
+        std::optional<std::string> owned_ground = ground ? std::optional<std::string>(*ground) : std::nullopt;
+        CadaclysmBlacksmithSweptClashes* h = ::cadaclysm_blacksmith_assembly_swept_clash(
+            raw_handle("assembly_swept_clash"), joint_pointers.empty() ? nullptr : joint_pointers.data(),
+            counts.empty() ? nullptr : counts.data(), first.size(), flat.empty() ? nullptr : flat.data(),
+            static_cast<std::uint32_t>(keyframes.size()), owned_ground ? owned_ground->c_str() : nullptr, tolerance, clearance,
+            resolution, max_steps, allowed_flat.empty() ? nullptr : allowed_flat.data(), static_cast<std::uint32_t>(allowed.size()),
+            joined);
+        return detail::swept_clashes_of(h, "assembly_swept_clash");
+    }
+
     // Add a named motion sequence over this assembly's states. It is closed unless the last
     // segment is "discontinuous"; `seconds` writes the parameter's unit as the second.
     // Refused, with the kernel's own message and the assembly left unchanged, when a rule
@@ -4780,5 +8711,49 @@ private:
 }  // namespace blacksmith
 }  // namespace CADACLYSM_ABI
 }  // namespace cadaclysm
+
+// Values hash as they compare: by kind and numbers.
+namespace std {
+template <>
+struct hash<cadaclysm::blacksmith::Interval> {
+    std::size_t operator()(const cadaclysm::blacksmith::Interval& v) const noexcept { return v.hash(); }
+};
+template <>
+struct hash<cadaclysm::blacksmith::Line> {
+    std::size_t operator()(const cadaclysm::blacksmith::Line& v) const noexcept { return v.hash(); }
+};
+template <>
+struct hash<cadaclysm::blacksmith::Circle> {
+    std::size_t operator()(const cadaclysm::blacksmith::Circle& v) const noexcept { return v.hash(); }
+};
+template <>
+struct hash<cadaclysm::blacksmith::Arc> {
+    std::size_t operator()(const cadaclysm::blacksmith::Arc& v) const noexcept { return v.hash(); }
+};
+template <>
+struct hash<cadaclysm::blacksmith::Ellipse> {
+    std::size_t operator()(const cadaclysm::blacksmith::Ellipse& v) const noexcept { return v.hash(); }
+};
+template <>
+struct hash<cadaclysm::blacksmith::Sphere> {
+    std::size_t operator()(const cadaclysm::blacksmith::Sphere& v) const noexcept { return v.hash(); }
+};
+template <>
+struct hash<cadaclysm::blacksmith::Cylinder> {
+    std::size_t operator()(const cadaclysm::blacksmith::Cylinder& v) const noexcept { return v.hash(); }
+};
+template <>
+struct hash<cadaclysm::blacksmith::Cone> {
+    std::size_t operator()(const cadaclysm::blacksmith::Cone& v) const noexcept { return v.hash(); }
+};
+template <>
+struct hash<cadaclysm::blacksmith::Torus> {
+    std::size_t operator()(const cadaclysm::blacksmith::Torus& v) const noexcept { return v.hash(); }
+};
+template <>
+struct hash<cadaclysm::blacksmith::Cuboid> {
+    std::size_t operator()(const cadaclysm::blacksmith::Cuboid& v) const noexcept { return v.hash(); }
+};
+}  // namespace std
 
 #endif  // CADACLYSM_BLACKSMITH_HPP

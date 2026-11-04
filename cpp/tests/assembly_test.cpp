@@ -154,6 +154,24 @@ static Result<void> run() {
     check(fresh_cube.name() == std::nullopt, "a fresh cuboid's name is not null");  // fact 10
 
     check(bolt.named("").ok() == false, "an empty name was accepted");
+
+    // The material and the outside style: read back, kept by a cut, written to STEP.
+    check(fresh_cube.material() == std::nullopt, "a fresh cuboid has a material");
+    CADACLYSM_TRY(made, fresh_cube.with_material("Steel"));
+    CADACLYSM_TRY(steel, made.styled("materials/steel.mtlx", "BrushedSteel"));
+    check(steel.material() == std::optional<std::string>("Steel"), "the material did not read back");
+    check(steel.style_location() == std::optional<std::string>("materials/steel.mtlx"), "the style's location did not read back");
+    check(steel.style_identification() == std::optional<std::string>("BrushedSteel"), "the style's identification did not read back");
+    CADACLYSM_TRY(tool, fresh_cube.translate(0.5, 0.5, 0.5));
+    CADACLYSM_TRY(cut, steel.cut(tool));
+    check(cut.material() == std::optional<std::string>("Steel"), "a cut is not made of its target's material");
+    CADACLYSM_TRY(only, fresh_cube.styled(std::nullopt, "BrushedSteel"));
+    check(only.style_location() == std::nullopt, "a style given no location has one");
+    CADACLYSM_TRY(steel_text, steel.step_text());
+    check(steel_text.find("MATERIAL_DESIGNATION('Steel'") != std::string::npos, "STEP is missing the material");
+    check(steel_text.find("EXTERNALLY_DEFINED_STYLE(IDENTIFIER('BrushedSteel')") != std::string::npos, "STEP is missing the style");
+    check(fresh_cube.with_material(" ").ok() == false, "a blank material was accepted");
+    check(fresh_cube.styled(std::nullopt, std::nullopt).ok() == false, "a style naming nothing was accepted");
     return {};
 }
 

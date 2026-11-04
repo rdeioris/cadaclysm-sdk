@@ -168,6 +168,12 @@ export class Brep {
   readonly manifold: Manifold;
   /** This brep with its free edges sewn, and what was sewn; this one is left as it was. Release the new brep. */
   sewed(options?: { tolerance?: number; vertex?: number }): { brep: Brep; report: SewReport };
+  /** What is wrong with this brep: free edges and wires, small features, loose edges, what sewing would do, and, asked for, the mesh's cracks. Nothing moves. */
+  health(options?: HealthOptions): HealthReport;
+  /** This brep with its small features removed, and what was done; this one is left as it was. Release the new brep. */
+  healed(options?: HealOptions): { brep: Brep; report: HealReport };
+  /** How far brep edge `edge` may lie off its curve: 0 exact, the distance healing or sewing moved it, null when no trim names the id. */
+  edgeTolerance(edge: number): number | null;
   release(): void;
 }
 
@@ -177,6 +183,80 @@ export interface SewReport {
   worstGap: number; tolerance: number; vertex: number;
 }
 
+/** What a small feature is: a `SmallFeature`'s, `HealFix`'s or `HealRefusal`'s `kind`. */
+export type SmallFeatureKind = 'short_edge' | 'collapsed_edge' | 'sliver_face' | 'tiny_face' | 'tiny_body' | 'small_hole';
+/** Why `healed` left a small feature: a `HealRefusal`'s `why`. */
+export type HealWhy = 'would_empty_loop' | 'closed' | 'seam' | 'chain' | 'neighbours_part' | 'uneven' | 'non_manifold'
+  | 'has_holes' | 'body_guard' | 'toggled' | 'unsupported';
+/** One free edge: a side only one face bounds, with its nearest partner (a row of `freeEdges`) and the gap to it (`Infinity` without one). */
+export class FreeEdge {
+  constructor(trim: number, edge: number | null, face: number, wire: number, partner: number | null, sharedEnds: number, length: number, gap: number);
+  trim: number;
+  /** The edge it lies on; null for a side that has no edge. */
+  edge: number | null;
+  face: number;
+  wire: number;
+  /** The nearest free edge across the gap, as an index into `freeEdges`; null if there is none. */
+  partner: number | null;
+  sharedEnds: number;
+  length: number;
+  gap: number;
+}
+/** A chain of free edges end to end: the rows `first` to `first + count` of `freeEdges`. */
+export class FreeWire {
+  constructor(first: number, count: number, closed: boolean, length: number, widestGap: number);
+  first: number; count: number; closed: boolean; length: number; widestGap: number;
+}
+/** Something below the tolerance: its kind, its edge, face, body or loop number, and how small. */
+export class SmallFeature {
+  constructor(kind: SmallFeatureKind, index: number, size: number);
+  kind: SmallFeatureKind; index: number; size: number;
+}
+/** What a mesh of the body shows (`health({ mesh: true })`); only a closed body's cracks are counted. */
+export class Cracks {
+  constructor(watertight: boolean, open: number, folded: number, crossings: number, edges: number[]);
+  watertight: boolean; open: number; folded: number; crossings: number; edges: number[];
+}
+/** What is wrong with a body, as plain data (`health`); nothing in it moves the body. */
+export class HealthReport {
+  constructor(tolerance: number, rounding: number, extent: number, freeEdges: FreeEdge[], wires: FreeWire[], small: SmallFeature[],
+    looseEdges: number, worstLoose: number, sewPairs: number, sewRefused: number, sewWorstGap: number, cracks: Cracks | null, worstGap: number);
+  tolerance: number; rounding: number; extent: number;
+  freeEdges: FreeEdge[]; wires: FreeWire[]; small: SmallFeature[];
+  looseEdges: number; worstLoose: number;
+  sewPairs: number; sewRefused: number; sewWorstGap: number;
+  /** Where the mesh cracks; null unless the call asked for the mesh. */
+  cracks: Cracks | null;
+  /** The widest gap between a free edge and its partner. */
+  worstGap: number;
+  /** The free edges of wire number `wire`, in order. */
+  wireEdges(wire: number): FreeEdge[];
+}
+/** One small feature `healed` removed: what it was, its number in the input, its size, and how far the vertices it merged moved. */
+export class HealFix {
+  constructor(kind: SmallFeatureKind, index: number, size: number, moved: number);
+  kind: SmallFeatureKind; index: number; size: number; moved: number;
+}
+/** One small feature `healed` left, and why; `figure` the chain's width or the neighbours' gap, else 0. */
+export class HealRefusal {
+  constructor(kind: SmallFeatureKind, index: number, why: HealWhy, figure: number);
+  kind: SmallFeatureKind; index: number; why: HealWhy; figure: number;
+}
+/** What `healed` did: the fixes, the features left and why, and the body's health before and after. */
+export class HealReport {
+  constructor(tolerance: number, moved: number, guarded: boolean, fixes: HealFix[], refused: HealRefusal[], smallBefore: number, smallAfter: number,
+    freeBefore: number, freeAfter: number, closedBefore: boolean, closedAfter: boolean, nonmanifoldBefore: number, nonmanifoldAfter: number);
+  tolerance: number; moved: number; guarded: boolean;
+  fixes: HealFix[]; refused: HealRefusal[];
+  smallBefore: number; smallAfter: number;
+  freeBefore: number; freeAfter: number;
+  closedBefore: boolean; closedAfter: boolean;
+  nonmanifoldBefore: number; nonmanifoldAfter: number;
+}
+/** `health`'s options: `tolerance` (omitted takes the default, `1e-4` times the diagonal) and `mesh` (also mesh the body and report its cracks). */
+export interface HealthOptions { tolerance?: number; mesh?: boolean }
+/** `healed`'s options: `tolerance` as `health`'s, and the three kinds of fix, each on unless `false`. */
+export interface HealOptions { tolerance?: number; edges?: boolean; faces?: boolean; holes?: boolean }
 /** Whether a brep's faces make a manifold, read off its topology (`Brep.manifold`). */
 export interface Manifold {
   faces: number; edges: number; vertices: number;

@@ -86,6 +86,7 @@ internal unsafe struct RawViewViewport
     public fixed float Projection[16];
     public fixed float Eye[3];
     public uint Grid;
+    public uint LayerMask;
 }
 
 internal struct RawViewEvent
@@ -146,6 +147,48 @@ internal unsafe struct RawViewText
     public float BoxPadding;
     public uint OnTop;
     public uint Font;
+}
+
+internal unsafe struct RawViewProgram
+{
+    public uint Size;
+    public uint ToolNumber;
+    public uint ToolShape;
+    public double ToolDiameter;
+    public double ToolFluteLength;
+    public double ToolAngle;
+    public double ToolCornerRadius;
+    public IntPtr Gcode;
+}
+
+internal unsafe struct RawViewMachining
+{
+    public uint Size;
+    public uint ProgramCount;
+    public IntPtr Programs;
+    public fixed double StockMin[3];
+    public fixed double StockMax[3];
+    public IntPtr PartPositions;
+    public IntPtr PartIndices;
+    public uint PartVertexCount;
+    public uint PartIndexCount;
+    public double Cell;
+    public double Tolerance;
+    public double Skin;
+    public double RapidRate;
+    public uint SkinSet;
+}
+
+internal unsafe struct RawViewMachiningInfo
+{
+    public uint Size;
+    public uint Moves;
+    public uint Move;
+    public uint Nx;
+    public uint Ny;
+    public float Cell;
+    public fixed float Min[2];
+    public double CycleTime;
 }
 
 // 1.10, bound only: nothing in this file fills one yet (C#'s viewport-camera API comes later).
@@ -263,11 +306,30 @@ internal static unsafe class ViewNative
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_set_xray(ViewHandle view, uint item, [MarshalAs(UnmanagedType.I1)] bool on);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_occluded(ViewHandle view, uint item, uint mode);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool cadaclysm_view_set_finish(ViewHandle view, uint item, uint finish);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_set_face_colours(ViewHandle view, uint item, uint* faces, float* rgba, uint count);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_set_placement(ViewHandle view, uint item, double* matrix);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_set_node_transforms(ViewHandle view, uint item, double* transforms, uint count);
+    // 1.7: the machining and the timeline.
+    [DllImport(Lib)] internal static extern uint cadaclysm_view_show_machining(ViewHandle view, RawViewMachining* machining);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)] internal static extern bool cadaclysm_view_machining_seek(ViewHandle view, uint item, uint to);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)] internal static extern bool cadaclysm_view_machining_colour_by(ViewHandle view, uint item, uint mode);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)] internal static extern bool cadaclysm_view_machining_overlays(ViewHandle view, uint item, [MarshalAs(UnmanagedType.I1)] bool path, [MarshalAs(UnmanagedType.I1)] bool tool);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)] internal static extern bool cadaclysm_view_machining_info(ViewHandle view, uint item, RawViewMachiningInfo* info);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)] internal static extern bool cadaclysm_view_machining_heights(ViewHandle view, uint item, float* heights, nuint capacity);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)] internal static extern bool cadaclysm_view_timeline_play(ViewHandle view, double speed);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)] internal static extern bool cadaclysm_view_timeline_pause(ViewHandle view);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)] internal static extern bool cadaclysm_view_timeline_seek(ViewHandle view, double seconds);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)] internal static extern bool cadaclysm_view_timeline_set_loop(ViewHandle view, [MarshalAs(UnmanagedType.I1)] bool on);
+    [DllImport(Lib)] internal static extern double cadaclysm_view_timeline_time(ViewHandle view);
+    [DllImport(Lib)] internal static extern double cadaclysm_view_timeline_duration(ViewHandle view);
+    [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)] internal static extern bool cadaclysm_view_timeline_playing(ViewHandle view);
+    [DllImport(Lib)] internal static extern nuint cadaclysm_view_timeline_status(ViewHandle view, byte* text, nuint capacity);
     [DllImport(Lib)] internal static extern uint cadaclysm_view_show_solid(ViewHandle view, SolidHandle solid, double tolerance, float* rgb);
     [DllImport(Lib)] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool cadaclysm_view_image(ViewHandle view, byte* rgba, nuint capacity);
@@ -436,15 +498,16 @@ public static unsafe class ViewLibrary
     }
 
     /// <summary>Why the library at `path`, answering `version` from cadaclysm_view_abi_version, is
-    /// refused -- null when this wrapper takes it (1.11 or a later 1.x).</summary>
+    /// refused -- null when this wrapper takes it (1.18 or a later 1.x).</summary>
     internal static string? AbiRefusal(string path, uint version)
     {
         uint major = version >> 16, minor = version & 0xFFFF;
         // 1.6: text -- show_text, set_text, load_font and the text layer. 1.7: the machining and
-        // timeline calls (not bound here yet). 1.8: the pick's clicks and point,
+        // timeline calls (bound: ShowMachining, Machining, the transport). 1.8: the pick's clicks and point,
         // set_double_click_frames, focus, navigation. 1.9: set_lighting and lighting. 1.10: the
-        // viewport cameras (bound; C#'s own API for them comes later). 1.11: show_points.
-        return major != 1 || minor < 11 ? $"{path}: view ABI {major}.{minor}, this wrapper needs 1.11 or a later 1.x" : null;
+        // viewport cameras (bound; C#'s own API for them comes later). 1.11: show_points. 1.13: set_occluded.
+        // 1.18: set_finish.
+        return major != 1 || minor < 18 ? $"{path}: view ABI {major}.{minor}, this wrapper needs 1.18 or a later 1.x" : null;
     }
 
     private static bool SamePath(string a, string? b) =>
@@ -562,6 +625,63 @@ public sealed record ViewEvent(string Type, float X = 0, float Y = 0, uint Butto
 /// <summary>Rect is x, y, w, h in physical pixels, the matrices column-major; Grid: none, top, front or right.</summary>
 public sealed record Viewport(uint[] Rect, float[] View, float[] Projection, float[] Eye, string Grid = "none");
 
+/// <summary>A CAM tool: Shape is flat, ball, drill, vbit or bullnose; the flute length, a V-bit's angle and a bull-nose's corner radius are 0 where they mean nothing.</summary>
+public sealed record MachiningTool(uint Number, string Shape, double Diameter, double FluteLength = 0, double Angle = 0, double CornerRadius = 0);
+
+/// <summary>One program of a job: the tool that runs it and its G-code.</summary>
+public sealed record MachiningProgram(MachiningTool Tool, string Gcode);
+
+/// <summary>The finished part, for colouring by deviation: x y z floats a vertex, three indices a triangle.</summary>
+public sealed record MachiningPart(float[] Positions, uint[] Indices);
+
+/// <summary>The library's own default for any null. Skin, once given, is used even at 0.</summary>
+public sealed record MachiningOptions(double? Cell = null, double? Tolerance = null, double? Skin = null, double? RapidRate = null);
+
+/// <summary>Machining.Info(): the move the timeline is at of the job's moves, the height grid and the cycle time in seconds.</summary>
+public sealed record MachiningInfo(uint Moves, uint Move, uint Nx, uint Ny, float Cell, float[] Min, double CycleTime);
+
+/// <summary>A CAM job shown in a View (View.ShowMachining): the stock is this item; the view's timeline plays it.</summary>
+public sealed unsafe class Machining : Item
+{
+    internal Machining(View view, uint id) : base(view, id, null) { }
+
+    private static readonly string[] Modes = { "height", "tool", "deviation" };
+
+    /// <summary>Jump the timeline to the end of move `move` (0: the untouched stock).</summary>
+    public void SeekMove(uint move) =>
+        Ok(ViewNative.cadaclysm_view_machining_seek(View.Live("cadaclysm_view_machining_seek"), Id, move));
+
+    /// <summary>"height", "tool" or "deviation" (needs the part given to ShowMachining).</summary>
+    public void ColourBy(string mode)
+    {
+        var m = mode is null ? -1 : Array.IndexOf(Modes, mode);
+        if (m < 0) throw new ViewException($"mode '{mode}': one of {string.Join(", ", Modes)}");
+        Ok(ViewNative.cadaclysm_view_machining_colour_by(View.Live("cadaclysm_view_machining_colour_by"), Id, (uint)m));
+    }
+
+    /// <summary>The toolpath and the tool, each on or off.</summary>
+    public void Overlays(bool path = true, bool tool = true) =>
+        Ok(ViewNative.cadaclysm_view_machining_overlays(View.Live("cadaclysm_view_machining_overlays"), Id, path, tool));
+
+    public MachiningInfo Info()
+    {
+        var raw = new RawViewMachiningInfo { Size = (uint)sizeof(RawViewMachiningInfo) };
+        Ok(ViewNative.cadaclysm_view_machining_info(View.Live("cadaclysm_view_machining_info"), Id, &raw));
+        return new MachiningInfo(raw.Moves, raw.Move, raw.Nx, raw.Ny, raw.Cell, new[] { raw.Min[0], raw.Min[1] }, raw.CycleTime);
+    }
+
+    /// <summary>The stock's heights now, Nx * Ny floats, row y then x; waits for the GPU.</summary>
+    public float[] Heights()
+    {
+        var info = Info();
+        var n = (ulong)info.Nx * info.Ny;
+        if (n > int.MaxValue) throw new ViewException($"heights: {info.Nx} x {info.Ny} cells is too large");
+        var z = new float[Math.Max((int)n, 1)];
+        fixed (float* p = z) Ok(ViewNative.cadaclysm_view_machining_heights(View.Live("cadaclysm_view_machining_heights"), Id, p, (nuint)n));
+        return n == (ulong)z.Length ? z : Array.Empty<float>();
+    }
+}
+
 /// <summary>A pick answer: the item, node and face hit; Clicks 2 for a double click, else 1; Point where
 /// the ray met the model (x, y, z, in the coordinates the items were shown in), or null where the
 /// library read no depth (a machining stock, the terminal library).</summary>
@@ -573,14 +693,14 @@ public sealed record Camera(float[] Eye, float[] Target, float[] Up, bool Orthog
 public sealed record ViewImage(int Width, int Height, byte[] Rgba);
 
 /// <summary>One thing a view shows. It holds the object it shows.</summary>
-public sealed unsafe class Item
+public unsafe class Item
 {
     internal Item(View view, uint id, object? shown) { View = view; Id = id; Shown = shown; }
     public View View { get; }
     public uint Id { get; }
     public object? Shown { get; internal set; }
 
-    private void Ok(bool done) { if (!done) throw ViewNative.Failure(); }
+    internal void Ok(bool done) { if (!done) throw ViewNative.Failure(); }
 
     public void Remove()
     {
@@ -659,6 +779,28 @@ public sealed unsafe class Item
     }
 
     public void Xray(bool on) => Ok(ViewNative.cadaclysm_view_set_xray(View.Live("cadaclysm_view_set_xray"), Id, on));
+
+    /// <summary>How the item's lines and points draw where a surface hides them: "off" (not drawn; an
+    /// item shows with this until it is set), "solid" (drawn through) or "dashed" (dashed and dimmed).</summary>
+    public void Occluded(string mode)
+    {
+        if (mode is null || !View.OccludedModes.TryGetValue(mode, out uint m))
+            throw new ViewException($"occluded: '{mode}' is not 'off', 'solid' or 'dashed'");
+        Ok(ViewNative.cadaclysm_view_set_occluded(View.Live("cadaclysm_view_set_occluded"), Id, m));
+    }
+
+    /// <summary>The item's finish: "gloss" (an item shows with this until it is set) -- under the
+    /// showroom lighting a clear coat mirroring the room, silver at a grazing angle -- "satin" (a
+    /// weaker, blurred coat) or "matte" (no mirror, a faint sheen: rubber, cloth). Uploads the scene
+    /// again, as a show does: set it as each item is shown rather than over a finished scene item by
+    /// item.</summary>
+    public void Finish(string finish)
+    {
+        if (finish is null || !View.Finishes.TryGetValue(finish, out uint f))
+            throw new ViewException($"finish: '{finish}' is not 'gloss', 'satin' or 'matte'");
+        Ok(ViewNative.cadaclysm_view_set_finish(View.Live("cadaclysm_view_set_finish"), Id, f));
+    }
+
     public void NodeVisible(uint node, bool on) => Ok(ViewNative.cadaclysm_view_set_node_visible(View.Live("cadaclysm_view_set_node_visible"), Id, node, on));
 
     /// <summary><see cref="NodeColour(uint, float[])"/> with the colour as text (alpha 1); null clears.</summary>
@@ -695,6 +837,8 @@ public sealed unsafe class View : IDisposable
         ["top-left"] = 0, ["top"] = 1, ["top-right"] = 2, ["left"] = 3, ["centre"] = 4, ["center"] = 4,
         ["right"] = 5, ["bottom-left"] = 6, ["bottom"] = 7, ["bottom-right"] = 8,
     };
+    internal static readonly Dictionary<string, uint> OccludedModes = new() { ["off"] = 0, ["solid"] = 1, ["dashed"] = 2 };
+    internal static readonly Dictionary<string, uint> Finishes = new() { ["gloss"] = 0, ["satin"] = 1, ["matte"] = 2 };
     private static readonly Dictionary<string, uint> TextModes = new() { ["label"] = 0, ["world"] = 1 };
     private static readonly Dictionary<string, uint> Events = new()
     {
@@ -963,6 +1107,130 @@ public sealed unsafe class View : IDisposable
             return NewItem(ViewNative.cadaclysm_view_show_points(h, p, (uint)positions.Length / 3, c, sizePx), null);
     }
 
+    private static readonly string[] ToolShapes = { "flat", "ball", "drill", "vbit", "bullnose" };
+
+    private static double FiniteOr0(double? value, string what) =>
+        value is null ? 0 : double.IsFinite(value.Value) ? value.Value : throw new ViewException($"{what}: a finite number, not {value}");
+
+    private static void FiniteAll(double[]? values, int n, string what)
+    {
+        if (values is null || values.Length != n) throw new ViewException($"{what}: {n} finite numbers, not {values?.Length ?? 0}");
+        foreach (var d in values) if (!double.IsFinite(d)) throw new ViewException($"{what}: {n} finite numbers");
+    }
+
+    /// <summary>A CAM job on a stock, paused at its start: `programs` in run order, the stock's two
+    /// corners, the finished `part` (null: none; ColourBy("deviation") needs it) and the options (null,
+    /// or a null in them: the library's defaults). Play it with Play(). A shape is one of flat, ball,
+    /// drill, vbit, bullnose; a part's positions are x y z triples and its indices whole triangles
+    /// inside them. Anything wrong is refused before the library is called.</summary>
+    public unsafe Machining ShowMachining(IReadOnlyList<MachiningProgram> programs, double[] stockMin, double[] stockMax,
+        MachiningPart? part = null, MachiningOptions? options = null)
+    {
+        if (programs is null) throw new ViewException("programs: a list, not null");
+        foreach (var program in programs)
+        {
+            var tool = program?.Tool;
+            if (tool is null || tool.Shape is null) throw new ViewException("tool needs number, shape and diameter");
+            if (Array.IndexOf(ToolShapes, tool.Shape) < 0) throw new ViewException($"shape '{tool.Shape}': one of {string.Join(", ", ToolShapes)}");
+            if (program!.Gcode is null) throw new ViewException("a program needs its gcode, not null");
+            if (program.Gcode.Contains('\0')) throw new ViewException("a program's G-code cannot hold a NUL character (the C string ends there)");
+            FiniteAll(new[] { tool.Diameter, tool.FluteLength, tool.Angle, tool.CornerRadius }, 4, "tool diameter, flute length, angle and corner radius");
+        }
+        FiniteAll(stockMin, 3, "stock min");
+        FiniteAll(stockMax, 3, "stock max");
+        var o = options ?? new MachiningOptions();
+        double cell = FiniteOr0(o.Cell, "cell"), tolerance = FiniteOr0(o.Tolerance, "tolerance"),
+            skin = FiniteOr0(o.Skin, "skin"), rapidRate = FiniteOr0(o.RapidRate, "rapid_rate");
+        var positions = part?.Positions ?? Array.Empty<float>();
+        var indices = part?.Indices ?? Array.Empty<uint>();
+        if (part is not null)
+        {
+            if (positions.Length % 3 != 0) throw new ViewException($"part positions: {positions.Length} numbers is not a whole number of x y z triples");
+            foreach (var f in positions) if (!float.IsFinite(f)) throw new ViewException("part positions: finite numbers");
+            if (indices.Length % 3 != 0) throw new ViewException($"part indices: {indices.Length} is not a whole number of triangles");
+            uint top = 0;
+            foreach (var k in indices) if (k > top) top = k;
+            if (indices.Length > 0 && top >= (uint)(positions.Length / 3)) throw new ViewException($"part indices: {top} is past the last of {positions.Length / 3} vertices");
+        }
+        var h = Live("cadaclysm_view_show_machining");
+        var n = programs.Count;
+        var texts = new IntPtr[n];
+        var list = new RawViewProgram[Math.Max(n, 1)];
+        try
+        {
+            for (var k = 0; k < n; k++)
+            {
+                var tool = programs[k].Tool;
+                texts[k] = Marshal.StringToCoTaskMemUTF8(programs[k].Gcode);
+                list[k] = new RawViewProgram
+                {
+                    Size = (uint)sizeof(RawViewProgram), ToolNumber = tool.Number, ToolShape = (uint)Array.IndexOf(ToolShapes, tool.Shape),
+                    ToolDiameter = tool.Diameter, ToolFluteLength = tool.FluteLength, ToolAngle = tool.Angle, ToolCornerRadius = tool.CornerRadius,
+                    Gcode = texts[k],
+                };
+            }
+            var raw = new RawViewMachining { Size = (uint)sizeof(RawViewMachining), ProgramCount = (uint)n,
+                Cell = cell, Tolerance = tolerance, Skin = skin, RapidRate = rapidRate, SkinSet = o.Skin is null ? 0u : 1u };
+            for (var k = 0; k < 3; k++) { raw.StockMin[k] = stockMin[k]; raw.StockMax[k] = stockMax[k]; }
+            fixed (RawViewProgram* programsPtr = list) fixed (float* pp = NonNull(positions)) fixed (uint* ip = NonNull(indices))
+            {
+                raw.Programs = n == 0 ? IntPtr.Zero : (IntPtr)programsPtr;
+                if (part is not null)
+                {
+                    raw.PartPositions = (IntPtr)pp; raw.PartIndices = (IntPtr)ip;
+                    raw.PartVertexCount = (uint)(positions.Length / 3); raw.PartIndexCount = (uint)indices.Length;
+                }
+                var id = ViewNative.cadaclysm_view_show_machining(h, &raw);
+                if (id == 0) throw ViewNative.Failure();
+                var shown = new Machining(this, id);
+                lock (Items) Items[id] = shown;
+                return shown;
+            }
+        }
+        finally { foreach (var t in texts) if (t != IntPtr.Zero) Marshal.FreeCoTaskMem(t); }
+    }
+
+    // ---- the timeline (1.7): one per view, shared by whatever it shows
+
+    /// <summary>Play the timeline at `speed` times real time, from where it is (from the start once it has ended).</summary>
+    public void Play(double speed = 1) => Ok(ViewNative.cadaclysm_view_timeline_play(Live("cadaclysm_view_timeline_play"), speed));
+
+    public void Pause() => Ok(ViewNative.cadaclysm_view_timeline_pause(Live("cadaclysm_view_timeline_pause")));
+
+    /// <summary>Set the clock, clamped to [0, Duration]; the next draw shows it.</summary>
+    public void Seek(double seconds) => Ok(ViewNative.cadaclysm_view_timeline_seek(Live("cadaclysm_view_timeline_seek"), seconds));
+
+    /// <summary>Whether the timeline starts over at its end.</summary>
+    public void Loop(bool on = true) => Ok(ViewNative.cadaclysm_view_timeline_set_loop(Live("cadaclysm_view_timeline_set_loop"), on));
+
+    /// <summary>Seconds into the timeline, as of the last draw.</summary>
+    public double Time => ViewNative.cadaclysm_view_timeline_time(Live("cadaclysm_view_timeline_time"));
+
+    /// <summary>The timeline's length in seconds; 0 with nothing to play.</summary>
+    public double Duration => ViewNative.cadaclysm_view_timeline_duration(Live("cadaclysm_view_timeline_duration"));
+
+    public bool Playing => ViewNative.cadaclysm_view_timeline_playing(Live("cadaclysm_view_timeline_playing"));
+
+    /// <summary>What the timeline is doing, one line a track (for example "move 3 of 9 ..."); empty with no tracks.</summary>
+    public unsafe IReadOnlyList<string> Status()
+    {
+        var h = Live("cadaclysm_view_timeline_status");
+        var n = ViewNative.cadaclysm_view_timeline_status(h, null, 0);
+        while (n != 0)
+        {
+            var buf = new byte[(int)n + 1];
+            nuint got;
+            fixed (byte* b = buf) got = ViewNative.cadaclysm_view_timeline_status(h, b, (nuint)buf.Length);
+            if (got < (nuint)buf.Length)
+            {
+                if (got == 0) return Array.Empty<string>();
+                return System.Text.Encoding.UTF8.GetString(buf, 0, (int)got).Split('\n');
+            }
+            n = got;   // the line grew between the two calls: ask again with room for it
+        }
+        return Array.Empty<string>();
+    }
+
     /// <summary><see cref="ShowCurves(float[], float[])"/> with the colour as text.</summary>
     public Item ShowCurves(float[] beziers, string rgb) => ShowCurves(beziers, ViewNative.Colour(rgb));
 
@@ -1087,6 +1355,7 @@ public sealed unsafe class View : IDisposable
                 for (var k = 0; k < 16; k++) { p[i].View[k] = list[i].View[k]; p[i].Projection[k] = list[i].Projection[k]; }
                 for (var k = 0; k < 3; k++) p[i].Eye[k] = list[i].Eye[k];
                 p[i].Grid = grids[i];
+                p[i].LayerMask = 0xFFFFFFFFu; // every user layer
             }
             Ok(ViewNative.cadaclysm_view_set_viewports(handle, p, (uint)raw.Length));
         }

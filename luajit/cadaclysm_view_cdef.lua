@@ -3,7 +3,7 @@ return [[
 
 static const uint32_t CADACLYSM_VIEW_ABI_MAJOR = 1;
 
-static const uint32_t CADACLYSM_VIEW_ABI_MINOR = 12;
+static const uint32_t CADACLYSM_VIEW_ABI_MINOR = 19;
 
 static const uint32_t CADACLYSM_VIEW_WINDOW_WIN32 = 1;
 
@@ -15,6 +15,14 @@ static const uint32_t CADACLYSM_VIEW_WINDOW_WAYLAND = 4;
 
 static const uint32_t CADACLYSM_VIEW_WINDOW_APPKIT = 5;
 
+static const uint32_t CADACLYSM_VIEW_WINDOW_KMS = 6;
+
+static const uint32_t CADACLYSM_VIEW_KMS_GBM = 1;
+
+static const uint32_t CADACLYSM_VIEW_KMS_GPU = 2;
+
+static const uint32_t CADACLYSM_VIEW_KMS_COPY = 3;
+
 static const uint32_t CADACLYSM_VIEW_SURFACES_EXACT = 0;
 
 static const uint32_t CADACLYSM_VIEW_SURFACES_TRIANGLES = 1;
@@ -22,6 +30,28 @@ static const uint32_t CADACLYSM_VIEW_SURFACES_TRIANGLES = 1;
 static const uint32_t CADACLYSM_VIEW_LIGHTING_HEADLIGHT = 0;
 
 static const uint32_t CADACLYSM_VIEW_LIGHTING_STUDIO = 1;
+
+static const uint32_t CADACLYSM_VIEW_LIGHTING_SHOWROOM = 2;
+
+static const uint32_t CADACLYSM_VIEW_FINISH_GLOSS = 0;
+
+static const uint32_t CADACLYSM_VIEW_FINISH_SATIN = 1;
+
+static const uint32_t CADACLYSM_VIEW_FINISH_MATTE = 2;
+
+static const uint32_t CADACLYSM_VIEW_ANALYSIS_NONE = 0;
+
+static const uint32_t CADACLYSM_VIEW_ANALYSIS_ZEBRA = 1;
+
+static const uint32_t CADACLYSM_VIEW_ANALYSIS_ISOPHOTES = 2;
+
+static const uint32_t CADACLYSM_VIEW_ANALYSIS_GAUSSIAN = 3;
+
+static const uint32_t CADACLYSM_VIEW_ANALYSIS_MEAN = 4;
+
+static const uint32_t CADACLYSM_VIEW_ANALYSIS_MIN = 5;
+
+static const uint32_t CADACLYSM_VIEW_ANALYSIS_MAX = 6;
 
 static const uint32_t CADACLYSM_VIEW_BACKEND_ANY = 0;
 
@@ -54,6 +84,12 @@ static const uint32_t CADACLYSM_VIEW_LAYER_TEXT = 5;
 static const uint32_t CADACLYSM_VIEW_TEXT_LABEL = 0;
 
 static const uint32_t CADACLYSM_VIEW_TEXT_WORLD = 1;
+
+static const uint32_t CADACLYSM_VIEW_OCCLUDED_OFF = 0;
+
+static const uint32_t CADACLYSM_VIEW_OCCLUDED_SOLID = 1;
+
+static const uint32_t CADACLYSM_VIEW_OCCLUDED_DASHED = 2;
 
 static const uint32_t CADACLYSM_VIEW_ALIGN_TOP_LEFT = 0;
 
@@ -145,6 +181,8 @@ static const uint32_t CADACLYSM_VIEW_COLOUR_BY_TOOL = 1;
 
 static const uint32_t CADACLYSM_VIEW_COLOUR_BY_DEVIATION = 2;
 
+static const uint32_t CADACLYSM_VIEW_USER_LAYERS = 32;
+
 static const uint32_t CADACLYSM_VIEW_API_D3D12 = 1;
 
 static const uint32_t CADACLYSM_VIEW_API_VULKAN = 2;
@@ -234,6 +272,23 @@ typedef struct CadaclysmViewPick {
   float point[3];
 } CadaclysmViewPick;
 
+typedef struct CadaclysmViewAnalysis {
+
+  uint32_t size;
+
+  uint32_t mode;
+
+  uint32_t count;
+
+  float angle;
+
+  float width;
+
+  float light[3];
+
+  double range;
+} CadaclysmViewAnalysis;
+
 typedef struct CadaclysmViewLod {
 
   uint32_t size;
@@ -255,6 +310,8 @@ typedef struct CadaclysmViewViewport {
   float eye[3];
 
   uint32_t grid;
+
+  uint32_t layer_mask;
 } CadaclysmViewViewport;
 
 typedef struct CadaclysmViewEvent {
@@ -543,6 +600,29 @@ typedef struct CadaclysmViewTexture {
   uint64_t release_value;
 } CadaclysmViewTexture;
 
+typedef struct CadaclysmViewKmsInfo {
+
+  uint32_t size;
+
+  uint32_t path;
+
+  uint64_t modifier;
+
+  uint32_t connector;
+
+  uint32_t width;
+  uint32_t height;
+  uint32_t refresh;
+
+  uint32_t fourcc;
+
+  char connector_name[32];
+
+  char card[64];
+
+  char adapter[128];
+} CadaclysmViewKmsInfo;
+
 uint32_t cadaclysm_view_abi_version(void);
 
 const char *cadaclysm_view_last_error(void);
@@ -594,11 +674,20 @@ void cadaclysm_view_set_orthographic(struct CadaclysmView *view, bool on);
 
 bool cadaclysm_view_set_layer(struct CadaclysmView *view, uint32_t layer, bool on);
 
+bool cadaclysm_view_set_item_layer(struct CadaclysmView *view, uint32_t item, uint32_t layer);
+
+bool cadaclysm_view_set_user_layer(struct CadaclysmView *view, uint32_t layer, bool on);
+
 void cadaclysm_view_set_background(struct CadaclysmView *view, const float *rgb);
 
 bool cadaclysm_view_set_lighting(struct CadaclysmView *view, uint32_t lighting);
 
 uint32_t cadaclysm_view_lighting(const struct CadaclysmView *view);
+
+bool cadaclysm_view_set_analysis(struct CadaclysmView *view,
+                                 const struct CadaclysmViewAnalysis *analysis);
+
+bool cadaclysm_view_analysis(const struct CadaclysmView *view, struct CadaclysmViewAnalysis *out);
 
 bool cadaclysm_view_set_lod(struct CadaclysmView *view, const struct CadaclysmViewLod *lod);
 
@@ -672,6 +761,10 @@ uint32_t cadaclysm_view_show_image(struct CadaclysmView *view,
 bool cadaclysm_view_set_colour(struct CadaclysmView *view, uint32_t item, const float *rgb);
 
 bool cadaclysm_view_set_xray(struct CadaclysmView *view, uint32_t item, bool on);
+
+bool cadaclysm_view_set_occluded(struct CadaclysmView *view, uint32_t item, uint32_t mode);
+
+bool cadaclysm_view_set_finish(struct CadaclysmView *view, uint32_t item, uint32_t finish);
 
 bool cadaclysm_view_set_face_colours(struct CadaclysmView *view,
                                      uint32_t item,
@@ -780,4 +873,9 @@ struct CadaclysmView *cadaclysm_view_create_shared(const struct CadaclysmViewSha
 bool cadaclysm_view_texture(struct CadaclysmView *view, struct CadaclysmViewTexture *out);
 
 bool cadaclysm_view_release(struct CadaclysmView *view, uint64_t release_value);
+
+bool cadaclysm_view_kms_info(const struct CadaclysmView *view, struct CadaclysmViewKmsInfo *out);
+
+bool cadaclysm_view_kms_probe(const struct CadaclysmViewWindow *window,
+                              struct CadaclysmViewKmsInfo *out);
 ]]

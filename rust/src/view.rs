@@ -11,6 +11,8 @@ mod options;
 
 mod items;
 
+mod machining;
+
 mod target;
 
 pub(crate) mod objects;
@@ -25,7 +27,8 @@ mod text;
 
 pub use colour::{Colour, Rgb, Rgba};
 pub use options::{Camera, Lighting, Navigation, Pick, SurfaceMode, ViewOptions};
-pub use items::{Item, View};
+pub use items::{Finish, Item, Occluded, View};
+pub use machining::{ColourBy, Machining, MachiningInfo, MachiningOptions, MachiningPart, MachiningProgram, MachiningTool, ToolShape};
 pub use text::{Align, Text, TextMode};
 pub use target::{RawWindow, WindowKind};
 pub use control::{Button, Event, Grid, Image, Input, Layer, Lod, LodMotion, Pointer, Standard, Viewport};
@@ -360,7 +363,7 @@ mod tests {
     fn a_viewer_reports_its_name_and_version() {
         let v = fake::library();
         assert_eq!(v.name(), "fake 1.0");
-        assert_eq!(v.abi_version(), (1, 11));
+        assert_eq!(v.abi_version(), (1, 18));
         assert_eq!(v.path(), Path::new("fake"));
     }
 
@@ -435,8 +438,8 @@ mod tests {
     fn another_abi_major_is_refused_with_both_versions() {
         fake::abi((2 << 16) | 5);
         let err = Library::from_api(fake::api(), PathBuf::from("v2.dll"), None).expect_err("ABI 2 refused");
-        fake::abi((1 << 16) | 11);
-        assert_eq!(err.message(), "v2.dll: view ABI 2.5, this SDK needs 1.11 or a later 1.x");
+        fake::abi((1 << 16) | 18);
+        assert_eq!(err.message(), "v2.dll: view ABI 2.5, this SDK needs 1.18 or a later 1.x");
     }
 
     #[test]
@@ -445,30 +448,30 @@ mod tests {
         let m = abi_mismatch(1, 5, Path::new("old.dll"), Some(reason));
         assert_eq!(
             m,
-            "old.dll: view ABI 1.5, this SDK needs 1.11 or a later 1.x\n\
+            "old.dll: view ABI 1.5, this SDK needs 1.18 or a later 1.x\n\
              The build gave no libraries of its own: they were not built from R:\\src: cargo build failed"
         );
-        assert_eq!(abi_mismatch(1, 5, Path::new("old.dll"), None), "old.dll: view ABI 1.5, this SDK needs 1.11 or a later 1.x");
+        assert_eq!(abi_mismatch(1, 5, Path::new("old.dll"), None), "old.dll: view ABI 1.5, this SDK needs 1.18 or a later 1.x");
     }
 
     #[test]
-    fn a_minor_version_below_11_is_refused_with_the_abi_message() {
+    fn a_minor_version_below_18_is_refused_with_the_abi_message() {
         fake::abi((1 << 16) | 4);
         let err = Library::from_api(fake::api(), PathBuf::from("v1.4.dll"), None).expect_err("1.4 is too old");
-        fake::abi((1 << 16) | 11);
-        assert_eq!(err.message(), "v1.4.dll: view ABI 1.4, this SDK needs 1.11 or a later 1.x");
-        fake::abi((1 << 16) | 10);
-        let err = Library::from_api(fake::api(), PathBuf::from("v1.10.dll"), None).expect_err("1.10 is too old");
-        fake::abi((1 << 16) | 11);
-        assert_eq!(err.message(), "v1.10.dll: view ABI 1.10, this SDK needs 1.11 or a later 1.x");
+        fake::abi((1 << 16) | 18);
+        assert_eq!(err.message(), "v1.4.dll: view ABI 1.4, this SDK needs 1.18 or a later 1.x");
+        fake::abi((1 << 16) | 17);
+        let err = Library::from_api(fake::api(), PathBuf::from("v1.17.dll"), None).expect_err("1.17 is too old");
+        fake::abi((1 << 16) | 18);
+        assert_eq!(err.message(), "v1.17.dll: view ABI 1.17, this SDK needs 1.18 or a later 1.x");
     }
 
     #[test]
     fn a_later_minor_version_is_accepted() {
-        fake::abi((1 << 16) | 12);
-        let v = Library::from_api(fake::api(), PathBuf::from("v1.12"), None);
-        fake::abi((1 << 16) | 11);
-        assert_eq!(v.expect("1.12 is 1.11 or later").abi_version(), (1, 12));
+        fake::abi((1 << 16) | 19);
+        let v = Library::from_api(fake::api(), PathBuf::from("v1.19"), None);
+        fake::abi((1 << 16) | 18);
+        assert_eq!(v.expect("1.19 is 1.18 or later").abi_version(), (1, 19));
     }
 
     #[test]
@@ -501,7 +504,7 @@ mod tests {
     #[test]
     fn a_viewer_prints_its_name_path_and_version() {
         let text = format!("{:?}", fake::library());
-        assert_eq!(text, r#"Library { name: "fake 1.0", path: "fake", abi_version: (1, 11) }"#);
+        assert_eq!(text, r#"Library { name: "fake 1.0", path: "fake", abi_version: (1, 18) }"#);
     }
 
     #[test]

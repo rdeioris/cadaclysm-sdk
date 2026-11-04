@@ -37,12 +37,14 @@ end
 local M = {}
 
 -- 1.6: text -- cadaclysm_view_show_text, _set_text, _load_font and the text layer.
--- 1.7: the machining and timeline calls (not bound here yet).
+-- 1.7: the machining and timeline calls (View:show_machining, Machining, the transport).
 -- 1.8: the pick's `clicks` and `point`, cadaclysm_view_set_double_click_frames, _focus, _navigation.
 -- 1.9: cadaclysm_view_set_lighting and _lighting (headlight or studio).
 -- 1.10: the viewport cameras -- each move's trailing viewport, camera/set_camera, viewport_rects, aim, pivot, tap.
 -- 1.11: cadaclysm_view_show_points.
-local ABI_MAJOR, ABI_MINOR = 1, 11
+-- 1.13: cadaclysm_view_set_occluded.
+-- 1.18: cadaclysm_view_set_finish.
+local ABI_MAJOR, ABI_MINOR = 1, 18
 local NAVIGATION_FLY = 1   -- CADACLYSM_VIEW_NAVIGATION_FLY (ORBIT is 0)
 local OPEN, CLOSED = 1, 2
 local INPUT_CLOSE, NONE_COMING = 1, 0xFFFFFFFF
@@ -64,6 +66,8 @@ local ALIGN = names({ "top-left", "top", "top-right", "left", "centre", "right",
 ALIGN.center = ALIGN.centre   -- the American spelling is taken too (and named in the message)
 ALIGN._list = { "top-left", "top", "top-right", "left", "centre", "center", "right", "bottom-left", "bottom", "bottom-right" }
 local TEXT_MODES = names({ "label", "world" })
+local OCCLUDED = names({ "off", "solid", "dashed" })
+local FINISH = names({ "gloss", "satin", "matte" })
 local POINTERS = names({ "mouse", "touch", "pen" })
 local CAMERA_KINDS = names({ "orbit", "fly", "ortho", "fixed" })
 local EVENTS = { pointer_down = 1, pointer_move = 2, pointer_up = 3, pointer_cancel = 4, wheel = 5, key = 6,
@@ -298,9 +302,14 @@ local ENTRY_POINTS = {
   "cadaclysm_view_set_node_highlight", "cadaclysm_view_set_viewports", "cadaclysm_view_request_pick",
   "cadaclysm_view_request_pick_in", "cadaclysm_view_pick_result", "cadaclysm_view_frame_node", "cadaclysm_view_look",
   "cadaclysm_view_dolly", "cadaclysm_view_input", "cadaclysm_view_show_mesh", "cadaclysm_view_show_lines",
-  "cadaclysm_view_show_points", "cadaclysm_view_show_curves", "cadaclysm_view_show_image", "cadaclysm_view_set_colour", "cadaclysm_view_set_xray",
+  "cadaclysm_view_show_points", "cadaclysm_view_show_curves", "cadaclysm_view_show_image", "cadaclysm_view_set_colour", "cadaclysm_view_set_xray", "cadaclysm_view_set_occluded", "cadaclysm_view_set_finish",
   "cadaclysm_view_set_face_colours", "cadaclysm_view_set_placement", "cadaclysm_view_show_solid", "cadaclysm_view_image",
   "cadaclysm_view_size", "cadaclysm_view_set_lod", "cadaclysm_view_wake_ms", "cadaclysm_view_set_node_transforms",
+  "cadaclysm_view_show_machining", "cadaclysm_view_machining_seek", "cadaclysm_view_machining_colour_by",
+  "cadaclysm_view_machining_overlays", "cadaclysm_view_machining_info", "cadaclysm_view_machining_heights",
+  "cadaclysm_view_timeline_play", "cadaclysm_view_timeline_pause", "cadaclysm_view_timeline_seek",
+  "cadaclysm_view_timeline_set_loop", "cadaclysm_view_timeline_time", "cadaclysm_view_timeline_duration",
+  "cadaclysm_view_timeline_playing", "cadaclysm_view_timeline_status",
   "cadaclysm_view_parse_colour", "cadaclysm_view_load_font", "cadaclysm_view_show_text", "cadaclysm_view_set_text",
   "cadaclysm_view_set_double_click_frames", "cadaclysm_view_focus", "cadaclysm_view_navigation",
   "cadaclysm_view_set_lighting", "cadaclysm_view_lighting",
@@ -881,6 +890,7 @@ function View:viewports(list)
     for k = 0, 15 do slot.view[k] = view[k]; slot.projection[k] = projection[k] end
     for k = 0, 2 do slot.eye[k] = eye[k] end
     slot.grid = name_of(GRIDS, v.grid or "none", "grid")
+    slot.layer_mask = 0xFFFFFFFF -- every user layer
   end
   ok(self, self._lib.C.cadaclysm_view_set_viewports(p, raw, #list))
 end
@@ -1300,6 +1310,20 @@ function Item:frame() item_ok(self, self.view._lib.C.cadaclysm_view_frame(self.v
 function Item:xray(on)
   item_ok(self, self.view._lib.C.cadaclysm_view_set_xray(self.view:_live("cadaclysm_view_set_xray"), self.id, on ~= false))
 end
+function Item:occluded(mode)
+  local m = mode ~= nil and OCCLUDED[mode] or nil
+  if type(m) ~= "number" then error(("occluded: '%s' is not 'off', 'solid' or 'dashed'"):format(tostring(mode)), 2) end
+  item_ok(self, self.view._lib.C.cadaclysm_view_set_occluded(self.view:_live("cadaclysm_view_set_occluded"), self.id, m))
+end
+-- The item's finish: "gloss" (an item shows with this until it is set) -- under the showroom
+-- lighting a clear coat mirroring the room, silver at a grazing angle -- "satin" (a weaker,
+-- blurred coat) or "matte" (no mirror, a faint sheen: rubber, cloth). Uploads the scene again,
+-- as a show does: set it as each item is shown rather than over a finished scene item by item.
+function Item:finish(finish)
+  local f = finish ~= nil and FINISH[finish] or nil
+  if type(f) ~= "number" then error(("finish: '%s' is not 'gloss', 'satin' or 'matte'"):format(tostring(finish)), 2) end
+  item_ok(self, self.view._lib.C.cadaclysm_view_set_finish(self.view:_live("cadaclysm_view_set_finish"), self.id, f))
+end
 function Item:node_visible(node, on)
   local index = node_index(node, "node_visible node")
   item_ok(self, self.view._lib.C.cadaclysm_view_set_node_visible(self.view:_live("cadaclysm_view_set_node_visible"), self.id, index, on ~= false))
@@ -1319,6 +1343,181 @@ end
 function Item:frame_node(node)
   local index = node_index(node, "frame_node node")
   item_ok(self, self.view._lib.C.cadaclysm_view_frame_node(self.view:_live("cadaclysm_view_frame_node"), self.id, index))
+end
+
+-- ---- Machining and the timeline (1.7) ----------------------------------------------------
+
+local TOOL_SHAPES = names({ "flat", "ball", "drill", "vbit", "bullnose" })
+local COLOUR_BY = names({ "height", "tool", "deviation" })
+
+local Machining = setmetatable({}, { __index = Item })
+Machining.__index = Machining
+M.Machining = Machining
+
+-- A finite number, refused naming the field.
+local function finite(v, what)
+  if type(v) ~= "number" or v ~= v or v == math.huge or v == -math.huge then
+    fail(what .. ": a finite number, not " .. describe(v), 3)
+  end
+  return v
+end
+
+-- One `{ tool, gcode }` as the struct (Python's `_program`); the gcode text is kept in `keep`.
+local function program_of(p, entry, keep)
+  if type(p) ~= "table" then fail("programs: { tool, gcode } pairs, not " .. describe(p), 3) end
+  local tool, gcode = p[1], p[2]
+  if type(tool) ~= "table" or tool.number == nil or tool.shape == nil or tool.diameter == nil then
+    fail("tool needs number, shape and diameter", 3)
+  end
+  local number_ = finite(tool.number, "tool number")
+  if number_ ~= math.floor(number_) then fail(("tool number %s is not a whole number"):format(tostring(number_)), 3) end
+  if number_ < 0 then fail(("tool number %d is negative"):format(number_), 3) end
+  if number_ > UINT_MAX then fail(("tool number %d is past %d"):format(number_, UINT_MAX), 3) end
+  local shape = type(tool.shape) == "string" and TOOL_SHAPES[tool.shape]
+  if type(shape) ~= "number" then
+    fail(("shape '%s': one of %s"):format(tostring(tool.shape), table.concat(TOOL_SHAPES._list, ", ")), 3)
+  end
+  entry.size, entry.tool_number, entry.tool_shape = ffi.sizeof("CadaclysmViewProgram"), number_, shape
+  entry.tool_diameter = finite(tool.diameter, "tool diameter")
+  entry.tool_flute_length = finite(tool.flute_length or 0, "tool flute_length")
+  entry.tool_angle = finite(tool.angle or 0, "tool angle")
+  entry.tool_corner_radius = finite(tool.corner_radius or 0, "tool corner_radius")
+  if type(gcode) ~= "string" then fail("gcode: a string, not " .. describe(gcode), 3) end
+  if gcode:find("\0", 1, true) then fail("gcode: a NUL character cannot be sent (the C string ends there)", 3) end
+  keep[#keep + 1] = ffi.new("char[?]", #gcode + 1, gcode)
+  entry.gcode = keep[#keep]
+end
+
+-- A part's `{ positions, indices }` as C arrays (Python's `_part_arrays`' checks and words).
+local function part_of(part)
+  if type(part) ~= "table" then fail("part: { positions = ..., indices = ... }, not " .. describe(part), 3) end
+  local positions, indices = table_of(part.positions, "part positions"), table_of(part.indices, "part indices")
+  local np, ni = #positions, #indices
+  for k = 1, ni do
+    local i = indices[k]
+    if type(i) ~= "number" or i ~= math.floor(i) then fail("part indices must be whole numbers", 3) end
+    if i < 0 then fail("part indices must not be negative", 3) end
+    if i > UINT_MAX then fail(("part indices: %d is past %d"):format(i, UINT_MAX), 3) end
+  end
+  for k = 1, np do finite(positions[k], ("part positions: item %d"):format(k)) end
+  if np % 3 ~= 0 then fail(("part positions: %d numbers is not a whole number of x y z triples"):format(np), 3) end
+  if ni % 3 ~= 0 then fail(("part indices: %d is not a whole number of triangles"):format(ni), 3) end
+  local top = -1
+  for k = 1, ni do if indices[k] > top then top = indices[k] end end
+  if top >= np / 3 then fail(("part indices: %d is past the last of %d vertices"):format(top, np / 3), 3) end
+  local p, i = carray("float", positions, "part positions"), carray("uint32_t", indices, "part indices")
+  return p, i, np / 3, ni
+end
+
+--- A CAM job on a stock, paused at its start, as Python's View.show_machining: `programs` a list of
+--- `{ tool, gcode }` in run order -- `tool` a table of number, shape ("flat", "ball", "drill", "vbit",
+--- "bullnose"), diameter and, where given, flute_length, angle (a V-bit's), corner_radius (a bull-nose's);
+--- `stock` `{ {x, y, z}, {x, y, z} }` (min, max); `part` nil or `{ positions = {...}, indices = {...} }`
+--- (flat lists, three numbers a vertex and three indices a triangle) for colouring by deviation;
+--- `options` nil or a table of cell, tolerance, skin and rapid_rate (absent: the library's defaults).
+--- Play it with View:play().
+function View:show_machining(programs, stock, part, options)
+  table_of(programs, "programs")
+  if options ~= nil and type(options) ~= "table" then fail("show_machining options: a table, not " .. describe(options), 2) end
+  options = options or {}
+  local n = #programs
+  local raw = ffi.new("CadaclysmViewProgram[?]", math.max(n, 1))
+  local keep = {}   -- the locals raw, keep, pp and pi hold the arrays the struct points into across the call
+  for k = 1, n do program_of(programs[k], raw[k - 1], keep) end
+  local m = ffi.new("CadaclysmViewMachining")
+  m.size, m.program_count, m.programs = ffi.sizeof("CadaclysmViewMachining"), n, raw
+  if type(stock) ~= "table" or type(stock[1]) ~= "table" or type(stock[2]) ~= "table" then
+    fail("stock: { {minX, minY, minZ}, {maxX, maxY, maxZ} }, not " .. describe(stock), 2)
+  end
+  if #stock[1] ~= 3 or #stock[2] ~= 3 then fail("stock: three numbers a corner", 2) end
+  for a = 1, 3 do
+    m.stock_min[a - 1] = finite(stock[1][a], "stock min")
+    m.stock_max[a - 1] = finite(stock[2][a], "stock max")
+  end
+  local pp, pi
+  if part ~= nil then
+    local vertices, count
+    pp, pi, vertices, count = part_of(part)
+    m.part_positions, m.part_indices, m.part_vertex_count, m.part_index_count = pp, pi, vertices, count
+  end
+  m.cell = finite(options.cell or 0, "show_machining cell")
+  m.tolerance = finite(options.tolerance or 0, "show_machining tolerance")
+  m.rapid_rate = finite(options.rapid_rate or 0, "show_machining rapid_rate")
+  if options.skin ~= nil then m.skin, m.skin_set = finite(options.skin, "show_machining skin"), 1 end
+  local id = self._lib.C.cadaclysm_view_show_machining(self:_live("cadaclysm_view_show_machining"), m)
+  local item = setmetatable(self:_item(id, nil), Machining)
+  return item
+end
+
+--- Jumps the timeline to the end of move `move` (0: the untouched stock).
+function Machining:seek_move(move)
+  if type(move) ~= "number" or move ~= math.floor(move) or move < 0 or move > UINT_MAX then
+    fail("seek_move: a whole number of moves, 0 or more, not " .. describe(move), 2)
+  end
+  item_ok(self, self.view._lib.C.cadaclysm_view_machining_seek(self.view:_live("cadaclysm_view_machining_seek"), self.id, move))
+end
+--- "height", "tool" or "deviation" (the last needs a part).
+function Machining:colour_by(mode)
+  local m = type(mode) == "string" and COLOUR_BY[mode]
+  if type(m) ~= "number" then
+    fail(("mode '%s': one of %s"):format(tostring(mode), table.concat(COLOUR_BY._list, ", ")), 2)
+  end
+  item_ok(self, self.view._lib.C.cadaclysm_view_machining_colour_by(self.view:_live("cadaclysm_view_machining_colour_by"), self.id, m))
+end
+--- The toolpath and the tool, on or off (nil is on).
+function Machining:overlays(path, tool)
+  item_ok(self, self.view._lib.C.cadaclysm_view_machining_overlays(self.view:_live("cadaclysm_view_machining_overlays"), self.id, path ~= false, tool ~= false))
+end
+--- `moves`, `move` (done, as of the last draw), the heights' grid (`nx`, `ny`, `cell`, `min`) and the
+--- job's `cycle_time` in seconds.
+function Machining:info()
+  local out = ffi.new("CadaclysmViewMachiningInfo")
+  out.size = ffi.sizeof("CadaclysmViewMachiningInfo")
+  item_ok(self, self.view._lib.C.cadaclysm_view_machining_info(self.view:_live("cadaclysm_view_machining_info"), self.id, out))
+  return { moves = tonumber(out.moves), move = tonumber(out.move), nx = tonumber(out.nx), ny = tonumber(out.ny),
+    cell = tonumber(out.cell), min = { tonumber(out.min[0]), tonumber(out.min[1]) }, cycle_time = tonumber(out.cycle_time) }
+end
+--- The stock's heights now: a 1-based table of nx * ny numbers, row y then x (z[j * nx + i + 1]); waits for the GPU.
+function Machining:heights()
+  local info = self:info()
+  local n = info.nx * info.ny
+  local z = ffi.new("float[?]", math.max(n, 1))
+  item_ok(self, self.view._lib.C.cadaclysm_view_machining_heights(self.view:_live("cadaclysm_view_machining_heights"), self.id, z, n))
+  local out = {}
+  for k = 0, n - 1 do out[k + 1] = z[k] end
+  return out
+end
+
+--- Plays the timeline at `speed` (default 1) times real time; it stops at its end unless loop() is on.
+function View:play(speed)
+  ok(self, self._lib.C.cadaclysm_view_timeline_play(self:_live("cadaclysm_view_timeline_play"), finite(speed == nil and 1 or speed, "play speed")))
+end
+function View:pause() ok(self, self._lib.C.cadaclysm_view_timeline_pause(self:_live("cadaclysm_view_timeline_pause"))) end
+--- Sets the clock, clamped to [0, duration].
+function View:seek(seconds)
+  ok(self, self._lib.C.cadaclysm_view_timeline_seek(self:_live("cadaclysm_view_timeline_seek"), finite(seconds, "seek seconds")))
+end
+--- Loops the timeline (nil is on; false is off).
+function View:loop(on) ok(self, self._lib.C.cadaclysm_view_timeline_set_loop(self:_live("cadaclysm_view_timeline_set_loop"), on ~= false)) end
+function View:time() return tonumber(self._lib.C.cadaclysm_view_timeline_time(self:_live("cadaclysm_view_timeline_time"))) end
+function View:duration() return tonumber(self._lib.C.cadaclysm_view_timeline_duration(self:_live("cadaclysm_view_timeline_duration"))) end
+function View:playing() return self._lib.C.cadaclysm_view_timeline_playing(self:_live("cadaclysm_view_timeline_playing")) == true end
+--- One line per track at the clock's time, e.g. "move 370 of 638 · T1 flat 6 mm · X12.3 Y-4.0 Z7.0".
+function View:status()
+  local p = self:_live("cadaclysm_view_timeline_status")
+  local n = tonumber(self._lib.C.cadaclysm_view_timeline_status(p, nil, 0))
+  while n > 0 do
+    local buf = ffi.new("char[?]", n + 1)
+    local got = tonumber(self._lib.C.cadaclysm_view_timeline_status(p, buf, n + 1))
+    if got < n + 1 then
+      local lines = {}
+      if got == 0 then return lines end   -- the line emptied between the two calls
+      for line in (ffi.string(buf, got) .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+      return lines
+    end
+    n = got   -- the line grew between the two calls: ask again with room for it
+  end
+  return {}
 end
 
 -- ---- show() and view() on the objects ------------------------------------------------------

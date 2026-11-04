@@ -10,7 +10,7 @@ use std::process::ExitCode;
 
 use cadaclysm_sdk::blacksmith::{
     self, Assembly, Axis, Collider, Curve, Frame, Intersection, Keep, PairOptions, Path as Outline, Profile, Selector, Solid, SolidHits,
-    SweepPath, Subd, SubdSolidOptions, Unit, Workplane, DEFAULT_TOLERANCE, FILLET_TOLERANCE,
+    SweepPath, Sketch, Subd, SubdSolidOptions, Unit, Workplane, DEFAULT_TOLERANCE, FILLET_TOLERANCE,
 };
 use cadaclysm_sdk::{Convention, Link, Node, OpenOptions, Scene, StateValue, SvgOptions};
 
@@ -612,7 +612,45 @@ fn kernel(license: Option<&str>) -> Result<(), String> {
     let cage_scene = cadaclysm_sdk::open_memory(cage_step.as_bytes(), "step").map_err(e)?;
     let meshable = cage_scene.walk().filter(|node| node.can_mesh()).count();
     check(meshable == 1, &format!("subd: the cage's STEP reads back as {meshable} meshable nodes, not one"))?;
+    let kiln = Subd::cuboid([2.0, 2.0, 2.0], [2, 2, 2]).map_err(e)?;
+    let whole = kiln.subdivide(&[]).map_err(e)?.faces().map_err(e)?.len();
+    let one = kiln.subdivide(&[1]).map_err(e)?.faces().map_err(e)?.len();
+    check(whole == 96 && one == 27, &format!("subd: subdivide gave {whole} and {one} faces, not 96 and 27"))?;
+    check(kiln.subdivide(&[999]).is_err(), "subd: subdivide accepted a face not in the cage")?;
     println!("subd: cuboid {cube_report:?}; extruded and inset deviation {}", piped_report.deviation);
+
+    // The 2D constraint sketcher: a plate dimensioned, solved and extruded (S1), and a
+    // conflict refused with the ids it clashes with (S2).
+    {
+        let plate = Sketch::new().map_err(e)?;
+        let (corners, sides) = plate.add_rect([0.0, 0.0], [40.0, 30.0]).map_err(e)?;
+        plate.fix(corners[0]).map_err(e)?;
+        let width = plate.length(sides[0], 60.0, true).map_err(e)?;
+        plate.length(sides[1], 30.0, true).map_err(e)?;
+        let hole = plate.add_circle(plate.add_point(30.0, 15.0).map_err(e)?, 5.0).map_err(e)?;
+        plate.radius_of(hole, 5.0, true).map_err(e)?;
+        let solved = plate.solve().map_err(e)?;
+        check(solved.converged() && solved.ids.is_empty(), &format!("sketch: the plate solved as {solved:?}"))?;
+        let corner = plate.point(corners[1]).map_err(e)?;
+        check((corner[0] - 60.0).abs() <= 1e-9 && corner[1].abs() <= 1e-9, &format!("sketch: corner 1 is at {corner:?}, not (60, 0)"))?;
+        check(
+            plate.constraint_kind(width).map_err(e)? == "length" && plate.constraint_value(width).map_err(e)? == Some(60.0),
+            "sketch: the width did not read back as a length of 60",
+        )?;
+        let dof = plate.diagnose().map_err(e)?;
+        check(dof.free == 2 && dof.state == "under", &format!("sketch: the plate diagnosed as {dof:?}"))?;
+        let loops = plate.profiles(1e-9).map_err(e)?;
+        check(loops.len() == 1, &format!("sketch: the plate has {} profiles, not 1", loops.len()))?;
+        let plate_solid = Solid::extrude(&loops[0], &Frame::xy([0.0; 3]), 10.0).map_err(e)?;
+        let plate_volume = plate_solid.mass(0.0).map_err(e)?.volume;
+        check(plate_volume > 0.0, "sketch: the extruded plate has no volume")?;
+        let clash = plate.distance(corners[0], corners[2], 10.0, true).expect_err("sketch: a diagonal over the dimensioned rectangle");
+        check(
+            clash.message().starts_with("sketch_constrain: over-constrained") && clash.ids() == [0, 1, 5, 6],
+            &format!("sketch: the conflict was refused as {clash:?}"),
+        )?;
+        println!("sketch: plate solved in {} iterations, volume {}", solved.iterations, plate_volume);
+    }
 
     let step = std::env::temp_dir().join("cadaclysm-smoke-rust.stp");
     rounded.step(&step, None, Unit::Millimetre).map_err(e)?;

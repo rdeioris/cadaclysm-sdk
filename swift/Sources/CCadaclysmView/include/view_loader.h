@@ -77,13 +77,13 @@ extern "C" {
 #define CVL_PATH 4096
 #define CVL_ERROR 8192
 #define CVL_NO_NODE 0xFFFFFFFFu
-#define CVL_ABI_MINOR 11u
+#define CVL_ABI_MINOR 18u
 #define CVL_PI 3.14159265358979323846
 #define CVL_RADIANS_PER_PIXEL 0.01 /* cadaclysm_view::view::ORBIT_PER_PIXEL */
 #define CVL_ZOOM_PER_STEP 0.9      /* cadaclysm_view::view::ZOOM_PER_STEP */
 
-/* name, return type, parameters: 70 calls of cadaclysm_view.h 1.11 -- every one but 1.7's machining
- * and timeline calls, which no linked wrapper uses yet -- in the header's order (a binding test
+/* name, return type, parameters: 86 calls of cadaclysm_view.h 1.18 -- every one but 1.14's analysis calls
+ * and 1.12's texture targets, which no linked wrapper uses yet -- in the header's order (a binding test
  * counts them against the header). */
 #define CVL_CALLS(X) \
     X(abi_version, uint32_t, (void))                                                               \
@@ -136,9 +136,25 @@ extern "C" {
     X(show_image, uint32_t, (CadaclysmView *, const CadaclysmViewImage *))                         \
     X(set_colour, bool, (CadaclysmView *, uint32_t, const float *))                                \
     X(set_xray, bool, (CadaclysmView *, uint32_t, bool))                                           \
+    X(set_occluded, bool, (CadaclysmView *, uint32_t, uint32_t))                                   \
+    X(set_finish, bool, (CadaclysmView *, uint32_t, uint32_t))                                     \
     X(set_face_colours, bool, (CadaclysmView *, uint32_t, const uint32_t *, const float *, uint32_t)) \
     X(set_placement, bool, (CadaclysmView *, uint32_t, const double *))                            \
     X(set_node_transforms, bool, (CadaclysmView *, uint32_t, const double *, uint32_t))            \
+    X(show_machining, uint32_t, (CadaclysmView *, const CadaclysmViewMachining *))               \
+    X(machining_seek, bool, (CadaclysmView *, uint32_t, uint32_t))                               \
+    X(machining_colour_by, bool, (CadaclysmView *, uint32_t, uint32_t))                          \
+    X(machining_overlays, bool, (CadaclysmView *, uint32_t, bool, bool))                         \
+    X(machining_info, bool, (CadaclysmView *, uint32_t, CadaclysmViewMachiningInfo *))           \
+    X(machining_heights, bool, (CadaclysmView *, uint32_t, float *, size_t))                     \
+    X(timeline_play, bool, (CadaclysmView *, double))                                            \
+    X(timeline_pause, bool, (CadaclysmView *))                                                   \
+    X(timeline_seek, bool, (CadaclysmView *, double))                                            \
+    X(timeline_set_loop, bool, (CadaclysmView *, bool))                                          \
+    X(timeline_time, double, (const CadaclysmView *))                                            \
+    X(timeline_duration, double, (const CadaclysmView *))                                        \
+    X(timeline_playing, bool, (const CadaclysmView *))                                           \
+    X(timeline_status, size_t, (const CadaclysmView *, char *, size_t))                          \
     X(show_solid, uint32_t, (CadaclysmView *, const CadaclysmBlacksmithSolid *, double, const float *)) \
     X(load_font, uint32_t, (const uint8_t *, size_t))                                              \
     X(show_text, uint32_t, (CadaclysmView *, const CadaclysmViewText *))                           \
@@ -492,7 +508,7 @@ CVL_API int cvl_find(const char *stem, const char *variable, const char *what, c
                     file, searched, variable);
 }
 
-/* A library's cadaclysm_view_abi_version() answer against the table's: 1.x, x >= 11
+/* A library's cadaclysm_view_abi_version() answer against the table's: 1.x, x >= 18
  * (CVL_ABI_MINOR). 1, or 0 and the refusal (Python's words) in `err`. */
 CVL_API int cvl_check_abi(uint32_t version, const char *path, char *err, size_t n) {
     uint32_t major = version >> 16, minor = version & 0xFFFFu;

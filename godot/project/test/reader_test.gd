@@ -129,7 +129,7 @@ func test_colour_attributes_and_their_text():
 			ok(a["name"] is String)
 			ok(a["kind"] in ["none", "text", "integer", "real", "boolean", "list", "reference"], str(a["kind"]))
 			ok(a["text"] is String)
-	eq(total, 8)
+	eq(total, 14)
 	scene.close()
 
 func test_edges_segments_and_copies():
@@ -210,6 +210,98 @@ func test_surfaces_and_the_brep():
 	brep.release()
 	brep.release()
 	eq(brep.pointer(), 0)
+	ok(Cadaclysm.last_error().contains("released"), Cadaclysm.last_error())
+
+# ---- the health report and healing (healing in the other wrappers, 2026-10-29) --------
+# `st203-bapl.stp` at the repository root, as Python's tests find it; skipped quietly
+# without it. Body 1 is the 188-free-edge one (body 0 takes minutes to diagnose).
+
+func rel(actual: float, expected: float, tolerance: float, message := "") -> bool:
+	return ok(absf(actual - expected) <= tolerance * absf(expected), "%s expected %s (rel %s), got %s" % [message, expected, tolerance, actual])
+
+func st203_body() -> CadaclysmBrep:
+	var r := root()
+	if r == "" or not FileAccess.file_exists(r.path_join("st203-bapl.stp")):
+		print("      skipped: st203-bapl.stp not to hand")
+		return null
+	var scene := CadaclysmScene.open_with(r.path_join("st203-bapl.stp"), {"convention": "native"})
+	var breps := []
+	for n in scene.nodes:
+		var b = n.brep
+		if b != null:
+			breps.append(b)
+	return breps[1]
+
+func test_brep_health_reports_the_free_edges_of_st203_bapl():
+	var body := st203_body()
+	if body == null:
+		return
+	eq(body.manifold()["boundary_edges"], 188)
+	var h := body.health()
+	eq([h["free_edges"].size(), h["wires"].size()], [188, 45])
+	var total := 0
+	for w in h["wires"]:
+		total += w["count"]
+	eq(total, 188)
+	var first: Dictionary = h["free_edges"][0]
+	eq([first["trim"], first["edge"], first["face"], first["wire"], first["partner"], first["shared_ends"]], [0, 41363, 0, 0, 67, 0])
+	rel(first["gap"], 95.01496054, 1e-6, "gap")
+	ok(h["free_edges"].all(func(e): return e["partner"] >= 0 or is_inf(e["gap"])), "a partnerless edge has an infinite gap")
+	rel(h["extent"], 253.66439715552204, 1e-12, "extent")
+	rel(h["tolerance"], 1e-4 * h["extent"], 1e-12, "tolerance")
+	eq(h["cracks"], null)
+	eq([h["loose_edges"], h["worst_loose"]], [0, 0.0])
+	# 56 is `sewed()`'s pairs, as Python's test compares them: this binding has no `sewed`.
+	eq([h["sew_pairs"], h["sew_refused"]], [56, 4])
+	ok(h["sew_worst_gap"] > 0.0)
+	var c: Dictionary = body.health(0.0, true)["cracks"]
+	eq([c["watertight"], c["open"], c["folded"], c["crossings"], c["edges"]], [false, 0, 0, 166, PackedInt64Array()])
+	var wide: Array = body.health(5.0)["small"]
+	eq(wide.size(), 96)
+	var edge: Dictionary = wide.filter(func(s): return s["kind"] == "short_edge")[0]
+	eq(edge["index"], 41550)
+	rel(edge["size"], 3.1622776616321775, 1e-9, "short edge size")
+
+func test_brep_healed_heals_st203_bapl_and_leaves_the_original():
+	var body := st203_body()
+	if body == null:
+		return
+	var pair := body.healed(5.0)
+	var healed: CadaclysmBrep = pair["body"]
+	var r: Dictionary = pair["report"]
+	eq(r["tolerance"], 5.0)
+	eq([r["small_before"], r["fixes"].size(), r["small_after"]], [96, 28, 8])
+	eq([r["free_before"], r["free_after"]], [188, 88])
+	var refused := []
+	for x in r["refused"]:
+		refused.append([x["kind"], x["why"]])
+	eq(refused, [["sliver_face", "uneven"], ["sliver_face", "uneven"], ["sliver_face", "uneven"], ["sliver_face", "uneven"],
+		["sliver_face", "uneven"], ["sliver_face", "uneven"], ["sliver_face", "uneven"], ["sliver_face", "uneven"]])
+	eq([r["closed_before"], r["closed_after"], r["nonmanifold_before"], r["nonmanifold_after"]], [false, false, 0, 0])
+	rel(r["moved"], 1.581138831332503, 1e-9, "moved")
+	var furthest := 0.0
+	for f in r["fixes"]:
+		furthest = maxf(furthest, f["moved"])
+	rel(furthest, 1.8248105306211464, 1e-9, "furthest fix")
+	eq(healed.health(5.0)["small"].size(), 8)
+	eq(body.health(5.0)["small"].size(), 96, "the input is left as it was")
+	eq(body.edge_tolerance(41550), 0.0)
+	ok(is_nan(healed.edge_tolerance(41550)), "a removed edge has no tolerance")
+	eq(healed.edge_tolerance(41363), 0.0)
+	ok(is_nan(healed.edge_tolerance(0xFFFFFFF0)), "no such edge")
+	var off: Dictionary = body.healed(5.0, false, false, false)["report"]
+	eq([off["fixes"].size(), off["refused"].size()], [0, 96])
+	ok(off["refused"].all(func(x): return x["why"] == "toggled" and x["figure"] == 0.0), "every refusal toggled")
+	var per_kind := []
+	for k in ["short_edge", "sliver_face", "tiny_face"]:
+		per_kind.append(off["refused"].filter(func(x): return x["kind"] == k).size())
+	eq(per_kind, [64, 26, 6])
+	healed.release()
+	eq(healed.health(), {})
+	ok(Cadaclysm.last_error().contains("released"), Cadaclysm.last_error())
+	eq(healed.healed(), {})
+	ok(Cadaclysm.last_error().contains("released"), Cadaclysm.last_error())
+	ok(is_nan(healed.edge_tolerance(0)))
 	ok(Cadaclysm.last_error().contains("released"), Cadaclysm.last_error())
 
 func test_query():

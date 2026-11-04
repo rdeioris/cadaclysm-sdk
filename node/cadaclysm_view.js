@@ -21,20 +21,29 @@ const path = require('node:path');
 const zlib = require('node:zlib');
 const { constants: bufferConstants } = require('node:buffer');
 const koffi = require('koffi');
+// `using x = ...` looks up Symbol.dispose: Node 22 aliases it to Symbol.for('nodejs.dispose'),
+// a V8 with its own Symbol.dispose does not, so name the one this runtime uses.
+const DISPOSE = typeof Symbol.dispose === 'symbol' ? Symbol.dispose : Symbol.for('nodejs.dispose');
 
 const ABI_MAJOR = 1;
 // 1.5: `cadaclysm_view_parse_colour`, which every colour argument's text goes through.
 // 1.6: text -- cadaclysm_view_show_text, _set_text, _load_font and the text layer.
-// 1.7: the machining and timeline calls (not bound here yet).
+// 1.7: the machining and timeline calls (showMachining, Machining, the transport).
 // 1.8: the pick's `clicks` and `point`, cadaclysm_view_set_double_click_frames, _focus, _navigation.
 // 1.9: cadaclysm_view_set_lighting and _lighting (headlight or studio).
 // 1.10: the viewport cameras (bound; Node's own API for them comes later).
 // 1.11: cadaclysm_view_show_points.
-const ABI_MINOR = 11;
+// 1.13: cadaclysm_view_set_occluded.
+// 1.18: cadaclysm_view_set_finish.
+const ABI_MINOR = 18;
 const OPEN = 1;
 const CLOSED = 2;
 const SURFACES = Object.freeze({ exact: 0, triangles: 1 });
+const TOOL_SHAPES = Object.freeze({ flat: 0, ball: 1, drill: 2, vbit: 3, bullnose: 4 });
+const COLOUR_BY = Object.freeze({ height: 0, tool: 1, deviation: 2 });
 const LIGHTING = Object.freeze({ headlight: 0, studio: 1 });
+const OCCLUDED = Object.freeze({ off: 0, solid: 1, dashed: 2 });
+const FINISH = Object.freeze({ gloss: 0, satin: 1, matte: 2 });
 const STANDARD = Object.freeze({ top: 0, front: 1, right: 2, iso: 3 });
 const ALIGN = Object.freeze({ 'top-left': 0, top: 1, 'top-right': 2, left: 3, centre: 4, center: 4, right: 5,
   'bottom-left': 6, bottom: 7, 'bottom-right': 8 });
@@ -107,6 +116,7 @@ koffi.struct('CadaclysmViewViewport', {
   projection: koffi.array('float', 16),
   eye: koffi.array('float', 3),
   grid: 'uint32_t',
+  layer_mask: 'uint32_t',
 });
 koffi.struct('CadaclysmViewEvent', {
   size: 'uint32_t',
@@ -179,6 +189,42 @@ koffi.struct('CadaclysmViewViewportCamera', {
   axis_right: koffi.array('float', 3),
   axis_up: koffi.array('float', 3),
 });
+koffi.struct('CadaclysmViewProgram', {
+  size: 'uint32_t',
+  tool_number: 'uint32_t',
+  tool_shape: 'uint32_t',
+  tool_diameter: 'double',
+  tool_flute_length: 'double',
+  tool_angle: 'double',
+  tool_corner_radius: 'double',
+  gcode: 'const char *',
+});
+koffi.struct('CadaclysmViewMachining', {
+  size: 'uint32_t',
+  program_count: 'uint32_t',
+  programs: 'const CadaclysmViewProgram *',
+  stock_min: koffi.array('double', 3),
+  stock_max: koffi.array('double', 3),
+  part_positions: 'const float *',
+  part_indices: 'const uint32_t *',
+  part_vertex_count: 'uint32_t',
+  part_index_count: 'uint32_t',
+  cell: 'double',
+  tolerance: 'double',
+  skin: 'double',
+  rapid_rate: 'double',
+  skin_set: 'uint32_t',
+});
+koffi.struct('CadaclysmViewMachiningInfo', {
+  size: 'uint32_t',
+  moves: 'uint32_t',
+  move: 'uint32_t',
+  nx: 'uint32_t',
+  ny: 'uint32_t',
+  cell: 'float',
+  min: koffi.array('float', 2),
+  cycle_time: 'double',
+});
 const SIZE = (name) => koffi.sizeof(name);
 
 // ---- the function table: every call of the header ------------------------------------
@@ -249,9 +295,25 @@ function _bind(l) {
     standard_in: f('bool cadaclysm_view_standard_in(CadaclysmView *view, uint32_t viewport, uint32_t which)'),
     set_colour: f('bool cadaclysm_view_set_colour(CadaclysmView *view, uint32_t item, const float *rgb)'),
     set_xray: f('bool cadaclysm_view_set_xray(CadaclysmView *view, uint32_t item, bool on)'),
+    set_occluded: f('bool cadaclysm_view_set_occluded(CadaclysmView *view, uint32_t item, uint32_t mode)'),
+    set_finish: f('bool cadaclysm_view_set_finish(CadaclysmView *view, uint32_t item, uint32_t finish)'),
     set_face_colours: f('bool cadaclysm_view_set_face_colours(CadaclysmView *view, uint32_t item, const uint32_t *faces, const float *rgba, uint32_t count)'),
     set_placement: f('bool cadaclysm_view_set_placement(CadaclysmView *view, uint32_t item, const double *matrix)'),
     set_node_transforms: f('bool cadaclysm_view_set_node_transforms(CadaclysmView *view, uint32_t item, const double *transforms, uint32_t count)'),
+    show_machining: f('uint32_t cadaclysm_view_show_machining(CadaclysmView *view, const CadaclysmViewMachining *machining)'),
+    machining_seek: f('bool cadaclysm_view_machining_seek(CadaclysmView *view, uint32_t item, uint32_t to)'),
+    machining_colour_by: f('bool cadaclysm_view_machining_colour_by(CadaclysmView *view, uint32_t item, uint32_t mode)'),
+    machining_overlays: f('bool cadaclysm_view_machining_overlays(CadaclysmView *view, uint32_t item, bool path, bool tool)'),
+    machining_info: f('bool cadaclysm_view_machining_info(CadaclysmView *view, uint32_t item, _Inout_ CadaclysmViewMachiningInfo *out)'),
+    machining_heights: f('bool cadaclysm_view_machining_heights(CadaclysmView *view, uint32_t item, _Out_ float *heights, size_t capacity)'),
+    timeline_play: f('bool cadaclysm_view_timeline_play(CadaclysmView *view, double speed)'),
+    timeline_pause: f('bool cadaclysm_view_timeline_pause(CadaclysmView *view)'),
+    timeline_seek: f('bool cadaclysm_view_timeline_seek(CadaclysmView *view, double seconds)'),
+    timeline_set_loop: f('bool cadaclysm_view_timeline_set_loop(CadaclysmView *view, bool on)'),
+    timeline_time: f('double cadaclysm_view_timeline_time(const CadaclysmView *view)'),
+    timeline_duration: f('double cadaclysm_view_timeline_duration(const CadaclysmView *view)'),
+    timeline_playing: f('bool cadaclysm_view_timeline_playing(const CadaclysmView *view)'),
+    timeline_status: f('size_t cadaclysm_view_timeline_status(const CadaclysmView *view, _Out_ uint8_t *text, size_t capacity)'),
     show_solid: f('uint32_t cadaclysm_view_show_solid(CadaclysmView *view, const void *solid, double tolerance, const float *rgb)'),
     image: f('bool cadaclysm_view_image(CadaclysmView *view, uint8_t *rgba, size_t capacity)'),
     size: f('bool cadaclysm_view_size(CadaclysmView *view, _Out_ uint32_t *width, _Out_ uint32_t *height)'),
@@ -533,6 +595,37 @@ function _fixed(values, n, what) {
   if (a.length !== n || !a.every(Number.isFinite)) throw new ViewError(`${what}: ${n} finite numbers`);
   return a;
 }
+/** A `[tool, gcode]` (or `{ tool, gcode }`) as CadaclysmViewProgram, refused as Python's `_program` refuses. */
+function _program(p) {
+  const [tool, gcode] = Array.isArray(p) ? p : [p?.tool, p?.gcode];
+  if (tool == null || ['number', 'shape', 'diameter'].some((k) => tool[k] == null)) throw new ViewError('showMachining: tool needs number, shape and diameter');
+  if (!Number.isInteger(Number(tool.number))) throw new ViewError(`showMachining: tool number ${tool.number} is not a whole number`);
+  if (Math.trunc(Number(tool.number)) < 0) throw new ViewError(`showMachining: tool number ${tool.number} is negative`);
+  if (!Object.hasOwn(TOOL_SHAPES, tool.shape)) throw new ViewError(`showMachining: shape '${tool.shape}': one of ${Object.keys(TOOL_SHAPES).join(', ')}`);
+  return {
+    size: SIZE('CadaclysmViewProgram'), tool_number: Math.trunc(Number(tool.number)), tool_shape: TOOL_SHAPES[tool.shape],
+    tool_diameter: Number(tool.diameter), tool_flute_length: Number(tool.flute_length ?? 0), tool_angle: Number(tool.angle ?? 0),
+    tool_corner_radius: Number(tool.corner_radius ?? 0), gcode: String(gcode),
+  };
+}
+
+/** A part's `{ positions, indices }` (or `[positions, indices]`) checked as Python's `_part_arrays`. */
+function _part(part) {
+  const [positions, indices] = Array.isArray(part) ? part : [part?.positions, part?.indices];
+  const flat = (a) => Array.from(a ?? []).flatMap((e) => (typeof e === 'number' ? [e] : Array.from(e ?? [])));
+  const p = _f32(flat(positions));
+  const raw = flat(indices);
+  if (raw.some((k) => !Number.isInteger(Number(k)))) throw new ViewError('showMachining: part indices must be whole numbers');
+  if (raw.some((k) => k < 0)) throw new ViewError('showMachining: part indices must not be negative');
+  if (p.length % 3) throw new ViewError(`showMachining: part positions: ${p.length} numbers is not a whole number of x y z triples`);
+  if (raw.length % 3) throw new ViewError(`showMachining: part indices: ${raw.length} is not a whole number of triangles`);
+  const vertices = p.length / 3;
+  let top = -1;
+  for (const k of raw) if (k > top) top = k;
+  if (top >= vertices) throw new ViewError(`showMachining: part indices: ${top} is past the last of ${vertices} vertices`);
+  return { p, i: Uint32Array.from(raw), vertices };
+}
+
 // A number showText copies into a float field: finite, or refused naming the field.
 function _finite(value, what) {
   if (typeof value !== 'number' || !Number.isFinite(value)) throw new ViewError(`${what}: a finite number, not ${_kind(value)}`);
@@ -634,11 +727,54 @@ class Item {
   }
   frame() { this._ok(this.view._lib.fn.frame(this.view._live('cadaclysm_view_frame'), this.id), 'frame'); }
   xray(on) { this._ok(this.view._lib.fn.set_xray(this.view._live('cadaclysm_view_set_xray'), this.id, Boolean(on)), 'xray'); }
+  /** How its lines and points draw where a surface hides them: 'off' (an item shows with it until set), 'solid' or 'dashed'. */
+  occluded(mode) {
+    if (typeof mode !== 'string' || !Object.hasOwn(OCCLUDED, mode)) throw new TypeError(`occluded: '${mode}' is not 'off', 'solid' or 'dashed'`);
+    this._ok(this.view._lib.fn.set_occluded(this.view._live('cadaclysm_view_set_occluded'), this.id, OCCLUDED[mode]), 'occluded');
+  }
+  /**
+   * The item's finish: 'gloss' (an item shows with this until it is set) -- under the showroom
+   * lighting a clear coat mirroring the room, silver at a grazing angle -- 'satin' (a weaker,
+   * blurred coat) or 'matte' (no mirror, a faint sheen: rubber, cloth). Uploads the scene again,
+   * as a show does: set it as each item is shown rather than over a finished scene item by item.
+   */
+  finish(finish) {
+    if (typeof finish !== 'string' || !Object.hasOwn(FINISH, finish)) throw new TypeError(`finish: '${finish}' is not 'gloss', 'satin' or 'matte'`);
+    this._ok(this.view._lib.fn.set_finish(this.view._live('cadaclysm_view_set_finish'), this.id, FINISH[finish]), 'finish');
+  }
   nodeVisible(node, on) { this._ok(this.view._lib.fn.set_node_visible(this.view._live('cadaclysm_view_set_node_visible'), this.id, node, Boolean(on)), 'nodeVisible'); }
   nodeColour(node, rgba) { this._ok(this.view._lib.fn.set_node_color(this.view._live('cadaclysm_view_set_node_color'), this.id, node, _rgba(rgba, 'nodeColour', this.view._lib)), 'nodeColour'); }
   /** Tint `node` toward `rgba`'s colour by its alpha; null clears. */
   nodeHighlight(node, rgba) { this._ok(this.view._lib.fn.set_node_highlight(this.view._live('cadaclysm_view_set_node_highlight'), this.id, node, _rgba(rgba, 'nodeHighlight', this.view._lib)), 'nodeHighlight'); }
   frameNode(node) { this._ok(this.view._lib.fn.frame_node(this.view._live('cadaclysm_view_frame_node'), this.id, node), 'frameNode'); }
+}
+
+/** A CAM job shown in a View (`View.showMachining`): the stock is this item; the view's timeline plays it. */
+class Machining extends Item {
+  seekMove(move) {
+    if (!Number.isInteger(move) || move < 0) throw new ViewError(`seekMove: a whole number of moves, 0 or more, not ${_kind(move)}`);
+    this._ok(this.view._lib.fn.machining_seek(this.view._live('cadaclysm_view_machining_seek'), this.id, move), 'seekMove');
+  }
+  colourBy(mode) {
+    if (!Object.hasOwn(COLOUR_BY, mode)) throw new ViewError(`mode '${mode}': one of ${Object.keys(COLOUR_BY).join(', ')}`);
+    this._ok(this.view._lib.fn.machining_colour_by(this.view._live('cadaclysm_view_machining_colour_by'), this.id, COLOUR_BY[mode]), 'colourBy');
+  }
+  overlays(path = true, tool = true) {
+    this._ok(this.view._lib.fn.machining_overlays(this.view._live('cadaclysm_view_machining_overlays'), this.id, Boolean(path), Boolean(tool)), 'overlays');
+  }
+  /** `{ moves, move, nx, ny, cell, min: [x, y], cycleTime }`. */
+  info() {
+    const out = { size: SIZE('CadaclysmViewMachiningInfo') };
+    this._ok(this.view._lib.fn.machining_info(this.view._live('cadaclysm_view_machining_info'), this.id, out), 'info');
+    return { moves: out.moves, move: out.move, nx: out.nx, ny: out.ny, cell: out.cell, min: [out.min[0], out.min[1]], cycleTime: out.cycle_time };
+  }
+  /** The stock's heights now, `nx * ny` floats, row y then x (`z[j * nx + i]`), mm; waits for the GPU. */
+  heights() {
+    const { nx, ny } = this.info();
+    const z = new Float32Array(nx * ny);
+    this._ok(this.view._lib.fn.machining_heights(this.view._live('cadaclysm_view_machining_heights'), this.id, _nonNull(z), z.length), 'heights');
+    return z;
+  }
 }
 
 // Python flushes stdout before a still is printed; Node has no flush, and on POSIX a write to a
@@ -786,6 +922,34 @@ class View {
     const rgb = _rgb(colour, 'showPoints rgb', this._lib);
     return this._item(this._lib.fn.show_points(this._live('cadaclysm_view_show_points'), _nonNull(p), p.length / 3, rgb, Number(sizePx ?? 8)), null, 'showPoints');
   }
+  /**
+   * A CAM job on a stock, paused at its start: `programs` in run order as `[tool, gcode]` --
+   * `tool` `{ number, shape ('flat'|'ball'|'drill'|'vbit'|'bullnose'), diameter, flute_length?, angle?, corner_radius? }`;
+   * `stock` `[[minX, minY, minZ], [maxX, maxY, maxZ]]`; `part` `{ positions, indices }` for colouring by
+   * deviation; `cell`, `tolerance`, `skin` and `rapidRate` as the library's (absent: its defaults). Play it with `play()`.
+   */
+  showMachining(programs, stock, part = null, { cell, tolerance, skin, rapidRate } = {}) {
+    const made = Array.from(programs ?? []).map(_program);
+    const [lo, hi] = stock ?? [];
+    if (lo == null || hi == null) throw new ViewError('showMachining: stock is [[minX, minY, minZ], [maxX, maxY, maxZ]]');
+    const raw = {
+      size: SIZE('CadaclysmViewMachining'), program_count: made.length, programs: made,
+      stock_min: Array.from(_doubles(lo, 3, 'showMachining stock min')), stock_max: Array.from(_doubles(hi, 3, 'showMachining stock max')),
+      part_positions: null, part_indices: null, part_vertex_count: 0, part_index_count: 0,
+      cell: _finite(cell ?? 0, 'showMachining cell'), tolerance: _finite(tolerance ?? 0, 'showMachining tolerance'),
+      skin: _finite(skin ?? 0, 'showMachining skin'), rapid_rate: _finite(rapidRate ?? 0, 'showMachining rapidRate'),
+      skin_set: skin == null ? 0 : 1,
+    };
+    if (part != null) {
+      const { p, i, vertices } = _part(part);
+      Object.assign(raw, { part_positions: _nonNull(p), part_indices: _nonNull(i), part_vertex_count: vertices, part_index_count: i.length });
+    }
+    const id = this._lib.fn.show_machining(this._live('cadaclysm_view_show_machining'), raw);
+    if (!id) throw this._lib.failure('showMachining');
+    const item = new Machining(this, id, null);
+    this._items.set(id, item);
+    return item;
+  }
   /** Sixteen floats a rational cubic: four control points as x, y, z, w. */
   showCurves(beziers, rgb = null) {
     const b = _floatsOf(beziers, 16, 'showCurves', 'curve');
@@ -840,7 +1004,7 @@ class View {
   /** `[{ rect: [x, y, w, h], view: 16, projection: 16, eye: 3, grid: 'none'|'top'|'front'|'right' }]`, matrices column-major. */
   viewports(list) {
     const exact = (a, n, what) => { const v = Array.from(a ?? []); if (v.length !== n) throw new ViewError(`viewport ${what}: ${n} numbers, not ${v.length}`); return v; };
-    const raw = list.map((v) => ({ size: SIZE('CadaclysmViewViewport'), rect: exact(v.rect, 4, 'rect'), view: exact(v.view, 16, 'view'), projection: exact(v.projection, 16, 'projection'), eye: exact(v.eye, 3, 'eye'), grid: _name(GRID, v.grid ?? 'none', 'grid') }));
+    const raw = list.map((v) => ({ size: SIZE('CadaclysmViewViewport'), rect: exact(v.rect, 4, 'rect'), view: exact(v.view, 16, 'view'), projection: exact(v.projection, 16, 'projection'), eye: exact(v.eye, 3, 'eye'), grid: _name(GRID, v.grid ?? 'none', 'grid'), layer_mask: 0xFFFFFFFF }));
     this._ok(this._lib.fn.set_viewports(this._live('cadaclysm_view_set_viewports'), raw, raw.length), 'viewports');
   }
   layer(name, on) { this._ok(this._lib.fn.set_layer(this._live('cadaclysm_view_set_layer'), _name(LAYER, name, 'layer'), Boolean(on)), 'layer'); }
@@ -851,6 +1015,28 @@ class View {
   /** How plain parts are lit, as Python's View.lighting: 'headlight' (the default) or 'studio' (a key light fixed above the scene, an ambient and a camera fill). */
   get lighting() { return this._lib.fn.lighting(this._live('cadaclysm_view_lighting')) === 1 ? 'studio' : 'headlight'; }
   set lighting(name) { this._ok(this._lib.fn.set_lighting(this._live('cadaclysm_view_set_lighting'), _name(LIGHTING, name, 'lighting')), 'lighting'); }
+  // -- the timeline --
+  /** Play at `speed` times real time; it stops at its end unless `loop()` is on; at the end it starts again from 0. */
+  play(speed = 1) { this._ok(this._lib.fn.timeline_play(this._live('cadaclysm_view_timeline_play'), Number(speed)), 'play'); }
+  pause() { this._ok(this._lib.fn.timeline_pause(this._live('cadaclysm_view_timeline_pause')), 'pause'); }
+  /** Set the clock, clamped to [0, duration]. */
+  seek(seconds) { this._ok(this._lib.fn.timeline_seek(this._live('cadaclysm_view_timeline_seek'), Number(seconds)), 'seek'); }
+  loop(on = true) { this._ok(this._lib.fn.timeline_set_loop(this._live('cadaclysm_view_timeline_set_loop'), Boolean(on)), 'loop'); }
+  get time() { return this._lib.fn.timeline_time(this._live('cadaclysm_view_timeline_time')); }
+  get duration() { return this._lib.fn.timeline_duration(this._live('cadaclysm_view_timeline_duration')); }
+  get playing() { return Boolean(this._lib.fn.timeline_playing(this._live('cadaclysm_view_timeline_playing'))); }
+  /** One line per track at the clock's time, e.g. "move 370 of 638 \u00b7 T1 flat 6 mm \u00b7 X12.3 Y-4.0 Z7.0". */
+  status() {
+    const p = this._live('cadaclysm_view_timeline_status');
+    let n = Number(this._lib.fn.timeline_status(p, null, 0));
+    while (n) {
+      const buf = Buffer.alloc(n + 1);
+      const got = Number(this._lib.fn.timeline_status(p, buf, n + 1));
+      if (got < n + 1) return got ? buf.toString('utf8', 0, got).split('\n') : [];   // 0: the line emptied between the calls
+      n = got;   // the line grew between the two calls: ask again with room for it
+    }
+    return [];
+  }
   get needsDraw() { return Boolean(this._lib.fn.needs_draw(this._live('cadaclysm_view_needs_draw'))); }
   // -- the rest
   /** What is under pixel (x, y) of `viewport`: `{ item, node, face, clicks, point }`, or null for nothing. */
@@ -991,7 +1177,7 @@ class View {
     this._items.clear();
     this._lib.fn.destroy(p);
   }
-  [Symbol.for('nodejs.dispose')]() { this.close(); }
+  [DISPOSE]() { this.close(); }
 }
 
 /** The camera `run` left, with `azimuth`/`elevation` as `show()` takes them (cadaclysm_view.py's `_camera`). */
@@ -1117,6 +1303,6 @@ function _present(obj, options = {}, mode = 'show', transforms = null) {
 }
 
 module.exports = {
-  ViewError, View, Item, Library, useTerminal, useWgpu, use, current, pump, loadFont,
+  ViewError, View, Item, Machining, Library, useTerminal, useWgpu, use, current, pump, loadFont,
   OPEN, CLOSED, VIEWS, _find, _camera, _pick, _png, _reset, _open, _release, _views, _present, _aim, _shared,
 };

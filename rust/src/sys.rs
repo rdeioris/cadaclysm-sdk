@@ -37,6 +37,20 @@ pub struct CadaclysmBrep {
     _private: [u8; 0],
 }
 
+/// A brep's health report (`cadaclysm_brep_health`): owned rows, independent of the brep.
+/// Opaque; freed with `cadaclysm_brep_health_free`.
+#[repr(C)]
+pub struct CadaclysmHealth {
+    _private: [u8; 0],
+}
+
+/// A heal report and the healed body (`cadaclysm_brep_healed`): owned, independent of the
+/// brep. Opaque; freed with `cadaclysm_brep_heal_free`.
+#[repr(C)]
+pub struct CadaclysmHeal {
+    _private: [u8; 0],
+}
+
 /// A posed mechanism -- `Scene::pose` or `Scene::pose_state`'s answer. Opaque; owns its
 /// transforms and does not borrow the scene. Freed with `cadaclysm_pose_free`.
 #[repr(C)]
@@ -449,6 +463,20 @@ entry_points! {
     fn cadaclysm_brep_release(brep: *const CadaclysmBrep);
     fn cadaclysm_brep_manifold(brep: *const CadaclysmBrep, out: *mut u32) -> bool;
     fn cadaclysm_brep_sew(brep: *const CadaclysmBrep, tolerance: f64, vertex: f64, out: *mut u32, gaps: *mut f64) -> *const CadaclysmBrep;
+    fn cadaclysm_brep_health(brep: *const CadaclysmBrep, tolerance: f64, mesh: bool) -> *mut CadaclysmHealth;
+    fn cadaclysm_brep_health_free(health: *mut CadaclysmHealth);
+    fn cadaclysm_brep_health_summary(health: *const CadaclysmHealth, counts: *mut u32, sizes: *mut f64) -> bool;
+    fn cadaclysm_brep_health_free_edges(health: *const CadaclysmHealth, ids: *mut u32, sizes: *mut f64) -> u32;
+    fn cadaclysm_brep_health_wires(health: *const CadaclysmHealth, runs: *mut u32, sizes: *mut f64) -> u32;
+    fn cadaclysm_brep_health_small(health: *const CadaclysmHealth, items: *mut u32, sizes: *mut f64) -> u32;
+    fn cadaclysm_brep_health_crack_edges(health: *const CadaclysmHealth, ids: *mut u32) -> u32;
+    fn cadaclysm_brep_healed(brep: *const CadaclysmBrep, tolerance: f64, flags: u32) -> *mut CadaclysmHeal;
+    fn cadaclysm_brep_heal_body(h: *const CadaclysmHeal) -> *const CadaclysmBrep;
+    fn cadaclysm_brep_heal_free(h: *mut CadaclysmHeal);
+    fn cadaclysm_brep_heal_summary(h: *const CadaclysmHeal, counts: *mut u32, sizes: *mut f64) -> bool;
+    fn cadaclysm_brep_heal_fixes(h: *const CadaclysmHeal, items: *mut u32, sizes: *mut f64) -> u32;
+    fn cadaclysm_brep_heal_refused(h: *const CadaclysmHeal, items: *mut u32, sizes: *mut f64) -> u32;
+    fn cadaclysm_brep_edge_tolerance(brep: *const CadaclysmBrep, edge: u32) -> f64;
     fn cadaclysm_brep_layout_id() -> *const c_char;
     fn cadaclysm_surface_matrix(scene: *const CadaclysmScene, out: *mut f32);
     fn cadaclysm_node_bounds(scene: *const CadaclysmScene, node: u32) -> CadaclysmBounds;

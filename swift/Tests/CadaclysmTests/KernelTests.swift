@@ -370,7 +370,9 @@ final class KernelTests: XCTestCase {
             kinds.append(curve.kind)
             if curve.kind == "ellipse" {
                 let t = (curve.t0 + curve.t1) / 2   // the curve's own point, mid-chain
-                let q = curve.origin + curve.x * curve.radius * cos(t) + curve.y * curve.radius2 * sin(t)
+                let along: SIMD3<Double> = curve.x * (curve.radius * cos(t))
+                let across: SIMD3<Double> = curve.y * (curve.radius2 * sin(t))
+                let q: SIMD3<Double> = curve.origin + along + across
                 XCTAssertTrue(offA(q) < 50 * tol && offB(q) < 50 * tol, "the ellipse leaves the pipes: \(q)")
             }
             XCTAssertTrue(c.description.hasPrefix("Chain(points="))
@@ -493,6 +495,13 @@ final class KernelTests: XCTestCase {
         XCTAssertTrue(try star.isWatertight())
         XCTAssertEqual(refusal { _ = try Profile.star([0, 0], 10, 10, 5) },
                        "profile_star: the inner radius must be under the outer")
+        // A count a UInt32 cannot hold is refused before the call, never clamped.
+        for n in [-1, (1 << 32) + 6] {
+            XCTAssertEqual(refusal { _ = try Profile.regularPolygon([0, 0], 10, n) },
+                           "profile_regular_polygon: sides is out of range: \(n)")
+            XCTAssertEqual(refusal { _ = try Profile.star([0, 0], 10, 4, n) },
+                           "profile_star: points is out of range: \(n)")
+        }
         // Text: an `i` is two shapes and an `o` one; the `o` extrudes to a watertight ring
         // with spline edges; an unknown family sets in the bundled face; bad bytes are refused.
         let word = try Profile.text("io", size: 10)
@@ -568,7 +577,8 @@ final class KernelTests: XCTestCase {
         let tray = try block.shell(3.0, open: [try block.selectFace(.min(.z))])
         XCTAssertEqual(try tray.faces, 11, "five walls in and out, and the rim")
         XCTAssertTrue(try tray.stepText().contains("CLOSED_SHELL"))
-        XCTAssertEqual(try volume(tray), 40 * 40 * 20 - 34 * 34 * 17, accuracy: 1)
+        let hollowed: Double = 32_000 - 19_652   // 40 x 40 x 20 less the 34 x 34 x 17 inside
+        XCTAssertEqual(try volume(tray), hollowed, accuracy: 1)
     }
 
     func testAProfileIsSweptAlongAPathOfLinesAndArcs() throws {
@@ -1417,6 +1427,20 @@ final class KernelTests: XCTestCase {
         XCTAssertNil(try Solid.cuboid(1, 1, 1).name)   // fact 10
         XCTAssertNotNil(refusal { _ = try bolt.named("") })
 
+        // The material and the outside style: read back, kept by a cut, written to STEP.
+        XCTAssertNil(try cube.material)
+        let steel = try cube.withMaterial("Steel").styled(location: "materials/steel.mtlx", identification: "BrushedSteel")
+        XCTAssertEqual(try steel.material, "Steel")
+        XCTAssertEqual(try steel.styleLocation, "materials/steel.mtlx")
+        XCTAssertEqual(try steel.styleIdentification, "BrushedSteel")
+        XCTAssertEqual(try steel.cut(try cube.withMaterial("Oak").translate(0.5, 0.5, 0.5)).material, "Steel")
+        XCTAssertNil(try cube.styled(identification: "BrushedSteel").styleLocation)
+        let steelText = try steel.stepText()
+        XCTAssertTrue(steelText.contains("MATERIAL_DESIGNATION('Steel'"))
+        XCTAssertTrue(steelText.contains("EXTERNALLY_DEFINED_STYLE(IDENTIFIER('BrushedSteel')"))
+        XCTAssertNotNil(refusal { _ = try cube.withMaterial(" ") })
+        XCTAssertNotNil(refusal { _ = try cube.styled() })
+
         frame.close()
         bracket.close()
     }
@@ -1909,7 +1933,7 @@ final class KernelTests: XCTestCase {
             XCTAssertLessThanOrEqual(abs(points[k * 3 + 1]), 1e-6, "control point \(k) is not at y = 0")
         }
         // The rulings run cap to cap, so their z extent is the height: that pins z against x and y.
-        let zs = (0..<rulings.count * 4).map { points[$0 * 3 + 2] }
+        let zs: [Double] = (0..<rulings.count * 4).map { (i: Int) -> Double in points[i * 3 + 2] }
         let low = try XCTUnwrap(zs.min()), high = try XCTUnwrap(zs.max())
         XCTAssertLessThanOrEqual(abs(high - low - height), 1e-6, "the rulings span z \(low)...\(high), not a height of \(height)")
     }
@@ -2120,6 +2144,21 @@ extension KernelTests {
         XCTAssertTrue(bad?.hasPrefix("bad selection: ") ?? false, "\(String(describing: bad))")
         let short = refusal { _ = try cube.transform(.vertices([0]), [1, 2, 3]) }
         XCTAssertTrue(short?.contains("matrix") ?? false, "\(String(describing: short))")
+    }
+
+    func testSubdSubdivide() throws {
+        let kiln = try Subd.cuboid(size: SIMD3(2, 2, 2), segments: (2, 2, 2))
+        defer { kiln.close() }
+        let whole = try kiln.subdivide()
+        defer { whole.close() }
+        XCTAssertEqual(try whole.faces.count, 96)
+        let one = try kiln.subdivide([1])
+        defer { one.close() }
+        XCTAssertEqual(try one.faces.count, 27)
+        XCTAssertEqual(try one.selection?.kind, .faces)
+        if case .faces(let picked)? = try one.selection { XCTAssertEqual(picked.count, 4) } else { XCTFail("no face selection") }
+        let bad = refusal { _ = try kiln.subdivide([999]) }
+        XCTAssertTrue(bad?.contains("subdivide: face 999 is not in the cage") ?? false, "\(String(describing: bad))")
     }
 
     func testSubdSmoothMeshIsConsistentAndKept() throws {

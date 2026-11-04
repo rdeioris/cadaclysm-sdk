@@ -705,6 +705,39 @@ public:
     Result<void> xray(bool on) {
         return ok("cadaclysm_view_set_xray", [&](detail::ViewState& s) { return s.t->set_xray(s.handle, id_, on); });
     }
+    // How the item's lines and points draw where a surface hides them: "off" (not drawn, the
+    // default), "solid" (drawn through) or "dashed" (dashed and dimmed).
+    Result<void> occluded(std::string_view mode) {
+        std::uint32_t m = 0;
+        if (mode == "off") {
+            m = CADACLYSM_VIEW_OCCLUDED_OFF;
+        } else if (mode == "solid") {
+            m = CADACLYSM_VIEW_OCCLUDED_SOLID;
+        } else if (mode == "dashed") {
+            m = CADACLYSM_VIEW_OCCLUDED_DASHED;
+        } else {
+            return detail::view_error("occluded: '" + std::string(mode) + "' is not 'off', 'solid' or 'dashed'");
+        }
+        return ok("cadaclysm_view_set_occluded", [&](detail::ViewState& s) { return s.t->set_occluded(s.handle, id_, m); });
+    }
+    // The item's finish: "gloss" (an item shows with this until it is set) -- under the
+    // showroom lighting a clear coat mirroring the room, silver at a grazing angle -- "satin"
+    // (a weaker, blurred coat) or "matte" (no mirror, a faint sheen: rubber, cloth). Uploads
+    // the scene again, as a show does: set it as each item is shown rather than over a
+    // finished scene item by item.
+    Result<void> finish(std::string_view finish) {
+        std::uint32_t f = 0;
+        if (finish == "gloss") {
+            f = CADACLYSM_VIEW_FINISH_GLOSS;
+        } else if (finish == "satin") {
+            f = CADACLYSM_VIEW_FINISH_SATIN;
+        } else if (finish == "matte") {
+            f = CADACLYSM_VIEW_FINISH_MATTE;
+        } else {
+            return detail::view_error("finish: '" + std::string(finish) + "' is not 'gloss', 'satin' or 'matte'");
+        }
+        return ok("cadaclysm_view_set_finish", [&](detail::ViewState& s) { return s.t->set_finish(s.handle, id_, f); });
+    }
     Result<void> node_visible(std::uint32_t node, bool on) {
         return ok("cadaclysm_view_set_node_visible",
                   [&](detail::ViewState& s) { return s.t->set_node_visible(s.handle, id_, node, on); });
@@ -747,6 +780,8 @@ public:
 private:
     friend class View;
     Item(std::weak_ptr<detail::ViewState> view, std::uint32_t id) : view_(std::move(view)), id_(id) {}
+
+protected:
     template <class F>
     Result<void> ok(const char* call, F&& f) {
         auto s = view_.lock();
@@ -765,6 +800,103 @@ private:
     }
     std::weak_ptr<detail::ViewState> view_;
     std::uint32_t id_ = 0;
+};
+
+// A tool as the machining view takes it: shape "flat", "ball", "drill", "vbit" or "bullnose".
+struct MachiningTool {
+    std::uint32_t number = 0;
+    std::string shape;
+    double diameter = 0.0;
+    double flute_length = 0.0;
+    double angle = 0.0;          // a V-bit's
+    double corner_radius = 0.0;  // a bull-nose's
+};
+struct MachiningProgram {
+    MachiningTool tool;
+    std::string gcode;
+};
+struct MachiningStock {
+    std::array<double, 3> min{};
+    std::array<double, 3> max{};
+};
+struct MachiningPart {
+    std::vector<float> positions;       // three a vertex
+    std::vector<std::uint32_t> indices; // three a triangle
+};
+// Absent: the library's own default.
+struct MachiningOptions {
+    std::optional<double> cell, tolerance, skin, rapid_rate;
+};
+struct MachiningInfo {
+    std::uint32_t moves = 0, move = 0, nx = 0, ny = 0;
+    float cell = 0.0f;
+    std::array<float, 2> min{};
+    double cycle_time = 0.0;
+};
+
+// A CAM job shown in a View (View::show_machining): the stock is this item, and the view's
+// timeline plays it (View::play, seek, status). Every Item member works on it too.
+class Machining : public Item {
+public:
+    // Jumps the timeline to the end of move `move` (0: the untouched stock).
+    Result<void> seek_move(std::uint32_t move) {
+        return ok("cadaclysm_view_machining_seek",
+                  [&](detail::ViewState& s) { return s.t->machining_seek(s.handle, id_, move); });
+    }
+    // "height", "tool" or "deviation" (the last needs a part).
+    Result<void> colour_by(std::string_view mode) {
+        std::uint32_t m = 0;
+        if (mode == "height") {
+            m = CADACLYSM_VIEW_COLOUR_BY_HEIGHT;
+        } else if (mode == "tool") {
+            m = CADACLYSM_VIEW_COLOUR_BY_TOOL;
+        } else if (mode == "deviation") {
+            m = CADACLYSM_VIEW_COLOUR_BY_DEVIATION;
+        } else {
+            return detail::view_error("mode " + detail::quoted(mode) + ": one of height, tool, deviation");
+        }
+        return ok("cadaclysm_view_machining_colour_by",
+                  [&](detail::ViewState& s) { return s.t->machining_colour_by(s.handle, id_, m); });
+    }
+    // The toolpath and the tool, on or off.
+    Result<void> overlays(bool path = true, bool tool = true) {
+        return ok("cadaclysm_view_machining_overlays",
+                  [&](detail::ViewState& s) { return s.t->machining_overlays(s.handle, id_, path, tool); });
+    }
+    // `moves`, `move` (done, as of the last draw), the heights' grid (`nx`, `ny`, `cell`, `min`)
+    // and the job's `cycle_time` in seconds.
+    Result<MachiningInfo> info() {
+        CadaclysmViewMachiningInfo out{};
+        out.size = sizeof out;
+        Result<void> done = ok("cadaclysm_view_machining_info",
+                               [&](detail::ViewState& s) { return s.t->machining_info(s.handle, id_, &out); });
+        if (!done) return done.error();
+        MachiningInfo i;
+        i.moves = out.moves;
+        i.move = out.move;
+        i.nx = out.nx;
+        i.ny = out.ny;
+        i.cell = out.cell;
+        i.min = {out.min[0], out.min[1]};
+        i.cycle_time = out.cycle_time;
+        return i;
+    }
+    // The stock's heights now, nx * ny floats, row y then x; waits for the GPU.
+    Result<std::vector<float>> heights() {
+        Result<MachiningInfo> i = info();
+        if (!i) return i.error();
+        std::vector<float> z(static_cast<std::size_t>(i->nx) * i->ny);
+        Result<void> done = ok("cadaclysm_view_machining_heights", [&](detail::ViewState& s) {
+            float none = 0.0f;  // never NULL, even for an empty grid
+            return s.t->machining_heights(s.handle, id_, z.empty() ? &none : z.data(), z.size());
+        });
+        if (!done) return done.error();
+        return z;
+    }
+
+private:
+    friend class View;
+    explicit Machining(const Item& item) : Item(item) {}
 };
 
 class View {
@@ -898,6 +1030,98 @@ public:
         return add("cadaclysm_view_show_points", [&](detail::ViewState& s) {
             return s.t->show_points(s.handle, detail::non_null(positions), *n, c->data(), size_px);
         }, {});
+    }
+    // A CAM job on a stock, paused at its start, as Python's View.show_machining: `programs` in
+    // run order, `stock` as its min and max corners, `part` (std::nullopt: none) to colour by
+    // deviation, `options` where the library's defaults (cell, tolerance 0.05, skin 0.3,
+    // rapid_rate 5000 mm/min) are not wanted. Play it with play(). A shape that is none of
+    // "flat", "ball", "drill", "vbit" or "bullnose", a number that is not finite, a part that
+    // is not whole triangles of x y z triples, or an index past its vertices is refused before
+    // the library is called.
+    Result<Machining> show_machining(const std::vector<MachiningProgram>& programs, const MachiningStock& stock,
+                                     const std::optional<MachiningPart>& part = std::nullopt,
+                                     const MachiningOptions& options = MachiningOptions()) {
+        Result<std::uint32_t> program_count = detail::count_of(programs.size(), "show_machining");
+        if (!program_count) return program_count.error();
+        std::vector<CadaclysmViewProgram> raw(programs.size());
+        for (std::size_t k = 0; k < programs.size(); ++k) {
+            const MachiningTool& tool = programs[k].tool;
+            std::uint32_t shape = 0;
+            if (tool.shape == "flat") {
+                shape = CADACLYSM_VIEW_TOOL_FLAT;
+            } else if (tool.shape == "ball") {
+                shape = CADACLYSM_VIEW_TOOL_BALL;
+            } else if (tool.shape == "drill") {
+                shape = CADACLYSM_VIEW_TOOL_DRILL;
+            } else if (tool.shape == "vbit") {
+                shape = CADACLYSM_VIEW_TOOL_VBIT;
+            } else if (tool.shape == "bullnose") {
+                shape = CADACLYSM_VIEW_TOOL_BULLNOSE;
+            } else {
+                return detail::view_error("shape " + detail::quoted(tool.shape) +
+                                          ": one of flat, ball, drill, vbit, bullnose");
+            }
+            if (!std::isfinite(tool.diameter) || !std::isfinite(tool.flute_length) || !std::isfinite(tool.angle) || !std::isfinite(tool.corner_radius))
+                return detail::view_error("tool: diameter, flute_length, angle and corner_radius are finite numbers");
+            if (programs[k].gcode.find('\0') != std::string::npos)
+                return detail::view_error("gcode: a NUL character cannot be sent (the C string ends there)");
+            CadaclysmViewProgram& p = raw[k];
+            p.size = sizeof p;
+            p.tool_number = tool.number;
+            p.tool_shape = shape;
+            p.tool_diameter = tool.diameter;
+            p.tool_flute_length = tool.flute_length;
+            p.tool_angle = tool.angle;
+            p.tool_corner_radius = tool.corner_radius;
+            p.gcode = programs[k].gcode.c_str();
+        }
+        CadaclysmViewMachining m{};
+        m.size = sizeof m;
+        m.program_count = *program_count;
+        m.programs = detail::non_null(raw);
+        for (std::size_t a = 0; a < 3; ++a) {
+            if (!std::isfinite(stock.min[a]) || !std::isfinite(stock.max[a]))
+                return detail::view_error("stock: min and max are finite numbers");
+            m.stock_min[a] = stock.min[a];
+            m.stock_max[a] = stock.max[a];
+        }
+        if (part) {
+            for (float x : part->positions)
+                if (!std::isfinite(x)) return detail::view_error("part positions: finite numbers");
+            if (part->positions.size() % 3)
+                return detail::view_error("part positions: " + std::to_string(part->positions.size()) +
+                                          " numbers is not a whole number of x y z triples");
+            if (part->indices.size() % 3)
+                return detail::view_error("part indices: " + std::to_string(part->indices.size()) +
+                                          " is not a whole number of triangles");
+            std::size_t vertices = part->positions.size() / 3;
+            for (std::uint32_t i : part->indices)
+                if (i >= vertices)
+                    return detail::view_error("part indices: " + std::to_string(i) + " is past the last of " +
+                                              std::to_string(vertices) + " vertices");
+            Result<std::uint32_t> vertex_count = detail::count_of(vertices, "show_machining part");
+            if (!vertex_count) return vertex_count.error();
+            Result<std::uint32_t> index_count = detail::count_of(part->indices.size(), "show_machining part");
+            if (!index_count) return index_count.error();
+            m.part_positions = detail::non_null(part->positions);
+            m.part_indices = detail::non_null(part->indices);
+            m.part_vertex_count = *vertex_count;
+            m.part_index_count = *index_count;
+        }
+        if ((options.cell && !std::isfinite(*options.cell)) || (options.tolerance && !std::isfinite(*options.tolerance)) ||
+            (options.skin && !std::isfinite(*options.skin)) || (options.rapid_rate && !std::isfinite(*options.rapid_rate)))
+            return detail::view_error("show_machining options: cell, tolerance, skin and rapid_rate are finite numbers");
+        m.cell = options.cell.value_or(0.0);
+        m.tolerance = options.tolerance.value_or(0.0);
+        m.rapid_rate = options.rapid_rate.value_or(0.0);
+        if (options.skin) {
+            m.skin = *options.skin;
+            m.skin_set = 1;
+        }
+        Result<Item> item = add("cadaclysm_view_show_machining",
+                                [&](detail::ViewState& s) { return s.t->show_machining(s.handle, &m); }, {});
+        if (!item) return item.error();
+        return Machining(*item);
     }
     // Rational cubics, sixteen floats each (four x, y, z, w control points).
     Result<Item> show_curves(const std::vector<float>& beziers, const std::optional<Colour>& rgb = std::nullopt) {
@@ -1053,6 +1277,7 @@ public:
             }
             for (std::size_t k = 0; k < 3; ++k) raw[i].eye[k] = list[i].eye[k];
             raw[i].grid = list[i].grid;
+            raw[i].layer_mask = 0xFFFFFFFFu;  // every user layer
         }
         return ok("cadaclysm_view_set_viewports", [&](detail::ViewState& s) {
             return s.t->set_viewports(s.handle, raw.empty() ? nullptr : raw.data(), *n);
@@ -1086,6 +1311,62 @@ public:
     Result<std::string> lighting() {
         if (auto no = detail::refusal(state_.get(), "cadaclysm_view_lighting")) return *no;
         return std::string(state_->t->lighting(state_->handle) == CADACLYSM_VIEW_LIGHTING_STUDIO ? "studio" : "headlight");
+    }
+    // The timeline of machining jobs. play: at `speed` times real time, stopping at its end
+    // unless loop() is on (play at the end starts again from 0).
+    Result<void> play(double speed = 1.0) {
+        if (!std::isfinite(speed)) return detail::view_error("play speed: a finite number");
+        return ok("cadaclysm_view_timeline_play", [&](detail::ViewState& s) { return s.t->timeline_play(s.handle, speed); });
+    }
+    Result<void> pause() {
+        return ok("cadaclysm_view_timeline_pause", [&](detail::ViewState& s) { return s.t->timeline_pause(s.handle); });
+    }
+    // Sets the clock, clamped to [0, duration].
+    Result<void> seek(double seconds) {
+        if (!std::isfinite(seconds)) return detail::view_error("seek seconds: a finite number");
+        return ok("cadaclysm_view_timeline_seek",
+                  [&](detail::ViewState& s) { return s.t->timeline_seek(s.handle, seconds); });
+    }
+    Result<void> loop(bool on = true) {
+        return ok("cadaclysm_view_timeline_set_loop",
+                  [&](detail::ViewState& s) { return s.t->timeline_set_loop(s.handle, on); });
+    }
+    Result<double> time() {
+        if (std::optional<Error> no = detail::refusal(state_.get(), "cadaclysm_view_timeline_time")) return *no;
+        return state_->t->timeline_time(state_->handle);
+    }
+    Result<double> duration() {
+        if (std::optional<Error> no = detail::refusal(state_.get(), "cadaclysm_view_timeline_duration")) return *no;
+        return state_->t->timeline_duration(state_->handle);
+    }
+    Result<bool> playing() {
+        if (std::optional<Error> no = detail::refusal(state_.get(), "cadaclysm_view_timeline_playing")) return *no;
+        return static_cast<bool>(state_->t->timeline_playing(state_->handle));
+    }
+    // One line per track at the clock's time, e.g. "move 370 of 638 - T1 flat 6 mm"; none when
+    // nothing is on the timeline.
+    Result<std::vector<std::string>> status() {
+        if (std::optional<Error> no = detail::refusal(state_.get(), "cadaclysm_view_timeline_status")) return *no;
+        std::size_t n = state_->t->timeline_status(state_->handle, nullptr, 0);
+        std::vector<std::string> lines;
+        while (n > 0) {
+            std::vector<char> buffer(n + 1, '\0');
+            std::size_t got = state_->t->timeline_status(state_->handle, buffer.data(), buffer.size());
+            if (got < buffer.size()) {  // else the line grew between the two calls: ask again with room for it
+                if (got == 0) return lines;  // the line emptied between the two calls
+                std::string text(buffer.data(), got);
+                std::size_t from = 0;
+                for (;;) {
+                    std::size_t at = text.find('\n', from);
+                    lines.push_back(text.substr(from, at == std::string::npos ? std::string::npos : at - from));
+                    if (at == std::string::npos) break;
+                    from = at + 1;
+                }
+                return lines;
+            }
+            n = got;
+        }
+        return lines;
     }
     // Levels of detail, as Python's View.lod: parts of `min_triangles` or more (0: the
     // library's default, 2,048) get coarser levels, and a moving frame draws as `motion`

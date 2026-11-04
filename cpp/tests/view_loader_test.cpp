@@ -1,6 +1,6 @@
 #define _CRT_SECURE_NO_WARNINGS  // std::fopen under MSVC /W4 /WX and Windows clang -Werror
 // view_loader.h on its own: the search and its messages, the camera maths, the PNG
-// writer, a refused non-library, the ABI 1.11 the table needs (a 1.10 stand-in refused), and -- over a table of fakes -- the order and the
+// writer, a refused non-library, the ABI 1.18 the table needs (a 1.17 stand-in refused), and -- over a table of fakes -- the order and the
 // refusals of cvl_draw_object and cvl_pick. Needs no view library and no GPU; the exit
 // code is the verdict.
 #include <cadaclysm/view_loader.h>
@@ -672,17 +672,18 @@ static void test_png(const char* empty) {
           "%s", err.data());
 }
 
-// ---- the ABI the table needs: 1.11 (parse_colour 1.5; load_font, show_text, set_text 1.6; set_double_click_frames,
-// focus, navigation 1.8; set_lighting, lighting 1.9; the viewport cameras 1.10; show_points 1.11) ---
+// ---- the ABI the table needs: 1.18 (parse_colour 1.5; load_font, show_text, set_text 1.6; set_double_click_frames,
+// focus, navigation 1.8; set_lighting, lighting 1.9; the viewport cameras 1.10; show_points 1.11; set_occluded 1.13;
+// set_finish 1.18) ---
 
 static void test_abi() {
     std::vector<char> err(CVL_ERROR, 0);
-    CHECK(cvl_check_abi(0x1000Bu, "lib", err.data(), err.size()), "1.11 refused: %s", err.data());
-    CHECK(cvl_check_abi(0x1000Cu, "lib", err.data(), err.size()), "1.12 refused: %s", err.data());
-    CHECK(!cvl_check_abi(0x1000Au, "lib", err.data(), err.size()), "1.10 accepted");
-    CHECK(std::string(err.data()) == "lib: view ABI 1.10, this SDK needs 1.11 or a later 1.x", "%s", err.data());
-    CHECK(!cvl_check_abi(0x2000Bu, "lib", err.data(), err.size()), "2.11 accepted");
-    CHECK(std::string(err.data()) == "lib: view ABI 2.11, this SDK needs 1.11 or a later 1.x", "%s", err.data());
+    CHECK(cvl_check_abi(0x10012u, "lib", err.data(), err.size()), "1.18 refused: %s", err.data());
+    CHECK(cvl_check_abi(0x10013u, "lib", err.data(), err.size()), "1.19 refused: %s", err.data());
+    CHECK(!cvl_check_abi(0x10011u, "lib", err.data(), err.size()), "1.17 accepted");
+    CHECK(std::string(err.data()) == "lib: view ABI 1.17, this SDK needs 1.18 or a later 1.x", "%s", err.data());
+    CHECK(!cvl_check_abi(0x20012u, "lib", err.data(), err.size()), "2.18 accepted");
+    CHECK(std::string(err.data()) == "lib: view ABI 2.18, this SDK needs 1.18 or a later 1.x", "%s", err.data());
 }
 
 // ---- a real (stand-in) library through cvl_open --------------------------------------------
@@ -694,20 +695,28 @@ static void test_fake_library(const char* path) {
     CHECK(cvl_open(&t, path, err.data(), err.size()), "%s", err.data());
     CHECK(t.label[0] == 0 && !cvl_is_terminal(&t) && !cvl_is_wgpu(&t), "label '%s'", t.label);
     CHECK(t.show_solid != nullptr && t.parse_colour != nullptr && t.set_text != nullptr && t.standard_in != nullptr &&
-          t.abi_version() == 0x1000Bu,
+          t.abi_version() == 0x10012u,
           "the table is not bound");
     CHECK(t.set_double_click_frames != nullptr && t.focus != nullptr && t.navigation != nullptr,
           "1.8's calls are not bound");
+    CHECK(t.show_machining != nullptr && t.machining_seek != nullptr && t.machining_colour_by != nullptr &&
+              t.machining_overlays != nullptr && t.machining_info != nullptr && t.machining_heights != nullptr &&
+              t.timeline_play != nullptr && t.timeline_pause != nullptr && t.timeline_seek != nullptr &&
+              t.timeline_set_loop != nullptr && t.timeline_time != nullptr && t.timeline_duration != nullptr &&
+              t.timeline_playing != nullptr && t.timeline_status != nullptr,
+          "1.7's calls are not bound");
     CHECK(t.set_lighting != nullptr && t.lighting != nullptr, "1.9's calls are not bound");
     CHECK(t.show_points != nullptr, "1.11's show_points is not bound");
-    // A library older than the table (1.10: no show_points) is refused before any call is
+    CHECK(t.set_occluded != nullptr, "1.13's set_occluded is not bound");
+    CHECK(t.set_finish != nullptr, "1.18's set_finish is not bound");
+    // A library older than the table (1.17: no set_finish) is refused before any call is
     // bound, in Python's words.
     static CvlTable old;
-    cvl_setenv("CVL_FAKE_ABI_MINOR", "10");
+    cvl_setenv("CVL_FAKE_ABI_MINOR", "17");
     int opened = cvl_open(&old, path, err.data(), err.size());
     cvl_setenv("CVL_FAKE_ABI_MINOR", nullptr);
-    CHECK(!opened, "a view library of ABI 1.10 was opened");
-    CHECK(std::string(err.data()) == std::string(path) + ": view ABI 1.10, this SDK needs 1.11 or a later 1.x", "%s",
+    CHECK(!opened, "a view library of ABI 1.17 was opened");
+    CHECK(std::string(err.data()) == std::string(path) + ": view ABI 1.17, this SDK needs 1.18 or a later 1.x", "%s",
           err.data());
     CHECK(old.library == nullptr && old.show_solid == nullptr, "a refused library filled the table");
     CHECK(std::strcmp(cvl_error(&t), "the view library failed") == 0, "NULL last_error: %s", cvl_error(&t));

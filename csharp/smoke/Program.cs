@@ -528,6 +528,38 @@ using var outline = rect.WithHole(hole);
     Console.WriteLine("machine: a drill as the end mill refused, the job unchanged; a disposed job refuses");
 }
 {
+    // Rest machining: a list of end mills, the Z range of each corner, an empty list refused.
+    using var block = PocketedBlock();
+    using var t1 = Tool.Flat(1, 6, 20, 800, 200, 12000);
+    using var t2 = Tool.Flat(2, 2, 20, 800, 200, 12000);
+    using (var single = new Job(Stock.Around(block, 2), 30))
+    {
+        var one = single.Machine(block, t1);
+        if (one.Count != 4 || one.Any(i => Math.Abs(i.Top - 10) > 1e-6 || Math.Abs(i.Bottom - 2) > 1e-6))
+            return Fail($"machine: the single tool's corners are not from z 10 down to z 2:\n{string.Join("\n", one.Select(i => $"{i.Top} {i.Bottom}"))}");
+    }
+    using (var job = new Job(Stock.Around(block, 2), 30))
+    {
+        var rest = job.MachineWith(block, new[] { t1, t2 });
+        if (rest.Count != 4) return Fail($"machine_with: {rest.Count} item(s), not 4:\n{rest}");
+        foreach (var item in rest)
+            if (!item.Reason.Contains("T2 (2 mm)") || Math.Abs(item.Top - 10) > 1e-6 || Math.Abs(item.Bottom - 2) > 1e-6)
+                return Fail($"machine_with: {item} is not T2's corner from z 10 down to z 2");
+        if (!job.Operations().Any(o => o.Kind == "pocket" && o.Tool == 2))
+            return Fail("machine_with: no pocket with tool 2");
+    }
+    using (var job = new Job(Stock.Around(block, 2), 30))
+    {
+        try { job.MachineWith(block, Array.Empty<Tool>()); return Fail("machine_with: an empty list was accepted"); }
+        catch (BuildException e) when (e.Message.Contains("machine: at least one end mill is needed")) { }
+        if (job.Operations().Count != 0) return Fail("machine_with: a refused call changed the job");
+        try { job.MachineWith(block, new Tool[] { t1, null! }); return Fail("machine_with: a null end mill was accepted"); }
+        catch (BuildException e) when (e.Message.Contains("job_machine_with: null end mill 1")) { }
+        if (job.Operations().Count != 0) return Fail("machine_with: a refused null changed the job");
+    }
+    Console.WriteLine("machine_with: two end mills leave T2's four corners, z 10 down to z 2; an empty list refused");
+}
+{
     // The plate of spec 2026-09-28: machined cleanly by one end mill and one drill.
     using var plateOutline = Profile.Rect(80, 50).Round(6);
     var platePart = Solid.Extrude(plateOutline, Frame.Xy(), 12);
@@ -729,6 +761,647 @@ using var outline = rect.WithHole(hole);
             return Fail($"intersect: an overlap ring leaves the shared band: {shared.Overlaps[0]}");
     Console.WriteLine($"intersect: {found} ({ellipses} ellipses); {shared.Overlaps[0]}");
 }
+// Transforms: Python's test_a_transform_is_sixteen_numbers_row_major_and_composes_right_to_left
+// .. test_a_profile_turns_scales_mirrors_and_maps (transforms plan A4). A frame goes as the 12
+// numbers Frame converts to; the skew one below is passed raw, since Frame refuses it first.
+{
+    var tfXy = Frame.Xy();
+    double[] TfF(double x, double y, double z) => Frame.Xy((x, y, z));
+    bool TfAt((double X, double Y, double Z) p, double x, double y, double z, double tol = 1e-12) =>
+        Math.Abs(p.X - x) <= tol && Math.Abs(p.Y - y) <= tol && Math.Abs(p.Z - z) <= tol;
+    bool TfNear(double a, double b, double tol = 1e-9) => Math.Abs(a - b) <= tol;
+    string TfRefused(Action act)
+    {
+        try { act(); return "(no exception)"; }
+        catch (BuildException e) { return e.Message; }
+    }
+    double TfDet(Transform t)
+    {
+        var r = t.Rows;
+        return r[0] * (r[5] * r[10] - r[6] * r[9]) - r[1] * (r[4] * r[10] - r[6] * r[8]) + r[2] * (r[4] * r[9] - r[5] * r[8]);
+    }
+
+    // 1. rows and composition: `a * b` (and a.Compose(b)) is a after b.
+    var tfT = Transform.Translation((1, 2, 3));
+    if (!tfT.Rows.SequenceEqual(new double[] { 1, 0, 0, 1, 0, 1, 0, 2, 0, 0, 1, 3, 0, 0, 0, 1 }))
+        return Fail($"transform: translation rows read {string.Join(",", tfT.Rows)}");
+    var tfS = Transform.Scale((0, 0, 0), 2);
+    if (!TfAt((tfT * tfS).Point((1, 1, 1)), 3, 4, 5) || !TfAt(tfT.Compose(tfS).Point((1, 1, 1)), 3, 4, 5))
+        return Fail($"transform: (t after s)(1,1,1) reads {(tfT * tfS).Point((1, 1, 1))}");
+    if (!TfAt((tfS * tfT).Point((1, 1, 1)), 4, 6, 8) || !TfAt(tfS.Compose(tfT).Point((1, 1, 1)), 4, 6, 8))
+        return Fail($"transform: (s after t)(1,1,1) reads {(tfS * tfT).Point((1, 1, 1))}");
+    var tfTs = tfT * tfS;
+    if (!TfAt((tfTs.Inverse() * tfTs).Point((3, -4, 5)), 3, -4, 5)) return Fail("transform: the inverse does not undo the map");
+    if (Transform.FromRows(tfT.Rows) != tfT || new Transform() != Transform.Identity())
+        return Fail("transform: from_rows or the identity does not compare equal");
+    var tfNested = new double[4, 4];
+    for (var i = 0; i < 16; i++) tfNested[i / 4, i % 4] = tfT.Rows[i];
+    if (Transform.FromRows(tfNested) != tfT) return Fail("transform: four rows of four is not the same map");
+    var tfBottom = TfRefused(() => new Transform(new double[] { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1 }));
+    if (!tfBottom.StartsWith("Transform: the bottom row must be 0 0 0 1 (a projective map is not affine)")) return Fail($"transform: a bad bottom row gave '{tfBottom}'");
+    var tfFifteen = TfRefused(() => new Transform(new double[15]));
+    if (!tfFifteen.StartsWith("Transform: a matrix is 16 numbers, got 15")) return Fail($"transform: 15 numbers gave '{tfFifteen}'");
+    var tfNan = new double[16];
+    tfNan[15] = 1;
+    tfNan[0] = double.NaN;
+    var tfNotFinite = TfRefused(() => new Transform(tfNan));
+    if (!tfNotFinite.StartsWith("Transform: not finite")) return Fail($"transform: a NaN gave '{tfNotFinite}'");
+    var tfSingular = TfRefused(() => Transform.ScaleXyz(tfXy, 1, 1, 0).Inverse());
+    if (!tfSingular.StartsWith("transform_inverse: the map is singular")) return Fail($"transform: a singular inverse gave '{tfSingular}'");
+
+    // 2. the constructors' closed forms
+    if (!TfAt(Transform.Rotation((1, 0, 0), (0, 0, 1), Math.PI / 2).Point((2, 0, 0)), 1, 1, 0)) return Fail("transform: rotation");
+    if (!TfAt(Transform.Mirror(TfF(0, 0, 5)).Point((1, 2, 3)), 1, 2, 7)) return Fail("transform: mirror");
+    if (!TfAt(Transform.ScaleXyz(tfXy, 2, 3, 4).Point((1, 1, 1)), 2, 3, 4)) return Fail("transform: scale_xyz");
+    if (!TfAt(Transform.Scale((1, 2, 3), 2).Point((2, 2, 3)), 3, 2, 3) || !TfAt(Transform.Scale((1, 2, 3), 2).Point((1, 2, 3)), 1, 2, 3))
+        return Fail("transform: scale about a centre");
+    if (!TfAt(Transform.Shear(tfXy, (5, 0, 0), 0.5).Point((0, 0, 2)), 1, 0, 2)) return Fail("transform: shear");
+    if (!TfAt(Transform.PlanarProjection(tfXy).Point((1, 2, 3)), 1, 2, 0)) return Fail("transform: planar_projection");
+    if (!TfAt(Transform.ProjectAlong(tfXy, (1, 0, 1)).Point((0, 0, 2)), -2, 0, 0)) return Fail("transform: project_along");
+    if (!TfAt(Transform.PlaneToPlane(tfXy, TfF(1, 2, 3)).Point((0, 0, 0)), 1, 2, 3)) return Fail("transform: plane_to_plane");
+    if (!TfAt(Transform.ChangeBasis(TfF(1, 2, 3), tfXy).Point((0, 0, 0)), 1, 2, 3)) return Fail("transform: change_basis");
+    var tfOffPlane = TfRefused(() => Transform.Shear(tfXy, (0, 0, 1), 0.5));
+    if (!tfOffPlane.StartsWith("transform_shear: the shear direction must lie in the plane")) return Fail($"transform: an off-plane shear gave '{tfOffPlane}'");
+    var tfSkew = TfRefused(() => Transform.Mirror(new double[] { 0, 0, 0, 1, 1e-3, 0, 0, 1, 0, 0, 0, 1 }));
+    if (!tfSkew.StartsWith("transform_mirror: the frame is not right-handed and orthonormal")) return Fail($"transform: a skew mirror frame gave '{tfSkew}'");
+
+    // 3. told and split
+    var tfTurn = Transform.Rotation((1, 2, 3), (1, 1, 0), 0.7);
+    if (!tfTurn.IsRigid() || tfTurn.IsSimilarity() is not double tfK1 || !TfNear(tfK1, 1)) return Fail("transform: a turn is not rigid");
+    var tfBig = Transform.Scale((0, 0, 0), 2.5) * tfTurn;
+    if (tfBig.IsRigid() || tfBig.IsSimilarity() is not double tfK25 || !TfNear(tfK25, 2.5)) return Fail("transform: a scaled turn is not a similarity of 2.5");
+    if (tfBig.DecomposeSimilarity() is not { } tfBigSplit || !TfNear(tfBigSplit.K, 2.5) || !tfBigSplit.Orthogonal.IsRigid())
+        return Fail("transform: the scaled turn does not split as 2.5 times a rigid map");
+    if (Transform.Scale((1, 2, 3), 2).DecomposeSimilarity() is not { } tfScaleSplit
+        || !TfAt(tfScaleSplit.Translation, -1, -2, -3, 1e-9) || !TfNear(tfScaleSplit.K, 2) || tfScaleSplit.Orthogonal != Transform.Identity())
+        return Fail("transform: a scale about (1, 2, 3) does not split as translation (-1, -2, -3), k 2");
+    var tfTurnRows = tfTurn.Rows;
+    if (tfTurn.DecomposeRigid() is not { } tfTurnSplit || !TfAt(tfTurnSplit.Translation, tfTurnRows[3], tfTurnRows[7], tfTurnRows[11], 1e-9)
+        || !tfTurnSplit.Orthogonal.IsRigid())
+        return Fail("transform: the turn does not split rigidly");
+    var tfStretch = Transform.ScaleXyz(tfXy, 1, 2, 3);
+    if (tfStretch.IsSimilarity() is not null || tfStretch.DecomposeRigid() is not null || tfStretch.DecomposeSimilarity() is not null)
+        return Fail("transform: a stretch reads as a similarity");
+    if ((Transform.Mirror(tfXy) * tfStretch).DecomposeAffine() is not { } tfPolar)
+        return Fail("transform: a mirrored stretch has no polar split");
+    if (!TfAt(tfPolar.Stretch, 3, 2, 1, 1e-9) || !TfNear(TfDet(tfPolar.Rotation), -1) || !TfNear(TfDet(tfPolar.Axes), 1)
+        || !tfPolar.Rotation.IsRigid() || !tfPolar.Axes.IsRigid())
+        return Fail($"transform: the polar split reads stretch {tfPolar.Stretch}, det(rotation) {TfDet(tfPolar.Rotation)}, det(axes) {TfDet(tfPolar.Axes)}");
+    if (Transform.PlanarProjection(tfXy).DecomposeAffine() is not null) return Fail("transform: a projection has a polar split");
+    var tfRigidTol = TfRefused(() => tfTurn.IsRigid(-1));
+    if (!tfRigidTol.StartsWith("transform_is_rigid: the tolerance must be finite and not negative")) return Fail($"transform: is_rigid(-1) gave '{tfRigidTol}'");
+    var tfSimTol = TfRefused(() => tfTurn.IsSimilarity(-1));
+    if (!tfSimTol.StartsWith("transform_is_similarity: the tolerance must be finite and not negative")) return Fail($"transform: is_similarity(-1) gave '{tfSimTol}'");
+
+    // 4. quaternions
+    var tfQ = Quaternion.FromAxisAngle((0, 0, 2), Math.PI / 2);
+    if (!TfNear(tfQ.W, Math.Cos(Math.PI / 4), 1e-12) || !TfNear(tfQ.X, 0, 1e-12) || !TfNear(tfQ.Y, 0, 1e-12) || !TfNear(tfQ.Z, Math.Sin(Math.PI / 4), 1e-12))
+        return Fail($"quaternion: from_axis_angle reads {tfQ}");
+    if (!TfNear(tfQ.Angle, Math.PI / 2, 1e-12) || tfQ.Axis is not { } tfQAxis || !TfAt(tfQAxis, 0, 0, 1)) return Fail("quaternion: angle or axis");
+    if (!TfAt(tfQ.ToTransform((1, 0, 0)).Point((2, 0, 0)), 1, 1, 0)) return Fail("quaternion: to_transform about (1, 0, 0)");
+    if (!TfAt(new Quaternion(2 * tfQ.W, 2 * tfQ.X, 2 * tfQ.Y, 2 * tfQ.Z).ToTransform().Point((1, 0, 0)), 0, 1, 0)) return Fail("quaternion: a doubled one does not turn alike");
+    var tfBack = Quaternion.FromTransform(tfQ.ToTransform());
+    if (!TfNear(tfBack.W, tfQ.W) || !TfNear(tfBack.X, tfQ.X) || !TfNear(tfBack.Y, tfQ.Y) || !TfNear(tfBack.Z, tfQ.Z)) return Fail($"quaternion: from_transform reads {tfBack}");
+    if (!TfNear(Quaternion.Slerp(new Quaternion(), tfQ, 0.25).Angle, Math.PI / 8)) return Fail("quaternion: slerp a quarter of the way");
+    var tfOne = tfQ * tfQ.Conjugate();
+    if (!TfNear(tfOne.W, 1) || !TfNear(tfOne.X, 0) || !TfNear(tfOne.Y, 0) || !TfNear(tfOne.Z, 0)) return Fail($"quaternion: q * conjugate reads {tfOne}");
+    if (new Quaternion(0, 0, 0, 2).Normalized() != new Quaternion(0, 0, 0, 1)) return Fail("quaternion: normalized (0, 0, 0, 2)");
+    var tfZeroTurn = TfRefused(() => new Quaternion(0, 0, 0, 0).ToTransform());
+    if (!tfZeroTurn.StartsWith("quaternion_to_transform: the quaternion is zero")) return Fail($"quaternion: a zero to_transform gave '{tfZeroTurn}'");
+    var tfFromMirror = TfRefused(() => Quaternion.FromTransform(Transform.Mirror(tfXy)));
+    if (!tfFromMirror.StartsWith("quaternion_from_transform: ")) return Fail($"quaternion: from_transform of a mirror gave '{tfFromMirror}'");
+    var tfXY = Quaternion.FromAxisAngle((1, 0, 0), Math.PI / 2) * Quaternion.FromAxisAngle((0, 1, 0), Math.PI / 2);
+    if (!TfNear(tfXY.W, 0.5, 1e-12) || !TfNear(tfXY.X, 0.5, 1e-12) || !TfNear(tfXY.Y, 0.5, 1e-12) || !TfNear(tfXY.Z, 0.5, 1e-12))
+        return Fail($"quaternion: x turn * y turn reads {tfXY}, not (0.5, 0.5, 0.5, 0.5)");
+    // No zero components, so every term counts: the y term's x*z part multiplies a zero above.
+    var tfFull = new Quaternion(1, 2, 3, 4) * new Quaternion(5, 6, 7, 8);
+    if (tfFull != new Quaternion(-60, 12, 30, 24)) return Fail($"quaternion: (1, 2, 3, 4) * (5, 6, 7, 8) reads {tfFull}, not (-60, 12, 30, 24)");
+    // Every term's sign, which the figure above leaves partly unread: for two generic turns the
+    // product turns as the two transforms composed.
+    var tfQa = Quaternion.FromAxisAngle((1, 2, 3), 0.7);
+    var tfQb = Quaternion.FromAxisAngle((-2, 1, 0.5), 1.1);
+    var tfProduct = (tfQa * tfQb).ToTransform().Rows;
+    var tfComposed = (tfQa.ToTransform() * tfQb.ToTransform()).Rows;
+    if (!tfProduct.Zip(tfComposed).All(p => TfNear(p.First, p.Second, 1e-12)))
+        return Fail($"quaternion: a * b does not turn as a's transform after b's");
+
+    // 5. far from unit length
+    var tfHalf = Math.Sqrt(0.5);
+    foreach (var k in new[] { 1e200, 1e-170 })
+    {
+        if (new Quaternion(k, 0, 0, 0).Normalized() != new Quaternion(1, 0, 0, 0)) return Fail($"quaternion: ({k}, 0, 0, 0) normalized");
+        if (new Quaternion(0, 0, 0, -k).Normalized() != new Quaternion(0, 0, 0, -1)) return Fail($"quaternion: (0, 0, 0, -{k}) normalized");
+        var kk = new Quaternion(k, k, 0, 0);
+        var kkn = kk.Normalized();
+        if (!TfNear(kkn.W, tfHalf, 1e-12) || !TfNear(kkn.X, tfHalf, 1e-12) || kkn.Y != 0 || kkn.Z != 0) return Fail($"quaternion: ({k}, {k}, 0, 0) normalized reads {kkn}");
+        if (!(Math.Abs(kk.Length - k * Math.Sqrt(2)) <= 1e-15 * k * Math.Sqrt(2))) return Fail($"quaternion: ({k}, {k}, 0, 0) length reads {kk.Length}");
+        if (!TfNear(kk.Angle, Math.PI / 2, 1e-12)) return Fail($"quaternion: ({k}, {k}, 0, 0) angle reads {kk.Angle}");
+        if (new Quaternion(0, k, k, 0).Axis is not { } kAxis || !TfAt(kAxis, tfHalf, tfHalf, 0)) return Fail($"quaternion: (0, {k}, {k}, 0) axis");
+    }
+    var tfZeroNorm = TfRefused(() => new Quaternion(0, 0, 0, 0).Normalized());
+    if (!tfZeroNorm.StartsWith("Quaternion.normalized: the quaternion is zero")) return Fail($"quaternion: a zero normalized gave '{tfZeroNorm}'");
+
+    // 6. a solid takes any affine map
+    using var tfBox = Solid.Cuboid(1, 2, 3);
+    if (tfBox.InexactTrims != 0) return Fail("transform: a solid no map made has lost trims");
+    using (var stretched = tfBox.Transform(Transform.ScaleXyz(tfXy, 2, 3, 0.5)))
+    {
+        var (lo, hi) = stretched.BoundsAt(0.05);
+        if (!TfNear(hi[0] - lo[0], 2) || !TfNear(hi[1] - lo[1], 6) || !TfNear(hi[2] - lo[2], 1.5) || stretched.InexactTrims != 0)
+            return Fail($"transform: the stretched box spans {hi[0] - lo[0]}, {hi[1] - lo[1]}, {hi[2] - lo[2]}");
+    }
+    using (var moved = tfBox.Transform(Transform.Translation((1, 0, 0)).Rows))
+        if (moved.InexactTrims != 0 || !TfNear(moved.Bounds.Min[0], 0.5, 1e-3)) return Fail("transform: 16 numbers did not move the box");
+    using (var can0 = Solid.Cylinder(1, 2))
+    using (var sheared = can0.Transform(Transform.Shear(tfXy, (1, 0, 0), 0.5)))
+    {
+        if (!(Math.Abs(sheared.Mass(1e-7).Volume - 2 * Math.PI) <= 1e-6 * 2 * Math.PI)) return Fail($"transform: the sheared can's volume is {sheared.Mass(1e-7).Volume}");
+        if (!Enumerable.Range(0, sheared.Faces).Any(i => sheared.FaceKind(i) == "nurbs")) return Fail("transform: the sheared can has no nurbs face");
+    }
+    var tfFlat = TfRefused(() => tfBox.Transform(Transform.ScaleXyz(tfXy, 1, 1, 0)).Dispose());
+    if (!tfFlat.StartsWith("solid_transform: a singular map flattens the solid")) return Fail($"transform: a flattening map gave '{tfFlat}'");
+
+    // 7. colours and name kept
+    using (var plainCan = Solid.Cylinder(1, 2))
+    using (var greyCan = plainCan.Coloured("#808080"))
+    using (var namedCan = greyCan.Named("can"))
+    {
+        var side = Enumerable.Range(0, namedCan.Faces).First(i => namedCan.FaceKind(i) == "cylinder");
+        using var can = namedCan.Coloured(0.2, 0.4, 1.0, face: side);
+        var solidColour = can.Colour!;
+        using var canSheared = can.Transform(Transform.Shear(tfXy, (1, 0, 0), 0.5));
+        using var canNurbs = can.ConvertToNurbs();
+        foreach (var (label, outSolid) in new[] { ("transform", canSheared), ("convert_to_nurbs", canNurbs) })
+        {
+            if (outSolid.Faces != can.Faces) return Fail($"{label}: {outSolid.Faces} faces from {can.Faces}");
+            if (!outSolid.FaceColour(side)!.SequenceEqual(new[] { 0.2, 0.4, 1.0 })) return Fail($"{label}: the side's colour reads {string.Join(",", outSolid.FaceColour(side)!)}");
+            for (var i = 0; i < outSolid.Faces; i++)
+                if (i != side && !outSolid.FaceColour(i)!.SequenceEqual(solidColour)) return Fail($"{label}: face {i}'s colour is not the solid's");
+            if (outSolid.Name != "can") return Fail($"{label}: the name reads {outSolid.Name}");
+        }
+    }
+
+    // 8. levels
+    using (var levelCan = Solid.Cylinder(1, 2))
+    {
+        using var every = levelCan.ConvertToNurbs();
+        if (!Enumerable.Range(0, every.Faces).All(i => every.FaceKind(i) == "nurbs") || every.InexactTrims != 0) return Fail("convert_to_nurbs: all leaves a face not nurbs");
+        using var analytic = levelCan.ConvertToNurbs("analytic");
+        var kinds = Enumerable.Range(0, analytic.Faces).Select(analytic.FaceKind).ToHashSet();
+        if (!kinds.Contains("plane") || !kinds.Contains("nurbs")) return Fail($"convert_to_nurbs: analytic gives {string.Join(",", kinds)}");
+        var tfLevel = TfRefused(() => levelCan.ConvertToNurbs("some").Dispose());
+        if (!tfLevel.StartsWith("convert_to_nurbs: level 'some' is not \"procedural\", \"analytic\" or \"all\"")) return Fail($"convert_to_nurbs: a bad level gave '{tfLevel}'");
+    }
+
+    // 9. profiles, measured by their footprints (extruded 1, bounds at 0.001)
+    using (var tfRect = Profile.Rect(80, 40))
+    {
+        var f0 = Footprint(tfRect);
+        double rx = (f0[0] + f0[1]) / 2, ry = (f0[2] + f0[3]) / 2;
+        double[] Spans(Profile p) { var f = Footprint(p); return new[] { f[1] - f[0], f[3] - f[2], (f[0] + f[1]) / 2, (f[2] + f[3]) / 2 }; }
+        using (var p = tfRect.Rotate((0, 0), Math.PI / 2)) { var s = Spans(p); if (!TfNear(s[0], 40, 1e-3) || !TfNear(s[1], 80, 1e-3)) return Fail($"profile rotate: spans {s[0]}, {s[1]}"); }
+        using (var p = tfRect.Scale((0, 0), 0.5, 2)) { var s = Spans(p); if (!TfNear(s[0], 40, 1e-3) || !TfNear(s[1], 80, 1e-3)) return Fail($"profile scale: spans {s[0]}, {s[1]}"); }
+        using (var p = tfRect.Rotate((10, 20), Math.PI / 2))
+        {
+            var s = Spans(p);
+            if (!TfNear(s[2], 10 - (ry - 20), 1e-3) || !TfNear(s[3], 20 + (rx - 10), 1e-3)) return Fail($"profile rotate about (10, 20): centre {s[2]}, {s[3]}");
+        }
+        using (var p = tfRect.Scale((10, 0), 0.5, 2))
+        {
+            var s = Spans(p);
+            if (!TfNear(s[2], 10 + 0.5 * (rx - 10), 1e-3) || !TfNear(s[3], 2 * ry, 1e-3)) return Fail($"profile scale about (10, 0): centre {s[2]}, {s[3]}");
+        }
+        using (var p = tfRect.Mirror((100, 0), (0, 1))) { var s = Spans(p); if (!TfNear(s[2], 200, 1e-3)) return Fail($"profile mirror: x centre {s[2]}"); }
+        using (var p = tfRect.Transform2d(new[] { 1, 0.5, 0, 0, 1, 0 })) { var s = Spans(p); if (!TfNear(s[0], 100, 1e-3)) return Fail($"profile transform2d: x span {s[0]}"); }
+        var tfSingular2d = TfRefused(() => tfRect.Transform2d(new double[] { 1, 2, 0, 2, 4, 0 }).Dispose());
+        if (!tfSingular2d.StartsWith("profile_transform2d: the 2D map is singular")) return Fail($"profile transform2d: a singular map gave '{tfSingular2d}'");
+    }
+    Console.WriteLine("transforms: rows, constructors, splits, quaternions, solid maps, NURBS levels and profile maps all read back");
+}
+// Value geometry: Python's TestInterval, TestFrameVerbs, TestCurveValues, TestSurfaceValues and
+// TestCuboidValue (value geometry plan B3), with the same numbers and tolerances. The Rhino
+// records are crates/cadaclysm/tests/fixtures/rhino/value_vectors.txt, found from this source
+// file's own path ([CallerFilePath]), never from the working directory; a missing file fails.
+{
+    const double VgExact = 1e-12;
+    const double VgNurbsFoot = 1e-7;
+    var vgXy = new double[] { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    // Right-handed and exact: x = world y, y = world z, z = world x, off the origin.
+    var vgYzx = new double[] { 1, 2, 3, 0, 1, 0, 0, 0, 1, 1, 0, 0 };
+    var vgChecks = 0;
+    string? vgFailed = null;
+    void VgCheck(bool ok, string why)
+    {
+        vgChecks++;
+        if (!ok && vgFailed is null) vgFailed = why;
+    }
+    string VgRefused(Action act)
+    {
+        try { act(); return "(no exception)"; }
+        catch (BuildException e) { return e.Message; }
+    }
+    double[] VgP((double X, double Y, double Z) p) => new[] { p.X, p.Y, p.Z };
+    (double X, double Y, double Z) VgT(double[] v, int at = 0) => (v[at], v[at + 1], v[at + 2]);
+    bool VgClose(IEnumerable<double> got, IEnumerable<double> want, double tol)
+    {
+        var g = got.ToArray();
+        var w = want.ToArray();
+        return g.Length == w.Length && g.Zip(w).All(p => Math.Abs(p.First - p.Second) <= tol);
+    }
+    bool VgAt((double X, double Y, double Z) p, double x, double y, double z, double tol = 1e-15) => VgClose(VgP(p), new[] { x, y, z }, tol);
+    bool VgRel(double got, double want, double rel) => Math.Abs(got - want) <= rel * Math.Abs(want);
+    // pytest.approx's default: rel 1e-6, abs 1e-12.
+    bool VgApprox(double got, double want) => Math.Abs(got - want) <= Math.Max(1e-6 * Math.Abs(want), 1e-12);
+    double VgDist(double[] a, double[] b) => Math.Sqrt(a.Zip(b).Sum(p => (p.First - p.Second) * (p.First - p.Second)));
+    double VgMod(double x, double m) => ((x % m) + m) % m; // Python's floored %
+
+    var vgPath = System.IO.Path.GetFullPath(System.IO.Path.Combine(SmokeSourceDir(), "..", "..", "..", "..",
+        "cadaclysm", "tests", "fixtures", "rhino", "value_vectors.txt"));
+    if (!System.IO.File.Exists(vgPath)) return Fail($"values: the Rhino vectors are not at {vgPath}");
+    var vgRecords = new Dictionary<(string, string), string[]>();
+    foreach (var rawLine in System.IO.File.ReadAllLines(vgPath))
+    {
+        var line = rawLine.Trim();
+        if (line.Contains("ERROR")) return Fail($"values: an ERROR line in the Rhino vectors: {line}");
+        if (line.Length == 0 || line.StartsWith('#')) continue;
+        var words = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (!vgRecords.TryAdd((words[0], words[1]), words[2..])) return Fail($"values: ({words[0]}, {words[1]}) twice in the Rhino vectors");
+    }
+    double[] VgNums(string c, string what) =>
+        vgRecords[(c, what)].Select(w => double.Parse(w, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+    IEnumerable<(string Case, double[] Q)> VgQueries(string vgShape) =>
+        Enumerable.Range(0, 12).Select(i => ($"{vgShape}_{i:00}", VgNums($"{vgShape}_{i:00}", "query")));
+    // A foot Rhino found by iteration on a NURBS form: the distance to 1e-12, never beaten by
+    // Rhino's, the point to 1e-7 -- as B1's `nurbs_foot`.
+    void VgNurbsFootCheck(string label, double[] q, double[] ours, double[] rhino)
+    {
+        double d = VgDist(q, ours), dr = VgDist(q, rhino);
+        VgCheck(d <= dr + VgExact && Math.Abs(d - dr) <= VgExact, $"{label}: distance {d} against Rhino's {dr}");
+        VgCheck(VgClose(ours, rhino, VgNurbsFoot), $"{label}: point ({string.Join(", ", ours)}) against ({string.Join(", ", rhino)})");
+    }
+
+    // ---- TestInterval ----
+    var up = new Interval(2, 6);
+    var down = new Interval(6, 2);
+    // test_measures_keep_the_orientation
+    VgCheck(up.Length == 4.0 && down.Length == -4.0, "interval: length");
+    VgCheck(up.Mid == 4.0 && down.Mid == 4.0, "interval: mid");
+    VgCheck(up.Min == 2.0 && up.Max == 6.0 && down.Min == 2.0 && down.Max == 6.0, "interval: min/max");
+    VgCheck(up.IsIncreasing && !down.IsIncreasing && !new Interval(3, 3).IsIncreasing, "interval: is_increasing");
+    VgCheck(new Interval(3, 3).IsSingleton && !up.IsSingleton, "interval: is_singleton");
+    VgCheck(up.Swapped() == down && down.Swapped() == up, "interval: swapped");
+    VgCheck(down.ToArray().SequenceEqual(new[] { 6.0, 2.0 }) && down.T0 == 6.0 && down.T1 == 2.0, "interval: t0/t1 keep the order");
+    // test_set_operations_answer_increasing_and_touching_is_a_singleton
+    VgCheck(up.Grown(9) == new Interval(2, 9) && down.Grown(-1) == new Interval(-1, 6) && down.Grown(3) == up, "interval: grown");
+    VgCheck(up.Union(new Interval(8, 7)) == new Interval(2, 8) && down.Union((1, 3)) == new Interval(1, 6), $"interval: union reads {up.Union(new Interval(8, 7))}");
+    VgCheck(down.Intersect((9, 4)) == new Interval(4, 6) && up.Intersect((3, 5)) == new Interval(3, 5), "interval: intersect");
+    VgCheck(up.Intersect((7, 9)) is null && down.Intersect((1, 1.5)) is null, "interval: apart intersect to none");
+    VgCheck(new Interval(0, 1).Intersect((1, 2)) == new Interval(1, 1) && new Interval(2, 1).Intersect((0, 1)) == new Interval(1, 1),
+        "interval: touching intervals intersect to a singleton");
+    foreach (var x in new[] { up, down })
+        VgCheck(x.Contains(2) && x.Contains(6) && x.Contains(4.5) && !x.Contains(1.999) && !x.Contains(6.001), $"interval: contains on {x}");
+    // test_parameters_round_trip
+    VgCheck(up.ParameterAt(0.25) == 3.0 && down.ParameterAt(0.25) == 5.0, "interval: parameter_at");
+    foreach (var x in new[] { up, down, new Interval(-1.5, 0.7) })
+        foreach (var s in new[] { -0.5, 0.0, 0.3, 1.0, 2.0 })
+            VgCheck(x.NormalizedParameterAt(x.ParameterAt(s)) is { } back && Math.Abs(back - s) <= 1e-15, $"interval: {x} round trip at {s}");
+    VgCheck(new Interval(3, 3).NormalizedParameterAt(3) is null, "interval: a singleton has no normalized parameter");
+    // test_is_a_frozen_hashable_value
+    var vgA = new Interval(1, 2);
+    VgCheck(vgA == new Interval(1.0, 2.0) && vgA.GetHashCode() == new Interval(1.0, 2.0).GetHashCode()
+        && new HashSet<Interval> { vgA, new Interval(1, 2) }.Count == 1, "interval: equal and hashed by value");
+    VgCheck(vgA.ToString() == "Interval(1, 2)", $"interval: prints {vgA}");
+    var vgArr = vgA.ToArray();
+    vgArr[0] = 5;
+    VgCheck(vgA.T0 == 1.0, "interval: ToArray is not a copy");
+    VgCheck(VgRefused(() => _ = new Interval(double.NaN, 1)).StartsWith("Interval: not finite"), "interval: a NaN end is not refused");
+    VgCheck(VgRefused(() => Interval.Of(new double[] { 1, 2, 3 })).StartsWith("Interval: an interval is 2 numbers, got 3"), "interval: three numbers are not refused");
+    VgCheck(Interval.Of(new double[] { 4, 1 }) == new Interval(4, 1), "interval: of two numbers");
+    // test_matches_rhino
+    foreach (var name in new[] { "apart", "dec_dec", "inc_dec", "inc_inc", "touch" })
+    {
+        var c = $"interval_{name}";
+        var args0 = VgNums(c, "args");
+        Interval a = new(args0[0], args0[1]), b = new(args0[2], args0[3]);
+        VgCheck(a.Union(b).ToArray().SequenceEqual(VgNums(c, "union")), $"{c}: union");
+        var got = a.Intersect(b);
+        if (vgRecords[(c, "intersection")].SequenceEqual(new[] { "none" })) VgCheck(got is null, $"{c}: intersection is not none");
+        else VgCheck(got is not null && got.ToArray().SequenceEqual(VgNums(c, "intersection")), $"{c}: intersection reads {got}");
+    }
+    foreach (var name in new[] { "inc_inside", "inc_out", "dec_low", "dec_inside" })
+    {
+        var args0 = VgNums($"grow_{name}", "args");
+        VgCheck(new Interval(args0[0], args0[1]).Grown(args0[2]).ToArray().SequenceEqual(VgNums($"grow_{name}", "grown")), $"grow_{name}");
+    }
+    foreach (var name in new[] { "inc", "dec" })
+        for (var k = 0; k < 4; k++)
+        {
+            var c = $"param_{name}_{k}";
+            var args0 = VgNums(c, "args");
+            var x = new Interval(args0[0], args0[1]);
+            var t = args0[2];
+            VgCheck(VgClose(new[] { x.ParameterAt(t) }, VgNums(c, "parameter_at"), VgExact), $"{c}: parameter_at");
+            VgCheck(x.NormalizedParameterAt(2.5 + t) is { } n && VgClose(new[] { n }, VgNums(c, "normalized_at"), VgExact), $"{c}: normalized_at");
+        }
+    if (vgFailed is not null) return Fail(vgFailed);
+
+    // ---- TestFrameVerbs ----
+    // test_plane_verbs_match_rhino
+    var vgPlane = Frame.Of(VgNums("plane", "frame"));
+    VgCheck(VgClose(vgPlane.Flipped().ToArray(), VgNums("plane", "flip"), VgExact), $"frame: flipped reads {vgPlane.Flipped()}");
+    VgCheck(VgClose(vgPlane.Rotated(0.6, (1, -1, 0.5)).ToArray(), VgNums("plane", "rotate"), VgExact), "frame: rotated");
+    foreach (var (c, q) in VgQueries("plane"))
+    {
+        var qp = VgT(q);
+        VgCheck(VgClose(VgP(vgPlane.ToLocal(qp)), VgNums(c, "remap"), VgExact), $"{c}: to_local");
+        VgCheck(VgClose(VgP(vgPlane.ClosestPoint(qp)), VgNums(c, "closest"), VgExact), $"{c}: closest_point");
+        VgCheck(VgClose(new[] { vgPlane.DistanceTo(qp) }, VgNums(c, "distance"), VgExact), $"{c}: distance_to reads {vgPlane.DistanceTo(qp)}");
+    }
+    // test_fit_matches_rhino_and_refuses_in_the_librarys_words
+    var vgFlat = VgNums("fit", "points");
+    var vgPts = Enumerable.Range(0, vgFlat.Length / 3).Select(k => VgT(vgFlat, 3 * k)).ToArray();
+    var (vgFitted, vgDeviation) = Frame.Fit(vgPts);
+    var vgWant = Frame.Of(VgNums("fit", "frame"));
+    var vgSign = VgP(vgFitted.Z).Zip(VgP(vgWant.Z)).Sum(p => p.First * p.Second) < 0 ? -1.0 : 1.0;
+    VgCheck(VgClose(VgP(vgFitted.Z).Select(c => vgSign * c), VgP(vgWant.Z), VgExact), "frame: fit's normal");
+    VgCheck(VgClose(new[] { vgWant.DistanceTo(vgFitted.Origin), vgFitted.DistanceTo(vgWant.Origin) }, new[] { 0.0, 0.0 }, VgExact), "frame: fit's origin");
+    VgCheck(VgClose(new[] { vgDeviation }, VgNums("fit", "deviation"), VgExact), $"frame: fit's deviation reads {vgDeviation}");
+    VgCheck(VgRefused(() => Frame.Fit(vgPts.Take(2))) == "frame_fit: needs three points", "frame: two points fit");
+    VgCheck(VgRefused(() => Frame.Fit(new (double, double, double)[] { (0, 0, 0), (1, 1, 1), (2, 2, 2) })) == "frame_fit: the points lie on one line",
+        "frame: three points on a line fit");
+    if (vgFailed is not null) return Fail(vgFailed);
+
+    // ---- TestCurveValues ----
+    // test_a_bad_value_is_refused_by_value_check
+    foreach (var (make, words) in new (Action, string)[]
+    {
+        (() => _ = new Circle(vgXy, 0), "the radius must be positive"),
+        (() => _ = new Line((1, 1, 1), (1, 1, 1)), "the line has no length"),
+        (() => _ = new Arc(vgXy, 1, (0, 7)), "the angle must increase by at most a full turn"),
+        (() => _ = new Arc(vgXy, 1, new Interval(1, 0)), "the angle must increase by at most a full turn"),
+        (() => _ = new Ellipse(vgXy, 3, -1), "the second radius must be positive"),
+        (() => _ = new Circle(new double[] { 0, 0, 0, 1, 1e-3, 0, 0, 1, 0, 0, 0, 1 }, 1), "the frame is not right-handed and orthonormal"),
+    })
+    {
+        var why = VgRefused(make);
+        VgCheck(why == $"value_check: {words}", $"values: '{words}' came back as '{why}'");
+    }
+    // 1e-7 off square is squared up, not refused.
+    var vgNear = new Circle(new double[] { 0, 0, 0, 1, 1e-7, 0, 0, 1, 0, 0, 0, 1 }, 1);
+    VgCheck(Math.Abs(VgP(vgNear.Frame.X).Zip(VgP(vgNear.Frame.Y)).Sum(p => p.First * p.Second)) < 1e-15 && vgNear.Frame.X.Y != 0, "values: 1e-7 off square is not squared up");
+    // value_size: a raw array of the wrong count, refused in the library's sentence.
+    var vgTwelve = VgRefused(() => Circle.FromValues(new double[12]));
+    VgCheck(vgTwelve == "value_check: a circle is 13 numbers, got 12", $"values: 12 numbers for a circle gave '{vgTwelve}'");
+    VgCheck(Circle.FromValues(vgXy.Append(2.0).ToArray()) == new Circle(vgXy, 2), "values: a circle from its 13 numbers");
+    // test_each_call_answers_b1s_figures
+    var vgUnit = new Circle(vgXy, 1);
+    VgCheck(VgAt(vgUnit.PointAt(Math.PI / 2), 0, 1, 0), "circle: point_at");
+    VgCheck(VgAt(vgUnit.TangentAt(0), 0, 1, 0), "circle: tangent_at");
+    var vgLine = new Line((0, 0, 0), (1, 2, 3));
+    VgCheck(vgLine.PointAt(0.5) == (0.5, 1.0, 1.5) && vgLine.Length() == Math.Sqrt(14), "line: point_at and length");
+    VgCheck(vgLine.Start == (0, 0, 0) && vgLine.End == (1, 2, 3), "line: start and end");
+    VgCheck(VgAt(vgLine.TangentAt(0), 1 / Math.Sqrt(14), 2 / Math.Sqrt(14), 3 / Math.Sqrt(14)), "line: tangent_at");
+    var vgQuarter = new Arc(vgXy, 2, (0, Math.PI / 2));
+    VgCheck(vgQuarter.Length() == Math.PI && vgQuarter.Angle == new Interval(0, Math.PI / 2), "arc: length and angle");
+    VgCheck(VgAt(vgQuarter.Start, 2, 0, 0) && VgAt(vgQuarter.End, 0, 2, 0), $"arc: start {vgQuarter.Start} and end {vgQuarter.End}");
+    VgCheck(VgAt(vgQuarter.Mid, Math.Sqrt(2), Math.Sqrt(2), 0), "arc: mid");
+    // On the axis the foot is a pick: t = 0, not unique.
+    VgCheck(vgUnit.ClosestPoint((2, 0, 5)) == new CurveFoot(0.0, (1.0, 0.0, 0.0), true), $"circle: closest to (2, 0, 5) reads {vgUnit.ClosestPoint((2, 0, 5))}");
+    VgCheck(vgUnit.ClosestPoint((0, 0, 5)) == new CurveFoot(0.0, (1.0, 0.0, 0.0), false), $"circle: closest to (0, 0, 5) reads {vgUnit.ClosestPoint((0, 0, 5))}");
+    VgCheck(VgApprox(vgUnit.DistanceTo((2, 0, 5)), Math.Sqrt(26)), "circle: distance_to");
+    VgCheck(new Line((1, 5, 0), (0, 2, 3)).Bounds() == ((0, 2, 0), (1, 5, 3)), "line: bounds");
+    VgCheck(VgRel(new Ellipse(vgXy, 3, 1).Length(), 13.364893220555258, 1e-12), "ellipse: length");
+    // test_constructors_and_transforms
+    (double, double, double) ca = (1, 0, 0), cb = (0, 1, 0), cc = (-1, 0, 0);
+    var vgThrough = Circle.Through(ca, cb, cc);
+    VgCheck(VgClose(vgThrough.Values, vgXy.Append(1.0), 1e-15), "circle: through");
+    VgCheck(VgClose(Arc.Through(ca, cb, cc).Values, vgXy.Concat(new[] { 1.0, 0.0, Math.PI }), 1e-15), "arc: through");
+    VgCheck(VgClose(Arc.FromStartTangentEnd(ca, (0, 1, 0), cc).Values, vgXy.Concat(new[] { 1.0, 0.0, Math.PI }), 1e-15), "arc: from_start_tangent_end");
+    VgCheck(VgRefused(() => Circle.Through(ca, ca, cc)) == "circle_through: the points are coincident or collinear", "circle: through a doubled point");
+    VgCheck(VgRefused(() => Arc.FromStartTangentEnd(ca, (0, 0, 0), cc)) == "arc_from_start_tangent_end: the tangent is zero or the end lies on the tangent line",
+        "arc: a zero tangent");
+    VgCheck(Ellipse.FromCircle(new Circle(vgXy, 2)) == new Ellipse(vgXy, 2, 2), "ellipse: from_circle");
+    VgCheck(new Circle(vgXy, 1).Transform(Transform.Scale((0, 0, 0), 2)) == new Circle(vgXy, 2), "circle: scaled");
+    var vgStretch = Transform.ScaleXyz(Frame.Xy(), 1, 3, 1);
+    VgCheck(VgRefused(() => new Circle(vgXy, 1).Transform(vgStretch)) == "value_transform: a circle takes only a similarity (use ellipse_from_circle)",
+        "circle: stretched");
+    var vgE = Ellipse.FromCircle(new Circle(vgXy, 1)).Transform(vgStretch.Rows);
+    VgCheck(Math.Abs(vgE.R1 - 3) <= 1e-15 && Math.Abs(vgE.R2 - 1) <= 1e-15, $"ellipse: stretched reads {vgE}");
+    VgCheck(new Line((0, 0, 0), (1, 0, 0)).Transform(Transform.Translation((0, 0, 2))) == new Line((0, 0, 2), (1, 0, 2)), "line: moved");
+    // test_values_are_immutable_hashable_and_iterate_as_their_array
+    var vgC = new Circle(vgYzx, 2);
+    VgCheck(vgC.Values.SequenceEqual(vgYzx.Append(2.0)) && vgC.Radius == 2.0 && vgC.Frame.Equals(Frame.Of(vgYzx)), "circle: values, radius, frame");
+    VgCheck(vgC == new Circle(Frame.Of(vgYzx), 2.0) && vgC.GetHashCode() == new Circle(vgYzx, 2).GetHashCode(), "circle: equal and hashed by value");
+    VgCheck(vgC != new Sphere(vgYzx, 2) && !vgC.Equals((object)new Sphere(vgYzx, 2))
+        && new HashSet<GeometryValue> { vgC, new Circle(vgYzx, 2), new Sphere(vgYzx, 2) }.Count == 2, "circle: equals a sphere of the same numbers");
+    VgCheck(vgC.ToString().StartsWith("Circle(frame=Frame(origin=(1, 2, 3)") && vgC.ToString().EndsWith("radius=2)"), $"circle: prints {vgC}");
+    var vgCopy = vgC.Values;
+    vgCopy[12] = 3;
+    VgCheck(vgC.Radius == 2.0, "circle: Values is not a copy");
+    // test_lines_circles_and_arcs_match_rhino
+    var ends = VgNums("line", "ends");
+    var rl = new Line(VgT(ends, 0), VgT(ends, 3));
+    VgCheck(VgClose(new[] { rl.Length() }, VgNums("line", "length"), VgExact), "rhino line: length");
+    VgCheck(VgClose(VgP(rl.TangentAt(0.5)), VgNums("line", "tangent"), VgExact), "rhino line: tangent");
+    for (var k = 0; k < 5; k++)
+    {
+        var n = VgNums($"line_at_{k}", "point");
+        VgCheck(VgClose(VgP(rl.PointAt(n[0])), n[1..], VgExact), $"line_at_{k}");
+    }
+    foreach (var (c, q) in VgQueries("line"))
+        VgCheck(VgClose(VgP(rl.ClosestPoint(VgT(q)).Point), VgNums(c, "closest"), VgExact), c);
+    var rc = new Circle(VgNums("circle", "frame"), VgNums("circle", "radius")[0]);
+    VgCheck(VgClose(new[] { rc.Length() }, VgNums("circle", "length"), VgExact), "rhino circle: length");
+    for (var k = 0; k < 5; k++)
+    {
+        var n = VgNums($"circle_at_{k}", "point");
+        VgCheck(VgClose(VgP(rc.PointAt(n[0])), n[1..4], VgExact), $"circle_at_{k}");
+        VgCheck(VgClose(VgP(rc.TangentAt(n[0])), n[4..7], VgExact), $"circle_at_{k} tangent");
+    }
+    foreach (var (c, q) in VgQueries("circle"))
+    {
+        var want = VgNums(c, "closest");
+        var foot = rc.ClosestPoint(VgT(q));
+        VgCheck(foot.Unique, $"{c}: not unique");
+        VgCheck(VgClose(new[] { foot.T }, new[] { VgMod(want[0], 2 * Math.PI) }, VgExact), $"{c}: t reads {foot.T}");
+        VgCheck(VgClose(VgP(foot.Point), want[1..], VgExact), $"{c}: point");
+    }
+    var ra = new Arc(VgNums("arc", "frame"), VgNums("arc", "radius")[0], Interval.Of(VgNums("arc", "angle")));
+    VgCheck(VgClose(new[] { ra.Length() }, VgNums("arc", "length"), VgExact), "rhino arc: length");
+    for (var k = 0; k < 4; k++)
+    {
+        var n = VgNums($"arc_at_{k}", "point");
+        VgCheck(VgClose(VgP(ra.PointAt(n[0])), n[1..4], VgExact), $"arc_at_{k}");
+        VgCheck(VgClose(VgP(ra.TangentAt(n[0])), n[4..7], VgExact), $"arc_at_{k} tangent");
+    }
+    foreach (var (c, q) in VgQueries("arc"))
+    {
+        var want = VgNums(c, "closest");
+        var foot = ra.ClosestPoint(VgT(q));
+        VgCheck(VgClose(new[] { foot.T }, want[..1], VgExact), $"{c}: t reads {foot.T}");
+        VgCheck(VgClose(VgP(foot.Point), want[1..], VgExact), $"{c}: point");
+    }
+    // test_an_edges_curve_is_its_value
+    using (var can = Solid.Cylinder(5, 3))
+        foreach (var rim in can.Edges.Where(e => e.Kind == "circle"))
+            VgCheck(rim.Curve?.Value is Circle rv && VgApprox(rv.Radius, 5) && (VgApprox(rv.Frame.Origin.Z, 0) || VgApprox(rv.Frame.Origin.Z, 3)),
+                $"edges: a cylinder rim's value is {rim.Curve?.Value}");
+    double[] VgRound(double[] p) => p.Select(c => Math.Round(c, 9) + 0.0).ToArray();
+    using (var box246 = Solid.Cuboid(2, 4, 6))
+        foreach (var e in box246.Edges)
+        {
+            var ok = e.Curve?.Value is Line lv;
+            if (ok && e.Curve!.Value is Line lv2)
+            {
+                var segEnds = e.Segments.SelectMany(s => new[] { VgRound(s.A), VgRound(s.B) }).ToList();
+                ok = new[] { VgRound(VgP(lv2.Start)), VgRound(VgP(lv2.End)) }.All(p => segEnds.Any(s => s.SequenceEqual(p)));
+            }
+            VgCheck(ok, $"edges: cuboid edge {e.Index}'s value is {e.Curve?.Value}");
+        }
+    using (var cube = Solid.Cuboid(10, 10, 10))
+    {
+        var upright = cube.Edges.Where(e => e.Direction is { } d && Math.Abs(Math.Abs(d[2]) - 1) < 1e-9).ToList();
+        using var vgRounded = cube.Fillet(upright.Take(1), 2.0);
+        var arcs = vgRounded.Edges.Where(e => e.Kind == "circle").ToList();
+        VgCheck(arcs.Count == 2, $"edges: the filleted cube has {arcs.Count} circle edges");
+        foreach (var e in arcs)
+        {
+            var ok = e.Curve?.Value is Arc av && VgApprox(av.Radius, 2) && VgApprox(av.Angle.Length, Math.PI / 2);
+            if (ok && e.Curve!.Value is Arc av2)
+            {
+                var vertices = new[] { e.Segments[0].A, e.Segments[^1].B };
+                ok = vertices.Any(p => VgDist(VgP(av2.Start), p) < 1e-9) && vertices.Any(p => VgDist(VgP(av2.End), p) < 1e-9);
+            }
+            VgCheck(ok, $"edges: a fillet edge's value is {e.Curve?.Value}");
+        }
+    }
+    using (var splineProfile = Profile.Spline(new (double, double)[] { (0, 0), (10, 0), (10, 10), (0, 10) }, 3, closed: true))
+    using (var spline = Solid.Extrude(splineProfile, Frame.Xy(), 2))
+    {
+        var nurbsEdges = spline.Edges.Where(e => e.Kind == "nurbs").ToList();
+        VgCheck(nurbsEdges.Count > 0 && nurbsEdges.All(e => e.Curve is not null && e.Curve.Value is null), "edges: a spline edge has a value");
+    }
+    if (vgFailed is not null) return Fail(vgFailed);
+
+    // ---- TestSurfaceValues ----
+    // test_a_bad_value_is_refused_by_value_check
+    foreach (var (make, words) in new (Action, string)[]
+    {
+        (() => _ = new Cylinder(vgXy, 1, (2, 1)), "the height must increase"),
+        (() => _ = new Torus(vgXy, 1, 1), "the minor radius must be less than the major"),
+        (() => _ = new Cone(vgXy, 1, 0), "the height must be positive"),
+        (() => _ = new Sphere(vgXy, double.NaN), "not finite"),
+    })
+    {
+        var why = VgRefused(make);
+        VgCheck(why == $"value_check: {words}", $"values: '{words}' came back as '{why}'");
+    }
+    // test_each_call_answers_b1s_figures
+    var vgSphere = new Sphere(vgXy, 2);
+    VgCheck(VgAt(vgSphere.PointAt(0, Math.PI / 2), 0, 0, 2), "sphere: point_at");
+    var vgCyl = new Cylinder(vgXy, 1, (-1, 2));
+    VgCheck(vgCyl.Height == new Interval(-1, 2), "cylinder: height");
+    VgCheck(VgAt(vgCyl.NormalAt(Math.PI / 2, 0), 0, 1, 0), "cylinder: normal_at");
+    VgCheck(VgAt(new Torus(vgXy, 3, 1).PointAt(0, 0), 4, 0, 0), "torus: point_at");
+    var vgFoot = vgSphere.ClosestPoint((0, 0, 5));
+    VgCheck(vgFoot.Unique && VgClose(new[] { vgFoot.U, vgFoot.V }.Concat(VgP(vgFoot.Point)), new[] { 0, Math.PI / 2, 0, 0, 2 }, 1e-15),
+        $"sphere: closest to (0, 0, 5) reads {vgFoot}");
+    VgCheck(!vgSphere.ClosestPoint((0, 0, 0)).Unique, "sphere: the centre is a pick");
+    VgCheck(VgApprox(vgSphere.DistanceTo((0, 0, 5)), 3), "sphere: distance_to");
+    VgCheck(vgCyl.Domain() == (new Interval(0, 2 * Math.PI), new Interval(-1, 2)), $"cylinder: domain reads {vgCyl.Domain()}");
+    VgCheck(new Cone(vgXy, 1, 2).Domain() == (new Interval(0, 2 * Math.PI), new Interval(0, 2)), "cone: domain");
+    VgCheck(Math.Abs(vgSphere.Volume() - 32 * Math.PI / 3) < 1e-13 && Math.Abs(vgSphere.Area() - 16 * Math.PI) < 1e-13, "sphere: volume and area");
+    VgCheck(new Torus(vgXy, 3, 1).Contains((3, 0, 0.5)) && !vgSphere.Contains((0, 0, 2.5)), "values: contains");
+    VgCheck(vgSphere.Contains((0, 0, 2.5), tolerance: 0.5), "sphere: contains within a tolerance");
+    var vgNegative = VgRefused(() => vgSphere.Contains((0, 0, 0), -1));
+    VgCheck(vgNegative == "solid_value_contains: the tolerance must be finite and not negative", $"sphere: a negative tolerance gave '{vgNegative}'");
+    VgCheck(vgSphere.Bounds() == ((-2, -2, -2), (2, 2, 2)), "sphere: bounds");
+    VgCheck(VgRefused(() => vgSphere.Transform(Transform.ScaleXyz(Frame.Xy(), 1, 3, 1))) == "value_transform: a sphere takes only a similarity", "sphere: stretched");
+    VgCheck(vgSphere.Transform(Transform.Translation((1, 0, 0))) == new Sphere(Frame.Xy((1, 0, 0)), 2), "sphere: moved");
+    using (var vgSheet = vgCyl.ToNurbsSheet())
+        VgCheck(vgSheet.Faces == 1, $"cylinder: the nurbs vgSheet has {vgSheet.Faces} faces");
+    // test_each_shape_becomes_a_solid_of_its_volume
+    foreach (var (vgShape, volume) in new (SolidValue, double)[]
+    {
+        (new Sphere(vgXy, 2), 32 * Math.PI / 3), (new Cylinder(vgXy, 1, (-1, 2)), 3 * Math.PI),
+        (new Cone(vgXy, 1, 2), 2 * Math.PI / 3), (new Torus(vgXy, 3, 1), 6 * Math.PI * Math.PI),
+        (new Cuboid(vgYzx, (0, 1), (0, 2), (0, 3)), 6.0),
+    })
+    {
+        using var solid = vgShape.ToSolid();
+        VgCheck(VgRel(solid.Mass(1e-9).Volume, volume, 1e-6), $"{vgShape}: the solid's volume is {solid.Mass(1e-9).Volume}");
+        VgCheck(VgRel(vgShape.Volume(), volume, 1e-12), $"{vgShape}: volume reads {vgShape.Volume()}");
+    }
+    // test_spheres_tori_cylinders_and_cones_match_rhino
+    var rs = new Sphere(VgNums("sphere", "frame"), VgNums("sphere", "radius")[0]);
+    foreach (var (c, q) in VgQueries("sphere"))
+    {
+        var want = VgNums(c, "closest");
+        var foot = rs.ClosestPoint(VgT(q));
+        VgCheck(VgClose(new[] { foot.U, foot.V }, new[] { VgMod(want[0], 2 * Math.PI), want[1] }, VgExact), $"{c}: u, v read {foot.U}, {foot.V}");
+        VgCheck(VgClose(VgP(foot.Point), want[2..], VgExact), $"{c}: point");
+    }
+    var radii = VgNums("torus", "radii");
+    var rt = new Torus(VgNums("torus", "frame"), radii[0], radii[1]);
+    foreach (var (c, q) in VgQueries("torus"))
+    {
+        var foot = rt.ClosestPoint(VgT(q));
+        VgCheck(foot.Unique, $"{c}: not unique");
+        VgNurbsFootCheck(c, q, VgP(foot.Point), VgNums(c, "closest"));
+    }
+    var rcyl = new Cylinder(VgNums("cylinder", "frame"), VgNums("cylinder", "radius")[0], Interval.Of(VgNums("cylinder", "height")));
+    foreach (var (c, q) in VgQueries("cylinder"))
+        VgNurbsFootCheck(c, q, VgP(rcyl.ClosestPoint(VgT(q)).Point), VgNums(c, "closest"));
+    var size = VgNums("cone", "size");
+    var rcone = new Cone(VgNums("cone", "frame"), size[0], size[1]);
+    foreach (var (c, q) in VgQueries("cone"))
+        VgNurbsFootCheck(c, q, VgP(rcone.ClosestPoint(VgT(q)).Point), VgNums(c, "closest"));
+    if (vgFailed is not null) return Fail(vgFailed);
+
+    // ---- TestCuboidValue ----
+    // test_construction_bounds_and_around
+    var vgBox = new Cuboid(vgYzx, (0, 1), (0, 2), new Interval(0, 3));
+    VgCheck(vgBox.X == new Interval(0, 1) && vgBox.Y == new Interval(0, 2) && vgBox.Z == new Interval(0, 3), "cuboid: ranges");
+    // x along world y (0..1), y along world z (0..2), z along world x (0..3), from (1, 2, 3).
+    VgCheck(vgBox.Bounds() == ((1, 2, 3), (4, 3, 5)), $"cuboid: bounds read {vgBox.Bounds()}");
+    VgCheck(Cuboid.FromBounds((0, 0, 0), (1, 2, 3)) == new Cuboid(vgXy, (0, 1), (0, 2), (0, 3)), "cuboid: from_bounds");
+    VgCheck(VgRefused(() => Cuboid.FromBounds((0, 0, 0), (1, 0, 3))) == "cuboid_from_bounds: the bounds must increase along every axis", "cuboid: flat bounds");
+    VgCheck(VgRefused(() => _ = new Cuboid(vgXy, (0, 1), (2, 2), (0, 1))) == "value_check: the y range must increase", "cuboid: an empty y range");
+    var vgAroundPts = new (double, double, double)[] { (0, 0, 0), (1, 2, 3), (0.5, -1, 0.25) };
+    VgCheck(Cuboid.Around(Frame.Xy(), vgAroundPts) == new Cuboid(vgXy, (0, 1), (-1, 2), (0, 3)), "cuboid: around");
+    var vgFlatAround = VgRefused(() => Cuboid.Around(vgXy, new (double, double, double)[] { (0, 0, 0), (1, 1, 0) }));
+    VgCheck(vgFlatAround == "cuboid_around: the points are flat along an axis of the frame", $"cuboid: around flat points gave '{vgFlatAround}'");
+    var vgNoPoints = VgRefused(() => Cuboid.Around(vgXy, Array.Empty<(double, double, double)>()));
+    VgCheck(vgNoPoints == "cuboid_around: no points", $"cuboid: around no points gave '{vgNoPoints}'");
+    // test_each_call_answers_b1s_figures
+    var vgB = new Cuboid(vgXy, (0, 1), (0, 2), (0, 3));
+    VgCheck(vgB.Area() == 22.0 && vgB.Volume() == 6.0, "cuboid: area and volume");
+    VgCheck(vgB.Contains((0.5, 0.5, 0.5)) && !vgB.Contains((1.5, 0.5, 0.5), 0.4) && vgB.Contains((1.5, 0.5, 0.5), 0.5), "cuboid: contains");
+    var vgTilted = new Cuboid(vgYzx, (0, 1), (0, 2), (0, 3));
+    VgCheck(vgTilted.ClosestPoint((9, 9, 9)) == (4, 3, 5), $"cuboid: closest reads {vgTilted.ClosestPoint((9, 9, 9))}");
+    VgCheck(VgAt(vgTilted.PointAt(0.5, 0.5, 0.5), 2.5, 2.5, 4), "cuboid: point_at");
+    var vgCorners = vgB.Corners();
+    VgCheck(vgCorners.Length == 8 && vgCorners[0] == (0, 0, 0) && vgCorners[2] == (1, 2, 0) && vgCorners[6] == (1, 2, 3),
+        $"cuboid: corners read {string.Join(" ", vgCorners)}");
+    var vgMoved = vgB.Transform(Transform.Translation((0, 0, 1)));
+    VgCheck(vgMoved.Bounds() == ((0, 0, 1), (1, 2, 4)), "cuboid: moved");
+    // test_boxes_match_rhino
+    var ranges = VgNums("box", "ranges");
+    var rbox = new Cuboid(VgNums("box", "frame"), (ranges[0], ranges[1]), (ranges[2], ranges[3]), (ranges[4], ranges[5]));
+    var rCorners = VgNums("box", "corners");
+    var rGot = rbox.Corners();
+    for (var k = 0; k < 8; k++)
+        VgCheck(VgClose(VgP(rGot[k]), rCorners[(3 * k)..(3 * k + 3)], VgExact), $"rhino box: corner {k}");
+    for (var k = 0; k < 4; k++)
+    {
+        var n = VgNums($"box_at_{k}", "point");
+        VgCheck(VgClose(VgP(rbox.PointAt(n[0], n[1], n[2])), n[3..6], VgExact), $"box_at_{k}");
+    }
+    foreach (var (c, q) in VgQueries("box"))
+        VgCheck(VgClose(VgP(rbox.ClosestPoint(VgT(q))), VgNums(c, "closest"), VgExact), c);
+    if (vgFailed is not null) return Fail(vgFailed);
+    Console.WriteLine($"values: {vgChecks} checks (interval, frame verbs, curves, surfaces, cuboid, Rhino records) all read back");
+}
 // The collider: two cuboids overlapping by 2 along x, plus one far away -> one hit (0, 1),
 // depth 2, Solid() non-null.
 {
@@ -754,6 +1427,664 @@ using var outline = rect.WithHole(hole);
     try { new Collider(new[] { partA, partB, partC }, groups: new uint[] { 0, 1 }); return Fail("collider: a short groups list was accepted"); }
     catch (BuildException e) when (e.Message.Contains("groups must have one entry per solid")) { }
     Console.WriteLine($"collider: {hits.Count} hit(s), depth {hit.Depth}, {stats}");
+}
+// Clash: Python's test_clash_* trimmed to the marshalling, plus the edge row (clash plan 3).
+{
+    double[] ClashAt(double x) => new double[] { x, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    string ClashRefused(Action act)
+    {
+        try { act(); return "(no exception)"; }
+        catch (BuildException e) { return e.Message; }
+    }
+    // 1. balls too close: every field read
+    using (var a = Solid.Sphere(1))
+    using (var b = Solid.Sphere(1))
+    using (var collider = new Collider(new[] { a, b }, 1e-3))
+    {
+        var rows = collider.Clash(new[] { ClashAt(0), ClashAt(2.5) }, 1.0);
+        if (rows.Count != 1) return Fail($"clash: the balls gave {rows.Count} rows, not one");
+        var r = rows[0];
+        if (r.A != 0 || r.B != 1 || r.Kind != "too_close") return Fail($"clash: the balls' row is {r}");
+        if (Math.Abs(r.Distance - 0.5) > 1e-3) return Fail($"clash: the balls' distance is {r.Distance}");
+        if (r.KindA != "face" || r.KindB != "face" || r.IndexA is null || r.IndexB is null || r.EdgeA is not null || r.EdgeB is not null)
+            return Fail($"clash: the balls' features read {r.KindA}#{r.IndexA}/{r.EdgeA}, {r.KindB}#{r.IndexB}/{r.EdgeB}");
+        if (Math.Abs(r.OnA[0] - 1) > 2e-3 || Math.Abs(r.OnB[0] - 1.5) > 2e-3) return Fail($"clash: the balls' points read {r.OnA[0]}, {r.OnB[0]}");
+        if (r.Text != "" || r.Depth != 0) return Fail($"clash: the balls' text or depth read '{r.Text}', {r.Depth}");
+        Console.WriteLine($"clash: {r} refined={r.Refined}");
+        if (collider.Clash(new[] { ClashAt(0), ClashAt(2.5) }, 0.25).Count != 0) return Fail("clash: clearance 0.25 still found the balls");
+    }
+    // 2. boxes face to face: touching, no solid, one overlap region of area 4 on x = 1
+    Clash touching;
+    using (var a = Solid.Cuboid(2, 2, 2))
+    using (var b = Solid.Cuboid(2, 2, 2))
+    using (var collider = new Collider(new[] { a, b }, 1e-3))
+    {
+        var rows = collider.Clash(new[] { ClashAt(0), ClashAt(2) });
+        if (rows.Count != 1 || rows[0].Kind != "touching" || rows[0].Distance > 1e-3) return Fail($"clash: the boxes face to face read {string.Join(", ", rows)}");
+        touching = rows[0];
+    }
+    var notPenetrating = ClashRefused(() => touching.Solid());
+    if (!notPenetrating.StartsWith("clashes_solid: pair (0, 1) is not penetrating")) return Fail($"clash: a touching pair's solid gave '{notPenetrating}'");
+    var face = touching.Intersect();
+    if (face.Overlaps.Count != 1 || face.Overlaps[0].Loops.Length < 1) return Fail($"clash: the touching pair intersects as {face}");
+    var ring = face.Overlaps[0].Loops[0];
+    if (ring.Any(p => Math.Abs(p[0] - 1) > 1e-3)) return Fail("clash: the touching ring leaves x = 1");
+    var twice = 0.0;
+    for (var i = 0; i < ring.Length; i++) twice += ring[i][1] * ring[(i + 1) % ring.Length][2] - ring[(i + 1) % ring.Length][1] * ring[i][2];
+    if (Math.Abs(Math.Abs(twice) / 2 - 4) > 1e-6) return Fail($"clash: the touching ring's area is {Math.Abs(twice) / 2}");
+    // 3. boxes interpenetrating: depth, features none, the row outlives its collider and its list
+    using (var a = Solid.Cuboid(2, 2, 2))
+    using (var b = Solid.Cuboid(2, 2, 2))
+    {
+        Clash Penetrating()
+        {
+            var collider = new Collider(new[] { a, b }, 1e-3);
+            var rows = collider.Clash(new[] { ClashAt(0), ClashAt(1.75) });
+            collider.Dispose();
+            return rows.Count == 1 ? rows[0] : throw new Exception($"clash: the boxes overlapping read {string.Join(", ", rows)}");
+        }
+        var r = Penetrating();
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        if (r.Kind != "penetrating" || Math.Abs(r.Depth - 0.25) >= 1e-9 || r.Distance != 0) return Fail($"clash: the overlapping row is {r}, depth {r.Depth}");
+        if (r.KindA != "none" || r.IndexA is not null || r.EdgeA is not null || r.KindB != "none" || r.IndexB is not null || r.EdgeB is not null)
+            return Fail($"clash: a penetrating row's features read {r.KindA}#{r.IndexA}/{r.EdgeA}, {r.KindB}#{r.IndexB}/{r.EdgeB}");
+        using var common = r.Solid();
+        if (Math.Abs(common.Mass().Volume - 1) > 1e-6) return Fail($"clash: the overlap's volume is {common.Mass().Volume}");
+        r.Intersect();
+    }
+    // 4. the one-shot, over two sets, one set, and one set with the pair allowed
+    using (var a0 = Solid.Sphere(1))
+    using (var a1 = Solid.Sphere(1).Translate(2.05, 0, 0))
+    using (var b0 = Solid.Sphere(1).Translate(0, 2.5, 0))
+    using (var b1 = Solid.Sphere(1).Translate(10, 0, 0))
+    {
+        var two = Blacksmith.Clash(new[] { a0, a1 }, new[] { b0, b1 }, clearance: 1.0, tolerance: 1e-3);
+        if (two.Count != 1 || two[0].A != 0 || two[0].B != 0 || two[0].Kind != "too_close" || Math.Abs(two[0].Distance - 0.5) > 1e-3)
+            return Fail($"clash: two sets read {string.Join(", ", two)}");
+        var one = Blacksmith.Clash(new[] { a0, a1 }, clearance: 1.0, tolerance: 1e-3);
+        if (one.Count != 1 || one[0].A != 0 || one[0].B != 1) return Fail($"clash: one set read {string.Join(", ", one)}");
+        if (Blacksmith.Clash(new[] { a0, a1 }, clearance: 1.0, tolerance: 1e-3, allowed: new uint[] { 0, 1 }).Count != 0)
+            return Fail("clash: an allowed pair was still tested");
+    }
+    // 5. the refusals, by prefix
+    using (var a = Solid.Cuboid(2, 2, 2))
+    using (var b = Solid.Cuboid(2, 2, 2))
+    using (var collider = new Collider(new[] { a, b }))
+    {
+        foreach (var (got, want) in new[] {
+            (ClashRefused(() => collider.Clash(new[] { ClashAt(0), ClashAt(1.75) }, -1)), "collider_clash: clearance -1"),
+            (ClashRefused(() => collider.Clash(new[] { ClashAt(0) })), "collider_clash: 1 frames for 2 groups"),
+            (ClashRefused(() => collider.Clash(new[] { ClashAt(0), ClashAt(1.75) }, share: (2, 2))), "collider_clash: share (2, 2)"),
+            (ClashRefused(() => Blacksmith.Clash(new[] { a, b }, clearance: -1)), "clash: clearance -1"),
+            (ClashRefused(() => Blacksmith.Clash(new[] { a, b }, allowed: new uint[] { 5, 0 })), "clash: allowed pair (5, 0) names a part out of range"),
+            (ClashRefused(() => Blacksmith.Clash(new[] { a, b }, Array.Empty<Solid>())), "clash: an empty set"),
+            (ClashRefused(() => Blacksmith.Clash(new[] { a, b }, allowed: new uint[] { 0, 1, 0 })), "clash: allowed is 3 numbers, not pairs"),
+        })
+            if (!got.StartsWith(want)) return Fail($"clash: expected '{want}...', got '{got}'");
+    }
+    // 6. the edge row: b turned 45 degrees about z and tipped, its edge 0.1 from a's edge on x = 1, y = 1
+    using (var a = Solid.Cuboid(2, 2, 2))
+    using (var b = Solid.Cuboid(2, 2, 2))
+    using (var collider = new Collider(new[] { a, b }, 1e-3))
+    {
+        double c = Math.Sqrt(0.5), s = 0.1 * c;
+        var tipped = new double[] { 2 + s, 2 + s, 0, c, -c, 0, 0.5, 0.5, c, -0.5, -0.5, c };
+        var rows = collider.Clash(new[] { ClashAt(0), tipped }, 0.5);
+        if (rows.Count != 1 || rows[0].Kind != "too_close" || Math.Abs(rows[0].Distance - 0.1) > 1e-3) return Fail($"clash: the edge pose read {string.Join(", ", rows)}");
+        var r = rows[0];
+        if (!Near(r.OnA, new double[] { 1, 1, 0 }, 2e-3)) return Fail($"clash: the edge row's on_a is ({string.Join(", ", r.OnA)})");
+        if (r.KindA != "edge" || r.KindB != "edge" || r.EdgeA is null || r.EdgeB is null) return Fail($"clash: the edge row's features read {r.KindA}/{r.EdgeA}, {r.KindB}/{r.EdgeB}");
+        var edgesA = a.Edges;
+        var onEdge = edgesA[(int)r.EdgeA.Value].Segments.SelectMany(g => new[] { g.A, g.B });
+        if (onEdge.Any(p => Math.Abs(p[0] - 1) > 2e-3 || Math.Abs(p[1] - 1) > 2e-3)) return Fail($"clash: a's edge {r.EdgeA} is not the one on x = 1, y = 1");
+        if (r.EdgeB.Value >= b.Edges.Count) return Fail($"clash: b's edge {r.EdgeB} is past its {b.Edges.Count} edges");
+        Console.WriteLine($"clash: edge row {r}, edge_a {r.EdgeA}, edge_b {r.EdgeB} of {edgesA.Count}");
+    }
+    // ... and a ball 0.2 off that edge: side a an edge, side b a face, so a swap of the sides shows
+    using (var box = Solid.Cuboid(2, 2, 2))
+    using (var ball = Solid.Sphere(1))
+    using (var collider = new Collider(new[] { box, ball }, 1e-3))
+    {
+        var off = 1 + 1.2 * Math.Sqrt(0.5);
+        var rows = collider.Clash(new[] { ClashAt(0), new double[] { off, off, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 } }, 0.5);
+        if (rows.Count != 1 || Math.Abs(rows[0].Distance - 0.2) > 1e-3) return Fail($"clash: the ball by the edge read {string.Join(", ", rows)}");
+        var r = rows[0];
+        if (r.KindA != "edge" || r.EdgeA is null || r.KindB != "face" || r.EdgeB is not null) return Fail($"clash: the ball by the edge names {r.KindA}/{r.EdgeA}, {r.KindB}/{r.EdgeB}");
+    }
+}
+// Swept clash: Python's test_swept_clash_* trimmed to the marshalling (swept clash plan 2b). A
+// 2-cube moving along x from -5 to 5 through a 2-cube at the origin meets it at t = 0.3 and
+// leaves at 0.7, at a relative speed of 10 a segment.
+{
+    const double SweptTol = 1e-3, SweptRes = 1e-3;
+    double[] SweptAt(double x, double y = 0) => new double[] { x, y, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    string SweptRefused(Action act)
+    {
+        try { act(); return "(no exception)"; }
+        catch (BuildException e) { return e.Message; }
+    }
+    var through = new[] { new[] { SweptAt(-5), SweptAt(0) }, new[] { SweptAt(5), SweptAt(0) } };
+    bool StartsNear(double got, double want) => Math.Abs(got - want) <= SweptTol / 10 + 1e-9;
+    bool EndsNear(double got, double want) => Math.Abs(got - want) <= SweptRes + SweptTol / 10;
+    // 1. a cube through a cube: every field read; `First` outlives the collider and the swept list
+    using (var a = Solid.Cuboid(2, 2, 2))
+    using (var b = Solid.Cuboid(2, 2, 2))
+    {
+        IReadOnlyList<SweptClash> Crossing()
+        {
+            var collider = new Collider(new[] { a, b }, SweptTol);
+            var found = collider.SweptClash(through);
+            collider.Dispose();
+            return found;
+        }
+        var rows = Crossing();
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        if (rows.Count != 1) return Fail($"swept clash: a cube through a cube gave {rows.Count} rows, not one");
+        var r = rows[0];
+        if (r.A != 0 || r.B != 1) return Fail($"swept clash: the crossing row is {r}");
+        if (!StartsNear(r.FirstTime, 0.3)) return Fail($"swept clash: the crossing's first time is {r.FirstTime}");
+        if (r.Intervals.Count != 1 || r.Intervals[0].Start != r.FirstTime || !EndsNear(r.Intervals[0].End, 0.7))
+            return Fail($"swept clash: the crossing's intervals read {r}");
+        if (r.First.A != 0 || r.First.B != 1 || r.First.Kind != "touching") return Fail($"swept clash: the crossing's first is {r.First}");
+        var notPenetrating = SweptRefused(() => r.First.Solid());
+        if (!notPenetrating.StartsWith("clashes_solid: pair (0, 1) is not penetrating"))
+            return Fail($"swept clash: a touching first's solid gave '{notPenetrating}'");
+        var x = r.First.Intersect();
+        if (x.Overlaps.Count != 1) return Fail($"swept clash: the crossing's first intersects as {x}");
+        if (x.Overlaps[0].Loops.Any(loop => loop.Any(p => Math.Abs(p[0] + 1) > 2 * SweptTol)))
+            return Fail("swept clash: the crossing's first contact leaves x = -1");
+        Console.WriteLine($"swept clash: {r}");
+    }
+    // 2. there and back: two intervals, in order
+    using (var a = Solid.Cuboid(2, 2, 2))
+    using (var b = Solid.Cuboid(2, 2, 2))
+    using (var collider = new Collider(new[] { a, b }, SweptTol))
+    {
+        var rows = collider.SweptClash(through.Append(new[] { SweptAt(-5), SweptAt(0) }));
+        if (rows.Count != 1 || rows[0].Intervals.Count != 2) return Fail($"swept clash: there and back read {string.Join(", ", rows)}");
+        var spans = rows[0].Intervals;
+        if (!StartsNear(spans[0].Start, 0.3) || !EndsNear(spans[0].End, 0.7) || !StartsNear(spans[1].Start, 1.3) || !EndsNear(spans[1].End, 1.7))
+            return Fail($"swept clash: there and back read {rows[0]}");
+    }
+    // 3. a miss, seen only within the clearance
+    using (var a = Solid.Cuboid(2, 2, 2))
+    using (var b = Solid.Cuboid(2, 2, 2))
+    using (var collider = new Collider(new[] { a, b }, SweptTol))
+    {
+        var passing = new[] { new[] { SweptAt(-5, 2.5), SweptAt(0) }, new[] { SweptAt(5, 2.5), SweptAt(0) } };
+        if (collider.SweptClash(passing, clearance: 0.4).Count != 0) return Fail("swept clash: clearance 0.4 still found the miss");
+        var rows = collider.SweptClash(passing, clearance: 0.6);
+        if (rows.Count != 1 || rows[0].First.Kind != "too_close" || rows[0].First.Distance < 0.5 - SweptTol || rows[0].First.Distance > 0.6)
+            return Fail($"swept clash: the miss at clearance 0.6 read {string.Join(", ", rows)}");
+    }
+    // 4. a pair starting inside: first time 0, the overlap rebuilt there
+    using (var a = Solid.Cuboid(2, 2, 2))
+    using (var b = Solid.Cuboid(2, 2, 2))
+    using (var collider = new Collider(new[] { a, b }, SweptTol))
+    {
+        var rows = collider.SweptClash(new[] { new[] { SweptAt(1.75), SweptAt(0) }, new[] { SweptAt(5), SweptAt(0) } });
+        if (rows.Count != 1 || rows[0].FirstTime != 0 || rows[0].First.Kind != "penetrating")
+            return Fail($"swept clash: starting inside read {string.Join(", ", rows)}");
+        using var common = rows[0].First.Solid();
+        if (Math.Abs(common.Mass().Volume - 1) > 1e-6) return Fail($"swept clash: the starting overlap's volume is {common.Mass().Volume}");
+    }
+    // 5. the one-shot: set a still at the origin and at y = 20, set b carried along x through them
+    using (var a0 = Solid.Cuboid(2, 2, 2))
+    using (var a1 = Solid.Cuboid(2, 2, 2).Translate(0, 20, 0))
+    using (var b0 = Solid.Cuboid(2, 2, 2))
+    using (var b1 = Solid.Cuboid(2, 2, 2))
+    {
+        var still = new[] { new[] { SweptAt(0), SweptAt(0) }, new[] { SweptAt(0), SweptAt(0) } };
+        var moving = new[] { new[] { SweptAt(-5), SweptAt(-5, 20) }, new[] { SweptAt(5), SweptAt(5, 20) } };
+        var two = Blacksmith.SweptClash(new[] { a0, a1 }, still, new[] { b0, b1 }, moving, tolerance: SweptTol);
+        if (string.Join(" ", two.Select(r => $"{r.A}{r.B}{r.First.A}{r.First.B}")) != "0000 1111")
+            return Fail($"swept clash: two sets read {string.Join(", ", two)}");
+        using (var collider = new Collider(new[] { a0, a1, b0, b1 }, SweptTol))
+        {
+            var via = collider.SweptClash(still.Zip(moving, (sa, sb) => sa.Concat(sb)));
+            if (string.Join(" ", via.Select(r => $"{r.A},{r.B - 2},{r.FirstTime:R},{string.Join(";", r.Intervals)}"))
+                != string.Join(" ", two.Select(r => $"{r.A},{r.B},{r.FirstTime:R},{string.Join(";", r.Intervals)}")))
+                return Fail($"swept clash: the collider read {string.Join(", ", via)} where the one-shot read {string.Join(", ", two)}");
+        }
+        var across = new[] { new[] { SweptAt(0), SweptAt(-5) }, new[] { SweptAt(0), SweptAt(5) } };
+        var one = Blacksmith.SweptClash(new[] { a0, b0 }, across, tolerance: SweptTol);
+        if (one.Count != 1 || one[0].A != 0 || one[0].B != 1) return Fail($"swept clash: one set read {string.Join(", ", one)}");
+        if (Blacksmith.SweptClash(new[] { a0, b0 }, across, tolerance: SweptTol, allowed: new uint[] { 0, 1 }).Count != 0)
+            return Fail("swept clash: an allowed pair was still tested");
+    }
+    // 6. the refusals, by prefix
+    using (var a = Solid.Cuboid(2, 2, 2))
+    using (var b = Solid.Cuboid(2, 2, 2))
+    using (var collider = new Collider(new[] { a, b }, SweptTol))
+    {
+        var still = new[] { new[] { SweptAt(0) }, new[] { SweptAt(0) } };
+        foreach (var (got, want) in new[] {
+            (SweptRefused(() => collider.SweptClash(through.Take(1))), "collider_swept_clash: 1 poses, at least 2 are needed"),
+            (SweptRefused(() => collider.SweptClash(still)), "collider_swept_clash: 1 frames for 2 groups"),
+            (SweptRefused(() => collider.SweptClash(new[] { new[] { SweptAt(0), SweptAt(0) }, new[] { SweptAt(0) } })), "collider_swept_clash: 1 frames for 2 groups"),
+            (SweptRefused(() => collider.SweptClash(through, resolution: 0)), "collider_swept_clash: resolution 0"),
+            (SweptRefused(() => collider.SweptClash(through, maxSteps: 0)), "collider_swept_clash: max_steps must be at least 1"),
+            (SweptRefused(() => collider.SweptClash(through, clearance: -1)), "collider_swept_clash: clearance -1"),
+            (SweptRefused(() => collider.SweptClash(through, share: (2, 2))), "collider_swept_clash: share (2, 2)"),
+            (SweptRefused(() => Blacksmith.SweptClash(new[] { a }, still, new[] { b })), "swept_clash: others and other_poses go together"),
+            (SweptRefused(() => Blacksmith.SweptClash(new[] { a }, still, otherPoses: still)), "swept_clash: others and other_poses go together"),
+            (SweptRefused(() => Blacksmith.SweptClash(new[] { a }, still, new[] { b }, still.Take(1))), "swept_clash: 2 poses for set a, 1 for set b"),
+            (SweptRefused(() => Blacksmith.SweptClash(new[] { a }, still, new[] { b }, new[] { new[] { SweptAt(0) }, new[] { SweptAt(0), SweptAt(0) } })),
+                "swept_clash: pose 1 of set b has 2 frames for 1 parts"),
+            (SweptRefused(() => Blacksmith.SweptClash(new[] { a }, still, Array.Empty<Solid>(), new[] { Array.Empty<double[]>(), Array.Empty<double[]>() })),
+                "swept_clash: an empty set"),
+            (SweptRefused(() => Blacksmith.SweptClash(new[] { a, b }, through, allowed: new uint[] { 5, 0 })), "swept_clash: allowed pair (5, 0) names a part out of range"),
+            (SweptRefused(() => Blacksmith.SweptClash(new[] { a, b }, through, allowed: new uint[] { 0, 1, 0 })), "swept_clash: allowed is 3 numbers, not pairs"),
+            (SweptRefused(() => Blacksmith.SweptClash(new[] { a, b }, through, maxSteps: 0)), "swept_clash: max_steps must be at least 1"),
+            (SweptRefused(() => Blacksmith.SweptClash(new[] { a, b }, through.Take(1))), "swept_clash: 1 poses, at least 2 are needed"),
+        })
+            if (!got.StartsWith(want)) return Fail($"swept clash: expected '{want}...', got '{got}'");
+    }
+}
+// An assembly's swept clash: Python's test_assembly_* swept tests trimmed to the marshalling
+// (swept clash plan 3c). The rig: a `base` plate on link `ground`; an `arm`, cuboid(3, 0.2, 0.2)
+// from the hinge out along x, on link `arm`, turning on `hinge`; a `carriage` far out on `slide`
+// (cylindrical, two values); and two cubes in no link: `chord` below the hinge, which the chord
+// between the arm's end poses crosses and its arc never does, and `circle` on the arm's circle.
+{
+    const double SweptTol = 1e-3;
+    double[] RigAt(double x, double y = 0, double z = 0) => new double[] { x, y, z, 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    string RigRefused(Action act)
+    {
+        try { act(); return "(no exception)"; }
+        catch (BuildException e) { return e.Message; }
+    }
+    static (string Joint, IReadOnlyList<double> Values) Key(string joint, params double[] values) => (joint, values);
+    Assembly Hand()
+    {
+        // a `tip` cube on link `body`, and a `nub` well above it on `nubs`, turning on `turn`
+        var hand = new Assembly("hand");
+        using (var tip = Solid.Cuboid(0.4, 0.4, 0.4)) hand.Place(tip, RigAt(0), "tip");
+        using (var nub = Solid.Cuboid(0.2, 0.2, 0.2)) hand.Place(nub, RigAt(0, 0, 2), "nub");
+        hand.Link("body", "tip");
+        hand.Link("nubs", "nub");
+        hand.Joint("turn", "body", "nubs");
+        hand.Pair("turn", "revolute", Frame.Xy());
+        return hand;
+    }
+    Assembly Rig(Assembly? hand = null)
+    {
+        var rig = new Assembly("rig");
+        using (var plate = Solid.Cuboid(1, 1, 0.4)) rig.Place(plate, RigAt(0, 0, -1), "base");
+        if (hand is null)
+        {
+            using var arm = Solid.Cuboid(3, 0.2, 0.2);
+            rig.Place(arm, RigAt(1.5), "arm");
+        }
+        else rig.Place(hand, RigAt(1.5), "hand");
+        foreach (var (name, at) in new[] { ("chord", RigAt(0, -1.2)), ("circle", RigAt(0, 1.5)), ("carriage", RigAt(20)) })
+            using (var cube = Solid.Cuboid(0.4, 0.4, 0.4)) rig.Place(cube, at, name);
+        rig.Link("ground", "base");
+        rig.Link("arm", hand is null ? "arm" : "hand");
+        rig.Link("carriage", "carriage");
+        foreach (var (joint, end, kind) in new[] { ("hinge", "arm", "revolute"), ("slide", "carriage", "cylindrical") })
+        {
+            rig.Joint(joint, "ground", end);
+            rig.Pair(joint, kind, Frame.Xy());
+        }
+        rig.Base("ground");
+        return rig;
+    }
+    // the hinge at 0, 90 and 180 degrees, the carriage sliding 0, 0.5, 1 unturned
+    var swing = new[] {
+        new[] { Key("hinge", 0.0), Key("slide", 0.0, 0.0) },
+        new[] { Key("hinge", Math.PI / 2), Key("slide", 0.5, 0.0) },
+        new[] { Key("hinge", Math.PI), Key("slide", 1.0, 0.0) },
+    };
+    // the time the arm's leading face (y = 0.1 in its own frame) is `gap` from the circle cube's
+    // corner (0.2, 1.3), the first point it meets, in the first segment
+    double CircleTime(double gap)
+    {
+        double r = Math.Sqrt(1.3 * 1.3 + 0.2 * 0.2), phi = Math.Atan2(0.2, 1.3);
+        return (Math.Acos((0.1 + gap) / r) - phi) / (Math.PI / 2);
+    }
+    string Named(IReadOnlyList<string> names, IEnumerable<SweptClash> rows) => string.Join(" ", rows.Select(r => $"({names[r.A]}, {names[r.B]})"));
+    // 1. parts: depth first, placements in order, a "/" inside a name escaped
+    using (var sub = new Assembly("pair"))
+    using (var top = new Assembly("top"))
+    using (var empty = new Assembly("empty"))
+    {
+        using (var x = Solid.Cuboid(1, 1, 1)) sub.Place(x, RigAt(0), "x");
+        using (var y = Solid.Cuboid(1, 1, 1)) sub.Place(y, RigAt(2), "y");
+        using (var p = Solid.Cuboid(1, 1, 1)) top.Place(p, RigAt(0, 5), "p");
+        top.Place(sub, RigAt(0), "a/b");
+        using (var q = Solid.Cuboid(1, 1, 1)) top.Place(q, RigAt(0, 9), "q");
+        var parts = top.Parts();
+        if (!parts.SequenceEqual(new[] { "p", "a\\/b/x", "a\\/b/y", "q" })) return Fail($"assembly parts: read [{string.Join(", ", parts)}]");
+        if (empty.Parts().Count != 0) return Fail("assembly parts: an empty assembly lists parts");
+    }
+    // 2. the arm sweeps its arc, not its chord: one row, (arm, circle), within the arc's window
+    using (var rig = Rig())
+    {
+        var names = rig.Parts();
+        if (!names.SequenceEqual(new[] { "base", "arm", "chord", "circle", "carriage" })) return Fail($"assembly swept clash: the rig's parts read [{string.Join(", ", names)}]");
+        var rows = rig.SweptClash(swing, tolerance: SweptTol);
+        if (Named(names, rows) != "(arm, circle)") return Fail($"assembly swept clash: the swing read {Named(names, rows)}");
+        double within = CircleTime(SweptTol), meets = CircleTime(0.0);
+        if (rows[0].FirstTime < within - 1e-9 || rows[0].FirstTime > meets + 1e-9)
+            return Fail($"assembly swept clash: the swing's first time {rows[0].FirstTime} is outside [{within}, {meets}]");
+        if (rows[0].First is not Clash) return Fail("assembly swept clash: the swing's first is not a Clash");
+        Console.WriteLine($"assembly swept clash: {rows[0]}");
+    }
+    // 3. the first clash is at the posed frames: the arm starts at 1.5 rad, through the circle cube
+    using (var rig = Rig())
+    {
+        var rows = rig.SweptClash(new[] { new[] { Key("hinge", 1.5), Key("slide", 0.0, 0.0) }, new[] { Key("hinge", Math.PI), Key("slide", 0.0, 0.0) } },
+            tolerance: SweptTol);
+        if (string.Join(" ", rows.Select(r => $"({r.A}, {r.B}, {r.FirstTime})")) != "(1, 3, 0)")
+            return Fail($"assembly swept clash: from 1.5 rad read {string.Join(", ", rows)}");
+        using var common = rows[0].First.Solid();
+        var got = common.BoundsBox(SweptTol);
+        double co = Math.Cos(1.5), si = Math.Sin(1.5);
+        using var armBar = Solid.Cuboid(3, 0.2, 0.2).Translate(1.5, 0, 0);
+        var want = armBar.BoundsBox(SweptTol).Moved(new double[] { 0, 0, 0, co, si, 0, -si, co, 0, 0, 0, 1 });
+        for (var k = 0; k < 3; k++)
+            if (got.Lo[k] < want.Lo[k] - 1e-6 || got.Hi[k] > want.Hi[k] + 1e-6)
+                return Fail($"assembly swept clash: the first overlap {got} leaves the turned arm {want}");
+        if (got.Lo[1] < 1.3 - 4 * SweptTol || got.Hi[1] > 1.7 + 4 * SweptTol || got.Hi[0] <= got.Lo[0])
+            return Fail($"assembly swept clash: the first overlap {got} is not at the circle cube");
+    }
+    // 4. joined links are tested only when asked: a pin on the arm's link inside a bore on ground
+    using (var pinned = new Assembly("pinned"))
+    {
+        using (var bore = Solid.Cuboid(0.6, 0.6, 0.6)) pinned.Place(bore, RigAt(0), "bore");
+        using (var pinCube = Solid.Cuboid(0.2, 0.2, 0.2)) pinned.Place(pinCube, RigAt(0), "pin");
+        pinned.Link("ground", "bore");
+        pinned.Link("arm", "pin");
+        pinned.Joint("hinge", "ground", "arm");
+        pinned.Pair("hinge", "revolute", Frame.Xy());
+        var keys = new[] { new[] { Key("hinge", 0.0) }, new[] { Key("hinge", 1.0) } };
+        if (pinned.SweptClash(keys, tolerance: SweptTol).Count != 0) return Fail("assembly swept clash: a joined pair was tested unasked");
+        var rows = pinned.SweptClash(keys, tolerance: SweptTol, joined: true);
+        if (string.Join(" ", rows.Select(r => $"({r.A}, {r.B}, {r.FirstTime})")) != "(0, 1, 0)")
+            return Fail($"assembly swept clash: joined read {string.Join(", ", rows)}");
+        if (pinned.SweptClash(keys, tolerance: SweptTol, joined: true, allowed: new uint[] { 0, 1 }).Count != 0)
+            return Fail("assembly swept clash: an allowed joined pair was still tested");
+    }
+    // 5. a sub-assembly rides its placement's link
+    using (var hand = Hand())
+    using (var rig = Rig(hand))
+    {
+        var names = rig.Parts();
+        if (!names.SequenceEqual(new[] { "base", "hand/tip", "hand/nub", "chord", "circle", "carriage" }))
+            return Fail($"assembly swept clash: the handed rig's parts read [{string.Join(", ", names)}]");
+        var rows = rig.SweptClash(swing, tolerance: SweptTol);
+        if (Named(names, rows) != "(hand/tip, circle)") return Fail($"assembly swept clash: the handed swing read {Named(names, rows)}");
+    }
+    // 6. the refusals, by their exact words: the wrapper's own first, then the kernel's passed on
+    using (var hand = Hand())
+    using (var rig = Rig(hand))
+    {
+        var two = new[] { new[] { Key("hinge", 0.0) }, new[] { Key("hinge", 1.0) } };
+        foreach (var (got, want) in new[] {
+            (RigRefused(() => rig.SweptClash(new[] { new[] { Key("hinge", 0.0), Key("slide", 0, 0) }, new[] { Key("hinge", 1.0), Key("slide", 0, 0) }, new[] { Key("hinge", 2.0) } })),
+                "swept_clash: joint 'slide' is in keyframe 0 and not in keyframe 2"),
+            (RigRefused(() => rig.SweptClash(new[] { new[] { Key("hinge", 0.0) }, new[] { Key("hinge", 1.0), Key("slide", 0, 0) } })),
+                "swept_clash: joint 'slide' is in keyframe 1 and not in keyframe 0"),
+            (RigRefused(() => rig.SweptClash(new[] { new[] { Key("hinge", 0.0) }, new[] { Key("hinge", 1.0), Key("hinge", 2.0) } })),
+                "swept_clash: joint 'hinge' is given twice"),
+            (RigRefused(() => rig.SweptClash(new[] { new[] { Key("slide", 0, 0) }, new[] { Key("slide", 1) } })),
+                "swept_clash: joint 'slide' has 2 values in keyframe 0 and 1 in keyframe 1"),
+            (RigRefused(() => rig.SweptClash(new[] { new[] { Key("hand/turn", 0.0) }, new[] { Key("hand/turn", 1.0) } })),
+                "swept_clash: joint 'hand/turn' is in a sub-assembly; a sweep moves this assembly's own joints"),
+            (RigRefused(() => rig.SweptClash(new[] { new[] { Key("elbow", 0.0) }, new[] { Key("elbow", 1.0) } })),
+                "swept_clash: no joint named 'elbow' in assembly 'rig' or under it"),
+            (RigRefused(() => rig.SweptClash(new[] { new[] { Key("hinge", 0, 0) }, new[] { Key("hinge", 1, 1) } })),
+                "swept_clash: joint 'hinge' takes 1 values, but 2 were given"),
+            (RigRefused(() => rig.SweptClash(two.Take(1))), "swept_clash: 1 poses, at least 2 are needed"),
+            (RigRefused(() => rig.SweptClash(two, resolution: 0)), "swept_clash: resolution 0"),
+            (RigRefused(() => rig.SweptClash(two, maxSteps: 0)), "swept_clash: max_steps must be at least 1"),
+            (RigRefused(() => rig.SweptClash(two, allowed: new uint[] { 9, 0 })), "swept_clash: allowed pair (9, 0) names a part out of range"),
+            (RigRefused(() => rig.SweptClash(two, allowed: new uint[] { 0, 1, 2 })), "swept_clash: allowed is 3 numbers, not pairs"),
+            (RigRefused(() => rig.SweptClash(two, ground: "wheel")), "swept_clash: assembly 'rig' has no link named 'wheel'"),
+        })
+            if (got != want && !(want == "swept_clash: resolution 0" && got.StartsWith(want)))
+                return Fail($"assembly swept clash: expected '{want}', got '{got}'");
+    }
+}
+// Wall thickness:Python's test_thickness_* / test_mesh_thickness_* trimmed to the marshalling (plan 2b).
+{
+    var xy = new double[] { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    string ThickRefused(Action act)
+    {
+        try { act(); return "(no exception)"; }
+        catch (BuildException e) { return e.Message; }
+        catch (ObjectDisposedException e) { return e.Message; }
+    }
+    uint FaceHolding(ThicknessGauge gauge, Solid solid, uint body, double[] p)
+    {
+        for (uint f = 0; f < solid.Faces; f++)
+        {
+            var r = gauge.ThicknessAt(body, f, p, 100.0, 0.5);
+            if (r is not null && Near(r.Point, p, 1e-9)) return f;
+        }
+        throw new Exception($"thickness: no face holds ({string.Join(", ", p)})");
+    }
+    // 1. a wallPlate reads 2 at every cap vertex
+    using (var wallPlate = Solid.Cuboid(10, 10, 2))
+    {
+        IReadOnlyList<Thickness> rows;
+        ThicknessMesh mesh;
+        using (var g = new ThicknessGauge(new[] { wallPlate }))
+        {
+            if (g.Count != 1 || g.Tolerance != 0.01) return Fail($"thickness: the gauge reads {g.Count} bodies at {g.Tolerance}");
+            rows = g.Thickness(10.0, 0.5);
+            mesh = g.Mesh(0);
+        }
+        var caps = rows.Where(r => Math.Abs(Math.Abs(r.Point[2]) - 1) < 1e-9 && Math.Abs(r.Opposite[2] + r.Point[2]) < 1e-9).ToList();
+        if (caps.Count < 8) return Fail($"thickness: {caps.Count} cap rows");
+        foreach (var r in caps)
+        {
+            if (Math.Abs(r.Value - 2) > 1e-9 || Math.Abs(r.ExactThickness - 2) > 1e-9) return Fail($"thickness: a cap row reads {r}");
+            if (Math.Abs(r.ExactOpposite[2] + r.Point[2]) > 1e-9) return Fail($"thickness: a cap row's exact opposite is {r.ExactOpposite[2]}");
+            if (r.Knife || r.OppositeBody != 0) return Fail($"thickness: a cap row reads knife {r.Knife}, opposite body {r.OppositeBody}");
+        }
+        foreach (var r in rows)
+        {
+            if (r.Body != 0 || r.Vertex is null || r.Point.Length != 3 || r.Opposite.Length != 3 || r.ExactOpposite.Length != 3)
+                return Fail($"thickness: a row reads {r}");
+            if (!Near(mesh.Positions[(int)r.Vertex.Value], r.Point, 0)) return Fail($"thickness: row {r} is not at mesh vertex {r.Vertex}");
+        }
+        if (!rows.Any(r => r.Sphere is not null)) return Fail("thickness: no row carries a sphere");
+        using (var g = new ThicknessGauge(new[] { wallPlate }, tolerance: 0.01))
+        {
+            if (g.Thickness(1.0).Count != 0) return Fail("thickness: a maximum under the wall still read");
+            if (g.Thickness(10.0).Count != rows.Count) return Fail("thickness: the sharp angle does not default to 0");
+        }
+        Console.WriteLine($"thickness: plate {rows.Count} rows, {caps.Count} on the caps");
+    }
+    // 2. the measuring mesh is a copy that matches the readings
+    using (var wallPlate = Solid.Cuboid(10, 10, 2))
+    {
+        var g = new ThicknessGauge(new[] { wallPlate });
+        var gaugeMesh = g.Mesh(0);
+        if (gaugeMesh.Faces.Length != gaugeMesh.Triangles.Length || gaugeMesh.Triangles.Length < 12) return Fail($"thickness: mesh has {gaugeMesh.Faces.Length} faces, {gaugeMesh.Triangles.Length} triangles");
+        if (gaugeMesh.Normals.Length != gaugeMesh.Positions.Length || gaugeMesh.Positions.Length == 0) return Fail("thickness: mesh normals and positions differ in count");
+        if (gaugeMesh.Positions.Concat(gaugeMesh.Normals).Any(p => p.Length != 3) || gaugeMesh.Triangles.Any(t => t.Length != 3)) return Fail("thickness: mesh rows are not triples");
+        if (gaugeMesh.Faces.Any(f => f >= wallPlate.Faces)) return Fail("thickness: a triangle names a face past the solid");
+        if (gaugeMesh.Triangles.SelectMany(t => t).Any(k => k >= gaugeMesh.Positions.Length)) return Fail("thickness: a triangle names a vertex past the mesh");
+        if (gaugeMesh.Normals.Any(n => Math.Abs(Norm(n) - 1) > 1e-9)) return Fail("thickness: a mesh normal is not a unit");
+        var rows = g.Thickness(100.0, 0.5);
+        if (rows.Count != gaugeMesh.Positions.Length) return Fail($"thickness: {rows.Count} rows for {gaugeMesh.Positions.Length} vertices");
+        foreach (var r in rows)
+        {
+            var t = Array.FindIndex(gaugeMesh.Triangles, tri => tri.Contains(r.Vertex!.Value));
+            if (t < 0 || gaugeMesh.Faces[t] != r.Face) return Fail($"thickness: row {r} sits on face {r.Face} but its triangle is on {(t < 0 ? -1 : (int)gaugeMesh.Faces[t])}");
+        }
+        var noBody = ThickRefused(() => g.Mesh(1));
+        if (noBody != "thickness_gauge_mesh: no body 1 -- there are 1") return Fail($"thickness: mesh(1) gave '{noBody}'");
+        g.Dispose();
+        if (gaugeMesh.Positions.Length != rows.Count) return Fail("thickness: the mesh did not outlive its gauge");
+        var closed = ThickRefused(() => g.Mesh(0));
+        if (!closed.StartsWith("thickness_gauge: closed")) return Fail($"thickness: a closed gauge's mesh gave '{closed}'");
+    }
+    // 3. a reading at a point: one row, no vertex
+    using (var wallPlate = Solid.Cuboid(10, 10, 2))
+    using (var g = new ThicknessGauge(new[] { wallPlate }))
+    {
+        var probe = new double[] { 1, 2, 1 };
+        var top = FaceHolding(g, wallPlate, 0, probe);
+        var r = g.ThicknessAt(0, top, probe, 100.0, 0.5);
+        if (r is null || r.Vertex is not null) return Fail($"thickness: the point reading is {r}");
+        if (r.Body != 0 || r.Face != top || r.OppositeBody != 0 || !Near(r.Point, probe, 0)) return Fail($"thickness: the point reading reads {r}");
+        if (Math.Abs(r.Value - 2) > 1e-9 || Math.Abs(r.ExactThickness - 2) > 1e-9) return Fail($"thickness: the point reading's thickness is {r.Value} / {r.ExactThickness}");
+        if (Math.Abs(r.Opposite[2] + 1) > 1e-9 || Math.Abs(r.ExactOpposite[2] + 1) > 1e-9) return Fail("thickness: the point reading's opposite is off");
+        if (r.Sphere is null || Math.Abs(r.Sphere.Value - 2) > 0.02) return Fail($"thickness: the point reading's sphere is {r.Sphere}");
+        if (g.ThicknessAt(0, top, probe, 1.0, 0.5) is not null) return Fail("thickness: a wall past the maximum still read at a point");
+        if (g.ThicknessAt(0, top, probe, 100.0)!.Value != r.Value) return Fail("thickness: the point reading's sharp angle does not default to 0");
+    }
+    // 4. a face's thickness, and none where nothing is found
+    using (var wallPlate = Solid.Cuboid(10, 10, 2))
+    {
+        uint top;
+        using (var g = new ThicknessGauge(new[] { wallPlate }))
+        {
+            top = FaceHolding(g, wallPlate, 0, new double[] { 1, 2, 1 });
+            var f = g.ThicknessAtFace(0, top, 100.0);
+            if (f is null || Math.Abs(f.Thickness - 2) > 1e-9 || !f.Uniform || Math.Abs(f.Min - 2) > 1e-9 || Math.Abs(f.Max - 2) > 1e-9)
+                return Fail($"thickness: the face reads {f}");
+            var at = new double[] { 1, 2, 5 };
+            var a = g.ThicknessAtFace(0, top, at, 100.0);
+            if (a is null || Math.Abs(a.Thickness - 2) > 1e-9 || a.Min != a.Max || !a.Uniform) return Fail($"thickness: the face at a point reads {a}");
+            if (g.ThicknessAtFace(0, top, null, 100.0)!.Thickness != f.Thickness) return Fail("thickness: a null `at` is not the whole face");
+            if (g.ThicknessAtFace(0, top, 1.0) is not null) return Fail("thickness: a face past the maximum still read");
+            if (g.ThicknessAtFace(0, top, new double[] { 50, 2, 5 }, 100.0) is not null) return Fail("thickness: an `at` off the face still read");
+        }
+        var s = wallPlate.ThicknessAtFace(top, 100.0);
+        if (s is null || Math.Abs(s.Thickness - 2) > 1e-9 || !s.Uniform) return Fail($"thickness: the solid's face reads {s}");
+        var t = wallPlate.ThicknessAtFace(top, new double[] { 1, 2, 5 }, 100.0, 0.05);
+        if (t is null || Math.Abs(t.Thickness - 2) > 1e-9) return Fail($"thickness: the solid's face at a point reads {t}");
+        if (wallPlate.ThicknessAtFace(top, 1.0) is not null) return Fail("thickness: the solid's face past the maximum still read");
+    }
+    // 5. a ball past the maximum is none
+    using (var wedgeOutline = Profile.Polygon([(0, 0), (10, 0), (0, 10)]))
+    using (var wedge = Solid.Extrude(wedgeOutline, xy, 20))
+    using (var g = new ThicknessGauge(new[] { wedge }))
+    {
+        var probe = new double[] { 5, 0, 10 };
+        var f = FaceHolding(g, wedge, 0, probe);
+        var wide = g.ThicknessAt(0, f, probe, 100.0, 0.5);
+        if (wide?.Sphere is null || Math.Abs(wide.Sphere.Value - 2 * 5 / (1 + Math.Sqrt(2))) > 0.01) return Fail($"thickness: the wide ball reads {wide}");
+        var narrow = g.ThicknessAt(0, f, probe, 4.0, 0.5);
+        if (narrow is null || Math.Abs(narrow.Value - 5 / Math.Sqrt(2)) > 1e-9) return Fail($"thickness: the narrow reading is {narrow}");
+        if (narrow.Sphere is not null) return Fail($"thickness: a ball past the maximum reads {narrow.Sphere}");
+    }
+    // 6. two bodies read each other, and the one-shot agrees
+    using (var slabOutline = Profile.Polygon([(0, 0), (10, 0), (10, 3), (0, 1)]))
+    using (var slab = Solid.Extrude(slabOutline, xy, 4))
+    using (var outer = Profile.Circle(5))
+    using (var inner = Profile.Circle(4))
+    using (var ring = outer.WithHole(inner))
+    using (var tube = Solid.Extrude(ring, xy, 10))
+    {
+        IReadOnlyList<Thickness> via;
+        using (var g = new ThicknessGauge(new[] { slab, tube }))
+        {
+            if (g.Count != 2) return Fail($"thickness: two bodies count {g.Count}");
+            via = g.Thickness(100.0, 0.5);
+        }
+        var one = Blacksmith.Thickness(new[] { slab, tube }, 100.0, 0.5);
+        var key = (Func<Thickness, (uint, uint?, uint, double, uint)>)(r => (r.Body, r.Vertex, r.Face, r.Value, r.OppositeBody));
+        if (!one.Select(key).SequenceEqual(via.Select(key))) return Fail("thickness: the one-shot differs from the gauge");
+        if (!one.Any(r => r.Body == 0 && r.OppositeBody == 1)) return Fail("thickness: the slab never reads the tube");
+        if (!one.Any(r => r.Body == 1 && r.OppositeBody == 0)) return Fail("thickness: the tube never reads the slab");
+        if (Blacksmith.Thickness(new[] { slab }, 0.001).Count != 0) return Fail("thickness: a tiny maximum still read");
+        if (Blacksmith.Thickness(new[] { slab }, 100.0, tolerance: 0.05).Count == 0) return Fail("thickness: the coarser one-shot read nothing");
+    }
+    // 7. mesh thickness: two triangles one apart
+    {
+        var lower = (new[] { new double[] { 0, 0, 0 }, new double[] { 0, 1, 0 }, new double[] { 1, 0, 0 } }, new[] { new uint[] { 0, 1, 2 } });
+        var upper = (new[] { new double[] { 0, 0, 1 }, new double[] { 1, 0, 1 }, new double[] { 0, 1, 1 } }, new[] { new uint[] { 0, 1, 2 } });
+        var meshes = new[] { lower, upper };
+        var rows = Blacksmith.MeshThickness(meshes, 10.0, 0.5);
+        if (rows.Count != 6) return Fail($"mesh_thickness: {rows.Count} rows, not 6");
+        foreach (var r in rows)
+        {
+            if (Math.Abs(r.Thickness - 1) > 1e-12 || r.Knife) return Fail($"mesh_thickness: a row reads {r}");
+            if (r.OppositeMesh != 1 - r.Mesh || r.OppositeTriangle != 0) return Fail($"mesh_thickness: a row's opposite is {r.OppositeMesh}/{r.OppositeTriangle}");
+            if (!Near(r.Point, meshes[r.Mesh].Item1[r.Vertex], 0)) return Fail($"mesh_thickness: row {r} is not at its vertex");
+            if (Math.Abs(r.Opposite[2] - (1 - r.Point[2])) > 1e-12 || r.Opposite[0] != r.Point[0] || r.Opposite[1] != r.Point[1])
+                return Fail($"mesh_thickness: row {r} reads to ({string.Join(", ", r.Opposite)})");
+        }
+        if (!rows.Select(r => (r.Mesh, r.Vertex)).SequenceEqual(new (uint, uint)[] { (0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2) }))
+            return Fail("mesh_thickness: the rows are not by mesh then vertex");
+        if (Blacksmith.MeshThickness(meshes, 0.5, 0.5).Count != 0) return Fail("mesh_thickness: a maximum under the gap still read");
+        if (Blacksmith.MeshThickness(Array.Empty<(double[][], uint[][])>(), 1.0).Count != 0) return Fail("mesh_thickness: no meshes read something");
+        if (Blacksmith.MeshThickness(meshes, 10.0).Count != 6) return Fail("mesh_thickness: the sharp angle does not default to 0");
+    }
+    // 8. every refusal carries the call's prefix
+    using (var wallPlate = Solid.Cuboid(10, 10, 2))
+    {
+        foreach (var (got, want) in new[] {
+            (ThickRefused(() => new ThicknessGauge(new[] { wallPlate }, 0.0)), "thickness_gauge_new: the tolerance must be positive and finite"),
+        })
+            if (!got.StartsWith(want)) return Fail($"thickness: expected '{want}...', got '{got}'");
+        var g = new ThicknessGauge(new[] { wallPlate });
+        var p121 = new double[] { 1, 2, 1 };
+        var meshes = new[] {
+            (new[] { new double[] { 0, 0, 0 }, new double[] { 0, 1, 0 }, new double[] { 1, 0, 0 } }, new[] { new uint[] { 0, 1, 2 } }),
+            (new[] { new double[] { 0, 0, 1 }, new double[] { 1, 0, 1 }, new double[] { 0, 1, 1 } }, new[] { new uint[] { 0, 1, 2 } }),
+        };
+        var tri = new[] { new uint[] { 0, 1, 2 } };
+        foreach (var (got, want) in new[] {
+            (ThickRefused(() => g.Thickness(0.0)), "thickness_gauge_measure: the maximum must be positive and finite"),
+            (ThickRefused(() => g.Thickness(10.0, -0.1)), "thickness_gauge_measure: the sharp angle must be zero or positive and finite"),
+            (ThickRefused(() => g.ThicknessAt(3, 0, p121, 10.0)), "thickness_gauge_at: no body 3 -- there are 1"),
+            (ThickRefused(() => g.ThicknessAt(0, 99, p121, 10.0)), "thickness_gauge_at: no face 99 -- the solid has 6 (0 to 5)"),
+            (ThickRefused(() => g.ThicknessAt(0, 0, new double[] { 1, double.NaN, 1 }, 10.0)), "thickness_gauge_at: the point must be finite"),
+            (ThickRefused(() => g.ThicknessAt(0, 0, new double[] { 1, 2 }, 10.0)), "thickness_gauge_at: a point is 3 numbers, got 2"),
+            (ThickRefused(() => g.ThicknessAt(0, 0, null!, 10.0)), "thickness_gauge_at: a point is 3 numbers, got 0"),
+            (ThickRefused(() => g.ThicknessAtFace(2, 0, 10.0)), "thickness_gauge_face: no body 2 -- there are 1"),
+            (ThickRefused(() => g.ThicknessAtFace(0, 99, 10.0)), "thickness_gauge_face: no face 99 -- the solid has 6 (0 to 5)"),
+            (ThickRefused(() => g.ThicknessAtFace(0, 0, new double[] { double.PositiveInfinity, 0, 1 }, 10.0)), "thickness_gauge_face: the point must be finite"),
+            (ThickRefused(() => g.ThicknessAtFace(0, 0, new double[] { 1, 2 }, 10.0)), "thickness_gauge_face: a point is 3 numbers, got 2"),
+            (ThickRefused(() => g.ThicknessAtFace(0, 0, 0.0)), "thickness_gauge_face: the maximum must be positive and finite"),
+        })
+            if (!got.StartsWith(want)) return Fail($"thickness: expected '{want}...', got '{got}'");
+        g.Dispose();
+        g.Dispose();
+        foreach (var (name, act) in new (string, Action)[] {
+            ("Thickness", () => g.Thickness(10.0)),
+            ("ThicknessAt", () => g.ThicknessAt(0, 0, p121, 10.0)),
+            ("ThicknessAtFace", () => g.ThicknessAtFace(0, 0, 10.0)),
+            ("Count", () => _ = g.Count),
+            ("Tolerance", () => _ = g.Tolerance),
+        })
+        {
+            var got = ThickRefused(act);
+            if (!got.StartsWith("thickness_gauge: closed")) return Fail($"thickness: a closed gauge's {name} gave '{got}'");
+        }
+        // the conveniences refuse with the gauge call's own prefix
+        foreach (var (got, want) in new[] {
+            (ThickRefused(() => Blacksmith.Thickness(new[] { wallPlate }, -1.0)), "thickness_gauge_measure: the maximum must be positive and finite"),
+            (ThickRefused(() => Blacksmith.Thickness(new[] { wallPlate }, 10.0, tolerance: double.NaN)), "thickness_gauge_new: the tolerance must be positive and finite"),
+            (ThickRefused(() => wallPlate.ThicknessAtFace(99, 10.0)), "thickness_gauge_face: no face 99"),
+            // mesh_thickness: the kernel's refusals and the wrapper's own
+            (ThickRefused(() => Blacksmith.MeshThickness(meshes, 0.0)), "mesh_thickness: the maximum must be positive and finite"),
+            (ThickRefused(() => Blacksmith.MeshThickness(meshes, 10.0, -0.5)), "mesh_thickness: the sharp angle must be zero or positive and finite"),
+            (ThickRefused(() => Blacksmith.MeshThickness(new[] { (new[] { new double[] { 0, 0, 0 }, new double[] { 1, 0, 0 } }, tri) }, 10.0)),
+                "mesh_thickness: a triangle names a position past the mesh"),
+            (ThickRefused(() => Blacksmith.MeshThickness(new[] { (new[] { new double[] { 0, 0, 0 }, new double[] { 1, double.NaN, 0 }, new double[] { 0, 1, 0 } }, tri) }, 10.0)),
+                "mesh_thickness: a mesh position is not finite"),
+            (ThickRefused(() => Blacksmith.MeshThickness(new[] { meshes[0], (null!, null!) }, 10.0)),
+                "mesh_thickness: mesh 1 is not a (positions, triangles) pair"),
+            (ThickRefused(() => Blacksmith.MeshThickness(new[] { (new[] { new double[] { 0, 0, 0 }, new double[] { 1, 0 } }, tri) }, 10.0)),
+                "mesh_thickness: mesh 0 position 1 is not three numbers"),
+            (ThickRefused(() => Blacksmith.MeshThickness(new[] { (new[] { new double[] { 0, 0, 0 }, new double[] { 1, 0, 0 }, new double[] { 0, 1, 0 } }, new[] { new uint[] { 0, 1 } }) }, 10.0)),
+                "mesh_thickness: mesh 0 triangle 0 is not three indices"),
+        })
+            if (!got.StartsWith(want)) return Fail($"thickness: expected '{want}...', got '{got}'");
+    }
+    Console.WriteLine("thickness: gauge, readings, face, mesh and refusals all read back");
 }
 // The SubD cage: Python's test_subd_* one for one (The Kiln, Plan 2b).
 {
@@ -869,6 +2200,19 @@ using var outline = rect.WithHole(hole);
             if (cut.Positions.Length != 36 || cut.Selection?.Kind != SubdElements.Edges) return Fail("subd: insert_loop is not 12 positions with an edge selection");
         var refused = SdRefused(() => cube.InsertLoop(new SubdEdge(0, 1), 1.5));
         if (!refused.StartsWith("bad selection: ")) return Fail($"subd: insert_loop at 1.5 was refused as: {refused}");
+    }
+    // 7b. subdivide: whole, one face, a bad face
+    using (var kiln = Subd.Cuboid((2, 2, 2), (2, 2, 2)))
+    {
+        using (var whole = kiln.Subdivide())
+            if (whole.Faces.Length != 96) return Fail($"subd: subdivide() is {whole.Faces.Length} faces, not 96");
+        using (var one = kiln.Subdivide(new uint[] { 1 }))
+        {
+            if (one.Faces.Length != 27) return Fail($"subd: subdivide([1]) is {one.Faces.Length} faces, not 27");
+            if (one.Selection?.Kind != SubdElements.Faces || one.Selection.Ids.Length != 4) return Fail("subd: subdivide([1]) does not select 4 faces");
+        }
+        var refused = SdRefused(() => kiln.Subdivide(new uint[] { 999 }));
+        if (!refused.Contains("subdivide: face 999 is not in the cage")) return Fail($"subd: subdivide([999]) was refused as: {refused}");
     }
     // 8. smooth_mesh
     SubdMesh keptMesh;
@@ -1000,6 +2344,349 @@ using var outline = rect.WithHole(hole);
         catch (InvalidOperationException e) { return Fail(e.Message); }
     }
     Console.WriteLine("subd: the cage, its edits, its mesh, its pick and its solid");
+}
+// The 2D constraint sketcher: Python's test_a_sketch_* one for one (sketch constraints, plan 4).
+{
+    BuildException? SkRefused(Action act)
+    {
+        try { act(); return null; }
+        catch (BuildException e) { return e; }
+    }
+    bool Near1(double a, double b, double tolerance) => Math.Abs(a - b) <= tolerance;
+    // S1: a plate, dimensioned, solved, diagnosed and extruded
+    using (var s = new Sketch())
+    {
+        var (plateCorners, plateSides) = s.AddRect((0, 0), (40, 30));
+        if (plateCorners.Length != 4 || plateSides.Length != 4) return Fail("sketch: add_rect is not 4 corners and 4 sides");
+        s.Fix(plateCorners[0]);
+        var width = s.Length(plateSides[0], 60);
+        s.Length(plateSides[1], 30);
+        var sk_hole = s.AddCircle(s.AddPoint(30, 15), 5);
+        s.RadiusOf(sk_hole, 5);
+        var report = s.Solve();
+        if (!report.Converged || report.Status != "converged" || report.Ids.Count != 0) return Fail($"sketch: the plate did not converge: {report}");
+        var corner = s.Point(plateCorners[1]);
+        if (!Near1(corner.X, 60, 1e-9) || !Near1(corner.Y, 0, 1e-9)) return Fail($"sketch: the plate's second corner is {corner}");
+        if (s.ConstraintKind(width) != "length" || s.ConstraintValue(width) != 60.0) return Fail("sketch: the width reads back wrong");
+        var dof = s.Diagnose();
+        if (dof.Free != 2 || dof.State != "under") return Fail($"sketch: the plate's dof is {dof}");
+        var profiles = s.Profiles(1e-9);
+        if (profiles.Count != 1) return Fail($"sketch: the plate has {profiles.Count} profiles");
+        using var body = Solid.Extrude(profiles[0], Frame.Xy().ToArray(), 10);
+        if (!(body.Mass().Volume > 0)) return Fail("sketch: the extruded sk_plate has no volume");
+    }
+    // S2: a conflict refused with its ids, a point in use, a plain refusal with none, a closed sketch
+    {
+        var s = new Sketch();
+        var (plateCorners, plateSides) = s.AddRect((0, 0), (40, 30));
+        s.Fix(plateCorners[0]); s.Length(plateSides[0], 40); s.Length(plateSides[1], 30);
+        var clash = SkRefused(() => s.Distance(plateCorners[0], plateCorners[2], 10));
+        if (clash is null || !clash.Message.StartsWith("sketch_constrain: over-constrained")) return Fail($"sketch: the conflict gave '{clash?.Message}'");
+        if (!clash.Ids.SequenceEqual(new uint[] { 0, 1, 5, 6 })) return Fail($"sketch: the conflict's ids are [{string.Join(", ", clash.Ids)}]");
+        if (s.Constraints().Length != 7) return Fail("sketch: the refused constraint was kept");
+        var inUse = SkRefused(() => s.RemoveEntity(plateCorners[0]));
+        if (inUse is null || !inUse.Message.StartsWith("sketch_remove_entity: point")) return Fail($"sketch: removing a used point gave '{inUse?.Message}'");
+        if (!inUse.Ids.OrderBy(i => i).SequenceEqual(new[] { plateSides[0], plateSides[3] }.OrderBy(i => i))) return Fail($"sketch: the point's users are [{string.Join(", ", inUse.Ids)}]");
+        var unknown = SkRefused(() => s.Kind(9999));
+        if (unknown is null || !unknown.Message.Contains("sketch_kind")) return Fail($"sketch: kind(9999) gave '{unknown?.Message}'");
+        if (unknown.Ids.Count != 0) return Fail($"sketch: kind(9999) carried the ids [{string.Join(", ", unknown.Ids)}]");
+        s.Dispose();
+        s.Dispose();
+        try { s.Solve(); return Fail("sketch: solve after dispose did not fail"); }
+        catch (ObjectDisposedException e) when (e.Message.Contains("sketch: closed")) { }
+    }
+    // S3: dragging a point
+    using (var s = new Sketch())
+    {
+        var (plateCorners, _) = s.AddRect((0, 0), (40, 30));
+        var r = s.Drag(new Dictionary<uint, (double X, double Y)> { [plateCorners[0]] = (5, 5) });
+        if (!r.Converged || r.Ids.Count != 0) return Fail($"sketch: the drag gave {r}");
+        var p = s.Point(plateCorners[0]);
+        if (!Near1(p.X, 5, 1e-9) || !Near1(p.Y, 5, 1e-9)) return Fail($"sketch: the dragged corner is {p}");
+        if (!Near1(s.Point(plateCorners[1]).Y, 5, 1e-9)) return Fail("sketch: the dragged side did not stay level");
+        // (a 3-number target is not expressible with tuple points; skipped)
+    }
+    // S4: a reference follows its source
+    using (var sk_plate = new Sketch())
+    using (var sk_boss = new Sketch())
+    {
+        var (plateCorners, plateSides) = sk_plate.AddRect((0, 0), (40, 30));
+        sk_plate.Fix(plateCorners[0]);
+        var width = sk_plate.Length(plateSides[0], 40);
+        sk_plate.Length(plateSides[1], 30);
+        var edge = sk_boss.Reference(sk_plate, plateSides[1]);
+        if (!sk_boss.IsReference(edge) || !sk_boss.IsConstruction(edge)) return Fail("sketch: a reference is not a construction reference");
+        var o = sk_boss.AddPoint(130, 15);
+        var sk_hole = sk_boss.AddCircle(o, 12);
+        sk_boss.RadiusOf(sk_hole, 12);
+        sk_boss.PointLineDistance(o, edge, 100);
+        if (!Near1(sk_boss.Point(o).X, 140, 1e-9)) return Fail($"sketch: the boss starts at {sk_boss.Point(o)}");
+        if (sk_boss.Profiles(1e-9).Count != 1) return Fail("sketch: the reference is part of a profile");
+        if (!sk_plate.SetValue(width, 60).Converged) return Fail("sketch: widening the plate did not converge");
+        var r = sk_boss.UpdateReference(edge, sk_plate);
+        if (!r.Converged || r.Ids.Count != 0) return Fail($"sketch: update_reference gave {r}");
+        if (!Near1(sk_boss.Point(o).X, 160, 1e-9)) return Fail($"sketch: the boss did not follow the plate: {sk_boss.Point(o)}");
+        var notRef = SkRefused(() => sk_boss.UpdateReference(o, sk_plate));
+        if (notRef is null || !notRef.Message.StartsWith("sketch_update_reference: entity") || notRef.Ids.Count != 0) return Fail($"sketch: update_reference of a plain point gave '{notRef?.Message}'");
+        var itself = SkRefused(() => sk_boss.Reference(sk_boss, o));
+        if (itself is null || !itself.Message.Contains("cannot reference itself")) return Fail($"sketch: referencing itself gave '{itself?.Message}'");
+    }
+    // S5: from a profile, keeping its tangent joints
+    using (var slot = Profile.Slot((0, 0), 60, 8))
+    using (var s = Sketch.FromProfile(slot, tolerance: 1e-9))
+    {
+        var tangents = s.Constraints().Where(c => s.ConstraintKind(c) == "tangent").ToArray();
+        if (tangents.Length != 4 || !tangents.All(s.IsJointTangent)) return Fail($"sketch: the slot has {tangents.Length} tangents");
+        if (s.Diagnose().Free != 4) return Fail("sketch: the slot's dof is not 4");
+    }
+    // S6: reads back what it holds
+    using (var s = new Sketch())
+    {
+        var a = s.AddPoint(0, 0); var b = s.AddPoint(10, 0);
+        var line = s.AddLine(a, b);
+        if (s.Kind(a) != "point" || s.Kind(line) != "line") return Fail("sketch: kinds of a point and a line");
+        if (!s.Entities().SequenceEqual(new[] { a, b, line }.OrderBy(i => i)) || !s.Ends(line).SequenceEqual(new[] { a, b })) return Fail("sketch: entities or ends");
+        var c = s.AddCircle(s.AddPoint(0, 20), 3);
+        if (s.Kind(c) != "circle" || s.Radius(c) != 3.0 || s.Kind(s.Centre(c)) != "point") return Fail("sketch: the circle reads back wrong");
+        s.SetRadius(c, 4);
+        if (s.Radius(c) != 4.0) return Fail("sketch: set_radius");
+        s.SetPoint(b, 12, 0);
+        if (s.Point(b) != (12.0, 0.0)) return Fail("sketch: set_point");
+        s.SetConstruction(c);
+        if (!s.IsConstruction(c) || s.IsReference(c)) return Fail("sketch: set_construction");
+        var h = s.Horizontal(a, b);
+        if (s.ConstraintKind(h) != "horizontal" || !s.ConstraintRefs(h).SequenceEqual(new[] { a, b })) return Fail("sketch: the horizontal reads back wrong");
+        if (s.ConstraintValue(h) is not null || s.ConstraintDriving(h) || s.ConstraintSense(h) != "auto") return Fail("sketch: a horizontal has a value, driving or a sense");
+        var d = s.Distance(a, b, 15, driving: false);
+        if (s.ConstraintValue(d) != 15.0 || s.ConstraintDriving(d) || !Near1(s.Measure(d), 12, 1e-12)) return Fail("sketch: the reporting distance reads back wrong");
+        var r = s.SetDriving(d, true);
+        if (!r.Converged || !s.ConstraintDriving(d) || s.ConstraintValue(d) != 12.0) return Fail($"sketch: set_driving gave {r}");
+        r = s.SetValue(d, 20);
+        if (!r.Converged || !Near1(s.Measure(d), 20, 1e-9)) return Fail($"sketch: set_value gave {r}");
+        r = s.Drag(new Dictionary<uint, (double X, double Y)> { [b] = (25, 5) });
+        if (r.Status is not ("converged" or "conflicting" or "diverged") || r.Ids is null) return Fail($"sketch: drag gave {r}");
+        if (!s.Constraints().SequenceEqual(new[] { h, d }.OrderBy(i => i))) return Fail("sketch: constraints");
+        s.Remove(h);
+        if (!s.Constraints().SequenceEqual(new[] { d })) return Fail("sketch: remove");
+        if (!s.RemoveEntity(line).SequenceEqual(new[] { d })) return Fail("sketch: remove_entity did not name the distance");
+        if (s.Entities().Contains(a) || s.Constraints().Length != 0) return Fail("sketch: remove_entity left its ends or constraints");
+        var bez = s.AddBezier(s.AddPoint(0, 0), (1, 1), (2, 1), (3, 0));
+        if (s.Kind(bez) != "free_curve" || s.Ends(bez).Length != 4) return Fail("sketch: the bezier reads back wrong");
+        if (s.OpenChains(1e-9).Count != 1) return Fail("sketch: open_chains");
+        var bad = SkRefused(() => s.Kind(9999));
+        if (bad is null || !bad.Message.Contains("sketch_kind")) return Fail("sketch: kind(9999) was not refused");
+        // an unknown id is refused by the readers whose failure is ambiguous (not read as "none" or false)
+        var noValue = SkRefused(() => s.ConstraintValue(999));
+        if (noValue is null || noValue.Ids.Count != 0) return Fail($"sketch: constraint_value(999) gave '{noValue?.Message}'");
+        var noDriving = SkRefused(() => s.ConstraintDriving(999));
+        if (noDriving is null) return Fail("sketch: constraint_driving(999) was not refused");
+        if (s.IsConstruction(999) || s.IsReference(999) || s.IsJointTangent(999)) return Fail("sketch: an unknown id reads as construction, reference or joint tangent");
+        var sideways = SkRefused(() => s.Tangent(bez, c, sense: "sideways"));
+        if (sideways is null || !sideways.Message.Contains("sense")) return Fail($"sketch: a sideways tangent gave '{sideways?.Message}'");
+    }
+    // the sense of a signed distance: "positive" and "negative" put the point on opposite sides of the line
+    foreach (var (name, expectY) in new[] { ("positive", 3.0), ("negative", -3.0) })
+    {
+        using var s = new Sketch();
+        var la = s.AddPoint(0, 0); var lb = s.AddPoint(10, 0);
+        var ln = s.AddLine(la, lb);
+        s.Fix(la); s.Fix(lb);
+        var pt = s.AddPoint(5, 1);
+        var dc = s.PointLineDistance(pt, ln, 3, sense: name);
+        if (s.ConstraintSense(dc) != name) return Fail($"sketch: the {name} sense reads back as {s.ConstraintSense(dc)}");
+        if (!s.Solve().Converged || !Near1(s.Point(pt).Y, expectY, 1e-6)) return Fail($"sketch: the {name} sense put the point at {s.Point(pt)}");
+    }
+    // S7: tangent_at_end reads its end back
+    using (var s = new Sketch())
+    {
+        var a = s.AddPoint(0, 0); var b = s.AddPoint(4, 0);
+        var line = s.AddLine(a, b);
+        var bez = s.AddBezier(b, (5, 0), (6, 1), (7, 1));
+        if (s.ConstraintEnd(s.TangentAtEnd(bez, line, end: "end")) != "end") return Fail("sketch: tangent_at_end(end) reads back wrong");
+        if (s.ConstraintEnd(s.TangentAtEnd(bez, line)) != "start") return Fail("sketch: tangent_at_end default is not start");
+        if (s.ConstraintEnd(s.Length(line, 4)) != "start") return Fail("sketch: a length has an end");
+        var none = SkRefused(() => s.ConstraintEnd(999));
+        if (none is null || !none.Message.Contains("sketch_constraint_end: no constraint 999")) return Fail($"sketch: constraint_end(999) gave '{none?.Message}'");
+    }
+    // S8: nurbs weights and finite points
+    using (var s = new Sketch())
+    {
+        var start = s.AddPoint(0, 0);
+        var points = new (double X, double Y)[] { (1, 2), (3, 2), (4, 0) };
+        var knots = new double[] { 0, 0, 0, 0.5, 1, 1, 1 };
+        var few = SkRefused(() => s.AddNurbs(start, points, knots, 2, new double[] { 1, 1, 1 }));
+        if (few is null || !few.Message.Contains("sketch_add_nurbs")) return Fail($"sketch: too few weights gave '{few?.Message}'");
+        var curve = s.AddNurbs(start, points, knots, 2, new double[] { 1, 0.5, 0.5, 1 });
+        var ends = s.Ends(curve);
+        if (s.Kind(curve) != "free_curve" || ends.Length != 4 || ends[0] != start) return Fail("sketch: the nurbs reads back wrong");
+    }
+    using (var s = new Sketch())
+    {
+        var nan = SkRefused(() => s.AddPoint(double.NaN, 0));
+        if (nan is null || !nan.Message.Contains("sketch_add_point: the coordinates must be finite")) return Fail($"sketch: a NaN point gave '{nan?.Message}'");
+        if (s.Entities().Length != 0) return Fail("sketch: a refused point was kept");
+        // the bindings the facts above skip
+        var conic = s.AddConic(s.AddPoint(0, 0), (1, 1), (2, 0), 0.7);
+        var arcCentre = s.AddPoint(0, 0); var arcStart = s.AddPoint(1, 0); var arcEnd = s.AddPoint(0, 1);
+        var arc = s.AddArc(arcCentre, arcStart, arcEnd);
+        if (s.Kind(conic) != "free_curve" || s.Kind(arc) != "arc") return Fail("sketch: conic or arc kinds");
+        var dof = s.Diagnose();
+        if (dof.Parts.Count == 0 || dof.Parts[0].Params == 0) return Fail($"sketch: diagnose has no parts: {dof}");
+    }
+    // S11: the diagnosis names the redundant and the conflicting ones (a swapped code table fails here)
+    using (var s = new Sketch())
+    {
+        var (rc, rs) = s.AddRect((0, 0), (40, 30));
+        s.Fix(rc[0]); s.Length(rs[0], 40); s.Length(rs[1], 30);
+        var h = s.Horizontal(rc[3], rc[2]);
+        if (h != 7) return Fail($"sketch: the redundant horizontal is constraint {h}, not 7");
+        var dof = s.Diagnose();
+        if (dof.Free != 0 || dof.State != "full" || !dof.Redundant.SequenceEqual(new uint[] { 7 }) || dof.Conflicting.Count != 0 || dof.Parts.Count != 1)
+            return Fail($"sketch: the redundant diagnosis reads {dof}");
+        var pd = dof.Parts[0];
+        if (pd.Free != 0 || pd.State != "full" || !pd.Redundant.SequenceEqual(new uint[] { 7 }) || pd.Conflicting.Count != 0
+            || !pd.Constraints.SequenceEqual(new uint[] { 0, 1, 2, 3, 5, 6, 7 }))
+            return Fail($"sketch: the redundant pd reads {pd}");
+    }
+    // S12: a diverged edit is refused with the text and the ids [2, 0, 1], and the sketch still solves
+    using (var s = new Sketch())
+    {
+        var a = s.AddPoint(0, 0); var b = s.AddPoint(1, 0); var c = s.AddPoint(0, 1);
+        s.Distance(a, b, 1); s.Distance(b, c, 1);
+        var d3 = s.Distance(a, c, 1);
+        var diverged = SkRefused(() => s.SetValue(d3, 10));
+        if (diverged is null || !diverged.Message.StartsWith("sketch_set_value: the solve did not converge")) return Fail($"sketch: the diverged set_value gave '{diverged?.Message}'");
+        if (!diverged.Ids.SequenceEqual(new uint[] { 2, 0, 1 })) return Fail($"sketch: the diverged set_value's ids are [{string.Join(", ", diverged.Ids)}]");
+        if (!s.Solve().Converged) return Fail("sketch: the sketch does not solve after a refused edit");
+    }
+    // every constraint method on a fixture none refuses: kind, refs in order, value for the dimensions
+    {
+        var cases = new List<(string Kind, Func<Sketch, uint[], uint> Make, int[] Refs, double? Value, Func<Sketch, uint[], (double Got, double Want)>? Effect)>
+        {
+            ("coincident", (s, i) => s.Coincident(i[0], i[2]), new[] { 0, 2 }, null, (s, i) => (Dist(s, i[0], i[2]), 0)),
+            ("point_on_line", (s, i) => s.PointOnLine(i[2], i[4]), new[] { 2, 4 }, null, (s, i) => (LineOff(s, i[4], i[2]), 0)),
+            ("point_on_circle", (s, i) => s.PointOnCircle(i[2], i[6]), new[] { 2, 6 }, null, (s, i) => (Dist(s, i[2], s.Centre(i[6])), s.Radius(i[6]))),
+            ("horizontal", (s, i) => s.Horizontal(i[0], i[1]), new[] { 0, 1 }, null, (s, i) => (s.Point(i[0]).Y - s.Point(i[1]).Y, 0)),
+            ("vertical", (s, i) => s.Vertical(i[1], i[0]), new[] { 1, 0 }, null, (s, i) => (s.Point(i[1]).X - s.Point(i[0]).X, 0)),
+            ("parallel", (s, i) => s.Parallel(i[4], i[5]), new[] { 4, 5 }, null, (s, i) => (Cross(s, i[4], i[5]), 0)),
+            ("perpendicular", (s, i) => s.Perpendicular(i[4], i[5]), new[] { 4, 5 }, null, (s, i) => (Dot(s, i[4], i[5]), 0)),
+            ("collinear", (s, i) => s.Collinear(i[4], i[5]), new[] { 4, 5 }, null, (s, i) => (Cross(s, i[4], i[5]) + LineOff(s, i[4], s.Ends(i[5])[0]), 0)),
+            ("tangent", (s, i) => s.Tangent(i[4], i[6]), new[] { 4, 6 }, null, (s, i) => (Math.Abs(LineOff(s, i[4], s.Centre(i[6]))), s.Radius(i[6]))),
+            ("tangent_at_end", (s, i) => s.TangentAtEnd(i[9], i[4]), new[] { 9, 4 }, null, null),
+            ("concentric", (s, i) => s.Concentric(i[6], i[7]), new[] { 6, 7 }, null, (s, i) => (Dist(s, s.Centre(i[6]), s.Centre(i[7])), 0)),
+            ("equal_length", (s, i) => s.EqualLength(i[4], i[5]), new[] { 4, 5 }, null, (s, i) => (Len(s, i[4]) - Len(s, i[5]), 0)),
+            ("equal_radius", (s, i) => s.EqualRadius(i[6], i[7]), new[] { 6, 7 }, null, (s, i) => (s.Radius(i[6]) - s.Radius(i[7]), 0)),
+            ("midpoint", (s, i) => s.Midpoint(i[2], i[4]), new[] { 2, 4 }, null, (s, i) => (Dist2(s.Point(i[2]), Mid(s, i[4])), 0)),
+            ("symmetric", (s, i) => s.Symmetric(i[2], i[3], i[4]), new[] { 2, 3, 4 }, null, null),
+            // a drag that would move the point: the fixed one stays at (0, 0)
+            ("fix", (s, i) => s.Fix(i[0]), new[] { 0 }, null, (s, i) =>
+            {
+                s.Drag(new Dictionary<uint, (double X, double Y)> { [i[0]] = (5, 5) });
+                return (Dist2(s.Point(i[0]), (0, 0)), 0);
+            }),
+            ("distance", (s, i) => s.Distance(i[0], i[2], 5), new[] { 0, 2 }, 5, (s, i) => (Dist(s, i[0], i[2]), 5)),
+            ("point_line_distance", (s, i) => s.PointLineDistance(i[2], i[4], 3), new[] { 2, 4 }, 3, (s, i) => (Math.Abs(LineOff(s, i[4], i[2])), 3)),
+            ("line_distance", (s, i) => s.LineDistance(i[4], i[5], 2), new[] { 4, 5 }, 2, null),
+            ("circle_line_distance", (s, i) => s.CircleLineDistance(i[6], i[4], 2), new[] { 6, 4 }, 2, null),
+            ("circle_distance", (s, i) => s.CircleDistance(i[6], i[7], 5), new[] { 6, 7 }, 5, null),
+            ("horizontal_distance", (s, i) => s.HorizontalDistance(i[0], i[2], 4), new[] { 0, 2 }, 4, (s, i) => (Math.Abs(s.Point(i[2]).X - s.Point(i[0]).X), 4)),
+            ("vertical_distance", (s, i) => s.VerticalDistance(i[0], i[2], 4), new[] { 0, 2 }, 4, (s, i) => (Math.Abs(s.Point(i[2]).Y - s.Point(i[0]).Y), 4)),
+            ("length", (s, i) => s.Length(i[4], 9), new[] { 4 }, 9, (s, i) => (Len(s, i[4]), 9)),
+            ("angle", (s, i) => s.Angle(i[4], i[5], 0.5), new[] { 4, 5 }, 0.5, (s, i) => (Math.Abs(Math.Atan2(Cross(s, i[4], i[5]), Dot(s, i[4], i[5]))), 0.5)),
+            ("radius", (s, i) => s.RadiusOf(i[6], 2.5), new[] { 6 }, 2.5, (s, i) => (s.Radius(i[6]), 2.5)),
+            ("diameter", (s, i) => s.Diameter(i[6], 7), new[] { 6 }, 7, (s, i) => (s.Radius(i[6]), 3.5)),
+        };
+        if (cases.Count != 27 || cases.Select(c => c.Kind).Distinct().Count() != 27) return Fail("sketch: the every-method table is not 27 distinct kinds");
+        // what the solved geometry shows each kind did (a swapped kind table round-trips by name, so the geometry is the witness)
+        double Dist2((double X, double Y) a, (double X, double Y) b) => Math.Sqrt((a.X - b.X) * (a.X - b.X) + (a.Y - b.Y) * (a.Y - b.Y));
+        double Dist(Sketch s, uint a, uint b) => Dist2(s.Point(a), s.Point(b));
+        (double X, double Y) Dir(Sketch s, uint line) { var e = s.Ends(line); var a = s.Point(e[0]); var b = s.Point(e[1]); return (b.X - a.X, b.Y - a.Y); }
+        double Len(Sketch s, uint line) { var d = Dir(s, line); return Math.Sqrt(d.X * d.X + d.Y * d.Y); }
+        double Cross(Sketch s, uint l, uint m) { var a = Dir(s, l); var b = Dir(s, m); return (a.X * b.Y - a.Y * b.X) / (Len(s, l) * Len(s, m)); }
+        double Dot(Sketch s, uint l, uint m) { var a = Dir(s, l); var b = Dir(s, m); return (a.X * b.X + a.Y * b.Y) / (Len(s, l) * Len(s, m)); }
+        double LineOff(Sketch s, uint line, uint point)
+        {
+            var e = s.Ends(line); var a = s.Point(e[0]); var d = Dir(s, line); var p = s.Point(point);
+            return ((p.X - a.X) * d.Y - (p.Y - a.Y) * d.X) / Math.Sqrt(d.X * d.X + d.Y * d.Y);
+        }
+        (double X, double Y) Mid(Sketch s, uint line) { var e = s.Ends(line); var a = s.Point(e[0]); var b = s.Point(e[1]); return ((a.X + b.X) / 2, (a.Y + b.Y) / 2); }
+        foreach (var (kind, make, refs, value, effect) in cases)
+        {
+            using var s = new Sketch();
+            // 0..3 points, 4 and 5 lines, 6 and 7 circles, 8 an arc, 9 a free curve
+            var pts = new[] { s.AddPoint(0, 0), s.AddPoint(10, 2), s.AddPoint(3, 7), s.AddPoint(12, 9) };
+            var l1 = s.AddLine(pts[0], pts[1]); var l2 = s.AddLine(pts[2], pts[3]);
+            var c1 = s.AddCircle(s.AddPoint(20, 20), 3); var c2 = s.AddCircle(s.AddPoint(30, 22), 4);
+            var arc = s.AddArc(s.AddPoint(0, 30), s.AddPoint(5, 30), s.AddPoint(0, 35));
+            var curve = s.AddBezier(s.AddPoint(40, 0), (41, 1), (42, 1), (43, 0));
+            var ids = new[] { pts[0], pts[1], pts[2], pts[3], l1, l2, c1, c2, arc, curve };
+            uint id;
+            try { id = make(s, ids); }
+            catch (BuildException e) { return Fail($"sketch: {kind} was refused: {e.Message}"); }
+            if (s.ConstraintKind(id) != kind) return Fail($"sketch: {kind} reads back as {s.ConstraintKind(id)}");
+            if (!s.ConstraintRefs(id).SequenceEqual(refs.Select(r => ids[r]))) return Fail($"sketch: {kind}'s refs read [{string.Join(", ", s.ConstraintRefs(id))}]");
+            if (s.ConstraintValue(id) != value) return Fail($"sketch: {kind}'s value reads {s.ConstraintValue(id)}");
+            if (effect is not null)
+            {
+                if (!s.Solve().Converged) return Fail($"sketch: {kind} does not solve");
+                var (got, want) = effect(s, ids);
+                if (Math.Abs(got - want) > 1e-6) return Fail($"sketch: {kind} left {got} where {want} was meant");
+            }
+        }
+        using var k = new Sketch();
+        var arcId = k.AddArc(k.AddPoint(0, 0), k.AddPoint(1, 0), k.AddPoint(0, 1));
+        var conicId = k.AddConic(k.AddPoint(5, 5), (6, 7), (8, 5), 0.7);
+        if (k.Kind(arcId) != "arc" || k.Kind(conicId) != "free_curve") return Fail("sketch: add_arc or add_conic kind");
+    }
+    // the drag rule: ascending id order to the library, a repeated id refused
+    {
+        var shuffled = new[]
+        {
+            new KeyValuePair<uint, (double X, double Y)>(9, (1, 2)),
+            new KeyValuePair<uint, (double X, double Y)>(2, (3, 4)),
+            new KeyValuePair<uint, (double X, double Y)>(5, (5, 6)),
+        };
+        var (order, xy) = Sketch.DragOrder(shuffled);
+        if (!order.SequenceEqual(new uint[] { 2, 5, 9 }) || !xy.SequenceEqual(new double[] { 3, 4, 5, 6, 1, 2 })) return Fail($"sketch: drag order is [{string.Join(", ", order)}] / [{string.Join(", ", xy)}]");
+        using var s = new Sketch();
+        var (rc, _) = s.AddRect((0, 0), (40, 30));
+        var twice = SkRefused(() => s.Drag(new[]
+        {
+            new KeyValuePair<uint, (double X, double Y)>(rc[0], (1, 1)),
+            new KeyValuePair<uint, (double X, double Y)>(rc[0], (2, 2)),
+        }));
+        if (twice is null || twice.Message != $"sketch_drag: point {rc[0]} given twice") return Fail($"sketch: a repeated drag id gave '{twice?.Message}'");
+        var back = s.Drag(new[]
+        {
+            new KeyValuePair<uint, (double X, double Y)>(rc[2], (45, 35)),
+            new KeyValuePair<uint, (double X, double Y)>(rc[0], (5, 5)),
+        });
+        if (back.Status is not ("converged" or "conflicting" or "diverged")) return Fail($"sketch: a two-point drag gave {back}");
+    }
+    // report numbers convert exactly (a NaN or a fraction is an error naming the call, never a code)
+    {
+        if (Sketch.Exact(7, "sketch_solve") != 7 || Sketch.Exact(-3, "sketch_solve") != -3) return Fail("sketch: Exact of a whole number");
+        foreach (var bad in new[] { double.NaN, 1.5, 3e9, -3e9, double.PositiveInfinity })
+        {
+            var e = SkRefused(() => Sketch.Exact(bad, "sketch_diagnose"));
+            if (e is null || !e.Message.StartsWith("sketch_diagnose:")) return Fail($"sketch: Exact({bad}) gave '{e?.Message}'");
+        }
+    }
+    // a closed other sketch and a bad end name
+    {
+        using var s = new Sketch();
+        var other = new Sketch();
+        var a = s.AddPoint(0, 0);
+        other.AddPoint(1, 1);
+        other.Dispose();
+        try { s.Reference(other, 0); return Fail("sketch: referencing a closed sketch did not fail"); }
+        catch (ObjectDisposedException e) when (e.Message.Contains("sketch: closed")) { }
+        var line = s.AddLine(a, s.AddPoint(4, 0));
+        var curve = s.AddBezier(s.AddPoint(5, 0), (6, 0), (7, 1), (8, 1));
+        var middle = SkRefused(() => s.TangentAtEnd(curve, line, end: "middle"));
+        if (middle is null || !middle.Message.Contains("end must be one of")) return Fail($"sketch: a bad end name gave '{middle?.Message}'");
+    }
+    Console.WriteLine("sketch: entities, constraints, solves, diagnosis, references and refusals with ids");
 }
 // Solid x profile hits: a line through a cuboid pierces two faces and is cut into three
 // pieces, outside/inside/outside, the middle one spanning the box and sweeping; a loop no hit
@@ -1156,6 +2843,267 @@ if (!shape.IsClosed || shape.Faces != rounded.Faces) return Fail($"the filleted 
     if (shortSpline != "spline: 2 weights for 4 points; give one per point") return Fail($"a short weight list: {shortSpline}");
     if (shortNurbs != "nurbs_to: 2 weights for 3 control points (the current point and 2 given); give one per point") return Fail($"a short weight list: {shortNurbs}");
     Console.WriteLine($"sheet verbs: face, trim ({holed.Faces}+{disc.Faces}), face_sheet, drop_faces, round ({slab.Faces} faces), along, chain, push_pull, coil, pipe, split_by_plane, split_by_profile, close_loop, from_loops, revolve_in_plane, regular_polygon, star, text, spline, parabola: ok");
+}
+// Health and healing on the kernel: Python's test_health_* / test_healed_* figures.
+{
+    static bool Rel(double a, double b, double rel) => Math.Abs(a - b) <= rel * Math.Abs(b);
+    // 1. a closed cuboid: nothing free, nothing small, cracks only on request
+    using var hBox = Solid.Cuboid(10, 10, 10);
+    var hr = hBox.Health();
+    if (hr.FreeEdges.Count != 0 || hr.Wires.Count != 0 || hr.Small.Count != 0 || hr.Cracks is not null)
+        return Fail($"health: the closed cuboid reads {hr}");
+    if (!Rel(hr.Extent, 10 * Math.Sqrt(3), 1e-12) || !Rel(hr.Rounding, 1e-7 * hr.Extent, 1e-12) || !Rel(hr.Tolerance, 1e-4 * hr.Extent, 1e-12))
+        return Fail($"health: the cuboid's figures are extent {hr.Extent}, rounding {hr.Rounding}, tolerance {hr.Tolerance}");
+    if (hr.LooseEdges != 0 || hr.WorstLoose != 0 || hr.SewPairs != 0 || hr.SewRefused != 0 || hr.SewWorstGap != 0)
+        return Fail($"health: the cuboid has loose or sewing figures: {hr}");
+    var hMeshed = hBox.Health(mesh: true).Cracks;
+    if (hMeshed is null || !hMeshed.Watertight || hMeshed.Open != 0 || hMeshed.Folded != 0 || hMeshed.Crossings != 0 || hMeshed.Edges.Count != 0)
+        return Fail($"health: the meshed cuboid's cracks read {hMeshed}");
+    if (hBox.Health(0.5).Tolerance != 0.5 || hBox.Health(-1).Tolerance != hr.Tolerance)
+        return Fail("health: a given tolerance is not the one used, or -1 is not the default");
+    // 2. the cuboid without face 0: one closed rim of four edges, each partnered across the hole
+    using var hHole = hBox.DropFaces(new[] { 0 });
+    var ho = hHole.Health();
+    if (ho.FreeEdges.Count != 4 || ho.Wires.Count != 1) return Fail($"health: the open cuboid has {ho.FreeEdges.Count} free edges in {ho.Wires.Count} wires");
+    var hWire = ho.Wires[0];
+    if (hWire.First != 0 || hWire.Count != 4 || !hWire.Closed || !Rel(hWire.Length, 40, 1e-6)) return Fail($"health: the rim reads {hWire}");
+    var hRows = ho.FreeEdges.Select(e => (e.Trim, e.Edge, e.Face, e.Partner)).ToArray();
+    var hWant = new (uint, uint?, uint, uint?)[] { (4, 3, 1, 2), (16, 2, 4, 3), (11, 1, 2, 0), (15, 0, 3, 1) };
+    if (!hRows.SequenceEqual(hWant)) return Fail($"health: the rim's (trim, edge, face, partner) rows are {string.Join(" ", hRows)}");
+    foreach (var e in ho.FreeEdges)
+        if (e.Wire != 0 || e.SharedEnds != 0 || !Rel(e.Length, 10, 1e-6) || !Rel(e.Gap, 10, 1e-6)) return Fail($"health: a rim edge reads {e}");
+    if (!Rel(ho.WorstGap, 10, 1e-6) || !ho.WireEdges(0).SequenceEqual(ho.FreeEdges)) return Fail($"health: the rim's worst gap {ho.WorstGap} or wire_edges(0) is wrong");
+    var hoc = hHole.Health(mesh: true).Cracks;
+    if (hoc is null || hoc.Watertight || hoc.Open != 0 || hoc.Folded != 0 || hoc.Crossings != 0 || hoc.Edges.Count != 0)
+        return Fail($"health: the open cuboid's cracks read {hoc}");
+    // 3. a thin plate at 0.01: its four thickness edges and four side faces, in that order
+    using var hPlate = Solid.Cuboid(10, 10, 0.001);
+    var hp = hPlate.Health(0.01);
+    var hSmall = hp.Small.Select(s => (s.Kind, s.Index)).ToArray();
+    var hSmallWant = new uint[] { 8, 9, 10, 11 }.Select(i => ("short_edge", i)).Concat(new uint[] { 2, 3, 4, 5 }.Select(i => ("sliver_face", i))).ToArray();
+    if (!hSmall.SequenceEqual(hSmallWant)) return Fail($"health: the plate's small features are {string.Join(" ", hSmall)}");
+    if (hp.Small.Take(4).Any(s => !Rel(s.Size, 0.001, 1e-6)) || hp.Small.Skip(4).Any(s => !Rel(s.Size, 0.0009999, 1e-3)))
+        return Fail($"health: the plate's small sizes are {string.Join(" ", hp.Small.Select(s => s.Size))}");
+    // 4. a tiny body: twelve short edges, six tiny faces, one tiny body
+    using var hTiny = Solid.Cuboid(0.0005, 0.0005, 0.0005);
+    var ht = hTiny.Health(0.01);
+    var hTinyFaces = ht.Small.Where(s => s.Kind == "tiny_face").ToArray();
+    var hTinyBody = ht.Small.Where(s => s.Kind == "tiny_body").ToArray();
+    if (ht.Small.Count(s => s.Kind == "short_edge") != 12 || hTinyFaces.Length != 6 || hTinyBody.Length != 1 || ht.Small.Count != 19)
+        return Fail($"health: the tiny body's small features are {string.Join(" ", ht.Small)}");
+    if (!hTinyFaces.Select(s => s.Index).SequenceEqual(new uint[] { 0, 1, 2, 3, 4, 5 }) || hTinyFaces.Any(s => !Rel(s.Size, 2.5e-7, 1e-6)))
+        return Fail($"health: the tiny faces read {string.Join(" ", hTinyFaces.AsEnumerable())}");
+    if (hTinyBody[0].Index != 0 || !Rel(hTinyBody[0].Size, 0.0005 * Math.Sqrt(3), 1e-9)) return Fail($"health: the tiny body reads {hTinyBody[0]}");
+    // 5. the cuboid heals to itself, as a new solid; every edge exact
+    var (hHealed, hh) = hBox.Healed();
+    using (hHealed)
+    {
+        if (hHealed.Handle.DangerousGetHandle() == hBox.Handle.DangerousGetHandle()) return Fail("healed: the cuboid came back as the same handle");
+        if (hh.Fixes.Count != 0 || hh.Refused.Count != 0 || hh.Guarded) return Fail($"healed: the cuboid's report is {hh}");
+        if (hh.SmallBefore != 0 || hh.SmallAfter != 0 || hh.FreeBefore != 0 || hh.FreeAfter != 0 || !hh.ClosedBefore || !hh.ClosedAfter
+            || hh.NonmanifoldBefore != 0 || hh.NonmanifoldAfter != 0)
+            return Fail($"healed: the cuboid's before/after counts are {hh}");
+        if (!Rel(hh.Tolerance, hr.Tolerance, 1e-12) || hh.Moved != 0) return Fail($"healed: the cuboid's tolerance {hh.Tolerance} or moved {hh.Moved}");
+        if (hHealed.Faces != 6 || !Rel(hHealed.Mass().Volume, 1000, 1e-6)) return Fail($"healed: the healed cuboid has {hHealed.Faces} faces");
+        for (uint e = 0; e < 12; e++)
+            if (hHealed.EdgeTolerance(e) != 0.0) return Fail($"edge_tolerance: cuboid edge {e} reads {hHealed.EdgeTolerance(e)}");
+        if (hHealed.EdgeTolerance(0xFFFFFFF0) is not null) return Fail("edge_tolerance: an id no trim names is not null");
+    }
+    var (hHalf, hHalfReport) = hBox.Healed(0.5);
+    hHalf.Dispose();
+    if (hHalfReport.Tolerance != 0.5) return Fail($"healed: a tolerance of 0.5 reads back {hHalfReport.Tolerance}");
+    // 6. every kind switched off: each of the plate's small features refused as toggled
+    var (hOffBody, hOff) = hPlate.Healed(0.01, edges: false, faces: false, holes: false);
+    hOffBody.Dispose();
+    var hOffRows = hOff.Refused.Select(r => (r.Kind, r.Index, r.Why, r.Figure)).ToArray();
+    var hOffWant = new uint[] { 8, 9, 10, 11 }.Select(i => ("short_edge", i, "toggled", 0.0))
+        .Concat(new uint[] { 2, 3, 4, 5 }.Select(i => ("sliver_face", i, "toggled", 0.0))).ToArray();
+    if (hOff.Fixes.Count != 0 || hOff.SmallBefore != 8 || hOff.SmallAfter != 8 || !hOffRows.SequenceEqual(hOffWant))
+        return Fail($"healed: every kind off gave fixes {hOff.Fixes.Count}, small {hOff.SmallBefore}/{hOff.SmallAfter}, refused {string.Join(" ", hOffRows)}");
+    var (hOnBody, hOn) = hPlate.Healed(0.01);
+    hOnBody.Dispose();
+    if (hOn.SmallBefore != 8 || hOn.Refused.Any(r => r.Why == "toggled") || (hOn.Guarded && hOn.Refused.Any(r => r.Why != "body_guard")))
+        return Fail($"healed: every kind on gave {hOn}, refused {string.Join(" ", hOn.Refused)}");
+    // a pinhole in a sheet (a 0.003 hole, its loop 1): a small hole, healed with holes on, refused as toggled with holes off
+    using (var hSheet = Solid.Face(Profile.Rect(20, 20), new double[] { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 }))
+    using (var hPin = Solid.Extrude(Profile.Circle(0.003), new double[] { 0, 0, -1, 1, 0, 0, 0, 1, 0, 0, 0, 1 }, 2))
+    using (var hPinhole = hSheet.Trim(hPin, tolerance: 1e-4))
+    {
+        var hPinSmall = hPinhole.Health(0.01).Small;
+        var (hNoHolesBody, hNoHoles) = hPinhole.Healed(0.01, holes: false);
+        hNoHolesBody.Dispose();
+        var (hHolesBody, hHoles) = hPinhole.Healed(0.01);
+        hHolesBody.Dispose();
+        if (!hPinSmall.Any(s => s.Kind == "small_hole" && s.Index == 1)) return Fail($"health: the pinhole sheet lists no small hole: {string.Join(" ", hPinSmall)}");
+        if (!hNoHoles.Refused.Any(r => (r.Kind, r.Index, r.Why) == ("small_hole", 1u, "toggled")) || hNoHoles.Fixes.Count != 0)
+            return Fail($"healed: holes off did not refuse the pinhole as toggled: {string.Join(" ", hNoHoles.Refused)}");
+        if (!hHoles.Fixes.Select(f => (f.Kind, f.Index)).SequenceEqual(new[] { ("small_hole", 1u) }) || hHoles.Refused.Any(r => r.Why == "toggled"))
+            return Fail($"healed: holes on did not heal the pinhole: {string.Join(" ", hHoles.Fixes)}");
+    }
+    // the switches as the C ABI's flag bits: 1 edges, 2 faces, 4 holes
+    if (Solid.HealFlags(true, true, true) != 7 || Solid.HealFlags(true, false, false) != 1 || Solid.HealFlags(false, true, false) != 2
+        || Solid.HealFlags(false, false, true) != 4 || Solid.HealFlags(false, false, false) != 0)
+        return Fail("healed: the flag bits are not 1 edges, 2 faces, 4 holes");
+    // 7. a closed solid: every call refuses at the binding, in its words
+    var hClosed = Solid.Cuboid(1, 1, 1);
+    hClosed.Dispose();
+    foreach (var (what, call) in new (string, Action)[] { ("health", () => hClosed.Health()), ("healed", () => hClosed.Healed()), ("edge_tolerance", () => hClosed.EdgeTolerance(0)) })
+    {
+        try { call(); return Fail($"{what}: a closed solid answered"); }
+        catch (ObjectDisposedException e) when (e.Message.Contains("closed")) { }
+    }
+    // The decoders, on Python's distinct rows: a swapped column cannot read back the same.
+    const uint hNone = 0xFFFFFFFF;
+    var dr = Cadaclysm.Blacksmith.HealthReport.FromRows(
+        new uint[] { 2, 1, 1, 2, 1, 0, 0, 1, 0, 3, 4, 5, 1, 0, 11, 12, 13, 2 }, new[] { 0.5, 0.25, 9.0, 7.5, 6.5, 5.5, 4.5, 3.5 },
+        new uint[] { 10, 20, 30, 40, 1, 2, 11, hNone, 31, 41, hNone, 0 }, new[] { 1.5, 2.5, 3.5, double.PositiveInfinity },
+        new uint[] { 0, 2, 1 }, new[] { 8.5, 2.5 }, new uint[] { 1, 77, 4, 99 }, new[] { 0.125, 0.0625 }, new uint[] { 5, 6 });
+    if ((dr.Tolerance, dr.Rounding, dr.Extent, dr.WorstGap) != (0.5, 0.25, 9.0, 7.5)
+        || (dr.LooseEdges, dr.WorstLoose, dr.SewPairs, dr.SewRefused, dr.SewWorstGap) != (3u, 6.5, 4u, 5u, 5.5))
+        return Fail($"health decoder: the summary reads {dr}");
+    if (!dr.FreeEdges.SequenceEqual(new[] { new Cadaclysm.Blacksmith.FreeEdge(10, 20, 30, 40, 1, 2, 1.5, 2.5),
+                                            new Cadaclysm.Blacksmith.FreeEdge(11, null, 31, 41, null, 0, 3.5, double.PositiveInfinity) }))
+        return Fail($"health decoder: the free edges read {string.Join(" ", dr.FreeEdges)}");
+    if (!dr.Wires.SequenceEqual(new[] { new Cadaclysm.Blacksmith.FreeWire(0, 2, true, 8.5, 2.5) })) return Fail($"health decoder: the wires read {string.Join(" ", dr.Wires)}");
+    if (!dr.Small.SequenceEqual(new[] { new Cadaclysm.Blacksmith.SmallFeature("collapsed_edge", 77, 0.125), new Cadaclysm.Blacksmith.SmallFeature("tiny_body", 99, 0.0625) }))
+        return Fail($"health decoder: the small features read {string.Join(" ", dr.Small)}");
+    if (dr.Cracks is null || (dr.Cracks.Watertight, dr.Cracks.Open, dr.Cracks.Folded, dr.Cracks.Crossings) != (false, 11u, 12u, 13u) || !dr.Cracks.Edges.SequenceEqual(new uint[] { 5, 6 }))
+        return Fail($"health decoder: the cracks read {dr.Cracks}");
+    var dh = Cadaclysm.Blacksmith.HealReport.FromRows(new uint[] { 2, 3, 1, 9, 8, 7, 6, 1, 0, 5, 4 }, new[] { 0.5, 0.25 },
+        new uint[] { 5, 11, 0, 12 }, new[] { 1.5, 0.125, 2.5, 0.0625 }, new uint[] { 3, 21, 9, 4, 22, 3, 2, 23, 10 }, new[] { 0.0, 7.5, 0.0 });
+    if ((dh.Tolerance, dh.Moved, dh.Guarded) != (0.5, 0.25, true) || (dh.SmallBefore, dh.SmallAfter, dh.FreeBefore, dh.FreeAfter) != (9u, 8u, 7u, 6u)
+        || (dh.ClosedBefore, dh.ClosedAfter, dh.NonmanifoldBefore, dh.NonmanifoldAfter) != (true, false, 5u, 4u))
+        return Fail($"heal decoder: the summary reads {dh}");
+    if (!dh.Fixes.SequenceEqual(new[] { new Cadaclysm.Blacksmith.HealFix("small_hole", 11, 1.5, 0.125), new Cadaclysm.Blacksmith.HealFix("short_edge", 12, 2.5, 0.0625) }))
+        return Fail($"heal decoder: the fixes read {string.Join(" ", dh.Fixes)}");
+    if (!dh.Refused.SequenceEqual(new[] { new Cadaclysm.Blacksmith.HealRefusal("tiny_face", 21, "toggled", 0.0),
+                                          new Cadaclysm.Blacksmith.HealRefusal("tiny_body", 22, "chain", 7.5),
+                                          new Cadaclysm.Blacksmith.HealRefusal("sliver_face", 23, "unsupported", 0.0) }))
+        return Fail($"heal decoder: the refusals read {string.Join(" ", dh.Refused)}");
+    Console.WriteLine("kernel health/healed: cuboid, open rim, plate, tiny body, healed cuboid, toggled, pinhole, closed solid and both decoders: ok");
+}
+// Health and healing on the reader: Python's test_brep_health_* / test_brep_healed_* figures on
+// st203-bapl.stp's 188-free-edge body (breps[1]; body 0 takes minutes). The sample is the
+// repository's, not an SDK checkout's, so this runs where found; the decoders run everywhere.
+{
+    static bool Rel(double a, double b, double rel) => Math.Abs(a - b) <= rel * Math.Abs(b);
+    var st203 = sampleRoot is null ? null : System.IO.Path.Combine(sampleRoot, "st203-bapl.stp");
+    if (st203 is not null && File.Exists(st203))
+    {
+        using var stScene = Cadaclysm.Cadaclysm.Open(st203);
+        var breps = stScene.Nodes.Select(n => n.Brep).Where(b => b is not null).Select(b => b!).ToList();
+        try
+        {
+            var stBody = breps[1];
+            // 8. health
+            var stReport = stBody.Health();
+            if (stReport.FreeEdges.Count != 188 || stReport.Wires.Count != 45 || stReport.Wires.Sum(w => (long)w.Count) != 188)
+                return Fail($"brep health: {stReport.FreeEdges.Count} free edges in {stReport.Wires.Count} wires");
+            if (!stReport.WireEdges(0).SequenceEqual(stReport.FreeEdges.Take((int)stReport.Wires[0].Count)) || stReport.WireEdges(0).Any(e => e.Wire != 0))
+                return Fail("brep health: wire_edges(0) is not the first wire's rows");
+            var stFirst = stReport.FreeEdges[0];
+            if ((stFirst.Trim, stFirst.Edge, stFirst.Face, stFirst.Wire, stFirst.Partner, stFirst.SharedEnds) != (0u, (uint?)41363, 0u, 0u, (uint?)67, 0u)
+                || !Rel(stFirst.Gap, 95.01496054, 1e-6))
+                return Fail($"brep health: the first free edge reads {stFirst}");
+            if (stReport.FreeEdges.Any(e => e.Partner is null ? !double.IsPositiveInfinity(e.Gap) : e.Partner == e.Trim))
+                return Fail("brep health: a free edge without a partner has a finite gap, or one partners itself");
+            if (!Rel(stReport.Extent, 253.66439715552204, 1e-12) || !Rel(stReport.Rounding, 1e-7 * stReport.Extent, 1e-12)
+                || !Rel(stReport.Tolerance, 1e-4 * stReport.Extent, 1e-12))
+                return Fail($"brep health: extent {stReport.Extent}, rounding {stReport.Rounding}, tolerance {stReport.Tolerance}");
+            if (stReport.Cracks is not null || stBody.Health(double.NaN).Tolerance != stReport.Tolerance) return Fail("brep health: cracks unasked, or NaN is not the default");
+            var (stSewn, stSew) = stBody.Sewed();
+            stSewn.Dispose();
+            if (stReport.LooseEdges != 0 || stReport.WorstLoose != 0 || stReport.SewRefused != 4 || stSew.Refused != 4 || stReport.SewPairs != stSew.Pairs
+                || !Rel(stReport.SewWorstGap, stSew.WorstGap, 1e-12) || stReport.SewWorstGap <= 0)
+                return Fail($"brep health: loose {stReport.LooseEdges}, sew {stReport.SewPairs}/{stReport.SewRefused}/{stReport.SewWorstGap} against sewed's {stSew}");
+            var stCracks = stBody.Health(mesh: true).Cracks;
+            if (stCracks is null || (stCracks.Watertight, stCracks.Open, stCracks.Folded, stCracks.Crossings) != (false, 0u, 0u, 166u) || stCracks.Edges.Count != 0)
+                return Fail($"brep health: the meshed report's cracks read {stCracks}");
+            var stWide = stBody.Health(5.0);
+            var stKinds = stWide.Small.Select(s => s.Kind).Distinct().OrderBy(k => k).ToArray();
+            if (stWide.Small.Count != 96 || !stKinds.SequenceEqual(new[] { "short_edge", "sliver_face", "tiny_face" }))
+                return Fail($"brep health: at 5, {stWide.Small.Count} small features of kinds {string.Join(" ", stKinds)}");
+            var stShort = stWide.Small.First(s => s.Kind == "short_edge");
+            if (stShort.Index != 41550 || !Rel(stShort.Size, 3.1622776616321775, 1e-9)) return Fail($"brep health: the first short edge reads {stShort}");
+            // 9. healed
+            var (stSame, stDefaults) = stBody.Healed();
+            stSame.Dispose();
+            if (stDefaults.SmallBefore != 0 || stDefaults.FreeBefore != 188 || stDefaults.FreeAfter > 188 || !Rel(stDefaults.Tolerance, 1e-4 * stReport.Extent, 1e-12))
+                return Fail($"brep healed: at the default tolerance {stDefaults}");
+            var (stHealed, stHeal) = stBody.Healed(5.0);
+            using (stHealed)
+            {
+                if (stHeal.Tolerance != 5.0 || stHeal.SmallBefore != 96 || stHeal.Fixes.Count != 28 || stHeal.SmallAfter != 8 || stHeal.FreeBefore != 188 || stHeal.FreeAfter != 88)
+                    return Fail($"brep healed: at 5 {stHeal}");
+                if (stHeal.Refused.Count != 8 || stHeal.Refused.Any(r => r.Kind != "sliver_face" || r.Why != "uneven"))
+                    return Fail($"brep healed: the refusals read {string.Join(" ", stHeal.Refused)}");
+                if (stHeal.ClosedBefore || stHeal.ClosedAfter || stHeal.NonmanifoldBefore != 0 || stHeal.NonmanifoldAfter != 0)
+                    return Fail($"brep healed: closed/non-manifold before and after read {stHeal}");
+                if (!Rel(stHeal.Moved, 1.581138831332503, 1e-9) || !Rel(stHeal.Fixes.Max(f => f.Moved), 1.8248105306211464, 1e-9))
+                    return Fail($"brep healed: moved {stHeal.Moved}, the largest fix moved {stHeal.Fixes.Max(f => f.Moved)}");
+                var stFix = stHeal.Fixes.First(f => f.Kind == "short_edge");
+                if (stFix.Index != 41550 || !Rel(stFix.Size, 3.1622776616321775, 1e-9)) return Fail($"brep healed: the first short-edge fix reads {stFix}");
+                if (stBody.EdgeTolerance(41550) != 0.0 || stHealed.EdgeTolerance(41550) is not null || stHealed.EdgeTolerance(41363) != 0.0
+                    || stHealed.EdgeTolerance(0xFFFFFFF0) is not null)
+                    return Fail($"brep edge_tolerance: {stBody.EdgeTolerance(41550)} {stHealed.EdgeTolerance(41550)} {stHealed.EdgeTolerance(41363)} {stHealed.EdgeTolerance(0xFFFFFFF0)}");
+                if (stHealed.Health(5.0).Small.Count != 8 || stBody.Health(5.0).Small.Count != 96) return Fail("brep healed: the result's or the input's small count moved");
+            }
+            var (stOffBody, stOff) = stBody.Healed(5.0, edges: false, faces: false, holes: false);
+            stOffBody.Dispose();
+            var stPerKind = new[] { "short_edge", "sliver_face", "tiny_face" }.Select(k => stOff.Refused.Count(r => r.Kind == k)).ToArray();
+            if (stOff.Fixes.Count != 0 || stOff.Refused.Count != 96 || stOff.Refused.Any(r => r.Why != "toggled" || r.Figure != 0.0)
+                || !stPerKind.SequenceEqual(new[] { 64, 26, 6 }) || stOff.FreeAfter != stOff.FreeBefore)
+                return Fail($"brep healed: every kind off gave {stOff.Fixes.Count} fixes, {stOff.Refused.Count} refused, per kind {string.Join(" ", stPerKind)}");
+            var (stEdgesBody, stEdgesOnly) = stBody.Healed(5.0, faces: false, holes: false);
+            stEdgesBody.Dispose();
+            if (stEdgesOnly.Refused.Any(r => r.Kind != "short_edge" && r.Why != "toggled") || stEdgesOnly.Fixes.Any(f => f.Kind != "short_edge" && f.Kind != "collapsed_edge"))
+                return Fail($"brep healed: edges only gave {string.Join(" ", stEdgesOnly.Fixes)}");
+        }
+        finally
+        {
+            foreach (var b in breps) b.Dispose();
+        }
+        var stReleased = breps[1];
+        foreach (var (what, call) in new (string, Action)[] { ("health", () => stReleased.Health()), ("healed", () => stReleased.Healed()), ("edge_tolerance", () => stReleased.EdgeTolerance(0)) })
+        {
+            try { call(); return Fail($"brep {what}: a released brep answered"); }
+            catch (CadaclysmException e) when (e.Message.Contains("released")) { }
+        }
+        Console.WriteLine("reader health/healed: st203-bapl body 1's free edges, wires, cracks, small features, heal at 5, toggled and released: ok");
+    }
+    else Console.WriteLine($"reader health/healed: {st203} not to hand, skipped");
+    // The decoders, on Python's distinct rows: a swapped column cannot read back the same.
+    const uint rNone = 0xFFFFFFFF;
+    var rdr = Cadaclysm.HealthReport.FromRows(
+        new uint[] { 2, 1, 1, 2, 1, 0, 0, 1, 0, 3, 4, 5, 1, 0, 11, 12, 13, 2 }, new[] { 0.5, 0.25, 9.0, 7.5, 6.5, 5.5, 4.5, 3.5 },
+        new uint[] { 10, 20, 30, 40, 1, 2, 11, rNone, 31, 41, rNone, 0 }, new[] { 1.5, 2.5, 3.5, double.PositiveInfinity },
+        new uint[] { 0, 2, 1 }, new[] { 8.5, 2.5 }, new uint[] { 1, 77, 4, 99 }, new[] { 0.125, 0.0625 }, new uint[] { 5, 6 });
+    if ((rdr.Tolerance, rdr.Rounding, rdr.Extent, rdr.WorstGap) != (0.5, 0.25, 9.0, 7.5)
+        || (rdr.LooseEdges, rdr.WorstLoose, rdr.SewPairs, rdr.SewRefused, rdr.SewWorstGap) != (3u, 6.5, 4u, 5u, 5.5))
+        return Fail($"brep health decoder: the summary reads {rdr}");
+    if (!rdr.FreeEdges.SequenceEqual(new[] { new Cadaclysm.FreeEdge(10, 20, 30, 40, 1, 2, 1.5, 2.5),
+                                            new Cadaclysm.FreeEdge(11, null, 31, 41, null, 0, 3.5, double.PositiveInfinity) }))
+        return Fail($"brep health decoder: the free edges read {string.Join(" ", rdr.FreeEdges)}");
+    if (!rdr.Wires.SequenceEqual(new[] { new Cadaclysm.FreeWire(0, 2, true, 8.5, 2.5) })) return Fail($"brep health decoder: the wires read {string.Join(" ", rdr.Wires)}");
+    if (!rdr.Small.SequenceEqual(new[] { new Cadaclysm.SmallFeature("collapsed_edge", 77, 0.125), new Cadaclysm.SmallFeature("tiny_body", 99, 0.0625) }))
+        return Fail($"brep health decoder: the small features read {string.Join(" ", rdr.Small)}");
+    if (rdr.Cracks is null || (rdr.Cracks.Watertight, rdr.Cracks.Open, rdr.Cracks.Folded, rdr.Cracks.Crossings) != (false, 11u, 12u, 13u) || !rdr.Cracks.Edges.SequenceEqual(new uint[] { 5, 6 }))
+        return Fail($"brep health decoder: the cracks read {rdr.Cracks}");
+    var rdh = Cadaclysm.HealReport.FromRows(new uint[] { 2, 3, 1, 9, 8, 7, 6, 1, 0, 5, 4 }, new[] { 0.5, 0.25 },
+        new uint[] { 5, 11, 0, 12 }, new[] { 1.5, 0.125, 2.5, 0.0625 }, new uint[] { 3, 21, 9, 4, 22, 3, 2, 23, 10 }, new[] { 0.0, 7.5, 0.0 });
+    if ((rdh.Tolerance, rdh.Moved, rdh.Guarded) != (0.5, 0.25, true) || (rdh.SmallBefore, rdh.SmallAfter, rdh.FreeBefore, rdh.FreeAfter) != (9u, 8u, 7u, 6u)
+        || (rdh.ClosedBefore, rdh.ClosedAfter, rdh.NonmanifoldBefore, rdh.NonmanifoldAfter) != (true, false, 5u, 4u))
+        return Fail($"brep heal decoder: the summary reads {rdh}");
+    if (!rdh.Fixes.SequenceEqual(new[] { new Cadaclysm.HealFix("small_hole", 11, 1.5, 0.125), new Cadaclysm.HealFix("short_edge", 12, 2.5, 0.0625) }))
+        return Fail($"brep heal decoder: the fixes read {string.Join(" ", rdh.Fixes)}");
+    if (!rdh.Refused.SequenceEqual(new[] { new Cadaclysm.HealRefusal("tiny_face", 21, "toggled", 0.0),
+                                          new Cadaclysm.HealRefusal("tiny_body", 22, "chain", 7.5),
+                                          new Cadaclysm.HealRefusal("sliver_face", 23, "unsupported", 0.0) }))
+        return Fail($"brep heal decoder: the refusals read {string.Join(" ", rdh.Refused)}");
+    if (Brep.HealFlags(true, true, true) != 7 || Brep.HealFlags(true, false, false) != 1 || Brep.HealFlags(false, true, false) != 2
+        || Brep.HealFlags(false, false, true) != 4 || Brep.HealFlags(false, false, false) != 0)
+        return Fail("brep healed: the flag bits are not 1 edges, 2 faces, 4 holes");
+    Console.WriteLine("reader health/heal decoders and flags: ok");
 }
 // Frames: built, checked, and passed wherever twelve numbers go.
 {
@@ -1623,6 +3571,30 @@ using (var back = Cadaclysm.Cadaclysm.Open(step))
         catch (BuildException e) when (e.Message.Contains("freed")) { }
     }
     Console.WriteLine("kernel fem: a freed mesh refuses all eighteen reads");
+}
+
+// Solid.WithMaterial and Solid.Styled with their readers, at parity with the Python
+// reference's test_a_material_and_an_outside_style_ride_operations_and_reach_step.
+{
+    using var cube = Solid.Cuboid(1, 1, 1);
+    if (cube.Material != null) return Fail("material: a fresh cuboid has a material");
+    using var made = cube.WithMaterial("Steel");
+    using var steel = made.Styled("materials/steel.mtlx", "BrushedSteel");
+    if (steel.Material != "Steel" || steel.StyleLocation != "materials/steel.mtlx" || steel.StyleIdentification != "BrushedSteel")
+        return Fail($"material: read back {steel.Material}, {steel.StyleLocation}, {steel.StyleIdentification}");
+    using var tool = cube.Translate(0.5, 0.5, 0.5);
+    using var cut = steel.Cut(tool);
+    if (cut.Material != "Steel") return Fail($"material: a cut is made of {cut.Material}, not its target's Steel");
+    using var only = cube.Styled(null, "BrushedSteel");
+    if (only.StyleLocation != null) return Fail("material: a style given no location has one");
+    var text = steel.StepText();
+    if (!text.Contains("MATERIAL_DESIGNATION('Steel'") || !text.Contains("EXTERNALLY_DEFINED_STYLE(IDENTIFIER('BrushedSteel')"))
+        return Fail("material: STEP is missing the material or the style");
+    try { cube.WithMaterial(" "); return Fail("material: a blank material was accepted"); }
+    catch (BuildException) { }
+    try { cube.Styled(null, null); return Fail("material: a style naming nothing was accepted"); }
+    catch (BuildException) { }
+    Console.WriteLine("kernel material: read back, kept by a cut, written to STEP");
 }
 
 // Assemblies: Assembly, Solid.Named and Solid.Name, at parity with the Python reference's
@@ -2419,9 +4391,640 @@ Console.WriteLine("blacksmith svg: solid and profile drawn together, both group 
         Console.WriteLine($"silhouette (reader): sphere {silFirst.Count} then {silSecond.Count} curves, first answer kept; infinite tolerance refused; planar box empty");
     }
 }
+// Oriented box, lengths, containment and closest points: Python's test_oriented_box_* ..
+// test_closest_*, trimmed to what proves the marshalling (measure plan 3).
+{
+    bool Within(double a, double b, double tol) => Math.Abs(a - b) <= tol;
+    string Refused(Action act)
+    {
+        try { act(); return "(no exception)"; }
+        catch (BuildException e) { return e.Message; }
+    }
+    // 1. the oriented box of a turned cuboid
+    using (var turned0 = Solid.Cuboid(2, 3, 4))
+    using (var turned = turned0.Rotate(new double[] { 0, 0, 0, 0, 0, 1 }, Math.PI / 6))
+    {
+        var ob = turned.OrientedBox(1e-9);
+        var want = new[] { 1.0, 1.5, 2.0 };
+        var sorted = ob.Half.OrderBy(h => h).ToArray();
+        for (var i = 0; i < 3; i++)
+            if (!(sorted[i] >= want[i] - 1e-9 && sorted[i] <= want[i] + 1e-3)) return Fail($"oriented box: half {string.Join(",", ob.Half)} is not (1, 1.5, 2)");
+        if (ob.Centre.Length != 3 || ob.Centre.Any(c => Math.Abs(c) > 1e-3)) return Fail($"oriented box: centre {string.Join(",", ob.Centre)} is not the origin");
+        if (ob.Axes.Length != 3 || ob.Axes.Any(r => r.Length != 3)) return Fail("oriented box: axes are not three rows of three");
+        for (var i = 0; i < 3; i++)
+            for (var j = 0; j < 3; j++)
+            {
+                var dot = ob.Axes[i][0] * ob.Axes[j][0] + ob.Axes[i][1] * ob.Axes[j][1] + ob.Axes[i][2] * ob.Axes[j][2];
+                if (!Within(dot, i == j ? 1 : 0, 1e-9)) return Fail($"oriented box: axes {i}.{j} = {dot}");
+            }
+    }
+    // 2. defaults and errors
+    using (var cyl = Solid.Cylinder(1, 2))
+    {
+        var a0 = cyl.OrientedBox(0);
+        var aNeg = cyl.OrientedBox(-1);
+        var aDef = cyl.OrientedBox(1e-5);
+        if (!a0.Half.SequenceEqual(aDef.Half) || !aNeg.Half.SequenceEqual(aDef.Half) || !a0.Centre.SequenceEqual(aDef.Centre)
+            || !a0.Axes.Zip(aDef.Axes).All(p => p.First.SequenceEqual(p.Second)))
+            return Fail("oriented box: accuracy 0 or -1 is not the default 1e-5");
+        var grown = 1 + 3.125e-5 * Math.Sqrt(12);
+        if (aDef.Half.Any(h => !Within(h, grown, 1e-12)))
+            return Fail($"oriented box: half {string.Join(",", aDef.Half)} is not the grown figure {grown}");
+        var nan = Refused(() => cyl.OrientedBox(double.NaN));
+        if (!nan.StartsWith("oriented_box: ") || !nan.Contains("is not an accuracy")) return Fail($"oriented box: NaN accuracy gave '{nan}'");
+        using var openSheet = Solid.Cuboid(1, 2, 3).FaceSheet(0);
+        var open = Refused(() => openSheet.OrientedBox());
+        if (!open.StartsWith("oriented_box: ")) return Fail($"oriented box: an open sheet gave '{open}'");
+    }
+    // 3. edge length
+    using (var cyl = Solid.Cylinder(2.5, 4))
+    {
+        var circles = 0;
+        foreach (var edge in cyl.Edges.Where(e => e.Kind == "circle"))
+        {
+            circles++;
+            var len = cyl.EdgeLength(edge.Index, 1e-9);
+            if (len.Error < 0 || len.Error > 1e-6 * len.Value || !Within(len.Value, 5 * Math.PI, Math.Max(len.Error, 1e-9)) || !len.AccuracyMet || len.FromPolyline)
+                return Fail($"edge length: circle {edge.Index} reads {len}");
+        }
+        if (circles == 0) return Fail("edge length: the cylinder has no circle edge");
+        using var cube = Solid.Cuboid(1, 1, 1);
+        var past = Refused(() => cube.EdgeLength(cube.Edges.Count));
+        if (!past.StartsWith("edge_length: ")) return Fail($"edge length: an edge past the end gave '{past}'");
+    }
+    // 4. profile length
+    using (var slot = Profile.Slot((0, 0), 8, 1))
+    {
+        var len = slot.Length(1e-9);
+        if (len.Error < 0 || len.Error > 1e-6 * len.Value || !Within(len.Value, 12 + 2 * Math.PI, Math.Max(len.Error, 1e-9)) || !len.AccuracyMet) return Fail($"profile length: the slot reads {len}");
+        var nan = Refused(() => slot.Length(double.NaN));
+        if (!nan.StartsWith("profile_length: ")) return Fail($"profile length: NaN accuracy gave '{nan}'");
+    }
+    // 4b. arc-length sampling
+    {
+        double Dist(double[] a, double[] b) => Math.Sqrt(Enumerable.Range(0, 3).Sum(k => (a[k] - b[k]) * (a[k] - b[k])));
+        using (var cyl = Solid.Cylinder(2.5, 4))
+        {
+            var rims = 0;
+            foreach (var edge in cyl.Edges.Where(e => e.Kind == "circle"))
+            {
+                rims++;
+                var c = edge.Curve!;
+                var start = cyl.EdgePointAtLength(edge.Index, 0);
+                if (start.Parameter != c.T0) return Fail($"point at length: edge {edge.Index} starts at parameter {start.Parameter}, not {c.T0}");
+                var q = cyl.EdgePointAtLength(edge.Index, 2.5 * Math.PI / 2);
+                if (Math.Abs(q.Parameter - (c.T0 + Math.PI / 2)) > 1e-9) return Fail($"point at length: a quarter turn reads parameter {q.Parameter}");
+                if (Math.Abs(Dist(q.Point, c.Origin) - 2.5) > 1e-9) return Fail($"point at length: the quarter point is off the circle: {q}");
+                if (Math.Abs(Norm(q.Tangent) - 1) > 1e-12) return Fail($"point at length: the tangent is not unit: {q}");
+                if (q.Segment is not null || q.FromPolyline || !(q.Error >= 0) || double.IsInfinity(q.Error)) return Fail($"point at length: segment, polyline or error wrong: {q}");
+                var four = cyl.EdgeDivideByCount(edge.Index, 4);
+                if (four.Count != 4) return Fail($"divide by count: a rim gave {four.Count} samples");
+                for (var k = 0; k < 4; k++)
+                    if (Math.Abs(Dist(four[k].Point, four[(k + 1) % 4].Point) - 2.5 * Math.Sqrt(2)) > 1e-9) return Fail($"divide by count: the chord {k} is off");
+                if (!Near(four[0].Point, start.Point, 1e-12)) return Fail("divide by count: the first sample is not the start");
+                var bylen = cyl.EdgeDivideByLength(edge.Index, 2.5 * Math.PI / 2);
+                if (bylen.Count != 4) return Fail($"divide by length: a rim gave {bylen.Count} samples");
+            }
+            if (rims < 2) return Fail("arc length: the cylinder has fewer than two circle edges");
+            var past = Refused(() => cyl.EdgePointAtLength(cyl.Edges.Count, 0));
+            if (!past.StartsWith("edge_point_at_length: ")) return Fail($"point at length: an edge past the end gave '{past}'");
+            var rim = cyl.Edges.First(e => e.Kind == "circle").Index;
+            var negEdge = Refused(() => cyl.EdgePointAtLength(-1, 0));
+            if (negEdge == "(no exception)") return Fail("point at length: a negative edge was not refused");
+            Console.WriteLine($"arc length: negative edge refused: {negEdge}");
+            var neg = Refused(() => cyl.EdgePointAtLength(rim, -1));
+            if (!neg.StartsWith("edge_point_at_length: ")) return Fail($"point at length: -1 gave '{neg}'");
+            var far = Refused(() => cyl.EdgePointAtLength(rim, 100));
+            if (!far.StartsWith("edge_point_at_length: ")) return Fail($"point at length: 100 gave '{far}'");
+            var zero = Refused(() => cyl.EdgeDivideByCount(rim, 0));
+            if (!zero.StartsWith("edge_divide_by_count: ") || !zero.Contains("not at least 1")) return Fail($"divide by count: 0 gave '{zero}'");
+            var huge = Refused(() => cyl.EdgeDivideByCount(rim, 1_000_001));
+            if (!huge.StartsWith("edge_divide_by_count: ") || !huge.Contains("not at most 1000000")) return Fail($"divide by count: 1000001 gave '{huge}'");
+            var nostep = Refused(() => cyl.EdgeDivideByLength(rim, 0));
+            if (!nostep.StartsWith("edge_divide_by_length: ")) return Fail($"divide by length: 0 gave '{nostep}'");
+            var nan = Refused(() => cyl.EdgePointAtLength(rim, 1, double.NaN));
+            if (!nan.StartsWith("edge_point_at_length: ") || !nan.Contains("is not an accuracy")) return Fail($"point at length: NaN accuracy gave '{nan}'");
+        }
+        using (var box = Solid.Cuboid(2, 3, 4))
+        {
+            var line = box.Edges.First(e => e.Kind == "line" && Within(box.EdgeLength(e.Index).Value, 4, 1e-9));
+            var c = line.Curve!;
+            var five = box.EdgeDivideByCount(line.Index, 4);
+            if (five.Count != 5) return Fail($"divide by count: an open edge gave {five.Count} samples");
+            for (var k = 0; k < 5; k++)
+                if (Math.Abs(Dist(five[k].Point, five[0].Point) - k) > 1e-9) return Fail($"divide by count: sample {k} is not {k} from the start");
+            if (five[0].Parameter != c.T0 || five[4].Parameter != c.T1) return Fail("divide by count: the ends' parameters are not the curve's range");
+            var by = box.EdgeDivideByLength(line.Index, 1.5);
+            if (by.Count != 3) return Fail($"divide by length: an open edge gave {by.Count} samples");
+            for (var k = 0; k < 3; k++)
+                if (Math.Abs(Dist(by[k].Point, by[0].Point) - 1.5 * k) > 1e-9) return Fail($"divide by length: sample {k} is off");
+        }
+        using (var slot = Profile.Slot((0, 0), 8, 1))
+        {
+            var at = slot.PointAtLength(6 + Math.PI / 2);
+            if (!Near(at.Point, new double[] { 4, 0, 0 }, 1e-9) || at.Segment != 1u) return Fail($"profile point at length: the slot's far end reads {at}");
+            var eight = slot.DivideByCount(8);
+            if (eight.Count != 8 || eight.Any(a => a.Segment is null || a.Segment > 4u)) return Fail("profile divide by count: 8 samples, each on a side 0..4");
+            var by = slot.DivideByLength(3);
+            if (by.Count != (int)Math.Floor((12 + 2 * Math.PI) / 3) + 1) return Fail($"profile divide by length: {by.Count} samples");
+            for (var k = 0; k < by.Count; k++)
+            {
+                var one = slot.PointAtLength(3.0 * k);
+                if (!Near(by[k].Point, one.Point, 1e-12) || by[k].Segment != one.Segment) return Fail($"profile divide by length: sample {k} is not the point at {3 * k}");
+            }
+            if (Dist(by[^1].Point, by[0].Point) <= 0.1) return Fail("profile divide by length: the last sample repeats the start");
+            var neg = Refused(() => slot.PointAtLength(-1));
+            if (!neg.StartsWith("profile_point_at_length: ")) return Fail($"profile point at length: -1 gave '{neg}'");
+            var zero = Refused(() => slot.DivideByCount(0));
+            if (!zero.StartsWith("profile_divide_by_count: ")) return Fail($"profile divide by count: 0 gave '{zero}'");
+            var badStep = Refused(() => slot.DivideByLength(-1));
+            if (!badStep.StartsWith("profile_divide_by_length: ")) return Fail($"profile divide by length: -1 gave '{badStep}'");
+            var def = slot.PointAtLength(5);
+            foreach (var acc in new[] { 0.0, -1.0 })
+            {
+                var other = slot.PointAtLength(5, acc);
+                if (!Near(other.Point, def.Point, 0) || !Near(other.Tangent, def.Tangent, 0) || other.Parameter != def.Parameter
+                    || other.Segment != def.Segment || other.Error != def.Error || other.FromPolyline != def.FromPolyline)
+                    return Fail($"profile point at length: accuracy {acc} is not the default");
+            }
+        }
+        Console.WriteLine("arc length: points, divides by count and length, refusals all read back");
+    }
+    // 4c. the R-tree: Python's test_rtree_*, trimmed to what proves the marshalling (rtree plan 3)
+    {
+        Box B(double x0, double y0, double z0, double x1, double y1, double z1) => new(new[] { x0, y0, z0 }, new[] { x1, y1, z1 });
+        bool Sorted(List<RTreePair> ps) => ps.Zip(ps.Skip(1)).All(q => q.First.A < q.Second.A || (q.First.A == q.Second.A && q.First.B <= q.Second.B));
+        string Closed(Action act)
+        {
+            try { act(); return "(no exception)"; }
+            catch (ObjectDisposedException e) { return e.Message; }
+        }
+        // 1. the grid, packed and inserted one at a time
+        var cells = new List<(uint Id, Box Box)>();
+        for (var i = 0; i < 10; i++)
+            for (var j = 0; j < 10; j++)
+                for (var k = 0; k < 10; k++)
+                    cells.Add(((uint)(100 * i + 10 * j + k), B(i, j, k, i + 1, j + 1, k + 1)));
+        using var packed = RTree.FromBoxes(cells);
+        using var grown = new RTree();
+        foreach (var (id, box) in Enumerable.Reverse(cells)) grown.Insert(id, box);
+        var corner = cells.Select(c => c.Id).Where(id => id / 100 <= 2 && id / 10 % 10 <= 2 && id % 10 <= 2).OrderBy(id => id).ToList();
+        var answers = new List<List<RTreePair>>();
+        foreach (var (name, tree) in new[] { ("from_boxes", packed), ("insert", grown) })
+        {
+            if (tree.Count != 1000) return Fail($"rtree {name}: count {tree.Count}");
+            var box6 = tree.Bounds;
+            if (box6 is null || !Near(box6.Lo, new double[] { 0, 0, 0 }, 0) || !Near(box6.Hi, new double[] { 10, 10, 10 }, 0)) return Fail($"rtree {name}: bounds {box6}");
+            var found = tree.Search(B(0, 0, 0, 2, 2, 2));
+            if (!found.SequenceEqual(corner)) return Fail($"rtree {name}: search found {string.Join(",", found)}");
+            var near = tree.Nearest(new double[] { -1, -1, -1 }, 1);
+            if (near.Count != 1 || near[0].Id != 0 || !Within(near[0].Distance, Math.Sqrt(3), 1e-12)) return Fail($"rtree {name}: nearest {string.Join(",", near)}");
+            var at = tree.Within(new double[] { 0, 0, 0 }, 0);
+            if (at.Count != 1 || at[0] != new RTreeHit(0, 0)) return Fail($"rtree {name}: within 0 {string.Join(",", at)}");
+            var four = tree.Within(new double[] { -1, -1, -1 }, 2.5).Select(h => h.Id).ToList();
+            if (!four.SequenceEqual(new uint[] { 0, 1, 10, 100 })) return Fail($"rtree {name}: within 2.5 {string.Join(",", four)}");
+            var pairs = tree.SelfOverlaps();
+            if (pairs.Count != (28 * 28 * 28 - 1000) / 2 || pairs.Any(p => p.A >= p.B) || !Sorted(pairs)) return Fail($"rtree {name}: self overlaps {pairs.Count}, or a pair out of order");
+            if (!tree.SelfOverlaps(0.5).SequenceEqual(pairs)) return Fail($"rtree {name}: unit gaps paired at slack 0.5");
+            answers.Add(pairs);
+        }
+        if (!answers[0].SequenceEqual(answers[1])) return Fail("rtree: the packed and the grown trees disagree");
+        // 2. two trees, and the same tree twice
+        using (var one = RTree.FromBoxes(new[] { (7u, B(4.5, 4.5, 4.5, 5.5, 5.5, 5.5)) }))
+        {
+            var cross = packed.Overlaps(one);
+            var want = new uint[] { 444, 445, 454, 455, 544, 545, 554, 555 }.Select(a => new RTreePair(a, 7)).ToList();
+            if (!cross.SequenceEqual(want)) return Fail($"rtree overlaps: {string.Join(",", cross)}");
+            var back = one.Overlaps(packed);
+            if (!back.SequenceEqual(want.Select(p => new RTreePair(p.B, p.A)))) return Fail($"rtree overlaps: the other way round {string.Join(",", back)}");
+        }
+        var twice = packed.Overlaps(packed, 0);
+        if (twice.Count != 1000 + 2 * 10476 || !Sorted(twice)) return Fail($"rtree overlaps: the grid with itself gave {twice.Count}");
+        // 3. points, insert and remove
+        using (var pts = RTree.FromPoints(new[] { new double[] { 0, 0, 0 }, new double[] { 5, 0, 0 }, new double[] { 1, 0, 0 }, new double[] { 0, 3, 0 } }))
+        {
+            if (!pts.Search(B(-0.1, -0.1, -0.1, 1.1, 0.1, 0.1)).SequenceEqual(new uint[] { 0, 2 })) return Fail("rtree from points: ids are not the indices");
+            var two = pts.Nearest(new double[] { 4, 0, 0 }, 2);
+            if (!two.SequenceEqual(new[] { new RTreeHit(1, 1), new RTreeHit(2, 3) })) return Fail($"rtree from points: nearest {string.Join(",", two)}");
+        }
+        using (var tree = new RTree())
+        {
+            var cell = B(3, 3, 3, 4, 4, 4);
+            tree.Insert(7, cell);
+            tree.Insert(7, cell);
+            if (!tree.Search(cell).SequenceEqual(new uint[] { 7, 7 })) return Fail("rtree insert: one (id, box) twice is two entries");
+            if (!tree.Remove(7, cell) || !tree.Remove(7, cell) || tree.Remove(7, cell)) return Fail("rtree remove: true, true, then false");
+            tree.Insert(7, cell);
+            if (tree.Remove(8, cell)) return Fail("rtree remove: another id took the entry out");
+            if (tree.Remove(7, B(3, 3, 3, 4, 4, 4.5))) return Fail("rtree remove: another box took the entry out");
+            var point = new double[] { 1, 2, 3 };
+            tree.Insert(9, point);
+            var box6 = tree.Bounds;
+            if (tree.Count != 2 || box6 is null || !Near(box6.Lo, point, 0) || !Near(box6.Hi, new double[] { 4, 4, 4 }, 0)) return Fail($"rtree insert: a point, bounds {box6}");
+            if (!tree.Remove(9, point) || !tree.Remove(7, cell)) return Fail("rtree remove: the point or the box stayed");
+            if (tree.Count != 0 || tree.Bounds is not null) return Fail("rtree remove: emptied, the tree still has bounds");
+        }
+        // 4. point neighbours against brute force
+        {
+            ulong state = 5;
+            double Next() { state = state * 6364136223846793005UL + 1442695040888963407UL; return (state >> 11) / (double)(1UL << 53); }
+            var hay = Enumerable.Range(0, 30).Select(_ => new[] { 10 * Next(), 10 * Next(), 10 * Next() }).ToList();
+            var needles = Enumerable.Range(0, 5).Select(_ => new[] { 10 * Next(), 10 * Next(), 10 * Next() }).ToList();
+            double Dist(double[] a, double[] b) => Math.Sqrt(Enumerable.Range(0, 3).Sum(k => (a[k] - b[k]) * (a[k] - b[k])));
+            List<uint> ByDistance(double[] p) => Enumerable.Range(0, hay.Count).OrderBy(i => Dist(hay[i], p)).ThenBy(i => i).Select(i => (uint)i).ToList();
+            var close = Blacksmith.ClosestPoints(hay, needles, 3.0);
+            for (var n = 0; n < needles.Count; n++)
+                if (!close[n].SequenceEqual(ByDistance(needles[n]).Where(i => Dist(hay[(int)i], needles[n]) <= 3.0))) return Fail($"closest points: needle {n} gave {string.Join(",", close[n])}");
+            if (close.Count != 5 || close.All(c => c.Count == 0) || close.All(c => c.Count == hay.Count)) return Fail("closest points: the limit chose nothing or everything");
+            var knn = Blacksmith.KNeighbors(hay, needles, 4);
+            for (var n = 0; n < needles.Count; n++)
+                if (!knn[n].SequenceEqual(ByDistance(needles[n]).Take(4))) return Fail($"k neighbors: needle {n} gave {string.Join(",", knn[n])}");
+            var all = Blacksmith.KNeighbors(hay, needles.Take(2), 500);
+            if (all.Count != 2 || !all[1].SequenceEqual(ByDistance(needles[1]))) return Fail("k neighbors: k over the hay count is not every point");
+            if (Blacksmith.KNeighbors(new List<double[]>(), needles.Take(2), 3).Any(c => c.Count != 0)) return Fail("k neighbors: an empty hay found something");
+        }
+        // 5. refusals, by the call's name
+        using (var tree = new RTree())
+        {
+            var nanBox = Refused(() => tree.Insert(1, B(0, 0, 0, double.NaN, 1, 1)));
+            if (!nanBox.StartsWith("rtree_insert: ") || !nanBox.EndsWith("is not a box")) return Fail($"rtree insert: a NaN box gave '{nanBox}'");
+            var inverted = Refused(() => tree.Insert(1, B(1, 0, 0, 0, 1, 1)));
+            if (!inverted.StartsWith("rtree_insert: ") || !inverted.EndsWith("is not a box")) return Fail($"rtree insert: an inverted box gave '{inverted}'");
+            var infPoint = Refused(() => tree.Insert(1, new[] { double.PositiveInfinity, 0, 0 }));
+            if (!infPoint.StartsWith("rtree_insert_point: ") || !infPoint.EndsWith("is not finite")) return Fail($"rtree insert: an infinite point gave '{infPoint}'");
+            if (tree.Count != 0) return Fail("rtree insert: a refused insert changed the tree");
+            var badRemove = Refused(() => tree.Remove(1, B(1, 0, 0, 0, 1, 1)));
+            if (!badRemove.StartsWith("rtree_remove: ")) return Fail($"rtree remove: an inverted box gave '{badRemove}'");
+            if (tree.Remove(1, B(0, 0, 0, 1, 1, 1))) return Fail("rtree remove: absent right after a refusal read true");
+            var nanWithin = Refused(() => tree.Within(new[] { double.NaN, 0, 0 }, 1));
+            if (!nanWithin.StartsWith("rtree_within: ") || !nanWithin.EndsWith("is not finite")) return Fail($"rtree within: a NaN point gave '{nanWithin}'");
+            var nanNearest = Refused(() => tree.Nearest(new[] { double.NaN, 0, 0 }, 1));
+            if (!nanNearest.StartsWith("rtree_nearest: ") || !nanNearest.EndsWith("is not finite")) return Fail($"rtree nearest: a NaN point gave '{nanNearest}'");
+            var radius = Refused(() => tree.Within(new double[] { 0, 0, 0 }, -1));
+            if (radius != "rtree_within: radius -1 is not a distance") return Fail($"rtree within: radius -1 gave '{radius}'");
+            var slack = Refused(() => tree.SelfOverlaps(double.NaN));
+            if (slack != "rtree_self_overlaps: slack NaN is not a distance") return Fail($"rtree self overlaps: slack NaN gave '{slack}'");
+            var negSlack = Refused(() => tree.Overlaps(tree, -0.5));
+            if (!negSlack.StartsWith("rtree_overlaps: ")) return Fail($"rtree overlaps: slack -0.5 gave '{negSlack}'");
+            var k = Refused(() => tree.Nearest(new double[] { 0, 0, 0 }, 1_000_001));
+            if (k != "rtree_nearest: k 1000001 is not at most 1000000") return Fail($"rtree nearest: k 1000001 gave '{k}'");
+            var twoNumbers = Refused(() => tree.Within(new double[] { 0, 0 }, 1));
+            if (!twoNumbers.StartsWith("rtree_within: ")) return Fail($"rtree within: two numbers gave '{twoNumbers}'");
+        }
+        var entry = Refused(() => RTree.FromBoxes(new[] { (1u, B(0, 0, 0, 1, 1, 1)), (2u, B(2, 0, 0, 1, 1, 1)) }).Dispose());
+        if (!entry.StartsWith("rtree_from_boxes: entry 1")) return Fail($"rtree from boxes: a bad entry 1 gave '{entry}'");
+        var badPoint = Refused(() => RTree.FromPoints(new[] { new double[] { 0, 0, 0 }, new[] { 0, double.NaN, 0 } }).Dispose());
+        if (badPoint != "rtree_from_points: point 1 is not finite") return Fail($"rtree from points: a NaN point 1 gave '{badPoint}'");
+        var limit = Refused(() => Blacksmith.ClosestPoints(new[] { new double[] { 0, 0, 0 } }, new[] { new double[] { 0, 0, 0 } }, -1));
+        if (limit != "closest_points: limit -1 is not a distance") return Fail($"closest points: limit -1 gave '{limit}'");
+        // The limit as Rust's `{}` prints an f64: the shortest round-trip digits, never an exponent.
+        foreach (var (bad, shown) in new[] {
+            (-1e-7, "-0.0000001"), (-1e20, "-100000000000000000000"), (-1.5, "-1.5"), (-(0.1 + 0.2), "-0.30000000000000004"),
+            (double.NaN, "NaN"), (double.NegativeInfinity, "-inf"), (-5e-324, "-0." + new string('0', 323) + "5"),
+            (-1e-323, "-0." + new string('0', 322) + "1"), (-1e16, "-10000000000000000"), (-1.2345678901234568e17, "-123456789012345680"),
+            (-1e21, "-1000000000000000000000"), (-0.000123, "-0.000123"), (-2.5e-5, "-0.000025") })
+        {
+            var said = Refused(() => Blacksmith.ClosestPoints(new[] { new double[] { 0, 0, 0 } }, new[] { new double[] { 0, 0, 0 } }, bad));
+            if (said != $"closest_points: limit {shown} is not a distance") return Fail($"closest points: limit {bad:R} gave '{said}'");
+        }
+        var needle = Refused(() => Blacksmith.ClosestPoints(new[] { new double[] { 0, 0, 0 } }, new[] { new[] { double.NaN, 0, 0 } }, 1));
+        if (needle != "closest_points: needle point 0 is not finite") return Fail($"closest points: a NaN needle gave '{needle}'");
+        var hayNan = Refused(() => Blacksmith.KNeighbors(new[] { new double[] { 0, 0, 0 }, new[] { double.PositiveInfinity, 0, 0 } }, new[] { new double[] { 0, 0, 0 } }, 1_000_001));
+        if (hayNan != "k_neighbors: hay point 1 is not finite") return Fail($"k neighbors: an infinite hay point before a bad k gave '{hayNan}'");
+        var bigK = Refused(() => Blacksmith.KNeighbors(new[] { new double[] { 0, 0, 0 } }, new[] { new double[] { 0, 0, 0 } }, 1_000_001));
+        if (bigK != "k_neighbors: k 1000001 is not at most 1000000") return Fail($"k neighbors: k 1000001 gave '{bigK}'");
+        // 6. lifetime: an empty tree answers nothing; a disposed one refuses
+        var empty = new RTree();
+        if (empty.Count != 0 || empty.Bounds is not null || empty.Search(B(0, 0, 0, 1, 1, 1)).Count != 0
+            || empty.Within(new double[] { 0, 0, 0 }, 10).Count != 0 || empty.Nearest(new double[] { 0, 0, 0 }, 3).Count != 0
+            || empty.SelfOverlaps().Count != 0 || empty.Overlaps(packed).Count != 0)
+            return Fail("rtree: an empty tree answered something");
+        empty.Dispose();
+        empty.Dispose();
+        foreach (var (name, call) in new (string, Action)[] {
+            ("count", () => _ = empty.Count), ("bounds", () => _ = empty.Bounds), ("insert", () => empty.Insert(1, new double[] { 0, 0, 0 })),
+            ("search", () => empty.Search(B(0, 0, 0, 1, 1, 1))), ("nearest", () => empty.Nearest(new double[] { 0, 0, 0 }, 1)),
+            ("self overlaps", () => empty.SelfOverlaps()), ("overlaps", () => packed.Overlaps(empty)) })
+        {
+            var said = Closed(call);
+            if (!said.StartsWith("rtree: closed")) return Fail($"rtree {name}: a disposed tree gave '{said}'");
+        }
+        var rayClosed = Closed(() => empty.Ray(new double[] { 0, 0, 0 }, new double[] { 1, 0, 0 }));
+        if (!rayClosed.StartsWith("rtree: closed")) return Fail($"rtree ray: a disposed tree gave '{rayClosed}'");
+        Console.WriteLine($"rtree: grid of {packed.Count}, {answers[0].Count} self pairs, points, neighbours, refusals and lifetime all read back");
+        // 7. rays, triangle trees and a solid's face tree (rtree plan 6)
+        string Hits(List<RTreeHit> hs) => string.Join(",", hs);
+        using (var row = RTree.FromBoxes(Enumerable.Range(0, 10).Select(i => ((uint)i, B(i, 0, 0, i + 1, 1, 1)))))
+        {
+            var along = row.Ray(new double[] { -1, 0.5, 0.5 }, new double[] { 1, 0, 0 });
+            if (!along.SequenceEqual(Enumerable.Range(0, 10).Select(i => new RTreeHit((uint)i, i + 1.0)))) return Fail($"rtree ray: the row gave {Hits(along)}");
+            var scaled = row.Ray(new double[] { -1, 0.5, 0.5 }, new double[] { 2, 0, 0 }, 1.0);
+            if (!scaled.SequenceEqual(new[] { new RTreeHit(0, 0.5), new RTreeHit(1, 1.0) })) return Fail($"rtree ray: t is not in units of the direction: {Hits(scaled)}");
+            var cut = row.Ray(new double[] { -1, 0.5, 0.5 }, new double[] { 1, 0, 0 }, 3);
+            if (!cut.SequenceEqual(new[] { new RTreeHit(0, 1), new RTreeHit(1, 2), new RTreeHit(2, 3) })) return Fail($"rtree ray: max_t 3 gave {Hits(cut)}");
+            var inside = row.Ray(new double[] { 2.5, 0.5, 0.5 }, new double[] { 1, 0, 0 }, 1);
+            if (!inside.SequenceEqual(new[] { new RTreeHit(2, 0), new RTreeHit(3, 0.5) })) return Fail($"rtree ray: from inside gave {Hits(inside)}");
+            var back = row.Ray(new double[] { 11, 0.5, 0.5 }, new double[] { -1, 0, 0 }, 2);
+            if (!back.SequenceEqual(new[] { new RTreeHit(9, 1), new RTreeHit(8, 2) })) return Fail($"rtree ray: backwards gave {Hits(back)}");
+            if (row.Ray(new double[] { -1, 1, 0.5 }, new double[] { 1, 0, 0 }).Count != 10) return Fail("rtree ray: grazing the top face missed");
+            if (row.Ray(new double[] { -1, 1 + 1e-12, 0.5 }, new double[] { 1, 0, 0 }).Count != 0) return Fail("rtree ray: a ray above the row met it");
+            var zero = Refused(() => row.Ray(new double[] { 0, 0, 0 }, new double[] { 0, 0, 0 }));
+            if (zero != "rtree_ray: direction (0, 0, 0) is not a direction") return Fail($"rtree ray: a zero direction gave '{zero}'");
+            var negative = Refused(() => row.Ray(new double[] { 0, 0, 0 }, new double[] { 1, 0, 0 }, -1));
+            if (negative != "rtree_ray: max_t -1 is not a distance") return Fail($"rtree ray: max_t -1 gave '{negative}'");
+            var nanT = Refused(() => row.Ray(new double[] { 0, 0, 0 }, new double[] { 1, 0, 0 }, double.NaN));
+            if (nanT != "rtree_ray: max_t NaN is not a distance") return Fail($"rtree ray: max_t NaN gave '{nanT}'");
+            var nanOrigin = Refused(() => row.Ray(new[] { double.NaN, 0, 0 }, new double[] { 1, 0, 0 }));
+            if (nanOrigin != "rtree_ray: origin (NaN, 0, 0) is not finite") return Fail($"rtree ray: a NaN origin gave '{nanOrigin}'");
+            var shortOrigin = Refused(() => row.Ray(new double[] { 0, 0 }, new double[] { 1, 0, 0 }));
+            if (!shortOrigin.StartsWith("rtree_ray: ")) return Fail($"rtree ray: two numbers gave '{shortOrigin}'");
+        }
+        var positions = new[] { new double[] { 0, 0, 0 }, new double[] { 2, 0, 0 }, new double[] { 0, 3, 0 }, new[] { double.NaN, 0, 0 }, new double[] { 5, 1, 4 } };
+        using (var tris = RTree.FromTriangles(positions, new[] { (0u, 1u, 2u), (1u, 4u, 1u) }))
+        {
+            var box6 = tris.Bounds;
+            if (tris.Count != 2 || box6 is null || !Near(box6.Lo, new double[] { 0, 0, 0 }, 0) || !Near(box6.Hi, new double[] { 5, 3, 4 }, 0)) return Fail($"rtree from triangles: count {tris.Count}, bounds {box6}");
+            if (!tris.Search(B(1, 1, 0, 1, 1, 0)).SequenceEqual(new uint[] { 0 }) || !tris.Search(B(4, 0.5, 2, 4, 0.5, 2)).SequenceEqual(new uint[] { 1 })) return Fail("rtree from triangles: ids are not the triangle indices");
+            var through = tris.Ray(new double[] { -1, 0.5, 0 }, new double[] { 1, 0, 0 });
+            if (!through.SequenceEqual(new[] { new RTreeHit(0, 1), new RTreeHit(1, 3) })) return Fail($"rtree from triangles: a ray gave {Hits(through)}");
+        }
+        using (var none = RTree.FromTriangles(new List<double[]>(), new List<(uint, uint, uint)>()))
+            if (none.Count != 0) return Fail("rtree from triangles: none gave entries");
+        var past = Refused(() => RTree.FromTriangles(Enumerable.Repeat(new double[] { 0, 0, 0 }, 4), new[] { (0u, 1u, 2u), (0u, 4u, 1u) }).Dispose());
+        if (past != "rtree_from_triangles: triangle 1 names point 4 of 4") return Fail($"rtree from triangles: an index past the points gave '{past}'");
+        var infCorner = Refused(() => RTree.FromTriangles(new[] { new double[] { 0, 0, 0 }, new[] { 0, double.PositiveInfinity, 0 } }, new[] { (0u, 1u, 0u) }).Dispose());
+        if (infCorner != "rtree_from_triangles: triangle 0 point 1 is not finite") return Fail($"rtree from triangles: an infinite corner gave '{infCorner}'");
+        var shortPoint = Refused(() => RTree.FromTriangles(new[] { new double[] { 0, 0, 0 }, new double[] { 1, 1 } }, new[] { (0u, 0u, 0u) }).Dispose());
+        if (!shortPoint.StartsWith("rtree_from_triangles: point 1")) return Fail($"rtree from triangles: two numbers gave '{shortPoint}'");
+        using (var cuboid = Solid.Cuboid(3, 4, 5))
+        using (var faces = cuboid.FaceTree())
+        {
+            var grow = 5 * 1e-3;
+            var fb = faces.Bounds;
+            if (faces.Count != 6 || fb is null || !Near(fb.Lo, new[] { -1.5 - grow, -2 - grow, -2.5 - grow }, 1e-9) || !Near(fb.Hi, new[] { 1.5 + grow, 2 + grow, 2.5 + grow }, 1e-9)) return Fail($"face tree: count {faces.Count}, bounds {fb}");
+            if (faces.Search(B(1.4, 1.9, 2.4, 1.6, 2.1, 2.6)).Count != 3) return Fail("face tree: a corner is not three faces");
+            var shot = faces.Ray(new double[] { 10, 0, 0 }, new double[] { -1, 0, 0 });
+            if (shot.Count != 2 || !Within(shot[0].Distance, 8.5 - grow, 1e-9) || !Within(shot[1].Distance, 11.5 - grow, 1e-9)) return Fail($"face tree: a ray gave {Hits(shot)}");
+            if (!Near(cuboid.FaceFrame((int)shot[0].Id)[9..12], new double[] { 1, 0, 0 }, 1e-9)) return Fail("face tree: the first face met is not the +x face");
+        }
+        Console.WriteLine("rtree: rays, triangle trees and a cuboid's face tree all read back");
+    }
+    // 4d. the interpolator: Python's test_interpolator_*, trimmed to what proves the marshalling
+    {
+        var squares = new double[] { 0, 1, 4, 9, 16 };
+        var modes = Enum.GetValues<InterpolatorMode>();
+        bool One(double[] v, double want) => v.Length == 1 && Within(v[0], want, 1e-12);
+        bool All(double[] v, double[] want) => v.Length == want.Length && Near(v, want, 1e-12);
+        string Disposed(Action act)
+        {
+            try { act(); return "(no exception)"; }
+            catch (ObjectDisposedException e) { return e.Message; }
+        }
+        // 1. closed forms on the squares
+        using (var sq = new Interpolator(squares))
+        {
+            if (sq.Count != 5 || sq.Dimension != 1 || sq.Cyclic) return Fail($"interpolator: the squares read {sq}");
+            if (modes.Length != 5) return Fail("interpolator: not five modes");
+            foreach (var mode in modes)
+            {
+                for (var k = 0; k < squares.Length; k++)
+                    if (!One(sq.At(k, mode), squares[k])) return Fail($"interpolator {mode}: t {k} gave {sq.At(k, mode)[0]}, not {squares[k]}");
+                if (!One(sq.At(-2, mode), 0) || !One(sq.At(7, mode), 16)) return Fail($"interpolator {mode}: an open list is not clamped to its end samples");
+            }
+            if (sq.Nearest(1.5)[0] != 4 || sq.Nearest(1.49)[0] != 1) return Fail("interpolator: nearest 1.5 / 1.49");
+            if (!One(sq.Linear(1.5), 2.5)) return Fail($"interpolator: linear 1.5 gave {sq.Linear(1.5)[0]}");
+            if (!One(sq.Cosine(1.5), 2.5) || !One(sq.Cosine(1.25), 1 + 3 * (1 - Math.Cos(Math.PI / 4)) / 2)) return Fail("interpolator: cosine 1.5 / 1.25");
+            if (!One(sq.Cubic(1.5), 2.0)) return Fail($"interpolator: cubic 1.5 gave {sq.Cubic(1.5)[0]}");
+            if (!One(sq.CatmullRom(1.5), 2.25)) return Fail($"interpolator: catmull-rom 1.5 gave {sq.CatmullRom(1.5)[0]}");
+            if (sq.At(1.5)[0] != sq.Linear(1.5)[0]) return Fail("interpolator: at is not linear by default");
+        }
+        using (var ring = new Interpolator(squares, cyclic: true))
+        {
+            if (!ring.Cyclic) return Fail("interpolator: a cyclic list reads open");
+            if (!One(ring.CatmullRom(5), ring.CatmullRom(0)[0])) return Fail("interpolator: cyclic catmull-rom 5 is not 0");
+            if (!One(ring.Linear(-0.5), 8.0)) return Fail($"interpolator: cyclic linear -0.5 gave {ring.Linear(-0.5)[0]}");
+        }
+        // 2. points, and sample a loop of at
+        var helix = Enumerable.Range(0, 9).Select(k => new[] { Math.Cos(0.7 * k), Math.Sin(0.7 * k), 0.3 * k }).ToList();
+        using (var h = new Interpolator(helix))
+        {
+            if (h.Count != 9 || h.Dimension != 3) return Fail($"interpolator: the helix reads {h}");
+            if (!All(h.At(2), helix[2])) return Fail("interpolator: the helix at 2 is not sample 2");
+            if (h.CatmullRom(2.5).Length != 3) return Fail("interpolator: a 3D catmull-rom is not 3 numbers");
+            var ts = Enumerable.Range(0, 50).Select(k => -1.0 + 10.0 * k / 49).ToArray();
+            foreach (var mode in modes)
+            {
+                var all = h.Sample(ts, mode);
+                if (all.Length != ts.Length || ts.Select((t, k) => All(all[k], h.At(t, mode))).Any(ok => !ok)) return Fail($"interpolator {mode}: sample is not a loop of at");
+            }
+            if (h.Sample(Array.Empty<double>()).Length != 0) return Fail("interpolator: sample of nothing is not empty");
+        }
+        var squareCorners = new[] { new double[] { 0, 0 }, new double[] { 1, 0 }, new double[] { 1, 1 }, new double[] { 0, 1 } };
+        using (var square = new Interpolator(squareCorners, cyclic: true))
+        {
+            if (!All(square.Linear(-0.5), new double[] { 0, 0.5 })) return Fail("interpolator: the square at -0.5");
+            var two = square.Sample(new[] { 0.5, 1.5 });
+            if (two.Length != 2 || !All(two[0], new double[] { 0.5, 0 }) || !All(two[1], new double[] { 1, 0.5 })) return Fail("interpolator: the square sampled at 0.5, 1.5");
+        }
+        // 3. refusals
+        var none = Refused(() => new Interpolator(Array.Empty<double>()).Dispose());
+        if (!none.StartsWith("interpolator_new: no samples")) return Fail($"interpolator: no samples gave '{none}'");
+        var noRows = Refused(() => new Interpolator(new List<double[]>()).Dispose());
+        if (!noRows.StartsWith("interpolator_new: no samples")) return Fail($"interpolator: no rows gave '{noRows}'");
+        var nan = Refused(() => new Interpolator(new[] { 0.0, 1.0, double.NaN }).Dispose());
+        if (!nan.StartsWith("interpolator_new: sample 2 is not finite")) return Fail($"interpolator: a NaN sample gave '{nan}'");
+        try { new Interpolator(new[] { new double[] { 0, 1 }, new double[] { 2, 3, 4 } }).Dispose(); return Fail("interpolator: rows of unequal length were taken"); }
+        catch (ArgumentException e) when (e.Message.StartsWith("interpolator: samples differ in length")) { }
+        using (var sq = new Interpolator(squares))
+        {
+            var nanT = Refused(() => sq.Linear(double.NaN));
+            if (!nanT.StartsWith("interpolator_at: t NaN is not finite")) return Fail($"interpolator: t NaN gave '{nanT}'");
+            var infT = Refused(() => sq.Sample(new[] { 0.0, double.PositiveInfinity }));
+            if (!infT.StartsWith("interpolator_sample: t 1 (inf) is not finite")) return Fail($"interpolator: sample of an infinity gave '{infT}'");
+            var badMode = Refused(() => sq.At(1, (InterpolatorMode)7));
+            if (!badMode.StartsWith("interpolator_at: mode 7 is not a mode")) return Fail($"interpolator: mode 7 gave '{badMode}'");
+            sq.Dispose();
+            sq.Dispose();
+            foreach (var (name, call) in new (string, Action)[] {
+                ("count", () => _ = sq.Count), ("dimension", () => _ = sq.Dimension), ("cyclic", () => _ = sq.Cyclic),
+                ("at", () => sq.At(1)), ("sample", () => sq.Sample(Array.Empty<double>())), ("catmull-rom", () => sq.CatmullRom(1)) })
+            {
+                var said = Disposed(call);
+                if (!said.StartsWith("interpolator: closed")) return Fail($"interpolator {name}: a disposed one gave '{said}'");
+            }
+        }
+        Console.WriteLine("interpolator: the squares' closed forms, points, sample, refusals and lifetime all read back");
+    }
+    // 4e. the circumscribed polygon: Python's test_circumscribed_polygon_touches_its_circle
+    {
+        const double r = 5;
+        const int n = 6;
+        using var hex = Profile.CircumscribedPolygon((2, -1), r, n, 0.3);
+        var perimeter = hex.Length(1e-12).Value;
+        var want = 2 * n * r * Math.Tan(Math.PI / n);
+        if (Math.Abs(perimeter - want) > 1e-9 * want) return Fail($"circumscribed polygon: perimeter {perimeter}, not {want}");
+        var marks = hex.DivideByCount(2 * n, 1e-12);
+        if (marks.Count != 2 * n) return Fail($"circumscribed polygon: {marks.Count} marks, not {2 * n}");
+        for (var k = 0; k < 2 * n; k++)
+        {
+            var from = Math.Sqrt((marks[k].Point[0] - 2) * (marks[k].Point[0] - 2) + (marks[k].Point[1] + 1) * (marks[k].Point[1] + 1));
+            var expected = k % 2 == 0 ? r / Math.Cos(Math.PI / n) : r;
+            if (Math.Abs(from - expected) > 1e-6 * expected) return Fail($"circumscribed polygon: mark {k} is {from} from the centre, not {expected}");
+        }
+        var two = Refused(() => Profile.CircumscribedPolygon((0, 0), 10, 2).Dispose());
+        if (two != "profile_circumscribed_polygon: a polygon has at least 3 sides, not 2") return Fail($"circumscribed polygon: 2 sides gave '{two}'");
+        var negative = Refused(() => Profile.CircumscribedPolygon((0, 0), 10, -1).Dispose());
+        if (!negative.StartsWith("profile_circumscribed_polygon: a polygon has at least 3 sides")) return Fail($"circumscribed polygon: -1 sides gave '{negative}'");
+        Console.WriteLine($"circumscribed polygon: perimeter {perimeter:G10}, corners and midpoints on their circles, refusals read back");
+    }
+    // 4f. merge and regions: Python's test_merge_* and test_a_merged_body_is_refused_*
+    {
+        const double tol = 1e-6;
+        using var a = Solid.Cuboid(1, 1, 1);
+        using var moved = a.Translate(0.5, 0.5, 0.5);
+        using var merged = a.Merge(moved, tol);
+        if (merged.Faces != 18) return Fail($"merge: two cubes at a corner gave {merged.Faces} faces, not 18");
+        var regions = merged.Regions();
+        if (!regions.Select(g => g.Index).SequenceEqual(new[] { 0, 1, 2, 3 })) return Fail($"regions: indices {string.Join(",", regions.Select(g => g.Index))}");
+        if (regions[0].Finite || regions.Skip(1).Any(g => !g.Finite)) return Fail("regions: region 0 is not the one infinite region");
+        if (regions.Any(g => g.Shells != 1)) return Fail($"regions: shells {string.Join(",", regions.Select(g => g.Shells))}");
+        if (regions.Any(g => g.Sides.Any(s => s.Sense != 1 && s.Sense != -1))) return Fail("regions: a sense neither +1 nor -1");
+        if (regions.Sum(g => g.Sides.Count) != 2 * merged.Faces) return Fail($"regions: {regions.Sum(g => g.Sides.Count)} sides, not each face's two");
+        if (!regions.Skip(1).SelectMany(g => g.Sides.Select(s => s.Face)).Distinct().OrderBy(f => f).SequenceEqual(Enumerable.Range(0, merged.Faces)))
+            return Fail("regions: the finite regions' faces do not cover every face");
+        if (regions.Any(g => !g.Sides.Zip(g.Sides.Skip(1)).All(p => p.First.Face < p.Second.Face || (p.First.Face == p.Second.Face && p.First.Sense < p.Second.Sense))))
+            return Fail("regions: sides are not ascending by face then sense");
+        var volumes = new Dictionary<int, double>();
+        foreach (var g in regions.Skip(1))
+        {
+            using var cell = merged.RegionSolid(g.Index);
+            volumes[g.Index] = cell.Mass().Volume;
+        }
+        var sorted = volumes.Values.OrderBy(v => v).ToArray();
+        if (!Near(sorted, new[] { 0.125, 0.875, 0.875 }, 1e-6)) return Fail($"region solids: volumes {string.Join(",", sorted)}");
+        var small = regions[volumes.First(p => Math.Abs(p.Value - 0.125) < 1e-6).Key];
+        if (small.Sides.Count != 6 || small.Sides.Any(s => s.Sense != -1)) return Fail($"regions: the overlap has sides {string.Join(",", small.Sides)}");
+        if (!Near(small.Box.Lo, new double[] { 0, 0, 0 }, 1e-6) || !Near(small.Box.Hi, new[] { 0.5, 0.5, 0.5 }, 1e-6)) return Fail($"regions: the overlap's box is {small.Box}");
+        var again = merged.Regions();
+        if (!again.SequenceEqual(regions)) return Fail("regions: twice are not equal by value");
+        if (regions[1] == regions[2]) return Fail("regions: two different regions are equal");
+        // a ball merged into the cube
+        using (var ball = Solid.Sphere(0.3))
+        using (var holed = a.Merge(ball, tol))
+        {
+            var cells = holed.Regions();
+            if (cells.Count != 3) return Fail($"merge: a ball in a box gave {cells.Count} regions, not 3");
+            var ballVolume = 4.0 / 3.0 * Math.PI * 0.3 * 0.3 * 0.3;
+            var vols = cells.Skip(1).Select(g => { using var s = holed.RegionSolid(g.Index); return (g, v: s.Mass().Volume); }).OrderByDescending(p => p.v).ToArray();
+            if (!Within(vols[0].v, 1 - ballVolume, 1e-6) || !Within(vols[1].v, ballVolume, 1e-6)) return Fail($"merge: a ball in a box measures {vols[0].v}, {vols[1].v}");
+            if (vols[0].g.Shells != 2 || vols[1].g.Shells != 1) return Fail($"merge: the box cell has {vols[0].g.Shells} shells, the ball {vols[1].g.Shells}");
+        }
+        // refusals
+        var join = Refused(() => merged.Join(a, tol).Dispose());
+        if (!join.StartsWith("join: the join needs a manifold solid, and this one has edges of three or more faces")) return Fail($"merge: join of the merge gave '{join}'");
+        var mass = Refused(() => merged.Mass());
+        if (!mass.StartsWith("mass_properties: the mass needs a manifold solid")) return Fail($"merge: the merge's mass gave '{mass}'");
+        var zero = Refused(() => merged.RegionSolid(0).Dispose());
+        if (zero != "region_solid: region 0 is the infinite region") return Fail($"region solid: 0 gave '{zero}'");
+        var four = Refused(() => merged.RegionSolid(4).Dispose());
+        if (four != "region_solid: region 4 is not below 4") return Fail($"region solid: 4 gave '{four}'");
+        try { merged.RegionSolid(-1).Dispose(); return Fail("region solid: -1 was taken"); }
+        catch (ArgumentOutOfRangeException e) when (e.Message.StartsWith("region_solid: region is out of range: -1")) { }
+        var flat = Refused(() => a.Merge(a, 0.0).Dispose());
+        if (!flat.StartsWith("merge: tolerance must be positive and finite")) return Fail($"merge: tolerance 0 gave '{flat}'");
+        using (var cell = merged.RegionSolid(1))
+        using (var joined = cell.Join(a, tol))
+            if (joined.Faces == 0) return Fail("region solid: a cell joined to the cube has no faces");
+        var plain = a.Regions();
+        if (plain.Count != 2 || plain[0].Sides.Any(s => s.Sense != 1) || plain[1].Sides.Any(s => s.Sense != -1)) return Fail("regions: an ordinary cube is not outside +1, inside -1");
+        Console.WriteLine($"merge: {merged.Faces} faces, {regions.Count} regions, cells {string.Join(", ", sorted.Select(v => v.ToString("G6")))}; ball in a box, refusals read back");
+    }
+    // 5. containment, one-shot and classifier
+    using (var box = Solid.Cuboid(2, 3, 4))
+    {
+        if (box.Contains(new double[] { 0, 0, 0 }) != "inside" || box.Contains(new double[] { 5, 0, 0 }) != "outside"
+            || box.Contains(new double[] { 0, 0, 2 }) != "on")
+            return Fail("contains: the box's inside, outside and on points read wrong");
+        using var cls = box.Classifier();
+        foreach (var p in new[] { new double[] { 0, 0, 0 }, new double[] { 0.99, 0, 0 }, new double[] { 1, 0, 0 }, new double[] { 1.2, 0, 0 },
+                                  new double[] { 0, 1.6, 0 }, new double[] { 0, 0, -2 } })
+            if (cls.Contains(p) != box.Contains(p)) return Fail($"classifier: disagrees with contains at {string.Join(",", p)}");
+    }
+    using (var ball = Solid.Sphere(1.5))
+    {
+        using var cls = ball.Classifier(1e-3);
+        var xs = new[] { -2.0, -1.4, -0.5, 0, 0.5, 1.4, 2 };
+        var expected = new[] { "outside", "inside", "inside", "inside", "inside", "inside", "outside" };
+        for (var i = 0; i < xs.Length; i++)
+            if (cls.Contains(new[] { xs[i], 0, 0 }) != expected[i]) return Fail($"classifier: sphere at x={xs[i]} reads {cls.Contains(new[] { xs[i], 0, 0 })}");
+        if (cls.Contains(new[] { 1.5, 0, 0 }) != "on" || cls.Contains(new[] { 0, 0, -1.5 }) != "on") return Fail("classifier: the sphere's surface does not read on");
+    }
+    // 6. the classifier outlives its solid
+    Classifier orphan;
+    {
+        var ball = Solid.Sphere(1.0);
+        orphan = ball.Classifier(1e-3);
+        ball.Dispose();
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+    }
+    if (orphan.Contains(new double[] { 0, 0, 0 }) != "inside" || orphan.Contains(new double[] { 2, 0, 0 }) != "outside"
+        || orphan.Contains(new double[] { 1, 0, 0 }) != "on")
+        return Fail("classifier: it stopped answering once its solid was freed");
+    // 7. containment errors, and a closed classifier
+    using (var box = Solid.Cuboid(2, 3, 4))
+    {
+        var nanPoint = new[] { double.NaN, 0, 0 };
+        var e1 = Refused(() => box.Contains(nanPoint));
+        if (!e1.StartsWith("contains: ") || !e1.Contains("not finite")) return Fail($"contains: a NaN point gave '{e1}'");
+        var e2 = Refused(() => orphan.Contains(nanPoint));
+        if (!e2.StartsWith("classifier_contains: ") || !e2.Contains("not finite")) return Fail($"classifier: a NaN point gave '{e2}'");
+        var e3 = Refused(() => box.Contains(new double[] { 0, 0, 0 }, 0));
+        if (!e3.StartsWith("contains: ") || !e3.Contains("positive and finite")) return Fail($"contains: tolerance 0 gave '{e3}'");
+        var e4 = Refused(() => box.Classifier(0));
+        if (!e4.StartsWith("classifier_new: ") || !e4.Contains("positive and finite")) return Fail($"classifier: tolerance 0 gave '{e4}'");
+    }
+    orphan.Dispose();
+    orphan.Dispose();
+    try { orphan.Contains(new double[] { 0, 0, 0 }); return Fail("classifier: a closed classifier answered"); }
+    catch (ObjectDisposedException) { }
+    // 8. the closest points of two spheres
+    using (var s1 = Solid.Sphere(1))
+    using (var s2 = Solid.Sphere(1).Translate(5, 0, 0))
+    {
+        var c = s1.Closest(s2, 1e-3);
+        if (!Within(c.Distance, 3, 6e-9) || !c.Refined) return Fail($"closest: the spheres read {c}");
+        if (c.KindA != "face" || c.KindB != "face" || c.EdgeA is not null || c.EdgeB is not null) return Fail($"closest: the spheres' kinds or edges read {c}");
+        if (!Near(c.OnA, new double[] { 1, 0, 0 }, 1e-6) || !Near(c.OnB, new double[] { 4, 0, 0 }, 1e-6)) return Fail($"closest: the spheres' points read {c}");
+        var back = s2.Closest(s1, 1e-3);
+        if (!Near(back.OnA, c.OnB, 1e-9) || !Near(back.OnB, c.OnA, 1e-9) || !Within(back.Distance, c.Distance, 1e-12))
+            return Fail($"closest: swapping the solids did not swap the points: {back}");
+    }
+    // 9. a filletable edge
+    using (var box = Solid.Cuboid(2, 3, 4))
+    using (var ball = Solid.Sphere(1).Translate(3, 0, 4))
+    {
+        var c = box.Closest(ball, 1e-3);
+        if (!Within(c.Distance, 2 * Math.Sqrt(2) - 1, 2e-3)) return Fail($"closest: the box and ball read {c}");
+        if (c.KindA != "edge" || c.EdgeA is null || c.KindB != "face" || c.EdgeB is not null) return Fail($"closest: the box and ball name {c}");
+        using var edgeRounded = box.Fillet(new[] { (int)c.EdgeA.Value }, 0.2);
+        if (edgeRounded.Faces != box.Faces + 1) return Fail($"closest: filleting the named edge gave {edgeRounded.Faces} faces from {box.Faces}");
+    }
+    // 10. closest errors
+    using (var s1 = Solid.Sphere(1))
+    using (var s2 = Solid.Sphere(1).Translate(5, 0, 0))
+    {
+        var zero = Refused(() => s1.Closest(s2, 0));
+        if (!zero.StartsWith("closest: ")) return Fail($"closest: tolerance 0 gave '{zero}'");
+    }
+    Console.WriteLine("measure: oriented box, lengths, containment and closest points all read back");
+}
 return 0;
 
 static int Fail(string why) { Console.Error.WriteLine(why); return 1; }
+// This source file's own folder, from the compiler: the repository's fixtures are found from it,
+// never from the working directory.
+static string SmokeSourceDir([System.Runtime.CompilerServices.CallerFilePath] string path = "") => System.IO.Path.GetDirectoryName(path)!;
 static double Norm(double[] v) => Math.Sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
 static int CountOf(string haystack, string needle) => (haystack.Length - haystack.Replace(needle, "").Length) / needle.Length;
 // A profile's [x0, x1, y0, y1], read off the bounds of it extruded 1, at a fine tolerance.

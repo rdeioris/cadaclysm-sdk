@@ -239,6 +239,124 @@ pub(crate) fn manifold(m: sdk::Manifold) -> VarDictionary {
     dict(&[("faces", (m.faces as i64).to_variant()), ("edges", (m.edges as i64).to_variant()), ("vertices", (m.vertices as i64).to_variant()), ("boundary_edges", (m.boundary_edges as i64).to_variant()), ("non_manifold_edges", (m.non_manifold_edges as i64).to_variant()), ("non_manifold_vertices", (m.non_manifold_vertices as i64).to_variant()), ("is_manifold", m.is_manifold.to_variant()), ("is_closed", m.is_closed.to_variant())])
 }
 
+// ---- health and healing (shared by both libraries, as `manifold` is) ------------------
+
+/// `health`'s and `healed`'s tolerance from GDScript's `float`: anything not finite and
+/// positive (the default 0, a negative, NaN, INF) is the library's default, passed as NaN.
+pub(crate) fn heal_tolerance(tolerance: f64) -> Option<f64> {
+    (tolerance.is_finite() && tolerance > 0.0).then_some(tolerance)
+}
+
+/// An id that may be none, as GDScript's `int`: -1 for none, as `CadaclysmClosest` gives it.
+fn id_or_none(id: Option<u32>) -> i64 {
+    id.map_or(-1, i64::from)
+}
+
+fn free_edge(e: &sdk::FreeEdge) -> VarDictionary {
+    dict(&[
+        ("trim", i64::from(e.trim).to_variant()),
+        ("edge", id_or_none(e.edge).to_variant()),
+        ("face", i64::from(e.face).to_variant()),
+        ("wire", i64::from(e.wire).to_variant()),
+        ("partner", id_or_none(e.partner).to_variant()),
+        ("shared_ends", i64::from(e.shared_ends).to_variant()),
+        ("length", e.length.to_variant()),
+        ("gap", e.gap.to_variant()),
+    ])
+}
+
+fn free_wire(w: &sdk::FreeWire) -> VarDictionary {
+    dict(&[
+        ("first", i64::from(w.first).to_variant()),
+        ("count", i64::from(w.count).to_variant()),
+        ("closed", w.closed.to_variant()),
+        ("length", w.length.to_variant()),
+        ("widest_gap", w.widest_gap.to_variant()),
+    ])
+}
+
+fn small_feature(s: &sdk::SmallFeature) -> VarDictionary {
+    dict(&[("kind", gs(&s.kind).to_variant()), ("index", i64::from(s.index).to_variant()), ("size", s.size.to_variant())])
+}
+
+fn cracks(c: &sdk::Cracks) -> VarDictionary {
+    dict(&[
+        ("watertight", c.watertight.to_variant()),
+        ("open", i64::from(c.open).to_variant()),
+        ("folded", i64::from(c.folded).to_variant()),
+        ("crossings", i64::from(c.crossings).to_variant()),
+        ("edges", c.edges.iter().map(|&e| i64::from(e)).collect::<PackedInt64Array>().to_variant()),
+    ])
+}
+
+fn rows<T>(items: &[T], f: impl Fn(&T) -> VarDictionary) -> Variant {
+    items.iter().map(f).collect::<Array<VarDictionary>>().to_variant()
+}
+
+/// A health report as a Dictionary: the `HealthReport` fields as keys, its rows as arrays of
+/// Dictionaries, `cracks` a Dictionary or `null`.
+pub(crate) fn health_report(r: &sdk::HealthReport) -> VarDictionary {
+    dict(&[
+        ("tolerance", r.tolerance.to_variant()),
+        ("rounding", r.rounding.to_variant()),
+        ("extent", r.extent.to_variant()),
+        ("free_edges", rows(&r.free_edges, free_edge)),
+        ("wires", rows(&r.wires, free_wire)),
+        ("small", rows(&r.small, small_feature)),
+        ("loose_edges", i64::from(r.loose_edges).to_variant()),
+        ("worst_loose", r.worst_loose.to_variant()),
+        ("sew_pairs", i64::from(r.sew_pairs).to_variant()),
+        ("sew_refused", i64::from(r.sew_refused).to_variant()),
+        ("sew_worst_gap", r.sew_worst_gap.to_variant()),
+        ("cracks", r.cracks.as_ref().map_or(Variant::nil(), |c| cracks(c).to_variant())),
+        ("worst_gap", r.worst_gap.to_variant()),
+    ])
+}
+
+/// A heal report as a Dictionary: the `HealReport` fields as keys, `fixes` and `refused` as
+/// arrays of Dictionaries (`{kind, index, size, moved}`, `{kind, index, why, figure}`).
+pub(crate) fn heal_report(r: &sdk::HealReport) -> VarDictionary {
+    let fix = |f: &sdk::HealFix| {
+        dict(&[("kind", gs(&f.kind).to_variant()), ("index", i64::from(f.index).to_variant()), ("size", f.size.to_variant()), ("moved", f.moved.to_variant())])
+    };
+    let refusal = |f: &sdk::HealRefusal| {
+        dict(&[("kind", gs(&f.kind).to_variant()), ("index", i64::from(f.index).to_variant()), ("why", gs(&f.why).to_variant()), ("figure", f.figure.to_variant())])
+    };
+    dict(&[
+        ("tolerance", r.tolerance.to_variant()),
+        ("moved", r.moved.to_variant()),
+        ("guarded", r.guarded.to_variant()),
+        ("fixes", rows(&r.fixes, fix)),
+        ("refused", rows(&r.refused, refusal)),
+        ("small_before", i64::from(r.small_before).to_variant()),
+        ("small_after", i64::from(r.small_after).to_variant()),
+        ("free_before", i64::from(r.free_before).to_variant()),
+        ("free_after", i64::from(r.free_after).to_variant()),
+        ("closed_before", r.closed_before.to_variant()),
+        ("closed_after", r.closed_after.to_variant()),
+        ("nonmanifold_before", i64::from(r.nonmanifold_before).to_variant()),
+        ("nonmanifold_after", i64::from(r.nonmanifold_after).to_variant()),
+    ])
+}
+
+/// `healed`'s three switches as the SDK's `HealKinds`.
+pub(crate) fn heal_kinds(edges: bool, faces: bool, holes: bool) -> sdk::HealKinds {
+    sdk::HealKinds { edges, faces, holes }
+}
+
+/// `{body, report}`: what `healed` returns, `body` the new brep or solid.
+pub(crate) fn healed_pair(body: Variant, report: &sdk::HealReport) -> VarDictionary {
+    dict(&[("body", body), ("report", heal_report(report).to_variant())])
+}
+
+/// An edge id for `edge_tolerance` from GDScript's `int`, refused outside 0 to 4294967295.
+pub(crate) fn edge_id(edge: i64) -> Option<u32> {
+    match u32::try_from(edge) {
+        Ok(e) => Some(e),
+        Err(_) => fail(format!("edge_tolerance: no edge {edge}")),
+    }
+}
+
 // ---- options -----------------------------------------------------------------------
 
 /// `CadaclysmScene.open`'s options dictionary as the SDK's `OpenOptions`.
@@ -2932,6 +3050,62 @@ impl CadaclysmBrep {
     #[func]
     fn manifold(&self) -> VarDictionary {
         self.with(|b| ok(b.manifold()).map(manifold)).flatten().unwrap_or_default()
+    }
+
+    /// What is wrong with this brep, as a Dictionary with `HealthReport`'s keys: `tolerance`,
+    /// `rounding`, `extent`, `free_edges` (Dictionaries `{trim, edge, face, wire, partner,
+    /// shared_ends, length, gap}`, `edge` and `partner` -1 for none), `wires` (`{first, count,
+    /// closed, length, widest_gap}`), `small` (`{kind, index, size}`, `kind` a String),
+    /// `loose_edges`, `worst_loose`, `sew_pairs`, `sew_refused`, `sew_worst_gap`, `cracks`
+    /// (`{watertight, open, folded, crossings, edges}`, or `null` unless `mesh`) and
+    /// `worst_gap`. Nothing moves. `tolerance` is an absolute length; 0 (the default), a
+    /// negative, NaN or INF takes the library's default, `1e-4` times the diagonal. A wire's
+    /// edges are `free_edges.slice(w.first, w.first + w.count)`. An empty Dictionary on failure
+    /// (a released brep), with the reason in `Cadaclysm.last_error()`.
+    #[func]
+    fn health(&self, #[opt(default = 0.0)] tolerance: f64, #[opt(default = false)] mesh: bool) -> VarDictionary {
+        self.with(|b| ok(b.health(heal_tolerance(tolerance), mesh)).map(|r| health_report(&r))).flatten().unwrap_or_default()
+    }
+
+    /// This brep with its small features removed, beside what was done, as a Dictionary
+    /// `{body, report}`: `body` a new `CadaclysmBrep` (this one is left as it was), `report`
+    /// a Dictionary with `HealReport`'s keys -- `tolerance`, `moved`, `guarded`, `fixes`
+    /// (`{kind, index, size, moved}`), `refused` (`{kind, index, why, figure}`, `why` a
+    /// String), `small_before`, `small_after`, `free_before`, `free_after`, `closed_before`,
+    /// `closed_after`, `nonmanifold_before`, `nonmanifold_after`. `edges`, `faces` and `holes`
+    /// switch each kind of fix; a kind switched off is refused as `"toggled"`. `tolerance` as
+    /// `health`'s. An empty Dictionary on failure, with the reason in `Cadaclysm.last_error()`.
+    #[func]
+    fn healed(
+        &self,
+        #[opt(default = 0.0)] tolerance: f64,
+        #[opt(default = true)] edges: bool,
+        #[opt(default = true)] faces: bool,
+        #[opt(default = true)] holes: bool,
+    ) -> VarDictionary {
+        let kinds = heal_kinds(edges, faces, holes);
+        self.with(|b| ok(b.healed(heal_tolerance(tolerance), kinds)))
+            .flatten()
+            .map(|(brep, report)| healed_pair(Gd::from_object(CadaclysmBrep { brep: RefCell::new(Some(brep)) }).to_variant(), &report))
+            .unwrap_or_default()
+    }
+
+    /// How far brep edge `edge` (an id as a free edge or a fix names one) may lie off its
+    /// curve: 0 for an exact edge, the distance healing or sewing moved it where that is
+    /// recorded, `NAN` when no trim names the id (Godot has no null number). `NAN` too on
+    /// failure (a released brep, an id outside 0 to 4294967295), with the reason in
+    /// `Cadaclysm.last_error()`.
+    #[func]
+    fn edge_tolerance(&self, edge: i64) -> f64 {
+        let Some(edge) = edge_id(edge) else { return f64::NAN };
+        let tolerance = self.with(|b| b.edge_tolerance(edge));
+        match tolerance {
+            Some(t) => {
+                clear_error();
+                t.unwrap_or(f64::NAN)
+            }
+            None => f64::NAN,
+        }
     }
 
     /// Hand the B-rep back now.

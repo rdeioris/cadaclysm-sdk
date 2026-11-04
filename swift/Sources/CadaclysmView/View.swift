@@ -434,15 +434,15 @@ package func drawObject(solid: OpaquePointer?, scene: OpaquePointer?, tolerance:
 
 // ---- items -----------------------------------------------------------------------------------
 
-/// One thing shown in a View. It keeps its view alive.
-public final class Item {
+/// One thing shown in a View. It keeps its view alive. (Not final: `Machining` is one.)
+public class Item {
     /// The item's id, as a pick reports it.
     public let id: UInt32
     /// The view it is shown in.
     public let view: View
     init(view: View, id: UInt32) { self.view = view; self.id = id }
 
-    private func ok(_ call: String, _ f: (UnsafeMutablePointer<CvlTable>, OpaquePointer) -> Bool) throws {
+    func ok(_ call: String, _ f: (UnsafeMutablePointer<CvlTable>, OpaquePointer) -> Bool) throws {
         try view.ok(call, f)
     }
     /// Takes the item out of the view and lets go of what it showed.
@@ -486,6 +486,19 @@ public final class Item {
     public func frame() throws { try ok("cadaclysm_view_frame") { t, v in t.pointee.frame!(v, id) } }
     /// Draws the item's triangles through whatever is in front of them.
     public func xray(_ on: Bool) throws { try ok("cadaclysm_view_set_xray") { t, v in t.pointee.set_xray!(v, id, on) } }
+    /// How the item's lines and points draw where a surface hides them.
+    public enum Occluded: UInt32, Sendable { case off = 0, solid = 1, dashed = 2 }
+    /// Sets how the item's lines and points draw where a surface hides them: not drawn (`off`, the
+    /// default), drawn through (`solid`) or dashed and dimmed (`dashed`).
+    public func occluded(_ mode: Occluded) throws { try ok("cadaclysm_view_set_occluded") { t, v in t.pointee.set_occluded!(v, id, mode.rawValue) } }
+    /// An item's finish under the lighting.
+    public enum Finish: UInt32, Sendable { case gloss = 0, satin = 1, matte = 2 }
+    /// Sets the item's finish: `gloss` (an item shows with this until it is set) -- under the
+    /// showroom lighting a clear coat mirroring the room, silver at a grazing angle -- `satin` (a
+    /// weaker, blurred coat) or `matte` (no mirror, a faint sheen: rubber, cloth). Uploads the scene
+    /// again, as a show does: set it as each item is shown rather than over a finished scene item by
+    /// item.
+    public func finish(_ finish: Finish) throws { try ok("cadaclysm_view_set_finish") { t, v in t.pointee.set_finish!(v, id, finish.rawValue) } }
     /// Shows or hides a scene node (the reader's index) and its subtree.
     public func nodeVisible(_ node: UInt32, _ on: Bool) throws {
         try ok("cadaclysm_view_set_node_visible") { t, v in t.pointee.set_node_visible!(v, id, node, on) }
@@ -518,6 +531,107 @@ public final class Item {
         let n = try count(transforms.count, "node_transforms")
         let flat = transforms.flatMap { $0 }
         try ok("cadaclysm_view_set_node_transforms") { t, v in withDoubles(flat) { t.pointee.set_node_transforms!(v, id, $0, n) } }
+    }
+}
+
+// ---- machining ---------------------------------------------------------------------------------
+
+/// A tool as the machining view takes it: `shape` is "flat", "ball", "drill", "vbit" or
+/// "bullnose"; `fluteLength`, `angle` (a V-bit's) and `cornerRadius` (a bull-nose's) are 0 when
+/// not given.
+public struct MachiningTool: Sendable {
+    public var number: UInt32
+    public var shape: String
+    public var diameter: Double
+    public var fluteLength: Double
+    public var angle: Double
+    public var cornerRadius: Double
+    public init(number: UInt32, shape: String, diameter: Double, fluteLength: Double = 0, angle: Double = 0,
+                cornerRadius: Double = 0) {
+        self.number = number; self.shape = shape; self.diameter = diameter
+        self.fluteLength = fluteLength; self.angle = angle; self.cornerRadius = cornerRadius
+    }
+}
+/// One program of a job: its tool and its G-code.
+public struct MachiningProgram: Sendable {
+    public var tool: MachiningTool
+    public var gcode: String
+    public init(tool: MachiningTool, gcode: String) { self.tool = tool; self.gcode = gcode }
+}
+/// The blank's lowest and highest corners, mm.
+public struct MachiningStock: Sendable {
+    public var min: SIMD3<Double>
+    public var max: SIMD3<Double>
+    public init(min: SIMD3<Double>, max: SIMD3<Double>) { self.min = min; self.max = max }
+}
+/// The part a job is cut to, for colouring by deviation: `positions` three floats a vertex,
+/// `indices` three a triangle.
+public struct MachiningPart: Sendable {
+    public var positions: [Float]
+    public var indices: [UInt32]
+    public init(positions: [Float], indices: [UInt32]) { self.positions = positions; self.indices = indices }
+}
+/// Absent (nil): the library's own default (the cell by the tools, tolerance 0.05, skin 0.3,
+/// rapidRate 5000 mm/min).
+public struct MachiningOptions: Sendable {
+    public var cell: Double?
+    public var tolerance: Double?
+    public var skin: Double?
+    public var rapidRate: Double?
+    public init(cell: Double? = nil, tolerance: Double? = nil, skin: Double? = nil, rapidRate: Double? = nil) {
+        self.cell = cell; self.tolerance = tolerance; self.skin = skin; self.rapidRate = rapidRate
+    }
+}
+/// A machining's facts: `moves` in the job, `move` done as of the last draw, the heights'
+/// grid (`nx`, `ny`, `cell` mm, `min` the corner of cell (0, 0)) and the `cycleTime` in seconds.
+public struct MachiningInfo {
+    public var moves: UInt32, move: UInt32, nx: UInt32, ny: UInt32
+    public var cell: Float
+    public var min: (Float, Float)
+    public var cycleTime: Double
+}
+
+/// A CAM job shown in a `View` (`View.showMachining`): the stock is this item; the view's
+/// timeline plays it. Every `Item` member works on it too; `remove()` takes the job and its
+/// track away.
+public final class Machining: Item {
+    /// Jump the timeline to the end of move `move` (0: the untouched stock).
+    public func seekMove(_ move: UInt32) throws {
+        try ok("cadaclysm_view_machining_seek") { t, v in t.pointee.machining_seek!(v, id, move) }
+    }
+    /// "height", "tool" or "deviation" (needs a part).
+    public func colourBy(_ mode: String) throws {
+        let modes: [String: UInt32] = ["height": UInt32(CADACLYSM_VIEW_COLOUR_BY_HEIGHT),
+                                       "tool": UInt32(CADACLYSM_VIEW_COLOUR_BY_TOOL),
+                                       "deviation": UInt32(CADACLYSM_VIEW_COLOUR_BY_DEVIATION)]
+        guard let m = modes[mode] else { throw ViewError("mode '\(mode)': one of height, tool, deviation") }
+        try ok("cadaclysm_view_machining_colour_by") { t, v in t.pointee.machining_colour_by!(v, id, m) }
+    }
+    /// The toolpath and the tool, on or off.
+    public func overlays(path: Bool = true, tool: Bool = true) throws {
+        try ok("cadaclysm_view_machining_overlays") { t, v in t.pointee.machining_overlays!(v, id, path, tool) }
+    }
+    /// `moves`, `move` (done, as of the last draw), the heights' grid and the cycle time.
+    public func info() throws -> MachiningInfo {
+        var out = CadaclysmViewMachiningInfo()
+        out.size = UInt32(MemoryLayout<CadaclysmViewMachiningInfo>.size)
+        try ok("cadaclysm_view_machining_info") { t, v in t.pointee.machining_info!(v, id, &out) }
+        return MachiningInfo(moves: out.moves, move: out.move, nx: out.nx, ny: out.ny, cell: out.cell,
+                             min: (out.min.0, out.min.1), cycleTime: out.cycle_time)
+    }
+    /// The stock's heights now, nx * ny floats, row y then x; waits for the GPU.
+    public func heights() throws -> [Float] {
+        let i = try info()
+        var z = [Float](repeating: 0, count: Int(i.nx) * Int(i.ny))
+        let n = z.count
+        var none: Float = 0  // never NULL, even for an empty grid
+        try withUnsafeMutablePointer(to: &none) { stand in
+            try z.withUnsafeMutableBufferPointer { b in
+                let at = b.baseAddress ?? stand
+                try ok("cadaclysm_view_machining_heights") { t, v in t.pointee.machining_heights!(v, id, at, n) }
+            }
+        }
+        return z
     }
 }
 
@@ -699,11 +813,16 @@ public final class View {
         if !lastError(t).isEmpty { throw libraryError(t) }
     }
     private func add(_ call: String, owner: AnyObject?, _ f: (UnsafeMutablePointer<CvlTable>, OpaquePointer) -> UInt32) throws -> Item {
+        try add(call, owner: owner, make: { Item(view: $0, id: $1) }, f)
+    }
+    /// `add` wrapping the id as `make` says (a subclass of Item).
+    private func add<T: Item>(_ call: String, owner: AnyObject?, make: (View, UInt32) -> T,
+                              _ f: (UnsafeMutablePointer<CvlTable>, OpaquePointer) -> UInt32) throws -> T {
         let (t, v) = try live(call)
         let id = f(t, v)
         if id == 0 { throw libraryError(t) }
         keep(id, owner)
-        return Item(view: self, id: id)
+        return make(self, id)
     }
     /// What item `id` keeps; a value it replaces (a library that hands an id out again) is let
     /// go of after the unlock.
@@ -790,6 +909,110 @@ public final class View {
             withFloats(positions) { p in withColour(c) { t.pointee.show_points!(v, p, n, $0, sizePx) } }
         }
     }
+    /// A CAM job on a stock, paused at its start, as Python's `View.show_machining`: `programs`
+    /// in run order, `stock` its corners, `part` (nil: none) to colour by deviation, `options`
+    /// where the library's defaults are not wanted. Play it with `play()`. A shape that is none
+    /// of "flat", "ball", "drill", "vbit" or "bullnose", a number that is not finite, a NUL in
+    /// a program's G-code, a part that is not whole triangles of x y z triples or an index past
+    /// its vertices is refused before the library is called.
+    public func showMachining(_ programs: [MachiningProgram], stock: MachiningStock, part: MachiningPart? = nil,
+                              options: MachiningOptions = MachiningOptions()) throws -> Machining {
+        let programCount = try count(programs.count, "show_machining")
+        var shapes: [UInt32] = []
+        for program in programs {
+            let tool = program.tool
+            let shape: Int32
+            switch tool.shape {
+            case "flat": shape = CADACLYSM_VIEW_TOOL_FLAT
+            case "ball": shape = CADACLYSM_VIEW_TOOL_BALL
+            case "drill": shape = CADACLYSM_VIEW_TOOL_DRILL
+            case "vbit": shape = CADACLYSM_VIEW_TOOL_VBIT
+            case "bullnose": shape = CADACLYSM_VIEW_TOOL_BULLNOSE
+            default: throw ViewError("shape \(quoted(tool.shape)): one of flat, ball, drill, vbit, bullnose")
+            }
+            shapes.append(UInt32(shape))
+            guard tool.diameter.isFinite, tool.fluteLength.isFinite, tool.angle.isFinite, tool.cornerRadius.isFinite else {
+                throw ViewError("tool: diameter, flute_length, angle and corner_radius are finite numbers")
+            }
+            if program.gcode.unicodeScalars.contains("\0") {
+                throw ViewError("gcode: a NUL character cannot be sent (the C string ends there)")
+            }
+        }
+        guard (0..<3).allSatisfy({ stock.min[$0].isFinite && stock.max[$0].isFinite }) else {
+            throw ViewError("stock: min and max are finite numbers")
+        }
+        var vertexCount: UInt32 = 0, indexCount: UInt32 = 0
+        if let part {
+            if part.positions.contains(where: { !$0.isFinite }) { throw ViewError("part positions: finite numbers") }
+            if part.positions.count % 3 != 0 {
+                throw ViewError("part positions: \(part.positions.count) numbers is not a whole number of x y z triples")
+            }
+            if part.indices.count % 3 != 0 {
+                throw ViewError("part indices: \(part.indices.count) is not a whole number of triangles")
+            }
+            let vertices = part.positions.count / 3
+            if let top = part.indices.max(), Int(top) >= vertices {
+                throw ViewError("part indices: \(top) is past the last of \(vertices) vertices")
+            }
+            vertexCount = try count(vertices, "show_machining part")
+            indexCount = try count(part.indices.count, "show_machining part")
+        }
+        for value in [options.cell, options.tolerance, options.skin, options.rapidRate] {
+            if let value, !value.isFinite {
+                throw ViewError("show_machining options: cell, tolerance, skin and rapid_rate are finite numbers")
+            }
+        }
+        // The programs' array and each G-code are C memory for the call, freed after it.
+        let slots = max(programs.count, 1)
+        let raw = UnsafeMutablePointer<CadaclysmViewProgram>.allocate(capacity: slots)
+        raw.initialize(repeating: CadaclysmViewProgram(), count: slots)
+        defer {
+            for k in 0..<programs.count { free(UnsafeMutableRawPointer(mutating: raw[k].gcode)) }
+            raw.deallocate()
+        }
+        for (k, program) in programs.enumerated() {
+            let tool = program.tool
+            raw[k].size = UInt32(MemoryLayout<CadaclysmViewProgram>.size)
+            raw[k].tool_number = tool.number
+            raw[k].tool_shape = shapes[k]
+            raw[k].tool_diameter = tool.diameter
+            raw[k].tool_flute_length = tool.fluteLength
+            raw[k].tool_angle = tool.angle
+            raw[k].tool_corner_radius = tool.cornerRadius
+            guard let gcode = strdup(program.gcode) else {  // the defer frees the copies made so far
+                throw ViewError("program \(k): out of memory copying its G-code")
+            }
+            raw[k].gcode = UnsafePointer(gcode)
+        }
+        var m = CadaclysmViewMachining()
+        m.size = UInt32(MemoryLayout<CadaclysmViewMachining>.size)
+        m.program_count = programCount
+        m.programs = UnsafePointer(raw)
+        m.stock_min = (stock.min.x, stock.min.y, stock.min.z)
+        m.stock_max = (stock.max.x, stock.max.y, stock.max.z)
+        m.part_vertex_count = vertexCount
+        m.part_index_count = indexCount
+        m.cell = options.cell ?? 0
+        m.tolerance = options.tolerance ?? 0
+        m.rapid_rate = options.rapidRate ?? 0
+        if let skin = options.skin {
+            m.skin = skin
+            m.skin_set = 1
+        }
+        func show(_ positions: UnsafePointer<Float>?, _ indices: UnsafePointer<UInt32>?) throws -> Machining {
+            m.part_positions = positions
+            m.part_indices = indices
+            return try add("cadaclysm_view_show_machining", owner: nil, make: { Machining(view: $0, id: $1) }) { t, v in
+                t.pointee.show_machining!(v, &m)
+            }
+        }
+        guard let part else { return try show(nil, nil) }
+        let shown = withFloats(part.positions) { p in
+            withUInt32s(part.indices) { i in Result { try show(p, i) } }
+        }
+        return try shown.get()
+    }
+
     /// Rational cubics, sixteen floats each (four x, y, z, w control points); `rgb` a Colour,
     /// nil the default.
     public func showCurves(_ beziers: [Float], rgb: (any Colour)? = nil) throws -> Item {
@@ -950,6 +1173,7 @@ public final class View {
             withUnsafeMutableBytes(of: &r.projection) { _ = $0.bindMemory(to: Float.self).update(from: p.projection) }
             r.eye = (p.eye.x, p.eye.y, p.eye.z)
             r.grid = p.grid
+            r.layer_mask = 0xFFFF_FFFF  // every user layer
             raw.append(r)
         }
         try ok("cadaclysm_view_set_viewports") { t, v in
@@ -976,6 +1200,62 @@ public final class View {
             let (t, v) = try live("cadaclysm_view_lighting")
             return t.pointee.lighting!(v) == UInt32(CADACLYSM_VIEW_LIGHTING_STUDIO) ? "studio" : "headlight"
         }
+    }
+    // -- the timeline (CAM jobs shown with showMachining play on it)
+
+    /// Plays the timeline at `speed` times real time; it stops at its end unless `loop()` is on
+    /// (`play` at the end starts again from 0). A speed that is not finite is refused.
+    public func play(speed: Double = 1) throws {
+        guard speed.isFinite else { throw ViewError("play speed: a finite number") }
+        try ok("cadaclysm_view_timeline_play") { t, v in t.pointee.timeline_play!(v, speed) }
+    }
+    public func pause() throws { try ok("cadaclysm_view_timeline_pause") { t, v in t.pointee.timeline_pause!(v) } }
+    /// Sets the clock, clamped to [0, duration].
+    public func seek(_ seconds: Double) throws {
+        guard seconds.isFinite else { throw ViewError("seek seconds: a finite number") }
+        try ok("cadaclysm_view_timeline_seek") { t, v in t.pointee.timeline_seek!(v, seconds) }
+    }
+    public func loop(_ on: Bool = true) throws {
+        try ok("cadaclysm_view_timeline_set_loop") { t, v in t.pointee.timeline_set_loop!(v, on) }
+    }
+    /// The clock, seconds.
+    public var time: Double {
+        get throws {
+            let (t, v) = try live("cadaclysm_view_timeline_time")
+            return t.pointee.timeline_time!(v)
+        }
+    }
+    /// The timeline's length, seconds.
+    public var duration: Double {
+        get throws {
+            let (t, v) = try live("cadaclysm_view_timeline_duration")
+            return t.pointee.timeline_duration!(v)
+        }
+    }
+    public var playing: Bool {
+        get throws {
+            let (t, v) = try live("cadaclysm_view_timeline_playing")
+            return t.pointee.timeline_playing!(v)
+        }
+    }
+    /// One line per track at the clock's time, e.g. "move 370 of 638 - T1 flat 6 mm"; none when
+    /// nothing is on the timeline. Asks the length, then fills a buffer for it (asking again
+    /// when the line grew between the two calls, as Python does).
+    public func status() throws -> [String] {
+        let (t, v) = try live("cadaclysm_view_timeline_status")
+        var n = t.pointee.timeline_status!(v, nil, 0)
+        while n > 0 {
+            var buffer = [CChar](repeating: 0, count: n + 1)
+            let room = buffer.count
+            let got = buffer.withUnsafeMutableBufferPointer { t.pointee.timeline_status!(v, $0.baseAddress, room) }
+            if got < room {
+                if got == 0 { return [] }
+                let line = String(decoding: buffer[0..<got].map { UInt8(bitPattern: $0) }, as: UTF8.self)
+                return line.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            }
+            n = got
+        }
+        return []
     }
     /// Switches a `CADACLYSM_VIEW_LAYER_*` layer (`CADACLYSM_VIEW_LAYER_TEXT`: every text item).
     public func layer(_ which: UInt32, _ on: Bool) throws {

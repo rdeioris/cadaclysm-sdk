@@ -435,6 +435,9 @@ public final class Cad {
             NODE_SELECT_AS, NODE_GENERATOR, DIAGNOSTIC_COUNT, DIAGNOSTIC, NODE_EDGES,
             NODE_CURVES, NODE_ISOCURVES, REALIZE_ALL, REALIZED, REALIZE_TOTAL, CANCEL,
             NODE_BREP, BREP_RELEASE, BREP_LAYOUT_ID, BREP_MANIFOLD, BREP_SEW, MESH_FORMAT_LABEL,
+            BREP_HEALTH, BREP_HEALTH_FREE, BREP_HEALTH_SUMMARY, BREP_HEALTH_FREE_EDGES, BREP_HEALTH_WIRES,
+            BREP_HEALTH_SMALL, BREP_HEALTH_CRACK_EDGES, BREP_HEALED, BREP_HEAL_BODY, BREP_HEAL_FREE,
+            BREP_HEAL_SUMMARY, BREP_HEAL_FIXES, BREP_HEAL_REFUSED, BREP_EDGE_TOLERANCE,
             FORMAT_COUNT, FORMAT_NAME, FORMAT_EXTENSIONS, PICK_SAVE, GEOMETRY_DIAGNOSTIC_COUNT,
             GEOMETRY_DIAGNOSTIC, FORGET_MESHES, LOD_LEVELS, NODE_MESH_LOD, NODE_LOD_ERROR,
             NODE_EDGE_BEZIERS, NODE_CURVE_BEZIERS, NODE_ISOCURVE_BEZIERS,
@@ -535,6 +538,20 @@ public final class Cad {
         BREP_LAYOUT_ID = bind(linker, lib, "cadaclysm_brep_layout_id", FunctionDescriptor.of(A));
         BREP_MANIFOLD = bind(linker, lib, "cadaclysm_brep_manifold", FunctionDescriptor.of(B, A, A));
         BREP_SEW = bind(linker, lib, "cadaclysm_brep_sew", FunctionDescriptor.of(A, A, D, D, A, A));
+        BREP_HEALTH = bind(linker, lib, "cadaclysm_brep_health", FunctionDescriptor.of(A, A, D, B));
+        BREP_HEALTH_FREE = bind(linker, lib, "cadaclysm_brep_health_free", FunctionDescriptor.ofVoid(A));
+        BREP_HEALTH_SUMMARY = bind(linker, lib, "cadaclysm_brep_health_summary", FunctionDescriptor.of(B, A, A, A));
+        BREP_HEALTH_FREE_EDGES = bind(linker, lib, "cadaclysm_brep_health_free_edges", FunctionDescriptor.of(I, A, A, A));
+        BREP_HEALTH_WIRES = bind(linker, lib, "cadaclysm_brep_health_wires", FunctionDescriptor.of(I, A, A, A));
+        BREP_HEALTH_SMALL = bind(linker, lib, "cadaclysm_brep_health_small", FunctionDescriptor.of(I, A, A, A));
+        BREP_HEALTH_CRACK_EDGES = bind(linker, lib, "cadaclysm_brep_health_crack_edges", FunctionDescriptor.of(I, A, A));
+        BREP_HEALED = bind(linker, lib, "cadaclysm_brep_healed", FunctionDescriptor.of(A, A, D, I));
+        BREP_HEAL_BODY = bind(linker, lib, "cadaclysm_brep_heal_body", FunctionDescriptor.of(A, A));
+        BREP_HEAL_FREE = bind(linker, lib, "cadaclysm_brep_heal_free", FunctionDescriptor.ofVoid(A));
+        BREP_HEAL_SUMMARY = bind(linker, lib, "cadaclysm_brep_heal_summary", FunctionDescriptor.of(B, A, A, A));
+        BREP_HEAL_FIXES = bind(linker, lib, "cadaclysm_brep_heal_fixes", FunctionDescriptor.of(I, A, A, A));
+        BREP_HEAL_REFUSED = bind(linker, lib, "cadaclysm_brep_heal_refused", FunctionDescriptor.of(I, A, A, A));
+        BREP_EDGE_TOLERANCE = bind(linker, lib, "cadaclysm_brep_edge_tolerance", FunctionDescriptor.of(D, A, I));
         MESH_FORMAT_LABEL = bind(linker, lib, "cadaclysm_mesh_format_label", FunctionDescriptor.of(A, I));
         FORMAT_COUNT = bind(linker, lib, "cadaclysm_format_count", FunctionDescriptor.of(I));
         FORMAT_NAME = bind(linker, lib, "cadaclysm_format_name", FunctionDescriptor.of(A, I));
@@ -2288,6 +2305,171 @@ public final class Cad {
     public record Sewn(Brep brep, SewReport report) {
     }
 
+    /** One free edge (a side only one face bounds), from {@link HealthReport#freeEdges()}: its
+     *  {@code trim} (the face's side), the {@code edge} it lies on (null for a side with no
+     *  edge), the {@code face} and free {@code wire} it is on, its nearest {@code partner} --
+     *  a row of {@code freeEdges}, null if there is none -- how many of its two ends it
+     *  {@code sharedEnds} with that partner, its {@code length} and the {@code gap} to the
+     *  partner (infinite without one). */
+    public record FreeEdge(int trim, Integer edge, int face, int wire, Integer partner, int sharedEnds,
+                           double length, double gap) {
+    }
+
+    /** A chain of free edges end to end: the rows {@code first .. first + count} of {@link
+     *  HealthReport#freeEdges()}, whether it {@code closed} on itself, its total {@code length}
+     *  and the {@code widestGap} to any partner. */
+    public record FreeWire(int first, int count, boolean closed, double length, double widestGap) {
+    }
+
+    /** Something below the tolerance: {@code kind} is "short_edge", "collapsed_edge",
+     *  "sliver_face", "tiny_face", "tiny_body" or "small_hole"; {@code index} its edge, face,
+     *  body or loop number; {@code size} how small. */
+    public record SmallFeature(String kind, int index, double size) {
+    }
+
+    /** What a mesh of the body shows ({@code health(tolerance, true)}): whether it is {@code
+     *  watertight}, how many mesh edges are {@code open} or {@code folded}, how many {@code
+     *  crossings}, and the brep {@code edges} it cracks along. */
+    public record Cracks(boolean watertight, int open, int folded, int crossings, List<Integer> edges) {
+        public Cracks {
+            edges = List.copyOf(edges);
+        }
+    }
+
+    /** The kinds a {@link SmallFeature}, {@link HealFix} or {@link HealRefusal} names, by the C
+     *  ABI's number. */
+    private static final String[] HEALTH_KINDS = {"short_edge", "collapsed_edge", "sliver_face", "tiny_face", "tiny_body", "small_hole"};
+
+    /** The reasons a {@link HealRefusal} gives, by the C ABI's number. */
+    private static final String[] HEAL_WHYS = {"would_empty_loop", "closed", "seam", "chain", "neighbours_part", "uneven",
+            "non_manifold", "has_holes", "body_guard", "toggled", "unsupported"};
+
+    /** The C ABI's "no such id" in a free-edge row. */
+    private static final int HEALTH_NONE = 0xFFFFFFFF;
+
+    /**
+     * What is wrong with a body, as plain data ({@link Brep#health}): the {@code tolerance} and
+     * {@code rounding} it judged at and the body's {@code extent}; the free edges, their wires,
+     * the features below the tolerance; the loose edges ({@code worstLoose} the farthest from
+     * any face); what sewing would do ({@code sewPairs} joined, {@code sewRefused}, {@code
+     * sewWorstGap}); and, if asked for with {@code mesh}, the mesh's {@code cracks} (else
+     * null). {@code worstGap} is the widest gap between a free edge and its partner.
+     */
+    public record HealthReport(double tolerance, double rounding, double extent, List<FreeEdge> freeEdges,
+                               List<FreeWire> wires, List<SmallFeature> small, int looseEdges, double worstLoose,
+                               int sewPairs, int sewRefused, double sewWorstGap, Cracks cracks, double worstGap) {
+        public HealthReport {
+            freeEdges = List.copyOf(freeEdges);
+            wires = List.copyOf(wires);
+            small = List.copyOf(small);
+        }
+
+        /** The free edges of wire number {@code wire}, in order. */
+        public List<FreeEdge> wireEdges(int wire) {
+            FreeWire w = wires.get(wire);
+            return freeEdges.subList(w.first(), w.first() + w.count());
+        }
+
+        /** From the flat rows {@code cadaclysm_brep_health_summary} and the row readers write, in
+         *  their order: counts (18) and sizes (8); free edges 6 ids and 2 sizes a row; wires 3
+         *  and 2; small features 2 and 1; the crack edges. */
+        public static HealthReport of(int[] counts, double[] sizes, int[] freeIds, double[] freeSizes, int[] wireRuns,
+                                      double[] wireSizes, int[] smallItems, double[] smallSizes, int[] crackEdges) {
+            List<FreeEdge> free = new ArrayList<>(freeIds.length / 6);
+            for (int i = 0; i < freeIds.length / 6; i++) {
+                int edge = freeIds[6 * i + 1], partner = freeIds[6 * i + 4];
+                free.add(new FreeEdge(freeIds[6 * i], edge == HEALTH_NONE ? null : edge, freeIds[6 * i + 2], freeIds[6 * i + 3],
+                        partner == HEALTH_NONE ? null : partner, freeIds[6 * i + 5], freeSizes[2 * i], freeSizes[2 * i + 1]));
+            }
+            List<FreeWire> wires = new ArrayList<>(wireRuns.length / 3);
+            for (int i = 0; i < wireRuns.length / 3; i++)
+                wires.add(new FreeWire(wireRuns[3 * i], wireRuns[3 * i + 1], wireRuns[3 * i + 2] != 0, wireSizes[2 * i], wireSizes[2 * i + 1]));
+            List<SmallFeature> small = new ArrayList<>(smallSizes.length);
+            for (int i = 0; i < smallSizes.length; i++)
+                small.add(new SmallFeature(HEALTH_KINDS[smallItems[2 * i]], smallItems[2 * i + 1], smallSizes[i]));
+            Cracks cracks = null;
+            if (counts[12] == 1) {
+                List<Integer> edges = new ArrayList<>(crackEdges.length);
+                for (int e : crackEdges) edges.add(e);
+                cracks = new Cracks(counts[13] != 0, counts[14], counts[15], counts[16], edges);
+            }
+            return new HealthReport(sizes[0], sizes[1], sizes[2], free, wires, small, counts[9], sizes[4], counts[10], counts[11],
+                    sizes[5], cracks, sizes[3]);
+        }
+    }
+
+    /** One small feature {@link Brep#healed} removed: its {@code kind} (as {@link
+     *  SmallFeature#kind()}), its {@code index} in the input (the edge, face or loop number
+     *  {@code health} gave it), its {@code size}, and how far the vertex it merged {@code
+     *  moved}. */
+    public record HealFix(String kind, int index, double size, double moved) {
+    }
+
+    /** One small feature {@link Brep#healed} left, and why: {@code kind} and {@code index} as in
+     *  {@link HealFix}; {@code why} is "would_empty_loop", "closed", "seam", "chain",
+     *  "neighbours_part", "uneven", "non_manifold", "has_holes", "body_guard", "toggled" or
+     *  "unsupported"; {@code figure} the chain's width or the neighbours' gap, else 0. */
+    public record HealRefusal(String kind, int index, String why, double figure) {
+    }
+
+    /**
+     * What {@link Brep#healed} did, as plain data: the {@code tolerance} it healed at, the
+     * furthest any trim {@code moved}, whether the body guard refused fixes ({@code guarded}),
+     * the {@code fixes} made and the features {@code refused}; and the body's health before and
+     * after at that tolerance -- its small features, free edges, whether it is closed, and its
+     * non-manifold edges.
+     */
+    public record HealReport(double tolerance, double moved, boolean guarded, List<HealFix> fixes, List<HealRefusal> refused,
+                             int smallBefore, int smallAfter, int freeBefore, int freeAfter, boolean closedBefore,
+                             boolean closedAfter, int nonmanifoldBefore, int nonmanifoldAfter) {
+        public HealReport {
+            fixes = List.copyOf(fixes);
+            refused = List.copyOf(refused);
+        }
+
+        /** From the flat rows {@code cadaclysm_brep_heal_summary} and the row readers write, in
+         *  their order: counts (11) and sizes (2); fixes 2 items and 2 sizes a row; refusals 3
+         *  items and 1 size. */
+        public static HealReport of(int[] counts, double[] sizes, int[] fixItems, double[] fixSizes, int[] refusedItems,
+                                    double[] refusedSizes) {
+            List<HealFix> fixes = new ArrayList<>(fixItems.length / 2);
+            for (int i = 0; i < fixItems.length / 2; i++)
+                fixes.add(new HealFix(HEALTH_KINDS[fixItems[2 * i]], fixItems[2 * i + 1], fixSizes[2 * i], fixSizes[2 * i + 1]));
+            List<HealRefusal> refused = new ArrayList<>(refusedSizes.length);
+            for (int i = 0; i < refusedSizes.length; i++)
+                refused.add(new HealRefusal(HEALTH_KINDS[refusedItems[3 * i]], refusedItems[3 * i + 1], HEAL_WHYS[refusedItems[3 * i + 2]],
+                        refusedSizes[i]));
+            return new HealReport(sizes[0], sizes[1], counts[2] != 0, fixes, refused, counts[3], counts[4], counts[5], counts[6],
+                    counts[7] != 0, counts[8] != 0, counts[9], counts[10]);
+        }
+    }
+
+    /** A healed brep and its {@link HealReport}, from {@link Brep#healed}. The brep is the
+     *  caller's to close. */
+    public record Healed(Brep brep, HealReport report) {
+    }
+
+    /** {@code healed}'s switches as the C ABI's flag bits: 1 edges, 2 faces, 4 holes. */
+    static int healFlags(boolean edges, boolean faces, boolean holes) {
+        return (edges ? 1 : 0) | (faces ? 2 : 0) | (holes ? 4 : 0);
+    }
+
+    /** One two-call row reader's rows: the count with null buffers, then the rows into buffers
+     *  of {@code idsPer} {@code uint32_t} and {@code sizesPer} doubles a row. */
+    private record HealthRows(int[] ids, double[] sizes) {
+        static HealthRows read(MethodHandle reader, MemorySegment handle, int idsPer, int sizesPer) throws Throwable {
+            int n = (int) reader.invokeExact(handle, MemorySegment.NULL, MemorySegment.NULL);
+            if (n == 0) return new HealthRows(new int[0], new double[0]);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment ids = arena.allocate(ValueLayout.JAVA_INT, (long) idsPer * n);
+                MemorySegment sizes = arena.allocate(ValueLayout.JAVA_DOUBLE, (long) sizesPer * n);
+                int written = (int) reader.invokeExact(handle, ids, sizes);
+                if (written != n) throw new CadaclysmException("health: a row reader wrote " + written + " rows, not " + n);
+                return new HealthRows(ids.toArray(ValueLayout.JAVA_INT), sizes.toArray(ValueLayout.JAVA_DOUBLE));
+            }
+        }
+    }
+
     /**
      * A body's exact B-rep -- the trimmed surfaces its mesh is cut from -- shared with the
      * scene rather than copied: a reference of this object's own, given back by {@link
@@ -2375,6 +2557,129 @@ public final class Cad {
                 int[] c = counts.toArray(ValueLayout.JAVA_INT);
                 double[] g = gaps.toArray(ValueLayout.JAVA_DOUBLE);
                 return new Sewn(new Brep(raw), new SewReport(c[0], c[1], c[2], c[3], g[0], g[1], g[2]));
+            } finally {
+                java.lang.ref.Reference.reachabilityFence(this);
+            }
+        }
+
+        /** {@link #health(Double, boolean)} at the default tolerance, without the mesh. */
+        public HealthReport health() {
+            return health(null, false);
+        }
+
+        /** What is wrong with this brep, as a {@link HealthReport}: the free edges (the sides one
+         *  face bounds) and the wires they chain into, with each edge's nearest partner and the
+         *  gap to it; the features below {@code tolerance}; the loose edges; and what {@link
+         *  #sewed} would join and leave. {@code tolerance} is the length below which a feature
+         *  is small and a gap closes -- null, or a value that is not finite and positive, takes
+         *  the default (the report shows what was used). {@code mesh} also meshes the brep and
+         *  reports where the mesh cracks ({@code cracks}); without it {@code cracks} is null.
+         *  Nothing moves. */
+        public HealthReport health(Double tolerance, boolean mesh) {
+            MemorySegment p = pointer();
+            MemorySegment h;
+            try {
+                h = (MemorySegment) BREP_HEALTH.invokeExact(p, tolerance == null ? Double.NaN : tolerance, mesh);
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+            if (h.address() == 0) throw new CadaclysmException(lastErrorOr("health"));
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment counts = arena.allocate(ValueLayout.JAVA_INT, 18);
+                MemorySegment sizes = arena.allocate(ValueLayout.JAVA_DOUBLE, 8);
+                if (!(boolean) BREP_HEALTH_SUMMARY.invokeExact(h, counts, sizes)) throw new CadaclysmException(lastErrorOr("health"));
+                HealthRows free = HealthRows.read(BREP_HEALTH_FREE_EDGES, h, 6, 2);
+                HealthRows wires = HealthRows.read(BREP_HEALTH_WIRES, h, 3, 2);
+                HealthRows small = HealthRows.read(BREP_HEALTH_SMALL, h, 2, 1);
+                int n = (int) BREP_HEALTH_CRACK_EDGES.invokeExact(h, MemorySegment.NULL);
+                int[] cracks = new int[0];
+                if (n > 0) {
+                    MemorySegment ids = arena.allocate(ValueLayout.JAVA_INT, n);
+                    int written = (int) BREP_HEALTH_CRACK_EDGES.invokeExact(h, ids);
+                    if (written != n) throw new CadaclysmException("health: the crack edges wrote " + written + " ids, not " + n);
+                    cracks = ids.toArray(ValueLayout.JAVA_INT);
+                }
+                return HealthReport.of(counts.toArray(ValueLayout.JAVA_INT), sizes.toArray(ValueLayout.JAVA_DOUBLE), free.ids(),
+                        free.sizes(), wires.ids(), wires.sizes(), small.ids(), small.sizes(), cracks);
+            } catch (CadaclysmException e) {
+                throw e;
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            } finally {
+                try {
+                    BREP_HEALTH_FREE.invokeExact(h);
+                } catch (Throwable t) {
+                    throw new RuntimeException(t);
+                }
+                java.lang.ref.Reference.reachabilityFence(this);
+            }
+        }
+
+        /** {@link #healed(Double, boolean, boolean, boolean)} at the default tolerance, every
+         *  kind of fix on. */
+        public Healed healed() {
+            return healed(null, true, true, true);
+        }
+
+        /** {@link #healed(Double, boolean, boolean, boolean)} with every kind of fix on. */
+        public Healed healed(Double tolerance) {
+            return healed(tolerance, true, true, true);
+        }
+
+        /** This brep with its small features removed, and what was done, as a new {@link Brep}
+         *  and a {@link HealReport}; this one is left as it was. The features are the ones
+         *  {@link #health} lists as small at {@code tolerance}: short and collapsed edges,
+         *  sliver and tiny faces, small holes. Every fix is a vertex merge, and an edge it moves
+         *  records how far as its {@link #edgeTolerance}. A guard compares the result's health
+         *  with this one's and refuses fixes that made it worse ({@code guarded}). {@code
+         *  edges}, {@code faces} and {@code holes} switch each kind of fix; a kind switched off
+         *  is refused as "toggled". {@code tolerance} null, or a value that is not finite and
+         *  positive, takes the default (the report shows what was used). The brep is the
+         *  caller's to close. */
+        public Healed healed(Double tolerance, boolean edges, boolean faces, boolean holes) {
+            MemorySegment p = pointer();
+            MemorySegment h;
+            try {
+                h = (MemorySegment) BREP_HEALED.invokeExact(p, tolerance == null ? Double.NaN : tolerance, healFlags(edges, faces, holes));
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            }
+            if (h.address() == 0) throw new CadaclysmException(lastErrorOr("healed"));
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment counts = arena.allocate(ValueLayout.JAVA_INT, 11);
+                MemorySegment sizes = arena.allocate(ValueLayout.JAVA_DOUBLE, 2);
+                if (!(boolean) BREP_HEAL_SUMMARY.invokeExact(h, counts, sizes)) throw new CadaclysmException(lastErrorOr("healed"));
+                HealthRows fixes = HealthRows.read(BREP_HEAL_FIXES, h, 2, 2);
+                HealthRows refused = HealthRows.read(BREP_HEAL_REFUSED, h, 3, 1);
+                HealReport report = HealReport.of(counts.toArray(ValueLayout.JAVA_INT), sizes.toArray(ValueLayout.JAVA_DOUBLE),
+                        fixes.ids(), fixes.sizes(), refused.ids(), refused.sizes());
+                MemorySegment body = (MemorySegment) BREP_HEAL_BODY.invokeExact(h);
+                if (body.address() == 0) throw new CadaclysmException(lastErrorOr("healed"));
+                return new Healed(new Brep(body), report);
+            } catch (CadaclysmException e) {
+                throw e;
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
+            } finally {
+                try {
+                    BREP_HEAL_FREE.invokeExact(h);
+                } catch (Throwable t) {
+                    throw new RuntimeException(t);
+                }
+                java.lang.ref.Reference.reachabilityFence(this);
+            }
+        }
+
+        /** How far brep edge {@code edge} (as a {@link HealFix} names one) may lie off its curve:
+         *  0 for an exact edge, the distance healing (or sewing) moved it where that is
+         *  recorded, null when no trim names the id (an edge healing removed). */
+        public Double edgeTolerance(int edge) {
+            MemorySegment p = pointer();
+            try {
+                double t = (double) BREP_EDGE_TOLERANCE.invokeExact(p, edge);
+                return Double.isNaN(t) ? null : t;
+            } catch (Throwable t) {
+                throw new RuntimeException(t);
             } finally {
                 java.lang.ref.Reference.reachabilityFence(this);
             }

@@ -63,6 +63,15 @@ engine's own window from its native handle, beside `cadaclysm_love.lua` and
 `cadaclysm_lovr.lua`; the host forwards input with `v:input{...}`, calls `v:resize` and
 `v:draw`, and `view.pump(0)` from its own loop keeps a window of the library's own live.
 
+A CAM job plays on the view's timeline, as Python's `show_machining` does:
+
+```lua
+local m = v:show_machining({ { { number = 1, shape = "flat", diameter = 6, flute_length = 20 }, gcode } },
+                           { { -42, -27, 0 }, { 42, 27, 14 } }, nil, { cell = 0.5 })
+v:play(4)                          -- v:pause(), v:seek(s), v:loop(on), v:time(), v:duration(), v:playing(), v:status()
+m:seek_move(m:info().moves)        -- m:colour_by("tool"), m:overlays(path, tool), m:heights() (nx * ny numbers)
+```
+
 ## Notes
 
 - **Fields, not calls.** What Python spells as a property is a field here

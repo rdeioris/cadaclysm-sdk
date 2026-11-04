@@ -231,6 +231,11 @@ local ENTRY_POINTS = {
   "cadaclysm_node_edges", "cadaclysm_node_curves", "cadaclysm_node_isocurves",
   "cadaclysm_node_edge_colors", "cadaclysm_node_surface_edge_colors",
   "cadaclysm_brep_layout_id", "cadaclysm_brep_manifold", "cadaclysm_brep_sew", "cadaclysm_brep_release",
+  "cadaclysm_brep_health", "cadaclysm_brep_health_free", "cadaclysm_brep_health_summary",
+  "cadaclysm_brep_health_free_edges", "cadaclysm_brep_health_wires", "cadaclysm_brep_health_small",
+  "cadaclysm_brep_health_crack_edges", "cadaclysm_brep_healed", "cadaclysm_brep_heal_body", "cadaclysm_brep_heal_free",
+  "cadaclysm_brep_heal_summary", "cadaclysm_brep_heal_fixes", "cadaclysm_brep_heal_refused",
+  "cadaclysm_brep_edge_tolerance",
   "cadaclysm_mesh_format_count", "cadaclysm_mesh_format", "cadaclysm_mesh_format_extension",
   "cadaclysm_pick_file",
   "cadaclysm_mesh_format_label", "cadaclysm_format_count", "cadaclysm_format_name", "cadaclysm_format_extensions",
@@ -1012,6 +1017,347 @@ function Brep:release()
     ffi.gc(p, nil)
     lib().cadaclysm_brep_release(p)
   end
+end
+
+-- ---- health and healing ----------------------------------------------------------
+
+-- In a block of its own: only the report classes, `Brep:health`, `Brep:healed` and
+-- `Brep:edge_tolerance` (and the decoders, for the tests) leave it.
+do
+
+--- One free edge (`HealthReport.free_edges`): a side only one face bounds, with its
+--- nearest partner. `trim` the face's side, `edge` the edge it lies on (nil for a side
+--- with no edge), `face` the face it bounds, `wire` its free wire (a number from zero
+--- into `wires`), `partner` the nearest free edge across the gap as a number from zero
+--- into `free_edges` (nil if there is none), `shared_ends` how many of its two ends it
+--- shares with the partner (2 is what `Brep:sewed` joins), its `length` and the `gap`
+--- to the partner (`math.huge` without one).
+---@class FreeEdge
+---@field trim integer
+---@field edge integer|nil
+---@field face integer
+---@field wire integer
+---@field partner integer|nil
+---@field shared_ends integer
+---@field length number
+---@field gap number
+local FreeEdge = {}
+FreeEdge.__index = FreeEdge
+M.FreeEdge = FreeEdge
+
+--- A chain of free edges end to end (`HealthReport.wires`): the rows `first` to
+--- `first + count` (from zero) of `free_edges`, whether it `closed` on itself, its total
+--- `length` and the `widest_gap` from any of its edges to a partner.
+---@class FreeWire
+---@field first integer
+---@field count integer
+---@field closed boolean
+---@field length number
+---@field widest_gap number
+local FreeWire = {}
+FreeWire.__index = FreeWire
+M.FreeWire = FreeWire
+
+--- Something below the tolerance (`HealthReport.small`): `kind` is "short_edge",
+--- "collapsed_edge", "sliver_face", "tiny_face", "tiny_body" or "small_hole"; `index` its
+--- edge, face or body number (a small hole's is its loop number); `size` how small.
+---@class SmallFeature
+---@field kind string
+---@field index integer
+---@field size number
+local SmallFeature = {}
+SmallFeature.__index = SmallFeature
+M.SmallFeature = SmallFeature
+
+--- What a mesh of the body shows (`Brep:health(tolerance, true)`): whether it is
+--- `watertight`, how many mesh edges are `open` (one triangle) or `folded` (more than
+--- two), how many pairs of triangles pass through each other (`crossings`), and the
+--- brep `edges` the cracks lie along. Only a closed body is counted.
+---@class Cracks
+---@field watertight boolean
+---@field open integer
+---@field folded integer
+---@field crossings integer
+---@field edges integer[]
+local Cracks = {}
+Cracks.__index = Cracks
+M.Cracks = Cracks
+
+--- What is wrong with a body, as plain data (`Brep:health`): the `tolerance` and
+--- `rounding` it judged at and the body's `extent` (its diagonal); the `free_edges`,
+--- their `wires`, the features below the tolerance (`small`); the `loose_edges`
+--- (`worst_loose` the widest gap among them); what sewing would do (`sew_pairs` joined,
+--- `sew_refused` groups left, `sew_worst_gap`); `worst_gap`, the widest gap between a
+--- free edge and its partner; and, if asked for, the mesh's `cracks` (nil otherwise).
+---@class HealthReport
+---@field tolerance number
+---@field rounding number
+---@field extent number
+---@field free_edges FreeEdge[]
+---@field wires FreeWire[]
+---@field small SmallFeature[]
+---@field loose_edges integer
+---@field worst_loose number
+---@field sew_pairs integer
+---@field sew_refused integer
+---@field sew_worst_gap number
+---@field cracks Cracks|nil
+---@field worst_gap number
+local HealthReport = {}
+HealthReport.__index = HealthReport
+M.HealthReport = HealthReport
+
+--- The free edges of wire number `wire` (from zero, as `FreeEdge.wire` numbers it), in order.
+---@param wire integer
+---@return FreeEdge[]
+function HealthReport:wire_edges(wire)
+  local w = type(wire) == "number" and self.wires[wire + 1] or nil
+  if w == nil then fail(("wire_edges: no wire %s (%d wires)"):format(tostring(wire), #self.wires), 2) end
+  local out = {}
+  for i = 1, w.count do out[i] = self.free_edges[w.first + i] end
+  return out
+end
+
+--- One small feature `Brep:healed` removed: its `kind` (as `SmallFeature.kind`), its
+--- `index` in the input (as `health` gave it), its `size`, and how far the vertices it
+--- merged `moved`.
+---@class HealFix
+---@field kind string
+---@field index integer
+---@field size number
+---@field moved number
+local HealFix = {}
+HealFix.__index = HealFix
+M.HealFix = HealFix
+
+--- One small feature `Brep:healed` left, and why: `kind` and `index` as in `HealFix`;
+--- `why` is "would_empty_loop", "closed", "seam", "chain", "neighbours_part", "uneven",
+--- "non_manifold", "has_holes", "body_guard", "toggled" or "unsupported"; `figure` the
+--- chain's width or the neighbours' gap, else 0.
+---@class HealRefusal
+---@field kind string
+---@field index integer
+---@field why string
+---@field figure number
+local HealRefusal = {}
+HealRefusal.__index = HealRefusal
+M.HealRefusal = HealRefusal
+
+--- What `Brep:healed` did, as plain data: the `tolerance` it healed at, the furthest any
+--- trim `moved`, whether the body guard refused fixes (`guarded`), the `fixes` made and the
+--- features `refused`; and the body's health before and after at that tolerance -- its
+--- small features, free edges, whether it is closed, and its non-manifold edges.
+---@class HealReport
+---@field tolerance number
+---@field moved number
+---@field guarded boolean
+---@field fixes HealFix[]
+---@field refused HealRefusal[]
+---@field small_before integer
+---@field small_after integer
+---@field free_before integer
+---@field free_after integer
+---@field closed_before boolean
+---@field closed_after boolean
+---@field nonmanifold_before integer
+---@field nonmanifold_after integer
+local HealReport = {}
+HealReport.__index = HealReport
+M.HealReport = HealReport
+
+local NO_ID = 0xFFFFFFFF
+local KINDS = { [0] = "short_edge", "collapsed_edge", "sliver_face", "tiny_face", "tiny_body", "small_hole" }
+local WHYS = { [0] = "would_empty_loop", "closed", "seam", "chain", "neighbours_part", "uneven", "non_manifold",
+  "has_holes", "body_guard", "toggled", "unsupported" }
+
+local function named(table_, code, what)
+  local name = table_[code]
+  if name == nil then fail(what .. ": the library sent an unknown code " .. tostring(code), 3) end
+  return name
+end
+
+-- The flat rows of the health C ABI (Lua lists from one) as a `HealthReport`: Python's
+-- `_health_report`, index for index.
+local function health_report(counts, sizes, free_ids, free_sizes, wire_runs, wire_sizes, small_items, small_sizes,
+                             crack_edges)
+  local free = {}
+  for i = 0, math.floor(#free_ids / 6) - 1 do
+    local b, s = 6 * i, 2 * i
+    local edge, partner = free_ids[b + 2], free_ids[b + 5]
+    free[i + 1] = setmetatable({
+      trim = free_ids[b + 1], edge = edge ~= NO_ID and edge or nil, face = free_ids[b + 3], wire = free_ids[b + 4],
+      partner = partner ~= NO_ID and partner or nil, shared_ends = free_ids[b + 6],
+      length = free_sizes[s + 1], gap = free_sizes[s + 2],
+    }, FreeEdge)
+  end
+  local wires = {}
+  for i = 0, math.floor(#wire_runs / 3) - 1 do
+    wires[i + 1] = setmetatable({
+      first = wire_runs[3 * i + 1], count = wire_runs[3 * i + 2], closed = wire_runs[3 * i + 3] ~= 0,
+      length = wire_sizes[2 * i + 1], widest_gap = wire_sizes[2 * i + 2],
+    }, FreeWire)
+  end
+  local small = {}
+  for i = 0, #small_sizes - 1 do
+    small[i + 1] = setmetatable({
+      kind = named(KINDS, small_items[2 * i + 1], "health"), index = small_items[2 * i + 2], size = small_sizes[i + 1],
+    }, SmallFeature)
+  end
+  local cracks
+  if counts[13] == 1 then
+    local edges = {}
+    for i, e in ipairs(crack_edges) do edges[i] = e end
+    cracks = setmetatable({
+      watertight = counts[14] ~= 0, open = counts[15], folded = counts[16], crossings = counts[17], edges = edges,
+    }, Cracks)
+  end
+  return setmetatable({
+    tolerance = sizes[1], rounding = sizes[2], extent = sizes[3], worst_gap = sizes[4],
+    free_edges = free, wires = wires, small = small,
+    loose_edges = counts[10], worst_loose = sizes[5], sew_pairs = counts[11], sew_refused = counts[12],
+    sew_worst_gap = sizes[6], cracks = cracks,
+  }, HealthReport)
+end
+M._health_report = health_report
+
+-- The flat rows of the heal C ABI as a `HealReport`: Python's `_heal_report`.
+local function heal_report(counts, sizes, fix_items, fix_sizes, refused_items, refused_sizes)
+  local fixes = {}
+  for i = 0, math.floor(#fix_items / 2) - 1 do
+    fixes[i + 1] = setmetatable({
+      kind = named(KINDS, fix_items[2 * i + 1], "healed"), index = fix_items[2 * i + 2],
+      size = fix_sizes[2 * i + 1], moved = fix_sizes[2 * i + 2],
+    }, HealFix)
+  end
+  local refused = {}
+  for i = 0, #refused_sizes - 1 do
+    refused[i + 1] = setmetatable({
+      kind = named(KINDS, refused_items[3 * i + 1], "healed"), index = refused_items[3 * i + 2],
+      why = named(WHYS, refused_items[3 * i + 3], "healed"), figure = refused_sizes[i + 1],
+    }, HealRefusal)
+  end
+  return setmetatable({
+    tolerance = sizes[1], moved = sizes[2], guarded = counts[3] ~= 0, fixes = fixes, refused = refused,
+    small_before = counts[4], small_after = counts[5], free_before = counts[6], free_after = counts[7],
+    closed_before = counts[8] ~= 0, closed_after = counts[9] ~= 0,
+    nonmanifold_before = counts[10], nonmanifold_after = counts[11],
+  }, HealReport)
+end
+M._heal_report = heal_report
+
+-- `n` elements of a C array as a Lua list.
+local function listed(arr, n)
+  local out = {}
+  for i = 1, n do out[i] = tonumber(arr[i - 1]) end
+  return out
+end
+
+local function refused_by(what)
+  local reason = last_error()
+  fail(reason ~= "" and reason or what, 3)
+end
+
+-- `tolerance` as the C ABI takes it: nil is NaN, the default.
+local function tolerance_of(tolerance, what)
+  if tolerance == nil then return 0 / 0 end
+  if type(tolerance) ~= "number" then fail(what .. ": tolerance must be a number, got " .. tostring(tolerance), 3) end
+  return tolerance
+end
+
+--- What is wrong with this brep, as a `HealthReport`: the free edges (the sides one face
+--- bounds) and the wires they chain into, with each edge's nearest partner and the gap to
+--- it; the features below `tolerance`; the loose edges; and what `sewed` would join and
+--- leave. `tolerance` is the length below which a feature is "small" and a gap closes --
+--- nil, or a value that is not finite and positive, takes the default, `1e-4` times the
+--- diagonal (the report shows what was used). `mesh` true also meshes the brep and reports
+--- where the mesh cracks (`cracks`); without it `cracks` is nil. Nothing moves.
+---@param tolerance number|nil
+---@param mesh boolean|nil
+---@return HealthReport
+function Brep:health(tolerance, mesh)
+  local pointer = self.pointer
+  local L = lib()
+  local h = L.cadaclysm_brep_health(pointer, tolerance_of(tolerance, "health"), mesh and true or false)
+  if h == nil then refused_by("health") end
+  local ok, report = pcall(function()
+    local counts, sizes = ffi.new("uint32_t[18]"), ffi.new("double[8]")
+    if not L.cadaclysm_brep_health_summary(h, counts, sizes) then refused_by("health") end
+    local n = tonumber(L.cadaclysm_brep_health_free_edges(h, nil, nil))
+    local free_ids, free_sizes = ffi.new("uint32_t[?]", 6 * n + 1), ffi.new("double[?]", 2 * n + 1)
+    if n > 0 then L.cadaclysm_brep_health_free_edges(h, free_ids, free_sizes) end
+    local w = tonumber(L.cadaclysm_brep_health_wires(h, nil, nil))
+    local wire_runs, wire_sizes = ffi.new("uint32_t[?]", 3 * w + 1), ffi.new("double[?]", 2 * w + 1)
+    if w > 0 then L.cadaclysm_brep_health_wires(h, wire_runs, wire_sizes) end
+    local s = tonumber(L.cadaclysm_brep_health_small(h, nil, nil))
+    local small_items, small_sizes = ffi.new("uint32_t[?]", 2 * s + 1), ffi.new("double[?]", s + 1)
+    if s > 0 then L.cadaclysm_brep_health_small(h, small_items, small_sizes) end
+    local c = tonumber(L.cadaclysm_brep_health_crack_edges(h, nil))
+    local crack_ids = ffi.new("uint32_t[?]", c + 1)
+    if c > 0 then L.cadaclysm_brep_health_crack_edges(h, crack_ids) end
+    return health_report(listed(counts, 18), listed(sizes, 8), listed(free_ids, 6 * n), listed(free_sizes, 2 * n),
+      listed(wire_runs, 3 * w), listed(wire_sizes, 2 * w), listed(small_items, 2 * s), listed(small_sizes, s),
+      listed(crack_ids, c))
+  end)
+  L.cadaclysm_brep_health_free(h)
+  if not ok then error(report, 0) end
+  return report
+end
+
+--- This brep with its small features removed, and what was done: a new `Brep` (yours to
+--- `release()`) and a `HealReport`; this one is left as it was. The features are the ones
+--- `health` lists as small at `tolerance`: short and collapsed edges, sliver and tiny
+--- faces, small holes. Every fix is a vertex merge, and an edge it moves records how far as
+--- its `edge_tolerance`. A guard compares the result's health with this one's and refuses
+--- fixes that made it worse (`guarded`). `edges`, `faces` and `holes` (each true unless
+--- `false`) switch each kind of fix; a kind switched off is refused as "toggled".
+--- `tolerance` nil, or a value that is not finite and positive, takes the default.
+---@param tolerance number|nil
+---@param edges boolean|nil
+---@param faces boolean|nil
+---@param holes boolean|nil
+---@return Brep, HealReport
+function Brep:healed(tolerance, edges, faces, holes)
+  local pointer = self.pointer
+  local L = lib()
+  local flags = (edges ~= false and 1 or 0) + (faces ~= false and 2 or 0) + (holes ~= false and 4 or 0)
+  local h = L.cadaclysm_brep_healed(pointer, tolerance_of(tolerance, "healed"), flags)
+  if h == nil then refused_by("healed") end
+  local ok, body, report = pcall(function()
+    local counts, sizes = ffi.new("uint32_t[11]"), ffi.new("double[2]")
+    if not L.cadaclysm_brep_heal_summary(h, counts, sizes) then refused_by("healed") end
+    local n = tonumber(L.cadaclysm_brep_heal_fixes(h, nil, nil))
+    local fix_items, fix_sizes = ffi.new("uint32_t[?]", 2 * n + 1), ffi.new("double[?]", 2 * n + 1)
+    if n > 0 then L.cadaclysm_brep_heal_fixes(h, fix_items, fix_sizes) end
+    local r = tonumber(L.cadaclysm_brep_heal_refused(h, nil, nil))
+    local refused_items, refused_sizes = ffi.new("uint32_t[?]", 3 * r + 1), ffi.new("double[?]", r + 1)
+    if r > 0 then L.cadaclysm_brep_heal_refused(h, refused_items, refused_sizes) end
+    local made = heal_report(listed(counts, 11), listed(sizes, 2), listed(fix_items, 2 * n), listed(fix_sizes, 2 * n),
+      listed(refused_items, 3 * r), listed(refused_sizes, r))
+    local p = L.cadaclysm_brep_heal_body(h)
+    if p == nil then refused_by("healed") end
+    return setmetatable({ _ptr = ffi.gc(p, L.cadaclysm_brep_release) }, Brep), made
+  end)
+  L.cadaclysm_brep_heal_free(h)
+  if not ok then error(body, 0) end
+  return body, report
+end
+
+--- How far brep edge `edge` (as a `HealFix` or `FreeEdge` names one) may lie off its
+--- curve: 0 for an exact edge, the distance healing (or sewing) moved it where that is
+--- recorded, nil when no trim names the id (an edge healing removed). `edge` is a whole
+--- number from 0 to 4294967295.
+---@param edge integer
+---@return number|nil
+function Brep:edge_tolerance(edge)
+  local pointer = self.pointer
+  if type(edge) ~= "number" or edge ~= math.floor(edge) or edge < 0 or edge > 4294967295 then
+    fail("edge_tolerance: edge must be a whole number from 0 to 4294967295, got " .. tostring(edge), 2)
+  end
+  local t = lib().cadaclysm_brep_edge_tolerance(pointer, edge)
+  if t ~= t then return nil end
+  return t
+end
+
 end
 
 -- ---- meshlets --------------------------------------------------------------------

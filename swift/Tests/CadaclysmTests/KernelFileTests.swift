@@ -153,7 +153,8 @@ final class KernelFileTests: XCTestCase {
         XCTAssertEqual(solids.count, 4)
         let centres = Set(try solids.map { s -> [Double] in
             let (lo, hi) = try s.bounds
-            return [lo.x + hi.x, lo.y + hi.y, lo.z + hi.z].map { ($0 / 2 * 1e6).rounded() / 1e6 }
+            let sums: [Double] = [lo.x + hi.x, lo.y + hi.y, lo.z + hi.z]
+            return sums.map { (v: Double) -> Double in (v / 2 * 1e6).rounded() / 1e6 }
         })
         XCTAssertEqual(centres.count, 4, "each body where it is drawn")
         XCTAssertEqual(refusal { _ = try Solid.open(sat) }?.hasPrefix("open: block-instances.sat holds 4 bodies"), true)

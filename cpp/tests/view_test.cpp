@@ -17,6 +17,7 @@
 // cadaclysm_view_test <scratch dir> [samples/mechanism-solid.stp] [the stand-in library] [the bundled font]
 #include <cadaclysm/view.hpp>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -24,11 +25,15 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -261,6 +266,312 @@ static void points_case(const cadaclysm::ViewLibrary& stand_in) {
                   four ? "accepted" : refused(four).c_str());
             CHECK(points::calls == 2, "a refused show_points reached the library");
             CHECK(made->close(), "close the stand-in's view");
+        }
+    }
+    t = saved;
+}
+
+// ---- view ABI 1.7's machining view and timeline, on the stand-in's table -------------------
+
+namespace mach {
+int view_stand_in;  // the stand-in view's address
+CadaclysmView* create(const CadaclysmViewWindow*, const CadaclysmViewOptions*) {
+    return reinterpret_cast<CadaclysmView*>(&view_stand_in);
+}
+const char* said = nullptr;
+const char* last_error() { return said; }
+// What the last show_machining was handed (copied: the arrays are the caller's), and how many
+// calls reached it.
+int shows = 0;
+std::uint32_t show_id = 7;  // 0 refuses
+std::uint32_t program_count = 0, struct_size = 0;
+struct Program {
+    std::uint32_t size, number, shape;
+    double diameter, flute, angle, corner;
+    std::string gcode;
+};
+std::vector<Program> programs;
+std::array<double, 6> stock{};
+std::uint32_t part_vertices = 0, part_indices = 0;
+std::vector<float> part_positions;
+std::vector<std::uint32_t> part_index_values;
+double cell = -1, tolerance = -1, skin = -1, rapid_rate = -1;
+std::uint32_t skin_set = 9;
+std::uint32_t show_machining(CadaclysmView*, const CadaclysmViewMachining* m) {
+    ++shows;
+    struct_size = m->size;
+    program_count = m->program_count;
+    programs.clear();
+    for (std::uint32_t k = 0; k < m->program_count; ++k) {
+        const CadaclysmViewProgram& p = m->programs[k];
+        programs.push_back({p.size, p.tool_number, p.tool_shape, p.tool_diameter, p.tool_flute_length, p.tool_angle,
+                            p.tool_corner_radius, p.gcode});
+    }
+    stock = {m->stock_min[0], m->stock_min[1], m->stock_min[2], m->stock_max[0], m->stock_max[1], m->stock_max[2]};
+    part_vertices = m->part_vertex_count;
+    part_indices = m->part_index_count;
+    part_positions.assign(m->part_positions, m->part_positions + 3 * static_cast<std::size_t>(m->part_vertex_count));
+    part_index_values.assign(m->part_indices, m->part_indices + m->part_index_count);
+    cell = m->cell;
+    tolerance = m->tolerance;
+    skin = m->skin;
+    skin_set = m->skin_set;
+    rapid_rate = m->rapid_rate;
+    return show_id;
+}
+// Every other call: noted, answering true (false while `answer` is false).
+std::string calls;
+bool answer = true;
+bool seek(CadaclysmView*, std::uint32_t id, std::uint32_t to) {
+    calls += "seek " + std::to_string(id) + " " + std::to_string(to) + ";";
+    return answer;
+}
+bool colour_by(CadaclysmView*, std::uint32_t id, std::uint32_t mode) {
+    calls += "colour_by " + std::to_string(id) + " " + std::to_string(mode) + ";";
+    return answer;
+}
+bool overlays(CadaclysmView*, std::uint32_t id, bool path, bool tool) {
+    calls += "overlays " + std::to_string(id) + (path ? " on" : " off") + (tool ? " on;" : " off;");
+    return answer;
+}
+bool info(CadaclysmView*, std::uint32_t, CadaclysmViewMachiningInfo* out) {
+    calls += "info;";
+    out->moves = 9;
+    out->move = 3;
+    out->nx = 4;
+    out->ny = 2;
+    out->cell = 0.5f;
+    out->min[0] = -1;
+    out->min[1] = -2;
+    out->cycle_time = 12.5;
+    return answer;
+}
+std::size_t heights_capacity = 0;
+bool heights(CadaclysmView*, std::uint32_t, float* z, std::size_t capacity) {
+    heights_capacity = capacity;
+    for (std::size_t k = 0; k < capacity; ++k) z[k] = static_cast<float>(k);
+    return answer;
+}
+bool play(CadaclysmView*, double speed) {
+    calls += "play " + std::to_string(speed) + ";";
+    return answer;
+}
+bool pause(CadaclysmView*) {
+    calls += "pause;";
+    return answer;
+}
+bool seek_time(CadaclysmView*, double seconds) {
+    calls += "seek_time " + std::to_string(seconds) + ";";
+    return answer;
+}
+bool set_loop(CadaclysmView*, bool on) {
+    calls += on ? "loop on;" : "loop off;";
+    return answer;
+}
+double time(const CadaclysmView*) { return 1.5; }
+double duration(const CadaclysmView*) { return 12.5; }
+bool playing(const CadaclysmView*) { return true; }
+// status: line `asked` (clamped to the last) of `lines`, its length answered, and as much of it as fits copied.
+std::vector<std::string> lines;
+std::size_t asked = 0;
+std::size_t status(const CadaclysmView*, char* text, std::size_t capacity) {
+    const std::string& line = lines[std::min(asked, lines.size() - 1)];
+    ++asked;
+    if (text && capacity > 0) {
+        std::size_t room = std::min(line.size(), capacity - 1);
+        std::memcpy(text, line.data(), room);
+        text[room] = '\0';
+    }
+    return line.size();
+}
+bool remove(CadaclysmView*, std::uint32_t) { return true; }
+}  // namespace mach
+
+static_assert(std::is_base_of<cadaclysm::Item, cadaclysm::Machining>::value, "a Machining is an Item");
+
+static cadaclysm::MachiningTool tool_of(std::uint32_t number, const char* shape, double diameter, double flute = 0,
+                                        double angle = 0) {
+    cadaclysm::MachiningTool tool;
+    tool.number = number;
+    tool.shape = shape;
+    tool.diameter = diameter;
+    tool.flute_length = flute;
+    tool.angle = angle;
+    return tool;
+}
+
+// The machining facts (F1-F6) on the stand-in's table, rigged and put back: the struct that
+// reaches the library; the defaults a bare call leaves it; what is refused before it; the
+// transport and the machining's own calls; status asking again when the line grew; the
+// library's words for a refusal.
+static void machining_case(const cadaclysm::ViewLibrary& stand_in) {
+    CvlTable& t = const_cast<CvlTable&>(cadaclysm::detail::ViewAccess::table(stand_in));
+    const CvlTable saved = t;
+    t.create = &mach::create;
+    t.last_error = &mach::last_error;
+    t.show_machining = &mach::show_machining;
+    t.machining_seek = &mach::seek;
+    t.machining_colour_by = &mach::colour_by;
+    t.machining_overlays = &mach::overlays;
+    t.machining_info = &mach::info;
+    t.machining_heights = &mach::heights;
+    t.timeline_play = &mach::play;
+    t.timeline_pause = &mach::pause;
+    t.timeline_seek = &mach::seek_time;
+    t.timeline_set_loop = &mach::set_loop;
+    t.timeline_time = &mach::time;
+    t.timeline_duration = &mach::duration;
+    t.timeline_playing = &mach::playing;
+    t.timeline_status = &mach::status;
+    t.remove = &mach::remove;
+    {
+        cadaclysm::Result<View> made = View::offscreen(8, 8);
+        CHECK(made, "a view on the stand-in: %s", refused(made).c_str());
+        if (made) {
+            cadaclysm::MachiningStock box;
+            box.min = {-1, -2, 0};
+            box.max = {1, 2, 3};
+            std::vector<cadaclysm::MachiningProgram> two = {{tool_of(1, "flat", 6, 20), "G0 X0\n"},
+                                                           {tool_of(3, "vbit", 6, 0, 60), "G0 X1\n"}};
+
+            // F1: the struct reaches the library.
+            cadaclysm::MachiningPart part;
+            part.positions = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+            part.indices = {0, 1, 2};
+            cadaclysm::MachiningOptions options;
+            options.cell = 0.25;
+            options.skin = 0.0;
+            cadaclysm::Result<cadaclysm::Machining> m = made->show_machining(two, box, part, options);
+            CHECK(m && m->id() == 7, "show_machining: %s", refused(m).c_str());
+            CHECK(mach::shows == 1 && mach::program_count == 2 && mach::struct_size == 128, "F1: %d calls, %u programs, size %u",
+                  mach::shows, mach::program_count, mach::struct_size);
+            if (mach::programs.size() == 2) {
+                const mach::Program& a = mach::programs[0];
+                const mach::Program& b = mach::programs[1];
+                CHECK(a.size == 56 && a.number == 1 && a.shape == 0 && a.diameter == 6 && a.flute == 20 && a.angle == 0 &&
+                          a.corner == 0 && a.gcode == "G0 X0\n",
+                      "F1 program 0");
+                CHECK(b.size == 56 && b.number == 3 && b.shape == 3 && b.diameter == 6 && b.flute == 0 && b.angle == 60 &&
+                          b.corner == 0 && b.gcode == "G0 X1\n",
+                      "F1 program 1");
+            }
+            CHECK((mach::stock == std::array<double, 6>{-1, -2, 0, 1, 2, 3}), "F1 stock");
+            CHECK(mach::part_vertices == 3 && mach::part_indices == 3 &&
+                      mach::part_positions == std::vector<float>({0, 0, 0, 1, 0, 0, 0, 1, 0}) &&
+                      mach::part_index_values == std::vector<std::uint32_t>({0, 1, 2}),
+                  "F1 part");
+            CHECK(mach::cell == 0.25 && mach::tolerance == 0 && mach::skin_set == 1 && mach::skin == 0 && mach::rapid_rate == 0,
+                  "F1 options: cell %g tolerance %g skin_set %u skin %g rapid %g", mach::cell, mach::tolerance,
+                  mach::skin_set, mach::skin, mach::rapid_rate);
+
+            // F2: a bare call leaves every default to the library.
+            cadaclysm::Result<cadaclysm::Machining> bare = made->show_machining({{tool_of(1, "flat", 6), "G0"}}, box);
+            CHECK(bare, "bare show_machining: %s", refused(bare).c_str());
+            CHECK(mach::skin_set == 0 && mach::part_vertices == 0 && mach::part_indices == 0 && mach::cell == 0 &&
+                      mach::tolerance == 0 && mach::rapid_rate == 0,
+                  "F2: skin_set %u, part %u/%u, cell %g", mach::skin_set, mach::part_vertices, mach::part_indices, mach::cell);
+
+            // F3: refused before the library.
+            int shows = mach::shows;
+            std::string spade = refused(made->show_machining({{tool_of(1, "spade", 6), "G0"}}, box));
+            CHECK(spade == "shape 'spade': one of flat, ball, drill, vbit, bullnose", "shape: %s", spade.c_str());
+            cadaclysm::MachiningPart four;
+            four.positions = {0, 0, 0, 1};
+            CHECK(refused(made->show_machining({{tool_of(1, "flat", 6), "G0"}}, box, four)) ==
+                      "part positions: 4 numbers is not a whole number of x y z triples",
+                  "positions: %s", refused(made->show_machining({{tool_of(1, "flat", 6), "G0"}}, box, four)).c_str());
+            cadaclysm::MachiningPart two_indices;
+            two_indices.positions = {0, 0, 0};
+            two_indices.indices = {0, 0};
+            CHECK(refused(made->show_machining({{tool_of(1, "flat", 6), "G0"}}, box, two_indices)) ==
+                      "part indices: 2 is not a whole number of triangles",
+                  "indices: %s", refused(made->show_machining({{tool_of(1, "flat", 6), "G0"}}, box, two_indices)).c_str());
+            cadaclysm::MachiningPart past;
+            past.positions = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+            past.indices = {0, 1, 3};
+            CHECK(refused(made->show_machining({{tool_of(1, "flat", 6), "G0"}}, box, past)) ==
+                      "part indices: 3 is past the last of 3 vertices",
+                  "past: %s", refused(made->show_machining({{tool_of(1, "flat", 6), "G0"}}, box, past)).c_str());
+            cadaclysm::MachiningPart nan_part;
+            nan_part.positions = {0, 0, std::nanf("")};
+            CHECK(!made->show_machining({{tool_of(1, "flat", 6), "G0"}}, box, nan_part), "a NaN position was accepted");
+            cadaclysm::MachiningOptions nan_options;
+            nan_options.cell = std::nan("");
+            CHECK(!made->show_machining({{tool_of(1, "flat", 6), "G0"}}, box, std::nullopt, nan_options),
+                  "a NaN cell was accepted");
+            cadaclysm::MachiningStock nan_box = box;
+            nan_box.max[2] = std::nan("");
+            CHECK(!made->show_machining({{tool_of(1, "flat", 6), "G0"}}, nan_box), "a NaN stock was accepted");
+            CHECK(!made->show_machining({{tool_of(1, "flat", std::nan("")), "G0"}}, box), "a NaN diameter was accepted");
+            CHECK(!made->play(std::nan("")) && !made->seek(INFINITY), "a non-finite speed or time was accepted");
+            CHECK(mach::shows == shows, "a refused show_machining reached the library");
+
+            // F4: the machining's own calls and the transport.
+            if (m) {
+                mach::calls.clear();
+                CHECK(made->play(4), "play");
+                CHECK(made->pause(), "pause");
+                CHECK(made->seek(2.0), "seek");
+                CHECK(made->loop(), "loop");
+                CHECK(made->loop(false), "loop off");
+                CHECK(m->seek_move(3), "seek_move");
+                CHECK(m->colour_by("tool"), "colour_by tool");
+                CHECK(m->colour_by("deviation"), "colour_by deviation");
+                CHECK(m->overlays(false), "overlays");
+                CHECK(mach::calls == "play 4.000000;pause;seek_time 2.000000;loop on;loop off;seek 7 3;colour_by 7 1;"
+                                     "colour_by 7 2;overlays 7 off on;",
+                      "the calls: %s", mach::calls.c_str());
+                CHECK(refused(m->colour_by("rainbow")) == "mode 'rainbow': one of height, tool, deviation", "mode: %s",
+                      refused(m->colour_by("rainbow")).c_str());
+                cadaclysm::Result<double> time = made->time();
+                cadaclysm::Result<double> duration = made->duration();
+                cadaclysm::Result<bool> playing = made->playing();
+                CHECK(time && *time == 1.5 && duration && *duration == 12.5 && playing && *playing, "time, duration, playing");
+                mach::lines = {"move 3 of 9 \xC2\xB7 T1 flat 6 mm"};
+                mach::asked = 0;
+                cadaclysm::Result<std::vector<std::string>> status = made->status();
+                CHECK(status && status->size() == 1 && (*status)[0] == mach::lines[0], "status: %s",
+                      status ? (*status)[0].c_str() : refused(status).c_str());
+                cadaclysm::Result<cadaclysm::MachiningInfo> info = m->info();
+                CHECK(info && info->moves == 9 && info->move == 3 && info->nx == 4 && info->ny == 2 && info->cell == 0.5f &&
+                          info->min[0] == -1 && info->min[1] == -2 && info->cycle_time == 12.5,
+                      "info: %s", refused(info).c_str());
+                cadaclysm::Result<std::vector<float>> z = m->heights();
+                CHECK(z && z->size() == 8 && mach::heights_capacity == 8 && (*z)[1 * 4 + 0] == 4.0f, "heights: %s",
+                      refused(z).c_str());
+
+                // F5: status asks again when the line grew, and is empty with no tracks.
+                mach::lines = {"move 9 of 9", "move 10 of 10 \xC2\xB7 longer"};
+                mach::asked = 0;
+                cadaclysm::Result<std::vector<std::string>> grown = made->status();
+                CHECK(grown && grown->size() == 1 && (*grown)[0] == mach::lines[1] && mach::asked == 3,
+                      "F5: asked %zu times", mach::asked);
+                mach::lines = {""};
+                mach::asked = 0;
+                cadaclysm::Result<std::vector<std::string>> none = made->status();
+                CHECK(none && none->empty(), "an empty status");
+                mach::lines = {"move 9 of 9", ""};  // the line emptied between the two calls
+                mach::asked = 0;
+                cadaclysm::Result<std::vector<std::string>> emptied = made->status();
+                CHECK(emptied && emptied->empty() && mach::asked == 2, "an emptied status: %zu lines, asked %zu",
+                      emptied ? emptied->size() : 0, mach::asked);
+
+                // F6: a library refusal is the library's words.
+                mach::answer = false;
+                mach::said = "cadaclysm_view_machining_seek: no machining 9 is shown";
+                CHECK(refused(m->seek_move(3)) == mach::said, "seek_move refusal: %s", refused(m->seek_move(3)).c_str());
+                mach::answer = true;
+                CHECK(m->remove(), "remove");
+            }
+            mach::show_id = 0;
+            mach::said = "cadaclysm_view_show_machining: a machining needs at least one program (program_count is 0)";
+            CHECK(refused(made->show_machining({}, box)) == mach::said, "show_machining refusal: %s",
+                  refused(made->show_machining({}, box)).c_str());
+            mach::show_id = 7;
+            mach::said = nullptr;
+            CHECK(made->close(), "close the stand-in's view");
+            CHECK(refused(made->play()) == "cadaclysm_view_timeline_play: the view is closed", "closed: %s",
+                  refused(made->play()).c_str());
         }
     }
     t = saved;
@@ -1014,6 +1325,163 @@ static void double_click_case() {
     }
 }
 
+// ---- the plate of web/test/fixtures/machining-plate, offscreen on the real library (F7) ------
+
+static std::string read_file(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    std::ostringstream text;
+    text << in.rdbuf();
+    return text.str();
+}
+
+// The directory holding web/test/fixtures/machining-plate/job.json, walking up from `from`
+// (a file or directory); empty where there is none (an SDK checkout).
+static std::string plate_directory(const std::string& from) {
+    if (from.empty()) return "";
+    std::error_code ignored;
+    std::filesystem::path dir = std::filesystem::absolute(from, ignored);
+    if (ignored) return "";
+    for (;;) {
+        std::filesystem::path candidate = dir / "web" / "test" / "fixtures" / "machining-plate";
+        if (std::filesystem::exists(candidate / "job.json", ignored)) return candidate.string();
+        if (!dir.has_parent_path() || dir.parent_path() == dir) return "";
+        dir = dir.parent_path();
+    }
+}
+
+// Python's _compare_at_walls (web/test/machining-selftest.js's rule): every cell within 2e-3 mm of
+// the oracle, or, at a wall -- the oracle's 3x3 neighbourhood spanning more than 0.5 mm -- within
+// 2e-3 of one of its neighbours; those excused number at most max(4, walls / 100).
+static bool agrees_at_walls(const std::vector<float>& gpu, const float* oracle, std::uint32_t nx, std::uint32_t ny,
+                            std::string& why) {
+    std::size_t failed = 0, excused = 0, walls = 0;
+    for (std::int64_t j = 0; j < static_cast<std::int64_t>(ny); ++j) {
+        for (std::int64_t i = 0; i < static_cast<std::int64_t>(nx); ++i) {
+            float lo = INFINITY, hi = -INFINITY;
+            for (std::int64_t b = std::max<std::int64_t>(0, j - 1); b <= std::min<std::int64_t>(ny - 1, j + 1); ++b)
+                for (std::int64_t a = std::max<std::int64_t>(0, i - 1); a <= std::min<std::int64_t>(nx - 1, i + 1); ++a) {
+                    lo = std::min(lo, oracle[b * nx + a]);
+                    hi = std::max(hi, oracle[b * nx + a]);
+                }
+            bool wall = hi - lo > 0.5f;
+            if (wall) ++walls;
+            float g = gpu[static_cast<std::size_t>(j * nx + i)];
+            if (std::fabs(g - oracle[j * nx + i]) <= 2e-3f) continue;
+            bool matched = false;
+            if (wall)
+                for (std::int64_t b = std::max<std::int64_t>(0, j - 1); b <= std::min<std::int64_t>(ny - 1, j + 1); ++b)
+                    for (std::int64_t a = std::max<std::int64_t>(0, i - 1); a <= std::min<std::int64_t>(nx - 1, i + 1); ++a)
+                        if (std::fabs(oracle[b * nx + a] - g) <= 2e-3f) matched = true;
+            if (matched) ++excused; else ++failed;
+        }
+    }
+    why = "failed " + std::to_string(failed) + ", excused " + std::to_string(excused) + ", walls " + std::to_string(walls);
+    return failed == 0 && excused <= std::max<std::size_t>(4, walls / 100);
+}
+
+// F7 and the rest of the machining calls, run for real: the plate's job plays offscreen to
+// the oracle's heights; the transport, the colour modes (deviation refused without a part,
+// taken with one) and the overlays run on the library itself.
+static void plate_case(const std::string& start, const std::string& cwd_start) {
+    std::string dir = plate_directory(start);
+    if (dir.empty()) dir = plate_directory(cwd_start);
+    if (dir.empty()) {
+        if (required()) {
+            CHECK(false, "CADACLYSM_REQUIRE_WGPU needs web/test/fixtures/machining-plate above %s", start.c_str());
+        } else {
+            std::printf("view: the machining plate skipped, no web/test/fixtures/machining-plate\n");
+        }
+        return;
+    }
+    // web/test/fixtures/machining-plate/job.json
+    std::vector<cadaclysm::MachiningProgram> programs = {
+        {tool_of(1, "flat", 6, 20), read_file(dir + "/program-0.gcode")},
+        {tool_of(2, "drill", 6, 30), read_file(dir + "/program-1.gcode")},
+    };
+    cadaclysm::MachiningStock box;
+    box.min = {-42, -27, 0};
+    box.max = {42, 27, 14};
+    cadaclysm::MachiningOptions options;
+    options.cell = 0.5;
+    options.rapid_rate = 5000;
+
+    cadaclysm::Result<View> made = View::offscreen(64, 48);
+    CHECK(made, "the plate's view: %s", refused(made).c_str());
+    if (!made) return;
+    cadaclysm::Result<cadaclysm::Machining> m = made->show_machining(programs, box, std::nullopt, options);
+    CHECK(m, "show_machining: %s", refused(m).c_str());
+    if (!m) return;
+    cadaclysm::Result<double> duration = made->duration();
+    CHECK(duration && std::fabs(*duration - 893.247024) < 1e-3, "duration %g", duration ? *duration : -1.0);
+    cadaclysm::Result<cadaclysm::MachiningInfo> info = m->info();
+    CHECK(info && info->moves > 0, "info: %s", refused(info).c_str());
+    if (!info) return;
+
+    // F7: the last move's heights are the oracle's.
+    CHECK(m->seek_move(info->moves), "seek_move: %s", refused(m->seek_move(info->moves)).c_str());
+    cadaclysm::Result<std::vector<float>> gpu = m->heights();
+    CHECK(gpu, "heights: %s", refused(gpu).c_str());
+    std::string heights = read_file(dir + "/heights.bin");
+    CHECK(heights.size() >= 28, "heights.bin is %zu bytes", heights.size());
+    if (gpu && heights.size() >= 28) {
+        std::uint32_t nx = 0, ny = 0;
+        std::memcpy(&nx, heights.data() + 8, 4);
+        std::memcpy(&ny, heights.data() + 12, 4);
+        CHECK(info->nx == nx && info->ny == ny && gpu->size() == static_cast<std::size_t>(nx) * ny,
+              "the grid: %u x %u, the fixture's %u x %u, %zu floats", info->nx, info->ny, nx, ny, gpu->size());
+        if (heights.size() >= 28 + 4 * static_cast<std::size_t>(nx) * ny && gpu->size() == static_cast<std::size_t>(nx) * ny) {
+            std::vector<float> oracle(static_cast<std::size_t>(nx) * ny);
+            std::memcpy(oracle.data(), heights.data() + 28, 4 * oracle.size());
+            std::string why;
+            CHECK(agrees_at_walls(*gpu, oracle.data(), nx, ny, why), "the heights against the oracle: %s", why.c_str());
+        }
+    }
+    CHECK(made->draw(), "draw");
+    cadaclysm::Result<std::vector<std::string>> status = made->status();
+    std::string want = "move " + std::to_string(info->moves) + " of " + std::to_string(info->moves);
+    CHECK(status && !status->empty() && starts((*status)[0], want.c_str()), "status: %s",
+          status && !status->empty() ? (*status)[0].c_str() : refused(status).c_str());
+
+    // Every other call, on the library itself.
+    CHECK(made->seek(0.0), "seek 0");
+    CHECK(made->draw(), "draw at 0");
+    cadaclysm::Result<bool> idle = made->playing();
+    CHECK(idle && !*idle, "playing before play");
+    CHECK(made->play(2), "play");
+    cadaclysm::Result<bool> running = made->playing();
+    CHECK(running && *running, "playing after play");
+    CHECK(made->pause(), "pause");
+    cadaclysm::Result<bool> stopped = made->playing();
+    CHECK(stopped && !*stopped, "playing after pause");
+    CHECK(made->seek(10), "seek 10");
+    CHECK(made->draw(), "draw at 10");
+    cadaclysm::Result<double> at = made->time();
+    CHECK(at && std::fabs(*at - 10) < 1e-6, "time after seek(10): %g", at ? *at : -1.0);
+    CHECK(made->seek(*duration + 100), "seek past the end");
+    CHECK(made->draw(), "draw at the end");
+    cadaclysm::Result<double> clamped = made->time();
+    CHECK(clamped && std::fabs(*clamped - *duration) < 1e-6, "time clamped to the duration: %g", clamped ? *clamped : -1.0);
+    CHECK(made->loop(true) && made->loop(false), "loop on and off");
+    CHECK(m->colour_by("tool") && m->colour_by("height"), "colour_by tool, height");
+    std::string deviation = refused(m->colour_by("deviation"));
+    CHECK(has(deviation, "cadaclysm_view_machining_colour_by"), "deviation without a part: %s", deviation.c_str());
+    CHECK(m->overlays(false, false) && m->overlays(), "overlays");
+    CHECK(made->draw(), "draw");
+    CHECK(m->remove(), "remove");
+
+    cadaclysm::MachiningPart part;
+    part.positions = {-42, -27, 14, 42, -27, 14, 0, 27, 14};
+    part.indices = {0, 1, 2};
+    cadaclysm::Result<cadaclysm::Machining> with_part = made->show_machining(programs, box, part, options);
+    CHECK(with_part, "show_machining with a part: %s", refused(with_part).c_str());
+    if (with_part) {
+        CHECK(with_part->colour_by("deviation"), "deviation with a part: %s", refused(with_part->colour_by("deviation")).c_str());
+        CHECK(made->draw(), "draw by deviation");
+        CHECK(with_part->remove(), "remove");
+    }
+    CHECK(made->close(), "close");
+}
+
 int main(int argc, char** argv) {
     const std::string scratch = argc > 1 ? argv[1] : ".";
     const std::string mechanism = argc > 2 ? argv[2] : "";  // samples/mechanism-solid.stp
@@ -1048,6 +1516,7 @@ int main(int argc, char** argv) {
             auto cube = bs::Solid::cuboid(1, 1, 1);
             if (cube) CHECK(refused(cube->show()) == "the view library failed", "%s", refused(cube->show()).c_str());
             points_case(**mine);
+            machining_case(**mine);
         }
     }
 
@@ -1103,6 +1572,7 @@ int main(int argc, char** argv) {
     colour_text(mechanism);
     text_case(font_path);
     double_click_case();
+    plate_case(mechanism, ".");
 
     // A solid by handle: its item keeps it alive after the Solid is gone.
     cadaclysm::Result<cadaclysm::Item> item = cadaclysm::Error{"not shown", cadaclysm::Origin::view};

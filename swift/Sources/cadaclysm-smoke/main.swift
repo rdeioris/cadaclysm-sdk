@@ -234,7 +234,8 @@ for e in must("edges") { try Solid.cuboid(2, 4, 6).edges } {
     guard let c = e.curve, c.kind == "line", c.t0 == 0, c.t1 == 1 else { fail("edge_curve: a cuboid edge reads \(String(describing: e.curve))") }
     let far = c.origin + c.x
     let ends = e.segments.flatMap { [$0.start, $0.end] }
-    check(ends.contains { (($0 - c.origin) * ($0 - c.origin)).sum() < 1e-18 } && ends.contains { (($0 - far) * ($0 - far)).sum() < 1e-18 },
+    let at = { (a: SIMD3<Double>) -> (SIMD3<Double>) -> Bool in { (p: SIMD3<Double>) -> Bool in let d: SIMD3<Double> = p - a; return (d * d).sum() < 1e-18 } }
+    check(ends.contains(where: at(c.origin)) && ends.contains(where: at(far)),
           "edge_curve: a cuboid line's ends are not its own vertices: \(c)")
 }
 print("edge_curve: \(rims[0])")
@@ -242,8 +243,12 @@ print("edge_curve: \(rims[0])")
 // Intersect: two equal pipes crossing at right angles meet on ellipse chains whose points lie
 // on both pipes; apart, nothing; two coaxial pipes overlapping in height share a wall band.
 let tol = 1e-3
-let offA = { (p: SIMD3<Double>) in abs((p.x * p.x + p.y * p.y).squareRoot() - 1) }
-let offB = { (p: SIMD3<Double>) in abs((p.x * p.x + (p.z - 3) * (p.z - 3)).squareRoot() - 1) }
+let offA = { (p: SIMD3<Double>) -> Double in let r: Double = (p.x * p.x + p.y * p.y).squareRoot(); return abs(r - 1) }
+let offB = { (p: SIMD3<Double>) -> Double in
+    let dz: Double = p.z - 3
+    let r: Double = (p.x * p.x + dz * dz).squareRoot()
+    return abs(r - 1)
+}
 let pipeA = must("cylinder") { try Solid.cylinder(1, 6) }
 let pipeB = must("rotate") { try Solid.cylinder(1, 6).rotate((origin: SIMD3(0, 0, 3), direction: SIMD3(1, 0, 0)), Double.pi / 2) }
 let found = must("intersect") { try pipeA.intersect(pipeB, tolerance: tol) }
@@ -256,7 +261,9 @@ for c in found.chains {
     if curve.kind != "ellipse" { continue }
     ellipses += 1
     let t = (curve.t0 + curve.t1) / 2
-    let q = curve.origin + curve.x * curve.radius * cos(t) + curve.y * curve.radius2 * sin(t)
+    let along: SIMD3<Double> = curve.x * (curve.radius * cos(t))
+    let across: SIMD3<Double> = curve.y * (curve.radius2 * sin(t))
+    let q: SIMD3<Double> = curve.origin + along + across
     check(offA(q) < 50 * tol && offB(q) < 50 * tol, "intersect: the ellipse leaves the pipes at \(curve)")
 }
 check(ellipses > 0, "intersect: two equal pipes cross on ellipses")

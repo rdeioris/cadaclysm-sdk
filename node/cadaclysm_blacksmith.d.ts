@@ -3,7 +3,11 @@
 import type { Node, Scene } from './cadaclysm';
 import type { ShowOptions, Camera } from './cadaclysm_view';
 
-export class BuildError extends Error {}
+export class BuildError extends Error {
+  constructor(message: string, ids?: number[]);
+  /** The sketch ids a `Sketch` refusal names; empty for every other refusal. */
+  ids: number[];
+}
 
 /** What `Solid.silhouetteBeziers` answers: `points` twelve numbers a curve, `weights` four. */
 export interface SilhouetteCurves { points: Float64Array; weights: Float64Array; count: number }
@@ -101,6 +105,12 @@ export class Profile {
   static slot(centre: Point2, length: number, r: number): Profile;
   static polygon(points: Point2[]): Profile;
   static regularPolygon(centre: Point2, radius: number, sides: number, angle?: number): Profile;
+  /**
+   * A regular polygon of `sides` sides (at least 3) whose sides touch the circle of `radius` about
+   * `centre` (the polygon across flats): its corners on the circle of `radius / cos(pi / sides)`,
+   * on the same rays as `regularPolygon`'s for the same `angle`. `sides` a whole number from 0 to 4294967295.
+   */
+  static circumscribedPolygon(centre: Point2, radius: number, sides: number, angle?: number): Profile;
   static star(centre: Point2, outer: number, inner: number, points: number, angle?: number): Profile;
   static spline(points: Point2[], degree?: number, weights?: ArrayLike<number> | null, closed?: boolean): Profile;
   static path(start: Point2): Path;
@@ -113,6 +123,14 @@ export class Profile {
   /** This curve with piece `piece` of `pieces` taken away: what is left, as open profiles. */
   trim(cutters: Iterable<Profile>, piece: number, tolerance?: number): Profile[];
   withHole(hole: Profile): Profile;
+  /** The perimeter of the outer loop -- holes are not counted -- measured to the relative `accuracy` (0: the default). */
+  length(accuracy?: number): Length;
+  /** The point `s` along the outer loop from its start; `segment` is the side. */
+  pointAtLength(s: number, accuracy?: number): At;
+  /** The outer loop in `n` (1 to 1,000,000) pieces of equal arc length: `n` samples (a profile's outer loop is closed). */
+  divideByCount(n: number, accuracy?: number): At[];
+  /** The outer loop every `step` of arc length; the short last piece is kept. */
+  divideByLength(step: number, accuracy?: number): At[];
   /** The outline, then each hole, as x, y, z runs at z = 0 within `tolerance` (0.05 by default). */
   polylines(tolerance?: number): Float32Array[];
   /** Every free-form side as lines and arcs within `tolerance` (0.01 by default). */
@@ -123,6 +141,14 @@ export class Profile {
   common(other: Profile, tolerance?: number): Profile[];
   static text(text: string, size?: number, font?: string, halign?: 'left' | 'center' | 'right', valign?: 'baseline' | 'bottom' | 'center' | 'top', spacing?: number, direction?: 'ltr' | 'rtl', fontBytes?: Uint8Array | ArrayBuffer | null): Profile[];
   translate(dx: number, dy: number): Profile;
+  /** This outline turned `radians` (counter-clockwise) about `centre`. */
+  rotate(centre: Point2, radians: number): Profile;
+  /** This outline scaled by `sx`, `sy` about `centre`; an arc becomes exact conics where the two differ, a zero factor throws. */
+  scale(centre: Point2, sx: number, sy: number): Profile;
+  /** This outline reflected across the line through `point` along `direction`. */
+  mirror(point: Point2, direction: Point2): Profile;
+  /** This outline under the 2D affine map `m`, six numbers row-major: `x' = m0 x + m1 y + m2`, `y' = m3 x + m4 y + m5`. */
+  transform2d(m: ArrayLike<number>): Profile;
   /** This outline coloured -- '#rgb', '#rrggbb', a CSS colour name or [r, g, b] in 0..1: how it is drawn.
    *  The verbs that make a profile from one carry it; a solid made from it takes nothing. */
   coloured(colour: string | Iterable<number>): Profile;
@@ -177,6 +203,330 @@ export class Frame implements Iterable<number> {
   readonly z: number[];
   translate(dx: number, dy: number, dz: number): Frame;
   offset(distance: number): Frame;
+  /** The same plane facing the other way: x and y swapped, z reversed. */
+  flipped(): Frame;
+  /** This frame turned `radians` about `axis` through its origin. */
+  rotated(radians: number, axis: Point3): Frame;
+  /** `p` in this frame's coordinates. */
+  toLocal(p: Point3): number[];
+  /** `p` dropped onto the plane along z. */
+  closestPoint(p: Point3): number[];
+  /** How far `p` sits above the plane, along z (negative below). */
+  distanceTo(p: Point3): number;
+  /** The least-squares plane through `points`, and the largest distance any point sits off it. */
+  static fit(points: Iterable<Point3>): { frame: Frame; deviation: number };
+  equals(other: unknown): boolean;
+  [Symbol.iterator](): Iterator<number>;
+}
+
+/** Sixteen numbers row-major, or four rows of four. */
+export type MatrixLike = ArrayLike<number> | [ArrayLike<number>, ArrayLike<number>, ArrayLike<number>, ArrayLike<number>];
+/** `Solid.convertToNurbs`'s level. */
+export type NurbsLevel = 'procedural' | 'analytic' | 'all';
+
+/** An affine map of space: 16 numbers, row-major, the bottom row `0 0 0 1`. Immutable; `a.compose(b)` is `a` after `b`. */
+export class Transform implements Iterable<number> {
+  constructor(rows?: MatrixLike);
+  static fromRows(rows: MatrixLike): Transform;
+  static identity(): Transform;
+  static translation(v: Point3): Transform;
+  static rotation(point: Point3, direction: Point3, radians: number): Transform;
+  static mirror(plane: FrameLike): Transform;
+  static scale(centre: Point3, k: number): Transform;
+  static scaleXyz(frame: FrameLike, sx: number, sy: number, sz: number): Transform;
+  static shear(plane: FrameLike, direction: Point3, factor: number): Transform;
+  static planeToPlane(a: FrameLike, b: FrameLike): Transform;
+  static changeBasis(from: FrameLike, to: FrameLike): Transform;
+  static planarProjection(plane: FrameLike): Transform;
+  static projectAlong(plane: FrameLike, direction: Point3): Transform;
+  /** The 16 numbers, row-major (a copy). */
+  readonly rows: number[];
+  point(p: Point3): [number, number, number];
+  /** This map after `other`. */
+  compose(other: Transform): Transform;
+  inverse(): Transform;
+  isRigid(tolerance?: number): boolean;
+  /** The scale `k`, or null for a map that is not a similarity. */
+  isSimilarity(tolerance?: number): number | null;
+  decomposeRigid(tolerance?: number): { translation: number[]; orthogonal: Transform } | null;
+  decomposeSimilarity(tolerance?: number): { translation: number[]; orthogonal: Transform; k: number } | null;
+  /** The polar split: the linear part is `rotation · axes · diag(stretch) · axesᵀ`; null for a singular map. */
+  decomposeAffine(): { translation: number[]; rotation: Transform; axes: Transform; stretch: number[] } | null;
+  equals(other: unknown): boolean;
+  [Symbol.iterator](): Iterator<number>;
+}
+
+/** A rotation as `w + xi + yj + zk`. Immutable; `a.multiply(b)` turns by `b`, then `a`. */
+export class Quaternion implements Iterable<number> {
+  constructor(w?: number, x?: number, y?: number, z?: number);
+  static fromAxisAngle(direction: Point3, radians: number): Quaternion;
+  static fromTransform(t: Transform | MatrixLike): Quaternion;
+  static slerp(a: Quaternion, b: Quaternion, s: number): Quaternion;
+  toTransform(centre?: Point3): Transform;
+  readonly w: number;
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly length: number;
+  /** The turn, in `[0, 2π]`. */
+  readonly angle: number;
+  /** The turn's axis, null for the identity. */
+  readonly axis: [number, number, number] | null;
+  conjugate(): Quaternion;
+  normalized(): Quaternion;
+  multiply(o: Quaternion): Quaternion;
+  equals(other: unknown): boolean;
+  [Symbol.iterator](): Iterator<number>;
+}
+
+/** An `Interval`, or two numbers. */
+export type IntervalLike = Interval | ArrayLike<number> | Iterable<number>;
+/** A parameter range `t0..t1`, in either order: the set operations answer increasing. Immutable; iterates as `[t0, t1]`. */
+export class Interval implements Iterable<number> {
+  constructor(t0: number, t1: number);
+  /** An `Interval`, or two numbers, as an `Interval`. */
+  static of(value: IntervalLike): Interval;
+  readonly t0: number;
+  readonly t1: number;
+  /** `t1 - t0`: negative for a decreasing interval. */
+  readonly length: number;
+  readonly mid: number;
+  readonly min: number;
+  readonly max: number;
+  readonly isIncreasing: boolean;
+  readonly isSingleton: boolean;
+  swapped(): Interval;
+  grown(t: number): Interval;
+  union(o: IntervalLike): Interval;
+  /** The increasing overlap; null where the two are apart. */
+  intersect(o: IntervalLike): Interval | null;
+  contains(t: number): boolean;
+  parameterAt(s: number): number;
+  /** Null for a singleton. */
+  normalizedParameterAt(t: number): number | null;
+  equals(other: unknown): boolean;
+  [Symbol.iterator](): Iterator<number>;
+}
+
+/** The closest point of a curve value; `unique` false where it is a fixed pick among equals. */
+export class CurveFoot {
+  constructor(t: number, point: number[], unique: boolean);
+  readonly t: number;
+  readonly point: number[];
+  readonly unique: boolean;
+}
+/** The closest point of a surface value; `unique` false where it is a fixed pick among equals. */
+export class SurfaceFoot {
+  constructor(u: number, v: number, point: number[], unique: boolean);
+  readonly u: number;
+  readonly v: number;
+  readonly point: number[];
+  readonly unique: boolean;
+}
+
+/** What `Curve.value` gives. */
+export type CurveValue = Line | Circle | Arc | Ellipse;
+
+/** The segment from `start` to `end`; its parameter runs 0..1. Immutable, nothing to free. */
+export class Line implements Iterable<number> {
+  constructor(start: Point3, end: Point3);
+  /** From the six numbers `values` gives, checked as the constructor checks. */
+  static fromValues(values: ArrayLike<number>): Line;
+  readonly start: number[];
+  readonly end: number[];
+  /** The canonical numbers (a copy). */
+  readonly values: number[];
+  pointAt(t: number): number[];
+  tangentAt(t: number): number[];
+  length(): number;
+  closestPoint(p: Point3): CurveFoot;
+  distanceTo(p: Point3): number;
+  /** `[min, max]`. */
+  bounds(): [number[], number[]];
+  transform(t: Transform | MatrixLike): Line;
+  equals(other: unknown): boolean;
+  [Symbol.iterator](): Iterator<number>;
+}
+
+/** The circle of `radius` about the frame's origin in its x-y plane. Immutable, nothing to free. */
+export class Circle implements Iterable<number> {
+  constructor(frame: FrameLike, radius: number);
+  static fromValues(values: ArrayLike<number>): Circle;
+  static through(a: Point3, b: Point3, c: Point3): Circle;
+  readonly frame: Frame;
+  readonly radius: number;
+  readonly values: number[];
+  pointAt(t: number): number[];
+  tangentAt(t: number): number[];
+  length(): number;
+  closestPoint(p: Point3): CurveFoot;
+  distanceTo(p: Point3): number;
+  bounds(): [number[], number[]];
+  transform(t: Transform | MatrixLike): Circle;
+  equals(other: unknown): boolean;
+  [Symbol.iterator](): Iterator<number>;
+}
+
+/** The part of a circle over `angle`, increasing by at most a full turn. Immutable, nothing to free. */
+export class Arc implements Iterable<number> {
+  constructor(frame: FrameLike, radius: number, angle: IntervalLike);
+  static fromValues(values: ArrayLike<number>): Arc;
+  static through(a: Point3, b: Point3, c: Point3): Arc;
+  static fromStartTangentEnd(a: Point3, tangent: Point3, c: Point3): Arc;
+  readonly frame: Frame;
+  readonly radius: number;
+  readonly angle: Interval;
+  readonly start: number[];
+  readonly end: number[];
+  readonly mid: number[];
+  readonly values: number[];
+  pointAt(t: number): number[];
+  tangentAt(t: number): number[];
+  length(): number;
+  closestPoint(p: Point3): CurveFoot;
+  distanceTo(p: Point3): number;
+  bounds(): [number[], number[]];
+  transform(t: Transform | MatrixLike): Arc;
+  equals(other: unknown): boolean;
+  [Symbol.iterator](): Iterator<number>;
+}
+
+/** The ellipse of radius `r1` along the frame's x and `r2` along its y. Immutable, nothing to free. */
+export class Ellipse implements Iterable<number> {
+  constructor(frame: FrameLike, r1: number, r2: number);
+  static fromValues(values: ArrayLike<number>): Ellipse;
+  static fromCircle(circle: Circle): Ellipse;
+  readonly frame: Frame;
+  readonly r1: number;
+  readonly r2: number;
+  readonly values: number[];
+  pointAt(t: number): number[];
+  tangentAt(t: number): number[];
+  length(): number;
+  closestPoint(p: Point3): CurveFoot;
+  distanceTo(p: Point3): number;
+  bounds(): [number[], number[]];
+  transform(t: Transform | MatrixLike): Ellipse;
+  equals(other: unknown): boolean;
+  [Symbol.iterator](): Iterator<number>;
+}
+
+/** The sphere of `radius` about the frame's origin. Immutable, nothing to free. */
+export class Sphere implements Iterable<number> {
+  constructor(frame: FrameLike, radius: number);
+  static fromValues(values: ArrayLike<number>): Sphere;
+  readonly frame: Frame;
+  readonly radius: number;
+  readonly values: number[];
+  pointAt(u: number, v: number): number[];
+  normalAt(u: number, v: number): number[];
+  closestPoint(p: Point3): SurfaceFoot;
+  distanceTo(p: Point3): number;
+  domain(): [Interval, Interval];
+  toNurbsSheet(): Solid;
+  contains(p: Point3, tolerance?: number): boolean;
+  area(): number;
+  volume(): number;
+  toSolid(): Solid;
+  bounds(): [number[], number[]];
+  transform(t: Transform | MatrixLike): Sphere;
+  equals(other: unknown): boolean;
+  [Symbol.iterator](): Iterator<number>;
+}
+
+/** The capped cylinder of `radius` about the frame's z over `height`. Immutable, nothing to free. */
+export class Cylinder implements Iterable<number> {
+  constructor(frame: FrameLike, radius: number, height: IntervalLike);
+  static fromValues(values: ArrayLike<number>): Cylinder;
+  readonly frame: Frame;
+  readonly radius: number;
+  readonly height: Interval;
+  readonly values: number[];
+  pointAt(u: number, v: number): number[];
+  normalAt(u: number, v: number): number[];
+  closestPoint(p: Point3): SurfaceFoot;
+  distanceTo(p: Point3): number;
+  domain(): [Interval, Interval];
+  toNurbsSheet(): Solid;
+  contains(p: Point3, tolerance?: number): boolean;
+  area(): number;
+  volume(): number;
+  toSolid(): Solid;
+  bounds(): [number[], number[]];
+  transform(t: Transform | MatrixLike): Cylinder;
+  equals(other: unknown): boolean;
+  [Symbol.iterator](): Iterator<number>;
+}
+
+/** The capped cone of base `radius`, its apex `height` up the frame's z. Immutable, nothing to free. */
+export class Cone implements Iterable<number> {
+  constructor(frame: FrameLike, radius: number, height: number);
+  static fromValues(values: ArrayLike<number>): Cone;
+  readonly frame: Frame;
+  readonly radius: number;
+  readonly height: number;
+  readonly values: number[];
+  pointAt(u: number, v: number): number[];
+  normalAt(u: number, v: number): number[];
+  closestPoint(p: Point3): SurfaceFoot;
+  distanceTo(p: Point3): number;
+  domain(): [Interval, Interval];
+  toNurbsSheet(): Solid;
+  contains(p: Point3, tolerance?: number): boolean;
+  area(): number;
+  volume(): number;
+  toSolid(): Solid;
+  bounds(): [number[], number[]];
+  transform(t: Transform | MatrixLike): Cone;
+  equals(other: unknown): boolean;
+  [Symbol.iterator](): Iterator<number>;
+}
+
+/** The torus of `major` radius about the frame's z and `minor` radius about that circle. Immutable, nothing to free. */
+export class Torus implements Iterable<number> {
+  constructor(frame: FrameLike, major: number, minor: number);
+  static fromValues(values: ArrayLike<number>): Torus;
+  readonly frame: Frame;
+  readonly major: number;
+  readonly minor: number;
+  readonly values: number[];
+  pointAt(u: number, v: number): number[];
+  normalAt(u: number, v: number): number[];
+  closestPoint(p: Point3): SurfaceFoot;
+  distanceTo(p: Point3): number;
+  domain(): [Interval, Interval];
+  toNurbsSheet(): Solid;
+  contains(p: Point3, tolerance?: number): boolean;
+  area(): number;
+  volume(): number;
+  toSolid(): Solid;
+  bounds(): [number[], number[]];
+  transform(t: Transform | MatrixLike): Torus;
+  equals(other: unknown): boolean;
+  [Symbol.iterator](): Iterator<number>;
+}
+
+/** The box over `x`, `y`, `z` along its frame's axes. Immutable, nothing to free. */
+export class Cuboid implements Iterable<number> {
+  constructor(frame: FrameLike, x: IntervalLike, y: IntervalLike, z: IntervalLike);
+  static fromValues(values: ArrayLike<number>): Cuboid;
+  static fromBounds(min: Point3, max: Point3): Cuboid;
+  static around(frame: FrameLike, points: Iterable<Point3>): Cuboid;
+  readonly frame: Frame;
+  readonly x: Interval;
+  readonly y: Interval;
+  readonly z: Interval;
+  readonly values: number[];
+  /** The eight corners, the `z0` face then the `z1` face. */
+  corners(): number[][];
+  pointAt(sx: number, sy: number, sz: number): number[];
+  closestPoint(p: Point3): number[];
+  contains(p: Point3, tolerance?: number): boolean;
+  area(): number;
+  volume(): number;
+  toSolid(): Solid;
+  bounds(): [number[], number[]];
+  transform(t: Transform | MatrixLike): Cuboid;
   equals(other: unknown): boolean;
   [Symbol.iterator](): Iterator<number>;
 }
@@ -191,6 +541,80 @@ export class Slant {
 /** A `Slant`, or a bare number for `Slant.flat(number)`. */
 export type SlantLike = Slant | number;
 
+/** What a small feature is: a `SmallFeature`'s, `HealFix`'s or `HealRefusal`'s `kind`. */
+export type SmallFeatureKind = 'short_edge' | 'collapsed_edge' | 'sliver_face' | 'tiny_face' | 'tiny_body' | 'small_hole';
+/** Why `healed` left a small feature: a `HealRefusal`'s `why`. */
+export type HealWhy = 'would_empty_loop' | 'closed' | 'seam' | 'chain' | 'neighbours_part' | 'uneven' | 'non_manifold'
+  | 'has_holes' | 'body_guard' | 'toggled' | 'unsupported';
+/** One free edge: a side only one face bounds, with its nearest partner (a row of `freeEdges`) and the gap to it (`Infinity` without one). */
+export class FreeEdge {
+  constructor(trim: number, edge: number | null, face: number, wire: number, partner: number | null, sharedEnds: number, length: number, gap: number);
+  trim: number;
+  /** The edge it lies on; null for a side that has no edge. */
+  edge: number | null;
+  face: number;
+  wire: number;
+  /** The nearest free edge across the gap, as an index into `freeEdges`; null if there is none. */
+  partner: number | null;
+  sharedEnds: number;
+  length: number;
+  gap: number;
+}
+/** A chain of free edges end to end: the rows `first` to `first + count` of `freeEdges`. */
+export class FreeWire {
+  constructor(first: number, count: number, closed: boolean, length: number, widestGap: number);
+  first: number; count: number; closed: boolean; length: number; widestGap: number;
+}
+/** Something below the tolerance: its kind, its edge, face, body or loop number, and how small. */
+export class SmallFeature {
+  constructor(kind: SmallFeatureKind, index: number, size: number);
+  kind: SmallFeatureKind; index: number; size: number;
+}
+/** What a mesh of the body shows (`health({ mesh: true })`); only a closed body's cracks are counted. */
+export class Cracks {
+  constructor(watertight: boolean, open: number, folded: number, crossings: number, edges: number[]);
+  watertight: boolean; open: number; folded: number; crossings: number; edges: number[];
+}
+/** What is wrong with a body, as plain data (`health`); nothing in it moves the body. */
+export class HealthReport {
+  constructor(tolerance: number, rounding: number, extent: number, freeEdges: FreeEdge[], wires: FreeWire[], small: SmallFeature[],
+    looseEdges: number, worstLoose: number, sewPairs: number, sewRefused: number, sewWorstGap: number, cracks: Cracks | null, worstGap: number);
+  tolerance: number; rounding: number; extent: number;
+  freeEdges: FreeEdge[]; wires: FreeWire[]; small: SmallFeature[];
+  looseEdges: number; worstLoose: number;
+  sewPairs: number; sewRefused: number; sewWorstGap: number;
+  /** Where the mesh cracks; null unless the call asked for the mesh. */
+  cracks: Cracks | null;
+  /** The widest gap between a free edge and its partner. */
+  worstGap: number;
+  /** The free edges of wire number `wire`, in order. */
+  wireEdges(wire: number): FreeEdge[];
+}
+/** One small feature `healed` removed: what it was, its number in the input, its size, and how far the vertices it merged moved. */
+export class HealFix {
+  constructor(kind: SmallFeatureKind, index: number, size: number, moved: number);
+  kind: SmallFeatureKind; index: number; size: number; moved: number;
+}
+/** One small feature `healed` left, and why; `figure` the chain's width or the neighbours' gap, else 0. */
+export class HealRefusal {
+  constructor(kind: SmallFeatureKind, index: number, why: HealWhy, figure: number);
+  kind: SmallFeatureKind; index: number; why: HealWhy; figure: number;
+}
+/** What `healed` did: the fixes, the features left and why, and the body's health before and after. */
+export class HealReport {
+  constructor(tolerance: number, moved: number, guarded: boolean, fixes: HealFix[], refused: HealRefusal[], smallBefore: number, smallAfter: number,
+    freeBefore: number, freeAfter: number, closedBefore: boolean, closedAfter: boolean, nonmanifoldBefore: number, nonmanifoldAfter: number);
+  tolerance: number; moved: number; guarded: boolean;
+  fixes: HealFix[]; refused: HealRefusal[];
+  smallBefore: number; smallAfter: number;
+  freeBefore: number; freeAfter: number;
+  closedBefore: boolean; closedAfter: boolean;
+  nonmanifoldBefore: number; nonmanifoldAfter: number;
+}
+/** `health`'s options: `tolerance` (omitted takes the default, `1e-4` times the diagonal) and `mesh` (also mesh the body and report its cracks). */
+export interface HealthOptions { tolerance?: number; mesh?: boolean }
+/** `healed`'s options: `tolerance` as `health`'s, and the three kinds of fix, each on unless `false`. */
+export interface HealOptions { tolerance?: number; edges?: boolean; faces?: boolean; holes?: boolean }
 /** Whether a solid's faces make a manifold, read off its topology (`Solid.manifold`). */
 export interface Manifold {
   faces: number; edges: number; vertices: number;
@@ -237,6 +661,71 @@ export interface Mass {
   /** `density * volume`, in whatever units the model and the density agree on. */
   weight(density: number): number;
 }
+/**
+ * A closed solid's box on its principal axes (`Solid.orientedBox`). Not the minimal box in
+ * general, and with equal moments the axes are a free choice.
+ */
+export interface OrientedBox {
+  /** The box's middle, not the body's centroid. */
+  readonly centre: number[];
+  /** The three unit axes, one row each: orthonormal and right-handed. */
+  readonly axes: number[][];
+  /** The half-extent along each axis, grown by the tolerance the measurement settled on. */
+  readonly half: number[];
+}
+/** A measured length (`Solid.edgeLength`, `Profile.length`) beside an estimate of its error. */
+export interface Length {
+  /** The length. */
+  readonly length: number;
+  /** An estimate of how far `length` is from the true length. */
+  readonly error: number;
+  /** The error came under the accuracy asked for. */
+  readonly accuracyMet: boolean;
+  /** The curve was a sampled polyline: exact for its points, not for what they were sampled from. */
+  readonly fromPolyline: boolean;
+}
+/** A point at an arc length (`Solid.edgePointAtLength`, `Profile.pointAtLength`, a divide's samples). */
+export interface At {
+  readonly point: number[];
+  /** The unit tangent. */
+  readonly tangent: number[];
+  /** The curve's parameter; on a profile, that side's own. */
+  readonly parameter: number;
+  /** The profile side the point is on; null on a solid's edge. */
+  readonly segment: number | null;
+  /** An estimate of how far the arc length is from the true one. */
+  readonly error: number;
+  /** The curve was a sampled polyline. */
+  readonly fromPolyline: boolean;
+}
+/** Where a point is relative to a closed solid's boundary. */
+export type Containment = 'outside' | 'inside' | 'on';
+/**
+ * The closest points between two solids' boundaries (`Solid.closest`), side `a` the solid asked
+ * and side `b` the other.
+ */
+export interface Closest {
+  /** The distance between the two points. */
+  readonly distance: number;
+  /** The point on side `a`. */
+  readonly onA: number[];
+  /** The point on side `b`. */
+  readonly onB: number[];
+  /** What side `a`'s point lies on. */
+  readonly kindA: 'face' | 'edge' | 'vertex';
+  /** The kernel's id for side `a`'s feature. */
+  readonly indexA: number;
+  /** The index `fillet` and `Solid.edges` use for side `a`'s edge; null for a face, a vertex, or an edge the fillet table does not hold. */
+  readonly edgeA: number | null;
+  /** What side `b`'s point lies on. */
+  readonly kindB: 'face' | 'edge' | 'vertex';
+  /** The kernel's id for side `b`'s feature. */
+  readonly indexB: number;
+  /** The index `fillet` and `Solid.edges` use for side `b`'s edge, or null. */
+  readonly edgeB: number | null;
+  /** The answer was refined on the exact surfaces; false is the mesh's answer, within the tolerance. */
+  readonly refined: boolean;
+}
 export interface SolidMesh { positions: Float32Array; normals: Float32Array; indices: Uint32Array; vertexCount: number; indexCount: number }
 /** `SolidMesh` in `double`: the same tessellation's own unnarrowed positions/normals. */
 export interface SolidMesh64 { positions: Float64Array; normals: Float64Array; indices: Uint32Array; vertexCount: number; indexCount: number }
@@ -280,6 +769,12 @@ export class Solid {
   static face(profile: Profile, frame: FrameLike): Solid;
   faceSheet(face: number): Solid;
   dropFaces(faces: Iterable<number>): Solid;
+  /** What is wrong with this solid: free edges and wires, small features, loose edges, what sewing would do, and, asked for, the mesh's cracks. Nothing moves. */
+  health(options?: HealthOptions): HealthReport;
+  /** This solid with its small features removed, and what was done; this one is left as it was. */
+  healed(options?: HealOptions): { solid: Solid; report: HealReport };
+  /** How far brep edge `edge` may lie off its curve: 0 exact, the distance healing or sewing moved it, null when no trim names the id. */
+  edgeTolerance(edge: number): number | null;
   trim(tool: Solid, keep?: 'outside' | 'inside', tolerance?: number, progress?: Progress | null): Solid;
   trimAsync(tool: Solid, keep?: 'outside' | 'inside', tolerance?: number, progress?: Progress | null): Promise<Solid>;
   place(frame: FrameLike): Solid;
@@ -290,6 +785,12 @@ export class Solid {
   scaled(factor: number): Solid;
   rotate(axis: AxisLine, radians: number): Solid;
   mirror(plane: FrameLike): Solid;
+  /** Through the affine map `t` -- a `Transform` or 16 numbers -- exactly, colours and name kept. */
+  transform(t: Transform | MatrixLike): Solid;
+  /** Its surfaces rewritten as their exact NURBS, `'all'` by default. */
+  convertToNurbs(level?: NurbsLevel): Solid;
+  /** The trims the `transform` / `convertToNurbs` call that made this solid lost; 0 otherwise. */
+  readonly inexactTrims: number;
   join(other: Solid, tolerance?: number, progress?: Progress | null, merge?: boolean): Solid;
   cut(other: Solid, tolerance?: number, progress?: Progress | null, merge?: boolean): Solid;
   common(other: Solid, tolerance?: number, progress?: Progress | null, merge?: boolean): Solid;
@@ -297,6 +798,16 @@ export class Solid {
   cutAsync(other: Solid, tolerance?: number, progress?: Progress | null): Promise<Solid>;
   commonAsync(other: Solid, tolerance?: number, progress?: Progress | null): Promise<Solid>;
   splitSheet(tool: Solid, tolerance?: number, progress?: Progress | null): Solid;
+  /**
+   * This solid and `other` as one non-manifold body that keeps every piece: its regions are this
+   * solid less `other`, the two together and `other` less this one. The manifold verbs refuse it;
+   * take its cells with `regions` and `regionSolid`.
+   */
+  merge(other: Solid, tolerance?: number, progress?: Progress | null): Solid;
+  /** The regions of space this solid's faces bound, region 0 the infinite one. */
+  regions(): Region[];
+  /** Finite region `region` (an index into `regions()`, a whole number from 0 to 4294967295) as a closed solid of its own. */
+  regionSolid(region: number): Solid;
   /**
    * Where this solid's faces cross or coincide with `other`'s: chains along the curves the faces
    * meet on (one per face pair per branch -- join them by matching ends) and overlaps where a face
@@ -348,9 +859,27 @@ export class Solid {
    * `accuracy` is relative and 0 asks for the library's default.
    */
   mass(accuracy?: number): Mass;
+  /** This closed solid's box on its principal axes; `accuracy` 0 or less asks for the box's own default, 1e-5. */
+  orientedBox(accuracy?: number): OrientedBox;
+  /** The length of edge `edge` (an index into `edges()`), measured to the relative `accuracy` (0: the default). */
+  edgeLength(edge: number, accuracy?: number): Length;
+  /** The point of edge `edge` `s` along it from the start of its curve range; `accuracy` 0 or less asks for the default. */
+  edgePointAtLength(edge: number, s: number, accuracy?: number): At;
+  /** Edge `edge` in `n` (1 to 1,000,000) pieces of equal arc length: `n + 1` samples, or `n` for a closed edge. */
+  edgeDivideByCount(edge: number, n: number, accuracy?: number): At[];
+  /** Edge `edge` every `step` of arc length; the short last piece is kept. */
+  edgeDivideByLength(edge: number, step: number, accuracy?: number): At[];
+  /** Where `point` is: inside, outside, or on within `tolerance` (0.05 by default) of the boundary. Meshes every call. */
+  contains(point: Point3, tolerance?: number): Containment;
+  /** A `Classifier` for this closed solid at `tolerance` (0.05 by default): meshed once, asked point after point. */
+  classifier(tolerance?: number): Classifier;
+  /** The closest points between this solid's boundary and `other`'s, to `tolerance` (0.05 by default); this solid is side `a`. `progress` hears 'meshing', 'pruning' and 'refining'; over the wasm it is never called. */
+  closest(other: Solid, tolerance?: number, progress?: Progress | null): Closest;
   /** This solid's box at `tolerance`: its boolean mesh, padded by twice that -- the
    *  broad phase's own bound (`Collider` builds one per part at construction). */
   boundsBox(tolerance?: number): Box;
+  /** One thickness for face `face` of this solid alone, on a `ThicknessGauge` meshed at `tolerance` (0.01 by default), used once and freed; null where nothing is found. `maximum` has no default. */
+  thicknessAtFace(face: number, options: ThicknessAtFaceOptions & { tolerance?: number }): FaceThickness | null;
   mesh(tolerance?: number): SolidMesh;
   /** `mesh` in `double`, from the same tessellation cache -- unnarrowed positions/normals. */
   mesh64(tolerance?: number): SolidMesh64;
@@ -404,6 +933,8 @@ export class Solid {
    */
   silhouetteBeziers(options?: SvgOptions): SilhouetteCurves;
   selectFace(selector: Selector): number;
+  /** An `RTree` over this solid's faces: one entry per face, its id the face index, its box holding the face (grown by a thousandth of the solid's extent). The tree outlives the solid. */
+  faceTree(): RTree;
   faceFrame(face: number): number[];
   /** Face `face` by what it is, eight numbers (kind, point x y z, normal x y z, extent): what a feature made on the face keeps, to find the face again with `findFace` on a rebuilt solid. */
   faceRef(face: number): number[];
@@ -414,6 +945,19 @@ export class Solid {
   named(name: string): Solid;
   /** This solid's name, or null if it has none -- what `named` set, kept or dropped by whatever built this solid. */
   readonly name: string | null;
+  /** This solid made of `material`, written to STEP as its product's MATERIAL_DESIGNATION; kept by
+   *  operations as its colour is (a boolean's result takes its first solid's). Refused when blank. */
+  withMaterial(material: string): Solid;
+  /** What this solid is made of, or null. */
+  readonly material: string | null;
+  /** This solid drawn in a style defined outside the file (`identification` in the library at
+   *  `location`: a MaterialX or MDL file), written to STEP as an EXTERNALLY_DEFINED_STYLE beside
+   *  its colour. Either may be null, not both. */
+  styled(location?: string | null, identification?: string | null): Solid;
+  /** Where this solid's outside style lives, or null. */
+  readonly styleLocation: string | null;
+  /** This solid's outside style's name in its library, or null. */
+  readonly styleIdentification: string | null;
   coloured(colour: string | Iterable<number>, face?: number | null): Solid;
   readonly colour: [number, number, number] | null;
   faceColour(face: number): [number, number, number] | null;
@@ -472,6 +1016,23 @@ export interface PosedOptions {
   state?: JointKey | null;
   /** One of the assembly's own links, held fixed. */
   ground?: string | null;
+}
+/** `Assembly.sweptClash`'s options. */
+export interface AssemblySweptClashOptions {
+  /** How close counts as a clash, 0 by default. */
+  clearance?: number;
+  /** The meshing tolerance, 0.05 by default. */
+  tolerance?: number;
+  /** How closely an interval's end is found, in (0, 1], 1e-3 by default. */
+  resolution?: number;
+  /** The pose-wise tests one pair may take, 100000 by default. */
+  maxSteps?: number;
+  /** Pairs of part indices never tested, flattened: `[a0, b0, a1, b1, ...]`. */
+  allowed?: ArrayLike<number>;
+  /** One of this assembly's links held fixed; null for its default. */
+  ground?: string | null;
+  /** Test pairs on two links a joint joins too. */
+  joined?: boolean;
 }
 
 export interface PairWithOptions {
@@ -543,6 +1104,26 @@ export class Assembly {
    */
   posed(values?: PosedValues | null, options?: PosedOptions): Assembly;
   /**
+   * The placement path of every solid under this assembly, at any depth: depth first,
+   * placements in order, names joined by "/" with a "/" or backslash inside a name escaped with
+   * a backslash (as `posed`'s keys). The index `sweptClash`'s rows use.
+   */
+  parts(): string[];
+  /**
+   * Every pair of this assembly's solids (indexed as `parts()` lists them) that penetrates,
+   * touches or comes within `clearance` (0 by default) of the other anywhere while this
+   * assembly's own mechanism moves through `keyframes`, as `SweptClash` rows. Each keyframe is
+   * `posed`'s `values`, and every keyframe names the same joints with as many values each (the
+   * first fixes their order); keyframe `k` is at time `k`. Between two keyframes each joint value
+   * moves linearly, so a link swinging about a joint goes round its arc. Only this assembly's own
+   * joints move: a sub-assembly rides the link its placement is in. `ground` one of this
+   * assembly's links held fixed; pairs on two links a joint joins are tested only when `joined`;
+   * `allowed` flattened pairs of part indices never tested. `tolerance` (0.05) meshes the parts;
+   * `resolution` (1e-3) and `maxSteps` (100000) as `Collider.sweptClash`. Throws in the
+   * kernel's `swept_clash:` words.
+   */
+  sweptClash(keyframes: Iterable<PosedValues>, options?: AssemblySweptClashOptions): SweptClash[];
+  /**
    * Add a named motion sequence over this assembly's states: `segments` are `[state, t,
    * interpolation]` rows, the interpolation `'undefined'`, `'discontinuous'`, `'synchronous'` or
    * `'linear'`; `seconds` writes the parameter's unit as the second. Closed unless the last
@@ -583,6 +1164,8 @@ export class Curve {
   origin: number[]; x: number[]; y: number[]; z: number[];
   radius: number; radius2: number; t0: number; t1: number;
   degree: number; knots: number[]; poles: number[][]; weights: number[] | null;
+  /** This curve as a value: a `Line`, a `Circle` (a full turn), an `Arc` or an `Ellipse`; null for any other kind. */
+  readonly value: CurveValue | null;
 }
 /** What `Solid.hits` found: `hits` (a on the profile, b on the solid's faces) and `pieces` (empty for an open body). */
 export class SolidHits {
@@ -627,7 +1210,7 @@ export class Chain {
 /**
  * A coincident face pair: `faces` (`[face in a, face in b]`) and `loops`, the shared region's rings
  * (outer first, holes after; each ring closed without repeating its first point) -- empty for a
- * partial overlap whose outlines cross.
+ * partial overlap of curved faces whose outlines cross.
  */
 export class Overlap {
   private constructor();
@@ -683,6 +1266,79 @@ export class CollisionHit {
    *  refused pair, or a collisions handle already closed some other way. */
   solid(): Solid;
 }
+/** What a clash row found: the parts' interiors overlap, their boundaries lie within the
+ *  tolerance of each other, they are apart by less than the clearance, or the pair could not be
+ *  decided. */
+export type ClashKind = 'penetrating' | 'touching' | 'too_close' | 'refused';
+/**
+ * One pair `Collider.clash` or `clash` found: `a`, `b` the part indices (for one set or a collider
+ * `a < b`; for two sets `a` indexes the first and `b` the second), `kind` (see `ClashKind`;
+ * `text` says why for a refused pair). `distance` is the gap between the two boundaries (0 for a
+ * penetrating or refused pair); `onA`/`onB` world points -- the closest pair, or for a
+ * penetrating pair the centre of the overlap's world box. `kindA`, `indexA`, `edgeA` (and `B`)
+ * say what each point lies on as `Solid.closest` does; for a penetrating or refused pair the
+ * kinds are `'none'` and the indices and edges null. `refined` is true where the distance is
+ * measured on the exact surfaces; `depth` the thinnest side of a penetrating pair's overlap box
+ * (0 otherwise). Every row of one call keeps that call's handle alive until the last of them is
+ * unreachable.
+ */
+export class Clash {
+  private constructor();
+  a: number;
+  b: number;
+  kind: ClashKind;
+  distance: number;
+  onA: number[];
+  onB: number[];
+  kindA: 'face' | 'edge' | 'vertex' | 'none';
+  /** The kernel's id for side `a`'s feature; null for kind `'none'`. */
+  indexA: number | null;
+  /** The index `fillet` and `Solid.edges` use for side `a`'s edge; null for a face, a vertex, an edge the fillet table does not hold, or kind `'none'`. */
+  edgeA: number | null;
+  kindB: 'face' | 'edge' | 'vertex' | 'none';
+  indexB: number | null;
+  edgeB: number | null;
+  refined: boolean;
+  depth: number;
+  text: string;
+  /** The exact shared volume of this penetrating pair at the placement it was found at, as a new
+   *  solid. Throws for a pair that is not penetrating. */
+  solid(): Solid;
+  /** Where this pair's two parts cross or coincide at the placement it was found at, as
+   *  `Solid.intersect` reports it (a touching pair's shared face is an `Overlap`). Throws for a
+   *  refused pair. */
+  intersect(): Intersection;
+}
+/**
+ * One pair `Collider.sweptClash` or `sweptClash` found: `a`, `b` the part indices (for one set or
+ * a collider `a < b`; for two sets `a` indexes the first and `b` the second). `firstTime` is the
+ * first time the pair came within the clearance, in pose units (pose `k` at time `k`; for a
+ * refused pair the time it was refused at), and `first` the `Clash` there, at the frames the
+ * motion places the parts at that time, so `first.solid()` and `first.intersect()` rebuild the
+ * contact there. `intervals` are the time ranges the pair stays in clash, `[start, end]` pairs,
+ * ascending and disjoint (none for a refused pair).
+ */
+export class SweptClash {
+  private constructor();
+  a: number;
+  b: number;
+  firstTime: number;
+  first: Clash;
+  intervals: [number, number][];
+}
+/**
+ * A closed solid meshed once and asked where point after point lies (`Solid.classifier`). It keeps
+ * its own reference to the body, so it answers on after that solid is closed. `close()` frees this
+ * handle; so does leaving a `using` block or the garbage collector.
+ */
+export class Classifier {
+  constructor(solid: Solid, tolerance?: number);
+  close(): void;
+  readonly closed: boolean;
+  [Symbol.dispose](): void;
+  /** Where `point` is: inside, outside, or on within the tolerance of the boundary. */
+  contains(point: Point3): Containment;
+}
 /**
  * Parts meshed once, asked pose after pose which of them interfere. `close()` frees this handle;
  * so does leaving a `using` block or the garbage collector.
@@ -707,6 +1363,228 @@ export class Collider {
    * same as omitted: the C ABI reads `n` 0 as every pair.
    */
   check(frames: FrameLike[], share?: [number, number] | null): CollisionHit[];
+  /**
+   * Every pair of parts that penetrates, touches or lies within `clearance` (0 by default; zero
+   * or more) of the other, as `Clash` rows in pair order, with each group placed at its matching
+   * frame in `frames` (as for `check`); `share` as for `check`. The collider keeps each measured
+   * part's closest mesh for its lifetime. Throws for a negative or non-finite `clearance`, the
+   * wrong number of frames or a bad `share`.
+   */
+  clash(frames: FrameLike[], clearance?: number, share?: [number, number] | null): Clash[];
+  /**
+   * Every pair of parts that penetrates, touches or comes within `clearance` (0 by default) of
+   * the other anywhere on the path through `poses` -- not only at the poses -- as `SweptClash`
+   * rows in pair order. `poses` is two or more poses, each the `frames` `clash` takes. Between
+   * two poses each group moves rigidly about the centre of its rest box (straight line, steady
+   * shorter-way rotation); time runs in pose units. `resolution` (1e-3 by default, in (0, 1]) is
+   * how closely an interval's end is found; `maxSteps` (100000 by default) the pose-wise tests
+   * one pair may take -- past it the pair is a `'refused'` row. `share` as for `check`, over the
+   * pairs whose swept boxes meet. Throws for fewer than two poses, the wrong number of frames in
+   * a pose, a bad frame, `clearance`, `resolution` or `share`, or `maxSteps` 0.
+   */
+  sweptClash(poses: Iterable<Iterable<FrameLike>>, clearance?: number, resolution?: number, maxSteps?: number, share?: [number, number] | null): SweptClash[];
+}
+/** An R-tree box: `[min, max]` (two triples), a `Box`, `{ min, max }`, or 6 numbers `[minx, miny, minz, maxx, maxy, maxz]`; a point (3 numbers) stands for a zero box. */
+export type RTreeBox = [ArrayLike<number>, ArrayLike<number>] | Box | { min: ArrayLike<number>; max: ArrayLike<number> } | ArrayLike<number>;
+/** One `within` / `nearest` answer: `[id, distance]`, the distance from the point to the entry's box (0 inside it). */
+export type RTreeHit = [number, number];
+/** One overlapping pair of entry ids, `[a, b]`. */
+export type RTreePair = [number, number];
+/**
+ * A spatial index over boxes with ids (an R*-tree). Ids are whole numbers from 0 to 4294967295,
+ * the caller's own, and may repeat. Answers come in a fixed order: `search` ids ascending,
+ * `within` / `nearest` by distance then id, pairs ascending. The tree changes in place;
+ * `close()` frees it; so does leaving a `using` block or the garbage collector.
+ */
+export class RTree {
+  /** An empty tree. */
+  constructor();
+  /** A tree over `[id, box]` pairs at once, packed: fuller and faster to query than inserting them one by one. */
+  static fromBoxes(entries: Iterable<[number, RTreeBox]>): RTree;
+  /** A tree over `points`, each a zero box whose id is its index. */
+  static fromPoints(points: Iterable<Point3>): RTree;
+  /** A tree over a mesh's triangles (three indices into `positions` each), one entry per triangle, its id the triangle's index, its box its three corners' box. */
+  static fromTriangles(positions: Iterable<Point3>, triangles: Iterable<ArrayLike<number>>): RTree;
+  close(): void;
+  readonly closed: boolean;
+  [Symbol.dispose](): void;
+  /** How many entries the tree holds. */
+  readonly count: number;
+  /** The union of every entry's box as `[min, max]`, or null for an empty tree. */
+  readonly bounds: [number[], number[]] | null;
+  /** Add the entry `[id, box]`, `box` a box or a point. */
+  insert(id: number, box: RTreeBox): void;
+  /** Take out one entry equal to `[id, box]` (the box it was inserted with); false when there is none. */
+  remove(id: number, box: RTreeBox): boolean;
+  /** The ids of every entry whose box meets `box` (touching counts), ascending. */
+  search(box: RTreeBox): number[];
+  /** Every entry whose box is within `r` of `point`, by distance then id. */
+  within(point: Point3, r: number): RTreeHit[];
+  /** The `k` (0 to 1,000,000) entries nearest `point`, by distance then id; all of them when `k` is over the count. */
+  nearest(point: Point3, k: number): RTreeHit[];
+  /** Every entry whose box the ray `origin + t * direction`, `0 <= t <= maxT` (Infinity by default), meets, as `[id, t]` by `t` then id, `t` where the ray enters the box (0 inside it). */
+  ray(origin: Point3, direction: Point3, maxT?: number): RTreeHit[];
+  /** Every pair `[a, b]`, `a` an entry of this tree and `b` one of `other`, at most `slack` (0 by default) apart, ascending. */
+  overlaps(other: RTree, slack?: number): RTreePair[];
+  /** Every unordered pair of distinct entries at most `slack` apart, once each as `[smaller id, larger id]`, ascending. */
+  selfOverlaps(slack?: number): RTreePair[];
+}
+/** For each of `needles`, the indices of the `hay` points within `limit` of it, by distance then index. */
+export function closestPoints(hay: Iterable<Point3>, needles: Iterable<Point3>, limit: number): number[][];
+/** For each of `needles`, the indices of the `k` (0 to 1,000,000) nearest `hay` points, by distance then index. */
+export function kNeighbors(hay: Iterable<Point3>, needles: Iterable<Point3>, k: number): number[][];
+/**
+ * Every pair of `parts` -- or, with `others`, every part of `parts` against every part of
+ * `others` -- that penetrates, touches or lies within `clearance` (0 by default) of the other,
+ * as `Clash` rows, the solids as they stand, meshed at `tolerance` (0.05 by default). `allowed`
+ * pairs never tested, flattened as `Collider`'s (`[a0, b0, a1, b1, ...]`; with `others` an index
+ * in `parts` then one in `others`). Throws for an empty `others`, an `allowed` of odd length or
+ * with an entry that is not a whole number from 0 to 4294967295 or out of range, a bad
+ * `clearance` or `tolerance`, or a part that is not a closed solid.
+ */
+export function clash(parts: Iterable<Solid>, others?: Iterable<Solid> | null, clearance?: number, tolerance?: number, allowed?: ArrayLike<number>): Clash[];
+/**
+ * Every pair of `parts` -- or, with `others`, every part of `parts` against every part of
+ * `others` -- that penetrates, touches or comes within `clearance` (0 by default) of the other
+ * anywhere on a path, as `SweptClash` rows. Each part is its own group: pose `k` of `poses` is one
+ * frame per part of `parts`, pose `k` of `otherPoses` one per part of `others` (the two go
+ * together, and have as many poses). The motion, `resolution` and `maxSteps` are
+ * `Collider.sweptClash`'s; `tolerance` the meshing tolerance (0.05 by default); `allowed` as
+ * `clash`'s. Throws as `Collider.sweptClash` does, and for `others` without `otherPoses` (or the
+ * other way round), pose counts that differ, a pose with the wrong number of frames, an empty
+ * `others`, an `allowed` `clash` refuses, or a part that is not a closed solid.
+ */
+export function sweptClash(parts: Iterable<Solid>, poses: Iterable<Iterable<FrameLike>>, others?: Iterable<Solid> | null, otherPoses?: Iterable<Iterable<FrameLike>> | null, clearance?: number, tolerance?: number, resolution?: number, maxSteps?: number, allowed?: ArrayLike<number>): SweptClash[];
+/**
+ * One wall-thickness reading on a solid (`ThicknessGauge.thickness` / `.thicknessAt`, `thickness`).
+ * `point` lies on face `face` of body `body` (the body's index in the gauge): at vertex `vertex` of
+ * that body's measuring mesh (`ThicknessGauge.mesh`), or `vertex` null for a reading at a point.
+ * `thickness` is the nearest-opposing-wall rule on the measuring mesh, to `opposite` on face
+ * `oppositeFace` of body `oppositeBody`; `knife` marks a knife edge (thickness 0, `opposite` ==
+ * `point`). `exactOpposite` is `opposite` moved onto its exact face where its foot lies within the
+ * tolerance and inside the face's trims, `exactThickness` the distance to it. `sphere` is the
+ * diameter of the largest ball tangent at `point` that holds none of the surfaces, null where none
+ * under the maximum does (0 on a knife edge).
+ */
+export class Thickness {
+  private constructor();
+  body: number;
+  vertex: number | null;
+  face: number;
+  point: number[];
+  thickness: number;
+  opposite: number[];
+  oppositeBody: number;
+  oppositeFace: number;
+  knife: boolean;
+  exactThickness: number;
+  exactOpposite: number[];
+  sphere: number | null;
+}
+/** A face's thickness, found: `thickness` the median of the face's vertex readings (or the reading at `at`), `min` and `max` their extremes, `uniform` whether `max - min` is within the gauge's tolerance. */
+export class FaceThickness {
+  private constructor();
+  thickness: number;
+  min: number;
+  max: number;
+  uniform: boolean;
+}
+/** A body's measuring mesh, copied out of the gauge: `positions` and `normals` (unit, outward) one `[x, y, z]` per vertex (a reading's `vertex` indexes them), `triangles` three vertex indices each, `faces` the B-rep face of each triangle. */
+export class ThicknessMesh {
+  private constructor();
+  positions: number[][];
+  normals: number[][];
+  triangles: number[][];
+  faces: number[];
+}
+/** One reading on a plain mesh (`meshThickness`): vertex `vertex` of mesh `mesh`, at `point`, reads `thickness` to `opposite` on triangle `oppositeTriangle` of mesh `oppositeMesh`. `knife`: a knife edge, thickness 0 and `opposite` == `point`. */
+export class MeshThickness {
+  private constructor();
+  mesh: number;
+  vertex: number;
+  thickness: number;
+  point: number[];
+  opposite: number[];
+  oppositeMesh: number;
+  oppositeTriangle: number;
+  knife: boolean;
+}
+/** The options of a face-thickness call: `at` a point whose foot on the face is measured (omitted or null: over the face's vertices), `maximum` the limit (positive and finite; no default). */
+export interface ThicknessAtFaceOptions { at?: Point3 | null; maximum: number }
+/**
+ * Wall thickness (the nearest-opposing-wall rule) over `solids`, measured against each other: each
+ * solid meshed once at `tolerance` -- absolute, in model units (0.01 by default) -- then asked as
+ * often as needed. A reading's `body` is the solid's index in `solids`. The gauge keeps its own
+ * reference to the bodies, so it answers on after the solids are closed. `close()` frees this
+ * handle; so does leaving a `using` block or the garbage collector. Throws for a `tolerance` not
+ * positive and finite.
+ */
+export class ThicknessGauge {
+  constructor(solids: Iterable<Solid>, tolerance?: number);
+  close(): void;
+  readonly closed: boolean;
+  [Symbol.dispose](): void;
+  /** How many bodies the gauge measures. */
+  readonly bodyCount: number;
+  /** The tolerance the gauge meshed its bodies at. */
+  readonly tolerance: number;
+  /** One reading per measuring-mesh vertex that has one within `maximum` (positive and finite), by body then vertex; vertices whose interior angle is under `sharpAngle` radians (0 by default) are knife edges. */
+  thickness(maximum: number, sharpAngle?: number): Thickness[];
+  /** The reading at `point`'s foot on face `face` of body `body` (its `vertex` null), or null where the foot lies off the face or the wall is thicker than `maximum`. */
+  thicknessAt(body: number, face: number, point: Point3, maximum: number, sharpAngle?: number): Thickness | null;
+  /** One thickness for face `face` of body `body`, at `at`'s foot or over the face's vertices; null where nothing is found. The `maximum` has no default. */
+  thicknessAtFace(body: number, face: number, options: ThicknessAtFaceOptions): FaceThickness | null;
+  /** Body `body`'s measuring mesh, copied out (it outlives the gauge). */
+  mesh(body: number): ThicknessMesh;
+}
+/** `new ThicknessGauge(solids, tolerance).thickness(maximum, sharpAngle)` on a gauge used once and freed: every reading within `maximum` on the solids, measured against each other. */
+export function thickness(solids: Iterable<Solid>, maximum: number, sharpAngle?: number, tolerance?: number): Thickness[];
+/** A plain mesh for `meshThickness`: `{ positions, triangles }` or a `[positions, triangles]` pair, `[x, y, z]` points and triples of indices into its own points. */
+export type ThicknessMeshInput = { positions: Iterable<ArrayLike<number>>; triangles: Iterable<ArrayLike<number>> } | [Iterable<ArrayLike<number>>, Iterable<ArrayLike<number>>];
+/** The nearest-opposing-wall rule on plain meshes measured against each other: one reading per vertex that has one within `maximum`, by mesh then vertex. `sharpAngle` as for `ThicknessGauge.thickness`. */
+export function meshThickness(meshes: Iterable<ThicknessMeshInput>, maximum: number, sharpAngle?: number): MeshThickness[];
+/** One side of one face bounding a region: `sense` +1 where the region is the side the face's normal points to, -1 the other. */
+export interface FaceSide { readonly face: number; readonly sense: 1 | -1 }
+/**
+ * One region of space a solid's faces bound (`Solid.regions`): its `index` (0 the infinite region,
+ * whose `finite` is false), the `box` round its faces, its `sides` ascending by face then sense,
+ * and its `shells` -- 1, plus one per void inside it. A plain frozen object.
+ */
+export interface Region {
+  readonly index: number;
+  readonly finite: boolean;
+  readonly box: Box;
+  readonly sides: readonly FaceSide[];
+  readonly shells: number;
+}
+/** An interpolator's mode, by Python's names; `'linear'` is the default. */
+export type InterpolatorMode = 'nearest' | 'linear' | 'cosine' | 'cubic' | 'catmull_rom';
+/**
+ * A list of samples read at a fractional index, as Rhino's `Interpolator`: `t = 2.5` is halfway
+ * between samples 2 and 3. Samples are numbers (answered as numbers) or equal-length arrays of
+ * numbers (answered as arrays). An open list clamps `t` to its ends; a `cyclic` one wraps it.
+ * It never changes once made; `close()` frees it, so does leaving a `using` block or the garbage collector.
+ */
+export class Interpolator {
+  constructor(samples: Iterable<number> | Iterable<ArrayLike<number>>, cyclic?: boolean);
+  close(): void;
+  readonly closed: boolean;
+  [Symbol.dispose](): void;
+  /** How many samples. */
+  readonly count: number;
+  /** How many numbers per sample: 1 answers numbers, more answers arrays. */
+  readonly dimension: number;
+  /** Whether `t` wraps round the list (else it is clamped to the ends). */
+  readonly cyclic: boolean;
+  /** The value at the fractional index `t` by `mode` (`'linear'` by default): a number at dimension 1, an array otherwise. */
+  at(t: number, mode?: InterpolatorMode): number | number[];
+  /** The values at every `t` of `ts` by `mode`, as `at` reads each, in one call. */
+  sample(ts: Iterable<number>, mode?: InterpolatorMode): (number | number[])[];
+  nearest(t: number): number | number[];
+  linear(t: number): number | number[];
+  cosine(t: number): number | number[];
+  cubic(t: number): number | number[];
+  catmullRom(t: number): number | number[];
 }
 export class Edge {
   private constructor();
@@ -784,6 +1662,8 @@ export class Subd {
   pin(vertices: ArrayLike<number>, on?: boolean): Subd;
   extrude(faces: ArrayLike<number>, distance: number): Subd;
   inset(faces: ArrayLike<number>, amount: number, individual?: boolean): Subd;
+  /** A new cage with `faces` subdivided once by the Catmull-Clark rules (the whole cage when no faces are given): each face becomes quads round a new point, and an unpicked face beside them takes the new edge points as corners. The whole cage keeps its smooth surface exactly. The new cage selects the new faces. */
+  subdivide(faces?: ArrayLike<number>): Subd;
   insertLoop(edge: SubdEdge, at?: number): Subd;
   /** Empty when `edge` is not an edge of the cage. */
   edgeLoop(edge: SubdEdge): SubdEdge[];
@@ -796,6 +1676,118 @@ export class Subd {
   pick(point: Point3, kind: 'vertex' | 'face'): number | null;
   pick(point: Point3, kind: 'edge'): SubdEdge | null;
   toSolid(tolerance?: number, g1Angle?: number, maxLevels?: number): { solid: Solid; report: SubdReport };
+}
+export type SketchEntityKind = 'point' | 'line' | 'circle' | 'arc' | 'free_curve';
+export type SketchConstraintKind =
+  | 'coincident' | 'point_on_line' | 'point_on_circle' | 'horizontal' | 'vertical' | 'parallel' | 'perpendicular'
+  | 'collinear' | 'tangent' | 'tangent_at_end' | 'concentric' | 'equal_length' | 'equal_radius' | 'midpoint'
+  | 'symmetric' | 'fix' | 'distance' | 'point_line_distance' | 'line_distance' | 'circle_line_distance'
+  | 'circle_distance' | 'horizontal_distance' | 'vertical_distance' | 'length' | 'angle' | 'radius' | 'diameter';
+export type SketchSense = 'auto' | 'positive' | 'negative';
+export type SketchEnd = 'start' | 'end';
+export type SketchStatus = 'converged' | 'conflicting' | 'diverged';
+export type SketchState = 'under' | 'full' | 'over';
+/** What a solve did; `ids` the constraints a conflict ran into, or the worst of a diverged solve (empty when it converged). */
+export class SolveReport {
+  private constructor();
+  status: SketchStatus; iterations: number; maxResidual: number; ids: number[];
+  readonly converged: boolean;
+}
+/** One independent part of a diagnosed sketch. */
+export class PartDof {
+  private constructor();
+  params: number; free: number; state: SketchState;
+  constraints: number[]; redundant: number[]; conflicting: number[]; freeEntities: number[];
+}
+/** A sketch's degrees of freedom (`Sketch.diagnose`), whole and per independent part. */
+export class Dof {
+  private constructor();
+  free: number; state: SketchState;
+  redundant: number[]; conflicting: number[]; freeEntities: number[]; parts: PartDof[];
+}
+/**
+ * A 2D sketch of points, lines, circles, arcs and free curves held by geometric constraints and
+ * dimensions, solved on request. Ids are numbers; a refusal throws `BuildError` whose `ids` name
+ * what it ran into. `close()` frees it; so does a `using` block or the garbage collector.
+ */
+export class Sketch {
+  constructor();
+  static fromProfile(profile: Profile, infer?: boolean, tolerance?: number): Sketch;
+  readonly closed: boolean;
+  close(): void;
+  [Symbol.dispose](): void;
+  addPoint(x: number, y: number): number;
+  addLine(a: number, b: number): number;
+  addCircle(centre: number, r: number): number;
+  addArc(centre: number, start: number, end: number): number;
+  addBezier(start: number, c1: Point2, c2: Point2, to: Point2): number;
+  addConic(start: number, control: Point2, to: Point2, weight: number): number;
+  /** `weights` null for a plain B-spline, or one per control point counting the start. */
+  addNurbs(start: number, points: Iterable<Point2>, knots: ArrayLike<number>, degree?: number, weights?: ArrayLike<number> | null): number;
+  /** `[corners, sides]`, four ids each. */
+  addRect(a: Point2, b: Point2): [number[], number[]];
+  kind(id: number): SketchEntityKind;
+  entities(): number[];
+  point(id: number): [number, number];
+  setPoint(id: number, x: number, y: number): void;
+  radius(id: number): number;
+  setRadius(id: number, r: number): void;
+  centre(id: number): number;
+  ends(id: number): number[];
+  setConstruction(id: number, on?: boolean): void;
+  isConstruction(id: number): boolean;
+  isReference(id: number): boolean;
+  removeEntity(id: number): number[];
+  reference(other: Sketch, entity: number): number;
+  updateReference(id: number, other: Sketch): SolveReport;
+  coincident(a: number, b: number): number;
+  pointOnLine(point: number, line: number): number;
+  pointOnCircle(point: number, circle: number): number;
+  horizontal(a: number, b: number): number;
+  vertical(a: number, b: number): number;
+  parallel(a: number, b: number): number;
+  perpendicular(a: number, b: number): number;
+  collinear(a: number, b: number): number;
+  tangent(a: number, b: number, sense?: SketchSense): number;
+  tangentAtEnd(curve: number, other: number, end?: SketchEnd): number;
+  concentric(a: number, b: number): number;
+  equalLength(a: number, b: number): number;
+  equalRadius(a: number, b: number): number;
+  midpoint(point: number, line: number): number;
+  symmetric(a: number, b: number, about: number): number;
+  fix(entity: number): number;
+  distance(a: number, b: number, value: number, driving?: boolean): number;
+  pointLineDistance(point: number, line: number, value: number, driving?: boolean, sense?: SketchSense): number;
+  lineDistance(a: number, b: number, value: number, driving?: boolean, sense?: SketchSense): number;
+  circleLineDistance(circle: number, line: number, value: number, driving?: boolean, sense?: SketchSense): number;
+  circleDistance(a: number, b: number, value: number, driving?: boolean): number;
+  horizontalDistance(a: number, b: number, value: number, driving?: boolean): number;
+  verticalDistance(a: number, b: number, value: number, driving?: boolean): number;
+  length(line: number, value: number, driving?: boolean): number;
+  /** In radians. */
+  angle(a: number, b: number, value: number, driving?: boolean): number;
+  /** The RADIUS dimension (kind 'radius'); `radius(id)` reads a radius. */
+  radiusOf(circle: number, value: number, driving?: boolean): number;
+  diameter(circle: number, value: number, driving?: boolean): number;
+  constraints(): number[];
+  constraintKind(id: number): SketchConstraintKind;
+  constraintRefs(id: number): number[];
+  /** Null for a constraint that is not a dimension. */
+  constraintValue(id: number): number | null;
+  constraintDriving(id: number): boolean;
+  constraintSense(id: number): SketchSense;
+  constraintEnd(id: number): SketchEnd;
+  isJointTangent(id: number): boolean;
+  remove(id: number): void;
+  setValue(id: number, value: number): SolveReport;
+  setDriving(id: number, driving: boolean): SolveReport;
+  measure(id: number): number;
+  solve(): SolveReport;
+  /** `moves` a `Map` or a plain object of point id to its `[x, y]` target. */
+  drag(moves: Map<number, Point2> | Record<number, Point2>): SolveReport;
+  diagnose(): Dof;
+  profiles(tolerance?: number): Profile[];
+  openChains(tolerance?: number): Profile[];
 }
 /** One place two curves meet: a point (start equals end; touch where tangent) or a run from start to end. */
 export class Hit {
@@ -883,12 +1875,13 @@ export class Operation {
 
 /** One thing `Job.machine()` left uncut: `kind` (`"corner"`, `"hole"`, `"slope"`,
  * `"undercut"` or `"too_deep"`), `at` (`[x, y, z]`), `size` (its meaning per `kind`),
- * `reason` (one sentence naming the tool involved), and `region` (its XY area, as a list
- * of `Profile`). Read-only. */
+ * `reason` (one sentence naming the tool involved), `region` (its XY area, as a list
+ * of `Profile`), and `top` and `bottom` (the highest and lowest Z it stands at, from the
+ * band's top down to its floor). Read-only. */
 export class ReportItem {
   private constructor();
   readonly kind: string; readonly at: number[]; readonly size: number; readonly reason: string;
-  readonly region: Profile[];
+  readonly region: Profile[]; readonly top: number; readonly bottom: number;
 }
 /** What `Job.machine()` could not make, read eagerly when it returns: a plain array of
  * `ReportItem`, in order, with a non-enumerable `text` (the kernel's own report text, one
@@ -936,11 +1929,13 @@ export class Job {
   drill(tool: Tool, points: Iterable<Point2>, top: number, bottom: number, peck?: number | null): void;
   /**
    * Recognise `part` and append the operations that make it: faced, contoured and
-   * pocketed with `endMill`, its holes drilled with whichever of `drills` fits each -- a
-   * tool per required diameter. `drills` may be one `Tool` as well as an array of them.
+   * pocketed with `endMill` -- or with several end mills, largest first, given as an
+   * array: each later one cleans what the earlier ones left, and the report lists only
+   * what none of them reached -- its holes drilled with whichever of `drills` fits each --
+   * a tool per required diameter. `drills` may be one `Tool` as well as an array of them.
    * Returns the machining's `Report` of what could not be cut.
    */
-  machine(part: Solid, endMill: Tool, drills?: Tool | Iterable<Tool>, stepover?: number | null, stepdown?: number | null, skin?: number, peck?: number | null): Report;
+  machine(part: Solid, endMill: Tool | (Tool | null)[], drills?: Tool | Iterable<Tool>, stepover?: number | null, stepdown?: number | null, skin?: number, peck?: number | null): Report;
   /** Every operation added to this job so far, in order -- whether added by
    * `face`/`contour`/`pocket`/`drill` or by `machine`. */
   operations(): Operation[];

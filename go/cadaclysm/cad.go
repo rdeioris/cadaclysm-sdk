@@ -2091,6 +2091,309 @@ type SewReport struct {
 	WorstGap, Tolerance, Vertex           float64
 }
 
+// Health is what is wrong with this brep, as a [HealthReport]: the free edges (the sides one
+// face bounds) and the wires they chain into, with each edge's nearest partner and the gap to
+// it; the features below tolerance; the loose edges; and what [Brep.Sewed] would join and
+// leave. tolerance is the length below which a feature is small and a gap closes -- nil, or a
+// value that is not finite and positive, takes the default (the report shows what was used).
+// mesh also meshes the brep and reports where the mesh cracks (Cracks); without it Cracks is
+// nil. Nothing moves.
+func (b *Brep) Health(tolerance *float64, mesh bool) (HealthReport, error) {
+	defer pin()()
+	if b == nil || b.ptr == nil {
+		return HealthReport{}, &CadaclysmError{Message: "brep: released"}
+	}
+	tol := math.NaN()
+	if tolerance != nil {
+		tol = *tolerance
+	}
+	h := C.cadaclysm_brep_health(b.ptr, C.double(tol), C.bool(mesh))
+	runtime.KeepAlive(b)
+	if h == nil {
+		return HealthReport{}, &CadaclysmError{Message: lastErrorOr("health")}
+	}
+	defer C.cadaclysm_brep_health_free(h)
+	var counts [18]uint32
+	var sizes [8]float64
+	if !bool(C.cadaclysm_brep_health_summary(h, (*C.uint32_t)(unsafe.Pointer(&counts[0])), (*C.double)(unsafe.Pointer(&sizes[0])))) {
+		return HealthReport{}, &CadaclysmError{Message: lastErrorOr("health")}
+	}
+	n := int(C.cadaclysm_brep_health_free_edges(h, nil, nil))
+	freeIDs, freeSizes := make([]uint32, 6*n), make([]float64, 2*n)
+	if n > 0 {
+		C.cadaclysm_brep_health_free_edges(h, (*C.uint32_t)(unsafe.Pointer(&freeIDs[0])), (*C.double)(unsafe.Pointer(&freeSizes[0])))
+	}
+	n = int(C.cadaclysm_brep_health_wires(h, nil, nil))
+	wireRuns, wireSizes := make([]uint32, 3*n), make([]float64, 2*n)
+	if n > 0 {
+		C.cadaclysm_brep_health_wires(h, (*C.uint32_t)(unsafe.Pointer(&wireRuns[0])), (*C.double)(unsafe.Pointer(&wireSizes[0])))
+	}
+	n = int(C.cadaclysm_brep_health_small(h, nil, nil))
+	smallItems, smallSizes := make([]uint32, 2*n), make([]float64, n)
+	if n > 0 {
+		C.cadaclysm_brep_health_small(h, (*C.uint32_t)(unsafe.Pointer(&smallItems[0])), (*C.double)(unsafe.Pointer(&smallSizes[0])))
+	}
+	n = int(C.cadaclysm_brep_health_crack_edges(h, nil))
+	crackEdges := make([]uint32, n)
+	if n > 0 {
+		C.cadaclysm_brep_health_crack_edges(h, (*C.uint32_t)(unsafe.Pointer(&crackEdges[0])))
+	}
+	return healthReport(counts[:], sizes[:], freeIDs, freeSizes, wireRuns, wireSizes, smallItems, smallSizes, crackEdges), nil
+}
+
+// Healed is this brep with its small features removed, and what was done, as a new [Brep] and
+// a [HealReport]; this one is left as it was. The features are the ones [Brep.Health] lists
+// as small at tolerance: short and collapsed edges, sliver and tiny faces, small holes. Every
+// fix is a vertex merge, and an edge it moves records how far as its [Brep.EdgeTolerance]. A
+// guard compares the result's health with this one's and refuses fixes that made it worse
+// (Guarded). edges, faces and holes switch each kind of fix -- pass true for all three to heal
+// everything; a kind switched off is refused as "toggled". A nil tolerance, or one that is not
+// finite and positive, takes the default (the report shows what was used). The new brep is the
+// caller's to Close.
+func (b *Brep) Healed(tolerance *float64, edges, faces, holes bool) (*Brep, HealReport, error) {
+	defer pin()()
+	if b == nil || b.ptr == nil {
+		return nil, HealReport{}, &CadaclysmError{Message: "brep: released"}
+	}
+	tol := math.NaN()
+	if tolerance != nil {
+		tol = *tolerance
+	}
+	h := C.cadaclysm_brep_healed(b.ptr, C.double(tol), C.uint32_t(healFlags(edges, faces, holes)))
+	runtime.KeepAlive(b)
+	if h == nil {
+		return nil, HealReport{}, &CadaclysmError{Message: lastErrorOr("healed")}
+	}
+	defer C.cadaclysm_brep_heal_free(h)
+	var counts [11]uint32
+	var sizes [2]float64
+	if !bool(C.cadaclysm_brep_heal_summary(h, (*C.uint32_t)(unsafe.Pointer(&counts[0])), (*C.double)(unsafe.Pointer(&sizes[0])))) {
+		return nil, HealReport{}, &CadaclysmError{Message: lastErrorOr("healed")}
+	}
+	n := int(C.cadaclysm_brep_heal_fixes(h, nil, nil))
+	fixItems, fixSizes := make([]uint32, 2*n), make([]float64, 2*n)
+	if n > 0 {
+		C.cadaclysm_brep_heal_fixes(h, (*C.uint32_t)(unsafe.Pointer(&fixItems[0])), (*C.double)(unsafe.Pointer(&fixSizes[0])))
+	}
+	n = int(C.cadaclysm_brep_heal_refused(h, nil, nil))
+	refusedItems, refusedSizes := make([]uint32, 3*n), make([]float64, n)
+	if n > 0 {
+		C.cadaclysm_brep_heal_refused(h, (*C.uint32_t)(unsafe.Pointer(&refusedItems[0])), (*C.double)(unsafe.Pointer(&refusedSizes[0])))
+	}
+	report := healReport(counts[:], sizes[:], fixItems, fixSizes, refusedItems, refusedSizes)
+	p := C.cadaclysm_brep_heal_body(h)
+	if p == nil {
+		return nil, HealReport{}, &CadaclysmError{Message: lastErrorOr("healed")}
+	}
+	healed := &Brep{ptr: p}
+	runtime.SetFinalizer(healed, (*Brep).Close)
+	return healed, report, nil
+}
+
+// EdgeTolerance is how far brep edge edge (as a [HealFix] or [FreeEdge] names one) may lie off
+// its curve: 0 for an exact edge, the distance healing (or sewing) moved it where that is
+// recorded, nil when no trim names the id (an edge healing removed).
+func (b *Brep) EdgeTolerance(edge uint32) (*float64, error) {
+	if b == nil || b.ptr == nil {
+		return nil, &CadaclysmError{Message: "brep: released"}
+	}
+	t := float64(C.cadaclysm_brep_edge_tolerance(b.ptr, C.uint32_t(edge)))
+	runtime.KeepAlive(b)
+	if math.IsNaN(t) {
+		return nil, nil
+	}
+	return &t, nil
+}
+
+// HealthReport is what is wrong with a body, as plain data ([Brep.Health]): the Tolerance and
+// Rounding it judged at and the body's Extent; the free edges, their wires, the features below
+// the tolerance; the loose edges (WorstLoose the farthest from any face); what sewing would do
+// (SewPairs joined, SewRefused, SewWorstGap); and, if asked for with mesh, the mesh's Cracks
+// (nil otherwise). WorstGap is the widest gap between a free edge and its partner.
+type HealthReport struct {
+	Tolerance, Rounding, Extent float64
+	FreeEdges                   []FreeEdge
+	Wires                       []FreeWire
+	Small                       []SmallFeature
+	LooseEdges                  int
+	WorstLoose                  float64
+	SewPairs, SewRefused        int
+	SewWorstGap                 float64
+	Cracks                      *Cracks
+	WorstGap                    float64
+}
+
+// WireEdges is the free edges of wire number wire, in order: the rows FreeEdges[First :
+// First+Count] of Wires[wire].
+func (r HealthReport) WireEdges(wire int) []FreeEdge {
+	w := r.Wires[wire]
+	return r.FreeEdges[w.First : w.First+w.Count]
+}
+
+// FreeEdge is one side a single face bounds (a free edge): its Trim (the face's side), the
+// Edge it lies on (nil for a side with no edge), the Face and free Wire (a row of
+// HealthReport.Wires) it is on, its nearest Partner across the gap (a row of
+// HealthReport.FreeEdges; nil if there is none), how many of its two ends it shares with that
+// partner (SharedEnds), its Length and the Gap to the partner (+Inf without one).
+type FreeEdge struct {
+	Trim       uint32
+	Edge       *uint32
+	Face       uint32
+	Wire       int
+	Partner    *int
+	SharedEnds int
+	Length     float64
+	Gap        float64
+}
+
+// FreeWire is a chain of free edges end to end: the rows FreeEdges[First : First+Count],
+// whether it Closed on itself, its total Length and the WidestGap to any partner.
+type FreeWire struct {
+	First, Count      int
+	Closed            bool
+	Length, WidestGap float64
+}
+
+// SmallFeature is something below the tolerance: Kind is "short_edge", "collapsed_edge",
+// "sliver_face", "tiny_face", "tiny_body" or "small_hole"; Index its edge, face, body or loop
+// number; Size how small.
+type SmallFeature struct {
+	Kind  string
+	Index uint32
+	Size  float64
+}
+
+// Cracks is what a mesh of the body shows (Health with mesh): whether it is Watertight, how
+// many mesh edges are Open or Folded, how many Crossings, and the brep Edges it cracks along.
+type Cracks struct {
+	Watertight              bool
+	Open, Folded, Crossings int
+	Edges                   []uint32
+}
+
+// HealReport is what [Brep.Healed] did, as plain data: the Tolerance it healed at, the
+// furthest any trim Moved, whether the body guard refused fixes (Guarded), the Fixes made and
+// the features Refused; and the body's health before and after at that tolerance -- its small
+// features, free edges, whether it is closed, and its non-manifold edges.
+type HealReport struct {
+	Tolerance, Moved                    float64
+	Guarded                             bool
+	Fixes                               []HealFix
+	Refused                             []HealRefusal
+	SmallBefore, SmallAfter             int
+	FreeBefore, FreeAfter               int
+	ClosedBefore, ClosedAfter           bool
+	NonmanifoldBefore, NonmanifoldAfter int
+}
+
+// HealFix is one small feature [Brep.Healed] removed: its Kind (as [SmallFeature]'s), its
+// Index in the input (the edge, face or loop number Health gave it), its Size, and how far
+// the vertex it merged Moved.
+type HealFix struct {
+	Kind        string
+	Index       uint32
+	Size, Moved float64
+}
+
+// HealRefusal is one small feature [Brep.Healed] left, and why: Kind and Index as in
+// [HealFix]; Why is "would_empty_loop", "closed", "seam", "chain" (a chain wider than the
+// tolerance), "neighbours_part" (a sliver's neighbours part), "uneven" (uneven sliver sides),
+// "non_manifold", "has_holes", "body_guard" (the fix made the body's health worse),
+// "toggled" (its kind switched off) or "unsupported"; Figure the chain's width or the
+// neighbours' gap, else 0.
+type HealRefusal struct {
+	Kind   string
+	Index  uint32
+	Why    string
+	Figure float64
+}
+
+// healthKinds are SmallFeature.Kind's words by the C ABI's kind number; healWhys
+// HealRefusal.Why's by its reason number.
+var (
+	healthKinds = [...]string{"short_edge", "collapsed_edge", "sliver_face", "tiny_face", "tiny_body", "small_hole"}
+	healWhys    = [...]string{"would_empty_loop", "closed", "seam", "chain", "neighbours_part", "uneven",
+		"non_manifold", "has_holes", "body_guard", "toggled", "unsupported"}
+)
+
+// healthReport is the health C ABI's flat rows as a HealthReport: counts[18] and sizes[8]
+// from the summary, then the free-edge, wire, small-feature and crack-edge rows.
+func healthReport(counts []uint32, sizes []float64, freeIDs []uint32, freeSizes []float64,
+	wireRuns []uint32, wireSizes []float64, smallItems []uint32, smallSizes []float64, crackEdges []uint32) HealthReport {
+	free := make([]FreeEdge, len(freeIDs)/6)
+	for i := range free {
+		ids := freeIDs[6*i : 6*i+6]
+		e := FreeEdge{Trim: ids[0], Face: ids[2], Wire: int(ids[3]), SharedEnds: int(ids[5]),
+			Length: freeSizes[2*i], Gap: freeSizes[2*i+1]}
+		if ids[1] != noneIndex {
+			edge := ids[1]
+			e.Edge = &edge
+		}
+		if ids[4] != noneIndex {
+			partner := int(ids[4])
+			e.Partner = &partner
+		}
+		free[i] = e
+	}
+	wires := make([]FreeWire, len(wireRuns)/3)
+	for i := range wires {
+		wires[i] = FreeWire{First: int(wireRuns[3*i]), Count: int(wireRuns[3*i+1]), Closed: wireRuns[3*i+2] != 0,
+			Length: wireSizes[2*i], WidestGap: wireSizes[2*i+1]}
+	}
+	small := make([]SmallFeature, len(smallSizes))
+	for i := range small {
+		small[i] = SmallFeature{Kind: healthKinds[smallItems[2*i]], Index: smallItems[2*i+1], Size: smallSizes[i]}
+	}
+	var cracks *Cracks
+	if counts[12] == 1 {
+		cracks = &Cracks{Watertight: counts[13] != 0, Open: int(counts[14]), Folded: int(counts[15]),
+			Crossings: int(counts[16]), Edges: append([]uint32{}, crackEdges...)}
+	}
+	return HealthReport{
+		Tolerance: sizes[0], Rounding: sizes[1], Extent: sizes[2], WorstGap: sizes[3],
+		FreeEdges: free, Wires: wires, Small: small,
+		LooseEdges: int(counts[9]), WorstLoose: sizes[4],
+		SewPairs: int(counts[10]), SewRefused: int(counts[11]), SewWorstGap: sizes[5],
+		Cracks: cracks,
+	}
+}
+
+// healReport is the heal C ABI's flat rows as a HealReport: counts[11] and sizes[2] from the
+// summary, then the fix and refusal rows.
+func healReport(counts []uint32, sizes []float64, fixItems []uint32, fixSizes []float64,
+	refusedItems []uint32, refusedSizes []float64) HealReport {
+	fixes := make([]HealFix, len(fixItems)/2)
+	for i := range fixes {
+		fixes[i] = HealFix{Kind: healthKinds[fixItems[2*i]], Index: fixItems[2*i+1], Size: fixSizes[2*i], Moved: fixSizes[2*i+1]}
+	}
+	refused := make([]HealRefusal, len(refusedSizes))
+	for i := range refused {
+		refused[i] = HealRefusal{Kind: healthKinds[refusedItems[3*i]], Index: refusedItems[3*i+1],
+			Why: healWhys[refusedItems[3*i+2]], Figure: refusedSizes[i]}
+	}
+	return HealReport{
+		Tolerance: sizes[0], Moved: sizes[1], Guarded: counts[2] != 0, Fixes: fixes, Refused: refused,
+		SmallBefore: int(counts[3]), SmallAfter: int(counts[4]), FreeBefore: int(counts[5]), FreeAfter: int(counts[6]),
+		ClosedBefore: counts[7] != 0, ClosedAfter: counts[8] != 0,
+		NonmanifoldBefore: int(counts[9]), NonmanifoldAfter: int(counts[10]),
+	}
+}
+
+// healFlags is Healed's switches as the C ABI's flag bits: 1 edges, 2 faces, 4 holes.
+func healFlags(edges, faces, holes bool) uint32 {
+	var flags uint32
+	if edges {
+		flags |= 1
+	}
+	if faces {
+		flags |= 2
+	}
+	if holes {
+		flags |= 4
+	}
+	return flags
+}
+
 // Close gives this reference back. Idempotent, and a no-op on a nil Brep. The error
 // return is always nil; it exists so a Brep defers like every other resource.
 func (b *Brep) Close() error {

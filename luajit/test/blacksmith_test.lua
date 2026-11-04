@@ -190,6 +190,223 @@ return function(t)
     big:close()
   end)
 
+  -- ---- transforms: Transform, Quaternion, Solid:transform / convert_to_nurbs, profile maps ----
+
+  local function F(x, y, z) return bs.Frame.xy({ x, y, z }) end
+
+  local function near3(actual, expected, tolerance, message)
+    t.ok(type(actual) == "table" and #actual == #expected, (message or "") .. ": wrong shape")
+    for i = 1, #expected do
+      if math.abs(actual[i] - expected[i]) > (tolerance or 1e-12) then
+        error(("%s: expected {%s}, got {%s}"):format(message or "near3", table.concat(expected, ", "),
+          table.concat(actual, ", ")), 2)
+      end
+    end
+  end
+
+  local function det3(m)
+    local r = m.rows
+    return r[1] * (r[6] * r[11] - r[7] * r[10]) - r[2] * (r[5] * r[11] - r[7] * r[9])
+      + r[3] * (r[5] * r[10] - r[6] * r[9])
+  end
+
+  t.test("a transform is sixteen numbers row-major and composes right to left", function()
+    local T = bs.Transform
+    local tr = T.translation({ 1, 2, 3 })
+    t.ok(same(tr.rows, { 1, 0, 0, 1, 0, 1, 0, 2, 0, 0, 1, 3, 0, 0, 0, 1 }), "translation rows")
+    t.eq(tr[4], 1, "a transform indexes as its sixteen numbers")
+    local s = T.scale({ 0, 0, 0 }, 2)
+    near3(tr:compose(s):point({ 1, 1, 1 }), { 3, 4, 5 }, 1e-12, "t after s, by compose")
+    near3(s:compose(tr):point({ 1, 1, 1 }), { 4, 6, 8 }, 1e-12, "s after t, by compose")
+    near3((tr * s):point({ 1, 1, 1 }), { 3, 4, 5 }, 1e-12, "t after s, by *")
+    near3((s * tr):point({ 1, 1, 1 }), { 4, 6, 8 }, 1e-12, "s after t, by *")
+    near3(((tr * s):inverse() * (tr * s)):point({ 3, -4, 5 }), { 3, -4, 5 }, 1e-12, "inverse undoes")
+    t.ok(T.from_rows(tr.rows) == tr, "from_rows(t.rows) == t")
+    t.ok(T() == T.identity(), "Transform() is the identity")
+    local r = tr.rows
+    t.ok(T({ { r[1], r[2], r[3], r[4] }, { r[5], r[6], r[7], r[8] }, { r[9], r[10], r[11], r[12] },
+      { r[13], r[14], r[15], r[16] } }) == tr, "four rows of four")
+    t.ok(not (tr == T.identity()), "different maps are not equal")
+    local e = t.raises(function() T({ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1 }) end,
+      "^Transform: the bottom row must be 0 0 0 1 %(a projective map is not affine%)")
+    t.ok(is_build_error(e))
+    t.raises(function() T({ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14 }) end,
+      "^Transform: a matrix is 16 numbers, got 15")
+    t.raises(function() T({ 1, 0, 0, 1 }) end, "^Transform: a matrix is 16 numbers, got 4")
+    t.raises(function() T({ 1, 0, 0, 0 / 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 }) end, "^Transform: not finite")
+    e = t.raises(function() T.scale_xyz(XY, 1, 1, 0):inverse() end, "^transform_inverse: the map is singular")
+    t.ok(is_build_error(e))
+  end)
+
+  t.test("the transform constructors match their closed forms", function()
+    local T, Fxy = bs.Transform, bs.Frame.xy()
+    near3(T.rotation({ 1, 0, 0 }, { 0, 0, 1 }, pi / 2):point({ 2, 0, 0 }), { 1, 1, 0 }, 1e-12, "rotation")
+    near3(T.mirror(F(0, 0, 5)):point({ 1, 2, 3 }), { 1, 2, 7 }, 1e-12, "mirror")
+    near3(T.scale_xyz(Fxy, 2, 3, 4):point({ 1, 1, 1 }), { 2, 3, 4 }, 1e-12, "scale_xyz")
+    near3(T.scale({ 1, 2, 3 }, 2):point({ 2, 2, 3 }), { 3, 2, 3 }, 1e-12, "scale")
+    near3(T.scale({ 1, 2, 3 }, 2):point({ 1, 2, 3 }), { 1, 2, 3 }, 1e-12, "scale fixes its centre")
+    near3(T.shear(Fxy, { 5, 0, 0 }, 0.5):point({ 0, 0, 2 }), { 1, 0, 2 }, 1e-12, "shear")
+    near3(T.planar_projection(Fxy):point({ 1, 2, 3 }), { 1, 2, 0 }, 1e-12, "planar_projection")
+    near3(T.project_along(Fxy, { 1, 0, 1 }):point({ 0, 0, 2 }), { -2, 0, 0 }, 1e-12, "project_along")
+    near3(T.plane_to_plane(Fxy, F(1, 2, 3)):point({ 0, 0, 0 }), { 1, 2, 3 }, 1e-12, "plane_to_plane")
+    near3(T.change_basis(F(1, 2, 3), Fxy):point({ 0, 0, 0 }), { 1, 2, 3 }, 1e-12, "change_basis")
+    local e = t.raises(function() T.shear(Fxy, { 0, 0, 1 }, 0.5) end,
+      "^transform_shear: the shear direction must lie in the plane")
+    t.ok(is_build_error(e))
+    -- The raw twelve numbers: Frame.new would square this one up (or refuse it) first.
+    t.raises(function() T.mirror({ 0, 0, 0, 1, 1e-3, 0, 0, 1, 0, 0, 0, 1 }) end,
+      "^transform_mirror: the frame is not right%-handed and orthonormal")
+  end)
+
+  t.test("maps are told and split", function()
+    local T, Fxy = bs.Transform, bs.Frame.xy()
+    local turn = T.rotation({ 1, 2, 3 }, { 1, 1, 0 }, 0.7)
+    t.ok(turn:is_rigid(), "a turn is rigid")
+    t.near(turn:is_similarity(), 1, 1e-9, "a turn's k")
+    local big = T.scale({ 0, 0, 0 }, 2.5) * turn
+    t.ok(not big:is_rigid(), "a scaled turn is not rigid")
+    t.near(big:is_similarity(), 2.5, 1e-9, "a scaled turn's k")
+    local split = big:decompose_similarity()
+    t.near(split.k, 2.5, 1e-9)
+    t.ok(split.orthogonal:is_rigid())
+    split = T.scale({ 1, 2, 3 }, 2):decompose_similarity()
+    near3(split.translation, { -1, -2, -3 }, 1e-12, "a scale's translation")
+    t.near(split.k, 2, 1e-12)
+    t.ok(split.orthogonal == T.identity(), "a scale's orthogonal part is the identity")
+    local rigid = turn:decompose_rigid()
+    local r = turn.rows
+    near3(rigid.translation, { r[4], r[8], r[12] }, 1e-12, "a turn's translation")
+    t.ok(rigid.orthogonal:is_rigid())
+    local stretch = T.scale_xyz(Fxy, 1, 2, 3)
+    t.eq(stretch:is_similarity(), nil)
+    t.eq(stretch:decompose_rigid(), nil)
+    t.eq(stretch:decompose_similarity(), nil)
+    local affine = (T.mirror(Fxy) * stretch):decompose_affine()
+    near3(affine.stretch, { 3, 2, 1 }, 1e-9, "stretch, largest first")
+    t.ok(affine.rotation:is_rigid() and affine.axes:is_rigid())
+    t.near(det3(affine.rotation), -1, 1e-9, "rotation carries the mirror")
+    t.near(det3(affine.axes), 1, 1e-9, "axes are a proper rotation")
+    t.eq(T.planar_projection(Fxy):decompose_affine(), nil)
+    local e = t.raises(function() turn:is_rigid(-1) end,
+      "^transform_is_rigid: the tolerance must be finite and not negative")
+    t.ok(is_build_error(e))
+    t.raises(function() turn:is_similarity(-1) end,
+      "^transform_is_similarity: the tolerance must be finite and not negative")
+  end)
+
+  t.test("a quaternion turns as its transform does", function()
+    local Q, T = bs.Quaternion, bs.Transform
+    local q = Q.from_axis_angle({ 0, 0, 2 }, pi / 2)
+    near3(q:values(), { math.cos(pi / 4), 0, 0, math.sin(pi / 4) }, 1e-12, "from_axis_angle")
+    t.near(q.angle, pi / 2, 1e-12)
+    near3(q.axis, { 0, 0, 1 }, 1e-12, "axis")
+    near3(q:to_transform({ 1, 0, 0 }):point({ 2, 0, 0 }), { 1, 1, 0 }, 1e-12, "about a centre")
+    near3(Q(2 * q.w, 2 * q.x, 2 * q.y, 2 * q.z):to_transform():point({ 1, 0, 0 }), { 0, 1, 0 }, 1e-12, "normalised")
+    near3(Q.from_transform(q:to_transform()):values(), q:values(), 1e-12, "from_transform")
+    t.near(Q.slerp(Q(), q, 0.25).angle, pi / 8, 1e-12, "slerp")
+    near3((q * q:conjugate()):values(), { 1, 0, 0, 0 }, 1e-12, "q times its conjugate")
+    t.ok(Q(0, 0, 0, 2):normalized() == Q(0, 0, 0, 1), "normalized")
+    t.ok(same((Q(1, 2, 3, 4) * Q(5, 6, 7, 8)):values(), { -60, 12, 30, 24 }), "the product, exactly")
+    local a = Q.from_axis_angle({ 1, 2, 3 }, 0.7)
+    local b = Q.from_axis_angle({ -2, 1, 0.5 }, 1.9)
+    t.ok(all_near((a * b):to_transform().rows, (a:to_transform() * b:to_transform()).rows, 1e-12),
+      "a * b turns as a's transform after b's")
+    near3((Q.from_axis_angle({ 1, 0, 0 }, pi / 2) * Q.from_axis_angle({ 0, 1, 0 }, pi / 2)):values(),
+      { 0.5, 0.5, 0.5, 0.5 }, 1e-12, "the product's signs")
+    local e = t.raises(function() Q(0, 0, 0, 0):to_transform() end, "^quaternion_to_transform: the quaternion is zero")
+    t.ok(is_build_error(e))
+    t.raises(function() Q.from_transform(T.mirror(bs.Frame.xy())) end, "^quaternion_from_transform: ")
+    t.raises(function() Q(0 / 0, 0, 0, 0) end, "^Quaternion: not finite")
+  end)
+
+  t.test("a quaternion far from unit length normalises like the ABI", function()
+    local Q = bs.Quaternion
+    local h = math.sqrt(0.5)
+    for _, k in ipairs({ 1e200, 1e-170 }) do
+      t.ok(Q(k, 0, 0, 0):normalized() == Q(1, 0, 0, 0), "(k, 0, 0, 0) at " .. k)
+      t.ok(Q(0, 0, 0, -k):normalized() == Q(0, 0, 0, -1), "(0, 0, 0, -k) at " .. k)
+      near3(Q(k, k, 0, 0):normalized():values(), { h, h, 0, 0 }, 1e-12, "(k, k, 0, 0) at " .. k)
+      local length = Q(k, k, 0, 0).length
+      t.ok(math.abs(length - k * math.sqrt(2)) <= 1e-15 * k * math.sqrt(2), "length at " .. k .. ": " .. length)
+      t.near(Q(k, k, 0, 0).angle, pi / 2, 1e-12, "angle at " .. k)
+      near3(Q(0, k, k, 0).axis, { h, h, 0 }, 1e-12, "axis at " .. k)
+    end
+    t.eq(Q().axis, nil, "the identity has no axis")
+    t.raises(function() Q(0, 0, 0, 0):normalized() end, "^Quaternion.normalized: the quaternion is zero")
+  end)
+
+  t.test("a solid takes any affine map", function()
+    local T, Fxy = bs.Transform, bs.Frame.xy()
+    local box = bs.Solid.cuboid(1, 2, 3)
+    t.eq(box.inexact_trims, 0, "a solid no map made has lost nothing")
+    local stretched = box:transform(T.scale_xyz(Fxy, 2, 3, 0.5))
+    local b = stretched:bounds_at(0.05)
+    near3({ b[2][1] - b[1][1], b[2][2] - b[1][2], b[2][3] - b[1][3] }, { 2, 6, 1.5 }, 1e-9, "stretched extents")
+    t.eq(stretched.inexact_trims, 0)
+    local moved = box:transform(T.translation({ 1, 0, 0 }).rows)
+    t.eq(moved.inexact_trims, 0, "sixteen numbers do too")
+    t.near(moved:bounds_at(0.05)[1][1], box:bounds_at(0.05)[1][1] + 1, 1e-9, "sixteen numbers move it")
+    local sheared = bs.Solid.cylinder(1, 2):transform(T.shear(Fxy, { 1, 0, 0 }, 0.5))
+    local volume = sheared:mass(1e-7).volume
+    t.ok(math.abs(volume - 2 * pi) <= 1e-6 * 2 * pi, "sheared volume " .. volume)
+    t.ok(#count_faces(sheared, "nurbs") > 0, "a shear turns the cylinder into a NURBS")
+    local e = t.raises(function() box:transform(T.scale_xyz(Fxy, 1, 1, 0)) end,
+      "^solid_transform: a singular map flattens the solid")
+    t.ok(is_build_error(e))
+  end)
+
+  t.test("a mapped solid keeps its colours and name", function()
+    local can = bs.Solid.cylinder(1, 2):coloured("#808080"):named("can")
+    local side = count_faces(can, "cylinder")[1]
+    can = can:coloured({ 0.2, 0.4, 1.0 }, side)
+    local shear = bs.Transform.shear(bs.Frame.xy(), { 1, 0, 0 }, 0.5)
+    for _, out in ipairs({ can:transform(shear), can:convert_to_nurbs() }) do
+      t.eq(out.faces, can.faces)
+      t.ok(same(out:face_colour(side), { 0.2, 0.4, 1.0 }), "the side keeps its colour")
+      for i = 0, out.faces - 1 do
+        if i ~= side then t.ok(same(out:face_colour(i), can.colour), "face " .. i .. " keeps the solid's colour") end
+      end
+      t.eq(out.name, "can")
+    end
+  end)
+
+  t.test("a solid converts to NURBS at each level", function()
+    local can = bs.Solid.cylinder(1, 2)
+    local every = can:convert_to_nurbs()
+    t.eq(#count_faces(every, "nurbs"), every.faces, "every face a NURBS")
+    t.eq(every.inexact_trims, 0)
+    local analytic = can:convert_to_nurbs("analytic")
+    t.ok(#count_faces(analytic, "plane") > 0 and #count_faces(analytic, "nurbs") > 0, "analytic keeps the planes")
+    local e = t.raises(function() can:convert_to_nurbs("some") end,
+      "^convert_to_nurbs: level 'some' is not \"procedural\", \"analytic\" or \"all\"")
+    t.ok(is_build_error(e))
+  end)
+
+  t.test("a profile turns, scales, mirrors and maps", function()
+    local rect = bs.Profile.rect(80, 40)
+    -- Spans and centres of the outline: a planar face's mesh keeps a straight-sided
+    -- outline's corners exactly.
+    local function box2(p)
+      local b = bs.Solid.face(p, XY):bounds_at(0.01)
+      return b[2][1] - b[1][1], b[2][2] - b[1][2], (b[2][1] + b[1][1]) / 2, (b[2][2] + b[1][2]) / 2
+    end
+    local sx, sy = box2(rect:rotate({ 0, 0 }, pi / 2))
+    t.near(sx, 40, 1e-3) t.near(sy, 80, 1e-3)
+    sx, sy = box2(rect:scale({ 0, 0 }, 0.5, 2))
+    t.near(sx, 40, 1e-3) t.near(sy, 80, 1e-3)
+    local _, _, rx, ry = box2(rect)
+    local _, _, cx, cy = box2(rect:rotate({ 10, 20 }, pi / 2))
+    t.near(cx, 10 - (ry - 20), 1e-3, "turned centre x") t.near(cy, 20 + (rx - 10), 1e-3, "turned centre y")
+    _, _, cx, cy = box2(rect:scale({ 10, 0 }, 0.5, 2))
+    t.near(cx, 10 + 0.5 * (rx - 10), 1e-3, "scaled centre x") t.near(cy, 2 * ry, 1e-3, "scaled centre y")
+    _, _, cx = box2(rect:mirror({ 100, 0 }, { 0, 1 }))
+    t.near(cx, 200, 1e-3, "mirrored centre x")
+    sx = box2(rect:transform2d({ 1, 0.5, 0, 0, 1, 0 }))
+    t.near(sx, 100, 1e-3, "sheared x span")
+    local e = t.raises(function() rect:transform2d({ 1, 2, 0, 2, 4, 0 }) end, "^profile_transform2d: the 2D map is singular")
+    t.ok(is_build_error(e))
+  end)
+
   t.test("svg: solid text, a file, several solids' groups, up defaults to z, fov=200 refused", function()
     local plate = bs.Solid.extrude(plate_outline(), XY, 6)
     local text = plate:svg_text()
@@ -785,6 +1002,756 @@ return function(t)
       "Collider: groups must have one entry per solid %(2 solids, 1 groups%)")
   end)
 
+  -- ---- clash: test_cadaclysm_blacksmith.py's test_clash_* trimmed to the marshalling, plus the
+  -- edge rows (an edge against an edge, and an edge against a face, so a swap of the two sides shows).
+
+  -- The frame at (x, y, z), axes along the world's.
+  local function at(x, y, z) return { x, y or 0, z or 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 } end
+
+  local function near_point(p, q, tolerance)
+    for i = 1, 3 do
+      if math.abs(p[i] - q[i]) > tolerance then return false end
+    end
+    return true
+  end
+
+  t.test("clash: balls within the clearance are too close", function()
+    local collider = bs.Collider({ bs.Solid.sphere(1), bs.Solid.sphere(1) }, 1e-3)
+    local rows = collider:clash({ at(0), at(2.5) }, 1)
+    t.eq(#rows, 1)
+    local r = rows[1]
+    t.ok(getmetatable(r) == bs.Clash)
+    t.eq(r.a, 0)
+    t.eq(r.b, 1)
+    t.eq(r.kind, "too_close")
+    t.ok(math.abs(r.distance - 0.5) <= 1e-3, "distance " .. r.distance)
+    t.eq(r.kind_a, "face")
+    t.eq(r.kind_b, "face")
+    t.eq(type(r.index_a), "number")
+    t.eq(type(r.index_b), "number")
+    t.eq(r.edge_a, nil)
+    t.eq(r.edge_b, nil)
+    t.ok(math.abs(r.on_a[1] - 1) <= 2e-3, "on_a " .. table.concat(r.on_a, ", "))
+    t.ok(math.abs(r.on_b[1] - 1.5) <= 2e-3, "on_b " .. table.concat(r.on_b, ", "))
+    t.eq(r.text, "")
+    t.eq(r.depth, 0)
+    t.eq(type(r.refined), "boolean")
+    t.eq(tostring(r), ("Clash(a=0, b=1, kind='too_close', distance=%.9g)"):format(r.distance))
+    t.eq(#collider:clash({ at(0), at(2.5) }, 0.25), 0)
+  end)
+
+  t.test("clash: boxes face to face touch and intersect on the shared face", function()
+    local collider = bs.Collider({ bs.Solid.cuboid(2, 2, 2), bs.Solid.cuboid(2, 2, 2) })
+    local rows = collider:clash({ at(0), at(2) })
+    t.eq(#rows, 1)
+    local r = rows[1]
+    t.eq(r.kind, "touching")
+    t.ok(r.distance <= 1e-3, "distance " .. r.distance)
+    t.raises(function() r:solid() end, "^clashes_solid: pair %(0, 1%) is not penetrating")
+    local x = r:intersect()
+    t.ok(getmetatable(x) == bs.Intersection)
+    t.eq(#x.overlaps, 1)
+    local ring = x.overlaps[1].loops[1]
+    t.ok(#ring >= 3)
+    local area = 0
+    for i, p in ipairs(ring) do
+      t.ok(math.abs(p[1] - 1) <= 1e-3, "x " .. p[1])
+      local q = ring[i % #ring + 1]
+      area = area + p[2] * q[3] - q[2] * p[3]
+    end
+    t.near(math.abs(area) / 2, 4, 1e-6, "the shared face's area")
+  end)
+
+  t.test("clash: interpenetrating boxes report the depth and outlive the collider", function()
+    local collider = bs.Collider({ bs.Solid.cuboid(2, 2, 2), bs.Solid.cuboid(2, 2, 2) })
+    local rows = collider:clash({ at(0), at(1.75) })
+    collider:close()
+    t.eq(#rows, 1)
+    local r = rows[1]
+    rows = nil
+    collectgarbage()
+    collectgarbage()
+    t.eq(r.kind, "penetrating")
+    t.ok(math.abs(r.depth - 0.25) < 1e-9, "depth " .. r.depth)
+    t.eq(r.distance, 0)
+    t.eq(r.kind_a, "none")
+    t.eq(r.kind_b, "none")
+    t.eq(r.index_a, nil)
+    t.eq(r.index_b, nil)
+    t.eq(r.edge_a, nil)
+    t.eq(r.edge_b, nil)
+    t.near(r:solid():mass().volume, 1, 1e-6, "the overlap's volume")
+    t.ok(getmetatable(r:intersect()) == bs.Intersection)
+  end)
+
+  t.test("clash: the one-shot indexes the second set, and one set with allowed", function()
+    local a0, a1 = bs.Solid.sphere(1), bs.Solid.sphere(1):translate(2.05, 0, 0)
+    local b0, b1 = bs.Solid.sphere(1):translate(0, 2.5, 0), bs.Solid.sphere(1):translate(10, 0, 0)
+    local two = bs.clash({ a0, a1 }, { b0, b1 }, 1, 1e-3)
+    t.eq(#two, 1)
+    t.eq(two[1].a, 0)
+    t.eq(two[1].b, 0)
+    t.eq(two[1].kind, "too_close")
+    t.ok(math.abs(two[1].distance - 0.5) <= 1e-3, "distance " .. two[1].distance)
+    local one = bs.clash({ a0, a1 }, nil, 1, 1e-3)
+    t.eq(#one, 1)
+    t.eq(one[1].a, 0)
+    t.eq(one[1].b, 1)
+    t.eq(#bs.clash({ a0, a1 }, nil, 1, 1e-3, { 0, 1 }), 0)
+  end)
+
+  t.test("clash: refusals carry the call's prefix", function()
+    local a, b = bs.Solid.cuboid(2, 2, 2), bs.Solid.cuboid(2, 2, 2)
+    local collider = bs.Collider({ a, b })
+    t.raises(function() collider:clash({ at(0), at(1.75) }, -1) end, "^collider_clash: clearance %-1")
+    t.raises(function() collider:clash({ at(0) }) end, "^collider_clash: 1 frames for 2 groups")
+    t.raises(function() collider:clash({ at(0), at(1.75) }, 0, { 2, 2 }) end, "^collider_clash: share %(2, 2%)")
+    t.eq(collider:clash({ at(0), at(1.75) })[1].kind, "penetrating")
+    collider:close()
+    t.raises(function() bs.clash({ a, b }, nil, -1) end, "^clash: clearance %-1")
+    t.raises(function() bs.clash({ a, b }, nil, 0, 0.05, { 5, 0 }) end,
+      "^clash: allowed pair %(5, 0%) names a part out of range")
+    t.raises(function() bs.clash({ a, b }, nil, 0, 0.05, { 0, 1, 2 }) end, "^clash: allowed is 3 numbers, not pairs$")
+    for _, bad in ipairs({ { -1, 0 }, { 0, 2 ^ 32 }, { 0, 0.5 }, { 0, "x" } }) do
+      t.raises(function() bs.clash({ a, b }, nil, 0, 0.05, bad) end, "^clash: allowed pair %(.*%) is not two indices$")
+    end
+    t.raises(function() bs.clash({ a, b }, {}) end, "^clash: an empty set$")
+  end)
+
+  -- ---- swept clash: test_cadaclysm_blacksmith.py's test_swept_clash_* trimmed to the marshalling.
+  -- A 2-cube moving along x from -5 to 5 through a 2-cube at the origin meets it at t = 0.3 and
+  -- leaves at 0.7, at a relative speed of 10 a segment.
+
+  local SWEPT_TOL, SWEPT_RES = 1e-3, 1e-3
+  local function through() return { { at(-5), at(0) }, { at(5), at(0) } } end
+
+  -- The time `got` within the first-time tolerance of `want`, and an end within the resolution.
+  local function near_start(got, want) return math.abs(got - want) <= SWEPT_TOL / 10 + 1e-9 end
+  local function near_end(got, want) return math.abs(got - want) <= SWEPT_RES + SWEPT_TOL / 10 end
+
+  t.test("swept clash: a cube through a cube", function()
+    local collider = bs.Collider({ bs.Solid.cuboid(2, 2, 2), bs.Solid.cuboid(2, 2, 2) }, SWEPT_TOL)
+    local rows = collider:swept_clash(through())
+    collider:close()
+    collectgarbage()
+    collectgarbage()
+    t.eq(#rows, 1)
+    local r = rows[1]
+    t.ok(getmetatable(r) == bs.SweptClash)
+    t.ok(getmetatable(r.first) == bs.Clash)
+    t.eq(r.a, 0)
+    t.eq(r.b, 1)
+    t.ok(near_start(r.first_time, 0.3), "first_time " .. r.first_time)
+    t.eq(#r.intervals, 1)
+    local span = r.intervals[1]
+    t.eq(span[1], r.first_time)
+    t.ok(near_end(span[2], 0.7), "end " .. span[2])
+    t.eq(r.first.a, 0)
+    t.eq(r.first.b, 1)
+    t.eq(r.first.kind, "touching")
+    t.eq(tostring(r), ("SweptClash(a=0, b=1, first_time=%.9g, kind='touching', intervals={{%.9g, %.9g}})")
+      :format(r.first_time, span[1], span[2]))
+    -- the first row keeps its own handle: the collider is gone, the contact still rebuilds
+    t.raises(function() r.first:solid() end, "^clashes_solid: pair %(0, 1%) is not penetrating")
+    local x = r.first:intersect()
+    t.eq(#x.overlaps, 1)
+    for _, loop in ipairs(x.overlaps[1].loops) do
+      for _, p in ipairs(loop) do t.ok(math.abs(p[1] + 1) <= 2 * SWEPT_TOL, "x " .. p[1]) end
+    end
+  end)
+
+  t.test("swept clash: there and back is two intervals", function()
+    local collider = bs.Collider({ bs.Solid.cuboid(2, 2, 2), bs.Solid.cuboid(2, 2, 2) }, SWEPT_TOL)
+    local poses = through()
+    poses[3] = { at(-5), at(0) }
+    local rows = collider:swept_clash(poses)
+    collider:close()
+    t.eq(#rows, 1)
+    local spans = rows[1].intervals
+    t.eq(#spans, 2)
+    for i, want in ipairs({ { 0.3, 0.7 }, { 1.3, 1.7 } }) do
+      t.ok(near_start(spans[i][1], want[1]), ("interval %d starts at %.9g"):format(i, spans[i][1]))
+      t.ok(near_end(spans[i][2], want[2]), ("interval %d ends at %.9g"):format(i, spans[i][2]))
+    end
+  end)
+
+  t.test("swept clash: a miss is seen only within the clearance", function()
+    local collider = bs.Collider({ bs.Solid.cuboid(2, 2, 2), bs.Solid.cuboid(2, 2, 2) }, SWEPT_TOL)
+    local passing = { { at(-5, 2.5), at(0) }, { at(5, 2.5), at(0) } }
+    t.eq(#collider:swept_clash(passing, 0.4), 0)
+    local rows = collider:swept_clash(passing, 0.6)
+    collider:close()
+    t.eq(#rows, 1)
+    t.eq(rows[1].first.kind, "too_close")
+    local d = rows[1].first.distance
+    t.ok(0.5 - SWEPT_TOL <= d and d <= 0.6, "distance " .. d)
+    t.eq(#rows[1].intervals, 1)
+  end)
+
+  t.test("swept clash: a pair starting inside rebuilds the overlap at its first time", function()
+    -- the cubes share a 0.25 slab at t = 0, then a moves clear
+    local collider = bs.Collider({ bs.Solid.cuboid(2, 2, 2), bs.Solid.cuboid(2, 2, 2) }, SWEPT_TOL)
+    local rows = collider:swept_clash({ { at(1.75), at(0) }, { at(5), at(0) } })
+    collider:close()
+    t.eq(#rows, 1)
+    t.eq(rows[1].first_time, 0)
+    t.eq(rows[1].first.kind, "penetrating")
+    t.near(rows[1].first:solid():mass().volume, 1, 1e-6, "the overlap's volume")
+  end)
+
+  t.test("swept clash: the one-shot indexes the second set, and one set with allowed", function()
+    -- set a still at the origin and at y = 20; set b carried along x through them
+    local a0, a1 = bs.Solid.cuboid(2, 2, 2), bs.Solid.cuboid(2, 2, 2):translate(0, 20, 0)
+    local b0, b1 = bs.Solid.cuboid(2, 2, 2), bs.Solid.cuboid(2, 2, 2)
+    local still = { { at(0), at(0) }, { at(0), at(0) } }
+    local moving = { { at(-5), at(-5, 20) }, { at(5), at(5, 20) } }
+    local two = bs.swept_clash({ a0, a1 }, still, { b0, b1 }, moving, nil, SWEPT_TOL)
+    t.eq(#two, 2)
+    for i, r in ipairs(two) do
+      t.eq(r.a, i - 1)
+      t.eq(r.b, i - 1)
+      t.eq(r.first.a, i - 1)
+      t.eq(r.first.b, i - 1)
+      t.ok(near_start(r.first_time, 0.3), "first_time " .. r.first_time)
+    end
+    local one_poses = { { at(0), at(-5) }, { at(0), at(5) } }
+    local one = bs.swept_clash({ a0, b0 }, one_poses, nil, nil, nil, SWEPT_TOL)
+    t.eq(#one, 1)
+    t.eq(one[1].a, 0)
+    t.eq(one[1].b, 1)
+    t.eq(#bs.swept_clash({ a0, b0 }, one_poses, nil, nil, nil, SWEPT_TOL, nil, nil, { 0, 1 }), 0)
+  end)
+
+  t.test("swept clash: refusals carry the call's prefix", function()
+    local a, b = bs.Solid.cuboid(2, 2, 2), bs.Solid.cuboid(2, 2, 2)
+    local collider = bs.Collider({ a, b }, SWEPT_TOL)
+    local first_only = { through()[1] }
+    t.raises(function() collider:swept_clash(first_only) end, "^collider_swept_clash: 1 poses, at least 2 are needed")
+    t.raises(function() collider:swept_clash({ { at(0) }, { at(0) } }) end, "^collider_swept_clash: 1 frames for 2 groups")
+    t.raises(function() collider:swept_clash({ { at(0), at(0) }, { at(0) } }) end,
+      "^collider_swept_clash: 1 frames for 2 groups$")
+    t.raises(function() collider:swept_clash(through(), 0, 0) end, "^collider_swept_clash: resolution 0")
+    t.raises(function() collider:swept_clash(through(), 0, 1e-3, 0) end,
+      "^collider_swept_clash: max_steps must be at least 1")
+    t.raises(function() collider:swept_clash(through(), -1) end, "^collider_swept_clash: clearance %-1")
+    t.raises(function() collider:swept_clash(through(), 0, 1e-3, 100000, { 2, 2 }) end,
+      "^collider_swept_clash: share %(2, 2%)")
+    t.eq(#collider:swept_clash(through()), 1)
+    collider:close()
+    local still = { { at(0) }, { at(0) } }
+    t.raises(function() bs.swept_clash({ a }, still, { b }) end, "^swept_clash: others and other_poses go together$")
+    t.raises(function() bs.swept_clash({ a }, still, nil, still) end, "^swept_clash: others and other_poses go together$")
+    t.raises(function() bs.swept_clash({ a }, still, { b }, { still[1] }) end, "^swept_clash: 2 poses for set a, 1 for set b$")
+    t.raises(function() bs.swept_clash({ a }, still, { b }, { { at(0) }, { at(0), at(0) } }) end,
+      "^swept_clash: pose 1 of set b has 2 frames for 1 parts$")
+    t.raises(function() bs.swept_clash({ a }, still, {}, { {}, {} }) end, "^swept_clash: an empty set$")
+    t.raises(function() bs.swept_clash({ a, b }, through(), nil, nil, 0, 0.05, 1e-3, 100000, { 5, 0 }) end,
+      "^swept_clash: allowed pair %(5, 0%) names a part out of range")
+    t.raises(function() bs.swept_clash({ a, b }, through(), nil, nil, 0, 0.05, 1e-3, 100000, { 0, 1, 2 }) end,
+      "^swept_clash: allowed is 3 numbers, not pairs$")
+    for _, bad in ipairs({ { -1, 0 }, { 0, 2 ^ 32 }, { 0, 0.5 }, { 0, "x" } }) do
+      t.raises(function() bs.swept_clash({ a, b }, through(), nil, nil, 0, 0.05, 1e-3, 100000, bad) end,
+        "^swept_clash: allowed pair %(.*%) is not two indices$")
+    end
+    t.raises(function() bs.swept_clash({ a, b }, through(), nil, nil, 0, 0.05, 1e-3, 0) end,
+      "^swept_clash: max_steps must be at least 1")
+    t.raises(function() bs.swept_clash({ a, b }, first_only) end, "^swept_clash: 1 poses, at least 2 are needed")
+  end)
+
+  -- ---- an assembly's swept clash: test_cadaclysm_blacksmith.py's test_assembly_* swept tests
+  -- trimmed to the marshalling, on its rig: a `base` plate on link `ground`; an `arm`,
+  -- cuboid(3, 0.2, 0.2) from the hinge out along x, on link `arm`, turning on `hinge` (revolute
+  -- about z through the origin); a `carriage` far out on `slide` (cylindrical, two values); and
+  -- two cubes in no link, held fixed: `chord` below the hinge, which the chord between the arm's
+  -- end poses crosses and its arc never does, and `circle` on the arm's circle at 90 degrees.
+  do
+    local function rig_of(hand)
+      local rig = bs.Assembly("rig")
+      rig:place(bs.Solid.cuboid(1, 1, 0.4), at(0, 0, -1), "base")
+      if hand == nil then
+        rig:place(bs.Solid.cuboid(3, 0.2, 0.2), at(1.5), "arm")
+      else
+        rig:place(hand, at(1.5), "hand")
+      end
+      rig:place(bs.Solid.cuboid(0.4, 0.4, 0.4), at(0, -1.2), "chord")
+      rig:place(bs.Solid.cuboid(0.4, 0.4, 0.4), at(0, 1.5), "circle")
+      rig:place(bs.Solid.cuboid(0.4, 0.4, 0.4), at(20), "carriage")
+      rig:link("ground", { "base" })
+      rig:link("arm", { hand == nil and "arm" or "hand" })
+      rig:link("carriage", { "carriage" })
+      for _, j in ipairs({ { "hinge", "arm", "revolute" }, { "slide", "carriage", "cylindrical" } }) do
+        rig:joint(j[1], "ground", j[2])
+        rig:pair(j[1], j[3], at(0))
+      end
+      rig:base("ground")
+      return rig
+    end
+
+    -- a `tip` cube on link `body`, and a `nub` well above it on `nubs`, turning on `turn`
+    local function hand_of()
+      local hand = bs.Assembly("hand")
+      hand:place(bs.Solid.cuboid(0.4, 0.4, 0.4), at(0), "tip")
+      hand:place(bs.Solid.cuboid(0.2, 0.2, 0.2), at(0, 0, 2), "nub")
+      hand:link("body", { "tip" })
+      hand:link("nubs", { "nub" })
+      hand:joint("turn", "body", "nubs")
+      hand:pair("turn", "revolute", at(0))
+      return hand
+    end
+
+    -- the hinge at 0, 90 and 180 degrees, the carriage sliding 0, 0.5, 1 unturned; rows, so the
+    -- hinge comes first
+    local SWING = {
+      { { "hinge", 0.0 }, { "slide", { 0.0, 0.0 } } },
+      { { "hinge", math.pi / 2 }, { "slide", { 0.5, 0.0 } } },
+      { { "hinge", math.pi }, { "slide", { 1.0, 0.0 } } },
+    }
+
+    -- The time the arm's leading face (y = 0.1 in its own frame) is `gap` from the circle cube's
+    -- corner (0.2, 1.3), the first point it meets, in the first segment.
+    local function circle_time(gap)
+      local r, phi = math.sqrt(1.3 ^ 2 + 0.2 ^ 2), math.atan2(0.2, 1.3)
+      return (math.acos((0.1 + gap) / r) - phi) / (math.pi / 2)
+    end
+
+    local function named_rows(names, rows)
+      local out = {}
+      for i, r in ipairs(rows) do out[i] = names[r.a + 1] .. " x " .. names[r.b + 1] end
+      return table.concat(out, ", ")
+    end
+
+    t.test("assembly parts are listed depth first and escaped", function()
+      local sub = bs.Assembly("pair")
+      sub:place(bs.Solid.cuboid(1, 1, 1), at(0), "x")
+      sub:place(bs.Solid.cuboid(1, 1, 1), at(2), "y")
+      local top = bs.Assembly("top")
+      top:place(bs.Solid.cuboid(1, 1, 1), at(0, 5), "p")
+      top:place(sub, at(0), "a/b")
+      top:place(bs.Solid.cuboid(1, 1, 1), at(0, 9), "q")
+      t.eq(table.concat(top:parts(), "|"), "p|a\\/b/x|a\\/b/y|q")
+      t.eq(#top:parts(), 4)
+      t.eq(#bs.Assembly("empty"):parts(), 0)
+    end)
+
+    t.test("assembly swept clash sweeps the arc, not the chord", function()
+      local rig = rig_of()
+      local names = rig:parts()
+      t.eq(table.concat(names, "|"), "base|arm|chord|circle|carriage")
+      local rows = rig:swept_clash(SWING, { tolerance = SWEPT_TOL })
+      t.eq(named_rows(names, rows), "arm x circle")
+      local r = rows[1]
+      t.ok(getmetatable(r) == bs.SweptClash)
+      t.ok(getmetatable(r.first) == bs.Clash)
+      local within, meets = circle_time(SWEPT_TOL), circle_time(0)
+      t.ok(within - 1e-9 <= r.first_time and r.first_time <= meets + 1e-9,
+        ("first_time %.9g outside [%.9g, %.9g]"):format(r.first_time, within, meets))
+      -- a joint key as a list of names, a map, and a number as a one-value list read the same
+      local again = {}
+      for k, frame in ipairs(SWING) do
+        again[k] = { { { "hinge" }, { frame[1][2] } }, { "slide", frame[2][2] } }
+      end
+      local same = rig:swept_clash(again, { tolerance = SWEPT_TOL })
+      t.eq(#same, 1)
+      t.eq(same[1].first_time, r.first_time)
+      local maps = {}
+      for k, frame in ipairs(SWING) do maps[k] = { hinge = frame[1][2], slide = frame[2][2] } end
+      local mapped = rig:swept_clash(maps, { tolerance = SWEPT_TOL })
+      t.eq(#mapped, 1)
+      t.eq(mapped[1].first_time, r.first_time)
+    end)
+
+    t.test("assembly swept clash: first is at the posed frames", function()
+      -- the arm starts at 1.5 rad, already through the circle cube: penetrating at time 0, and
+      -- the overlap rebuilt from the first row lies inside the arm's box turned 1.5 about z
+      local rig = rig_of()
+      local rows = rig:swept_clash({
+        { { "hinge", 1.5 }, { "slide", { 0, 0 } } }, { { "hinge", math.pi }, { "slide", { 0, 0 } } },
+      }, { tolerance = SWEPT_TOL })
+      t.eq(#rows, 1)
+      t.eq(rows[1].a, 1)
+      t.eq(rows[1].b, 3)
+      t.eq(rows[1].first_time, 0)
+      local got = rows[1].first:solid():bounds_box_at(SWEPT_TOL)
+      local co, si = math.cos(1.5), math.sin(1.5)
+      local want = bs.Solid.cuboid(3, 0.2, 0.2):translate(1.5, 0, 0):bounds_box_at(SWEPT_TOL)
+        :moved({ 0, 0, 0, co, si, 0, -si, co, 0, 0, 0, 1 })
+      for k = 1, 3 do
+        t.ok(want.lo[k] - 1e-6 <= got.lo[k] and got.hi[k] <= want.hi[k] + 1e-6,
+          ("axis %d: got [%.9g, %.9g], want within [%.9g, %.9g]"):format(k, got.lo[k], got.hi[k], want.lo[k], want.hi[k]))
+      end
+      t.ok(got.lo[2] >= 1.3 - 4 * SWEPT_TOL and got.hi[2] <= 1.7 + 4 * SWEPT_TOL and got.hi[1] > got.lo[1],
+        ("y [%.9g, %.9g], x [%.9g, %.9g]"):format(got.lo[2], got.hi[2], got.lo[1], got.hi[1]))
+    end)
+
+    t.test("assembly swept clash tests joined links only when asked", function()
+      -- a pin on the arm's link inside a bore on the ground link, the hinge joining them
+      local pinned = bs.Assembly("pinned")
+      pinned:place(bs.Solid.cuboid(0.6, 0.6, 0.6), at(0), "bore")
+      pinned:place(bs.Solid.cuboid(0.2, 0.2, 0.2), at(0), "pin")
+      pinned:link("ground", { "bore" })
+      pinned:link("arm", { "pin" })
+      pinned:joint("hinge", "ground", "arm")
+      pinned:pair("hinge", "revolute", at(0))
+      local keys = { { hinge = 0.0 }, { hinge = 1.0 } }
+      t.eq(#pinned:swept_clash(keys, { tolerance = SWEPT_TOL }), 0)
+      local rows = pinned:swept_clash(keys, { tolerance = SWEPT_TOL, joined = true })
+      t.eq(#rows, 1)
+      t.eq(rows[1].a, 0)
+      t.eq(rows[1].b, 1)
+      t.eq(rows[1].first_time, 0)
+      t.eq(#pinned:swept_clash(keys, { tolerance = SWEPT_TOL, joined = true, allowed = { 0, 1 } }), 0)
+    end)
+
+    t.test("assembly swept clash: a sub-assembly rides its placement's link", function()
+      local rig = rig_of(hand_of())
+      local names = rig:parts()
+      t.eq(table.concat(names, "|"), "base|hand/tip|hand/nub|chord|circle|carriage")
+      t.eq(named_rows(names, rig:swept_clash(SWING, { tolerance = SWEPT_TOL })), "hand/tip x circle")
+    end)
+
+    t.test("assembly swept clash refuses in the kernel's words", function()
+      local rig = rig_of(hand_of())
+      local two = { { hinge = 0.0 }, { hinge = 1.0 } }
+      -- keyframes naming different joints, refused before C is called
+      t.raises(function()
+        rig:swept_clash({ { hinge = 0.0, slide = { 0, 0 } }, { hinge = 1.0, slide = { 0, 0 } }, { hinge = 2.0 } })
+      end, "^swept_clash: joint 'slide' is in keyframe 0 and not in keyframe 2$")
+      t.raises(function() rig:swept_clash({ { hinge = 0.0 }, { hinge = 1.0, slide = { 0, 0 } } }) end,
+        "^swept_clash: joint 'slide' is in keyframe 1 and not in keyframe 0$")
+      t.raises(function() rig:swept_clash({ { hinge = 0.0 }, { { "hinge", 1.0 }, { "hinge", 2.0 } } }) end,
+        "^swept_clash: joint 'hinge' is given twice$")
+      t.raises(function() rig:swept_clash({ { slide = { 0, 0 } }, { slide = { 1 } } }) end,
+        "^swept_clash: joint 'slide' has 2 values in keyframe 0 and 1 in keyframe 1$")
+      -- and the kernel's own refusals, passed on
+      t.raises(function() rig:swept_clash({ { { { "hand", "turn" }, 0.0 } }, { { { "hand", "turn" }, 1.0 } } }) end,
+        "^swept_clash: joint 'hand/turn' is in a sub%-assembly; a sweep moves this assembly's own joints$")
+      t.raises(function() rig:swept_clash({ { elbow = 0.0 }, { elbow = 1.0 } }) end,
+        "^swept_clash: no joint named 'elbow' in assembly 'rig' or under it$")
+      t.raises(function() rig:swept_clash({ { hinge = { 0.0, 0.0 } }, { hinge = { 1.0, 1.0 } } }) end,
+        "^swept_clash: joint 'hinge' takes 1 values, but 2 were given$")
+      t.raises(function() rig:swept_clash({ two[1] }) end, "^swept_clash: 1 poses, at least 2 are needed$")
+      t.raises(function() rig:swept_clash(two, { resolution = 0 }) end, "^swept_clash: resolution 0")
+      t.raises(function() rig:swept_clash(two, { max_steps = 0 }) end, "^swept_clash: max_steps must be at least 1$")
+      t.raises(function() rig:swept_clash(two, { allowed = { 9, 0 } }) end,
+        "^swept_clash: allowed pair %(9, 0%) names a part out of range$")
+      t.raises(function() rig:swept_clash(two, { allowed = { 0, 1, 2 } }) end,
+        "^swept_clash: allowed is 3 numbers, not pairs$")
+      t.raises(function() rig:swept_clash(two, { allowed = { 0, 0.5 } }) end,
+        "^swept_clash: allowed pair %(.*%) is not two indices$")
+      t.raises(function() rig:swept_clash(two, { ground = "wheel" }) end,
+        "^swept_clash: assembly 'rig' has no link named 'wheel'$")
+    end)
+  end
+
+  -- ---- wall thickness: test_cadaclysm_blacksmith.py's test_thickness_* / test_mesh_thickness_* trimmed
+  -- to the marshalling.
+
+  -- The face of body `body` whose reading at `p` lies at `p`.
+  local function thickness_face_holding(gauge, solid, body, p)
+    for f = 0, solid.faces - 1 do
+      local r = gauge:thickness_at(body, f, p, 100, 0.5)
+      if r and near_point(r.point, p, 1e-9) then return f end
+    end
+    error("no face holds " .. table.concat(p, ", "))
+  end
+
+  local function thickness_tube()
+    return bs.Solid.extrude(bs.Profile.circle(5):with_hole(bs.Profile.circle(4)), XY, 10)
+  end
+
+  t.test("thickness: a plate reads two at every cap vertex", function()
+    local plate = bs.Solid.cuboid(10, 10, 2)
+    local g = bs.ThicknessGauge({ plate })
+    t.eq(getmetatable(g), bs.ThicknessGauge)
+    t.eq(g.body_count, 1)
+    t.eq(getmetatable(g).__len(g), 1)
+    t.eq(g.tolerance, 0.01)
+    local rows = g:thickness(10, 0.5)
+    local mesh = g:mesh(0)
+    local caps = 0
+    for _, r in ipairs(rows) do
+      t.eq(getmetatable(r), bs.Thickness)
+      t.eq(r.body, 0)
+      t.eq(type(r.vertex), "number")
+      t.eq(#r.point, 3)
+      local p = mesh.positions[r.vertex + 1]
+      t.ok(p[1] == r.point[1] and p[2] == r.point[2] and p[3] == r.point[3], "the vertex indexes the mesh")
+      t.ok(r.sphere == nil or type(r.sphere) == "number")
+      if math.abs(math.abs(r.point[3]) - 1) < 1e-9 and math.abs(r.opposite[3] + r.point[3]) < 1e-9 then
+        caps = caps + 1
+        t.near(r.thickness, 2, 1e-9)
+        t.near(r.exact_thickness, 2, 1e-9)
+        t.near(r.exact_opposite[3], -r.point[3], 1e-9)
+        t.eq(r.knife, false)
+        t.eq(r.opposite_body, 0)
+      end
+    end
+    t.ok(caps >= 8, "cap rows " .. caps)
+    -- below the wall nothing reads; the sharp angle defaults to 0
+    t.eq(#g:thickness(1), 0)
+    t.eq(#g:thickness(10), #rows)
+    t.ok(tostring(rows[1]):find("^Thickness%(") and tostring(g):find("^ThicknessGauge%(bodies=1"))
+    g:close()
+  end)
+
+  t.test("thickness: the gauge mesh is a copy that matches the readings", function()
+    local plate = bs.Solid.cuboid(10, 10, 2)
+    local g = bs.ThicknessGauge({ plate })
+    local m = g:mesh(0)
+    t.eq(getmetatable(m), bs.ThicknessMesh)
+    t.eq(#m.faces, #m.triangles)
+    t.ok(#m.faces >= 12)
+    t.eq(#m.normals, #m.positions)
+    t.ok(#m.positions > 0)
+    for _, n in ipairs(m.normals) do
+      t.near(math.sqrt(n[1] * n[1] + n[2] * n[2] + n[3] * n[3]), 1, 1e-9)
+    end
+    for i, tri in ipairs(m.triangles) do
+      t.eq(#tri, 3)
+      for _, k in ipairs(tri) do t.ok(k >= 0 and k < #m.positions, "index in range") end
+      t.ok(m.faces[i] >= 0 and m.faces[i] < plate.faces)
+    end
+    local rows = g:thickness(100, 0.5)
+    t.eq(#rows, #m.positions)
+    for _, r in ipairs(rows) do
+      local face
+      for i, tri in ipairs(m.triangles) do
+        if tri[1] == r.vertex or tri[2] == r.vertex or tri[3] == r.vertex then face = m.faces[i] break end
+      end
+      t.eq(face, r.face)
+    end
+    t.raises(function() g:mesh(1) end, "^thickness_gauge_mesh: no body 1 %-%- there are 1$")
+    g:close()
+    t.eq(#m.positions, #rows) -- copied out: the mesh outlives the gauge, which refuses once closed
+    t.raises(function() g:mesh(0) end, "^thickness_gauge: closed$")
+    t.ok(tostring(m):find("^ThicknessMesh%(vertices="))
+  end)
+
+  t.test("thickness: at a point reads one row with no vertex", function()
+    local plate = bs.Solid.cuboid(10, 10, 2)
+    local probe = { 1, 2, 1 }
+    local g = bs.ThicknessGauge({ plate })
+    local top = thickness_face_holding(g, plate, 0, probe)
+    local r = g:thickness_at(0, top, probe, 100, 0.5)
+    t.eq(getmetatable(r), bs.Thickness)
+    t.eq(r.vertex, nil)
+    t.eq(r.body, 0)
+    t.eq(r.face, top)
+    t.eq(r.opposite_body, 0)
+    t.ok(r.point[1] == 1 and r.point[2] == 2 and r.point[3] == 1)
+    t.near(r.thickness, 2, 1e-9)
+    t.near(r.exact_thickness, 2, 1e-9)
+    t.near(r.opposite[3], -1, 1e-9)
+    t.near(r.exact_opposite[3], -1, 1e-9)
+    t.near(r.sphere, 2, 2 * 0.01)
+    t.eq(g:thickness_at(0, top, probe, 1, 0.5), nil) -- thicker than the maximum
+    t.eq(g:thickness_at(0, top, probe, 100).thickness, r.thickness)
+  end)
+
+  t.test("thickness: at a face reads the plate and nil where nothing is found", function()
+    local plate = bs.Solid.cuboid(10, 10, 2)
+    local g = bs.ThicknessGauge({ plate })
+    local top = thickness_face_holding(g, plate, 0, { 1, 2, 1 })
+    local f = g:thickness_at_face(0, top, nil, 100)
+    t.eq(getmetatable(f), bs.FaceThickness)
+    t.near(f.thickness, 2, 1e-9)
+    t.eq(f.uniform, true)
+    t.near(f.min, 2, 1e-9)
+    t.near(f.max, 2, 1e-9)
+    local a = g:thickness_at_face(0, top, { 1, 2, 5 }, 100)
+    t.near(a.thickness, 2, 1e-9)
+    t.ok(a.min == a.max and a.uniform == true)
+    t.eq(g:thickness_at_face(0, top, nil, 1), nil)
+    t.eq(g:thickness_at_face(0, top, { 50, 2, 5 }, 100), nil)
+    t.raises(function() g:thickness_at_face(0, top) end, "^thickness_gauge_face: the maximum is required$")
+    -- the one-solid convenience: a gauge of its own
+    local s = plate:thickness_at_face(top, nil, 100)
+    t.eq(getmetatable(s), bs.FaceThickness)
+    t.near(s.thickness, 2, 1e-9)
+    t.eq(s.uniform, true)
+    t.near(plate:thickness_at_face(top, { 1, 2, 5 }, 100, 0.05).thickness, 2, 1e-9)
+    t.eq(plate:thickness_at_face(top, nil, 1), nil)
+    t.ok(tostring(f):find("^FaceThickness%("))
+  end)
+
+  t.test("thickness: a ball past the maximum is nil", function()
+    local wedge = bs.Solid.extrude(bs.Profile.polygon({ { 0, 0 }, { 10, 0 }, { 0, 10 } }), XY, 20)
+    local probe = { 5, 0, 10 }
+    local g = bs.ThicknessGauge({ wedge })
+    local f = thickness_face_holding(g, wedge, 0, probe)
+    local wide = g:thickness_at(0, f, probe, 100, 0.5)
+    t.near(wide.sphere, 2 * 5 / (1 + math.sqrt(2)), 0.01)
+    local narrow = g:thickness_at(0, f, probe, 4, 0.5)
+    t.near(narrow.thickness, 5 / math.sqrt(2), 1e-9)
+    t.eq(narrow.sphere, nil)
+  end)
+
+  t.test("thickness: two bodies read each other and the one-shot agrees", function()
+    local slab = bs.Solid.extrude(bs.Profile.polygon({ { 0, 0 }, { 10, 0 }, { 10, 3 }, { 0, 1 } }), XY, 4)
+    local tube = thickness_tube()
+    local g = bs.ThicknessGauge({ slab, tube })
+    t.eq(g.body_count, 2)
+    local via = g:thickness(100, 0.5)
+    local one = bs.thickness({ slab, tube }, 100, 0.5)
+    t.eq(#one, #via)
+    local forward, backward = false, false
+    for i, r in ipairs(one) do
+      local v = via[i]
+      t.ok(r.body == v.body and r.vertex == v.vertex and r.face == v.face and r.thickness == v.thickness
+        and r.opposite_body == v.opposite_body, "row " .. i)
+      forward = forward or (r.body == 0 and r.opposite_body == 1)
+      backward = backward or (r.body == 1 and r.opposite_body == 0)
+    end
+    t.ok(forward, "the slab reads the tube somewhere")
+    t.ok(backward, "the tube reads the slab somewhere")
+    t.eq(#bs.thickness({ slab }, 0.001), 0)
+    t.ok(#bs.thickness({ slab }, 100, nil, 0.05) > 0)
+  end)
+
+  t.test("thickness: a body or face that is not a uint32 is refused, not wrapped", function()
+    local plate = bs.Solid.cuboid(10, 10, 2)
+    local g = bs.ThicknessGauge({ plate })
+    local p = { 1, 2, 1 }
+    for _, bad in ipairs({ -1, 0.5, 2 ^ 32, "1" }) do
+      t.raises(function() g:thickness_at(bad, 0, p, 10) end, "^thickness_gauge_at: body ")
+      t.raises(function() g:thickness_at(0, bad, p, 10) end, "^thickness_gauge_at: face ")
+      t.raises(function() g:thickness_at_face(bad, 0, nil, 10) end, "^thickness_gauge_face: body ")
+      t.raises(function() g:thickness_at_face(0, bad, nil, 10) end, "^thickness_gauge_face: face ")
+      t.raises(function() g:mesh(bad) end, "^thickness_gauge_mesh: body ")
+      t.raises(function() plate:thickness_at_face(bad, nil, 10) end, "^thickness_gauge_face: face ")
+    end
+    t.raises(function() g:mesh(0 / 0) end, "^thickness_gauge_mesh: body must be a whole number")
+    g:close()
+  end)
+
+  local thickness_lower = { { { 0, 0, 0 }, { 0, 1, 0 }, { 1, 0, 0 } }, { { 0, 1, 2 } } }
+  local thickness_upper = { { { 0, 0, 1 }, { 1, 0, 1 }, { 0, 1, 1 } }, { { 0, 1, 2 } } }
+
+  t.test("mesh_thickness: two triangles one apart read one across", function()
+    local meshes = { thickness_lower, thickness_upper }
+    local rows = bs.mesh_thickness(meshes, 10, 0.5)
+    t.eq(#rows, 6)
+    local order = {}
+    for i, r in ipairs(rows) do
+      t.eq(getmetatable(r), bs.MeshThickness)
+      t.near(r.thickness, 1, 1e-12)
+      t.eq(r.knife, false)
+      t.eq(r.opposite_mesh, 1 - r.mesh)
+      t.eq(r.opposite_triangle, 0)
+      local p = meshes[r.mesh + 1][1][r.vertex + 1]
+      t.ok(r.point[1] == p[1] and r.point[2] == p[2] and r.point[3] == p[3], "point")
+      t.near(r.opposite[3], 1 - r.point[3], 1e-12)
+      t.ok(r.opposite[1] == r.point[1] and r.opposite[2] == r.point[2])
+      order[i] = r.mesh .. ":" .. r.vertex
+    end
+    t.eq(table.concat(order, " "), "0:0 0:1 0:2 1:0 1:1 1:2")
+    t.eq(#bs.mesh_thickness(meshes, 0.5, 0.5), 0) -- under the gap nothing
+    t.eq(#bs.mesh_thickness({}, 1), 0)
+    t.eq(#bs.mesh_thickness(meshes, 10), 6)
+    t.ok(tostring(rows[1]):find("^MeshThickness%("))
+  end)
+
+  t.test("thickness: refusals carry the call's prefix", function()
+    local plate = bs.Solid.cuboid(10, 10, 2)
+    t.raises(function() bs.ThicknessGauge({ plate }, 0) end, "^thickness_gauge_new: the tolerance must be positive and finite")
+    t.raises(function() bs.ThicknessGauge({ 5 }) end, "^thickness_gauge: expected a Solid")
+    local g = bs.ThicknessGauge({ plate })
+    t.raises(function() g:thickness(0) end, "^thickness_gauge_measure: the maximum must be positive and finite")
+    t.raises(function() g:thickness() end, "^thickness_gauge_measure: the maximum is required$")
+    t.raises(function() g:thickness(10, -0.1) end,
+      "^thickness_gauge_measure: the sharp angle must be zero or positive and finite")
+    t.raises(function() g:thickness_at(3, 0, { 1, 2, 1 }, 10) end, "^thickness_gauge_at: no body 3 %-%- there are 1$")
+    t.raises(function() g:thickness_at(0, 99, { 1, 2, 1 }, 10) end,
+      "^thickness_gauge_at: no face 99 %-%- the solid has 6 %(0 to 5%)$")
+    t.raises(function() g:thickness_at(0, 0, { 1, 0 / 0, 1 }, 10) end, "^thickness_gauge_at: the point must be finite")
+    t.raises(function() g:thickness_at(0, 0, { 1, 2 }, 10) end, "^thickness_gauge_at: a point is 3 numbers, got 2$")
+    t.raises(function() g:thickness_at(0, 0, { 1, 2, "x" }, 10) end, "^thickness_gauge_at: a point is 3 numbers, got 'x'$")
+    t.raises(function() g:thickness_at(0, 0, 5, 10) end, "^thickness_gauge_at: a point is 3 numbers, got 5$")
+    t.raises(function() g:thickness_at_face(2, 0, nil, 10) end, "^thickness_gauge_face: no body 2 %-%- there are 1$")
+    t.raises(function() g:thickness_at_face(0, 99, nil, 10) end,
+      "^thickness_gauge_face: no face 99 %-%- the solid has 6 %(0 to 5%)$")
+    t.raises(function() g:thickness_at_face(0, 0, { math.huge, 0, 1 }, 10) end,
+      "^thickness_gauge_face: the point must be finite")
+    t.raises(function() g:thickness_at_face(0, 0, { 1, 2 }, 10) end, "^thickness_gauge_face: a point is 3 numbers, got 2$")
+    t.raises(function() g:thickness_at_face(0, 0, nil, 0) end,
+      "^thickness_gauge_face: the maximum must be positive and finite")
+    g:close()
+    g:close() -- twice is a no-op
+    t.eq(tostring(g), "ThicknessGauge(closed)")
+    t.raises(function() g:thickness(10) end, "^thickness_gauge: closed$")
+    t.raises(function() return g.body_count end, "^thickness_gauge: closed$")
+    -- the conveniences refuse with the gauge call's own prefix
+    t.raises(function() bs.thickness({ plate }, -1) end, "^thickness_gauge_measure: the maximum must be positive and finite")
+    t.raises(function() bs.thickness({ plate }, 10, nil, 0 / 0) end,
+      "^thickness_gauge_new: the tolerance must be positive and finite")
+    t.raises(function() plate:thickness_at_face(99, nil, 10) end, "^thickness_gauge_face: no face 99")
+    t.raises(function() plate:thickness_at_face(0, nil) end, "^thickness_gauge_face: the maximum is required$")
+    -- mesh_thickness: the kernel's refusals and the module's own
+    local meshes = { thickness_lower, thickness_upper }
+    local tri = { { 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 } }
+    t.raises(function() bs.mesh_thickness(meshes, 0) end, "^mesh_thickness: the maximum must be positive and finite")
+    t.raises(function() bs.mesh_thickness(meshes, 10, -0.5) end,
+      "^mesh_thickness: the sharp angle must be zero or positive and finite")
+    t.raises(function() bs.mesh_thickness({ { { { 0, 0, 0 }, { 1, 0, 0 } }, { { 0, 1, 2 } } } }, 10) end,
+      "^mesh_thickness: a triangle names a position past the mesh")
+    t.raises(function() bs.mesh_thickness({ { { { 0, 0, 0 }, { 1, 0 / 0, 0 }, { 0, 1, 0 } }, { { 0, 1, 2 } } } }, 10) end,
+      "^mesh_thickness: a mesh position is not finite")
+    t.raises(function() bs.mesh_thickness({ thickness_lower, 5 }, 10) end,
+      "^mesh_thickness: mesh 1 is not a %(positions, triangles%) pair$")
+    t.raises(function() bs.mesh_thickness({ { tri } }, 10) end,
+      "^mesh_thickness: mesh 0 is not a %(positions, triangles%) pair$")
+    t.raises(function() bs.mesh_thickness({ { { { 0, 0, 0 }, { 1, 0 } }, { { 0, 1, 2 } } } }, 10) end,
+      "^mesh_thickness: mesh 0 position 1 is not three numbers$")
+    for _, bad in ipairs({ { 0, 1 }, { 0, 1, -2 }, { 0, 1, 2 ^ 32 }, { 0, 1, 0.5 }, { 0, 1, "x" } }) do
+      t.raises(function() bs.mesh_thickness({ { tri, { bad } } }, 10) end,
+        "^mesh_thickness: mesh 0 triangle 0 is not three indices$")
+    end
+    t.raises(function() bs.mesh_thickness(meshes) end, "^mesh_thickness: the maximum is required$")
+  end)
+
+  t.test("clash: an edge against an edge, and an edge against a face", function()
+    local c = math.sqrt(0.5)
+    local s = 0.1 * c
+    local a, b = bs.Solid.cuboid(2, 2, 2), bs.Solid.cuboid(2, 2, 2)
+    local collider = bs.Collider({ a, b }, 1e-3)
+    local rows = collider:clash({ at(0), { 2 + s, 2 + s, 0, c, -c, 0, 0.5, 0.5, c, -0.5, -0.5, c } }, 0.5)
+    t.eq(#rows, 1)
+    local r = rows[1]
+    t.eq(r.kind, "too_close")
+    t.ok(math.abs(r.distance - 0.1) <= 1e-3, "distance " .. r.distance)
+    t.ok(near_point(r.on_a, { 1, 1, 0 }, 2e-3), "on_a " .. table.concat(r.on_a, ", "))
+    t.eq(r.kind_a, "edge")
+    t.eq(r.kind_b, "edge")
+    t.eq(type(r.edge_a), "number")
+    for _, seg in ipairs(a.edges[r.edge_a + 1].segments) do
+      for _, p in ipairs(seg) do
+        t.ok(math.abs(p[1] - 1) <= 2e-3 and math.abs(p[2] - 1) <= 2e-3, "edge_a's point " .. table.concat(p, ", "))
+      end
+    end
+    t.eq(type(r.edge_b), "number")
+    t.ok(r.edge_b < #b.edges, "edge_b " .. r.edge_b)
+
+    -- A ball whose surface sits 0.2 off the box's x = 1, y = 1 edge: side a an edge, side b a
+    -- face, the row as `Solid:closest` names the same pair.
+    local d = 1 + 1.2 * c
+    local box, ball = bs.Solid.cuboid(2, 2, 2), bs.Solid.sphere(1)
+    local mixed = bs.Collider({ box, ball }, 1e-3):clash({ at(0), at(d, d, 0) }, 0.5)
+    t.eq(#mixed, 1)
+    local m = mixed[1]
+    local want = box:closest(ball:translate(d, d, 0), 1e-3)
+    t.eq(m.kind, "too_close")
+    t.ok(math.abs(m.distance - 0.2) <= 1e-3, "distance " .. m.distance)
+    t.eq(m.kind_a, "edge")
+    t.eq(m.kind_b, "face")
+    t.eq(m.kind_a, want.kind_a)
+    t.eq(m.kind_b, want.kind_b)
+    t.eq(m.index_a, want.index_a)
+    t.eq(m.edge_a, want.edge_a)
+    t.eq(m.index_b, want.index_b)
+    t.eq(m.edge_b, nil)
+    t.ok(near_point(m.on_a, want.on_a, 2e-3), "on_a " .. table.concat(m.on_a, ", "))
+  end)
+
   t.test("a line through a cuboid hits twice and cuts three pieces", function()
     local box = bs.Solid.cuboid(10, 20, 30)
     local line = bs.Profile.path({ -20, 0 }):line_to(20, 0):end_open()
@@ -958,6 +1925,16 @@ return function(t)
     t.ok(star:is_watertight())
     e = t.raises(function() bs.Profile.star({ 0, 0 }, 10, 10, 5) end)
     t.eq(e.message, "profile_star: the inner radius must be under the outer")
+    -- A count the C call's uint32_t cannot hold is refused before it, never wrapped
+    -- (2^32 + 6 would be a hexagon); so is a count that is not whole.
+    for _, n in ipairs({ -1, 2 ^ 32 + 6 }) do
+      e = t.raises(function() bs.Profile.regular_polygon({ 0, 0 }, 10, n) end)
+      t.eq(e.message, ("profile_regular_polygon: sides is out of range: %.14g"):format(n))
+      e = t.raises(function() bs.Profile.star({ 0, 0 }, 10, 4, n) end)
+      t.eq(e.message, ("profile_star: points is out of range: %.14g"):format(n))
+    end
+    e = t.raises(function() bs.Profile.regular_polygon({ 0, 0 }, 10, 6.5) end)
+    t.eq(e.message, "profile_regular_polygon: sides must be a whole number, got 6.5")
   end)
 
   t.test("text is set as profiles with curved walls", function()
@@ -1592,6 +2569,25 @@ return function(t)
       "^hyperbola_to: the weight must be over 1 %(1 is a parabola, under 1 an ellipse%)$")
     t.raises(function() bs.Profile.parabola({ 0, 0 }, { 0, 0 }, 1, -1, 1) end,
       "^path_parabola: the axis direction is zero$")
+  end)
+
+  -- Solid:with_material and Solid:styled with their readers, at parity with the
+  -- Python reference's test_a_material_and_an_outside_style_ride_operations_and_reach_step.
+  t.test("a material and an outside style ride operations and reach STEP", function()
+    local cube = bs.Solid.cuboid(1, 1, 1)
+    t.eq(cube.material, nil)
+    local steel = cube:with_material("Steel"):styled("materials/steel.mtlx", "BrushedSteel")
+    t.eq(steel.material, "Steel")
+    t.eq(steel.style_location, "materials/steel.mtlx")
+    t.eq(steel.style_identification, "BrushedSteel")
+    local cut = steel:cut(cube:with_material("Oak"):translate(0.5, 0.5, 0.5))
+    t.eq(cut.material, "Steel")
+    t.eq(cube:styled(nil, "BrushedSteel").style_location, nil)
+    local text = steel:step_text()
+    t.eq(text:find("MATERIAL_DESIGNATION('Steel'", 1, true) ~= nil, true)
+    t.eq(text:find("EXTERNALLY_DEFINED_STYLE(IDENTIFIER('BrushedSteel')", 1, true) ~= nil, true)
+    t.raises(function() cube:with_material(" ") end, "^with_material: a material's name cannot be blank$")
+    t.raises(function() cube:styled() end, "^styled: a style needs a location or an identification$")
   end)
 
   -- Assemblies: Assembly, Solid:named and Solid.name, at parity with the Python
@@ -2435,6 +3431,68 @@ return function(t)
     job:close()
   end)
 
+  -- Rest machining: a list of end mills, each pass at the first that fits; every item
+  -- carries the Z range it covers.
+  local function pocketed_block()
+    local part = bs.Solid.cuboid(40, 30, 10):translate(0, 0, 5)
+    return part:cut(bs.Solid.cuboid(20, 10, 8):translate(0, 0, 6))
+  end
+
+  t.test("one end mill's report items carry the Z range they cover", function()
+    local part = pocketed_block()
+    local job = bs.Job(bs.Stock.around(part, 2), 30)
+    local report = job:machine(part, bs.Tool.flat(1, 6, 20, 800, 200, 12000))
+    t.eq(#report, 4)
+    for _, item in ipairs(report) do
+      t.near(item.top, 10, 1e-6)
+      t.near(item.bottom, 2, 1e-6)
+    end
+    job:close()
+  end)
+
+  t.test("a list of two end mills rests the corners on the second", function()
+    local part = pocketed_block()
+    local job = bs.Job(bs.Stock.around(part, 2), 30)
+    local big = bs.Tool.flat(1, 6, 20, 800, 200, 12000)
+    local small = bs.Tool.flat(2, 2, 20, 800, 200, 12000)
+    local report = job:machine(part, { big, small })
+    t.eq(#report, 4)
+    for _, item in ipairs(report) do
+      t.ok(item.reason:find("T2 (2 mm)", 1, true) ~= nil, item.reason)
+      t.near(item.top, 10, 1e-6)
+      t.near(item.bottom, 2, 1e-6)
+    end
+    local pocket_with_2 = false
+    for _, op in ipairs(job:operations()) do
+      if op.kind == "pocket" and op.tool == 2 then pocket_with_2 = true end
+    end
+    t.ok(pocket_with_2, "operations() has a pocket with tool 2")
+    job:close()
+  end)
+
+  t.test("an empty list of end mills is refused and leaves the job as it was", function()
+    local part = pocketed_block()
+    local job = bs.Job(bs.Stock.around(part, 2), 30)
+    local e = t.raises(function() job:machine(part, {}) end)
+    t.ok(is_build_error(e))
+    t.ok(e.message:find("machine: at least one end mill is needed", 1, true) ~= nil, e.message)
+    t.eq(#job:operations(), 0)
+    job:close()
+  end)
+
+  -- `{ big, nil }` has length 1 and reads as one tool; a list is counted by its keys, so
+  -- a hole before the last key is a nil tool, refused at its place.
+  t.test("a nil in the list of end mills is refused, not shortened", function()
+    local part = pocketed_block()
+    local job = bs.Job(bs.Stock.around(part, 2), 30)
+    local big = bs.Tool.flat(1, 6, 20, 800, 200, 12000)
+    local small = bs.Tool.flat(2, 2, 20, 800, 200, 12000)
+    local e = t.raises(function() job:machine(part, { big, [3] = small }) end)
+    t.ok(tostring(type(e) == "table" and e.message or e):find("machine: end_mill[2] must be a Tool", 1, true) ~= nil, tostring(e))
+    t.eq(#job:operations(), 0)
+    job:close()
+  end)
+
   t.test("the plate: faced, pocketed and drilled, an empty report, gcode and camotics files", function()
     local base = bs.Profile.rect(80, 50):round(6)
     local part = bs.Solid.extrude(base, XY, 12)
@@ -2827,6 +3885,20 @@ return function(t)
     keep.close()
   end)
 
+  t.test("subd subdivide: whole, one face, a bad face", function()
+    local keep = subd_scope()
+    local kiln = keep(bs.Subd.cuboid({ 2, 2, 2 }, { 2, 2, 2 }))
+    t.eq(#keep(kiln:subdivide()).faces, 96)
+    t.eq(#keep(kiln:subdivide({})).faces, 96)
+    local one = keep(kiln:subdivide({ 1 }))
+    t.eq(#one.faces, 27)
+    t.eq(one.selection.kind, "faces")
+    t.eq(#one.selection.ids, 4)
+    t.raises(function() kiln:subdivide({ 999 }) end, "subdivide: face 999 is not in the cage")
+    t.raises(function() kiln:subdivide({ 1.5 }) end, "subdivide: faces%[1%] is not an index")
+    keep.close()
+  end)
+
   t.test("subd: smooth_mesh is consistent, kept per level, and outlives its cage", function()   -- fact 8
     local cube = bs.Subd.cuboid()
     local mesh = cube:smooth_mesh(2)
@@ -2976,4 +4048,2163 @@ return function(t)
     t.raises(function() cube:pick({ 0, 0, 0 }, "face") end, "^subd: closed$")
     t.raises(function() cube:to_solid() end, "^subd: closed$")
   end)
+
+  -- -- oriented box, lengths, containment and closest: at parity with the Python reference's tests
+  -- in test_cadaclysm_blacksmith.py ("oriented box, lengths, containment, closest"), trimmed to what
+  -- proves the marshalling -- every field read, every error path's prefix, the classifier's lifetime.
+
+  local function near3(a, b, tolerance)
+    if #a ~= 3 then return false end
+    for i = 1, 3 do
+      if math.abs(a[i] - b[i]) > tolerance then return false end
+    end
+    return true
+  end
+
+  t.test("measure: the oriented box of a turned cuboid", function()   -- 1
+    local box = bs.Solid.cuboid(2, 3, 4):rotate({ { 0, 0, 0 }, { 0, 0, 1 } }, pi / 6):oriented_box(1e-9)
+    t.eq(getmetatable(box), bs.OrientedBox)
+    local half = { box.half[1], box.half[2], box.half[3] }
+    table.sort(half)
+    for i, w in ipairs({ 1.0, 1.5, 2.0 }) do
+      t.ok(half[i] >= w - 1e-9 and half[i] <= w + 1e-3, "half " .. table.concat(box.half, ", "))
+    end
+    t.eq(#box.centre, 3)
+    for i = 1, 3 do t.ok(math.abs(box.centre[i]) <= 1e-3, "centre " .. table.concat(box.centre, ", ")) end
+    t.eq(#box.axes, 3)
+    for i = 1, 3 do
+      t.eq(#box.axes[i], 3)
+      for j = 1, 3 do
+        local dot = box.axes[i][1] * box.axes[j][1] + box.axes[i][2] * box.axes[j][2] + box.axes[i][3] * box.axes[j][3]
+        t.near(dot, i == j and 1 or 0, 1e-9, "axes " .. i .. "." .. j)
+      end
+    end
+  end)
+
+  t.test("measure: the oriented box defaults its accuracy and refuses NaN and an open body", function()   -- 2
+    local cylinder = bs.Solid.cylinder(1, 2)
+    local own = cylinder:oriented_box(1e-5)
+    local function same_box(a, b, label)
+      for i = 1, 3 do
+        t.eq(a.centre[i], b.centre[i], label .. " centre")
+        t.eq(a.half[i], b.half[i], label .. " half")
+        for j = 1, 3 do t.eq(a.axes[i][j], b.axes[i][j], label .. " axes") end
+      end
+    end
+    same_box(cylinder:oriented_box(0), own, "accuracy 0")
+    same_box(cylinder:oriented_box(-1), own, "accuracy -1")
+    same_box(cylinder:oriented_box(), own, "no accuracy")
+    local grown = 1 + 3.125e-5 * math.sqrt(12)
+    for i = 1, 3 do t.near(own.half[i], grown, 1e-12, "half " .. i) end
+    t.raises(function() cylinder:oriented_box(0 / 0) end, "^oriented_box: .*is not an accuracy")
+    t.raises(function() bs.Solid.cuboid(1, 2, 3):face_sheet(0):oriented_box() end, "^oriented_box: ")
+  end)
+
+  t.test("measure: a cylinder rim is 5 pi long, and an edge past the end is refused", function()   -- 3
+    local cylinder = bs.Solid.cylinder(2.5, 4)
+    local circles = 0
+    for _, e in ipairs(cylinder.edges) do
+      if e.curve ~= nil and e.curve.kind == "circle" then
+        circles = circles + 1
+        local l = cylinder:edge_length(e.index, 1e-9)
+        t.eq(getmetatable(l), bs.Length)
+        t.ok(math.abs(l.length - 5 * pi) <= math.max(l.error, 1e-9), ("edge %d: %.15g +- %g"):format(e.index, l.length, l.error))
+        t.ok(l.error >= 0 and l.error <= 1e-6 * l.length, ("edge %d's error %g"):format(e.index, l.error))
+        t.eq(l.accuracy_met, true)
+        t.eq(l.from_polyline, false)
+      end
+    end
+    t.ok(circles >= 1, "the cylinder has a circle edge")
+    local cube = bs.Solid.cuboid(1, 1, 1)
+    t.raises(function() cube:edge_length(#cube.edges) end, "^edge_length: ")
+    t.raises(function() cube:edge_length(1.5) end, "^edge_length: edge must be an index")
+  end)
+
+  t.test("measure: a slot profile is 12 + 2 pi long, and a NaN accuracy is refused", function()   -- 4
+    local slot = bs.Profile.slot({ 0, 0 }, 8, 1)
+    local l = slot:length(1e-9)
+    t.eq(getmetatable(l), bs.Length)
+    t.ok(math.abs(l.length - (12 + 2 * pi)) <= math.max(l.error, 1e-9), ("slot %.15g +- %g"):format(l.length, l.error))
+    t.ok(l.error >= 0 and l.error <= 1e-6 * l.length, "slot error " .. l.error)
+    t.eq(l.accuracy_met, true)
+    t.near(slot:length(0).length, 12 + 2 * pi, 1e-6)
+    t.raises(function() slot:length(0 / 0) end, "^profile_length: ")
+  end)
+
+  t.test("measure: containment one-shot and through a classifier agree", function()   -- 5
+    local box = bs.Solid.cuboid(2, 3, 4)
+    t.eq(box:contains({ 0, 0, 0 }), "inside")
+    t.eq(box:contains({ 5, 0, 0 }), "outside")
+    t.eq(box:contains({ 0, 0, 2 }), "on")
+    local c = box:classifier()
+    t.eq(getmetatable(c), bs.Classifier)
+    for _, p in ipairs({ { 0, 0, 0 }, { 0.99, 0, 0 }, { 1, 0, 0 }, { 1.2, 0, 0 }, { 0, 1.6, 0 }, { 0, 0, -2 } }) do
+      t.eq(c:contains(p), box:contains(p), ("at (%g, %g, %g)"):format(p[1], p[2], p[3]))
+    end
+    c:close()
+    local ball = bs.Solid.sphere(1.5):classifier(1e-3)
+    local want = { "outside", "inside", "inside", "inside", "inside", "inside", "outside" }
+    for i, x in ipairs({ -2, -1.4, -0.5, 0, 0.5, 1.4, 2 }) do t.eq(ball:contains({ x, 0, 0 }), want[i], "x = " .. x) end
+    t.eq(ball:contains({ 1.5, 0, 0 }), "on")
+    t.eq(ball:contains({ 0, 0, -1.5 }), "on")
+    ball:close()
+  end)
+
+  t.test("measure: a classifier outlives its solid", function()   -- 6
+    local sphere = bs.Solid.sphere(1.0)
+    local c = sphere:classifier(1e-3)
+    sphere:close()
+    sphere = nil
+    collectgarbage()
+    collectgarbage()
+    t.eq(c:contains({ 0, 0, 0 }), "inside")
+    t.eq(c:contains({ 2, 0, 0 }), "outside")
+    t.eq(c:contains({ 1, 0, 0 }), "on")
+    c:close()
+  end)
+
+  t.test("measure: containment refuses a NaN point, a zero tolerance and a closed classifier", function()   -- 7
+    local box = bs.Solid.cuboid(2, 3, 4)
+    local c = box:classifier()
+    t.raises(function() box:contains({ 0 / 0, 0, 0 }) end, "^contains: .*not finite")
+    t.raises(function() c:contains({ 0 / 0, 0, 0 }) end, "^classifier_contains: .*not finite")
+    t.raises(function() box:contains({ 0, 0, 0 }, 0) end, "^contains: .*positive and finite")
+    t.raises(function() box:classifier(0) end, "^classifier_new: .*positive and finite")
+    t.raises(function() box:contains({ 0, 0 }) end, "^contains: ")
+    t.raises(function() bs.Solid.cuboid(1, 2, 3):face_sheet(0):classifier() end, "^classifier_new: ")
+    t.eq(c.closed, false)
+    c:close()
+    t.eq(c.closed, true)
+    local e = t.raises(function() c:contains({ 0, 0, 0 }) end, "^classifier: closed$")
+    t.ok(is_build_error(e), "a closed classifier refuses with a BuildError")
+    c:close()   -- closing twice is a no-op
+    t.eq(c.closed, true)
+  end)
+
+  t.test("measure: the closest points of two spheres", function()   -- 8
+    local a = bs.Solid.sphere(1)
+    local b = bs.Solid.sphere(1):translate(5, 0, 0)
+    local c = a:closest(b, 1e-3)
+    t.eq(getmetatable(c), bs.Closest)
+    t.ok(math.abs(c.distance - 3) <= 6e-9, "distance " .. c.distance)
+    t.eq(c.refined, true)
+    t.eq(c.kind_a, "face")
+    t.eq(c.kind_b, "face")
+    t.eq(c.edge_a, nil)
+    t.eq(c.edge_b, nil)
+    t.eq(type(c.index_a), "number")
+    t.eq(type(c.index_b), "number")
+    t.ok(near3(c.on_a, { 1, 0, 0 }, 1e-6), "on_a " .. table.concat(c.on_a, ", "))
+    t.ok(near3(c.on_b, { 4, 0, 0 }, 1e-6), "on_b " .. table.concat(c.on_b, ", "))
+    local swapped = b:closest(a, 1e-3)
+    t.ok(near3(swapped.on_a, c.on_b, 1e-9) and near3(swapped.on_b, c.on_a, 1e-9), "swapping swaps the points")
+    t.near(swapped.distance, c.distance, 1e-12)
+  end)
+
+  t.test("measure: the closest point of a box names an edge fillet takes", function()   -- 9
+    local box = bs.Solid.cuboid(2, 3, 4)
+    local c = box:closest(bs.Solid.sphere(1):translate(3, 0, 4), 1e-3)
+    t.ok(math.abs(c.distance - (2 * math.sqrt(2) - 1)) <= 2e-3, "distance " .. c.distance)
+    t.eq(c.kind_a, "edge")
+    t.eq(type(c.edge_a), "number", "edge_a " .. tostring(c.edge_a))
+    t.eq(c.kind_b, "face")
+    t.eq(c.edge_b, nil)
+    t.eq(box:fillet({ c.edge_a }, 0.2).faces, box.faces + 1)
+  end)
+
+  t.test("measure: closest refuses a zero tolerance and reports its progress", function()   -- 10
+    local a = bs.Solid.sphere(1)
+    local b = bs.Solid.sphere(1):translate(5, 0, 0)
+    t.raises(function() a:closest(b, 0) end, "^closest: ")
+    local phases, heard = {}, 0
+    local c = a:closest(b, 1e-3, function(phase) phases[phase] = true heard = heard + 1 end)
+    t.ok(math.abs(c.distance - 3) <= 6e-9)
+    t.ok(phases.meshing, "phases heard: " .. heard)
+    -- A raise inside the callback surfaces after the call, not through the library's frames.
+    t.raises(function() a:closest(b, 1e-3, function() error("stop") end) end, "stop")
+    b:close()
+    t.raises(function() a:closest(b) end, "solid: closed")
+  end)
+
+  -- ---- Sketch: the 2D constraint sketcher -- facts S1-S8 and S10-S12 of the sketch-constraints
+  -- plan, the values of test_cadaclysm_blacksmith.py's test_a_sketch_* tests (S9 is finalize_test's).
+
+  local function ids_text(list)
+    local out = {}
+    for i, v in ipairs(list) do out[i] = tostring(v) end
+    return "{" .. table.concat(out, ", ") .. "}"
+  end
+  local function ids_eq(actual, expected, message)
+    t.ok(type(actual) == "table", (message or "ids") .. ": not a table but " .. tostring(actual))
+    t.eq(ids_text(actual), ids_text(expected), message)
+  end
+  local function sorted(list)
+    local out = {}
+    for i, v in ipairs(list) do out[i] = v end
+    table.sort(out)
+    return out
+  end
+  -- The BuildError `fn` raises (failing when it raises none, or anything else).
+  local function refusal(fn, pattern)
+    local e = t.raises(fn, pattern)
+    t.ok(is_build_error(e), "not a BuildError: " .. tostring(e))
+    return e
+  end
+
+  t.test("sketch: dimensions a plate and extrudes it", function()   -- S1
+    local s = bs.Sketch.new()
+    local corners, sides = s:add_rect({ 0, 0 }, { 40, 30 })
+    t.eq(#corners, 4)
+    t.eq(#sides, 4)
+    s:fix(corners[1])
+    local width = s:length(sides[1], 60)
+    s:length(sides[2], 30)
+    local hole = s:add_circle(s:add_point(30, 15), 5)
+    s:radius_of(hole, 5)
+    local report = s:solve()
+    t.eq(getmetatable(report), bs.SolveReport)
+    t.eq(report.converged, true)
+    t.eq(report.status, "converged")
+    ids_eq(report.ids, {})
+    t.eq(type(report.iterations), "number")
+    t.eq(type(report.max_residual), "number")
+    local x, y = s:point(corners[2])
+    t.near(x, 60, 1e-9)
+    t.near(y, 0, 1e-9)
+    t.eq(s:constraint_kind(width), "length")
+    t.eq(s:constraint_value(width), 60)
+    local dof = s:diagnose()
+    t.eq(getmetatable(dof), bs.Dof)
+    t.eq(dof.free, 2)
+    t.eq(dof.state, "under")
+    local profiles = s:profiles(1e-9)
+    t.eq(#profiles, 1)
+    t.ok(bs.Solid.extrude(profiles[1], XY, 10):mass().volume > 0)
+    s:close()
+  end)
+
+  t.test("sketch: refuses a conflict, and the refusal carries the ids", function()   -- S2
+    local s = bs.Sketch()
+    local corners, sides = s:add_rect({ 0, 0 }, { 40, 30 })
+    s:fix(corners[1])
+    s:length(sides[1], 40)
+    s:length(sides[2], 30)
+    local over = refusal(function() s:distance(corners[1], corners[3], 10) end, "^sketch_constrain: over%-constrained")
+    ids_eq(over.ids, { 0, 1, 5, 6 }, "the constraints the distance fights")
+    t.eq(#s:constraints(), 7)
+    local held = refusal(function() s:remove_entity(corners[1]) end, "^sketch_remove_entity: point")
+    ids_eq(sorted(held.ids), sorted({ sides[1], sides[4] }), "the sides still on the corner")
+    local unknown = refusal(function() s:kind(9999) end, "sketch_kind")
+    ids_eq(unknown.ids, {}, "a refusal that names no ids carries none, not the last conflict's")
+    ids_eq(refusal(function() bs.Profile.rect(0, 1) end).ids, {}, "an error outside a sketch")
+    s:close()
+    refusal(function() s:solve() end, "^sketch: closed$")
+    s:close()   -- a second close is a no-op
+  end)
+
+  t.test("sketch: drag moves the point it holds", function()   -- S3
+    local s = bs.Sketch.new()
+    local corners = s:add_rect({ 0, 0 }, { 40, 30 })
+    local r = s:drag({ [corners[1]] = { 5, 5 } })
+    t.ok(r.converged, r.status)
+    ids_eq(r.ids, {})
+    local x, y = s:point(corners[1])
+    t.near(x, 5, 1e-9)
+    t.near(y, 5, 1e-9)
+    local _, y1 = s:point(corners[2])
+    t.near(y1, 5, 1e-9)
+    t.ok(s:drag({}).converged, "no moves at all (a count of 0) is a plain solve")
+    refusal(function() s:drag({ [corners[1]] = { 1, 2, 3 } }) end, "sketch_drag")
+    refusal(function() s:drag(nil) end, "^sketch_drag: moves must be")
+    refusal(function() s:drag({ [1.5] = { 1, 2 } }) end, "^sketch_drag: id must be an id")
+    refusal(function() s:add_nurbs(corners[1], { { 1 } }, { 0, 0, 1, 1 }, 1) end, "sketch_add_nurbs")
+  end)
+
+  t.test("sketch: a reference follows its source", function()   -- S4
+    local plate = bs.Sketch.new()
+    local corners, sides = plate:add_rect({ 0, 0 }, { 40, 30 })
+    plate:fix(corners[1])
+    local width = plate:length(sides[1], 40)
+    plate:length(sides[2], 30)
+    local boss = bs.Sketch.new()
+    local edge = boss:reference(plate, sides[2])
+    t.ok(boss:is_reference(edge) and boss:is_construction(edge))
+    local o = boss:add_point(130, 15)
+    local hole = boss:add_circle(o, 12)
+    boss:radius_of(hole, 12)
+    boss:point_line_distance(o, edge, 100)
+    t.near((boss:point(o)), 140, 1e-9)
+    t.eq(#boss:profiles(1e-9), 1)
+    t.ok(plate:set_value(width, 60).converged)
+    local r = boss:update_reference(edge, plate)
+    t.ok(r.converged, r.status)
+    ids_eq(r.ids, {})
+    t.near((boss:point(o)), 160, 1e-9)
+    local not_one = refusal(function() boss:update_reference(o, plate) end, "^sketch_update_reference: entity")
+    ids_eq(not_one.ids, {})
+    refusal(function() boss:reference(boss, o) end, "cannot reference itself")
+  end)
+
+  t.test("sketch: comes from a profile and keeps its tangents", function()   -- S5
+    local s = bs.Sketch.from_profile(bs.Profile.slot({ 0, 0 }, 60, 8), true, 1e-9)
+    local tangents = {}
+    for _, c in ipairs(s:constraints()) do
+      if s:constraint_kind(c) == "tangent" then tangents[#tangents + 1] = c end
+    end
+    t.eq(#tangents, 4)
+    for _, c in ipairs(tangents) do t.ok(s:is_joint_tangent(c), "joint tangent " .. c) end
+    t.eq(s:diagnose().free, 4)
+    t.ok(#bs.Sketch.from_profile(bs.Profile.rect(2, 2)):entities() > 0, "the defaults infer at 1e-6")
+  end)
+
+  t.test("sketch: reads back what it holds", function()   -- S6 and S7
+    local s = bs.Sketch.new()
+    local a = s:add_point(0, 0)
+    local b = s:add_point(10, 0)
+    local line = s:add_line(a, b)
+    t.eq(s:kind(a), "point")
+    t.eq(s:kind(line), "line")
+    ids_eq(s:entities(), sorted({ a, b, line }))
+    ids_eq(s:ends(line), { a, b })
+    local c = s:add_circle(s:add_point(0, 20), 3)
+    t.eq(s:kind(c), "circle")
+    t.eq(s:radius(c), 3)
+    t.eq(s:kind(s:centre(c)), "point")
+    s:set_radius(c, 4)
+    t.eq(s:radius(c), 4)
+    s:set_point(b, 12, 0)
+    local bx, by = s:point(b)
+    t.eq(bx, 12)
+    t.eq(by, 0)
+    s:set_construction(c)
+    t.ok(s:is_construction(c))
+    t.ok(not s:is_reference(c))
+    s:set_construction(c, false)
+    t.ok(not s:is_construction(c))
+    s:set_construction(c)
+    t.ok(not s:is_construction(9999) and not s:is_reference(9999), "an unknown id is neither")
+    local h = s:horizontal(a, b)
+    t.eq(s:constraint_kind(h), "horizontal")
+    ids_eq(s:constraint_refs(h), { a, b })
+    t.eq(s:constraint_value(h), nil)
+    t.eq(s:constraint_driving(h), false)
+    t.eq(s:constraint_sense(h), "auto")
+    local d = s:distance(a, b, 15, false)
+    t.eq(s:constraint_value(d), 15)
+    t.eq(s:constraint_driving(d), false)
+    t.near(s:measure(d), 12, 1e-12)
+    local driven = s:set_driving(d, true)
+    t.ok(driven.converged, driven.status)
+    t.eq(s:constraint_driving(d), true)
+    t.eq(s:constraint_value(d), 12)
+    t.ok(s:set_value(d, 20).converged)
+    t.near(s:measure(d), 20, 1e-9)
+    local dragged = s:drag({ [b] = { 25, 5 } })
+    t.ok(dragged.status == "converged" or dragged.status == "conflicting" or dragged.status == "diverged", dragged.status)
+    t.eq(type(dragged.ids), "table")
+    ids_eq(s:constraints(), sorted({ h, d }))
+    s:remove(h)
+    ids_eq(s:constraints(), { d })
+    ids_eq(s:remove_entity(line), { d })
+    for _, e in ipairs(s:entities()) do t.ok(e ~= a, "a went with its line") end
+    ids_eq(s:constraints(), {})
+    local bez = s:add_bezier(s:add_point(0, 0), { 1, 1 }, { 2, 1 }, { 3, 0 })
+    t.eq(s:kind(bez), "free_curve")
+    t.eq(#s:ends(bez), 4)
+    t.eq(#s:open_chains(1e-9), 1)
+    refusal(function() s:kind(9999) end, "sketch_kind")
+    local sideways = refusal(function() s:tangent(bez, c, "sideways") end)
+    t.eq(sideways.message, "tangent: sense must be one of 'auto', 'positive', 'negative', not 'sideways'")
+    local middle = refusal(function() s:tangent_at_end(bez, c, "middle") end)
+    t.eq(middle.message, "tangent_at_end: end must be one of 'start', 'end', not 'middle'")
+
+    -- S7: tangent_at_end reads back its end
+    local p = s:add_point(0, 0)
+    local q = s:add_point(4, 0)
+    local seg = s:add_line(p, q)
+    local curve = s:add_bezier(q, { 5, 0 }, { 6, 1 }, { 7, 1 })
+    t.eq(s:constraint_end(s:tangent_at_end(curve, seg, "end")), "end")
+    t.eq(s:constraint_end(s:tangent_at_end(curve, seg)), "start")
+    t.eq(s:constraint_end(s:length(seg, 4)), "start")
+    refusal(function() s:constraint_end(999) end, "^sketch_constraint_end: no constraint 999")
+  end)
+
+  t.test("sketch: nurbs weights are counted, and coordinates must be finite", function()   -- S8
+    local s = bs.Sketch.new()
+    local start = s:add_point(0, 0)
+    local points = { { 1, 2 }, { 3, 2 }, { 4, 0 } }
+    local knots = { 0, 0, 0, 0.5, 1, 1, 1 }
+    local three = refusal(function() s:add_nurbs(start, points, knots, 2, { 1, 1, 1 }) end)
+    t.eq(three.message, "sketch_add_nurbs: 3 weights for 4 control points (the start and 3 given); give one per point")
+    local curve = s:add_nurbs(start, points, knots, 2, { 1, 0.5, 0.5, 1 })
+    t.eq(s:kind(curve), "free_curve")
+    local ends = s:ends(curve)
+    t.eq(#ends, 4)
+    t.eq(ends[1], start)
+    t.eq(s:kind(s:add_nurbs(start, points, knots, 2)), "free_curve", "no weights is a plain B-spline")
+    refusal(function() s:add_nurbs(start, points, knots, -1) end, "^sketch_add_nurbs: degree must not be negative")
+    refusal(function() s:add_nurbs(start, points, knots, 2.5) end, "^sketch_add_nurbs: degree must be a whole number")
+    local u = bs.Sketch.new()
+    refusal(function() u:add_point(0 / 0, 0) end, "^sketch_add_point: the coordinates must be finite")
+    ids_eq(u:entities(), {})
+  end)
+
+  t.test("sketch: a sense picks the side, and unknown dimensions are refused", function()   -- S10
+    for _, case in ipairs({ { "positive", 3 }, { "negative", -3 } }) do
+      local sense, side = case[1], case[2]
+      local s = bs.Sketch.new()
+      local a = s:add_point(0, 0)
+      local b = s:add_point(10, 0)
+      local line = s:add_line(a, b)
+      s:fix(a)
+      s:fix(b)
+      local p = s:add_point(4, side > 0 and 1 or -1)
+      local d = s:point_line_distance(p, line, 3, true, sense)
+      t.ok(s:solve().converged, sense)
+      local _, y = s:point(p)
+      t.near(y, side, 1e-6, sense)
+      t.eq(s:constraint_sense(d), sense)
+    end
+    local s = bs.Sketch.new()
+    refusal(function() s:constraint_value(999) end, "999")
+    refusal(function() s:constraint_driving(999) end, "999")
+  end)
+
+  t.test("sketch: the diagnosis names the redundant and the conflicting apart", function()   -- S11
+    local s = bs.Sketch.new()
+    local corners, sides = s:add_rect({ 0, 0 }, { 40, 30 })
+    s:fix(corners[1])
+    s:length(sides[1], 40)
+    s:length(sides[2], 30)
+    local h = s:horizontal(corners[4], corners[3])
+    t.eq(h, 7)
+    local dof = s:diagnose()
+    t.eq(dof.free, 0)
+    t.eq(dof.state, "full")
+    ids_eq(dof.redundant, { 7 }, "redundant")
+    ids_eq(dof.conflicting, {}, "conflicting")
+    t.eq(type(dof.free_entities), "table")
+    t.eq(#dof.parts, 1)
+    local part = dof.parts[1]
+    t.eq(getmetatable(part), bs.PartDof)
+    t.eq(type(part.params), "number")
+    t.eq(part.free, 0)
+    t.eq(part.state, "full")
+    ids_eq(part.redundant, { 7 }, "part redundant")
+    ids_eq(part.conflicting, {}, "part conflicting")
+    ids_eq(part.constraints, { 0, 1, 2, 3, 5, 6, 7 }, "part constraints")
+    t.eq(type(part.free_entities), "table")
+  end)
+
+  t.test("sketch: set_value that cannot converge is refused with its ids", function()   -- S12
+    local s = bs.Sketch.new()
+    local a, b, c = s:add_point(0, 0), s:add_point(1, 0), s:add_point(0, 1)
+    s:distance(a, b, 1)
+    s:distance(b, c, 1)
+    local d3 = s:distance(a, c, 1)
+    local diverged = refusal(function() s:set_value(d3, 10) end, "^sketch_set_value: the solve did not converge")
+    ids_eq(diverged.ids, { 2, 0, 1 }, "the diverged refusal's ids, in the library's order")
+    t.ok(s:solve().converged, "the refused edit was reverted")
+    s:close()
+  end)
+
+  t.test("sketch: drag sends its point ids in ascending order", function()
+    -- built in a scrambled order and large enough that a hash walk has no reason to be sorted
+    local moves = {}
+    for _, id in ipairs({ 40, 7, 1000, 3, 21, 512, 0, 99, 64, 8 }) do moves[id] = { id, -id } end
+    ids_eq(bs._sketch_drag_ids(moves), { 0, 3, 7, 8, 21, 40, 64, 99, 512, 1000 }, "the ids drag sends")
+    refusal(function() bs._sketch_drag_ids({ [1.5] = { 0, 0 } }) end, "^sketch_drag: id must be an id")
+    -- and the real call with such a table is a plain solve of its moves
+    local s = bs.Sketch.new()
+    local corners = s:add_rect({ 0, 0 }, { 40, 30 })
+    local report = s:drag({ [corners[3]] = { 41, 31 }, [corners[1]] = { -1, -1 }, [corners[2]] = { 41, -1 } })
+    t.ok(report.converged, "the drag converges")
+    s:close()
+  end)
+
+  t.test("sketch: a hole in a list is refused, not read as a shorter list", function()
+    local s = bs.Sketch.new()
+    local start = s:add_point(0, 0)
+    local knots = { 0, 0, 0, 0.5, 1, 1, 1 }
+    refusal(function() s:add_nurbs(start, { { 1, 2 }, nil, { 4, 0 } }, knots, 2) end, "sketch_add_nurbs")
+    refusal(function() s:add_nurbs(start, { { 1, 2 }, { 3, 2 }, { 4, 0 } }, { 0, 0, 0, nil, 1, 1, 1 }, 2) end, "sketch_add_nurbs")
+    refusal(function() s:add_nurbs(start, { { 1, 2 }, { 3, 2 }, { 4, 0 } }, knots, 2, { 1, nil, 0.5, 1 }) end, "sketch_add_nurbs")
+    ids_eq(s:entities(), { start }, "no refused call added anything")
+    local curve = s:add_nurbs(start, { { 1, 2 }, { 3, 2 }, { 4, 0 } }, knots, 2)
+    t.eq(s:kind(curve), "free_curve")
+    s:close()
+  end)
+
+  t.test("sketch: every constraint method and entity adder reads back its kind and refs", function()
+    local s = bs.Sketch.new()
+    local ox = 0
+    local function pt(x, y) return s:add_point(ox + x, y) end
+    local function line(x0, y0, x1, y1) return s:add_line(pt(x0, y0), pt(x1, y1)) end
+    local function circle(x, y, r) return s:add_circle(pt(x, y), r) end
+    -- Each on geometry of its own (a fresh place along x): none fights another, so none is refused.
+    local ffi = require("ffi")
+    local raw = ffi.load(bs.library_path())
+    -- The header's codes, when the repository is here (an SDK checkout has no header: the raw
+    -- code check is skipped there, the kind and refs checks still run).
+    local header_path = t.fixture("crates/cadaclysm-blacksmith-capi/include/cadaclysm_blacksmith.h")
+    local codes
+    if header_path then
+      local file = assert(io.open(header_path, "rb"))
+      local header = file:read("*a")
+      file:close()
+      local ncodes = 0
+      codes = {}
+      for name, code in header:gmatch("#define CADACLYSM_BLACKSMITH_SKETCH_CONSTRAINT_(%w[%w_]*) (%d+)") do
+        codes[name] = tonumber(code)
+        ncodes = ncodes + 1
+      end
+      t.eq(ncodes, 27)
+    end
+    local function check(kind, refs, add, value, sense)
+      local id = add((table.unpack or unpack)(refs))
+      t.eq(s:constraint_kind(id), kind)
+      -- the name round-trips through the wrapper's own table, so also ask the library for the raw code
+      if codes then
+        t.eq(tonumber(raw.cadaclysm_blacksmith_sketch_constraint_kind(s:_h(), id)), codes[kind:upper()], kind .. " raw code")
+      end
+      ids_eq(s:constraint_refs(id), refs, kind .. " refs")
+      t.eq(s:constraint_value(id), value, kind .. " value")
+      if sense then t.eq(s:constraint_sense(id), sense) end
+      t.ok(s:solve().converged, kind .. " solves")
+      return refs
+    end
+    local function place() ox = ox + 100 end
+    place()
+    check("coincident", { pt(0, 0), pt(1, 1) }, function(p, q) return s:coincident(p, q) end)
+    place()
+    check("point_on_line", { pt(3, 2), line(0, 0, 10, 0) }, function(p, l) return s:point_on_line(p, l) end)
+    place()
+    check("point_on_circle", { pt(6, 1), circle(0, 0, 5) }, function(p, c) return s:point_on_circle(p, c) end)
+    place()
+    local hr = check("horizontal", { pt(0, 0), pt(5, 1) }, function(p, q) return s:horizontal(p, q) end)
+    t.ok(math.abs(select(2, s:point(hr[1])) - select(2, s:point(hr[2]))) < 1e-9, "the wire code really is horizontal")
+    place()
+    local vr = check("vertical", { pt(0, 0), pt(1, 5) }, function(p, q) return s:vertical(p, q) end)
+    t.ok(math.abs(s:point(vr[1]) - s:point(vr[2])) < 1e-9, "the wire code really is vertical")
+    place()
+    check("parallel", { line(0, 0, 10, 0), line(0, 5, 10, 7) }, function(p, q) return s:parallel(p, q) end)
+    place()
+    check("perpendicular", { line(0, 0, 10, 0), line(3, 5, 4, 15) }, function(p, q) return s:perpendicular(p, q) end)
+    place()
+    check("collinear", { line(0, 0, 10, 0), line(12, 1, 20, 2) }, function(p, q) return s:collinear(p, q) end)
+    place()
+    check("tangent", { circle(0, 5, 3), line(-10, 0, 10, 0) }, function(p, q) return s:tangent(p, q) end)
+    place()
+    check("tangent", { circle(0, 0, 3), circle(7, 0, 3) }, function(p, q) return s:tangent(p, q, "positive") end, nil, "positive")
+    place()
+    local ln = line(0, 0, 4, 0)
+    local bez = s:add_bezier(s:ends(ln)[2], { ox + 5, 0 }, { ox + 6, 1 }, { ox + 7, 1 })
+    check("tangent_at_end", { bez, ln }, function(p, q) return s:tangent_at_end(p, q, "end") end)
+    t.eq(s:constraint_end(s:constraints()[#s:constraints()]), "end")
+    place()
+    check("concentric", { circle(0, 0, 3), circle(1, 1, 5) }, function(p, q) return s:concentric(p, q) end)
+    place()
+    check("equal_length", { line(0, 0, 10, 0), line(0, 5, 7, 5) }, function(p, q) return s:equal_length(p, q) end)
+    place()
+    check("equal_radius", { circle(0, 0, 3), circle(9, 0, 5) }, function(p, q) return s:equal_radius(p, q) end)
+    place()
+    check("midpoint", { pt(4, 1), line(0, 0, 10, 0) }, function(p, q) return s:midpoint(p, q) end)
+    place()
+    check("symmetric", { pt(-3, 2), pt(4, 3), line(0, 0, 0, 10) }, function(p, q, r) return s:symmetric(p, q, r) end)
+    place()
+    check("fix", { pt(2, 2) }, function(p) return s:fix(p) end)
+    place()
+    check("distance", { pt(0, 0), pt(5, 1) }, function(p, q) return s:distance(p, q, 7) end, 7)
+    place()
+    check("point_line_distance", { pt(3, 2), line(0, 0, 10, 0) }, function(p, q) return s:point_line_distance(p, q, 3) end, 3)
+    place()
+    check("line_distance", { line(0, 0, 10, 0), line(0, 5, 10, 5) }, function(p, q) return s:line_distance(p, q, 4) end, 4)
+    place()
+    check("circle_line_distance", { circle(0, 10, 2), line(-10, 0, 10, 0) }, function(p, q) return s:circle_line_distance(p, q, 3) end, 3)
+    place()
+    check("circle_distance", { circle(0, 0, 2), circle(10, 0, 3) }, function(p, q) return s:circle_distance(p, q, 3) end, 3)
+    place()
+    check("horizontal_distance", { pt(0, 0), pt(5, 1) }, function(p, q) return s:horizontal_distance(p, q, 6) end, 6)
+    place()
+    check("vertical_distance", { pt(0, 0), pt(5, 1) }, function(p, q) return s:vertical_distance(p, q, 6) end, 6)
+    place()
+    check("length", { line(0, 0, 10, 0) }, function(p) return s:length(p, 12) end, 12)
+    place()
+    check("angle", { line(0, 0, 10, 0), line(0, 5, 10, 7) }, function(p, q) return s:angle(p, q, 0.5) end, 0.5)
+    place()
+    check("radius", { circle(0, 0, 3) }, function(p) return s:radius_of(p, 4) end, 4)
+    place()
+    check("diameter", { circle(0, 0, 3) }, function(p) return s:diameter(p, 9) end, 9)
+    t.eq(#s:constraints(), 28)
+    local arc = s:add_arc(s:add_point(0, -30), s:add_point(5, -30), s:add_point(0, -25))
+    local conic = s:add_conic(s:add_point(0, -60), { 1, -58 }, { 3, -60 }, 0.7)
+    t.eq(s:kind(arc), "arc")
+    t.eq(s:kind(conic), "free_curve")
+    refusal(function() s:add_line(-1, 0) end, "^sketch_add_line: a must be an id")
+    local b = s:add_point(10, -90)
+    refusal(function() s:add_line("1", b) end, "^sketch_add_line: a must be an id")
+    refusal(function() s:fix(nil) end, "^fix: id must be an id")
+    refusal(function() s:kind(2 ^ 32) end, "^sketch_kind: id must be an id")
+  end)
+
+  t.test("sketch: a closed sketch refuses every call", function()
+    local s = bs.Sketch.new()
+    s:add_point(1, 2)
+    local other = bs.Sketch.new()
+    s:close()
+    for i, call in ipairs({
+      function() s:add_point(0, 0) end, function() s:entities() end, function() s:diagnose() end,
+      function() s:drag({}) end, function() other:reference(s, 0) end, function() other:update_reference(0, s) end,
+    }) do
+      local e = refusal(call)
+      t.eq(e.message, "sketch: closed", "call " .. i)
+    end
+    other:close()
+  end)
+
+  -- ---- arc-length sampling: point at length, divide by count, divide by length ----
+
+  local function dist(a, b)
+    return math.sqrt((a[1] - b[1]) ^ 2 + (a[2] - b[2]) ^ 2 + (a[3] - b[3]) ^ 2)
+  end
+
+  t.test("arc length: a cylinder rim a quarter of the way round is a quarter turn", function()
+    local cylinder = bs.Solid.cylinder(2.5, 4)
+    local rims = 0
+    for _, e in ipairs(cylinder.edges) do
+      if e.curve ~= nil and e.curve.kind == "circle" then
+        rims = rims + 1
+        local c, i = e.curve, e.index
+        local start = cylinder:edge_point_at_length(i, 0)
+        t.eq(getmetatable(start), bs.At)
+        t.near(start.parameter, c.t0, 1e-12)
+        local a = cylinder:edge_point_at_length(i, 2.5 * pi / 2)
+        t.near(a.parameter, c.t0 + pi / 2, 1e-9)
+        t.near(dist(a.point, c.origin), 2.5, 1e-9)
+        t.near(math.sqrt(a.tangent[1] ^ 2 + a.tangent[2] ^ 2 + a.tangent[3] ^ 2), 1, 1e-12)
+        t.eq(a.segment, nil)
+        t.eq(a.from_polyline, false)
+        t.ok(a.error >= 0 and a.error < math.huge, "error " .. tostring(a.error))
+        local four = cylinder:edge_divide_by_count(i, 4)
+        t.eq(#four, 4)
+        for k = 1, 4 do
+          t.near(dist(four[k].point, four[k % 4 + 1].point), 2.5 * math.sqrt(2), 1e-9)
+        end
+        t.ok(all_near(four[1].point, start.point, 1e-9), "the first sample is the start")
+        t.eq(#cylinder:edge_divide_by_length(i, 2.5 * pi / 2), 4)
+      end
+    end
+    t.ok(rims >= 2, "the cylinder has two circle edges")
+  end)
+
+  t.test("arc length: an open edge has both its ends", function()
+    local box = bs.Solid.cuboid(2, 3, 4)
+    local checked = 0
+    for _, e in ipairs(box.edges) do
+      if e.kind == "line" and math.abs(box:edge_length(e.index).length - 4) <= 1e-9 and checked == 0 then
+        checked = checked + 1
+        local five = box:edge_divide_by_count(e.index, 4)
+        t.eq(#five, 5)
+        for k = 1, 5 do t.near(dist(five[k].point, five[1].point), k - 1, 1e-9) end
+        t.near(five[1].parameter, e.curve.t0, 1e-12)
+        t.near(five[5].parameter, e.curve.t1, 1e-12)
+        local by = box:edge_divide_by_length(e.index, 1.5)
+        t.eq(#by, 3)
+        for k = 1, 3 do t.near(dist(by[k].point, by[1].point), 1.5 * (k - 1), 1e-9) end
+      end
+    end
+    t.eq(checked, 1)
+  end)
+
+  t.test("arc length: a slot profile reports the side", function()
+    local slot = bs.Profile.slot({ 0, 0 }, 8, 1)
+    local at = slot:point_at_length(6 + pi / 2)
+    t.eq(getmetatable(at), bs.At)
+    t.ok(all_near(at.point, { 4, 0, 0 }, 1e-9), "point " .. at.point[1] .. ", " .. at.point[2])
+    t.eq(at.segment, 1)
+    local eight = slot:divide_by_count(8)
+    t.eq(#eight, 8)
+    for _, a in ipairs(eight) do t.ok(a.segment >= 0 and a.segment <= 4, "segment " .. tostring(a.segment)) end
+    local by = slot:divide_by_length(3)
+    t.eq(#by, math.floor((12 + 2 * pi) / 3) + 1)
+    t.eq(#by, 7)
+    for k = 1, #by do
+      local own = slot:point_at_length(3 * (k - 1))
+      t.ok(all_near(by[k].point, own.point, 1e-12), "sample " .. k)
+      t.eq(by[k].segment, own.segment)
+    end
+    t.ok(dist(by[#by].point, by[1].point) > 0.1)
+  end)
+
+  t.test("arc length: refusals name the call", function()
+    local cylinder = bs.Solid.cylinder(2.5, 4)
+    local rim
+    for _, e in ipairs(cylinder.edges) do
+      if e.kind == "circle" then rim = e.index break end
+    end
+    local slot = bs.Profile.slot({ 0, 0 }, 8, 1)
+    t.raises(function() cylinder:edge_point_at_length(rim, -1) end, "^edge_point_at_length: ")
+    t.raises(function() cylinder:edge_point_at_length(rim, 100) end, "^edge_point_at_length: ")
+    t.raises(function() cylinder:edge_point_at_length(#cylinder.edges, 1) end, "^edge_point_at_length: ")
+    t.raises(function() cylinder:edge_divide_by_count(rim, 0) end, "^edge_divide_by_count: .*not at least 1")
+    t.raises(function() cylinder:edge_divide_by_count(rim, 1000001) end, "^edge_divide_by_count: .*not at most 1000000")
+    t.raises(function() cylinder:edge_divide_by_length(rim, 0) end, "^edge_divide_by_length: ")
+    t.raises(function() slot:point_at_length(-1) end, "^profile_point_at_length: ")
+    t.raises(function() slot:divide_by_count(0) end, "^profile_divide_by_count: ")
+    t.raises(function() slot:divide_by_length(-1) end, "^profile_divide_by_length: ")
+    t.raises(function() cylinder:edge_point_at_length(rim, 1, 0 / 0) end, "^edge_point_at_length: .*is not an accuracy")
+    t.raises(function() cylinder:edge_divide_by_count(rim, -1) end, "^edge_divide_by_count: n is out of range: %-1$")
+    t.raises(function() cylinder:edge_divide_by_count(rim, 2 ^ 32 + 4) end, "^edge_divide_by_count: n is out of range: 4294967300$")
+    t.raises(function() cylinder:edge_divide_by_count(rim, 4.5) end, "^edge_divide_by_count: n must be a whole number")
+    t.raises(function() slot:divide_by_count(-1) end, "^profile_divide_by_count: n is out of range: %-1$")
+    t.raises(function() slot:divide_by_count(2 ^ 32 + 4) end, "^profile_divide_by_count: n is out of range: 4294967300$")
+    t.raises(function() slot:divide_by_count(4.5) end, "^profile_divide_by_count: n must be a whole number")
+  end)
+
+  t.test("arc length: accuracy 0 or less is the default", function()
+    local slot = bs.Profile.slot({ 0, 0 }, 8, 1)
+    local own = slot:point_at_length(5)
+    for _, accuracy in ipairs({ 0, -1 }) do
+      local a = slot:point_at_length(5, accuracy)
+      t.ok(all_near(a.point, own.point, 0) and all_near(a.tangent, own.tangent, 0), "accuracy " .. accuracy)
+      t.eq(a.parameter, own.parameter)
+      t.eq(a.segment, own.segment)
+      t.eq(a.error, own.error)
+      t.eq(a.from_polyline, own.from_polyline)
+    end
+  end)
+
+  -- ---- the R-tree (r-tree plan 3), at parity with the Python reference's test_rtree_*,
+  -- test_closest_points_and_k_neighbors_match_brute_force and
+  -- test_k_neighbors_reports_a_bad_point_before_a_bad_k, trimmed to what proves the marshalling:
+  -- every field read, every refusal's prefix, the lists' length and order, the handle's lifetime.
+
+  -- The 10 x 10 x 10 grid of unit boxes as {id, {min, max}}, id 100 i + 10 j + k, ascending.
+  local function rtree_grid()
+    local cells = {}
+    for i = 0, 9 do
+      for j = 0, 9 do
+        for k = 0, 9 do
+          cells[#cells + 1] = { 100 * i + 10 * j + k, { { i, j, k }, { i + 1, j + 1, k + 1 } } }
+        end
+      end
+    end
+    return cells
+  end
+
+  -- Two lists of rows (or of numbers) equal, element by element.
+  local function rows_same(a, b)
+    if #a ~= #b then return false end
+    for n = 1, #a do
+      if type(a[n]) == "table" then
+        if type(b[n]) ~= "table" or not same(a[n], b[n]) then return false end
+      elseif a[n] ~= b[n] then
+        return false
+      end
+    end
+    return true
+  end
+
+  local function pairs_ascending(list)
+    for n = 2, #list do
+      local p, q = list[n - 1], list[n]
+      if not (p[1] < q[1] or (p[1] == q[1] and p[2] <= q[2])) then return false end
+    end
+    return true
+  end
+
+  local function refused(fn, pattern)
+    local e = t.raises(fn, pattern)
+    t.ok(is_build_error(e), "a BuildError: " .. tostring(e))
+    return e
+  end
+
+  t.test("rtree: a grid packed or grown answers alike", function()
+    local cells = rtree_grid()
+    local packed = bs.RTree.from_boxes(cells)
+    local grown = bs.RTree()
+    t.eq(getmetatable(grown), bs.RTree)
+    -- grown backwards, each box shape in turn: {min, max}, a Box, 6 numbers
+    for n = #cells, 1, -1 do
+      local id, lo, hi = cells[n][1], cells[n][2][1], cells[n][2][2]
+      local shapes = { { lo, hi }, bs.Box(lo, hi), { lo[1], lo[2], lo[3], hi[1], hi[2], hi[3] } }
+      grown:insert(id, shapes[n % 3 + 1])
+    end
+    local corner = {}
+    for _, c in ipairs(cells) do
+      local id = c[1]
+      if math.floor(id / 100) <= 2 and math.floor(id / 10) % 10 <= 2 and id % 10 <= 2 then corner[#corner + 1] = id end
+    end
+    t.eq(#corner, 27)
+    local answers = {}
+    for _, named in ipairs({ { "from_boxes", packed }, { "insert", grown } }) do
+      local name, tree = named[1], named[2]
+      t.eq(tree:count(), 1000, name)
+      local b = tree.bounds
+      t.ok(same(b[1], { 0, 0, 0 }) and same(b[2], { 10, 10, 10 }), name .. ": bounds")
+      t.ok(same(tree:search({ { 0, 0, 0 }, { 2, 2, 2 } }), corner), name .. ": search")
+      local near = tree:nearest({ -1, -1, -1 }, 1)
+      t.eq(#near, 1, name)
+      t.eq(near[1][1], 0, name)
+      t.near(near[1][2], math.sqrt(3), 1e-12, name)
+      t.ok(rows_same(tree:within({ 0, 0, 0 }, 0), { { 0, 0 } }), name .. ": within 0")
+      local ids = {}
+      for _, h in ipairs(tree:within({ -1, -1, -1 }, 2.5)) do ids[#ids + 1] = h[1] end
+      t.ok(same(ids, { 0, 1, 10, 100 }), name .. ": by distance then id")
+      local list = tree:self_overlaps()
+      t.eq(#list, (28 ^ 3 - 1000) / 2, name)
+      for _, p in ipairs(list) do
+        if not (p[1] < p[2]) then t.ok(false, name .. ": the smaller id first") end
+      end
+      t.ok(pairs_ascending(list), name .. ": pairs ascending")
+      t.ok(rows_same(tree:self_overlaps(0.5), list), name .. ": unit gaps paired at slack 0.5")
+      answers[#answers + 1] = list
+    end
+    t.ok(rows_same(answers[1], answers[2]), "both trees answer alike")
+  end)
+
+  t.test("rtree: two trees, and one tree against itself", function()
+    local grid = bs.RTree.from_boxes(rtree_grid())
+    local one = bs.RTree.from_boxes({ { 7, { { 4.5, 4.5, 4.5 }, { 5.5, 5.5, 5.5 } } } })
+    local ids = { 444, 445, 454, 455, 544, 545, 554, 555 }
+    local forward, backward = {}, {}
+    for n, id in ipairs(ids) do
+      forward[n] = { id, 7 }
+      backward[n] = { 7, id }
+    end
+    t.ok(rows_same(grid:overlaps(one), forward), "grid against one")
+    t.ok(rows_same(one:overlaps(grid, 0), backward), "one against grid")
+    local twice = grid:overlaps(grid)
+    t.eq(#twice, 1000 + 2 * 10476)
+    t.ok(pairs_ascending(twice))
+  end)
+
+  t.test("rtree: points, insert and remove", function()
+    local points = bs.RTree.from_points({ { 0, 0, 0 }, { 5, 0, 0 }, { 1, 0, 0 }, { 0, 3, 0 } })
+    t.eq(points:count(), 4)
+    t.ok(same(points:search({ { 0.9, -0.1, -0.1 }, { 1.1, 0.1, 0.1 } }), { 2 }))
+    t.ok(rows_same(points:nearest({ 4, 0, 0 }, 2), { { 1, 1 }, { 2, 3 } }))
+
+    local tree = bs.RTree()
+    local unit = { { 3, 3, 3 }, { 4, 4, 4 } }
+    tree:insert(7, unit)
+    tree:insert(7, unit)
+    t.ok(same(tree:search(unit), { 7, 7 }))
+    t.eq(tree:remove(7, unit), true)
+    t.eq(tree:remove(7, unit), true)
+    t.eq(tree:remove(7, unit), false)
+    tree:insert(7, unit)
+    t.eq(tree:remove(8, unit), false, "another id")
+    t.eq(tree:remove(7, { { 3, 3, 3 }, { 4, 4, 4.5 } }), false, "another box")
+    tree:insert(9, { 1, 2, 3 })
+    t.eq(tree:count(), 2)
+    local b = tree.bounds
+    t.ok(same(b[1], { 1, 2, 3 }) and same(b[2], { 4, 4, 4 }), "bounds")
+    t.eq(tree:remove(9, { 1, 2, 3 }), true, "a point is removed by the same point")
+    t.eq(tree:remove(7, bs.Box(unit[1], unit[2])), true)
+    t.eq(tree:count(), 0)
+    t.eq(tree.bounds, nil)
+    local largest = 2 ^ 32 - 1
+    tree:insert(largest, { 1, 2, 3 })
+    t.ok(same(tree:search({ 0, 0, 0, 5, 5, 5 }), { largest }))
+    t.eq(tree:remove(largest, { 1, 2, 3 }), true)
+  end)
+
+  t.test("rtree: closest_points and k_neighbors match a brute force", function()
+    local state = 5
+    local function next_number()
+      state = (state * 1664525 + 1013904223) % 4294967296
+      return state / 4294967296
+    end
+    local function points_of(n)
+      local out = {}
+      for i = 1, n do out[i] = { 10 * next_number(), 10 * next_number(), 10 * next_number() } end
+      return out
+    end
+    local hay, needles = points_of(30), points_of(5)
+    local function by_distance(q)
+      local order = {}
+      for i = 1, #hay do order[i] = i - 1 end
+      table.sort(order, function(x, y)
+        local dx, dy = dist(hay[x + 1], q), dist(hay[y + 1], q)
+        if dx ~= dy then return dx < dy end
+        return x < y
+      end)
+      return order
+    end
+    local closest = bs.closest_points(hay, needles, 3)
+    local knn = bs.k_neighbors(hay, needles, 4)
+    t.eq(#closest, 5)
+    t.eq(#knn, 5)
+    local some, all = false, true
+    for n, q in ipairs(needles) do
+      local order = by_distance(q)
+      local in_limit, first = {}, {}
+      for _, i in ipairs(order) do
+        if dist(hay[i + 1], q) <= 3 then in_limit[#in_limit + 1] = i end
+      end
+      for m = 1, 4 do first[m] = order[m] end
+      t.ok(same(closest[n], in_limit), "closest points, needle " .. (n - 1))
+      t.ok(same(knn[n], first), "k neighbors, needle " .. (n - 1))
+      some = some or #in_limit > 0
+      all = all and #in_limit == #hay
+    end
+    t.ok(some and not all, "the limit chose nothing or everything")
+    t.ok(same(bs.k_neighbors(hay, { needles[1], needles[2] }, 500)[2], by_distance(needles[2])),
+      "k over the hay count is every point")
+    local empty = bs.k_neighbors({}, { needles[1], needles[2] }, 3)
+    t.eq(#empty, 2, "an empty hay")
+    t.eq(#empty[1], 0)
+    t.eq(#empty[2], 0)
+  end)
+
+  t.test("rtree: refusals name their call, and ids and k are checked before the call", function()
+    local nan, inf = 0 / 0, math.huge
+    local tree = bs.RTree()
+    refused(function() tree:insert(1, { { 0, 0, 0 }, { nan, 1, 1 } }) end, "^rtree_insert: .*is not a box$")
+    refused(function() tree:insert(1, { { 1, 0, 0 }, { 0, 1, 1 } }) end, "^rtree_insert: .*is not a box$")
+    refused(function() tree:insert(1, { inf, 0, 0 }) end, "^rtree_insert_point: .*is not finite$")
+    t.eq(tree:count(), 0, "a refused insert changed the tree")
+    refused(function() tree:remove(1, { { 1, 0, 0 }, { 0, 1, 1 } }) end, "^rtree_remove: ")
+    t.eq(tree:remove(1, { { 0, 0, 0 }, { 1, 1, 1 } }), false, "absent right after a refusal")
+    refused(function() tree:search({ { 0, 0, 0 }, { nan, 1, 1 } }) end, "^rtree_search: ")
+    refused(function() tree:within({ nan, 0, 0 }, 1) end, "^rtree_within: .*is not finite$")
+    refused(function() tree:nearest({ nan, 0, 0 }, 1) end, "^rtree_nearest: .*is not finite$")
+    refused(function() tree:within({ 0, 0, 0 }, -1) end, "^rtree_within: radius %-1 is not a distance$")
+    refused(function() tree:self_overlaps(nan) end, "^rtree_self_overlaps: slack NaN is not a distance$")
+    refused(function() tree:overlaps(tree, -0.5) end, "^rtree_overlaps: ")
+    refused(function() tree:nearest({ 0, 0, 0 }, 1000001) end, "^rtree_nearest: k 1000001 is not at most 1000000$")
+    refused(function() bs.RTree.from_boxes({ { 1, { { 0, 0, 0 }, { 1, 1, 1 } } }, { 2, { { 2, 0, 0 }, { 1, 1, 1 } } } }) end,
+      "^rtree_from_boxes: entry 1")
+    refused(function() bs.RTree.from_points({ { 0, 0, 0 }, { 0, nan, 0 } }) end, "^rtree_from_points: point 1 is not finite$")
+    -- the shapes, refused here
+    refused(function() tree:insert(1, "box") end, "^rtree_insert: a box is ")
+    refused(function() tree:insert(1, { 0, 0 }) end, "^rtree_insert: a box is ")
+    refused(function() tree:within({ 0, 0 }, 1) end, "^rtree_within: a point is 3 numbers")
+    refused(function() tree:within({ 0, 0, 0 }, "1") end, "^rtree_within: radius .* is not a number$")
+    refused(function() bs.RTree.from_boxes({ 7 }) end, "^rtree_from_boxes: entry 0 is not an {id, box} pair")
+    refused(function() tree:overlaps({}) end, "^rtree_overlaps: other must be an RTree")
+
+    local origin = { { 0, 0, 0 } }
+    refused(function() bs.closest_points(origin, origin, -1) end, "^closest_points: limit %-1 is not a distance$")
+    refused(function() bs.closest_points({ { 0, 0, 0 }, { nan, 0, 0 } }, { { inf, 0, 0 } }, -1) end,
+      "^closest_points: limit %-1 is not a distance$")
+    refused(function() bs.closest_points(origin, { { nan, 0, 0 } }, 1) end, "^closest_points: needle point 0 is not finite$")
+    refused(function() bs.closest_points({ { 0, 0, 0 }, { 0, 0, nan } }, { { nan, 0, 0 } }, 1) end,
+      "^closest_points: hay point 1 is not finite$")
+    refused(function() bs.k_neighbors({ { 0, 0, 0 }, { inf, 0, 0 } }, origin, 1000001) end, "^k_neighbors: hay point 1 is not finite$")
+    refused(function() bs.k_neighbors(origin, origin, 1000001) end, "^k_neighbors: k 1000001 is not at most 1000000$")
+    -- the limit as Rust's {} prints an f64: the shortest round-trip digits, never an exponent
+    for _, c in ipairs({
+      { -1e-7, "-0.0000001" }, { -1e20, "-100000000000000000000" }, { -1.5, "-1.5" }, { -(0.1 + 0.2), "-0.30000000000000004" },
+      { nan, "NaN" }, { -inf, "-inf" }, { -5e-324, "-0." .. ("0"):rep(323) .. "5" }, { -1e-323, "-0." .. ("0"):rep(322) .. "1" },
+      { -1e16, "-10000000000000000" }, { -1.2345678901234568e17, "-123456789012345680" }, { -1e21, "-1000000000000000000000" },
+      { -0.000123, "-0.000123" }, { -2.5e-5, "-0.000025" },
+    }) do
+      refused(function() bs.closest_points(origin, origin, c[1]) end,
+        "^closest_points: limit " .. c[2]:gsub("[%-%.]", "%%%0") .. " is not a distance$")
+    end
+
+    -- a number is not a uint32_t: refused before the FFI could wrap it
+    for _, id in ipairs({ -1, 2 ^ 32 }) do
+      local shown = ("%.14g"):format(id):gsub("%-", "%%-")
+      refused(function() tree:insert(id, { 0, 0, 0 }) end, "^rtree_insert: id is out of range: " .. shown .. "$")
+      refused(function() tree:insert(id, { { 0, 0, 0 }, { 1, 1, 1 } }) end, "^rtree_insert: id is out of range: " .. shown .. "$")
+      refused(function() tree:remove(id, { 0, 0, 0 }) end, "^rtree_remove: id is out of range: " .. shown .. "$")
+      refused(function() bs.RTree.from_boxes({ { id, { 0, 0, 0 } } }) end,
+        "^rtree_from_boxes: entry 0: id is out of range: " .. shown .. "$")
+      refused(function() tree:nearest({ 0, 0, 0 }, id) end, "^rtree_nearest: k is out of range: " .. shown .. "$")
+      refused(function() bs.k_neighbors(origin, origin, id) end, "^k_neighbors: k is out of range: " .. shown .. "$")
+    end
+    t.eq(tree:count(), 0, "an id out of range reached the tree")
+    refused(function() tree:insert(1.5, { 0, 0, 0 }) end, "^rtree_insert: id must be a whole number")
+    refused(function() tree:insert("1", { 0, 0, 0 }) end, "^rtree_insert: id must be a whole number")
+    refused(function() tree:nearest({ 0, 0, 0 }, 1.5) end, "^rtree_nearest: k must be a whole number")
+    refused(function() bs.k_neighbors(origin, origin, nan) end, "^k_neighbors: k must be a whole number")
+    -- a NaN is no whole number; an infinity is one out of range
+    refused(function() tree:insert(nan, { 1, 2, 3 }) end, "^rtree_insert: id must be a whole number, got nan$")
+    refused(function() tree:insert(inf, { 1, 2, 3 }) end, "^rtree_insert: id is out of range: inf$")
+    refused(function() tree:nearest({ 0, 0, 0 }, -inf) end, "^rtree_nearest: k is out of range: %-inf$")
+    t.eq(tree:count(), 0, "a refused id reached the tree")
+  end)
+
+  t.test("rtree: an empty tree answers nothing, and a closed one refuses", function()
+    local other = bs.RTree.from_boxes(rtree_grid())
+    local empty = bs.RTree()
+    t.eq(empty:count(), 0)
+    t.eq(empty.bounds, nil)
+    t.eq(#empty:search({ { 0, 0, 0 }, { 1, 1, 1 } }), 0)
+    t.eq(#empty:within({ 0, 0, 0 }, 10), 0)
+    t.eq(#empty:nearest({ 0, 0, 0 }, 3), 0)
+    t.eq(#empty:self_overlaps(), 0)
+    t.eq(#empty:overlaps(other), 0)
+    t.eq(#other:overlaps(empty), 0)
+    t.eq(#other:nearest({ 0, 0, 0 }, 0), 0)
+    t.eq(bs.RTree.from_boxes({}):count(), 0)
+    t.eq(bs.RTree.from_points({}):count(), 0)
+    t.eq(empty.closed, false)
+    empty:close()
+    empty:close()
+    t.eq(empty.closed, true)
+    local closed = "^rtree: closed$"
+    refused(function() return empty:count() end, closed)
+    refused(function() return empty.bounds end, closed)
+    refused(function() empty:insert(1, { 0, 0, 0 }) end, closed)
+    refused(function() empty:remove(1, { 0, 0, 0 }) end, closed)
+    refused(function() empty:search({ 0, 0, 0 }) end, closed)
+    refused(function() empty:within({ 0, 0, 0 }, 1) end, closed)
+    refused(function() empty:nearest({ 0, 0, 0 }, 1) end, closed)
+    refused(function() empty:self_overlaps() end, closed)
+    refused(function() other:overlaps(empty) end, closed)
+    refused(function() empty:overlaps(other) end, closed)
+    other:close()
+    t.eq(other.closed, true)
+  end)
+
+  -- ---- the interpolator, the circumscribed polygon, merge and regions, at parity with the
+  -- Python reference's test_interpolator_*, test_circumscribed_polygon_touches_its_circle,
+  -- test_merge_* and test_a_merged_body_is_refused_*, trimmed to what proves the marshalling:
+  -- every field read, every refusal's prefix, the lists' length and order, the handle's lifetime.
+
+  local SQUARES = { 0, 1, 4, 9, 16 }
+  local INTERPOLATOR_MODES = { "nearest", "linear", "cosine", "cubic", "catmull_rom" }
+  local MERGE_TOL = 1e-6
+
+  local function fails(fn, pattern)
+    local e = t.raises(fn, pattern)
+    t.ok(is_build_error(e), "a BuildError: " .. tostring(e))
+    return e
+  end
+
+  -- Two answers of an interpolator equal exactly: numbers, or lists of numbers.
+  local function values_same(a, b)
+    if type(a) ~= type(b) then return false end
+    if type(a) == "number" then return a == b end
+    return same(a, b)
+  end
+
+  t.test("interpolator: closed forms on the squares", function()
+    local sq = bs.Interpolator(SQUARES)
+    t.eq(getmetatable(sq), bs.Interpolator)
+    t.eq(sq:count(), 5)
+    t.eq(sq.dimension, 1)
+    t.eq(sq.cyclic, false)
+    for _, mode in ipairs(INTERPOLATOR_MODES) do
+      for k, y in ipairs(SQUARES) do
+        local v = sq:at(k - 1, mode)
+        t.eq(type(v), "number", mode)
+        t.near(v, y, 1e-12, mode .. " at " .. (k - 1))
+      end
+      -- open: clamped to the end samples
+      t.near(sq:at(-2, mode), 0, 1e-12, mode .. " at -2")
+      t.near(sq:at(7, mode), 16, 1e-12, mode .. " at 7")
+    end
+    t.eq(sq:nearest(1.5), 4)
+    t.eq(sq:nearest(1.49), 1)
+    t.near(sq:linear(1.5), 2.5, 1e-12)
+    t.near(sq:cosine(1.5), 2.5, 1e-12)
+    t.near(sq:cosine(1.25), 1 + 3 * (1 - math.cos(pi / 4)) / 2, 1e-12)
+    t.near(sq:cubic(1.5), 2.0, 1e-12)
+    t.near(sq:catmull_rom(1.5), 2.25, 1e-12)
+    t.eq(sq:at(1.5), sq:linear(1.5), "linear by default")
+    local ring = bs.Interpolator(SQUARES, true)
+    t.eq(ring.cyclic, true)
+    t.near(ring:catmull_rom(5), ring:catmull_rom(0), 1e-12)
+    t.near(ring:linear(-0.5), 8.0, 1e-12, "halfway from the last sample back to the first")
+    ring:close()
+  end)
+
+  t.test("interpolator: points answer lists, and sample is a loop of at", function()
+    local helix = {}
+    for k = 0, 8 do helix[k + 1] = { math.cos(0.7 * k), math.sin(0.7 * k), 0.3 * k } end
+    local h = bs.Interpolator(helix)
+    t.eq(h:count(), 9)
+    t.eq(h.dimension, 3)
+    t.ok(all_near(h:at(2), helix[3], 1e-12), "at a whole t, the sample")
+    local v = h:catmull_rom(2.5)
+    t.eq(type(v), "table")
+    t.eq(#v, 3)
+    local ts = {}
+    for k = 0, 49 do ts[k + 1] = -1.0 + 10.0 * k / 49 end
+    for _, mode in ipairs(INTERPOLATOR_MODES) do
+      local list = h:sample(ts, mode)
+      t.eq(#list, #ts, mode)
+      for k, x in ipairs(ts) do
+        t.ok(values_same(list[k], h:at(x, mode)), mode .. ": sample " .. (k - 1) .. " is at's")
+      end
+    end
+    local none = h:sample({})
+    t.eq(type(none), "table")
+    t.eq(#none, 0)
+    local square = bs.Interpolator({ { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } }, true)
+    t.ok(all_near(square:linear(-0.5), { 0, 0.5 }, 1e-12), "wraps")
+    local two = square:sample({ 0.5, 1.5 })
+    t.eq(#two, 2)
+    t.ok(all_near(two[1], { 0.5, 0 }, 1e-12) and all_near(two[2], { 1, 0.5 }, 1e-12), "two 2D values in order")
+    local scalars = bs.Interpolator(SQUARES):sample({ 0, 1.5, 4 }, "linear")
+    t.ok(same(scalars, { 0, 2.5, 16 }), "numbers at dimension 1")
+  end)
+
+  t.test("interpolator: refusals, and a closed one refuses", function()
+    local nan, inf = 0 / 0, math.huge
+    fails(function() bs.Interpolator({}) end, "^interpolator_new: no samples")
+    fails(function() bs.Interpolator({ 0, 1, nan }) end, "^interpolator_new: sample 2 is not finite")
+    fails(function() bs.Interpolator({ { 0, 1 }, { 2, 3, 4 } }) end, "^interpolator: samples differ in length %(2, 3%)$")
+    fails(function() bs.Interpolator({ 1, { 2 } }) end, "^interpolator: samples are all numbers or all lists of numbers")
+    fails(function() bs.Interpolator({ { 1 }, 2 }) end, "^interpolator: samples are all numbers or all lists of numbers")
+    local sq = bs.Interpolator(SQUARES)
+    local names = "is not one of nearest, linear, cosine, cubic, catmull_rom$"
+    fails(function() sq:at(1, "spline") end, "^interpolator: mode 'spline' " .. names)
+    fails(function() sq:sample({ 1 }, "bezier") end, "^interpolator: mode 'bezier' " .. names)
+    fails(function() sq:sample({}, "bezier") end, "^interpolator: mode 'bezier' " .. names)
+    fails(function() sq:at(1, 3) end, "^interpolator: mode 3 " .. names)
+    fails(function() sq:linear(nan) end, "^interpolator_at: t NaN is not finite")
+    fails(function() sq:sample({ 0, inf }) end, "^interpolator_sample: t 1 %(inf%) is not finite")
+    fails(function() sq:linear("1") end, "^interpolator_at: t '1' is not a number$")
+    t.eq(sq.closed, false)
+    sq:close()
+    sq:close()
+    t.eq(sq.closed, true)
+    t.eq(tostring(sq), "Interpolator(closed)")
+    local closed = "^interpolator: closed$"
+    fails(function() sq:linear(1) end, closed)
+    fails(function() sq:sample({ 1 }) end, closed)
+    fails(function() return sq:count() end, closed)
+    fails(function() return sq.dimension end, closed)
+    fails(function() return sq.cyclic end, closed)
+  end)
+
+  t.test("circumscribed polygon: its sides touch its circle", function()
+    local cx, cy, r, n = 2, -1, 5, 6
+    local hex = bs.Profile.circumscribed_polygon({ cx, cy }, r, n, 0.3)
+    t.eq(getmetatable(hex), bs.Profile)
+    -- perimeter 2 n r tan(pi/n) through the library's own length (there is no area call)
+    local perimeter = 2 * n * r * math.tan(pi / n)
+    t.near(hex:length().length, perimeter, 1e-9 * perimeter)
+    -- 2n points evenly round it by arc length, from the first corner: corners on the circle
+    -- of r / cos(pi/n) alternating with the sides' midpoints on the circle of r
+    local points = hex:divide_by_count(2 * n)
+    t.ok(#points >= 2 * n, "points: " .. #points)
+    for k = 1, 2 * n do
+      local p = points[k].point
+      local want = (k % 2 == 1) and r / math.cos(pi / n) or r
+      t.near(math.sqrt((p[1] - cx) ^ 2 + (p[2] - cy) ^ 2), want, 1e-6 * r, "point " .. (k - 1))
+    end
+    local first = points[1].point
+    t.near(math.atan2(first[2] - cy, first[1] - cx), 0.3, 1e-9, "the first corner at angle")
+    local e = fails(function() bs.Profile.circumscribed_polygon({ 0, 0 }, 10, 2) end)
+    t.eq(e.message, "profile_circumscribed_polygon: a polygon has at least 3 sides, not 2")
+    -- a number is not a uint32_t: refused before the FFI could wrap it
+    fails(function() bs.Profile.circumscribed_polygon({ 0, 0 }, 10, -1) end,
+      "^profile_circumscribed_polygon: sides is out of range: %-1$")
+    fails(function() bs.Profile.circumscribed_polygon({ 0, 0 }, 10, 2 ^ 32 + 6) end,
+      "^profile_circumscribed_polygon: sides is out of range: 4294967302$")
+    fails(function() bs.Profile.circumscribed_polygon({ 0, 0 }, 10, 6.5) end,
+      "^profile_circumscribed_polygon: sides must be a whole number, got 6.5$")
+  end)
+
+  t.test("merge: two cubes at a corner are the outside and three cells", function()
+    local a = bs.Solid.cuboid(1, 1, 1)
+    local b = a:translate(0.5, 0.5, 0.5)
+    local phases = {}
+    local m = a:merge(b, MERGE_TOL, function(phase) phases[phase] = true end)
+    t.eq(getmetatable(m), bs.Solid)
+    t.ok(phases.imprint and phases.select and phases.check, "the merge's phases reach progress")
+    t.eq(m.faces, 18)
+    local regions = m:regions()
+    t.eq(#regions, 4)
+    local total, finite_faces = 0, {}
+    for i, r in ipairs(regions) do
+      t.eq(getmetatable(r), bs.Region)
+      t.eq(r.index, i - 1, "indices from 0, in order")
+      t.eq(r.finite, i > 1, "region " .. (i - 1) .. " finite")
+      t.eq(r.shells, 1)
+      t.eq(getmetatable(r.box), bs.Box)
+      for k, s in ipairs(r.sides) do
+        t.eq(getmetatable(s), bs.FaceSide)
+        t.ok(s.sense == 1 or s.sense == -1, "a sense is +1 or -1, not " .. tostring(s.sense))
+        if k > 1 then
+          local p = r.sides[k - 1]
+          t.ok(p.face < s.face or (p.face == s.face and p.sense < s.sense), "sides ascending by face then sense")
+        end
+        if r.finite then finite_faces[s.face] = true end
+      end
+      total = total + #r.sides
+    end
+    t.eq(total, 2 * m.faces, "each face's two sides")
+    for f = 0, m.faces - 1 do t.ok(finite_faces[f], "face " .. f .. " bounds a cell") end
+    local volumes, small = {}, nil
+    for i = 2, 4 do
+      local v = m:region_solid(i - 1):mass().volume
+      volumes[#volumes + 1] = v
+      if math.abs(v - 0.125) < 1e-6 then small = regions[i] end
+    end
+    table.sort(volumes)
+    t.ok(all_near(volumes, { 0.125, 0.875, 0.875 }, 1e-6), "cell volumes")
+    t.ok(small ~= nil, "the 1/8 cell")
+    t.eq(#small.sides, 6)
+    for _, s in ipairs(small.sides) do t.eq(s.sense, -1, "inside both, behind its walls") end
+    t.ok(all_near(small.box.lo, { 0, 0, 0 }, 1e-6) and all_near(small.box.hi, { 0.5, 0.5, 0.5 }, 1e-6), "its box")
+    -- value records: equal by value
+    local again = m:regions()
+    t.eq(#again, #regions)
+    for i = 1, #regions do
+      t.ok(again[i] == regions[i], "region " .. (i - 1) .. " equal by value")
+      t.ok(rawequal(again[i], regions[i]) == false)
+    end
+    t.ok(not (again[2] == again[3]), "two cells differ")
+    t.ok(regions[1].sides[1] == again[1].sides[1], "a face side equal by value")
+    t.ok(not (regions[1].sides[1] == regions[1].sides[2]), "two face sides differ")
+  end)
+
+  t.test("merge: a ball in a box is a box cell with a void", function()
+    local m = bs.Solid.cuboid(1, 1, 1):merge(bs.Solid.sphere(0.3), MERGE_TOL)
+    local regions = m:regions()
+    t.eq(#regions, 3)
+    local ball = 4.0 / 3.0 * pi * 0.3 ^ 3
+    local v1, v2 = m:region_solid(1):mass().volume, m:region_solid(2):mass().volume
+    local box, inner = 2, 3
+    if v2 > v1 then box, inner = 3, 2 end
+    t.near(math.max(v1, v2), 1 - ball, 1e-6)
+    t.near(math.min(v1, v2), ball, 1e-6)
+    t.eq(regions[box].shells, 2)
+    t.eq(regions[inner].shells, 1)
+  end)
+
+  t.test("merge: its body is refused by the manifold verbs, and its cells are not", function()
+    local a = bs.Solid.cuboid(1, 1, 1)
+    local m = a:merge(a:translate(0.5, 0.5, 0.5), MERGE_TOL)
+    fails(function() m:join(a, MERGE_TOL) end,
+      "^join: the join needs a manifold solid, and this one has edges of three or more faces")
+    fails(function() m:mass() end, "^mass_properties: the mass needs a manifold solid")
+    fails(function() m:region_solid(0) end, "^region_solid: region 0 is the infinite region$")
+    fails(function() m:region_solid(4) end, "^region_solid: region 4 is not below 4$")
+    fails(function() a:merge(a, 0.0) end, "^merge: tolerance must be positive and finite")
+    fails(function() a:merge("a") end, "^merge: expected a Solid")
+    -- a number is not a uint32_t: refused before the FFI could wrap it
+    fails(function() m:region_solid(-1) end, "^region_solid: region is out of range: %-1$")
+    fails(function() m:region_solid(2 ^ 32 + 1) end, "^region_solid: region is out of range: 4294967297$")
+    fails(function() m:region_solid(1.5) end, "^region_solid: region must be a whole number, got 1.5$")
+    -- a cell is an ordinary solid again
+    t.ok(m:region_solid(1):join(a, MERGE_TOL).faces > 0)
+    -- an ordinary solid has two regions: outside in front of every face, inside behind
+    local regions = a:regions()
+    t.eq(#regions, 2)
+    t.eq(regions[1].finite, false)
+    t.eq(regions[2].finite, true)
+    t.eq(#regions[1].sides, 6)
+    for _, s in ipairs(regions[1].sides) do t.eq(s.sense, 1, "outside") end
+    for _, s in ipairs(regions[2].sides) do t.eq(s.sense, -1, "inside") end
+    m:close()
+    fails(function() m:regions() end, "^solid: closed$")
+  end)
+
+  -- ---- rays, triangle trees and a solid's face tree (r-tree plan 6): Python's
+  -- test_rtree_ray_*, test_rtree_from_triangles_* and test_solid_face_tree_*, trimmed.
+
+  t.test("rtree: a ray through a row", function()
+    local cells = {}
+    for i = 0, 9 do cells[i + 1] = { i, { { i, 0, 0 }, { i + 1, 1, 1 } } } end
+    local row = bs.RTree.from_boxes(cells)
+    local start = { -1, 0.5, 0.5 }
+    local along = {}
+    for i = 0, 9 do along[i + 1] = { i, i + 1 } end
+    t.ok(rows_same(row:ray(start, { 1, 0, 0 }), along), "entry t per box")
+    t.ok(rows_same(row:ray(start, { 2, 0, 0 }, 1), { { 0, 0.5 }, { 1, 1 } }), "t in units of the direction")
+    t.ok(rows_same(row:ray(start, { 1, 0, 0 }, 3), { { 0, 1 }, { 1, 2 }, { 2, 3 } }), "max_t cuts the row")
+    t.ok(rows_same(row:ray({ 2.5, 0.5, 0.5 }, { 1, 0, 0 }, 1), { { 2, 0 }, { 3, 0.5 } }), "from inside: 0")
+    t.ok(rows_same(row:ray({ 11, 0.5, 0.5 }, { -1, 0, 0 }, 2), { { 9, 1 }, { 8, 2 } }), "backwards")
+    t.eq(#row:ray({ -1, 1, 0.5 }, { 1, 0, 0 }), 10, "grazing the top face counts")
+    t.eq(#row:ray({ -1, 1 + 1e-12, 0.5 }, { 1, 0, 0 }), 0)
+    t.eq(#row:ray(start, { 1, 0, 0 }, math.huge), 10)
+    t.eq(#row:ray(start, { 1, 0, 0 }, nil), 10, "nil max_t is infinity")
+    t.eq(#bs.RTree():ray(start, { 1, 0, 0 }), 0, "an empty tree")
+    local nan, inf = 0 / 0, math.huge
+    refused(function() row:ray({ 0, 0, 0 }, { 0, 0, 0 }) end, "^rtree_ray: direction %(0, 0, 0%) is not a direction$")
+    refused(function() row:ray({ 0, 0, 0 }, { 1, 0, 0 }, -1) end, "^rtree_ray: max_t %-1 is not a distance$")
+    refused(function() row:ray({ 0, 0, 0 }, { 1, 0, 0 }, nan) end, "^rtree_ray: max_t NaN is not a distance$")
+    refused(function() row:ray({ nan, 0, 0 }, { 1, 0, 0 }) end, "^rtree_ray: origin %(NaN, 0, 0%) is not finite$")
+    refused(function() row:ray({ 0, 0, 0 }, { inf, 0, 0 }) end, "^rtree_ray: direction %(inf, 0, 0%) is not finite$")
+    -- the shapes, refused here
+    refused(function() row:ray({ 0, 0 }, { 1, 0, 0 }) end, "^rtree_ray: an origin is 3 numbers")
+    refused(function() row:ray({ 0, 0, 0 }, "x") end, "^rtree_ray: a direction is 3 numbers")
+    refused(function() row:ray({ 0, 0, 0 }, { 1, 0, 0 }, "1") end, "^rtree_ray: max_t .* is not a number$")
+    row:close()
+    refused(function() row:ray(start, { 1, 0, 0 }) end, "^rtree: closed$")
+  end)
+
+  t.test("rtree: from_triangles boxes each triangle", function()
+    local nan, inf = 0 / 0, math.huge
+    local positions = { { 0, 0, 0 }, { 2, 0, 0 }, { 0, 3, 0 }, { nan, 0, 0 }, { 5, 1, 4 } }
+    local tree = bs.RTree.from_triangles(positions, { { 0, 1, 2 }, { 1, 4, 1 } })
+    t.eq(tree:count(), 2)
+    local b = tree.bounds
+    t.ok(same(b[1], { 0, 0, 0 }) and same(b[2], { 5, 3, 4 }), "point 3 is used by no triangle")
+    t.ok(same(tree:search({ 1, 1, 0 }), { 0 }), "ids are the triangle indices")
+    t.ok(same(tree:search({ 4, 0.5, 2 }), { 1 }))
+    t.ok(rows_same(tree:ray({ -1, 0.5, 0 }, { 1, 0, 0 }), { { 0, 1 }, { 1, 3 } }))
+    t.eq(bs.RTree.from_triangles({}, {}):count(), 0)
+    local four = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } }
+    refused(function() bs.RTree.from_triangles(four, { { 0, 1, 2 }, { 0, 4, 1 } }) end,
+      "^rtree_from_triangles: triangle 1 names point 4 of 4$")
+    refused(function() bs.RTree.from_triangles({ { 0, 0, 0 }, { 0, inf, 0 } }, { { 0, 1, 0 } }) end,
+      "^rtree_from_triangles: triangle 0 point 1 is not finite$")
+    -- the shapes and the index range, refused here
+    refused(function() bs.RTree.from_triangles({ { 0, 0, 0 }, { 1, 1 } }, { { 0, 0, 0 } }) end,
+      "^rtree_from_triangles: point 1 is not 3 numbers")
+    refused(function() bs.RTree.from_triangles(four, { { 0, 1, 2 }, { 0, 1 } }) end,
+      "^rtree_from_triangles: triangle 1 is not 3 indices")
+    refused(function() bs.RTree.from_triangles(four, "x") end, "^rtree_from_triangles: expected a list of triangles")
+    for _, k in ipairs({ { -1, "%-1" }, { 2 ^ 32, "4294967296" } }) do
+      refused(function() bs.RTree.from_triangles(four, { { 0, 1, 2 }, { 0, k[1], 1 } }) end,
+        "^rtree_from_triangles: triangle 1's index is out of range: " .. k[2] .. "$")
+    end
+    refused(function() bs.RTree.from_triangles(four, { { 0, 1.5, 2 } }) end,
+      "^rtree_from_triangles: triangle 0's index must be a whole number")
+  end)
+
+  t.test("rtree: a cuboid's face tree", function()
+    local cuboid = bs.Solid.cuboid(3, 4, 5)
+    local faces = cuboid:face_tree()
+    t.eq(getmetatable(faces), bs.RTree)
+    t.eq(faces:count(), 6)
+    local grow = 5 * 1e-3
+    local b = faces.bounds
+    t.ok(all_near(b[1], { -1.5 - grow, -2 - grow, -2.5 - grow }) and all_near(b[2], { 1.5 + grow, 2 + grow, 2.5 + grow }),
+      "bounds grown by a thousandth of the extent")
+    t.eq(#faces:search({ { 1.4, 1.9, 2.4 }, { 1.6, 2.1, 2.6 } }), 3, "three faces at a corner")
+    local shot = faces:ray({ 10, 0, 0 }, { -1, 0, 0 })
+    t.eq(#shot, 2)
+    t.near(shot[1][2], 8.5 - grow, 1e-9)
+    t.near(shot[2][2], 11.5 - grow, 1e-9)
+    -- The +x face is the one the ray met first: a face call by that index agrees.
+    local frame = cuboid:face_frame(shot[1][1])
+    t.ok(all_near({ frame[10], frame[11], frame[12] }, { 1, 0, 0 }), "the +x face first")
+    -- The tree is its own: it outlives the solid.
+    cuboid:close()
+    t.eq(faces:count(), 6)
+    refused(function() cuboid:face_tree() end, "^solid: closed$")
+    faces:close()
+  end)
+
+  -- ---- health and healing (Python's test_health_* / test_healed_* and its two decoder tests)
+  do
+    local function rel(actual, expected, r, message)
+      t.ok(math.abs(actual - expected) <= r * math.abs(expected),
+        ("%sexpected %.17g (rel %g), got %.17g"):format(message and (message .. ": ") or "", expected, r, actual))
+    end
+    local function row_of(e)
+      return ("%s,%s,%s,%s,%s,%s,%g,%g"):format(e.trim, tostring(e.edge), e.face, e.wire, tostring(e.partner),
+        e.shared_ends, e.length, e.gap)
+    end
+
+    t.test("health of a closed cuboid has nothing free and cracks only on request", function()
+      local box = bs.Solid.cuboid(10, 10, 10)
+      local report = box:health()
+      t.eq(getmetatable(report), bs.HealthReport)
+      t.eq(#report.free_edges, 0)
+      t.eq(#report.wires, 0)
+      t.eq(#report.small, 0)
+      t.eq(report.cracks, nil)
+      rel(report.extent, 10 * math.sqrt(3), 1e-12, "extent")
+      rel(report.rounding, 1e-7 * report.extent, 1e-12, "rounding")
+      rel(report.tolerance, 1e-4 * report.extent, 1e-12, "tolerance")
+      t.eq(report.loose_edges, 0)
+      t.eq(report.worst_loose, 0)
+      t.eq(report.sew_pairs, 0)
+      t.eq(report.sew_refused, 0)
+      t.eq(report.sew_worst_gap, 0)
+      local cracks = box:health(nil, true).cracks
+      t.eq(getmetatable(cracks), bs.Cracks)
+      t.eq(cracks.watertight, true)
+      t.eq(cracks.open, 0)
+      t.eq(cracks.folded, 0)
+      t.eq(cracks.crossings, 0)
+      t.eq(#cracks.edges, 0)
+      t.eq(box:health(0.5).tolerance, 0.5)
+      t.eq(box:health(-1).tolerance, report.tolerance)
+    end)
+
+    t.test("health of a cuboid without a face is one open rim of four edges", function()
+      local hole = bs.Solid.cuboid(10, 10, 10):drop_faces({ 0 })
+      local report = hole:health()
+      t.eq(#report.free_edges, 4)
+      t.eq(#report.wires, 1)
+      local wire = report.wires[1]
+      t.eq(getmetatable(wire), bs.FreeWire)
+      t.eq(wire.first, 0)
+      t.eq(wire.count, 4)
+      t.eq(wire.closed, true)
+      t.near(wire.length, 40, 1e-9)
+      -- (trim, edge, face, partner): the partner a row of this list, never a face or edge id
+      local expected = { { 4, 3, 1, 2 }, { 16, 2, 4, 3 }, { 11, 1, 2, 0 }, { 15, 0, 3, 1 } }
+      for i, e in ipairs(report.free_edges) do
+        t.eq(getmetatable(e), bs.FreeEdge)
+        t.eq(("%s %s %s %s"):format(e.trim, e.edge, e.face, e.partner), table.concat(expected[i], " "), "row " .. i)
+        t.eq(e.wire, 0)
+        t.eq(e.shared_ends, 0)
+        t.near(e.length, 10, 1e-9)
+        t.near(e.gap, 10, 1e-9)
+        t.eq(report.free_edges[e.partner + 1].partner, i - 1, "partners pair up")
+      end
+      t.near(report.worst_gap, 10, 1e-9)
+      local rows = report:wire_edges(0)
+      t.eq(#rows, 4)
+      for i = 1, 4 do t.eq(rows[i], report.free_edges[i]) end
+      t.eq(report.sew_pairs, 0)
+      t.eq(report.sew_refused, 0)
+      t.eq(report.sew_worst_gap, 0)
+      local cracks = hole:health(nil, true).cracks
+      t.ok(cracks ~= nil and not cracks.watertight)
+      t.eq(cracks.open + cracks.folded + cracks.crossings + #cracks.edges, 0)
+    end)
+
+    t.test("health lists a thin plate's small features by kind, index and size", function()
+      local report = bs.Solid.cuboid(10, 10, 0.001):health(0.01)
+      local got = {}
+      for i, s in ipairs(report.small) do
+        t.eq(getmetatable(s), bs.SmallFeature)
+        got[i] = s.kind .. " " .. s.index
+      end
+      t.eq(table.concat(got, ", "), "short_edge 8, short_edge 9, short_edge 10, short_edge 11, "
+        .. "sliver_face 2, sliver_face 3, sliver_face 4, sliver_face 5")
+      for i = 1, 4 do t.near(report.small[i].size, 0.001, 1e-9) end
+      for i = 5, 8 do rel(report.small[i].size, 0.0009999, 1e-3, "sliver width") end
+    end)
+
+    t.test("health reports a tiny body and its tiny faces", function()
+      local report = bs.Solid.cuboid(0.0005, 0.0005, 0.0005):health(0.01)
+      local kinds = {}
+      for _, s in ipairs(report.small) do
+        kinds[s.kind] = kinds[s.kind] or {}
+        table.insert(kinds[s.kind], s)
+      end
+      t.eq(#kinds.short_edge, 12)
+      t.eq(#kinds.tiny_face, 6)
+      t.eq(#kinds.tiny_body, 1)
+      t.eq(#report.small, 19)
+      for i, s in ipairs(kinds.tiny_face) do
+        t.eq(s.index, i - 1)
+        t.near(s.size, 2.5e-7, 1e-12)
+      end
+      t.eq(kinds.tiny_body[1].index, 0)
+      rel(kinds.tiny_body[1].size, 0.0005 * math.sqrt(3), 1e-9, "tiny body")
+    end)
+
+    t.test("healed cuboid heals to itself as a new solid", function()
+      local box = bs.Solid.cuboid(10, 10, 10)
+      local healed, report = box:healed()
+      t.eq(getmetatable(healed), bs.Solid)
+      t.eq(getmetatable(report), bs.HealReport)
+      t.ok(healed:_h() ~= box:_h(), "a new solid")
+      t.eq(#report.fixes, 0)
+      t.eq(#report.refused, 0)
+      t.eq(report.guarded, false)
+      t.eq(("%d %d %d %d"):format(report.small_before, report.small_after, report.free_before, report.free_after), "0 0 0 0")
+      t.eq(report.closed_before, true)
+      t.eq(report.closed_after, true)
+      t.eq(report.nonmanifold_before, 0)
+      t.eq(report.nonmanifold_after, 0)
+      rel(report.tolerance, box:health().tolerance, 1e-12, "tolerance")
+      t.eq(report.moved, 0)
+      t.eq(healed.faces, 6)
+      t.near(healed:mass().volume, 1000, 1e-6)
+      local _, half = box:healed(0.5)
+      t.eq(half.tolerance, 0.5)
+      for e = 0, 11 do t.eq(healed:edge_tolerance(e), 0, "edge " .. e) end
+      t.eq(healed:edge_tolerance(0xFFFFFFF0), nil)
+      refused(function() healed:edge_tolerance(-1) end, "^edge_tolerance: ")
+      refused(function() healed:edge_tolerance(1.5) end, "^edge_tolerance: ")
+    end)
+
+    t.test("healed with every kind off refuses each small feature as toggled", function()
+      local plate = bs.Solid.cuboid(10, 10, 0.001)
+      local _, report = plate:healed(0.01, false, false, false)
+      t.eq(#report.fixes, 0)
+      t.eq(report.small_before, 8)
+      t.eq(report.small_after, 8)
+      local got = {}
+      for i, r in ipairs(report.refused) do
+        t.eq(getmetatable(r), bs.HealRefusal)
+        got[i] = ("%s %d %s %g"):format(r.kind, r.index, r.why, r.figure)
+      end
+      t.eq(table.concat(got, ", "), "short_edge 8 toggled 0, short_edge 9 toggled 0, short_edge 10 toggled 0, "
+        .. "short_edge 11 toggled 0, sliver_face 2 toggled 0, sliver_face 3 toggled 0, sliver_face 4 toggled 0, "
+        .. "sliver_face 5 toggled 0")
+      -- one kind off at a time: only that kind's features are toggled
+      for _, off in ipairs({ { false, true, true, "short_edge" }, { true, false, true, "sliver_face" } }) do
+        local _, one = plate:healed(0.01, off[1], off[2], off[3])
+        local toggled = 0
+        for _, r in ipairs(one.refused) do
+          if r.why == "toggled" then
+            t.eq(r.kind, off[4])
+            toggled = toggled + 1
+          end
+        end
+        t.eq(toggled, 4, off[4] .. " toggled")
+      end
+      local _, on = plate:healed(0.01)
+      t.eq(on.small_before, 8)
+      for _, r in ipairs(on.refused) do
+        t.ok(r.why ~= "toggled")
+        if on.guarded then t.eq(r.why, "body_guard") end
+      end
+    end)
+
+    t.test("healed drops a sheet's pinhole unless holes is switched off", function()
+      -- a 0.002-wide hole in a flat sheet: an inner loop whose edges are all free, below 0.01
+      local sheet = bs.Solid.face(bs.Profile.rect(10, 10):with_hole(bs.Profile.circle(0.002)), XY)
+      local holes = {}
+      for _, s in ipairs(sheet:health(0.01).small) do
+        if s.kind == "small_hole" then holes[#holes + 1] = s.index end
+      end
+      t.eq(table.concat(holes, " "), "1")
+      local _, on = sheet:healed(0.01)
+      t.eq(#on.fixes, 1)
+      t.eq(on.fixes[1].kind .. " " .. on.fixes[1].index, "small_hole 1")
+      t.eq(#on.refused, 0)
+      t.eq(on.small_after, 0)
+      local _, off = sheet:healed(0.01, true, true, false)
+      t.eq(#off.fixes, 0)
+      local got = {}
+      for _, x in ipairs(off.refused) do
+        if x.why == "toggled" then got[#got + 1] = x.kind .. " " .. x.index end
+      end
+      t.eq(table.concat(got, ", "), "small_hole 1")
+    end)
+
+    t.test("health, healed and edge_tolerance of a closed solid raise", function()
+      local box = bs.Solid.cuboid(1, 1, 1)
+      box:close()
+      refused(function() box:health() end, "closed")
+      refused(function() box:healed() end, "closed")
+      refused(function() box:edge_tolerance(0) end, "closed")
+    end)
+
+    t.test("the health decoder reads every column of distinct rows", function()
+      local none = 0xFFFFFFFF
+      local counts = { 2, 1, 1, 2, 1, 0, 0, 1, 0, 3, 4, 5, 1, 0, 11, 12, 13, 2 }
+      local sizes = { 0.5, 0.25, 9.0, 7.5, 6.5, 5.5, 4.5, 3.5 }
+      local r = bs._health_report(counts, sizes, { 10, 20, 30, 40, 1, 2, 11, none, 31, 41, none, 0 },
+        { 1.5, 2.5, 3.5, math.huge }, { 0, 2, 1 }, { 8.5, 2.5 }, { 1, 77, 4, 99 }, { 0.125, 0.0625 }, { 5, 6 })
+      t.eq(("%g %g %g %g"):format(r.tolerance, r.rounding, r.extent, r.worst_gap), "0.5 0.25 9 7.5")
+      t.eq(("%d %g %d %d %g"):format(r.loose_edges, r.worst_loose, r.sew_pairs, r.sew_refused, r.sew_worst_gap),
+        "3 6.5 4 5 5.5")
+      t.eq(#r.free_edges, 2)
+      t.eq(row_of(r.free_edges[1]), "10,20,30,40,1,2,1.5,2.5")
+      t.eq(row_of(r.free_edges[2]), "11,nil,31,41,nil,0,3.5,inf")
+      t.eq(#r.wires, 1)
+      local w = r.wires[1]
+      t.eq(("%d %d %s %g %g"):format(w.first, w.count, tostring(w.closed), w.length, w.widest_gap), "0 2 true 8.5 2.5")
+      t.eq(#r.small, 2)
+      t.eq(("%s %d %g"):format(r.small[1].kind, r.small[1].index, r.small[1].size), "collapsed_edge 77 0.125")
+      t.eq(("%s %d %g"):format(r.small[2].kind, r.small[2].index, r.small[2].size), "tiny_body 99 0.0625")
+      local c = r.cracks
+      t.eq(("%s %d %d %d %s"):format(tostring(c.watertight), c.open, c.folded, c.crossings, table.concat(c.edges, " ")),
+        "false 11 12 13 5 6")
+      -- counts[12] 0: not meshed, so no cracks however the other counts read
+      counts[13] = 0
+      local unmeshed = bs._health_report(counts, sizes, {}, {}, {}, {}, { 5, 1 }, { 1 }, {})
+      t.eq(unmeshed.cracks, nil)
+      t.eq(unmeshed.small[1].kind, "small_hole")
+    end)
+
+    t.test("the heal decoder reads every column of distinct rows", function()
+      local r = bs._heal_report({ 2, 3, 1, 9, 8, 7, 6, 1, 0, 5, 4 }, { 0.5, 0.25 }, { 5, 11, 0, 12 },
+        { 1.5, 0.125, 2.5, 0.0625 }, { 3, 21, 9, 4, 22, 3, 2, 23, 10 }, { 0.0, 7.5, 0.0 })
+      t.eq(("%g %g %s"):format(r.tolerance, r.moved, tostring(r.guarded)), "0.5 0.25 true")
+      t.eq(("%d %d %d %d"):format(r.small_before, r.small_after, r.free_before, r.free_after), "9 8 7 6")
+      t.eq(("%s %s %d %d"):format(tostring(r.closed_before), tostring(r.closed_after), r.nonmanifold_before,
+        r.nonmanifold_after), "true false 5 4")
+      local fixes = {}
+      for i, f in ipairs(r.fixes) do
+        t.eq(getmetatable(f), bs.HealFix)
+        fixes[i] = ("%s %d %g %g"):format(f.kind, f.index, f.size, f.moved)
+      end
+      t.eq(table.concat(fixes, ", "), "small_hole 11 1.5 0.125, short_edge 12 2.5 0.0625")
+      local refusals = {}
+      for i, x in ipairs(r.refused) do refusals[i] = ("%s %d %s %g"):format(x.kind, x.index, x.why, x.figure) end
+      t.eq(table.concat(refusals, ", "), "tiny_face 21 toggled 0, tiny_body 22 chain 7.5, sliver_face 23 unsupported 0")
+      local whys = {}
+      for why = 0, 10 do
+        local one = bs._heal_report({ 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, { 0, 0 }, {}, {}, { 0, 0, why }, { 0 })
+        whys[#whys + 1] = one.refused[1].why
+      end
+      t.eq(table.concat(whys, " "), "would_empty_loop closed seam chain neighbours_part uneven non_manifold "
+        .. "has_holes body_guard toggled unsupported")
+    end)
+  end
+
+  -- ---- value geometry (plan B3): Interval, the frame verbs, the feet and the nine values ----------
+  --
+  -- Python's TestInterval, TestFrameVerbs, TestCurveValues, TestSurfaceValues and TestCuboidValue,
+  -- figure for figure. The Rhino records are the file B1's crates/cadaclysm/tests/rhino_values.rs
+  -- reads, found from this file's own path: in a checkout a missing file fails; the SDK ships this
+  -- folder without it, so there the record tests say "skipped:" and the rest still run.
+  do
+    local V_XY = { 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 }
+    --- Right-handed and exact: x = world y, y = world z, z = world x, off the origin.
+    local YZX = { 1, 2, 3, 0, 1, 0, 0, 0, 1, 1, 0, 0 }
+    local EXACT, NURBS_FOOT = 1e-12, 1e-7
+
+    -- The records file and whether this copy is the repository's (its crates/cadaclysm/Cargo.toml
+    -- beside the resolved root), from this test file's own path, never the working directory.
+    local function vectors_path()
+      local source = debug.getinfo(1, "S").source
+      local file = (source:sub(1, 1) == "@" and source:sub(2) or "blacksmith_test.lua"):gsub("\\", "/")
+      local dir = file:match("^(.*)/[^/]*$") or "."
+      local root = dir .. "/../../../../.."   -- test, luajit, examples, cadaclysm-capi, crates
+      local cargo = io.open(root .. "/crates/cadaclysm/Cargo.toml", "rb")
+      if cargo then cargo:close() end
+      return root .. "/crates/cadaclysm/tests/fixtures/rhino/value_vectors.txt", cargo ~= nil
+    end
+
+    local records
+    -- The records by (case, what), or nil (and a "skipped:" line) in an SDK layout without them.
+    local function vectors(test)
+      if records == nil then
+        local path, in_repo = vectors_path()
+        local f = io.open(path, "rb")
+        if not f then
+          if in_repo then error("the Rhino records are missing from the checkout: " .. path, 2) end
+          records = false
+        else
+          local text = f:read("*a")
+          f:close()
+          records = {}
+          for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+            line = line:gsub("\r", ""):match("^%s*(.-)%s*$")
+            assert(not line:find("ERROR", 1, true), line)
+            if line ~= "" and line:sub(1, 1) ~= "#" then
+              local words = {}
+              for w in line:gmatch("%S+") do words[#words + 1] = w end
+              local key = words[1] .. " " .. words[2]
+              assert(records[key] == nil, "a record twice: " .. key)
+              records[key] = { unpack(words, 3) }
+            end
+          end
+        end
+      end
+      if not records then
+        print("skipped: " .. test .. ": no value_vectors.txt beside this copy (an SDK layout)")
+        return nil
+      end
+      return records
+    end
+
+    local function words(r, case, what)
+      local w = r[case .. " " .. what]
+      if not w then error("no record " .. case .. " " .. what, 2) end
+      return w
+    end
+
+    local function nums(r, case, what)
+      local out = {}
+      for i, w in ipairs(words(r, case, what)) do out[i] = assert(tonumber(w), w) end
+      return out
+    end
+
+    local function sub(a, i, j)
+      local out = {}
+      for k = i, j do out[#out + 1] = a[k] end
+      return out
+    end
+
+    local function close(got, want, tol, label)
+      if #got ~= #want then error(("%s: %d numbers, want %d"):format(label, #got, #want), 2) end
+      for i = 1, #want do
+        if not (math.abs(got[i] - want[i]) <= tol) then
+          error(("%s: got {%s}, want {%s}"):format(label, table.concat(got, ", "), table.concat(want, ", ")), 2)
+        end
+      end
+    end
+
+    local function dist(a, b)
+      return math.sqrt((a[1] - b[1]) ^ 2 + (a[2] - b[2]) ^ 2 + (a[3] - b[3]) ^ 2)
+    end
+
+    local function queries(r, shape)
+      local out = {}
+      for i = 0, 11 do
+        local case = ("%s_%02d"):format(shape, i)
+        out[#out + 1] = { case, nums(r, case, "query") }
+      end
+      return out
+    end
+
+    -- A foot Rhino found by iteration on a NURBS form: the distance to 1e-12, never beaten by
+    -- Rhino's, the point to 1e-7 -- as B1's `nurbs_foot`.
+    local function nurbs_foot(label, q, ours, rhino)
+      local d, dr = dist(q, ours), dist(q, rhino)
+      t.ok(d <= dr + EXACT and math.abs(d - dr) <= EXACT, ("%s: %.17g vs %.17g"):format(label, d, dr))
+      close(ours, rhino, NURBS_FOOT, label)
+    end
+
+    -- Raised with exactly the library's (or the wrapper's) sentence.
+    local function refused(fn, text)
+      local e = t.raises(fn)
+      t.ok(is_build_error(e), "a BuildError: " .. tostring(e))
+      t.eq(tostring(e), text)
+    end
+
+    local function is(v, cls) return type(v) == "table" and getmetatable(v) == cls end
+
+    -- ---- Interval ----
+
+    t.test("an Interval's measures keep the orientation", function()
+      local I = bs.Interval
+      local up, down = I(2, 6), I(6, 2)
+      t.eq(up.length, 4.0)
+      t.eq(down.length, -4.0)
+      t.eq(up.mid, 4.0)
+      t.eq(down.mid, 4.0)
+      t.ok(up.min == 2 and up.max == 6 and down.min == 2 and down.max == 6)
+      t.ok(up.is_increasing and not down.is_increasing and not I(3, 3).is_increasing)
+      t.ok(I(3, 3).is_singleton and not up.is_singleton)
+      t.ok(up:swapped() == down and down:swapped() == up)
+      t.ok(down[1] == 6 and down[2] == 2 and down.t0 == 6 and down.t1 == 2)
+      t.ok(same(down:values(), { 6, 2 }))
+    end)
+
+    t.test("an Interval's set operations answer increasing, and touching is a singleton", function()
+      local i = bs.Interval
+      local up, down = i(2, 6), i(6, 2)
+      t.ok(up:grown(9) == i(2, 9) and down:grown(-1) == i(-1, 6) and down:grown(3) == up)
+      t.ok(up:union(i(8, 7)) == i(2, 8) and down:union({ 1, 3 }) == i(1, 6))
+      t.ok(down:intersect(i(9, 4)) == i(4, 6) and up:intersect(i(3, 5)) == i(3, 5))
+      t.ok(up:intersect(i(7, 9)) == nil and down:intersect(i(1, 1.5)) == nil)
+      t.ok(i(0, 1):intersect(i(1, 2)) == i(1, 1) and i(2, 1):intersect(i(0, 1)) == i(1, 1), "touching")
+      for _, x in ipairs({ up, down }) do
+        t.ok(x:contains(2) and x:contains(6) and x:contains(4.5))
+        t.ok(not x:contains(1.999) and not x:contains(6.001))
+      end
+    end)
+
+    t.test("an Interval's parameters round-trip", function()
+      local i = bs.Interval
+      t.eq(i(2, 6):parameter_at(0.25), 3.0)
+      t.eq(i(6, 2):parameter_at(0.25), 5.0)
+      for _, x in ipairs({ i(2, 6), i(6, 2), i(-1.5, 0.7) }) do
+        for _, s in ipairs({ -0.5, 0.0, 0.3, 1.0, 2.0 }) do
+          t.near(x:normalized_parameter_at(x:parameter_at(s)), s, 1e-15)
+        end
+      end
+      t.eq(i(3, 3):normalized_parameter_at(3), nil)
+    end)
+
+    t.test("an Interval is a frozen value", function()
+      local a = bs.Interval(1, 2)
+      t.ok(a == bs.Interval(1.0, 2.0) and a ~= bs.Interval(2, 1))
+      t.ok(a ~= { 1.0, 2.0 }, "not equal to a plain pair")
+      t.eq(tostring(a), "Interval(1, 2)")
+      t.raises(function() a.t0 = 5 end, "Interval is immutable: cannot set t0")
+      t.raises(function() a.extra = 5 end, "Interval is immutable: cannot set extra")
+      refused(function() bs.Interval(0 / 0, 1) end, "Interval: not finite")
+      refused(function() bs.Interval(1, math.huge) end, "Interval: not finite")
+      refused(function() bs.Interval.of({ 1, 2, 3 }) end, "Interval: an interval is 2 numbers, got 3")
+      t.eq(bs.Interval.of(a), a)
+      t.ok(bs.Interval.of({ 3, 4 }) == bs.Interval(3, 4))
+    end)
+
+    t.test("an Interval matches Rhino", function()
+      local r = vectors("an Interval matches Rhino")
+      if not r then return end
+      for _, name in ipairs({ "apart", "dec_dec", "inc_dec", "inc_inc", "touch" }) do
+        local case = "interval_" .. name
+        local args = nums(r, case, "args")
+        local a, b = bs.Interval(args[1], args[2]), bs.Interval(args[3], args[4])
+        t.ok(same(a:union(b):values(), nums(r, case, "union")), case)
+        local got = a:intersect(b)
+        if words(r, case, "intersection")[1] == "none" then
+          t.eq(got, nil, case)
+        else
+          t.ok(got ~= nil and same(got:values(), nums(r, case, "intersection")), case)
+        end
+      end
+      for _, name in ipairs({ "inc_inside", "inc_out", "dec_low", "dec_inside" }) do
+        local args = nums(r, "grow_" .. name, "args")
+        t.ok(same(bs.Interval(args[1], args[2]):grown(args[3]):values(), nums(r, "grow_" .. name, "grown")), name)
+      end
+      for _, name in ipairs({ "inc", "dec" }) do
+        for k = 0, 3 do
+          local case = ("param_%s_%d"):format(name, k)
+          local args = nums(r, case, "args")
+          local x, s = bs.Interval(args[1], args[2]), args[3]
+          close({ x:parameter_at(s) }, nums(r, case, "parameter_at"), EXACT, case)
+          close({ x:normalized_parameter_at(2.5 + s) }, nums(r, case, "normalized_at"), EXACT, case)
+        end
+      end
+    end)
+
+    -- ---- the frame verbs ----
+
+    t.test("the plane verbs match Rhino", function()
+      local r = vectors("the plane verbs match Rhino")
+      if not r then return end
+      local p = bs.Frame.of(nums(r, "plane", "frame"))
+      t.ok(is(p:flipped(), bs.Frame))
+      close(p:flipped():values(), nums(r, "plane", "flip"), EXACT, "flip")
+      close(p:rotated(0.6, { 1, -1, 0.5 }):values(), nums(r, "plane", "rotate"), EXACT, "rotate")
+      for _, cq in ipairs(queries(r, "plane")) do
+        local case, q = cq[1], cq[2]
+        close(p:to_local(q), nums(r, case, "remap"), EXACT, case)
+        close(p:closest_point(q), nums(r, case, "closest"), EXACT, case)
+        close({ p:distance_to(q) }, nums(r, case, "distance"), EXACT, case)
+      end
+    end)
+
+    t.test("Frame.fit matches Rhino and refuses in the library's words", function()
+      refused(function() bs.Frame.fit({ { 0, 0, 0 }, { 1, 0, 0 } }) end, "frame_fit: needs three points")
+      refused(function() bs.Frame.fit({ { 0, 0, 0 }, { 1, 1, 1 }, { 2, 2, 2 } }) end, "frame_fit: the points lie on one line")
+      local r = vectors("Frame.fit matches Rhino")
+      if not r then return end
+      local flat = nums(r, "fit", "points")
+      local pts = {}
+      for k = 1, #flat, 3 do pts[#pts + 1] = { flat[k], flat[k + 1], flat[k + 2] } end
+      local got, deviation = bs.Frame.fit(pts)
+      t.ok(is(got, bs.Frame))
+      local want = bs.Frame.of(nums(r, "fit", "frame"))
+      local gz, wz = got.z, want.z
+      local sign = (gz[1] * wz[1] + gz[2] * wz[2] + gz[3] * wz[3]) < 0 and -1.0 or 1.0
+      close({ sign * gz[1], sign * gz[2], sign * gz[3] }, wz, EXACT, "normal")
+      close({ want:distance_to(got.origin), got:distance_to(want.origin) }, { 0, 0 }, EXACT, "origins")
+      close({ deviation }, nums(r, "fit", "deviation"), EXACT, "deviation")
+      refused(function() bs.Frame.fit({ pts[1], pts[2] }) end, "frame_fit: needs three points")
+    end)
+
+    -- ---- curves ----
+
+    t.test("a bad curve value is refused by value_check", function()
+      refused(function() bs.Circle(V_XY, 0) end, "value_check: the radius must be positive")
+      refused(function() bs.Line({ 1, 1, 1 }, { 1, 1, 1 }) end, "value_check: the line has no length")
+      refused(function() bs.Arc(V_XY, 1, { 0, 7 }) end, "value_check: the angle must increase by at most a full turn")
+      refused(function() bs.Arc(V_XY, 1, bs.Interval(1, 0)) end,
+        "value_check: the angle must increase by at most a full turn")
+      refused(function() bs.Ellipse(V_XY, 3, -1) end, "value_check: the second radius must be positive")
+      refused(function() bs.Circle({ 0, 0, 0, 1, 1e-3, 0, 0, 1, 0, 0, 0, 1 }, 1) end,
+        "value_check: the frame is not right-handed and orthonormal")
+      -- A wrong count is refused before the call, in the library's sentence (value_size).
+      refused(function() bs.Circle.from_array(sub(V_XY, 1, 12)) end, "value_check: a circle is 13 numbers, got 12")
+      t.ok(bs.Circle.from_array({ 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 2 }) == bs.Circle(V_XY, 2))
+      -- 1e-7 off square is squared up, not refused.
+      local near = bs.Circle({ 0, 0, 0, 1, 1e-7, 0, 0, 1, 0, 0, 0, 1 }, 1)
+      local x, y = near.frame.x, near.frame.y
+      t.ok(math.abs(x[1] * y[1] + x[2] * y[2] + x[3] * y[3]) < 1e-15 and x[2] ~= 0)
+    end)
+
+    t.test("each curve call answers B1's figures", function()
+      local unit = bs.Circle(V_XY, 1)
+      near3(unit:point_at(pi / 2), { 0, 1, 0 }, 1e-15, "point_at")
+      near3(unit:tangent_at(0), { 0, 1, 0 }, 1e-15, "tangent_at")
+      local line = bs.Line({ 0, 0, 0 }, { 1, 2, 3 })
+      t.ok(same(line:point_at(0.5), { 0.5, 1.0, 1.5 }))
+      t.eq(line:length(), math.sqrt(14))
+      t.ok(same(line.start, { 0, 0, 0 }) and same(line.end_, { 1, 2, 3 }) and same(line["end"], { 1, 2, 3 }))
+      near3(line:tangent_at(0), { 1 / math.sqrt(14), 2 / math.sqrt(14), 3 / math.sqrt(14) }, 1e-15, "line tangent")
+      local quarter = bs.Arc(V_XY, 2, { 0, pi / 2 })
+      t.eq(quarter:length(), pi)
+      t.ok(quarter.angle == bs.Interval(0, pi / 2))
+      near3(quarter.start, { 2, 0, 0 }, 1e-15, "start")
+      near3(quarter.end_, { 0, 2, 0 }, 1e-15, "end")
+      near3(quarter.mid, { math.sqrt(2), math.sqrt(2), 0 }, 1e-15, "mid")
+      -- On the axis the foot is a pick: t = 0, not unique.
+      t.ok(unit:closest_point({ 2, 0, 5 }) == bs.CurveFoot(0.0, { 1.0, 0.0, 0.0 }, true), "off the axis")
+      local pick = unit:closest_point({ 0, 0, 5 })
+      t.ok(is(pick, bs.CurveFoot))
+      t.ok(pick == bs.CurveFoot(0.0, { 1.0, 0.0, 0.0 }, false), "on the axis: " .. tostring(pick))
+      t.near(unit:distance_to({ 2, 0, 5 }), math.sqrt(26), 1e-12)
+      local lo, hi = bs.Line({ 1, 5, 0 }, { 0, 2, 3 }):bounds()
+      t.ok(same(lo, { 0, 2, 0 }) and same(hi, { 1, 5, 3 }), "line bounds")
+      t.near(bs.Ellipse(V_XY, 3, 1):length(), 13.364893220555258, 13.364893220555258 * 1e-12)
+      refused(function() bs.Line({ 0, 0 }, { 1, 1, 1 }) end, "Line: a point is 3 numbers, got 2")
+    end)
+
+    t.test("curve constructors and transforms", function()
+      local a, b, c = { 1, 0, 0 }, { 0, 1, 0 }, { -1, 0, 0 }
+      local circle = bs.Circle.through(a, b, c)
+      t.ok(is(circle, bs.Circle))
+      local want = sub(V_XY, 1, 12)
+      want[13] = 1
+      near3(circle:values(), want, 1e-15, "circle through")
+      want[14], want[15] = 0, pi
+      near3(bs.Arc.through(a, b, c):values(), want, 1e-15, "arc through")
+      local arc = bs.Arc.from_start_tangent_end(a, { 0, 1, 0 }, c)
+      t.ok(is(arc, bs.Arc))
+      near3(arc:values(), want, 1e-15, "arc from start, tangent, end")
+      refused(function() bs.Circle.through(a, a, c) end, "circle_through: the points are coincident or collinear")
+      refused(function() bs.Arc.from_start_tangent_end(a, { 0, 0, 0 }, c) end,
+        "arc_from_start_tangent_end: the tangent is zero or the end lies on the tangent line")
+      t.ok(bs.Ellipse.from_circle(bs.Circle(V_XY, 2)) == bs.Ellipse(V_XY, 2, 2))
+      t.ok(bs.Circle(V_XY, 1):transform(bs.Transform.scale({ 0, 0, 0 }, 2)) == bs.Circle(V_XY, 2))
+      local stretch = bs.Transform.scale_xyz(bs.Frame.xy(), 1, 3, 1)
+      refused(function() bs.Circle(V_XY, 1):transform(stretch) end,
+        "value_transform: a circle takes only a similarity (use ellipse_from_circle)")
+      local e = bs.Ellipse.from_circle(bs.Circle(V_XY, 1)):transform(stretch.rows)
+      t.ok(is(e, bs.Ellipse))
+      near3({ e.r1, e.r2 }, { 3, 1 }, 1e-15, "stretched radii")
+      local moved = bs.Line({ 0, 0, 0 }, { 1, 0, 0 }):transform(bs.Transform.translation({ 0, 0, 2 }))
+      t.ok(moved == bs.Line({ 0, 0, 2 }, { 1, 0, 2 }))
+    end)
+
+    t.test("values are immutable, compare by kind and array, and index as their array", function()
+      local c = bs.Circle(YZX, 2)
+      local want = sub(YZX, 1, 12)
+      want[13] = 2
+      t.ok(same(c:values(), want) and c[13] == 2 and c.radius == 2.0 and c.frame == bs.Frame.of(YZX))
+      t.eq(c.kind, "circle")
+      t.ok(c == bs.Circle(bs.Frame.of(YZX), 2.0))
+      t.ok(c ~= bs.Sphere(YZX, 2), "a circle is not the sphere of the same numbers")
+      t.ok(bs.Sphere(YZX, 2) == bs.Sphere(YZX, 2))
+      local s = tostring(c)
+      t.ok(s:find("^Circle%(frame=Frame%(origin=%(1, 2, 3%)") and s:find("radius=2%)$"), s)
+      t.raises(function() c.radius = 3 end, "Circle is immutable: cannot set radius")
+      t.raises(function() c.extra = 3 end, "Circle is immutable: cannot set extra")
+    end)
+
+    t.test("lines, circles and arcs match Rhino", function()
+      local r = vectors("lines, circles and arcs match Rhino")
+      if not r then return end
+      local ends = nums(r, "line", "ends")
+      local line = bs.Line(sub(ends, 1, 3), sub(ends, 4, 6))
+      close({ line:length() }, nums(r, "line", "length"), EXACT, "line length")
+      close(line:tangent_at(0.5), nums(r, "line", "tangent"), EXACT, "line tangent")
+      for k = 0, 4 do
+        local n = nums(r, "line_at_" .. k, "point")
+        close(line:point_at(n[1]), sub(n, 2, 4), EXACT, "line_at_" .. k)
+      end
+      for _, cq in ipairs(queries(r, "line")) do
+        close(line:closest_point(cq[2]).point, nums(r, cq[1], "closest"), EXACT, cq[1])
+      end
+
+      local circle = bs.Circle(nums(r, "circle", "frame"), nums(r, "circle", "radius")[1])
+      close({ circle:length() }, nums(r, "circle", "length"), EXACT, "circle length")
+      for k = 0, 4 do
+        local n = nums(r, "circle_at_" .. k, "point")
+        close(circle:point_at(n[1]), sub(n, 2, 4), EXACT, "circle_at_" .. k)
+        close(circle:tangent_at(n[1]), sub(n, 5, 7), EXACT, "circle_at_" .. k .. " tangent")
+      end
+      for _, cq in ipairs(queries(r, "circle")) do
+        local case = cq[1]
+        local want, foot = nums(r, case, "closest"), circle:closest_point(cq[2])
+        t.ok(foot.unique, case)
+        close({ foot.t }, { want[1] % (2 * pi) }, EXACT, case)
+        close(foot.point, sub(want, 2, 4), EXACT, case)
+      end
+
+      local arc = bs.Arc(nums(r, "arc", "frame"), nums(r, "arc", "radius")[1], nums(r, "arc", "angle"))
+      close({ arc:length() }, nums(r, "arc", "length"), EXACT, "arc length")
+      for k = 0, 3 do
+        local n = nums(r, "arc_at_" .. k, "point")
+        close(arc:point_at(n[1]), sub(n, 2, 4), EXACT, "arc_at_" .. k)
+        close(arc:tangent_at(n[1]), sub(n, 5, 7), EXACT, "arc_at_" .. k .. " tangent")
+      end
+      for _, cq in ipairs(queries(r, "arc")) do
+        local case = cq[1]
+        local want, foot = nums(r, case, "closest"), arc:closest_point(cq[2])
+        close({ foot.t }, sub(want, 1, 1), EXACT, case)
+        close(foot.point, sub(want, 2, 4), EXACT, case)
+      end
+    end)
+
+    t.test("an edge's curve is its value", function()
+      local function key(p)
+        local parts = {}
+        for i = 1, 3 do
+          local s = ("%.9f"):format(p[i])
+          if s:match("^%-0%.0+$") then s = s:sub(2) end
+          parts[i] = s
+        end
+        return table.concat(parts, " ")
+      end
+      local rims = 0
+      for _, rim in ipairs(bs.Solid.cylinder(5, 3).edges) do
+        if rim.kind == "circle" then
+          rims = rims + 1
+          local v = rim.curve.value
+          t.ok(is(v, bs.Circle), "a rim is a Circle: " .. tostring(v))
+          t.near(v.radius, 5, 1e-9)
+          local z = v.frame.origin[3]
+          t.ok(math.abs(z) < 1e-9 or math.abs(z - 3) < 1e-9, "a rim's height")
+        end
+      end
+      t.eq(rims, 2)
+      for _, e in ipairs(bs.Solid.cuboid(2, 4, 6).edges) do
+        local v = e.curve.value
+        t.ok(is(v, bs.Line), "a box edge is a Line")
+        local ends = {}
+        for _, seg in ipairs(e.segments) do
+          for _, p in ipairs(seg) do ends[key(p)] = true end
+        end
+        t.ok(ends[key(v.start)] and ends[key(v.end_)], "a line's ends are its edge's")
+      end
+      local cube = bs.Solid.cuboid(10, 10, 10)
+      local upright = {}
+      for _, e in ipairs(cube.edges) do
+        local d = e.direction
+        if d and math.abs(math.abs(d[3]) - 1) < 1e-9 then upright[#upright + 1] = e end
+      end
+      local rounded = cube:fillet({ upright[1] }, 2.0)
+      local arcs = {}
+      for _, e in ipairs(rounded.edges) do
+        if e.kind == "circle" then arcs[#arcs + 1] = e end
+      end
+      t.eq(#arcs, 2)
+      for _, e in ipairs(arcs) do
+        local v = e.curve.value
+        t.ok(is(v, bs.Arc), "a fillet's rim is an Arc: " .. tostring(v))
+        t.near(v.radius, 2, 1e-9)
+        t.near(v.angle.length, pi / 2, 1e-9)
+        local vertices = { e.segments[1][1], e.segments[#e.segments][2] }
+        local function on_a_vertex(p) return dist(p, vertices[1]) < 1e-9 or dist(p, vertices[2]) < 1e-9 end
+        t.ok(on_a_vertex(v.start) and on_a_vertex(v.end_), "the arc ends on its edge's vertices")
+      end
+      local spline = bs.Solid.extrude(bs.Profile.spline({ { 0, 0 }, { 10, 0 }, { 10, 10 }, { 0, 10 } }, 3, nil, true),
+        bs.Frame.xy(), 2)
+      local nurbs = 0
+      for _, e in ipairs(spline.edges) do
+        if e.kind == "nurbs" then
+          nurbs = nurbs + 1
+          t.eq(e.curve.value, nil)
+        end
+      end
+      t.ok(nurbs > 0, "the spline has nurbs edges")
+    end)
+
+    -- ---- surfaces ----
+
+    t.test("a bad surface value is refused by value_check", function()
+      refused(function() bs.Cylinder(V_XY, 1, { 2, 1 }) end, "value_check: the height must increase")
+      refused(function() bs.Torus(V_XY, 1, 1) end, "value_check: the minor radius must be less than the major")
+      refused(function() bs.Cone(V_XY, 1, 0) end, "value_check: the height must be positive")
+      refused(function() bs.Sphere(V_XY, 0 / 0) end, "value_check: not finite")
+    end)
+
+    t.test("each surface call answers B1's figures", function()
+      local sphere = bs.Sphere(V_XY, 2)
+      near3(sphere:point_at(0, pi / 2), { 0, 0, 2 }, 1e-15, "sphere point")
+      local cyl = bs.Cylinder(V_XY, 1, { -1, 2 })
+      t.ok(cyl.height == bs.Interval(-1, 2))
+      near3(cyl:normal_at(pi / 2, 0), { 0, 1, 0 }, 1e-15, "cylinder normal")
+      near3(bs.Torus(V_XY, 3, 1):point_at(0, 0), { 4, 0, 0 }, 1e-15, "torus point")
+      local foot = sphere:closest_point({ 0, 0, 5 })
+      t.ok(is(foot, bs.SurfaceFoot) and foot.unique)
+      near3({ foot.u, foot.v, foot.point[1], foot.point[2], foot.point[3] }, { 0, pi / 2, 0, 0, 2 }, 1e-15, "foot")
+      t.ok(not sphere:closest_point({ 0, 0, 0 }).unique, "the centre is a pick")
+      t.near(sphere:distance_to({ 0, 0, 5 }), 3, 1e-12)
+      local u, v = cyl:domain()
+      t.ok(u == bs.Interval(0, 2 * pi) and v == bs.Interval(-1, 2), "cylinder domain")
+      u, v = bs.Cone(V_XY, 1, 2):domain()
+      t.ok(u == bs.Interval(0, 2 * pi) and v == bs.Interval(0, 2), "cone domain")
+      t.ok(math.abs(sphere:volume() - 32 * pi / 3) < 1e-13 and math.abs(sphere:area() - 16 * pi) < 1e-13)
+      t.ok(bs.Torus(V_XY, 3, 1):contains({ 3, 0, 0.5 }) and not sphere:contains({ 0, 0, 2.5 }))
+      t.ok(sphere:contains({ 0, 0, 2.5 }, 0.5))
+      refused(function() sphere:contains({ 0, 0, 0 }, -1) end,
+        "solid_value_contains: the tolerance must be finite and not negative")
+      local lo, hi = sphere:bounds()
+      t.ok(same(lo, { -2, -2, -2 }) and same(hi, { 2, 2, 2 }), "sphere bounds")
+      refused(function() sphere:transform(bs.Transform.scale_xyz(bs.Frame.xy(), 1, 3, 1)) end,
+        "value_transform: a sphere takes only a similarity")
+      t.ok(sphere:transform(bs.Transform.translation({ 1, 0, 0 })) == bs.Sphere(bs.Frame.xy({ 1, 0, 0 }), 2))
+      local sheet = cyl:to_nurbs_sheet()
+      t.ok(is(sheet, bs.Solid))
+      t.eq(sheet.faces, 1)
+    end)
+
+    t.test("each shape becomes a solid of its volume", function()
+      for _, sv in ipairs({ { bs.Sphere(V_XY, 2), 32 * pi / 3 }, { bs.Cylinder(V_XY, 1, { -1, 2 }), 3 * pi },
+        { bs.Cone(V_XY, 1, 2), 2 * pi / 3 }, { bs.Torus(V_XY, 3, 1), 6 * pi ^ 2 },
+        { bs.Cuboid(YZX, { 0, 1 }, { 0, 2 }, { 0, 3 }), 6.0 } }) do
+        local shape, volume = sv[1], sv[2]
+        local solid = shape:to_solid()
+        t.ok(is(solid, bs.Solid))
+        t.near(solid:mass(1e-9).volume, volume, volume * 1e-6, tostring(shape))
+        t.near(shape:volume(), volume, volume * 1e-12, tostring(shape))
+      end
+    end)
+
+    t.test("spheres, tori, cylinders and cones match Rhino", function()
+      local r = vectors("spheres, tori, cylinders and cones match Rhino")
+      if not r then return end
+      local sphere = bs.Sphere(nums(r, "sphere", "frame"), nums(r, "sphere", "radius")[1])
+      for _, cq in ipairs(queries(r, "sphere")) do
+        local case = cq[1]
+        local want, foot = nums(r, case, "closest"), sphere:closest_point(cq[2])
+        close({ foot.u, foot.v }, { want[1] % (2 * pi), want[2] }, EXACT, case)
+        close(foot.point, sub(want, 3, 5), EXACT, case)
+      end
+      local radii = nums(r, "torus", "radii")
+      local torus = bs.Torus(nums(r, "torus", "frame"), radii[1], radii[2])
+      for _, cq in ipairs(queries(r, "torus")) do
+        local foot = torus:closest_point(cq[2])
+        t.ok(foot.unique, cq[1])
+        nurbs_foot(cq[1], cq[2], foot.point, nums(r, cq[1], "closest"))
+      end
+      local cyl = bs.Cylinder(nums(r, "cylinder", "frame"), nums(r, "cylinder", "radius")[1],
+        nums(r, "cylinder", "height"))
+      for _, cq in ipairs(queries(r, "cylinder")) do
+        nurbs_foot(cq[1], cq[2], cyl:closest_point(cq[2]).point, nums(r, cq[1], "closest"))
+      end
+      local size = nums(r, "cone", "size")
+      local cone = bs.Cone(nums(r, "cone", "frame"), size[1], size[2])
+      for _, cq in ipairs(queries(r, "cone")) do
+        nurbs_foot(cq[1], cq[2], cone:closest_point(cq[2]).point, nums(r, cq[1], "closest"))
+      end
+    end)
+
+    -- ---- the cuboid ----
+
+    t.test("a cuboid's construction, bounds and around", function()
+      local box = bs.Cuboid(YZX, { 0, 1 }, { 0, 2 }, bs.Interval(0, 3))
+      t.ok(box.x == bs.Interval(0, 1) and box.y == bs.Interval(0, 2) and box.z == bs.Interval(0, 3))
+      -- x along world y (0..1), y along world z (0..2), z along world x (0..3), from (1, 2, 3).
+      local lo, hi = box:bounds()
+      t.ok(same(lo, { 1, 2, 3 }) and same(hi, { 4, 3, 5 }), "tilted bounds")
+      t.ok(bs.Cuboid.from_bounds({ 0, 0, 0 }, { 1, 2, 3 }) == bs.Cuboid(V_XY, { 0, 1 }, { 0, 2 }, { 0, 3 }))
+      refused(function() bs.Cuboid.from_bounds({ 0, 0, 0 }, { 1, 0, 3 }) end,
+        "cuboid_from_bounds: the bounds must increase along every axis")
+      refused(function() bs.Cuboid(V_XY, { 0, 1 }, { 2, 2 }, { 0, 1 }) end, "value_check: the y range must increase")
+      local pts = { { 0, 0, 0 }, { 1, 2, 3 }, { 0.5, -1, 0.25 } }
+      t.ok(bs.Cuboid.around(bs.Frame.xy(), pts) == bs.Cuboid(V_XY, { 0, 1 }, { -1, 2 }, { 0, 3 }))
+      refused(function() bs.Cuboid.around(V_XY, { { 0, 0, 0 }, { 1, 1, 0 } }) end,
+        "cuboid_around: the points are flat along an axis of the frame")
+      refused(function() bs.Cuboid.around(V_XY, {}) end, "cuboid_around: no points")
+    end)
+
+    t.test("each cuboid call answers B1's figures", function()
+      local box = bs.Cuboid(V_XY, { 0, 1 }, { 0, 2 }, { 0, 3 })
+      t.eq(box:area(), 22.0)
+      t.eq(box:volume(), 6.0)
+      t.ok(box:contains({ 0.5, 0.5, 0.5 }) and not box:contains({ 1.5, 0.5, 0.5 }, 0.4)
+        and box:contains({ 1.5, 0.5, 0.5 }, 0.5))
+      local tilted = bs.Cuboid(YZX, { 0, 1 }, { 0, 2 }, { 0, 3 })
+      t.ok(same(tilted:closest_point({ 9, 9, 9 }), { 4, 3, 5 }))
+      near3(tilted:point_at(0.5, 0.5, 0.5), { 2.5, 2.5, 4 }, 1e-15, "point_at")
+      local corners = box:corners()
+      t.eq(#corners, 8)
+      t.ok(same(corners[1], { 0, 0, 0 }) and same(corners[3], { 1, 2, 0 }) and same(corners[7], { 1, 2, 3 }),
+        "corners 0, 2 and 6")
+      local moved = box:transform(bs.Transform.translation({ 0, 0, 1 }))
+      t.ok(is(moved, bs.Cuboid))
+      local lo, hi = moved:bounds()
+      t.ok(same(lo, { 0, 0, 1 }) and same(hi, { 1, 2, 4 }), "moved bounds")
+    end)
+
+    t.test("boxes match Rhino", function()
+      local r = vectors("boxes match Rhino")
+      if not r then return end
+      local ranges = nums(r, "box", "ranges")
+      local box = bs.Cuboid(nums(r, "box", "frame"), sub(ranges, 1, 2), sub(ranges, 3, 4), sub(ranges, 5, 6))
+      local corners = nums(r, "box", "corners")
+      for k, c in ipairs(box:corners()) do
+        close(c, sub(corners, 3 * k - 2, 3 * k), EXACT, "corner " .. (k - 1))
+      end
+      for k = 0, 3 do
+        local n = nums(r, "box_at_" .. k, "point")
+        close(box:point_at(n[1], n[2], n[3]), sub(n, 4, 6), EXACT, "box_at_" .. k)
+      end
+      for _, cq in ipairs(queries(r, "box")) do
+        close(box:closest_point(cq[2]), nums(r, cq[1], "closest"), EXACT, cq[1])
+      end
+    end)
+  end
 end

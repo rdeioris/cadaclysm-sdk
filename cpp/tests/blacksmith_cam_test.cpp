@@ -153,6 +153,78 @@ static Result<void> test_pocketed_block_reports_four_corners() {
     return {};
 }
 
+// ---- rest machining: a list of end mills, and each corner's Z range -------------------
+
+static const double kZTolerance = 1e-6;
+
+static Result<void> test_machine_with_two_end_mills_rests_the_corners() {
+    CADACLYSM_TRY(block, pocketed_block());
+    CADACLYSM_TRY(stock, bs::Stock::around(block, 2));
+    CADACLYSM_TRY(job, bs::Job::make(stock, 30));
+    CADACLYSM_TRY(big, bs::Tool::flat(1, 6, 20, 800, 200, 12000));
+    CADACLYSM_TRY(small, bs::Tool::flat(2, 2, 20, 800, 200, 12000));
+
+    // W2: the single-tool report carries each corner's Z range.
+    CADACLYSM_TRY(single_stock, bs::Stock::around(block, 2));
+    CADACLYSM_TRY(single_job, bs::Job::make(single_stock, 30));
+    CADACLYSM_TRY(single, single_job.machine(block, big, {}, std::nullopt, std::nullopt, 0.3));
+    check(single.items.size() == 4, "the single-tool report has " + std::to_string(single.items.size()) + " items, not 4");
+    for (const bs::ReportItem& item : single.items) {
+        check(std::fabs(item.top - 10.0) <= kZTolerance, "a corner's top is " + std::to_string(item.top) + ", not 10");
+        check(std::fabs(item.bottom - 2.0) <= kZTolerance,
+              "a corner's bottom is " + std::to_string(item.bottom) + ", not 2");
+    }
+
+    // W1: the 2 mm end mill reaches the corners the 6 mm one misses.
+    std::vector<const bs::Tool*> end_mills = {&big, &small};
+    CADACLYSM_TRY(report, job.machine_with(block, end_mills, {}, std::nullopt, std::nullopt, 0.3));
+    check(report.items.size() == 4, "the two-tool report has " + std::to_string(report.items.size()) + " items, not 4");
+    for (const bs::ReportItem& item : report.items) {
+        check(item.reason.find("T2 (2 mm)") != std::string::npos,
+              "a corner's reason does not name 'T2 (2 mm)': " + item.reason);
+        check(std::fabs(item.top - 10.0) <= kZTolerance, "a rest corner's top is " + std::to_string(item.top) + ", not 10");
+        check(std::fabs(item.bottom - 2.0) <= kZTolerance,
+              "a rest corner's bottom is " + std::to_string(item.bottom) + ", not 2");
+    }
+    CADACLYSM_TRY(ops, job.operations());
+    bool pocket_with_tool_2 = false;
+    for (const bs::Operation& op : ops) {
+        if (op.kind == "pocket" && op.tool == 2) pocket_with_tool_2 = true;
+    }
+    check(pocket_with_tool_2, "no pocket operation uses tool 2");
+    return {};
+}
+
+static Result<void> test_machine_with_refuses_an_empty_list_and_a_null() {
+    CADACLYSM_TRY(block, pocketed_block());
+    CADACLYSM_TRY(stock, bs::Stock::around(block, 2));
+    CADACLYSM_TRY(job, bs::Job::make(stock, 30));
+    CADACLYSM_TRY(big, bs::Tool::flat(1, 6, 20, 800, 200, 12000));
+
+    // W3: an empty list is refused, and the job is untouched.
+    std::vector<const bs::Tool*> none;
+    Result<bs::Report> empty = job.machine_with(block, none, {}, std::nullopt, std::nullopt, 0.3);
+    check(!empty, "an empty end mill list was accepted");
+    if (!empty) {
+        check(empty.error().message.find("machine: at least one end mill is needed") != std::string::npos,
+              "the refusal does not say 'at least one end mill is needed': " + empty.error().message);
+    }
+    CADACLYSM_TRY(ops_after_empty, job.operations());
+    check(ops_after_empty.empty(), "operations() is not empty after a refused machine_with()");
+
+    // W4: a null in the list is refused, naming its index.
+    std::vector<const bs::Tool*> with_null = {&big, nullptr};
+    Result<bs::Report> null_refused = job.machine_with(block, with_null, {}, std::nullopt, std::nullopt, 0.3);
+    check(!null_refused, "a null end mill was accepted");
+    if (!null_refused) {
+        check(null_refused.error().message.find("job_machine_with: null end mill 1") != std::string::npos,
+              "the refusal does not say 'null end mill 1': " + null_refused.error().message);
+    }
+    CADACLYSM_TRY(ops_after_null, job.operations());
+    check(ops_after_null.empty(), "operations() is not empty after a refused machine_with()");
+    return {};
+}
+
 // ---- the plate: an empty report, operations, gcode and write_camotics ----------------
 
 static Result<void> test_the_plate_is_machined_cleanly() {
@@ -366,6 +438,8 @@ int main(int argc, char** argv) {
     if (outcome) outcome = test_profile_to_arcs_fits_a_spline_within_tolerance();
     if (outcome) outcome = test_solid_section_cuts_a_cuboid();
     if (outcome) outcome = test_pocketed_block_reports_four_corners();
+    if (outcome) outcome = test_machine_with_two_end_mills_rests_the_corners();
+    if (outcome) outcome = test_machine_with_refuses_an_empty_list_and_a_null();
     if (outcome) outcome = test_the_plate_is_machined_cleanly();
     if (outcome) outcome = test_the_four_verbs_by_hand();
     if (outcome) outcome = test_a_closed_job_refuses_a_later_call();

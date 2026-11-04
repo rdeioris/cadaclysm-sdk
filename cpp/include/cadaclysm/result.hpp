@@ -5,12 +5,14 @@
 #define CADACLYSM_RESULT_HPP
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #if __has_include(<version>)
 #include <version>
@@ -38,13 +40,13 @@
 #endif
 
 #if CADACLYSM_CHECKED && CADACLYSM_STD_SPAN
-#define CADACLYSM_ABI checked_stdspan_v1
+#define CADACLYSM_ABI checked_stdspan_v2
 #elif CADACLYSM_CHECKED
-#define CADACLYSM_ABI checked_v1
+#define CADACLYSM_ABI checked_v2
 #elif CADACLYSM_STD_SPAN
-#define CADACLYSM_ABI unchecked_stdspan_v1
+#define CADACLYSM_ABI unchecked_stdspan_v2
 #else
-#define CADACLYSM_ABI unchecked_v1
+#define CADACLYSM_ABI unchecked_v2
 #endif
 
 // What a misuse does: value() on an error, a read through a stale view, a call on a
@@ -70,10 +72,13 @@ inline namespace CADACLYSM_ABI {
 enum class Origin { reader, kernel, view };
 
 // A failed call: the library's own message (cadaclysm_last_error or
-// cadaclysm_blacksmith_last_error), or the wrapper's where it refused first.
+// cadaclysm_blacksmith_last_error), or the wrapper's where it refused first. `ids` is
+// what a refusal from a Sketch names -- the constraints a new one clashes with, the
+// entities still holding a point -- and empty everywhere else.
 struct Error {
     std::string message;
     Origin origin = Origin::reader;
+    std::vector<std::uint32_t> ids{};
 };
 
 namespace detail {

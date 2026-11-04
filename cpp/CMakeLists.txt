@@ -133,6 +133,133 @@ if(CADACLYSM_LIBRARY_DIR)
             "$<TARGET_FILE_DIR:cadaclysm_subd_test>")
   add_test(NAME subd COMMAND cadaclysm_subd_test ${CADACLYSM_LICENSE})
 
+  # Sketch, SolveReport, Dof and PartDof over the cadaclysm_blacksmith_sketch_* calls, at parity
+  # with the Python reference's test_a_sketch_* tests (sketch-constraints plan 4). Needs a license,
+  # no sample file.
+  add_executable(cadaclysm_sketch_test tests/sketch_test.cpp)
+  target_link_libraries(cadaclysm_sketch_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_sketch_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_sketch_test>")
+  add_test(NAME sketch COMMAND cadaclysm_sketch_test ${CADACLYSM_LICENSE})
+
+  # The oriented box, edge and profile lengths, containment (one-shot and Classifier) and
+  # closest points, at parity with the Python reference's measure tests. Needs a license, no
+  # sample file.
+  add_executable(cadaclysm_measure_test tests/measure_test.cpp)
+  target_link_libraries(cadaclysm_measure_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_measure_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_measure_test>")
+  add_test(NAME measure COMMAND cadaclysm_measure_test ${CADACLYSM_LICENSE})
+
+  # Point at length, divide by count and divide by length on edges and a profile's outer loop,
+  # at parity with the Python reference's arc-length tests. Needs a license, no sample file.
+  add_executable(cadaclysm_arc_length_test tests/arc_length_test.cpp)
+  target_link_libraries(cadaclysm_arc_length_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_arc_length_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_arc_length_test>")
+  add_test(NAME arc_length COMMAND cadaclysm_arc_length_test ${CADACLYSM_LICENSE})
+
+  # RTree, closest_points and k_neighbors, at parity with the Python reference's R-tree tests.
+  # No sample file.
+  add_executable(cadaclysm_rtree_test tests/rtree_test.cpp)
+  target_link_libraries(cadaclysm_rtree_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_rtree_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_rtree_test>")
+  add_test(NAME rtree COMMAND cadaclysm_rtree_test ${CADACLYSM_LICENSE})
+
+  # Collider::clash, the one-shot clash() and the Clash row, at parity with the Python reference's
+  # clash tests (clash plan 3). No sample file.
+  add_executable(cadaclysm_clash_test tests/clash_test.cpp)
+  target_link_libraries(cadaclysm_clash_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_clash_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_clash_test>")
+  add_test(NAME clash COMMAND cadaclysm_clash_test ${CADACLYSM_LICENSE})
+
+  # Collider::swept_clash, the one-shot swept_clash() and the SweptClash row, at parity with the
+  # Python reference's test_swept_clash_* tests (swept clash plan 2b), and Assembly::parts and
+  # Assembly::swept_clash, at parity with its test_assembly_* swept tests (plan 3c). No sample file.
+  add_executable(cadaclysm_swept_clash_test tests/swept_clash_test.cpp)
+  target_link_libraries(cadaclysm_swept_clash_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_swept_clash_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_swept_clash_test>")
+  add_test(NAME swept_clash COMMAND cadaclysm_swept_clash_test ${CADACLYSM_LICENSE})
+
+  # ThicknessGauge, the Thickness rows, thickness(), mesh_thickness() and Solid::thickness_at_face,
+  # at parity with the Python reference's test_thickness_* and test_mesh_thickness_* tests (wall
+  # thickness plan 2b). No sample file.
+  add_executable(cadaclysm_thickness_test tests/thickness_test.cpp)
+  target_link_libraries(cadaclysm_thickness_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_thickness_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_thickness_test>")
+  add_test(NAME thickness COMMAND cadaclysm_thickness_test ${CADACLYSM_LICENSE})
+
+  # Transform, Quaternion, Solid::transform / convert_to_nurbs / inexact_trims and the Profile
+  # maps, at parity with the Python reference's transform tests (transforms plan A4). No sample
+  # file.
+  add_executable(cadaclysm_transform_test tests/transform_test.cpp)
+  target_link_libraries(cadaclysm_transform_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_transform_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_transform_test>")
+  add_test(NAME transform COMMAND cadaclysm_transform_test ${CADACLYSM_LICENSE})
+
+  # Interval, the Frame verbs, the nine values and Curve::value, at parity with the Python
+  # reference's value tests (value geometry plan B3). The Rhino records live in the repository,
+  # which the SDK does not carry: the test reads both paths at run time, failing on a missing
+  # file where the manifest beside it says this is a checkout, skipping with the reason where not.
+  add_executable(cadaclysm_values_test tests/values_test.cpp)
+  target_link_libraries(cadaclysm_values_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  target_compile_definitions(cadaclysm_values_test PRIVATE
+    CADACLYSM_VALUE_VECTORS="${CMAKE_CURRENT_SOURCE_DIR}/../../../cadaclysm/tests/fixtures/rhino/value_vectors.txt"
+    CADACLYSM_REPO_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/../../../cadaclysm/Cargo.toml")
+  add_custom_command(TARGET cadaclysm_values_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_values_test>")
+  add_test(NAME values COMMAND cadaclysm_values_test ${CADACLYSM_LICENSE})
+
+  # Solid::health / healed / edge_tolerance and Brep::health / healed / edge_tolerance, at parity
+  # with the Python reference's health and healing tests and their two decoder tests. The reader
+  # half opens st203-bapl.stp at the repository root, which an SDK checkout does not carry: "-"
+  # skips it there.
+  set(_cadaclysm_st203 "${CMAKE_CURRENT_SOURCE_DIR}/../../../../st203-bapl.stp")
+  if(NOT EXISTS "${_cadaclysm_st203}")
+    set(_cadaclysm_st203 "-")
+  endif()
+  add_executable(cadaclysm_healing_test tests/healing_test.cpp)
+  target_link_libraries(cadaclysm_healing_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_healing_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_healing_test>")
+  add_test(NAME healing COMMAND cadaclysm_healing_test "${_cadaclysm_st203}" ${CADACLYSM_LICENSE})
+
+  # Interpolator, Profile::circumscribed_polygon and Solid::merge / regions / region_solid, at
+  # parity with the Python reference's interpolator, circumscribed-polygon and merge tests. No
+  # sample file.
+  add_executable(cadaclysm_interpolator_merge_test tests/interpolator_merge_test.cpp)
+  target_link_libraries(cadaclysm_interpolator_merge_test PRIVATE cadaclysm::blacksmith Threads::Threads)
+  add_custom_command(TARGET cadaclysm_interpolator_merge_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:cadaclysm::reader>" "$<TARGET_FILE:cadaclysm::blacksmith>"
+            "$<TARGET_FILE_DIR:cadaclysm_interpolator_merge_test>")
+  add_test(NAME interpolator_merge COMMAND cadaclysm_interpolator_merge_test ${CADACLYSM_LICENSE})
+
   # Assembly::posed over the paired arm, two copies of a bracket and plan 4's gears.
   add_executable(cadaclysm_posed_test tests/posed_test.cpp)
   target_link_libraries(cadaclysm_posed_test PRIVATE cadaclysm::blacksmith Threads::Threads)

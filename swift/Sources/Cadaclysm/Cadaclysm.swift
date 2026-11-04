@@ -736,6 +736,248 @@ public struct SewReport: Hashable, Sendable {
     }
 }
 
+/// One free edge (a side only one face bounds) with its nearest partner: its `trim` (the face's
+/// side), the `edge` it lies on (nil for a side with no edge), the `face` and free `wire` (a row
+/// of `HealthReport.wires`) it is on, its nearest `partner` across the gap as a row of
+/// `HealthReport.freeEdges` (nil if there is none), how many of its two ends it `sharedEnds`
+/// with that partner (2 is what `Brep.sewed` joins), its `length` and the `gap` to the partner
+/// (infinite without one).
+public struct FreeEdge: Hashable, Sendable {
+    public let trim: Int
+    public let edge: Int?
+    public let face: Int
+    public let wire: Int
+    public let partner: Int?
+    public let sharedEnds: Int
+    public let length: Double
+    public let gap: Double
+
+    public init(trim: Int, edge: Int?, face: Int, wire: Int, partner: Int?, sharedEnds: Int, length: Double, gap: Double) {
+        self.trim = trim
+        self.edge = edge
+        self.face = face
+        self.wire = wire
+        self.partner = partner
+        self.sharedEnds = sharedEnds
+        self.length = length
+        self.gap = gap
+    }
+}
+
+/// A chain of free edges end to end: the rows `first ..< first + count` of
+/// `HealthReport.freeEdges`, whether it `closed` on itself, its total `length` and the
+/// `widestGap` from any of its edges to a partner.
+public struct FreeWire: Hashable, Sendable {
+    public let first: Int
+    public let count: Int
+    public let closed: Bool
+    public let length: Double
+    public let widestGap: Double
+
+    public init(first: Int, count: Int, closed: Bool, length: Double, widestGap: Double) {
+        self.first = first
+        self.count = count
+        self.closed = closed
+        self.length = length
+        self.widestGap = widestGap
+    }
+}
+
+/// Something below the tolerance: `kind` is `"short_edge"`, `"collapsed_edge"`,
+/// `"sliver_face"`, `"tiny_face"`, `"tiny_body"` or `"small_hole"`; `index` its edge, face or
+/// body number (a small hole's is its loop number); `size` how small.
+public struct SmallFeature: Hashable, Sendable {
+    public let kind: String
+    public let index: Int
+    public let size: Double
+
+    public init(kind: String, index: Int, size: Double) {
+        self.kind = kind
+        self.index = index
+        self.size = size
+    }
+}
+
+/// What a mesh of the body shows (`Brep.health(mesh: true)`): whether it is `watertight`, how
+/// many mesh edges are `open` (one triangle) or `folded` (more than two), how many pairs of
+/// triangles cross (`crossings`), and the brep `edges` the cracks lie along. Only a closed body
+/// is counted: an open one's census is empty by design.
+public struct Cracks: Hashable, Sendable {
+    public let watertight: Bool
+    public let open: Int
+    public let folded: Int
+    public let crossings: Int
+    public let edges: [Int]
+
+    public init(watertight: Bool, open: Int, folded: Int, crossings: Int, edges: [Int]) {
+        self.watertight = watertight
+        self.open = open
+        self.folded = folded
+        self.crossings = crossings
+        self.edges = edges
+    }
+}
+
+/// What is wrong with a body, as plain data (`Brep.health`): the `tolerance` and `rounding` it
+/// judged at and the body's `extent` (its diagonal); the free edges, their wires, the features
+/// below the tolerance; the loose edges (`worstLoose` the widest such gap); what sewing would do
+/// (`sewPairs` joined, `sewRefused`, `sewWorstGap`); `worstGap`, the widest gap between a free
+/// edge and its partner; and, if asked for with `mesh: true`, the mesh's `cracks`.
+public struct HealthReport: Hashable, Sendable {
+    public let tolerance: Double
+    public let rounding: Double
+    public let extent: Double
+    public let freeEdges: [FreeEdge]
+    public let wires: [FreeWire]
+    public let small: [SmallFeature]
+    public let looseEdges: Int
+    public let worstLoose: Double
+    public let sewPairs: Int
+    public let sewRefused: Int
+    public let sewWorstGap: Double
+    public let cracks: Cracks?
+    public let worstGap: Double
+
+    /// The free edges of wire number `wire`, in order.
+    public func wireEdges(_ wire: Int) -> [FreeEdge] {
+        let w = wires[wire]
+        return Array(freeEdges[w.first ..< w.first + w.count])
+    }
+
+    /// The flat rows of the health C ABI, decoded index for index as cadaclysm.py's
+    /// `_health_report`.
+    init(counts: [UInt32], sizes: [Double], freeIds: [UInt32], freeSizes: [Double], wireRuns: [UInt32],
+         wireSizes: [Double], smallItems: [UInt32], smallSizes: [Double], crackEdges: [UInt32]) {
+        // UInt32.max is "none"; typed closures and sub-expressions keep the type checker fast.
+        let index: (UInt32) -> Int? = { $0 == UInt32.max ? nil : Int($0) }
+        freeEdges = (0 ..< freeIds.count / 6).map { (i: Int) -> FreeEdge in
+            let ids: ArraySlice<UInt32> = freeIds[6 * i ..< 6 * i + 6]
+            let at: Int = ids.startIndex
+            return FreeEdge(trim: Int(ids[at]), edge: index(ids[at + 1]), face: Int(ids[at + 2]),
+                            wire: Int(ids[at + 3]), partner: index(ids[at + 4]), sharedEnds: Int(ids[at + 5]),
+                            length: freeSizes[2 * i], gap: freeSizes[2 * i + 1])
+        }
+        wires = (0 ..< wireRuns.count / 3).map { (i: Int) -> FreeWire in
+            let closed: Bool = wireRuns[3 * i + 2] != 0
+            return FreeWire(first: Int(wireRuns[3 * i]), count: Int(wireRuns[3 * i + 1]), closed: closed,
+                            length: wireSizes[2 * i], widestGap: wireSizes[2 * i + 1])
+        }
+        small = (0 ..< smallSizes.count).map { i in
+            SmallFeature(kind: healthKind(smallItems[2 * i]), index: Int(smallItems[2 * i + 1]), size: smallSizes[i])
+        }
+        cracks = counts[12] == 1
+            ? Cracks(watertight: counts[13] != 0, open: Int(counts[14]), folded: Int(counts[15]),
+                     crossings: Int(counts[16]), edges: crackEdges.map { Int($0) })
+            : nil
+        tolerance = sizes[0]
+        rounding = sizes[1]
+        extent = sizes[2]
+        worstGap = sizes[3]
+        looseEdges = Int(counts[9])
+        worstLoose = sizes[4]
+        sewPairs = Int(counts[10])
+        sewRefused = Int(counts[11])
+        sewWorstGap = sizes[5]
+    }
+}
+
+/// One small feature `Brep.healed` removed: its `kind` (as `SmallFeature.kind`), its `index` in
+/// the input (as `health` gave it), its `size`, and how far the vertices it merged `moved`.
+public struct HealFix: Hashable, Sendable {
+    public let kind: String
+    public let index: Int
+    public let size: Double
+    public let moved: Double
+
+    public init(kind: String, index: Int, size: Double, moved: Double) {
+        self.kind = kind
+        self.index = index
+        self.size = size
+        self.moved = moved
+    }
+}
+
+/// One small feature `Brep.healed` left, and why: `kind` and `index` as in `HealFix`; `why` is
+/// `"would_empty_loop"`, `"closed"`, `"seam"`, `"chain"`, `"neighbours_part"`, `"uneven"`,
+/// `"non_manifold"`, `"has_holes"`, `"body_guard"`, `"toggled"` or `"unsupported"`; `figure`
+/// the chain's width or the neighbours' gap, else 0.
+public struct HealRefusal: Hashable, Sendable {
+    public let kind: String
+    public let index: Int
+    public let why: String
+    public let figure: Double
+
+    public init(kind: String, index: Int, why: String, figure: Double) {
+        self.kind = kind
+        self.index = index
+        self.why = why
+        self.figure = figure
+    }
+}
+
+/// What `Brep.healed` did, as plain data: the `tolerance` it healed at, the furthest any trim
+/// the result keeps `moved`, whether the body guard refused fixes (`guarded`), the `fixes` made
+/// and the features `refused`; and the body's health before and after at that tolerance -- its
+/// small features, free edges, whether it is closed, and its non-manifold edges.
+public struct HealReport: Hashable, Sendable {
+    public let tolerance: Double
+    public let moved: Double
+    public let guarded: Bool
+    public let fixes: [HealFix]
+    public let refused: [HealRefusal]
+    public let smallBefore: Int
+    public let smallAfter: Int
+    public let freeBefore: Int
+    public let freeAfter: Int
+    public let closedBefore: Bool
+    public let closedAfter: Bool
+    public let nonmanifoldBefore: Int
+    public let nonmanifoldAfter: Int
+
+    /// The flat rows of the heal C ABI, decoded index for index as cadaclysm.py's `_heal_report`.
+    init(counts: [UInt32], sizes: [Double], fixItems: [UInt32], fixSizes: [Double], refusedItems: [UInt32],
+         refusedSizes: [Double]) {
+        fixes = (0 ..< fixItems.count / 2).map { i in
+            HealFix(kind: healthKind(fixItems[2 * i]), index: Int(fixItems[2 * i + 1]), size: fixSizes[2 * i],
+                    moved: fixSizes[2 * i + 1])
+        }
+        refused = (0 ..< refusedSizes.count).map { i in
+            HealRefusal(kind: healthKind(refusedItems[3 * i]), index: Int(refusedItems[3 * i + 1]),
+                        why: healWhy(refusedItems[3 * i + 2]), figure: refusedSizes[i])
+        }
+        tolerance = sizes[0]
+        moved = sizes[1]
+        guarded = counts[2] != 0
+        smallBefore = Int(counts[3])
+        smallAfter = Int(counts[4])
+        freeBefore = Int(counts[5])
+        freeAfter = Int(counts[6])
+        closedBefore = counts[7] != 0
+        closedAfter = counts[8] != 0
+        nonmanifoldBefore = Int(counts[9])
+        nonmanifoldAfter = Int(counts[10])
+    }
+}
+
+/// The small-feature kinds, by the C ABI's code.
+let healthKinds = ["short_edge", "collapsed_edge", "sliver_face", "tiny_face", "tiny_body", "small_hole"]
+/// Why healing left a feature, by the C ABI's code.
+let healWhys = ["would_empty_loop", "closed", "seam", "chain", "neighbours_part", "uneven", "non_manifold",
+                "has_holes", "body_guard", "toggled", "unsupported"]
+
+private func healthKind(_ code: UInt32) -> String {
+    Int(code) < healthKinds.count ? healthKinds[Int(code)] : "unknown"
+}
+
+private func healWhy(_ code: UInt32) -> String {
+    Int(code) < healWhys.count ? healWhys[Int(code)] : "unknown"
+}
+
+/// `healed`'s switches as the C ABI's flag bits: 1 edges, 2 faces, 4 holes.
+func healFlags(edges: Bool, faces: Bool, holes: Bool) -> UInt32 {
+    (edges ? 1 : 0) | (faces ? 2 : 0) | (holes ? 4 : 0)
+}
+
 /// A node's triangles, in the node's own frame: what `Node.mesh` returns.
 ///
 /// The arrays are read-only views into the scene's memory, not copies -- see the top of this
@@ -1864,6 +2106,81 @@ public final class Brep {
             throw CadaclysmError(lastErrorOr("sew"))
         }
         return (Brep(handle: sewn), SewReport(counts: counts, gaps: gaps))
+    }
+
+    /// What is wrong with this brep, as a `HealthReport`: the free edges (the sides one face
+    /// bounds) and the wires they chain into, with each edge's nearest partner and the gap to it;
+    /// the features below `tolerance`; the loose edges; and what `sewed` would join and leave.
+    /// `tolerance` is the length below which a feature is small and a gap closes -- nil, or a
+    /// value that is not finite and positive, takes the default (the report shows what was
+    /// used). `mesh: true` also meshes the brep and reports where the mesh cracks (`cracks`);
+    /// without it `cracks` is nil. Nothing moves. Throws once released, or with the library's
+    /// reason.
+    public func health(tolerance: Double? = nil, mesh: Bool = false) throws -> HealthReport {
+        guard let handle = handle else { throw CadaclysmError("brep: released") }
+        guard let h = cadaclysm_brep_health(handle, tolerance ?? .nan, mesh) else {
+            throw CadaclysmError(lastErrorOr("health"))
+        }
+        defer { cadaclysm_brep_health_free(h) }
+        var counts = [UInt32](repeating: 0, count: 18)
+        var sizes = [Double](repeating: 0, count: 8)
+        guard cadaclysm_brep_health_summary(h, &counts, &sizes) else { throw CadaclysmError(lastErrorOr("health")) }
+        var n = Int(cadaclysm_brep_health_free_edges(h, nil, nil))
+        var freeIds = [UInt32](repeating: 0, count: 6 * n), freeSizes = [Double](repeating: 0, count: 2 * n)
+        if n > 0 { _ = cadaclysm_brep_health_free_edges(h, &freeIds, &freeSizes) }
+        n = Int(cadaclysm_brep_health_wires(h, nil, nil))
+        var wireRuns = [UInt32](repeating: 0, count: 3 * n), wireSizes = [Double](repeating: 0, count: 2 * n)
+        if n > 0 { _ = cadaclysm_brep_health_wires(h, &wireRuns, &wireSizes) }
+        n = Int(cadaclysm_brep_health_small(h, nil, nil))
+        var smallItems = [UInt32](repeating: 0, count: 2 * n), smallSizes = [Double](repeating: 0, count: n)
+        if n > 0 { _ = cadaclysm_brep_health_small(h, &smallItems, &smallSizes) }
+        n = Int(cadaclysm_brep_health_crack_edges(h, nil))
+        var crackEdges = [UInt32](repeating: 0, count: n)
+        if n > 0 { _ = cadaclysm_brep_health_crack_edges(h, &crackEdges) }
+        return HealthReport(counts: counts, sizes: sizes, freeIds: freeIds, freeSizes: freeSizes, wireRuns: wireRuns,
+                            wireSizes: wireSizes, smallItems: smallItems, smallSizes: smallSizes, crackEdges: crackEdges)
+    }
+
+    /// This brep with its small features removed, and what was done, as a new `Brep` and a
+    /// `HealReport`; this one is left as it was. The features are the ones `health` lists as
+    /// small at `tolerance`: short and collapsed edges, sliver and tiny faces, small holes. Every
+    /// fix is a vertex merge, and an edge it moves records how far as its `edgeTolerance`. A
+    /// guard compares the result's health with this one's and refuses fixes that made it worse
+    /// (`guarded`). `edges`, `faces` and `holes` switch each kind of fix; a kind switched off is
+    /// refused as `"toggled"`. `tolerance` nil, or a value that is not finite and positive, takes
+    /// the default (the report shows what was used). Throws once released, or with the library's
+    /// reason.
+    public func healed(tolerance: Double? = nil, edges: Bool = true, faces: Bool = true,
+                       holes: Bool = true) throws -> (Brep, HealReport) {
+        guard let handle = handle else { throw CadaclysmError("brep: released") }
+        guard let h = cadaclysm_brep_healed(handle, tolerance ?? .nan, healFlags(edges: edges, faces: faces, holes: holes)) else {
+            throw CadaclysmError(lastErrorOr("healed"))
+        }
+        defer { cadaclysm_brep_heal_free(h) }
+        var counts = [UInt32](repeating: 0, count: 11)
+        var sizes = [Double](repeating: 0, count: 2)
+        guard cadaclysm_brep_heal_summary(h, &counts, &sizes) else { throw CadaclysmError(lastErrorOr("healed")) }
+        var n = Int(cadaclysm_brep_heal_fixes(h, nil, nil))
+        var fixItems = [UInt32](repeating: 0, count: 2 * n), fixSizes = [Double](repeating: 0, count: 2 * n)
+        if n > 0 { _ = cadaclysm_brep_heal_fixes(h, &fixItems, &fixSizes) }
+        n = Int(cadaclysm_brep_heal_refused(h, nil, nil))
+        var refusedItems = [UInt32](repeating: 0, count: 3 * n), refusedSizes = [Double](repeating: 0, count: n)
+        if n > 0 { _ = cadaclysm_brep_heal_refused(h, &refusedItems, &refusedSizes) }
+        let report = HealReport(counts: counts, sizes: sizes, fixItems: fixItems, fixSizes: fixSizes,
+                                refusedItems: refusedItems, refusedSizes: refusedSizes)
+        guard let body = cadaclysm_brep_heal_body(h) else { throw CadaclysmError(lastErrorOr("healed")) }
+        return (Brep(handle: body), report)
+    }
+
+    /// How far brep edge `edge` (as a `HealFix` names one) may lie off its curve: 0 for an exact
+    /// edge, the distance healing (or sewing) moved it where that is recorded, nil when no trim
+    /// names the id (an edge healing removed). Throws once released, or for an id that is not a
+    /// `UInt32`.
+    public func edgeTolerance(_ edge: Int) throws -> Double? {
+        guard let handle = handle else { throw CadaclysmError("brep: released") }
+        guard let id = UInt32(exactly: edge) else { throw CadaclysmError("edge_tolerance: edge \(edge) is out of range") }
+        let t = cadaclysm_brep_edge_tolerance(handle, id)
+        return t.isNaN ? nil : t
     }
 
     /// Give the reference back now. Idempotent; `deinit` does it otherwise.

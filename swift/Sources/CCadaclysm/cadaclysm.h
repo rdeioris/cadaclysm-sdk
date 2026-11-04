@@ -1,4 +1,4 @@
-/* Copyright 2026 Blitter S.r.l. */
+/* Copyright Blitter S.r.l. 2026 All Rights Reserved. */
 /* cadaclysm - one C ABI over the whole project. Generated; do not edit. */
 
 #ifndef CADACLYSM_H
@@ -376,7 +376,25 @@ typedef struct CadaclysmBrep CadaclysmBrep;
 typedef struct CadaclysmFemMesh CadaclysmFemMesh;
 
 /**
+ * A heal report and the healed body: owned, opaque, independent of the brep it was made
+ * from (it stays good after [`cadaclysm_brep_release`](crate::cadaclysm_brep_release)).
+ * Made by [`cadaclysm_brep_healed`], freed with [`cadaclysm_brep_heal_free`].
+ */
+typedef struct CadaclysmHeal CadaclysmHeal;
+
+/**
+ * A health report: owned data, opaque, independent of the brep it was made from
+ * (it stays good after [`cadaclysm_brep_release`](crate::cadaclysm_brep_release)).
+ * Made by [`cadaclysm_brep_health`], freed with [`cadaclysm_brep_health_free`].
+ */
+typedef struct CadaclysmHealth CadaclysmHealth;
+
+/**
  * A mesh split into meshlets, and the coarser levels above them.
+ *
+ * Held as owned meshlets -- each its own positions, normals and indices -- because that is
+ * what every accessor here copies out, and a caller across the ABI has no vertex buffer of
+ * the crate's to index.
  */
 typedef struct CadaclysmMeshlets CadaclysmMeshlets;
 
@@ -3586,13 +3604,18 @@ void cadaclysm_cancel(const struct CadaclysmScene *scene);
 /**
  * Write the whole scene -- every placement of every shape, named and placed
  * as the document's tree is, with a material per colour -- to `path` as glTF,
- * OBJ or an OCCT `.brep`. False on failure, with
+ * OBJ, OpenUSD or an OCCT `.brep`. False on failure, with
  * [`cadaclysm_last_error`] saying why.
  *
  * `format` is `"glb"` (binary, one file), `"gltf"` (JSON with the vertex
  * buffer embedded, also one file) or `"obj"` (Wavefront text, every placement
  * baked to its own named object, with a `.mtl` written beside it under the
- * same stem when anything has a colour). These hold a scene where the
+ * same stem when anything has a colour). `"usda"` is an OpenUSD text layer:
+ * each shape's triangles once, every placement a prim referencing them with its
+ * world matrix, a `UsdPreviewSurface` per colour, and a node's MaterialX or MDL
+ * material (its `ExternalStyle.*` or `MaterialReference.*` properties) bound in
+ * its own format -- `cadaclysm_usd` says exactly what it carries. The layer's
+ * `upAxis` and `metersPerUnit` are the space the scene was opened into. These hold a scene where the
  * [`cadaclysm_mesh_format`] rows write one node's mesh; the same names there
  * are the one-mesh forms. `"brep"` writes what the readers kept of the exact
  * geometry rather than the mesh: every face's surface whole, bounded by the
@@ -3600,6 +3623,16 @@ void cadaclysm_cancel(const struct CadaclysmScene *scene);
  * each place it stands (`cadaclysm_brep_file::write_document` says exactly
  * what that carries). A scene with no exact geometry at all -- an STL, a
  * mesh-only file -- is refused as such. Any other name is refused.
+ *
+ * A mechanism goes into a USD layer as UsdPhysics: a rigid body per link and a
+ * joint prim per pair, for a simulator (Isaac Sim, Omniverse).
+ *
+ * `"glb-skinned"`, `"gltf-skinned"` and `"usda-skinned"` write the same
+ * containers with the scene's mechanism as a skin (in USD a UsdSkel skeleton): one bone per link, each moving link's bone on
+ * its joint, every vertex weighted wholly to its own link's bone -- for an
+ * engine that moves skeletal meshes only. The plain forms hang each moving
+ * link under a pivot node on its joint instead; both write the joints' ranges
+ * and the named states as glTF `extras`.
  *
  * Coordinates are the scene's own, in the space it was opened into: a scene
  * opened as `CADACLYSM_Y_UP` writes the Y-up metres glTF specifies, and one
@@ -3611,7 +3644,9 @@ void cadaclysm_cancel(const struct CadaclysmScene *scene);
  * `scene` must be null or a handle from [`cadaclysm_open`]; `path` and
  * `format` must be null or valid C strings.
  */
-bool cadaclysm_scene_save(const struct CadaclysmScene *scene, const char *path, const char *format);
+bool cadaclysm_scene_save(const struct CadaclysmScene *scene,
+                          const char *path,
+                          const char *format);
 
 /**
  * How many formats [`cadaclysm_node_save_mesh`] accepts.
@@ -3896,6 +3931,212 @@ const struct CadaclysmBrep *cadaclysm_brep_sew(const struct CadaclysmBrep *brep,
                                                double vertex,
                                                uint32_t *out,
                                                double *gaps);
+
+/**
+ * Diagnose a brep: its free edges and the wires they chain into, the features
+ * smaller than `tolerance`, what a dry-run sew would do, and (with `mesh`) the
+ * cracks of its mesh. `brep` is left as it was. `NaN` or `tolerance <= 0` takes
+ * the default, `1e-4` times the diagonal of the body's edge points; the report's
+ * `sizes[0]` says what was used. With `mesh` the body is also meshed at that
+ * tolerance, which costs time on a large body.
+ *
+ * A report handle, read with the `cadaclysm_brep_health_*` accessors and freed
+ * with [`cadaclysm_brep_health_free`]; null (and
+ * [`cadaclysm_last_error`](crate::cadaclysm_last_error)) on a null `brep` or a panic
+ * inside the diagnosis (the message starts `panicked:`).
+ *
+ * # Safety
+ * `brep` null or from [`cadaclysm_node_brep`](crate::cadaclysm_node_brep) or
+ * [`cadaclysm_brep_sew`](crate::cadaclysm_brep_sew) and not yet released.
+ */
+struct CadaclysmHealth *cadaclysm_brep_health(const struct CadaclysmBrep *brep,
+                                              double tolerance,
+                                              bool mesh);
+
+/**
+ * Free a report. Null is a no-op.
+ *
+ * # Safety
+ * `health` null or from [`cadaclysm_brep_health`], and freed once.
+ */
+void cadaclysm_brep_health_free(struct CadaclysmHealth *health);
+
+/**
+ * The report's figures. `counts`, eighteen `uint32_t`, in order: free edges,
+ * wires, closed wires, small features, short edges, collapsed edges, sliver
+ * faces, tiny faces, tiny body, loose edges, sew pairs, sew refused, meshed,
+ * watertight, open, folded, crossings, crack edges (the last six are 0 unless
+ * the report was made with `mesh`, and `meshed` is 1 then). `sizes`, eight
+ * `double`: tolerance used, rounding, extent, worst free-edge gap (largest
+ * finite, 0 if none), worst loose edge, sew worst gap, shortest edge, narrowest
+ * face (0 if none). Either output may be null; not both. `false` (and
+ * [`cadaclysm_last_error`](crate::cadaclysm_last_error)) on a null `health` or
+ * both outputs null.
+ *
+ * # Safety
+ * `health` null or live from [`cadaclysm_brep_health`]; `counts` null or
+ * eighteen `uint32_t`; `sizes` null or eight `double`.
+ */
+bool cadaclysm_brep_health_summary(const struct CadaclysmHealth *health,
+                                   uint32_t *counts,
+                                   double *sizes);
+
+/**
+ * The free edges (the sides one face bounds), one row each: `ids`, six
+ * `uint32_t` per edge -- trim, edge, face, wire, partner, shared ends (edge and
+ * partner are `UINT32_MAX` where there is none); `sizes`, two `double` per edge
+ * -- length, gap to its partner (`+inf` with none). Returns the count; with
+ * both buffers null it writes nothing, so call it twice: once to size the
+ * buffers, once to fill them. A non-null buffer must hold the whole count.
+ * Zero (and [`cadaclysm_last_error`](crate::cadaclysm_last_error)) on a null
+ * `health`.
+ *
+ * # Safety
+ * `health` null or live from [`cadaclysm_brep_health`]; `ids` null or `6 n`
+ * `uint32_t`, `sizes` null or `2 n` `double`, for `n` the count.
+ */
+uint32_t cadaclysm_brep_health_free_edges(const struct CadaclysmHealth *health,
+                                          uint32_t *ids,
+                                          double *sizes);
+
+/**
+ * The free wires (the free edges chained end to end), one row each: `runs`,
+ * three `uint32_t` per wire -- first, count, closed (the free-edge rows it
+ * covers); `sizes`, two `double` -- length, widest gap. Returns the count,
+ * with the two-call convention of [`cadaclysm_brep_health_free_edges`].
+ *
+ * # Safety
+ * `health` null or live; `runs` null or `3 n` `uint32_t`, `sizes` null or
+ * `2 n` `double`.
+ */
+uint32_t cadaclysm_brep_health_wires(const struct CadaclysmHealth *health,
+                                     uint32_t *runs,
+                                     double *sizes);
+
+/**
+ * The features below the tolerance, one row each: `items`, two `uint32_t` --
+ * kind (0 short edge, 1 collapsed edge, 2 sliver face, 3 tiny face, 4 tiny
+ * body, 5 small hole), index (a hole's is its loop); `sizes`, one `double` -- its size. Returns the count, with the
+ * two-call convention of [`cadaclysm_brep_health_free_edges`].
+ *
+ * # Safety
+ * `health` null or live; `items` null or `2 n` `uint32_t`, `sizes` null or
+ * `n` `double`.
+ */
+uint32_t cadaclysm_brep_health_small(const struct CadaclysmHealth *health,
+                                     uint32_t *items,
+                                     double *sizes);
+
+/**
+ * The edge ids the mesh cracks along (none unless the report was made with
+ * `mesh`). Returns the count, with the two-call convention of
+ * [`cadaclysm_brep_health_free_edges`].
+ *
+ * # Safety
+ * `health` null or live; `ids` null or `n` `uint32_t`.
+ */
+uint32_t cadaclysm_brep_health_crack_edges(const struct CadaclysmHealth *health, uint32_t *ids);
+
+/**
+ * Remove the features smaller than `tolerance` that
+ * [`cadaclysm_brep_health`](crate::cadaclysm_brep_health) lists as small: short and
+ * collapsed edges, sliver and tiny faces, small holes. Every fix is a vertex merge; each
+ * edge moved records how far as its tolerance
+ * ([`cadaclysm_brep_edge_tolerance`]). A guard compares the result's health with the
+ * input's and refuses fixes that made it worse (the summary's `guarded`). `brep` is left
+ * as it was. `NaN` or `tolerance <= 0` takes the default, `1e-4` times the diagonal of the
+ * body's edge points; the summary's `sizes[0]` says what was used. `flags` picks what is
+ * fixed: 1 edges, 2 faces, 4 holes, 7 all; a kind switched off is refused as toggled.
+ *
+ * A report handle, read with the `cadaclysm_brep_heal_*` accessors and freed with
+ * [`cadaclysm_brep_heal_free`]; null (and
+ * [`cadaclysm_last_error`](crate::cadaclysm_last_error)) on a null `brep` or a flag bit
+ * other than those three, or a panic inside the heal (the message starts `panicked:`).
+ *
+ * # Safety
+ * `brep` null or from [`cadaclysm_node_brep`](crate::cadaclysm_node_brep),
+ * [`cadaclysm_brep_sew`](crate::cadaclysm_brep_sew) or [`cadaclysm_brep_heal_body`] and
+ * not yet released.
+ */
+struct CadaclysmHeal *cadaclysm_brep_healed(const struct CadaclysmBrep *brep,
+                                            double tolerance,
+                                            uint32_t flags);
+
+/**
+ * The healed body: a new reference the caller releases with
+ * [`cadaclysm_brep_release`](crate::cadaclysm_brep_release). It outlives the report. Null
+ * (and [`cadaclysm_last_error`](crate::cadaclysm_last_error)) on a null `h`.
+ *
+ * # Safety
+ * `h` null or live from [`cadaclysm_brep_healed`].
+ */
+const struct CadaclysmBrep *cadaclysm_brep_heal_body(const struct CadaclysmHeal *h);
+
+/**
+ * Free a report. Null is a no-op. A body taken with [`cadaclysm_brep_heal_body`] stays
+ * good.
+ *
+ * # Safety
+ * `h` null or from [`cadaclysm_brep_healed`], and freed once.
+ */
+void cadaclysm_brep_heal_free(struct CadaclysmHeal *h);
+
+/**
+ * The report's figures. `counts`, eleven `uint32_t`, in order: fixes, refused, guarded,
+ * small before, small after, free edges before, free edges after, closed before, closed
+ * after, non-manifold edges before, non-manifold edges after (before and after are the
+ * input's and the result's health at the tolerance used). `sizes`, two `double`: the
+ * tolerance used, the furthest any trim moved. Either output may be null; not both.
+ * `false` (and [`cadaclysm_last_error`](crate::cadaclysm_last_error)) on a null `h` or
+ * both outputs null.
+ *
+ * # Safety
+ * `h` null or live from [`cadaclysm_brep_healed`]; `counts` null or eleven `uint32_t`;
+ * `sizes` null or two `double`.
+ */
+bool cadaclysm_brep_heal_summary(const struct CadaclysmHeal *h, uint32_t *counts, double *sizes);
+
+/**
+ * The features removed, in the order they were, one row each: `items`, two `uint32_t` --
+ * kind (0 short edge, 1 collapsed edge, 2 sliver face, 3 tiny face, 4 tiny body, 5 small
+ * hole), index (as in [`cadaclysm_brep_health_small`](crate::cadaclysm_brep_health_small),
+ * of the input); `sizes`, two `double` -- its size, the furthest a vertex it merged moved.
+ * Returns the count; with both buffers null it writes nothing, so call it twice: once to
+ * size the buffers, once to fill them. A non-null buffer must hold the whole count. Zero
+ * (and [`cadaclysm_last_error`](crate::cadaclysm_last_error)) on a null `h`.
+ *
+ * # Safety
+ * `h` null or live from [`cadaclysm_brep_healed`]; `items` null or `2 n` `uint32_t`,
+ * `sizes` null or `2 n` `double`, for `n` the count.
+ */
+uint32_t cadaclysm_brep_heal_fixes(const struct CadaclysmHeal *h, uint32_t *items, double *sizes);
+
+/**
+ * The small features left, one row each: `items`, three `uint32_t` -- kind (as in
+ * [`cadaclysm_brep_heal_fixes`]), index, why (0 would empty its loop, 1 closed, 2 seam,
+ * 3 chain wider than the tolerance, 4 a sliver's neighbours part, 5 uneven sliver sides,
+ * 6 non-manifold, 7 has holes, 8 the body guard, 9 toggled off by `flags`, 10
+ * unsupported); `sizes`, one `double` -- the why's figure (a chain's width, the
+ * neighbours' gap, else 0). Returns the count, with the two-call convention of
+ * [`cadaclysm_brep_heal_fixes`].
+ *
+ * # Safety
+ * `h` null or live; `items` null or `3 n` `uint32_t`, `sizes` null or `n` `double`.
+ */
+uint32_t cadaclysm_brep_heal_refused(const struct CadaclysmHeal *h, uint32_t *items, double *sizes);
+
+/**
+ * How far edge `edge` may lie off its curve: 0 for an exact edge, the distance healing
+ * (or sewing) moved it where that is recorded, `NaN` when no trim of a face's loop names
+ * the id (an edge healing removed), `brep` is null or the lookup panicked (with
+ * [`cadaclysm_last_error`](crate::cadaclysm_last_error) set). The edges' map is built on
+ * the first call for a brep and kept while the same brep is asked about, so walking a
+ * body's edges is one pass over its trims, not one per call.
+ *
+ * # Safety
+ * `brep` null or a live brep handle (see [`cadaclysm_brep_healed`]).
+ */
+double cadaclysm_brep_edge_tolerance(const struct CadaclysmBrep *brep, uint32_t edge);
 
 /**
  * The defaults: the viewer's `iso`, orthographic, a 1000-square page, black
@@ -4416,6 +4657,48 @@ const char *cadaclysm_fem_mesh_msh_text(const struct CadaclysmFemMesh *m);
  * `m` must have come from [`cadaclysm_node_fem_mesh`] and not been freed.
  */
 void cadaclysm_fem_mesh_free(struct CadaclysmFemMesh *m);
+
+/**
+ * One B-rep face index per triangle of [`cadaclysm_node_mesh`](crate::cadaclysm_node_mesh),
+ * numbered as [`cadaclysm_node_surfaces`](crate::cadaclysm_node_surfaces) numbers faces
+ * (face `f` is `surfaces.faces[f]`), and the triangle count written to `count`.
+ *
+ * A triangle whose face has no entry in `surfaces.faces` -- a zero-area face the surface
+ * build skips, so the list is packed and the faces after it move down one -- holds
+ * [`CADACLYSM_NONE`](crate::CADACLYSM_NONE) (`UINT32_MAX`) instead of a face number. Every
+ * other entry is below `surfaces.face_count`.
+ *
+ * NULL, with `*count` 0, for a part with no B-rep behind its triangles: a mesh the file
+ * carried, a CSG body, a reader that does not track faces. Meshes the part if it has not
+ * been. The pointer borrows from the scene like the mesh's own and is good until the scene
+ * is closed or [`cadaclysm_forget_meshes`](crate::cadaclysm_forget_meshes) is called.
+ * Instances answer for the shape they instance, as `cadaclysm_node_mesh` does.
+ *
+ * # Safety
+ * `scene` null or a live scene; `count` null or writable.
+ */
+const uint32_t *cadaclysm_node_mesh_faces(const struct CadaclysmScene *scene,
+                                          uint32_t node,
+                                          uint32_t *count);
+
+/**
+ * The worst distance, in the part's own frame and units, from this part's display mesh to
+ * the exact surfaces it was meshed from: measured once, against the face
+ * [`cadaclysm_node_mesh_faces`] names for each triangle, and kept. Negative
+ * when it cannot be known -- no B-rep, no face list. What a ray tracer offsets a ray by when it
+ * starts on an exact surface and tests against these triangles.
+ *
+ * Closed form on the analytic faces (planes, cylinders, cones, spheres, tori), at every
+ * triangle's three edge midpoints and its centroid (a flat triangle on a doubly curved face
+ * sags deepest inside); exact on spheres, where the deepest point of the triangle is used.
+ * Where any triangle is on a freeform face (NURBS, revolutions, extrusions), or names no face,
+ * the figure is no less than the mesher's own sag at default quality, the part's largest
+ * bounding-box axis over 217 -- an overstatement, the safe side for a ray offset.
+ *
+ * # Safety
+ * `scene` null or a live scene.
+ */
+double cadaclysm_node_mesh_deviation(const struct CadaclysmScene *scene, uint32_t node);
 
 #ifdef __cplusplus
 }  // extern "C"

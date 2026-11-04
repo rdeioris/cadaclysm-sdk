@@ -41,7 +41,14 @@ ABI_MAJOR = 1
 # 1.9: `cadaclysm_view_set_lighting` and `_lighting` (headlight or studio).
 # 1.10: the viewport cameras -- cadaclysm_view_viewport_camera, _set_viewport_camera, _set_viewport_rects, _aim, _set_pivot, _set_tap and the _in camera calls (bound; Python's own API for them comes later).
 # 1.11: `cadaclysm_view_show_points` (a point cloud as one item, a disc a point).
-ABI_MINOR = 11
+# 1.13: `cadaclysm_view_set_occluded` (an item's hidden lines and points: off, solid or dashed).
+# 1.14: `cadaclysm_view_set_analysis` and `_analysis` (zebra, isophotes, curvature colour).
+# 1.15: `CADACLYSM_VIEW_LIGHTING_SHOWROOM`, a showroom mirrored in a clear coat.
+# 1.16: `cadaclysm_view_set_item_layer`, `cadaclysm_view_set_user_layer`, `CadaclysmViewViewport::layer_mask`.
+# 1.17: `CADACLYSM_VIEW_WINDOW_KMS` (drawn straight onto a Linux display; not a Python window kind).
+# 1.18: `cadaclysm_view_set_finish` (an item's finish: gloss, satin or matte).
+# 1.19: `cadaclysm_view_kms_info` and `_kms_probe` (how a KMS view draws onto its display).
+ABI_MINOR = 19
 
 #: A colour: text -- "#rgb", "#rrggbb" (the "#" optional) or one of the 148 CSS colour names,
 #: any case, read by the view library's own `cadaclysm_view_parse_colour`, so the forms are
@@ -59,9 +66,12 @@ _STANDARD_TOP, _STANDARD_FRONT = 0, 1
 
 _OPEN, _CLOSED = 1, 2
 _INPUT_CLOSE, _INPUT_PICKED = 1, 2
-_WINDOW_KINDS = {"win32": 1, "xlib": 2, "xcb": 3, "wayland": 4, "appkit": 5}
+_WINDOW_KINDS = {"win32": 1, "xlib": 2, "xcb": 3, "wayland": 4, "appkit": 5, "kms": 6}
 _SURFACES = {"exact": 0, "triangles": 1}
-_LIGHTING = {"headlight": 0, "studio": 1}
+_LIGHTING = {"headlight": 0, "studio": 1, "showroom": 2}
+_ANALYSIS = {"zebra": 1, "isophotes": 2, "gaussian": 3, "mean": 4, "min": 5, "max": 6}
+_OCCLUDED = {"off": 0, "solid": 1, "dashed": 2}
+_FINISH = {"gloss": 0, "satin": 1, "matte": 2}
 _LOD_MOTION = {"detailed": 0, "smooth": 1}
 _STANDARD = {"top": 0, "front": 1, "right": 2, "iso": 3}
 _LAYERS = {"surfaces": 0, "edges": 1, "curves": 2, "isocurves": 3, "grid": 4, "text": 5}
@@ -101,7 +111,7 @@ class _Event(ctypes.Structure):
 
 class _Viewport(ctypes.Structure):
     _fields_ = [("size", c_uint32), ("rect", c_uint32 * 4), ("view", c_float * 16), ("projection", c_float * 16),
-                ("eye", c_float * 3), ("grid", c_uint32)]
+                ("eye", c_float * 3), ("grid", c_uint32), ("layer_mask", c_uint32)]
 
 
 class _Mesh(ctypes.Structure):
@@ -138,6 +148,12 @@ class _Lod(ctypes.Structure):
     _fields_ = [("size", c_uint32), ("min_triangles", c_uint32), ("motion", c_uint32)]
 
 
+class _Analysis(ctypes.Structure):
+    #: CadaclysmViewAnalysis, cadaclysm_view.h 1.14.
+    _fields_ = [("size", c_uint32), ("mode", c_uint32), ("count", c_uint32), ("angle", c_float), ("width", c_float),
+                ("light", c_float * 3), ("range", c_double)]
+
+
 class _Text(ctypes.Structure):
     #: CadaclysmViewText, cadaclysm_view.h 1.6.
     _fields_ = [("size", c_uint32), ("text", c_char_p), ("mode", c_uint32), ("at", c_float * 3), ("right", c_float * 3),
@@ -166,6 +182,13 @@ class _MachiningInfo(ctypes.Structure):
     #: CadaclysmViewMachiningInfo, cadaclysm_view.h 1.7.
     _fields_ = [("size", c_uint32), ("moves", c_uint32), ("move", c_uint32), ("nx", c_uint32), ("ny", c_uint32),
                 ("cell", c_float), ("min", c_float * 2), ("cycle_time", c_double)]
+
+
+class _KmsInfo(ctypes.Structure):
+    #: CadaclysmViewKmsInfo, cadaclysm_view.h 1.19.
+    _fields_ = [("size", c_uint32), ("path", c_uint32), ("modifier", ctypes.c_uint64), ("connector", c_uint32),
+                ("width", c_uint32), ("height", c_uint32), ("refresh", c_uint32), ("fourcc", c_uint32),
+                ("connector_name", ctypes.c_char * 32), ("card", ctypes.c_char * 64), ("adapter", ctypes.c_char * 128)]
 
 
 class _ViewportCamera(ctypes.Structure):
@@ -199,6 +222,8 @@ _SIGNATURES = {
     "cadaclysm_view_surfaces": (c_uint32, [V]),
     "cadaclysm_view_set_lighting": (c_bool, [V, c_uint32]),
     "cadaclysm_view_lighting": (c_uint32, [V]),
+    "cadaclysm_view_set_analysis": (c_bool, [V, POINTER(_Analysis)]),
+    "cadaclysm_view_analysis": (c_bool, [V, POINTER(_Analysis)]),
     "cadaclysm_view_orbit": (None, [V, c_float, c_float]),
     "cadaclysm_view_pan": (None, [V, c_float, c_float]),
     "cadaclysm_view_zoom": (None, [V, c_float]),
@@ -225,6 +250,10 @@ _SIGNATURES = {
     "cadaclysm_view_show_image": (c_uint32, [V, POINTER(_Image)]),
     "cadaclysm_view_set_colour": (c_bool, [V, c_uint32, F]),
     "cadaclysm_view_set_xray": (c_bool, [V, c_uint32, c_bool]),
+    "cadaclysm_view_set_occluded": (c_bool, [V, c_uint32, c_uint32]),
+    "cadaclysm_view_set_item_layer": (c_bool, [V, c_uint32, c_uint32]),
+    "cadaclysm_view_set_user_layer": (c_bool, [V, c_uint32, c_bool]),
+    "cadaclysm_view_set_finish": (c_bool, [V, c_uint32, c_uint32]),
     "cadaclysm_view_set_face_colours": (c_bool, [V, c_uint32, POINTER(c_uint32), F, c_uint32]),
     "cadaclysm_view_set_placement": (c_bool, [V, c_uint32, POINTER(c_double)]),
     "cadaclysm_view_set_node_transforms": (c_bool, [V, c_uint32, POINTER(c_double), c_uint32]),
@@ -264,9 +293,13 @@ _SIGNATURES = {
     "cadaclysm_view_dolly_in": (None, [V, c_uint32, c_float]),
     "cadaclysm_view_frame_in": (c_bool, [V, c_uint32, c_uint32]),
     "cadaclysm_view_standard_in": (c_bool, [V, c_uint32, c_uint32]),
+    "cadaclysm_view_kms_info": (c_bool, [V, POINTER(_KmsInfo)]),
+    "cadaclysm_view_kms_probe": (c_bool, [POINTER(_Window), POINTER(_KmsInfo)]),
 }
 
 _TOOL_SHAPES = {"flat": 0, "ball": 1, "drill": 2, "vbit": 3, "bullnose": 4}
+#: CadaclysmViewKmsInfo.path (1.19).
+_KMS_PATHS = {1: "gbm", 2: "gpu", 3: "copy"}
 _COLOUR_BY = {"height": 0, "tool": 1, "deviation": 2}
 
 
@@ -1163,6 +1196,24 @@ class Item:
     def xray(self, on: bool = True) -> None:
         self.view._ok("cadaclysm_view_set_xray", self.id, bool(on))
 
+    def occluded(self, mode: str) -> None:
+        """How the item's lines and points draw where a surface hides them: "off" (not
+        drawn; an item shows with this until it is set), "solid" (drawn through) or "dashed"
+        (dashed and dimmed; a point as a dimmed ring)."""
+        if mode not in _OCCLUDED:
+            raise ValueError(f"occluded: {mode!r} is not 'off', 'solid' or 'dashed'")
+        self.view._ok("cadaclysm_view_set_occluded", self.id, _OCCLUDED[mode])
+
+    def finish(self, finish: str) -> None:
+        """The item's finish: "gloss" (an item shows with this until it is set) -- under the
+        showroom lighting a clear coat mirroring the room, silver at a grazing angle -- "satin"
+        (a weaker, blurred coat) or "matte" (no mirror, a faint sheen: rubber, cloth). Uploads
+        the scene again, as a show does: give it to `show_solid(..., finish=)` as each item is
+        shown rather than over a finished scene item by item."""
+        if finish not in _FINISH:
+            raise ValueError(f"finish: {finish!r} is not 'gloss', 'satin' or 'matte'")
+        self.view._ok("cadaclysm_view_set_finish", self.id, _FINISH[finish])
+
     def frame(self) -> None:
         self.view._ok("cadaclysm_view_frame", self.id)
 
@@ -1227,6 +1278,18 @@ class Machining(Item):
 
 
 def _window_struct(window, display, kind, width, height):
+    if kind == "kms":
+        # A Linux display through KMS: the connector (0 the first connected), the DRM fd the
+        # host's seat manager gave it (None: the view opens the display itself), the mode
+        # (0 x 0 the preferred one). The fd's int is kept on the struct until create has read it.
+        w = _Window()
+        w.size, w.kind = ctypes.sizeof(_Window), _WINDOW_KINDS["kms"]
+        w.window_id = int(window or 0)
+        if display is not None:
+            w._fd = ctypes.c_int(int(display))
+            w.display = ctypes.addressof(w._fd)
+        w.width, w.height = int(width), int(height)
+        return w
     if not width or not height:
         raise ValueError("a host's window needs width= and height=: its client size in physical pixels")
     kind = kind or {"win32": "win32", "darwin": "appkit"}.get(sys.platform, "xlib")
@@ -1245,9 +1308,36 @@ def _window_struct(window, display, kind, width, height):
     return w
 
 
+def _kms_dict(i: _KmsInfo) -> Dict[str, Any]:
+    return {"path": _KMS_PATHS.get(i.path, str(i.path)), "connector": i.connector,
+            "connector_name": i.connector_name.decode("utf-8", "replace"), "width": i.width, "height": i.height,
+            "refresh": i.refresh, "fourcc": i.fourcc.to_bytes(4, "little").decode("ascii", "replace"),
+            "modifier": i.modifier, "card": i.card.decode("utf-8", "replace"),
+            "adapter": i.adapter.decode("utf-8", "replace")}
+
+
+def kms_probe(connector: int = 0, fd: Optional[int] = None, width: int = 0, height: int = 0) -> Dict[str, Any]:
+    """How `View(kind="kms", window=connector, display=fd, width=width, height=height)` would draw
+    onto its display, found without taking it: the dict `View.kms_info()` gives, or `ViewError` with
+    the reason the view would be refused (another master such as a compositor, no connected output,
+    no Vulkan device). The defaults are the display a window of the view's own takes at a console.
+    Linux and the wgpu library only; slow, as it enumerates the Vulkan devices."""
+    lib = current()._library
+    w = _window_struct(connector, fd, "kms", width, height)
+    i = _KmsInfo()
+    i.size = ctypes.sizeof(_KmsInfo)
+    if not lib.cadaclysm_view_kms_probe(ctypes.byref(w), ctypes.byref(i)):
+        raise ViewError(_text(lib.cadaclysm_view_last_error()))
+    return _kms_dict(i)
+
+
 class View:
-    """A view of `cadaclysm_view.h`: a window of its own (no `window`), a host's window
-    (`window=` its handle), or `View.offscreen(width, height)`. Belongs to the thread that made it."""
+    """A view of `cadaclysm_view.h`: a window of its own (no `window`; at a Linux console
+    with no window system, the wgpu library's is the whole display, driven by its keyboard and
+    mouse -- `use("wgpu")`, as the default terminal library draws in the terminal), a host's
+    window (`window=` its handle), a Linux display with no window system (`kind="kms"`: `window=` the
+    connector id, `display=` a DRM fd, `width`/`height` a mode -- each optional; feed it input
+    with `input()`), or `View.offscreen(width, height)`. Belongs to the thread that made it."""
 
     def __init__(self, window: Optional[int] = None, display: Optional[int] = None, *, kind: Optional[str] = None,
                  title: Optional[str] = None, width: int = 0, height: int = 0, surfaces: str = "exact",
@@ -1261,12 +1351,12 @@ class View:
         self._library, self._lib = library, library._library
         self._thread = threading.get_ident()
         self._items, self._closed, self._up, self._drawn = {}, False, 1 if up == "y" else 0, False
-        self._own = window is None and not _offscreen
+        self._own = window is None and not _offscreen and kind != "kms"
         o = _Options()
         o.size, o.surfaces, o.y_up = ctypes.sizeof(_Options), _SURFACES[surfaces], self._up
         o.title = (title or "Cadaclysm").encode("utf-8", "replace")
         o.width, o.height, o.offscreen = int(width), int(height), 1 if _offscreen else 0
-        w = None if window is None else _window_struct(window, display, kind, width, height)
+        w = None if window is None and kind != "kms" else _window_struct(window, display, kind, width, height)
         v = self._lib.cadaclysm_view_create(None if w is None else ctypes.byref(w), ctypes.byref(o))
         if not v:
             message = _text(self._lib.cadaclysm_view_last_error())
@@ -1376,10 +1466,22 @@ class View:
             raise ValueError(f"a triangle soup is three points a triangle, not {len(points)}")
         return self.show_mesh(points, np.arange(len(points), dtype=np.uint32), rgb=rgb)
 
-    def show_solid(self, solid: Any, tolerance: float = 0.05, rgb: Optional[Colour] = None) -> Item:
+    def show_solid(self, solid: Any, tolerance: float = 0.05, rgb: Optional[Colour] = None,
+                   finish: Optional[str] = None) -> Item:
+        """A kernel solid, read in place; `finish` "gloss", "satin" or "matte" (`Item.finish`),
+        None the gloss every item shows with."""
+        if finish is not None and finish not in _FINISH:
+            raise ValueError(f"finish: {finish!r} is not 'gloss', 'satin' or 'matte'")
         packed = _rgb3(rgb, self._lib)
-        return self._item(self._ok("cadaclysm_view_show_solid", solid._h(), float(tolerance),
+        item = self._item(self._ok("cadaclysm_view_show_solid", solid._h(), float(tolerance),
                                    None if packed is None else packed[1]), solid)
+        if finish not in (None, "gloss"):
+            try:
+                item.finish(finish)
+            except BaseException:
+                item.remove()
+                raise
+        return item
 
     def show_scene(self, scene: Any) -> Item:
         return self._item(self._ok("cadaclysm_view_show", scene._handle), scene)
@@ -1552,6 +1654,7 @@ class View:
             buf = ctypes.create_string_buffer(n + 1)
             got = self._call("cadaclysm_view_timeline_status", buf, n + 1)
             if got < n + 1:
+                n = got  # 0: the line emptied between the two calls
                 break
             n = got      # the line grew between the two calls: ask again with room for it
         if not n:
@@ -1592,6 +1695,14 @@ class View:
         `focus` leave it."""
         return "fly" if self._call("cadaclysm_view_navigation") == 1 else "orbit"
 
+    def set_item_layer(self, item: int, layer: int) -> None:
+        """Put an item on user layer `layer` (0-31; new items are on layer 0)."""
+        self._ok("cadaclysm_view_set_item_layer", int(item), int(layer))
+
+    def set_user_layer(self, layer: int, on: bool) -> None:
+        """Show or hide user layer `layer` (0-31) for every viewport; all start shown."""
+        self._ok("cadaclysm_view_set_user_layer", int(layer), bool(on))
+
     def standard(self, name: str) -> None:
         if name not in _STANDARD:
             raise ValueError(f"standard view {name!r}: one of {', '.join(_STANDARD)}")
@@ -1609,6 +1720,7 @@ class View:
             slot.projection[:] = [float(x) for x in pane["projection"]]
             slot.eye[:] = [float(x) for x in pane["eye"]]
             slot.grid = _GRIDS[pane.get("grid", "none")]
+            slot.layer_mask = int(pane.get("layer_mask", 0xFFFFFFFF))
         self._ok("cadaclysm_view_set_viewports", array, len(panes))
 
     # -- the rest --
@@ -1707,6 +1819,19 @@ class View:
     def resize(self, width: int, height: int) -> None:
         self._ok("cadaclysm_view_resize", int(width), int(height))
 
+    def kms_info(self) -> Dict[str, Any]:
+        """How this view draws onto a Linux display through KMS (`kind="kms"`, or a window of its
+        own at a console): `path` -- "gbm" (the display's buffers, drawn into by a second device,
+        as on a Raspberry Pi), "gpu" (the GPU's own buffers, the display being the same device) or
+        "copy" (drawn offscreen and copied by the CPU each frame) -- the `connector` and its
+        `connector_name`, the mode's `width`, `height` and `refresh` (Hz), the buffers' `fourcc`
+        ("XB24") and `modifier`, the display's `card` and the Vulkan `adapter` that draws.
+        `ViewError` for any other view."""
+        i = _KmsInfo()
+        i.size = ctypes.sizeof(_KmsInfo)
+        self._ok("cadaclysm_view_kms_info", ctypes.byref(i))
+        return _kms_dict(i)
+
     @property
     def size(self) -> Tuple[int, int]:
         """(width, height): what `image()` reads, in physical pixels."""
@@ -1729,15 +1854,63 @@ class View:
     @property
     def lighting(self) -> str:
         """How plain parts are lit: "headlight" (the default: whatever faces the camera is
-        bright) or "studio" (a key light fixed above the model, ambient and a fill from the
-        camera, so a top reads brighter than its sides)."""
-        return "studio" if self._call("cadaclysm_view_lighting") == 1 else "headlight"
+        bright), "studio" (a key light fixed above the model, ambient and a fill from the
+        camera, so a top reads brighter than its sides) or "showroom" (a room fixed in the
+        world -- floor, horizon, ceiling, softboxes -- mirrored in a clear coat over the
+        colours, so paint reads by its reflections as a car's does; a terminal view draws
+        it as studio)."""
+        return {1: "studio", 2: "showroom"}.get(self._call("cadaclysm_view_lighting"), "headlight")
 
     @lighting.setter
     def lighting(self, value: str) -> None:
         if value not in _LIGHTING:
-            raise ValueError(f"lighting {value!r}: 'headlight' or 'studio'")
+            raise ValueError(f"lighting {value!r}: 'headlight', 'studio' or 'showroom'")
         self._ok("cadaclysm_view_set_lighting", _LIGHTING[value])
+
+    @property
+    def analysis(self) -> Optional[str]:
+        """The surface analysis drawn over every surface in place of the lighting, for judging
+        it as a surfacer does: "zebra", "isophotes", or curvature colour -- "gaussian", "mean",
+        "min", "max" -- or None (the default: lit). Setting a name draws it at its defaults;
+        `zebra()`, `isophotes()` and `curvature()` take its settings."""
+        out = _Analysis(ctypes.sizeof(_Analysis))
+        self._ok("cadaclysm_view_analysis", ctypes.byref(out))
+        return next((name for name, mode in _ANALYSIS.items() if mode == out.mode), None)
+
+    @analysis.setter
+    def analysis(self, value: Optional[str]) -> None:
+        if value is None:
+            self._ok("cadaclysm_view_set_analysis", None)
+            return
+        if value not in _ANALYSIS:
+            raise ValueError(f"analysis {value!r}: one of {', '.join(_ANALYSIS)} or None")
+        self._analyse(_ANALYSIS[value])
+
+    def _analyse(self, mode: int, count: int = 0, angle: float = 0.0, width: float = 0.0,
+                 light: Sequence[float] = (0.0, 0.0, 0.0), range: float = 0.0) -> None:
+        a = _Analysis(ctypes.sizeof(_Analysis), mode, int(count), float(angle), float(width), _f32(light, 3), float(range))
+        self._ok("cadaclysm_view_set_analysis", ctypes.byref(a))
+
+    def zebra(self, stripes: int = 16, angle: float = 0.0, width: float = 0.5) -> None:
+        """Zebra stripes: every surface a mirror in a cylinder of light bands fixed to the camera
+        -- `stripes` black bands round the turn, upright on screen at `angle` 0 (degrees; 90 lays
+        them flat), each `width` of its period (inside 0..1). A G0 joint breaks the stripes, a G1
+        joint kinks them, a G2 joint carries them smoothly."""
+        self._analyse(_ANALYSIS["zebra"], stripes, angle, width)
+
+    def isophotes(self, light: Sequence[float] = (0.0, 0.0, 1.0), lines: int = 9) -> None:
+        """Isophotes: a dark line every `90 / lines` degrees of the angle between the normal and
+        `light`, the direction towards the light in the camera's frame (x right, y up, z towards
+        the viewer; the default is a headlight)."""
+        self._analyse(_ANALYSIS["isophotes"], lines, light=light)
+
+    def curvature(self, kind: str = "mean", range: float = 0.0) -> None:
+        """Curvature as false colour -- `kind` "gaussian", "mean", "min" or "max", signed against
+        the outward normal -- blue at `-range`, green at zero, red at `+range` (in 1/length, or
+        1/length^2 for "gaussian"); `range` 0 is automatic, from the scene's size."""
+        if kind not in ("gaussian", "mean", "min", "max"):
+            raise ValueError(f"curvature {kind!r}: one of gaussian, mean, min, max")
+        self._analyse(_ANALYSIS[kind], range=range)
 
     def layer(self, name: str, on: bool = True) -> None:
         if name not in _LAYERS:

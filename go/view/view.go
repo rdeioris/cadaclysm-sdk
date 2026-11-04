@@ -150,10 +150,26 @@ static uint32_t cv_input(const CvlTable *t, CadaclysmView *v, const CadaclysmVie
 static uint32_t cv_show_mesh(const CvlTable *t, CadaclysmView *v, const CadaclysmViewMesh *m) { return t->show_mesh(v, m); }
 static uint32_t cv_show_lines(const CvlTable *t, CadaclysmView *v, const float *s, uint32_t n, const float *rgb) { return t->show_lines(v, s, n, rgb); }
 static uint32_t cv_show_points(const CvlTable *t, CadaclysmView *v, const float *p, uint32_t n, const float *rgb, float size_px) { return t->show_points(v, p, n, rgb, size_px); }
+static uint32_t cv_show_machining(const CvlTable *t, CadaclysmView *v, const CadaclysmViewMachining *m) { return t->show_machining(v, m); }
+static bool cv_machining_seek(const CvlTable *t, CadaclysmView *v, uint32_t i, uint32_t to) { return t->machining_seek(v, i, to); }
+static bool cv_machining_colour_by(const CvlTable *t, CadaclysmView *v, uint32_t i, uint32_t m) { return t->machining_colour_by(v, i, m); }
+static bool cv_machining_overlays(const CvlTable *t, CadaclysmView *v, uint32_t i, bool p, bool tool) { return t->machining_overlays(v, i, p, tool); }
+static bool cv_machining_info(const CvlTable *t, CadaclysmView *v, uint32_t i, CadaclysmViewMachiningInfo *o) { return t->machining_info(v, i, o); }
+static bool cv_machining_heights(const CvlTable *t, CadaclysmView *v, uint32_t i, float *z, size_t n) { return t->machining_heights(v, i, z, n); }
+static bool cv_timeline_play(const CvlTable *t, CadaclysmView *v, double s) { return t->timeline_play(v, s); }
+static bool cv_timeline_pause(const CvlTable *t, CadaclysmView *v) { return t->timeline_pause(v); }
+static bool cv_timeline_seek(const CvlTable *t, CadaclysmView *v, double s) { return t->timeline_seek(v, s); }
+static bool cv_timeline_set_loop(const CvlTable *t, CadaclysmView *v, bool on) { return t->timeline_set_loop(v, on); }
+static double cv_timeline_time(const CvlTable *t, CadaclysmView *v) { return t->timeline_time(v); }
+static double cv_timeline_duration(const CvlTable *t, CadaclysmView *v) { return t->timeline_duration(v); }
+static bool cv_timeline_playing(const CvlTable *t, CadaclysmView *v) { return t->timeline_playing(v); }
+static size_t cv_timeline_status(const CvlTable *t, CadaclysmView *v, char *s, size_t n) { return t->timeline_status(v, s, n); }
 static uint32_t cv_show_curves(const CvlTable *t, CadaclysmView *v, const float *b, uint32_t n, const float *rgb) { return t->show_curves(v, b, n, rgb); }
 static uint32_t cv_show_image(const CvlTable *t, CadaclysmView *v, const CadaclysmViewImage *i) { return t->show_image(v, i); }
 static bool cv_set_colour(const CvlTable *t, CadaclysmView *v, uint32_t i, const float *rgb) { return t->set_colour(v, i, rgb); }
 static bool cv_set_xray(const CvlTable *t, CadaclysmView *v, uint32_t i, bool on) { return t->set_xray(v, i, on); }
+static bool cv_set_occluded(const CvlTable *t, CadaclysmView *v, uint32_t i, uint32_t m) { return t->set_occluded(v, i, m); }
+static bool cv_set_finish(const CvlTable *t, CadaclysmView *v, uint32_t i, uint32_t f) { return t->set_finish(v, i, f); }
 static bool cv_set_face_colours(const CvlTable *t, CadaclysmView *v, uint32_t i, const uint32_t *f, const float *c, uint32_t n) { return t->set_face_colours(v, i, f, c, n); }
 static bool cv_set_placement(const CvlTable *t, CadaclysmView *v, uint32_t i, const double *m) { return t->set_placement(v, i, m); }
 static bool cv_set_node_transforms(const CvlTable *t, CadaclysmView *v, uint32_t i, const double *m, uint32_t n) { return t->set_node_transforms(v, i, m, n); }
@@ -254,6 +270,7 @@ const (
 	WindowXcb     = C.CADACLYSM_VIEW_WINDOW_XCB
 	WindowWayland = C.CADACLYSM_VIEW_WINDOW_WAYLAND
 	WindowAppKit  = C.CADACLYSM_VIEW_WINDOW_APPKIT
+	WindowKms     = C.CADACLYSM_VIEW_WINDOW_KMS // 1.17: Window.WindowId the connector, Window.Display an *C.int DRM fd or nil
 
 	LayerSurfaces  = C.CADACLYSM_VIEW_LAYER_SURFACES // View.Layer
 	LayerEdges     = C.CADACLYSM_VIEW_LAYER_EDGES
@@ -393,7 +410,7 @@ func find(stem, variable, what string, dirs []string) (string, error) {
 }
 
 // checkABI is cvl_check_abi, which every open runs on the library's answer first: nil for
-// 1.11 or a later 1.x, else the refusal naming `path`.
+// 1.18 or a later 1.x, else the refusal naming `path`.
 func checkABI(version uint32, path string) error {
 	cp := C.CString(path)
 	defer C.free(unsafe.Pointer(cp))
@@ -1000,6 +1017,236 @@ func (v *View) ShowPoints(positions []float32, rgb Colour, sizePx float32) (*Ite
 	}, nil)
 }
 
+// A tool as the machining view takes it: Shape is "flat", "ball", "drill", "vbit" or
+// "bullnose"; Angle is a V-bit's included angle, CornerRadius a bull-nose's; FluteLength 0 is
+// not given.
+type MachiningTool struct {
+	Number                                     uint32
+	Shape                                      string
+	Diameter, FluteLength, Angle, CornerRadius float64
+}
+
+// MachiningProgram is one program of a job: G-code run with a tool.
+type MachiningProgram struct {
+	Tool  MachiningTool
+	Gcode string
+}
+
+// MachiningStock is the blank: its lowest and highest corners, mm.
+type MachiningStock struct{ Min, Max [3]float64 }
+
+// MachiningPart is a mesh to colour by deviation against: Positions three floats a vertex,
+// Indices three a triangle.
+type MachiningPart struct {
+	Positions []float32
+	Indices   []uint32
+}
+
+// MachiningOptions: a nil field is the library's own default.
+type MachiningOptions struct{ Cell, Tolerance, Skin, RapidRate *float64 }
+
+// MachiningInfo is a machining's facts: its Moves, the Move done (as of the last draw), the
+// heights' grid (Nx, Ny, Cell, Min) and the job's CycleTime in seconds.
+type MachiningInfo struct {
+	Moves, Move, Nx, Ny uint32
+	Cell                float32
+	Min                 [2]float32
+	CycleTime           float64
+}
+
+// Machining is a CAM job shown in a View (ShowMachining): the stock is this item and the
+// view's timeline plays it (View.Play, Seek, Status). Every Item method works on it too.
+type Machining struct{ *Item }
+
+// ShowMachining shows a CAM job on a stock, paused at its start: programs in run order, the
+// stock box, an optional part (nil: none) for colouring by deviation, and options (nil: all
+// defaults) whose nil fields are the library's own (tolerance 0.05, skin 0.3, rapid rate 5000
+// mm/min). Play it with Play. A shape that is none of "flat", "ball", "drill", "vbit" or
+// "bullnose", a number that is not finite, a NUL in the G-code, a part that is not whole
+// triangles of x y z triples and an index past its vertices are refused before the library.
+func (v *View) ShowMachining(programs []MachiningProgram, stock MachiningStock, part *MachiningPart, o *MachiningOptions) (*Machining, error) {
+	shapes := map[string]C.uint32_t{"flat": C.CADACLYSM_VIEW_TOOL_FLAT, "ball": C.CADACLYSM_VIEW_TOOL_BALL,
+		"drill": C.CADACLYSM_VIEW_TOOL_DRILL, "vbit": C.CADACLYSM_VIEW_TOOL_VBIT, "bullnose": C.CADACLYSM_VIEW_TOOL_BULLNOSE}
+	finite := func(xs ...float64) bool {
+		for _, x := range xs {
+			if math.IsNaN(x) || math.IsInf(x, 0) {
+				return false
+			}
+		}
+		return true
+	}
+	n, err := count(len(programs), "show_machining")
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range programs {
+		if _, ok := shapes[p.Tool.Shape]; !ok {
+			return nil, refused(fmt.Sprintf("shape '%s': one of flat, ball, drill, vbit, bullnose", p.Tool.Shape))
+		}
+		if !finite(p.Tool.Diameter, p.Tool.FluteLength, p.Tool.Angle, p.Tool.CornerRadius) {
+			return nil, refused("tool: diameter, flute_length, angle and corner_radius are finite numbers")
+		}
+		if strings.IndexByte(p.Gcode, 0) >= 0 {
+			return nil, refused("gcode: a NUL character cannot be sent (the C string ends there)")
+		}
+	}
+	if !finite(stock.Min[0], stock.Min[1], stock.Min[2], stock.Max[0], stock.Max[1], stock.Max[2]) {
+		return nil, refused("stock: min and max are finite numbers")
+	}
+	var vertices, indices C.uint32_t
+	if part != nil {
+		for _, x := range part.Positions {
+			if !finite(float64(x)) {
+				return nil, refused("part positions: finite numbers")
+			}
+		}
+		if len(part.Positions)%3 != 0 {
+			return nil, refused(fmt.Sprintf("part positions: %d numbers is not a whole number of x y z triples", len(part.Positions)))
+		}
+		if len(part.Indices)%3 != 0 {
+			return nil, refused(fmt.Sprintf("part indices: %d is not a whole number of triangles", len(part.Indices)))
+		}
+		for _, k := range part.Indices {
+			if uint64(k) >= uint64(len(part.Positions)/3) {
+				return nil, refused(fmt.Sprintf("part indices: %d is past the last of %d vertices", k, len(part.Positions)/3))
+			}
+		}
+		if vertices, err = count(len(part.Positions)/3, "show_machining part"); err != nil {
+			return nil, err
+		}
+		if indices, err = count(len(part.Indices), "show_machining part"); err != nil {
+			return nil, err
+		}
+	}
+	if o != nil {
+		for _, x := range []*float64{o.Cell, o.Tolerance, o.Skin, o.RapidRate} {
+			if x != nil && !finite(*x) {
+				return nil, refused("show_machining options: cell, tolerance, skin and rapid_rate are finite numbers")
+			}
+		}
+	}
+
+	// cgo's pointer rules: no Go pointer inside memory C reads, so every array the struct
+	// points at is C memory, freed when the call returns.
+	size := C.size_t(unsafe.Sizeof(C.CadaclysmViewProgram{}))
+	base := C.calloc(C.size_t(len(programs))+1, size)
+	defer C.free(base)
+	raw := unsafe.Slice((*C.CadaclysmViewProgram)(base), len(programs)+1)
+	for k, p := range programs {
+		text := C.CString(p.Gcode)
+		defer C.free(unsafe.Pointer(text))
+		raw[k] = C.CadaclysmViewProgram{size: C.uint32_t(size), tool_number: C.uint32_t(p.Tool.Number), tool_shape: shapes[p.Tool.Shape],
+			tool_diameter: C.double(p.Tool.Diameter), tool_flute_length: C.double(p.Tool.FluteLength), tool_angle: C.double(p.Tool.Angle),
+			tool_corner_radius: C.double(p.Tool.CornerRadius), gcode: text}
+	}
+	m := (*C.CadaclysmViewMachining)(C.calloc(1, C.size_t(unsafe.Sizeof(C.CadaclysmViewMachining{}))))
+	defer C.free(unsafe.Pointer(m))
+	m.size, m.program_count, m.programs = C.uint32_t(unsafe.Sizeof(*m)), n, (*C.CadaclysmViewProgram)(base)
+	for a := 0; a < 3; a++ {
+		m.stock_min[a], m.stock_max[a] = C.double(stock.Min[a]), C.double(stock.Max[a])
+	}
+	if part != nil {
+		positions := C.malloc((C.size_t(len(part.Positions)) + 1) * 4)
+		defer C.free(positions)
+		triangles := C.malloc((C.size_t(len(part.Indices)) + 1) * 4)
+		defer C.free(triangles)
+		copy(unsafe.Slice((*float32)(positions), len(part.Positions)+1), part.Positions)
+		copy(unsafe.Slice((*uint32)(triangles), len(part.Indices)+1), part.Indices)
+		m.part_positions, m.part_indices = (*C.float)(positions), (*C.uint32_t)(triangles)
+		m.part_vertex_count, m.part_index_count = vertices, indices
+	}
+	if o != nil {
+		if o.Cell != nil {
+			m.cell = C.double(*o.Cell)
+		}
+		if o.Tolerance != nil {
+			m.tolerance = C.double(*o.Tolerance)
+		}
+		if o.RapidRate != nil {
+			m.rapid_rate = C.double(*o.RapidRate)
+		}
+		if o.Skin != nil {
+			m.skin, m.skin_set = C.double(*o.Skin), 1
+		}
+	}
+	item, err := v.add("cadaclysm_view_show_machining", func() C.uint32_t { return C.cv_show_machining(v.lib.t, v.handle, m) }, nil)
+	runtime.KeepAlive(v)
+	if err != nil {
+		return nil, err
+	}
+	return &Machining{Item: item}, nil
+}
+
+// SeekMove jumps the timeline to the end of move `move` (0: the untouched stock; Info's
+// Moves: the end). The stock gets there over the next draws, or at once on Heights.
+func (m *Machining) SeekMove(move uint32) error {
+	defer runtime.KeepAlive(m.view)
+	return m.ok("cadaclysm_view_machining_seek", func(v *View) C.bool {
+		return C.cv_machining_seek(v.lib.t, v.handle, C.uint32_t(m.id), C.uint32_t(move))
+	})
+}
+
+// ColourBy colours the stock: "height", "tool" or "deviation" (the last needs a part).
+func (m *Machining) ColourBy(mode string) error {
+	modes := map[string]C.uint32_t{"height": C.CADACLYSM_VIEW_COLOUR_BY_HEIGHT, "tool": C.CADACLYSM_VIEW_COLOUR_BY_TOOL,
+		"deviation": C.CADACLYSM_VIEW_COLOUR_BY_DEVIATION}
+	c, ok := modes[mode]
+	if !ok {
+		return refused(fmt.Sprintf("mode '%s': one of height, tool, deviation", mode))
+	}
+	defer runtime.KeepAlive(m.view)
+	return m.ok("cadaclysm_view_machining_colour_by", func(v *View) C.bool {
+		return C.cv_machining_colour_by(v.lib.t, v.handle, C.uint32_t(m.id), c)
+	})
+}
+
+// Overlays turns the toolpath and the tool on or off (both are on when shown).
+func (m *Machining) Overlays(path, tool bool) error {
+	defer runtime.KeepAlive(m.view)
+	return m.ok("cadaclysm_view_machining_overlays", func(v *View) C.bool {
+		return C.cv_machining_overlays(v.lib.t, v.handle, C.uint32_t(m.id), C.bool(path), C.bool(tool))
+	})
+}
+
+// Info is the job's moves, the move done, the heights' grid and its cycle time.
+func (m *Machining) Info() (MachiningInfo, error) {
+	defer runtime.KeepAlive(m.view)
+	out := (*C.CadaclysmViewMachiningInfo)(C.calloc(1, C.size_t(unsafe.Sizeof(C.CadaclysmViewMachiningInfo{}))))
+	defer C.free(unsafe.Pointer(out))
+	out.size = C.uint32_t(unsafe.Sizeof(*out))
+	if err := m.ok("cadaclysm_view_machining_info", func(v *View) C.bool {
+		return C.cv_machining_info(v.lib.t, v.handle, C.uint32_t(m.id), out)
+	}); err != nil {
+		return MachiningInfo{}, err
+	}
+	return MachiningInfo{Moves: uint32(out.moves), Move: uint32(out.move), Nx: uint32(out.nx), Ny: uint32(out.ny),
+		Cell: float32(out.cell), Min: [2]float32{float32(out.min[0]), float32(out.min[1])}, CycleTime: float64(out.cycle_time)}, nil
+}
+
+// Heights is the stock's heights now, Nx x Ny floats, row y then x (z[j*Nx+i]), mm; it
+// waits for the GPU.
+func (m *Machining) Heights() ([]float32, error) {
+	info, err := m.Info()
+	if err != nil {
+		return nil, err
+	}
+	cells := uint64(info.Nx) * uint64(info.Ny)
+	if cells > uint64(math.MaxInt)/4 {
+		return nil, refused(fmt.Sprintf("heights: %d x %d cells is too large", info.Nx, info.Ny))
+	}
+	defer runtime.KeepAlive(m.view)
+	z := C.malloc((C.size_t(cells) + 1) * 4) // never NULL, even for an empty grid
+	defer C.free(z)
+	if err := m.ok("cadaclysm_view_machining_heights", func(v *View) C.bool {
+		return C.cv_machining_heights(v.lib.t, v.handle, C.uint32_t(m.id), (*C.float)(z), C.size_t(cells))
+	}); err != nil {
+		return nil, err
+	}
+	out := make([]float32, cells)
+	copy(out, unsafe.Slice((*float32)(z), cells))
+	return out, nil
+}
+
 // ShowCurves shows rational cubics, sixteen floats each (four x, y, z, w control points);
 // rgb a Colour, nil the default.
 func (v *View) ShowCurves(beziers []float32, rgb Colour) (*Item, error) {
@@ -1392,6 +1639,33 @@ func (i *Item) Xray(on bool) error {
 	})
 }
 
+// Occluded sets how the item's lines and points draw where a surface hides them: "off"
+// (not drawn, the default), "solid" (drawn through) or "dashed" (dashed and dimmed).
+func (i *Item) Occluded(mode string) error {
+	m, ok := map[string]C.uint32_t{"off": C.CADACLYSM_VIEW_OCCLUDED_OFF, "solid": C.CADACLYSM_VIEW_OCCLUDED_SOLID, "dashed": C.CADACLYSM_VIEW_OCCLUDED_DASHED}[mode]
+	if !ok {
+		return fmt.Errorf("occluded: %q is not \"off\", \"solid\" or \"dashed\"", mode)
+	}
+	return i.ok("cadaclysm_view_set_occluded", func(v *View) C.bool {
+		return C.cv_set_occluded(v.lib.t, v.handle, C.uint32_t(i.id), m)
+	})
+}
+
+// Finish sets the item's finish: "gloss" (an item shows with this until it is set) -- under
+// the showroom lighting a clear coat mirroring the room, silver at a grazing angle -- "satin"
+// (a weaker, blurred coat) or "matte" (no mirror, a faint sheen: rubber, cloth). Uploads the
+// scene again, as a show does: set it as each item is shown rather than over a finished
+// scene item by item.
+func (i *Item) Finish(finish string) error {
+	f, ok := map[string]C.uint32_t{"gloss": C.CADACLYSM_VIEW_FINISH_GLOSS, "satin": C.CADACLYSM_VIEW_FINISH_SATIN, "matte": C.CADACLYSM_VIEW_FINISH_MATTE}[finish]
+	if !ok {
+		return fmt.Errorf("finish: %q is not \"gloss\", \"satin\" or \"matte\"", finish)
+	}
+	return i.ok("cadaclysm_view_set_finish", func(v *View) C.bool {
+		return C.cv_set_finish(v.lib.t, v.handle, C.uint32_t(i.id), f)
+	})
+}
+
 // NodeVisible shows or hides a scene node (the reader's index) and its subtree.
 func (i *Item) NodeVisible(node uint32, on bool) error {
 	return i.ok("cadaclysm_view_set_node_visible", func(v *View) C.bool {
@@ -1544,6 +1818,90 @@ func (v *View) Lighting() (string, error) {
 	return "headlight", nil
 }
 
+// Play plays the view's timeline at `speed` times real time: each Draw moves it on by the
+// wall-clock time since the last. It stops at its end unless Loop is on; Play at the end
+// starts again from 0.
+func (v *View) Play(speed float64) error {
+	if math.IsNaN(speed) || math.IsInf(speed, 0) {
+		return refused("play speed: a finite number")
+	}
+	defer runtime.KeepAlive(v)
+	return v.ok("cadaclysm_view_timeline_play", func() C.bool { return C.cv_timeline_play(v.lib.t, v.handle, C.double(speed)) })
+}
+
+// Pause stops the timeline where it is.
+func (v *View) Pause() error {
+	defer runtime.KeepAlive(v)
+	return v.ok("cadaclysm_view_timeline_pause", func() C.bool { return C.cv_timeline_pause(v.lib.t, v.handle) })
+}
+
+// Seek sets the timeline's clock, clamped to [0, Duration].
+func (v *View) Seek(seconds float64) error {
+	if math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return refused("seek seconds: a finite number")
+	}
+	defer runtime.KeepAlive(v)
+	return v.ok("cadaclysm_view_timeline_seek", func() C.bool { return C.cv_timeline_seek(v.lib.t, v.handle, C.double(seconds)) })
+}
+
+// Loop sets whether the timeline starts again at its end.
+func (v *View) Loop(on bool) error {
+	defer runtime.KeepAlive(v)
+	return v.ok("cadaclysm_view_timeline_set_loop", func() C.bool { return C.cv_timeline_set_loop(v.lib.t, v.handle, C.bool(on)) })
+}
+
+// Time is the timeline's clock, seconds.
+func (v *View) Time() (float64, error) {
+	if err := v.refusal("cadaclysm_view_timeline_time"); err != nil {
+		return 0, err
+	}
+	defer runtime.KeepAlive(v)
+	return float64(C.cv_timeline_time(v.lib.t, v.handle)), nil
+}
+
+// Duration is the timeline's length, seconds: its longest track's.
+func (v *View) Duration() (float64, error) {
+	if err := v.refusal("cadaclysm_view_timeline_duration"); err != nil {
+		return 0, err
+	}
+	defer runtime.KeepAlive(v)
+	return float64(C.cv_timeline_duration(v.lib.t, v.handle)), nil
+}
+
+// Playing is whether the timeline plays.
+func (v *View) Playing() (bool, error) {
+	if err := v.refusal("cadaclysm_view_timeline_playing"); err != nil {
+		return false, err
+	}
+	defer runtime.KeepAlive(v)
+	return bool(C.cv_timeline_playing(v.lib.t, v.handle)), nil
+}
+
+// Status is one line per track at the clock's time, e.g. "move 370 of 638 - T1 flat 6 mm";
+// none when nothing is on the timeline.
+func (v *View) Status() ([]string, error) {
+	if err := v.refusal("cadaclysm_view_timeline_status"); err != nil {
+		return nil, err
+	}
+	defer runtime.KeepAlive(v)
+	n := C.cv_timeline_status(v.lib.t, v.handle, nil, 0)
+	for n > 0 {
+		buffer := C.malloc(n + 1)
+		got := C.cv_timeline_status(v.lib.t, v.handle, (*C.char)(buffer), n+1)
+		if got < n+1 {
+			text := C.GoStringN((*C.char)(buffer), C.int(got))
+			C.free(buffer)
+			if got == 0 { // the line emptied between the two calls
+				return []string{}, nil
+			}
+			return strings.Split(text, "\n"), nil
+		}
+		C.free(buffer) // the line grew between the two calls: ask again with room for it
+		n = got
+	}
+	return []string{}, nil
+}
+
 // Layer switches a CADACLYSM_VIEW_LAYER_* layer.
 func (v *View) Layer(layer uint32, on bool) error {
 	return v.ok("cadaclysm_view_set_layer", func() C.bool {
@@ -1579,6 +1937,7 @@ func (v *View) Viewports(list []Viewport) error {
 			raw[i].eye[k] = C.float(p.Eye[k])
 		}
 		raw[i].grid = C.uint32_t(p.Grid)
+		raw[i].layer_mask = 0xFFFFFFFF // every user layer
 	}
 	var first *C.CadaclysmViewViewport // NULL, 0 for none, as Python's
 	if len(raw) > 0 {

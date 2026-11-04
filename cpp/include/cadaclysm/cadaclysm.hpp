@@ -922,6 +922,278 @@ struct SewReport {
     double vertex = 0.0;
 };
 
+// One free edge (a side only one face bounds), a row of HealthReport::free_edges: its
+// `trim` (the face's side), the `edge` it lies on (nullopt for a side with no edge), the
+// `face` and free `wire` it is on, its nearest `partner` -- a row of free_edges, nullopt if
+// there is none -- how many of its two ends it `shared_ends` with that partner (2 is what
+// Brep::sewed joins), its `length` and the `gap` to the partner (infinite without one).
+struct FreeEdge {
+    std::uint32_t trim = 0;
+    std::optional<std::uint32_t> edge;
+    std::uint32_t face = 0;
+    std::uint32_t wire = 0;
+    std::optional<std::uint32_t> partner;
+    std::uint32_t shared_ends = 0;
+    double length = 0.0;
+    double gap = 0.0;
+};
+
+// A chain of free edges end to end: the rows `first` to `first + count` of
+// HealthReport::free_edges, whether it `closed` on itself, its total `length` and the
+// `widest_gap` from any of its edges to a partner.
+struct FreeWire {
+    std::uint32_t first = 0;
+    std::uint32_t count = 0;
+    bool closed = false;
+    double length = 0.0;
+    double widest_gap = 0.0;
+};
+
+// Something below the tolerance: `kind` is "short_edge", "collapsed_edge", "sliver_face",
+// "tiny_face", "tiny_body" or "small_hole"; `index` its edge, face, body or loop number;
+// `size` how small.
+struct SmallFeature {
+    std::string kind;
+    std::uint32_t index = 0;
+    double size = 0.0;
+};
+
+// What a mesh of the body shows (Brep::health with `mesh`): whether it is `watertight`,
+// how many mesh edges are `open` or `folded`, how many `crossings`, and the brep `edges`
+// it cracks along. Only a closed body is counted: an open one's census is empty by design.
+struct Cracks {
+    bool watertight = false;
+    std::uint32_t open = 0;
+    std::uint32_t folded = 0;
+    std::uint32_t crossings = 0;
+    std::vector<std::uint32_t> edges;
+};
+
+// What is wrong with a body, as plain data (Brep::health): the `tolerance` and `rounding`
+// it judged at and the body's `extent`; the free edges, their wires, the features below
+// the tolerance; the loose edges (`worst_loose` the widest gap); what sewing would do
+// (`sew_pairs` joined, `sew_refused`, `sew_worst_gap`); and, if asked for with `mesh`, the
+// mesh's `cracks` (nullopt otherwise). `worst_gap` is the widest gap between a free edge
+// and its partner.
+struct HealthReport {
+    double tolerance = 0.0;
+    double rounding = 0.0;
+    double extent = 0.0;
+    std::vector<FreeEdge> free_edges;
+    std::vector<FreeWire> wires;
+    std::vector<SmallFeature> small;
+    std::uint32_t loose_edges = 0;
+    double worst_loose = 0.0;
+    std::uint32_t sew_pairs = 0;
+    std::uint32_t sew_refused = 0;
+    double sew_worst_gap = 0.0;
+    std::optional<Cracks> cracks;
+    double worst_gap = 0.0;
+
+    // The free edges of wire number `wire`, in order; refused for a wire there is not.
+    Result<std::vector<FreeEdge>> wire_edges(std::uint32_t wire) const {
+        if (wire >= wires.size()) {
+            return Error{"wire_edges: wire " + std::to_string(wire) + " is not one of the " + std::to_string(wires.size()),
+                         Origin::reader};
+        }
+        const FreeWire& w = wires[wire];
+        std::size_t first = std::min<std::size_t>(w.first, free_edges.size());
+        std::size_t last = std::min<std::size_t>(first + w.count, free_edges.size());
+        return std::vector<FreeEdge>(free_edges.begin() + static_cast<std::ptrdiff_t>(first),
+                                     free_edges.begin() + static_cast<std::ptrdiff_t>(last));
+    }
+};
+
+// One small feature Brep::healed removed: its `kind` (as SmallFeature::kind), its `index`
+// in the input (the edge, face or loop number health() gave it), its `size`, and how far
+// the vertices it merged `moved`.
+struct HealFix {
+    std::string kind;
+    std::uint32_t index = 0;
+    double size = 0.0;
+    double moved = 0.0;
+};
+
+// One small feature Brep::healed left, and why: `kind` and `index` as in HealFix; `why` is
+// "would_empty_loop", "closed", "seam", "chain", "neighbours_part", "uneven",
+// "non_manifold", "has_holes", "body_guard", "toggled" or "unsupported"; `figure` the
+// chain's width or the neighbours' gap, else 0.
+struct HealRefusal {
+    std::string kind;
+    std::uint32_t index = 0;
+    std::string why;
+    double figure = 0.0;
+};
+
+// What Brep::healed did, as plain data: the `tolerance` it healed at, the furthest any
+// trim `moved`, whether the body guard refused fixes (`guarded`), the `fixes` made and
+// the features `refused`; and the body's health before and after at that tolerance -- its
+// small features, free edges, whether it is closed, and its non-manifold edges.
+struct HealReport {
+    double tolerance = 0.0;
+    double moved = 0.0;
+    bool guarded = false;
+    std::vector<HealFix> fixes;
+    std::vector<HealRefusal> refused;
+    std::uint32_t small_before = 0;
+    std::uint32_t small_after = 0;
+    std::uint32_t free_before = 0;
+    std::uint32_t free_after = 0;
+    bool closed_before = false;
+    bool closed_after = false;
+    std::uint32_t nonmanifold_before = 0;
+    std::uint32_t nonmanifold_after = 0;
+};
+
+namespace detail {
+// The kinds a SmallFeature, HealFix or HealRefusal names, by the C ABI's number; the
+// reasons a HealRefusal gives, likewise.
+inline constexpr const char* HEALTH_KINDS[6] = {"short_edge", "collapsed_edge", "sliver_face", "tiny_face", "tiny_body", "small_hole"};
+inline constexpr const char* HEAL_WHYS[11] = {"would_empty_loop", "closed",       "seam",       "chain",   "neighbours_part", "uneven",
+                                              "non_manifold",     "has_holes",    "body_guard", "toggled", "unsupported"};
+
+// Brep::healed's switches as the C ABI's flag bits: 1 edges, 2 faces, 4 holes.
+inline std::uint32_t heal_flags(bool edges, bool faces, bool holes) {
+    return (edges ? 1u : 0u) | (faces ? 2u : 0u) | (holes ? 4u : 0u);
+}
+
+inline Result<std::string> health_kind(std::uint32_t kind, const char* call) {
+    if (kind >= 6) return Error{std::string(call) + ": kind " + std::to_string(kind) + " is not one of the six", Origin::reader};
+    return std::string(HEALTH_KINDS[kind]);
+}
+
+// The flat rows of cadaclysm_brep_health_summary and the row readers, in their order:
+// counts (18) and sizes (8); free edges 6 ids and 2 sizes a row; wires 3 and 2; small
+// features 2 and 1; the crack edges. cracks is read only where counts[12] says meshed.
+inline Result<HealthReport> health_report(const std::uint32_t (&counts)[18], const double (&sizes)[8],
+                                          const std::vector<std::uint32_t>& free_ids, const std::vector<double>& free_sizes,
+                                          const std::vector<std::uint32_t>& wire_runs, const std::vector<double>& wire_sizes,
+                                          const std::vector<std::uint32_t>& small_items, const std::vector<double>& small_sizes,
+                                          const std::vector<std::uint32_t>& crack_edges) {
+    HealthReport r;
+    r.tolerance = sizes[0];
+    r.rounding = sizes[1];
+    r.extent = sizes[2];
+    r.worst_gap = sizes[3];
+    r.worst_loose = sizes[4];
+    r.sew_worst_gap = sizes[5];
+    r.loose_edges = counts[9];
+    r.sew_pairs = counts[10];
+    r.sew_refused = counts[11];
+    std::size_t free_count = std::min(free_ids.size() / 6, free_sizes.size() / 2);
+    r.free_edges.reserve(free_count);
+    for (std::size_t i = 0; i < free_count; ++i) {
+        FreeEdge e;
+        e.trim = free_ids[6 * i];
+        if (free_ids[6 * i + 1] != NONE) e.edge = free_ids[6 * i + 1];
+        e.face = free_ids[6 * i + 2];
+        e.wire = free_ids[6 * i + 3];
+        if (free_ids[6 * i + 4] != NONE) e.partner = free_ids[6 * i + 4];
+        e.shared_ends = free_ids[6 * i + 5];
+        e.length = free_sizes[2 * i];
+        e.gap = free_sizes[2 * i + 1];
+        r.free_edges.push_back(e);
+    }
+    std::size_t wire_count = std::min(wire_runs.size() / 3, wire_sizes.size() / 2);
+    r.wires.reserve(wire_count);
+    for (std::size_t i = 0; i < wire_count; ++i) {
+        FreeWire w;
+        w.first = wire_runs[3 * i];
+        w.count = wire_runs[3 * i + 1];
+        w.closed = wire_runs[3 * i + 2] != 0;
+        w.length = wire_sizes[2 * i];
+        w.widest_gap = wire_sizes[2 * i + 1];
+        r.wires.push_back(w);
+    }
+    std::size_t small_count = std::min(small_items.size() / 2, small_sizes.size());
+    r.small.reserve(small_count);
+    for (std::size_t i = 0; i < small_count; ++i) {
+        Result<std::string> kind = health_kind(small_items[2 * i], "health");
+        if (!kind) return kind.error();
+        SmallFeature s;
+        s.kind = std::move(kind).value();
+        s.index = small_items[2 * i + 1];
+        s.size = small_sizes[i];
+        r.small.push_back(std::move(s));
+    }
+    if (counts[12] == 1) {
+        Cracks c;
+        c.watertight = counts[13] != 0;
+        c.open = counts[14];
+        c.folded = counts[15];
+        c.crossings = counts[16];
+        c.edges = crack_edges;
+        r.cracks = std::move(c);
+    }
+    return r;
+}
+
+// The flat rows of cadaclysm_brep_heal_summary and the row readers, in their order:
+// counts (11) and sizes (2); fixes 2 items and 2 sizes a row; refusals 3 items and 1 size.
+inline Result<HealReport> heal_report(const std::uint32_t (&counts)[11], const double (&sizes)[2],
+                                      const std::vector<std::uint32_t>& fix_items, const std::vector<double>& fix_sizes,
+                                      const std::vector<std::uint32_t>& refused_items, const std::vector<double>& refused_sizes) {
+    HealReport r;
+    r.tolerance = sizes[0];
+    r.moved = sizes[1];
+    r.guarded = counts[2] != 0;
+    r.small_before = counts[3];
+    r.small_after = counts[4];
+    r.free_before = counts[5];
+    r.free_after = counts[6];
+    r.closed_before = counts[7] != 0;
+    r.closed_after = counts[8] != 0;
+    r.nonmanifold_before = counts[9];
+    r.nonmanifold_after = counts[10];
+    std::size_t fix_count = std::min(fix_items.size() / 2, fix_sizes.size() / 2);
+    r.fixes.reserve(fix_count);
+    for (std::size_t i = 0; i < fix_count; ++i) {
+        Result<std::string> kind = health_kind(fix_items[2 * i], "healed");
+        if (!kind) return kind.error();
+        HealFix f;
+        f.kind = std::move(kind).value();
+        f.index = fix_items[2 * i + 1];
+        f.size = fix_sizes[2 * i];
+        f.moved = fix_sizes[2 * i + 1];
+        r.fixes.push_back(std::move(f));
+    }
+    std::size_t refused_count = std::min(refused_items.size() / 3, refused_sizes.size());
+    r.refused.reserve(refused_count);
+    for (std::size_t i = 0; i < refused_count; ++i) {
+        Result<std::string> kind = health_kind(refused_items[3 * i], "healed");
+        if (!kind) return kind.error();
+        std::uint32_t why = refused_items[3 * i + 2];
+        if (why >= 11) return Error{"healed: why " + std::to_string(why) + " is not one of the eleven", Origin::reader};
+        HealRefusal f;
+        f.kind = std::move(kind).value();
+        f.index = refused_items[3 * i + 1];
+        f.why = HEAL_WHYS[why];
+        f.figure = refused_sizes[i];
+        r.refused.push_back(std::move(f));
+    }
+    return r;
+}
+
+// One two-call row reader's rows: the count with null buffers, then `ids_per` ids and
+// `sizes_per` sizes a row. A second count that differs is refused.
+template <class Handle, class Reader>
+inline Result<std::pair<std::vector<std::uint32_t>, std::vector<double>>> health_rows(Reader reader, const Handle* h,
+                                                                                    std::size_t ids_per, std::size_t sizes_per,
+                                                                                    const char* call) {
+    std::uint32_t n = reader(h, nullptr, nullptr);
+    std::vector<std::uint32_t> ids(ids_per * n);
+    std::vector<double> sizes(sizes_per * n);
+    if (n) {
+        std::uint32_t written = reader(h, ids.data(), sizes.data());
+        if (written != n) {
+            return Error{std::string(call) + ": a row reader wrote " + std::to_string(written) + " rows, not " + std::to_string(n),
+                         Origin::reader};
+        }
+    }
+    return std::pair<std::vector<std::uint32_t>, std::vector<double>>(std::move(ids), std::move(sizes));
+}
+}  // namespace detail
+
 // A node's exact B-rep, shared with the scene (not copied), for
 // blacksmith::Solid::from_node. Holds a reference of its own, so it outlives the
 // scene; released when destroyed or on release().
@@ -967,6 +1239,90 @@ public:
         report.tolerance = gaps[1];
         report.vertex = gaps[2];
         return std::pair<Brep, SewReport>(Brep(sewn), report);
+    }
+
+    // What is wrong with this brep, as a HealthReport: the free edges (the sides one face
+    // bounds) and the wires they chain into, with each edge's nearest partner and the gap
+    // to it; the features below `tolerance`; the loose edges; and what sewed() would join
+    // and leave. `tolerance` is the length below which a feature is small and a gap closes
+    // -- nullopt, or a value that is not finite and positive, takes the default, 1e-4 times
+    // the diagonal (the report shows what was used). `mesh` also meshes the brep and reports
+    // where the mesh cracks (`cracks`); without it `cracks` is nullopt. Nothing moves.
+    Result<HealthReport> health(std::optional<double> tolerance = std::nullopt, bool mesh = false) const {
+        if (!ptr_) return Error{"brep: released", Origin::reader};
+        struct Free {
+            void operator()(CadaclysmHealth* h) const noexcept { ::cadaclysm_brep_health_free(h); }
+        };
+        std::unique_ptr<CadaclysmHealth, Free> h(::cadaclysm_brep_health(ptr_.get(), tolerance.value_or(std::nan("")), mesh));
+        if (!h) return detail::reader_error("health");
+        std::uint32_t counts[18] = {};
+        double sizes[8] = {};
+        if (!::cadaclysm_brep_health_summary(h.get(), counts, sizes)) return detail::reader_error("health");
+        Result<std::pair<std::vector<std::uint32_t>, std::vector<double>>> free = detail::health_rows(
+            [](const CadaclysmHealth* p, std::uint32_t* ids, double* s) { return ::cadaclysm_brep_health_free_edges(p, ids, s); },
+            h.get(), 6, 2, "health");
+        if (!free) return free.error();
+        Result<std::pair<std::vector<std::uint32_t>, std::vector<double>>> wires = detail::health_rows(
+            [](const CadaclysmHealth* p, std::uint32_t* ids, double* s) { return ::cadaclysm_brep_health_wires(p, ids, s); },
+            h.get(), 3, 2, "health");
+        if (!wires) return wires.error();
+        Result<std::pair<std::vector<std::uint32_t>, std::vector<double>>> small = detail::health_rows(
+            [](const CadaclysmHealth* p, std::uint32_t* ids, double* s) { return ::cadaclysm_brep_health_small(p, ids, s); },
+            h.get(), 2, 1, "health");
+        if (!small) return small.error();
+        std::uint32_t n = ::cadaclysm_brep_health_crack_edges(h.get(), nullptr);
+        std::vector<std::uint32_t> cracks(n);
+        if (n && ::cadaclysm_brep_health_crack_edges(h.get(), cracks.data()) != n) {
+            return Error{"health: the crack edges changed count between reads", Origin::reader};
+        }
+        return detail::health_report(counts, sizes, free->first, free->second, wires->first, wires->second, small->first,
+                                     small->second, cracks);
+    }
+
+    // This brep with its small features removed, and what was done, as a new Brep and a
+    // HealReport; this one is left as it was. The features are the ones health() lists as
+    // small at `tolerance`: short and collapsed edges, sliver and tiny faces, small holes.
+    // Every fix is a vertex merge, and an edge it moves records how far as its
+    // edge_tolerance(). A guard compares the result's health with this one's and refuses
+    // fixes that made it worse (`guarded`). `edges`, `faces` and `holes` switch each kind of
+    // fix; a kind switched off is refused as "toggled". `tolerance` nullopt, or a value that
+    // is not finite and positive, takes the default (the report shows what was used).
+    Result<std::pair<Brep, HealReport>> healed(std::optional<double> tolerance = std::nullopt, bool edges = true,
+                                               bool faces = true, bool holes = true) const {
+        if (!ptr_) return Error{"brep: released", Origin::reader};
+        struct Free {
+            void operator()(CadaclysmHeal* h) const noexcept { ::cadaclysm_brep_heal_free(h); }
+        };
+        std::unique_ptr<CadaclysmHeal, Free> h(
+            ::cadaclysm_brep_healed(ptr_.get(), tolerance.value_or(std::nan("")), detail::heal_flags(edges, faces, holes)));
+        if (!h) return detail::reader_error("healed");
+        std::uint32_t counts[11] = {};
+        double sizes[2] = {};
+        if (!::cadaclysm_brep_heal_summary(h.get(), counts, sizes)) return detail::reader_error("healed");
+        Result<std::pair<std::vector<std::uint32_t>, std::vector<double>>> fixes = detail::health_rows(
+            [](const CadaclysmHeal* p, std::uint32_t* items, double* s) { return ::cadaclysm_brep_heal_fixes(p, items, s); },
+            h.get(), 2, 2, "healed");
+        if (!fixes) return fixes.error();
+        Result<std::pair<std::vector<std::uint32_t>, std::vector<double>>> refused = detail::health_rows(
+            [](const CadaclysmHeal* p, std::uint32_t* items, double* s) { return ::cadaclysm_brep_heal_refused(p, items, s); },
+            h.get(), 3, 1, "healed");
+        if (!refused) return refused.error();
+        Result<HealReport> report =
+            detail::heal_report(counts, sizes, fixes->first, fixes->second, refused->first, refused->second);
+        if (!report) return report.error();
+        const CadaclysmBrep* body = ::cadaclysm_brep_heal_body(h.get());
+        if (body == nullptr) return detail::reader_error("healed");
+        return std::pair<Brep, HealReport>(Brep(body), std::move(report).value());
+    }
+
+    // How far brep edge `edge` (as a HealFix or FreeEdge names one) may lie off its curve: 0
+    // for an exact edge, the distance healing (or sewing) moved it where that is recorded,
+    // nullopt when no trim names the id (an edge healing removed).
+    Result<std::optional<double>> edge_tolerance(std::uint32_t edge) const {
+        if (!ptr_) return Error{"brep: released", Origin::reader};
+        double t = ::cadaclysm_brep_edge_tolerance(ptr_.get(), edge);
+        if (std::isnan(t)) return std::optional<double>();
+        return std::optional<double>(t);
     }
 
     void release() noexcept { ptr_.reset(); }

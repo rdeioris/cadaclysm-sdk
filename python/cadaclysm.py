@@ -63,6 +63,7 @@ import platform
 import re
 import sys
 from ctypes import POINTER, c_bool, c_char_p, c_double, c_float, c_size_t, c_uint32, c_uint64, c_void_p
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, Iterator, Tuple, Union, cast, overload
 
@@ -136,6 +137,14 @@ __all__ = [
     "Link",
     "Manifold",
     "SewReport",
+    "FreeEdge",
+    "FreeWire",
+    "SmallFeature",
+    "Cracks",
+    "HealthReport",
+    "HealFix",
+    "HealRefusal",
+    "HealReport",
     "Mesh",
     "Meshlet",
     "Meshlets",
@@ -782,6 +791,20 @@ _ENTRY_POINTS = [
     ("cadaclysm_brep_release", None, [c_void_p]),
     ("cadaclysm_brep_manifold", c_bool, [c_void_p, POINTER(c_uint32)]),
     ("cadaclysm_brep_sew", c_void_p, [c_void_p, c_double, c_double, POINTER(c_uint32), POINTER(c_double)]),
+    ("cadaclysm_brep_health", c_void_p, [c_void_p, c_double, c_bool]),
+    ("cadaclysm_brep_health_free", None, [c_void_p]),
+    ("cadaclysm_brep_health_summary", c_bool, [c_void_p, POINTER(c_uint32), POINTER(c_double)]),
+    ("cadaclysm_brep_health_free_edges", c_uint32, [c_void_p, POINTER(c_uint32), POINTER(c_double)]),
+    ("cadaclysm_brep_health_wires", c_uint32, [c_void_p, POINTER(c_uint32), POINTER(c_double)]),
+    ("cadaclysm_brep_health_small", c_uint32, [c_void_p, POINTER(c_uint32), POINTER(c_double)]),
+    ("cadaclysm_brep_health_crack_edges", c_uint32, [c_void_p, POINTER(c_uint32)]),
+    ("cadaclysm_brep_healed", c_void_p, [c_void_p, c_double, c_uint32]),
+    ("cadaclysm_brep_heal_body", c_void_p, [c_void_p]),
+    ("cadaclysm_brep_heal_free", None, [c_void_p]),
+    ("cadaclysm_brep_heal_summary", c_bool, [c_void_p, POINTER(c_uint32), POINTER(c_double)]),
+    ("cadaclysm_brep_heal_fixes", c_uint32, [c_void_p, POINTER(c_uint32), POINTER(c_double)]),
+    ("cadaclysm_brep_heal_refused", c_uint32, [c_void_p, POINTER(c_uint32), POINTER(c_double)]),
+    ("cadaclysm_brep_edge_tolerance", c_double, [c_void_p, c_uint32]),
     ("cadaclysm_brep_layout_id", c_char_p, []),
     ("cadaclysm_surface_matrix", None, [c_void_p, POINTER(c_float)]),
     ("cadaclysm_node_bounds", _Bounds, [c_void_p, c_uint32]),
@@ -2706,6 +2729,90 @@ class Brep:
             raise CadaclysmError(_text(_lib().cadaclysm_last_error()) or "sew")
         return Brep(pointer), SewReport(tuple(out), tuple(gaps))
 
+    def health(self, tolerance: "float | None" = None, mesh: bool = False) -> "HealthReport":
+        """What is wrong with this brep, as a `HealthReport`: the free edges (the sides one
+        face bounds) and the wires they chain into, with each edge's nearest partner and the
+        gap to it; the features below `tolerance`; the loose edges; and what `sewed` would
+        join and leave. `tolerance` is the length below which a feature is "small" and a
+        gap closes -- `None`, or a value that is not finite and positive, takes the default
+        (the report shows what was used). `mesh=True` also meshes the brep and reports
+        where the mesh cracks (`cracks`); without it `cracks` is `None`. Nothing moves."""
+        lib = _lib()
+        nan = float("nan")
+        handle = lib.cadaclysm_brep_health(self.pointer, nan if tolerance is None else float(tolerance), bool(mesh))
+        if not handle:
+            raise CadaclysmError(_text(lib.cadaclysm_last_error()) or "health")
+        try:
+            counts = (c_uint32 * 18)()
+            sizes = (c_double * 8)()
+            if not lib.cadaclysm_brep_health_summary(handle, counts, sizes):
+                raise CadaclysmError(_text(lib.cadaclysm_last_error()) or "health")
+            n = lib.cadaclysm_brep_health_free_edges(handle, None, None)
+            free_ids, free_sizes = (c_uint32 * (6 * n))(), (c_double * (2 * n))()
+            if n:
+                lib.cadaclysm_brep_health_free_edges(handle, free_ids, free_sizes)
+            n = lib.cadaclysm_brep_health_wires(handle, None, None)
+            wire_runs, wire_sizes = (c_uint32 * (3 * n))(), (c_double * (2 * n))()
+            if n:
+                lib.cadaclysm_brep_health_wires(handle, wire_runs, wire_sizes)
+            n = lib.cadaclysm_brep_health_small(handle, None, None)
+            small_items, small_sizes = (c_uint32 * (2 * n))(), (c_double * n)()
+            if n:
+                lib.cadaclysm_brep_health_small(handle, small_items, small_sizes)
+            n = lib.cadaclysm_brep_health_crack_edges(handle, None)
+            cracks = (c_uint32 * n)()
+            if n:
+                lib.cadaclysm_brep_health_crack_edges(handle, cracks)
+            return _health_report(list(counts), list(sizes), list(free_ids), list(free_sizes), list(wire_runs),
+                                  list(wire_sizes), list(small_items), list(small_sizes), list(cracks))
+        finally:
+            lib.cadaclysm_brep_health_free(handle)
+
+    def healed(self, tolerance: "float | None" = None, edges: bool = True, faces: bool = True,
+               holes: bool = True) -> "tuple[Brep, HealReport]":
+        """This brep with its small features removed, and what was done, as a new `Brep`
+        and a `HealReport`; this one is left as it was. The features are the ones `health`
+        lists as small at `tolerance`: short and collapsed edges, sliver and tiny faces,
+        small holes. Every fix is a vertex merge, and an edge it moves records how far as
+        its `edge_tolerance`. A guard compares the result's health with this one's and
+        refuses fixes that made it worse (`guarded`). `edges`, `faces` and `holes` switch
+        each kind of fix; a kind switched off is refused as "toggled". `tolerance` `None`,
+        or a value that is not finite and positive, takes the default (the report shows
+        what was used)."""
+        lib = _lib()
+        tol = float("nan") if tolerance is None else float(tolerance)
+        handle = lib.cadaclysm_brep_healed(self.pointer, tol, _heal_flags(edges, faces, holes))
+        if not handle:
+            raise CadaclysmError(_text(lib.cadaclysm_last_error()) or "healed")
+        try:
+            counts = (c_uint32 * 11)()
+            sizes = (c_double * 2)()
+            if not lib.cadaclysm_brep_heal_summary(handle, counts, sizes):
+                raise CadaclysmError(_text(lib.cadaclysm_last_error()) or "healed")
+            n = lib.cadaclysm_brep_heal_fixes(handle, None, None)
+            fix_items, fix_sizes = (c_uint32 * (2 * n))(), (c_double * (2 * n))()
+            if n:
+                lib.cadaclysm_brep_heal_fixes(handle, fix_items, fix_sizes)
+            n = lib.cadaclysm_brep_heal_refused(handle, None, None)
+            refused_items, refused_sizes = (c_uint32 * (3 * n))(), (c_double * n)()
+            if n:
+                lib.cadaclysm_brep_heal_refused(handle, refused_items, refused_sizes)
+            report = _heal_report(list(counts), list(sizes), list(fix_items), list(fix_sizes),
+                                  list(refused_items), list(refused_sizes))
+            body = lib.cadaclysm_brep_heal_body(handle)
+            if not body:
+                raise CadaclysmError(_text(lib.cadaclysm_last_error()) or "healed")
+            return Brep(body), report
+        finally:
+            lib.cadaclysm_brep_heal_free(handle)
+
+    def edge_tolerance(self, edge: int) -> "float | None":
+        """How far brep edge `edge` (as a `HealFix` names one) may lie off its curve: 0 for
+        an exact edge, the distance healing (or sewing) moved it where that is recorded,
+        `None` when no trim names the id (an edge healing removed)."""
+        t = _lib().cadaclysm_brep_edge_tolerance(self.pointer, int(edge))
+        return None if math.isnan(t) else float(t)
+
     def release(self) -> None:
         pointer, self._pointer = getattr(self, "_pointer", None), None
         if pointer and _library is not None:
@@ -2771,6 +2878,194 @@ class SewReport:
         return (f"SewReport(pairs={self.pairs}, free_before={self.free_before}, free_after={self.free_after}, "
                 f"refused={self.refused}, worst_gap={self.worst_gap:g}, tolerance={self.tolerance:g}, "
                 f"vertex={self.vertex:g})")
+
+
+@dataclass(frozen=True)
+class FreeEdge:
+    """One side a single face bounds (a free edge): its `trim` (the face's side), the
+    `edge` it lies on (`None` for a side with no edge), the `face` and free `wire` it is on,
+    its nearest `partner` side across the gap (`None` if there is none), how many of its two
+    ends it `shared_ends` with that partner, its `length` and the `gap` to the partner
+    (`math.inf` without one)."""
+
+    trim: int
+    edge: "int | None"
+    face: int
+    wire: int
+    partner: "int | None"
+    shared_ends: int
+    length: float
+    gap: float
+
+
+@dataclass(frozen=True)
+class FreeWire:
+    """A chain of free edges end to end: the rows `free_edges[first:first + count]`, whether
+    it `closed` on itself, its total `length` and the `widest_gap` to any partner."""
+
+    first: int
+    count: int
+    closed: bool
+    length: float
+    widest_gap: float
+
+
+@dataclass(frozen=True)
+class SmallFeature:
+    """Something below the tolerance: `kind` is "short_edge", "collapsed_edge",
+    "sliver_face", "tiny_face", "tiny_body" or "small_hole"; `index` its edge, face, body
+    or loop number; `size` how small."""
+
+    kind: str
+    index: int
+    size: float
+
+
+@dataclass(frozen=True)
+class Cracks:
+    """What a mesh of the body shows (`health(mesh=True)`): whether it is `watertight`, how
+    many mesh edges are `open` or `folded`, how many `crossings`, and the brep `edges` it
+    cracks along."""
+
+    watertight: bool
+    open: int
+    folded: int
+    crossings: int
+    edges: "tuple[int, ...]"
+
+
+@dataclass(frozen=True)
+class HealthReport:
+    """What is wrong with a body, as plain data (`health`): the `tolerance` and `rounding`
+    it judged at and the body's `extent`; the free edges, their wires, the features below
+    the tolerance; the loose edges (`worst_loose` the farthest from any face); what sewing
+    would do (`sew_pairs` joined, `sew_refused`, `sew_worst_gap`); and, if asked for with
+    `mesh=True`, the mesh's `cracks`."""
+
+    tolerance: float
+    rounding: float
+    extent: float
+    free_edges: "tuple[FreeEdge, ...]"
+    wires: "tuple[FreeWire, ...]"
+    small: "tuple[SmallFeature, ...]"
+    loose_edges: int
+    worst_loose: float
+    sew_pairs: int
+    sew_refused: int
+    sew_worst_gap: float
+    cracks: "Cracks | None"
+    _worst_gap: float = field(default=math.inf, init=False, repr=False)
+
+    @property
+    def worst_gap(self) -> float:
+        """The widest gap between a free edge and its partner."""
+        return self._worst_gap
+
+    def wire_edges(self, wire: int) -> "tuple[FreeEdge, ...]":
+        """The free edges of wire number `wire`, in order."""
+        w = self.wires[wire]
+        return self.free_edges[w.first:w.first + w.count]
+
+
+_HEALTH_KINDS = ("short_edge", "collapsed_edge", "sliver_face", "tiny_face", "tiny_body", "small_hole")
+
+
+def _health_report(counts, sizes, free_ids, free_sizes, wire_runs, wire_sizes, small_items, small_sizes,
+                   crack_edges) -> HealthReport:
+    """The flat rows of the health C ABI (or the wasm object) as a `HealthReport`."""
+    none = 0xFFFFFFFF
+    n = len(free_ids) // 6
+    free = tuple(
+        FreeEdge(int(free_ids[6 * i]), None if free_ids[6 * i + 1] == none else int(free_ids[6 * i + 1]),
+                 int(free_ids[6 * i + 2]), int(free_ids[6 * i + 3]),
+                 None if free_ids[6 * i + 4] == none else int(free_ids[6 * i + 4]), int(free_ids[6 * i + 5]),
+                 float(free_sizes[2 * i]), float(free_sizes[2 * i + 1]))
+        for i in range(n))
+    wires = tuple(FreeWire(int(wire_runs[3 * i]), int(wire_runs[3 * i + 1]), bool(wire_runs[3 * i + 2]),
+                           float(wire_sizes[2 * i]), float(wire_sizes[2 * i + 1]))
+                  for i in range(len(wire_runs) // 3))
+    small = tuple(SmallFeature(_HEALTH_KINDS[int(small_items[2 * i])], int(small_items[2 * i + 1]),
+                               float(small_sizes[i])) for i in range(len(small_sizes)))
+    cracks = None
+    if counts[12] == 1:
+        cracks = Cracks(bool(counts[13]), int(counts[14]), int(counts[15]), int(counts[16]),
+                        tuple(int(e) for e in crack_edges))
+    report = HealthReport(float(sizes[0]), float(sizes[1]), float(sizes[2]), free, wires, small,
+                          int(counts[9]), float(sizes[4]), int(counts[10]), int(counts[11]), float(sizes[5]),
+                          cracks)
+    object.__setattr__(report, "_worst_gap", float(sizes[3]))
+    return report
+
+
+@dataclass(frozen=True)
+class HealFix:
+    """One small feature `healed` removed: its `kind` (as `SmallFeature.kind`), its `index`
+    in the input (the edge, face or loop number `health` gave it), its `size`, and how far
+    the vertex it merged `moved`."""
+
+    kind: str
+    index: int
+    size: float
+    moved: float
+
+
+@dataclass(frozen=True)
+class HealRefusal:
+    """One small feature `healed` left, and why: `kind` and `index` as in `HealFix`; `why`
+    is "would_empty_loop", "closed", "seam", "chain" (a chain wider than the tolerance),
+    "neighbours_part" (a sliver's neighbours part), "uneven" (uneven sliver sides),
+    "non_manifold", "has_holes", "body_guard" (the fix made the body's health worse),
+    "toggled" (its kind switched off) or "unsupported"; `figure` the chain's width or the
+    neighbours' gap, else 0."""
+
+    kind: str
+    index: int
+    why: str
+    figure: float
+
+
+@dataclass(frozen=True)
+class HealReport:
+    """What `healed` did, as plain data: the `tolerance` it healed at, the furthest any trim
+    `moved`, whether the body guard refused fixes (`guarded`), the `fixes` made and the
+    features `refused`; and the body's health before and after at that tolerance -- its small
+    features, free edges, whether it is closed, and its non-manifold edges."""
+
+    tolerance: float
+    moved: float
+    guarded: bool
+    fixes: "tuple[HealFix, ...]"
+    refused: "tuple[HealRefusal, ...]"
+    small_before: int
+    small_after: int
+    free_before: int
+    free_after: int
+    closed_before: bool
+    closed_after: bool
+    nonmanifold_before: int
+    nonmanifold_after: int
+
+
+_HEAL_WHYS = ("would_empty_loop", "closed", "seam", "chain", "neighbours_part", "uneven", "non_manifold",
+              "has_holes", "body_guard", "toggled", "unsupported")
+
+
+def _heal_report(counts, sizes, fix_items, fix_sizes, refused_items, refused_sizes) -> HealReport:
+    """The flat rows of the heal C ABI (or the wasm object) as a `HealReport`."""
+    fixes = tuple(HealFix(_HEALTH_KINDS[int(fix_items[2 * i])], int(fix_items[2 * i + 1]),
+                          float(fix_sizes[2 * i]), float(fix_sizes[2 * i + 1]))
+                  for i in range(len(fix_items) // 2))
+    refused = tuple(HealRefusal(_HEALTH_KINDS[int(refused_items[3 * i])], int(refused_items[3 * i + 1]),
+                                _HEAL_WHYS[int(refused_items[3 * i + 2])], float(refused_sizes[i]))
+                    for i in range(len(refused_sizes)))
+    return HealReport(float(sizes[0]), float(sizes[1]), bool(counts[2]), fixes, refused,
+                      int(counts[3]), int(counts[4]), int(counts[5]), int(counts[6]),
+                      bool(counts[7]), bool(counts[8]), int(counts[9]), int(counts[10]))
+
+
+def _heal_flags(edges: bool, faces: bool, holes: bool) -> int:
+    """`healed`'s switches as the C ABI's flag bits: 1 edges, 2 faces, 4 holes."""
+    return (1 if edges else 0) | (2 if faces else 0) | (4 if holes else 0)
 
 
 class Meshlet:
@@ -4473,13 +4768,21 @@ class Scene:
 
     def save(self, path: str | os.PathLike[str], fmt: str = "glb") -> None:
         """Write the whole scene to `path`: `"glb"` (binary glTF), `"gltf"`
-        (text glTF, one file either way) or `"obj"` (Wavefront, every
+        (text glTF, one file either way), `"obj"` (Wavefront, every
         placement baked to its own named object, a `.mtl` beside it under the
-        same stem when anything has a colour).
+        same stem when anything has a colour) or `"usda"` (an OpenUSD text
+        layer: each shape's triangles once, every placement a prim referencing
+        them, a node's MaterialX or MDL material bound in its own format over a
+        preview of its colour; the layer states its up axis and metres per unit).
 
         Every placement of every shape, named and placed as the tree is, with a
         material per colour -- where `Node.save_mesh` writes one node's mesh
         on its own (the same names in `mesh_formats()` are those one-mesh forms).
+        A mechanism's moving links hang under pivot nodes on their joints
+        (in USD: a UsdPhysics rigid body per link and a joint prim per pair, for
+        a simulator such as Isaac Sim); `"glb-skinned"` / `"gltf-skinned"` /
+        `"usda-skinned"` write it as a skin instead, one bone per link (in USD a
+        UsdSkel skeleton), for engines that move skeletal meshes only.
         Coordinates are the scene's own, in the convention it was opened with
         (`Y_UP` for the Y-up metres glTF specifies); the winding is turned for
         a clockwise convention so the file reads right-side out everywhere.

@@ -53,14 +53,16 @@ public final class View implements AutoCloseable {
     static final int ABI_MAJOR = 1;
     /**
      * 1.6: text -- {@code cadaclysm_view_show_text}, {@code _set_text}, {@code _load_font} and the text layer.
-     * 1.7: the machining and timeline calls (not bound here yet).
+     * 1.7: the machining and timeline calls ({@code showMachining}, {@link Machining}, the transport).
      * 1.8: the pick's {@code clicks} and {@code point}, {@code cadaclysm_view_set_double_click_frames},
      * {@code _focus}, {@code _navigation}.
      * 1.9: {@code cadaclysm_view_set_lighting} and {@code _lighting} (headlight or studio).
      * 1.10: the viewport cameras (bound; Java's own API for them comes later).
      * 1.11: {@code cadaclysm_view_show_points}.
+     * 1.13: {@code cadaclysm_view_set_occluded}.
+     * 1.18: {@code cadaclysm_view_set_finish}.
      */
-    static final int ABI_MINOR = 11;
+    static final int ABI_MINOR = 18;
     /** CADACLYSM_VIEW_NAVIGATION_FLY (ORBIT is 0). */
     static final int NAVIGATION_FLY = 1;
     static final int OPEN = 1;
@@ -70,12 +72,16 @@ public final class View implements AutoCloseable {
     public static final int WINDOW_XCB = 3;
     public static final int WINDOW_WAYLAND = 4;
     public static final int WINDOW_APPKIT = 5;
+    /** 1.17: a Linux display through KMS; windowId the connector, display an int* DRM fd or NULL. */
+    public static final int WINDOW_KMS = 6;
     static final Map<String, Integer> STANDARD = Map.of("top", 0, "front", 1, "right", 2, "iso", 3);
     static final Map<String, Integer> LAYERS = Map.of("surfaces", 0, "edges", 1, "curves", 2, "isocurves", 3, "grid", 4,
             "text", 5);
     /** cadaclysm_view.h's CADACLYSM_VIEW_ALIGN_*: where the anchor sits on the text ("center" is "centre"). */
     static final Map<String, Integer> ALIGN = Map.of("top-left", 0, "top", 1, "top-right", 2, "left", 3, "centre", 4,
             "center", 4, "right", 5, "bottom-left", 6, "bottom", 7, "bottom-right", 8);
+    static final Map<String, Integer> OCCLUDED = Map.of("off", 0, "solid", 1, "dashed", 2);
+    static final Map<String, Integer> FINISHES = Map.of("gloss", 0, "satin", 1, "matte", 2);
     static final Map<String, Integer> TEXT_MODES = Map.of("label", 0, "world", 1);
     static final Map<String, Integer> EVENTS = Map.of("pointer_down", 1, "pointer_move", 2, "pointer_up", 3,
             "pointer_cancel", 4, "wheel", 5, "key", 6);
@@ -136,7 +142,8 @@ public final class View implements AutoCloseable {
             MemoryLayout.sequenceLayout(16, ValueLayout.JAVA_FLOAT).withName("view"),
             MemoryLayout.sequenceLayout(16, ValueLayout.JAVA_FLOAT).withName("projection"),
             MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_FLOAT).withName("eye"),
-            ValueLayout.JAVA_INT.withName("grid"));
+            ValueLayout.JAVA_INT.withName("grid"),
+            ValueLayout.JAVA_INT.withName("layer_mask"));
     static final MemoryLayout EVENT = MemoryLayout.structLayout(
             ValueLayout.JAVA_INT.withName("size"),
             ValueLayout.JAVA_INT.withName("kind"),
@@ -168,6 +175,45 @@ public final class View implements AutoCloseable {
             ValueLayout.JAVA_INT.withName("edge_count"),
             MemoryLayout.paddingLayout(4),
             ValueLayout.ADDRESS.withName("rgb"));
+    static final MemoryLayout PROGRAM = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("size"),
+            ValueLayout.JAVA_INT.withName("tool_number"),
+            ValueLayout.JAVA_INT.withName("tool_shape"),
+            MemoryLayout.paddingLayout(4),
+            ValueLayout.JAVA_DOUBLE.withName("tool_diameter"),
+            ValueLayout.JAVA_DOUBLE.withName("tool_flute_length"),
+            ValueLayout.JAVA_DOUBLE.withName("tool_angle"),
+            ValueLayout.JAVA_DOUBLE.withName("tool_corner_radius"),
+            ValueLayout.ADDRESS.withName("gcode"));
+    static final MemoryLayout MACHINING = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("size"),
+            ValueLayout.JAVA_INT.withName("program_count"),
+            ValueLayout.ADDRESS.withName("programs"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("stock_min"),
+            MemoryLayout.sequenceLayout(3, ValueLayout.JAVA_DOUBLE).withName("stock_max"),
+            ValueLayout.ADDRESS.withName("part_positions"),
+            ValueLayout.ADDRESS.withName("part_indices"),
+            ValueLayout.JAVA_INT.withName("part_vertex_count"),
+            ValueLayout.JAVA_INT.withName("part_index_count"),
+            ValueLayout.JAVA_DOUBLE.withName("cell"),
+            ValueLayout.JAVA_DOUBLE.withName("tolerance"),
+            ValueLayout.JAVA_DOUBLE.withName("skin"),
+            ValueLayout.JAVA_DOUBLE.withName("rapid_rate"),
+            ValueLayout.JAVA_INT.withName("skin_set"),
+            MemoryLayout.paddingLayout(4));
+    static final MemoryLayout MACHINING_INFO = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("size"),
+            ValueLayout.JAVA_INT.withName("moves"),
+            ValueLayout.JAVA_INT.withName("move"),
+            ValueLayout.JAVA_INT.withName("nx"),
+            ValueLayout.JAVA_INT.withName("ny"),
+            ValueLayout.JAVA_FLOAT.withName("cell"),
+            MemoryLayout.sequenceLayout(2, ValueLayout.JAVA_FLOAT).withName("min"),
+            ValueLayout.JAVA_DOUBLE.withName("cycle_time"));
+    /** CADACLYSM_VIEW_TOOL_FLAT .. _BULLNOSE, in order. */
+    static final List<String> TOOL_SHAPES = List.of("flat", "ball", "drill", "vbit", "bullnose");
+    /** The machining's colour modes, in CADACLYSM_VIEW_MACHINING_COLOUR_* order. */
+    static final List<String> COLOUR_BY = List.of("height", "tool", "deviation");
     static final MemoryLayout IMAGE = MemoryLayout.structLayout(
             ValueLayout.JAVA_INT.withName("size"),
             MemoryLayout.sequenceLayout(12, ValueLayout.JAVA_FLOAT).withName("corners"),
@@ -258,11 +304,13 @@ public final class View implements AutoCloseable {
         MethodHandle lastError, create, destroy, pump, run, resize, needsDraw, draw, show, remove, setSurfaces,
                 surfaces, orbit, pan, zoom, frame, standard, setOrthographic, setLayer, setBackground, setNodeVisible,
                 setNodeColor, setNodeHighlight, setViewports, requestPick, requestPickIn, pickResult, frameNode, look,
-                dolly, input, showMesh, showLines, showPoints, showCurves, showImage, setColour, setXray, setFaceColours,
+                dolly, input, showMesh, showLines, showPoints, showCurves, showImage, setColour, setXray, setOccluded, setFinish, setFaceColours,
                 setPlacement, showSolid, image, size, setLod, wakeMs, setNodeTransforms, parseColour, loadFont, showText,
                 setText, setDoubleClickFrames, focus, navigation, setLighting, lighting, viewportCamera,
                 setViewportCamera, setViewportRects, aim, setPivot, setTap, orbitIn, panIn, zoomIn, lookIn, dollyIn,
-                frameIn, standardIn;
+                frameIn, standardIn, showMachining, machiningSeek, machiningColourBy, machiningOverlays, machiningInfo,
+                machiningHeights, timelinePlay, timelinePause, timelineSeek, timelineSetLoop, timelineTime,
+                timelineDuration, timelinePlaying, timelineStatus;
 
         @SuppressWarnings("restricted") // libraryLookup: the view library chosen.
         Library(Path file) {
@@ -322,6 +370,8 @@ public final class View implements AutoCloseable {
             showImage = bind(linker, lib, "cadaclysm_view_show_image", FunctionDescriptor.of(I, A, A));
             setColour = bind(linker, lib, "cadaclysm_view_set_colour", FunctionDescriptor.of(B, A, I, A));
             setXray = bind(linker, lib, "cadaclysm_view_set_xray", FunctionDescriptor.of(B, A, I, B));
+            setOccluded = bind(linker, lib, "cadaclysm_view_set_occluded", FunctionDescriptor.of(B, A, I, I));
+            setFinish = bind(linker, lib, "cadaclysm_view_set_finish", FunctionDescriptor.of(B, A, I, I));
             setFaceColours = bind(linker, lib, "cadaclysm_view_set_face_colours", FunctionDescriptor.of(B, A, I, A, A, I));
             setPlacement = bind(linker, lib, "cadaclysm_view_set_placement", FunctionDescriptor.of(B, A, I, A));
             setNodeTransforms = bind(linker, lib, "cadaclysm_view_set_node_transforms", FunctionDescriptor.of(B, A, I, A, I));
@@ -350,6 +400,20 @@ public final class View implements AutoCloseable {
             dollyIn = bind(linker, lib, "cadaclysm_view_dolly_in", FunctionDescriptor.ofVoid(A, I, F));
             frameIn = bind(linker, lib, "cadaclysm_view_frame_in", FunctionDescriptor.of(B, A, I, I));
             standardIn = bind(linker, lib, "cadaclysm_view_standard_in", FunctionDescriptor.of(B, A, I, I));
+            showMachining = bind(linker, lib, "cadaclysm_view_show_machining", FunctionDescriptor.of(I, A, A));
+            machiningSeek = bind(linker, lib, "cadaclysm_view_machining_seek", FunctionDescriptor.of(B, A, I, I));
+            machiningColourBy = bind(linker, lib, "cadaclysm_view_machining_colour_by", FunctionDescriptor.of(B, A, I, I));
+            machiningOverlays = bind(linker, lib, "cadaclysm_view_machining_overlays", FunctionDescriptor.of(B, A, I, B, B));
+            machiningInfo = bind(linker, lib, "cadaclysm_view_machining_info", FunctionDescriptor.of(B, A, I, A));
+            machiningHeights = bind(linker, lib, "cadaclysm_view_machining_heights", FunctionDescriptor.of(B, A, I, A, L));
+            timelinePlay = bind(linker, lib, "cadaclysm_view_timeline_play", FunctionDescriptor.of(B, A, D));
+            timelinePause = bind(linker, lib, "cadaclysm_view_timeline_pause", FunctionDescriptor.of(B, A));
+            timelineSeek = bind(linker, lib, "cadaclysm_view_timeline_seek", FunctionDescriptor.of(B, A, D));
+            timelineSetLoop = bind(linker, lib, "cadaclysm_view_timeline_set_loop", FunctionDescriptor.of(B, A, B));
+            timelineTime = bind(linker, lib, "cadaclysm_view_timeline_time", FunctionDescriptor.of(D, A));
+            timelineDuration = bind(linker, lib, "cadaclysm_view_timeline_duration", FunctionDescriptor.of(D, A));
+            timelinePlaying = bind(linker, lib, "cadaclysm_view_timeline_playing", FunctionDescriptor.of(B, A));
+            timelineStatus = bind(linker, lib, "cadaclysm_view_timeline_status", FunctionDescriptor.of(L, A, A, L));
             name = text(View.<MemorySegment>call(() -> (MemorySegment) nameFn.invoke()));
         }
 
@@ -599,6 +663,26 @@ public final class View implements AutoCloseable {
     public record Viewport(int[] rect, float[] view, float[] projection, float[] eye, String grid) {
     }
 
+    /** A CAM tool: {@code shape} is flat, ball, drill, vbit or bullnose; the flute length, a V-bit's angle and a bull-nose's corner radius are 0 where they mean nothing. */
+    public record MachiningTool(int number, String shape, double diameter, double fluteLength, double angle, double cornerRadius) {
+    }
+
+    /** One program of a job: the tool that runs it and its G-code. */
+    public record MachiningProgram(MachiningTool tool, String gcode) {
+    }
+
+    /** The finished part, for colouring by deviation: x y z floats a vertex, three indices a triangle. */
+    public record MachiningPart(float[] positions, int[] indices) {
+    }
+
+    /** The library's own defaults for any null. {@code skin}, once given, is used even at 0. */
+    public record MachiningOptions(Double cell, Double tolerance, Double skin, Double rapidRate) {
+    }
+
+    /** {@link Machining#info()}: the move the timeline is at of the job's moves, the height grid and the cycle time. */
+    public record MachiningInfo(int moves, int move, int nx, int ny, float cell, float[] min, double cycleTime) {
+    }
+
     /**
      * A pick answer: the item, node and face hit; {@code clicks} 2 for a double click, else 1;
      * {@code point} where the ray met the model (x, y, z, in the coordinates the items were shown
@@ -622,7 +706,7 @@ public final class View implements AutoCloseable {
 
     /**
      * Why the library at {@code path}, answering {@code version} from cadaclysm_view_abi_version,
-     * is refused -- null when this wrapper takes it (1.11 or a later 1.x).
+     * is refused -- null when this wrapper takes it (1.18 or a later 1.x).
      */
     static String abiRefusal(String path, int version) {
         int major = version >>> 16, minor = version & 0xFFFF;
@@ -767,8 +851,8 @@ public final class View implements AutoCloseable {
         if (window.width() <= 0 || window.height() <= 0) {
             throw new ViewException("a host's window needs width and height: its client size in physical pixels");
         }
-        if (window.kind() < WINDOW_WIN32 || window.kind() > WINDOW_APPKIT) {
-            throw new ViewException("kind " + window.kind() + ": one of WINDOW_WIN32 .. WINDOW_APPKIT (1 to 5)");
+        if (window.kind() < WINDOW_WIN32 || window.kind() > WINDOW_KMS) {
+            throw new ViewException("kind " + window.kind() + ": one of WINDOW_WIN32 .. WINDOW_KMS (1 to 6)");
         }
         if (window.kind() >= WINDOW_XLIB && window.kind() <= WINDOW_WAYLAND && window.display() == 0) {
             throw new ViewException("kind " + window.kind() + " needs display (the Display*, xcb_connection_t* or wl_display*)");
@@ -1020,6 +1104,109 @@ public final class View implements AutoCloseable {
         }
     }
 
+    private static double[] finite(double[] values, int n, String what) {
+        if (values == null || values.length != n) throw new ViewException(what + ": " + n + " finite numbers, not " + (values == null ? "null" : values.length));
+        for (double d : values) if (!Double.isFinite(d)) throw new ViewException(what + ": " + n + " finite numbers");
+        return values;
+    }
+
+    private static double option(Double value, String what) {
+        if (value == null) return 0;
+        if (!Double.isFinite(value)) throw new ViewException("showMachining " + what + ": a finite number, not " + value);
+        return value;
+    }
+
+    /** {@link #showMachining(List, double[], double[], MachiningPart, MachiningOptions)} with no part and the library's defaults. */
+    public Machining showMachining(List<MachiningProgram> programs, double[] stockMin, double[] stockMax) {
+        return showMachining(programs, stockMin, stockMax, null, null);
+    }
+
+    /** {@link #showMachining(List, double[], double[], MachiningPart, MachiningOptions)} with the library's defaults. */
+    public Machining showMachining(List<MachiningProgram> programs, double[] stockMin, double[] stockMax, MachiningPart part) {
+        return showMachining(programs, stockMin, stockMax, part, null);
+    }
+
+    /**
+     * A CAM job on a stock, paused at its start: {@code programs} in run order, the stock's two corners, the finished
+     * {@code part} (null: none; {@code colourBy("deviation")} needs it) and the options (null, or a null in them: the
+     * library's defaults). Play it with {@link #play()}. A tool number is not negative, a shape one of flat, ball,
+     * drill, vbit, bullnose, a part's positions are x y z triples and its indices whole triangles inside them.
+     */
+    public Machining showMachining(List<MachiningProgram> programs, double[] stockMin, double[] stockMax, MachiningPart part, MachiningOptions options) {
+        if (programs == null) throw new ViewException("showMachining: programs, not null");
+        for (MachiningProgram program : programs) {
+            MachiningTool tool = program == null ? null : program.tool();
+            if (tool == null || tool.shape() == null) throw new ViewException("showMachining: tool needs number, shape and diameter");
+            if (tool.number() < 0) throw new ViewException("showMachining: tool number " + tool.number() + " is negative");
+            if (!TOOL_SHAPES.contains(tool.shape())) {
+                throw new ViewException("showMachining: shape '" + tool.shape() + "': one of " + String.join(", ", TOOL_SHAPES));
+            }
+            if (program.gcode() == null) throw new ViewException("showMachining: a program needs its gcode, not null");
+            finite(new double[]{tool.diameter(), tool.fluteLength(), tool.angle(), tool.cornerRadius()}, 4, "showMachining tool");
+        }
+        finite(stockMin, 3, "showMachining stock min");
+        finite(stockMax, 3, "showMachining stock max");
+        MachiningOptions o = options == null ? new MachiningOptions(null, null, null, null) : options;
+        double cell = option(o.cell(), "cell"), tolerance = option(o.tolerance(), "tolerance"),
+                skin = option(o.skin(), "skin"), rapidRate = option(o.rapidRate(), "rapidRate");
+        float[] pos = new float[0];
+        int[] idx = new int[0];
+        if (part != null) {
+            if (part.positions() != null) pos = part.positions();
+            if (part.indices() != null) idx = part.indices();
+            if (pos.length % 3 != 0) throw new ViewException("showMachining: part positions: " + pos.length + " numbers is not a whole number of x y z triples");
+            int top = -1;
+            for (int k : idx) {
+                if (k < 0) throw new ViewException("showMachining: part indices must not be negative");
+                if (k > top) top = k;
+            }
+            if (idx.length % 3 != 0) throw new ViewException("showMachining: part indices: " + idx.length + " is not a whole number of triangles");
+            if (top >= pos.length / 3) throw new ViewException("showMachining: part indices: " + top + " is past the last of " + pos.length / 3 + " vertices");
+        }
+        final float[] partPositions = pos;
+        final int[] partIndices = idx;
+        MemorySegment p = live(c("show_machining"));
+        try (Arena arena = Arena.ofConfined()) {
+            int n = programs.size();
+            MemorySegment list = n == 0 ? MemorySegment.NULL : arena.allocate(PROGRAM.byteSize() * n, 8);
+            for (int k = 0; k < n; k++) {
+                MachiningProgram program = programs.get(k);
+                MachiningTool tool = program.tool();
+                MemorySegment at = list.asSlice(PROGRAM.byteSize() * k, PROGRAM.byteSize());
+                at.set(ValueLayout.JAVA_INT, off(PROGRAM, "size"), (int) PROGRAM.byteSize());
+                at.set(ValueLayout.JAVA_INT, off(PROGRAM, "tool_number"), tool.number());
+                at.set(ValueLayout.JAVA_INT, off(PROGRAM, "tool_shape"), TOOL_SHAPES.indexOf(tool.shape()));
+                at.set(ValueLayout.JAVA_DOUBLE, off(PROGRAM, "tool_diameter"), tool.diameter());
+                at.set(ValueLayout.JAVA_DOUBLE, off(PROGRAM, "tool_flute_length"), tool.fluteLength());
+                at.set(ValueLayout.JAVA_DOUBLE, off(PROGRAM, "tool_angle"), tool.angle());
+                at.set(ValueLayout.JAVA_DOUBLE, off(PROGRAM, "tool_corner_radius"), tool.cornerRadius());
+                at.set(ValueLayout.ADDRESS, off(PROGRAM, "gcode"), arena.allocateFrom(program.gcode()));
+            }
+            MemorySegment raw = arena.allocate(MACHINING);
+            raw.set(ValueLayout.JAVA_INT, off(MACHINING, "size"), (int) MACHINING.byteSize());
+            raw.set(ValueLayout.JAVA_INT, off(MACHINING, "program_count"), n);
+            raw.set(ValueLayout.ADDRESS, off(MACHINING, "programs"), list);
+            MemorySegment.copy(stockMin, 0, raw, ValueLayout.JAVA_DOUBLE, off(MACHINING, "stock_min"), 3);
+            MemorySegment.copy(stockMax, 0, raw, ValueLayout.JAVA_DOUBLE, off(MACHINING, "stock_max"), 3);
+            if (part != null) {
+                raw.set(ValueLayout.ADDRESS, off(MACHINING, "part_positions"), arena.allocateFrom(ValueLayout.JAVA_FLOAT, partPositions));
+                raw.set(ValueLayout.ADDRESS, off(MACHINING, "part_indices"), arena.allocateFrom(ValueLayout.JAVA_INT, partIndices));
+                raw.set(ValueLayout.JAVA_INT, off(MACHINING, "part_vertex_count"), partPositions.length / 3);
+                raw.set(ValueLayout.JAVA_INT, off(MACHINING, "part_index_count"), partIndices.length);
+            }
+            raw.set(ValueLayout.JAVA_DOUBLE, off(MACHINING, "cell"), cell);
+            raw.set(ValueLayout.JAVA_DOUBLE, off(MACHINING, "tolerance"), tolerance);
+            raw.set(ValueLayout.JAVA_DOUBLE, off(MACHINING, "skin"), skin);
+            raw.set(ValueLayout.JAVA_DOUBLE, off(MACHINING, "rapid_rate"), rapidRate);
+            raw.set(ValueLayout.JAVA_INT, off(MACHINING, "skin_set"), o.skin() == null ? 0 : 1);
+            int id = call(() -> (int) lib.showMachining.invoke(p, raw));
+            if (id == 0) throw lib.failure("showMachining");
+            Machining shown = new Machining(this, id);
+            items.put(id, shown);
+            return shown;
+        }
+    }
+
     /** {@link #showCurves(float[], float[])} in the default colour. */
     public Item showCurves(float[] beziers) {
         return showCurves(beziers, (float[]) null);
@@ -1213,6 +1400,7 @@ public final class View implements AutoCloseable {
                 MemorySegment.copy(v.projection(), 0, one, ValueLayout.JAVA_FLOAT, off(VIEWPORT, "projection"), 16);
                 MemorySegment.copy(v.eye(), 0, one, ValueLayout.JAVA_FLOAT, off(VIEWPORT, "eye"), 3);
                 one.set(ValueLayout.JAVA_INT, off(VIEWPORT, "grid"), grids.get(i));
+                one.set(ValueLayout.JAVA_INT, off(VIEWPORT, "layer_mask"), -1); // every user layer
             }
             ok(call(() -> (boolean) lib.setViewports.invoke(p, all, list.size())), "viewports");
         }
@@ -1269,6 +1457,74 @@ public final class View implements AutoCloseable {
         int which = named(LIGHTING, name, "lighting");
         MemorySegment p = live(c("set_lighting"));
         ok(call(() -> (boolean) lib.setLighting.invoke(p, which)), "lighting");
+    }
+
+    // -- the timeline (1.7): one per view, shared by whatever it shows
+
+    /** {@link #play(double)} at normal speed. */
+    public void play() {
+        play(1.0);
+    }
+
+    /** Play the timeline at {@code speed} times real time, from where it is (from the start once it has ended). */
+    public void play(double speed) {
+        MemorySegment p = live(c("timeline_play"));
+        ok(call(() -> (boolean) lib.timelinePlay.invoke(p, speed)), "play");
+    }
+
+    public void pause() {
+        MemorySegment p = live(c("timeline_pause"));
+        ok(call(() -> (boolean) lib.timelinePause.invoke(p)), "pause");
+    }
+
+    /** Jump to {@code seconds} into the timeline (clamped to its length); the next draw shows it. */
+    public void seek(double seconds) {
+        MemorySegment p = live(c("timeline_seek"));
+        ok(call(() -> (boolean) lib.timelineSeek.invoke(p, seconds)), "seek");
+    }
+
+    /** {@link #loop(boolean)} on. */
+    public void loop() {
+        loop(true);
+    }
+
+    /** Whether the timeline starts over at its end. */
+    public void loop(boolean on) {
+        MemorySegment p = live(c("timeline_set_loop"));
+        ok(call(() -> (boolean) lib.timelineSetLoop.invoke(p, on)), "loop");
+    }
+
+    /** Seconds into the timeline, as of the last draw. */
+    public double time() {
+        MemorySegment p = live(c("timeline_time"));
+        return call(() -> (double) lib.timelineTime.invoke(p));
+    }
+
+    /** The timeline's length in seconds; 0 with nothing to play. */
+    public double duration() {
+        MemorySegment p = live(c("timeline_duration"));
+        return call(() -> (double) lib.timelineDuration.invoke(p));
+    }
+
+    public boolean playing() {
+        MemorySegment p = live(c("timeline_playing"));
+        return call(() -> (boolean) lib.timelinePlaying.invoke(p));
+    }
+
+    /** What the timeline is doing, one line a track (for example "move 3 of 9 ..."); empty with no tracks. */
+    public List<String> status() {
+        MemorySegment p = live(c("timeline_status"));
+        try (Arena arena = Arena.ofConfined()) {
+            long n = call(() -> (long) lib.timelineStatus.invoke(p, MemorySegment.NULL, 0L));
+            while (n != 0) {
+                long capacity = n + 1;
+                MemorySegment buf = arena.allocate(capacity);
+                long got = call(() -> (long) lib.timelineStatus.invoke(p, buf, capacity));
+                if (got < capacity) return got == 0 ? List.of() : List.of(buf.getString(0).split("\n", -1));
+                n = got;   // the line grew between the calls: ask again with the new length
+            }
+            return List.of();
+        }
     }
 
     public boolean needsDraw() {
@@ -1598,9 +1854,9 @@ public final class View implements AutoCloseable {
     // ---- the item ---------------------------------------------------------------------
 
     /** One thing a view shows. It holds the object it shows. */
-    public static final class Item {
-        private final View view;
-        private final int id;
+    public static class Item {
+        final View view;
+        final int id;
         Object shown;
 
         Item(View view, int id, Object shown) {
@@ -1730,6 +1986,27 @@ public final class View implements AutoCloseable {
             view.ok(call(() -> (boolean) view.lib.setXray.invoke(p, id, on)), "xray");
         }
 
+        /** How the item's lines and points draw where a surface hides them: "off" (not drawn, the default), "solid" (drawn through) or "dashed" (dashed and dimmed). */
+        public void occluded(String mode) {
+            Integer m = mode == null ? null : OCCLUDED.get(mode);
+            if (m == null) throw new ViewException("occluded: '" + mode + "' is not 'off', 'solid' or 'dashed'");
+            MemorySegment p = view.live(c("set_occluded"));
+            view.ok(call(() -> (boolean) view.lib.setOccluded.invoke(p, id, (int) m)), "occluded");
+        }
+
+        /**
+         * The item's finish: "gloss" (an item shows with this until it is set) -- under the showroom
+         * lighting a clear coat mirroring the room, silver at a grazing angle -- "satin" (a weaker,
+         * blurred coat) or "matte" (no mirror, a faint sheen: rubber, cloth). Uploads the scene again,
+         * as a show does: set it as each item is shown rather than over a finished scene item by item.
+         */
+        public void finish(String finish) {
+            Integer f = finish == null ? null : FINISHES.get(finish);
+            if (f == null) throw new ViewException("finish: '" + finish + "' is not 'gloss', 'satin' or 'matte'");
+            MemorySegment p = view.live(c("set_finish"));
+            view.ok(call(() -> (boolean) view.lib.setFinish.invoke(p, id, (int) f)), "finish");
+        }
+
         public void nodeVisible(int node, boolean on) {
             MemorySegment p = view.live(c("set_node_visible"));
             view.ok(call(() -> (boolean) view.lib.setNodeVisible.invoke(p, id, node, on)), "nodeVisible");
@@ -1768,6 +2045,66 @@ public final class View implements AutoCloseable {
         public void frameNode(int node) {
             MemorySegment p = view.live(c("frame_node"));
             view.ok(call(() -> (boolean) view.lib.frameNode.invoke(p, id, node)), "frameNode");
+        }
+    }
+
+    /** A CAM job shown in a View ({@link View#showMachining}): the stock is this item; the view's timeline plays it. */
+    public static final class Machining extends Item {
+        Machining(View view, int id) {
+            super(view, id, null);
+        }
+
+        /** Jump the timeline to the end of move {@code move} (0: the untouched stock). */
+        public void seekMove(int move) {
+            if (move < 0) throw new ViewException("seekMove: move " + move + " is negative");
+            MemorySegment p = view.live(c("machining_seek"));
+            view.ok(call(() -> (boolean) view.lib.machiningSeek.invoke(p, id, move)), "seekMove");
+        }
+
+        /** "height", "tool" or "deviation" (needs the part given to showMachining). */
+        public void colourBy(String mode) {
+            int m = mode == null ? -1 : COLOUR_BY.indexOf(mode);
+            if (m < 0) throw new ViewException("mode '" + mode + "': one of " + String.join(", ", COLOUR_BY));
+            MemorySegment p = view.live(c("machining_colour_by"));
+            view.ok(call(() -> (boolean) view.lib.machiningColourBy.invoke(p, id, m)), "colourBy");
+        }
+
+        /** {@link #overlays(boolean, boolean)} with both on. */
+        public void overlays() {
+            overlays(true, true);
+        }
+
+        /** The toolpath and the tool, each on or off. */
+        public void overlays(boolean path, boolean tool) {
+            MemorySegment p = view.live(c("machining_overlays"));
+            view.ok(call(() -> (boolean) view.lib.machiningOverlays.invoke(p, id, path, tool)), "overlays");
+        }
+
+        public MachiningInfo info() {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment out = arena.allocate(MACHINING_INFO);
+                out.set(ValueLayout.JAVA_INT, off(MACHINING_INFO, "size"), (int) MACHINING_INFO.byteSize());
+                MemorySegment p = view.live(c("machining_info"));
+                view.ok(call(() -> (boolean) view.lib.machiningInfo.invoke(p, id, out)), "info");
+                long min = off(MACHINING_INFO, "min");
+                return new MachiningInfo(out.get(ValueLayout.JAVA_INT, off(MACHINING_INFO, "moves")), out.get(ValueLayout.JAVA_INT, off(MACHINING_INFO, "move")),
+                        out.get(ValueLayout.JAVA_INT, off(MACHINING_INFO, "nx")), out.get(ValueLayout.JAVA_INT, off(MACHINING_INFO, "ny")),
+                        out.get(ValueLayout.JAVA_FLOAT, off(MACHINING_INFO, "cell")),
+                        new float[]{out.get(ValueLayout.JAVA_FLOAT, min), out.get(ValueLayout.JAVA_FLOAT, min + 4)},
+                        out.get(ValueLayout.JAVA_DOUBLE, off(MACHINING_INFO, "cycle_time")));
+            }
+        }
+
+        /** The stock's heights now, nx * ny floats, row y then x; waits for the GPU. */
+        public float[] heights() {
+            MachiningInfo i = info();
+            long n = (long) i.nx() * i.ny();
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment z = arena.allocate(ValueLayout.JAVA_FLOAT, Math.max(n, 1));
+                MemorySegment p = view.live(c("machining_heights"));
+                view.ok(call(() -> (boolean) view.lib.machiningHeights.invoke(p, id, z, n)), "heights");
+                return z.asSlice(0, 4 * n).toArray(ValueLayout.JAVA_FLOAT);
+            }
         }
     }
 

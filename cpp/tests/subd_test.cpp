@@ -229,6 +229,24 @@ static Result<void> transform_inset_and_insert_loop() {
     return {};
 }
 
+// subdivide: whole, one face, a bad face
+static Result<void> subdivide_whole_one_face_and_a_bad_face() {
+    CADACLYSM_TRY(kiln, bs::Subd::cuboid({2.0, 2.0, 2.0}, {2, 2, 2}));
+    {
+        CADACLYSM_TRY(whole, kiln.subdivide());
+        check(whole.faces().size() == 96, "subdivide() has 96 faces");
+    }
+    {
+        CADACLYSM_TRY(one, kiln.subdivide(ids({1})));
+        check(one.faces().size() == 27, "subdivide({1}) has 27 faces");
+        std::optional<SubdSelection> selected = one.selection();
+        check(selected.has_value() && selected->kind == SubdElements::faces && selected->ids.size() == 4,
+              "subdivide({1}) selects 4 faces");
+    }
+    refused(kiln.subdivide(ids({999})), Match::contains, "subdivide: face 999 is not in the cage", "subdivide face 999");
+    return {};
+}
+
 // 8
 // Two point lists the same length and equal to within `tolerance` in every coordinate.
 static bool within(const std::vector<Vec3>& a, const std::vector<Vec3>& b, double tolerance) {
@@ -270,10 +288,11 @@ static Result<void> smooth_mesh_is_consistent_and_kept() {
     check(mesh.positions.size() == n && mesh.normals.size() == n, "the mesh lost its arrays with its cage");
     // A topology met a second time is meshed from kept weights, the same mesh to within
     // rounding (cadaclysm-subd's Cage::smooth_mesh): the fresh cube's points may differ in
-    // the last bits, its triangles not at all.
+    // the last bits, its triangles not at all. The bounds are cadaclysm-subd's own: 1e-12 of the
+    // cube's diagonal for a point, 1e-9 for a normal.
     CADACLYSM_TRY(fresh, cube());
     CADACLYSM_TRY(reference, fresh.smooth_mesh(2));
-    check(within(mesh.positions, reference.positions, 1e-12) && within(mesh.normals, reference.normals, 1e-12) &&
+    check(within(mesh.positions, reference.positions, 1e-12 * std::sqrt(12.0)) && within(mesh.normals, reference.normals, 1e-9) &&
               mesh.indices == reference.indices && mesh.triangle_face == reference.triangle_face,
           "the mesh read after its cage closed differs from a fresh one");
     return {};
@@ -437,6 +456,7 @@ int main(int argc, char** argv) {
         {"mirror_round_trip", mirror_round_trip},
         {"edge_loops", edge_loops},
         {"transform_inset_and_insert_loop", transform_inset_and_insert_loop},
+        {"subdivide_whole_one_face_and_a_bad_face", subdivide_whole_one_face_and_a_bad_face},
         {"smooth_mesh_is_consistent_and_kept", smooth_mesh_is_consistent_and_kept},
         {"pick_finds_the_element_or_none", pick_finds_the_element_or_none},
         {"to_solid_converts_a_cube", to_solid_converts_a_cube},

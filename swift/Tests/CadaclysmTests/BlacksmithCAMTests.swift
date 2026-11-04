@@ -115,6 +115,45 @@ final class BlacksmithCAMTests: XCTestCase {
         XCTAssertTrue(try fresh.operations().isEmpty)
     }
 
+    // MARK: - Rest machining: a list of end mills and the Z range of an item
+
+    func testOneEndMillReportsTheZRangeOfEachCorner() throws {
+        let block = try pocketedBlock()
+        let endMill = try Tool.flat(1, diameter: 6, fluteLength: 20, feed: 800, plunge: 200, rpm: 12000)
+        let job = try Job(try Stock.around(block, margin: 2), safeZ: 30)
+        let report = try job.machine(block, endMill: endMill, skin: 0.3)
+        XCTAssertEqual(report.items.count, 4)
+        for item in report.items {
+            XCTAssertEqual(item.top, 10, accuracy: 1e-6, item.reason)
+            XCTAssertEqual(item.bottom, 2, accuracy: 1e-6, item.reason)
+        }
+    }
+
+    func testTwoEndMillsLeaveWhatTheSmallerOneMissesAtTheSameZRange() throws {
+        let block = try pocketedBlock()
+        let t1 = try Tool.flat(1, diameter: 6, fluteLength: 20, feed: 800, plunge: 200, rpm: 12000)
+        let t2 = try Tool.flat(2, diameter: 2, fluteLength: 20, feed: 800, plunge: 200, rpm: 12000)
+        let job = try Job(try Stock.around(block, margin: 2), safeZ: 30)
+        let report = try job.machine(block, endMills: [t1, t2], skin: 0.3)
+        XCTAssertEqual(report.items.count, 4)
+        for item in report.items {
+            XCTAssertTrue(item.reason.contains("T2 (2 mm)"), item.reason)
+            XCTAssertEqual(item.top, 10, accuracy: 1e-6, item.reason)
+            XCTAssertEqual(item.bottom, 2, accuracy: 1e-6, item.reason)
+        }
+        let ops = try job.operations()
+        XCTAssertTrue(ops.contains { $0.kind == "pocket" && $0.tool == 2 }, "\(ops)")
+    }
+
+    func testAnEmptyEndMillListIsRefusedAndLeavesTheJobAsItWas() throws {
+        let block = try pocketedBlock()
+        let job = try Job(try Stock.around(block, margin: 2), safeZ: 30)
+        let before = try job.operations().count
+        let message = refusal { _ = try job.machine(block, endMills: [], skin: 0.3) }
+        XCTAssertTrue(message?.contains("machine: at least one end mill is needed") ?? false, message ?? "nil")
+        XCTAssertEqual(try job.operations().count, before)
+    }
+
     // MARK: - The plate: an empty report, operations, gcode and write_camotics
 
     func testThePlateIsMachinedCleanlyByOneEndMillAndOneDrill() throws {
